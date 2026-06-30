@@ -16,3 +16,7 @@ export async function postJSON(path, payload = {}) {
     body: JSON.stringify(payload),
   })
 }
+
+export async function deleteJSON(path) {
+  return getJSON(path, { method: 'DELETE' })
+}

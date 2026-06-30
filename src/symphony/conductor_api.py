@@ -235,5 +235,7 @@ def _web_asset(path: str) -> tuple[str, str] | None:
         "/assets/lib/api.js": ("lib/api.js", "text/javascript; charset=utf-8"),
         "/assets/lib/format.js": ("lib/format.js", "text/javascript; charset=utf-8"),
         "/assets/lib/state.js": ("lib/state.js", "text/javascript; charset=utf-8"),
+        "/assets/views/issues.js": ("views/issues.js", "text/javascript; charset=utf-8"),
+        "/assets/views/runs.js": ("views/runs.js", "text/javascript; charset=utf-8"),
     }
     return assets.get(path)
