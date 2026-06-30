@@ -19,6 +19,7 @@ from .models import (
     utc_now,
 )
 from .persistence import PersistedState, PersistenceStore
+from .linear import format_linear_milestone_comment
 from .workspace import WorkspaceManager
 
 
@@ -729,8 +730,27 @@ def _is_low_value_message(message: str) -> bool:
 
 
 def _failure_comment_body(entry: RunningEntry, error: str, next_attempt: int) -> str:
+    event_type = "stalled" if error == "stalled" else "retry_backoff"
+    reason = (
+        "Stalled because no Codex output arrived before the stall timeout."
+        if error == "stalled"
+        else f"Retrying because {error}. Next retry attempt: {next_attempt}."
+    )
+    detail = {
+        "issue_identifier": entry.issue.identifier,
+        "latest_run": {
+            "turn_count": entry.turn_count,
+            "total_tokens": entry.tokens.total_tokens,
+            "estimated_cost_usd": 0.0,
+        },
+        "state_explanation": reason,
+    }
     lines = [
-        f"Symphony could not complete {entry.issue.identifier}.",
+        format_linear_milestone_comment(
+            detail,
+            event_type=event_type,
+            debug_url=entry.issue.url or f"linear://issue/{entry.issue.identifier}",
+        ),
         "",
         f"Failure: {error}",
         f"Next retry attempt: {next_attempt}",

@@ -7,7 +7,7 @@ import httpx
 import pytest
 
 from symphony.config import TrackerConfig
-from symphony.linear import LinearClient, LinearError, LinearTracker
+from symphony.linear import LinearClient, LinearError, LinearTracker, format_linear_milestone_comment
 
 
 class RecordingTransport(httpx.AsyncBaseTransport):
@@ -510,3 +510,23 @@ async def test_malformed_json_payload_is_mapped() -> None:
         await client.fetch_candidate_issues(make_config())
 
     assert exc.value.code == "linear_unknown_payload"
+
+
+def test_linear_milestone_comment_includes_turns_tokens_cost_and_debug_url() -> None:
+    detail = {
+        "issue_identifier": "ENG-1",
+        "latest_run": {"turn_count": 7, "total_tokens": 188240, "estimated_cost_usd": 0.97},
+        "state_explanation": "Stalled because no Codex output arrived for 14 minutes after a tool timeout.",
+    }
+
+    comment = format_linear_milestone_comment(
+        detail,
+        event_type="stalled",
+        debug_url="http://localhost:8801/issues/ENG-1",
+    )
+
+    assert "Turns: 7" in comment
+    assert "Tokens: 188240" in comment
+    assert "Cost: $0.97" in comment
+    assert "Reason: Stalled because no Codex output arrived" in comment
+    assert "http://localhost:8801/issues/ENG-1" in comment

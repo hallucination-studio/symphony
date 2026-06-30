@@ -351,6 +351,24 @@ class LinearTracker:
         return await self.client.set_issue_lifecycle_label(issue_id, label_name)
 
 
+def format_linear_milestone_comment(issue_detail: dict[str, object], *, event_type: str, debug_url: str) -> str:
+    latest_run = issue_detail.get("latest_run")
+    if not isinstance(latest_run, dict):
+        latest_run = {}
+    turns = int(latest_run.get("turn_count") or 0)
+    tokens = int(latest_run.get("total_tokens") or 0)
+    cost = float(latest_run.get("estimated_cost_usd") or 0.0)
+    reason = str(issue_detail.get("state_explanation") or "")
+    return (
+        f"Symphony milestone: {event_type}\n"
+        f"Turns: {turns}\n"
+        f"Tokens: {tokens}\n"
+        f"Cost: ${cost:.2f}\n"
+        f"Reason: {reason}\n"
+        f"Debug: {debug_url}"
+    )
+
+
 def _normalize_issue(node: dict[str, Any]) -> Issue:
     labels = [label.get("name", "") for label in (((node.get("labels") or {}).get("nodes")) or [])]
     blockers: list[BlockerRef] = []
