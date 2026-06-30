@@ -26,6 +26,9 @@ conductor = "symphony.conductor_cli:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+symphony = ["web/*.html", "web/*.css", "web/*.js", "web/lib/*.js", "web/views/*.js"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]

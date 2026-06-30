@@ -124,11 +124,28 @@ class Issue:
         return False
 
 
-@dataclass
+@dataclass(init=False)
 class RuntimeTokens:
     input_tokens: int = 0
     output_tokens: int = 0
     total_tokens: int = 0
+    cached_tokens: int = 0
+
+    def __init__(
+        self,
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+        cached_tokens: int = 0,
+        total_tokens: int | None = None,
+    ) -> None:
+        self.input_tokens = input_tokens
+        self.output_tokens = output_tokens
+        if total_tokens is None:
+            self.cached_tokens = 0
+            self.total_tokens = cached_tokens
+        else:
+            self.cached_tokens = cached_tokens
+            self.total_tokens = total_tokens
 
 
 @dataclass
