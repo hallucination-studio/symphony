@@ -292,6 +292,35 @@ async def test_web_shell_mentions_issue_first_ops_views(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_web_shell_mentions_trace_and_retention_surfaces(tmp_path: Path) -> None:
+    service = make_service(tmp_path)
+    server = ConductorApiServer(service)
+    await server.start(port=0)
+    try:
+        assert server.port is not None
+
+        status, _, body = await request(server.port, "GET", "/")
+        html = body.decode()
+
+        assert status == 200
+        assert "Trace Viewer" in html
+        assert "Retention" in html
+        assert "Pinned Issues" in html
+
+        status, headers, body = await request(server.port, "GET", "/assets/views/trace.js")
+        assert status == 200
+        assert headers["content-type"].startswith("text/javascript")
+        assert b"renderTraceView" in body
+
+        status, headers, body = await request(server.port, "GET", "/assets/views/ops.js")
+        assert status == 200
+        assert headers["content-type"].startswith("text/javascript")
+        assert b"renderRetentionView" in body
+    finally:
+        await server.stop()
+
+
+@pytest.mark.asyncio
 async def test_api_previews_instance_workflow_without_creating_instance(tmp_path: Path) -> None:
     repo = make_repo(tmp_path)
     service = make_service(tmp_path)

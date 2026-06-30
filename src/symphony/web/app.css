@@ -331,6 +331,95 @@ h1 {
   border-radius: 7px;
 }
 
+.trace-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(340px, 0.65fr);
+  grid-template-areas:
+    "toolbar detail"
+    "list detail";
+  gap: 12px 16px;
+  align-items: start;
+}
+
+.trace-toolbar {
+  grid-area: toolbar;
+  display: flex;
+  gap: 10px;
+}
+
+.trace-toolbar input,
+.trace-toolbar select {
+  min-height: 36px;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+}
+
+.trace-toolbar input {
+  flex: 1;
+  padding: 0 10px;
+}
+
+.trace-toolbar select {
+  padding: 0 10px;
+}
+
+.trace-list {
+  grid-area: list;
+  display: grid;
+  gap: 8px;
+}
+
+.trace-grid > .detail-pane {
+  grid-area: detail;
+}
+
+.trace-button {
+  width: 100%;
+  color: var(--text);
+  text-align: left;
+}
+
+.json-panel {
+  max-height: 360px;
+  overflow: auto;
+  margin: 0;
+  padding: 12px;
+  color: #dbe7f3;
+  background: #0c1015;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.ops-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.metric-card {
+  display: grid;
+  gap: 8px;
+  min-height: 96px;
+  padding: 14px;
+  background: #141920;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.metric-card span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.metric-card strong {
+  font-size: 26px;
+}
+
 @media (max-width: 820px) {
   #app-shell {
     grid-template-columns: 1fr;
@@ -347,8 +436,17 @@ h1 {
   .search-strip,
   .summary-grid,
   .split-view,
-  .metric-row {
+  .metric-row,
+  .trace-grid,
+  .ops-grid {
     grid-template-columns: 1fr;
+  }
+
+  .trace-grid {
+    grid-template-areas:
+      "toolbar"
+      "list"
+      "detail";
   }
 
   .row-card {

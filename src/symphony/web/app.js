@@ -3,6 +3,8 @@ import { formatCurrency, formatTokens } from './lib/format.js'
 import { state, setRoute } from './lib/state.js'
 import { renderIssuesView } from './views/issues.js'
 import { renderRunsView } from './views/runs.js'
+import { renderTraceView } from './views/trace.js'
+import { renderInstancesView, renderLinearView, renderRetentionView, renderSettingsView, renderWorkflowView } from './views/ops.js'
 
 const root = document.querySelector('#view-root')
 const navItems = Array.from(document.querySelectorAll('.nav-item'))
@@ -28,6 +30,30 @@ async function render() {
     await renderRunsView(root, { onSummary: updateRunSummary })
     return
   }
+  if (state.route === 'trace') {
+    await renderTraceView(root)
+    return
+  }
+  if (state.route === 'retention') {
+    await renderRetentionView(root, { onSummary: updateRetentionSummary })
+    return
+  }
+  if (state.route === 'instances') {
+    await renderInstancesView(root)
+    return
+  }
+  if (state.route === 'linear') {
+    renderLinearView(root)
+    return
+  }
+  if (state.route === 'workflow') {
+    renderWorkflowView(root)
+    return
+  }
+  if (state.route === 'settings') {
+    renderSettingsView(root)
+    return
+  }
   root.innerHTML = `<div class="empty-state"><h2>${titleForRoute(state.route)}</h2><p>Loading ${state.route} operations surface.</p></div>`
 }
 
@@ -41,6 +67,10 @@ async function updateIssueSummary(issues) {
 
 function updateRunSummary(runs) {
   document.querySelector('#run-count').textContent = String(runs.length)
+}
+
+function updateRetentionSummary(retention) {
+  document.querySelector('#retention-state').textContent = String(retention.pinned_issue_count || 0)
 }
 
 function sum(records, key) {
