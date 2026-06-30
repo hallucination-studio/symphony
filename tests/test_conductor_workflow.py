@@ -1,0 +1,169 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+from symphony.conductor_models import InstanceRecord, WorkflowValidationResult
+from symphony.conductor_workflow import (
+    ConductorValidationError,
+    generate_workflow_content,
+    validate_instance_workflow,
+)
+
+
+def make_instance(tmp_path: Path) -> InstanceRecord:
+    instance_dir = tmp_path / "instances" / "inst-1"
+    return InstanceRecord.create(
+        name="Example",
+        repo_source_type="local_path",
+        repo_source_value=str(tmp_path / "repo"),
+        resolved_repo_path=str(tmp_path / "repo"),
+        instance_dir=str(instance_dir),
+        linear_project="ENG",
+        linear_filters={"labels": ["codex"], "active_states": ["Todo", "In Progress"]},
+        workflow_profile="default",
+        workflow_inputs={"goal": "Keep issues moving"},
+        workspace_root=str(instance_dir / "workspace" / "repo"),
+        persistence_path=str(instance_dir / "state" / "symphony.json"),
+        log_path=str(instance_dir / "logs" / "symphony.log"),
+        workflow_path=str(instance_dir / "WORKFLOW.md"),
+        http_port=8811,
+    )
+
+
+def test_generate_workflow_content_injects_managed_runtime_resources(tmp_path: Path) -> None:
+    instance = make_instance(tmp_path)
+
+    content = generate_workflow_content(instance)
+
+    assert "workspace:" in content
+    assert f"root: {instance.workspace_root}" in content
+    assert "per_issue: false" in content
+    assert f"path: {instance.persistence_path}" in content
+    assert f"port: {instance.http_port}" in content
+    assert "project_slug: ENG" in content
+    assert "Keep issues moving" in content
+    assert "Current Linear issue:" in content
+    assert "Identifier: {{ issue.identifier }}" in content
+    assert "Title: {{ issue.title }}" in content
+    assert "Issue ID: {{ issue.id }}" in content
+    assert "{{ issue.description or 'No description provided.' }}" in content
+    assert "after_create: |" not in content
+    assert "rsync -a --delete" not in content
+    assert "Work in this prepared repository workspace." in content
+    assert "When the requested work is implemented and verified" in content
+    assert "create a Linear comment" in content
+    assert "move the issue out of the active states" in content
+    assert "Configured terminal states: Closed, Cancelled, Canceled, Done." in content
+    assert "query CurrentIssueTeam" in content
+    assert "query TerminalState" in content
+    assert "team { id key name }" in content
+    assert "query TerminalState($teamId: ID!)" in content
+    assert "workflowStates(first: 50, filter: { team: { id: { eq: $teamId } } })" in content
+    assert "states: workflowStates" not in content
+    assert "mutation CompleteIssue" in content
+    assert "commentCreate" in content
+    assert "issueUpdate" in content
+    assert "linear_graphql" in content
+
+
+def test_validate_instance_workflow_reports_yaml_errors(tmp_path: Path) -> None:
+    instance = make_instance(tmp_path)
+    instance = instance.with_updates(workflow_content="---\ntracker: [\n---\nBroken\n")
+
+    result = validate_instance_workflow(instance, [])
+
+    assert result.ok is False
+    assert result.error_code == "workflow_parse_error"
+    assert result.diagnostics
+
+
+def test_validate_instance_workflow_rejects_missing_required_fields(tmp_path: Path) -> None:
+    instance = make_instance(tmp_path)
+    instance = instance.with_updates(
+        workflow_content="""---
+workspace:
+  root: /tmp/work
+server:
+  port: 8811
+---
+Prompt
+"""
+    )
+
+    result = validate_instance_workflow(instance, [])
+
+    assert result.ok is False
+    assert result.error_code == "missing_tracker_project_slug"
+
+
+def test_validate_instance_workflow_rejects_resource_collisions(tmp_path: Path) -> None:
+    current = make_instance(tmp_path)
+    other = InstanceRecord.create(
+        name="Other",
+        repo_source_type="local_path",
+        repo_source_value=str(tmp_path / "repo-2"),
+        resolved_repo_path=str(tmp_path / "repo-2"),
+        instance_dir=str(tmp_path / "instances" / "inst-2"),
+        linear_project="OPS",
+        linear_filters={},
+        workflow_profile="default",
+        workflow_inputs={},
+        workspace_root=current.workspace_root,
+        persistence_path=str(tmp_path / "instances" / "inst-2" / "state" / "symphony.json"),
+        log_path=str(tmp_path / "instances" / "inst-2" / "logs" / "symphony.log"),
+        workflow_path=str(tmp_path / "instances" / "inst-2" / "WORKFLOW.md"),
+        http_port=9911,
+    )
+    current = current.with_updates(workflow_content=generate_workflow_content(current))
+
+    result = validate_instance_workflow(current, [other])
+
+    assert result.ok is False
+    assert result.error_code == "resource_collision"
+    assert any("workspace.root" in item for item in result.diagnostics)
+
+
+def test_validate_instance_workflow_round_trips_current_parser(tmp_path: Path) -> None:
+    instance = make_instance(tmp_path)
+    instance = instance.with_updates(workflow_content=generate_workflow_content(instance))
+
+    result = validate_instance_workflow(instance, [])
+
+    assert result == WorkflowValidationResult(ok=True, error_code=None, diagnostics=[])
+
+
+def test_validate_instance_workflow_requires_managed_runtime_resources(tmp_path: Path) -> None:
+    instance = make_instance(tmp_path)
+    instance = instance.with_updates(
+        workflow_content="""---
+tracker:
+  kind: linear
+  project_slug: ENG
+  api_key: $LINEAR_API_KEY
+workspace:
+  root: /tmp/not-the-managed-root
+persistence:
+  path: /tmp/not-the-managed-state.json
+server:
+  port: 3000
+---
+Prompt
+"""
+    )
+
+    result = validate_instance_workflow(instance, [])
+
+    assert result.ok is False
+    assert result.error_code == "managed_resource_mismatch"
+    assert len(result.diagnostics) == 3
+
+
+def test_generate_workflow_content_requires_known_profile(tmp_path: Path) -> None:
+    instance = make_instance(tmp_path).with_updates(workflow_profile="unknown")
+
+    try:
+        generate_workflow_content(instance)
+    except ConductorValidationError as exc:
+        assert exc.code == "unknown_workflow_profile"
+    else:
+        raise AssertionError("expected ConductorValidationError")

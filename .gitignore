@@ -1,0 +1,12 @@
+.venv/
+.env
+workspaces/
+__pycache__/
+.pytest_cache/
+*.pyc
+docs/superpowers
+.codex-runtime
+symphony_linear_codex.egg-info
+.DS_Store
+conductor-data
+.symphony
