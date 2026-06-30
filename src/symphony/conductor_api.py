@@ -8,7 +8,7 @@ from urllib.parse import parse_qs
 
 from .conductor_models import InstanceCreateRequest, InstancePatchRequest
 from .conductor_service import ConductorService, ConductorServiceError
-from .conductor_web import favicon_ico, manage_web_concept_svg, render_console_html
+from .conductor_web import favicon_ico, manage_web_concept_svg, render_console_html, web_asset_text
 
 
 @dataclass(frozen=True)
@@ -81,6 +81,11 @@ class ConductorApiServer:
         try:
             if method == "GET" and path == "/":
                 return 200, RawResponse.text(render_console_html(), "text/html; charset=utf-8")
+            if method == "GET" and path.startswith("/assets/"):
+                asset = _web_asset(path)
+                if asset is not None:
+                    relative_path, content_type = asset
+                    return 200, RawResponse.text(web_asset_text(relative_path), content_type)
             if method == "GET" and path == "/assets/manage-web-concept.svg":
                 return 200, RawResponse.text(manage_web_concept_svg(), "image/svg+xml; charset=utf-8")
             if method == "GET" and path == "/favicon.ico":
@@ -221,3 +226,14 @@ def _int(value: Any, default: int) -> int:
     if isinstance(value, int) and not isinstance(value, bool):
         return value
     return default
+
+
+def _web_asset(path: str) -> tuple[str, str] | None:
+    assets = {
+        "/assets/app.css": ("app.css", "text/css; charset=utf-8"),
+        "/assets/app.js": ("app.js", "text/javascript; charset=utf-8"),
+        "/assets/lib/api.js": ("lib/api.js", "text/javascript; charset=utf-8"),
+        "/assets/lib/format.js": ("lib/format.js", "text/javascript; charset=utf-8"),
+        "/assets/lib/state.js": ("lib/state.js", "text/javascript; charset=utf-8"),
+    }
+    return assets.get(path)

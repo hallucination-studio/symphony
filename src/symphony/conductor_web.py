@@ -5,7 +5,18 @@ import struct
 import zlib
 
 
+WEB_ROOT = Path(__file__).resolve().parent / "web"
+
+
 def render_console_html() -> str:
+    return web_asset_text("index.html")
+
+
+def web_asset_text(relative_path: str) -> str:
+    return (WEB_ROOT / relative_path).read_text(encoding="utf-8")
+
+
+def legacy_console_html() -> str:
     return """<!doctype html>
 <html lang="en">
 <head>

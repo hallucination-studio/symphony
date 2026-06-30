@@ -210,7 +210,7 @@ async def test_api_creates_lists_reads_and_validates_instances(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
-async def test_web_console_routes_return_html_and_static_assets(tmp_path: Path) -> None:
+async def test_web_shell_serves_new_ops_console_assets(tmp_path: Path) -> None:
     service = make_service(tmp_path)
     server = ConductorApiServer(service)
     await server.start(port=0)
@@ -223,44 +223,29 @@ async def test_web_console_routes_return_html_and_static_assets(tmp_path: Path) 
         assert headers["content-type"].startswith("text/html")
         html = body.decode()
         assert "<!doctype html>" in html.lower()
-        assert "Conductor" in html
-        assert 'id="app"' in html
+        assert "Conductor Ops Console" in html
+        assert '/assets/app.css' in html
+        assert '/assets/app.js' in html
+        assert "Issues" in html
+        assert "Runs" in html
+        assert "Retention" in html
+        assert 'id="app-shell"' in html
         assert "/api/dashboard" in html
-        assert "/api/instances" in html
-        assert "Tokens" in html
-        assert "Runtime" in html
-        assert "Failures / Retries" in html
-        assert "Linear project slug" in html
-        assert "linear-project-slug-help" in html
-        assert "Project settings" in html
-        assert "goal-help" in html
-        assert "Instance goal" in html
-        assert "Leave this blank to use the default goal." in html
-        assert "<textarea name=\"goal\" required" not in html
-        assert "<textarea name=\"goal\"></textarea>" in html
-        assert "Preview Workflow" in html
-        assert "Confirm Create" not in html
-        assert "workflow-preview" in html
-        assert 'await refresh();\n        setView("workflow");' not in html
-        assert 'setView("instances");' in html
-        assert 'data-action="delete"' in html
-        assert "Delete instance" in html
-        assert 'method: "DELETE"' in html
-        assert "Issue Runtime" in html
-        assert "workspace-note" in html
-        assert "runtime-issues" in html
-        assert "renderRuntime" in html
-        assert "Settings" in html
-        assert "Conductor Settings" in html
-        assert "Linear API key" in html
-        assert "/api/settings" in html
 
-        status, headers, body = await request(server.port, "GET", "/assets/manage-web-concept.svg")
-
+        status, headers, body = await request(server.port, "GET", "/assets/app.css")
         assert status == 200
-        assert headers["content-type"].startswith("image/svg+xml")
-        assert body.startswith(b"<svg")
-        assert b"Symphony Control Plane" in body
+        assert headers["content-type"].startswith("text/css")
+        assert b"#app-shell" in body
+
+        status, headers, body = await request(server.port, "GET", "/assets/app.js")
+        assert status == 200
+        assert headers["content-type"].startswith("text/javascript")
+        assert b"/api/issues" in body
+
+        status, headers, body = await request(server.port, "GET", "/assets/lib/api.js")
+        assert status == 200
+        assert headers["content-type"].startswith("text/javascript")
+        assert b"getJSON" in body
 
         status, headers, body = await request(server.port, "GET", "/favicon.ico")
 
