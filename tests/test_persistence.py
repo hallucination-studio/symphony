@@ -50,7 +50,7 @@ def test_persistence_store_round_trips_retry_entries_and_sessions(tmp_path: Path
                     }
                 ],
                 turn_count=2,
-                tokens=RuntimeTokens(input_tokens=10, output_tokens=4, total_tokens=14),
+                tokens=RuntimeTokens(input_tokens=10, output_tokens=4, cached_tokens=3, total_tokens=17),
             )
         ],
     )
@@ -73,7 +73,8 @@ def test_persistence_store_round_trips_retry_entries_and_sessions(tmp_path: Path
     assert loaded.sessions[0].status_label == "symphony:running"
     assert loaded.sessions[0].workspace_path == str(tmp_path / "workspaces" / "MT-2")
     assert loaded.sessions[0].recent_events[0]["raw_event"]["raw_method"] == "turn/completed"
-    assert loaded.sessions[0].tokens.total_tokens == 14
+    assert loaded.sessions[0].tokens.cached_tokens == 3
+    assert loaded.sessions[0].tokens.total_tokens == 17
 
 
 def test_persistence_store_builds_state_from_running_entries(tmp_path: Path) -> None:
@@ -101,7 +102,7 @@ def test_persistence_store_builds_state_from_running_entries(tmp_path: Path) -> 
                 "raw_event": {"event": "notification", "raw_method": "item/agentMessage/delta"},
             }
         ],
-        tokens=RuntimeTokens(input_tokens=3, output_tokens=2, total_tokens=5),
+        tokens=RuntimeTokens(input_tokens=3, output_tokens=2, cached_tokens=1, total_tokens=6),
         turn_count=1,
     )
 
@@ -116,7 +117,8 @@ def test_persistence_store_builds_state_from_running_entries(tmp_path: Path) -> 
     assert state.sessions[0].status_label == "symphony:running"
     assert state.sessions[0].workspace_path == str(tmp_path / "workspaces" / "MT-1")
     assert state.sessions[0].recent_events[0]["message"] == "working"
-    assert state.sessions[0].tokens.total_tokens == 5
+    assert state.sessions[0].tokens.cached_tokens == 1
+    assert state.sessions[0].tokens.total_tokens == 6
 
 
 def test_persistence_store_missing_or_corrupt_file_loads_empty(tmp_path: Path) -> None:

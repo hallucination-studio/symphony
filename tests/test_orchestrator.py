@@ -653,6 +653,7 @@ async def test_codex_event_updates_session_and_token_totals(tmp_path: Path) -> N
                 "total_token_usage": {
                     "input_tokens": 130,
                     "output_tokens": 50,
+                    "cached_tokens": 20,
                     "total_tokens": 180,
                 }
             },
@@ -666,11 +667,13 @@ async def test_codex_event_updates_session_and_token_totals(tmp_path: Path) -> N
     assert entry.codex_app_server_pid == 123
     assert entry.tokens.input_tokens == 130
     assert entry.tokens.output_tokens == 50
+    assert entry.tokens.cached_tokens == 20
     assert entry.tokens.total_tokens == 180
     assert entry.recent_events[-1]["event"] == "thread_token_usage_updated"
     assert entry.recent_events[-1]["usage"] == {
         "input_tokens": 130,
         "output_tokens": 50,
+        "cached_tokens": 20,
         "total_tokens": 180,
     }
     assert entry.recent_events[-1]["raw_event"]["payload"]["total_token_usage"]["total_tokens"] == 180

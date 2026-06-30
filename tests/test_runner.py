@@ -9,12 +9,15 @@ from symphony.config import (
     AgentConfig,
     CodexConfig,
     HooksConfig,
+    PersistenceConfig,
     PollingConfig,
     ServiceConfig,
     TrackerConfig,
     WorkspaceConfig,
 )
 from symphony.models import Issue
+from symphony.ops_store import OpsStore
+from symphony.persistence import ops_snapshot_path_from_persistence_path
 from symphony.runner import AgentRunner
 from symphony.workspace import Workspace, WorkspaceError, WorkspaceManager
 
@@ -87,6 +90,21 @@ def make_config(tmp_path: Path) -> ServiceConfig:
         codex=CodexConfig(),
         prompt_template="Do {{ issue.identifier }}",
         workflow_path=tmp_path / "WORKFLOW.md",
+    )
+
+
+def make_config_with_persistence(tmp_path: Path) -> ServiceConfig:
+    config = make_config(tmp_path)
+    return ServiceConfig(
+        tracker=config.tracker,
+        polling=config.polling,
+        workspace=config.workspace,
+        hooks=config.hooks,
+        agent=config.agent,
+        codex=config.codex,
+        prompt_template=config.prompt_template,
+        workflow_path=config.workflow_path,
+        persistence=PersistenceConfig(path=tmp_path / "state" / "symphony.json"),
     )
 
 
@@ -247,6 +265,66 @@ async def test_runner_passes_worker_host_to_codex_session(tmp_path: Path) -> Non
 
     assert codex.kwargs is not None
     assert codex.kwargs["worker_host"] == "builder-1"
+
+
+@pytest.mark.asyncio
+async def test_runner_writes_run_attempt_turn_ops_snapshot(tmp_path: Path) -> None:
+    codex = FakeCodex()
+    config = make_config_with_persistence(tmp_path)
+    runner = AgentRunner(
+        config,
+        WorkspaceManager(config.workspace, config.hooks),
+        codex_client=codex,
+        tracker=FakeTracker(),
+    )
+    forwarded_events: list[dict[str, Any]] = []
+
+    await runner.run_issue(
+        Issue(id="mt-1", identifier="MT-1", title="Build", state="Todo", labels=["codex"], project_slug="MT"),
+        1,
+        forwarded_events.append,
+    )
+
+    assert codex.kwargs is not None
+    codex.kwargs["on_event"](
+        {
+            "event": "turn_started",
+            "thread_id": "thr_1",
+            "turn_id": "turn_1",
+            "session_id": "thr_1-turn_1",
+        }
+    )
+    codex.kwargs["on_event"](
+        {
+            "event": "thread_token_usage_updated",
+            "session_id": "thr_1-turn_1",
+            "turn_id": "turn_1",
+            "usage": {"input_tokens": 12, "output_tokens": 4, "cached_tokens": 2, "total_tokens": 18},
+        }
+    )
+    codex.kwargs["on_event"](
+        {
+            "event": "turn_completed",
+            "thread_id": "thr_1",
+            "turn_id": "turn_1",
+            "session_id": "thr_1-turn_1",
+        }
+    )
+
+    snapshot = OpsStore(ops_snapshot_path_from_persistence_path(config.persistence.path)).load()
+    run = next(iter(snapshot.runs.values()))
+    turn = next(iter(snapshot.turns.values()))
+    assert run.issue_id == "mt-1"
+    assert run.instance_id == "local"
+    assert run.workspace_path == str(tmp_path / "MT-1")
+    assert run.turn_count == 1
+    assert turn.cached_tokens == 2
+    assert snapshot.events[-1].event_type == "turn_completed"
+    assert [event["event"] for event in forwarded_events] == [
+        "turn_started",
+        "thread_token_usage_updated",
+        "turn_completed",
+    ]
 
 
 @pytest.mark.asyncio

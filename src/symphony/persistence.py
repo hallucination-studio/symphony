@@ -88,6 +88,12 @@ class PersistenceStore:
         return _state_from_json(payload)
 
 
+def ops_snapshot_path_from_persistence_path(path: Path | None) -> Path:
+    if path is None:
+        return Path("ops.json")
+    return path.parent / "ops.json"
+
+
 def _state_to_json(state: PersistedState) -> dict[str, Any]:
     return {
         "retry_attempts": [_retry_to_json(entry) for entry in state.retry_attempts],
@@ -176,6 +182,7 @@ def _session_to_json(session: PersistedSession) -> dict[str, Any]:
         "tokens": {
             "input_tokens": session.tokens.input_tokens,
             "output_tokens": session.tokens.output_tokens,
+            "cached_tokens": session.tokens.cached_tokens,
             "total_tokens": session.tokens.total_tokens,
         },
     }
@@ -210,6 +217,7 @@ def _session_from_json(payload: dict[str, Any]) -> PersistedSession | None:
         tokens=RuntimeTokens(
             input_tokens=_int(tokens.get("input_tokens")),
             output_tokens=_int(tokens.get("output_tokens")),
+            cached_tokens=_int(tokens.get("cached_tokens")),
             total_tokens=_int(tokens.get("total_tokens")),
         ),
     )

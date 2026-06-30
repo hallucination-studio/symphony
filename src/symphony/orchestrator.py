@@ -511,6 +511,7 @@ class Orchestrator:
         return {
             "input_tokens": tokens.input_tokens,
             "output_tokens": tokens.output_tokens,
+            "cached_tokens": tokens.cached_tokens,
             "total_tokens": tokens.total_tokens,
         }
 
@@ -617,7 +618,12 @@ class Orchestrator:
         output_delta = max(tokens.output_tokens - entry.last_reported_tokens.output_tokens, 0)
         total_delta = max(tokens.total_tokens - entry.last_reported_tokens.total_tokens, 0)
         entry.tokens = tokens
-        entry.last_reported_tokens = RuntimeTokens(tokens.input_tokens, tokens.output_tokens, tokens.total_tokens)
+        entry.last_reported_tokens = RuntimeTokens(
+            input_tokens=tokens.input_tokens,
+            output_tokens=tokens.output_tokens,
+            cached_tokens=tokens.cached_tokens,
+            total_tokens=tokens.total_tokens,
+        )
         self.state.codex_totals.input_tokens += input_delta
         self.state.codex_totals.output_tokens += output_delta
         self.state.codex_totals.total_tokens += total_delta
@@ -636,6 +642,7 @@ class Orchestrator:
         return RuntimeTokens(
             input_tokens=self._int_from_keys(token_payload, "input_tokens", "inputTokens", "input"),
             output_tokens=self._int_from_keys(token_payload, "output_tokens", "outputTokens", "output"),
+            cached_tokens=self._int_from_keys(token_payload, "cached_tokens", "cachedTokens", "cached"),
             total_tokens=self._int_from_keys(token_payload, "total_tokens", "totalTokens", "total"),
         )
 

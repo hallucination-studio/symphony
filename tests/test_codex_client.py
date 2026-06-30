@@ -554,6 +554,83 @@ async def test_supported_dynamic_tool_call_returns_structured_result(tmp_path: P
 
 
 @pytest.mark.asyncio
+async def test_codex_client_emits_tool_start_success_and_failure_events(tmp_path: Path) -> None:
+    success_process = FakeProcess(
+        [
+            {"id": 0, "result": {"userAgent": "codex", "platformFamily": "unix", "platformOs": "macos", "codexHome": "/tmp"}},
+            {"id": 1, "result": {"thread": {"id": "thr_1"}}},
+            {"id": 2, "result": {"turn": {"id": "turn_1"}}},
+            {
+                "id": 99,
+                "method": "tool/call",
+                "params": {"name": "linear_graphql", "arguments": {"query": "query Viewer { viewer { id } }"}},
+            },
+            {"method": "turn/completed", "params": {"turn": {"id": "turn_1"}, "status": "completed"}},
+        ]
+    )
+
+    async def success_factory(*args: Any, **kwargs: Any) -> FakeProcess:
+        return success_process
+
+    async def linear_graphql(arguments: Any) -> dict[str, Any]:
+        return {"success": True, "arguments": arguments}
+
+    success_events: list[dict[str, Any]] = []
+    success_client = CodexAppServerClient(
+        CodexConfig(read_timeout_ms=100, turn_timeout_ms=1000),
+        process_factory=success_factory,
+        tools={"linear_graphql": linear_graphql},
+    )
+    await success_client.run_session(tmp_path, "Do work", "MT-1: Build", on_event=success_events.append)
+
+    assert [event["event"] for event in success_events if str(event["event"]).startswith("tool_call_")] == [
+        "tool_call_started",
+        "tool_call_completed",
+    ]
+    started = next(event for event in success_events if event["event"] == "tool_call_started")
+    assert started["tool_name"] == "linear_graphql"
+    assert started["arguments"] == {"query": "query Viewer { viewer { id } }"}
+
+    failure_process = FakeProcess(
+        [
+            {"id": 0, "result": {"userAgent": "codex", "platformFamily": "unix", "platformOs": "macos", "codexHome": "/tmp"}},
+            {"id": 1, "result": {"thread": {"id": "thr_1"}}},
+            {"id": 2, "result": {"turn": {"id": "turn_1"}}},
+            {
+                "id": 100,
+                "method": "tool/call",
+                "params": {"name": "linear_graphql", "arguments": {"query": "broken"}},
+            },
+        ]
+    )
+
+    async def failure_factory(*args: Any, **kwargs: Any) -> FakeProcess:
+        return failure_process
+
+    async def failing_tool(arguments: Any) -> dict[str, Any]:
+        raise RuntimeError("linear unavailable")
+
+    failure_events: list[dict[str, Any]] = []
+    failure_client = CodexAppServerClient(
+        CodexConfig(read_timeout_ms=100, turn_timeout_ms=1000),
+        process_factory=failure_factory,
+        tools={"linear_graphql": failing_tool},
+    )
+
+    with pytest.raises(CodexError) as exc:
+        await failure_client.run_session(tmp_path, "Do work", "MT-1: Build", on_event=failure_events.append)
+
+    assert exc.value.code == "tool_call_failed"
+    assert [event["event"] for event in failure_events if str(event["event"]).startswith("tool_call_")] == [
+        "tool_call_started",
+        "tool_call_failed",
+    ]
+    failed = next(event for event in failure_events if event["event"] == "tool_call_failed")
+    assert failed["tool_name"] == "linear_graphql"
+    assert failed["error"] == "linear unavailable"
+
+
+@pytest.mark.asyncio
 async def test_supported_item_tool_call_returns_current_protocol_content_items(tmp_path: Path) -> None:
     process = FakeProcess(
         [
@@ -653,7 +730,12 @@ async def test_token_usage_notification_is_normalized(tmp_path: Path) -> None:
                 "method": "thread/tokenUsage/updated",
                 "params": {
                     "turnId": "turn_1",
-                    "total_token_usage": {"input_tokens": 5, "output_tokens": 3, "total_tokens": 8},
+                    "total_token_usage": {
+                        "input_tokens": 5,
+                        "output_tokens": 3,
+                        "cached_tokens": 2,
+                        "total_tokens": 8,
+                    },
                     "rate_limits": {"primary": {"remaining": 10}},
                 },
             },
@@ -669,7 +751,13 @@ async def test_token_usage_notification_is_normalized(tmp_path: Path) -> None:
     await client.run_session(tmp_path, "Do work", "MT-1: Build", on_event=events.append)
 
     token_events = [event for event in events if event["event"] == "thread_token_usage_updated"]
-    assert token_events[0]["usage"] == {"input_tokens": 5, "output_tokens": 3, "total_tokens": 8}
+    assert token_events[0]["usage"] == {
+        "input_tokens": 5,
+        "output_tokens": 3,
+        "cached_tokens": 2,
+        "total_tokens": 8,
+    }
+    assert token_events[0]["cached_tokens"] == 2
     assert token_events[0]["rate_limits"] == {"primary": {"remaining": 10}}
 
 

@@ -451,7 +451,33 @@ class CodexAppServerClient:
             )
             return
 
-        result = await self.tools[name](arguments)
+        self._emit(
+            on_event,
+            {
+                "event": "tool_call_started",
+                "timestamp": utc_now().astimezone(timezone.utc).isoformat(),
+                "method": method,
+                "tool_name": name,
+                "arguments": arguments,
+                "payload": params,
+            },
+        )
+        try:
+            result = await self.tools[name](arguments)
+        except Exception as exc:
+            self._emit(
+                on_event,
+                {
+                    "event": "tool_call_failed",
+                    "timestamp": utc_now().astimezone(timezone.utc).isoformat(),
+                    "method": method,
+                    "tool_name": name,
+                    "arguments": arguments,
+                    "error": str(exc),
+                    "payload": params,
+                },
+            )
+            raise CodexError("tool_call_failed", str(exc)) from exc
         self._emit(
             on_event,
             {
@@ -520,18 +546,22 @@ class CodexAppServerClient:
             event_name = "turn_cancelled"
         elif method == "turn/failed":
             event_name = "turn_failed"
-        return {
+        usage = self._usage_from_params(method, params)
+        event = {
             "event": event_name,
             "timestamp": utc_now().astimezone(timezone.utc).isoformat(),
             "turn_id": (turn or {}).get("id") or params.get("turnId"),
             "thread_id": self._active_thread_id,
             "session_id": self._session_id_for_turn((turn or {}).get("id") or params.get("turnId")),
             "message": self._message_from_params(method, params),
-            "usage": self._usage_from_params(method, params),
+            "usage": usage,
             "rate_limits": self._rate_limits_from_params(params),
             "raw_method": method,
             "payload": params,
         }
+        if usage is not None:
+            event.update(usage)
+        return event
 
     def _session_id_for_turn(self, turn_id: Any) -> str | None:
         if not isinstance(turn_id, str):
@@ -548,11 +578,13 @@ class CodexAppServerClient:
         raw = params.get("total_token_usage") or params.get("totalTokenUsage") or params.get("tokenUsage")
         if not isinstance(raw, dict):
             return None
-        return {
+        usage = {
             "input_tokens": self._int_from_keys(raw, "input_tokens", "inputTokens", "input"),
             "output_tokens": self._int_from_keys(raw, "output_tokens", "outputTokens", "output"),
+            "cached_tokens": self._int_from_keys(raw, "cached_tokens", "cachedTokens", "cached"),
             "total_tokens": self._int_from_keys(raw, "total_tokens", "totalTokens", "total"),
         }
+        return usage
 
     def _rate_limits_from_params(self, params: dict[str, Any]) -> dict[str, Any] | None:
         raw = params.get("rate_limits") or params.get("rateLimits")
