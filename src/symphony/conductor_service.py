@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 import shutil
+import subprocess
 from datetime import datetime, timezone
 
 from .conductor_models import (
@@ -20,6 +21,10 @@ from .conductor_workflow import (
     validate_instance_workflow,
     workflow_profiles,
 )
+from .ops_models import OpsSnapshot
+from .ops_projection import build_issue_detail, build_issue_list, build_run_detail, build_trace_stream
+from .ops_retention import RetentionPolicy
+from .ops_store import OpsStore
 from .persistence import PersistenceStore, PersistedSession
 
 
@@ -115,6 +120,83 @@ class ConductorService:
                 "retries": retry_count,
             },
         }
+
+    def list_issues(self) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for instance, snapshot in self._ops_snapshots():
+            for issue in build_issue_list(snapshot):
+                row = issue.to_dict()
+                row["instance_id"] = instance.id
+                rows.append(row)
+        return sorted(rows, key=lambda row: str(row.get("last_activity_at") or ""), reverse=True)
+
+    def get_issue(self, issue_id: str) -> dict[str, Any]:
+        for instance, snapshot in self._ops_snapshots():
+            if issue_id in snapshot.issues:
+                detail = build_issue_detail(snapshot, issue_id)
+                detail["instance_id"] = instance.id
+                return detail
+        raise ConductorServiceError("issue_not_found", f"Issue not found: {issue_id}")
+
+    def list_runs(self) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for instance, snapshot in self._ops_snapshots():
+            for run in snapshot.runs.values():
+                row = run.to_dict()
+                row["instance_id"] = instance.id
+                rows.append(row)
+        return sorted(rows, key=lambda row: str(row.get("last_activity_at") or ""), reverse=True)
+
+    def get_run(self, run_id: str) -> dict[str, Any]:
+        for instance, snapshot in self._ops_snapshots():
+            if run_id in snapshot.runs:
+                detail = build_run_detail(snapshot, run_id)
+                detail["instance_id"] = instance.id
+                return detail
+        raise ConductorServiceError("run_not_found", f"Run not found: {run_id}")
+
+    def list_trace_events(
+        self, *, issue_id: str | None, run_id: str | None, limit: int = 200
+    ) -> list[dict[str, Any]]:
+        events: list[dict[str, Any]] = []
+        for instance, snapshot in self._ops_snapshots():
+            for event in build_trace_stream(snapshot, issue_id=issue_id, run_id=run_id, limit=limit):
+                row = event.to_dict()
+                row["instance_id"] = instance.id
+                events.append(row)
+        return sorted(events, key=lambda row: str(row.get("timestamp") or ""))[-limit:]
+
+    def retention_status(self) -> dict[str, Any]:
+        pinned_issue_ids: set[str] = set()
+        pinned_run_ids: set[str] = set()
+        event_counts = {"summary": 0, "trace": 0, "raw": 0}
+        for _instance, snapshot in self._ops_snapshots():
+            pinned_issue_ids.update(snapshot.retention.pinned_issue_ids)
+            pinned_run_ids.update(snapshot.retention.pinned_run_ids)
+            for event in snapshot.events:
+                if event.retention_tier in event_counts:
+                    event_counts[event.retention_tier] += 1
+        return {
+            "pinned_issue_count": len(pinned_issue_ids),
+            "pinned_run_count": len(pinned_run_ids),
+            "pinned_issue_ids": sorted(pinned_issue_ids),
+            "pinned_run_ids": sorted(pinned_run_ids),
+            "event_counts": event_counts,
+        }
+
+    def pin_issue(self, issue_id: str) -> dict[str, Any]:
+        self._update_issue_pin(issue_id, pinned=True)
+        return self.retention_status()
+
+    def unpin_issue(self, issue_id: str) -> dict[str, Any]:
+        self._update_issue_pin(issue_id, pinned=False)
+        return self.retention_status()
+
+    def collect_retention(self, policy: RetentionPolicy | None = None) -> dict[str, Any]:
+        policy = policy or RetentionPolicy()
+        for _instance, store, snapshot in self._ops_stores():
+            store.save(policy.apply(snapshot))
+        return self.retention_status()
 
     def get_instance(self, instance_id: str) -> InstanceRecord | None:
         return self.store.get_instance(instance_id)
@@ -278,12 +360,24 @@ class ConductorService:
         }
 
     def clone_repo(self, repo_url: str, target_path: str) -> dict[str, Any]:
-        raise ConductorServiceError("clone_not_implemented", "Git clone flow is not implemented in this build")
+        target = Path(target_path)
+        if target.exists() and any(target.iterdir()):
+            return {"repo_url": repo_url, "target_path": str(target), "cloned": False}
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            subprocess.run(["git", "clone", "--", repo_url, str(target)], check=True)
+        except subprocess.CalledProcessError as exc:
+            raise ConductorServiceError("git_clone_failed", f"Git clone failed: {exc}") from exc
+        return {"repo_url": repo_url, "target_path": str(target), "cloned": True}
 
     def available_workflow_profiles(self) -> list[dict[str, str]]:
         return workflow_profiles()
 
     def _resolve_repo(self, repo_source_type: str, repo_source_value: str) -> str:
+        if repo_source_type == "git":
+            if not repo_source_value.strip():
+                raise ConductorServiceError("missing_git_url", "Git repository URL is required")
+            return repo_source_value
         if repo_source_type != "local_path":
             raise ConductorServiceError("unsupported_repo_source", f"Unsupported repo source type: {repo_source_type}")
         candidate = Path(repo_source_value).expanduser().resolve()
@@ -303,6 +397,9 @@ class ConductorService:
         workspace = Path(instance.workspace_root)
         workspace.mkdir(parents=True, exist_ok=True)
         if any(workspace.iterdir()):
+            return
+        if instance.repo_source_type == "git":
+            self.clone_repo(instance.resolved_repo_path, instance.workspace_root)
             return
         if instance.repo_source_type != "local_path":
             return
@@ -372,6 +469,37 @@ class ConductorService:
             "retrying": retrying,
             "issues": running + retrying,
         }
+
+    def _ops_snapshots(self) -> list[tuple[InstanceRecord, OpsSnapshot]]:
+        return [(instance, snapshot) for instance, _store, snapshot in self._ops_stores()]
+
+    def _ops_stores(self) -> list[tuple[InstanceRecord, OpsStore, OpsSnapshot]]:
+        rows: list[tuple[InstanceRecord, OpsStore, OpsSnapshot]] = []
+        for instance in self.store.list_instances():
+            store = OpsStore(Path(instance.persistence_path).parent / "ops.json")
+            snapshot = store.load()
+            rows.append((instance, store, snapshot))
+        return rows
+
+    def _update_issue_pin(self, issue_id: str, *, pinned: bool) -> None:
+        found = False
+        for _instance, store, snapshot in self._ops_stores():
+            if issue_id not in snapshot.issues and issue_id not in snapshot.retention.pinned_issue_ids:
+                continue
+            found = True
+            pinned_ids = list(snapshot.retention.pinned_issue_ids)
+            if pinned and issue_id not in pinned_ids:
+                pinned_ids.append(issue_id)
+            if not pinned:
+                pinned_ids = [item for item in pinned_ids if item != issue_id]
+            snapshot.retention = snapshot.retention.__class__(
+                pinned_issue_ids=sorted(pinned_ids),
+                pinned_run_ids=list(snapshot.retention.pinned_run_ids),
+                last_collected_at=snapshot.retention.last_collected_at,
+            )
+            store.save(snapshot)
+        if not found:
+            raise ConductorServiceError("issue_not_found", f"Issue not found: {issue_id}")
 
 
 def json_stable(payload: dict[str, Any]) -> str:

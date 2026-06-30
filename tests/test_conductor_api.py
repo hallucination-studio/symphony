@@ -11,6 +11,8 @@ import pytest
 from symphony.conductor_api import ConductorApiServer
 from symphony.conductor_service import ConductorService
 from symphony.conductor_store import ConductorStore
+from symphony.ops_models import IssueRecord, OpsSnapshot, RunRecord, TraceEvent
+from symphony.ops_store import OpsStore
 
 
 def make_service(tmp_path: Path) -> ConductorService:
@@ -26,6 +28,47 @@ def make_repo(tmp_path: Path) -> Path:
     (repo / ".git").mkdir()
     (repo / "README.md").write_text("hello\n", encoding="utf-8")
     return repo
+
+
+def write_sample_ops_snapshot(instance: dict[str, object]) -> None:
+    persistence_path = Path(str(instance["persistence_path"]))
+    OpsStore(persistence_path.parent / "ops.json").save(
+        OpsSnapshot(
+            issues={
+                "issue-1": IssueRecord(
+                    issue_id="issue-1",
+                    issue_identifier="ENG-1",
+                    title="Trace UI",
+                    state="running",
+                    total_turn_count=7,
+                    total_tokens=188240,
+                    total_estimated_cost_usd=0.97,
+                    last_activity_at="2026-06-30T00:10:00Z",
+                )
+            },
+            runs={
+                "run-1": RunRecord(
+                    run_id="run-1",
+                    issue_id="issue-1",
+                    instance_id=str(instance["id"]),
+                    status="running",
+                    turn_count=7,
+                    total_tokens=188240,
+                    last_activity_at="2026-06-30T00:10:00Z",
+                )
+            },
+            events=[
+                TraceEvent(
+                    event_id="evt-1",
+                    event_type="issue_dispatched",
+                    timestamp="2026-06-30T00:00:00Z",
+                    issue_id="issue-1",
+                    run_id="run-1",
+                    retention_tier="summary",
+                )
+            ],
+        )
+    )
 
 
 async def request(port: int, method: str, path: str, payload: dict | None = None) -> tuple[int, dict[str, str], bytes]:
@@ -55,6 +98,67 @@ async def request(port: int, method: str, path: str, payload: dict | None = None
             key, value = line.split(":", 1)
             headers[key.lower()] = value.strip()
     return status, headers, response_body
+
+
+@pytest.mark.asyncio
+async def test_api_lists_issues_runs_trace_and_retention(tmp_path: Path) -> None:
+    repo = make_repo(tmp_path)
+    service = make_service(tmp_path)
+    server = ConductorApiServer(service)
+    await server.start(port=0)
+    try:
+        assert server.port is not None
+        status, _, body = await request(
+            server.port,
+            "POST",
+            "/api/instances",
+            {
+                "name": "Alpha",
+                "repo_source_type": "local_path",
+                "repo_source_value": str(repo),
+                "linear_project": "ENG",
+                "linear_filters": {"labels": ["codex"]},
+                "workflow_profile": "default",
+                "workflow_inputs": {"goal": "Handle tasks"},
+            },
+        )
+        assert status == 201
+        instance = json.loads(body)["instance"]
+        write_sample_ops_snapshot(instance)
+
+        status, _, body = await request(server.port, "GET", "/api/issues")
+        assert status == 200
+        assert json.loads(body)["issues"][0]["issue_identifier"] == "ENG-1"
+
+        status, _, body = await request(server.port, "GET", "/api/issues/issue-1")
+        assert status == 200
+        assert json.loads(body)["issue"]["metrics"]["turns"] == 7
+
+        status, _, body = await request(server.port, "GET", "/api/runs")
+        assert status == 200
+        assert json.loads(body)["runs"][0]["turn_count"] == 7
+
+        status, _, body = await request(server.port, "GET", "/api/runs/run-1")
+        assert status == 200
+        assert json.loads(body)["run"]["run"]["run_id"] == "run-1"
+
+        status, _, body = await request(server.port, "GET", "/api/traces?issue_id=issue-1")
+        assert status == 200
+        assert json.loads(body)["events"][0]["event_type"] == "issue_dispatched"
+
+        status, _, body = await request(server.port, "POST", "/api/issues/issue-1/pin")
+        assert status == 200
+        assert json.loads(body)["retention"]["pinned_issue_count"] == 1
+
+        status, _, body = await request(server.port, "GET", "/api/retention")
+        assert status == 200
+        assert json.loads(body)["retention"]["pinned_issue_ids"] == ["issue-1"]
+
+        status, _, body = await request(server.port, "POST", "/api/retention/collect")
+        assert status == 200
+        assert json.loads(body)["retention"]["pinned_issue_count"] == 1
+    finally:
+        await server.stop()
 
 
 @pytest.mark.asyncio

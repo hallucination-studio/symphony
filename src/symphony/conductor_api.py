@@ -4,6 +4,7 @@ import asyncio
 import json
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import parse_qs
 
 from .conductor_models import InstanceCreateRequest, InstancePatchRequest
 from .conductor_service import ConductorService, ConductorServiceError
@@ -49,7 +50,9 @@ class ConductorApiServer:
             raw_body = b""
             if content_length > 0:
                 raw_body = await reader.readexactly(content_length)
-            status, payload = await self._route(method.upper(), path.split("?", 1)[0], raw_body)
+            raw_path, _, raw_query = path.partition("?")
+            query = {key: values[-1] for key, values in parse_qs(raw_query).items() if values}
+            status, payload = await self._route(method.upper(), raw_path, raw_body, query)
             self._write_response(writer, status, payload)
             await writer.drain()
         except Exception as exc:
@@ -70,8 +73,11 @@ class ConductorApiServer:
                 key, value = decoded.split(":", 1)
                 headers[key.strip().lower()] = value.strip()
 
-    async def _route(self, method: str, path: str, raw_body: bytes) -> tuple[int, dict[str, Any] | RawResponse]:
+    async def _route(
+        self, method: str, path: str, raw_body: bytes, query: dict[str, str] | None = None
+    ) -> tuple[int, dict[str, Any] | RawResponse]:
         body = json.loads(raw_body.decode() or "{}") if raw_body else {}
+        query = query or {}
         try:
             if method == "GET" and path == "/":
                 return 200, RawResponse.text(render_console_html(), "text/html; charset=utf-8")
@@ -81,6 +87,35 @@ class ConductorApiServer:
                 return 200, RawResponse(favicon_ico(), "image/x-icon")
             if method == "GET" and path == "/api/dashboard":
                 return 200, {"dashboard": self.service.dashboard()}
+            if method == "GET" and path == "/api/issues":
+                return 200, {"issues": self.service.list_issues()}
+            if method == "GET" and path.startswith("/api/issues/"):
+                suffix = path.removeprefix("/api/issues/")
+                if suffix.endswith("/pin"):
+                    return 404, {"error": {"code": "not_found", "message": f"Route not found: {path}"}}
+                return 200, {"issue": self.service.get_issue(suffix)}
+            if method == "POST" and path.startswith("/api/issues/") and path.endswith("/pin"):
+                issue_id = path.removeprefix("/api/issues/").removesuffix("/pin")
+                return 200, {"retention": self.service.pin_issue(issue_id)}
+            if method == "DELETE" and path.startswith("/api/issues/") and path.endswith("/pin"):
+                issue_id = path.removeprefix("/api/issues/").removesuffix("/pin")
+                return 200, {"retention": self.service.unpin_issue(issue_id)}
+            if method == "GET" and path == "/api/runs":
+                return 200, {"runs": self.service.list_runs()}
+            if method == "GET" and path.startswith("/api/runs/"):
+                return 200, {"run": self.service.get_run(path.removeprefix("/api/runs/"))}
+            if method == "GET" and path == "/api/traces":
+                return 200, {
+                    "events": self.service.list_trace_events(
+                        issue_id=query.get("issue_id"),
+                        run_id=query.get("run_id"),
+                        limit=_int(query.get("limit"), 200),
+                    )
+                }
+            if method == "GET" and path == "/api/retention":
+                return 200, {"retention": self.service.retention_status()}
+            if method == "POST" and path == "/api/retention/collect":
+                return 200, {"retention": self.service.collect_retention()}
             if method == "GET" and path == "/api/instances":
                 return 200, {
                     "instances": [instance.to_dict(include_workflow_content=False) for instance in self.service.list_instances()]
@@ -178,3 +213,11 @@ class ConductorApiServer:
             ).encode()
             + body
         )
+
+
+def _int(value: Any, default: int) -> int:
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value.strip())
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    return default

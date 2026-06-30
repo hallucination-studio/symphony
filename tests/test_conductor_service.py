@@ -10,6 +10,8 @@ from symphony.conductor_models import ConductorSettings, InstanceCreateRequest, 
 from symphony.conductor_service import ConductorService, ConductorServiceError
 from symphony.conductor_store import ConductorStore
 from symphony.models import RetryEntry, RuntimeTokens, utc_now
+from symphony.ops_models import IssueRecord, OpsSnapshot, RetentionMetadata, RunRecord, TraceEvent
+from symphony.ops_store import OpsStore
 from symphony.persistence import PersistenceStore, PersistedSession, PersistedState
 
 
@@ -39,6 +41,59 @@ def make_request(repo: Path, *, name: str = "Alpha", port: int | None = None) ->
     )
 
 
+def write_sample_ops_snapshot(instance: InstanceRecord) -> None:
+    OpsStore(Path(instance.persistence_path).parent / "ops.json").save(
+        OpsSnapshot(
+            issues={
+                "issue-1": IssueRecord(
+                    issue_id="issue-1",
+                    issue_identifier="ENG-1",
+                    title="Trace UI",
+                    state="stalled",
+                    total_turn_count=7,
+                    total_tokens=188240,
+                    total_estimated_cost_usd=0.97,
+                    failure_reason="no Codex output arrived for 14 minutes after a tool timeout",
+                    last_activity_at="2026-06-30T00:10:00Z",
+                )
+            },
+            runs={
+                "run-1": RunRecord(
+                    run_id="run-1",
+                    issue_id="issue-1",
+                    instance_id=instance.id,
+                    status="stalled",
+                    turn_count=7,
+                    attempt_count=2,
+                    total_tokens=188240,
+                    estimated_cost_usd=0.97,
+                    failure_summary="no Codex output arrived for 14 minutes after a tool timeout",
+                    last_activity_at="2026-06-30T00:10:00Z",
+                )
+            },
+            events=[
+                TraceEvent(
+                    event_id="evt-1",
+                    event_type="issue_dispatched",
+                    timestamp="2026-06-30T00:00:00Z",
+                    issue_id="issue-1",
+                    run_id="run-1",
+                    retention_tier="summary",
+                ),
+                TraceEvent(
+                    event_id="evt-2",
+                    event_type="tool_call_failed",
+                    timestamp="2026-06-30T00:09:00Z",
+                    issue_id="issue-1",
+                    run_id="run-1",
+                    retention_tier="raw",
+                ),
+            ],
+            retention=RetentionMetadata(),
+        )
+    )
+
+
 class CapturingRuntime:
     def __init__(self) -> None:
         self.env: dict[str, str] | None = None
@@ -59,6 +114,42 @@ class CapturingRuntime:
 
     def read_logs(self, instance):
         return ""
+
+
+def test_conductor_service_lists_issue_run_trace_and_retention(tmp_path: Path) -> None:
+    service = make_service(tmp_path)
+    repo = make_repo(tmp_path)
+    instance = service.create_instance(make_request(repo))
+    write_sample_ops_snapshot(instance)
+
+    issues = service.list_issues()
+    runs = service.list_runs()
+    traces = service.list_trace_events(issue_id="issue-1", run_id=None)
+    retention = service.retention_status()
+
+    assert issues[0]["issue_identifier"] == "ENG-1"
+    assert issues[0]["instance_id"] == instance.id
+    assert "no Codex output" in service.get_issue("issue-1")["state_explanation"]
+    assert runs[0]["turn_count"] == 7
+    assert service.get_run("run-1")["run"]["run_id"] == "run-1"
+    assert traces[0]["event_type"] == "issue_dispatched"
+    assert retention["pinned_issue_count"] == 0
+
+
+def test_conductor_service_pins_issue_and_collects_retention(tmp_path: Path) -> None:
+    service = make_service(tmp_path)
+    repo = make_repo(tmp_path)
+    instance = service.create_instance(make_request(repo))
+    write_sample_ops_snapshot(instance)
+
+    service.pin_issue("issue-1")
+    retention = service.retention_status()
+    service.collect_retention()
+
+    assert retention["pinned_issue_count"] == 1
+    assert "issue-1" in retention["pinned_issue_ids"]
+    snapshot = OpsStore(Path(instance.persistence_path).parent / "ops.json").load()
+    assert "issue-1" in snapshot.retention.pinned_issue_ids
 
 
 def test_create_instance_from_local_path_generates_valid_workflow(tmp_path: Path) -> None:
