@@ -2,23 +2,39 @@ from __future__ import annotations
 
 import asyncio
 import json
-import struct
-import zlib
 from pathlib import Path
 
 import pytest
 
-from symphony.conductor_api import ConductorApiServer
-from symphony.conductor_service import ConductorService
-from symphony.conductor_store import ConductorStore
-from symphony.ops_models import IssueRecord, OpsSnapshot, RunRecord, TraceEvent
-from symphony.ops_store import OpsStore
+from conductor.conductor_api import ConductorApiServer
+from conductor.conductor_service import ConductorService
+from conductor.conductor_store import ConductorStore
+from performer_api.ops_models import IssueRecord, OpsSnapshot, RunRecord, TraceEvent
+from performer_api.ops_store import OpsStore
+
+
+class CapturingRuntime:
+    async def start(self, instance, *, env: dict[str, str] | None = None):
+        return instance.with_updates(process_status="running", pid=4242)
+
+    async def stop(self, instance):
+        return instance.with_updates(process_status="stopped", pid=None)
+
+    async def restart(self, instance, *, env: dict[str, str] | None = None):
+        return instance.with_updates(process_status="running", pid=4242)
+
+    def runtime_snapshot(self, instance):
+        return {"instance_id": instance.id, "process_status": instance.process_status, "pid": instance.pid}
+
+    def read_logs(self, instance):
+        return ""
 
 
 def make_service(tmp_path: Path) -> ConductorService:
     return ConductorService(
         store=ConductorStore(tmp_path / "conductor-data"),
         data_root=tmp_path / "conductor-data",
+        runtime_manager=CapturingRuntime(),
     )
 
 
@@ -210,7 +226,7 @@ async def test_api_creates_lists_reads_and_validates_instances(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
-async def test_web_shell_serves_new_ops_console_assets(tmp_path: Path) -> None:
+async def test_root_reports_conductor_daemon_health(tmp_path: Path) -> None:
     service = make_service(tmp_path)
     server = ConductorApiServer(service)
     await server.start(port=0)
@@ -220,152 +236,8 @@ async def test_web_shell_serves_new_ops_console_assets(tmp_path: Path) -> None:
         status, headers, body = await request(server.port, "GET", "/")
 
         assert status == 200
-        assert headers["content-type"].startswith("text/html")
-        html = body.decode()
-        assert "<!doctype html>" in html.lower()
-        assert "Conductor Ops Console" in html
-        assert '/assets/app.css' in html
-        assert '/assets/app.js' in html
-        assert "Issues" in html
-        assert "Runs" in html
-        assert "Retention" in html
-        assert 'id="app-shell"' in html
-        assert "/api/dashboard" in html
-
-        status, headers, body = await request(server.port, "GET", "/assets/app.css")
-        assert status == 200
-        assert headers["content-type"].startswith("text/css")
-        assert b"#app-shell" in body
-
-        status, headers, body = await request(server.port, "GET", "/assets/app.js")
-        assert status == 200
-        assert headers["content-type"].startswith("text/javascript")
-        assert b"/api/issues" in body
-
-        status, headers, body = await request(server.port, "GET", "/assets/lib/api.js")
-        assert status == 200
-        assert headers["content-type"].startswith("text/javascript")
-        assert b"getJSON" in body
-
-        status, headers, body = await request(server.port, "GET", "/favicon.ico")
-
-        assert status == 200
-        assert headers["content-type"].startswith("image/x-icon")
-        assert body.startswith(b"\x00\x00\x01\x00")
-        assert len(body) > 100
-        pixels = ico_png_pixels(body)
-        assert pixels[(16, 8)] == (251, 247, 241, 255)
-        assert pixels[(24, 6)] == (215, 177, 132, 255)
-        assert pixels[(16, 22)] == (215, 177, 132, 255)
-    finally:
-        await server.stop()
-
-
-@pytest.mark.asyncio
-async def test_web_shell_mentions_issue_first_ops_views(tmp_path: Path) -> None:
-    service = make_service(tmp_path)
-    server = ConductorApiServer(service)
-    await server.start(port=0)
-    try:
-        assert server.port is not None
-
-        status, _, body = await request(server.port, "GET", "/")
-        html = body.decode()
-
-        assert status == 200
-        assert "Issue → Run → Attempt → Turn → Trace" in html
-        assert "Active Issues" in html
-        assert "Total Tokens" in html
-        assert "Estimated Cost" in html
-
-        status, headers, body = await request(server.port, "GET", "/assets/views/issues.js")
-        assert status == 200
-        assert headers["content-type"].startswith("text/javascript")
-        assert b"renderIssuesView" in body
-
-        status, headers, body = await request(server.port, "GET", "/assets/views/runs.js")
-        assert status == 200
-        assert headers["content-type"].startswith("text/javascript")
-        assert b"renderRunsView" in body
-    finally:
-        await server.stop()
-
-
-@pytest.mark.asyncio
-async def test_web_shell_mentions_trace_and_retention_surfaces(tmp_path: Path) -> None:
-    service = make_service(tmp_path)
-    server = ConductorApiServer(service)
-    await server.start(port=0)
-    try:
-        assert server.port is not None
-
-        status, _, body = await request(server.port, "GET", "/")
-        html = body.decode()
-
-        assert status == 200
-        assert "Trace Viewer" in html
-        assert "Retention" in html
-        assert "Pinned Issues" in html
-
-        status, headers, body = await request(server.port, "GET", "/assets/views/trace.js")
-        assert status == 200
-        assert headers["content-type"].startswith("text/javascript")
-        assert b"renderTraceView" in body
-
-        status, headers, body = await request(server.port, "GET", "/assets/views/ops.js")
-        assert status == 200
-        assert headers["content-type"].startswith("text/javascript")
-        assert b"renderRetentionView" in body
-    finally:
-        await server.stop()
-
-
-@pytest.mark.asyncio
-async def test_issue_and_run_views_use_detail_payload_shapes(tmp_path: Path) -> None:
-    service = make_service(tmp_path)
-    server = ConductorApiServer(service)
-    await server.start(port=0)
-    try:
-        assert server.port is not None
-
-        status, headers, body = await request(server.port, "GET", "/assets/views/issues.js")
-        assert status == 200
-        assert headers["content-type"].startswith("text/javascript")
-        assert b"issue.events" in body
-        assert b"issue.timeline" not in body
-
-        status, headers, body = await request(server.port, "GET", "/assets/views/runs.js")
-        assert status == 200
-        assert headers["content-type"].startswith("text/javascript")
-        assert b"const { run: payload }" in body
-        assert b"payload.attempts" in body
-        assert b"payload.metrics" in body
-    finally:
-        await server.stop()
-
-
-@pytest.mark.asyncio
-async def test_trace_and_retention_views_wire_filters_and_event_counts(tmp_path: Path) -> None:
-    service = make_service(tmp_path)
-    server = ConductorApiServer(service)
-    await server.start(port=0)
-    try:
-        assert server.port is not None
-
-        status, headers, body = await request(server.port, "GET", "/assets/views/trace.js")
-        assert status == 200
-        assert headers["content-type"].startswith("text/javascript")
-        assert b"trace-filter" in body
-        assert b"trace-tier" in body
-        assert b"addEventListener('input'" in body
-        assert b"addEventListener('change'" in body
-
-        status, headers, body = await request(server.port, "GET", "/assets/views/ops.js")
-        assert status == 200
-        assert headers["content-type"].startswith("text/javascript")
-        assert b"retention.event_counts?.summary" in body
-        assert b"retention.event_counts?.trace" in body
-        assert b"retention.event_counts?.raw" in body
+        assert headers["content-type"].startswith("application/json")
+        assert json.loads(body) == {"service": "conductor", "status": "ok"}
     finally:
         await server.stop()
 
@@ -418,7 +290,11 @@ async def test_api_supports_conductor_settings_without_echoing_secret(tmp_path: 
 
         status, _, body = await request(server.port, "GET", "/api/settings")
         assert status == 200
-        assert json.loads(body) == {"settings": {"linear_api_key_configured": False}}
+        settings = json.loads(body)["settings"]
+        assert settings["linear_api_key_configured"] is False
+        assert settings["podium_url"] == ""
+        assert settings["podium_token_configured"] is False
+        assert settings["conductor_id"]
 
         status, _, body = await request(
             server.port,
@@ -428,12 +304,14 @@ async def test_api_supports_conductor_settings_without_echoing_secret(tmp_path: 
         )
 
         assert status == 200
-        assert json.loads(body) == {"settings": {"linear_api_key_configured": True}}
+        settings = json.loads(body)["settings"]
+        assert settings["linear_api_key_configured"] is True
+        assert settings["podium_token_configured"] is False
 
         status, _, body = await request(server.port, "GET", "/api/settings")
 
         assert status == 200
-        assert json.loads(body) == {"settings": {"linear_api_key_configured": True}}
+        assert json.loads(body)["settings"]["linear_api_key_configured"] is True
         assert b"linear-token" not in body
     finally:
         await server.stop()
@@ -501,35 +379,6 @@ async def test_dashboard_aggregates_instance_status_and_linear_views(tmp_path: P
     finally:
         await server.stop()
 
-
-def ico_png_pixels(body: bytes) -> dict[tuple[int, int], tuple[int, int, int, int]]:
-    image_offset = struct.unpack_from("<I", body, 18)[0]
-    png = body[image_offset:]
-    assert png.startswith(b"\x89PNG\r\n\x1a\n")
-    cursor = 8
-    width = height = 0
-    compressed = bytearray()
-    while cursor < len(png):
-        length = struct.unpack_from(">I", png, cursor)[0]
-        chunk_type = png[cursor + 4 : cursor + 8]
-        data = png[cursor + 8 : cursor + 8 + length]
-        cursor += 12 + length
-        if chunk_type == b"IHDR":
-            width, height = struct.unpack_from(">II", data)
-        elif chunk_type == b"IDAT":
-            compressed.extend(data)
-        elif chunk_type == b"IEND":
-            break
-    raw = zlib.decompress(bytes(compressed))
-    pixels: dict[tuple[int, int], tuple[int, int, int, int]] = {}
-    stride = 1 + width * 4
-    for y in range(height):
-        row = raw[y * stride : (y + 1) * stride]
-        assert row[0] == 0
-        for x in range(width):
-            offset = 1 + x * 4
-            pixels[(x, y)] = tuple(row[offset : offset + 4])  # type: ignore[assignment]
-    return pixels
 
 
 @pytest.mark.asyncio

@@ -6,10 +6,10 @@ from pathlib import Path
 
 import pytest
 
-from symphony.completion_verifier import CompletionVerifier
-from symphony.config import CompletionVerificationConfig
-from symphony.models import Issue
-from symphony.ops_models import OpsSnapshot, RunRecord, TraceEvent
+from performer.completion_verifier import CompletionVerifier
+from performer_api.config import CompletionVerificationConfig
+from performer_api.models import Issue
+from performer_api.ops_models import OpsSnapshot, RunRecord, TraceEvent
 
 
 class FakeTracker:
@@ -23,7 +23,7 @@ def issue() -> Issue:
 
 @pytest.mark.asyncio
 async def test_verify_completion_rejects_non_repo_workspace_when_required() -> None:
-    workspace = Path("/tmp/symphony-non-repo-workspace")
+    workspace = Path("/tmp/performer-non-repo-workspace")
     workspace.mkdir(parents=True, exist_ok=True)
     verifier = CompletionVerifier(
         CompletionVerificationConfig(
@@ -186,7 +186,7 @@ async def test_verify_completion_accepts_nested_codex_command_evidence(tmp_path:
         CompletionVerificationConfig(
             required_checks=["test_command_evidence"],
             optional_checks=[],
-            expected_test_patterns=["test -f SYMPHONY_REAL_SMALL_TASK.md"],
+            expected_test_patterns=["test -f PERFORMER_REAL_SMALL_TASK.md"],
         ),
         FakeTracker(),
     )
@@ -199,7 +199,7 @@ async def test_verify_completion_accepts_nested_codex_command_evidence(tmp_path:
                 issue_id="mt-1",
                 payload={
                     "payload": {
-                        "command": "test -f SYMPHONY_REAL_SMALL_TASK.md",
+                        "command": "test -f PERFORMER_REAL_SMALL_TASK.md",
                         "exit_code": 0,
                     }
                 },
@@ -222,7 +222,7 @@ async def test_verify_completion_accepts_command_evidence_associated_by_run_id(t
         CompletionVerificationConfig(
             required_checks=["test_command_evidence"],
             optional_checks=[],
-            expected_test_patterns=["test -f SYMPHONY_REAL_SMALL_TASK.md"],
+            expected_test_patterns=["test -f PERFORMER_REAL_SMALL_TASK.md"],
         ),
         FakeTracker(),
     )
@@ -244,7 +244,7 @@ async def test_verify_completion_accepts_command_evidence_associated_by_run_id(t
                 run_id="run-mt-1",
                 payload={
                     "payload": {
-                        "command": "test -f SYMPHONY_REAL_SMALL_TASK.md",
+                        "command": "test -f PERFORMER_REAL_SMALL_TASK.md",
                         "exit_code": 0,
                     }
                 },
@@ -306,7 +306,7 @@ async def test_verify_completion_accepts_untracked_file_as_workspace_change(tmp_
     workspace = tmp_path / "repo"
     workspace.mkdir()
     subprocess.run(["git", "init", "-q"], cwd=workspace, check=True)
-    (workspace / "SYMPHONY_CONDUCTOR_VALIDATION.md").write_text(
+    (workspace / "PERFORMER_CONDUCTOR_VALIDATION.md").write_text(
         "conductor runtime validation passed.\n",
         encoding="utf-8",
     )

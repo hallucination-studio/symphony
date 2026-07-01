@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from symphony.conductor_models import ConductorSettings, InstanceRecord
-from symphony.conductor_store import ConductorStore
+from conductor.conductor_models import ConductorSettings, InstanceRecord
+from conductor.conductor_store import ConductorStore
 
 
 def make_instance(tmp_path: Path, *, instance_id: str, name: str, port: int) -> InstanceRecord:
@@ -22,8 +22,8 @@ def make_instance(tmp_path: Path, *, instance_id: str, name: str, port: int) -> 
         workflow_profile="default",
         workflow_inputs={"goal": "Ship"},
         workspace_root=str(instance_dir / "workspace"),
-        persistence_path=str(instance_dir / "state" / "symphony.json"),
-        log_path=str(instance_dir / "logs" / "symphony.log"),
+        persistence_path=str(instance_dir / "state" / "performer.json"),
+        log_path=str(instance_dir / "logs" / "performer.log"),
         workflow_path=str(instance_dir / "WORKFLOW.md"),
         http_port=port,
     )
@@ -76,4 +76,8 @@ def test_store_saves_and_loads_conductor_settings(tmp_path: Path) -> None:
     loaded = store.get_settings()
 
     assert loaded.linear_api_key == "linear-token"
-    assert loaded.to_public_dict() == {"linear_api_key_configured": True}
+    public = loaded.to_public_dict()
+    assert public["linear_api_key_configured"] is True
+    assert public["podium_token_configured"] is False
+    assert public["podium_url"] == ""
+    assert public["conductor_id"]

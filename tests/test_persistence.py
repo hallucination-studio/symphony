@@ -3,12 +3,12 @@ from __future__ import annotations
 from datetime import timedelta
 from pathlib import Path
 
-from symphony.models import ContinuationEntry, Issue, RetryEntry, RunningEntry, RuntimeTokens, utc_now
-from symphony.persistence import PersistenceStore, PersistedSession, PersistedState
+from performer_api.models import ContinuationEntry, Issue, RetryEntry, RunningEntry, RuntimeTokens, utc_now
+from performer_api.persistence import PersistenceStore, PersistedSession, PersistedState
 
 
 def test_persistence_store_round_trips_retry_entries_and_sessions(tmp_path: Path) -> None:
-    path = tmp_path / "state" / "symphony.json"
+    path = tmp_path / "state" / "performer.json"
     store = PersistenceStore(path)
     due_at = utc_now() + timedelta(seconds=30)
     started_at = utc_now() - timedelta(seconds=5)
@@ -49,7 +49,7 @@ def test_persistence_store_round_trips_retry_entries_and_sessions(tmp_path: Path
                 last_message="done",
                 last_raw_message="turn/completed",
                 phase="running",
-                status_label="symphony:running",
+                status_label="performer:running",
                 workspace_path=str(tmp_path / "workspaces" / "MT-2"),
                 recent_events=[
                     {
@@ -80,14 +80,14 @@ def test_persistence_store_round_trips_retry_entries_and_sessions(tmp_path: Path
     assert loaded.continuations[0].identifier == "MT-3"
     assert loaded.continuations[0].attempt == 4
     assert loaded.continuations[0].phase == "continuing"
-    assert loaded.continuations[0].status_label == "symphony:continuing"
+    assert loaded.continuations[0].status_label == "performer:continuing"
     assert loaded.continuations[0].last_message == "max turns reached; continuing"
     assert loaded.sessions[0].issue_id == "issue-2"
     assert loaded.sessions[0].session_id == "thread-turn"
     assert loaded.sessions[0].worker_host == "builder-1"
     assert loaded.sessions[0].last_raw_message == "turn/completed"
     assert loaded.sessions[0].phase == "running"
-    assert loaded.sessions[0].status_label == "symphony:running"
+    assert loaded.sessions[0].status_label == "performer:running"
     assert loaded.sessions[0].workspace_path == str(tmp_path / "workspaces" / "MT-2")
     assert loaded.sessions[0].recent_events[0]["raw_event"]["raw_method"] == "turn/completed"
     assert loaded.sessions[0].tokens.cached_tokens == 3
@@ -108,7 +108,7 @@ def test_persistence_store_builds_state_from_running_entries(tmp_path: Path) -> 
         last_codex_message="working",
         last_raw_codex_message="item/agentMessage/delta",
         phase="running",
-        status_label="symphony:running",
+        status_label="performer:running",
         workspace_path=str(tmp_path / "workspaces" / "MT-1"),
         recent_events=[
             {
@@ -131,7 +131,7 @@ def test_persistence_store_builds_state_from_running_entries(tmp_path: Path) -> 
     assert state.sessions[0].last_event == "notification"
     assert state.sessions[0].last_raw_message == "item/agentMessage/delta"
     assert state.sessions[0].phase == "running"
-    assert state.sessions[0].status_label == "symphony:running"
+    assert state.sessions[0].status_label == "performer:running"
     assert state.sessions[0].workspace_path == str(tmp_path / "workspaces" / "MT-1")
     assert state.sessions[0].recent_events[0]["message"] == "working"
     assert state.sessions[0].tokens.cached_tokens == 1
@@ -162,7 +162,7 @@ def test_persistence_migrates_legacy_errorless_retry_to_continuation(tmp_path: P
             '"error":null,'
             '"issue_url":"https://linear.app/x/issue/MT-1",'
             '"phase":"done",'
-            '"status_label":"symphony:done",'
+            '"status_label":"performer:done",'
             '"last_message":"continue later"'
             '}],"sessions":[]}'
         ),
@@ -176,4 +176,4 @@ def test_persistence_migrates_legacy_errorless_retry_to_continuation(tmp_path: P
     assert loaded.continuations[0].issue_id == "issue-1"
     assert loaded.continuations[0].attempt == 2
     assert loaded.continuations[0].phase == "continuing"
-    assert loaded.continuations[0].status_label == "symphony:continuing"
+    assert loaded.continuations[0].status_label == "performer:continuing"

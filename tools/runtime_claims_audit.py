@@ -34,7 +34,7 @@ def audit_runtime_state(state: dict[str, Any], log_text: str = "") -> dict[str, 
         if continuation.get("phase") not in {None, "continuing"}:
             failures.append(f"continuation_unexpected_phase:{continuation.get('identifier')}:{continuation.get('phase')}")
         status_label = continuation.get("status_label")
-        if status_label not in {None, "symphony:continuing"}:
+        if status_label not in {None, "performer:continuing"}:
             failures.append(f"continuation_unexpected_label:{continuation.get('identifier')}:{status_label}")
 
     repeated_claim_stalls = _claim_stalls(log_text)
@@ -100,9 +100,9 @@ def _scheduled_row(entry: dict[str, Any]) -> dict[str, Any]:
 
 
 def parser() -> argparse.ArgumentParser:
-    arg_parser = argparse.ArgumentParser(description="Audit Symphony persisted runtime for retry/continuation problems.")
-    arg_parser.add_argument("--state", type=Path, required=True, help="Path to state/symphony.json")
-    arg_parser.add_argument("--log", type=Path, help="Optional path to logs/symphony.log")
+    arg_parser = argparse.ArgumentParser(description="Audit Performer persisted runtime for retry/continuation problems.")
+    arg_parser.add_argument("--state", type=Path, required=True, help="Path to state/performer.json")
+    arg_parser.add_argument("--log", type=Path, help="Optional path to logs/performer.log")
     arg_parser.add_argument("--out", type=Path, help="Write JSON evidence to this path.")
     return arg_parser
 

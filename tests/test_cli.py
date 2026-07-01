@@ -4,45 +4,43 @@ from pathlib import Path
 
 import pytest
 
-from symphony import cli
-from symphony.cli import (
+from performer import cli
+from podium.cli import parse_args as parse_podium_args
+from performer.cli import (
     apply_runtime_config,
     build_config_from_path,
     build_acceptance_runner,
     default_workflow_path,
-    effective_server_port,
-    _maybe_start_http_server,
     persistence_store_from_config,
     parse_args,
 )
-from symphony.codex_client import CodexAppServerClient
-from symphony.conductor_cli import parse_args as parse_conductor_args
-from symphony.config import (
+from performer.codex_client import CodexAppServerClient
+from conductor.conductor_cli import parse_args as parse_conductor_args
+from performer_api.config import (
     AgentConfig,
     CodexConfig,
     HooksConfig,
     PollingConfig,
     ServiceConfig,
     TrackerConfig,
-    ObservabilityConfig,
     AcceptanceConfig,
     WorkspaceConfig,
 )
-from symphony.acceptance import CodexAcceptanceRunner
-from symphony.linear import LinearTracker
-from symphony.orchestrator import Orchestrator
-from symphony.runner import AgentRunner
-from symphony.workspace import WorkspaceManager
+from performer.acceptance import CodexAcceptanceRunner
+from performer.linear import LinearTracker
+from performer.orchestrator import Orchestrator
+from performer.runner import AgentRunner
+from performer.workspace import WorkspaceManager
 
 
 def test_default_workflow_path_uses_cwd(tmp_path: Path) -> None:
     assert default_workflow_path(tmp_path) == tmp_path / "WORKFLOW.md"
 
 
-def test_conductor_default_data_root_is_dot_symphony() -> None:
+def test_conductor_default_data_root_is_dot_performer() -> None:
     args = parse_conductor_args([])
 
-    assert args.data_root == ".symphony"
+    assert args.data_root == ".conductor"
 
 
 def test_parse_args_accepts_positional_workflow_path() -> None:
@@ -52,37 +50,12 @@ def test_parse_args_accepts_positional_workflow_path() -> None:
     assert args.once is True
 
 
-def test_parse_args_accepts_port_override() -> None:
-    args = parse_args(["custom/WORKFLOW.md", "--port", "0"])
+def test_podium_parse_args_accepts_helpful_defaults() -> None:
+    args = parse_podium_args([])
 
-    assert args.workflow == "custom/WORKFLOW.md"
-    assert args.port == 0
+    assert args.host == "127.0.0.1"
+    assert args.port == 8090
 
-
-def test_effective_server_port_prefers_cli_override(tmp_path: Path) -> None:
-    config = make_service_config(tmp_path, project_slug="MT", api_key="token", workspace="ws", command="codex")
-
-    assert effective_server_port(config, 0) == 0
-
-
-def test_effective_server_port_uses_workflow_server_port(tmp_path: Path) -> None:
-    workflow = tmp_path / "WORKFLOW.md"
-    workflow.write_text(
-        """---
-tracker:
-  kind: linear
-  project_slug: MT
-  api_key: token
-server:
-  port: 8181
----
-Do {{ issue.identifier }}
-""",
-        encoding="utf-8",
-    )
-    config = build_config_from_path(workflow)
-
-    assert effective_server_port(config, None) == 8181
 
 
 def test_build_config_from_explicit_workflow_path(tmp_path: Path, monkeypatch) -> None:
@@ -258,7 +231,7 @@ tracker:
   project_slug: MT
   api_key: token
 persistence:
-  path: ./state/symphony.json
+  path: ./state/performer.json
 ---
 Do {{ issue.identifier }}
 """,
@@ -269,7 +242,7 @@ Do {{ issue.identifier }}
     store = persistence_store_from_config(config)
 
     assert store is not None
-    assert store.path == (tmp_path / "state" / "symphony.json").resolve()
+    assert store.path == (tmp_path / "state" / "performer.json").resolve()
 
 
 def test_persistence_store_from_config_returns_none_when_unconfigured(tmp_path: Path) -> None:
@@ -278,33 +251,9 @@ def test_persistence_store_from_config_returns_none_when_unconfigured(tmp_path: 
     assert persistence_store_from_config(config) is None
 
 
-@pytest.mark.asyncio
-async def test_observability_disabled_prevents_http_server_start(tmp_path: Path) -> None:
-    config = make_service_config(tmp_path, project_slug="MT", api_key="token", workspace="ws", command="codex")
-    disabled = ServiceConfig(
-        tracker=config.tracker,
-        polling=config.polling,
-        workspace=config.workspace,
-        hooks=config.hooks,
-        agent=config.agent,
-        codex=config.codex,
-        prompt_template=config.prompt_template,
-        workflow_path=config.workflow_path,
-        server=type(config.server)(port=0, host=config.server.host),
-        observability=ObservabilityConfig(enabled=False),
-    )
-    tracker = LinearTracker(disabled.tracker)
-    workspace_manager = WorkspaceManager(disabled.workspace, disabled.hooks)
-    runner = AgentRunner(disabled, workspace_manager, CodexAppServerClient(disabled.codex), tracker=tracker)
-    orchestrator = Orchestrator(disabled, tracker, runner, workspace_manager=workspace_manager)
-
-    server = await _maybe_start_http_server(disabled, orchestrator, None)
-
-    assert server is None
-
 
 def test_main_returns_nonzero_on_startup_failure(monkeypatch) -> None:
-    async def failing_daemon(path, *, once=False, port=None):
+    async def failing_daemon(path, *, once=False):
         raise RuntimeError("boom")
 
     monkeypatch.setattr(cli, "run_reloading_daemon", failing_daemon)
@@ -315,11 +264,11 @@ def test_main_returns_nonzero_on_startup_failure(monkeypatch) -> None:
 def test_main_returns_zero_on_normal_shutdown(monkeypatch) -> None:
     captured = {}
 
-    async def successful_daemon(path, *, once=False, port=None):
-        captured["port"] = port
+    async def successful_daemon(path, *, once=False):
+        captured["once"] = once
         return None
 
     monkeypatch.setattr(cli, "run_reloading_daemon", successful_daemon)
 
-    assert cli.main(["WORKFLOW.md", "--once", "--port", "0"]) == 0
-    assert captured["port"] == 0
+    assert cli.main(["WORKFLOW.md", "--once"]) == 0
+    assert captured["once"] is True

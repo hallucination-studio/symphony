@@ -5,7 +5,7 @@ from typing import Any
 import httpx
 import pytest
 
-from symphony.linear_tool import LinearGraphQLTool
+from performer.linear_tool import LinearGraphQLTool
 
 
 class RecordingTransport(httpx.AsyncBaseTransport):

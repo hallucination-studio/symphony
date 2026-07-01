@@ -8,8 +8,8 @@ from typing import Any
 
 import pytest
 
-from symphony.codex_client import CodexAppServerClient, CodexError
-from symphony.config import CodexConfig
+from performer.codex_client import CodexAppServerClient, CodexError
+from performer_api.config import CodexConfig
 
 
 class FakeStdin:
@@ -211,7 +211,7 @@ async def test_run_session_uses_workspace_pythonpath_instead_of_host_pythonpath(
         ]
     )
     (tmp_path / "src").mkdir()
-    monkeypatch.setenv("PYTHONPATH", "/Users/murphy/code/github/symphony/src")
+    monkeypatch.setenv("PYTHONPATH", "/Users/murphy/code/github/performer/src")
     captured: dict[str, Any] = {}
 
     async def factory(*args: Any, **kwargs: Any) -> FakeProcess:

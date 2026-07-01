@@ -6,13 +6,13 @@ import subprocess
 
 import pytest
 
-from symphony.conductor_models import ConductorSettings, InstanceCreateRequest, InstancePatchRequest, InstanceRecord
-from symphony.conductor_service import ConductorService, ConductorServiceError
-from symphony.conductor_store import ConductorStore
-from symphony.models import ContinuationEntry, RetryEntry, RuntimeTokens, utc_now
-from symphony.ops_models import IssueRecord, OpsSnapshot, RetentionMetadata, RunRecord, TraceEvent
-from symphony.ops_store import OpsStore
-from symphony.persistence import PersistenceStore, PersistedSession, PersistedState
+from conductor.conductor_models import ConductorSettings, InstanceCreateRequest, InstancePatchRequest, InstanceRecord
+from conductor.conductor_service import ConductorService, ConductorServiceError
+from conductor.conductor_store import ConductorStore
+from performer_api.models import ContinuationEntry, RetryEntry, RuntimeTokens, utc_now
+from performer_api.ops_models import IssueRecord, OpsSnapshot, RetentionMetadata, RunRecord, TraceEvent
+from performer_api.ops_store import OpsStore
+from performer_api.persistence import PersistenceStore, PersistedSession, PersistedState
 
 
 def make_service(tmp_path: Path) -> ConductorService:
@@ -153,10 +153,12 @@ def test_conductor_service_pins_issue_and_collects_retention(tmp_path: Path) -> 
 
 
 def test_create_instance_from_local_path_generates_valid_workflow(tmp_path: Path) -> None:
-    service = make_service(tmp_path)
     repo = make_repo(tmp_path)
+    data_root = repo / ".custom-conductor-data"
+    service = ConductorService(store=ConductorStore(data_root), data_root=data_root)
     (repo / "src.txt").write_text("source\n", encoding="utf-8")
-    for excluded in [".symphony", "conductor-data", ".venv", "workspaces", ".codex-runtime"]:
+    (data_root / "must-not-copy.txt").write_text("no\n", encoding="utf-8")
+    for excluded in [".conductor", "conductor-data", ".venv", "workspaces", ".codex-runtime"]:
         (repo / excluded).mkdir()
         (repo / excluded / "excluded.txt").write_text("no\n", encoding="utf-8")
 
@@ -170,8 +172,9 @@ def test_create_instance_from_local_path_generates_valid_workflow(tmp_path: Path
     assert Path(instance.log_path).parent.exists()
     assert (Path(instance.workspace_root) / "src.txt").read_text(encoding="utf-8") == "source\n"
     assert (Path(instance.workspace_root) / ".git").exists()
-    for excluded in [".symphony", "conductor-data", ".venv", "workspaces", ".codex-runtime"]:
+    for excluded in [".conductor", "conductor-data", ".venv", "workspaces", ".codex-runtime"]:
         assert not (Path(instance.workspace_root) / excluded).exists()
+    assert not (Path(instance.workspace_root) / ".custom-conductor-data").exists()
     assert "Handle tasks" in instance.workflow_content
 
 
@@ -263,7 +266,7 @@ def test_create_instance_reuses_non_empty_git_workspace_without_cloning(
     assert (workspace_root / "keep.txt").read_text(encoding="utf-8") == "existing\n"
 
 
-def test_instance_runtime_includes_persisted_symphony_issue_details(tmp_path: Path) -> None:
+def test_instance_runtime_includes_persisted_performer_issue_details(tmp_path: Path) -> None:
     service = make_service(tmp_path)
     repo = make_repo(tmp_path)
     instance = service.create_instance(make_request(repo))
@@ -285,7 +288,7 @@ def test_instance_runtime_includes_persisted_symphony_issue_details(tmp_path: Pa
                     last_message="working",
                     last_raw_message="item/agentMessage/delta",
                     phase="running",
-                    status_label="symphony:running",
+                    status_label="performer:running",
                     workspace_path=str(Path(instance.workspace_root) / "ENG-1"),
                     recent_events=[
                         {
@@ -314,7 +317,7 @@ def test_instance_runtime_includes_persisted_symphony_issue_details(tmp_path: Pa
                     error="worker exited: boom",
                     issue_url="https://linear.app/x/issue/ENG-2",
                     phase="retrying",
-                    status_label="symphony:retrying",
+                    status_label="performer:retrying",
                 )
             ],
             continuations=[
@@ -336,20 +339,20 @@ def test_instance_runtime_includes_persisted_symphony_issue_details(tmp_path: Pa
     assert runtime["workspace"]["root"] == instance.workspace_root
     assert runtime["workspace"]["strategy"] == "instance_repo_workspace"
     assert "reuses the prepared repository workspace" in runtime["workspace"]["description"]
-    assert runtime["symphony"]["source"] == "persistence"
-    assert runtime["symphony"]["counts"] == {"running": 1, "retrying": 1, "continuing": 1}
-    assert runtime["symphony"]["running"][0]["issue_identifier"] == "ENG-1"
-    assert runtime["symphony"]["running"][0]["phase"] == "running"
-    assert runtime["symphony"]["running"][0]["status_label"] == "symphony:running"
-    assert runtime["symphony"]["running"][0]["turn_count"] == 3
-    assert runtime["symphony"]["running"][0]["tokens"]["cached_tokens"] == 5
-    assert runtime["symphony"]["running"][0]["tokens"]["total_tokens"] == 33
-    assert runtime["symphony"]["running"][0]["recent_events"][0]["raw_event"]["payload"]["delta"] == "working"
-    assert runtime["symphony"]["retrying"][0]["issue_identifier"] == "ENG-2"
-    assert runtime["symphony"]["retrying"][0]["error"] == "worker exited: boom"
-    assert runtime["symphony"]["continuing"][0]["issue_identifier"] == "ENG-3"
-    assert runtime["symphony"]["continuing"][0]["phase"] == "continuing"
-    assert runtime["symphony"]["continuing"][0]["status_label"] == "symphony:continuing"
+    assert runtime["performer"]["source"] == "persistence"
+    assert runtime["performer"]["counts"] == {"running": 1, "retrying": 1, "continuing": 1}
+    assert runtime["performer"]["running"][0]["issue_identifier"] == "ENG-1"
+    assert runtime["performer"]["running"][0]["phase"] == "running"
+    assert runtime["performer"]["running"][0]["status_label"] == "performer:running"
+    assert runtime["performer"]["running"][0]["turn_count"] == 3
+    assert runtime["performer"]["running"][0]["tokens"]["cached_tokens"] == 5
+    assert runtime["performer"]["running"][0]["tokens"]["total_tokens"] == 33
+    assert runtime["performer"]["running"][0]["recent_events"][0]["raw_event"]["payload"]["delta"] == "working"
+    assert runtime["performer"]["retrying"][0]["issue_identifier"] == "ENG-2"
+    assert runtime["performer"]["retrying"][0]["error"] == "worker exited: boom"
+    assert runtime["performer"]["continuing"][0]["issue_identifier"] == "ENG-3"
+    assert runtime["performer"]["continuing"][0]["phase"] == "continuing"
+    assert runtime["performer"]["continuing"][0]["status_label"] == "performer:continuing"
     assert runtime["metrics"]["tokens"]["cached_tokens"] == 5
     assert runtime["metrics"]["tokens"]["total_tokens"] == 33
     assert runtime["metrics"]["turns"] == 3
@@ -527,8 +530,8 @@ def test_service_initialization_marks_stale_running_instances_stopped(tmp_path: 
         instance_dir=str(tmp_path / "conductor-data" / "instances" / "inst-1"),
         workflow_path=str(tmp_path / "conductor-data" / "instances" / "inst-1" / "WORKFLOW.md"),
         workspace_root=str(tmp_path / "conductor-data" / "instances" / "inst-1" / "workspace"),
-        persistence_path=str(tmp_path / "conductor-data" / "instances" / "inst-1" / "state" / "symphony.json"),
-        log_path=str(tmp_path / "conductor-data" / "instances" / "inst-1" / "logs" / "symphony.log"),
+        persistence_path=str(tmp_path / "conductor-data" / "instances" / "inst-1" / "state" / "performer.json"),
+        log_path=str(tmp_path / "conductor-data" / "instances" / "inst-1" / "logs" / "performer.log"),
         http_port=8801,
         linear_project="ENG",
         linear_filters={"labels": ["codex"]},

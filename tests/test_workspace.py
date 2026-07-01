@@ -5,8 +5,8 @@ import logging
 
 import pytest
 
-from symphony.config import HooksConfig, WorkspaceConfig
-from symphony.workspace import WorkspaceError, WorkspaceManager, sanitize_workspace_key
+from performer_api.config import HooksConfig, WorkspaceConfig
+from performer.workspace import WorkspaceError, WorkspaceManager, sanitize_workspace_key
 
 
 def test_sanitize_workspace_key_replaces_unsafe_characters() -> None:
@@ -86,7 +86,7 @@ async def test_nonfatal_after_run_hook_failure_is_logged_and_ignored(
 
     await manager.run_after_run(workspace.path)
 
-    assert "symphony_hook outcome=failed hook=after_run" in caplog.text
+    assert "performer_hook outcome=failed hook=after_run" in caplog.text
     assert "exit_code=7" in caplog.text
     assert "bad" in caplog.text
 
@@ -121,4 +121,4 @@ async def test_nonfatal_before_remove_hook_timeout_is_logged_and_cleanup_continu
     await manager.remove_for_issue("MT-1")
 
     assert not workspace.path.exists()
-    assert "symphony_hook outcome=timeout hook=before_remove" in caplog.text
+    assert "performer_hook outcome=timeout hook=before_remove" in caplog.text

@@ -11,12 +11,12 @@ from pathlib import Path
 
 import pytest
 
-from symphony.conductor_api import ConductorApiServer
-from symphony.conductor_models import ConductorSettings, InstanceCreateRequest
-from symphony.conductor_models import InstancePatchRequest
-from symphony.conductor_service import ConductorService
-from symphony.conductor_store import ConductorStore
-from symphony.ops_store import OpsStore
+from conductor.conductor_api import ConductorApiServer
+from conductor.conductor_models import ConductorSettings, InstanceCreateRequest
+from conductor.conductor_models import InstancePatchRequest
+from conductor.conductor_service import ConductorService
+from conductor.conductor_store import ConductorStore
+from performer_api.ops_store import OpsStore
 
 
 class FakeLinearServer:
@@ -64,7 +64,7 @@ class FakeLinearServer:
         self._server = None
 
     def _graphql_response(self, query: str, variables: dict[str, object]) -> dict[str, object]:
-        if "SymphonyCandidateIssues" in query or "SymphonyIssuesByStates" in query:
+        if "PerformerCandidateIssues" in query or "PerformerIssuesByStates" in query:
             return {
                 "data": {
                     "issues": {
@@ -73,7 +73,7 @@ class FakeLinearServer:
                     }
                 }
             }
-        if "SymphonyIssueStates" in query:
+        if "PerformerIssueStates" in query:
             return {"data": {"issues": {"nodes": [self._issue_node()]}}}
         if "CurrentIssueTeam" in query:
             return {
@@ -85,7 +85,7 @@ class FakeLinearServer:
                     }
                 }
             }
-        if "SymphonyIssueLabelContext" in query:
+        if "PerformerIssueLabelContext" in query:
             return {
                 "data": {
                     "issue": {
@@ -96,18 +96,18 @@ class FakeLinearServer:
                     }
                 }
             }
-        if "SymphonyIssueLabelByName" in query:
+        if "PerformerIssueLabelByName" in query:
             name = str(variables.get("name") or "")
             nodes = []
             if name in self.created_labels:
                 nodes.append({"id": self.created_labels[name], "name": name})
             return {"data": {"issueLabels": {"nodes": nodes}}}
-        if "SymphonyIssueLabelCreate" in query:
+        if "PerformerIssueLabelCreate" in query:
             name = str(variables.get("name") or "")
             label_id = f"label-{len(self.created_labels) + 1}"
             self.created_labels[name] = label_id
             return {"data": {"issueLabelCreate": {"success": True, "issueLabel": {"id": label_id, "name": name}}}}
-        if "SymphonyUpdateIssueLabels" in query:
+        if "PerformerUpdateIssueLabels" in query:
             label_ids = list(variables.get("labelIds") or [])
             self.issue_labels = [{"id": str(label_id), "name": self._label_name(str(label_id))} for label_id in label_ids]
             return {
@@ -118,11 +118,11 @@ class FakeLinearServer:
                     }
                 }
             }
-        if "SymphonyCommentIssue" in query:
+        if "PerformerCommentIssue" in query:
             body = str(variables.get("body") or "")
             self.comments.append(body)
             return {"data": {"commentCreate": {"success": True, "comment": {"id": f"comment-{len(self.comments)}"}}}}
-        if "SymphonyTransitionIssue" in query:
+        if "PerformerTransitionIssue" in query:
             self.issue_state = "Done"
             return {
                 "data": {

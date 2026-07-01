@@ -6,8 +6,8 @@ from typing import Any
 
 import pytest
 
-from symphony.acceptance import CodexAcceptanceRunner, CodexGatePlanner, parse_acceptance_report, parse_gate_plan_report
-from symphony.config import (
+from performer.acceptance import CodexAcceptanceRunner, CodexGatePlanner, parse_acceptance_report, parse_gate_plan_report
+from performer_api.config import (
     AcceptanceConfig,
     AgentConfig,
     CodexConfig,
@@ -17,8 +17,8 @@ from symphony.config import (
     TrackerConfig,
     WorkspaceConfig,
 )
-from symphony.models import Issue
-from symphony.ops_models import CompletionVerdict
+from performer_api.models import Issue
+from performer_api.ops_models import CompletionVerdict
 
 
 class FakeCodex:
@@ -89,7 +89,7 @@ def test_parse_acceptance_report_passes_score_3_only_with_concrete_findings() ->
   "result": "pass",
   "score_reason": "Core behavior is implemented and verified by pytest, but docs still omit the new retry label.",
   "evidence_citations": ["workspace.git_status", "ops.events.evt-7"],
-  "residual_findings": ["README does not mention symphony:gate/pass-with-findings for operator triage."],
+  "residual_findings": ["README does not mention performer:gate/pass-with-findings for operator triage."],
   "recommended_next_action": "Move to Done and track the README follow-up."
 }
 """,
@@ -100,7 +100,7 @@ def test_parse_acceptance_report_passes_score_3_only_with_concrete_findings() ->
     assert report.accepted is True
     assert report.score == 3
     assert report.residual_findings == [
-        "README does not mention symphony:gate/pass-with-findings for operator triage."
+        "README does not mention performer:gate/pass-with-findings for operator triage."
     ]
 
 
@@ -229,7 +229,7 @@ async def test_codex_acceptance_runner_prompts_for_task_scoped_gate_and_strict_j
         title="Build Linear gate",
         description="Add acceptance issue workflow.",
         state="Done",
-        labels=["symphony:type/task"],
+        labels=["performer:type/task"],
         url="https://linear.app/x/issue/MT-1",
     )
     acceptance_issue = {

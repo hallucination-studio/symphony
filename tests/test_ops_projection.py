@@ -1,5 +1,5 @@
-from symphony.ops_models import AttemptRecord, IssueRecord, OpsSnapshot, RunRecord, TraceEvent, TurnRecord
-from symphony.ops_projection import build_issue_detail, build_issue_list, build_run_detail, build_trace_stream
+from performer_api.ops_models import AttemptRecord, IssueRecord, OpsSnapshot, RunRecord, TraceEvent, TurnRecord
+from performer_api.ops_projection import build_issue_detail, build_issue_list, build_run_detail, build_trace_stream
 
 
 def sample_snapshot() -> OpsSnapshot:

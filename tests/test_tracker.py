@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import pytest
 
-from symphony.config import ConfigError, TrackerConfig
-from symphony.linear import LinearTracker
-from symphony.tracker import create_tracker, register_tracker_adapter
+from performer_api.config import ConfigError, TrackerConfig
+from performer.linear import LinearTracker
+from performer.tracker import create_tracker, register_tracker_adapter, validate_tracker_config
 
 
 def make_config(kind: str = "linear") -> TrackerConfig:
@@ -59,5 +59,12 @@ def test_custom_tracker_adapter_can_use_non_linear_config_without_token_or_proje
 def test_unknown_tracker_kind_fails_at_factory_time() -> None:
     with pytest.raises(ConfigError) as exc:
         create_tracker(make_config("missing"))
+
+    assert exc.value.code == "unsupported_tracker_kind"
+
+
+def test_unknown_tracker_kind_fails_performer_runtime_validation() -> None:
+    with pytest.raises(ConfigError) as exc:
+        validate_tracker_config(make_config("missing"))
 
     assert exc.value.code == "unsupported_tracker_kind"

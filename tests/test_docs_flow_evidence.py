@@ -14,9 +14,9 @@ from typing import Any
 import httpx
 import pytest
 
-from symphony.codex_client import CodexAppServerClient, CodexError
-from symphony.completion_verifier import CompletionVerifier
-from symphony.config import (
+from performer.codex_client import CodexAppServerClient, CodexError
+from performer.completion_verifier import CompletionVerifier
+from performer_api.config import (
     AgentConfig,
     CompletionVerificationConfig,
     CodexConfig,
@@ -27,15 +27,14 @@ from symphony.config import (
     WorkspaceConfig,
     WorkerConfig,
 )
-from symphony.http_server import SymphonyHttpServer
-from symphony.models import BlockerRef, Issue, RetryEntry, RunningEntry, RuntimeTokens, sort_for_dispatch, utc_now
-from symphony.ops_models import OpsSnapshot, TraceEvent
-from symphony.orchestrator import Orchestrator, OrchestratorState
-from symphony.linear import LinearClient, LinearError, LinearTracker
-from symphony.reloader import WorkflowReloader
-from symphony.snapshot import build_runtime_snapshot
-from symphony.workflow import render_prompt
-from symphony.workspace import WorkspaceError, WorkspaceManager, sanitize_workspace_key
+from performer_api.models import BlockerRef, Issue, RetryEntry, RunningEntry, RuntimeTokens, sort_for_dispatch, utc_now
+from performer_api.ops_models import OpsSnapshot, TraceEvent
+from performer.orchestrator import Orchestrator, OrchestratorState
+from performer.linear import LinearClient, LinearError, LinearTracker
+from performer.reloader import WorkflowReloader
+from performer.snapshot import build_runtime_snapshot
+from performer_api.workflow import render_prompt
+from performer.workspace import WorkspaceError, WorkspaceManager, sanitize_workspace_key
 
 
 def issue(identifier: str, **overrides: Any) -> Issue:
@@ -117,7 +116,7 @@ class FlowHandoffRunner:
     async def run_issue(
         self, issue: Issue, attempt: int | None, on_event: Any, *, worker_host: str | None = None
     ) -> None:
-        (self.workspace_path / "SYMPHONY_CONDUCTOR_VALIDATION.md").write_text(
+        (self.workspace_path / "PERFORMER_CONDUCTOR_VALIDATION.md").write_text(
             "pytest tests/test_runner.py::test_runner_uses_workspace_cwd -q passed\n",
             encoding="utf-8",
         )
@@ -419,7 +418,7 @@ def assert_score_4_bundle(bundle: dict[str, Any]) -> None:
 async def test_flow_001_dispatch_run_and_human_review_handoff_has_reviewer_evidence(tmp_path: Path) -> None:
     tracker = FlowTracker(
         candidates=[
-            issue("ENG-1", id="eng-1", title="Build handoff evidence", labels=["symphony"], project_slug="MT")
+            issue("ENG-1", id="eng-1", title="Build handoff evidence", labels=["performer"], project_slug="MT")
         ]
     )
     workspace_manager = WorkspaceManager(WorkspaceConfig(root=tmp_path / "test-workspaces"), HooksConfig())
@@ -431,7 +430,7 @@ async def test_flow_001_dispatch_run_and_human_review_handoff_has_reviewer_evide
             endpoint="https://api.linear.app/graphql",
             project_slug="MT",
             api_key="test-token",
-            required_labels=["symphony"],
+            required_labels=["performer"],
             active_states=["Todo", "In Progress"],
             terminal_states=["Done", "Canceled"],
         ),
@@ -456,7 +455,7 @@ async def test_flow_001_dispatch_run_and_human_review_handoff_has_reviewer_evide
 
     await orchestrator.tick()
     await runner.started.wait()
-    tracker.refreshed = [issue("ENG-1", id="eng-1", state="Human Review", labels=["symphony"], project_slug="MT")]
+    tracker.refreshed = [issue("ENG-1", id="eng-1", state="Human Review", labels=["performer"], project_slug="MT")]
     await orchestrator.reconcile_running()
 
     comment = tracker.comments[-1][1]
@@ -466,7 +465,7 @@ async def test_flow_001_dispatch_run_and_human_review_handoff_has_reviewer_evide
         title="active issue dispatches, emits evidence, and reaches Human Review handoff",
         source_sections=["1", "5", "7", "8", "9", "10", "11", "12", "13", "14"],
         profile="core|quality_overlay",
-        initial_state={"issue": "ENG-1", "tracker_state": "Todo", "labels": ["symphony"]},
+        initial_state={"issue": "ENG-1", "tracker_state": "Todo", "labels": ["performer"]},
         trigger="Run one dispatch tick, emit Codex validation evidence, then refresh tracker state to Human Review",
         observed_transitions=[
             "Unclaimed -> Claimed",
@@ -477,7 +476,7 @@ async def test_flow_001_dispatch_run_and_human_review_handoff_has_reviewer_evide
         ],
         workspace_evidence={
             "workspace_path": str(workspace.path),
-            "validation_artifact": (workspace.path / "SYMPHONY_CONDUCTOR_VALIDATION.md").read_text(encoding="utf-8"),
+            "validation_artifact": (workspace.path / "PERFORMER_CONDUCTOR_VALIDATION.md").read_text(encoding="utf-8"),
         },
         tracker_evidence={
             "candidate_fetch_calls": tracker.fetch_candidate_calls,
@@ -561,7 +560,7 @@ async def test_flow_002_rejects_model_success_without_workspace_or_validation_ev
 async def test_flow_003_changed_files_without_focused_validation_routes_retry_with_evidence(tmp_path: Path) -> None:
     workspace = tmp_path / "ENG-3"
     init_repo(workspace)
-    target = workspace / "src" / "symphony"
+    target = workspace / "src" / "performer"
     target.mkdir(parents=True)
     (target / "runner.py").write_text("print('changed')\n", encoding="utf-8")
     snapshot = OpsSnapshot(
@@ -592,7 +591,7 @@ async def test_flow_003_changed_files_without_focused_validation_routes_retry_wi
         title="changed files do not satisfy focused validation requirement",
         source_sections=["1", "12.3", "13", "14.2", "15.5", "17.8"],
         profile="quality_overlay",
-        initial_state={"issue": "ENG-3", "changed_file": "src/symphony/runner.py"},
+        initial_state={"issue": "ENG-3", "changed_file": "src/performer/runner.py"},
         trigger="Verifier sees workspace diff plus unrelated successful pytest command",
         observed_transitions=["turn_completed", "completion_verification -> NEEDS_RETRY"],
         workspace_evidence={"git_status": subprocess.run(["git", "status", "--short"], cwd=workspace, check=True, capture_output=True, text=True).stdout},
@@ -891,7 +890,7 @@ async def test_flow_009_normal_exit_schedules_short_continuation(tmp_path: Path)
 
     assert continuation is not None
     assert continuation.attempt == 1
-    assert continuation.status_label == "symphony:continuing"
+    assert continuation.status_label == "performer:continuing"
     assert "eng-9" not in orchestrator.state.retry_attempts
     assert "eng-9" in orchestrator.state.claimed
     assert bundle["final_state"]["continuing"] is True
@@ -1033,7 +1032,7 @@ async def test_flow_013_human_review_stops_run_and_preserves_workspace_with_revi
     runner = FlowCompletingRunner()
     workspace_manager = WorkspaceManager(WorkspaceConfig(root=tmp_path / "workspaces"), HooksConfig())
     workspace = await workspace_manager.create_for_issue("ENG-13")
-    (workspace.path / "SYMPHONY_CONDUCTOR_VALIDATION.md").write_text("validation passed\n", encoding="utf-8")
+    (workspace.path / "PERFORMER_CONDUCTOR_VALIDATION.md").write_text("validation passed\n", encoding="utf-8")
     orchestrator = Orchestrator(
         config_with_verification(tmp_path, required_checks=[]),
         tracker,
@@ -1061,7 +1060,7 @@ async def test_flow_013_human_review_stops_run_and_preserves_workspace_with_revi
         observed_transitions=["state_refresh -> Human Review", "worker_cancelled", "workspace_preserved", "handoff_comment_written"],
         workspace_evidence={
             "workspace_exists": workspace.path.exists(),
-            "validation_artifact": (workspace.path / "SYMPHONY_CONDUCTOR_VALIDATION.md").read_text(encoding="utf-8"),
+            "validation_artifact": (workspace.path / "PERFORMER_CONDUCTOR_VALIDATION.md").read_text(encoding="utf-8"),
         },
         tracker_evidence={"refresh_calls": tracker.fetch_state_calls, "comment": comment},
         codex_evidence={"session_id": "thread-13-turn-1", "last_message": "Validation evidence is ready for review."},
@@ -1070,7 +1069,7 @@ async def test_flow_013_human_review_stops_run_and_preserves_workspace_with_revi
         score_reason="Reviewer-facing handoff comment gives tracker state, preserved workspace path, session, and required next action.",
     )
 
-    assert "Symphony stopped automation for human review." in comment
+    assert "Performer stopped automation for human review." in comment
     assert "Tracker state: Human Review" in comment
     assert str(workspace.path) in comment
     assert workspace.path.exists()
@@ -1224,7 +1223,7 @@ def test_flow_016_invalid_workflow_reload_keeps_last_good_config_with_diagnostic
 
     assert second is first
     assert reloader.last_error is not None
-    assert "symphony_workflow_reload failed" in caplog.text
+    assert "performer_workflow_reload failed" in caplog.text
     assert second.tracker.active_states == ["Todo"]
     assert bundle["final_state"]["same_config_object"] is True
 
@@ -1298,8 +1297,8 @@ async def test_flow_017_workspace_hooks_order_failure_semantics_and_operator_log
 
 @pytest.mark.asyncio
 async def test_flow_018_malicious_identifier_stays_inside_workspace_and_not_shell(tmp_path: Path) -> None:
-    raw_identifier = "ENG/../../x; touch /tmp/symphony-flow-018-pwned"
-    marker = Path("/tmp/symphony-flow-018-pwned")
+    raw_identifier = "ENG/../../x; touch /tmp/performer-flow-018-pwned"
+    marker = Path("/tmp/performer-flow-018-pwned")
     marker.unlink(missing_ok=True)
     manager = WorkspaceManager(
         WorkspaceConfig(root=tmp_path / "workspaces"),
@@ -1352,7 +1351,7 @@ async def test_flow_018_malicious_identifier_stays_inside_workspace_and_not_shel
         score_reason="Bundle shows raw and sanitized identifiers, root containment, hook cwd, Codex argv/cwd, and absence of shell side effect.",
     )
 
-    assert workspace.workspace_key == "ENG_.._.._x__touch__tmp_symphony-flow-018-pwned"
+    assert workspace.workspace_key == "ENG_.._.._x__touch__tmp_performer-flow-018-pwned"
     assert root in workspace.path.resolve().parents
     assert captured["kwargs"]["cwd"] == str(workspace.path)
     assert captured["args"] == ("bash", "-lc", "fake-codex app-server")
@@ -1379,10 +1378,10 @@ async def test_flow_019_secret_used_for_linear_request_but_never_logged(
                 endpoint="https://api.linear.test/graphql",
                 api_key=os.environ["LINEAR_API_KEY"],
                 project_slug="ENG",
-                required_labels=["symphony"],
+                required_labels=["performer"],
             )
         )
-    logging.getLogger("symphony.flow").warning("candidate fetch failed category=%s", exc.value.code)
+    logging.getLogger("performer.flow").warning("candidate fetch failed category=%s", exc.value.code)
 
     request = transport.requests[0]
     bundle = flow_bundle(
@@ -1740,87 +1739,11 @@ def test_flow_023_token_and_runtime_metrics_use_latest_absolute_totals(tmp_path:
     assert bundle["final_state"]["aggregate_total_tokens"] == 220
 
 
-@pytest.mark.asyncio
-async def test_flow_024_http_observability_surfaces_mirror_state_and_are_optional(tmp_path: Path) -> None:
-    refresh_calls = 0
-
-    async def refresh() -> None:
-        nonlocal refresh_calls
-        refresh_calls += 1
-
-    config = config_with_verification(tmp_path, required_checks=[])
-    state = OrchestratorState()
-    running_issue = issue("ENG-24", id="eng-24", state="In Progress")
-    state.running["eng-24"] = RunningEntry(
-        issue=running_issue,
-        task=None,
-        started_at=utc_now(),
-        retry_attempt=1,
-        session_id="thread-24-turn-1",
-        tokens=RuntimeTokens(total_tokens=5),
-    )
-    retry = RetryEntry(
-        issue_id="eng-24b",
-        identifier="ENG-24B",
-        attempt=2,
-        due_at=utc_now() + timedelta(seconds=30),
-        due_at_ms=123,
-        error="retry",
-    )
-    state.retry_attempts["eng-24b"] = retry
-    disabled_snapshot = build_runtime_snapshot(config, state)
-    server = SymphonyHttpServer(config, state, refresh)
-    await server.start(port=0)
-    try:
-        assert server.port is not None
-        state_status, _, state_body = await http_request(server.port, "GET", "/api/v1/state")
-        issue_status, _, issue_body = await http_request(server.port, "GET", "/api/v1/ENG-24")
-        unknown_status, _, unknown_body = await http_request(server.port, "GET", "/api/v1/unknown")
-        refresh_status, _, refresh_body = await http_request(server.port, "POST", "/api/v1/refresh")
-        method_status, _, method_body = await http_request(server.port, "DELETE", "/api/v1/state")
-    finally:
-        await server.stop()
-
-    api_state = json.loads(state_body)
-    bundle = flow_bundle(
-        test_id="FLOW-024",
-        title="observability API mirrors orchestrator state and core correctness is independent of dashboard",
-        source_sections=["13.3", "13.4", "13.6", "13.7"],
-        profile="core|optional HTTP extension",
-        initial_state={"running": ["ENG-24"], "retrying": ["ENG-24B"]},
-        trigger="Build snapshot without HTTP, then query enabled HTTP API routes",
-        observed_transitions=["disabled_snapshot_built", "server_bound_loopback", "state_returned", "refresh_queued", "errors_enveloped"],
-        workspace_evidence={"not_required": True},
-        tracker_evidence={"refresh_calls": refresh_calls},
-        codex_evidence={"session": "thread-24-turn-1"},
-        observability_evidence={
-            "disabled_snapshot": disabled_snapshot,
-            "api_state": api_state,
-            "issue": json.loads(issue_body),
-            "unknown": json.loads(unknown_body),
-            "refresh": json.loads(refresh_body),
-            "method": json.loads(method_body),
-        },
-        final_state={"state_status": state_status, "issue_status": issue_status, "unknown_status": unknown_status, "method_status": method_status},
-        score_reason="Disabled snapshot proves dashboard is optional; enabled API exposes state, issue detail, refresh, 404, and 405 diagnostics.",
-    )
-
-    assert state_status == 200
-    assert api_state["counts"] == {"running": 1, "retrying": 1, "continuing": 0}
-    assert issue_status == 200
-    assert json.loads(issue_body)["issue_identifier"] == "ENG-24"
-    assert unknown_status == 404
-    assert json.loads(unknown_body)["error"]["code"] == "issue_not_found"
-    assert refresh_status == 202
-    assert refresh_calls == 1
-    assert method_status == 405
-    assert bundle["final_state"]["state_status"] == 200
-
 
 def test_flow_025_real_integration_profiles_skip_fail_and_pass_are_explicit(tmp_path: Path) -> None:
     base_env = dict(os.environ)
     base_env.pop("LINEAR_API_KEY", None)
-    base_env.pop("SYMPHONY_REAL_INTEGRATION", None)
+    base_env.pop("PERFORMER_REAL_INTEGRATION", None)
     missing = subprocess.run(
         [sys.executable, "-m", "pytest", "tests/test_real_integration.py", "-q"],
         cwd=Path.cwd(),
@@ -1830,7 +1753,7 @@ def test_flow_025_real_integration_profiles_skip_fail_and_pass_are_explicit(tmp_
         timeout=30,
     )
     invalid_env = dict(base_env)
-    invalid_env["SYMPHONY_REAL_INTEGRATION"] = "1"
+    invalid_env["PERFORMER_REAL_INTEGRATION"] = "1"
     invalid_env["LINEAR_API_KEY"] = "invalid-token-for-flow-025"
     invalid = subprocess.run(
         [sys.executable, "-m", "pytest", "tests/test_real_integration.py", "-q"],
@@ -1872,7 +1795,7 @@ async def test_flow_026_ssh_worker_extension_preserves_orchestrator_authority(tm
     config = ServiceConfig(
         tracker=TrackerConfig(kind="linear", endpoint="https://api.linear.app/graphql", project_slug="MT", api_key="linear-token", required_labels=["codex"]),
         polling=PollingConfig(interval_ms=100),
-        workspace=WorkspaceConfig(root=Path("/remote/symphony")),
+        workspace=WorkspaceConfig(root=Path("/remote/performer")),
         hooks=HooksConfig(),
         agent=AgentConfig(max_concurrent_agents=2),
         codex=CodexConfig(),
@@ -1912,7 +1835,7 @@ async def test_flow_026_ssh_worker_extension_preserves_orchestrator_authority(tm
 
     client = CodexAppServerClient(CodexConfig(read_timeout_ms=1), process_factory=factory)
     with pytest.raises(CodexError):
-        await client.run_session(Path("/remote/symphony/ENG-26A"), "Do work", "ENG-26A", worker_host="host-b")
+        await client.run_session(Path("/remote/performer/ENG-26A"), "Do work", "ENG-26A", worker_host="host-b")
     ssh_args = process.sent
 
     bundle = flow_bundle(
@@ -1923,7 +1846,7 @@ async def test_flow_026_ssh_worker_extension_preserves_orchestrator_authority(tm
         initial_state={"ssh_hosts": ["host-a", "host-b"], "host_a_saturated": True},
         trigger="Dispatch with host-a saturated, then all hosts saturated, then launch SSH client",
         observed_transitions=["host-b_selected", "claim_owned_by_orchestrator", "all_hosts_wait", "ssh_launch_attempted"],
-        workspace_evidence={"remote_root": "/remote/symphony"},
+        workspace_evidence={"remote_root": "/remote/performer"},
         tracker_evidence={"candidate_fetch_calls": tracker.fetch_candidate_calls},
         codex_evidence={"selected_host": selected, "ssh_sent_messages": ssh_args},
         observability_evidence={"running_hosts": [entry.worker_host for entry in orchestrator.state.running.values()], "saturated_running": list(saturated.state.running)},

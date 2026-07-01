@@ -5,7 +5,7 @@ from typing import Any
 
 import pytest
 
-from symphony.config import (
+from performer_api.config import (
     AcceptanceConfig,
     AgentConfig,
     CodexConfig,
@@ -16,11 +16,11 @@ from symphony.config import (
     TrackerConfig,
     WorkspaceConfig,
 )
-from symphony.models import Issue
-from symphony.ops_store import OpsStore
-from symphony.persistence import ops_snapshot_path_from_persistence_path
-from symphony.runner import AgentRunner
-from symphony.workspace import Workspace, WorkspaceError, WorkspaceManager
+from performer_api.models import Issue
+from performer_api.ops_store import OpsStore
+from performer_api.persistence import ops_snapshot_path_from_persistence_path
+from performer.runner import AgentRunner
+from performer.workspace import Workspace, WorkspaceError, WorkspaceManager
 
 
 class FakeCodex:
@@ -124,7 +124,7 @@ def make_config_with_persistence(tmp_path: Path) -> ServiceConfig:
         codex=config.codex,
         prompt_template=config.prompt_template,
         workflow_path=config.workflow_path,
-        persistence=PersistenceConfig(path=tmp_path / "state" / "symphony.json"),
+        persistence=PersistenceConfig(path=tmp_path / "state" / "performer.json"),
     )
 
 

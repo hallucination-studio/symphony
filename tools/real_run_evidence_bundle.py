@@ -37,16 +37,16 @@ def bundle(args: argparse.Namespace) -> dict[str, Any]:
         "cleanup_before": copy_if_exists(args.cleanup_before, out / "cleanup-before.json") if args.cleanup_before else False,
         "cleanup_after": copy_if_exists(args.cleanup_after, out / "cleanup-after.json") if args.cleanup_after else False,
     }
-    state_path = args.instance_root / "state" / "symphony.json"
+    state_path = args.instance_root / "state" / "performer.json"
     ops_path = args.instance_root / "state" / "ops.json"
-    log_path = args.instance_root / "logs" / "symphony.log"
-    copied["symphony_state"] = copy_if_exists(state_path, out / "symphony-state.json")
+    log_path = args.instance_root / "logs" / "performer.log"
+    copied["performer_state"] = copy_if_exists(state_path, out / "performer-state.json")
     copied["ops"] = copy_if_exists(ops_path, out / "ops.json")
-    copied["symphony_log"] = copy_if_exists(log_path, out / "symphony.log")
+    copied["performer_log"] = copy_if_exists(log_path, out / "performer.log")
 
     log_text = log_path.read_text(encoding="utf-8", errors="replace") if log_path.exists() else ""
     log_tail = "\n".join(log_text.splitlines()[-200:])
-    (out / "symphony-log-tail.txt").write_text(log_tail, encoding="utf-8")
+    (out / "performer-log-tail.txt").write_text(log_tail, encoding="utf-8")
     runtime_audit = audit_runtime_state(load_json(state_path), log_text)
     (out / "runtime-claims-audit.json").write_text(
         json.dumps(runtime_audit, indent=2, sort_keys=True),

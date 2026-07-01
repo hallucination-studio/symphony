@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from symphony.config import (
+from performer_api.config import (
     AgentConfig,
     CompletionVerificationConfig,
     AcceptanceConfig,
@@ -18,9 +18,9 @@ from symphony.config import (
     WorkerConfig,
     WorkspaceConfig,
 )
-from symphony.models import BlockerRef, Issue, utc_now
-from symphony.orchestrator import Orchestrator
-from symphony.persistence import PersistenceStore
+from performer_api.models import BlockerRef, Issue, utc_now
+from performer.orchestrator import Orchestrator
+from performer_api.persistence import PersistenceStore
 
 
 class FakeTracker:
@@ -537,11 +537,11 @@ async def test_dispatch_and_codex_events_update_lifecycle_labels_and_phase(tmp_p
 
     entry = orchestrator.state.running["mt-1"]
     assert tracker.lifecycle_labels == [
-        ("mt-1", "symphony:starting"),
-        ("mt-1", "symphony:running"),
+        ("mt-1", "performer:starting"),
+        ("mt-1", "performer:running"),
     ]
     assert entry.phase == "running"
-    assert entry.status_label == "symphony:running"
+    assert entry.status_label == "performer:running"
     assert entry.recent_events[-1]["event"] == "turn_started"
     assert entry.recent_events[-1]["raw_event"]["session_id"] == "thread-1-turn-1"
     assert entry.workspace_path == str(tmp_path / "workspaces" / "MT-1")
@@ -560,8 +560,8 @@ async def test_lifecycle_label_failures_do_not_block_dispatch(tmp_path: Path, ca
     await orchestrator.tick()
 
     assert [started[0].identifier for started in runner.started] == ["MT-1"]
-    assert "symphony_lifecycle_label outcome=failed" in caplog.text
-    assert "label=symphony:starting" in caplog.text
+    assert "performer_lifecycle_label outcome=failed" in caplog.text
+    assert "label=performer:starting" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -577,10 +577,10 @@ async def test_tick_logs_candidate_summary_and_skip_reasons(
 
     await orchestrator.tick()
 
-    assert "symphony_dispatch_scan candidate_count=2 available_slots=10" in caplog.text
-    assert "symphony_dispatch_candidate outcome=dispatch issue_id=mt-1 issue_identifier=MT-1 worker_host=local" in caplog.text
-    assert "symphony_dispatch_candidate outcome=skip issue_id=mt-2 issue_identifier=MT-2 reason=missing_required_labels" in caplog.text
-    assert "symphony_dispatch_summary dispatched=1 skipped=1 running=1 claimed=1" in caplog.text
+    assert "performer_dispatch_scan candidate_count=2 available_slots=10" in caplog.text
+    assert "performer_dispatch_candidate outcome=dispatch issue_id=mt-1 issue_identifier=MT-1 worker_host=local" in caplog.text
+    assert "performer_dispatch_candidate outcome=skip issue_id=mt-2 issue_identifier=MT-2 reason=missing_required_labels" in caplog.text
+    assert "performer_dispatch_summary dispatched=1 skipped=1 running=1 claimed=1" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -599,7 +599,7 @@ async def test_candidate_fetch_failure_logs_and_skips_dispatch(
 
     assert runner.started == []
     assert orchestrator.state.running == {}
-    assert "symphony_dispatch failed" in caplog.text
+    assert "performer_dispatch failed" in caplog.text
     assert "reason=candidate unavailable" in caplog.text
 
 
@@ -617,7 +617,7 @@ async def test_tick_validation_failure_logs_and_skips_dispatch_after_reconcile(
     await orchestrator.tick()
 
     assert runner.started == []
-    assert "symphony_dispatch_validation failed" in caplog.text
+    assert "performer_dispatch_validation failed" in caplog.text
     assert "missing_codex_command" in caplog.text
 
 
@@ -635,7 +635,7 @@ async def test_tick_rejects_candidate_from_different_project(tmp_path: Path) -> 
 
 @pytest.mark.asyncio
 async def test_tick_allows_non_linear_tracker_issue_without_project_slug(tmp_path: Path) -> None:
-    from symphony.tracker import register_tracker_adapter
+    from performer.tracker import register_tracker_adapter
 
     class CustomTracker:
         def __init__(self, config):
@@ -774,9 +774,9 @@ async def test_worker_failure_schedules_exponential_retry(tmp_path: Path) -> Non
     assert retry.error == "worker exited: boom"
     assert retry.due_at_ms > 0
     assert "mt-1" in orchestrator.state.claimed
-    assert tracker.lifecycle_labels[-1] == ("mt-1", "symphony:retrying")
+    assert tracker.lifecycle_labels[-1] == ("mt-1", "performer:retrying")
     assert retry.phase == "retrying"
-    assert retry.status_label == "symphony:retrying"
+    assert retry.status_label == "performer:retrying"
 
 
 @pytest.mark.asyncio
@@ -843,7 +843,7 @@ async def test_worker_failure_is_logged(tmp_path: Path, caplog: pytest.LogCaptur
     await orchestrator.tick()
     await orchestrator.wait_for_idle()
 
-    assert "symphony_worker outcome=failed" in caplog.text
+    assert "performer_worker outcome=failed" in caplog.text
     assert "issue_id=mt-1" in caplog.text
     assert "issue_identifier=MT-1" in caplog.text
     assert "reason=boom" in caplog.text
@@ -882,8 +882,8 @@ async def test_normal_worker_exit_schedules_continuation_for_still_active_issue(
     assert "mt-1" not in orchestrator.state.retry_attempts
     assert continuation.attempt == 1
     assert continuation.phase == "continuing"
-    assert continuation.status_label == "symphony:continuing"
-    assert orchestrator._desired_lifecycle_labels["mt-1"] == "symphony:continuing"
+    assert continuation.status_label == "performer:continuing"
+    assert orchestrator._desired_lifecycle_labels["mt-1"] == "performer:continuing"
 
 
 @pytest.mark.asyncio
@@ -900,7 +900,7 @@ async def test_due_continuation_dispatches_without_retry_label(tmp_path: Path) -
     assert runner.started[0][1] == 2
     assert "mt-1" not in orchestrator.state.continuations
     assert "mt-1" not in orchestrator.state.retry_attempts
-    assert ("mt-1", "symphony:retrying") not in tracker.lifecycle_labels
+    assert ("mt-1", "performer:retrying") not in tracker.lifecycle_labels
 
 
 @pytest.mark.asyncio
@@ -915,7 +915,7 @@ async def test_normal_worker_exit_records_completed_bookkeeping_for_terminal_iss
     assert "mt-1" in orchestrator.state.completed
     assert "mt-1" not in orchestrator.state.claimed
     assert "mt-1" not in orchestrator.state.retry_attempts
-    assert ("mt-1", "symphony:done") in tracker.lifecycle_labels
+    assert ("mt-1", "performer:done") in tracker.lifecycle_labels
 
 
 @pytest.mark.asyncio
@@ -932,8 +932,8 @@ async def test_acceptance_enabled_creates_gate_issue_instead_of_marking_original
             "id": "gate-1",
             "identifier": "MT-G1",
             "title": "[Gate] MT-1: Behavior",
-            "label_ids": ["symphony:type/gate"],
-            "labels": ["symphony:type/gate"],
+            "label_ids": ["performer:type/gate"],
+            "labels": ["performer:type/gate"],
             "state": "Todo",
         }
     ]
@@ -945,8 +945,8 @@ async def test_acceptance_enabled_creates_gate_issue_instead_of_marking_original
     assert "mt-1" not in orchestrator.state.completed
     assert tracker.created_issues == []
     assert tracker.created_relations == []
-    assert ("mt-1", "symphony:done") not in tracker.lifecycle_labels
-    assert any(label == "symphony:gate/pending" for _, label in tracker.lifecycle_labels)
+    assert ("mt-1", "performer:done") not in tracker.lifecycle_labels
+    assert any(label == "performer:gate/pending" for _, label in tracker.lifecycle_labels)
     assert tracker.transitions[-1] == ("mt-1", "In Review")
 
 
@@ -955,8 +955,8 @@ async def test_acceptance_enabled_does_not_enter_review_without_implementation_e
     tmp_path: Path,
 ) -> None:
     description = (
-        "Business issue for Symphony gate tree smoke.\n\n"
-        "Implement a tiny validation artifact named SYMPHONY_GATE_TREE_SMOKE.md containing this issue identifier.\n"
+        "Business issue for Performer gate tree smoke.\n\n"
+        "Implement a tiny validation artifact named PERFORMER_GATE_TREE_SMOKE.md containing this issue identifier.\n"
         "Run: pytest tests/test_acceptance.py -q\n"
         "Final evidence must include Implementation summary, Test commands and exact output, and Remaining risks."
     )
@@ -967,8 +967,8 @@ async def test_acceptance_enabled_does_not_enter_review_without_implementation_e
             "id": "gate-1",
             "identifier": "MT-G1",
             "title": "[Gate] MT-1: Behavior",
-            "label_ids": ["symphony:type/gate"],
-            "labels": ["symphony:type/gate"],
+            "label_ids": ["performer:type/gate"],
+            "labels": ["performer:type/gate"],
             "state": "Todo",
         }
     ]
@@ -1015,16 +1015,16 @@ async def test_acceptance_todo_preflight_creates_marker_plan_and_moves_to_in_pro
     assert len(tracker.created_issues) == 2
     assert [created["parent_id"] for created in tracker.created_issues] == ["mt-1", "mt-1"]
     assert [created["label_ids"] for created in tracker.created_issues] == [
-        ["symphony:type/gate"],
-        ["symphony:type/gate"],
+        ["performer:type/gate"],
+        ["performer:type/gate"],
     ]
     assert tracker.created_relations == []
     assert tracker.transitions == [("mt-1", "In Progress")]
-    assert any(label == "symphony:type/task" for _, label in tracker.lifecycle_labels)
-    assert any(label == "symphony:phase/planned" for _, label in tracker.lifecycle_labels)
+    assert any(label == "performer:type/task" for _, label in tracker.lifecycle_labels)
+    assert any(label == "performer:phase/planned" for _, label in tracker.lifecycle_labels)
     assert tracker.description_updates
     _, marker, block = tracker.description_updates[0]
-    assert marker == "SYMPHONY ACCEPTANCE"
+    assert marker == "PERFORMER ACCEPTANCE"
     assert "gate_count: 2" in block
     assert "plan_revision: 1" in block
     assert "Gate plan:" in block
@@ -1042,8 +1042,8 @@ async def test_acceptance_todo_preflight_reuses_existing_gate_children(
             "id": "gate-1",
             "identifier": "MT-G1",
             "title": "[Gate] MT-1: Existing",
-            "label_ids": ["symphony:type/gate"],
-            "labels": ["symphony:type/gate"],
+            "label_ids": ["performer:type/gate"],
+            "labels": ["performer:type/gate"],
             "state": "Todo",
         }
     ]
@@ -1075,14 +1075,14 @@ async def test_reconcile_terminal_running_issue_waits_for_worker_when_acceptance
     assert "mt-1" in orchestrator.state.running
     assert "mt-1" in orchestrator.state.claimed
     assert tracker.created_issues == []
-    assert ("mt-1", "symphony:done") not in tracker.lifecycle_labels
+    assert ("mt-1", "performer:done") not in tracker.lifecycle_labels
 
     runner.release.set()
     await orchestrator.wait_for_idle()
 
     assert tracker.created_issues == []
     assert tracker.created_relations == []
-    assert ("mt-1", "symphony:done") not in tracker.lifecycle_labels
+    assert ("mt-1", "performer:done") not in tracker.lifecycle_labels
 
 
 @pytest.mark.asyncio
@@ -1094,8 +1094,8 @@ async def test_acceptance_score_4_marks_original_done_after_gate_passes(tmp_path
             "identifier": "MT-G1",
             "title": "[Gate] MT-1: Behavior",
             "description": "Purpose: verify behavior",
-            "label_ids": ["symphony:type/gate"],
-            "labels": ["symphony:type/gate"],
+            "label_ids": ["performer:type/gate"],
+            "labels": ["performer:type/gate"],
             "state": "Todo",
             "url": "https://linear.app/x/issue/MT-G1",
         }
@@ -1124,10 +1124,10 @@ async def test_acceptance_score_4_marks_original_done_after_gate_passes(tmp_path
     assert acceptance_runner.calls
     assert "mt-1" in orchestrator.state.completed
     evidence = tracker.children["gate-1"][0]
-    assert evidence["label_ids"] == ["symphony:type/evidence"]
+    assert evidence["label_ids"] == ["performer:type/evidence"]
     assert tracker.transitions == [(evidence["id"], "Done"), ("gate-1", "Done"), ("mt-1", "Done")]
-    assert ("gate-1", "symphony:gate/passed") in tracker.lifecycle_labels
-    assert ("gate-1", "symphony:score/4") in tracker.lifecycle_labels
+    assert ("gate-1", "performer:gate/passed") in tracker.lifecycle_labels
+    assert ("gate-1", "performer:score/4") in tracker.lifecycle_labels
     assert tracker.comments[-1][0] == "gate-1"
     assert "Acceptance score: 4" in tracker.comments[-1][1]
 
@@ -1141,8 +1141,8 @@ async def test_acceptance_rejected_keeps_original_blocked_with_failed_gate(tmp_p
             "identifier": "MT-G1",
             "title": "[Gate] MT-1: Behavior",
             "description": "Purpose: verify behavior",
-            "label_ids": ["symphony:type/gate"],
-            "labels": ["symphony:type/gate"],
+            "label_ids": ["performer:type/gate"],
+            "labels": ["performer:type/gate"],
             "state": "Todo",
             "url": "https://linear.app/x/issue/MT-G1",
         }
@@ -1170,9 +1170,9 @@ async def test_acceptance_rejected_keeps_original_blocked_with_failed_gate(tmp_p
 
     assert "mt-1" not in orchestrator.state.completed
     assert tracker.transitions == [("mt-1", "In Progress")]
-    assert ("gate-1", "symphony:gate/failed") in tracker.lifecycle_labels
-    assert ("gate-1", "symphony:score/2") in tracker.lifecycle_labels
-    assert tracker.children["gate-1"][0]["label_ids"] == ["symphony:type/evidence"]
+    assert ("gate-1", "performer:gate/failed") in tracker.lifecycle_labels
+    assert ("gate-1", "performer:score/2") in tracker.lifecycle_labels
+    assert tracker.children["gate-1"][0]["label_ids"] == ["performer:type/evidence"]
     assert tracker.comments[-1][0] == "gate-1"
     assert "Gate rejection reasons:" in tracker.comments[-1][1]
     assert "score_below_minimum" in tracker.comments[-1][1]
@@ -1188,8 +1188,8 @@ async def test_acceptance_rejected_releases_claim_for_rework_dispatch(tmp_path: 
             "identifier": "MT-G1",
             "title": "[Gate] MT-1: Behavior",
             "description": "Purpose: verify behavior",
-            "label_ids": ["symphony:type/gate"],
-            "labels": ["symphony:type/gate"],
+            "label_ids": ["performer:type/gate"],
+            "labels": ["performer:type/gate"],
             "state": "Todo",
             "url": "https://linear.app/x/issue/MT-G1",
         }
@@ -1231,8 +1231,8 @@ async def test_acceptance_in_review_is_not_dispatched_to_agent(tmp_path: Path) -
             "identifier": "MT-G1",
             "title": "[Gate] MT-1: Behavior",
             "description": "Purpose: verify behavior",
-            "label_ids": ["symphony:type/gate"],
-            "labels": ["symphony:type/gate"],
+            "label_ids": ["performer:type/gate"],
+            "labels": ["performer:type/gate"],
             "state": "Todo",
             "url": "https://linear.app/x/issue/MT-G1",
         }
@@ -1284,8 +1284,8 @@ async def test_acceptance_direct_done_bypass_with_evidence_runs_gate_from_review
             "identifier": "MT-G1",
             "title": "[Gate] MT-1: Behavior",
             "description": "Purpose: verify behavior",
-            "label_ids": ["symphony:type/gate"],
-            "labels": ["symphony:type/gate"],
+            "label_ids": ["performer:type/gate"],
+            "labels": ["performer:type/gate"],
             "state": "Todo",
             "url": "https://linear.app/x/issue/MT-G1",
         }
@@ -1326,8 +1326,8 @@ async def test_acceptance_direct_done_bypass_without_evidence_returns_to_in_prog
             "id": "gate-1",
             "identifier": "MT-G1",
             "title": "[Gate] MT-1: Behavior",
-            "label_ids": ["symphony:type/gate"],
-            "labels": ["symphony:type/gate"],
+            "label_ids": ["performer:type/gate"],
+            "labels": ["performer:type/gate"],
             "state": "Todo",
         }
     ]
@@ -1358,12 +1358,12 @@ async def test_acceptance_direct_done_bypass_ignores_gate_plan_marker_evidence_r
                 state="Done",
                 description=(
                     "Business issue without implementation evidence.\n\n"
-                    "<!-- BEGIN SYMPHONY ACCEPTANCE -->\n"
+                    "<!-- BEGIN PERFORMER ACCEPTANCE -->\n"
                     "Evidence required:\n"
                     "* Implementation summary.\n"
                     "* Test commands and exact output.\n"
                     "* Remaining risks or explicit none.\n"
-                    "<!-- END SYMPHONY ACCEPTANCE -->"
+                    "<!-- END PERFORMER ACCEPTANCE -->"
                 ),
             )
         ]
@@ -1373,8 +1373,8 @@ async def test_acceptance_direct_done_bypass_ignores_gate_plan_marker_evidence_r
             "id": "gate-1",
             "identifier": "MT-G1",
             "title": "[Gate] MT-1: Behavior",
-            "label_ids": ["symphony:type/gate"],
-            "labels": ["symphony:type/gate"],
+            "label_ids": ["performer:type/gate"],
+            "labels": ["performer:type/gate"],
             "state": "Todo",
         }
     ]
@@ -1399,7 +1399,7 @@ async def test_acceptance_done_with_passed_gate_is_not_treated_as_bypass(tmp_pat
             issue(
                 "MT-1",
                 state="Done",
-                labels=["codex", "symphony:gate/passed", "symphony:score/4"],
+                labels=["codex", "performer:gate/passed", "performer:score/4"],
                 description="Implementation summary: done\nTest command: pytest\nRemaining risks: none",
             )
         ]
@@ -1439,7 +1439,7 @@ async def test_completion_verification_failure_retries_instead_of_marking_done(t
     assert "mt-1" not in orchestrator.state.completed
     assert "mt-1" in orchestrator.state.retry_attempts
     assert "mt-1" in orchestrator.state.claimed
-    assert tracker.lifecycle_labels[-1] == ("mt-1", "symphony:retrying")
+    assert tracker.lifecycle_labels[-1] == ("mt-1", "performer:retrying")
     assert tracker.comments[-1][0] == "mt-1"
     assert "Verification failed after agent claimed success." in tracker.comments[-1][1]
     assert "workspace_changes" in tracker.comments[-1][1]
@@ -1478,7 +1478,7 @@ async def test_completion_verification_needs_human_does_not_mark_done(tmp_path: 
     assert "mt-1" not in orchestrator.state.completed
     assert "mt-1" not in orchestrator.state.retry_attempts
     assert "mt-1" not in orchestrator.state.claimed
-    assert tracker.lifecycle_labels[-1] != ("mt-1", "symphony:done")
+    assert tracker.lifecycle_labels[-1] != ("mt-1", "performer:done")
     assert tracker.comments[-1][0] == "mt-1"
     assert "human review is required" in tracker.comments[-1][1].lower()
 
@@ -1549,7 +1549,7 @@ async def test_completion_verification_needs_human_does_not_create_legacy_accept
     assert tracker.created_issues == []
     assert tracker.created_relations == []
     assert acceptance_runner.calls == []
-    assert ("mt-1", "symphony:done") not in tracker.lifecycle_labels
+    assert ("mt-1", "performer:done") not in tracker.lifecycle_labels
 
 
 @pytest.mark.asyncio
@@ -1558,7 +1558,7 @@ async def test_completion_verification_needs_human_with_acceptance_moves_to_revi
 ) -> None:
     description = (
         "Implementation summary: created requested artifact.\n"
-        "Test commands and exact output: test -f SYMPHONY_REAL_SMALL_TASK.md -> exit code 0.\n"
+        "Test commands and exact output: test -f PERFORMER_REAL_SMALL_TASK.md -> exit code 0.\n"
         "Remaining risks: none."
     )
     tracker = FakeTracker(candidates=[issue("MT-1", state="In Progress", description=description)])
@@ -1576,8 +1576,8 @@ async def test_completion_verification_needs_human_with_acceptance_moves_to_revi
             "identifier": "MT-G1",
             "title": "[Gate] MT-1: Evidence",
             "description": "Purpose: verify evidence",
-            "label_ids": ["symphony:type/gate"],
-            "labels": ["symphony:type/gate"],
+            "label_ids": ["performer:type/gate"],
+            "labels": ["performer:type/gate"],
             "state": "Todo",
             "url": "https://linear.app/x/issue/MT-G1",
         }
@@ -1634,8 +1634,8 @@ async def test_completion_verification_needs_human_with_acceptance_moves_to_revi
 
 @pytest.mark.asyncio
 async def test_retry_prompt_includes_previous_verification_failure_reason(tmp_path: Path) -> None:
-    from symphony.runner import AgentRunner
-    from symphony.workspace import WorkspaceManager
+    from performer.runner import AgentRunner
+    from performer.workspace import WorkspaceManager
 
     class CapturingCodexClient:
         def __init__(self) -> None:
@@ -1755,7 +1755,7 @@ async def test_codex_events_are_logged_with_issue_context(
         },
     )
 
-    assert "symphony_codex_event" in caplog.text
+    assert "performer_codex_event" in caplog.text
     assert "issue_id=mt-1" in caplog.text
     assert "issue_identifier=MT-1" in caplog.text
     assert "event=notification" in caplog.text
@@ -1861,14 +1861,14 @@ async def test_request_timeout_updates_last_message_with_readable_error(tmp_path
 
     assert orchestrator.state.running["mt-1"].last_codex_message == "initialize timed out"
     assert orchestrator.state.running["mt-1"].phase == "error"
-    assert orchestrator.state.running["mt-1"].status_label == "symphony:failed"
+    assert orchestrator.state.running["mt-1"].status_label == "performer:failed"
 
 
 @pytest.mark.asyncio
 async def test_orchestrator_persists_retry_and_session_metadata(tmp_path: Path) -> None:
     tracker = FakeTracker(candidates=[issue("MT-1")])
     runner = FakeRunner()
-    store = PersistenceStore(tmp_path / "state" / "symphony.json")
+    store = PersistenceStore(tmp_path / "state" / "performer.json")
     orchestrator = Orchestrator(make_config(tmp_path), tracker, runner, persistence_store=store)
 
     orchestrator._schedule_retry(issue("MT-1"), 2, error="retry", delay_ms=60_000)
@@ -1895,7 +1895,7 @@ async def test_orchestrator_persists_retry_and_session_metadata(tmp_path: Path) 
 
 
 def test_orchestrator_loads_persisted_retries(tmp_path: Path) -> None:
-    store = PersistenceStore(tmp_path / "state" / "symphony.json")
+    store = PersistenceStore(tmp_path / "state" / "performer.json")
     first = Orchestrator(make_config(tmp_path), FakeTracker(), FakeRunner(), persistence_store=store)
     first._schedule_retry(issue("MT-1"), 2, error="retry", delay_ms=60_000)
 
@@ -1949,7 +1949,7 @@ async def test_reconcile_with_no_running_issues_is_noop(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_reconcile_terminal_running_issue_cleans_workspace(tmp_path: Path) -> None:
-    from symphony.workspace import WorkspaceManager
+    from performer.workspace import WorkspaceManager
 
     tracker = FakeTracker(candidates=[issue("MT-1")])
     runner = FakeRunner()
@@ -1970,7 +1970,7 @@ async def test_reconcile_terminal_running_issue_cleans_workspace(tmp_path: Path)
 
 @pytest.mark.asyncio
 async def test_reconcile_active_issue_that_loses_required_label_stops_without_cleanup(tmp_path: Path) -> None:
-    from symphony.workspace import WorkspaceManager
+    from performer.workspace import WorkspaceManager
 
     tracker = FakeTracker(candidates=[issue("MT-1")])
     runner = FakeRunner()
@@ -1991,7 +1991,7 @@ async def test_reconcile_active_issue_that_loses_required_label_stops_without_cl
 
 @pytest.mark.asyncio
 async def test_reconcile_missing_refreshed_issue_stops_without_cleanup(tmp_path: Path) -> None:
-    from symphony.workspace import WorkspaceManager
+    from performer.workspace import WorkspaceManager
 
     tracker = FakeTracker(candidates=[issue("MT-1")])
     runner = FakeRunner()
@@ -2026,7 +2026,7 @@ async def test_reconcile_refresh_failure_keeps_workers_running(
     await orchestrator.reconcile_running()
 
     assert "mt-1" in orchestrator.state.running
-    assert "symphony_reconcile failed" in caplog.text
+    assert "performer_reconcile failed" in caplog.text
     assert "reason=refresh unavailable" in caplog.text
 
 
@@ -2034,7 +2034,7 @@ async def test_reconcile_refresh_failure_keeps_workers_running(
 async def test_startup_cleanup_failure_logs_warning_and_continues(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    from symphony.workspace import WorkspaceManager
+    from performer.workspace import WorkspaceManager
 
     tracker = FakeTracker()
     tracker.fail_by_states = True
@@ -2044,7 +2044,7 @@ async def test_startup_cleanup_failure_logs_warning_and_continues(
 
     await orchestrator.startup_terminal_workspace_cleanup(workspace_manager)
 
-    assert "symphony_startup_cleanup failed" in caplog.text
+    assert "performer_startup_cleanup failed" in caplog.text
     assert "reason=linear unavailable" in caplog.text
 
 
@@ -2165,13 +2165,13 @@ async def test_due_retry_candidate_fetch_failure_keeps_retry(
     assert retry.error == "retry poll failed"
     assert "mt-1" in orchestrator.state.claimed
     assert runner.started == []
-    assert "symphony_retry failed" in caplog.text
+    assert "performer_retry failed" in caplog.text
     assert "reason=candidate unavailable" in caplog.text
 
 
 @pytest.mark.asyncio
 async def test_startup_cleanup_removes_terminal_workspaces(tmp_path: Path) -> None:
-    from symphony.workspace import WorkspaceManager
+    from performer.workspace import WorkspaceManager
 
     tracker = FakeTracker()
     tracker.by_states = [issue("MT-1", state="Done")]

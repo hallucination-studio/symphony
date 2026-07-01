@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import timedelta
 from pathlib import Path
 
-from symphony.config import (
+from performer_api.config import (
     AgentConfig,
     CodexConfig,
     HooksConfig,
@@ -14,9 +14,9 @@ from symphony.config import (
     PersistenceConfig,
     WorkspaceConfig,
 )
-from symphony.models import ContinuationEntry, Issue, RetryEntry, RunningEntry, RuntimeTokens, utc_now
-from symphony.orchestrator import OrchestratorState
-from symphony.snapshot import build_runtime_snapshot, build_issue_snapshot
+from performer_api.models import ContinuationEntry, Issue, RetryEntry, RunningEntry, RuntimeTokens, utc_now
+from performer.orchestrator import OrchestratorState
+from performer.snapshot import build_runtime_snapshot, build_issue_snapshot
 
 
 def make_config(tmp_path: Path) -> ServiceConfig:
@@ -84,7 +84,7 @@ def test_runtime_snapshot_includes_running_retry_totals_and_rate_limits(tmp_path
                 last_codex_message="done",
                 last_raw_codex_message="turn/completed",
                 phase="running",
-                status_label="symphony:running",
+                status_label="performer:running",
                 workspace_path=str(tmp_path / "workspaces" / "MT-1"),
                 recent_events=[
                     {
@@ -113,7 +113,7 @@ def test_runtime_snapshot_includes_running_retry_totals_and_rate_limits(tmp_path
                 error="no available orchestrator slots",
                 issue_url=retry_issue.url,
                 phase="retrying",
-                status_label="symphony:retrying",
+                status_label="performer:retrying",
             )
         },
         continuations={
@@ -145,7 +145,7 @@ def test_runtime_snapshot_includes_running_retry_totals_and_rate_limits(tmp_path
     assert snapshot["running"][0]["codex_app_server_pid"] == 123
     assert snapshot["running"][0]["turn_count"] == 2
     assert snapshot["running"][0]["phase"] == "running"
-    assert snapshot["running"][0]["status_label"] == "symphony:running"
+    assert snapshot["running"][0]["status_label"] == "performer:running"
     assert snapshot["running"][0]["workspace_path"] == str(tmp_path / "workspaces" / "MT-1")
     assert snapshot["running"][0]["last_event"] == "turn_completed"
     assert snapshot["running"][0]["last_message"] == "done"
@@ -163,12 +163,12 @@ def test_runtime_snapshot_includes_running_retry_totals_and_rate_limits(tmp_path
     assert snapshot["retrying"][0]["due_at_ms"] == 123456
     assert snapshot["retrying"][0]["error"] == "no available orchestrator slots"
     assert snapshot["retrying"][0]["phase"] == "retrying"
-    assert snapshot["retrying"][0]["status_label"] == "symphony:retrying"
+    assert snapshot["retrying"][0]["status_label"] == "performer:retrying"
     assert snapshot["continuing"][0]["issue_id"] == "issue-3"
     assert snapshot["continuing"][0]["issue_identifier"] == "MT-3"
     assert snapshot["continuing"][0]["attempt"] == 4
     assert snapshot["continuing"][0]["phase"] == "continuing"
-    assert snapshot["continuing"][0]["status_label"] == "symphony:continuing"
+    assert snapshot["continuing"][0]["status_label"] == "performer:continuing"
     assert snapshot["issues"][-1]["issue_identifier"] == "MT-3"
     assert snapshot["codex_totals"]["input_tokens"] == 500
     assert snapshot["codex_totals"]["output_tokens"] == 200
@@ -228,7 +228,7 @@ def test_issue_snapshot_returns_running_workspace_and_attempt_details(tmp_path: 
                 last_codex_event="notification",
                 last_codex_message="Working",
                 phase="running",
-                status_label="symphony:running",
+                status_label="performer:running",
                 workspace_path=str(tmp_path / "workspaces" / "MT-1"),
                 recent_events=[
                     {
@@ -252,7 +252,7 @@ def test_issue_snapshot_returns_running_workspace_and_attempt_details(tmp_path: 
     assert detail["issue_id"] == "issue-1"
     assert detail["status"] == "running"
     assert detail["phase"] == "running"
-    assert detail["status_label"] == "symphony:running"
+    assert detail["status_label"] == "performer:running"
     assert detail["workspace"]["path"] == str((tmp_path / "workspaces" / "MT-1").resolve())
     assert detail["attempts"]["current_retry_attempt"] == 2
     assert detail["running"]["session_id"] == "thread-1-turn-1"
@@ -284,7 +284,7 @@ def test_issue_snapshot_returns_continuation_details(tmp_path: Path) -> None:
     assert detail is not None
     assert detail["status"] == "continuing"
     assert detail["phase"] == "continuing"
-    assert detail["status_label"] == "symphony:continuing"
+    assert detail["status_label"] == "performer:continuing"
     assert detail["attempts"]["current_retry_attempt"] == 2
     assert detail["retry"] is None
     assert detail["continuation"]["last_message"] == "continuing"

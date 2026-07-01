@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "conductor"
+version = "0.1.0"
+description = "Symphony Conductor local daemon for operating and reporting Performer instances."
+requires-python = ">=3.12"
+dependencies = [
+  "performer-api==0.1.0",
+]
+
+[project.scripts]
+conductor = "conductor.conductor_cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

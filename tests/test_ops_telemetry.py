@@ -1,7 +1,7 @@
 from pathlib import Path
 
-from symphony.ops_store import OpsStore
-from symphony.ops_telemetry import ExecutionTelemetryRecorder
+from performer_api.ops_store import OpsStore
+from performer.ops_telemetry import ExecutionTelemetryRecorder
 
 
 def test_recorder_creates_run_attempt_turn_and_events(tmp_path: Path) -> None:

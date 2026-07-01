@@ -1,7 +1,7 @@
 from pathlib import Path
 
-from symphony.ops_models import IssueRecord, OpsSnapshot, RunRecord, TraceEvent
-from symphony.ops_store import OpsStore
+from performer_api.ops_models import IssueRecord, OpsSnapshot, RunRecord, TraceEvent
+from performer_api.ops_store import OpsStore
 
 
 def test_ops_store_round_trips_snapshot(tmp_path: Path) -> None:

@@ -1,0 +1,165 @@
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass, field, replace
+from datetime import datetime, timezone
+from typing import Any, Literal
+from uuid import uuid4
+
+
+RepoSourceType = Literal["git", "local_path"]
+WorkflowGenerationStatus = Literal["draft", "valid", "invalid", "generation_failed"]
+ProcessStatus = Literal["stopped", "starting", "running", "unhealthy", "exited", "crash_loop"]
+
+
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+@dataclass(frozen=True)
+class WorkflowValidationResult:
+    ok: bool
+    error_code: str | None
+    diagnostics: list[str]
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class ConductorSettings:
+    linear_api_key: str = ""
+    podium_url: str = ""
+    podium_token: str = ""
+    conductor_id: str = field(default_factory=lambda: uuid4().hex)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    def to_public_dict(self) -> dict[str, Any]:
+        return {
+            "linear_api_key_configured": bool(self.linear_api_key.strip()),
+            "podium_url": self.podium_url,
+            "podium_token_configured": bool(self.podium_token.strip()),
+            "conductor_id": self.conductor_id,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> ConductorSettings:
+        return cls(
+            linear_api_key=str(payload.get("linear_api_key") or ""),
+            podium_url=str(payload.get("podium_url") or ""),
+            podium_token=str(payload.get("podium_token") or ""),
+            conductor_id=str(payload.get("conductor_id") or uuid4().hex),
+        )
+
+
+@dataclass(frozen=True)
+class InstanceRecord:
+    id: str
+    name: str
+    repo_source_type: RepoSourceType
+    repo_source_value: str
+    resolved_repo_path: str
+    instance_dir: str
+    workflow_path: str
+    workspace_root: str
+    persistence_path: str
+    log_path: str
+    http_port: int
+    linear_project: str
+    linear_filters: dict[str, Any]
+    workflow_profile: str
+    workflow_inputs: dict[str, Any]
+    workflow_content: str = ""
+    workflow_generation_status: WorkflowGenerationStatus = "draft"
+    process_status: ProcessStatus = "stopped"
+    pid: int | None = None
+    last_exit_code: int | None = None
+    last_error: str | None = None
+    created_at: str = ""
+    updated_at: str = ""
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        name: str,
+        repo_source_type: RepoSourceType,
+        repo_source_value: str,
+        resolved_repo_path: str,
+        instance_dir: str,
+        workflow_path: str,
+        workspace_root: str,
+        persistence_path: str,
+        log_path: str,
+        http_port: int,
+        linear_project: str,
+        linear_filters: dict[str, Any],
+        workflow_profile: str,
+        workflow_inputs: dict[str, Any],
+        id: str | None = None,
+    ) -> InstanceRecord:
+        now = utc_now_iso()
+        return cls(
+            id=id or uuid4().hex,
+            name=name,
+            repo_source_type=repo_source_type,
+            repo_source_value=repo_source_value,
+            resolved_repo_path=resolved_repo_path,
+            instance_dir=instance_dir,
+            workflow_path=workflow_path,
+            workspace_root=workspace_root,
+            persistence_path=persistence_path,
+            log_path=log_path,
+            http_port=http_port,
+            linear_project=linear_project,
+            linear_filters=linear_filters,
+            workflow_profile=workflow_profile,
+            workflow_inputs=workflow_inputs,
+            created_at=now,
+            updated_at=now,
+        )
+
+    def with_updates(self, **changes: Any) -> InstanceRecord:
+        if "updated_at" not in changes:
+            changes["updated_at"] = utc_now_iso()
+        return replace(self, **changes)
+
+    def to_dict(self, *, include_workflow_content: bool = True) -> dict[str, Any]:
+        data = asdict(self)
+        if not include_workflow_content:
+            data.pop("workflow_content", None)
+        return data
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> InstanceRecord:
+        return cls(**payload)
+
+
+@dataclass(frozen=True)
+class InstanceCreateRequest:
+    name: str
+    repo_source_type: RepoSourceType
+    repo_source_value: str
+    linear_project: str
+    linear_filters: dict[str, Any]
+    workflow_profile: str
+    workflow_inputs: dict[str, Any]
+    http_port: int | None = None
+    instance_dir: str | None = None
+    workspace_root: str | None = None
+    persistence_path: str | None = None
+    log_path: str | None = None
+
+    def with_overrides(self, **changes: Any) -> InstanceCreateRequest:
+        return replace(self, **changes)
+
+
+@dataclass(frozen=True)
+class InstancePatchRequest:
+    name: str | None = None
+    linear_project: str | None = None
+    linear_filters: dict[str, Any] | None = None
+    workflow_profile: str | None = None
+    workflow_inputs: dict[str, Any] | None = None
+    workflow_content: str | None = None

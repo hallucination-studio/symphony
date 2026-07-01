@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from symphony.conductor_models import InstanceRecord, WorkflowValidationResult
-from symphony.conductor_workflow import (
+from conductor.conductor_models import InstanceRecord, WorkflowValidationResult
+from conductor.conductor_workflow import (
     ConductorValidationError,
     generate_workflow_content,
     validate_instance_workflow,
@@ -23,8 +23,8 @@ def make_instance(tmp_path: Path) -> InstanceRecord:
         workflow_profile="default",
         workflow_inputs={"goal": "Keep issues moving"},
         workspace_root=str(instance_dir / "workspace" / "repo"),
-        persistence_path=str(instance_dir / "state" / "symphony.json"),
-        log_path=str(instance_dir / "logs" / "symphony.log"),
+        persistence_path=str(instance_dir / "state" / "performer.json"),
+        log_path=str(instance_dir / "logs" / "performer.log"),
         workflow_path=str(instance_dir / "WORKFLOW.md"),
         http_port=8811,
     )
@@ -41,7 +41,8 @@ def test_generate_workflow_content_injects_managed_runtime_resources(tmp_path: P
     assert f"path: {instance.persistence_path}" in content
     assert "agent:" in content
     assert "max_turns: 20" in content
-    assert f"port: {instance.http_port}" in content
+    assert "server:" not in content
+    assert "observability:" not in content
     assert "project_slug: ENG" in content
     assert "Keep issues moving" in content
     assert "Current Linear issue:" in content
@@ -111,8 +112,8 @@ def test_validate_instance_workflow_rejects_resource_collisions(tmp_path: Path) 
         workflow_profile="default",
         workflow_inputs={},
         workspace_root=current.workspace_root,
-        persistence_path=str(tmp_path / "instances" / "inst-2" / "state" / "symphony.json"),
-        log_path=str(tmp_path / "instances" / "inst-2" / "logs" / "symphony.log"),
+        persistence_path=str(tmp_path / "instances" / "inst-2" / "state" / "performer.json"),
+        log_path=str(tmp_path / "instances" / "inst-2" / "logs" / "performer.log"),
         workflow_path=str(tmp_path / "instances" / "inst-2" / "WORKFLOW.md"),
         http_port=9911,
     )
@@ -146,8 +147,6 @@ workspace:
   root: /tmp/not-the-managed-root
 persistence:
   path: /tmp/not-the-managed-state.json
-server:
-  port: 3000
 ---
 Prompt
 """
@@ -157,7 +156,7 @@ Prompt
 
     assert result.ok is False
     assert result.error_code == "managed_resource_mismatch"
-    assert len(result.diagnostics) == 3
+    assert len(result.diagnostics) == 2
 
 
 def test_generate_workflow_content_requires_known_profile(tmp_path: Path) -> None:

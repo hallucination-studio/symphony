@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "podium"
+version = "0.1.0"
+description = "Symphony Podium SaaS boundary for Conductor registration."
+requires-python = ">=3.12"
+dependencies = [
+  "performer-api==0.1.0",
+]
+
+[project.scripts]
+podium = "podium.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

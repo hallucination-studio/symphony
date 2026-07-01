@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from symphony.models import BlockerRef, Issue, sort_for_dispatch
+from performer_api.models import BlockerRef, Issue, sort_for_dispatch
 
 
 def test_issue_normalizes_labels_and_priority() -> None:

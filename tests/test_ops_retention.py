@@ -1,5 +1,5 @@
-from symphony.ops_models import OpsSnapshot, RetentionMetadata, TraceEvent
-from symphony.ops_retention import RetentionPolicy
+from performer_api.ops_models import OpsSnapshot, RetentionMetadata, TraceEvent
+from performer_api.ops_retention import RetentionPolicy
 
 
 def test_retention_policy_prunes_old_completed_raw_before_summary() -> None:

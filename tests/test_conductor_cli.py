@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from symphony import conductor_cli
+from conductor import conductor_cli
 
 
 def test_conductor_main_does_not_load_dotenv_from_launch_directory(tmp_path: Path, monkeypatch) -> None:

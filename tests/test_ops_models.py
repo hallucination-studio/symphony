@@ -1,5 +1,5 @@
-from symphony.models import RuntimeTokens
-from symphony.ops_models import AttemptRecord, TurnRecord
+from performer_api.models import RuntimeTokens
+from performer_api.ops_models import AttemptRecord, TurnRecord
 
 
 def test_runtime_tokens_include_cached_tokens() -> None:

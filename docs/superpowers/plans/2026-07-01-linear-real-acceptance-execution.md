@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Execute one real Linear-driven repository change through Symphony, diagnose real end-to-end defects, repair them, rerun the flow, and commit the validated fixes.
+**Goal:** Execute one real Linear-driven repository change through Performer, diagnose real end-to-end defects, repair them, rerun the flow, and commit the validated fixes.
 
-**Architecture:** The acceptance run uses the existing local Symphony/Conductor stack, the real Linear project configured in `WORKFLOW.md`, and one tightly scoped repository issue. Evidence is collected from tracker state, runtime logs, ops snapshot/API output, and focused test runs. Only defects discovered through the real run are repaired.
+**Architecture:** The acceptance run uses the existing local Performer/Conductor stack, the real Linear project configured in `WORKFLOW.md`, and one tightly scoped repository issue. Evidence is collected from tracker state, runtime logs, ops snapshot/API output, and focused test runs. Only defects discovered through the real run are repaired.
 
 **Tech Stack:** Python 3.12+, pytest, asyncio, Linear GraphQL API, Codex app-server, Conductor JSON API, static web assets.
 
@@ -141,7 +141,7 @@ mutation CreateAcceptanceIssue($teamId: String!, $projectId: String!, $title: St
 variables = {
     "teamId": "REPLACE_TEAM_ID",
     "projectId": "REPLACE_PROJECT_ID",
-    "title": "Acceptance: tighten one real Symphony behavior",
+    "title": "Acceptance: tighten one real Performer behavior",
     "description": "Use this issue for end-to-end acceptance. Make one small real improvement in this repository, verify it, and report the result.",
     "labelIds": ["REPLACE_CODEX2_LABEL_ID"],
 }
@@ -208,13 +208,13 @@ make install
 
 Expected: `.venv` exists and the editable package plus test dependencies are installed.
 
-- [ ] **Step 2: Run one real Symphony polling cycle**
+- [ ] **Step 2: Run one real Performer polling cycle**
 
 Run:
 
 ```bash
 set -a && source .env && set +a
-PYTHONPATH=$(pwd)/src .venv/bin/symphony WORKFLOW.md --once | tee .test-real-flow/first-run.log
+PYTHONPATH=$(pwd)/src .venv/bin/performer WORKFLOW.md --once | tee .test-real-flow/first-run.log
 ```
 
 Expected: the log shows candidate polling, issue selection or skip reasoning, and if dispatched, a real worker run for the chosen issue.
@@ -224,7 +224,7 @@ Expected: the log shows candidate polling, issue selection or skip reasoning, an
 Run:
 
 ```bash
-find . -path '*ops.json' -o -path '*symphony.json'
+find . -path '*ops.json' -o -path '*performer.json'
 ```
 
 Expected: at least one relevant runtime state file exists, or the absence itself becomes evidence of a defect in the acceptance chain.
@@ -241,7 +241,7 @@ from pathlib import Path
 log = Path(".test-real-flow/first-run.log").read_text(encoding="utf-8")
 summary = {
     "dispatched": "dispatch" in log.lower() or "running" in log.lower(),
-    "saw_linear_writeback": "symphony_lifecycle_label" in log or "milestone" in log.lower(),
+    "saw_linear_writeback": "performer_lifecycle_label" in log or "milestone" in log.lower(),
     "log_size": len(log),
 }
 Path(".test-real-flow/first-run-state.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
@@ -303,7 +303,7 @@ Run:
 
 ```bash
 set -a && source .env && set +a
-PYTHONPATH=$(pwd)/src .venv/bin/symphony WORKFLOW.md --once | tee .test-real-flow/second-run.log
+PYTHONPATH=$(pwd)/src .venv/bin/performer WORKFLOW.md --once | tee .test-real-flow/second-run.log
 ```
 
 Expected: the repaired behavior is observable in the second run.
@@ -337,7 +337,7 @@ from pathlib import Path
 log = Path(".test-real-flow/second-run.log").read_text(encoding="utf-8")
 summary = {
     "dispatched": "dispatch" in log.lower() or "running" in log.lower(),
-    "saw_linear_writeback": "symphony_lifecycle_label" in log or "milestone" in log.lower(),
+    "saw_linear_writeback": "performer_lifecycle_label" in log or "milestone" in log.lower(),
     "log_size": len(log),
 }
 Path(".test-real-flow/second-run-state.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")

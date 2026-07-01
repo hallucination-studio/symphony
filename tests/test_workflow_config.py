@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from symphony.config import ConfigError, ServiceConfig
-from symphony.workflow import WorkflowError, load_workflow, render_prompt
+from performer_api.config import ConfigError, ServiceConfig
+from performer_api.workflow import WorkflowError, load_workflow, render_prompt
 
 
 def write_workflow(path: Path, front_matter: str, body: str = "Issue {{ issue.identifier }} attempt {{ attempt }}") -> None:
@@ -142,13 +142,13 @@ acceptance:
   minimum_score: 3
   require_findings_for_score_3: true
   auto_retry_on_fail: false
-  task_type_label: symphony:type/task
-  acceptance_type_label: symphony:type/acceptance
-  gate_pending_label: symphony:gate/pending
-  gate_passed_label: symphony:gate/passed
-  gate_pass_with_findings_label: symphony:gate/pass-with-findings
-  gate_failed_label: symphony:gate/failed
-  score_label_prefix: symphony:score/
+  task_type_label: performer:type/task
+  acceptance_type_label: performer:type/acceptance
+  gate_pending_label: performer:gate/pending
+  gate_passed_label: performer:gate/passed
+  gate_pass_with_findings_label: performer:gate/pass-with-findings
+  gate_failed_label: performer:gate/failed
+  score_label_prefix: performer:score/
 """,
     )
 
@@ -159,13 +159,13 @@ acceptance:
     assert config.acceptance.minimum_score == 3
     assert config.acceptance.require_findings_for_score_3 is True
     assert config.acceptance.auto_retry_on_fail is False
-    assert config.acceptance.task_type_label == "symphony:type/task"
-    assert config.acceptance.acceptance_type_label == "symphony:type/acceptance"
-    assert config.acceptance.gate_pending_label == "symphony:gate/pending"
-    assert config.acceptance.gate_passed_label == "symphony:gate/passed"
-    assert config.acceptance.gate_pass_with_findings_label == "symphony:gate/pass-with-findings"
-    assert config.acceptance.gate_failed_label == "symphony:gate/failed"
-    assert config.acceptance.score_label_prefix == "symphony:score/"
+    assert config.acceptance.task_type_label == "performer:type/task"
+    assert config.acceptance.acceptance_type_label == "performer:type/acceptance"
+    assert config.acceptance.gate_pending_label == "performer:gate/pending"
+    assert config.acceptance.gate_passed_label == "performer:gate/passed"
+    assert config.acceptance.gate_pass_with_findings_label == "performer:gate/pass-with-findings"
+    assert config.acceptance.gate_failed_label == "performer:gate/failed"
+    assert config.acceptance.score_label_prefix == "performer:score/"
 
 
 def test_acceptance_enabled_extends_candidate_scan_states(tmp_path: Path) -> None:
@@ -241,12 +241,12 @@ tracker:
   project_slug: MT
   api_key: linear-token
 workspace:
-  root: ~/symphony-test-workspaces
+  root: ~/performer-test-workspaces
 """,
     )
 
     home_config = ServiceConfig.from_workflow(load_workflow(home_workflow_path), home_workflow_path)
-    assert str(home_config.workspace.root).endswith("symphony-test-workspaces")
+    assert str(home_config.workspace.root).endswith("performer-test-workspaces")
     assert home_config.workspace.root.is_absolute()
 
 
@@ -326,7 +326,7 @@ tracker:
   project_slug: MT
   api_key: linear-token
 persistence:
-  path: ./state/symphony.json
+  path: ./state/performer.json
 observability:
   enabled: true
   host: 127.0.0.2
@@ -342,7 +342,7 @@ worker:
 
     config = ServiceConfig.from_workflow(load_workflow(workflow_path), workflow_path)
 
-    assert config.persistence.path == (tmp_path / "state" / "symphony.json").resolve()
+    assert config.persistence.path == (tmp_path / "state" / "performer.json").resolve()
     assert config.observability.enabled is True
     assert config.observability.host == "127.0.0.2"
     assert config.observability.allow_refresh is False
@@ -408,16 +408,13 @@ tracker:
 
     config = ServiceConfig.from_workflow(load_workflow(workflow_path), workflow_path)
 
-    with pytest.raises(ConfigError) as exc:
-        config.validate_for_dispatch()
-
-    assert exc.value.code == "unsupported_tracker_kind"
+    config.validate_for_dispatch()
 
 
 def test_non_linear_tracker_config_does_not_require_linear_auth_or_project(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from symphony.tracker import register_tracker_adapter
+    from performer.tracker import register_tracker_adapter
 
     class CustomTracker:
         def __init__(self, config):

@@ -7,8 +7,8 @@ import pytest
 
 
 pytestmark = pytest.mark.skipif(
-    os.environ.get("SYMPHONY_REAL_INTEGRATION") != "1" or not os.environ.get("LINEAR_API_KEY"),
-    reason="set SYMPHONY_REAL_INTEGRATION=1 and LINEAR_API_KEY to run real integration checks",
+    os.environ.get("PERFORMER_REAL_INTEGRATION") != "1" or not os.environ.get("LINEAR_API_KEY"),
+    reason="set PERFORMER_REAL_INTEGRATION=1 and LINEAR_API_KEY to run real integration checks",
 )
 
 

@@ -21,9 +21,9 @@ def tail_text(path: Path, max_bytes: int = 80_000) -> str:
 
 def runtime_paths(instance_root: Path) -> dict[str, Path]:
     return {
-        "state": instance_root / "state" / "symphony.json",
+        "state": instance_root / "state" / "performer.json",
         "ops": instance_root / "state" / "ops.json",
-        "log": instance_root / "logs" / "symphony.log",
+        "log": instance_root / "logs" / "performer.log",
     }
 
 
@@ -65,9 +65,9 @@ def diagnose(tree: dict[str, Any] | None, runtime: dict[str, Any]) -> list[str]:
     business = tree.get("business_issue") or {}
     labels = set(business.get("labels") or [])
     state = business.get("state")
-    if "symphony:phase/review" in labels and state != "In Review":
+    if "performer:phase/review" in labels and state != "In Review":
         findings.append("linear_state_phase_mismatch:review_phase_without_in_review_state")
-    if "symphony:gate/passed" in labels and state != "Done":
+    if "performer:gate/passed" in labels and state != "Done":
         findings.append("linear_state_phase_mismatch:passed_gate_without_done_state")
     findings.extend(f"linear_tree:{failure}" for failure in tree.get("failures", []))
     return findings
@@ -102,7 +102,7 @@ async def observe(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def parser() -> argparse.ArgumentParser:
-    arg_parser = argparse.ArgumentParser(description="Observe a real Symphony/Conductor run without mutating Linear.")
+    arg_parser = argparse.ArgumentParser(description="Observe a real Performer/Conductor run without mutating Linear.")
     arg_parser.add_argument("--issue", required=True, help="Business issue id or identifier.")
     arg_parser.add_argument("--instance-root", type=Path, required=True, help="Conductor instance root containing state/ and logs/.")
     arg_parser.add_argument("--interval", type=float, default=10.0)

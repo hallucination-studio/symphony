@@ -1,4 +1,4 @@
-from symphony.ops_reasoning import explain_issue_state
+from performer_api.ops_reasoning import explain_issue_state
 
 
 def test_stalled_explanation_includes_failure_context() -> None:

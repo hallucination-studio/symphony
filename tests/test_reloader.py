@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from symphony.reloader import WorkflowReloader
+from performer.reloader import WorkflowReloader
 
 
 def write_workflow(path: Path, interval: int) -> None:
@@ -36,7 +36,7 @@ def test_reloader_keeps_last_good_config_after_invalid_reload(
 
     assert second is first
     assert reloader.last_error is not None
-    assert "symphony_workflow_reload failed" in caplog.text
+    assert "performer_workflow_reload failed" in caplog.text
 
 
 def test_reloader_applies_changed_workflow(tmp_path: Path) -> None:

@@ -6,8 +6,8 @@ from typing import Any
 
 import pytest
 
-from symphony.conductor_models import InstanceRecord
-from symphony.conductor_runtime import ConductorRuntimeManager
+from conductor.conductor_models import InstanceRecord
+from conductor.conductor_runtime import ConductorRuntimeManager
 
 
 class FakeStream:
@@ -54,8 +54,8 @@ def make_instance(tmp_path: Path) -> InstanceRecord:
         instance_dir=str(instance_dir),
         workflow_path=str(instance_dir / "WORKFLOW.md"),
         workspace_root=str(instance_dir / "workspace"),
-        persistence_path=str(instance_dir / "state" / "symphony.json"),
-        log_path=str(instance_dir / "logs" / "symphony.log"),
+        persistence_path=str(instance_dir / "state" / "performer.json"),
+        log_path=str(instance_dir / "logs" / "performer.log"),
         http_port=8801,
         linear_project="ENG",
         linear_filters={"labels": ["codex"]},
@@ -74,7 +74,7 @@ async def wait_for_log(path: Path, expected: str) -> str:
 
 
 @pytest.mark.asyncio
-async def test_start_launches_symphony_process_and_captures_logs(tmp_path: Path) -> None:
+async def test_start_launches_performer_process_and_captures_logs(tmp_path: Path) -> None:
     process = FakeProcess()
     captured: dict[str, Any] = {}
 
@@ -83,12 +83,12 @@ async def test_start_launches_symphony_process_and_captures_logs(tmp_path: Path)
         captured["kwargs"] = kwargs
         return process
 
-    manager = ConductorRuntimeManager(process_factory=process_factory, command="symphony")
+    manager = ConductorRuntimeManager(process_factory=process_factory, command="performer")
     instance = make_instance(tmp_path)
 
     started = await manager.start(instance, env={"LINEAR_API_KEY": "conductor-token"})
 
-    assert captured["args"] == ("symphony", instance.workflow_path)
+    assert captured["args"] == ("performer", instance.workflow_path)
     assert captured["kwargs"]["cwd"] == instance.resolved_repo_path
     assert captured["kwargs"]["env"]["LINEAR_API_KEY"] == "conductor-token"
     assert started.process_status == "running"
@@ -100,3 +100,12 @@ async def test_start_launches_symphony_process_and_captures_logs(tmp_path: Path)
     assert process.terminated is True
     assert stopped.process_status == "stopped"
     assert stopped.pid is None
+
+
+def test_default_command_falls_back_to_python_module_in_editable_repo() -> None:
+    manager = ConductorRuntimeManager(process_factory=None)
+
+    if manager.command.endswith("/performer"):
+        assert manager._command_args("WORKFLOW.md") == (manager.command, "WORKFLOW.md")
+    else:
+        assert manager._command_args("WORKFLOW.md") == (manager.command, "-m", "performer.cli", "WORKFLOW.md")

@@ -1,34 +1,89 @@
 # Symphony Agent Operating Notes
 
-This file captures repo-specific commands and real-run testing rules for future agents.
+This file captures repo-specific commands, product boundaries, coding standards, and real-run testing rules for future agents.
+
+## Product Positioning
+
+Symphony is one product, not four unrelated projects. The repository remains `symphony` because the system is the full orchestra:
+
+- `podium` is the SaaS-facing web boundary. In this refactor it is a small HTTP service for Conductor registration and health checks.
+- `conductor` is the local daemon, reporting hub, and operator API. It starts, stops, configures, and observes Performer instances, then reports state/events upward to Podium.
+- `performer` is the execution worker. A Conductor may operate multiple Performer instances, and each Performer polls assigned work, prepares workspaces, and runs Codex.
+- `performer_api` is the shared contract package: workflow/config parsing, persisted state schemas, ops projections, runtime labels, and registration DTOs.
+
+Package boundaries are runtime boundaries, not product boundaries. Keep user-facing language anchored in Symphony as the whole system, with Podium, Conductor, and Performer as roles inside that system.
+
+Current hard renames:
+
+- no Python package or CLI named `symphony`;
+- the worker CLI is `performer`;
+- runtime labels use `performer:*`;
+- managed state/log defaults are `state/performer.json` and `logs/performer.log`;
+- Conductor data defaults to `.conductor`;
+- Conductor and Performer do not ship a local web console in this build. Conductor exposes the local daemon/API; Podium is the SaaS web boundary.
+
+## Code Standards
+
+- Preserve import boundaries:
+  - `performer_api` must not import `performer`, `conductor`, or `podium`;
+  - `performer`, `conductor`, and `podium` may import `performer_api`;
+  - `performer`, `conductor`, and `podium` must not directly import each other.
+- Keep Conductor as the only local process manager for Performer. Conductor should start Performer through the installed `performer` command or the existing repo-local fallback, not by importing Performer internals.
+- Keep shared schemas and parsing in `performer_api` when more than one role needs the contract. Keep runtime adapters, subprocess management, tracker clients, and daemon logic in their owning role package.
+- Do not reintroduce Performer HTTP status/web UI or Conductor static web UI unless the product direction explicitly changes. Runtime status should flow through persisted state/ops and Conductor APIs.
+- Avoid compatibility shims for old `symphony` imports, commands, labels, files, or logs unless explicitly requested. This refactor is a hard break.
+- Do not print secrets. Settings such as `linear_api_key`, `podium_token`, and environment-resolved tokens may be validated or passed through, but final responses, logs, and API responses must not echo secret values.
+- Keep workflow behavior repo-owned through `WORKFLOW.md`. Conductor may generate and validate managed workflow files, but it should not hide policy in unrelated code paths.
+- Prefer small focused modules over large cross-role files. When adding behavior, put lifecycle, repo materialization, ops/retention reads, registration/reporting, tracker integration, and Codex process handling in clearly owned modules.
+- Use structured models and parsers already in the codebase instead of ad hoc string manipulation for workflow config, persisted state, ops snapshots, registration payloads, and Linear data.
+- Tests should cover both the role-local behavior and the cross-role contract. Add or update import-boundary tests when package relationships change.
 
 ## Standard Commands
 
 Run the full local suite:
 
 ```bash
-PYTHONPATH=src python3 -m pytest -q
+make test
 ```
 
 Run focused orchestration checks:
 
 ```bash
-PYTHONPATH=src python3 -m pytest tests/test_orchestrator.py tests/test_linear.py tests/test_acceptance.py -q
+PYTHONPATH=$(pwd)/packages/performer-api/src:$(pwd)/packages/performer/src:$(pwd)/packages/conductor/src:$(pwd)/packages/podium/src \
+  .venv/bin/python -m pytest tests/test_orchestrator.py tests/test_linear.py tests/test_acceptance.py -q
 ```
 
-Run Conductor locally:
+Install all editable packages:
+
+```bash
+make install
+```
+
+Run a Performer directly from `WORKFLOW.md`:
 
 ```bash
 make dev
 ```
 
-Stop local Conductor/Symphony processes launched by the Makefile:
+Run Conductor locally:
+
+```bash
+.venv/bin/conductor --port 8081 --data-root ./.conductor
+```
+
+Run Podium locally:
+
+```bash
+.venv/bin/podium --port 8090
+```
+
+Stop local Performer/Conductor processes launched by the Makefile:
 
 ```bash
 make stop
 ```
 
-Run one Symphony tick from `WORKFLOW.md`:
+Run one Performer tick from `WORKFLOW.md`:
 
 ```bash
 make once
@@ -94,7 +149,8 @@ set -a && source .env && set +a
 Audit active unarchived HELL issues:
 
 ```bash
-PYTHONPATH=src python3 tools/linear_project_issues.py audit \
+PYTHONPATH=$(pwd)/packages/performer-api/src:$(pwd)/packages/performer/src:$(pwd)/packages/conductor/src:$(pwd)/packages/podium/src \
+  .venv/bin/python tools/linear_project_issues.py audit \
   --project HELL \
   --out .test-real-flow/evidence/hell-audit.json
 ```
@@ -102,7 +158,8 @@ PYTHONPATH=src python3 tools/linear_project_issues.py audit \
 Archive active unarchived HELL issues:
 
 ```bash
-PYTHONPATH=src python3 tools/linear_project_issues.py archive \
+PYTHONPATH=$(pwd)/packages/performer-api/src:$(pwd)/packages/performer/src:$(pwd)/packages/conductor/src:$(pwd)/packages/podium/src \
+  .venv/bin/python tools/linear_project_issues.py archive \
   --project HELL \
   --out .test-real-flow/evidence/hell-archive.json
 ```
@@ -110,32 +167,36 @@ PYTHONPATH=src python3 tools/linear_project_issues.py archive \
 Archive only a run-label family:
 
 ```bash
-PYTHONPATH=src python3 tools/linear_project_issues.py archive \
+PYTHONPATH=$(pwd)/packages/performer-api/src:$(pwd)/packages/performer/src:$(pwd)/packages/conductor/src:$(pwd)/packages/podium/src \
+  .venv/bin/python tools/linear_project_issues.py archive \
   --project HELL \
-  --label-prefix symphony-real-codex- \
+  --label-prefix performer-real-codex- \
   --out .test-real-flow/evidence/hell-archive-real-codex.json
 ```
 
 Audit a business issue gate/evidence tree:
 
 ```bash
-PYTHONPATH=src:tools python3 tools/linear_tree_audit.py HELL-123 \
+PYTHONPATH=$(pwd)/packages/performer-api/src:$(pwd)/packages/performer/src:$(pwd)/packages/conductor/src:$(pwd)/packages/podium/src:tools \
+  .venv/bin/python tools/linear_tree_audit.py HELL-123 \
   --out .test-real-flow/evidence/linear-tree-audit.json
 ```
 
 Audit persisted retry/continuation state:
 
 ```bash
-PYTHONPATH=src:tools python3 tools/runtime_claims_audit.py \
-  --state /path/to/instances/inst-1/state/symphony.json \
-  --log /path/to/instances/inst-1/logs/symphony.log \
+PYTHONPATH=$(pwd)/packages/performer-api/src:$(pwd)/packages/performer/src:$(pwd)/packages/conductor/src:$(pwd)/packages/podium/src:tools \
+  .venv/bin/python tools/runtime_claims_audit.py \
+  --state /path/to/instances/inst-1/state/performer.json \
+  --log /path/to/instances/inst-1/logs/performer.log \
   --out .test-real-flow/evidence/runtime-claims-audit.json
 ```
 
 Observe a running real scenario without mutating Linear:
 
 ```bash
-PYTHONPATH=src:tools python3 tools/real_run_observer.py \
+PYTHONPATH=$(pwd)/packages/performer-api/src:$(pwd)/packages/performer/src:$(pwd)/packages/conductor/src:$(pwd)/packages/podium/src:tools \
+  .venv/bin/python tools/real_run_observer.py \
   --issue HELL-123 \
   --instance-root /path/to/instances/inst-1 \
   --interval 10 \
@@ -148,7 +209,8 @@ PYTHONPATH=src:tools python3 tools/real_run_observer.py \
 Bundle real-run evidence:
 
 ```bash
-PYTHONPATH=src:tools python3 tools/real_run_evidence_bundle.py \
+PYTHONPATH=$(pwd)/packages/performer-api/src:$(pwd)/packages/performer/src:$(pwd)/packages/conductor/src:$(pwd)/packages/podium/src:tools \
+  .venv/bin/python tools/real_run_evidence_bundle.py \
   --instance-root /path/to/instances/inst-1 \
   --business-issue .test-real-flow/evidence/business-issue.json \
   --linear-tree .test-real-flow/evidence/linear-tree-audit.json \
@@ -167,7 +229,7 @@ A real run must:
 1. Use `.env` and the real `LINEAR_API_KEY`.
 2. Start a Conductor instance first.
 3. Create a real Linear business issue after Conductor is running.
-4. Let Symphony create gates, dispatch Codex, verify completion, create evidence, and transition states.
+4. Let Conductor operate Performer so Performer creates gates, dispatches Codex, verifies completion, creates evidence, and transitions states.
 5. Use real `codex app-server` when the scenario says real Codex.
 6. Record Linear tree, runtime state, ops snapshot, logs, and cleanup evidence.
 7. Archive/audit the test project before and after the scenario.
@@ -186,8 +248,8 @@ The harness may create the initial issue and observe state. It must not manually
 For the new business issue gate tree:
 
 - business issue is the root;
-- gate issues are direct children with `symphony:type/gate`;
-- evidence issues are children of their gate with `symphony:type/evidence`;
+- gate issues are direct children with `performer:type/gate`;
+- evidence issues are children of their gate with `performer:type/evidence`;
 - no default `[Acceptance]` sibling issue is created;
 - no new default `blocks` relation is the primary acceptance mechanism;
 - business issue only reaches `Done` after all gates pass;
@@ -211,7 +273,7 @@ Use these meanings:
 
 Expected continuation evidence:
 
-- `symphony:continuing` label;
+- `performer:continuing` label;
 - persisted `continuations`;
 - snapshot `continuing`;
 - no `retry_attempts` row with `error: null`;
@@ -223,7 +285,7 @@ Stop and diagnose instead of continuing to wait when:
 
 - logs repeatedly show `running=0 claimed=1`;
 - `already_running_or_claimed` repeats while no worker is running;
-- Linear has `symphony:phase/review` but state is not `In Review`;
+- Linear has `performer:phase/review` but state is not `In Review`;
 - gate/evidence parent relationships are wrong;
 - evidence is missing and the issue is in review;
 - normal continuation appears in retry state;

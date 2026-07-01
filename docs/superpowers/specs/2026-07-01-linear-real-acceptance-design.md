@@ -2,14 +2,14 @@
 
 ## Goal
 
-Run a real end-to-end acceptance cycle for this repository using the existing Symphony + Linear + Codex flow, intentionally using one small real issue to expose product bugs, observability gaps, and unreasonable workflow behavior, then fix the discovered problems in-repo and verify the repaired flow.
+Run a real end-to-end acceptance cycle for this repository using the existing Performer + Linear + Codex flow, intentionally using one small real issue to expose product bugs, observability gaps, and unreasonable workflow behavior, then fix the discovered problems in-repo and verify the repaired flow.
 
 ## Why This Scope
 
 The repository already contains substantial Linear integration, lifecycle label syncing, milestone comments, Conductor runtime management, and Ops Console telemetry surfaces. The remaining risk is not “isolated unit behavior,” but whether the full operational loop works under real conditions:
 
 - a real Linear issue is selected correctly
-- Symphony actually dispatches it
+- Performer actually dispatches it
 - Codex can work inside the repository workspace
 - Linear receives usable progress/write-back signals
 - Conductor/Ops Console surfaces enough evidence to debug the run
@@ -25,7 +25,7 @@ Recommended path:
 
 1. choose or create a minimal issue in the configured Linear project with the required `codex2` label
 2. ensure the issue asks for a real repository change that should complete in one short run
-3. run Symphony/Conductor against that issue
+3. run Performer/Conductor against that issue
 4. observe dispatch, tool execution, Linear write-back, and Ops Console drill-down
 5. fix any defects or unreasonable behaviors found during the run
 6. re-run until the same flow produces strong end-to-end evidence
@@ -77,7 +77,7 @@ The flow is only considered proven if evidence exists for all of the following:
    - the chosen Linear issue is visible in the configured project and matches dispatch criteria
 
 2. **Real dispatch**
-   - Symphony starts a run for the issue in the local repository workspace
+   - Performer starts a run for the issue in the local repository workspace
 
 3. **Repository change**
    - the issue results in actual local code or content changes tied to the requested behavior

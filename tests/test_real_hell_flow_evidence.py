@@ -7,13 +7,13 @@ import pytest
 
 
 pytestmark = pytest.mark.skipif(
-    os.environ.get("SYMPHONY_REAL_HELL_FLOW") != "1" or not os.environ.get("LINEAR_API_KEY"),
-    reason="set SYMPHONY_REAL_HELL_FLOW=1 and LINEAR_API_KEY to run the real HELL flow evidence suite",
+    os.environ.get("PERFORMER_REAL_HELL_FLOW") != "1" or not os.environ.get("LINEAR_API_KEY"),
+    reason="set PERFORMER_REAL_HELL_FLOW=1 and LINEAR_API_KEY to run the real HELL flow evidence suite",
 )
 
 
 def test_real_hell_flow_evidence_harness_scores_all_plan_flows(tmp_path: Path) -> None:
-    from symphony.real_hell_flow import run_real_hell_flow_evidence
+    from tests.tools.real_hell_flow import run_real_hell_flow_evidence
 
     report = run_real_hell_flow_evidence(tmp_path)
 

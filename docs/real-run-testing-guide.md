@@ -1,12 +1,12 @@
 # Real Run Testing Guide
 
-This guide defines how to test Symphony as a running system, not as a collection of mocks.
+This guide defines how to test Performer as a running system, not as a collection of mocks.
 
 Use it when validating orchestration behavior, Linear state transitions, Codex execution, Conductor runtime, acceptance gates, retry/continuation semantics, or any behavior where unit tests can pass while the product still fails operationally.
 
 ## Core Rule
 
-A real run test must start the local product and let Symphony own the workflow.
+A real run test must start the local product and let Performer own the workflow.
 
 The harness may:
 
@@ -53,7 +53,7 @@ Archive only issues from one run label family:
 set -a && source .env && set +a
 PYTHONPATH=src python3 tools/linear_project_issues.py archive \
   --project HELL \
-  --label-prefix symphony-real-codex- \
+  --label-prefix performer-real-codex- \
   --out .test-real-flow/evidence/hell-archive-real-codex.json
 ```
 
@@ -67,7 +67,7 @@ Use this order for end-to-end validation:
 2. Create and start a Conductor instance for the current repo.
 3. Patch only the instance workflow needed for the scenario.
 4. Create one Linear business issue with a unique run label.
-5. Let Symphony perform planning, implementation dispatch, review, gate/evidence creation, and final transitions.
+5. Let Performer perform planning, implementation dispatch, review, gate/evidence creation, and final transitions.
 6. Observe until a terminal condition or a clear stall is reached.
 7. Save evidence.
 8. Stop Conductor.
@@ -88,14 +88,14 @@ A real run evidence bundle should include:
   - `retry_attempts`
   - `continuations`
 - Ops snapshot excerpts for runs, attempts, turns, and important events.
-- Symphony log excerpts around dispatch, worker completion, verification, gate review, fail/rework, pass/done, retry, and continuation.
+- Performer log excerpts around dispatch, worker completion, verification, gate review, fail/rework, pass/done, retry, and continuation.
 - Cleanup audit after the run.
 
 For gate-tree acceptance, success requires:
 
 - the business issue is the root;
-- each gate is a direct child with `symphony:type/gate`;
-- each evidence issue is a child of its gate with `symphony:type/evidence`;
+- each gate is a direct child with `performer:type/gate`;
+- each evidence issue is a child of its gate with `performer:type/evidence`;
 - no new default `[Acceptance]` sibling issue is created;
 - no new default `blocks` relation is used as the primary acceptance mechanism;
 - the business issue reaches `Done` only after all gates pass.
@@ -107,9 +107,9 @@ Do not keep waiting if the system is clearly stuck. Stop and inspect.
 Useful read-only checks:
 
 ```bash
-ps -ef | rg 'symphony|conductor|codex app-server' | rg -v rg
-tail -200 /path/to/instances/inst-1/logs/symphony.log
-python3 -m json.tool /path/to/instances/inst-1/state/symphony.json
+ps -ef | rg 'performer|conductor|codex app-server' | rg -v rg
+tail -200 /path/to/instances/inst-1/logs/performer.log
+python3 -m json.tool /path/to/instances/inst-1/state/performer.json
 python3 -m json.tool /path/to/instances/inst-1/state/ops.json
 ```
 
@@ -145,7 +145,7 @@ issue(id: $issueId) {
 Common real-run failure signatures:
 
 - `running=0 claimed=1` repeated in logs: a scheduler claim was not released.
-- Business issue has `symphony:phase/review` but Linear state is still `In Progress`: review phase and Linear workflow state diverged.
+- Business issue has `performer:phase/review` but Linear state is still `In Progress`: review phase and Linear workflow state diverged.
 - Gate issues are siblings of the business issue: child creation is not using `parentId`.
 - Evidence issues are siblings of gates: evidence creation is not using the gate as parent.
 - Agent final answer says it did work, but business issue lacks `Implementation summary`, `Test commands and exact output`, and `Remaining risks`: do not enter review.
@@ -171,13 +171,13 @@ Use these terms consistently:
 
 A continuation should appear as:
 
-- `symphony:continuing`;
+- `performer:continuing`;
 - `continuations` in persisted runtime;
 - `continuing` in snapshots and Conductor runtime.
 
 It should not appear as:
 
-- `symphony:retrying`;
+- `performer:retrying`;
 - an error-bearing `retry_attempts` row;
 - a failure count in dashboards.
 

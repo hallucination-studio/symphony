@@ -1,4 +1,4 @@
-# Symphony Service Specification
+# Performer Service Specification
 
 Status: Draft v1 (language-agnostic)
 
@@ -15,7 +15,7 @@ behavior.
 
 ## 1. Problem Statement
 
-Symphony is a long-running automation service that continuously reads work from an issue tracker
+Performer is a long-running automation service that continuously reads work from an issue tracker
 (Linear in this specification version), creates an isolated workspace for each issue, and runs a
 coding agent session for that issue inside the workspace.
 
@@ -35,7 +35,7 @@ stricter approvals or sandboxing.
 
 Important boundary:
 
-- Symphony is a scheduler/runner and tracker reader.
+- Performer is a scheduler/runner and tracker reader.
 - Ticket writes (state transitions, comments, PR links) are typically performed by the coding agent
   using tools available in the workflow/runtime environment.
 - A successful run can end at a workflow-defined handoff state (for example `Human Review`), not
@@ -113,7 +113,7 @@ Important boundary:
 
 ### 3.2 Abstraction Levels
 
-Symphony is easiest to port when kept in these layers:
+Performer is easiest to port when kept in these layers:
 
 1. `Policy Layer` (repo-defined)
    - `WORKFLOW.md` prompt body.
@@ -381,7 +381,7 @@ Fields:
 Fields:
 
 - `root` (path string or `$VAR`)
-  - Default: `<system-temp>/symphony_workspaces`
+  - Default: `<system-temp>/performer_workspaces`
   - `~` is expanded.
   - Relative paths are resolved relative to the directory containing `WORKFLOW.md`.
   - The effective workspace root is normalized to an absolute path before use.
@@ -583,7 +583,7 @@ not require recognizing or validating extension fields unless that extension is 
 - `tracker.active_states`: list of strings, default `["Todo", "In Progress"]`
 - `tracker.terminal_states`: list of strings, default `["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]`
 - `polling.interval_ms`: integer, default `30000`
-- `workspace.root`: path resolved to absolute, default `<system-temp>/symphony_workspaces`
+- `workspace.root`: path resolved to absolute, default `<system-temp>/performer_workspaces`
 - `hooks.after_create`: shell script or null
 - `hooks.before_run`: shell script or null
 - `hooks.after_run`: shell script or null
@@ -913,7 +913,7 @@ Invariant 3: Workspace key is sanitized.
 
 ## 10. Agent Runner Protocol (Coding Agent Integration)
 
-This section defines Symphony's language-neutral responsibilities when integrating a Codex
+This section defines Performer's language-neutral responsibilities when integrating a Codex
 app-server. The Codex app-server protocol for the targeted Codex version is the source of truth for
 protocol schemas, message payloads, transport framing, and method names.
 
@@ -924,7 +924,7 @@ Protocol source of truth:
   instead of treating this specification as a protocol schema.
 - If this specification appears to conflict with the targeted Codex app-server protocol, the Codex
   protocol controls protocol shape and transport behavior.
-- Symphony-specific requirements in this section still control orchestration behavior, workspace
+- Performer-specific requirements in this section still control orchestration behavior, workspace
   selection, prompt construction, continuation handling, and observability extraction.
 
 ### 10.1 Launch Contract
@@ -950,7 +950,7 @@ RECOMMENDED additional process settings:
 
 Reference: https://developers.openai.com/codex/app-server/
 
-Startup MUST follow the targeted Codex app-server contract. Symphony additionally requires the
+Startup MUST follow the targeted Codex app-server contract. Performer additionally requires the
 client to:
 
 - Start the app-server subprocess in the per-issue workspace.
@@ -1063,7 +1063,7 @@ Optional client-side tool extension:
 
 `linear_graphql` extension contract:
 
-- Purpose: execute a raw GraphQL query or mutation against Linear using Symphony's configured
+- Purpose: execute a raw GraphQL query or mutation against Linear using Performer's configured
   tracker auth for the current session.
 - Availability: only meaningful when `tracker.kind == "linear"` and valid Linear auth is configured.
 - Preferred input shape:
@@ -1084,7 +1084,7 @@ Optional client-side tool extension:
 - Execute one GraphQL operation per tool call.
 - If the provided document contains multiple operations, reject the tool call as invalid input.
 - `operationName` selection is intentionally out of scope for this extension.
-- Reuse the configured Linear endpoint and auth from the active Symphony workflow/runtime config; do
+- Reuse the configured Linear endpoint and auth from the active Performer workflow/runtime config; do
   not require the coding agent to read raw tokens from disk.
 - Tool result semantics:
   - transport success + no top-level GraphQL `errors` -> `success=true`
@@ -1212,7 +1212,7 @@ Orchestrator behavior on tracker errors:
 
 ### 11.5 Tracker Writes (Important Boundary)
 
-Symphony does not require first-class tracker write APIs in the orchestrator.
+Performer does not require first-class tracker write APIs in the orchestrator.
 
 - Ticket mutations (state transitions, comments, PR metadata) are typically handled by the coding
   agent using tools defined by the workflow prompt.
@@ -1357,6 +1357,8 @@ If implemented:
 
 ### 13.7 OPTIONAL HTTP Server Extension
 
+Current implementation note: Performer no longer exposes this HTTP/web extension. Conductor is the local daemon/control plane and reads Performer runtime state from persisted `state/performer.json` and `ops.json` artifacts for status, events, and Podium reporting.
+
 This section defines an OPTIONAL HTTP interface for observability and operational control.
 
 If implemented:
@@ -1460,7 +1462,7 @@ Minimum endpoints:
       "issue_id": "abc123",
       "status": "running",
       "workspace": {
-        "path": "/tmp/symphony_workspaces/MT-649"
+        "path": "/tmp/performer_workspaces/MT-649"
       },
       "attempts": {
         "restart_count": 1,
@@ -1485,7 +1487,7 @@ Minimum endpoints:
         "codex_session_logs": [
           {
             "label": "latest",
-            "path": "/var/log/symphony/codex/MT-649/latest.log",
+            "path": "/var/log/performer/codex/MT-649/latest.log",
             "url": null
           }
         ]
@@ -2107,7 +2109,7 @@ Use the same validation profiles as Section 17:
 - HTTP server extension honors CLI `--port` over `server.port`, uses a safe default bind host, and
   exposes the baseline endpoints/error semantics in Section 13.7 if shipped.
 - `linear_graphql` client-side tool extension exposes raw Linear GraphQL access through the
-  app-server session using configured Symphony auth.
+  app-server session using configured Performer auth.
 - TODO: Persist retry queue and session metadata across process restarts.
 - TODO: Make observability settings configurable in workflow front matter without prescribing UI
   implementation details.
@@ -2124,7 +2126,7 @@ Use the same validation profiles as Section 17:
 
 ## Appendix A. SSH Worker Extension (OPTIONAL)
 
-This appendix describes a common extension profile in which Symphony keeps one central
+This appendix describes a common extension profile in which Performer keeps one central
 orchestrator but executes worker runs on one or more remote hosts over SSH.
 
 Extension config:
@@ -2183,4 +2185,3 @@ Extension config:
 - Cleanup and observability:
   - Operators need to know which host owns a run, where its workspace lives, and whether cleanup
     happened on the right machine.
-

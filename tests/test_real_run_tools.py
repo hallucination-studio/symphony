@@ -32,12 +32,12 @@ def test_runtime_claims_audit_flags_errorless_retry_and_claim_stall() -> None:
                     "attempt": 2,
                     "error": None,
                     "phase": "done",
-                    "status_label": "symphony:done",
+                    "status_label": "performer:done",
                 }
             ],
             "continuations": [],
         },
-        "symphony_dispatch_summary dispatched=0 skipped=1 running=0 claimed=1",
+        "performer_dispatch_summary dispatched=0 skipped=1 running=0 claimed=1",
     )
 
     assert result["pass"] is False
@@ -54,7 +54,7 @@ def test_linear_tree_audit_requires_gate_and_evidence_parent_links() -> None:
             "identifier": "HELL-1",
             "title": "Business",
             "state": {"name": "In Review", "type": "started"},
-            "labels": {"nodes": [{"name": "symphony:type/task"}]},
+            "labels": {"nodes": [{"name": "performer:type/task"}]},
             "children": {
                 "nodes": [
                     {
@@ -63,7 +63,7 @@ def test_linear_tree_audit_requires_gate_and_evidence_parent_links() -> None:
                         "title": "[Gate] HELL-1: Behavior",
                         "parent": {"id": "other", "identifier": "HELL-X"},
                         "state": {"name": "Todo", "type": "unstarted"},
-                        "labels": {"nodes": [{"name": "symphony:type/gate"}]},
+                        "labels": {"nodes": [{"name": "performer:type/gate"}]},
                         "children": {
                             "nodes": [
                                 {
@@ -72,7 +72,7 @@ def test_linear_tree_audit_requires_gate_and_evidence_parent_links() -> None:
                                     "title": "[Evidence] HELL-1",
                                     "parent": {"id": "business-1", "identifier": "HELL-1"},
                                     "state": {"name": "Todo", "type": "unstarted"},
-                                    "labels": {"nodes": [{"name": "symphony:type/evidence"}]},
+                                    "labels": {"nodes": [{"name": "performer:type/evidence"}]},
                                 }
                             ]
                         },
@@ -106,7 +106,7 @@ def test_real_run_observer_diagnoses_review_phase_state_mismatch() -> None:
             "business_issue": {
                 "identifier": "HELL-1",
                 "state": "In Progress",
-                "labels": ["symphony:phase/review"],
+                "labels": ["performer:phase/review"],
             },
             "failures": [],
         },

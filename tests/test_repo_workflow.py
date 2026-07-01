@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from symphony.config import ServiceConfig, load_env_file
-from symphony.workflow import load_workflow
+from performer_api.config import ServiceConfig, load_env_file
+from performer_api.workflow import load_workflow
 
 
 def test_repo_workflow_prepares_isolated_issue_workspaces() -> None:

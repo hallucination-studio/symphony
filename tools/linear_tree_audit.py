@@ -9,8 +9,8 @@ from typing import Any
 from linear_project_issues import graphql
 
 
-GATE_LABEL = "symphony:type/gate"
-EVIDENCE_LABEL = "symphony:type/evidence"
+GATE_LABEL = "performer:type/gate"
+EVIDENCE_LABEL = "performer:type/evidence"
 
 
 async def fetch_issue_tree(issue_id: str) -> dict[str, Any]:

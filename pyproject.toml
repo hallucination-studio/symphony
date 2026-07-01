@@ -1,34 +1,3 @@
-[build-system]
-requires = ["setuptools>=69", "wheel"]
-build-backend = "setuptools.build_meta"
-
-[project]
-name = "symphony-linear-codex"
-version = "0.1.0"
-description = "Local Symphony daemon for Linear scheduling and Codex execution."
-requires-python = ">=3.12"
-dependencies = [
-  "httpx>=0.27",
-  "Jinja2>=3.1",
-  "PyYAML>=6.0",
-]
-
-[project.optional-dependencies]
-test = [
-  "pytest>=8.0",
-  "pytest-asyncio>=0.23",
-]
-
-[project.scripts]
-symphony = "symphony.cli:main"
-conductor = "symphony.conductor_cli:main"
-
-[tool.setuptools.packages.find]
-where = ["src"]
-
-[tool.setuptools.package-data]
-symphony = ["web/*.html", "web/*.css", "web/*.js", "web/lib/*.js", "web/views/*.js"]
-
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
