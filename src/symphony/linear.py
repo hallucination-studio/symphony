@@ -6,7 +6,7 @@ from typing import Any
 import httpx
 
 from .config import TrackerConfig
-from .models import LIFECYCLE_LABEL_PREFIX, BlockerRef, Issue
+from .models import LIFECYCLE_LABELS, BlockerRef, Issue
 
 
 class LinearError(Exception):
@@ -117,6 +117,52 @@ mutation SymphonyTransitionIssue($issueId: String!, $stateId: String!) {
 """
 
 
+ISSUE_CREATE_MUTATION = """
+mutation SymphonyCreateIssue(
+  $teamId: String!,
+  $projectId: String!,
+  $stateId: String!,
+  $labelIds: [String!],
+  $title: String!,
+  $description: String!
+) {
+  issueCreate(input: {
+    teamId: $teamId,
+    projectId: $projectId,
+    stateId: $stateId,
+    labelIds: $labelIds,
+    title: $title,
+    description: $description
+  }) {
+    success
+    issue {
+      id
+      identifier
+      title
+      url
+      state { name }
+      labels { nodes { name } }
+    }
+  }
+}
+"""
+
+
+ISSUE_RELATION_CREATE_MUTATION = """
+mutation SymphonyCreateIssueRelation($input: IssueRelationCreateInput!) {
+  issueRelationCreate(input: $input) {
+    success
+    issueRelation {
+      id
+      type
+      issue { id identifier }
+      relatedIssue { id identifier }
+    }
+  }
+}
+"""
+
+
 ISSUE_LABEL_CONTEXT_QUERY = """
 query SymphonyIssueLabelContext($issueId: String!) {
   issue(id: $issueId) {
@@ -124,6 +170,19 @@ query SymphonyIssueLabelContext($issueId: String!) {
     identifier
     team { id }
     labels { nodes { id name } }
+  }
+}
+"""
+
+
+ISSUE_CREATION_CONTEXT_QUERY = """
+query SymphonyIssueCreationContext($issueId: String!) {
+  issue(id: $issueId) {
+    id
+    identifier
+    team { id }
+    project { id }
+    state { id name }
   }
 }
 """
@@ -248,13 +307,106 @@ class LinearClient:
             "state": state.get("name") if isinstance(state, dict) else None,
         }
 
+    async def create_issue(
+        self,
+        *,
+        team_id: str,
+        project_id: str,
+        state_id: str,
+        label_ids: list[str],
+        title: str,
+        description: str,
+    ) -> dict[str, Any]:
+        payload = await self.graphql(
+            ISSUE_CREATE_MUTATION,
+            {
+                "teamId": team_id,
+                "projectId": project_id,
+                "stateId": state_id,
+                "labelIds": label_ids,
+                "title": title,
+                "description": description,
+            },
+        )
+        result = ((payload.get("data") or {}).get("issueCreate") or {})
+        issue = result.get("issue") if isinstance(result, dict) else {}
+        if not result.get("success") or not isinstance(issue, dict) or not issue.get("id"):
+            raise LinearError("linear_issue_create_failed", "Linear issueCreate returned success=false")
+        return issue
+
+    async def create_issue_relation(
+        self,
+        *,
+        issue_id: str,
+        related_issue_id: str,
+        relation_type: str,
+    ) -> dict[str, Any]:
+        payload = await self.graphql(
+            ISSUE_RELATION_CREATE_MUTATION,
+            {
+                "input": {
+                    "type": relation_type,
+                    "issueId": issue_id,
+                    "relatedIssueId": related_issue_id,
+                }
+            },
+        )
+        result = ((payload.get("data") or {}).get("issueRelationCreate") or {})
+        relation = result.get("issueRelation") if isinstance(result, dict) else {}
+        if not result.get("success") or not isinstance(relation, dict) or not relation.get("id"):
+            raise LinearError("linear_issue_relation_create_failed", "Linear issueRelationCreate returned success=false")
+        return relation
+
+    async def create_acceptance_issue_for(
+        self,
+        *,
+        original_issue_id: str,
+        title: str,
+        description: str,
+        acceptance_label_name: str,
+    ) -> dict[str, Any]:
+        context = await self._fetch_issue_creation_context(original_issue_id)
+        label = await self._ensure_issue_label(context["team_id"], acceptance_label_name)
+        return await self.create_issue(
+            team_id=context["team_id"],
+            project_id=context["project_id"],
+            state_id=context["state_id"],
+            label_ids=[label["id"]],
+            title=title,
+            description=description,
+        )
+
     async def set_issue_lifecycle_label(self, issue_id: str, label_name: str) -> dict[str, Any]:
         context = await self._fetch_issue_label_context(issue_id)
         target = await self._ensure_issue_label(context["team_id"], label_name)
+        lifecycle_labels = {label.lower() for label in LIFECYCLE_LABELS.values()}
         preserved = [
             label
             for label in context["labels"]
-            if not str(label.get("name") or "").lower().startswith(LIFECYCLE_LABEL_PREFIX)
+            if str(label.get("name") or "").lower() not in lifecycle_labels
+        ]
+        label_ids = [label["id"] for label in preserved if label.get("id")]
+        if target["id"] not in label_ids:
+            label_ids.append(target["id"])
+        payload = await self.graphql(ISSUE_UPDATE_LABELS_MUTATION, {"issueId": issue_id, "labelIds": label_ids})
+        result = ((payload.get("data") or {}).get("issueUpdate") or {})
+        issue = result.get("issue") if isinstance(result, dict) else {}
+        return {
+            "success": bool(result.get("success")),
+            "issue_id": issue.get("id") if isinstance(issue, dict) else None,
+            "identifier": issue.get("identifier") if isinstance(issue, dict) else None,
+            "label": label_name,
+            "label_ids": label_ids,
+        }
+
+    async def set_issue_label_group(self, issue_id: str, label_name: str, *, prefix: str) -> dict[str, Any]:
+        context = await self._fetch_issue_label_context(issue_id)
+        target = await self._ensure_issue_label(context["team_id"], label_name)
+        lowered_prefix = prefix.lower()
+        preserved = [
+            label
+            for label in context["labels"]
+            if not str(label.get("name") or "").lower().startswith(lowered_prefix)
         ]
         label_ids = [label["id"] for label in preserved if label.get("id")]
         if target["id"] not in label_ids:
@@ -283,6 +435,29 @@ class LinearClient:
             "identifier": issue.get("identifier") if isinstance(issue, dict) else None,
             "team_id": team_id,
             "labels": [label for label in labels if isinstance(label, dict)],
+        }
+
+    async def _fetch_issue_creation_context(self, issue_id: str) -> dict[str, Any]:
+        payload = await self.graphql(ISSUE_CREATION_CONTEXT_QUERY, {"issueId": issue_id})
+        issue = ((payload.get("data") or {}).get("issue") or {})
+        team = issue.get("team") if isinstance(issue, dict) else {}
+        project = issue.get("project") if isinstance(issue, dict) else {}
+        state = issue.get("state") if isinstance(issue, dict) else {}
+        team_id = team.get("id") if isinstance(team, dict) else None
+        project_id = project.get("id") if isinstance(project, dict) else None
+        state_id = state.get("id") if isinstance(state, dict) else None
+        if not isinstance(team_id, str) or not team_id:
+            raise LinearError("linear_missing_issue_team", "Linear issue.team.id missing")
+        if not isinstance(project_id, str) or not project_id:
+            raise LinearError("linear_missing_issue_project", "Linear issue.project.id missing")
+        if not isinstance(state_id, str) or not state_id:
+            raise LinearError("linear_missing_issue_state", "Linear issue.state.id missing")
+        return {
+            "issue_id": issue.get("id") if isinstance(issue, dict) else issue_id,
+            "identifier": issue.get("identifier") if isinstance(issue, dict) else None,
+            "team_id": team_id,
+            "project_id": project_id,
+            "state_id": state_id,
         }
 
     async def _ensure_issue_label(self, team_id: str, label_name: str) -> dict[str, str]:
@@ -347,8 +522,58 @@ class LinearTracker:
     async def transition_issue(self, issue_id: str, state_id: str) -> dict[str, Any]:
         return await self.client.transition_issue(issue_id, state_id)
 
+    async def create_issue(
+        self,
+        *,
+        team_id: str,
+        project_id: str,
+        state_id: str,
+        label_ids: list[str],
+        title: str,
+        description: str,
+    ) -> dict[str, Any]:
+        return await self.client.create_issue(
+            team_id=team_id,
+            project_id=project_id,
+            state_id=state_id,
+            label_ids=label_ids,
+            title=title,
+            description=description,
+        )
+
+    async def create_issue_relation(
+        self,
+        *,
+        issue_id: str,
+        related_issue_id: str,
+        relation_type: str,
+    ) -> dict[str, Any]:
+        return await self.client.create_issue_relation(
+            issue_id=issue_id,
+            related_issue_id=related_issue_id,
+            relation_type=relation_type,
+        )
+
+    async def create_acceptance_issue_for(
+        self,
+        *,
+        original_issue_id: str,
+        title: str,
+        description: str,
+        acceptance_label_name: str,
+    ) -> dict[str, Any]:
+        return await self.client.create_acceptance_issue_for(
+            original_issue_id=original_issue_id,
+            title=title,
+            description=description,
+            acceptance_label_name=acceptance_label_name,
+        )
+
     async def set_issue_lifecycle_label(self, issue_id: str, label_name: str) -> dict[str, Any]:
         return await self.client.set_issue_lifecycle_label(issue_id, label_name)
+
+    async def set_issue_label_group(self, issue_id: str, label_name: str, *, prefix: str) -> dict[str, Any]:
+        return await self.client.set_issue_label_group(issue_id, label_name, prefix=prefix)
 
 
 def format_linear_milestone_comment(

@@ -1,0 +1,242 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+import json
+from pathlib import Path
+from typing import Any
+
+from .codex_client import CodexAppServerClient
+from .config import ServiceConfig
+
+
+@dataclass(frozen=True)
+class AcceptanceReport:
+    score: int
+    result: str
+    score_reason: str
+    evidence_citations: list[str]
+    residual_findings: list[str]
+    recommended_next_action: str
+    accepted: bool
+    rejection_reasons: list[str] = field(default_factory=list)
+
+
+class CodexAcceptanceRunner:
+    def __init__(self, config: ServiceConfig, *, codex_client: Any | None = None) -> None:
+        self.config = config
+        self.codex_client = codex_client or CodexAppServerClient(config.codex)
+
+    async def run_acceptance(
+        self,
+        *,
+        original_issue: Any,
+        acceptance_issue: dict[str, Any],
+        completion_verdict: Any,
+        workspace_path: str | None,
+    ) -> str:
+        workspace = Path(workspace_path or self.config.workspace.root)
+        prompt = build_acceptance_prompt(
+            original_issue=original_issue,
+            acceptance_issue=acceptance_issue,
+            completion_verdict=completion_verdict,
+            config=self.config,
+        )
+        last_message: str | None = None
+
+        def on_event(event: dict[str, Any]) -> None:
+            nonlocal last_message
+            message = event.get("message")
+            if isinstance(message, str) and message.strip():
+                last_message = message.strip()
+
+        result = await self.codex_client.run_session(
+            workspace,
+            prompt,
+            f"Acceptance {getattr(original_issue, 'identifier', 'issue')}",
+            on_event=on_event,
+            max_turns=self.config.agent.max_turns,
+        )
+        if isinstance(result, str):
+            return result
+        message = getattr(result, "message", None)
+        if isinstance(message, str) and message.strip():
+            return message.strip()
+        if last_message is not None:
+            return last_message
+        return str(result)
+
+
+def build_acceptance_prompt(
+    *,
+    original_issue: Any,
+    acceptance_issue: dict[str, Any],
+    completion_verdict: Any,
+    config: ServiceConfig,
+) -> str:
+    issue_identifier = getattr(original_issue, "identifier", "")
+    issue_title = getattr(original_issue, "title", "")
+    issue_description = getattr(original_issue, "description", "") or ""
+    issue_url = getattr(original_issue, "url", "") or ""
+    issue_labels = getattr(original_issue, "labels", []) or []
+    verdict_status = getattr(completion_verdict, "status", "unknown")
+    verdict_reason = getattr(completion_verdict, "reason", "unknown")
+    checks = getattr(completion_verdict, "checks", []) or []
+    evidence = getattr(completion_verdict, "evidence", {}) or {}
+    lines = [
+        "You are the independent Symphony acceptance reviewer for one completed Linear task.",
+        "This is a task-scoped gate modeled after Superpowers task review: first judge Spec compliance, then Code quality.",
+        "Do not trust the implementer report or the prior completion verdict. Treat them as claims to verify against evidence.",
+        "",
+        "Original issue:",
+        f"- Identifier: {issue_identifier}",
+        f"- Title: {issue_title}",
+        f"- URL: {issue_url}",
+        f"- Labels: {', '.join(str(label) for label in issue_labels)}",
+        f"- Description: {issue_description}",
+        "",
+        "Acceptance issue:",
+        f"- ID: {acceptance_issue.get('id', '')}",
+        f"- Identifier: {acceptance_issue.get('identifier', '')}",
+        f"- URL: {acceptance_issue.get('url', '')}",
+        "",
+        "Prior completion verdict:",
+        f"- Status: {verdict_status}",
+        f"- Reason: {verdict_reason}",
+        "",
+        "Completion checks:",
+    ]
+    for check in checks:
+        lines.append(
+            f"- {getattr(check, 'check_name', 'unknown')}: "
+            f"{'PASS' if getattr(check, 'passed', False) else 'FAIL'} - {getattr(check, 'message', '')}"
+        )
+    if evidence:
+        lines.extend(["", "Completion evidence keys:"])
+        for key in sorted(str(item) for item in evidence.keys()):
+            lines.append(f"- {key}")
+    lines.extend(
+        [
+            "",
+            "Gate rubric:",
+            "- Score 4: pass; requirements are satisfied, evidence is strong, no material residual findings.",
+            "- Score 3: pass only with concrete residual findings that should be tracked.",
+            "- Score 2: fail; material gaps, missing evidence, or likely false positive completion.",
+            "- Score 1: fail; implementation is mostly absent or unsafe.",
+            "- Score 0: fail; no usable evidence or wrong task.",
+            "",
+            "Evaluate both:",
+            "- Spec compliance: missing, extra, or misunderstood requirements.",
+            "- Code quality: maintainability, error handling, tests, and evidence quality.",
+            "",
+            "Return one JSON object only with exactly these fields:",
+            "{",
+            '  "score": 0,',
+            '  "result": "pass|fail",',
+            '  "score_reason": "specific evidence-backed reasoning, not a vague approval",',
+            '  "evidence_citations": ["workspace/file:line or command/result or Linear/ops evidence"],',
+            '  "residual_findings": ["required when score is 3; concrete findings only"],',
+            '  "recommended_next_action": "what Symphony should do next"',
+            "}",
+            "",
+            f"Minimum passing score: {config.acceptance.minimum_score}.",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def parse_acceptance_report(
+    text: str,
+    *,
+    minimum_score: int,
+    require_findings_for_score_3: bool,
+) -> AcceptanceReport:
+    try:
+        payload = json.loads(_extract_json_object(text))
+    except (json.JSONDecodeError, ValueError):
+        return _rejected(["invalid_json"])
+    if not isinstance(payload, dict):
+        return _rejected(["invalid_json"])
+
+    score = _int(payload.get("score"), default=-1)
+    result = _string(payload.get("result"))
+    score_reason = _string(payload.get("score_reason"))
+    evidence_citations = _string_list(payload.get("evidence_citations"))
+    residual_findings = _string_list(payload.get("residual_findings"))
+    recommended_next_action = _string(payload.get("recommended_next_action"))
+
+    rejection_reasons: list[str] = []
+    if score < minimum_score:
+        rejection_reasons.append("score_below_minimum")
+    if result != "pass":
+        rejection_reasons.append("result_not_pass")
+    if not _substantive(score_reason):
+        rejection_reasons.append("score_reason_not_substantive")
+    if not evidence_citations:
+        rejection_reasons.append("missing_evidence_citations")
+    if score == 3 and require_findings_for_score_3 and not residual_findings:
+        rejection_reasons.append("score_3_requires_residual_findings")
+    if not recommended_next_action:
+        rejection_reasons.append("missing_recommended_next_action")
+
+    return AcceptanceReport(
+        score=score,
+        result=result,
+        score_reason=score_reason,
+        evidence_citations=evidence_citations,
+        residual_findings=residual_findings,
+        recommended_next_action=recommended_next_action,
+        accepted=not rejection_reasons,
+        rejection_reasons=rejection_reasons,
+    )
+
+
+def _rejected(reasons: list[str]) -> AcceptanceReport:
+    return AcceptanceReport(
+        score=-1,
+        result="invalid",
+        score_reason="",
+        evidence_citations=[],
+        residual_findings=[],
+        recommended_next_action="",
+        accepted=False,
+        rejection_reasons=reasons,
+    )
+
+
+def _extract_json_object(text: str) -> str:
+    stripped = text.strip()
+    if stripped.startswith("{") and stripped.endswith("}"):
+        return stripped
+    start = stripped.find("{")
+    end = stripped.rfind("}")
+    if start < 0 or end <= start:
+        raise ValueError("missing JSON object")
+    return stripped[start : end + 1]
+
+
+def _int(value: Any, *, default: int) -> int:
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value.strip())
+    return default
+
+
+def _string(value: Any) -> str:
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [item.strip() for item in value if isinstance(item, str) and item.strip()]
+
+
+def _substantive(value: str) -> bool:
+    lowered = value.strip().lower()
+    if len(lowered) < 40:
+        return False
+    vague = {"looks good", "seems fine", "all good", "ok", "done"}
+    return lowered not in vague

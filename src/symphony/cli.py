@@ -5,6 +5,7 @@ import asyncio
 import logging
 from pathlib import Path
 
+from .acceptance import CodexAcceptanceRunner
 from .config import ServiceConfig, load_env_file
 from .http_server import SymphonyHttpServer
 from .linear import LinearTracker
@@ -42,10 +43,23 @@ def apply_runtime_config(
     runner.config = config
     runner.workspace_manager = workspace_manager
     runner.codex_client.config = config.codex
+    if not config.acceptance.enabled:
+        orchestrator.acceptance_runner = None
+    elif isinstance(orchestrator.acceptance_runner, CodexAcceptanceRunner):
+        orchestrator.acceptance_runner.config = config
+        orchestrator.acceptance_runner.codex_client.config = config.codex
+    elif orchestrator.acceptance_runner is None:
+        orchestrator.acceptance_runner = build_acceptance_runner(config)
 
 
 def effective_server_port(config: ServiceConfig, cli_port: int | None) -> int | None:
     return cli_port if cli_port is not None else config.server.port
+
+
+def build_acceptance_runner(config: ServiceConfig) -> CodexAcceptanceRunner | None:
+    if not config.acceptance.enabled:
+        return None
+    return CodexAcceptanceRunner(config)
 
 
 def persistence_store_from_config(config: ServiceConfig) -> PersistenceStore | None:
@@ -66,6 +80,7 @@ async def run_daemon(config: ServiceConfig, *, once: bool = False, port: int | N
         runner,
         workspace_manager=workspace_manager,
         persistence_store=persistence_store_from_config(config),
+        acceptance_runner=build_acceptance_runner(config),
     )
     orchestrator.load_persisted_state()
     http_server = await _maybe_start_http_server(config, orchestrator, port)
@@ -98,6 +113,7 @@ async def run_reloading_daemon(workflow_path: Path, *, once: bool = False, port:
         runner,
         workspace_manager=workspace_manager,
         persistence_store=persistence_store_from_config(config),
+        acceptance_runner=build_acceptance_runner(config),
     )
     orchestrator.load_persisted_state()
     http_server = await _maybe_start_http_server(config, orchestrator, port)

@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any, Protocol
 
+from .acceptance import AcceptanceReport, parse_acceptance_report
 from .config import ConfigError, ServiceConfig
 from .completion_verifier import CompletionVerifier
 from .models import (
@@ -45,6 +46,10 @@ class RunnerProtocol(Protocol):
     ) -> None: ...
 
 
+class AcceptanceRunnerProtocol(Protocol):
+    async def run_acceptance(self, **kwargs: Any) -> str: ...
+
+
 @dataclass
 class OrchestratorState:
     running: dict[str, RunningEntry] = field(default_factory=dict)
@@ -65,10 +70,12 @@ class Orchestrator:
         *,
         workspace_manager: WorkspaceManager | None = None,
         persistence_store: PersistenceStore | None = None,
+        acceptance_runner: AcceptanceRunnerProtocol | None = None,
     ):
         self.config = config
         self.tracker = tracker
         self.runner = runner
+        self.acceptance_runner = acceptance_runner
         self.workspace_manager = workspace_manager
         self.persistence_store = persistence_store
         self.completion_verifier = CompletionVerifier(config.completion_verification, tracker)
@@ -333,6 +340,12 @@ class Orchestrator:
                         )
                         self._schedule_retry(refreshed_issue, max(entry.retry_attempt + 1, 1), error=None, delay_ms=1_000)
                     elif refreshed_issue is not None and self._is_terminal(refreshed_issue):
+                        if self.config.acceptance.enabled:
+                            await self._create_acceptance_gate(entry, verdict)
+                            self.state.claimed.discard(issue_id)
+                            self.state.retry_attempts.pop(issue_id, None)
+                            logger.info("symphony_acceptance_gate_created issue_id=%s", issue_id)
+                            return
                         self.state.completed.add(issue_id)
                         self.state.claimed.discard(issue_id)
                         self.state.retry_attempts.pop(issue_id, None)
@@ -515,6 +528,107 @@ class Orchestrator:
                 "symphony_handoff_comment outcome=failed issue_id=%s issue_identifier=%s reason=linear_unsuccessful",
                 entry.issue.id,
                 entry.issue.identifier,
+            )
+
+    async def _create_acceptance_gate(self, entry: RunningEntry, verdict: Any) -> None:
+        if self.config.tracker.kind != "linear":
+            return
+        create_issue = getattr(self.tracker, "create_issue", None)
+        create_acceptance_issue = getattr(self.tracker, "create_acceptance_issue_for", None)
+        create_relation = getattr(self.tracker, "create_issue_relation", None)
+        if not callable(create_relation) or (not callable(create_acceptance_issue) and not callable(create_issue)):
+            return
+        acceptance = self.config.acceptance
+        description = _acceptance_issue_description(entry, verdict)
+        title = f"[Acceptance] {entry.issue.identifier}: {entry.issue.title}"
+        if callable(create_acceptance_issue):
+            created = await create_acceptance_issue(
+                original_issue_id=entry.issue.id,
+                title=title,
+                description=description,
+                acceptance_label_name=acceptance.acceptance_type_label,
+            )
+        else:
+            created = await create_issue(
+                team_id="",
+                project_id=self.config.tracker.project_slug,
+                state_id=self.config.tracker.active_states[0] if self.config.tracker.active_states else "",
+                label_ids=[],
+                title=title,
+                description=description,
+            )
+        acceptance_issue_id = str(created.get("id") or "")
+        if acceptance_issue_id:
+            await create_relation(
+                issue_id=acceptance_issue_id,
+                related_issue_id=entry.issue.id,
+                relation_type="blocks",
+            )
+        await self._sync_label_group(entry.issue.id, acceptance.gate_pending_label, prefix="symphony:gate/")
+        if self.acceptance_runner is None or not acceptance_issue_id:
+            return
+        raw_report = await self.acceptance_runner.run_acceptance(
+            original_issue=entry.issue,
+            acceptance_issue=created,
+            completion_verdict=verdict,
+            workspace_path=entry.workspace_path,
+        )
+        report = parse_acceptance_report(
+            raw_report,
+            minimum_score=acceptance.minimum_score,
+            require_findings_for_score_3=acceptance.require_findings_for_score_3,
+        )
+        await self._comment_acceptance_report(acceptance_issue_id, entry, report)
+        if report.accepted:
+            gate_label = (
+                acceptance.gate_pass_with_findings_label
+                if report.score == acceptance.minimum_score and report.residual_findings
+                else acceptance.gate_passed_label
+            )
+            await self._sync_label_group(entry.issue.id, gate_label, prefix="symphony:gate/")
+            await self._sync_label_group(
+                entry.issue.id,
+                f"{acceptance.score_label_prefix}{report.score}",
+                prefix=acceptance.score_label_prefix,
+            )
+            self.state.completed.add(entry.issue.id)
+            await self._sync_lifecycle_label(entry.issue.id, LIFECYCLE_LABELS["done"])
+        else:
+            await self._sync_label_group(entry.issue.id, acceptance.gate_failed_label, prefix="symphony:gate/")
+            if report.score >= 0:
+                await self._sync_label_group(
+                    entry.issue.id,
+                    f"{acceptance.score_label_prefix}{report.score}",
+                    prefix=acceptance.score_label_prefix,
+                )
+
+    async def _comment_acceptance_report(
+        self,
+        acceptance_issue_id: str,
+        entry: RunningEntry,
+        report: AcceptanceReport,
+    ) -> None:
+        if self.config.tracker.kind != "linear":
+            return
+        comment_issue = getattr(self.tracker, "comment_issue", None)
+        if not callable(comment_issue):
+            return
+        body = _acceptance_report_comment_body(entry, report)
+        try:
+            result = await comment_issue(acceptance_issue_id, body)
+        except Exception as exc:
+            logger.warning(
+                "symphony_acceptance_comment outcome=failed issue_id=%s acceptance_issue_id=%s reason=%s",
+                entry.issue.id,
+                acceptance_issue_id,
+                exc,
+            )
+            return
+        if isinstance(result, dict) and result.get("success") is False:
+            logger.warning(
+                "symphony_acceptance_comment outcome=failed issue_id=%s acceptance_issue_id=%s reason=linear_unsuccessful",
+                entry.issue.id,
+                acceptance_issue_id,
             )
 
     def _schedule_retry(self, issue: Issue, attempt: int, *, error: str | None, delay_ms: int | None) -> None:
@@ -750,6 +864,32 @@ class Orchestrator:
                 "symphony_lifecycle_label outcome=failed issue_id=%s label=%s reason=linear_unsuccessful",
                 issue_id,
                 label_name,
+            )
+
+    async def _sync_label_group(self, issue_id: str, label_name: str, *, prefix: str) -> None:
+        if self.config.tracker.kind != "linear":
+            return
+        set_label_group = getattr(self.tracker, "set_issue_label_group", None)
+        if not callable(set_label_group):
+            await self._sync_lifecycle_label(issue_id, label_name)
+            return
+        try:
+            result = await set_label_group(issue_id, label_name, prefix=prefix)
+        except Exception as exc:
+            logger.warning(
+                "symphony_label_group outcome=failed issue_id=%s label=%s prefix=%s reason=%s",
+                issue_id,
+                label_name,
+                prefix,
+                exc,
+            )
+            return
+        if isinstance(result, dict) and result.get("success") is False:
+            logger.warning(
+                "symphony_label_group outcome=failed issue_id=%s label=%s prefix=%s reason=linear_unsuccessful",
+                issue_id,
+                label_name,
+                prefix,
             )
 
     async def wait_for_idle(self) -> None:
@@ -1031,6 +1171,49 @@ def _completion_verification_error_comment_body(entry: RunningEntry, error: str)
     ]
     if entry.last_codex_message:
         lines.extend(["", f"Last observed message: {entry.last_codex_message}"])
+    return "\n".join(lines)
+
+
+def _acceptance_issue_description(entry: RunningEntry, verdict: Any) -> str:
+    return "\n".join(
+        [
+            f"Original issue: {entry.issue.identifier}",
+            f"Original issue ID: {entry.issue.id}",
+            f"Workspace: {entry.workspace_path or '<workspace path unavailable>'}",
+            f"Completion verdict: {getattr(verdict, 'status', 'unknown')}",
+            f"Completion reason: {getattr(verdict, 'reason', 'unknown')}",
+            "",
+            "Review the implementation evidence and produce a score from 0 to 4.",
+        ]
+    )
+
+
+def _acceptance_report_comment_body(entry: RunningEntry, report: AcceptanceReport) -> str:
+    lines = [
+        f"Acceptance score: {report.score}",
+        f"Result: {report.result}",
+        "",
+        f"Reason: {report.score_reason}",
+        "",
+        "Evidence citations:",
+    ]
+    for citation in report.evidence_citations:
+        lines.append(f"- {citation}")
+    if report.residual_findings:
+        lines.extend(["", "Residual findings:"])
+        for finding in report.residual_findings:
+            lines.append(f"- {finding}")
+    if report.rejection_reasons:
+        lines.extend(["", "Gate rejection reasons:"])
+        for reason in report.rejection_reasons:
+            lines.append(f"- {reason}")
+    lines.extend(
+        [
+            "",
+            f"Recommended next action: {report.recommended_next_action}",
+            f"Original issue: {entry.issue.identifier}",
+        ]
+    )
     return "\n".join(lines)
 
 

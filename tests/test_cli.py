@@ -8,6 +8,7 @@ from symphony import cli
 from symphony.cli import (
     apply_runtime_config,
     build_config_from_path,
+    build_acceptance_runner,
     default_workflow_path,
     effective_server_port,
     _maybe_start_http_server,
@@ -24,8 +25,10 @@ from symphony.config import (
     ServiceConfig,
     TrackerConfig,
     ObservabilityConfig,
+    AcceptanceConfig,
     WorkspaceConfig,
 )
+from symphony.acceptance import CodexAcceptanceRunner
 from symphony.linear import LinearTracker
 from symphony.orchestrator import Orchestrator
 from symphony.runner import AgentRunner
@@ -191,6 +194,59 @@ def test_apply_runtime_config_updates_tracker_workspace_and_codex(tmp_path: Path
     assert orchestrator.workspace_manager is runner.workspace_manager
     assert orchestrator.config.prompt_template == second.prompt_template
     assert runner.codex_client.config.command == "new-codex"
+
+
+def test_apply_runtime_config_disables_existing_acceptance_runner(tmp_path: Path) -> None:
+    first_base = make_service_config(tmp_path, project_slug="OLD", api_key="old-token", workspace="old", command="old-codex")
+    first = ServiceConfig(
+        tracker=first_base.tracker,
+        polling=first_base.polling,
+        workspace=first_base.workspace,
+        hooks=first_base.hooks,
+        agent=first_base.agent,
+        codex=first_base.codex,
+        prompt_template=first_base.prompt_template,
+        workflow_path=first_base.workflow_path,
+        acceptance=AcceptanceConfig(enabled=True),
+    )
+    second = make_service_config(tmp_path, project_slug="NEW", api_key="new-token", workspace="new", command="new-codex")
+    tracker = LinearTracker(first.tracker)
+    workspace_manager = WorkspaceManager(first.workspace, first.hooks)
+    runner = AgentRunner(first, workspace_manager, CodexAppServerClient(first.codex), tracker=tracker)
+
+    class NoopRunner:
+        async def run_issue(self, issue, attempt, on_event):
+            return None
+
+    orchestrator = Orchestrator(
+        first,
+        tracker,
+        NoopRunner(),
+        workspace_manager=workspace_manager,
+        acceptance_runner=build_acceptance_runner(first),
+    )
+
+    apply_runtime_config(second, tracker=tracker, runner=runner, orchestrator=orchestrator)
+
+    assert orchestrator.acceptance_runner is None
+
+
+def test_build_acceptance_runner_only_when_enabled(tmp_path: Path) -> None:
+    config = make_service_config(tmp_path, project_slug="MT", api_key="token", workspace="ws", command="codex")
+    enabled = ServiceConfig(
+        tracker=config.tracker,
+        polling=config.polling,
+        workspace=config.workspace,
+        hooks=config.hooks,
+        agent=config.agent,
+        codex=config.codex,
+        prompt_template=config.prompt_template,
+        workflow_path=config.workflow_path,
+        acceptance=AcceptanceConfig(enabled=True),
+    )
+
+    assert build_acceptance_runner(config) is None
+    assert isinstance(build_acceptance_runner(enabled), CodexAcceptanceRunner)
 
 
 def test_persistence_store_from_config_uses_configured_path(tmp_path: Path) -> None:

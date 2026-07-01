@@ -127,6 +127,47 @@ completion_verification:
     assert config.completion_verification.min_workspace_changes_chars == 12
 
 
+def test_service_config_parses_acceptance_gate_extension(tmp_path: Path) -> None:
+    workflow_path = tmp_path / "WORKFLOW.md"
+    write_workflow(
+        workflow_path,
+        """
+tracker:
+  kind: linear
+  project_slug: MT
+  api_key: linear-token
+acceptance:
+  enabled: true
+  mode: block_done
+  minimum_score: 3
+  require_findings_for_score_3: true
+  auto_retry_on_fail: false
+  task_type_label: symphony:type/task
+  acceptance_type_label: symphony:type/acceptance
+  gate_pending_label: symphony:gate/pending
+  gate_passed_label: symphony:gate/passed
+  gate_pass_with_findings_label: symphony:gate/pass-with-findings
+  gate_failed_label: symphony:gate/failed
+  score_label_prefix: symphony:score/
+""",
+    )
+
+    config = ServiceConfig.from_workflow(load_workflow(workflow_path), workflow_path)
+
+    assert config.acceptance.enabled is True
+    assert config.acceptance.mode == "block_done"
+    assert config.acceptance.minimum_score == 3
+    assert config.acceptance.require_findings_for_score_3 is True
+    assert config.acceptance.auto_retry_on_fail is False
+    assert config.acceptance.task_type_label == "symphony:type/task"
+    assert config.acceptance.acceptance_type_label == "symphony:type/acceptance"
+    assert config.acceptance.gate_pending_label == "symphony:gate/pending"
+    assert config.acceptance.gate_passed_label == "symphony:gate/passed"
+    assert config.acceptance.gate_pass_with_findings_label == "symphony:gate/pass-with-findings"
+    assert config.acceptance.gate_failed_label == "symphony:gate/failed"
+    assert config.acceptance.score_label_prefix == "symphony:score/"
+
+
 def test_completion_verification_allows_zero_min_duration_for_smoke_flows(tmp_path: Path) -> None:
     workflow_path = tmp_path / "WORKFLOW.md"
     write_workflow(

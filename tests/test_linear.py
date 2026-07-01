@@ -312,6 +312,152 @@ async def test_transition_issue_uses_issue_update() -> None:
 
 
 @pytest.mark.asyncio
+async def test_create_issue_uses_issue_create_with_labels() -> None:
+    transport = RecordingTransport(
+        [
+            {
+                "data": {
+                    "issueCreate": {
+                        "success": True,
+                        "issue": {
+                            "id": "acceptance-1",
+                            "identifier": "MT-2",
+                            "title": "[Acceptance] MT-1",
+                            "url": "https://linear.app/x/issue/MT-2",
+                            "state": {"name": "Todo"},
+                            "labels": {"nodes": [{"name": "symphony:type/acceptance"}]},
+                        },
+                    }
+                }
+            }
+        ]
+    )
+    client = LinearClient("https://api.linear.app/graphql", "linear-token", transport=transport)
+
+    created = await client.create_issue(
+        team_id="team-1",
+        project_id="project-1",
+        state_id="state-todo",
+        label_ids=["label-acceptance"],
+        title="[Acceptance] MT-1",
+        description="Review MT-1 evidence.",
+    )
+
+    assert created["id"] == "acceptance-1"
+    request = transport.requests[0]["json"]
+    assert "issueCreate" in request["query"]
+    assert request["variables"] == {
+        "teamId": "team-1",
+        "projectId": "project-1",
+        "stateId": "state-todo",
+        "labelIds": ["label-acceptance"],
+        "title": "[Acceptance] MT-1",
+        "description": "Review MT-1 evidence.",
+    }
+
+
+@pytest.mark.asyncio
+async def test_create_acceptance_issue_for_uses_original_linear_context_and_type_label() -> None:
+    transport = RecordingTransport(
+        [
+            {
+                "data": {
+                    "issue": {
+                        "id": "issue-1",
+                        "identifier": "MT-1",
+                        "team": {"id": "team-1"},
+                        "project": {"id": "project-1"},
+                        "state": {"id": "state-todo", "name": "Todo"},
+                        "labels": {"nodes": []},
+                    }
+                }
+            },
+            {
+                "data": {
+                    "issueLabels": {
+                        "nodes": [{"id": "label-acceptance", "name": "symphony:type/acceptance"}]
+                    }
+                }
+            },
+            {
+                "data": {
+                    "issueCreate": {
+                        "success": True,
+                        "issue": {
+                            "id": "acceptance-1",
+                            "identifier": "MT-2",
+                            "title": "[Acceptance] MT-1: Build",
+                            "url": "https://linear.app/x/issue/MT-2",
+                            "state": {"name": "Todo"},
+                            "labels": {"nodes": [{"name": "symphony:type/acceptance"}]},
+                        },
+                    }
+                }
+            },
+        ]
+    )
+    client = LinearClient("https://api.linear.app/graphql", "linear-token", transport=transport)
+    tracker = LinearTracker(make_config(), client=client)
+
+    created = await tracker.create_acceptance_issue_for(
+        original_issue_id="issue-1",
+        title="[Acceptance] MT-1: Build",
+        description="Review evidence.",
+        acceptance_label_name="symphony:type/acceptance",
+    )
+
+    assert created["id"] == "acceptance-1"
+    create_request = transport.requests[2]["json"]
+    assert create_request["variables"] == {
+        "teamId": "team-1",
+        "projectId": "project-1",
+        "stateId": "state-todo",
+        "labelIds": ["label-acceptance"],
+        "title": "[Acceptance] MT-1: Build",
+        "description": "Review evidence.",
+    }
+
+
+@pytest.mark.asyncio
+async def test_create_issue_relation_uses_blocks_relation() -> None:
+    transport = RecordingTransport(
+        [
+            {
+                "data": {
+                    "issueRelationCreate": {
+                        "success": True,
+                        "issueRelation": {
+                            "id": "relation-1",
+                            "type": "blocks",
+                            "issue": {"id": "acceptance-1", "identifier": "MT-2"},
+                            "relatedIssue": {"id": "task-1", "identifier": "MT-1"},
+                        },
+                    }
+                }
+            }
+        ]
+    )
+    client = LinearClient("https://api.linear.app/graphql", "linear-token", transport=transport)
+
+    relation = await client.create_issue_relation(
+        issue_id="acceptance-1",
+        related_issue_id="task-1",
+        relation_type="blocks",
+    )
+
+    assert relation["id"] == "relation-1"
+    request = transport.requests[0]["json"]
+    assert "issueRelationCreate" in request["query"]
+    assert request["variables"] == {
+        "input": {
+            "type": "blocks",
+            "issueId": "acceptance-1",
+            "relatedIssueId": "task-1",
+        }
+    }
+
+
+@pytest.mark.asyncio
 async def test_set_issue_lifecycle_label_replaces_only_symphony_labels() -> None:
     transport = RecordingTransport(
         [
@@ -380,6 +526,129 @@ async def test_set_issue_lifecycle_label_replaces_only_symphony_labels() -> None
     assert update_request["variables"] == {
         "issueId": "issue-1",
         "labelIds": ["label-business", "label-retrying"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_set_issue_lifecycle_label_preserves_type_gate_and_score_labels() -> None:
+    transport = RecordingTransport(
+        [
+            {
+                "data": {
+                    "issue": {
+                        "id": "issue-1",
+                        "identifier": "MT-1",
+                        "team": {"id": "team-1"},
+                        "labels": {
+                            "nodes": [
+                                {"id": "label-task", "name": "symphony:type/task"},
+                                {"id": "label-gate", "name": "symphony:gate/pending"},
+                                {"id": "label-score", "name": "symphony:score/3"},
+                                {"id": "label-old", "name": "symphony:running"},
+                            ]
+                        },
+                    }
+                }
+            },
+            {
+                "data": {
+                    "issueLabels": {
+                        "nodes": [{"id": "label-done", "name": "symphony:done"}]
+                    }
+                }
+            },
+            {
+                "data": {
+                    "issueUpdate": {
+                        "success": True,
+                        "issue": {
+                            "id": "issue-1",
+                            "identifier": "MT-1",
+                            "labels": {
+                                "nodes": [
+                                    {"id": "label-task", "name": "symphony:type/task"},
+                                    {"id": "label-gate", "name": "symphony:gate/pending"},
+                                    {"id": "label-score", "name": "symphony:score/3"},
+                                    {"id": "label-done", "name": "symphony:done"},
+                                ]
+                            },
+                        },
+                    }
+                }
+            },
+        ]
+    )
+    client = LinearClient("https://api.linear.app/graphql", "linear-token", transport=transport)
+
+    result = await client.set_issue_lifecycle_label("issue-1", "symphony:done")
+
+    assert result["label_ids"] == ["label-task", "label-gate", "label-score", "label-done"]
+    update_request = transport.requests[2]["json"]
+    assert update_request["variables"] == {
+        "issueId": "issue-1",
+        "labelIds": ["label-task", "label-gate", "label-score", "label-done"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_set_issue_label_group_replaces_only_matching_prefix() -> None:
+    transport = RecordingTransport(
+        [
+            {
+                "data": {
+                    "issue": {
+                        "id": "issue-1",
+                        "identifier": "MT-1",
+                        "team": {"id": "team-1"},
+                        "labels": {
+                            "nodes": [
+                                {"id": "label-business", "name": "codex2"},
+                                {"id": "label-done", "name": "symphony:done"},
+                                {"id": "label-old-gate", "name": "symphony:gate/pending"},
+                                {"id": "label-score", "name": "symphony:score/3"},
+                            ]
+                        },
+                    }
+                }
+            },
+            {
+                "data": {
+                    "issueLabels": {
+                        "nodes": [{"id": "label-passed", "name": "symphony:gate/passed"}]
+                    }
+                }
+            },
+            {
+                "data": {
+                    "issueUpdate": {
+                        "success": True,
+                        "issue": {
+                            "id": "issue-1",
+                            "identifier": "MT-1",
+                            "labels": {
+                                "nodes": [
+                                    {"id": "label-business", "name": "codex2"},
+                                    {"id": "label-done", "name": "symphony:done"},
+                                    {"id": "label-score", "name": "symphony:score/3"},
+                                    {"id": "label-passed", "name": "symphony:gate/passed"},
+                                ]
+                            },
+                        },
+                    }
+                }
+            },
+        ]
+    )
+    client = LinearClient("https://api.linear.app/graphql", "linear-token", transport=transport)
+    tracker = LinearTracker(make_config(), client=client)
+
+    result = await tracker.set_issue_label_group("issue-1", "symphony:gate/passed", prefix="symphony:gate/")
+
+    assert result["label_ids"] == ["label-business", "label-done", "label-score", "label-passed"]
+    update_request = transport.requests[2]["json"]
+    assert update_request["variables"] == {
+        "issueId": "issue-1",
+        "labelIds": ["label-business", "label-done", "label-score", "label-passed"],
     }
 
 

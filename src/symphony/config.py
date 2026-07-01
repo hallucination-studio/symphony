@@ -112,6 +112,24 @@ class CompletionVerificationConfig:
 
 
 @dataclass(frozen=True)
+class AcceptanceConfig:
+    """验收 gate 配置"""
+
+    enabled: bool = False
+    mode: str = "block_done"
+    minimum_score: int = 3
+    require_findings_for_score_3: bool = True
+    auto_retry_on_fail: bool = True
+    task_type_label: str = "symphony:type/task"
+    acceptance_type_label: str = "symphony:type/acceptance"
+    gate_pending_label: str = "symphony:gate/pending"
+    gate_passed_label: str = "symphony:gate/passed"
+    gate_pass_with_findings_label: str = "symphony:gate/pass-with-findings"
+    gate_failed_label: str = "symphony:gate/failed"
+    score_label_prefix: str = "symphony:score/"
+
+
+@dataclass(frozen=True)
 class ServiceConfig:
     tracker: TrackerConfig
     polling: PollingConfig
@@ -128,6 +146,7 @@ class ServiceConfig:
     completion_verification: CompletionVerificationConfig = field(
         default_factory=CompletionVerificationConfig
     )
+    acceptance: AcceptanceConfig = field(default_factory=AcceptanceConfig)
 
     @classmethod
     def from_workflow(cls, workflow: WorkflowDefinition, workflow_path: Path) -> ServiceConfig:
@@ -148,6 +167,7 @@ class ServiceConfig:
                 _map(raw.get("completion_verification")),
                 workflow_path,
             ),
+            acceptance=_acceptance_config(_map(raw.get("acceptance"))),
             prompt_template=workflow.prompt_template,
             workflow_path=workflow_path,
         )
@@ -399,4 +419,37 @@ def _completion_verification_config(raw: dict[str, Any], workflow_path: Path) ->
             defaults.min_workspace_changes_chars,
             positive=True,
         ),
+    )
+
+
+def _acceptance_config(raw: dict[str, Any]) -> AcceptanceConfig:
+    defaults = AcceptanceConfig()
+    return AcceptanceConfig(
+        enabled=_bool(raw.get("enabled"), defaults.enabled),
+        mode=_string(raw.get("mode"), defaults.mode) or defaults.mode,
+        minimum_score=_int(raw.get("minimum_score"), defaults.minimum_score),
+        require_findings_for_score_3=_bool(
+            raw.get("require_findings_for_score_3"),
+            defaults.require_findings_for_score_3,
+        ),
+        auto_retry_on_fail=_bool(raw.get("auto_retry_on_fail"), defaults.auto_retry_on_fail),
+        task_type_label=_string(raw.get("task_type_label"), defaults.task_type_label) or defaults.task_type_label,
+        acceptance_type_label=(
+            _string(raw.get("acceptance_type_label"), defaults.acceptance_type_label)
+            or defaults.acceptance_type_label
+        ),
+        gate_pending_label=(
+            _string(raw.get("gate_pending_label"), defaults.gate_pending_label)
+            or defaults.gate_pending_label
+        ),
+        gate_passed_label=(
+            _string(raw.get("gate_passed_label"), defaults.gate_passed_label)
+            or defaults.gate_passed_label
+        ),
+        gate_pass_with_findings_label=(
+            _string(raw.get("gate_pass_with_findings_label"), defaults.gate_pass_with_findings_label)
+            or defaults.gate_pass_with_findings_label
+        ),
+        gate_failed_label=_string(raw.get("gate_failed_label"), defaults.gate_failed_label) or defaults.gate_failed_label,
+        score_label_prefix=_string(raw.get("score_label_prefix"), defaults.score_label_prefix) or defaults.score_label_prefix,
     )
