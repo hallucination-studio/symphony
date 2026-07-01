@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import subprocess
+import os
+import shlex
+import sys
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -32,6 +35,41 @@ def _command_evidence_from_payload(payload: Any) -> tuple[str | None, int | None
             exit_code_raw = nested.get("exit_code")
     exit_code = exit_code_raw if isinstance(exit_code_raw, int) and not isinstance(exit_code_raw, bool) else None
     return command if isinstance(command, str) else None, exit_code
+
+
+def _parse_recorded_command(command: str) -> tuple[list[str], dict[str, str]] | None:
+    try:
+        parts = shlex.split(command)
+    except ValueError:
+        return None
+    if not parts:
+        return None
+    env = os.environ.copy()
+    while parts and "=" in parts[0] and not parts[0].startswith("-"):
+        key, value = parts[0].split("=", 1)
+        if not key.replace("_", "").isalnum():
+            return None
+        env[key] = value
+        parts = parts[1:]
+    if not parts:
+        return None
+    if parts[0] in {"pytest", "py.test"}:
+        return parts, env
+    if len(parts) >= 3 and parts[1:3] == ["-m", "pytest"]:
+        if parts[0] in {"python", "python3"}:
+            parts[0] = sys.executable
+        return parts, env
+    return None
+
+
+def _env_evidence(env: dict[str, str] | None) -> dict[str, str]:
+    if not env:
+        return {}
+    evidence: dict[str, str] = {}
+    pythonpath = env.get("PYTHONPATH")
+    if pythonpath:
+        evidence["PYTHONPATH"] = pythonpath
+    return evidence
 
 
 class CompletionVerifier:
@@ -80,7 +118,7 @@ class CompletionVerifier:
             checks.append(self._check_repo_path(workspace_path))
 
         if "test_results" in all_check_names:
-            checks.append(await self._check_test_results(workspace_path))
+            checks.append(await self._check_test_results(issue, workspace_path, ops_snapshot))
 
         if "test_command_evidence" in all_check_names:
             checks.append(self._check_test_command_evidence(issue, ops_snapshot))
@@ -231,20 +269,26 @@ class CompletionVerifier:
                 evidence={"error": str(e)},
             )
 
-    async def _check_test_results(self, workspace_path: Path) -> CheckResult:
+    async def _check_test_results(self, issue: Issue, workspace_path: Path, ops_snapshot: OpsSnapshot) -> CheckResult:
         """检查测试是否通过"""
         try:
             # 检测项目类型
             cmd: list[str] | None = None
+            env: dict[str, str] | None = None
             test_framework = "unknown"
 
             if (workspace_path / "package.json").exists():
                 cmd = ["npm", "test"]
                 test_framework = "npm"
             elif (workspace_path / "pyproject.toml").exists() or (workspace_path / "pytest.ini").exists():
-                cmd = ["pytest", "-v", "--tb=short"]
-                if self.config.expected_test_patterns:
-                    cmd.extend(self.config.expected_test_patterns)
+                recorded = self._recorded_successful_pytest_command(issue, ops_snapshot)
+                if recorded is not None:
+                    cmd, env = recorded
+                else:
+                    cmd = [sys.executable, "-m", "pytest", "-v", "--tb=short"]
+                    env = self._python_test_env(workspace_path)
+                    if self.config.expected_test_patterns:
+                        cmd.extend(self.config.expected_test_patterns)
                 test_framework = "pytest"
             elif (workspace_path / "Cargo.toml").exists():
                 cmd = ["cargo", "test"]
@@ -275,6 +319,7 @@ class CompletionVerifier:
                 capture_output=True,
                 text=True,
                 timeout=self.config.test_timeout_seconds,
+                env=env,
             )
 
             output_tail = result.stdout[-500:] if result.stdout else ""
@@ -288,6 +333,8 @@ class CompletionVerifier:
                     evidence={
                         "exit_code": 0,
                         "framework": test_framework,
+                        "command": cmd,
+                        "env": _env_evidence(env),
                         "output": output_tail,
                     },
                 )
@@ -299,6 +346,8 @@ class CompletionVerifier:
                     evidence={
                         "exit_code": result.returncode,
                         "framework": test_framework,
+                        "command": cmd,
+                        "env": _env_evidence(env),
                         "output": output_tail,
                         "errors": error_tail,
                     },
@@ -325,6 +374,40 @@ class CompletionVerifier:
                 message=f"Test check failed: {e}",
                 evidence={"error": str(e)},
             )
+
+    def _recorded_successful_pytest_command(
+        self,
+        issue: Issue,
+        ops_snapshot: OpsSnapshot,
+    ) -> tuple[list[str], dict[str, str]] | None:
+        patterns = [pattern for pattern in self.config.expected_test_patterns if pattern]
+        if not patterns:
+            return None
+        issue_run_ids = {
+            run.run_id
+            for run in ops_snapshot.runs.values()
+            if run.issue_id == issue.id
+        }
+        for event in ops_snapshot.events:
+            if event.issue_id != issue.id and event.run_id not in issue_run_ids:
+                continue
+            command, exit_code = _command_evidence_from_payload(event.payload)
+            if exit_code != 0 or not isinstance(command, str):
+                continue
+            if "pytest" not in command or not any(pattern in command for pattern in patterns):
+                continue
+            parsed = _parse_recorded_command(command)
+            if parsed is not None:
+                return parsed
+        return None
+
+    def _python_test_env(self, workspace_path: Path) -> dict[str, str] | None:
+        if not (workspace_path / "src").is_dir():
+            return None
+        env = os.environ.copy()
+        existing = env.get("PYTHONPATH")
+        env["PYTHONPATH"] = "src" if not existing else f"src{os.pathsep}{existing}"
+        return env
 
     def _check_test_command_evidence(self, issue: Issue, ops_snapshot: OpsSnapshot) -> CheckResult:
         patterns = [pattern for pattern in self.config.expected_test_patterns if pattern]

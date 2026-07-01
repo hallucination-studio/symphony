@@ -948,6 +948,85 @@ async def test_completion_verification_needs_human_does_not_mark_done(tmp_path: 
 
 
 @pytest.mark.asyncio
+async def test_completion_verification_needs_human_creates_acceptance_gate_when_enabled(
+    tmp_path: Path,
+) -> None:
+    tracker = FakeTracker(candidates=[issue("MT-1")])
+    tracker.refreshed = [
+        issue(
+            "MT-1",
+            state="Done",
+            blocked_by=[BlockerRef(id="dep-1", identifier="MT-0", state="In Progress")],
+        )
+    ]
+    workspace = tmp_path / "MT-1"
+    workspace.mkdir()
+    (workspace / "README.md").write_text("changed\n", encoding="utf-8")
+    runner = ControlledCompletingRunner()
+    config = make_config_with_completion_verification(
+        tmp_path,
+        required_checks=[],
+        optional_checks=["linear_state"],
+        auto_retry_on_fail=True,
+    )
+    config = ServiceConfig(
+        tracker=config.tracker,
+        polling=config.polling,
+        workspace=config.workspace,
+        hooks=config.hooks,
+        agent=config.agent,
+        codex=config.codex,
+        prompt_template=config.prompt_template,
+        workflow_path=config.workflow_path,
+        completion_verification=config.completion_verification,
+        acceptance=AcceptanceConfig(enabled=True),
+    )
+    acceptance_runner = FakeAcceptanceRunner(
+        """
+{
+  "score": 2,
+  "result": "fail",
+  "score_reason": "The completion verifier found active blockers, so the claimed Done state is not acceptable evidence.",
+  "evidence_citations": ["completion_verdict.linear_state", "linear.issue.MT-1"],
+  "residual_findings": ["Resolve or document the active blocker before accepting the task."],
+  "recommended_next_action": "Keep the original issue blocked and require human review."
+}
+"""
+    )
+    orchestrator = Orchestrator(
+        config,
+        tracker,
+        runner,
+        acceptance_runner=acceptance_runner,
+    )
+
+    await orchestrator.tick()
+    await runner.started.wait()
+    orchestrator.state.running["mt-1"].workspace_path = str(workspace)
+    runner.release.set()
+    await orchestrator.wait_for_idle()
+
+    assert "mt-1" not in orchestrator.state.completed
+    assert "mt-1" not in orchestrator.state.retry_attempts
+    assert "mt-1" not in orchestrator.state.claimed
+    assert tracker.created_issues
+    assert tracker.created_issues[0]["original_issue_id"] == "mt-1"
+    assert tracker.created_issues[0]["label_ids"] == ["symphony:type/acceptance"]
+    assert tracker.created_relations == [
+        {
+            "id": "relation-1",
+            "issue_id": "acceptance-1",
+            "related_issue_id": "mt-1",
+            "type": "blocks",
+        }
+    ]
+    assert acceptance_runner.calls
+    assert any(label == "symphony:gate/failed" for _, label in tracker.lifecycle_labels)
+    assert any(label == "symphony:score/2" for _, label in tracker.lifecycle_labels)
+    assert ("mt-1", "symphony:done") not in tracker.lifecycle_labels
+
+
+@pytest.mark.asyncio
 async def test_retry_prompt_includes_previous_verification_failure_reason(tmp_path: Path) -> None:
     from symphony.runner import AgentRunner
     from symphony.workspace import WorkspaceManager

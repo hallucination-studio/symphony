@@ -384,9 +384,12 @@ class Orchestrator:
                     # 需要人工审查，不自动标记完成
                     logger.error(f"symphony_completion_needs_human_review issue_id={issue_id} reason={verdict.reason}")
                     await self._comment_completion_verdict(entry, verdict, next_action="human_review")
+                    if self.config.acceptance.enabled:
+                        await self._create_acceptance_gate(entry, verdict)
                     self.state.claimed.discard(issue_id)
                     self.state.retry_attempts.pop(issue_id, None)
-                    await self._sync_lifecycle_label(entry.issue.id, LIFECYCLE_LABELS["failed"])
+                    if not self.config.acceptance.enabled:
+                        await self._sync_lifecycle_label(entry.issue.id, LIFECYCLE_LABELS["failed"])
 
             except Exception as exc:
                 # 验证器本身异常也不能直接放行为完成

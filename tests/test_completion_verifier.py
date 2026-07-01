@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -83,6 +84,61 @@ async def test_verify_completion_rejects_pytest_without_expected_focused_pattern
         check.check_name == "test_results" and check.evidence.get("framework") == "pytest"
         for check in verdict.checks
     )
+
+
+@pytest.mark.asyncio
+async def test_verify_completion_reuses_recorded_successful_pytest_command_for_src_layout_project(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=workspace, check=True)
+    (workspace / "pyproject.toml").write_text("[project]\nname='demo'\nversion='0.1.0'\n", encoding="utf-8")
+    package = workspace / "src" / "demo_pkg"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("VALUE = 7\n", encoding="utf-8")
+    tests_dir = workspace / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "test_demo.py").write_text(
+        "from demo_pkg import VALUE\n\n\ndef test_value():\n    assert VALUE == 7\n",
+        encoding="utf-8",
+    )
+    verifier = CompletionVerifier(
+        CompletionVerificationConfig(
+            required_checks=["test_results"],
+            optional_checks=[],
+            expected_test_patterns=["tests/test_demo.py"],
+        ),
+        FakeTracker(),
+    )
+    snapshot = OpsSnapshot(
+        events=[
+            TraceEvent(
+                event_id="evt-1",
+                event_type="notification",
+                timestamp="2026-07-01T00:00:00Z",
+                issue_id="mt-1",
+                payload={
+                    "command": "PYTHONPATH=src python -m pytest tests/test_demo.py -q",
+                    "exit_code": 0,
+                },
+            )
+        ]
+    )
+
+    verdict = await verifier.verify_completion(issue(), workspace, snapshot)
+
+    assert verdict.status == "VERIFIED"
+    test_check = next(check for check in verdict.checks if check.check_name == "test_results")
+    assert test_check.passed is True
+    assert test_check.evidence["command"] == [
+        sys.executable,
+        "-m",
+        "pytest",
+        "tests/test_demo.py",
+        "-q",
+    ]
+    assert test_check.evidence["env"]["PYTHONPATH"] == "src"
 
 
 @pytest.mark.asyncio
