@@ -6,6 +6,7 @@ from typing import Any
 import pytest
 
 from symphony.config import (
+    AcceptanceConfig,
     AgentConfig,
     CodexConfig,
     HooksConfig,
@@ -124,6 +125,21 @@ def make_config_with_persistence(tmp_path: Path) -> ServiceConfig:
         prompt_template=config.prompt_template,
         workflow_path=config.workflow_path,
         persistence=PersistenceConfig(path=tmp_path / "state" / "symphony.json"),
+    )
+
+
+def make_config_with_acceptance(tmp_path: Path) -> ServiceConfig:
+    config = make_config(tmp_path)
+    return ServiceConfig(
+        tracker=config.tracker,
+        polling=config.polling,
+        workspace=config.workspace,
+        hooks=config.hooks,
+        agent=config.agent,
+        codex=config.codex,
+        prompt_template=config.prompt_template,
+        workflow_path=config.workflow_path,
+        acceptance=AcceptanceConfig(enabled=True),
     )
 
 
@@ -285,6 +301,31 @@ async def test_runner_passes_max_turns_and_tracker_based_continuation(tmp_path: 
         "leave a concise completion comment and move the issue out of the active states. "
         "Configured terminal states: Closed, Cancelled, Canceled, Duplicate, Done."
     )
+
+
+@pytest.mark.asyncio
+async def test_runner_acceptance_prompt_forbids_state_changes_and_requires_evidence(tmp_path: Path) -> None:
+    codex = FakeCodex()
+    runner = AgentRunner(
+        make_config_with_acceptance(tmp_path),
+        WorkspaceManager(WorkspaceConfig(root=tmp_path), HooksConfig()),
+        codex_client=codex,
+        tracker=FakeTracker(),
+    )
+
+    await runner.run_issue(
+        Issue(id="mt-1", identifier="MT-1", title="Build", state="In Progress", labels=["codex"], project_slug="MT"),
+        None,
+        lambda event: None,
+    )
+
+    assert codex.prompt is not None
+    assert "Do not move the Linear issue to In Review or Done" in codex.prompt
+    assert "Implementation summary" in codex.prompt
+    assert "Test commands and exact output" in codex.prompt
+    assert "Remaining risks" in codex.prompt
+    continuation = codex.kwargs["continuation_provider"]
+    assert "Do not move the Linear issue to In Review or Done" in await continuation(1)
 
 
 @pytest.mark.asyncio

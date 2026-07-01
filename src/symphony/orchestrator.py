@@ -39,6 +39,8 @@ class TrackerProtocol(Protocol):
 
     async def set_issue_lifecycle_label(self, issue_id: str, label_name: str) -> dict[str, Any]: ...
 
+    async def transition_issue_by_state_name(self, issue_id: str, state_name: str) -> dict[str, Any]: ...
+
 
 class RunnerProtocol(Protocol):
     async def run_issue(
@@ -122,6 +124,9 @@ class Orchestrator:
                 )
                 skipped += 1
                 break
+            if await self._process_acceptance_state_candidate(candidate):
+                skipped += 1
+                continue
             reason = self.dispatch_skip_reason(candidate)
             if reason is not None:
                 logger.info(
@@ -195,12 +200,11 @@ class Orchestrator:
         by_id = {issue.id: issue for issue in candidates}
         for retry in due:
             self.state.retry_attempts.pop(retry.issue_id, None)
+            self.state.claimed.discard(retry.issue_id)
             issue = by_id.get(retry.issue_id)
             if issue is None:
-                self.state.claimed.discard(retry.issue_id)
                 self._persist_state()
                 continue
-            self.state.claimed.discard(retry.issue_id)
             if self.available_slots() <= 0 or not self.should_dispatch(issue):
                 if self.available_slots() <= 0:
                     self._schedule_retry(
@@ -232,6 +236,14 @@ class Orchestrator:
             return "already_running_or_claimed"
         if not self._is_active(issue):
             return "inactive_state"
+        if self.config.acceptance.enabled:
+            acceptance = self.config.acceptance
+            if issue.state_key() == normalize_state_key(acceptance.review_state):
+                return "acceptance_review_state"
+            if issue.state_key() == normalize_state_key(acceptance.done_state):
+                return "acceptance_done_state"
+            if issue.state_key() == normalize_state_key(acceptance.todo_state):
+                return "acceptance_preflight_required"
         if self.config.tracker.kind == "linear" and issue.project_slug != self.config.tracker.project_slug:
             return "project_mismatch"
         if not self._matches_assignee(issue):
@@ -264,6 +276,203 @@ class Orchestrator:
         self._set_running_phase(issue.id, "starting")
         self._sync_lifecycle_label_background(issue.id, LIFECYCLE_LABELS["starting"])
         self._persist_state()
+
+    async def _process_acceptance_state_candidate(self, issue: Issue) -> bool:
+        if not self.config.acceptance.enabled:
+            return False
+        acceptance = self.config.acceptance
+        state_key = issue.state_key()
+        if state_key == normalize_state_key(acceptance.todo_state):
+            if self.dispatch_skip_reason_without_acceptance(issue) is not None:
+                return False
+            await self._acceptance_preflight(issue)
+            return True
+        if state_key == normalize_state_key(acceptance.review_state):
+            if self.dispatch_skip_reason_without_acceptance(issue) is not None:
+                return False
+            await self._run_acceptance_gate_for_issue(issue, completion_verdict=None)
+            return True
+        if state_key == normalize_state_key(acceptance.done_state):
+            if _has_passed_acceptance_gate(issue, acceptance):
+                self.state.completed.add(issue.id)
+                return True
+            if self.dispatch_skip_reason_without_acceptance(issue) is not None:
+                return False
+            await self._handle_direct_done_bypass(issue)
+            return True
+        return False
+
+    def dispatch_skip_reason_without_acceptance(self, issue: Issue) -> str | None:
+        if not issue.id or not issue.identifier or not issue.title or not issue.state:
+            return "missing_required_issue_fields"
+        if issue.id in self.state.running or issue.id in self.state.claimed:
+            return "already_running_or_claimed"
+        if self.config.tracker.kind == "linear" and issue.project_slug != self.config.tracker.project_slug:
+            return "project_mismatch"
+        if not self._matches_assignee(issue):
+            return "assignee_mismatch"
+        if issue.has_required_labels(self.config.tracker.required_labels) is False:
+            return "missing_required_labels"
+        if self.available_slots() <= 0:
+            return "no_available_slots"
+        return None
+
+    async def _acceptance_preflight(self, issue: Issue) -> dict[str, Any] | None:
+        acceptance_issue = await self._ensure_acceptance_issue(issue, completion_verdict=None)
+        if acceptance_issue is None:
+            return None
+        block = _acceptance_marker_block(issue, acceptance_issue, self.config.acceptance)
+        update_description = getattr(self.tracker, "update_issue_description_marker_block", None)
+        if callable(update_description):
+            await update_description(issue.id, self.config.acceptance.marker_name, block)
+        await self._sync_label_group(issue.id, self.config.acceptance.task_type_label, prefix="symphony:type/")
+        await self._sync_label_group(issue.id, self.config.acceptance.gate_pending_label, prefix="symphony:gate/")
+        await self._sync_label_group(issue.id, self.config.acceptance.planned_phase_label, prefix="symphony:phase/")
+        await self._transition_issue_by_state_name(issue.id, self.config.acceptance.implementation_state)
+        return acceptance_issue
+
+    async def _handle_direct_done_bypass(self, issue: Issue) -> None:
+        acceptance_issue = await self._ensure_acceptance_issue(issue, completion_verdict=None)
+        if not _has_acceptance_evidence(issue):
+            await self._comment_policy_violation(issue, has_evidence=False)
+            await self._sync_label_group(issue.id, self.config.acceptance.gate_failed_label, prefix="symphony:gate/")
+            await self._sync_label_group(issue.id, self.config.acceptance.rework_phase_label, prefix="symphony:phase/")
+            await self._transition_issue_by_state_name(issue.id, self.config.acceptance.implementation_state)
+            return
+        await self._comment_policy_violation(issue, has_evidence=True)
+        await self._transition_issue_by_state_name(issue.id, self.config.acceptance.review_state)
+        await self._run_acceptance_gate_for_issue(issue, acceptance_issue=acceptance_issue, completion_verdict=None)
+
+    async def _ensure_acceptance_issue(self, issue: Issue, completion_verdict: Any | None) -> dict[str, Any] | None:
+        if self.config.tracker.kind != "linear":
+            return None
+        acceptance = self.config.acceptance
+        find_acceptance = getattr(self.tracker, "find_acceptance_issue_for", None)
+        if callable(find_acceptance):
+            existing = await find_acceptance(
+                original_issue=issue,
+                acceptance_label_name=acceptance.acceptance_type_label,
+            )
+            if existing:
+                await self._ensure_acceptance_relation(existing, issue)
+                return existing
+        create_acceptance_issue = getattr(self.tracker, "create_acceptance_issue_for", None)
+        create_issue = getattr(self.tracker, "create_issue", None)
+        if not callable(create_acceptance_issue) and not callable(create_issue):
+            return None
+        title = f"[Acceptance] {issue.identifier}: {issue.title}"
+        description = _acceptance_issue_description_for_issue(issue, completion_verdict, acceptance_issue=None)
+        if callable(create_acceptance_issue):
+            created = await create_acceptance_issue(
+                original_issue_id=issue.id,
+                title=title,
+                description=description,
+                acceptance_label_name=acceptance.acceptance_type_label,
+            )
+        else:
+            created = await create_issue(
+                team_id="",
+                project_id=self.config.tracker.project_slug,
+                state_id=self.config.tracker.active_states[0] if self.config.tracker.active_states else "",
+                label_ids=[],
+                title=title,
+                description=description,
+            )
+        await self._ensure_acceptance_relation(created, issue)
+        return created
+
+    async def _ensure_acceptance_relation(self, acceptance_issue: dict[str, Any], issue: Issue) -> None:
+        acceptance_issue_id = str(acceptance_issue.get("id") or "")
+        if not acceptance_issue_id:
+            return
+        ensure_relation = getattr(self.tracker, "ensure_issue_relation", None)
+        create_relation = getattr(self.tracker, "create_issue_relation", None)
+        if callable(ensure_relation):
+            await ensure_relation(
+                issue_id=acceptance_issue_id,
+                related_issue_id=issue.id,
+                relation_type="blocks",
+            )
+        elif callable(create_relation):
+            await create_relation(
+                issue_id=acceptance_issue_id,
+                related_issue_id=issue.id,
+                relation_type="blocks",
+            )
+
+    async def _run_acceptance_gate_for_issue(
+        self,
+        issue: Issue,
+        *,
+        acceptance_issue: dict[str, Any] | None = None,
+        completion_verdict: Any | None = None,
+        workspace_path: str | None = None,
+    ) -> None:
+        acceptance_issue = acceptance_issue or await self._ensure_acceptance_issue(issue, completion_verdict)
+        acceptance_issue_id = str((acceptance_issue or {}).get("id") or "")
+        await self._sync_label_group(issue.id, self.config.acceptance.gate_pending_label, prefix="symphony:gate/")
+        await self._sync_label_group(issue.id, self.config.acceptance.review_phase_label, prefix="symphony:phase/")
+        if self.acceptance_runner is None or not acceptance_issue_id:
+            return
+        raw_report = await self.acceptance_runner.run_acceptance(
+            original_issue=issue,
+            acceptance_issue=acceptance_issue,
+            completion_verdict=completion_verdict,
+            workspace_path=workspace_path,
+        )
+        report = parse_acceptance_report(
+            raw_report,
+            minimum_score=self.config.acceptance.minimum_score,
+            require_findings_for_score_3=self.config.acceptance.require_findings_for_score_3,
+        )
+        await self._comment_acceptance_report(acceptance_issue_id, _entry_for_issue(issue, workspace_path), report)
+        if report.accepted:
+            gate_label = (
+                self.config.acceptance.gate_pass_with_findings_label
+                if report.score == self.config.acceptance.minimum_score and report.residual_findings
+                else self.config.acceptance.gate_passed_label
+            )
+            await self._sync_label_group(issue.id, gate_label, prefix="symphony:gate/")
+            await self._sync_label_group(
+                issue.id,
+                f"{self.config.acceptance.score_label_prefix}{report.score}",
+                prefix=self.config.acceptance.score_label_prefix,
+            )
+            await self._transition_issue_by_state_name(acceptance_issue_id, self.config.acceptance.done_state)
+            await self._transition_issue_by_state_name(issue.id, self.config.acceptance.done_state)
+            self.state.completed.add(issue.id)
+            await self._sync_lifecycle_label(issue.id, LIFECYCLE_LABELS["done"])
+        else:
+            await self._sync_label_group(issue.id, self.config.acceptance.gate_failed_label, prefix="symphony:gate/")
+            await self._sync_label_group(issue.id, self.config.acceptance.rework_phase_label, prefix="symphony:phase/")
+            if report.score >= 0:
+                await self._sync_label_group(
+                    issue.id,
+                    f"{self.config.acceptance.score_label_prefix}{report.score}",
+                    prefix=self.config.acceptance.score_label_prefix,
+                )
+            await self._transition_issue_by_state_name(issue.id, self.config.acceptance.implementation_state)
+
+    async def _transition_issue_by_state_name(self, issue_id: str, state_name: str) -> None:
+        transition = getattr(self.tracker, "transition_issue_by_state_name", None)
+        if not callable(transition):
+            return
+        try:
+            result = await transition(issue_id, state_name)
+        except Exception as exc:
+            logger.warning(
+                "symphony_transition outcome=failed issue_id=%s state=%s reason=%s",
+                issue_id,
+                state_name,
+                exc,
+            )
+            return
+        if isinstance(result, dict) and result.get("success") is False:
+            logger.warning(
+                "symphony_transition outcome=failed issue_id=%s state=%s reason=linear_unsuccessful",
+                issue_id,
+                state_name,
+            )
 
     async def _run_worker(self, issue: Issue, attempt: int | None, *, worker_host: str | None) -> None:
         def on_event(event: dict[str, Any]) -> None:
@@ -332,19 +541,45 @@ class Orchestrator:
                 if verdict.status == "VERIFIED":
                     refreshed_issue = await self._refresh_issue_after_completion(entry.issue)
                     if refreshed_issue is not None and self._is_active(refreshed_issue):
-                        logger.info(
-                            "symphony_completion_verified_continuing issue_id=%s reason=%s state=%s",
-                            issue_id,
-                            verdict.reason,
-                            refreshed_issue.state,
-                        )
-                        self._schedule_retry(refreshed_issue, max(entry.retry_attempt + 1, 1), error=None, delay_ms=1_000)
-                    elif refreshed_issue is not None and self._is_terminal(refreshed_issue):
                         if self.config.acceptance.enabled:
-                            await self._create_acceptance_gate(entry, verdict)
+                            await self._ensure_acceptance_issue(refreshed_issue, verdict)
+                            await self._sync_label_group(
+                                refreshed_issue.id,
+                                self.config.acceptance.gate_pending_label,
+                                prefix="symphony:gate/",
+                            )
+                            await self._sync_label_group(
+                                refreshed_issue.id,
+                                self.config.acceptance.implementation_phase_label,
+                                prefix="symphony:phase/",
+                            )
+                            await self._transition_issue_by_state_name(
+                                refreshed_issue.id,
+                                self.config.acceptance.review_state,
+                            )
                             self.state.claimed.discard(issue_id)
                             self.state.retry_attempts.pop(issue_id, None)
-                            logger.info("symphony_acceptance_gate_created issue_id=%s", issue_id)
+                            logger.info("symphony_completion_verified_review issue_id=%s", issue_id)
+                            return
+                        else:
+                            logger.info(
+                                "symphony_completion_verified_continuing issue_id=%s reason=%s state=%s",
+                                issue_id,
+                                verdict.reason,
+                                refreshed_issue.state,
+                            )
+                            self._schedule_retry(
+                                refreshed_issue,
+                                max(entry.retry_attempt + 1, 1),
+                                error=None,
+                                delay_ms=1_000,
+                            )
+                    elif refreshed_issue is not None and self._is_terminal(refreshed_issue):
+                        if self.config.acceptance.enabled:
+                            await self._handle_direct_done_bypass(refreshed_issue)
+                            self.state.claimed.discard(issue_id)
+                            self.state.retry_attempts.pop(issue_id, None)
+                            logger.info("symphony_acceptance_direct_done_handled issue_id=%s", issue_id)
                             return
                         self.state.completed.add(issue_id)
                         self.state.claimed.discard(issue_id)
@@ -534,76 +769,11 @@ class Orchestrator:
             )
 
     async def _create_acceptance_gate(self, entry: RunningEntry, verdict: Any) -> None:
-        if self.config.tracker.kind != "linear":
-            return
-        create_issue = getattr(self.tracker, "create_issue", None)
-        create_acceptance_issue = getattr(self.tracker, "create_acceptance_issue_for", None)
-        create_relation = getattr(self.tracker, "create_issue_relation", None)
-        if not callable(create_relation) or (not callable(create_acceptance_issue) and not callable(create_issue)):
-            return
-        acceptance = self.config.acceptance
-        description = _acceptance_issue_description(entry, verdict)
-        title = f"[Acceptance] {entry.issue.identifier}: {entry.issue.title}"
-        if callable(create_acceptance_issue):
-            created = await create_acceptance_issue(
-                original_issue_id=entry.issue.id,
-                title=title,
-                description=description,
-                acceptance_label_name=acceptance.acceptance_type_label,
-            )
-        else:
-            created = await create_issue(
-                team_id="",
-                project_id=self.config.tracker.project_slug,
-                state_id=self.config.tracker.active_states[0] if self.config.tracker.active_states else "",
-                label_ids=[],
-                title=title,
-                description=description,
-            )
-        acceptance_issue_id = str(created.get("id") or "")
-        if acceptance_issue_id:
-            await create_relation(
-                issue_id=acceptance_issue_id,
-                related_issue_id=entry.issue.id,
-                relation_type="blocks",
-            )
-        await self._sync_label_group(entry.issue.id, acceptance.gate_pending_label, prefix="symphony:gate/")
-        if self.acceptance_runner is None or not acceptance_issue_id:
-            return
-        raw_report = await self.acceptance_runner.run_acceptance(
-            original_issue=entry.issue,
-            acceptance_issue=created,
+        await self._run_acceptance_gate_for_issue(
+            entry.issue,
             completion_verdict=verdict,
             workspace_path=entry.workspace_path,
         )
-        report = parse_acceptance_report(
-            raw_report,
-            minimum_score=acceptance.minimum_score,
-            require_findings_for_score_3=acceptance.require_findings_for_score_3,
-        )
-        await self._comment_acceptance_report(acceptance_issue_id, entry, report)
-        if report.accepted:
-            gate_label = (
-                acceptance.gate_pass_with_findings_label
-                if report.score == acceptance.minimum_score and report.residual_findings
-                else acceptance.gate_passed_label
-            )
-            await self._sync_label_group(entry.issue.id, gate_label, prefix="symphony:gate/")
-            await self._sync_label_group(
-                entry.issue.id,
-                f"{acceptance.score_label_prefix}{report.score}",
-                prefix=acceptance.score_label_prefix,
-            )
-            self.state.completed.add(entry.issue.id)
-            await self._sync_lifecycle_label(entry.issue.id, LIFECYCLE_LABELS["done"])
-        else:
-            await self._sync_label_group(entry.issue.id, acceptance.gate_failed_label, prefix="symphony:gate/")
-            if report.score >= 0:
-                await self._sync_label_group(
-                    entry.issue.id,
-                    f"{acceptance.score_label_prefix}{report.score}",
-                    prefix=acceptance.score_label_prefix,
-                )
 
     async def _comment_acceptance_report(
         self,
@@ -632,6 +802,30 @@ class Orchestrator:
                 "symphony_acceptance_comment outcome=failed issue_id=%s acceptance_issue_id=%s reason=linear_unsuccessful",
                 entry.issue.id,
                 acceptance_issue_id,
+            )
+
+    async def _comment_policy_violation(self, issue: Issue, *, has_evidence: bool) -> None:
+        if self.config.tracker.kind != "linear":
+            return
+        comment_issue = getattr(self.tracker, "comment_issue", None)
+        if not callable(comment_issue):
+            return
+        body = _policy_violation_comment_body(issue, has_evidence=has_evidence)
+        try:
+            result = await comment_issue(issue.id, body)
+        except Exception as exc:
+            logger.warning(
+                "symphony_policy_violation_comment outcome=failed issue_id=%s issue_identifier=%s reason=%s",
+                issue.id,
+                issue.identifier,
+                exc,
+            )
+            return
+        if isinstance(result, dict) and result.get("success") is False:
+            logger.warning(
+                "symphony_policy_violation_comment outcome=failed issue_id=%s issue_identifier=%s reason=linear_unsuccessful",
+                issue.id,
+                issue.identifier,
             )
 
     def _schedule_retry(self, issue: Issue, attempt: int, *, error: str | None, delay_ms: int | None) -> None:
@@ -698,7 +892,7 @@ class Orchestrator:
                 await self._terminate_running(issue_id, retry=False)
                 continue
             if self._is_terminal(refreshed_issue):
-                if self.config.completion_verification.enabled or self.config.acceptance.enabled:
+                if self.config.acceptance.enabled:
                     entry.issue = refreshed_issue
                     self._persist_state()
                     continue
@@ -1182,15 +1376,96 @@ def _completion_verification_error_comment_body(entry: RunningEntry, error: str)
 
 
 def _acceptance_issue_description(entry: RunningEntry, verdict: Any) -> str:
+    return _acceptance_issue_description_for_issue(entry.issue, verdict, acceptance_issue=None, workspace_path=entry.workspace_path)
+
+
+def _acceptance_issue_description_for_issue(
+    issue: Issue,
+    verdict: Any,
+    acceptance_issue: dict[str, Any] | None,
+    workspace_path: str | None = None,
+) -> str:
+    _ = acceptance_issue
     return "\n".join(
         [
-            f"Original issue: {entry.issue.identifier}",
-            f"Original issue ID: {entry.issue.id}",
-            f"Workspace: {entry.workspace_path or '<workspace path unavailable>'}",
+            f"Original issue: {issue.identifier}",
+            f"Original issue ID: {issue.id}",
+            f"Workspace: {workspace_path or '<workspace path unavailable>'}",
             f"Completion verdict: {getattr(verdict, 'status', 'unknown')}",
             f"Completion reason: {getattr(verdict, 'reason', 'unknown')}",
             "",
             "Review the implementation evidence and produce a score from 0 to 4.",
+        ]
+    )
+
+
+def _acceptance_marker_block(issue: Issue, acceptance_issue: dict[str, Any], acceptance: Any) -> str:
+    return "\n".join(
+        [
+            f"acceptance_issue_id: {acceptance_issue.get('id', '')}",
+            f"acceptance_issue_identifier: {acceptance_issue.get('identifier', '')}",
+            f"acceptance_issue_url: {acceptance_issue.get('url', '')}",
+            f"plan_revision: {acceptance.plan_revision}",
+            "",
+            "Execution plan:",
+            f"- Implement the Linear task described by {issue.identifier}.",
+            "- Run focused verification and capture exact output.",
+            "- Report implementation summary, test evidence, and remaining risks.",
+            "",
+            "Acceptance requirements:",
+            "- The original issue requirements are satisfied.",
+            "- The implementation is maintainable and scoped.",
+            "- Verification evidence is concrete enough for independent review.",
+            "",
+            "Evidence required:",
+            "- Implementation summary.",
+            "- Test commands and exact output.",
+            "- Remaining risks or explicit none.",
+        ]
+    )
+
+
+def _entry_for_issue(issue: Issue, workspace_path: str | None) -> RunningEntry:
+    return RunningEntry(
+        issue=issue,
+        task=None,
+        started_at=utc_now(),
+        retry_attempt=0,
+        workspace_path=workspace_path,
+    )
+
+
+def _has_acceptance_evidence(issue: Issue) -> bool:
+    text = (issue.description or "").lower()
+    required_groups = [
+        ("implementation summary", "changed", "implemented"),
+        ("test command", "test commands", "pytest", "npm test", "test output"),
+        ("remaining risks", "residual risk", "risk"),
+    ]
+    return all(any(needle in text for needle in group) for group in required_groups)
+
+
+def _has_passed_acceptance_gate(issue: Issue, acceptance: Any) -> bool:
+    labels = {str(label).strip().lower() for label in issue.labels}
+    return (
+        acceptance.gate_passed_label.strip().lower() in labels
+        or acceptance.gate_pass_with_findings_label.strip().lower() in labels
+    )
+
+
+def _policy_violation_comment_body(issue: Issue, *, has_evidence: bool) -> str:
+    if has_evidence:
+        next_action = "Evidence was present, so Symphony is pulling the issue back to In Review and running acceptance."
+    else:
+        next_action = "Evidence was missing, so Symphony is pulling the issue back to In Progress for rework."
+    return "\n".join(
+        [
+            "Policy violation: direct Done bypass before acceptance gate passed.",
+            "",
+            f"Original issue: {issue.identifier}",
+            next_action,
+            "",
+            "Required evidence before Done: implementation summary, test commands and exact output, and remaining risks.",
         ]
     )
 

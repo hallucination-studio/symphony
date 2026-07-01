@@ -8,6 +8,7 @@ import pytest
 
 from symphony.config import TrackerConfig
 from symphony.linear import LinearClient, LinearError, LinearTracker, format_linear_milestone_comment
+from symphony.models import Issue
 
 
 class RecordingTransport(httpx.AsyncBaseTransport):
@@ -312,6 +313,54 @@ async def test_transition_issue_uses_issue_update() -> None:
 
 
 @pytest.mark.asyncio
+async def test_transition_issue_by_state_name_resolves_team_state_id() -> None:
+    transport = RecordingTransport(
+        [
+            {
+                "data": {
+                    "issue": {
+                        "id": "issue-1",
+                        "identifier": "MT-1",
+                        "team": {
+                            "id": "team-1",
+                            "states": {
+                                "nodes": [
+                                    {"id": "state-progress", "name": "In Progress"},
+                                    {"id": "state-review", "name": "In Review"},
+                                ]
+                            },
+                        },
+                    }
+                }
+            },
+            {
+                "data": {
+                    "issueUpdate": {
+                        "success": True,
+                        "issue": {
+                            "id": "issue-1",
+                            "identifier": "MT-1",
+                            "state": {"name": "In Review"},
+                        },
+                    }
+                }
+            },
+        ]
+    )
+    client = LinearClient("https://api.linear.app/graphql", "linear-token", transport=transport)
+    tracker = LinearTracker(make_config(), client=client)
+
+    result = await tracker.transition_issue_by_state_name("issue-1", "In Review")
+
+    assert result["state"] == "In Review"
+    assert "states" in transport.requests[0]["json"]["query"]
+    assert transport.requests[1]["json"]["variables"] == {
+        "issueId": "issue-1",
+        "stateId": "state-review",
+    }
+
+
+@pytest.mark.asyncio
 async def test_create_issue_uses_issue_create_with_labels() -> None:
     transport = RecordingTransport(
         [
@@ -419,6 +468,51 @@ async def test_create_acceptance_issue_for_uses_original_linear_context_and_type
 
 
 @pytest.mark.asyncio
+async def test_find_acceptance_issue_for_reuses_inverse_blocking_relation_with_label() -> None:
+    transport = RecordingTransport(
+        [
+            {
+                "data": {
+                    "issue": {
+                        "id": "issue-1",
+                        "identifier": "MT-1",
+                        "inverseRelations": {
+                            "nodes": [
+                                {
+                                    "type": "blocks",
+                                    "issue": {
+                                        "id": "acceptance-1",
+                                        "identifier": "MT-A1",
+                                        "title": "[Acceptance] MT-1: Build",
+                                        "url": "https://linear.app/x/issue/MT-A1",
+                                        "state": {"name": "Todo"},
+                                        "labels": {
+                                            "nodes": [{"name": "symphony:type/acceptance"}]
+                                        },
+                                    },
+                                }
+                            ]
+                        },
+                    }
+                }
+            }
+        ]
+    )
+    client = LinearClient("https://api.linear.app/graphql", "linear-token", transport=transport)
+    tracker = LinearTracker(make_config(), client=client)
+
+    found = await tracker.find_acceptance_issue_for(
+        original_issue=Issue(id="issue-1", identifier="MT-1", title="Build it", state="Todo", project_slug="MT"),
+        acceptance_label_name="symphony:type/acceptance",
+    )
+
+    assert found is not None
+    assert found["id"] == "acceptance-1"
+    assert found["identifier"] == "MT-A1"
+    assert "inverseRelations" in transport.requests[0]["json"]["query"]
+
+
+@pytest.mark.asyncio
 async def test_create_issue_relation_uses_blocks_relation() -> None:
     transport = RecordingTransport(
         [
@@ -455,6 +549,83 @@ async def test_create_issue_relation_uses_blocks_relation() -> None:
             "relatedIssueId": "task-1",
         }
     }
+
+
+@pytest.mark.asyncio
+async def test_ensure_issue_relation_reuses_existing_blocks_relation() -> None:
+    transport = RecordingTransport(
+        [
+            {
+                "data": {
+                    "issue": {
+                        "id": "task-1",
+                        "identifier": "MT-1",
+                        "inverseRelations": {
+                            "nodes": [
+                                {
+                                    "id": "relation-1",
+                                    "type": "blocks",
+                                    "issue": {"id": "acceptance-1", "identifier": "MT-A1"},
+                                }
+                            ]
+                        },
+                    }
+                }
+            }
+        ]
+    )
+    client = LinearClient("https://api.linear.app/graphql", "linear-token", transport=transport)
+
+    relation = await client.ensure_issue_relation(
+        issue_id="acceptance-1",
+        related_issue_id="task-1",
+        relation_type="blocks",
+    )
+
+    assert relation["id"] == "relation-1"
+    assert len(transport.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_update_issue_description_marker_block_preserves_user_text_and_replaces_block() -> None:
+    transport = RecordingTransport(
+        [
+            {
+                "data": {
+                    "issue": {
+                        "id": "issue-1",
+                        "identifier": "MT-1",
+                        "description": "User text\n\n<!-- BEGIN SYMPHONY ACCEPTANCE -->\nold\n<!-- END SYMPHONY ACCEPTANCE -->\n\nTail",
+                    }
+                }
+            },
+            {
+                "data": {
+                    "issueUpdate": {
+                        "success": True,
+                        "issue": {
+                            "id": "issue-1",
+                            "identifier": "MT-1",
+                            "description": "updated",
+                        },
+                    }
+                }
+            },
+        ]
+    )
+    client = LinearClient("https://api.linear.app/graphql", "linear-token", transport=transport)
+
+    await client.update_issue_description_marker_block(
+        "issue-1",
+        "SYMPHONY ACCEPTANCE",
+        "acceptance_issue_id: acceptance-1",
+    )
+
+    updated_description = transport.requests[1]["json"]["variables"]["description"]
+    assert updated_description.startswith("User text")
+    assert "old" not in updated_description
+    assert "acceptance_issue_id: acceptance-1" in updated_description
+    assert updated_description.endswith("Tail")
 
 
 @pytest.mark.asyncio

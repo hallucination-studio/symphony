@@ -62,6 +62,8 @@ class AgentRunner:
             )
             if prompt_prefix:
                 prompt = f"{prompt_prefix}{prompt}"
+            if self.config.acceptance.enabled:
+                prompt = f"{prompt}\n\n{_acceptance_agent_boundary_prompt()}"
             logger.info(
                 "symphony_runner outcome=starting issue_id=%s issue_identifier=%s workspace=%s worker_host=%s",
                 issue.id,
@@ -120,6 +122,14 @@ class AgentRunner:
                 return None
         next_turn = turn_count + 1
         terminal_states = ", ".join(str(state) for state in self.config.tracker.terminal_states)
+        if self.config.acceptance.enabled:
+            return (
+                f"Continue working on {issue.identifier}. This is turn {next_turn} of {self.config.agent.max_turns}. "
+                "Do not move the Linear issue to In Review or Done. "
+                "When implementation and verification are complete, leave concrete evidence only: "
+                "Implementation summary, Test commands and exact output, and Remaining risks. "
+                "Symphony will perform the In Review and Done state transitions after verification and acceptance."
+            )
         return (
             f"Continue working on {issue.identifier}. This is turn {next_turn} of {self.config.agent.max_turns}. "
             "If the requested work is already implemented and verified, finish by updating Linear: "
@@ -258,3 +268,15 @@ def _retry_context_from_issue(issue: Issue) -> str | None:
     if marker in description:
         return description.split(marker, 1)[1].strip()
     return description.strip() or None
+
+
+def _acceptance_agent_boundary_prompt() -> str:
+    return "\n".join(
+        [
+            "Acceptance workflow boundary:",
+            "- Do not move the Linear issue to In Review or Done.",
+            "- Symphony is the only actor allowed to perform Linear state transitions for review and completion.",
+            "- When you finish implementation, leave concrete evidence in your final report or Linear comment.",
+            "- Required evidence: Implementation summary, Test commands and exact output, and Remaining risks.",
+        ]
+    )

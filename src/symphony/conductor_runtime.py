@@ -126,4 +126,9 @@ class ConductorRuntimeManager:
         env = dict(os.environ)
         if overrides:
             env.update(overrides)
+        local_src = str(Path(__file__).resolve().parents[1])
+        existing = env.get("PYTHONPATH")
+        paths = existing.split(os.pathsep) if existing else []
+        if local_src not in paths:
+            env["PYTHONPATH"] = local_src if not existing else f"{local_src}{os.pathsep}{existing}"
         return env

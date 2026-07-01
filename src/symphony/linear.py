@@ -117,6 +117,75 @@ mutation SymphonyTransitionIssue($issueId: String!, $stateId: String!) {
 """
 
 
+ISSUE_TEAM_STATES_QUERY = """
+query SymphonyIssueTeamStates($issueId: String!) {
+  issue(id: $issueId) {
+    id
+    identifier
+    team {
+      id
+      states(first: 100) {
+        nodes { id name }
+      }
+    }
+  }
+}
+"""
+
+
+ISSUE_DESCRIPTION_QUERY = """
+query SymphonyIssueDescription($issueId: String!) {
+  issue(id: $issueId) {
+    id
+    identifier
+    description
+  }
+}
+"""
+
+
+ISSUE_UPDATE_DESCRIPTION_MUTATION = """
+mutation SymphonyUpdateIssueDescription($issueId: String!, $description: String!) {
+  issueUpdate(id: $issueId, input: { description: $description }) {
+    success
+    issue { id identifier description }
+  }
+}
+"""
+
+
+ISSUE_ACCEPTANCE_RELATIONS_QUERY = """
+query SymphonyAcceptanceRelations($issueId: String!) {
+  issue(id: $issueId) {
+    id
+    identifier
+    inverseRelations {
+      nodes {
+        id
+        type
+        issue {
+          id
+          identifier
+          title
+          url
+          state { name }
+          labels { nodes { name } }
+        }
+        relatedIssue {
+          id
+          identifier
+          title
+          url
+          state { name }
+          labels { nodes { name } }
+        }
+      }
+    }
+  }
+}
+"""
+
+
 ISSUE_CREATE_MUTATION = """
 mutation SymphonyCreateIssue(
   $teamId: String!,
@@ -307,6 +376,70 @@ class LinearClient:
             "state": state.get("name") if isinstance(state, dict) else None,
         }
 
+    async def resolve_state_id_by_name(self, issue_id: str, state_name: str) -> str:
+        payload = await self.graphql(ISSUE_TEAM_STATES_QUERY, {"issueId": issue_id})
+        issue = ((payload.get("data") or {}).get("issue") or {})
+        team = issue.get("team") if isinstance(issue, dict) else {}
+        states = (((team.get("states") or {}).get("nodes")) or []) if isinstance(team, dict) else []
+        wanted = state_name.strip().lower()
+        for state in states:
+            if not isinstance(state, dict):
+                continue
+            if str(state.get("name") or "").strip().lower() == wanted and state.get("id"):
+                return str(state["id"])
+        raise LinearError("linear_state_not_found", f"Linear state not found for issue {issue_id}: {state_name}")
+
+    async def transition_issue_by_state_name(self, issue_id: str, state_name: str) -> dict[str, Any]:
+        state_id = await self.resolve_state_id_by_name(issue_id, state_name)
+        return await self.transition_issue(issue_id, state_id)
+
+    async def update_issue_description_marker_block(
+        self,
+        issue_id: str,
+        marker_name: str,
+        block: str,
+    ) -> dict[str, Any]:
+        payload = await self.graphql(ISSUE_DESCRIPTION_QUERY, {"issueId": issue_id})
+        issue = ((payload.get("data") or {}).get("issue") or {})
+        current = issue.get("description") if isinstance(issue, dict) else None
+        updated = replace_marker_block(str(current or ""), marker_name, block)
+        payload = await self.graphql(
+            ISSUE_UPDATE_DESCRIPTION_MUTATION,
+            {"issueId": issue_id, "description": updated},
+        )
+        result = ((payload.get("data") or {}).get("issueUpdate") or {})
+        updated_issue = result.get("issue") if isinstance(result, dict) else {}
+        return {
+            "success": bool(result.get("success")),
+            "issue_id": updated_issue.get("id") if isinstance(updated_issue, dict) else None,
+            "identifier": updated_issue.get("identifier") if isinstance(updated_issue, dict) else None,
+            "description": updated,
+        }
+
+    async def find_acceptance_issue_for(
+        self,
+        *,
+        original_issue: Issue,
+        acceptance_label_name: str,
+    ) -> dict[str, Any] | None:
+        payload = await self.graphql(ISSUE_ACCEPTANCE_RELATIONS_QUERY, {"issueId": original_issue.id})
+        issue = ((payload.get("data") or {}).get("issue") or {})
+        relations = (((issue.get("inverseRelations") or {}).get("nodes")) or []) if isinstance(issue, dict) else []
+        for relation in relations:
+            if not isinstance(relation, dict) or relation.get("type") != "blocks":
+                continue
+            candidate = relation.get("issue")
+            if not isinstance(candidate, dict):
+                continue
+            labels = [
+                str(label.get("name") or "").strip().lower()
+                for label in (((candidate.get("labels") or {}).get("nodes")) or [])
+                if isinstance(label, dict)
+            ]
+            if acceptance_label_name.strip().lower() in labels:
+                return _normalize_issue_dict(candidate)
+        return None
+
     async def create_issue(
         self,
         *,
@@ -356,6 +489,28 @@ class LinearClient:
         if not result.get("success") or not isinstance(relation, dict) or not relation.get("id"):
             raise LinearError("linear_issue_relation_create_failed", "Linear issueRelationCreate returned success=false")
         return relation
+
+    async def ensure_issue_relation(
+        self,
+        *,
+        issue_id: str,
+        related_issue_id: str,
+        relation_type: str,
+    ) -> dict[str, Any]:
+        payload = await self.graphql(ISSUE_ACCEPTANCE_RELATIONS_QUERY, {"issueId": related_issue_id})
+        issue = ((payload.get("data") or {}).get("issue") or {})
+        relations = (((issue.get("inverseRelations") or {}).get("nodes")) or []) if isinstance(issue, dict) else []
+        for relation in relations:
+            if not isinstance(relation, dict) or relation.get("type") != relation_type:
+                continue
+            blocker = relation.get("issue") if isinstance(relation.get("issue"), dict) else {}
+            if blocker.get("id") == issue_id:
+                return relation
+        return await self.create_issue_relation(
+            issue_id=issue_id,
+            related_issue_id=related_issue_id,
+            relation_type=relation_type,
+        )
 
     async def create_acceptance_issue_for(
         self,
@@ -522,6 +677,28 @@ class LinearTracker:
     async def transition_issue(self, issue_id: str, state_id: str) -> dict[str, Any]:
         return await self.client.transition_issue(issue_id, state_id)
 
+    async def transition_issue_by_state_name(self, issue_id: str, state_name: str) -> dict[str, Any]:
+        return await self.client.transition_issue_by_state_name(issue_id, state_name)
+
+    async def update_issue_description_marker_block(
+        self,
+        issue_id: str,
+        marker_name: str,
+        block: str,
+    ) -> dict[str, Any]:
+        return await self.client.update_issue_description_marker_block(issue_id, marker_name, block)
+
+    async def find_acceptance_issue_for(
+        self,
+        *,
+        original_issue: Issue,
+        acceptance_label_name: str,
+    ) -> dict[str, Any] | None:
+        return await self.client.find_acceptance_issue_for(
+            original_issue=original_issue,
+            acceptance_label_name=acceptance_label_name,
+        )
+
     async def create_issue(
         self,
         *,
@@ -549,6 +726,19 @@ class LinearTracker:
         relation_type: str,
     ) -> dict[str, Any]:
         return await self.client.create_issue_relation(
+            issue_id=issue_id,
+            related_issue_id=related_issue_id,
+            relation_type=relation_type,
+        )
+
+    async def ensure_issue_relation(
+        self,
+        *,
+        issue_id: str,
+        related_issue_id: str,
+        relation_type: str,
+    ) -> dict[str, Any]:
+        return await self.client.ensure_issue_relation(
             issue_id=issue_id,
             related_issue_id=related_issue_id,
             relation_type=relation_type,
@@ -665,3 +855,35 @@ def _normalize_issue(node: dict[str, Any]) -> Issue:
         project_slug=project.get("slugId") if isinstance(project, dict) else None,
         project_name=project.get("name") if isinstance(project, dict) else None,
     )
+
+
+def _normalize_issue_dict(node: dict[str, Any]) -> dict[str, Any]:
+    state = node.get("state")
+    state_name = state.get("name") if isinstance(state, dict) else state
+    labels = [
+        label.get("name", "")
+        for label in (((node.get("labels") or {}).get("nodes")) or [])
+        if isinstance(label, dict)
+    ]
+    return {
+        "id": node.get("id") or "",
+        "identifier": node.get("identifier") or "",
+        "title": node.get("title") or "",
+        "url": node.get("url"),
+        "state": state_name or "",
+        "labels": labels,
+    }
+
+
+def replace_marker_block(description: str, marker_name: str, block: str) -> str:
+    begin = f"<!-- BEGIN {marker_name} -->"
+    end = f"<!-- END {marker_name} -->"
+    replacement = f"{begin}\n{block.strip()}\n{end}"
+    start = description.find(begin)
+    stop = description.find(end)
+    if start >= 0 and stop >= start:
+        stop += len(end)
+        return f"{description[:start]}{replacement}{description[stop:]}"
+    if description.strip():
+        return f"{description.rstrip()}\n\n{replacement}"
+    return replacement

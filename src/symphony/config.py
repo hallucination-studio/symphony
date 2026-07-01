@@ -122,6 +122,17 @@ class AcceptanceConfig:
     auto_retry_on_fail: bool = True
     task_type_label: str = "symphony:type/task"
     acceptance_type_label: str = "symphony:type/acceptance"
+    todo_state: str = "Todo"
+    implementation_state: str = "In Progress"
+    review_state: str = "In Review"
+    done_state: str = "Done"
+    planned_phase_label: str = "symphony:phase/planned"
+    implementation_phase_label: str = "symphony:phase/implementation"
+    review_phase_label: str = "symphony:phase/review"
+    rework_phase_label: str = "symphony:phase/rework"
+    marker_name: str = "SYMPHONY ACCEPTANCE"
+    plan_revision: int = 1
+    direct_done_bypass_policy: str = "review_with_evidence"
     gate_pending_label: str = "symphony:gate/pending"
     gate_passed_label: str = "symphony:gate/passed"
     gate_pass_with_findings_label: str = "symphony:gate/pass-with-findings"
@@ -152,6 +163,9 @@ class ServiceConfig:
     def from_workflow(cls, workflow: WorkflowDefinition, workflow_path: Path) -> ServiceConfig:
         raw = workflow.config
         tracker = _tracker_config(_map(raw.get("tracker")), workflow_path)
+        acceptance = _acceptance_config(_map(raw.get("acceptance")))
+        if acceptance.enabled:
+            tracker = _tracker_with_acceptance_scan_states(tracker, acceptance)
         return cls(
             tracker=tracker,
             polling=_polling_config(_map(raw.get("polling"))),
@@ -167,7 +181,7 @@ class ServiceConfig:
                 _map(raw.get("completion_verification")),
                 workflow_path,
             ),
-            acceptance=_acceptance_config(_map(raw.get("acceptance"))),
+            acceptance=acceptance,
             prompt_template=workflow.prompt_template,
             workflow_path=workflow_path,
         )
@@ -276,6 +290,34 @@ def _validate_tracker(config: TrackerConfig) -> None:
         raise ConfigError("missing_tracker_api_key", "tracker.api_key is required")
     if config.kind == "linear" and not config.project_slug:
         raise ConfigError("missing_tracker_project_slug", "tracker.project_slug is required")
+
+
+def _tracker_with_acceptance_scan_states(
+    tracker: TrackerConfig,
+    acceptance: AcceptanceConfig,
+) -> TrackerConfig:
+    active_states = list(tracker.active_states)
+    seen = {normalize_state_key(state) for state in active_states}
+    for state in (
+        acceptance.todo_state,
+        acceptance.implementation_state,
+        acceptance.review_state,
+        acceptance.done_state,
+    ):
+        key = normalize_state_key(state)
+        if key and key not in seen:
+            active_states.append(state)
+            seen.add(key)
+    return TrackerConfig(
+        kind=tracker.kind,
+        endpoint=tracker.endpoint,
+        project_slug=tracker.project_slug,
+        api_key=tracker.api_key,
+        assignee_id=tracker.assignee_id,
+        required_labels=tracker.required_labels,
+        active_states=active_states,
+        terminal_states=tracker.terminal_states,
+    )
 
 
 def _normalize_required_labels(labels: list[str] | None) -> list[str]:
@@ -437,6 +479,35 @@ def _acceptance_config(raw: dict[str, Any]) -> AcceptanceConfig:
         acceptance_type_label=(
             _string(raw.get("acceptance_type_label"), defaults.acceptance_type_label)
             or defaults.acceptance_type_label
+        ),
+        todo_state=_string(raw.get("todo_state"), defaults.todo_state) or defaults.todo_state,
+        implementation_state=(
+            _string(raw.get("implementation_state"), defaults.implementation_state)
+            or defaults.implementation_state
+        ),
+        review_state=_string(raw.get("review_state"), defaults.review_state) or defaults.review_state,
+        done_state=_string(raw.get("done_state"), defaults.done_state) or defaults.done_state,
+        planned_phase_label=(
+            _string(raw.get("planned_phase_label"), defaults.planned_phase_label)
+            or defaults.planned_phase_label
+        ),
+        implementation_phase_label=(
+            _string(raw.get("implementation_phase_label"), defaults.implementation_phase_label)
+            or defaults.implementation_phase_label
+        ),
+        review_phase_label=(
+            _string(raw.get("review_phase_label"), defaults.review_phase_label)
+            or defaults.review_phase_label
+        ),
+        rework_phase_label=(
+            _string(raw.get("rework_phase_label"), defaults.rework_phase_label)
+            or defaults.rework_phase_label
+        ),
+        marker_name=_string(raw.get("marker_name"), defaults.marker_name) or defaults.marker_name,
+        plan_revision=_int(raw.get("plan_revision"), defaults.plan_revision, positive=True),
+        direct_done_bypass_policy=(
+            _string(raw.get("direct_done_bypass_policy"), defaults.direct_done_bypass_policy)
+            or defaults.direct_done_bypass_policy
         ),
         gate_pending_label=(
             _string(raw.get("gate_pending_label"), defaults.gate_pending_label)

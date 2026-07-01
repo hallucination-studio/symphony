@@ -168,6 +168,31 @@ acceptance:
     assert config.acceptance.score_label_prefix == "symphony:score/"
 
 
+def test_acceptance_enabled_extends_candidate_scan_states(tmp_path: Path) -> None:
+    workflow_path = tmp_path / "WORKFLOW.md"
+    write_workflow(
+        workflow_path,
+        """
+tracker:
+  kind: linear
+  project_slug: MT
+  api_key: linear-token
+  active_states:
+    - Ready
+acceptance:
+  enabled: true
+  todo_state: Todo
+  implementation_state: In Progress
+  review_state: QA Review
+  done_state: Complete
+""",
+    )
+
+    config = ServiceConfig.from_workflow(load_workflow(workflow_path), workflow_path)
+
+    assert config.tracker.active_states == ["Ready", "Todo", "In Progress", "QA Review", "Complete"]
+
+
 def test_completion_verification_allows_zero_min_duration_for_smoke_flows(tmp_path: Path) -> None:
     workflow_path = tmp_path / "WORKFLOW.md"
     write_workflow(
