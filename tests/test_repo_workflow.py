@@ -15,3 +15,11 @@ def test_repo_workflow_prepares_isolated_issue_workspaces() -> None:
     assert config.workspace.root.is_absolute()
     assert config.hooks.after_create is not None
     assert "git clone --shared --no-hardlinks ../.. ." in config.hooks.after_create
+
+
+def test_repo_workflow_exposes_issue_description_to_agent() -> None:
+    workflow_path = Path("WORKFLOW.md").resolve()
+
+    workflow = load_workflow(workflow_path)
+
+    assert "Description: {{ issue.description" in workflow.prompt_template

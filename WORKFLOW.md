@@ -43,6 +43,7 @@ You are working on a Linear issue.
 Issue: {{ issue.identifier }} - {{ issue.title }}
 URL: {{ issue.url }}
 State: {{ issue.state }}
+Description: {{ issue.description or 'No description provided.' }}
 Attempt: {{ attempt }}
 
 Implement the issue in this workspace. Follow repository instructions, run focused tests, and use available workflow tools to update Linear when useful.
