@@ -39,6 +39,8 @@ def test_generate_workflow_content_injects_managed_runtime_resources(tmp_path: P
     assert f"root: {instance.workspace_root}" in content
     assert "per_issue: false" in content
     assert f"path: {instance.persistence_path}" in content
+    assert "agent:" in content
+    assert "max_turns: 20" in content
     assert f"port: {instance.http_port}" in content
     assert "project_slug: ENG" in content
     assert "Keep issues moving" in content

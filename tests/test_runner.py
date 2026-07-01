@@ -36,6 +36,25 @@ class FakeCodex:
         self.kwargs = kwargs
 
 
+class FakeCodexWithoutTurnStarted(FakeCodex):
+    async def run_session(self, workspace_path: Path, prompt: str, title: str, **kwargs: Any) -> None:
+        await super().run_session(workspace_path, prompt, title, **kwargs)
+        on_event = kwargs["on_event"]
+        on_event(
+            {
+                "event": "thread_token_usage_updated",
+                "turn_id": "turn_1",
+                "usage": {
+                    "input_tokens": 12,
+                    "output_tokens": 4,
+                    "cached_tokens": 2,
+                    "total_tokens": 18,
+                },
+            }
+        )
+        on_event({"event": "turn_completed", "turn_id": "turn_1", "message": "completed"})
+
+
 class FakeTracker:
     def __init__(self, issue: Issue | None = None, *, missing: bool = False):
         self.issue = None if missing else issue or Issue(
@@ -196,6 +215,28 @@ async def test_runner_uses_workspace_root_when_per_issue_workspace_is_disabled(t
 
     assert codex.workspace_path == workspace_root
     assert not (workspace_root / "MT-1").exists()
+
+
+@pytest.mark.asyncio
+async def test_runner_records_turns_even_when_codex_skips_turn_started_event(tmp_path: Path) -> None:
+    config = make_config_with_persistence(tmp_path)
+    runner = AgentRunner(
+        config,
+        WorkspaceManager(WorkspaceConfig(root=tmp_path), HooksConfig()),
+        codex_client=FakeCodexWithoutTurnStarted(),
+        tracker=FakeTracker(),
+    )
+
+    await runner.run_issue(
+        Issue(id="mt-1", identifier="MT-1", title="Build", state="Todo", labels=["codex"], project_slug="MT"),
+        None,
+        lambda event: None,
+    )
+
+    snapshot = OpsStore(ops_snapshot_path_from_persistence_path(config.persistence.path)).load()
+    assert snapshot.turns
+    turn = next(iter(snapshot.turns.values()))
+    assert turn.total_tokens == 18
 
 
 @pytest.mark.asyncio

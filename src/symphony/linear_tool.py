@@ -31,7 +31,7 @@ class LinearGraphQLTool:
         query = parsed["query"]
         variables = parsed["variables"]
         try:
-            async with httpx.AsyncClient(timeout=self.timeout, transport=self.transport) as client:
+            async with httpx.AsyncClient(timeout=self.timeout, transport=self.transport, trust_env=False) as client:
                 response = await client.post(
                     self.endpoint,
                     json={"query": query, "variables": variables},

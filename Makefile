@@ -18,7 +18,7 @@ once: install
 	$(SYMPHONY) $(WORKFLOW) --once
 
 test: install
-	$(PYTHON) -m pytest -q
+	PYTHONPATH=$(PWD)/src $(PYTHON) -m pytest -q
 
 install: $(SYMPHONY) $(CONDUCTOR)
 

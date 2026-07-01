@@ -159,5 +159,5 @@ make test
 Real Linear integration checks are skipped by default. To run the non-mutating profile:
 
 ```bash
-SYMPHONY_REAL_INTEGRATION=1 LINEAR_API_KEY=... .venv/bin/python -m pytest tests/test_real_integration.py -q
+SYMPHONY_REAL_INTEGRATION=1 LINEAR_API_KEY=... PYTHONPATH=$(pwd)/src .venv/bin/python -m pytest tests/test_real_integration.py -q
 ```

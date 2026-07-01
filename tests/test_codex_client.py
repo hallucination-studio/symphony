@@ -417,7 +417,8 @@ async def test_initialize_timeout_emits_launch_and_timeout_diagnostics(tmp_path:
     launch_events = [event for event in events if event["event"] == "process_launch"]
     timeout_events = [event for event in events if event["event"] == "request_timeout"]
     assert launch_events
-    assert launch_events[0]["command"] == ["bash", "-lc", "codex app-server"]
+    assert launch_events[0]["command_argv"] == ["bash", "-lc", "codex app-server"]
+    assert "command" not in launch_events[0]
     assert launch_events[0]["cwd"] == str(tmp_path)
     assert timeout_events
     assert timeout_events[0]["method"] == "initialize"
@@ -783,6 +784,45 @@ async def test_generic_notifications_are_emitted_without_affecting_turn_completi
     notifications = [event for event in events if event["event"] == "notification"]
     assert notifications[0]["raw_method"] == "agent/message"
     assert notifications[0]["message"] == "working"
+
+
+@pytest.mark.asyncio
+async def test_command_execution_notification_is_normalized(tmp_path: Path) -> None:
+    process = FakeProcess(
+        [
+            {"id": 0, "result": {"userAgent": "codex", "platformFamily": "unix", "platformOs": "macos", "codexHome": "/tmp"}},
+            {"id": 1, "result": {"thread": {"id": "thr_1"}}},
+            {"id": 2, "result": {"turn": {"id": "turn_1"}}},
+            {
+                "method": "item/commandExecution/started",
+                "params": {
+                    "turnId": "turn_1",
+                    "command": "pytest tests/test_target.py::test_fix -q",
+                },
+            },
+            {
+                "method": "item/completed",
+                "params": {
+                    "turnId": "turn_1",
+                    "command": "pytest tests/test_target.py::test_fix -q",
+                    "exit_code": 0,
+                    "message": "1 passed",
+                },
+            },
+            {"method": "turn/completed", "params": {"turn": {"id": "turn_1"}, "status": "completed"}},
+        ]
+    )
+
+    async def factory(*args: Any, **kwargs: Any) -> FakeProcess:
+        return process
+
+    events: list[dict[str, Any]] = []
+    client = CodexAppServerClient(CodexConfig(read_timeout_ms=100, turn_timeout_ms=1000), process_factory=factory)
+    await client.run_session(tmp_path, "Do work", "MT-1: Build", on_event=events.append)
+
+    command_events = [event for event in events if event.get("command")]
+    assert command_events[0]["command"] == "pytest tests/test_target.py::test_fix -q"
+    assert command_events[1]["exit_code"] == 0
 
 
 @pytest.mark.asyncio

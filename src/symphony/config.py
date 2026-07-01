@@ -94,6 +94,24 @@ class WorkerConfig:
 
 
 @dataclass(frozen=True)
+class CompletionVerificationConfig:
+    """完成验证配置"""
+
+    enabled: bool = True
+    required_checks: list[str] = field(
+        default_factory=lambda: ["workspace_changes", "test_command_evidence", "metrics_reasonable"]
+    )
+    optional_checks: list[str] = field(default_factory=lambda: ["test_results", "linear_state"])
+    expected_repo_root: str | None = None
+    expected_test_patterns: list[str] = field(default_factory=list)
+    auto_retry_on_fail: bool = True
+    max_verification_retries: int = 1
+    test_timeout_seconds: int = 60
+    min_duration_seconds: int = 5
+    min_workspace_changes_chars: int = 50
+
+
+@dataclass(frozen=True)
 class ServiceConfig:
     tracker: TrackerConfig
     polling: PollingConfig
@@ -107,6 +125,9 @@ class ServiceConfig:
     persistence: PersistenceConfig = field(default_factory=PersistenceConfig)
     observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
     worker: WorkerConfig = field(default_factory=WorkerConfig)
+    completion_verification: CompletionVerificationConfig = field(
+        default_factory=CompletionVerificationConfig
+    )
 
     @classmethod
     def from_workflow(cls, workflow: WorkflowDefinition, workflow_path: Path) -> ServiceConfig:
@@ -123,6 +144,10 @@ class ServiceConfig:
             persistence=_persistence_config(_map(raw.get("persistence")), workflow_path),
             observability=_observability_config(_map(raw.get("observability"))),
             worker=_worker_config(_map(raw.get("worker"))),
+            completion_verification=_completion_verification_config(
+                _map(raw.get("completion_verification")),
+                workflow_path,
+            ),
             prompt_template=workflow.prompt_template,
             workflow_path=workflow_path,
         )
@@ -334,5 +359,44 @@ def _worker_config(raw: dict[str, Any]) -> WorkerConfig:
             raw.get("max_concurrent_agents_per_host"),
             1,
             "invalid_worker_max_concurrent_agents_per_host",
+        ),
+    )
+
+
+def _string_list(value: Any, default: list[str]) -> list[str]:
+    if value is None:
+        return list(default)
+    if not isinstance(value, list):
+        return list(default)
+    return [str(item).strip() for item in value if str(item).strip()]
+
+
+def _completion_verification_config(raw: dict[str, Any], workflow_path: Path) -> CompletionVerificationConfig:
+    defaults = CompletionVerificationConfig()
+    expected_repo_root = _string(raw.get("expected_repo_root"), defaults.expected_repo_root)
+    if expected_repo_root:
+        expected_repo_root = str(_resolve_path(expected_repo_root, workflow_path))
+    return CompletionVerificationConfig(
+        enabled=_bool(raw.get("enabled"), defaults.enabled),
+        required_checks=_string_list(raw.get("required_checks"), defaults.required_checks),
+        optional_checks=_string_list(raw.get("optional_checks"), defaults.optional_checks),
+        expected_repo_root=expected_repo_root,
+        expected_test_patterns=_string_list(raw.get("expected_test_patterns"), defaults.expected_test_patterns),
+        auto_retry_on_fail=_bool(raw.get("auto_retry_on_fail"), defaults.auto_retry_on_fail),
+        max_verification_retries=_int(
+            raw.get("max_verification_retries"),
+            defaults.max_verification_retries,
+            positive=True,
+        ),
+        test_timeout_seconds=_required_positive_int(
+            raw.get("test_timeout_seconds"),
+            defaults.test_timeout_seconds,
+            "invalid_completion_verification_test_timeout_seconds",
+        ),
+        min_duration_seconds=_int(raw.get("min_duration_seconds"), defaults.min_duration_seconds),
+        min_workspace_changes_chars=_int(
+            raw.get("min_workspace_changes_chars"),
+            defaults.min_workspace_changes_chars,
+            positive=True,
         ),
     )

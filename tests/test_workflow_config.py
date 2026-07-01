@@ -83,6 +83,67 @@ workspace:
     assert config.codex.thread_sandbox is None
     assert config.codex.turn_sandbox_policy is None
     assert config.agent.max_concurrent_agents == 10
+    assert "test_command_evidence" in config.completion_verification.required_checks
+
+
+def test_service_config_parses_completion_verification_extension(tmp_path: Path) -> None:
+    workflow_path = tmp_path / "WORKFLOW.md"
+    write_workflow(
+        workflow_path,
+        """
+tracker:
+  kind: linear
+  project_slug: MT
+  api_key: linear-token
+completion_verification:
+  enabled: false
+  required_checks:
+    - repo_path
+    - test_command_evidence
+  optional_checks:
+    - linear_state
+  expected_repo_root: ./repo
+  expected_test_patterns:
+    - tests/test_target.py::test_fix
+  auto_retry_on_fail: false
+  max_verification_retries: 3
+  test_timeout_seconds: 45
+  min_duration_seconds: 2
+  min_workspace_changes_chars: 12
+""",
+    )
+
+    config = ServiceConfig.from_workflow(load_workflow(workflow_path), workflow_path)
+
+    assert config.completion_verification.enabled is False
+    assert config.completion_verification.required_checks == ["repo_path", "test_command_evidence"]
+    assert config.completion_verification.optional_checks == ["linear_state"]
+    assert config.completion_verification.expected_repo_root == str((tmp_path / "repo").resolve())
+    assert config.completion_verification.expected_test_patterns == ["tests/test_target.py::test_fix"]
+    assert config.completion_verification.auto_retry_on_fail is False
+    assert config.completion_verification.max_verification_retries == 3
+    assert config.completion_verification.test_timeout_seconds == 45
+    assert config.completion_verification.min_duration_seconds == 2
+    assert config.completion_verification.min_workspace_changes_chars == 12
+
+
+def test_completion_verification_allows_zero_min_duration_for_smoke_flows(tmp_path: Path) -> None:
+    workflow_path = tmp_path / "WORKFLOW.md"
+    write_workflow(
+        workflow_path,
+        """
+tracker:
+  kind: linear
+  project_slug: MT
+  api_key: linear-token
+completion_verification:
+  min_duration_seconds: 0
+""",
+    )
+
+    config = ServiceConfig.from_workflow(load_workflow(workflow_path), workflow_path)
+
+    assert config.completion_verification.min_duration_seconds == 0
 
 
 def test_service_config_resolves_workspace_env_and_home_paths(

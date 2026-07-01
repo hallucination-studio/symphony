@@ -193,6 +193,9 @@ class ExecutionTelemetryRecorder:
         )
         snapshot.attempts[attempt.attempt_id] = replace(
             attempt,
+            status=status,
+            completed_at=now if status in {"completed", "failed"} else attempt.completed_at,
+            stop_reason=stop_reason,
             turn_count=max(attempt.turn_count, turn.turn_number),
             last_activity_at=now,
         )

@@ -20,6 +20,20 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def _command_evidence_from_payload(payload: Any) -> tuple[str | None, int | None]:
+    if not isinstance(payload, dict):
+        return None, None
+    command = payload.get("command")
+    exit_code_raw = payload.get("exit_code")
+    if not isinstance(command, str) or not command.strip():
+        nested = payload.get("payload")
+        if isinstance(nested, dict):
+            command = nested.get("command")
+            exit_code_raw = nested.get("exit_code")
+    exit_code = exit_code_raw if isinstance(exit_code_raw, int) and not isinstance(exit_code_raw, bool) else None
+    return command if isinstance(command, str) else None, exit_code
+
+
 class CompletionVerifier:
     """
     完成验证器 - 在 Codex 报告完成后独立验证实际产出
@@ -321,15 +335,18 @@ class CompletionVerifier:
                 message="No expected test patterns configured; skipping test command evidence check",
                 evidence={"expected_test_patterns": []},
             )
+        issue_run_ids = {
+            run.run_id
+            for run in ops_snapshot.runs.values()
+            if run.issue_id == issue.id
+        }
         commands: list[tuple[str, int | None]] = []
         for event in ops_snapshot.events:
-            if event.issue_id != issue.id:
+            if event.issue_id != issue.id and event.run_id not in issue_run_ids:
                 continue
-            command = event.payload.get("command") if isinstance(event.payload, dict) else None
+            command, exit_code = _command_evidence_from_payload(event.payload)
             if not isinstance(command, str) or not command.strip():
                 continue
-            exit_code_raw = event.payload.get("exit_code") if isinstance(event.payload, dict) else None
-            exit_code = exit_code_raw if isinstance(exit_code_raw, int) else None
             commands.append((command.strip(), exit_code))
         if not commands:
             return CheckResult(
@@ -395,8 +412,14 @@ class CompletionVerifier:
                         evidence={"duration_sec": duration_sec},
                     )
 
-            # 检查 tool calls
-            if latest_run.tool_call_count == 0:
+            # 检查 tool calls. Older telemetry snapshots may store tool calls only
+            # as trace events, so derive a fallback count from the run event stream.
+            tool_call_count = latest_run.tool_call_count or sum(
+                1
+                for event in ops_snapshot.events
+                if event.run_id == latest_run.run_id and event.event_type in {"tool_call_started", "tool_call_completed"}
+            )
+            if tool_call_count == 0:
                 return CheckResult(
                     check_name="metrics_reasonable",
                     passed=False,
@@ -407,10 +430,10 @@ class CompletionVerifier:
             return CheckResult(
                 check_name="metrics_reasonable",
                 passed=True,
-                message=f"Metrics normal ({latest_run.turn_count} turns, {latest_run.tool_call_count} tools)",
+                message=f"Metrics normal ({latest_run.turn_count} turns, {tool_call_count} tools)",
                 evidence={
                     "turn_count": latest_run.turn_count,
-                    "tool_call_count": latest_run.tool_call_count,
+                    "tool_call_count": tool_call_count,
                 },
             )
 
@@ -440,11 +463,19 @@ class CompletionVerifier:
 
             # 检查是否还有未解除的 blocker
             if fresh_issue.blocked_by:
+                blockers = [
+                    {
+                        "id": blocker.id,
+                        "identifier": blocker.identifier,
+                        "state": blocker.state,
+                    }
+                    for blocker in fresh_issue.blocked_by
+                ]
                 return CheckResult(
                     check_name="linear_state",
                     passed=False,
-                    message=f"Issue still blocked by {len(fresh_issue.blocked_by)} issues",
-                    evidence={"blockers": [b.id or b.identifier for b in fresh_issue.blocked_by]},
+                    message=f"Active blockers remain: {len(fresh_issue.blocked_by)}",
+                    evidence={"blockers": blockers},
                 )
 
             return CheckResult(

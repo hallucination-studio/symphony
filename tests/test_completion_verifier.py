@@ -122,6 +122,130 @@ async def test_verify_completion_accepts_matching_test_command_evidence(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_verify_completion_accepts_nested_codex_command_evidence(tmp_path: Path) -> None:
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    (workspace / ".git").mkdir()
+    verifier = CompletionVerifier(
+        CompletionVerificationConfig(
+            required_checks=["test_command_evidence"],
+            optional_checks=[],
+            expected_test_patterns=["test -f SYMPHONY_REAL_SMALL_TASK.md"],
+        ),
+        FakeTracker(),
+    )
+    snapshot = OpsSnapshot(
+        events=[
+            TraceEvent(
+                event_id="evt-1",
+                event_type="notification",
+                timestamp="2026-06-30T00:00:00Z",
+                issue_id="mt-1",
+                payload={
+                    "payload": {
+                        "command": "test -f SYMPHONY_REAL_SMALL_TASK.md",
+                        "exit_code": 0,
+                    }
+                },
+            )
+        ]
+    )
+
+    verdict = await verifier.verify_completion(issue(), workspace, snapshot)
+
+    assert verdict.status == "VERIFIED"
+    assert any(check.check_name == "test_command_evidence" and check.passed for check in verdict.checks)
+
+
+@pytest.mark.asyncio
+async def test_verify_completion_accepts_command_evidence_associated_by_run_id(tmp_path: Path) -> None:
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    (workspace / ".git").mkdir()
+    verifier = CompletionVerifier(
+        CompletionVerificationConfig(
+            required_checks=["test_command_evidence"],
+            optional_checks=[],
+            expected_test_patterns=["test -f SYMPHONY_REAL_SMALL_TASK.md"],
+        ),
+        FakeTracker(),
+    )
+    snapshot = OpsSnapshot(
+        runs={
+            "run-mt-1": RunRecord(
+                run_id="run-mt-1",
+                issue_id="mt-1",
+                instance_id="inst-1",
+                status="completed",
+            )
+        },
+        events=[
+            TraceEvent(
+                event_id="evt-1",
+                event_type="notification",
+                timestamp="2026-06-30T00:00:00Z",
+                issue_id=None,
+                run_id="run-mt-1",
+                payload={
+                    "payload": {
+                        "command": "test -f SYMPHONY_REAL_SMALL_TASK.md",
+                        "exit_code": 0,
+                    }
+                },
+            )
+        ],
+    )
+
+    verdict = await verifier.verify_completion(issue(), workspace, snapshot)
+
+    assert verdict.status == "VERIFIED"
+    assert any(check.check_name == "test_command_evidence" and check.passed for check in verdict.checks)
+
+
+@pytest.mark.asyncio
+async def test_verify_completion_counts_tool_call_events_when_run_counter_is_zero(tmp_path: Path) -> None:
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    (workspace / ".git").mkdir()
+    verifier = CompletionVerifier(
+        CompletionVerificationConfig(
+            required_checks=["metrics_reasonable"],
+            optional_checks=[],
+            min_duration_seconds=0,
+        ),
+        FakeTracker(),
+    )
+    snapshot = OpsSnapshot(
+        runs={
+            "run-mt-1": RunRecord(
+                run_id="run-mt-1",
+                issue_id="mt-1",
+                instance_id="inst-1",
+                status="completed",
+                started_at="2026-07-01T00:00:00Z",
+                completed_at="2026-07-01T00:00:02Z",
+                turn_count=1,
+                tool_call_count=0,
+            )
+        },
+        events=[
+            TraceEvent(
+                event_id="evt-1",
+                event_type="tool_call_completed",
+                timestamp="2026-07-01T00:00:01Z",
+                issue_id=None,
+                run_id="run-mt-1",
+            )
+        ],
+    )
+
+    verdict = await verifier.verify_completion(issue(), workspace, snapshot)
+
+    assert verdict.status == "VERIFIED"
+    assert any(check.check_name == "metrics_reasonable" and check.passed for check in verdict.checks)
+
+
+@pytest.mark.asyncio
 async def test_verify_completion_accepts_untracked_file_as_workspace_change(tmp_path: Path) -> None:
     workspace = tmp_path / "repo"
     workspace.mkdir()

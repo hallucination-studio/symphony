@@ -39,12 +39,21 @@ export async function renderTraceView(root, { issueId = null, runId = null } = {
     </section>
   `
 
-  root.querySelectorAll('[data-event-index]').forEach((row) => {
-    row.addEventListener('click', () => {
-      const event = events[Number(row.dataset.eventIndex)]
-      renderEventDetail(root, event)
-    })
-  })
+  const list = root.querySelector('#trace-list')
+  const search = root.querySelector('#trace-filter')
+  const tier = root.querySelector('#trace-tier')
+
+  const renderFilteredRows = () => {
+    const searchValue = String(search?.value || '').trim().toLowerCase()
+    const tierValue = String(tier?.value || '')
+    const filtered = events.filter((event) => matchesEvent(event, searchValue, tierValue))
+    list.innerHTML = renderTraceRows(filtered)
+    bindTraceRowEvents(root, filtered)
+  }
+
+  search?.addEventListener('input', renderFilteredRows)
+  tier?.addEventListener('change', renderFilteredRows)
+  bindTraceRowEvents(root, events)
 }
 
 function renderTraceRows(events) {
@@ -76,6 +85,36 @@ function renderEventDetail(root, event) {
     </div>
     <pre class="json-panel">${escapeHTML(JSON.stringify(event, null, 2))}</pre>
   `
+}
+
+function bindTraceRowEvents(root, events) {
+  root.querySelectorAll('[data-event-index]').forEach((row) => {
+    row.addEventListener('click', () => {
+      const event = events[Number(row.dataset.eventIndex)]
+      renderEventDetail(root, event)
+    })
+  })
+}
+
+function matchesEvent(event, searchValue, tierValue) {
+  if (tierValue && event.retention_tier !== tierValue) {
+    return false
+  }
+  if (!searchValue) {
+    return true
+  }
+  const haystack = [
+    event.event_type,
+    event.issue_id,
+    event.run_id,
+    event.attempt_id,
+    event.turn_id,
+    event.summary,
+  ]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase()
+  return haystack.includes(searchValue)
 }
 
 function escapeHTML(value) {

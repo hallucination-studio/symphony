@@ -20,15 +20,15 @@ export async function renderRetentionView(root, { onSummary = null } = {}) {
       </article>
       <article class="metric-card">
         <span>Summary Events</span>
-        <strong>${retention.summary_event_count || 0}</strong>
+        <strong>${retention.event_counts?.summary || 0}</strong>
       </article>
       <article class="metric-card">
         <span>Trace Events</span>
-        <strong>${retention.trace_event_count || 0}</strong>
+        <strong>${retention.event_counts?.trace || 0}</strong>
       </article>
       <article class="metric-card">
         <span>Raw Events</span>
-        <strong>${retention.raw_event_count || 0}</strong>
+        <strong>${retention.event_counts?.raw || 0}</strong>
       </article>
     </section>
     <section class="detail-pane">

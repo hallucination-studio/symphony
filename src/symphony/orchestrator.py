@@ -7,6 +7,7 @@ from datetime import timedelta
 from typing import Any, Protocol
 
 from .config import ConfigError, ServiceConfig
+from .completion_verifier import CompletionVerifier
 from .models import (
     LIFECYCLE_LABELS,
     Issue,
@@ -70,6 +71,7 @@ class Orchestrator:
         self.runner = runner
         self.workspace_manager = workspace_manager
         self.persistence_store = persistence_store
+        self.completion_verifier = CompletionVerifier(config.completion_verification, tracker)
         self.state = OrchestratorState()
         self._worker_tasks: set[asyncio.Task[Any]] = set()
         self._desired_lifecycle_labels: dict[str, str] = {}
@@ -210,7 +212,7 @@ class Orchestrator:
                     delay_ms=None,
                 )
                 continue
-            self.dispatch_issue(issue, attempt=retry.attempt, worker_host=worker_host)
+            self.dispatch_issue(_issue_with_retry_context(issue, retry), attempt=retry.attempt, worker_host=worker_host)
         await asyncio.sleep(0)
 
     def should_dispatch(self, issue: Issue) -> bool:
@@ -307,9 +309,85 @@ class Orchestrator:
             return
         self.state.ended_runtime_seconds += max((utc_now() - entry.started_at).total_seconds(), 0)
         if normal:
-            self.state.completed.add(issue_id)
-            await self._sync_lifecycle_label(entry.issue.id, LIFECYCLE_LABELS["done"])
-            self._schedule_retry(entry.issue, 1, error=None, delay_ms=1_000)
+            # 🆕 完成验证
+            try:
+                from pathlib import Path
+
+                ops_snapshot = self._load_ops_snapshot()
+                workspace_path = self._completion_workspace_path(entry)
+
+                verdict = await self.completion_verifier.verify_completion(
+                    entry.issue,
+                    workspace_path,
+                    ops_snapshot
+                )
+
+                if verdict.status == "VERIFIED":
+                    refreshed_issue = await self._refresh_issue_after_completion(entry.issue)
+                    if refreshed_issue is not None and self._is_active(refreshed_issue):
+                        logger.info(
+                            "symphony_completion_verified_continuing issue_id=%s reason=%s state=%s",
+                            issue_id,
+                            verdict.reason,
+                            refreshed_issue.state,
+                        )
+                        self._schedule_retry(refreshed_issue, max(entry.retry_attempt + 1, 1), error=None, delay_ms=1_000)
+                    elif refreshed_issue is not None and self._is_terminal(refreshed_issue):
+                        self.state.completed.add(issue_id)
+                        self.state.claimed.discard(issue_id)
+                        self.state.retry_attempts.pop(issue_id, None)
+                        await self._sync_lifecycle_label(entry.issue.id, LIFECYCLE_LABELS["done"])
+                        logger.info(f"symphony_completion_verified issue_id={issue_id} reason={verdict.reason}")
+                    elif refreshed_issue is not None:
+                        await self._comment_handoff_preserved(entry, refreshed_issue)
+                        self.state.claimed.discard(issue_id)
+                        self.state.retry_attempts.pop(issue_id, None)
+                    else:
+                        self._schedule_retry(entry.issue, max(entry.retry_attempt + 1, 1), error=None, delay_ms=1_000)
+
+                elif verdict.status == "NEEDS_RETRY":
+                    # 验证失败，需要重试
+                    if self.config.completion_verification.auto_retry_on_fail:
+                        logger.warning(f"symphony_completion_verification_failed issue_id={issue_id} reason={verdict.reason}")
+                        updated_issue = _issue_with_verification_context(entry.issue, verdict)
+                        await self._comment_completion_verdict(entry, verdict, next_action="retry")
+                        next_attempt = max(entry.retry_attempt + 1, 1)
+                        self._schedule_retry(
+                            updated_issue,
+                            next_attempt,
+                            error=f"verification_failed: {verdict.reason}",
+                            delay_ms=None
+                        )
+                        await self._sync_lifecycle_label(updated_issue.id, LIFECYCLE_LABELS["retrying"])
+                    else:
+                        # 不自动重试，标记失败并等待人工介入
+                        logger.error(f"symphony_completion_verification_failed_no_retry issue_id={issue_id}")
+                        await self._comment_completion_verdict(entry, verdict, next_action="human_review")
+                        self.state.claimed.discard(issue_id)
+                        self.state.retry_attempts.pop(issue_id, None)
+                        await self._sync_lifecycle_label(entry.issue.id, LIFECYCLE_LABELS["failed"])
+
+                else:  # NEEDS_HUMAN
+                    # 需要人工审查，不自动标记完成
+                    logger.error(f"symphony_completion_needs_human_review issue_id={issue_id} reason={verdict.reason}")
+                    await self._comment_completion_verdict(entry, verdict, next_action="human_review")
+                    self.state.claimed.discard(issue_id)
+                    self.state.retry_attempts.pop(issue_id, None)
+                    await self._sync_lifecycle_label(entry.issue.id, LIFECYCLE_LABELS["failed"])
+
+            except Exception as exc:
+                # 验证器本身异常也不能直接放行为完成
+                logger.exception(f"symphony_completion_verification_error issue_id={issue_id} error={exc}")
+                self.state.claimed.discard(issue_id)
+                await self._comment_completion_verification_error(entry, str(exc))
+                next_attempt = max(entry.retry_attempt + 1, 1)
+                self._schedule_retry(
+                    entry.issue,
+                    next_attempt,
+                    error=f"verification_error: {exc}",
+                    delay_ms=None,
+                )
+                await self._sync_lifecycle_label(entry.issue.id, LIFECYCLE_LABELS["retrying"])
         else:
             next_attempt = max(entry.retry_attempt + 1, 1)
             retry_error = f"worker exited: {error}"
@@ -317,6 +395,31 @@ class Orchestrator:
             await self._sync_lifecycle_label(entry.issue.id, LIFECYCLE_LABELS["retrying"])
             await self._comment_worker_failure(entry, retry_error, next_attempt)
         self._persist_state()
+
+    def _completion_workspace_path(self, entry: RunningEntry):
+        from pathlib import Path
+
+        if entry.workspace_path:
+            return Path(entry.workspace_path)
+        if self.workspace_manager is not None:
+            return self.workspace_manager.config.root
+        return self.config.workspace.root
+
+    async def _refresh_issue_after_completion(self, issue: Issue) -> Issue | None:
+        try:
+            refreshed = await self.tracker.fetch_issue_states_by_ids([issue.id])
+        except Exception as exc:
+            logger.warning(
+                "symphony_completion_state_refresh outcome=failed issue_id=%s issue_identifier=%s reason=%s",
+                issue.id,
+                issue.identifier,
+                exc,
+            )
+            return None
+        for current in refreshed:
+            if current.id == issue.id:
+                return current
+        return issue
 
     async def _comment_worker_failure(self, entry: RunningEntry, error: str, next_attempt: int) -> None:
         if self.config.tracker.kind != "linear" or error == "worker exited: cancelled":
@@ -342,12 +445,85 @@ class Orchestrator:
                 entry.issue.identifier,
             )
 
+    async def _comment_completion_verdict(self, entry: RunningEntry, verdict: Any, *, next_action: str) -> None:
+        if self.config.tracker.kind != "linear":
+            return
+        comment_issue = getattr(self.tracker, "comment_issue", None)
+        if not callable(comment_issue):
+            return
+        body = _completion_verdict_comment_body(entry, verdict, next_action=next_action)
+        try:
+            result = await comment_issue(entry.issue.id, body)
+        except Exception as exc:
+            logger.warning(
+                "symphony_completion_comment outcome=failed issue_id=%s issue_identifier=%s reason=%s",
+                entry.issue.id,
+                entry.issue.identifier,
+                exc,
+            )
+            return
+        if isinstance(result, dict) and result.get("success") is False:
+            logger.warning(
+                "symphony_completion_comment outcome=failed issue_id=%s issue_identifier=%s reason=linear_unsuccessful",
+                entry.issue.id,
+                entry.issue.identifier,
+            )
+
+    async def _comment_completion_verification_error(self, entry: RunningEntry, error: str) -> None:
+        if self.config.tracker.kind != "linear":
+            return
+        comment_issue = getattr(self.tracker, "comment_issue", None)
+        if not callable(comment_issue):
+            return
+        body = _completion_verification_error_comment_body(entry, error)
+        try:
+            result = await comment_issue(entry.issue.id, body)
+        except Exception as exc:
+            logger.warning(
+                "symphony_completion_comment outcome=failed issue_id=%s issue_identifier=%s reason=%s",
+                entry.issue.id,
+                entry.issue.identifier,
+                exc,
+            )
+            return
+        if isinstance(result, dict) and result.get("success") is False:
+            logger.warning(
+                "symphony_completion_comment outcome=failed issue_id=%s issue_identifier=%s reason=linear_unsuccessful",
+                entry.issue.id,
+                entry.issue.identifier,
+            )
+
+    async def _comment_handoff_preserved(self, entry: RunningEntry, refreshed_issue: Issue) -> None:
+        if self.config.tracker.kind != "linear":
+            return
+        comment_issue = getattr(self.tracker, "comment_issue", None)
+        if not callable(comment_issue):
+            return
+        body = _handoff_preserved_comment_body(entry, refreshed_issue)
+        try:
+            result = await comment_issue(entry.issue.id, body)
+        except Exception as exc:
+            logger.warning(
+                "symphony_handoff_comment outcome=failed issue_id=%s issue_identifier=%s reason=%s",
+                entry.issue.id,
+                entry.issue.identifier,
+                exc,
+            )
+            return
+        if isinstance(result, dict) and result.get("success") is False:
+            logger.warning(
+                "symphony_handoff_comment outcome=failed issue_id=%s issue_identifier=%s reason=linear_unsuccessful",
+                entry.issue.id,
+                entry.issue.identifier,
+            )
+
     def _schedule_retry(self, issue: Issue, attempt: int, *, error: str | None, delay_ms: int | None) -> None:
         if delay_ms is None:
             delay_ms = min(10_000 * (2 ** max(attempt - 1, 0)), self.config.agent.max_retry_backoff_ms)
         due_at = utc_now() + timedelta(milliseconds=delay_ms)
         due_at_ms = monotonic_ms() + delay_ms
         self.state.claimed.add(issue.id)
+        retry_context = _retry_context_from_issue(issue)
         self.state.retry_attempts[issue.id] = RetryEntry(
             issue_id=issue.id,
             identifier=issue.identifier,
@@ -358,13 +534,32 @@ class Orchestrator:
             issue_url=issue.url,
             phase="retrying" if error is not None else "done",
             status_label=LIFECYCLE_LABELS["retrying"] if error is not None else LIFECYCLE_LABELS["done"],
-            last_message=error,
+            last_message=retry_context or error,
         )
         self._sync_lifecycle_label_background(
             issue.id,
             LIFECYCLE_LABELS["retrying"] if error is not None else LIFECYCLE_LABELS["done"],
         )
         self._persist_state()
+
+    def _load_ops_snapshot(self):
+        """加载当前的 ops snapshot"""
+        try:
+            from .ops_store import OpsStore
+            from .persistence import ops_snapshot_path_from_persistence_path
+
+            ops_path = ops_snapshot_path_from_persistence_path(self.config.persistence.path)
+            if not ops_path.exists():
+                # 文件不存在，返回空 snapshot
+                from .ops_models import OpsSnapshot
+                return OpsSnapshot()
+            store = OpsStore(ops_path)
+            return store.load()
+        except Exception as e:
+            # 任何异常都返回空 snapshot，不阻塞完成流程
+            logger.warning(f"Failed to load ops snapshot: {e}, using empty snapshot")
+            from .ops_models import OpsSnapshot
+            return OpsSnapshot()
 
     async def reconcile_running(self) -> None:
         await self._reconcile_stalled()
@@ -392,6 +587,7 @@ class Orchestrator:
                 entry.issue = refreshed_issue
                 self._persist_state()
             else:
+                await self._comment_handoff_preserved(entry, refreshed_issue)
                 await self._terminate_running(issue_id, retry=False)
 
     async def _reconcile_stalled(self) -> None:
@@ -500,6 +696,8 @@ class Orchestrator:
             "message": entry.last_codex_message,
             "raw_method": event.get("raw_method") or event.get("method"),
             "usage": event.get("usage") or self._usage_row_from_tokens(self._extract_absolute_tokens(event)),
+            "command": _command_from_event(event),
+            "exit_code": _exit_code_from_event(event),
             "raw_event": dict(event),
         }
         entry.recent_events.append(row)
@@ -729,6 +927,40 @@ def _is_low_value_message(message: str) -> bool:
     return bool(stripped) and set(stripped) <= {".", " ", "\n", "\r", "\t"}
 
 
+def _command_from_event(event: dict[str, Any]) -> str | None:
+    payload = event.get("payload")
+    if not isinstance(payload, dict):
+        return None
+    command = payload.get("command")
+    if isinstance(command, str) and command.strip():
+        return command.strip()
+    item = payload.get("item")
+    if isinstance(item, dict):
+        nested = item.get("command")
+        if isinstance(nested, str) and nested.strip():
+            return nested.strip()
+    return None
+
+
+def _exit_code_from_event(event: dict[str, Any]) -> int | None:
+    payload = event.get("payload")
+    if not isinstance(payload, dict):
+        return None
+    value = payload.get("exit_code")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value.strip())
+    item = payload.get("item")
+    if isinstance(item, dict):
+        nested = item.get("exit_code")
+        if isinstance(nested, int):
+            return nested
+        if isinstance(nested, str) and nested.strip().isdigit():
+            return int(nested.strip())
+    return None
+
+
 def _failure_comment_body(entry: RunningEntry, error: str, next_attempt: int) -> str:
     event_type = "stalled" if error == "stalled" else "retry_backoff"
     reason = (
@@ -760,3 +992,153 @@ def _failure_comment_body(entry: RunningEntry, error: str, next_attempt: int) ->
     if entry.last_codex_message:
         lines.extend(["", f"Last observed message: {entry.last_codex_message}"])
     return "\n".join(lines)
+
+
+def _completion_verdict_comment_body(entry: RunningEntry, verdict: Any, *, next_action: str) -> str:
+    action_line = (
+        "Required next action: fix the verifier failures and retry."
+        if next_action == "retry"
+        else "Required next action: human review is required before closing this issue."
+    )
+    lines = [
+        "Verification failed after agent claimed success.",
+        "",
+        f"Verdict: {verdict.status}",
+        f"Reason: {verdict.reason}",
+        "",
+        "Observed evidence:",
+    ]
+    for check in getattr(verdict, "checks", []):
+        icon = "PASS" if check.passed else "FAIL"
+        lines.append(f"- [{icon}] {check.check_name}: {check.message}")
+        evidence = _format_check_evidence(getattr(check, "evidence", None))
+        if evidence:
+            lines.append(f"  Evidence: {evidence}")
+    if entry.last_codex_message:
+        lines.extend(["", f"Last observed message: {entry.last_codex_message}"])
+    lines.extend(["", action_line])
+    return "\n".join(lines)
+
+
+def _completion_verification_error_comment_body(entry: RunningEntry, error: str) -> str:
+    lines = [
+        "Verification failed after agent claimed success.",
+        "",
+        "Failure class: verifier_error",
+        f"Observed evidence: {error}",
+        "",
+        "Required next action: fix the verifier failure, then retry the issue.",
+    ]
+    if entry.last_codex_message:
+        lines.extend(["", f"Last observed message: {entry.last_codex_message}"])
+    return "\n".join(lines)
+
+
+def _handoff_preserved_comment_body(entry: RunningEntry, refreshed_issue: Issue) -> str:
+    evidence_path = entry.workspace_path or "<workspace path unavailable>"
+    lines = [
+        "Symphony stopped automation for human review.",
+        "",
+        f"Tracker state: {refreshed_issue.state}",
+        "Handoff type: non-active, non-terminal",
+        f"Workspace preserved for review: {evidence_path}",
+    ]
+    if entry.session_id:
+        lines.append(f"Codex session: {entry.session_id}")
+    if entry.last_codex_message:
+        lines.append(f"Last observed message: {entry.last_codex_message}")
+    lines.append("Required next action: inspect the preserved workspace and validation evidence before closing this issue.")
+    return "\n".join(lines)
+
+
+def _issue_with_verification_context(issue: Issue, verdict: Any) -> Issue:
+    evidence_lines = [f"- {check.check_name}: {check.message}" for check in getattr(verdict, "checks", []) if not check.passed]
+    if not evidence_lines:
+        evidence_lines = [f"- {verdict.reason}"]
+    context = "Previous attempt failed verification:\n" + "\n".join(evidence_lines)
+    description = issue.description or ""
+    marker = "Previous attempt failed verification:"
+    if marker in description:
+        description = description.split(marker, 1)[0].rstrip()
+    merged = f"{context}\n\n{description}".strip() if description else context
+    return Issue(
+        id=issue.id,
+        identifier=issue.identifier,
+        title=issue.title,
+        state=issue.state,
+        description=merged,
+        priority=issue.priority,
+        branch_name=issue.branch_name,
+        url=issue.url,
+        labels=list(issue.labels),
+        blocked_by=list(issue.blocked_by),
+        created_at=issue.created_at,
+        updated_at=issue.updated_at,
+        assignee_id=issue.assignee_id,
+        project_slug=issue.project_slug,
+        project_name=issue.project_name,
+    )
+
+
+def _issue_with_retry_context(issue: Issue, retry: RetryEntry) -> Issue:
+    retry_context = retry.last_message or retry.error
+    if not retry_context:
+        return issue
+    description = issue.description or ""
+    marker = "Previous attempt failed verification:"
+    if marker not in retry_context:
+        return issue
+    if marker in description:
+        description = description.split(marker, 1)[0].rstrip()
+    merged = f"{retry_context}\n\n{description}".strip() if description else retry_context
+    return Issue(
+        id=issue.id,
+        identifier=issue.identifier,
+        title=issue.title,
+        state=issue.state,
+        description=merged,
+        priority=issue.priority,
+        branch_name=issue.branch_name,
+        url=issue.url,
+        labels=list(issue.labels),
+        blocked_by=list(issue.blocked_by),
+        created_at=issue.created_at,
+        updated_at=issue.updated_at,
+        assignee_id=issue.assignee_id,
+        project_slug=issue.project_slug,
+        project_name=issue.project_name,
+    )
+
+
+def _retry_context_from_issue(issue: Issue) -> str | None:
+    description = issue.description or ""
+    marker = "Previous attempt failed verification:"
+    if marker not in description:
+        return None
+    return marker + description.split(marker, 1)[1]
+
+
+def _format_check_evidence(evidence: Any) -> str | None:
+    if not isinstance(evidence, dict) or not evidence:
+        return None
+    parts: list[str] = []
+    for key, value in evidence.items():
+        if isinstance(value, list):
+            rendered_items = []
+            for item in value[:5]:
+                if isinstance(item, dict):
+                    identity = item.get("identifier") or item.get("id") or "unknown"
+                    state = item.get("state")
+                    rendered_items.append(f"{identity} ({state})" if state else str(identity))
+                else:
+                    rendered_items.append(str(item))
+            rendered = ", ".join(rendered_items)
+            if len(value) > 5:
+                rendered += ", ..."
+        elif isinstance(value, dict):
+            rendered = ", ".join(f"{nested_key}={nested_value}" for nested_key, nested_value in list(value.items())[:5])
+        else:
+            rendered = str(value)
+        if rendered:
+            parts.append(f"{key}={rendered}")
+    return "; ".join(parts)[:1000] if parts else None

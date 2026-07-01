@@ -275,7 +275,10 @@ class ConductorService:
                     "Workflow validation failed",
                     diagnostics=validation.diagnostics,
                 )
-            updated = updated.with_updates(workflow_generation_status="valid")
+            updated = updated.with_updates(
+                workflow_content=workflow_content,
+                workflow_generation_status="valid",
+            )
             Path(updated.workflow_path).write_text(updated.workflow_content, encoding="utf-8")
         self.store.update_instance(updated)
         return updated
@@ -529,6 +532,7 @@ def _persisted_session_row(session: PersistedSession) -> dict[str, Any]:
         "tokens": {
             "input_tokens": session.tokens.input_tokens,
             "output_tokens": session.tokens.output_tokens,
+            "cached_tokens": session.tokens.cached_tokens,
             "total_tokens": session.tokens.total_tokens,
         },
     }
@@ -553,7 +557,7 @@ def _persisted_retry_row(entry) -> dict[str, Any]:
 def _runtime_metrics(symphony: dict[str, Any]) -> dict[str, Any]:
     running = symphony.get("running") if isinstance(symphony.get("running"), list) else []
     retrying = symphony.get("retrying") if isinstance(symphony.get("retrying"), list) else []
-    tokens = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+    tokens = {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0, "total_tokens": 0}
     turns = 0
     for row in running:
         if not isinstance(row, dict):
@@ -561,6 +565,7 @@ def _runtime_metrics(symphony: dict[str, Any]) -> dict[str, Any]:
         row_tokens = row.get("tokens") if isinstance(row.get("tokens"), dict) else {}
         tokens["input_tokens"] += _int(row_tokens.get("input_tokens"))
         tokens["output_tokens"] += _int(row_tokens.get("output_tokens"))
+        tokens["cached_tokens"] += _int(row_tokens.get("cached_tokens"))
         tokens["total_tokens"] += _int(row_tokens.get("total_tokens"))
         turns += _int(row.get("turn_count"))
     return {

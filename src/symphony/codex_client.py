@@ -96,7 +96,7 @@ class CodexAppServerClient:
             on_event,
             {
                 "event": "process_launch",
-                "command": launch_meta["parts"],
+                "command_argv": launch_meta["parts"],
                 "cwd": str(workspace_path),
                 "worker_host": worker_host or "local",
             },
@@ -166,9 +166,10 @@ class CodexAppServerClient:
                         "codex_app_server_pid": getattr(proc, "pid", None),
                     },
                 )
-                completed = await self._wait_for_turn(proc, turn_id, on_event)
-                if not completed:
-                    raise CodexError("turn_failed", "Turn did not complete successfully")
+                turn_outcome = await self._wait_for_turn(proc, turn_id, on_event)
+                if turn_outcome != "completed":
+                    code = "turn_cancelled" if turn_outcome == "cancelled" else "turn_failed"
+                    raise CodexError(code, f"Turn ended with status: {turn_outcome}")
                 turn_count += 1
                 last_turn_id = turn_id
                 if continuation_provider is None or turn_count >= max_turns:
@@ -490,7 +491,7 @@ class CodexAppServerClient:
         )
         await self._send(proc, {"id": request_id, "result": _tool_call_response(method, result)})
 
-    async def _wait_for_turn(self, proc: Any, turn_id: str, on_event: EventCallback | None) -> bool:
+    async def _wait_for_turn(self, proc: Any, turn_id: str, on_event: EventCallback | None) -> str:
         deadline = self.config.turn_timeout_ms / 1000
         try:
             return await asyncio.wait_for(self._wait_for_turn_event(turn_id, on_event), timeout=deadline)
@@ -498,7 +499,7 @@ class CodexAppServerClient:
             proc.kill()
             raise CodexError("turn_timeout", "Codex turn timed out") from exc
 
-    async def _wait_for_turn_event(self, turn_id: str, on_event: EventCallback | None) -> bool:
+    async def _wait_for_turn_event(self, turn_id: str, on_event: EventCallback | None) -> str:
         if self._event_queue is None:
             raise CodexError("response_error", "Codex event queue is not initialized")
         while True:
@@ -510,15 +511,18 @@ class CodexAppServerClient:
             for task in pending:
                 if task is event_task:
                     task.cancel()
+            if event_task in done:
+                event = event_task.result()
+                if event.get("turn_id") != turn_id:
+                    continue
+                if event["event"] == "turn_completed":
+                    return "completed"
+                if event["event"] == "turn_cancelled":
+                    return "cancelled"
+                if event["event"] in {"turn_failed", "turn_ended_with_error"}:
+                    return "failed"
             if self._fatal_error in done and self._fatal_error is not None:
                 raise self._fatal_error.result()
-            event = event_task.result()
-            if event.get("turn_id") != turn_id:
-                continue
-            if event["event"] == "turn_completed":
-                return True
-            if event["event"] in {"turn_failed", "turn_cancelled", "turn_ended_with_error"}:
-                return False
 
     def _set_fatal_error(self, error: CodexError) -> None:
         if self._fatal_error is not None and not self._fatal_error.done():
@@ -559,6 +563,12 @@ class CodexAppServerClient:
             "raw_method": method,
             "payload": params,
         }
+        command = self._command_from_params(method, params)
+        if command is not None:
+            event["command"] = command
+        exit_code = self._exit_code_from_params(method, params)
+        if exit_code is not None:
+            event["exit_code"] = exit_code
         if usage is not None:
             event.update(usage)
         return event
@@ -613,6 +623,32 @@ class CodexAppServerClient:
         status = params.get("status")
         if method.endswith("/status/changed") and isinstance(status, str) and status:
             return f"status={status}"
+        return None
+
+    def _command_from_params(self, method: str, params: dict[str, Any]) -> str | None:
+        command = params.get("command")
+        if isinstance(command, str) and command.strip():
+            return command.strip()
+        item = params.get("item")
+        if isinstance(item, dict):
+            nested = item.get("command")
+            if isinstance(nested, str) and nested.strip():
+                return nested.strip()
+        return None
+
+    def _exit_code_from_params(self, method: str, params: dict[str, Any]) -> int | None:
+        if self._command_from_params(method, params) is None:
+            return None
+        for key in ("exit_code", "exitCode"):
+            value = params.get(key)
+            if isinstance(value, int) and not isinstance(value, bool):
+                return value
+        item = params.get("item")
+        if isinstance(item, dict):
+            for key in ("exit_code", "exitCode"):
+                value = item.get(key)
+                if isinstance(value, int) and not isinstance(value, bool):
+                    return value
         return None
 
     def _int_from_keys(self, values: dict[str, Any], *keys: str) -> int:

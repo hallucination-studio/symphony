@@ -301,7 +301,7 @@ def test_instance_runtime_includes_persisted_symphony_issue_details(tmp_path: Pa
                         }
                     ],
                     turn_count=3,
-                    tokens=RuntimeTokens(input_tokens=20, output_tokens=8, total_tokens=28),
+                    tokens=RuntimeTokens(input_tokens=20, output_tokens=8, cached_tokens=5, total_tokens=33),
                 )
             ],
             retry_attempts=[
@@ -331,11 +331,13 @@ def test_instance_runtime_includes_persisted_symphony_issue_details(tmp_path: Pa
     assert runtime["symphony"]["running"][0]["phase"] == "running"
     assert runtime["symphony"]["running"][0]["status_label"] == "symphony:running"
     assert runtime["symphony"]["running"][0]["turn_count"] == 3
-    assert runtime["symphony"]["running"][0]["tokens"]["total_tokens"] == 28
+    assert runtime["symphony"]["running"][0]["tokens"]["cached_tokens"] == 5
+    assert runtime["symphony"]["running"][0]["tokens"]["total_tokens"] == 33
     assert runtime["symphony"]["running"][0]["recent_events"][0]["raw_event"]["payload"]["delta"] == "working"
     assert runtime["symphony"]["retrying"][0]["issue_identifier"] == "ENG-2"
     assert runtime["symphony"]["retrying"][0]["error"] == "worker exited: boom"
-    assert runtime["metrics"]["tokens"]["total_tokens"] == 28
+    assert runtime["metrics"]["tokens"]["cached_tokens"] == 5
+    assert runtime["metrics"]["tokens"]["total_tokens"] == 33
     assert runtime["metrics"]["turns"] == 3
     assert runtime["metrics"]["retrying"] == 1
 
@@ -423,6 +425,23 @@ def test_update_instance_revalidates_workflow_and_persists_raw_edits(tmp_path: P
 
     assert updated.workflow_generation_status == "valid"
     assert "Updated goal" in Path(updated.workflow_path).read_text(encoding="utf-8")
+
+
+def test_update_instance_persists_replaced_workflow_content_in_metadata(tmp_path: Path) -> None:
+    service = make_service(tmp_path)
+    repo = make_repo(tmp_path)
+    instance = service.create_instance(make_request(repo))
+    replacement = instance.workflow_content.replace("https://api.linear.app/graphql", "http://127.0.0.1:9999/graphql")
+
+    updated = service.update_instance(
+        instance.id,
+        InstancePatchRequest(workflow_content=replacement),
+    )
+
+    stored = service.get_instance(instance.id)
+    assert stored is not None
+    assert "http://127.0.0.1:9999/graphql" in updated.workflow_content
+    assert "http://127.0.0.1:9999/graphql" in stored.workflow_content
 
 
 def test_update_instance_rejects_invalid_raw_workflow(tmp_path: Path) -> None:

@@ -35,9 +35,12 @@ export async function renderRunsView(root, { onSummary = null } = {}) {
 }
 
 async function renderRunDetail(root, runId) {
-  const { run } = await getJSON(`/api/runs/${encodeURIComponent(runId)}`)
-  const detail = root.querySelector('#run-detail')
-  detail.innerHTML = `
+  const { run: payload } = await getJSON(`/api/runs/${encodeURIComponent(runId)}`)
+  const run = payload.run || {}
+  const metrics = payload.metrics || {}
+  const attempts = payload.attempts || []
+  const pane = root.querySelector('#run-detail')
+  pane.innerHTML = `
     <div class="detail-head">
       <div>
         <p class="eyebrow">${escapeHTML(run.issue_identifier || run.issue_id || 'Issue')}</p>
@@ -47,23 +50,23 @@ async function renderRunDetail(root, runId) {
     </div>
     <p class="state-note">${escapeHTML(run.failure_summary || run.last_reason_summary || 'Run is available for attempt and turn drill-down.')}</p>
     <div class="metric-row">
-      <span>Attempts <strong>${(run.attempts || []).length}</strong></span>
-      <span>Turns <strong>${run.turn_count || 0}</strong></span>
-      <span>Retry Count <strong>${run.retry_count || 0}</strong></span>
+      <span>Attempts <strong>${attempts.length}</strong></span>
+      <span>Turns <strong>${metrics.turns || run.turn_count || 0}</strong></span>
+      <span>Retry Count <strong>${metrics.retry_count || run.retry_count || 0}</strong></span>
     </div>
     <div class="metric-row">
-      <span>Total Tokens <strong>${formatTokens(run.total_tokens)}</strong></span>
-      <span>Estimated Cost <strong>${formatCurrency(run.estimated_cost_usd)}</strong></span>
-      <span>Duration <strong>${formatDuration(run.duration_ms)}</strong></span>
+      <span>Total Tokens <strong>${formatTokens(metrics.total_tokens || run.total_tokens)}</strong></span>
+      <span>Estimated Cost <strong>${formatCurrency(metrics.estimated_cost_usd || run.estimated_cost_usd)}</strong></span>
+      <span>Duration <strong>${formatDuration(metrics.duration_ms || run.duration_ms)}</strong></span>
     </div>
     <div class="metric-row">
-      <span>First Output <strong>${formatDuration(run.time_to_first_output_ms)}</strong></span>
-      <span>First Tool Call <strong>${formatDuration(run.time_to_first_tool_call_ms)}</strong></span>
-      <span>Last Activity <strong>${formatTimestamp(run.last_activity_at)}</strong></span>
+      <span>First Output <strong>${formatDuration(metrics.time_to_first_output_ms || run.time_to_first_output_ms)}</strong></span>
+      <span>First Tool Call <strong>${formatDuration(metrics.time_to_first_tool_call_ms || run.time_to_first_tool_call_ms)}</strong></span>
+      <span>Last Activity <strong>${formatTimestamp(metrics.last_activity_at || run.last_activity_at)}</strong></span>
     </div>
     <div class="timeline">
       <h4>Attempts and turns</h4>
-      ${(run.attempts || []).map(renderAttempt).join('') || '<p class="muted">No attempts recorded.</p>'}
+      ${attempts.map(renderAttempt).join('') || '<p class="muted">No attempts recorded.</p>'}
     </div>
   `
 }

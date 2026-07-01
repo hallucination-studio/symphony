@@ -50,10 +50,18 @@ class AgentRunner:
         self.workspace_manager.validate_workspace_path(workspace.path)
         await self.workspace_manager.run_before_run(workspace.path)
         try:
+            issue_payload = asdict(issue)
+            prompt_prefix = ""
+            if attempt and attempt > 1:
+                retry_context = _retry_context_from_issue(issue)
+                if retry_context:
+                    prompt_prefix = f"Previous attempt failed verification:\n{retry_context}\n\n"
             prompt = render_prompt(
                 self.config.prompt_template,
-                {"issue": asdict(issue), "attempt": attempt},
+                {"issue": issue_payload, "attempt": attempt},
             )
+            if prompt_prefix:
+                prompt = f"{prompt_prefix}{prompt}"
             logger.info(
                 "symphony_runner outcome=starting issue_id=%s issue_identifier=%s workspace=%s worker_host=%s",
                 issue.id,
@@ -166,14 +174,24 @@ class AgentRunner:
     ) -> Any:
         turn_ids: dict[str, str] = {}
 
+        def ensure_ops_turn_id(turn_key: Any) -> str | None:
+            if isinstance(turn_key, str) and turn_key:
+                existing = turn_ids.get(turn_key)
+                if existing is not None:
+                    return existing
+                turn_number = len(turn_ids) + 1
+                ops_turn_id = telemetry.open_turn(attempt_id, turn_number)
+                turn_ids[turn_key] = ops_turn_id
+                return ops_turn_id
+            if turn_ids:
+                return next(reversed(turn_ids.values()))
+            return None
+
         def handle(event: dict[str, Any]) -> None:
             event_name = event.get("event")
             turn_key = event.get("turn_id")
             if event_name == "turn_started":
-                turn_number = len(turn_ids) + 1
-                ops_turn_id = telemetry.open_turn(attempt_id, turn_number)
-                if isinstance(turn_key, str) and turn_key:
-                    turn_ids[turn_key] = ops_turn_id
+                ops_turn_id = ensure_ops_turn_id(turn_key)
                 telemetry.record_event(
                     telemetry.make_event(
                         "codex_turn_started",
@@ -184,18 +202,20 @@ class AgentRunner:
                     )
                 )
             elif event_name == "thread_token_usage_updated":
-                ops_turn_id = _current_turn_id(turn_ids, turn_key)
+                ops_turn_id = ensure_ops_turn_id(turn_key)
+                # Fix: support both formats - usage dict or top-level tokens
+                # Real codex_client does event.update(usage), tests use event["usage"]
                 usage = event.get("usage") if isinstance(event.get("usage"), dict) else {}
                 if ops_turn_id is not None:
                     telemetry.update_turn_tokens(
                         ops_turn_id,
-                        input_tokens=_int(usage.get("input_tokens")),
-                        output_tokens=_int(usage.get("output_tokens")),
-                        cached_tokens=_int(usage.get("cached_tokens")),
-                        total_tokens=_int(usage.get("total_tokens")),
+                        input_tokens=_int(usage.get("input_tokens") or event.get("input_tokens")),
+                        output_tokens=_int(usage.get("output_tokens") or event.get("output_tokens")),
+                        cached_tokens=_int(usage.get("cached_tokens") or event.get("cached_tokens")),
+                        total_tokens=_int(usage.get("total_tokens") or event.get("total_tokens")),
                     )
             elif event_name in {"turn_completed", "turn_failed", "turn_cancelled", "turn_ended_with_error"}:
-                ops_turn_id = _current_turn_id(turn_ids, turn_key)
+                ops_turn_id = ensure_ops_turn_id(turn_key)
                 if ops_turn_id is not None:
                     status = "completed" if event_name == "turn_completed" else "failed"
                     telemetry.finish_turn(ops_turn_id, status=status, stop_reason=event.get("message"))
@@ -205,7 +225,7 @@ class AgentRunner:
                         str(event_name),
                         run_id=run_id,
                         attempt_id=attempt_id,
-                        turn_id=_current_turn_id(turn_ids, turn_key),
+                        turn_id=ensure_ops_turn_id(turn_key),
                         payload=dict(event),
                     )
                 )
@@ -230,3 +250,11 @@ def _int(value: Any) -> int:
     if isinstance(value, str) and value.strip().isdigit():
         return int(value.strip())
     return 0
+
+
+def _retry_context_from_issue(issue: Issue) -> str | None:
+    description = issue.description or ""
+    marker = "Previous attempt failed verification:"
+    if marker in description:
+        return description.split(marker, 1)[1].strip()
+    return description.strip() or None

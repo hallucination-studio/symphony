@@ -179,7 +179,7 @@ class LinearClient:
     async def graphql(self, query: str, variables: dict[str, Any] | None = None) -> dict[str, Any]:
         headers = {"Authorization": self.api_key, "Content-Type": "application/json"}
         try:
-            async with httpx.AsyncClient(timeout=self.timeout, transport=self._transport) as client:
+            async with httpx.AsyncClient(timeout=self.timeout, transport=self._transport, trust_env=False) as client:
                 response = await client.post(
                     self.endpoint,
                     json={"query": query, "variables": variables or {}},
@@ -351,7 +351,15 @@ class LinearTracker:
         return await self.client.set_issue_lifecycle_label(issue_id, label_name)
 
 
-def format_linear_milestone_comment(issue_detail: dict[str, object], *, event_type: str, debug_url: str) -> str:
+def format_linear_milestone_comment(
+    issue_detail: dict[str, object], *, event_type: str, debug_url: str, verdict=None
+) -> str:
+    """
+    格式化 Linear milestone comment
+
+    Args:
+        verdict: 可选的 CompletionVerdict，用于展示验证结果
+    """
     latest_run = issue_detail.get("latest_run")
     if not isinstance(latest_run, dict):
         latest_run = {}
@@ -359,14 +367,49 @@ def format_linear_milestone_comment(issue_detail: dict[str, object], *, event_ty
     tokens = int(latest_run.get("total_tokens") or 0)
     cost = float(latest_run.get("estimated_cost_usd") or 0.0)
     reason = str(issue_detail.get("state_explanation") or "")
-    return (
-        f"Symphony milestone: {event_type}\n"
-        f"Turns: {turns}\n"
-        f"Tokens: {tokens}\n"
-        f"Cost: ${cost:.2f}\n"
-        f"Reason: {reason}\n"
-        f"Debug: {debug_url}"
-    )
+
+    # 基础信息
+    lines = [
+        f"Symphony milestone: {event_type}",
+        f"Turns: {turns}",
+    ]
+
+    # Token 信息（仅当非 0 时显示）
+    if tokens > 0:
+        lines.append(f"Tokens: {tokens}")
+
+    # Cost 信息
+    if cost > 0:
+        lines.append(f"Cost: ${cost:.2f}")
+    else:
+        lines.append("Cost: N/A")
+
+    lines.append(f"Reason: {reason}")
+    lines.append(f"Debug: {debug_url}")
+
+    # 🆕 添加验证结果
+    if verdict:
+        lines.append("")
+        lines.append(f"✅ Completion Verification (verified at {verdict.verified_at}):")
+
+        for check in verdict.checks:
+            icon = "✅" if check.passed else "❌"
+            lines.append(f"  {icon} {check.check_name}: {check.message}")
+
+        # 添加关键证据
+        if "diff_stat" in verdict.evidence:
+            stat_lines = verdict.evidence["diff_stat"].split("\n")
+            if stat_lines:
+                lines.append(f"  - Changes: {stat_lines[0]}")
+        if "test_output" in verdict.evidence:
+            lines.append(f"  - Tests: {verdict.evidence['test_output']}")
+        if "duration_sec" in verdict.evidence:
+            lines.append(f"  - Duration: {verdict.evidence['duration_sec']}s")
+
+        lines.append("")
+        lines.append("Verified by: Symphony Completion Verifier v1.0")
+
+    return "\n".join(lines)
 
 
 def _normalize_issue(node: dict[str, Any]) -> Issue:

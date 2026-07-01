@@ -321,6 +321,56 @@ async def test_web_shell_mentions_trace_and_retention_surfaces(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
+async def test_issue_and_run_views_use_detail_payload_shapes(tmp_path: Path) -> None:
+    service = make_service(tmp_path)
+    server = ConductorApiServer(service)
+    await server.start(port=0)
+    try:
+        assert server.port is not None
+
+        status, headers, body = await request(server.port, "GET", "/assets/views/issues.js")
+        assert status == 200
+        assert headers["content-type"].startswith("text/javascript")
+        assert b"issue.events" in body
+        assert b"issue.timeline" not in body
+
+        status, headers, body = await request(server.port, "GET", "/assets/views/runs.js")
+        assert status == 200
+        assert headers["content-type"].startswith("text/javascript")
+        assert b"const { run: payload }" in body
+        assert b"payload.attempts" in body
+        assert b"payload.metrics" in body
+    finally:
+        await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_trace_and_retention_views_wire_filters_and_event_counts(tmp_path: Path) -> None:
+    service = make_service(tmp_path)
+    server = ConductorApiServer(service)
+    await server.start(port=0)
+    try:
+        assert server.port is not None
+
+        status, headers, body = await request(server.port, "GET", "/assets/views/trace.js")
+        assert status == 200
+        assert headers["content-type"].startswith("text/javascript")
+        assert b"trace-filter" in body
+        assert b"trace-tier" in body
+        assert b"addEventListener('input'" in body
+        assert b"addEventListener('change'" in body
+
+        status, headers, body = await request(server.port, "GET", "/assets/views/ops.js")
+        assert status == 200
+        assert headers["content-type"].startswith("text/javascript")
+        assert b"retention.event_counts?.summary" in body
+        assert b"retention.event_counts?.trace" in body
+        assert b"retention.event_counts?.raw" in body
+    finally:
+        await server.stop()
+
+
+@pytest.mark.asyncio
 async def test_api_previews_instance_workflow_without_creating_instance(tmp_path: Path) -> None:
     repo = make_repo(tmp_path)
     service = make_service(tmp_path)

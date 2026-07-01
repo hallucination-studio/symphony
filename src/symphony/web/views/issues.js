@@ -37,6 +37,7 @@ export async function renderIssuesView(root, { onSummary = null } = {}) {
 async function renderIssueDetail(root, issueId) {
   const { issue } = await getJSON(`/api/issues/${encodeURIComponent(issueId)}`)
   const detail = root.querySelector('#issue-detail')
+  const tracePreview = (issue.events || []).slice(0, 6)
   detail.innerHTML = `
     <div class="detail-head">
       <div>
@@ -67,7 +68,7 @@ async function renderIssueDetail(root, issueId) {
     </div>
     <div class="timeline">
       <h4>Codex trace preview</h4>
-      ${(issue.timeline || []).slice(0, 6).map(renderTimelineEvent).join('') || '<p class="muted">No trace events recorded.</p>'}
+      ${tracePreview.map(renderTimelineEvent).join('') || '<p class="muted">No trace events recorded.</p>'}
     </div>
   `
 

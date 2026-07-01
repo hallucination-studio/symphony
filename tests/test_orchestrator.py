@@ -8,6 +8,7 @@ import pytest
 
 from symphony.config import (
     AgentConfig,
+    CompletionVerificationConfig,
     CodexConfig,
     HooksConfig,
     PollingConfig,
@@ -108,6 +109,32 @@ def make_config_with_labels(
         codex=CodexConfig(stall_timeout_ms=300_000),
         prompt_template="Do {{ issue.identifier }}",
         workflow_path=tmp_path / "WORKFLOW.md",
+        completion_verification=CompletionVerificationConfig(enabled=False),
+    )
+
+
+def make_config_with_completion_verification(
+    tmp_path: Path,
+    *,
+    required_checks: list[str],
+    optional_checks: list[str] | None = None,
+    auto_retry_on_fail: bool = True,
+) -> ServiceConfig:
+    config = make_config(tmp_path)
+    return ServiceConfig(
+        tracker=config.tracker,
+        polling=config.polling,
+        workspace=config.workspace,
+        hooks=config.hooks,
+        agent=config.agent,
+        codex=config.codex,
+        prompt_template=config.prompt_template,
+        workflow_path=config.workflow_path,
+        completion_verification=CompletionVerificationConfig(
+            required_checks=required_checks,
+            optional_checks=optional_checks or [],
+            auto_retry_on_fail=auto_retry_on_fail,
+        ),
     )
 
 
@@ -226,6 +253,33 @@ class CompletingRunner:
                 },
             }
         )
+        on_event({"event": "turn_completed", "session_id": "thread-1-turn-1", "turn_id": "turn-1"})
+
+
+class ControlledCompletingRunner:
+    def __init__(self) -> None:
+        self.started = asyncio_event()
+        self.release = asyncio_event()
+
+    async def run_issue(
+        self, issue: Issue, attempt: int | None, on_event: Any, *, worker_host: str | None = None
+    ) -> None:
+        on_event({"event": "session_started", "session_id": "thread-1-turn-1", "codex_app_server_pid": 123})
+        on_event(
+            {
+                "event": "thread_token_usage_updated",
+                "session_id": "thread-1-turn-1",
+                "payload": {
+                    "total_token_usage": {
+                        "input_tokens": 100,
+                        "output_tokens": 40,
+                        "total_tokens": 140,
+                    }
+                },
+            }
+        )
+        self.started.set()
+        await self.release.wait()
         on_event({"event": "turn_completed", "session_id": "thread-1-turn-1", "turn_id": "turn-1"})
 
 
@@ -602,15 +656,129 @@ async def test_worker_lifecycle_logs_include_issue_and_session_context(
 
 
 @pytest.mark.asyncio
-async def test_normal_worker_exit_records_completed_bookkeeping(tmp_path: Path) -> None:
+async def test_normal_worker_exit_schedules_continuation_for_still_active_issue(tmp_path: Path) -> None:
     tracker = FakeTracker(candidates=[issue("MT-1")])
     orchestrator = Orchestrator(make_config(tmp_path), tracker, CompletingRunner())
 
     await orchestrator.tick()
     await orchestrator.wait_for_idle()
 
+    retry = orchestrator.state.retry_attempts["mt-1"]
+    assert "mt-1" not in orchestrator.state.completed
+    assert "mt-1" in orchestrator.state.claimed
+    assert retry.attempt == 1
+    assert retry.error is None
+
+
+@pytest.mark.asyncio
+async def test_normal_worker_exit_records_completed_bookkeeping_for_terminal_issue(tmp_path: Path) -> None:
+    tracker = FakeTracker(candidates=[issue("MT-1")])
+    tracker.refreshed = [issue("MT-1", state="Done")]
+    orchestrator = Orchestrator(make_config(tmp_path), tracker, CompletingRunner())
+
+    await orchestrator.tick()
+    await orchestrator.wait_for_idle()
+
     assert "mt-1" in orchestrator.state.completed
+    assert "mt-1" not in orchestrator.state.claimed
+    assert "mt-1" not in orchestrator.state.retry_attempts
     assert ("mt-1", "symphony:done") in tracker.lifecycle_labels
+
+
+@pytest.mark.asyncio
+async def test_completion_verification_failure_retries_instead_of_marking_done(tmp_path: Path) -> None:
+    tracker = FakeTracker(candidates=[issue("MT-1")])
+    workspace = tmp_path / "MT-1"
+    workspace.mkdir()
+    (workspace / ".git").mkdir()
+    runner = ControlledCompletingRunner()
+    orchestrator = Orchestrator(
+        make_config_with_completion_verification(tmp_path, required_checks=["workspace_changes"]),
+        tracker,
+        runner,
+    )
+
+    await orchestrator.tick()
+    await runner.started.wait()
+    orchestrator.state.running["mt-1"].workspace_path = str(workspace)
+    runner.release.set()
+    await orchestrator.wait_for_idle()
+
+    assert "mt-1" not in orchestrator.state.completed
+    assert "mt-1" in orchestrator.state.retry_attempts
+    assert "mt-1" in orchestrator.state.claimed
+    assert tracker.lifecycle_labels[-1] == ("mt-1", "symphony:retrying")
+    assert tracker.comments[-1][0] == "mt-1"
+    assert "Verification failed after agent claimed success." in tracker.comments[-1][1]
+    assert "workspace_changes" in tracker.comments[-1][1]
+
+
+@pytest.mark.asyncio
+async def test_completion_verification_needs_human_does_not_mark_done(tmp_path: Path) -> None:
+    tracker = FakeTracker(candidates=[issue("MT-1")])
+    tracker.refreshed = [
+        issue(
+            "MT-1",
+            blocked_by=[BlockerRef(id="dep-1", identifier="MT-0", state="In Progress")],
+        )
+    ]
+    workspace = tmp_path / "MT-1"
+    workspace.mkdir()
+    (workspace / "README.md").write_text("changed\n", encoding="utf-8")
+    runner = ControlledCompletingRunner()
+    orchestrator = Orchestrator(
+        make_config_with_completion_verification(
+            tmp_path,
+            required_checks=[],
+            optional_checks=["linear_state"],
+            auto_retry_on_fail=True,
+        ),
+        tracker,
+        runner,
+    )
+
+    await orchestrator.tick()
+    await runner.started.wait()
+    orchestrator.state.running["mt-1"].workspace_path = str(workspace)
+    runner.release.set()
+    await orchestrator.wait_for_idle()
+
+    assert "mt-1" not in orchestrator.state.completed
+    assert "mt-1" not in orchestrator.state.retry_attempts
+    assert "mt-1" not in orchestrator.state.claimed
+    assert tracker.lifecycle_labels[-1] != ("mt-1", "symphony:done")
+    assert tracker.comments[-1][0] == "mt-1"
+    assert "human review is required" in tracker.comments[-1][1].lower()
+
+
+@pytest.mark.asyncio
+async def test_retry_prompt_includes_previous_verification_failure_reason(tmp_path: Path) -> None:
+    from symphony.runner import AgentRunner
+    from symphony.workspace import WorkspaceManager
+
+    class CapturingCodexClient:
+        def __init__(self) -> None:
+            self.prompts: list[str] = []
+
+        async def run_session(self, workspace_path, prompt, title, **kwargs):
+            self.prompts.append(prompt)
+
+    class NoopTracker:
+        async def fetch_issue_states_by_ids(self, issue_ids: list[str]) -> list[Issue]:
+            return [issue("MT-1")]
+
+    config = make_config(tmp_path)
+    workspace_manager = WorkspaceManager(config.workspace, config.hooks)
+    codex_client = CapturingCodexClient()
+    runner = AgentRunner(config, workspace_manager, codex_client=codex_client, tracker=NoopTracker())
+
+    issue_payload = issue("MT-1")
+    issue_payload.description = "Previous attempt failed verification: workspace_changes"
+
+    await runner.run_issue(issue_payload, 2, lambda event: None)
+
+    assert "Previous attempt failed verification:" in codex_client.prompts[0]
+    assert "workspace_changes" in codex_client.prompts[0]
 
 
 @pytest.mark.asyncio
@@ -755,6 +923,43 @@ async def test_low_value_codex_events_do_not_overwrite_last_useful_message(tmp_p
     )
 
     assert orchestrator.state.running["mt-1"].last_codex_message == "189 passed, 1 skipped"
+
+
+@pytest.mark.asyncio
+async def test_command_execution_events_capture_command_and_exit_code_in_recent_events(tmp_path: Path) -> None:
+    tracker = FakeTracker(candidates=[issue("MT-1")])
+    runner = FakeRunner()
+    orchestrator = Orchestrator(make_config(tmp_path), tracker, runner)
+    await orchestrator.tick()
+
+    orchestrator.on_codex_event(
+        "mt-1",
+        {
+            "event": "notification",
+            "thread_id": "thread-1",
+            "turn_id": "turn-1",
+            "session_id": "thread-1-turn-1",
+            "raw_method": "item/commandExecution/started",
+            "payload": {"command": "pytest tests/test_target.py::test_fix -q"},
+        },
+    )
+    orchestrator.on_codex_event(
+        "mt-1",
+        {
+            "event": "notification",
+            "thread_id": "thread-1",
+            "turn_id": "turn-1",
+            "session_id": "thread-1-turn-1",
+            "raw_method": "item/completed",
+            "payload": {"exit_code": 0, "command": "pytest tests/test_target.py::test_fix -q"},
+            "message": "1 passed",
+        },
+    )
+
+    recent = orchestrator.state.running["mt-1"].recent_events
+    assert recent[-2]["command"] == "pytest tests/test_target.py::test_fix -q"
+    assert recent[-1]["command"] == "pytest tests/test_target.py::test_fix -q"
+    assert recent[-1]["exit_code"] == 0
 
 
 @pytest.mark.asyncio

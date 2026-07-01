@@ -26,6 +26,7 @@ def test_recorder_creates_run_attempt_turn_and_events(tmp_path: Path) -> None:
     assert snapshot.runs[run_id].turn_count == 1
     assert snapshot.runs[run_id].total_tokens == 18
     assert snapshot.attempts[attempt_id].turn_count == 1
+    assert snapshot.attempts[attempt_id].status == "completed"
     assert snapshot.turns[turn_id].cached_tokens == 2
     assert snapshot.events[-1].event_type == "run_completed"
 

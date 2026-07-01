@@ -1,7 +1,45 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field, fields
-from typing import Any
+from typing import Any, Literal
+
+
+@dataclass
+class CompletionVerdict:
+    """完成验证判定"""
+
+    status: Literal["VERIFIED", "NEEDS_RETRY", "NEEDS_HUMAN"]
+    reason: str
+    checks: list["CheckResult"]
+    verified_at: str
+    evidence: dict[str, Any]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "status": self.status,
+            "reason": self.reason,
+            "checks": [c.to_dict() for c in self.checks],
+            "verified_at": self.verified_at,
+            "evidence": self.evidence,
+        }
+
+
+@dataclass
+class CheckResult:
+    """单个检查结果"""
+
+    check_name: str
+    passed: bool
+    message: str
+    evidence: dict[str, Any]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "check_name": self.check_name,
+            "passed": self.passed,
+            "message": self.message,
+            "evidence": self.evidence,
+        }
 
 
 @dataclass(frozen=True)
