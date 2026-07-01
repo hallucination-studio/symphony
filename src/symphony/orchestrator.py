@@ -6,11 +6,19 @@ from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any, Protocol
 
-from .acceptance import AcceptanceReport, parse_acceptance_report
+from .acceptance import (
+    AcceptanceReport,
+    CodexGatePlanner,
+    GatePlan,
+    GatePlanReport,
+    parse_acceptance_report,
+    parse_gate_plan_report,
+)
 from .config import ConfigError, ServiceConfig
 from .completion_verifier import CompletionVerifier
 from .models import (
     LIFECYCLE_LABELS,
+    ContinuationEntry,
     Issue,
     RetryEntry,
     RunningEntry,
@@ -52,11 +60,16 @@ class AcceptanceRunnerProtocol(Protocol):
     async def run_acceptance(self, **kwargs: Any) -> str: ...
 
 
+class GatePlannerProtocol(Protocol):
+    async def plan_gates(self, **kwargs: Any) -> str: ...
+
+
 @dataclass
 class OrchestratorState:
     running: dict[str, RunningEntry] = field(default_factory=dict)
     claimed: set[str] = field(default_factory=set)
     retry_attempts: dict[str, RetryEntry] = field(default_factory=dict)
+    continuations: dict[str, ContinuationEntry] = field(default_factory=dict)
     completed: set[str] = field(default_factory=set)
     codex_totals: RuntimeTokens = field(default_factory=RuntimeTokens)
     codex_rate_limits: dict[str, Any] | None = None
@@ -73,11 +86,13 @@ class Orchestrator:
         workspace_manager: WorkspaceManager | None = None,
         persistence_store: PersistenceStore | None = None,
         acceptance_runner: AcceptanceRunnerProtocol | None = None,
+        gate_planner: GatePlannerProtocol | None = None,
     ):
         self.config = config
         self.tracker = tracker
         self.runner = runner
         self.acceptance_runner = acceptance_runner
+        self.gate_planner = gate_planner
         self.workspace_manager = workspace_manager
         self.persistence_store = persistence_store
         self.completion_verifier = CompletionVerifier(config.completion_verification, tracker)
@@ -92,6 +107,9 @@ class Orchestrator:
         for retry in persisted.retry_attempts:
             self.state.retry_attempts[retry.issue_id] = retry
             self.state.claimed.add(retry.issue_id)
+        for continuation in persisted.continuations:
+            self.state.continuations[continuation.issue_id] = continuation
+            self.state.claimed.add(continuation.issue_id)
 
     async def tick(self) -> None:
         await self.reconcile_running()
@@ -100,6 +118,7 @@ class Orchestrator:
         except ConfigError as exc:
             logger.warning("symphony_dispatch_validation failed code=%s reason=%s", exc.code, exc)
             return
+        await self.process_due_continuations()
         await self.process_due_retries()
         try:
             candidates = await self.tracker.fetch_candidate_issues()
@@ -226,6 +245,60 @@ class Orchestrator:
             self.dispatch_issue(_issue_with_retry_context(issue, retry), attempt=retry.attempt, worker_host=worker_host)
         await asyncio.sleep(0)
 
+    async def process_due_continuations(self) -> None:
+        now_ms = monotonic_ms()
+        due = [entry for entry in self.state.continuations.values() if entry.due_at_ms <= now_ms]
+        if not due:
+            return
+        try:
+            candidates = await self.tracker.fetch_candidate_issues()
+        except Exception as exc:
+            logger.warning("symphony_continuation failed reason=%s", exc)
+            for continuation in due:
+                issue = Issue(
+                    id=continuation.issue_id,
+                    identifier=continuation.identifier,
+                    title=continuation.identifier,
+                    state=self.config.tracker.active_states[0] if self.config.tracker.active_states else "",
+                    url=continuation.issue_url,
+                    project_slug=self.config.tracker.project_slug,
+                )
+                self._schedule_continuation(
+                    issue,
+                    continuation.attempt,
+                    delay_ms=self.config.polling.interval_ms,
+                    last_message=f"continuation poll failed: {exc}",
+                )
+            return
+        by_id = {issue.id: issue for issue in candidates}
+        for continuation in due:
+            self.state.continuations.pop(continuation.issue_id, None)
+            self.state.claimed.discard(continuation.issue_id)
+            issue = by_id.get(continuation.issue_id)
+            if issue is None:
+                self._persist_state()
+                continue
+            if self.available_slots() <= 0 or not self.should_dispatch(issue):
+                if self.available_slots() <= 0:
+                    self._schedule_continuation(
+                        issue,
+                        continuation.attempt,
+                        delay_ms=self.config.polling.interval_ms,
+                        last_message="no available orchestrator slots",
+                    )
+                continue
+            worker_host = self._select_worker_host()
+            if self.config.worker.ssh_hosts and worker_host is None:
+                self._schedule_continuation(
+                    issue,
+                    continuation.attempt,
+                    delay_ms=self.config.polling.interval_ms,
+                    last_message="no available worker host",
+                )
+                continue
+            self.dispatch_issue(issue, attempt=continuation.attempt, worker_host=worker_host)
+        await asyncio.sleep(0)
+
     def should_dispatch(self, issue: Issue) -> bool:
         return self.dispatch_skip_reason(issue) is None
 
@@ -318,10 +391,30 @@ class Orchestrator:
         return None
 
     async def _acceptance_preflight(self, issue: Issue) -> dict[str, Any] | None:
-        acceptance_issue = await self._ensure_acceptance_issue(issue, completion_verdict=None)
-        if acceptance_issue is None:
+        gates = await self._fetch_gate_issues(issue)
+        if not gates:
+            planner = self.gate_planner or CodexGatePlanner(self.config)
+            raw_plan = await planner.plan_gates(issue=issue, workspace_path=str(self.config.workspace.root))
+            plan = parse_gate_plan_report(raw_plan)
+            if plan.needs_more_info:
+                await self._handle_gate_plan_needs_more_info(issue, plan)
+                return None
+            if not plan.valid:
+                await self._comment_gate_plan_rejected(issue, plan)
+                await self._sync_label_group(
+                    issue.id,
+                    self.config.acceptance.needs_more_info_label,
+                    prefix="symphony:needs-more-info",
+                )
+                return None
+            gates = []
+            for index, gate in enumerate(plan.gates, start=1):
+                created = await self._create_gate_issue(issue, gate, index=index)
+                if created:
+                    gates.append(created)
+        if not gates:
             return None
-        block = _acceptance_marker_block(issue, acceptance_issue, self.config.acceptance)
+        block = _gate_plan_marker_block(issue, gates, self.config.acceptance)
         update_description = getattr(self.tracker, "update_issue_description_marker_block", None)
         if callable(update_description):
             await update_description(issue.id, self.config.acceptance.marker_name, block)
@@ -329,10 +422,44 @@ class Orchestrator:
         await self._sync_label_group(issue.id, self.config.acceptance.gate_pending_label, prefix="symphony:gate/")
         await self._sync_label_group(issue.id, self.config.acceptance.planned_phase_label, prefix="symphony:phase/")
         await self._transition_issue_by_state_name(issue.id, self.config.acceptance.implementation_state)
-        return acceptance_issue
+        return gates[0]
+
+    async def _fetch_gate_issues(self, issue: Issue) -> list[dict[str, Any]]:
+        fetch_children = getattr(self.tracker, "fetch_child_issues", None)
+        if not callable(fetch_children):
+            return []
+        children = await fetch_children(issue.id, label_name=self.config.acceptance.gate_type_label)
+        return [child for child in children if _issue_dict_has_label(child, self.config.acceptance.gate_type_label)]
+
+    async def _create_gate_issue(self, issue: Issue, gate: GatePlan, *, index: int) -> dict[str, Any] | None:
+        create_child = getattr(self.tracker, "create_child_issue_for", None)
+        if not callable(create_child):
+            return None
+        title = f"[Gate] {issue.identifier}: {gate.title}"
+        description = _gate_issue_description(issue, gate, index=index)
+        return await create_child(
+            parent_issue_id=issue.id,
+            title=title,
+            description=description,
+            label_names=[self.config.acceptance.gate_type_label],
+        )
+
+    async def _handle_gate_plan_needs_more_info(self, issue: Issue, plan: GatePlanReport) -> None:
+        await self._sync_label_group(
+            issue.id,
+            self.config.acceptance.needs_more_info_label,
+            prefix="symphony:needs-more-info",
+        )
+        comment_issue = getattr(self.tracker, "comment_issue", None)
+        if callable(comment_issue):
+            await comment_issue(issue.id, _gate_plan_needs_more_info_comment(issue, plan.questions))
+
+    async def _comment_gate_plan_rejected(self, issue: Issue, plan: GatePlanReport) -> None:
+        comment_issue = getattr(self.tracker, "comment_issue", None)
+        if callable(comment_issue):
+            await comment_issue(issue.id, _gate_plan_rejected_comment(issue, plan.rejection_reasons))
 
     async def _handle_direct_done_bypass(self, issue: Issue) -> None:
-        acceptance_issue = await self._ensure_acceptance_issue(issue, completion_verdict=None)
         if not _has_acceptance_evidence(issue):
             await self._comment_policy_violation(issue, has_evidence=False)
             await self._sync_label_group(issue.id, self.config.acceptance.gate_failed_label, prefix="symphony:gate/")
@@ -341,7 +468,7 @@ class Orchestrator:
             return
         await self._comment_policy_violation(issue, has_evidence=True)
         await self._transition_issue_by_state_name(issue.id, self.config.acceptance.review_state)
-        await self._run_acceptance_gate_for_issue(issue, acceptance_issue=acceptance_issue, completion_verdict=None)
+        await self._run_acceptance_gate_for_issue(issue, completion_verdict=None)
 
     async def _ensure_acceptance_issue(self, issue: Issue, completion_verdict: Any | None) -> dict[str, Any] | None:
         if self.config.tracker.kind != "linear":
@@ -381,6 +508,17 @@ class Orchestrator:
         await self._ensure_acceptance_relation(created, issue)
         return created
 
+    async def _find_legacy_acceptance_issue(self, issue: Issue) -> dict[str, Any] | None:
+        if self.config.tracker.kind != "linear":
+            return None
+        find_acceptance = getattr(self.tracker, "find_acceptance_issue_for", None)
+        if not callable(find_acceptance):
+            return None
+        return await find_acceptance(
+            original_issue=issue,
+            acceptance_label_name=self.config.acceptance.acceptance_type_label,
+        )
+
     async def _ensure_acceptance_relation(self, acceptance_issue: dict[str, Any], issue: Issue) -> None:
         acceptance_issue_id = str(acceptance_issue.get("id") or "")
         if not acceptance_issue_id:
@@ -408,10 +546,97 @@ class Orchestrator:
         completion_verdict: Any | None = None,
         workspace_path: str | None = None,
     ) -> None:
-        acceptance_issue = acceptance_issue or await self._ensure_acceptance_issue(issue, completion_verdict)
-        acceptance_issue_id = str((acceptance_issue or {}).get("id") or "")
+        _ = acceptance_issue
+        gates = await self._fetch_gate_issues(issue)
+        if not gates:
+            legacy_acceptance = await self._find_legacy_acceptance_issue(issue)
+            if legacy_acceptance is not None:
+                await self._run_legacy_acceptance_issue(
+                    issue,
+                    legacy_acceptance,
+                    completion_verdict=completion_verdict,
+                    workspace_path=workspace_path,
+                )
+            return
         await self._sync_label_group(issue.id, self.config.acceptance.gate_pending_label, prefix="symphony:gate/")
         await self._sync_label_group(issue.id, self.config.acceptance.review_phase_label, prefix="symphony:phase/")
+        if self.acceptance_runner is None:
+            return
+        failed = False
+        reviewed_gates: list[dict[str, Any]] = []
+        for gate in gates:
+            if _issue_dict_has_label(gate, self.config.acceptance.gate_passed_label) or _issue_dict_has_label(
+                gate, self.config.acceptance.gate_pass_with_findings_label
+            ):
+                reviewed_gates.append(gate)
+                continue
+            raw_report = await self.acceptance_runner.run_acceptance(
+                original_issue=issue,
+                acceptance_issue=gate,
+                completion_verdict=completion_verdict,
+                workspace_path=workspace_path,
+            )
+            report = parse_acceptance_report(
+                raw_report,
+                minimum_score=self.config.acceptance.minimum_score,
+                require_findings_for_score_3=self.config.acceptance.require_findings_for_score_3,
+            )
+            evidence_issue = await self._create_evidence_issue(issue, gate, report, raw_report, workspace_path)
+            await self._comment_acceptance_report(str(gate.get("id") or ""), _entry_for_issue(issue, workspace_path), report)
+            if report.accepted:
+                gate_label = (
+                    self.config.acceptance.gate_pass_with_findings_label
+                    if report.score == self.config.acceptance.minimum_score and report.residual_findings
+                    else self.config.acceptance.gate_passed_label
+                )
+                await self._sync_label_group(str(gate.get("id") or ""), gate_label, prefix="symphony:gate/")
+                await self._sync_label_group(
+                    str(gate.get("id") or ""),
+                    f"{self.config.acceptance.score_label_prefix}{report.score}",
+                    prefix=self.config.acceptance.score_label_prefix,
+                )
+                if evidence_issue:
+                    await self._transition_issue_by_state_name(str(evidence_issue.get("id") or ""), self.config.acceptance.done_state)
+                await self._transition_issue_by_state_name(str(gate.get("id") or ""), self.config.acceptance.done_state)
+                reviewed_gates.append({**gate, "labels": [gate_label], "label_ids": [gate_label]})
+            else:
+                failed = True
+                await self._sync_label_group(str(gate.get("id") or ""), self.config.acceptance.gate_failed_label, prefix="symphony:gate/")
+                if report.score >= 0:
+                    await self._sync_label_group(
+                        str(gate.get("id") or ""),
+                        f"{self.config.acceptance.score_label_prefix}{report.score}",
+                        prefix=self.config.acceptance.score_label_prefix,
+                    )
+                break
+        if failed:
+            await self._sync_label_group(issue.id, self.config.acceptance.gate_failed_label, prefix="symphony:gate/")
+            await self._sync_label_group(issue.id, self.config.acceptance.rework_phase_label, prefix="symphony:phase/")
+            await self._transition_issue_by_state_name(issue.id, self.config.acceptance.implementation_state)
+            self.state.claimed.discard(issue.id)
+            self.state.retry_attempts.pop(issue.id, None)
+            self.state.continuations.pop(issue.id, None)
+            self._persist_state()
+            return
+        if len(reviewed_gates) == len(gates):
+            await self._sync_label_group(issue.id, self.config.acceptance.gate_passed_label, prefix="symphony:gate/")
+            await self._transition_issue_by_state_name(issue.id, self.config.acceptance.done_state)
+            self.state.completed.add(issue.id)
+            self.state.claimed.discard(issue.id)
+            self.state.retry_attempts.pop(issue.id, None)
+            self.state.continuations.pop(issue.id, None)
+            await self._sync_lifecycle_label(issue.id, LIFECYCLE_LABELS["done"])
+            self._persist_state()
+
+    async def _run_legacy_acceptance_issue(
+        self,
+        issue: Issue,
+        acceptance_issue: dict[str, Any],
+        *,
+        completion_verdict: Any | None,
+        workspace_path: str | None,
+    ) -> None:
+        acceptance_issue_id = str((acceptance_issue or {}).get("id") or "")
         if self.acceptance_runner is None or not acceptance_issue_id:
             return
         raw_report = await self.acceptance_runner.run_acceptance(
@@ -427,31 +652,29 @@ class Orchestrator:
         )
         await self._comment_acceptance_report(acceptance_issue_id, _entry_for_issue(issue, workspace_path), report)
         if report.accepted:
-            gate_label = (
-                self.config.acceptance.gate_pass_with_findings_label
-                if report.score == self.config.acceptance.minimum_score and report.residual_findings
-                else self.config.acceptance.gate_passed_label
-            )
-            await self._sync_label_group(issue.id, gate_label, prefix="symphony:gate/")
-            await self._sync_label_group(
-                issue.id,
-                f"{self.config.acceptance.score_label_prefix}{report.score}",
-                prefix=self.config.acceptance.score_label_prefix,
-            )
             await self._transition_issue_by_state_name(acceptance_issue_id, self.config.acceptance.done_state)
             await self._transition_issue_by_state_name(issue.id, self.config.acceptance.done_state)
             self.state.completed.add(issue.id)
-            await self._sync_lifecycle_label(issue.id, LIFECYCLE_LABELS["done"])
         else:
-            await self._sync_label_group(issue.id, self.config.acceptance.gate_failed_label, prefix="symphony:gate/")
-            await self._sync_label_group(issue.id, self.config.acceptance.rework_phase_label, prefix="symphony:phase/")
-            if report.score >= 0:
-                await self._sync_label_group(
-                    issue.id,
-                    f"{self.config.acceptance.score_label_prefix}{report.score}",
-                    prefix=self.config.acceptance.score_label_prefix,
-                )
             await self._transition_issue_by_state_name(issue.id, self.config.acceptance.implementation_state)
+
+    async def _create_evidence_issue(
+        self,
+        issue: Issue,
+        gate: dict[str, Any],
+        report: AcceptanceReport,
+        raw_report: str,
+        workspace_path: str | None,
+    ) -> dict[str, Any] | None:
+        create_child = getattr(self.tracker, "create_child_issue_for", None)
+        if not callable(create_child):
+            return None
+        return await create_child(
+            parent_issue_id=str(gate.get("id") or ""),
+            title=f"[Evidence] {issue.identifier}: {gate.get('title', 'Gate review')}",
+            description=_evidence_issue_description(issue, gate, report, raw_report, workspace_path),
+            label_names=[self.config.acceptance.evidence_type_label],
+        )
 
     async def _transition_issue_by_state_name(self, issue_id: str, state_name: str) -> None:
         transition = getattr(self.tracker, "transition_issue_by_state_name", None)
@@ -542,7 +765,23 @@ class Orchestrator:
                     refreshed_issue = await self._refresh_issue_after_completion(entry.issue)
                     if refreshed_issue is not None and self._is_active(refreshed_issue):
                         if self.config.acceptance.enabled:
-                            await self._ensure_acceptance_issue(refreshed_issue, verdict)
+                            if not _has_acceptance_evidence(refreshed_issue):
+                                reason = "implementation_evidence_missing: agent must leave implementation summary, test command output, and remaining risks before review"
+                                updated_issue = _issue_with_verification_context(entry.issue, verdict)
+                                await self._comment_completion_verdict(entry, verdict, next_action="retry")
+                                self._schedule_retry(
+                                    updated_issue,
+                                    max(entry.retry_attempt + 1, 1),
+                                    error=reason,
+                                    delay_ms=None,
+                                )
+                                await self._sync_lifecycle_label(updated_issue.id, LIFECYCLE_LABELS["retrying"])
+                                logger.warning(
+                                    "symphony_completion_review_blocked issue_id=%s reason=%s",
+                                    issue_id,
+                                    reason,
+                                )
+                                return
                             await self._sync_label_group(
                                 refreshed_issue.id,
                                 self.config.acceptance.gate_pending_label,
@@ -568,11 +807,11 @@ class Orchestrator:
                                 verdict.reason,
                                 refreshed_issue.state,
                             )
-                            self._schedule_retry(
+                            self._schedule_continuation(
                                 refreshed_issue,
                                 max(entry.retry_attempt + 1, 1),
-                                error=None,
                                 delay_ms=1_000,
+                                last_message=verdict.reason,
                             )
                     elif refreshed_issue is not None and self._is_terminal(refreshed_issue):
                         if self.config.acceptance.enabled:
@@ -591,7 +830,12 @@ class Orchestrator:
                         self.state.claimed.discard(issue_id)
                         self.state.retry_attempts.pop(issue_id, None)
                     else:
-                        self._schedule_retry(entry.issue, max(entry.retry_attempt + 1, 1), error=None, delay_ms=1_000)
+                        self._schedule_continuation(
+                            entry.issue,
+                            max(entry.retry_attempt + 1, 1),
+                            delay_ms=1_000,
+                            last_message="completion state refresh failed; continuing",
+                        )
 
                 elif verdict.status == "NEEDS_RETRY":
                     # 验证失败，需要重试
@@ -620,7 +864,38 @@ class Orchestrator:
                     logger.error(f"symphony_completion_needs_human_review issue_id={issue_id} reason={verdict.reason}")
                     await self._comment_completion_verdict(entry, verdict, next_action="human_review")
                     if self.config.acceptance.enabled:
-                        await self._create_acceptance_gate(entry, verdict)
+                        refreshed_issue = await self._refresh_issue_after_completion(entry.issue)
+                        review_issue = refreshed_issue or entry.issue
+                        if not _has_acceptance_evidence(review_issue):
+                            reason = "implementation_evidence_missing: agent must leave implementation summary, test command output, and remaining risks before review"
+                            updated_issue = _issue_with_verification_context(entry.issue, verdict)
+                            self._schedule_retry(
+                                updated_issue,
+                                max(entry.retry_attempt + 1, 1),
+                                error=reason,
+                                delay_ms=None,
+                            )
+                            await self._sync_lifecycle_label(updated_issue.id, LIFECYCLE_LABELS["retrying"])
+                            return
+                        await self._sync_label_group(
+                            review_issue.id,
+                            self.config.acceptance.gate_pending_label,
+                            prefix="symphony:gate/",
+                        )
+                        await self._sync_label_group(
+                            review_issue.id,
+                            self.config.acceptance.implementation_phase_label,
+                            prefix="symphony:phase/",
+                        )
+                        await self._transition_issue_by_state_name(
+                            review_issue.id,
+                            self.config.acceptance.review_state,
+                        )
+                        await self._run_acceptance_gate_for_issue(
+                            review_issue,
+                            completion_verdict=verdict,
+                            workspace_path=entry.workspace_path,
+                        )
                     self.state.claimed.discard(issue_id)
                     self.state.retry_attempts.pop(issue_id, None)
                     if not self.config.acceptance.enabled:
@@ -829,11 +1104,15 @@ class Orchestrator:
             )
 
     def _schedule_retry(self, issue: Issue, attempt: int, *, error: str | None, delay_ms: int | None) -> None:
+        if error is None:
+            self._schedule_continuation(issue, attempt, delay_ms=delay_ms)
+            return
         if delay_ms is None:
             delay_ms = min(10_000 * (2 ** max(attempt - 1, 0)), self.config.agent.max_retry_backoff_ms)
         due_at = utc_now() + timedelta(milliseconds=delay_ms)
         due_at_ms = monotonic_ms() + delay_ms
         self.state.claimed.add(issue.id)
+        self.state.continuations.pop(issue.id, None)
         retry_context = _retry_context_from_issue(issue)
         self.state.retry_attempts[issue.id] = RetryEntry(
             issue_id=issue.id,
@@ -843,14 +1122,37 @@ class Orchestrator:
             due_at_ms=due_at_ms,
             error=error,
             issue_url=issue.url,
-            phase="retrying" if error is not None else "done",
-            status_label=LIFECYCLE_LABELS["retrying"] if error is not None else LIFECYCLE_LABELS["done"],
+            phase="retrying",
+            status_label=LIFECYCLE_LABELS["retrying"],
             last_message=retry_context or error,
         )
-        self._sync_lifecycle_label_background(
-            issue.id,
-            LIFECYCLE_LABELS["retrying"] if error is not None else LIFECYCLE_LABELS["done"],
+        self._sync_lifecycle_label_background(issue.id, LIFECYCLE_LABELS["retrying"])
+        self._persist_state()
+
+    def _schedule_continuation(
+        self,
+        issue: Issue,
+        attempt: int,
+        *,
+        delay_ms: int | None,
+        last_message: str | None = None,
+    ) -> None:
+        if delay_ms is None:
+            delay_ms = self.config.polling.interval_ms
+        due_at = utc_now() + timedelta(milliseconds=delay_ms)
+        due_at_ms = monotonic_ms() + delay_ms
+        self.state.claimed.add(issue.id)
+        self.state.retry_attempts.pop(issue.id, None)
+        self.state.continuations[issue.id] = ContinuationEntry(
+            issue_id=issue.id,
+            identifier=issue.identifier,
+            attempt=attempt,
+            due_at=due_at,
+            due_at_ms=due_at_ms,
+            issue_url=issue.url,
+            last_message=last_message or _retry_context_from_issue(issue),
         )
+        self._sync_lifecycle_label_background(issue.id, LIFECYCLE_LABELS["continuing"])
         self._persist_state()
 
     def _load_ops_snapshot(self):
@@ -1210,6 +1512,7 @@ class Orchestrator:
         self.persistence_store.save(
             PersistedState.from_runtime(
                 retry_attempts=list(self.state.retry_attempts.values()),
+                continuations=list(self.state.continuations.values()),
                 running=list(self.state.running.values()),
             )
         )
@@ -1425,6 +1728,110 @@ def _acceptance_marker_block(issue: Issue, acceptance_issue: dict[str, Any], acc
     )
 
 
+def _gate_plan_marker_block(issue: Issue, gates: list[dict[str, Any]], acceptance: Any) -> str:
+    lines = [
+        f"plan_revision: {acceptance.plan_revision}",
+        f"gate_count: {len(gates)}",
+        "",
+        "Gate plan:",
+    ]
+    for index, gate in enumerate(gates, start=1):
+        lines.append(f"- Gate {index}: {gate.get('identifier', gate.get('id', ''))} {gate.get('title', '')}".rstrip())
+    lines.extend(
+        [
+            "",
+            "Implementation boundary:",
+            f"- Implement only the business issue described by {issue.identifier}.",
+            "- Do not move the Linear issue to In Review or Done.",
+            "- Symphony will run each gate and close the tree after acceptance.",
+            "",
+            "Evidence required:",
+            "- Implementation summary.",
+            "- Test commands and exact output.",
+            "- Remaining risks or explicit none.",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _gate_issue_description(issue: Issue, gate: GatePlan, *, index: int) -> str:
+    lines = [
+        f"Business issue: {issue.identifier}",
+        f"Gate index: {index}",
+        "",
+        "Purpose:",
+        gate.purpose,
+        "",
+        "Acceptance criteria:",
+    ]
+    for criterion in gate.acceptance_criteria:
+        lines.append(f"- {criterion}")
+    lines.extend(["", "Required evidence:"])
+    for evidence in gate.required_evidence:
+        lines.append(f"- {evidence}")
+    return "\n".join(lines)
+
+
+def _evidence_issue_description(
+    issue: Issue,
+    gate: dict[str, Any],
+    report: AcceptanceReport,
+    raw_report: str,
+    workspace_path: str | None,
+) -> str:
+    lines = [
+        f"Business issue: {issue.identifier}",
+        f"Gate: {gate.get('identifier', gate.get('id', ''))}",
+        f"Workspace: {workspace_path or '<workspace path unavailable>'}",
+        "",
+        "Reviewer conclusion:",
+        f"- Score: {report.score}",
+        f"- Result: {report.result}",
+        f"- Accepted: {report.accepted}",
+        f"- Reason: {report.score_reason}",
+        "",
+        "Evidence citations:",
+    ]
+    for citation in report.evidence_citations:
+        lines.append(f"- {citation}")
+    if report.residual_findings:
+        lines.extend(["", "Residual findings:"])
+        for finding in report.residual_findings:
+            lines.append(f"- {finding}")
+    if report.rejection_reasons:
+        lines.extend(["", "Gate rejection reasons:"])
+        for reason in report.rejection_reasons:
+            lines.append(f"- {reason}")
+    lines.extend(["", "Raw reviewer JSON:", raw_report.strip()])
+    return "\n".join(lines)
+
+
+def _gate_plan_needs_more_info_comment(issue: Issue, questions: list[str]) -> str:
+    lines = [
+        "Symphony needs more information before planning acceptance gates.",
+        "",
+        f"Business issue: {issue.identifier}",
+        "",
+        "Questions:",
+    ]
+    for question in questions:
+        lines.append(f"- {question}")
+    return "\n".join(lines)
+
+
+def _gate_plan_rejected_comment(issue: Issue, reasons: list[str]) -> str:
+    lines = [
+        "Symphony could not validate the acceptance gate plan.",
+        "",
+        f"Business issue: {issue.identifier}",
+        "",
+        "Planner rejection reasons:",
+    ]
+    for reason in reasons:
+        lines.append(f"- {reason}")
+    return "\n".join(lines)
+
+
 def _entry_for_issue(issue: Issue, workspace_path: str | None) -> RunningEntry:
     return RunningEntry(
         issue=issue,
@@ -1436,13 +1843,61 @@ def _entry_for_issue(issue: Issue, workspace_path: str | None) -> RunningEntry:
 
 
 def _has_acceptance_evidence(issue: Issue) -> bool:
-    text = (issue.description or "").lower()
-    required_groups = [
-        ("implementation summary", "changed", "implemented"),
-        ("test command", "test commands", "pytest", "npm test", "test output"),
-        ("remaining risks", "residual risk", "risk"),
-    ]
-    return all(any(needle in text for needle in group) for group in required_groups)
+    text = _strip_marker_block(issue.description or "", "SYMPHONY ACCEPTANCE").lower()
+    evidence_fields = {
+        "implementation": ("implementation summary:", "implemented:", "changed:"),
+        "tests": (
+            "test commands and exact output:",
+            "test command:",
+            "test commands:",
+            "test output:",
+        ),
+        "risks": ("remaining risks:", "residual risk:", "risks:"),
+    }
+    return all(_has_nonempty_evidence_field(text, prefixes) for prefixes in evidence_fields.values())
+
+
+def _has_nonempty_evidence_field(text: str, prefixes: tuple[str, ...]) -> bool:
+    for prefix in prefixes:
+        start = text.find(prefix)
+        if start < 0:
+            continue
+        value = text[start + len(prefix):].strip()
+        if not value:
+            continue
+        first_line = value.splitlines()[0].strip(" -*\t")
+        if _is_placeholder_evidence_value(first_line):
+            continue
+        return True
+    return False
+
+
+def _is_placeholder_evidence_value(value: str) -> bool:
+    normalized = value.strip().rstrip(".:").lower()
+    if not normalized:
+        return True
+    placeholder_prefixes = (
+        "must include",
+        "required",
+        "todo",
+        "tbd",
+        "none provided",
+        "no description",
+    )
+    return any(normalized.startswith(prefix) for prefix in placeholder_prefixes)
+
+
+def _strip_marker_block(description: str, marker_name: str) -> str:
+    begin = f"<!-- BEGIN {marker_name} -->"
+    end = f"<!-- END {marker_name} -->"
+    remaining = description
+    while begin in remaining and end in remaining:
+        prefix, after_begin = remaining.split(begin, 1)
+        if end not in after_begin:
+            break
+        _, suffix = after_begin.split(end, 1)
+        remaining = (prefix + suffix).strip()
+    return remaining
 
 
 def _has_passed_acceptance_gate(issue: Issue, acceptance: Any) -> bool:
@@ -1451,6 +1906,16 @@ def _has_passed_acceptance_gate(issue: Issue, acceptance: Any) -> bool:
         acceptance.gate_passed_label.strip().lower() in labels
         or acceptance.gate_pass_with_findings_label.strip().lower() in labels
     )
+
+
+def _issue_dict_has_label(issue: dict[str, Any], label_name: str) -> bool:
+    labels = issue.get("labels")
+    if not isinstance(labels, list):
+        labels = issue.get("label_ids")
+    if not isinstance(labels, list):
+        return False
+    wanted = label_name.strip().lower()
+    return wanted in {str(label).strip().lower() for label in labels}
 
 
 def _policy_violation_comment_body(issue: Issue, *, has_evidence: bool) -> str:

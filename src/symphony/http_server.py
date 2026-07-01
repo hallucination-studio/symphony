@@ -171,6 +171,10 @@ def _dashboard_html(snapshot: dict[str, Any]) -> bytes:
         f"<li>{_escape_html(row['issue_identifier'])} - attempt {row['attempt']} - {_escape_html(row.get('error'))}</li>"
         for row in snapshot["retrying"]
     )
+    continuation_items = "".join(
+        f"<li>{_escape_html(row['issue_identifier'])} - attempt {row['attempt']} - {_escape_html(row.get('last_message'))}</li>"
+        for row in snapshot.get("continuing", [])
+    )
     html = f"""<!doctype html>
 <html>
 <head><title>Symphony</title></head>
@@ -178,11 +182,14 @@ def _dashboard_html(snapshot: dict[str, Any]) -> bytes:
 <h1>Symphony</h1>
 <p>Running: {counts['running']}</p>
 <p>Retrying: {counts['retrying']}</p>
+<p>Continuing: {counts.get('continuing', 0)}</p>
 <p>Total tokens: {snapshot['codex_totals']['total_tokens']}</p>
 <h2>Running</h2>
 <ul>{running_items}</ul>
 <h2>Retrying</h2>
 <ul>{retry_items}</ul>
+<h2>Continuing</h2>
+<ul>{continuation_items}</ul>
 </body>
 </html>"""
     return html.encode()

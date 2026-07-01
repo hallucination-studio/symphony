@@ -122,6 +122,9 @@ class AcceptanceConfig:
     auto_retry_on_fail: bool = True
     task_type_label: str = "symphony:type/task"
     acceptance_type_label: str = "symphony:type/acceptance"
+    gate_type_label: str = "symphony:type/gate"
+    evidence_type_label: str = "symphony:type/evidence"
+    needs_more_info_label: str = "symphony:needs-more-info"
     todo_state: str = "Todo"
     implementation_state: str = "In Progress"
     review_state: str = "In Review"
@@ -380,7 +383,7 @@ def _codex_config(raw: dict[str, Any]) -> CodexConfig:
         approval_policy=raw.get("approval_policy"),
         thread_sandbox=raw.get("thread_sandbox"),
         turn_sandbox_policy=raw.get("turn_sandbox_policy"),
-        turn_timeout_ms=_int(raw.get("turn_timeout_ms"), 3_600_000, positive=True),
+        turn_timeout_ms=_int(raw.get("turn_timeout_ms"), 3_600_000),
         read_timeout_ms=_int(raw.get("read_timeout_ms"), 5_000, positive=True),
         stall_timeout_ms=_int(raw.get("stall_timeout_ms"), 300_000),
     )
@@ -479,6 +482,15 @@ def _acceptance_config(raw: dict[str, Any]) -> AcceptanceConfig:
         acceptance_type_label=(
             _string(raw.get("acceptance_type_label"), defaults.acceptance_type_label)
             or defaults.acceptance_type_label
+        ),
+        gate_type_label=_string(raw.get("gate_type_label"), defaults.gate_type_label) or defaults.gate_type_label,
+        evidence_type_label=(
+            _string(raw.get("evidence_type_label"), defaults.evidence_type_label)
+            or defaults.evidence_type_label
+        ),
+        needs_more_info_label=(
+            _string(raw.get("needs_more_info_label"), defaults.needs_more_info_label)
+            or defaults.needs_more_info_label
         ),
         todo_state=_string(raw.get("todo_state"), defaults.todo_state) or defaults.todo_state,
         implementation_state=(

@@ -83,6 +83,7 @@ class ConductorService:
         total_tokens = 0
         runtime_seconds = 0
         retry_count = 0
+        continuation_count = 0
         persisted_failures = 0
         for instance in instances:
             process_statuses[instance.process_status] = process_statuses.get(instance.process_status, 0) + 1
@@ -98,6 +99,7 @@ class ConductorService:
             linear_views[linear_key]["instances"] += 1
             persisted = PersistenceStore(Path(instance.persistence_path)).load()
             retry_count += len(persisted.retry_attempts)
+            continuation_count += len(persisted.continuations)
             persisted_failures += sum(1 for retry in persisted.retry_attempts if retry.error)
             now = datetime.now(timezone.utc)
             for session in persisted.sessions:
@@ -118,6 +120,7 @@ class ConductorService:
                 "runtime_seconds": runtime_seconds,
                 "failures": sum(1 for instance in instances if instance.last_error) + persisted_failures,
                 "retries": retry_count,
+                "continuations": continuation_count,
             },
         }
 
@@ -461,16 +464,19 @@ class ConductorService:
         persisted = PersistenceStore(Path(instance.persistence_path)).load()
         running = [_persisted_session_row(session) for session in persisted.sessions]
         retrying = [_persisted_retry_row(entry) for entry in persisted.retry_attempts]
+        continuing = [_persisted_continuation_row(entry) for entry in persisted.continuations]
         return {
             "source": "persistence",
             "persistence_path": instance.persistence_path,
             "counts": {
                 "running": len(running),
                 "retrying": len(retrying),
+                "continuing": len(continuing),
             },
             "running": running,
             "retrying": retrying,
-            "issues": running + retrying,
+            "continuing": continuing,
+            "issues": running + retrying + continuing,
         }
 
     def _ops_snapshots(self) -> list[tuple[InstanceRecord, OpsSnapshot]]:
@@ -554,9 +560,26 @@ def _persisted_retry_row(entry) -> dict[str, Any]:
     }
 
 
+def _persisted_continuation_row(entry) -> dict[str, Any]:
+    return {
+        "issue_id": entry.issue_id,
+        "issue_identifier": entry.identifier,
+        "issue_url": entry.issue_url,
+        "attempt": entry.attempt,
+        "due_at": entry.due_at.isoformat().replace("+00:00", "Z"),
+        "due_at_ms": entry.due_at_ms,
+        "error": None,
+        "last_message": entry.last_message,
+        "phase": entry.phase,
+        "status_label": entry.status_label,
+        "recent_events": entry.recent_events,
+    }
+
+
 def _runtime_metrics(symphony: dict[str, Any]) -> dict[str, Any]:
     running = symphony.get("running") if isinstance(symphony.get("running"), list) else []
     retrying = symphony.get("retrying") if isinstance(symphony.get("retrying"), list) else []
+    continuing = symphony.get("continuing") if isinstance(symphony.get("continuing"), list) else []
     tokens = {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0, "total_tokens": 0}
     turns = 0
     for row in running:
@@ -573,6 +596,7 @@ def _runtime_metrics(symphony: dict[str, Any]) -> dict[str, Any]:
         "turns": turns,
         "running": len(running),
         "retrying": len(retrying),
+        "continuing": len(continuing),
     }
 
 

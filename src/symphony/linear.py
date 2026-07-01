@@ -193,7 +193,8 @@ mutation SymphonyCreateIssue(
   $stateId: String!,
   $labelIds: [String!],
   $title: String!,
-  $description: String!
+  $description: String!,
+  $parentId: String
 ) {
   issueCreate(input: {
     teamId: $teamId,
@@ -201,7 +202,8 @@ mutation SymphonyCreateIssue(
     stateId: $stateId,
     labelIds: $labelIds,
     title: $title,
-    description: $description
+    description: $description,
+    parentId: $parentId
   }) {
     success
     issue {
@@ -211,6 +213,26 @@ mutation SymphonyCreateIssue(
       url
       state { name }
       labels { nodes { name } }
+    }
+  }
+}
+"""
+
+
+ISSUE_CHILDREN_QUERY = """
+query SymphonyIssueChildren($issueId: String!) {
+  issue(id: $issueId) {
+    id
+    children(first: 100) {
+      nodes {
+        id
+        identifier
+        title
+        description
+        url
+        state { name }
+        labels { nodes { name } }
+      }
     }
   }
 }
@@ -449,6 +471,7 @@ class LinearClient:
         label_ids: list[str],
         title: str,
         description: str,
+        parent_id: str | None = None,
     ) -> dict[str, Any]:
         payload = await self.graphql(
             ISSUE_CREATE_MUTATION,
@@ -459,6 +482,7 @@ class LinearClient:
                 "labelIds": label_ids,
                 "title": title,
                 "description": description,
+                "parentId": parent_id,
             },
         )
         result = ((payload.get("data") or {}).get("issueCreate") or {})
@@ -466,6 +490,20 @@ class LinearClient:
         if not result.get("success") or not isinstance(issue, dict) or not issue.get("id"):
             raise LinearError("linear_issue_create_failed", "Linear issueCreate returned success=false")
         return issue
+
+    async def fetch_child_issues(self, parent_issue_id: str, *, label_name: str | None = None) -> list[dict[str, Any]]:
+        payload = await self.graphql(ISSUE_CHILDREN_QUERY, {"issueId": parent_issue_id})
+        issue = ((payload.get("data") or {}).get("issue") or {})
+        nodes = (((issue.get("children") or {}).get("nodes")) or []) if isinstance(issue, dict) else []
+        children = [_normalize_issue_dict(node) for node in nodes if isinstance(node, dict)]
+        if label_name is None:
+            return children
+        wanted = label_name.strip().lower()
+        return [
+            child
+            for child in children
+            if wanted in {str(label).strip().lower() for label in child.get("labels", [])}
+        ]
 
     async def create_issue_relation(
         self,
@@ -529,6 +567,26 @@ class LinearClient:
             label_ids=[label["id"]],
             title=title,
             description=description,
+        )
+
+    async def create_child_issue_for(
+        self,
+        *,
+        parent_issue_id: str,
+        title: str,
+        description: str,
+        label_names: list[str],
+    ) -> dict[str, Any]:
+        context = await self._fetch_issue_creation_context(parent_issue_id)
+        labels = [await self._ensure_issue_label(context["team_id"], label_name) for label_name in label_names]
+        return await self.create_issue(
+            team_id=context["team_id"],
+            project_id=context["project_id"],
+            state_id=context["state_id"],
+            label_ids=[label["id"] for label in labels],
+            title=title,
+            description=description,
+            parent_id=parent_issue_id,
         )
 
     async def set_issue_lifecycle_label(self, issue_id: str, label_name: str) -> dict[str, Any]:
@@ -708,6 +766,7 @@ class LinearTracker:
         label_ids: list[str],
         title: str,
         description: str,
+        parent_id: str | None = None,
     ) -> dict[str, Any]:
         return await self.client.create_issue(
             team_id=team_id,
@@ -716,6 +775,25 @@ class LinearTracker:
             label_ids=label_ids,
             title=title,
             description=description,
+            parent_id=parent_id,
+        )
+
+    async def fetch_child_issues(self, parent_issue_id: str, *, label_name: str | None = None) -> list[dict[str, Any]]:
+        return await self.client.fetch_child_issues(parent_issue_id, label_name=label_name)
+
+    async def create_child_issue_for(
+        self,
+        *,
+        parent_issue_id: str,
+        title: str,
+        description: str,
+        label_names: list[str],
+    ) -> dict[str, Any]:
+        return await self.client.create_child_issue_for(
+            parent_issue_id=parent_issue_id,
+            title=title,
+            description=description,
+            label_names=label_names,
         )
 
     async def create_issue_relation(

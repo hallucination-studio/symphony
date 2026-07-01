@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .models import RetryEntry, RunningEntry, RuntimeTokens, monotonic_ms
+from .models import ContinuationEntry, RetryEntry, RunningEntry, RuntimeTokens, monotonic_ms
 
 
 @dataclass(frozen=True)
@@ -33,14 +33,20 @@ class PersistedSession:
 @dataclass(frozen=True)
 class PersistedState:
     retry_attempts: list[RetryEntry] = field(default_factory=list)
+    continuations: list[ContinuationEntry] = field(default_factory=list)
     sessions: list[PersistedSession] = field(default_factory=list)
 
     @classmethod
     def from_runtime(
-        cls, *, retry_attempts: list[RetryEntry], running: list[RunningEntry]
+        cls,
+        *,
+        retry_attempts: list[RetryEntry],
+        continuations: list[ContinuationEntry] | None = None,
+        running: list[RunningEntry],
     ) -> PersistedState:
         return cls(
             retry_attempts=list(retry_attempts),
+            continuations=list(continuations or []),
             sessions=[
                 PersistedSession(
                     issue_id=entry.issue.id,
@@ -97,16 +103,33 @@ def ops_snapshot_path_from_persistence_path(path: Path | None) -> Path:
 def _state_to_json(state: PersistedState) -> dict[str, Any]:
     return {
         "retry_attempts": [_retry_to_json(entry) for entry in state.retry_attempts],
+        "continuations": [_continuation_to_json(entry) for entry in state.continuations],
         "sessions": [_session_to_json(session) for session in state.sessions],
     }
 
 
 def _state_from_json(payload: dict[str, Any]) -> PersistedState:
-    retry_attempts = [
+    parsed_retry_entries = [
         entry
         for item in payload.get("retry_attempts", [])
         if isinstance(item, dict)
         for entry in [_retry_from_json(item)]
+        if entry is not None
+    ]
+    retry_attempts = [
+        entry
+        for entry in parsed_retry_entries
+        if not _is_legacy_continuation_retry(entry)
+    ]
+    continuations = [
+        _continuation_from_retry(entry)
+        for entry in parsed_retry_entries
+        if _is_legacy_continuation_retry(entry)
+    ] + [
+        entry
+        for item in payload.get("continuations", [])
+        if isinstance(item, dict)
+        for entry in [_continuation_from_json(item)]
         if entry is not None
     ]
     sessions = [
@@ -116,7 +139,7 @@ def _state_from_json(payload: dict[str, Any]) -> PersistedState:
         for session in [_session_from_json(item)]
         if session is not None
     ]
-    return PersistedState(retry_attempts=retry_attempts, sessions=sessions)
+    return PersistedState(retry_attempts=retry_attempts, continuations=continuations, sessions=sessions)
 
 
 def _retry_to_json(entry: RetryEntry) -> dict[str, Any]:
@@ -158,6 +181,61 @@ def _retry_from_json(payload: dict[str, Any]) -> RetryEntry | None:
         else "symphony:retrying",
         last_message=payload.get("last_message") if isinstance(payload.get("last_message"), str) else None,
         recent_events=_list_of_dicts(payload.get("recent_events")),
+    )
+
+
+def _continuation_to_json(entry: ContinuationEntry) -> dict[str, Any]:
+    return {
+        "issue_id": entry.issue_id,
+        "identifier": entry.identifier,
+        "attempt": entry.attempt,
+        "due_at": _iso(entry.due_at),
+        "issue_url": entry.issue_url,
+        "phase": entry.phase,
+        "status_label": entry.status_label,
+        "last_message": entry.last_message,
+        "recent_events": entry.recent_events,
+    }
+
+
+def _continuation_from_json(payload: dict[str, Any]) -> ContinuationEntry | None:
+    due_at = _parse_datetime(payload.get("due_at"))
+    if due_at is None:
+        return None
+    issue_id = payload.get("issue_id")
+    identifier = payload.get("identifier")
+    attempt = payload.get("attempt")
+    if not isinstance(issue_id, str) or not isinstance(identifier, str) or not isinstance(attempt, int):
+        return None
+    delay_ms = max(int((due_at - _utc_now()).total_seconds() * 1000), 0)
+    return ContinuationEntry(
+        issue_id=issue_id,
+        identifier=identifier,
+        attempt=attempt,
+        due_at=due_at,
+        due_at_ms=monotonic_ms() + delay_ms,
+        issue_url=payload.get("issue_url") if isinstance(payload.get("issue_url"), str) else None,
+        phase="continuing",
+        status_label="symphony:continuing",
+        last_message=payload.get("last_message") if isinstance(payload.get("last_message"), str) else None,
+        recent_events=_list_of_dicts(payload.get("recent_events")),
+    )
+
+
+def _is_legacy_continuation_retry(entry: RetryEntry) -> bool:
+    return entry.error is None or entry.phase in {"done", "continuing"}
+
+
+def _continuation_from_retry(entry: RetryEntry) -> ContinuationEntry:
+    return ContinuationEntry(
+        issue_id=entry.issue_id,
+        identifier=entry.identifier,
+        attempt=entry.attempt,
+        due_at=entry.due_at,
+        due_at_ms=entry.due_at_ms,
+        issue_url=entry.issue_url,
+        last_message=entry.last_message,
+        recent_events=list(entry.recent_events),
     )
 
 

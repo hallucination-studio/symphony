@@ -34,6 +34,24 @@ class FakeStdout:
         return self.lines.pop(0)
 
 
+class DelayedFakeStdout:
+    def __init__(self, lines: list[dict[str, Any]], *, delay_after: int, delay_seconds: float):
+        self.lines = [json.dumps(line).encode() + b"\n" for line in lines]
+        self.delay_after = delay_after
+        self.delay_seconds = delay_seconds
+        self.read_count = 0
+
+    async def readline(self) -> bytes:
+        if self.read_count >= self.delay_after:
+            await asyncio.sleep(self.delay_seconds)
+        else:
+            await asyncio.sleep(0)
+        self.read_count += 1
+        if not self.lines:
+            await asyncio.sleep(3600)
+        return self.lines.pop(0)
+
+
 class HangingStdout:
     async def readline(self) -> bytes:
         await asyncio.sleep(3600)
@@ -73,6 +91,12 @@ class FakeProcess:
 
     async def wait(self) -> int:
         return self.returncode or 0
+
+
+class DelayedFakeProcess(FakeProcess):
+    def __init__(self, lines: list[dict[str, Any]], *, delay_after: int, delay_seconds: float):
+        super().__init__(lines)
+        self.stdout = DelayedFakeStdout(lines, delay_after=delay_after, delay_seconds=delay_seconds)
 
 
 @pytest.mark.asyncio
@@ -457,6 +481,32 @@ async def test_turn_timeout_is_enforced(tmp_path: Path) -> None:
 
     assert exc.value.code == "turn_timeout"
     assert process.killed
+
+
+@pytest.mark.asyncio
+async def test_nonpositive_turn_timeout_disables_total_turn_deadline(tmp_path: Path) -> None:
+    process = DelayedFakeProcess(
+        [
+            {"id": 0, "result": {"userAgent": "codex", "platformFamily": "unix", "platformOs": "macos", "codexHome": "/tmp"}},
+            {"id": 1, "result": {"thread": {"id": "thr_1"}}},
+            {"id": 2, "result": {"turn": {"id": "turn_1"}}},
+            {"method": "turn/completed", "params": {"turn": {"id": "turn_1"}, "status": "completed"}},
+        ],
+        delay_after=3,
+        delay_seconds=0.02,
+    )
+
+    async def factory(*args: Any, **kwargs: Any) -> FakeProcess:
+        return process
+
+    client = CodexAppServerClient(
+        CodexConfig(read_timeout_ms=100, turn_timeout_ms=0, stall_timeout_ms=100),
+        process_factory=factory,
+    )
+
+    result = await client.run_session(tmp_path, "Do work", "MT-1: Build")
+
+    assert result.turn_id == "turn_1"
 
 
 @pytest.mark.asyncio

@@ -9,7 +9,7 @@ import pytest
 from symphony.conductor_models import ConductorSettings, InstanceCreateRequest, InstancePatchRequest, InstanceRecord
 from symphony.conductor_service import ConductorService, ConductorServiceError
 from symphony.conductor_store import ConductorStore
-from symphony.models import RetryEntry, RuntimeTokens, utc_now
+from symphony.models import ContinuationEntry, RetryEntry, RuntimeTokens, utc_now
 from symphony.ops_models import IssueRecord, OpsSnapshot, RetentionMetadata, RunRecord, TraceEvent
 from symphony.ops_store import OpsStore
 from symphony.persistence import PersistenceStore, PersistedSession, PersistedState
@@ -317,6 +317,17 @@ def test_instance_runtime_includes_persisted_symphony_issue_details(tmp_path: Pa
                     status_label="symphony:retrying",
                 )
             ],
+            continuations=[
+                ContinuationEntry(
+                    issue_id="issue-3",
+                    identifier="ENG-3",
+                    attempt=3,
+                    due_at=utc_now() + timedelta(seconds=90),
+                    due_at_ms=234567,
+                    issue_url="https://linear.app/x/issue/ENG-3",
+                    last_message="continuing",
+                )
+            ],
         )
     )
 
@@ -326,7 +337,7 @@ def test_instance_runtime_includes_persisted_symphony_issue_details(tmp_path: Pa
     assert runtime["workspace"]["strategy"] == "instance_repo_workspace"
     assert "reuses the prepared repository workspace" in runtime["workspace"]["description"]
     assert runtime["symphony"]["source"] == "persistence"
-    assert runtime["symphony"]["counts"] == {"running": 1, "retrying": 1}
+    assert runtime["symphony"]["counts"] == {"running": 1, "retrying": 1, "continuing": 1}
     assert runtime["symphony"]["running"][0]["issue_identifier"] == "ENG-1"
     assert runtime["symphony"]["running"][0]["phase"] == "running"
     assert runtime["symphony"]["running"][0]["status_label"] == "symphony:running"
@@ -336,6 +347,9 @@ def test_instance_runtime_includes_persisted_symphony_issue_details(tmp_path: Pa
     assert runtime["symphony"]["running"][0]["recent_events"][0]["raw_event"]["payload"]["delta"] == "working"
     assert runtime["symphony"]["retrying"][0]["issue_identifier"] == "ENG-2"
     assert runtime["symphony"]["retrying"][0]["error"] == "worker exited: boom"
+    assert runtime["symphony"]["continuing"][0]["issue_identifier"] == "ENG-3"
+    assert runtime["symphony"]["continuing"][0]["phase"] == "continuing"
+    assert runtime["symphony"]["continuing"][0]["status_label"] == "symphony:continuing"
     assert runtime["metrics"]["tokens"]["cached_tokens"] == 5
     assert runtime["metrics"]["tokens"]["total_tokens"] == 33
     assert runtime["metrics"]["turns"] == 3
@@ -373,6 +387,16 @@ def test_dashboard_aggregates_persisted_runtime_metrics(tmp_path: Path) -> None:
                     issue_url=None,
                 )
             ],
+            continuations=[
+                ContinuationEntry(
+                    issue_id="issue-3",
+                    identifier="ENG-3",
+                    attempt=2,
+                    due_at=utc_now() + timedelta(seconds=60),
+                    due_at_ms=234567,
+                    issue_url=None,
+                )
+            ],
         )
     )
 
@@ -382,6 +406,7 @@ def test_dashboard_aggregates_persisted_runtime_metrics(tmp_path: Path) -> None:
     assert dashboard["totals"]["runtime_seconds"] >= 19
     assert dashboard["totals"]["failures"] == 1
     assert dashboard["totals"]["retries"] == 1
+    assert dashboard["totals"]["continuations"] == 1
 
 
 def test_create_instance_rejects_duplicate_workspace_resources(tmp_path: Path) -> None:

@@ -854,7 +854,7 @@ async def test_flow_008_concurrency_and_claiming_prevent_duplicate_work(
 
 
 @pytest.mark.asyncio
-async def test_flow_009_normal_exit_schedules_short_continuation_retry(tmp_path: Path) -> None:
+async def test_flow_009_normal_exit_schedules_short_continuation(tmp_path: Path) -> None:
     tracker = FlowTracker(candidates=[issue("ENG-9", id="eng-9")])
     runner = FlowCompletingRunner()
     orchestrator = Orchestrator(config_with_verification(tmp_path, required_checks=[]), tracker, runner)
@@ -864,29 +864,37 @@ async def test_flow_009_normal_exit_schedules_short_continuation_retry(tmp_path:
     runner.release.set()
     await orchestrator.wait_for_idle()
 
-    retry = orchestrator.state.retry_attempts.get("eng-9")
+    continuation = orchestrator.state.continuations.get("eng-9")
     bundle = flow_bundle(
         test_id="FLOW-009",
-        title="normal worker exit keeps active work retryable",
+        title="normal worker exit keeps active work continuing",
         source_sections=["7.1", "7.3", "8.4", "16.6"],
         profile="core",
         initial_state={"issue": "ENG-9", "max_turns": 1},
         trigger="Worker returns normally while issue remains active",
-        observed_transitions=["Running removed", "runtime_totals_updated", "continuation_retry_scheduled"],
+        observed_transitions=["Running removed", "runtime_totals_updated", "continuation_scheduled"],
         workspace_evidence={"not_required": True},
         tracker_evidence={"issue_state": "Todo"},
         codex_evidence={"worker_attempts": runner.started_attempts},
-        observability_evidence={"retry": retry.__dict__ if retry else None, "claimed": "eng-9" in orchestrator.state.claimed},
-        final_state={"retrying": retry is not None, "completed": "eng-9" in orchestrator.state.completed},
-        score_reason="Status evidence shows clean worker exit schedules a continuation retry and keeps the issue claimed.",
+        observability_evidence={
+            "continuation": continuation.__dict__ if continuation else None,
+            "retrying": "eng-9" in orchestrator.state.retry_attempts,
+            "claimed": "eng-9" in orchestrator.state.claimed,
+        },
+        final_state={
+            "continuing": continuation is not None,
+            "retrying": "eng-9" in orchestrator.state.retry_attempts,
+            "completed": "eng-9" in orchestrator.state.completed,
+        },
+        score_reason="Status evidence shows clean worker exit schedules a continuation and keeps the issue claimed without using retry state.",
     )
 
-    assert retry is not None
-    assert retry.attempt == 1
-    assert retry.error is None
-    assert retry.status_label == "symphony:done"
+    assert continuation is not None
+    assert continuation.attempt == 1
+    assert continuation.status_label == "symphony:continuing"
+    assert "eng-9" not in orchestrator.state.retry_attempts
     assert "eng-9" in orchestrator.state.claimed
-    assert bundle["final_state"]["retrying"] is True
+    assert bundle["final_state"]["continuing"] is True
 
 
 @pytest.mark.asyncio
@@ -1798,7 +1806,7 @@ async def test_flow_024_http_observability_surfaces_mirror_state_and_are_optiona
     )
 
     assert state_status == 200
-    assert api_state["counts"] == {"running": 1, "retrying": 1}
+    assert api_state["counts"] == {"running": 1, "retrying": 1, "continuing": 0}
     assert issue_status == 200
     assert json.loads(issue_body)["issue_identifier"] == "ENG-24"
     assert unknown_status == 404

@@ -14,7 +14,7 @@ from symphony.config import (
     PersistenceConfig,
     WorkspaceConfig,
 )
-from symphony.models import Issue, RetryEntry, RunningEntry, RuntimeTokens, utc_now
+from symphony.models import ContinuationEntry, Issue, RetryEntry, RunningEntry, RuntimeTokens, utc_now
 from symphony.orchestrator import OrchestratorState
 from symphony.snapshot import build_runtime_snapshot, build_issue_snapshot
 
@@ -57,6 +57,15 @@ def test_runtime_snapshot_includes_running_retry_totals_and_rate_limits(tmp_path
         state="Todo",
         labels=["codex"],
         url="https://linear.app/x/issue/MT-2",
+        project_slug="MT",
+    )
+    continuation_issue = Issue(
+        id="issue-3",
+        identifier="MT-3",
+        title="Continue",
+        state="Todo",
+        labels=["codex"],
+        url="https://linear.app/x/issue/MT-3",
         project_slug="MT",
     )
     state = OrchestratorState(
@@ -107,6 +116,17 @@ def test_runtime_snapshot_includes_running_retry_totals_and_rate_limits(tmp_path
                 status_label="symphony:retrying",
             )
         },
+        continuations={
+            continuation_issue.id: ContinuationEntry(
+                issue_id=continuation_issue.id,
+                identifier=continuation_issue.identifier,
+                attempt=4,
+                due_at=utc_now() + timedelta(seconds=45),
+                due_at_ms=234567,
+                issue_url=continuation_issue.url,
+                last_message="max turns reached; continuing",
+            )
+        },
         codex_totals=RuntimeTokens(input_tokens=500, output_tokens=200, total_tokens=700),
         codex_rate_limits={"primary": {"remaining": 10}},
         ended_runtime_seconds=15,
@@ -114,7 +134,7 @@ def test_runtime_snapshot_includes_running_retry_totals_and_rate_limits(tmp_path
 
     snapshot = build_runtime_snapshot(make_config(tmp_path), state)
 
-    assert snapshot["counts"] == {"running": 1, "retrying": 1}
+    assert snapshot["counts"] == {"running": 1, "retrying": 1, "continuing": 1}
     assert snapshot["running"][0]["issue_id"] == "issue-1"
     assert snapshot["running"][0]["issue_identifier"] == "MT-1"
     assert snapshot["running"][0]["issue_url"] == "https://linear.app/x/issue/MT-1"
@@ -144,6 +164,12 @@ def test_runtime_snapshot_includes_running_retry_totals_and_rate_limits(tmp_path
     assert snapshot["retrying"][0]["error"] == "no available orchestrator slots"
     assert snapshot["retrying"][0]["phase"] == "retrying"
     assert snapshot["retrying"][0]["status_label"] == "symphony:retrying"
+    assert snapshot["continuing"][0]["issue_id"] == "issue-3"
+    assert snapshot["continuing"][0]["issue_identifier"] == "MT-3"
+    assert snapshot["continuing"][0]["attempt"] == 4
+    assert snapshot["continuing"][0]["phase"] == "continuing"
+    assert snapshot["continuing"][0]["status_label"] == "symphony:continuing"
+    assert snapshot["issues"][-1]["issue_identifier"] == "MT-3"
     assert snapshot["codex_totals"]["input_tokens"] == 500
     assert snapshot["codex_totals"]["output_tokens"] == 200
     assert snapshot["codex_totals"]["total_tokens"] == 700
@@ -236,6 +262,33 @@ def test_issue_snapshot_returns_running_workspace_and_attempt_details(tmp_path: 
     assert detail["running"]["turn_count"] == 4
     assert detail["running"]["tokens"]["total_tokens"] == 15
     assert detail["recent_events"][0]["raw_event"]["raw_method"] == "agent/message"
+
+
+def test_issue_snapshot_returns_continuation_details(tmp_path: Path) -> None:
+    state = OrchestratorState(
+        continuations={
+            "issue-1": ContinuationEntry(
+                issue_id="issue-1",
+                identifier="MT-1",
+                attempt=2,
+                due_at=utc_now() + timedelta(seconds=30),
+                due_at_ms=123456,
+                issue_url="https://linear.app/x/issue/MT-1",
+                last_message="continuing",
+            )
+        }
+    )
+
+    detail = build_issue_snapshot(make_config(tmp_path), state, "MT-1")
+
+    assert detail is not None
+    assert detail["status"] == "continuing"
+    assert detail["phase"] == "continuing"
+    assert detail["status_label"] == "symphony:continuing"
+    assert detail["attempts"]["current_retry_attempt"] == 2
+    assert detail["retry"] is None
+    assert detail["continuation"]["last_message"] == "continuing"
+    assert detail["last_error"] is None
 
 
 def test_issue_snapshot_returns_none_for_unknown_issue(tmp_path: Path) -> None:

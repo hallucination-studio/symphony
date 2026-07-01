@@ -32,6 +32,7 @@ class FakeTracker:
         self.lifecycle_labels: list[tuple[str, str]] = []
         self.created_issues: list[dict[str, Any]] = []
         self.created_relations: list[dict[str, Any]] = []
+        self.children: dict[str, list[dict[str, Any]]] = {}
         self.transitions: list[tuple[str, str]] = []
         self.description_updates: list[tuple[str, str, str]] = []
         self.existing_acceptance_issue: dict[str, Any] | None = None
@@ -66,13 +67,27 @@ class FakeTracker:
         if self.fail_lifecycle_label:
             raise RuntimeError("label unavailable")
         self.lifecycle_labels.append((issue_id, label_name))
+        self._record_label(issue_id, label_name, prefix=None)
         return {"success": True, "issue_id": issue_id, "label": label_name}
 
     async def set_issue_label_group(self, issue_id: str, label_name: str, *, prefix: str) -> dict[str, Any]:
         if self.fail_lifecycle_label:
             raise RuntimeError("label unavailable")
         self.lifecycle_labels.append((issue_id, label_name))
+        self._record_label(issue_id, label_name, prefix=prefix)
         return {"success": True, "issue_id": issue_id, "label": label_name, "prefix": prefix}
+
+    def _record_label(self, issue_id: str, label_name: str, *, prefix: str | None) -> None:
+        for created in self.created_issues:
+            if created.get("id") != issue_id:
+                continue
+            labels = list(created.get("label_ids") or created.get("labels") or [])
+            if prefix:
+                labels = [label for label in labels if not str(label).startswith(prefix)]
+            if label_name not in labels:
+                labels.append(label_name)
+            created["label_ids"] = labels
+            created["labels"] = labels
 
     async def create_issue(
         self,
@@ -83,9 +98,10 @@ class FakeTracker:
         label_ids: list[str],
         title: str,
         description: str,
+        parent_id: str | None = None,
     ) -> dict[str, Any]:
         created = {
-            "id": f"acceptance-{len(self.created_issues) + 1}",
+            "id": f"issue-{len(self.created_issues) + 1}",
             "identifier": f"MT-A{len(self.created_issues) + 1}",
             "team_id": team_id,
             "project_id": project_id,
@@ -93,9 +109,12 @@ class FakeTracker:
             "label_ids": label_ids,
             "title": title,
             "description": description,
+            "parent_id": parent_id,
             "url": f"https://linear.app/x/issue/MT-A{len(self.created_issues) + 1}",
         }
         self.created_issues.append(created)
+        if parent_id:
+            self.children.setdefault(parent_id, []).append(created)
         return created
 
     async def create_acceptance_issue_for(
@@ -116,6 +135,35 @@ class FakeTracker:
         )
         created["original_issue_id"] = original_issue_id
         return created
+
+    async def create_child_issue_for(
+        self,
+        *,
+        parent_issue_id: str,
+        title: str,
+        description: str,
+        label_names: list[str],
+    ) -> dict[str, Any]:
+        return await self.create_issue(
+            team_id="team-1",
+            project_id="project-1",
+            state_id="state-todo",
+            label_ids=label_names,
+            title=title,
+            description=description,
+            parent_id=parent_issue_id,
+        )
+
+    async def fetch_child_issues(
+        self,
+        parent_issue_id: str,
+        *,
+        label_name: str | None = None,
+    ) -> list[dict[str, Any]]:
+        children = list(self.children.get(parent_issue_id, []))
+        if label_name is None:
+            return children
+        return [child for child in children if label_name in child.get("label_ids", []) or label_name in child.get("labels", [])]
 
     async def find_acceptance_issue_for(
         self,
@@ -204,6 +252,20 @@ class FakeAcceptanceRunner:
     async def run_acceptance(self, **kwargs: Any) -> str:
         self.calls.append(kwargs)
         return self.report
+
+
+class FakeGatePlanner:
+    def __init__(self, report: str | dict[str, Any]) -> None:
+        self.report = report
+        self.calls: list[dict[str, Any]] = []
+
+    async def plan_gates(self, **kwargs: Any) -> str:
+        self.calls.append(kwargs)
+        if isinstance(self.report, str):
+            return self.report
+        import json
+
+        return json.dumps(self.report)
 
 
 def asyncio_event():
@@ -814,11 +876,31 @@ async def test_normal_worker_exit_schedules_continuation_for_still_active_issue(
     await orchestrator.tick()
     await orchestrator.wait_for_idle()
 
-    retry = orchestrator.state.retry_attempts["mt-1"]
+    continuation = orchestrator.state.continuations["mt-1"]
     assert "mt-1" not in orchestrator.state.completed
     assert "mt-1" in orchestrator.state.claimed
-    assert retry.attempt == 1
-    assert retry.error is None
+    assert "mt-1" not in orchestrator.state.retry_attempts
+    assert continuation.attempt == 1
+    assert continuation.phase == "continuing"
+    assert continuation.status_label == "symphony:continuing"
+    assert orchestrator._desired_lifecycle_labels["mt-1"] == "symphony:continuing"
+
+
+@pytest.mark.asyncio
+async def test_due_continuation_dispatches_without_retry_label(tmp_path: Path) -> None:
+    candidate = issue("MT-1")
+    tracker = FakeTracker(candidates=[candidate])
+    runner = FakeRunner()
+    orchestrator = Orchestrator(make_config(tmp_path), tracker, runner)
+    orchestrator._schedule_continuation(candidate, 2, delay_ms=-1)
+
+    await orchestrator.process_due_continuations()
+
+    assert [started[0].identifier for started in runner.started] == ["MT-1"]
+    assert runner.started[0][1] == 2
+    assert "mt-1" not in orchestrator.state.continuations
+    assert "mt-1" not in orchestrator.state.retry_attempts
+    assert ("mt-1", "symphony:retrying") not in tracker.lifecycle_labels
 
 
 @pytest.mark.asyncio
@@ -838,31 +920,67 @@ async def test_normal_worker_exit_records_completed_bookkeeping_for_terminal_iss
 
 @pytest.mark.asyncio
 async def test_acceptance_enabled_creates_gate_issue_instead_of_marking_original_done(tmp_path: Path) -> None:
-    tracker = FakeTracker(candidates=[issue("MT-1", state="In Progress")])
-    tracker.refreshed = [issue("MT-1", state="In Progress")]
+    description = (
+        "Implementation summary: created requested behavior.\n"
+        "Test commands and exact output: pytest tests/test_target.py -q -> passed.\n"
+        "Remaining risks: none."
+    )
+    tracker = FakeTracker(candidates=[issue("MT-1", state="In Progress", description=description)])
+    tracker.refreshed = [issue("MT-1", state="In Progress", description=description)]
+    tracker.children["mt-1"] = [
+        {
+            "id": "gate-1",
+            "identifier": "MT-G1",
+            "title": "[Gate] MT-1: Behavior",
+            "label_ids": ["symphony:type/gate"],
+            "labels": ["symphony:type/gate"],
+            "state": "Todo",
+        }
+    ]
     orchestrator = Orchestrator(make_config_with_acceptance(tmp_path), tracker, CompletingRunner())
 
     await orchestrator.tick()
     await orchestrator.wait_for_idle()
 
     assert "mt-1" not in orchestrator.state.completed
-    assert tracker.created_issues
-    acceptance_issue = tracker.created_issues[0]
-    assert acceptance_issue["title"] == "[Acceptance] MT-1: Build"
-    assert acceptance_issue["label_ids"] == ["symphony:type/acceptance"]
-    assert acceptance_issue["original_issue_id"] == "mt-1"
-    assert "Original issue: MT-1" in acceptance_issue["description"]
-    assert tracker.created_relations == [
-        {
-            "id": "relation-1",
-            "issue_id": "acceptance-1",
-            "related_issue_id": "mt-1",
-            "type": "blocks",
-        }
-    ]
+    assert tracker.created_issues == []
+    assert tracker.created_relations == []
     assert ("mt-1", "symphony:done") not in tracker.lifecycle_labels
     assert any(label == "symphony:gate/pending" for _, label in tracker.lifecycle_labels)
     assert tracker.transitions[-1] == ("mt-1", "In Review")
+
+
+@pytest.mark.asyncio
+async def test_acceptance_enabled_does_not_enter_review_without_implementation_evidence(
+    tmp_path: Path,
+) -> None:
+    description = (
+        "Business issue for Symphony gate tree smoke.\n\n"
+        "Implement a tiny validation artifact named SYMPHONY_GATE_TREE_SMOKE.md containing this issue identifier.\n"
+        "Run: pytest tests/test_acceptance.py -q\n"
+        "Final evidence must include Implementation summary, Test commands and exact output, and Remaining risks."
+    )
+    tracker = FakeTracker(candidates=[issue("MT-1", state="In Progress", description=description)])
+    tracker.refreshed = [issue("MT-1", state="In Progress", description=description)]
+    tracker.children["mt-1"] = [
+        {
+            "id": "gate-1",
+            "identifier": "MT-G1",
+            "title": "[Gate] MT-1: Behavior",
+            "label_ids": ["symphony:type/gate"],
+            "labels": ["symphony:type/gate"],
+            "state": "Todo",
+        }
+    ]
+    orchestrator = Orchestrator(make_config_with_acceptance(tmp_path), tracker, CompletingRunner())
+
+    await orchestrator.tick()
+    await orchestrator.wait_for_idle()
+
+    assert ("mt-1", "In Review") not in tracker.transitions
+    assert "mt-1" in orchestrator.state.retry_attempts
+    assert orchestrator.state.retry_attempts["mt-1"].error is not None
+    assert "implementation_evidence_missing" in str(orchestrator.state.retry_attempts["mt-1"].error)
 
 
 @pytest.mark.asyncio
@@ -871,59 +989,74 @@ async def test_acceptance_todo_preflight_creates_marker_plan_and_moves_to_in_pro
 ) -> None:
     tracker = FakeTracker(candidates=[issue("MT-1")])
     runner = FakeRunner()
-    orchestrator = Orchestrator(make_config_with_acceptance(tmp_path), tracker, runner)
+    planner = FakeGatePlanner(
+        {
+            "gates": [
+                {
+                    "title": "Behavior",
+                    "purpose": "Verify the user-visible behavior only.",
+                    "acceptance_criteria": ["The feature works for the requested case."],
+                    "required_evidence": ["Focused test output for the requested case."],
+                },
+                {
+                    "title": "Regression Coverage",
+                    "purpose": "Verify regression tests only.",
+                    "acceptance_criteria": ["A targeted regression test exists."],
+                    "required_evidence": ["Exact pytest output."],
+                },
+            ]
+        }
+    )
+    orchestrator = Orchestrator(make_config_with_acceptance(tmp_path), tracker, runner, gate_planner=planner)
 
     await orchestrator.tick()
 
     assert runner.started == []
-    assert tracker.created_issues
-    assert tracker.created_issues[0]["label_ids"] == ["symphony:type/acceptance"]
-    assert tracker.created_relations == [
-        {
-            "id": "relation-1",
-            "issue_id": "acceptance-1",
-            "related_issue_id": "mt-1",
-            "type": "blocks",
-        }
+    assert len(tracker.created_issues) == 2
+    assert [created["parent_id"] for created in tracker.created_issues] == ["mt-1", "mt-1"]
+    assert [created["label_ids"] for created in tracker.created_issues] == [
+        ["symphony:type/gate"],
+        ["symphony:type/gate"],
     ]
+    assert tracker.created_relations == []
     assert tracker.transitions == [("mt-1", "In Progress")]
     assert any(label == "symphony:type/task" for _, label in tracker.lifecycle_labels)
     assert any(label == "symphony:phase/planned" for _, label in tracker.lifecycle_labels)
     assert tracker.description_updates
     _, marker, block = tracker.description_updates[0]
     assert marker == "SYMPHONY ACCEPTANCE"
-    assert "acceptance_issue_id: acceptance-1" in block
+    assert "gate_count: 2" in block
     assert "plan_revision: 1" in block
-    assert "Execution plan:" in block
+    assert "Gate plan:" in block
     assert "Evidence required:" in block
+    assert planner.calls
 
 
 @pytest.mark.asyncio
-async def test_acceptance_todo_preflight_reuses_existing_acceptance_issue_and_relation(
+async def test_acceptance_todo_preflight_reuses_existing_gate_children(
     tmp_path: Path,
 ) -> None:
     tracker = FakeTracker(candidates=[issue("MT-1")])
-    tracker.existing_acceptance_issue = {
-        "id": "acceptance-1",
-        "identifier": "MT-A1",
-        "url": "https://linear.app/x/issue/MT-A1",
-    }
-    tracker.created_relations.append(
+    tracker.children["mt-1"] = [
         {
-            "id": "relation-1",
-            "issue_id": "acceptance-1",
-            "related_issue_id": "mt-1",
-            "type": "blocks",
+            "id": "gate-1",
+            "identifier": "MT-G1",
+            "title": "[Gate] MT-1: Existing",
+            "label_ids": ["symphony:type/gate"],
+            "labels": ["symphony:type/gate"],
+            "state": "Todo",
         }
-    )
-    orchestrator = Orchestrator(make_config_with_acceptance(tmp_path), tracker, FakeRunner())
+    ]
+    planner = FakeGatePlanner({"gates": []})
+    orchestrator = Orchestrator(make_config_with_acceptance(tmp_path), tracker, FakeRunner(), gate_planner=planner)
 
     await orchestrator.tick()
     await orchestrator.tick()
 
     assert tracker.created_issues == []
-    assert len(tracker.created_relations) == 1
+    assert tracker.created_relations == []
     assert tracker.transitions == [("mt-1", "In Progress"), ("mt-1", "In Progress")]
+    assert planner.calls == []
 
 
 @pytest.mark.asyncio
@@ -947,26 +1080,26 @@ async def test_reconcile_terminal_running_issue_waits_for_worker_when_acceptance
     runner.release.set()
     await orchestrator.wait_for_idle()
 
-    assert tracker.created_issues
-    assert tracker.created_relations == [
-        {
-            "id": "relation-1",
-            "issue_id": "acceptance-1",
-            "related_issue_id": "mt-1",
-            "type": "blocks",
-        }
-    ]
+    assert tracker.created_issues == []
+    assert tracker.created_relations == []
     assert ("mt-1", "symphony:done") not in tracker.lifecycle_labels
 
 
 @pytest.mark.asyncio
 async def test_acceptance_score_4_marks_original_done_after_gate_passes(tmp_path: Path) -> None:
     tracker = FakeTracker(candidates=[issue("MT-1", state="In Review")])
-    tracker.existing_acceptance_issue = {
-        "id": "acceptance-1",
-        "identifier": "MT-A1",
-        "url": "https://linear.app/x/issue/MT-A1",
-    }
+    tracker.children["mt-1"] = [
+        {
+            "id": "gate-1",
+            "identifier": "MT-G1",
+            "title": "[Gate] MT-1: Behavior",
+            "description": "Purpose: verify behavior",
+            "label_ids": ["symphony:type/gate"],
+            "labels": ["symphony:type/gate"],
+            "state": "Todo",
+            "url": "https://linear.app/x/issue/MT-G1",
+        }
+    ]
     acceptance_runner = FakeAcceptanceRunner(
         """
 {
@@ -990,21 +1123,30 @@ async def test_acceptance_score_4_marks_original_done_after_gate_passes(tmp_path
 
     assert acceptance_runner.calls
     assert "mt-1" in orchestrator.state.completed
-    assert tracker.transitions == [("acceptance-1", "Done"), ("mt-1", "Done")]
-    assert any(label == "symphony:gate/passed" for _, label in tracker.lifecycle_labels)
-    assert any(label == "symphony:score/4" for _, label in tracker.lifecycle_labels)
-    assert tracker.comments[-1][0] == "acceptance-1"
+    evidence = tracker.children["gate-1"][0]
+    assert evidence["label_ids"] == ["symphony:type/evidence"]
+    assert tracker.transitions == [(evidence["id"], "Done"), ("gate-1", "Done"), ("mt-1", "Done")]
+    assert ("gate-1", "symphony:gate/passed") in tracker.lifecycle_labels
+    assert ("gate-1", "symphony:score/4") in tracker.lifecycle_labels
+    assert tracker.comments[-1][0] == "gate-1"
     assert "Acceptance score: 4" in tracker.comments[-1][1]
 
 
 @pytest.mark.asyncio
 async def test_acceptance_rejected_keeps_original_blocked_with_failed_gate(tmp_path: Path) -> None:
     tracker = FakeTracker(candidates=[issue("MT-1", state="In Review")])
-    tracker.existing_acceptance_issue = {
-        "id": "acceptance-1",
-        "identifier": "MT-A1",
-        "url": "https://linear.app/x/issue/MT-A1",
-    }
+    tracker.children["mt-1"] = [
+        {
+            "id": "gate-1",
+            "identifier": "MT-G1",
+            "title": "[Gate] MT-1: Behavior",
+            "description": "Purpose: verify behavior",
+            "label_ids": ["symphony:type/gate"],
+            "labels": ["symphony:type/gate"],
+            "state": "Todo",
+            "url": "https://linear.app/x/issue/MT-G1",
+        }
+    ]
     acceptance_runner = FakeAcceptanceRunner(
         """
 {
@@ -1028,21 +1170,73 @@ async def test_acceptance_rejected_keeps_original_blocked_with_failed_gate(tmp_p
 
     assert "mt-1" not in orchestrator.state.completed
     assert tracker.transitions == [("mt-1", "In Progress")]
-    assert any(label == "symphony:gate/failed" for _, label in tracker.lifecycle_labels)
-    assert any(label == "symphony:score/2" for _, label in tracker.lifecycle_labels)
-    assert tracker.comments[-1][0] == "acceptance-1"
+    assert ("gate-1", "symphony:gate/failed") in tracker.lifecycle_labels
+    assert ("gate-1", "symphony:score/2") in tracker.lifecycle_labels
+    assert tracker.children["gate-1"][0]["label_ids"] == ["symphony:type/evidence"]
+    assert tracker.comments[-1][0] == "gate-1"
     assert "Gate rejection reasons:" in tracker.comments[-1][1]
     assert "score_below_minimum" in tracker.comments[-1][1]
 
 
 @pytest.mark.asyncio
+async def test_acceptance_rejected_releases_claim_for_rework_dispatch(tmp_path: Path) -> None:
+    tracker = FakeTracker(candidates=[])
+    original = issue("MT-1", state="In Review")
+    tracker.children["mt-1"] = [
+        {
+            "id": "gate-1",
+            "identifier": "MT-G1",
+            "title": "[Gate] MT-1: Behavior",
+            "description": "Purpose: verify behavior",
+            "label_ids": ["symphony:type/gate"],
+            "labels": ["symphony:type/gate"],
+            "state": "Todo",
+            "url": "https://linear.app/x/issue/MT-G1",
+        }
+    ]
+    acceptance_runner = FakeAcceptanceRunner(
+        """
+{
+  "score": 2,
+  "result": "fail",
+  "score_reason": "The implementation evidence is incomplete.",
+  "evidence_citations": ["linear.issue.MT-1"],
+  "residual_findings": ["Implementation needs rework."],
+  "recommended_next_action": "Return to implementation."
+}
+"""
+    )
+    orchestrator = Orchestrator(
+        make_config_with_acceptance(tmp_path),
+        tracker,
+        CompletingRunner(),
+        acceptance_runner=acceptance_runner,
+    )
+    orchestrator.state.claimed.add("mt-1")
+
+    await orchestrator._run_acceptance_gate_for_issue(original, completion_verdict=None)
+
+    assert tracker.transitions[-1] == ("mt-1", "In Progress")
+    assert "mt-1" not in orchestrator.state.claimed
+    assert "mt-1" not in orchestrator.state.retry_attempts
+    assert "mt-1" not in orchestrator.state.continuations
+
+
+@pytest.mark.asyncio
 async def test_acceptance_in_review_is_not_dispatched_to_agent(tmp_path: Path) -> None:
     tracker = FakeTracker(candidates=[issue("MT-1", state="In Review")])
-    tracker.existing_acceptance_issue = {
-        "id": "acceptance-1",
-        "identifier": "MT-A1",
-        "url": "https://linear.app/x/issue/MT-A1",
-    }
+    tracker.children["mt-1"] = [
+        {
+            "id": "gate-1",
+            "identifier": "MT-G1",
+            "title": "[Gate] MT-1: Behavior",
+            "description": "Purpose: verify behavior",
+            "label_ids": ["symphony:type/gate"],
+            "labels": ["symphony:type/gate"],
+            "state": "Todo",
+            "url": "https://linear.app/x/issue/MT-G1",
+        }
+    ]
     runner = FakeRunner()
     acceptance_runner = FakeAcceptanceRunner(
         """
@@ -1067,7 +1261,8 @@ async def test_acceptance_in_review_is_not_dispatched_to_agent(tmp_path: Path) -
 
     assert runner.started == []
     assert acceptance_runner.calls
-    assert tracker.transitions == [("acceptance-1", "Done"), ("mt-1", "Done")]
+    evidence = tracker.children["gate-1"][0]
+    assert tracker.transitions == [(evidence["id"], "Done"), ("gate-1", "Done"), ("mt-1", "Done")]
 
 
 @pytest.mark.asyncio
@@ -1083,11 +1278,18 @@ async def test_acceptance_direct_done_bypass_with_evidence_runs_gate_from_review
             )
         ]
     )
-    tracker.existing_acceptance_issue = {
-        "id": "acceptance-1",
-        "identifier": "MT-A1",
-        "url": "https://linear.app/x/issue/MT-A1",
-    }
+    tracker.children["mt-1"] = [
+        {
+            "id": "gate-1",
+            "identifier": "MT-G1",
+            "title": "[Gate] MT-1: Behavior",
+            "description": "Purpose: verify behavior",
+            "label_ids": ["symphony:type/gate"],
+            "labels": ["symphony:type/gate"],
+            "state": "Todo",
+            "url": "https://linear.app/x/issue/MT-G1",
+        }
+    ]
     acceptance_runner = FakeAcceptanceRunner(
         """
 {
@@ -1109,7 +1311,8 @@ async def test_acceptance_direct_done_bypass_with_evidence_runs_gate_from_review
 
     await orchestrator.tick()
 
-    assert tracker.transitions == [("mt-1", "In Review"), ("acceptance-1", "Done"), ("mt-1", "Done")]
+    evidence = tracker.children["gate-1"][0]
+    assert tracker.transitions == [("mt-1", "In Review"), (evidence["id"], "Done"), ("gate-1", "Done"), ("mt-1", "Done")]
     assert acceptance_runner.calls
 
 
@@ -1118,11 +1321,16 @@ async def test_acceptance_direct_done_bypass_without_evidence_returns_to_in_prog
     tmp_path: Path,
 ) -> None:
     tracker = FakeTracker(candidates=[issue("MT-1", state="Done", description="done")])
-    tracker.existing_acceptance_issue = {
-        "id": "acceptance-1",
-        "identifier": "MT-A1",
-        "url": "https://linear.app/x/issue/MT-A1",
-    }
+    tracker.children["mt-1"] = [
+        {
+            "id": "gate-1",
+            "identifier": "MT-G1",
+            "title": "[Gate] MT-1: Behavior",
+            "label_ids": ["symphony:type/gate"],
+            "labels": ["symphony:type/gate"],
+            "state": "Todo",
+        }
+    ]
     acceptance_runner = FakeAcceptanceRunner("{}")
     orchestrator = Orchestrator(
         make_config_with_acceptance(tmp_path),
@@ -1137,6 +1345,51 @@ async def test_acceptance_direct_done_bypass_without_evidence_returns_to_in_prog
     assert acceptance_runner.calls == []
     assert tracker.comments[-1][0] == "mt-1"
     assert "direct Done bypass" in tracker.comments[-1][1]
+
+
+@pytest.mark.asyncio
+async def test_acceptance_direct_done_bypass_ignores_gate_plan_marker_evidence_requirements(
+    tmp_path: Path,
+) -> None:
+    tracker = FakeTracker(
+        candidates=[
+            issue(
+                "MT-1",
+                state="Done",
+                description=(
+                    "Business issue without implementation evidence.\n\n"
+                    "<!-- BEGIN SYMPHONY ACCEPTANCE -->\n"
+                    "Evidence required:\n"
+                    "* Implementation summary.\n"
+                    "* Test commands and exact output.\n"
+                    "* Remaining risks or explicit none.\n"
+                    "<!-- END SYMPHONY ACCEPTANCE -->"
+                ),
+            )
+        ]
+    )
+    tracker.children["mt-1"] = [
+        {
+            "id": "gate-1",
+            "identifier": "MT-G1",
+            "title": "[Gate] MT-1: Behavior",
+            "label_ids": ["symphony:type/gate"],
+            "labels": ["symphony:type/gate"],
+            "state": "Todo",
+        }
+    ]
+    acceptance_runner = FakeAcceptanceRunner("{}")
+    orchestrator = Orchestrator(
+        make_config_with_acceptance(tmp_path),
+        tracker,
+        FakeRunner(),
+        acceptance_runner=acceptance_runner,
+    )
+
+    await orchestrator.tick()
+
+    assert tracker.transitions == [("mt-1", "In Progress")]
+    assert acceptance_runner.calls == []
 
 
 @pytest.mark.asyncio
@@ -1231,7 +1484,7 @@ async def test_completion_verification_needs_human_does_not_mark_done(tmp_path: 
 
 
 @pytest.mark.asyncio
-async def test_completion_verification_needs_human_creates_acceptance_gate_when_enabled(
+async def test_completion_verification_needs_human_does_not_create_legacy_acceptance_issue_when_enabled(
     tmp_path: Path,
 ) -> None:
     tracker = FakeTracker(candidates=[issue("MT-1", state="In Progress")])
@@ -1290,23 +1543,93 @@ async def test_completion_verification_needs_human_creates_acceptance_gate_when_
     await orchestrator.wait_for_idle()
 
     assert "mt-1" not in orchestrator.state.completed
-    assert "mt-1" not in orchestrator.state.retry_attempts
-    assert "mt-1" not in orchestrator.state.claimed
-    assert tracker.created_issues
-    assert tracker.created_issues[0]["original_issue_id"] == "mt-1"
-    assert tracker.created_issues[0]["label_ids"] == ["symphony:type/acceptance"]
-    assert tracker.created_relations == [
+    assert "mt-1" in orchestrator.state.retry_attempts
+    assert "mt-1" in orchestrator.state.claimed
+    assert "implementation_evidence_missing" in str(orchestrator.state.retry_attempts["mt-1"].error)
+    assert tracker.created_issues == []
+    assert tracker.created_relations == []
+    assert acceptance_runner.calls == []
+    assert ("mt-1", "symphony:done") not in tracker.lifecycle_labels
+
+
+@pytest.mark.asyncio
+async def test_completion_verification_needs_human_with_acceptance_moves_to_review_before_gate(
+    tmp_path: Path,
+) -> None:
+    description = (
+        "Implementation summary: created requested artifact.\n"
+        "Test commands and exact output: test -f SYMPHONY_REAL_SMALL_TASK.md -> exit code 0.\n"
+        "Remaining risks: none."
+    )
+    tracker = FakeTracker(candidates=[issue("MT-1", state="In Progress", description=description)])
+    tracker.refreshed = [
+        issue(
+            "MT-1",
+            state="In Progress",
+            description=description,
+            blocked_by=[BlockerRef(id="dep-1", identifier="MT-0", state="In Progress")],
+        )
+    ]
+    tracker.children["mt-1"] = [
         {
-            "id": "relation-1",
-            "issue_id": "acceptance-1",
-            "related_issue_id": "mt-1",
-            "type": "blocks",
+            "id": "gate-1",
+            "identifier": "MT-G1",
+            "title": "[Gate] MT-1: Evidence",
+            "description": "Purpose: verify evidence",
+            "label_ids": ["symphony:type/gate"],
+            "labels": ["symphony:type/gate"],
+            "state": "Todo",
+            "url": "https://linear.app/x/issue/MT-G1",
         }
     ]
+    workspace = tmp_path / "MT-1"
+    workspace.mkdir()
+    (workspace / "README.md").write_text("changed\n", encoding="utf-8")
+    runner = ControlledCompletingRunner()
+    base = make_config_with_completion_verification(
+        tmp_path,
+        required_checks=[],
+        optional_checks=["linear_state"],
+        auto_retry_on_fail=True,
+    )
+    config = ServiceConfig(
+        tracker=base.tracker,
+        polling=base.polling,
+        workspace=base.workspace,
+        hooks=base.hooks,
+        agent=base.agent,
+        codex=base.codex,
+        prompt_template=base.prompt_template,
+        workflow_path=base.workflow_path,
+        completion_verification=base.completion_verification,
+        acceptance=AcceptanceConfig(enabled=True),
+    )
+    acceptance_runner = FakeAcceptanceRunner(
+        """
+{
+  "score": 4,
+  "result": "pass",
+  "score_reason": "Implementation evidence is sufficient for this gate.",
+  "evidence_citations": ["linear.issue.MT-1"],
+  "residual_findings": [],
+  "recommended_next_action": "Pass this gate."
+}
+"""
+    )
+    orchestrator = Orchestrator(config, tracker, runner, acceptance_runner=acceptance_runner)
+
+    await orchestrator.tick()
+    await runner.started.wait()
+    orchestrator.state.running["mt-1"].workspace_path = str(workspace)
+    runner.release.set()
+    await orchestrator.wait_for_idle()
+
     assert acceptance_runner.calls
-    assert any(label == "symphony:gate/failed" for _, label in tracker.lifecycle_labels)
-    assert any(label == "symphony:score/2" for _, label in tracker.lifecycle_labels)
-    assert ("mt-1", "symphony:done") not in tracker.lifecycle_labels
+    assert ("mt-1", "In Review") in tracker.transitions
+    assert tracker.transitions[-1] == ("mt-1", "Done")
+    assert "mt-1" not in orchestrator.state.claimed
+    assert "mt-1" not in orchestrator.state.retry_attempts
+    assert "mt-1" not in orchestrator.state.continuations
 
 
 @pytest.mark.asyncio

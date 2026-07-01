@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import timedelta
 from pathlib import Path
 
-from symphony.models import Issue, RetryEntry, RunningEntry, RuntimeTokens, utc_now
+from symphony.models import ContinuationEntry, Issue, RetryEntry, RunningEntry, RuntimeTokens, utc_now
 from symphony.persistence import PersistenceStore, PersistedSession, PersistedState
 
 
@@ -22,6 +22,17 @@ def test_persistence_store_round_trips_retry_entries_and_sessions(tmp_path: Path
                 due_at_ms=123456,
                 error="retry poll failed",
                 issue_url="https://linear.app/x/issue/MT-1",
+            )
+        ],
+        continuations=[
+            ContinuationEntry(
+                issue_id="issue-3",
+                identifier="MT-3",
+                attempt=4,
+                due_at=due_at,
+                due_at_ms=234567,
+                issue_url="https://linear.app/x/issue/MT-3",
+                last_message="max turns reached; continuing",
             )
         ],
         sessions=[
@@ -65,6 +76,12 @@ def test_persistence_store_round_trips_retry_entries_and_sessions(tmp_path: Path
     assert loaded.retry_attempts[0].issue_url == "https://linear.app/x/issue/MT-1"
     assert loaded.retry_attempts[0].due_at == due_at
     assert loaded.retry_attempts[0].due_at_ms > 0
+    assert loaded.continuations[0].issue_id == "issue-3"
+    assert loaded.continuations[0].identifier == "MT-3"
+    assert loaded.continuations[0].attempt == 4
+    assert loaded.continuations[0].phase == "continuing"
+    assert loaded.continuations[0].status_label == "symphony:continuing"
+    assert loaded.continuations[0].last_message == "max turns reached; continuing"
     assert loaded.sessions[0].issue_id == "issue-2"
     assert loaded.sessions[0].session_id == "thread-turn"
     assert loaded.sessions[0].worker_host == "builder-1"
@@ -106,7 +123,7 @@ def test_persistence_store_builds_state_from_running_entries(tmp_path: Path) -> 
         turn_count=1,
     )
 
-    state = PersistedState.from_runtime(retry_attempts=[], running=[entry])
+    state = PersistedState.from_runtime(retry_attempts=[], continuations=[], running=[entry])
 
     assert state.sessions[0].issue_id == "issue-1"
     assert state.sessions[0].issue_identifier == "MT-1"
@@ -130,3 +147,33 @@ def test_persistence_store_missing_or_corrupt_file_loads_empty(tmp_path: Path) -
     path.write_text("{not-json", encoding="utf-8")
 
     assert store.load() == PersistedState()
+
+
+def test_persistence_migrates_legacy_errorless_retry_to_continuation(tmp_path: Path) -> None:
+    path = tmp_path / "state.json"
+    due_at = utc_now() + timedelta(seconds=30)
+    path.write_text(
+        (
+            '{"retry_attempts":[{'
+            '"issue_id":"issue-1",'
+            '"identifier":"MT-1",'
+            '"attempt":2,'
+            f'"due_at":"{due_at.isoformat().replace("+00:00", "Z")}",'
+            '"error":null,'
+            '"issue_url":"https://linear.app/x/issue/MT-1",'
+            '"phase":"done",'
+            '"status_label":"symphony:done",'
+            '"last_message":"continue later"'
+            '}],"sessions":[]}'
+        ),
+        encoding="utf-8",
+    )
+
+    loaded = PersistenceStore(path).load()
+
+    assert loaded.retry_attempts == []
+    assert len(loaded.continuations) == 1
+    assert loaded.continuations[0].issue_id == "issue-1"
+    assert loaded.continuations[0].attempt == 2
+    assert loaded.continuations[0].phase == "continuing"
+    assert loaded.continuations[0].status_label == "symphony:continuing"

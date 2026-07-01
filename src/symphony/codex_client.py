@@ -492,6 +492,8 @@ class CodexAppServerClient:
         await self._send(proc, {"id": request_id, "result": _tool_call_response(method, result)})
 
     async def _wait_for_turn(self, proc: Any, turn_id: str, on_event: EventCallback | None) -> str:
+        if self.config.turn_timeout_ms <= 0:
+            return await self._wait_for_turn_event(turn_id, on_event)
         deadline = self.config.turn_timeout_ms / 1000
         try:
             return await asyncio.wait_for(self._wait_for_turn_event(turn_id, on_event), timeout=deadline)

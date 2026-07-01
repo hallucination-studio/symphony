@@ -21,6 +21,23 @@ class AcceptanceReport:
     rejection_reasons: list[str] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class GatePlan:
+    title: str
+    purpose: str
+    acceptance_criteria: list[str]
+    required_evidence: list[str]
+
+
+@dataclass(frozen=True)
+class GatePlanReport:
+    valid: bool
+    needs_more_info: bool
+    gates: list[GatePlan] = field(default_factory=list)
+    questions: list[str] = field(default_factory=list)
+    rejection_reasons: list[str] = field(default_factory=list)
+
+
 class CodexAcceptanceRunner:
     def __init__(self, config: ServiceConfig, *, codex_client: Any | None = None) -> None:
         self.config = config
@@ -64,6 +81,64 @@ class CodexAcceptanceRunner:
         if last_message is not None:
             return last_message
         return str(result)
+
+
+class CodexGatePlanner:
+    def __init__(self, config: ServiceConfig, *, codex_client: Any | None = None) -> None:
+        self.config = config
+        self.codex_client = codex_client or CodexAppServerClient(config.codex)
+
+    async def plan_gates(self, *, issue: Any, workspace_path: str | None = None) -> str:
+        workspace = Path(workspace_path or self.config.workspace.root)
+        prompt = build_gate_planner_prompt(issue=issue)
+        last_message: str | None = None
+
+        def on_event(event: dict[str, Any]) -> None:
+            nonlocal last_message
+            message = event.get("message")
+            if isinstance(message, str) and message.strip():
+                last_message = message.strip()
+
+        result = await self.codex_client.run_session(
+            workspace,
+            prompt,
+            f"Gate plan {getattr(issue, 'identifier', 'issue')}",
+            on_event=on_event,
+            max_turns=self.config.agent.max_turns,
+        )
+        if isinstance(result, str):
+            return result
+        message = getattr(result, "message", None)
+        if isinstance(message, str) and message.strip():
+            return message.strip()
+        if last_message is not None:
+            return last_message
+        return str(result)
+
+
+def build_gate_planner_prompt(*, issue: Any) -> str:
+    issue_identifier = getattr(issue, "identifier", "")
+    issue_title = getattr(issue, "title", "")
+    issue_description = getattr(issue, "description", "") or ""
+    issue_labels = getattr(issue, "labels", []) or []
+    return "\n".join(
+        [
+            "You are Symphony's gate planner for one business Linear issue.",
+            "Create an acceptance gate tree under the business issue. Each gate must cover exactly one independently reviewable concern.",
+            "Balance the plan: do not create one giant catch-all gate, and do not split into trivial fragments.",
+            "If the issue is too ambiguous to plan, ask all needed questions at once.",
+            "",
+            "Business issue:",
+            f"- Identifier: {issue_identifier}",
+            f"- Title: {issue_title}",
+            f"- Labels: {', '.join(str(label) for label in issue_labels)}",
+            f"- Description: {issue_description}",
+            "",
+            "Return one JSON object only in one of these shapes:",
+            '{"gates":[{"title":"short title","purpose":"single responsibility","acceptance_criteria":["specific criterion"],"required_evidence":["specific evidence"]}]}',
+            '{"needs_more_info":true,"questions":["question 1","question 2"]}',
+        ]
+    )
 
 
 def build_acceptance_prompt(
@@ -190,6 +265,63 @@ def parse_acceptance_report(
     )
 
 
+def parse_gate_plan_report(text: str) -> GatePlanReport:
+    try:
+        payload = json.loads(_extract_json_object(text))
+    except (json.JSONDecodeError, ValueError):
+        return GatePlanReport(valid=False, needs_more_info=False, rejection_reasons=["invalid_json"])
+    if not isinstance(payload, dict):
+        return GatePlanReport(valid=False, needs_more_info=False, rejection_reasons=["invalid_json"])
+
+    needs_more_info = payload.get("needs_more_info") is True
+    if needs_more_info:
+        questions = _string_list(payload.get("questions"))
+        reasons = [] if questions else ["missing_questions"]
+        return GatePlanReport(
+            valid=not reasons,
+            needs_more_info=True,
+            questions=questions,
+            rejection_reasons=reasons,
+        )
+
+    raw_gates = payload.get("gates")
+    if not isinstance(raw_gates, list) or not raw_gates:
+        return GatePlanReport(valid=False, needs_more_info=False, rejection_reasons=["missing_gates"])
+
+    gates: list[GatePlan] = []
+    rejection_reasons: list[str] = []
+    for index, raw_gate in enumerate(raw_gates, start=1):
+        if not isinstance(raw_gate, dict):
+            rejection_reasons.append(f"gate_{index}_invalid")
+            continue
+        title = _string(raw_gate.get("title"))
+        purpose = _string(raw_gate.get("purpose"))
+        criteria = _string_list(raw_gate.get("acceptance_criteria"))
+        evidence = _string_list(raw_gate.get("required_evidence"))
+        if not title:
+            rejection_reasons.append(f"gate_{index}_missing_title")
+        if not _substantive_gate_purpose(purpose):
+            rejection_reasons.append(f"gate_{index}_purpose_not_substantive")
+        if not criteria:
+            rejection_reasons.append(f"gate_{index}_missing_acceptance_criteria")
+        if not evidence:
+            rejection_reasons.append(f"gate_{index}_missing_required_evidence")
+        gates.append(
+            GatePlan(
+                title=title,
+                purpose=purpose,
+                acceptance_criteria=criteria,
+                required_evidence=evidence,
+            )
+        )
+    return GatePlanReport(
+        valid=not rejection_reasons,
+        needs_more_info=False,
+        gates=gates,
+        rejection_reasons=rejection_reasons,
+    )
+
+
 def _rejected(reasons: list[str]) -> AcceptanceReport:
     return AcceptanceReport(
         score=-1,
@@ -239,4 +371,12 @@ def _substantive(value: str) -> bool:
     if len(lowered) < 40:
         return False
     vague = {"looks good", "seems fine", "all good", "ok", "done"}
+    return lowered not in vague
+
+
+def _substantive_gate_purpose(value: str) -> bool:
+    lowered = value.strip().lower()
+    if len(lowered) < 24:
+        return False
+    vague = {"check it", "review it", "everything", "all", "done"}
     return lowered not in vague

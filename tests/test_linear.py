@@ -402,7 +402,90 @@ async def test_create_issue_uses_issue_create_with_labels() -> None:
         "labelIds": ["label-acceptance"],
         "title": "[Acceptance] MT-1",
         "description": "Review MT-1 evidence.",
+        "parentId": None,
     }
+
+
+@pytest.mark.asyncio
+async def test_create_issue_supports_parent_id_for_child_issues() -> None:
+    transport = RecordingTransport(
+        [
+            {
+                "data": {
+                    "issueCreate": {
+                        "success": True,
+                        "issue": {
+                            "id": "gate-1",
+                            "identifier": "MT-2",
+                            "title": "[Gate] MT-1: Behavior",
+                            "url": "https://linear.app/x/issue/MT-2",
+                            "state": {"name": "Todo"},
+                            "labels": {"nodes": [{"name": "symphony:type/gate"}]},
+                        },
+                    }
+                }
+            }
+        ]
+    )
+    client = LinearClient("https://api.linear.app/graphql", "linear-token", transport=transport)
+
+    created = await client.create_issue(
+        team_id="team-1",
+        project_id="project-1",
+        state_id="state-todo",
+        label_ids=["label-gate"],
+        title="[Gate] MT-1: Behavior",
+        description="Gate details.",
+        parent_id="issue-1",
+    )
+
+    assert created["id"] == "gate-1"
+    request = transport.requests[0]["json"]
+    assert "parentId" in request["query"]
+    assert request["variables"]["parentId"] == "issue-1"
+
+
+@pytest.mark.asyncio
+async def test_fetch_child_issues_returns_direct_children_filtered_by_label() -> None:
+    transport = RecordingTransport(
+        [
+            {
+                "data": {
+                    "issue": {
+                        "id": "issue-1",
+                        "children": {
+                            "nodes": [
+                                {
+                                    "id": "gate-1",
+                                    "identifier": "MT-2",
+                                    "title": "[Gate] MT-1: Behavior",
+                                    "url": "https://linear.app/x/issue/MT-2",
+                                    "state": {"name": "Todo"},
+                                    "labels": {"nodes": [{"name": "symphony:type/gate"}]},
+                                },
+                                {
+                                    "id": "note-1",
+                                    "identifier": "MT-3",
+                                    "title": "Other",
+                                    "url": "https://linear.app/x/issue/MT-3",
+                                    "state": {"name": "Todo"},
+                                    "labels": {"nodes": [{"name": "other"}]},
+                                },
+                            ]
+                        },
+                    }
+                }
+            }
+        ]
+    )
+    client = LinearClient("https://api.linear.app/graphql", "linear-token", transport=transport)
+
+    children = await client.fetch_child_issues("issue-1", label_name="symphony:type/gate")
+
+    assert [child["id"] for child in children] == ["gate-1"]
+    request = transport.requests[0]["json"]
+    assert "children" in request["query"]
+    assert request["variables"] == {"issueId": "issue-1"}
 
 
 @pytest.mark.asyncio
@@ -464,6 +547,7 @@ async def test_create_acceptance_issue_for_uses_original_linear_context_and_type
         "labelIds": ["label-acceptance"],
         "title": "[Acceptance] MT-1: Build",
         "description": "Review evidence.",
+        "parentId": None,
     }
 
 

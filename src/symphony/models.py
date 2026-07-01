@@ -41,6 +41,7 @@ LIFECYCLE_LABELS = {
     "queued": f"{LIFECYCLE_LABEL_PREFIX}queued",
     "starting": f"{LIFECYCLE_LABEL_PREFIX}starting",
     "running": f"{LIFECYCLE_LABEL_PREFIX}running",
+    "continuing": f"{LIFECYCLE_LABEL_PREFIX}continuing",
     "retrying": f"{LIFECYCLE_LABEL_PREFIX}retrying",
     "failed": f"{LIFECYCLE_LABEL_PREFIX}failed",
     "done": f"{LIFECYCLE_LABEL_PREFIX}done",
@@ -183,6 +184,20 @@ class RetryEntry:
     issue_url: str | None = None
     phase: str = "retrying"
     status_label: str = LIFECYCLE_LABELS["retrying"]
+    last_message: str | None = None
+    recent_events: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass
+class ContinuationEntry:
+    issue_id: str
+    identifier: str
+    attempt: int
+    due_at: datetime
+    due_at_ms: int
+    issue_url: str | None = None
+    phase: str = "continuing"
+    status_label: str = LIFECYCLE_LABELS["continuing"]
     last_message: str | None = None
     recent_events: list[dict[str, Any]] = field(default_factory=list)
 

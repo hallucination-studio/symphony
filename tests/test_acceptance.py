@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from symphony.acceptance import CodexAcceptanceRunner, parse_acceptance_report
+from symphony.acceptance import CodexAcceptanceRunner, CodexGatePlanner, parse_acceptance_report, parse_gate_plan_report
 from symphony.config import (
     AcceptanceConfig,
     AgentConfig,
@@ -154,6 +155,70 @@ def test_parse_acceptance_report_rejects_invalid_json() -> None:
     assert "invalid_json" in report.rejection_reasons
 
 
+def test_parse_gate_plan_report_accepts_multiple_valid_gates() -> None:
+    plan = parse_gate_plan_report(
+        """
+{
+  "gates": [
+    {
+      "title": "Behavior",
+      "purpose": "Verify only the requested user-visible behavior.",
+      "acceptance_criteria": ["The requested behavior works."],
+      "required_evidence": ["Focused test command and exact output."]
+    },
+    {
+      "title": "Regression Coverage",
+      "purpose": "Verify only regression coverage.",
+      "acceptance_criteria": ["A regression test covers the requested case."],
+      "required_evidence": ["Test file citation and pytest output."]
+    }
+  ]
+}
+"""
+    )
+
+    assert plan.valid is True
+    assert plan.needs_more_info is False
+    assert [gate.title for gate in plan.gates] == ["Behavior", "Regression Coverage"]
+
+
+def test_parse_gate_plan_report_accepts_needs_more_info_questions() -> None:
+    plan = parse_gate_plan_report(
+        """
+{
+  "needs_more_info": true,
+  "questions": ["Which API should expose the new field?", "What migration behavior is expected?"]
+}
+"""
+    )
+
+    assert plan.valid is True
+    assert plan.needs_more_info is True
+    assert plan.questions == ["Which API should expose the new field?", "What migration behavior is expected?"]
+    assert plan.gates == []
+
+
+def test_parse_gate_plan_report_rejects_empty_or_unfocused_gate() -> None:
+    plan = parse_gate_plan_report(
+        """
+{
+  "gates": [
+    {
+      "title": "Everything",
+      "purpose": "Check it.",
+      "acceptance_criteria": [],
+      "required_evidence": ["output"]
+    }
+  ]
+}
+"""
+    )
+
+    assert plan.valid is False
+    assert "gate_1_missing_acceptance_criteria" in plan.rejection_reasons
+    assert "gate_1_purpose_not_substantive" in plan.rejection_reasons
+
+
 @pytest.mark.asyncio
 async def test_codex_acceptance_runner_prompts_for_task_scoped_gate_and_strict_json(tmp_path: Path) -> None:
     codex = FakeCodex(result='{"score": 4, "result": "pass"}')
@@ -227,4 +292,33 @@ async def test_codex_acceptance_runner_returns_last_agent_message_when_client_re
     )
 
     assert result == '{"score": 4, "result": "pass", "score_reason": "Evidence supports completion."}'
+    assert callable(codex.calls[0]["kwargs"]["on_event"])
+
+
+@pytest.mark.asyncio
+async def test_codex_gate_planner_returns_last_agent_message_when_client_returns_turn_result(tmp_path: Path) -> None:
+    class TurnResult:
+        success = True
+
+    emitted = """
+{
+  "gates": [
+    {
+      "title": "Implementation Evidence",
+      "purpose": "Verify only implementation summary and concrete workspace evidence.",
+      "acceptance_criteria": ["The requested validation artifact exists and is cited."],
+      "required_evidence": ["Workspace file citation and implementation summary."]
+    }
+  ]
+}
+"""
+    codex = FakeCodex(result=TurnResult(), emitted_message=emitted)
+    planner = CodexGatePlanner(make_config(tmp_path), codex_client=codex)
+
+    result = await planner.plan_gates(
+        issue=Issue(id="mt-1", identifier="MT-1", title="Build", state="Todo"),
+        workspace_path=str(tmp_path),
+    )
+
+    assert json.loads(result)["gates"][0]["title"] == "Implementation Evidence"
     assert callable(codex.calls[0]["kwargs"]["on_event"])
