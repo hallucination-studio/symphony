@@ -22,6 +22,11 @@ polling:
 workspace:
   root: ./workspaces
 
+hooks:
+  after_create: |
+    git clone --shared --no-hardlinks ../.. .
+  timeout_ms: 120000
+
 agent:
   max_concurrent_agents: 10
   max_turns: 20
