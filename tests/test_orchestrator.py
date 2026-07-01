@@ -812,6 +812,39 @@ async def test_acceptance_enabled_creates_gate_issue_instead_of_marking_original
 
 
 @pytest.mark.asyncio
+async def test_reconcile_terminal_running_issue_waits_for_worker_when_acceptance_enabled(
+    tmp_path: Path,
+) -> None:
+    tracker = FakeTracker(candidates=[issue("MT-1")])
+    tracker.refreshed = [issue("MT-1", state="Done")]
+    runner = ControlledCompletingRunner()
+    orchestrator = Orchestrator(make_config_with_acceptance(tmp_path), tracker, runner)
+
+    await orchestrator.tick()
+    await runner.started.wait()
+    await orchestrator.reconcile_running()
+
+    assert "mt-1" in orchestrator.state.running
+    assert "mt-1" in orchestrator.state.claimed
+    assert tracker.created_issues == []
+    assert ("mt-1", "symphony:done") not in tracker.lifecycle_labels
+
+    runner.release.set()
+    await orchestrator.wait_for_idle()
+
+    assert tracker.created_issues
+    assert tracker.created_relations == [
+        {
+            "id": "relation-1",
+            "issue_id": "acceptance-1",
+            "related_issue_id": "mt-1",
+            "type": "blocks",
+        }
+    ]
+    assert ("mt-1", "symphony:done") not in tracker.lifecycle_labels
+
+
+@pytest.mark.asyncio
 async def test_acceptance_score_4_marks_original_done_after_gate_passes(tmp_path: Path) -> None:
     tracker = FakeTracker(candidates=[issue("MT-1")])
     tracker.refreshed = [issue("MT-1", state="Done")]

@@ -698,6 +698,10 @@ class Orchestrator:
                 await self._terminate_running(issue_id, retry=False)
                 continue
             if self._is_terminal(refreshed_issue):
+                if self.config.completion_verification.enabled or self.config.acceptance.enabled:
+                    entry.issue = refreshed_issue
+                    self._persist_state()
+                    continue
                 await self._sync_lifecycle_label(issue_id, LIFECYCLE_LABELS["done"])
                 await self._terminate_running(issue_id, retry=False, cleanup_workspace=True)
             elif self._is_run_eligible(refreshed_issue):
