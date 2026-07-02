@@ -299,6 +299,19 @@ def start_process(name: str, command: list[str], *, env: dict[str, str], stdout_
     return ManagedProcess(name=name, process=process)
 
 
+async def wait_for_http_ready(url: str, *, timeout_seconds: float = 10.0) -> tuple[int, Any]:
+    deadline = time.monotonic() + timeout_seconds
+    last_error: str | None = None
+    while time.monotonic() < deadline:
+        try:
+            status, body = http_json("GET", url, timeout=2)
+            return status, body
+        except urllib.error.URLError as exc:
+            last_error = str(exc)
+        await asyncio.sleep(0.2)
+    raise RuntimeError(f"HTTP service not ready at {url}: {last_error or 'timed out'}")
+
+
 def make_fixture_repo(path: Path) -> Path:
     if path.exists():
         subprocess.run(["rm", "-rf", str(path)], check=True)
@@ -560,9 +573,8 @@ No-op.
             stdout_path=root / "podium.log",
         )
         processes.append(podium)
-        await asyncio.sleep(1)
         for path in ["/", "/api/v1/health"]:
-            status, body = http_json("GET", api_url(podium_port, path))
+            status, body = await wait_for_http_ready(api_url(podium_port, path))
             evidence.check(f"podium-api:{path}", status == 200, status=status, body=body)
         status, body = http_json("POST", api_url(podium_port, "/api/v1/conductors/register"), {"conductor_id": "matrix-probe"})
         evidence.check("podium-api:/api/v1/conductors/register", status == 200, status=status, body=body)
@@ -574,8 +586,7 @@ No-op.
             stdout_path=root / "conductor.log",
         )
         processes.append(conductor)
-        await asyncio.sleep(1)
-        status, body = http_json("GET", api_url(conductor_port, "/"))
+        status, body = await wait_for_http_ready(api_url(conductor_port, "/"))
         evidence.check("conductor-api:/", status == 200, status=status, body=body)
         status, body = http_json(
             "PATCH",
@@ -650,7 +661,7 @@ No-op.
             stdout_path=root / "conductor-restarted.log",
         )
         processes.append(conductor)
-        await asyncio.sleep(1)
+        await wait_for_http_ready(api_url(conductor_port, "/"))
         status, body = http_json("GET", api_url(conductor_port, f"/api/instances/{instance_id}"))
         evidence.check("conductor-daemon:restart-recovers-instance-metadata", status == 200 and body["instance"]["id"] == instance_id, status=status, process_status=body.get("instance", {}).get("process_status"))
 
@@ -785,7 +796,7 @@ No-op.
             stdout_path=root / "conductor-live-recovered.log",
         )
         processes.append(conductor)
-        await asyncio.sleep(1)
+        await wait_for_http_ready(api_url(conductor_port, "/"))
         status, body = http_json("GET", api_url(conductor_port, f"/api/instances/{instance_id}"))
         recovered = body.get("instance", {}) if isinstance(body, dict) else {}
         evidence.check(
