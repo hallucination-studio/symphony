@@ -30,6 +30,29 @@ class RawResponse:
 
 
 class PodiumServer:
+    """
+    Podium HTTP server for Symphony agent orchestration.
+
+    Current responsibilities:
+    1. Conductor registration and routing (POST /api/v1/conductors/register)
+    2. Linear webhook ingestion (POST /api/v1/linear/webhooks/agent-session)
+    3. Linear GraphQL proxy with OAuth token injection (POST /api/v1/linear/graphql)
+    4. Linear OAuth callback handling (GET /api/v1/linear/oauth/callback)
+
+    EXTENSION POINTS for web frontend refactoring:
+    - Add session management middleware for browser-based authentication
+    - Add CORS configuration for cross-origin requests from web UI
+    - Extract routing to a separate Router class for better organization
+    - Add WebSocket support for real-time updates to web clients
+    - Add rate limiting and request validation middleware
+    - Add structured logging with request tracing
+
+    CRITICAL CONSTRAINTS:
+    - Linear OAuth tokens (access_token, refresh_token) must NEVER appear in responses
+    - Existing conductor/webhook/proxy routes must preserve exact behavior
+    - All secret redaction tests must continue passing after refactoring
+    """
+
     def __init__(
         self,
         *,
@@ -112,6 +135,27 @@ class PodiumServer:
         headers: dict[str, str],
         query: dict[str, str] | None = None,
     ) -> tuple[int, dict[str, Any] | RawResponse]:
+        """
+        Route HTTP requests to appropriate handlers.
+
+        CRITICAL: Preserve exact behavior of existing routes during refactoring:
+        - POST /api/v1/conductors/register (conductor registration)
+        - POST /api/v1/linear/webhooks/agent-session (Linear webhook ingestion)
+        - POST /api/v1/linear/graphql (GraphQL proxy with OAuth token injection)
+
+        EXTENSION POINTS for web frontend / BFF APIs:
+        - Add routes under /api/web/* for browser-facing APIs
+        - Add routes under /api/bff/* for backend-for-frontend patterns
+        - Consider extracting route handling to a router class for better organization
+        - Session/auth middleware can be injected before route dispatch
+        - CORS handling should wrap this method's return values
+
+        SECURITY: All new routes must:
+        - Never expose Linear OAuth tokens (access_token, refresh_token) in responses
+        - Validate JSON input and return 400 with error code on parse failures
+        - Use proper authorization (Bearer tokens, session cookies, etc.)
+        - Redact secrets from all error messages and logs
+        """
         query = query or {}
         if method == "GET" and path == "/":
             return 200, RawResponse.text("Podium\n", "text/plain; charset=utf-8")
@@ -120,6 +164,7 @@ class PodiumServer:
         if method == "GET" and path == "/api/v1/linear/oauth/callback":
             return self._linear_oauth_callback(query)
         if method == "POST" and path == "/api/v1/conductors/register":
+            # CRITICAL: Do not modify this route's behavior - conductors depend on exact response shape
             if self.token and headers.get("authorization") != f"Bearer {self.token}":
                 return 401, {"error": {"code": "unauthorized", "message": "Unauthorized"}}
             try:
@@ -134,12 +179,30 @@ class PodiumServer:
             response = ConductorRegistrationResponse(status="accepted", conductor_id=request.conductor_id)
             return 200, response.to_dict()
         if method == "POST" and path == "/api/v1/linear/webhooks/agent-session":
+            # CRITICAL: Do not modify webhook signature validation or dispatch logic
             return await self._linear_agent_session_webhook(raw_body, headers)
         if method == "POST" and path == "/api/v1/linear/graphql":
+            # CRITICAL: Linear OAuth tokens must stay inside Podium - never in responses
             return await self._linear_graphql_proxy(raw_body, headers)
+        # EXTENSION POINT: Add new web/BFF routes here
+        # Example:
+        #   if method == "GET" and path.startswith("/api/web/"):
+        #       return await self._handle_web_api(method, path, raw_body, headers, query)
         return 404, {"error": {"code": "not_found", "message": f"Route not found: {path}"}}
 
     def _linear_oauth_callback(self, query: dict[str, str]) -> tuple[int, dict[str, Any]]:
+        """
+        Handle Linear OAuth callback after user authorizes the app.
+
+        CRITICAL: access_token and refresh_token are stored internally but NEVER returned in response.
+        Tests verify that tokens do not appear in response body.
+
+        EXTENSION POINT: After refactoring to web UI:
+        - Add browser session creation here so user stays logged in
+        - Return a redirect response (302) to the web UI instead of JSON
+        - Consider adding a state parameter validation for CSRF protection
+        - Log successful installations for monitoring/debugging
+        """
         code = str(query.get("code") or "").strip()
         if not code:
             return 400, {"error": {"code": "missing_code", "message": "OAuth code is required"}}
@@ -176,6 +239,18 @@ class PodiumServer:
     async def _linear_agent_session_webhook(
         self, raw_body: bytes, headers: dict[str, str]
     ) -> tuple[int, dict[str, Any]]:
+        """
+        Handle Linear AgentSessionEvent webhooks.
+
+        CRITICAL: Signature validation and dispatch logic must remain unchanged.
+        Tests verify signature rejection, event filtering, and multi-conductor dispatch.
+
+        EXTENSION POINT: After web UI refactoring:
+        - Broadcast events to connected WebSocket clients for real-time UI updates
+        - Store events in a database for audit trail and replay
+        - Add webhook delivery retry logic with exponential backoff
+        - Consider adding a webhook event queue for better reliability
+        """
         if self.linear_webhook_secret and not self._valid_linear_signature(raw_body, headers):
             return 401, {"error": {"code": "invalid_signature", "message": "Invalid Linear webhook signature"}}
         try:
@@ -195,6 +270,20 @@ class PodiumServer:
     async def _linear_graphql_proxy(
         self, raw_body: bytes, headers: dict[str, str]
     ) -> tuple[int, dict[str, Any]]:
+        """
+        Proxy GraphQL requests to Linear API with OAuth token injection.
+
+        CRITICAL: Linear OAuth access_token must NEVER appear in responses.
+        Proxy tokens are validated against registered conductors.
+        Tests verify unauthorized rejection, missing installation errors, and token redaction.
+
+        EXTENSION POINT: After web UI refactoring:
+        - Add browser session-based authentication as alternative to proxy tokens
+        - Add GraphQL query allowlisting/validation for security
+        - Add response caching for frequently requested queries
+        - Consider adding GraphQL query cost analysis to prevent abuse
+        - Add request/response logging for debugging (with token redaction)
+        """
         registration = self._registration_for_proxy(headers.get("authorization") or "")
         if registration is None:
             return 401, {"error": {"code": "unauthorized", "message": "Unauthorized"}}
