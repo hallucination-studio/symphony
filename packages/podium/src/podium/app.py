@@ -444,6 +444,9 @@ def normalize_agent_session_event(payload: dict[str, Any]) -> dict[str, str]:
     session = payload.get("agentSession") if isinstance(payload.get("agentSession"), dict) else {}
     issue = session.get("issue") if isinstance(session.get("issue"), dict) else {}
     project = issue.get("project") if isinstance(issue.get("project"), dict) else {}
+    assignee = issue.get("assignee") if isinstance(issue.get("assignee"), dict) else {}
+    agent = session.get("agent") if isinstance(session.get("agent"), dict) else {}
+    agent_user = agent.get("user") if isinstance(agent.get("user"), dict) else {}
     workspace = payload.get("workspace") if isinstance(payload.get("workspace"), dict) else {}
     return {
         "workspace_id": str(workspace.get("id") or payload.get("workspace_id") or ""),
@@ -451,4 +454,12 @@ def normalize_agent_session_event(payload: dict[str, Any]) -> dict[str, str]:
         "issue_id": str(issue.get("id") or payload.get("issue_id") or ""),
         "issue_identifier": str(issue.get("identifier") or payload.get("issue_identifier") or ""),
         "agent_session_id": str(session.get("id") or payload.get("agent_session_id") or ""),
+        "assignee_id": str(
+            assignee.get("id")
+            or agent_user.get("id")
+            or agent.get("userId")
+            or session.get("agentUserId")
+            or payload.get("assignee_id")
+            or ""
+        ),
     }

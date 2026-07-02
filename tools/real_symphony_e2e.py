@@ -137,7 +137,21 @@ async def linear_graphql(token: str, query: str, variables: dict[str, Any]) -> d
     raise RuntimeError(f"Linear GraphQL request failed after retries: {last_error!r}") from last_error
 
 
-async def create_linear_issue(token: str, project_slug: str, run_id: str) -> dict[str, Any]:
+async def fetch_linear_viewer(token: str) -> dict[str, Any]:
+    return (
+        await linear_graphql(
+            token,
+            """
+            query Viewer {
+              viewer { id name email }
+            }
+            """,
+            {},
+        )
+    )["viewer"]
+
+
+async def create_linear_issue(token: str, project_slug: str, run_id: str, *, assignee_id: str) -> dict[str, Any]:
     project = (
         await linear_graphql(
             token,
@@ -181,6 +195,7 @@ async def create_linear_issue(token: str, project_slug: str, run_id: str) -> dic
                   title
                   url
                   state { name type }
+                  assignee { id name }
                   labels { nodes { name } }
                 }
               }
@@ -191,6 +206,7 @@ async def create_linear_issue(token: str, project_slug: str, run_id: str) -> dic
                     "teamId": team["id"],
                     "projectId": project["id"],
                     "stateId": todo["id"],
+                    "assigneeId": assignee_id,
                     "title": f"Symphony managed agent dispatch {run_id}",
                     "description": (
                         "Real Symphony e2e task. Create SYMPHONY_REAL_E2E_RESULT.md at the workspace root, "
@@ -201,7 +217,7 @@ async def create_linear_issue(token: str, project_slug: str, run_id: str) -> dic
             },
         )
     )["issueCreate"]["issue"]
-    return {"project": project, "team": team, "todo_state": todo, "issue": issue}
+    return {"project": project, "team": team, "todo_state": todo, "assignee_id": assignee_id, "issue": issue}
 
 
 async def fetch_linear_issue(token: str, issue_id: str) -> dict[str, Any]:
@@ -216,6 +232,7 @@ async def fetch_linear_issue(token: str, issue_id: str) -> dict[str, Any]:
                 title
                 url
                 state { name type }
+                assignee { id name }
                 labels { nodes { name } }
                 comments(first: 20) { nodes { body createdAt } }
               }
@@ -255,6 +272,7 @@ async def fetch_linear_issue_tree(token: str, issue_id: str) -> dict[str, Any]:
                 title
                 url
                 state { name type }
+                assignee { id name }
                 labels { nodes { name } }
                 children(first: 50) {
                   nodes {
@@ -685,16 +703,32 @@ No-op.
             status, body = http_json(method, api_url(conductor_port, path), payload)
             evidence.check(f"conductor-api:{method} {path}", status in {200, 201}, status=status, body=body)
 
-        linear = await create_linear_issue(token, args.project_slug, run_id)
+        viewer = await fetch_linear_viewer(token)
+        agent_user_id = os.environ.get("LINEAR_AGENT_USER_ID", "").strip() or str(viewer["id"])
+        evidence.data["linear_agent_user_id"] = agent_user_id
+        evidence.check(
+            "linear-agent:assignee-selected",
+            bool(agent_user_id),
+            source="LINEAR_AGENT_USER_ID" if os.environ.get("LINEAR_AGENT_USER_ID", "").strip() else "viewer",
+            viewer={key: viewer.get(key) for key in ["id", "name", "email"]},
+        )
+        linear = await create_linear_issue(token, args.project_slug, run_id, assignee_id=agent_user_id)
         issue_path = root / "business-issue.json"
         issue_path.write_text(json.dumps(linear, indent=2, sort_keys=True), encoding="utf-8")
         evidence.artifact("business_issue", issue_path)
+        created_assignee_id = ((linear["issue"].get("assignee") or {}).get("id")) if isinstance(linear["issue"], dict) else None
+        evidence.check(
+            "linear-agent:issue-assigned-to-agent",
+            created_assignee_id == agent_user_id,
+            expected_assignee_id=agent_user_id,
+            actual_assignee=linear["issue"].get("assignee"),
+        )
         payload = {
             "name": f"Matrix {run_id}",
             "repo_source_type": "local_path",
             "repo_source_value": str(fixture),
             "linear_project": linear["project"]["slugId"],
-            "linear_filters": {"active_states": ["Todo", "In Progress"]},
+            "linear_filters": {"assignee_id": agent_user_id, "active_states": ["Todo", "In Progress"]},
             "workflow_profile": "task",
             "workflow_inputs": {"goal": "Run the real Symphony e2e matrix task."},
         }
@@ -751,6 +785,7 @@ No-op.
                     "id": linear["issue"]["id"],
                     "identifier": linear["issue"]["identifier"],
                     "project": {"slugId": linear["project"]["slugId"]},
+                    "assignee": {"id": agent_user_id},
                 },
             },
         }
@@ -807,6 +842,12 @@ No-op.
                 issue["state"]["type"] in {"completed", "canceled"},
                 identifier=issue["identifier"],
                 state=issue["state"],
+            )
+            evidence.check(
+                "real-flow:linear-agent-assignee-preserved",
+                ((issue.get("assignee") or {}).get("id")) == agent_user_id,
+                expected_assignee_id=agent_user_id,
+                actual_assignee=issue.get("assignee"),
             )
             evidence.check("real-flow:workspace-result", result_path.exists(), path=str(result_path))
             evidence.check(
@@ -913,7 +954,7 @@ No-op.
             "repo_source_type": "local_path",
             "repo_source_value": str(disposable_fixture),
             "linear_project": linear["project"]["slugId"],
-            "linear_filters": {"active_states": ["Todo"]},
+            "linear_filters": {"assignee_id": agent_user_id, "active_states": ["Todo"]},
             "workflow_profile": "task",
             "workflow_inputs": {},
         }

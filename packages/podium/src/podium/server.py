@@ -341,6 +341,9 @@ def _normalize_agent_session_event(payload: dict[str, Any]) -> dict[str, Any]:
     session = payload.get("agentSession") if isinstance(payload.get("agentSession"), dict) else {}
     issue = session.get("issue") if isinstance(session.get("issue"), dict) else {}
     project = issue.get("project") if isinstance(issue.get("project"), dict) else {}
+    assignee = issue.get("assignee") if isinstance(issue.get("assignee"), dict) else {}
+    agent = session.get("agent") if isinstance(session.get("agent"), dict) else {}
+    agent_user = agent.get("user") if isinstance(agent.get("user"), dict) else {}
     workspace = payload.get("workspace") if isinstance(payload.get("workspace"), dict) else {}
     return {
         "event_type": f"linear.agent_session.{str(payload.get('action') or '').strip() or 'unknown'}",
@@ -349,6 +352,14 @@ def _normalize_agent_session_event(payload: dict[str, Any]) -> dict[str, Any]:
         "issue_id": str(issue.get("id") or payload.get("issue_id") or ""),
         "issue_identifier": str(issue.get("identifier") or payload.get("issue_identifier") or ""),
         "agent_session_id": str(session.get("id") or payload.get("agent_session_id") or ""),
+        "assignee_id": str(
+            assignee.get("id")
+            or agent_user.get("id")
+            or agent.get("userId")
+            or session.get("agentUserId")
+            or payload.get("assignee_id")
+            or ""
+        ),
         "raw_action": str(payload.get("action") or ""),
     }
 

@@ -179,6 +179,7 @@ async def test_agent_session_event_is_normalized_and_pushed_to_matching_conducto
                 "id": "issue-1",
                 "identifier": "ENG-1",
                 "project": {"slugId": "ENG"},
+                "assignee": {"id": "agent-user-1"},
             },
         },
     }
@@ -218,6 +219,7 @@ async def test_agent_session_event_is_normalized_and_pushed_to_matching_conducto
         "issue_id": "issue-1",
         "issue_identifier": "ENG-1",
         "agent_session_id": "session-1",
+        "assignee_id": "agent-user-1",
         "raw_action": "created",
     }
     assert received[0]["registration"]["conductor_id"] == "cond-1"

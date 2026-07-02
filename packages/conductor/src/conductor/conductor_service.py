@@ -94,7 +94,15 @@ class ConductorService:
         if not issue_id and not issue_identifier:
             raise ConductorServiceError("missing_issue_id", "Podium dispatch event requires issue_id or issue_identifier")
         project_slug = str(event.get("project_slug") or "").strip()
-        instance = self._instance_for_podium_event(project_slug=project_slug)
+        assignee_id = str(event.get("assignee_id") or "").strip()
+        if not assignee_id:
+            return {
+                "status": "skipped",
+                "issue_id": issue_id or None,
+                "issue_identifier": issue_identifier or None,
+                "reason": "missing_agent_assignee",
+            }
+        instance = self._instance_for_podium_event(project_slug=project_slug, assignee_id=assignee_id)
         if instance is None:
             return {
                 "status": "skipped",
@@ -114,6 +122,7 @@ class ConductorService:
             "issue_identifier": issue_identifier or None,
             "instance_id": instance.id,
             "agent_session_id": event.get("agent_session_id") or None,
+            "assignee_id": assignee_id,
         }
 
     def dashboard(self) -> dict[str, Any]:
@@ -593,10 +602,15 @@ class ConductorService:
             raise ConductorServiceError("instance_not_found", f"Instance not found: {instance_id}")
         return current
 
-    def _instance_for_podium_event(self, *, project_slug: str) -> InstanceRecord | None:
+    def _instance_for_podium_event(self, *, project_slug: str, assignee_id: str) -> InstanceRecord | None:
         candidates = self.store.list_instances()
         if project_slug:
             candidates = [instance for instance in candidates if instance.linear_project == project_slug]
+        candidates = [
+            instance
+            for instance in candidates
+            if str(instance.linear_filters.get("assignee_id") or "").strip() == assignee_id
+        ]
         if not candidates:
             return None
         return candidates[0]

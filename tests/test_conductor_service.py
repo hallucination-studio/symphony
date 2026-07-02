@@ -783,6 +783,7 @@ async def test_dispatch_podium_event_starts_one_shot_performer_for_matching_proj
             "issue_identifier": "ENG-1",
             "project_slug": "ENG",
             "agent_session_id": "session-1",
+            "assignee_id": "agent-user-1",
         }
     )
 
@@ -792,6 +793,7 @@ async def test_dispatch_podium_event_starts_one_shot_performer_for_matching_proj
         "issue_identifier": "ENG-1",
         "instance_id": instance.id,
         "agent_session_id": "session-1",
+        "assignee_id": "agent-user-1",
     }
     assert runtime.dispatch_issue_id == "issue-1"
     assert runtime.env == {"PODIUM_PROXY_TOKEN": "proxy-token"}
@@ -809,13 +811,71 @@ async def test_dispatch_podium_event_skips_when_no_instance_matches_project(tmp_
     service.create_instance(make_request(repo).with_overrides(linear_project="ENG"))
 
     result = await service.dispatch_podium_event(
-        {"issue_id": "issue-1", "issue_identifier": "OPS-1", "project_slug": "OPS"}
+        {"issue_id": "issue-1", "issue_identifier": "OPS-1", "project_slug": "OPS", "assignee_id": "agent-user-1"}
     )
 
     assert result == {
         "status": "skipped",
         "issue_id": "issue-1",
         "issue_identifier": "OPS-1",
+        "reason": "no_matching_instance",
+    }
+    assert runtime.dispatch_issue_id is None
+
+
+@pytest.mark.asyncio
+async def test_dispatch_podium_event_requires_linear_agent_assignee(tmp_path: Path) -> None:
+    runtime = CapturingRuntime()
+    service = ConductorService(
+        store=ConductorStore(tmp_path / "conductor-data"),
+        data_root=tmp_path / "conductor-data",
+        runtime_manager=runtime,
+    )
+    repo = make_repo(tmp_path)
+    service.create_instance(
+        make_request(repo).with_overrides(linear_project="ENG", linear_filters={"assignee_id": "agent-user-1"})
+    )
+
+    result = await service.dispatch_podium_event(
+        {"issue_id": "issue-1", "issue_identifier": "ENG-1", "project_slug": "ENG", "agent_session_id": "session-1"}
+    )
+
+    assert result == {
+        "status": "skipped",
+        "issue_id": "issue-1",
+        "issue_identifier": "ENG-1",
+        "reason": "missing_agent_assignee",
+    }
+    assert runtime.dispatch_issue_id is None
+
+
+@pytest.mark.asyncio
+async def test_dispatch_podium_event_skips_when_agent_assignee_does_not_match_instance(tmp_path: Path) -> None:
+    runtime = CapturingRuntime()
+    service = ConductorService(
+        store=ConductorStore(tmp_path / "conductor-data"),
+        data_root=tmp_path / "conductor-data",
+        runtime_manager=runtime,
+    )
+    repo = make_repo(tmp_path)
+    service.create_instance(
+        make_request(repo).with_overrides(linear_project="ENG", linear_filters={"assignee_id": "agent-user-1"})
+    )
+
+    result = await service.dispatch_podium_event(
+        {
+            "issue_id": "issue-1",
+            "issue_identifier": "ENG-1",
+            "project_slug": "ENG",
+            "agent_session_id": "session-1",
+            "assignee_id": "other-agent",
+        }
+    )
+
+    assert result == {
+        "status": "skipped",
+        "issue_id": "issue-1",
+        "issue_identifier": "ENG-1",
         "reason": "no_matching_instance",
     }
     assert runtime.dispatch_issue_id is None
