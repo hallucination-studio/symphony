@@ -163,7 +163,7 @@ async def test_podium_webhook_rejects_bad_signature_and_invalid_json() -> None:
 
 
 @pytest.mark.asyncio
-async def test_agent_session_event_is_normalized_and_pushed_to_matching_conductor() -> None:
+async def test_agent_session_event_is_normalized_with_linear_agent_app_user() -> None:
     received: list[dict[str, object]] = []
 
     async def dispatch(payload: dict[str, object], registration) -> None:
@@ -175,11 +175,12 @@ async def test_agent_session_event_is_normalized_and_pushed_to_matching_conducto
         "workspace": {"id": "workspace-1"},
         "agentSession": {
             "id": "session-1",
+            "appUserId": "app-user-1",
             "issue": {
                 "id": "issue-1",
                 "identifier": "ENG-1",
                 "project": {"slugId": "ENG"},
-                "assignee": {"id": "agent-user-1"},
+                "assignee": {"id": "human-user-1"},
             },
         },
     }
@@ -219,7 +220,7 @@ async def test_agent_session_event_is_normalized_and_pushed_to_matching_conducto
         "issue_id": "issue-1",
         "issue_identifier": "ENG-1",
         "agent_session_id": "session-1",
-        "assignee_id": "agent-user-1",
+        "agent_app_user_id": "app-user-1",
         "raw_action": "created",
     }
     assert received[0]["registration"]["conductor_id"] == "cond-1"
@@ -411,11 +412,29 @@ async def test_runtime_enrollment_token_is_one_time_and_dispatch_can_be_acked() 
     async with httpx.AsyncClient(transport=transport, base_url="http://podium.test") as client:
         token_response = await client.post(
             "/api/v1/runtime/enrollment-tokens",
-            json={"runtime_group_id": "group-1", "linear_workspace_id": "workspace-1", "project_slug": "ENG"},
+            json={
+                "runtime_group_id": "group-1",
+                "linear_workspace_id": "workspace-1",
+                "project_slug": "ENG",
+                "linear_agent_app_user_id": "app-user-1",
+            },
         )
         enrollment_token = token_response.json()["enrollment_token"]
         enrolled = await client.post("/api/v1/runtime/enroll", json={"enrollment_token": enrollment_token})
         reused = await client.post("/api/v1/runtime/enroll", json={"enrollment_token": enrollment_token})
+        wrong_agent_webhook = await client.post(
+            "/api/v1/linear/webhooks/agent-session",
+            json={
+                "type": "AgentSessionEvent",
+                "action": "created",
+                "workspace": {"id": "workspace-1"},
+                "agentSession": {
+                    "id": "session-wrong",
+                    "appUserId": "other-app-user",
+                    "issue": {"id": "issue-wrong", "identifier": "ENG-0", "project": {"slugId": "ENG"}},
+                },
+            },
+        )
         webhook = await client.post(
             "/api/v1/linear/webhooks/agent-session",
             json={
@@ -424,6 +443,7 @@ async def test_runtime_enrollment_token_is_one_time_and_dispatch_can_be_acked() 
                 "workspace": {"id": "workspace-1"},
                 "agentSession": {
                     "id": "session-1",
+                    "appUserId": "app-user-1",
                     "issue": {"id": "issue-1", "identifier": "ENG-1", "project": {"slugId": "ENG"}},
                 },
             },
@@ -446,12 +466,16 @@ async def test_runtime_enrollment_token_is_one_time_and_dispatch_can_be_acked() 
     assert enrolled.json()["proxy_token"]
     assert reused.status_code == 400
     assert reused.json()["error"]["code"] == "enrollment_token_used"
+    assert wrong_agent_webhook.status_code == 200
+    assert wrong_agent_webhook.json()["queued"] == 0
     assert webhook.status_code == 200
     assert webhook.json()["queued"] == 1
     assert lease.status_code == 200
     assert lease.json()["dispatch"]["issue_id"] == "issue-1"
     assert lease.json()["dispatch"]["issue_identifier"] == "ENG-1"
     assert lease.json()["dispatch"]["linear_workspace_id"] == "workspace-1"
+    assert lease.json()["dispatch"]["agent_session_id"] == "session-1"
+    assert lease.json()["dispatch"]["agent_app_user_id"] == "app-user-1"
     assert lease.json()["dispatch"]["project_slug"] == "ENG"
     assert lease.json()["dispatch"]["workflow_profile"] == "task"
     assert ack.status_code == 200

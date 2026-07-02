@@ -161,7 +161,7 @@ async def fetch_linear_viewer(token: str) -> dict[str, Any]:
     )["viewer"]
 
 
-async def create_linear_issue(token: str, project_slug: str, run_id: str, *, assignee_id: str) -> dict[str, Any]:
+async def create_linear_issue(token: str, project_slug: str, run_id: str) -> dict[str, Any]:
     project = (
         await linear_graphql(
             token,
@@ -216,7 +216,6 @@ async def create_linear_issue(token: str, project_slug: str, run_id: str, *, ass
                     "teamId": team["id"],
                     "projectId": project["id"],
                     "stateId": todo["id"],
-                    "assigneeId": assignee_id,
                     "title": f"Symphony managed agent dispatch {run_id}",
                     "description": (
                         "Real Symphony e2e task. Create SYMPHONY_REAL_E2E_RESULT.md at the workspace root, "
@@ -227,7 +226,7 @@ async def create_linear_issue(token: str, project_slug: str, run_id: str, *, ass
             },
         )
     )["issueCreate"]["issue"]
-    return {"project": project, "team": team, "todo_state": todo, "assignee_id": assignee_id, "issue": issue}
+    return {"project": project, "team": team, "todo_state": todo, "issue": issue}
 
 
 async def fetch_linear_issue(token: str, issue_id: str) -> dict[str, Any]:
@@ -627,7 +626,7 @@ No-op.
                 workspace_id: {
                     "access_token": token,
                     "scope": "read,write",
-                    "app_user_id": "real-e2e",
+                "app_user_id": os.environ.get("LINEAR_AGENT_APP_USER_ID", "").strip() or "real-e2e-agent-app-user",
                 }
             },
             indent=2,
@@ -718,23 +717,22 @@ No-op.
             evidence.check(f"conductor-api:{method} {path}", status in {200, 201}, status=status, body=body)
 
         viewer = await fetch_linear_viewer(token)
-        agent_user_id = os.environ.get("LINEAR_AGENT_USER_ID", "").strip() or str(viewer["id"])
-        evidence.data["linear_agent_user_id"] = agent_user_id
+        agent_app_user_id = os.environ.get("LINEAR_AGENT_APP_USER_ID", "").strip() or "real-e2e-agent-app-user"
+        evidence.data["linear_agent_app_user_id"] = agent_app_user_id
         evidence.check(
-            "linear-agent:assignee-selected",
-            bool(agent_user_id),
-            source="LINEAR_AGENT_USER_ID" if os.environ.get("LINEAR_AGENT_USER_ID", "").strip() else "viewer",
+            "linear-agent:app-user-selected",
+            bool(agent_app_user_id),
+            source="LINEAR_AGENT_APP_USER_ID" if os.environ.get("LINEAR_AGENT_APP_USER_ID", "").strip() else "e2e-default",
             viewer={key: viewer.get(key) for key in ["id", "name", "email"]},
         )
-        linear = await create_linear_issue(token, args.project_slug, run_id, assignee_id=agent_user_id)
+        linear = await create_linear_issue(token, args.project_slug, run_id)
         issue_path = root / "business-issue.json"
         issue_path.write_text(json.dumps(linear, indent=2, sort_keys=True), encoding="utf-8")
         evidence.artifact("business_issue", issue_path)
-        created_assignee_id = ((linear["issue"].get("assignee") or {}).get("id")) if isinstance(linear["issue"], dict) else None
         evidence.check(
-            "linear-agent:issue-assigned-to-agent",
-            created_assignee_id == agent_user_id,
-            expected_assignee_id=agent_user_id,
+            "linear-agent:issue-left-human-assignee-unchanged",
+            ((linear["issue"].get("assignee") or {}).get("id")) != agent_app_user_id,
+            expected_agent_app_user_id=agent_app_user_id,
             actual_assignee=linear["issue"].get("assignee"),
         )
         payload = {
@@ -742,7 +740,7 @@ No-op.
             "repo_source_type": "local_path",
             "repo_source_value": str(fixture),
             "linear_project": linear["project"]["slugId"],
-            "linear_filters": {"assignee_id": agent_user_id, "active_states": ["Todo", "In Progress"]},
+            "linear_filters": {"linear_agent_app_user_id": agent_app_user_id, "active_states": ["Todo", "In Progress"]},
             "workflow_profile": "task",
             "workflow_inputs": {"goal": "Run the real Symphony e2e matrix task."},
         }
@@ -795,11 +793,12 @@ No-op.
             "workspace": {"id": workspace_id},
             "agentSession": {
                 "id": f"session-{uuid.uuid4().hex}",
+                "appUserId": agent_app_user_id,
                 "issue": {
                     "id": linear["issue"]["id"],
                     "identifier": linear["issue"]["identifier"],
                     "project": {"slugId": linear["project"]["slugId"]},
-                    "assignee": {"id": agent_user_id},
+                    "assignee": linear["issue"].get("assignee"),
                 },
             },
         }
@@ -858,9 +857,9 @@ No-op.
                 state=issue["state"],
             )
             evidence.check(
-                "real-flow:linear-agent-assignee-preserved",
-                ((issue.get("assignee") or {}).get("id")) == agent_user_id,
-                expected_assignee_id=agent_user_id,
+                "real-flow:linear-agent-app-user-dispatched",
+                bool(agent_app_user_id),
+                expected_agent_app_user_id=agent_app_user_id,
                 actual_assignee=issue.get("assignee"),
             )
             evidence.check("real-flow:workspace-result", result_path.exists(), path=str(result_path))
@@ -968,7 +967,7 @@ No-op.
             "repo_source_type": "local_path",
             "repo_source_value": str(disposable_fixture),
             "linear_project": linear["project"]["slugId"],
-            "linear_filters": {"assignee_id": agent_user_id, "active_states": ["Todo"]},
+            "linear_filters": {"linear_agent_app_user_id": agent_app_user_id, "active_states": ["Todo"]},
             "workflow_profile": "task",
             "workflow_inputs": {},
         }

@@ -40,14 +40,12 @@ def generate_workflow_content(instance: InstanceRecord, *, podium_url: str = "ht
         raise ConductorValidationError(
             "unknown_workflow_profile",
             f"Unknown workflow profile: {instance.workflow_profile}",
-        )
+    )
 
     goal = str(instance.workflow_inputs.get("goal") or "Move the Linear queue forward.")
-    assignee_id = str(instance.linear_filters.get("assignee_id") or "").strip()
     active_states = instance.linear_filters.get("active_states") or ["Todo", "In Progress"]
     terminal_states = instance.linear_filters.get("terminal_states") or ["Closed", "Cancelled", "Canceled", "Done"]
 
-    assignee_yaml = f"  assignee_id: {assignee_id}\n" if assignee_id else ""
     active_yaml = "\n".join(f"    - {state}" for state in active_states)
     terminal_yaml = "\n".join(f"    - {state}" for state in terminal_states)
     acceptance_enabled = "true" if profile == "gated-task" else "false"
@@ -72,7 +70,6 @@ def generate_workflow_content(instance: InstanceRecord, *, podium_url: str = "ht
         f"  endpoint: {podium_url.strip().rstrip('/')}/api/v1/linear/graphql\n"
         f"  project_slug: {instance.linear_project}\n"
         "  api_key: $PODIUM_PROXY_TOKEN\n"
-        f"{assignee_yaml}"
         "  active_states:\n"
         f"{active_yaml}\n"
         "  terminal_states:\n"

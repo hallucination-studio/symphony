@@ -120,6 +120,7 @@ def create_app(
                 "id": runtime_group_id,
                 "linear_workspace_id": linear_workspace_id,
                 "project_slug": project_slug,
+                "linear_agent_app_user_id": str(payload.get("linear_agent_app_user_id") or payload.get("agent_app_user_id") or ""),
                 "workflow_profile": str(payload.get("workflow_profile") or "task"),
             },
         )
@@ -347,6 +348,8 @@ class ManagedPodiumState:
                 continue
             if group.get("project_slug") and group.get("project_slug") != event.get("project_slug"):
                 continue
+            if group.get("linear_agent_app_user_id") and group.get("linear_agent_app_user_id") != event.get("agent_app_user_id"):
+                continue
             dispatch_id = f"dispatch_{len(self.dispatches) + 1}"
             self.dispatches[dispatch_id] = {
                 "dispatch_id": dispatch_id,
@@ -355,6 +358,8 @@ class ManagedPodiumState:
                 "issue_identifier": event["issue_identifier"],
                 "linear_workspace_id": event["workspace_id"],
                 "project_slug": event["project_slug"],
+                "agent_session_id": event.get("agent_session_id") or "",
+                "agent_app_user_id": event.get("agent_app_user_id") or "",
                 "routing_rule_id": group["id"],
                 "workflow_profile": group.get("workflow_profile") or "task",
                 "status": "queued",
@@ -418,6 +423,8 @@ def dispatch_public(dispatch: dict[str, Any]) -> dict[str, Any]:
         "issue_identifier": dispatch["issue_identifier"],
         "linear_workspace_id": dispatch["linear_workspace_id"],
         "project_slug": dispatch["project_slug"],
+        "agent_session_id": dispatch.get("agent_session_id") or "",
+        "agent_app_user_id": dispatch.get("agent_app_user_id") or "",
         "routing_rule_id": dispatch["routing_rule_id"],
         "workflow_profile": dispatch["workflow_profile"],
         "status": dispatch["status"],
@@ -444,9 +451,7 @@ def normalize_agent_session_event(payload: dict[str, Any]) -> dict[str, str]:
     session = payload.get("agentSession") if isinstance(payload.get("agentSession"), dict) else {}
     issue = session.get("issue") if isinstance(session.get("issue"), dict) else {}
     project = issue.get("project") if isinstance(issue.get("project"), dict) else {}
-    assignee = issue.get("assignee") if isinstance(issue.get("assignee"), dict) else {}
     agent = session.get("agent") if isinstance(session.get("agent"), dict) else {}
-    agent_user = agent.get("user") if isinstance(agent.get("user"), dict) else {}
     workspace = payload.get("workspace") if isinstance(payload.get("workspace"), dict) else {}
     return {
         "workspace_id": str(workspace.get("id") or payload.get("workspace_id") or ""),
@@ -454,12 +459,14 @@ def normalize_agent_session_event(payload: dict[str, Any]) -> dict[str, str]:
         "issue_id": str(issue.get("id") or payload.get("issue_id") or ""),
         "issue_identifier": str(issue.get("identifier") or payload.get("issue_identifier") or ""),
         "agent_session_id": str(session.get("id") or payload.get("agent_session_id") or ""),
-        "assignee_id": str(
-            assignee.get("id")
-            or agent_user.get("id")
-            or agent.get("userId")
-            or session.get("agentUserId")
-            or payload.get("assignee_id")
+        "agent_app_user_id": str(
+            session.get("appUserId")
+            or session.get("app_user_id")
+            or agent.get("appUserId")
+            or agent.get("app_user_id")
+            or payload.get("appUserId")
+            or payload.get("app_user_id")
+            or payload.get("agent_app_user_id")
             or ""
         ),
     }

@@ -87,17 +87,18 @@ def test_task_profile_is_default_managed_profile_without_acceptance_gate(tmp_pat
     assert "api_key: $PODIUM_PROXY_TOKEN" in content
 
 
-def test_managed_workflow_can_scope_to_linear_agent_assignee(tmp_path: Path) -> None:
+def test_managed_workflow_omits_agent_delegation_identity_from_performer_tracker(tmp_path: Path) -> None:
     instance = make_instance(tmp_path).with_updates(
         linear_filters={
-            "assignee_id": "agent-user-1",
+            "linear_agent_app_user_id": "app-user-1",
             "labels": ["legacy-label-that-should-not-dispatch"],
         }
     )
 
     content = generate_workflow_content(instance, podium_url="https://podium.example")
 
-    assert "assignee_id: agent-user-1" in content
+    assert "linear_agent_app_user_id:" not in content
+    assert "assignee_id:" not in content
     assert "required_labels:" not in content
     assert "legacy-label-that-should-not-dispatch" not in content
 

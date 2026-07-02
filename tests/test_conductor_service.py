@@ -764,7 +764,7 @@ async def test_start_instance_does_not_require_conductor_linear_api_key(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_dispatch_podium_event_starts_one_shot_performer_for_matching_project(tmp_path: Path) -> None:
+async def test_dispatch_podium_event_starts_one_shot_performer_for_matching_linear_agent_app_user(tmp_path: Path) -> None:
     runtime = CapturingRuntime()
     service = ConductorService(
         store=ConductorStore(tmp_path / "conductor-data"),
@@ -774,7 +774,7 @@ async def test_dispatch_podium_event_starts_one_shot_performer_for_matching_proj
     service.update_settings(ConductorSettings(podium_proxy_token="proxy-token"))
     repo = make_repo(tmp_path)
     instance = service.create_instance(
-        make_request(repo).with_overrides(linear_project="ENG", linear_filters={"assignee_id": "agent-user-1"})
+        make_request(repo).with_overrides(linear_project="ENG", linear_filters={"linear_agent_app_user_id": "app-user-1"})
     )
 
     result = await service.dispatch_podium_event(
@@ -783,7 +783,8 @@ async def test_dispatch_podium_event_starts_one_shot_performer_for_matching_proj
             "issue_identifier": "ENG-1",
             "project_slug": "ENG",
             "agent_session_id": "session-1",
-            "assignee_id": "agent-user-1",
+            "agent_app_user_id": "app-user-1",
+            "assignee_id": "human-user-1",
         }
     )
 
@@ -793,7 +794,7 @@ async def test_dispatch_podium_event_starts_one_shot_performer_for_matching_proj
         "issue_identifier": "ENG-1",
         "instance_id": instance.id,
         "agent_session_id": "session-1",
-        "assignee_id": "agent-user-1",
+        "agent_app_user_id": "app-user-1",
     }
     assert runtime.dispatch_issue_id == "issue-1"
     assert runtime.env == {"PODIUM_PROXY_TOKEN": "proxy-token"}
@@ -811,7 +812,7 @@ async def test_dispatch_podium_event_skips_when_no_instance_matches_project(tmp_
     service.create_instance(make_request(repo).with_overrides(linear_project="ENG"))
 
     result = await service.dispatch_podium_event(
-        {"issue_id": "issue-1", "issue_identifier": "OPS-1", "project_slug": "OPS", "assignee_id": "agent-user-1"}
+        {"issue_id": "issue-1", "issue_identifier": "OPS-1", "project_slug": "OPS", "agent_app_user_id": "app-user-1"}
     )
 
     assert result == {
@@ -824,7 +825,7 @@ async def test_dispatch_podium_event_skips_when_no_instance_matches_project(tmp_
 
 
 @pytest.mark.asyncio
-async def test_dispatch_podium_event_requires_linear_agent_assignee(tmp_path: Path) -> None:
+async def test_dispatch_podium_event_requires_linear_agent_app_user(tmp_path: Path) -> None:
     runtime = CapturingRuntime()
     service = ConductorService(
         store=ConductorStore(tmp_path / "conductor-data"),
@@ -833,7 +834,7 @@ async def test_dispatch_podium_event_requires_linear_agent_assignee(tmp_path: Pa
     )
     repo = make_repo(tmp_path)
     service.create_instance(
-        make_request(repo).with_overrides(linear_project="ENG", linear_filters={"assignee_id": "agent-user-1"})
+        make_request(repo).with_overrides(linear_project="ENG", linear_filters={"linear_agent_app_user_id": "app-user-1"})
     )
 
     result = await service.dispatch_podium_event(
@@ -844,13 +845,13 @@ async def test_dispatch_podium_event_requires_linear_agent_assignee(tmp_path: Pa
         "status": "skipped",
         "issue_id": "issue-1",
         "issue_identifier": "ENG-1",
-        "reason": "missing_agent_assignee",
+        "reason": "missing_linear_agent_app_user",
     }
     assert runtime.dispatch_issue_id is None
 
 
 @pytest.mark.asyncio
-async def test_dispatch_podium_event_skips_when_agent_assignee_does_not_match_instance(tmp_path: Path) -> None:
+async def test_dispatch_podium_event_skips_when_linear_agent_app_user_does_not_match_instance(tmp_path: Path) -> None:
     runtime = CapturingRuntime()
     service = ConductorService(
         store=ConductorStore(tmp_path / "conductor-data"),
@@ -859,7 +860,7 @@ async def test_dispatch_podium_event_skips_when_agent_assignee_does_not_match_in
     )
     repo = make_repo(tmp_path)
     service.create_instance(
-        make_request(repo).with_overrides(linear_project="ENG", linear_filters={"assignee_id": "agent-user-1"})
+        make_request(repo).with_overrides(linear_project="ENG", linear_filters={"linear_agent_app_user_id": "app-user-1"})
     )
 
     result = await service.dispatch_podium_event(
@@ -868,7 +869,7 @@ async def test_dispatch_podium_event_skips_when_agent_assignee_does_not_match_in
             "issue_identifier": "ENG-1",
             "project_slug": "ENG",
             "agent_session_id": "session-1",
-            "assignee_id": "other-agent",
+            "agent_app_user_id": "other-app-user",
         }
     )
 
