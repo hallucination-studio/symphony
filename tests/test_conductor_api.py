@@ -7,10 +7,14 @@ from pathlib import Path
 import pytest
 
 from conductor.conductor_api import ConductorApiServer
+from conductor.conductor_models import ConductorSettings
+from conductor.conductor_runtime import LogQueryResult
 from conductor.conductor_service import ConductorService
 from conductor.conductor_store import ConductorStore
+from performer_api.models import BlockedEntry, utc_now
 from performer_api.ops_models import IssueRecord, OpsSnapshot, RunRecord, TraceEvent
 from performer_api.ops_store import OpsStore
+from performer_api.persistence import PersistedState, PersistenceStore
 
 
 class CapturingRuntime:
@@ -28,6 +32,18 @@ class CapturingRuntime:
 
     def read_logs(self, instance):
         return ""
+
+    def query_logs(self, instance, query=None):
+        return LogQueryResult(
+            instance_id=instance.id,
+            generation=2,
+            path=instance.log_path,
+            order=query.order if query is not None else "desc",
+            lines=["newest", "older"],
+            offset_start=12,
+            offset_end=24,
+            warnings=[],
+        )
 
 
 def make_service(tmp_path: Path) -> ConductorService:
@@ -87,18 +103,27 @@ def write_sample_ops_snapshot(instance: dict[str, object]) -> None:
     )
 
 
-async def request(port: int, method: str, path: str, payload: dict | None = None) -> tuple[int, dict[str, str], bytes]:
+async def request(
+    port: int,
+    method: str,
+    path: str,
+    payload: dict | None = None,
+    headers: dict[str, str] | None = None,
+) -> tuple[int, dict[str, str], bytes]:
     body = json.dumps(payload).encode() if payload is not None else b""
     reader, writer = await asyncio.open_connection("127.0.0.1", port)
+    request_headers = {
+        "Host": f"127.0.0.1:{port}",
+        "Content-Type": "application/json",
+        "Content-Length": str(len(body)),
+        "Connection": "close",
+    }
+    if headers:
+        request_headers.update(headers)
     writer.write(
-        (
-            f"{method} {path} HTTP/1.1\r\n"
-            f"Host: 127.0.0.1:{port}\r\n"
-            "Content-Type: application/json\r\n"
-            f"Content-Length: {len(body)}\r\n"
-            "Connection: close\r\n"
-            "\r\n"
-        ).encode()
+        f"{method} {path} HTTP/1.1\r\n".encode()
+        + b"".join(f"{key}: {value}\r\n".encode() for key, value in request_headers.items())
+        + b"\r\n"
         + body
     )
     await writer.drain()
@@ -292,29 +317,82 @@ async def test_api_supports_conductor_settings_without_echoing_secret(tmp_path: 
         assert status == 200
         settings = json.loads(body)["settings"]
         assert settings["linear_api_key_configured"] is False
+        assert settings["linear_application_connected"] is False
         assert settings["podium_url"] == ""
         assert settings["podium_token_configured"] is False
+        assert settings["podium_dispatch_token_configured"] is False
+        assert settings["podium_proxy_token_configured"] is False
         assert settings["conductor_id"]
 
         status, _, body = await request(
             server.port,
             "PATCH",
             "/api/settings",
-            {"linear_api_key": "linear-token"},
+            {
+                "linear_api_key": "linear-token",
+                "podium_dispatch_token": "dispatch-token",
+                "podium_proxy_token": "proxy-token",
+            },
         )
 
         assert status == 200
         settings = json.loads(body)["settings"]
         assert settings["linear_api_key_configured"] is True
+        assert settings["linear_application_connected"] is True
         assert settings["podium_token_configured"] is False
+        assert settings["podium_dispatch_token_configured"] is True
+        assert settings["podium_proxy_token_configured"] is True
 
         status, _, body = await request(server.port, "GET", "/api/settings")
 
         assert status == 200
         assert json.loads(body)["settings"]["linear_api_key_configured"] is True
         assert b"linear-token" not in body
+        assert b"dispatch-token" not in body
+        assert b"proxy-token" not in body
     finally:
         await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_api_dispatch_endpoint_requires_dispatch_token_and_triggers_one_shot_dispatch(
+    tmp_path: Path,
+) -> None:
+    service = make_service(tmp_path)
+    service.update_settings(ConductorSettings(podium_dispatch_token="dispatch-token"))
+    calls: list[dict[str, object]] = []
+
+    async def dispatch(event: dict[str, object]) -> dict[str, object]:
+        calls.append(event)
+        return {"status": "accepted", "issue_id": event.get("issue_id")}
+
+    service.dispatch_podium_event = dispatch  # type: ignore[method-assign]
+    server = ConductorApiServer(service)
+    await server.start(port=0)
+    try:
+        assert server.port is not None
+        unauthorized_status, _, unauthorized_body = await request(
+            server.port,
+            "POST",
+            "/api/podium/dispatch",
+            {"issue_id": "issue-1"},
+            headers={"Authorization": "Bearer wrong"},
+        )
+        status, _, body = await request(
+            server.port,
+            "POST",
+            "/api/podium/dispatch",
+            {"issue_id": "issue-1", "agent_session_id": "session-1"},
+            headers={"Authorization": "Bearer dispatch-token"},
+        )
+    finally:
+        await server.stop()
+
+    assert unauthorized_status == 401
+    assert json.loads(unauthorized_body)["error"]["code"] == "unauthorized"
+    assert status == 200
+    assert json.loads(body)["dispatch"] == {"status": "accepted", "issue_id": "issue-1"}
+    assert calls == [{"issue_id": "issue-1", "agent_session_id": "session-1"}]
 
 
 @pytest.mark.asyncio
@@ -405,7 +483,8 @@ async def test_api_supports_runtime_actions_and_repo_inspection(tmp_path: Path) 
             },
         )
         assert create_status == 201
-        instance_id = json.loads(create_body)["instance"]["id"]
+        created_instance = json.loads(create_body)["instance"]
+        instance_id = created_instance["id"]
 
         status, _, body = await request(server.port, "POST", f"/api/instances/{instance_id}/start", {})
         assert status == 200
@@ -417,10 +496,47 @@ async def test_api_supports_runtime_actions_and_repo_inspection(tmp_path: Path) 
         runtime = json.loads(body)
         assert runtime["runtime"]["instance_id"] == instance_id
 
+        PersistenceStore(Path(created_instance["persistence_path"])).save(
+            PersistedState(
+                blocked=[
+                    BlockedEntry(
+                        issue_id="issue-1",
+                        identifier="MT-1",
+                        attempt=2,
+                        blocked_at=utc_now(),
+                        error="runtime_permission_blocked: writing outside of the project",
+                    )
+                ]
+            )
+        )
+        status, _, body = await request(
+            server.port,
+            "POST",
+            f"/api/instances/{instance_id}/runtime/approve-error",
+            {"issue_id": "MT-1"},
+        )
+        assert status == 200
+        approval = json.loads(body)
+        assert approval["approved"]["issue_identifier"] == "MT-1"
+        assert approval["instance"]["process_status"] == "running"
+        approved_state = PersistenceStore(Path(created_instance["persistence_path"])).load()
+        assert approved_state.blocked == []
+        assert approved_state.retry_attempts[0].issue_id == "issue-1"
+        assert approved_state.retry_attempts[0].status_label == "performer:retrying"
+
         status, _, body = await request(server.port, "GET", f"/api/instances/{instance_id}/logs")
         assert status == 200
         logs = json.loads(body)
         assert "logs" in logs
+        assert logs["logs"] == ""
+
+        status, _, body = await request(server.port, "GET", f"/api/instances/{instance_id}/logs?tail=2&order=desc")
+        assert status == 200
+        logs = json.loads(body)["logs"]
+        assert logs["instance_id"] == instance_id
+        assert logs["order"] == "desc"
+        assert logs["lines"] == ["newest", "older"]
+        assert logs["logs"] == "newest\nolder\n"
 
         status, _, body = await request(server.port, "POST", f"/api/instances/{instance_id}/stop", {})
         assert status == 200

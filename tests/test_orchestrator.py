@@ -12,6 +12,7 @@ from performer_api.config import (
     AcceptanceConfig,
     CodexConfig,
     HooksConfig,
+    PersistenceConfig,
     PollingConfig,
     ServiceConfig,
     TrackerConfig,
@@ -20,7 +21,9 @@ from performer_api.config import (
 )
 from performer_api.models import BlockerRef, Issue, utc_now
 from performer.orchestrator import Orchestrator
-from performer_api.persistence import PersistenceStore
+from performer.ops_telemetry import ExecutionTelemetryRecorder
+from performer_api.ops_store import OpsStore
+from performer_api.persistence import PersistenceStore, ops_snapshot_path_from_persistence_path
 
 
 class FakeTracker:
@@ -35,6 +38,7 @@ class FakeTracker:
         self.children: dict[str, list[dict[str, Any]]] = {}
         self.transitions: list[tuple[str, str]] = []
         self.description_updates: list[tuple[str, str, str]] = []
+        self.issue_comments: dict[str, list[dict[str, Any]]] = {}
         self.existing_acceptance_issue: dict[str, Any] | None = None
         self.fail_candidates = False
         self.fail_by_states = False
@@ -62,6 +66,9 @@ class FakeTracker:
             raise RuntimeError("comment unavailable")
         self.comments.append((issue_id, body))
         return {"success": True, "comment_id": f"comment-{len(self.comments)}"}
+
+    async def fetch_issue_comments(self, issue_id: str, *, first: int = 20) -> list[dict[str, Any]]:
+        return list(self.issue_comments.get(issue_id, []))[:first]
 
     async def set_issue_lifecycle_label(self, issue_id: str, label_name: str) -> dict[str, Any]:
         if self.fail_lifecycle_label:
@@ -506,6 +513,35 @@ async def test_tick_dispatches_candidate_issues_from_tracker(tmp_path: Path) -> 
 
     assert [started[0].identifier for started in runner.started] == ["MT-1"]
     assert "mt-1" in orchestrator.state.running
+
+
+@pytest.mark.asyncio
+async def test_dispatch_issue_by_id_does_not_scan_candidate_list(tmp_path: Path) -> None:
+    tracker = FakeTracker(candidates=[issue("MT-2")])
+    tracker.fail_candidates = True
+    tracker.refreshed = [issue("MT-1")]
+    runner = FakeRunner()
+    orchestrator = Orchestrator(make_config(tmp_path), tracker, runner)
+
+    result = await orchestrator.dispatch_issue_by_id("mt-1")
+
+    assert result == {"status": "dispatched", "issue_id": "mt-1", "issue_identifier": "MT-1"}
+    assert [started[0].identifier for started in runner.started] == ["MT-1"]
+    assert "mt-1" in orchestrator.state.running
+
+
+@pytest.mark.asyncio
+async def test_dispatch_issue_by_id_skips_already_claimed_issue(tmp_path: Path) -> None:
+    tracker = FakeTracker()
+    tracker.refreshed = [issue("MT-1")]
+    runner = FakeRunner()
+    orchestrator = Orchestrator(make_config(tmp_path), tracker, runner)
+    orchestrator.state.claimed.add("mt-1")
+
+    result = await orchestrator.dispatch_issue_by_id("mt-1")
+
+    assert result == {"status": "skipped", "issue_id": "mt-1", "reason": "already_running_or_claimed"}
+    assert runner.started == []
 
 
 @pytest.mark.asyncio
@@ -1861,7 +1897,157 @@ async def test_request_timeout_updates_last_message_with_readable_error(tmp_path
 
     assert orchestrator.state.running["mt-1"].last_codex_message == "initialize timed out"
     assert orchestrator.state.running["mt-1"].phase == "error"
-    assert orchestrator.state.running["mt-1"].status_label == "performer:failed"
+    assert orchestrator.state.running["mt-1"].status_label == "performer:error"
+    await asyncio_sleep()
+    assert ("mt-1", "performer:error") in tracker.lifecycle_labels
+    assert ("mt-1", "performer:failed") not in tracker.lifecycle_labels
+    assert tracker.comments[-1][0] == "mt-1"
+    assert "Performer runtime error" in tracker.comments[-1][1]
+    assert "initialize timed out" in tracker.comments[-1][1]
+
+
+@pytest.mark.asyncio
+async def test_permission_runtime_error_blocks_for_human_approval(tmp_path: Path) -> None:
+    tracker = FakeTracker(candidates=[issue("MT-1")])
+    runner = FakeRunner()
+    store = PersistenceStore(tmp_path / "state" / "performer.json")
+    orchestrator = Orchestrator(make_config(tmp_path), tracker, runner, persistence_store=store)
+    await orchestrator.tick()
+
+    orchestrator.on_codex_event(
+        "mt-1",
+        {
+            "event": "stderr",
+            "message": "patch rejected: writing outside of the project; approval required",
+        },
+    )
+    await orchestrator.wait_for_idle()
+    await asyncio_sleep()
+
+    assert "mt-1" not in orchestrator.state.running
+    assert "mt-1" not in orchestrator.state.retry_attempts
+    assert orchestrator.state.blocked["mt-1"].phase == "error"
+    assert orchestrator.state.blocked["mt-1"].status_label == "performer:error"
+    assert "runtime_permission_blocked" in orchestrator.state.blocked["mt-1"].error
+    persisted = store.load()
+    assert persisted.blocked[0].issue_id == "mt-1"
+    assert persisted.retry_attempts == []
+    assert ("mt-1", "performer:error") in tracker.lifecycle_labels
+    assert ("mt-1", "performer:retrying") not in tracker.lifecycle_labels
+    assert "paused" in tracker.comments[-1][1]
+    assert "/symphony approve-runtime-error MT-1" in tracker.comments[-1][1]
+
+
+@pytest.mark.asyncio
+async def test_permission_output_event_blocks_for_human_approval(tmp_path: Path) -> None:
+    tracker = FakeTracker(candidates=[issue("MT-1")])
+    runner = FakeRunner()
+    store = PersistenceStore(tmp_path / "state" / "performer.json")
+    orchestrator = Orchestrator(make_config(tmp_path), tracker, runner, persistence_store=store)
+    await orchestrator.tick()
+
+    orchestrator.on_codex_event(
+        "mt-1",
+        {
+            "event": "notification",
+            "raw_method": "item/commandExecution/outputDelta",
+            "message": "zsh:1: operation not permitted: /source/SYMPHONY_PERMISSION_DENIED_PROBE.md",
+        },
+    )
+    await orchestrator.wait_for_idle()
+    await asyncio_sleep()
+
+    assert "mt-1" not in orchestrator.state.running
+    assert "mt-1" not in orchestrator.state.retry_attempts
+    assert orchestrator.state.blocked["mt-1"].phase == "error"
+    assert "runtime_permission_blocked" in orchestrator.state.blocked["mt-1"].error
+    assert ("mt-1", "performer:error") in tracker.lifecycle_labels
+    assert "/symphony approve-runtime-error MT-1" in tracker.comments[-1][1]
+
+
+@pytest.mark.asyncio
+async def test_permission_text_in_prompt_does_not_reblock_runtime(tmp_path: Path) -> None:
+    tracker = FakeTracker(candidates=[issue("MT-1")])
+    runner = FakeRunner()
+    orchestrator = Orchestrator(make_config(tmp_path), tracker, runner)
+    await orchestrator.tick()
+
+    orchestrator.on_codex_event(
+        "mt-1",
+        {
+            "event": "notification",
+            "raw_method": "item/started",
+            "message": "Previous attempt failed: operation not permitted",
+        },
+    )
+    await asyncio_sleep()
+
+    assert "mt-1" in orchestrator.state.running
+    assert "mt-1" not in orchestrator.state.blocked
+    assert tracker.comments == []
+
+
+@pytest.mark.asyncio
+async def test_permission_summary_event_blocks_for_human_approval(tmp_path: Path) -> None:
+    tracker = FakeTracker(candidates=[issue("MT-1")])
+    runner = FakeRunner()
+    orchestrator = Orchestrator(make_config(tmp_path), tracker, runner)
+    await orchestrator.tick()
+
+    orchestrator.on_codex_event(
+        "mt-1",
+        {
+            "event": "notification",
+            "raw_method": "item/completed",
+            "message": "The outside-workspace write failed with: zsh:1: operation not permitted",
+        },
+    )
+    await orchestrator.wait_for_idle()
+    await asyncio_sleep()
+
+    assert "mt-1" not in orchestrator.state.running
+    assert orchestrator.state.blocked["mt-1"].phase == "error"
+    assert "/symphony approve-runtime-error MT-1" in tracker.comments[-1][1]
+
+
+@pytest.mark.asyncio
+async def test_linear_approval_comment_resumes_blocked_runtime_error(tmp_path: Path) -> None:
+    blocked_issue = issue("MT-1")
+    tracker = FakeTracker(candidates=[blocked_issue])
+    runner = FakeRunner()
+    store = PersistenceStore(tmp_path / "state" / "performer.json")
+    orchestrator = Orchestrator(make_config(tmp_path), tracker, runner, persistence_store=store)
+    await orchestrator.tick()
+
+    orchestrator.on_codex_event(
+        "mt-1",
+        {
+            "event": "stderr",
+            "message": "patch rejected: writing outside of the project; approval required",
+        },
+    )
+    await orchestrator.wait_for_idle()
+    blocked_at = orchestrator.state.blocked["mt-1"].blocked_at
+    tracker.issue_comments["mt-1"] = [
+        {
+            "id": "comment-approval",
+            "body": "/symphony approve-runtime-error MT-1",
+            "created_at": (blocked_at + timedelta(seconds=1)).isoformat(),
+            "user": {"id": "human-1", "name": "Human"},
+        }
+    ]
+
+    await orchestrator.tick()
+
+    assert "mt-1" not in orchestrator.state.blocked
+    assert "mt-1" not in orchestrator.state.retry_attempts
+    assert "mt-1" in orchestrator.state.running
+    assert runner.started[-1][0].id == "mt-1"
+    assert runner.started[-1][1] == 1
+    assert ("mt-1", "performer:retrying") in tracker.lifecycle_labels
+    persisted = store.load()
+    assert persisted.blocked == []
+    assert persisted.retry_attempts == []
 
 
 @pytest.mark.asyncio
@@ -1921,6 +2107,42 @@ async def test_reconcile_terminal_running_issue_cancels_and_releases(tmp_path: P
     assert "mt-1" not in orchestrator.state.claimed
     await orchestrator.wait_for_idle()
     assert "mt-1" not in orchestrator.state.retry_attempts
+
+
+@pytest.mark.asyncio
+async def test_reconcile_terminal_running_issue_finalizes_open_ops_records(tmp_path: Path) -> None:
+    tracker = FakeTracker(candidates=[issue("MT-1")])
+    runner = FakeRunner()
+    base = make_config(tmp_path)
+    persistence_path = tmp_path / "state" / "performer.json"
+    config = ServiceConfig(
+        tracker=base.tracker,
+        polling=base.polling,
+        workspace=base.workspace,
+        hooks=base.hooks,
+        agent=base.agent,
+        codex=base.codex,
+        prompt_template=base.prompt_template,
+        workflow_path=base.workflow_path,
+        persistence=PersistenceConfig(path=persistence_path),
+        completion_verification=base.completion_verification,
+    )
+    orchestrator = Orchestrator(config, tracker, runner, persistence_store=PersistenceStore(persistence_path))
+    await orchestrator.tick()
+    ops_store = OpsStore(ops_snapshot_path_from_persistence_path(persistence_path))
+    recorder = ExecutionTelemetryRecorder(ops_store)
+    run_id = recorder.open_run("mt-1", "MT-1", "inst-1", str(tmp_path), "abc123")
+    attempt_id = recorder.open_attempt(run_id, attempt_number=1)
+    recorder.open_turn(attempt_id, turn_number=1)
+    tracker.refreshed = [issue("MT-1", state="Done")]
+
+    await orchestrator.reconcile_running()
+    await orchestrator.wait_for_idle()
+
+    snapshot = ops_store.load()
+    assert snapshot.runs[run_id].status == "completed"
+    assert snapshot.attempts[attempt_id].status == "completed"
+    assert snapshot.events[-1].event_type == "run_completed"
 
 
 @pytest.mark.asyncio

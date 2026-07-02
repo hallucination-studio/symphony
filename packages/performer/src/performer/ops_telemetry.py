@@ -261,6 +261,75 @@ class ExecutionTelemetryRecorder:
         )
         self.store.save(snapshot)
 
+    def finish_latest_open_for_issue(
+        self,
+        issue_id: str,
+        *,
+        status: str,
+        failure_code: str | None = None,
+        failure_summary: str | None = None,
+    ) -> None:
+        snapshot = self.store.load()
+        open_runs = [
+            run
+            for run in snapshot.runs.values()
+            if run.issue_id == issue_id and run.status == "running"
+        ]
+        if not open_runs:
+            return
+        run = open_runs[-1]
+        now = _utc_now_iso()
+        open_attempts = [
+            attempt
+            for attempt in snapshot.attempts.values()
+            if attempt.run_id == run.run_id and attempt.status == "running"
+        ]
+        for attempt in open_attempts:
+            snapshot.attempts[attempt.attempt_id] = replace(
+                attempt,
+                status=status,
+                completed_at=now,
+                failure_code=failure_code,
+                failure_summary=failure_summary,
+                last_activity_at=now,
+            )
+            for turn in list(snapshot.turns.values()):
+                if turn.attempt_id != attempt.attempt_id or turn.status != "running":
+                    continue
+                snapshot.turns[turn.turn_id] = replace(
+                    turn,
+                    status=status,
+                    completed_at=now,
+                    stop_reason=failure_summary,
+                    last_activity_at=now,
+                )
+        snapshot.runs[run.run_id] = replace(
+            run,
+            status=status,
+            completed_at=now,
+            failure_code=failure_code,
+            failure_summary=failure_summary,
+            last_activity_at=now,
+        )
+        issue = snapshot.issues.get(run.issue_id)
+        if issue is not None:
+            snapshot.issues[issue.issue_id] = replace(
+                issue,
+                state=status,
+                failure_reason=failure_summary,
+                last_activity_at=now,
+            )
+        snapshot.events.append(
+            self.make_event(
+                f"run_{status}",
+                issue_id=run.issue_id,
+                run_id=run.run_id,
+                retention_tier="summary",
+                summary=failure_summary,
+            )
+        )
+        self.store.save(snapshot)
+
     def make_event(
         self,
         event_type: str,

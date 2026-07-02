@@ -202,6 +202,45 @@ async def test_fetch_issues_by_states_omits_assignee_filter_when_unset() -> None
 
 
 @pytest.mark.asyncio
+async def test_fetch_issue_comments_returns_body_created_at_and_user() -> None:
+    transport = RecordingTransport(
+        [
+            {
+                "data": {
+                    "issue": {
+                        "comments": {
+                            "nodes": [
+                                {
+                                    "id": "comment-1",
+                                    "body": "/symphony approve-runtime-error MT-1",
+                                    "createdAt": "2026-07-02T03:30:00Z",
+                                    "user": {"id": "user-1", "name": "Reviewer"},
+                                }
+                            ]
+                        }
+                    }
+                }
+            }
+        ]
+    )
+    client = LinearClient("https://api.linear.app/graphql", "linear-token", transport=transport)
+
+    comments = await client.fetch_issue_comments("issue-1", first=10)
+
+    assert comments == [
+        {
+            "id": "comment-1",
+            "body": "/symphony approve-runtime-error MT-1",
+            "created_at": "2026-07-02T03:30:00Z",
+            "user": {"id": "user-1", "name": "Reviewer"},
+        }
+    ]
+    request = transport.requests[0]
+    assert request["json"]["variables"] == {"issueId": "issue-1", "first": 10}
+    assert "comments(first: $first)" in request["json"]["query"]
+
+
+@pytest.mark.asyncio
 async def test_fetch_candidate_issues_paginates_in_order() -> None:
     transport = RecordingTransport(
         [
@@ -256,6 +295,43 @@ async def test_fetch_issue_state_refresh_uses_project_scope() -> None:
     assert variables["projectSlug"] == "MT"
     assert "project: { slugId: { eq: $projectSlug } }" in request["json"]["query"]
     assert "$ids: [ID!]" in request["json"]["query"]
+    assert "description" in request["json"]["query"]
+
+
+@pytest.mark.asyncio
+async def test_fetch_issue_state_refresh_preserves_description_for_acceptance_evidence() -> None:
+    transport = RecordingTransport(
+        [
+            {
+                "data": {
+                    "issues": {
+                        "nodes": [
+                            issue_node(
+                                description=(
+                                    "Implementation summary: done\n"
+                                    "Test commands and exact output: pytest -q -> passed\n"
+                                    "Remaining risks: none"
+                                ),
+                                branchName=None,
+                                createdAt=None,
+                                updatedAt=None,
+                            )
+                        ],
+                    }
+                }
+            }
+        ]
+    )
+    client = LinearClient("https://api.linear.app/graphql", "linear-token", transport=transport)
+    tracker = LinearTracker(make_config(), client=client)
+
+    issues = await tracker.fetch_issue_states_by_ids(["issue-1"])
+
+    assert issues[0].description == (
+        "Implementation summary: done\n"
+        "Test commands and exact output: pytest -q -> passed\n"
+        "Remaining risks: none"
+    )
 
 
 @pytest.mark.asyncio

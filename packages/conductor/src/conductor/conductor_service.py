@@ -14,6 +14,7 @@ from .conductor_models import (
     WorkflowValidationResult,
 )
 from .conductor_runtime import ConductorRuntimeManager
+from .conductor_runtime import LogQuery
 from .conductor_store import ConductorStore
 from .conductor_workflow import (
     ConductorValidationError,
@@ -26,7 +27,8 @@ from performer_api.ops_models import OpsSnapshot
 from performer_api.ops_projection import build_issue_detail, build_issue_list, build_run_detail, build_trace_stream
 from performer_api.ops_retention import RetentionPolicy
 from performer_api.ops_store import OpsStore
-from performer_api.persistence import PersistenceStore, PersistedSession
+from performer_api.persistence import PersistenceStore, PersistedSession, PersistedState
+from performer_api.models import LIFECYCLE_LABELS, RetryEntry, monotonic_ms, utc_now
 
 
 WORKSPACE_INIT_EXCLUDES = {
@@ -35,6 +37,8 @@ WORKSPACE_INIT_EXCLUDES = {
     ".venv",
     "workspaces",
     ".codex-runtime",
+    ".test-real-flow",
+    ".tmp-real-linear-flow",
     ".pytest_cache",
     "__pycache__",
     "node_modules",
@@ -84,6 +88,17 @@ class ConductorService:
         except PodiumRegistrationError as exc:
             raise ConductorServiceError(exc.code, str(exc)) from exc
 
+    async def dispatch_podium_event(self, event: dict[str, Any]) -> dict[str, Any]:
+        issue_id = str(event.get("issue_id") or "").strip()
+        issue_identifier = str(event.get("issue_identifier") or "").strip()
+        if not issue_id and not issue_identifier:
+            raise ConductorServiceError("missing_issue_id", "Podium dispatch event requires issue_id or issue_identifier")
+        return {
+            "status": "accepted",
+            "issue_id": issue_id or None,
+            "issue_identifier": issue_identifier or None,
+        }
+
     def dashboard(self) -> dict[str, Any]:
         instances = self.store.list_instances()
         process_statuses: dict[str, int] = {}
@@ -93,6 +108,7 @@ class ConductorService:
         runtime_seconds = 0
         retry_count = 0
         continuation_count = 0
+        blocked_count = 0
         persisted_failures = 0
         for instance in instances:
             process_statuses[instance.process_status] = process_statuses.get(instance.process_status, 0) + 1
@@ -109,6 +125,7 @@ class ConductorService:
             persisted = PersistenceStore(Path(instance.persistence_path)).load()
             retry_count += len(persisted.retry_attempts)
             continuation_count += len(persisted.continuations)
+            blocked_count += len(persisted.blocked)
             persisted_failures += sum(1 for retry in persisted.retry_attempts if retry.error)
             now = datetime.now(timezone.utc)
             for session in persisted.sessions:
@@ -130,6 +147,7 @@ class ConductorService:
                 "failures": sum(1 for instance in instances if instance.last_error) + persisted_failures,
                 "retries": retry_count,
                 "continuations": continuation_count,
+                "blocked": blocked_count,
             },
         }
 
@@ -341,6 +359,57 @@ class ConductorService:
         self.store.update_instance(restarted)
         return restarted
 
+    async def approve_runtime_error(self, instance_id: str, *, issue_id: str | None = None) -> dict[str, Any]:
+        current = self._require_instance(instance_id)
+        store = PersistenceStore(Path(current.persistence_path))
+        persisted = store.load()
+        if issue_id:
+            selected = [
+                entry
+                for entry in persisted.blocked
+                if entry.issue_id == issue_id or entry.identifier.lower() == issue_id.lower()
+            ]
+        else:
+            selected = list(persisted.blocked[:1])
+        if not selected:
+            raise ConductorServiceError("blocked_runtime_not_found", "No blocked runtime error matched the request")
+        approved = selected[0]
+        remaining_blocked = [entry for entry in persisted.blocked if entry.issue_id != approved.issue_id]
+        retry = RetryEntry(
+            issue_id=approved.issue_id,
+            identifier=approved.identifier,
+            attempt=approved.attempt,
+            due_at=utc_now(),
+            due_at_ms=monotonic_ms(),
+            error=f"human_approved_runtime_error: {approved.error}",
+            issue_url=approved.issue_url,
+            phase="retrying",
+            status_label=LIFECYCLE_LABELS["retrying"],
+            last_message=approved.last_message or approved.error,
+            recent_events=list(approved.recent_events),
+        )
+        store.save(
+            PersistedState(
+                retry_attempts=[*persisted.retry_attempts, retry],
+                continuations=list(persisted.continuations),
+                blocked=remaining_blocked,
+                sessions=list(persisted.sessions),
+            )
+        )
+        instance = current
+        if current.process_status in {"starting", "running", "unhealthy", "crash_loop"}:
+            instance = await self.runtime_manager.restart(current, env=self._runtime_env())
+            self.store.update_instance(instance)
+        return {
+            "approved": {
+                "issue_id": approved.issue_id,
+                "issue_identifier": approved.identifier,
+                "attempt": approved.attempt,
+                "error": approved.error,
+            },
+            "instance": instance.to_dict(include_workflow_content=False),
+        }
+
     def instance_runtime(self, instance_id: str) -> dict[str, object]:
         current = self._require_instance(instance_id)
         runtime = dict(self.runtime_manager.runtime_snapshot(current))
@@ -356,6 +425,41 @@ class ConductorService:
         runtime["performer"] = performer
         runtime["metrics"] = _runtime_metrics(performer)
         return runtime
+
+    def query_instance_logs(
+        self,
+        instance_id: str,
+        *,
+        tail: int | None = 200,
+        limit_bytes: int = 1_048_576,
+        previous: bool = False,
+        order: str = "desc",
+        timestamps: bool = False,
+        prefix: bool = False,
+    ) -> dict[str, Any]:
+        current = self._require_instance(instance_id)
+        result = self.runtime_manager.query_logs(
+            current,
+            LogQuery(
+                tail=tail,
+                limit_bytes=limit_bytes,
+                previous=previous,
+                order=order,
+                timestamps=timestamps,
+                prefix=prefix,
+            ),
+        )
+        return {
+            "instance_id": result.instance_id,
+            "generation": result.generation,
+            "path": result.path,
+            "order": result.order,
+            "lines": result.lines,
+            "logs": result.text(),
+            "offset_start": result.offset_start,
+            "offset_end": result.offset_end,
+            "warnings": result.warnings,
+        }
 
     def instance_logs(self, instance_id: str) -> str:
         current = self._require_instance(instance_id)
@@ -437,7 +541,8 @@ class ConductorService:
 
     def _generate_workflow(self, instance: InstanceRecord) -> str:
         try:
-            return generate_workflow_content(instance)
+            podium_url = self.store.get_settings().podium_url.strip() or "https://podium.example"
+            return generate_workflow_content(instance, podium_url=podium_url)
         except ConductorValidationError as exc:
             raise ConductorServiceError(exc.code, str(exc)) from exc
 
@@ -461,24 +566,30 @@ class ConductorService:
 
     def _runtime_env(self) -> dict[str, str]:
         settings = self.store.get_settings()
+        env: dict[str, str] = {}
+        proxy_token = settings.podium_proxy_token.strip()
+        if proxy_token:
+            env["PODIUM_PROXY_TOKEN"] = proxy_token
         linear_api_key = settings.linear_api_key.strip()
-        if not linear_api_key:
-            raise ConductorServiceError(
-                "missing_conductor_linear_api_key",
-                "Configure the Linear API key in Conductor settings before starting an instance",
-            )
-        return {"LINEAR_API_KEY": linear_api_key}
+        if linear_api_key and not proxy_token:
+            env["LINEAR_API_KEY"] = linear_api_key
+        return env
 
     def _normalize_stale_runtime_state(self) -> None:
         for instance in self.store.list_instances():
             if instance.process_status in {"starting", "running", "unhealthy", "crash_loop"}:
-                self.store.update_instance(instance.with_updates(process_status="stopped", pid=None))
+                recovered = self.runtime_manager.recover(instance)
+                if recovered is not None:
+                    self.store.update_instance(recovered)
+                else:
+                    self.store.update_instance(instance.with_updates(process_status="stopped", pid=None))
 
     def _performer_runtime_from_persistence(self, instance: InstanceRecord) -> dict[str, Any]:
         persisted = PersistenceStore(Path(instance.persistence_path)).load()
         running = [_persisted_session_row(session) for session in persisted.sessions]
         retrying = [_persisted_retry_row(entry) for entry in persisted.retry_attempts]
         continuing = [_persisted_continuation_row(entry) for entry in persisted.continuations]
+        blocked = [_persisted_blocked_row(entry) for entry in persisted.blocked]
         return {
             "source": "persistence",
             "persistence_path": instance.persistence_path,
@@ -486,11 +597,13 @@ class ConductorService:
                 "running": len(running),
                 "retrying": len(retrying),
                 "continuing": len(continuing),
+                "blocked": len(blocked),
             },
             "running": running,
             "retrying": retrying,
             "continuing": continuing,
-            "issues": running + retrying + continuing,
+            "blocked": blocked,
+            "issues": running + retrying + continuing + blocked,
         }
 
     def _ops_snapshots(self) -> list[tuple[InstanceRecord, OpsSnapshot]]:
@@ -590,10 +703,26 @@ def _persisted_continuation_row(entry) -> dict[str, Any]:
     }
 
 
+def _persisted_blocked_row(entry) -> dict[str, Any]:
+    return {
+        "issue_id": entry.issue_id,
+        "issue_identifier": entry.identifier,
+        "issue_url": entry.issue_url,
+        "attempt": entry.attempt,
+        "blocked_at": entry.blocked_at.isoformat().replace("+00:00", "Z"),
+        "error": entry.error,
+        "last_message": entry.last_message,
+        "phase": entry.phase,
+        "status_label": entry.status_label,
+        "recent_events": entry.recent_events,
+    }
+
+
 def _runtime_metrics(performer: dict[str, Any]) -> dict[str, Any]:
     running = performer.get("running") if isinstance(performer.get("running"), list) else []
     retrying = performer.get("retrying") if isinstance(performer.get("retrying"), list) else []
     continuing = performer.get("continuing") if isinstance(performer.get("continuing"), list) else []
+    blocked = performer.get("blocked") if isinstance(performer.get("blocked"), list) else []
     tokens = {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0, "total_tokens": 0}
     turns = 0
     for row in running:
@@ -611,6 +740,7 @@ def _runtime_metrics(performer: dict[str, Any]) -> dict[str, Any]:
         "running": len(running),
         "retrying": len(retrying),
         "continuing": len(continuing),
+        "blocked": len(blocked),
     }
 
 

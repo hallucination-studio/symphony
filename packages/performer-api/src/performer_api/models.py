@@ -41,6 +41,7 @@ LIFECYCLE_LABELS = {
     "queued": f"{LIFECYCLE_LABEL_PREFIX}queued",
     "starting": f"{LIFECYCLE_LABEL_PREFIX}starting",
     "running": f"{LIFECYCLE_LABEL_PREFIX}running",
+    "error": f"{LIFECYCLE_LABEL_PREFIX}error",
     "continuing": f"{LIFECYCLE_LABEL_PREFIX}continuing",
     "retrying": f"{LIFECYCLE_LABEL_PREFIX}retrying",
     "failed": f"{LIFECYCLE_LABEL_PREFIX}failed",
@@ -171,6 +172,7 @@ class RunningEntry:
     tokens: RuntimeTokens = field(default_factory=RuntimeTokens)
     last_reported_tokens: RuntimeTokens = field(default_factory=RuntimeTokens)
     turn_count: int = 0
+    human_blocked_reason: str | None = None
 
 
 @dataclass
@@ -198,6 +200,20 @@ class ContinuationEntry:
     issue_url: str | None = None
     phase: str = "continuing"
     status_label: str = LIFECYCLE_LABELS["continuing"]
+    last_message: str | None = None
+    recent_events: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass
+class BlockedEntry:
+    issue_id: str
+    identifier: str
+    attempt: int
+    blocked_at: datetime
+    error: str
+    issue_url: str | None = None
+    phase: str = "error"
+    status_label: str = LIFECYCLE_LABELS["error"]
     last_message: str | None = None
     recent_events: list[dict[str, Any]] = field(default_factory=list)
 

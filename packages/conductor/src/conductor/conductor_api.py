@@ -51,7 +51,7 @@ class ConductorApiServer:
                 raw_body = await reader.readexactly(content_length)
             raw_path, _, raw_query = path.partition("?")
             query = {key: values[-1] for key, values in parse_qs(raw_query).items() if values}
-            status, payload = await self._route(method.upper(), raw_path, raw_body, query)
+            status, payload = await self._route(method.upper(), raw_path, raw_body, query, headers)
             self._write_response(writer, status, payload)
             await writer.drain()
         except Exception as exc:
@@ -73,7 +73,12 @@ class ConductorApiServer:
                 headers[key.strip().lower()] = value.strip()
 
     async def _route(
-        self, method: str, path: str, raw_body: bytes, query: dict[str, str] | None = None
+        self,
+        method: str,
+        path: str,
+        raw_body: bytes,
+        query: dict[str, str] | None = None,
+        headers: dict[str, str] | None = None,
     ) -> tuple[int, dict[str, Any] | RawResponse]:
         body = json.loads(raw_body.decode() or "{}") if raw_body else {}
         query = query or {}
@@ -122,6 +127,10 @@ class ConductorApiServer:
                 return 200, {"settings": settings.to_public_dict()}
             if method == "POST" and path == "/api/podium/register":
                 return 200, {"registration": self.service.register_with_podium()}
+            if method == "POST" and path == "/api/podium/dispatch":
+                if not self._authorized_dispatch(headers or {}):
+                    return 401, {"error": {"code": "unauthorized", "message": "Unauthorized"}}
+                return 200, {"dispatch": await self.service.dispatch_podium_event(body)}
             if method == "POST" and path == "/api/instances/preview-workflow":
                 instance, validation = self.service.preview_instance(InstanceCreateRequest(**body))
                 return 200, {
@@ -141,14 +150,23 @@ class ConductorApiServer:
             if method == "GET" and path == "/api/templates/workflow-profiles":
                 return 200, {"profiles": self.service.available_workflow_profiles()}
             if path.startswith("/api/instances/"):
-                return await self._route_instance(method, path, body)
+                return await self._route_instance(method, path, body, query)
         except ConductorServiceError as exc:
             return 400 if exc.code != "instance_not_found" else 404, {
                 "error": {"code": exc.code, "message": str(exc), "diagnostics": exc.diagnostics}
             }
         return 404, {"error": {"code": "not_found", "message": f"Route not found: {path}"}}
 
-    async def _route_instance(self, method: str, path: str, body: dict[str, Any]) -> tuple[int, dict[str, Any] | RawResponse]:
+    def _authorized_dispatch(self, headers: dict[str, str]) -> bool:
+        token = self.service.settings().podium_dispatch_token.strip()
+        if not token:
+            return False
+        return headers.get("authorization") == f"Bearer {token}"
+
+    async def _route_instance(
+        self, method: str, path: str, body: dict[str, Any], query: dict[str, str] | None = None
+    ) -> tuple[int, dict[str, Any] | RawResponse]:
+        query = query or {}
         suffix = path.removeprefix("/api/instances/")
         if "/" in suffix:
             instance_id, action = suffix.split("/", 1)
@@ -181,9 +199,22 @@ class ConductorApiServer:
             instance = await self.service.restart_instance(instance_id)
             return 200, {"instance": instance.to_dict(include_workflow_content=False)}
         if method == "GET" and action == "logs":
-            return 200, {"logs": self.service.instance_logs(instance_id)}
+            if not query:
+                return 200, {"logs": self.service.instance_logs(instance_id)}
+            logs = self.service.query_instance_logs(
+                instance_id,
+                tail=_optional_int(query.get("tail"), 200),
+                limit_bytes=_int(query.get("limit_bytes"), 1_048_576),
+                previous=_bool(query.get("previous")),
+                order=query.get("order", "desc"),
+                timestamps=_bool(query.get("timestamps")),
+                prefix=_bool(query.get("prefix")),
+            )
+            return 200, {"logs": logs}
         if method == "GET" and action == "runtime":
             return 200, {"runtime": self.service.instance_runtime(instance_id)}
+        if method == "POST" and action == "runtime/approve-error":
+            return 200, await self.service.approve_runtime_error(instance_id, issue_id=body.get("issue_id"))
         return 404, {"error": {"code": "not_found", "message": f"Route not found: {path}"}}
 
     def _write_response(self, writer: asyncio.StreamWriter, status: int, payload: dict[str, Any] | RawResponse) -> None:
@@ -197,6 +228,7 @@ class ConductorApiServer:
             200: "OK",
             201: "Created",
             400: "Bad Request",
+            401: "Unauthorized",
             404: "Not Found",
             500: "Internal Server Error",
         }.get(status, "OK")
@@ -219,3 +251,18 @@ def _int(value: Any, default: int) -> int:
         return value
     return default
 
+
+def _optional_int(value: Any, default: int | None) -> int | None:
+    if value is None:
+        return default
+    if isinstance(value, str) and value.strip().lower() in {"", "none", "null", "all"}:
+        return None
+    return _int(value, default or 0)
+
+
+def _bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return False

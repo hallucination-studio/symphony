@@ -18,6 +18,7 @@ from performer_api.config import ConfigError, ServiceConfig
 from .completion_verifier import CompletionVerifier
 from performer_api.models import (
     LIFECYCLE_LABELS,
+    BlockedEntry,
     ContinuationEntry,
     Issue,
     RetryEntry,
@@ -25,15 +26,21 @@ from performer_api.models import (
     RuntimeTokens,
     monotonic_ms,
     normalize_state_key,
+    parse_datetime,
     sort_for_dispatch,
     utc_now,
 )
 from performer_api.persistence import PersistedState, PersistenceStore
+from performer_api.persistence import ops_snapshot_path_from_persistence_path
+from performer_api.ops_store import OpsStore
 from .linear import format_linear_milestone_comment
+from .ops_telemetry import ExecutionTelemetryRecorder
 from .workspace import WorkspaceManager
 
 
 logger = logging.getLogger(__name__)
+
+APPROVE_RUNTIME_ERROR_COMMAND = "/symphony approve-runtime-error"
 
 
 class TrackerProtocol(Protocol):
@@ -70,6 +77,7 @@ class OrchestratorState:
     claimed: set[str] = field(default_factory=set)
     retry_attempts: dict[str, RetryEntry] = field(default_factory=dict)
     continuations: dict[str, ContinuationEntry] = field(default_factory=dict)
+    blocked: dict[str, BlockedEntry] = field(default_factory=dict)
     completed: set[str] = field(default_factory=set)
     codex_totals: RuntimeTokens = field(default_factory=RuntimeTokens)
     codex_rate_limits: dict[str, Any] | None = None
@@ -110,6 +118,9 @@ class Orchestrator:
         for continuation in persisted.continuations:
             self.state.continuations[continuation.issue_id] = continuation
             self.state.claimed.add(continuation.issue_id)
+        for blocked in persisted.blocked:
+            self.state.blocked[blocked.issue_id] = blocked
+            self.state.claimed.add(blocked.issue_id)
 
     async def tick(self) -> None:
         await self.reconcile_running()
@@ -118,6 +129,7 @@ class Orchestrator:
         except ConfigError as exc:
             logger.warning("performer_dispatch_validation failed code=%s reason=%s", exc.code, exc)
             return
+        await self.process_blocked_approvals()
         await self.process_due_continuations()
         await self.process_due_retries()
         try:
@@ -180,6 +192,76 @@ class Orchestrator:
             len(self.state.running),
             len(self.state.claimed),
         )
+        await asyncio.sleep(0)
+
+    async def dispatch_issue_by_id(self, issue_id: str, *, worker_host: str | None = None) -> dict[str, Any]:
+        await self.reconcile_running()
+        try:
+            self.config.validate_for_dispatch()
+        except ConfigError as exc:
+            logger.warning("performer_event_dispatch_validation failed code=%s reason=%s", exc.code, exc)
+            return {"status": "skipped", "issue_id": issue_id, "reason": exc.code}
+        await self.process_blocked_approvals()
+        await self.process_due_continuations()
+        await self.process_due_retries()
+        try:
+            issues = await self.tracker.fetch_issue_states_by_ids([issue_id])
+        except Exception as exc:
+            logger.warning("performer_event_dispatch failed issue_id=%s reason=%s", issue_id, exc)
+            return {"status": "failed", "issue_id": issue_id, "reason": str(exc)}
+        issue = issues[0] if issues else None
+        if issue is None:
+            return {"status": "skipped", "issue_id": issue_id, "reason": "issue_not_found"}
+        reason = self.dispatch_skip_reason(issue)
+        if reason is not None:
+            return {"status": "skipped", "issue_id": issue.id, "reason": reason}
+        selected_worker_host = worker_host or self._select_worker_host()
+        if self.config.worker.ssh_hosts and selected_worker_host is None:
+            return {"status": "skipped", "issue_id": issue.id, "reason": "no_available_worker_host"}
+        self.dispatch_issue(issue, attempt=None, worker_host=selected_worker_host)
+        await asyncio.sleep(0)
+        return {"status": "dispatched", "issue_id": issue.id, "issue_identifier": issue.identifier}
+
+    async def process_blocked_approvals(self) -> None:
+        if not self.state.blocked:
+            return
+        fetch_comments = getattr(self.tracker, "fetch_issue_comments", None)
+        if not callable(fetch_comments):
+            return
+        for blocked in list(self.state.blocked.values()):
+            try:
+                comments = await fetch_comments(blocked.issue_id, first=20)
+            except Exception as exc:
+                logger.warning(
+                    "performer_blocked_approval_poll failed issue_id=%s issue_identifier=%s reason=%s",
+                    blocked.issue_id,
+                    blocked.identifier,
+                    exc,
+                )
+                continue
+            approval = _linear_runtime_approval_comment(blocked, comments)
+            if approval is None:
+                continue
+            issue = Issue(
+                id=blocked.issue_id,
+                identifier=blocked.identifier,
+                title=blocked.identifier,
+                state=self.config.tracker.active_states[0] if self.config.tracker.active_states else "",
+                url=blocked.issue_url,
+                project_slug=self.config.tracker.project_slug,
+            )
+            self._schedule_retry(
+                issue,
+                blocked.attempt,
+                error=f"linear_approved_runtime_error: {blocked.error}",
+                delay_ms=0,
+            )
+            logger.info(
+                "performer_blocked_approval outcome=approved issue_id=%s issue_identifier=%s comment_id=%s",
+                blocked.issue_id,
+                blocked.identifier,
+                approval.get("id"),
+            )
         await asyncio.sleep(0)
 
     async def startup_terminal_workspace_cleanup(self, workspace_manager: WorkspaceManager) -> None:
@@ -336,6 +418,7 @@ class Orchestrator:
 
     def dispatch_issue(self, issue: Issue, attempt: int | None, *, worker_host: str | None = None) -> None:
         self.state.claimed.add(issue.id)
+        self.state.blocked.pop(issue.id, None)
         task = asyncio.create_task(self._run_worker(issue, attempt, worker_host=worker_host))
         self._worker_tasks.add(task)
         task.add_done_callback(self._worker_tasks.discard)
@@ -917,9 +1000,13 @@ class Orchestrator:
         else:
             next_attempt = max(entry.retry_attempt + 1, 1)
             retry_error = f"worker exited: {error}"
-            self._schedule_retry(entry.issue, next_attempt, error=retry_error, delay_ms=None)
-            await self._sync_lifecycle_label(entry.issue.id, LIFECYCLE_LABELS["retrying"])
-            await self._comment_worker_failure(entry, retry_error, next_attempt)
+            if entry.human_blocked_reason:
+                self._schedule_blocked(entry, error=entry.human_blocked_reason, attempt=next_attempt)
+                await self._sync_lifecycle_label(entry.issue.id, LIFECYCLE_LABELS["error"])
+            else:
+                self._schedule_retry(entry.issue, next_attempt, error=retry_error, delay_ms=None)
+                await self._sync_lifecycle_label(entry.issue.id, LIFECYCLE_LABELS["retrying"])
+                await self._comment_worker_failure(entry, retry_error, next_attempt)
         self._persist_state()
 
     def _completion_workspace_path(self, entry: RunningEntry):
@@ -1113,6 +1200,7 @@ class Orchestrator:
         due_at_ms = monotonic_ms() + delay_ms
         self.state.claimed.add(issue.id)
         self.state.continuations.pop(issue.id, None)
+        self.state.blocked.pop(issue.id, None)
         retry_context = _retry_context_from_issue(issue)
         self.state.retry_attempts[issue.id] = RetryEntry(
             issue_id=issue.id,
@@ -1129,6 +1217,24 @@ class Orchestrator:
         self._sync_lifecycle_label_background(issue.id, LIFECYCLE_LABELS["retrying"])
         self._persist_state()
 
+    def _schedule_blocked(self, entry: RunningEntry, *, error: str, attempt: int) -> None:
+        self.state.claimed.add(entry.issue.id)
+        self.state.retry_attempts.pop(entry.issue.id, None)
+        self.state.continuations.pop(entry.issue.id, None)
+        self.state.blocked[entry.issue.id] = BlockedEntry(
+            issue_id=entry.issue.id,
+            identifier=entry.issue.identifier,
+            attempt=attempt,
+            blocked_at=utc_now(),
+            error=error,
+            issue_url=entry.issue.url,
+            phase="error",
+            status_label=LIFECYCLE_LABELS["error"],
+            last_message=entry.last_codex_message or error,
+            recent_events=list(entry.recent_events),
+        )
+        self._persist_state()
+
     def _schedule_continuation(
         self,
         issue: Issue,
@@ -1143,6 +1249,7 @@ class Orchestrator:
         due_at_ms = monotonic_ms() + delay_ms
         self.state.claimed.add(issue.id)
         self.state.retry_attempts.pop(issue.id, None)
+        self.state.blocked.pop(issue.id, None)
         self.state.continuations[issue.id] = ContinuationEntry(
             issue_id=issue.id,
             identifier=issue.identifier,
@@ -1199,7 +1306,7 @@ class Orchestrator:
                     self._persist_state()
                     continue
                 await self._sync_lifecycle_label(issue_id, LIFECYCLE_LABELS["done"])
-                await self._terminate_running(issue_id, retry=False, cleanup_workspace=True)
+                await self._terminate_running(issue_id, retry=False, cleanup_workspace=True, ops_status="completed")
             elif self._is_run_eligible(refreshed_issue):
                 entry.issue = refreshed_issue
                 self._persist_state()
@@ -1217,21 +1324,47 @@ class Orchestrator:
             if (now - since).total_seconds() * 1000 > stall_timeout_ms:
                 await self._terminate_running(issue_id, retry=True)
 
-    async def _terminate_running(self, issue_id: str, *, retry: bool, cleanup_workspace: bool = False) -> None:
+    async def _terminate_running(
+        self,
+        issue_id: str,
+        *,
+        retry: bool,
+        cleanup_workspace: bool = False,
+        ops_status: str | None = None,
+    ) -> None:
         entry = self.state.running.pop(issue_id, None)
         if not entry:
             return
         task = entry.task
         if task and not task.done():
             task.cancel()
+        if ops_status is not None:
+            self._finish_open_ops_for_issue(
+                issue_id,
+                status=ops_status,
+                failure_summary=None if ops_status == "completed" else ops_status,
+            )
         self.state.claimed.discard(issue_id)
         if cleanup_workspace and self.workspace_manager is not None:
             await self.workspace_manager.remove_for_issue(entry.issue.identifier)
         if retry:
+            self._finish_open_ops_for_issue(issue_id, status="failed", failure_summary="stalled")
             next_attempt = max(entry.retry_attempt + 1, 1)
             self._schedule_retry(entry.issue, next_attempt, error="stalled", delay_ms=None)
             await self._comment_worker_failure(entry, "stalled", next_attempt)
         self._persist_state()
+
+    def _finish_open_ops_for_issue(self, issue_id: str, *, status: str, failure_summary: str | None) -> None:
+        persistence_path = self.config.persistence.path
+        if persistence_path is None:
+            return
+        recorder = ExecutionTelemetryRecorder(OpsStore(ops_snapshot_path_from_persistence_path(persistence_path)))
+        recorder.finish_latest_open_for_issue(
+            issue_id,
+            status=status,
+            failure_code=None if status == "completed" else status,
+            failure_summary=failure_summary,
+        )
 
     def on_codex_event(self, issue_id: str, event: dict[str, Any]) -> None:
         entry = self.state.running.get(issue_id)
@@ -1261,6 +1394,15 @@ class Orchestrator:
         entry.last_codex_timestamp = utc_now()
         if event.get("event") == "turn_completed":
             entry.turn_count += 1
+        blocked_reason = _human_blocked_runtime_reason(entry, event) if _event_can_signal_human_block(event) else None
+        if blocked_reason and entry.human_blocked_reason is None:
+            entry.human_blocked_reason = blocked_reason
+            entry.phase = "error"
+            entry.status_label = LIFECYCLE_LABELS["error"]
+            self._sync_lifecycle_label_background(entry.issue.id, LIFECYCLE_LABELS["error"])
+            self._comment_runtime_error_background(entry, event)
+            if entry.task is not None and not entry.task.done():
+                entry.task.cancel()
         self._apply_phase_from_event(entry, event)
         self._append_recent_event(entry, event)
         logger.info(
@@ -1293,14 +1435,23 @@ class Orchestrator:
             entry.phase = "starting"
             entry.status_label = LIFECYCLE_LABELS["starting"]
         elif event_name == "turn_started":
+            if entry.human_blocked_reason:
+                return
             entry.phase = "running"
             entry.status_label = LIFECYCLE_LABELS["running"]
             self._sync_lifecycle_label_background(entry.issue.id, LIFECYCLE_LABELS["running"])
         elif event_name in {"request_timeout", "stderr", "turn_failed", "turn_cancelled", "turn_ended_with_error"}:
+            was_error = entry.phase == "error"
             entry.phase = "error"
-            entry.status_label = LIFECYCLE_LABELS["failed"]
-            self._sync_lifecycle_label_background(entry.issue.id, LIFECYCLE_LABELS["failed"])
+            entry.status_label = LIFECYCLE_LABELS["error"]
+            if not was_error:
+                self._sync_lifecycle_label_background(entry.issue.id, LIFECYCLE_LABELS["error"])
+                self._comment_runtime_error_background(entry, event)
+            if entry.human_blocked_reason and entry.task is not None and not entry.task.done():
+                entry.task.cancel()
         elif event_name == "turn_completed":
+            if entry.human_blocked_reason:
+                return
             entry.phase = "running"
             entry.status_label = LIFECYCLE_LABELS["running"]
 
@@ -1338,6 +1489,37 @@ class Orchestrator:
         except RuntimeError:
             return
         loop.create_task(self._sync_lifecycle_label(issue_id, label_name, only_if_current=True))
+
+    def _comment_runtime_error_background(self, entry: RunningEntry, event: dict[str, Any]) -> None:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        loop.create_task(self._comment_runtime_error(entry, event))
+
+    async def _comment_runtime_error(self, entry: RunningEntry, event: dict[str, Any]) -> None:
+        if self.config.tracker.kind != "linear":
+            return
+        comment_issue = getattr(self.tracker, "comment_issue", None)
+        if not callable(comment_issue):
+            return
+        body = _runtime_error_comment_body(entry, event)
+        try:
+            result = await comment_issue(entry.issue.id, body)
+        except Exception as exc:
+            logger.warning(
+                "performer_runtime_error_comment outcome=failed issue_id=%s issue_identifier=%s reason=%s",
+                entry.issue.id,
+                entry.issue.identifier,
+                exc,
+            )
+            return
+        if isinstance(result, dict) and result.get("success") is False:
+            logger.warning(
+                "performer_runtime_error_comment outcome=failed issue_id=%s issue_identifier=%s reason=linear_unsuccessful",
+                entry.issue.id,
+                entry.issue.identifier,
+            )
 
     async def _sync_lifecycle_label(
         self, issue_id: str, label_name: str, *, only_if_current: bool = False
@@ -1513,6 +1695,7 @@ class Orchestrator:
             PersistedState.from_runtime(
                 retry_attempts=list(self.state.retry_attempts.values()),
                 continuations=list(self.state.continuations.values()),
+                blocked=list(self.state.blocked.values()),
                 running=list(self.state.running.values()),
             )
         )
@@ -1636,6 +1819,107 @@ def _failure_comment_body(entry: RunningEntry, error: str, next_attempt: int) ->
     if entry.last_codex_message:
         lines.extend(["", f"Last observed message: {entry.last_codex_message}"])
     return "\n".join(lines)
+
+
+def _runtime_error_comment_body(entry: RunningEntry, event: dict[str, Any]) -> str:
+    event_name = str(event.get("event") or "unknown")
+    raw_method = str(event.get("raw_method") or event.get("method") or "-")
+    message = entry.last_codex_message or entry.last_raw_codex_message or event_name
+    lines = [
+        "Performer runtime error.",
+        "",
+        f"Issue: {entry.issue.identifier}",
+        f"Phase: {entry.phase}",
+        f"Event: {event_name}",
+        f"Raw method: {raw_method}",
+        f"Message: {message}",
+    ]
+    command = _command_from_event(event)
+    if command:
+        lines.append(f"Command: {command}")
+    exit_code = _exit_code_from_event(event)
+    if exit_code is not None:
+        lines.append(f"Exit code: {exit_code}")
+    lines.append("")
+    if entry.human_blocked_reason:
+        lines.extend(
+            [
+                "This run is paused because the runtime error requires human approval or environment changes.",
+                f"Blocked reason: {entry.human_blocked_reason}",
+                "After approving or fixing the environment, comment this exact line on the Linear issue:",
+                f"{APPROVE_RUNTIME_ERROR_COMMAND} {entry.issue.identifier}",
+            ]
+        )
+    else:
+        lines.append(
+            "The run has not been marked terminal failed yet. Performer will continue, retry, or post a final failure if recovery does not succeed."
+        )
+    return "\n".join(lines)
+
+
+def _human_blocked_runtime_reason(entry: RunningEntry, event: dict[str, Any]) -> str | None:
+    message = " ".join(
+        str(value or "")
+        for value in (
+            event.get("message"),
+            event.get("raw_method"),
+            event.get("method"),
+            entry.last_codex_message,
+            entry.last_raw_codex_message,
+        )
+    ).lower()
+    blocked_patterns = (
+        "writing outside of the project",
+        "outside of the project",
+        "requires approval",
+        "permission denied",
+        "operation not permitted",
+        "sandbox",
+        "approval denied",
+        "not permitted",
+    )
+    if any(pattern in message for pattern in blocked_patterns):
+        readable = entry.last_codex_message or event.get("message") or event.get("raw_method") or event.get("event")
+        return f"runtime_permission_blocked: {readable}"
+    return None
+
+
+def _linear_runtime_approval_comment(blocked: BlockedEntry, comments: list[dict[str, Any]]) -> dict[str, Any] | None:
+    for comment in comments:
+        if not isinstance(comment, dict):
+            continue
+        created_at = parse_datetime(comment.get("created_at") or comment.get("createdAt"))
+        if created_at is None or created_at <= blocked.blocked_at:
+            continue
+        body = str(comment.get("body") or "")
+        first_line = next((line.strip() for line in body.splitlines() if line.strip()), "")
+        parts = first_line.split()
+        if len(parts) not in {2, 3}:
+            continue
+        command = " ".join(parts[:2]).lower()
+        if command != APPROVE_RUNTIME_ERROR_COMMAND:
+            continue
+        if len(parts) == 3:
+            target = parts[2].strip().lower()
+            if target not in {blocked.issue_id.lower(), blocked.identifier.lower()}:
+                continue
+        return comment
+    return None
+
+
+def _event_can_signal_human_block(event: dict[str, Any]) -> bool:
+    event_name = str(event.get("event") or "")
+    raw_method = str(event.get("raw_method") or event.get("method") or "")
+    if event_name in {"request_timeout", "stderr", "turn_failed", "turn_cancelled", "turn_ended_with_error"}:
+        return True
+    if raw_method.startswith("item/commandExecution/"):
+        return True
+    if raw_method == "item/completed":
+        message = str(event.get("message") or "").lower()
+        if "previous attempt failed" in message:
+            return False
+        return "operation not permitted" in message or "permission denied" in message or "outside-workspace write failed" in message
+    return False
 
 
 def _completion_verdict_comment_body(entry: RunningEntry, verdict: Any, *, next_action: str) -> str:

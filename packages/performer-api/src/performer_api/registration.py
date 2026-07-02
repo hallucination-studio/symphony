@@ -15,6 +15,9 @@ class ConductorRegistrationRequest:
     conductor_id: str
     name: str | None = None
     callback_url: str | None = None
+    dispatch_token: str | None = None
+    proxy_token: str | None = None
+    routing: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -27,12 +30,20 @@ class ConductorRegistrationRequest:
         metadata = payload.get("metadata") or {}
         if not isinstance(metadata, dict):
             raise RegistrationError("invalid_metadata", "metadata must be an object")
+        routing = payload.get("routing") or {}
+        if not isinstance(routing, dict):
+            raise RegistrationError("invalid_routing", "routing must be an object")
         name = payload.get("name")
         callback_url = payload.get("callback_url")
+        dispatch_token = payload.get("dispatch_token")
+        proxy_token = payload.get("proxy_token")
         return cls(
             conductor_id=conductor_id,
             name=str(name).strip() if name is not None else None,
             callback_url=str(callback_url).strip() if callback_url is not None else None,
+            dispatch_token=str(dispatch_token).strip() if dispatch_token is not None else None,
+            proxy_token=str(proxy_token).strip() if proxy_token is not None else None,
+            routing=routing,
             metadata=metadata,
         )
 

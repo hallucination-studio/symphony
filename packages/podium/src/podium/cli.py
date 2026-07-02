@@ -12,11 +12,33 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--host", default="127.0.0.1", help="Bind host")
     parser.add_argument("--port", type=int, default=8090, help="Bind port")
     parser.add_argument("--token", default=None, help="Bearer token for conductor registration")
+    parser.add_argument("--linear-client-id", default=None, help="Linear OAuth application client id")
+    parser.add_argument("--linear-client-secret", default=None, help="Linear OAuth application client secret")
+    parser.add_argument("--linear-redirect-uri", default=None, help="Linear OAuth redirect URI")
+    parser.add_argument("--linear-webhook-secret", default=None, help="Linear OAuth application webhook secret")
+    parser.add_argument("--linear-installations-path", default=None, help="Path to persist Linear OAuth installations")
     return parser.parse_args(argv)
 
 
-async def run_server(*, host: str, port: int, token: str | None) -> None:
-    server = PodiumServer(token=token or os.environ.get("PODIUM_TOKEN"))
+async def run_server(
+    *,
+    host: str,
+    port: int,
+    token: str | None,
+    linear_client_id: str | None = None,
+    linear_client_secret: str | None = None,
+    linear_redirect_uri: str | None = None,
+    linear_webhook_secret: str | None = None,
+    linear_installations_path: str | None = None,
+) -> None:
+    server = PodiumServer(
+        token=token or os.environ.get("PODIUM_TOKEN"),
+        linear_client_id=linear_client_id or os.environ.get("LINEAR_CLIENT_ID"),
+        linear_client_secret=linear_client_secret or os.environ.get("LINEAR_CLIENT_SECRET"),
+        linear_redirect_uri=linear_redirect_uri or os.environ.get("LINEAR_REDIRECT_URI"),
+        linear_webhook_secret=linear_webhook_secret or os.environ.get("LINEAR_WEBHOOK_SECRET"),
+        linear_installations_path=linear_installations_path or os.environ.get("PODIUM_LINEAR_INSTALLATIONS_PATH"),
+    )
     await server.start(host=host, port=port)
     try:
         while True:
@@ -28,7 +50,18 @@ async def run_server(*, host: str, port: int, token: str | None) -> None:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     try:
-        asyncio.run(run_server(host=args.host, port=args.port, token=args.token))
+        asyncio.run(
+            run_server(
+                host=args.host,
+                port=args.port,
+                token=args.token,
+                linear_client_id=args.linear_client_id,
+                linear_client_secret=args.linear_client_secret,
+                linear_redirect_uri=args.linear_redirect_uri,
+                linear_webhook_secret=args.linear_webhook_secret,
+                linear_installations_path=args.linear_installations_path,
+            )
+        )
     except KeyboardInterrupt:
         return 0
     return 0

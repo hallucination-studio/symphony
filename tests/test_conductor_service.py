@@ -3,13 +3,15 @@ from __future__ import annotations
 from pathlib import Path
 from datetime import timedelta
 import subprocess
+import sys
 
 import pytest
 
 from conductor.conductor_models import ConductorSettings, InstanceCreateRequest, InstancePatchRequest, InstanceRecord
+from conductor.conductor_runtime import LogQueryResult
 from conductor.conductor_service import ConductorService, ConductorServiceError
 from conductor.conductor_store import ConductorStore
-from performer_api.models import ContinuationEntry, RetryEntry, RuntimeTokens, utc_now
+from performer_api.models import BlockedEntry, ContinuationEntry, RetryEntry, RuntimeTokens, utc_now
 from performer_api.ops_models import IssueRecord, OpsSnapshot, RetentionMetadata, RunRecord, TraceEvent
 from performer_api.ops_store import OpsStore
 from performer_api.persistence import PersistenceStore, PersistedSession, PersistedState
@@ -115,6 +117,18 @@ class CapturingRuntime:
     def read_logs(self, instance):
         return ""
 
+    def query_logs(self, instance, query=None):
+        return LogQueryResult(
+            instance_id=instance.id,
+            generation=None,
+            path=None,
+            order=query.order if query is not None else "desc",
+            lines=[],
+            offset_start=0,
+            offset_end=0,
+            warnings=[],
+        )
+
 
 def test_conductor_service_lists_issue_run_trace_and_retention(tmp_path: Path) -> None:
     service = make_service(tmp_path)
@@ -158,7 +172,7 @@ def test_create_instance_from_local_path_generates_valid_workflow(tmp_path: Path
     service = ConductorService(store=ConductorStore(data_root), data_root=data_root)
     (repo / "src.txt").write_text("source\n", encoding="utf-8")
     (data_root / "must-not-copy.txt").write_text("no\n", encoding="utf-8")
-    for excluded in [".conductor", "conductor-data", ".venv", "workspaces", ".codex-runtime"]:
+    for excluded in [".conductor", "conductor-data", ".venv", "workspaces", ".codex-runtime", ".test-real-flow"]:
         (repo / excluded).mkdir()
         (repo / excluded / "excluded.txt").write_text("no\n", encoding="utf-8")
 
@@ -172,10 +186,20 @@ def test_create_instance_from_local_path_generates_valid_workflow(tmp_path: Path
     assert Path(instance.log_path).parent.exists()
     assert (Path(instance.workspace_root) / "src.txt").read_text(encoding="utf-8") == "source\n"
     assert (Path(instance.workspace_root) / ".git").exists()
-    for excluded in [".conductor", "conductor-data", ".venv", "workspaces", ".codex-runtime"]:
+    for excluded in [".conductor", "conductor-data", ".venv", "workspaces", ".codex-runtime", ".test-real-flow"]:
         assert not (Path(instance.workspace_root) / excluded).exists()
     assert not (Path(instance.workspace_root) / ".custom-conductor-data").exists()
     assert "Handle tasks" in instance.workflow_content
+
+
+def test_create_instance_uses_configured_podium_proxy_endpoint(tmp_path: Path) -> None:
+    repo = make_repo(tmp_path)
+    service = make_service(tmp_path)
+    service.update_settings(ConductorSettings(podium_url="https://podium.internal/"))
+
+    instance = service.create_instance(make_request(repo))
+
+    assert "endpoint: https://podium.internal/api/v1/linear/graphql" in instance.workflow_content
 
 
 def test_create_instance_reuses_existing_workspace_without_resyncing(tmp_path: Path) -> None:
@@ -331,6 +355,16 @@ def test_instance_runtime_includes_persisted_performer_issue_details(tmp_path: P
                     last_message="continuing",
                 )
             ],
+            blocked=[
+                BlockedEntry(
+                    issue_id="issue-4",
+                    identifier="ENG-4",
+                    attempt=4,
+                    blocked_at=utc_now(),
+                    error="runtime_permission_blocked: writing outside of the project",
+                    issue_url="https://linear.app/x/issue/ENG-4",
+                )
+            ],
         )
     )
 
@@ -340,7 +374,7 @@ def test_instance_runtime_includes_persisted_performer_issue_details(tmp_path: P
     assert runtime["workspace"]["strategy"] == "instance_repo_workspace"
     assert "reuses the prepared repository workspace" in runtime["workspace"]["description"]
     assert runtime["performer"]["source"] == "persistence"
-    assert runtime["performer"]["counts"] == {"running": 1, "retrying": 1, "continuing": 1}
+    assert runtime["performer"]["counts"] == {"running": 1, "retrying": 1, "continuing": 1, "blocked": 1}
     assert runtime["performer"]["running"][0]["issue_identifier"] == "ENG-1"
     assert runtime["performer"]["running"][0]["phase"] == "running"
     assert runtime["performer"]["running"][0]["status_label"] == "performer:running"
@@ -353,10 +387,14 @@ def test_instance_runtime_includes_persisted_performer_issue_details(tmp_path: P
     assert runtime["performer"]["continuing"][0]["issue_identifier"] == "ENG-3"
     assert runtime["performer"]["continuing"][0]["phase"] == "continuing"
     assert runtime["performer"]["continuing"][0]["status_label"] == "performer:continuing"
+    assert runtime["performer"]["blocked"][0]["issue_identifier"] == "ENG-4"
+    assert runtime["performer"]["blocked"][0]["phase"] == "error"
+    assert runtime["performer"]["blocked"][0]["status_label"] == "performer:error"
     assert runtime["metrics"]["tokens"]["cached_tokens"] == 5
     assert runtime["metrics"]["tokens"]["total_tokens"] == 33
     assert runtime["metrics"]["turns"] == 3
     assert runtime["metrics"]["retrying"] == 1
+    assert runtime["metrics"]["blocked"] == 1
 
 
 def test_dashboard_aggregates_persisted_runtime_metrics(tmp_path: Path) -> None:
@@ -412,6 +450,35 @@ def test_dashboard_aggregates_persisted_runtime_metrics(tmp_path: Path) -> None:
     assert dashboard["totals"]["continuations"] == 1
 
 
+def test_query_instance_logs_returns_structured_query_result(tmp_path: Path) -> None:
+    service = make_service(tmp_path)
+    repo = make_repo(tmp_path)
+    instance = service.create_instance(make_request(repo))
+    current = Path(instance.instance_dir) / "logs" / "performer-000001.log"
+    current.write_text("line-1\nline-2\nline-3\n", encoding="utf-8")
+    updated = instance.with_updates(log_path=str(current))
+    service.store.update_instance(updated)
+
+    result = service.query_instance_logs(instance.id, tail=2, order="desc")
+
+    assert result["instance_id"] == instance.id
+    assert result["generation"] == 1
+    assert result["order"] == "desc"
+    assert result["lines"] == ["line-3", "line-2"]
+    assert result["logs"] == "line-3\nline-2\n"
+
+
+def test_instance_logs_preserves_legacy_text_result(tmp_path: Path) -> None:
+    service = make_service(tmp_path)
+    repo = make_repo(tmp_path)
+    instance = service.create_instance(make_request(repo))
+    current = Path(instance.instance_dir) / "logs" / "performer-000001.log"
+    current.write_text("line-1\nline-2\n", encoding="utf-8")
+    service.store.update_instance(instance.with_updates(log_path=str(current)))
+
+    assert service.instance_logs(instance.id) == "line-1\nline-2\n"
+
+
 def test_create_instance_rejects_duplicate_workspace_resources(tmp_path: Path) -> None:
     service = make_service(tmp_path)
     repo_a = make_repo(tmp_path, "repo-a")
@@ -459,7 +526,10 @@ def test_update_instance_persists_replaced_workflow_content_in_metadata(tmp_path
     service = make_service(tmp_path)
     repo = make_repo(tmp_path)
     instance = service.create_instance(make_request(repo))
-    replacement = instance.workflow_content.replace("https://api.linear.app/graphql", "http://127.0.0.1:9999/graphql")
+    replacement = instance.workflow_content.replace(
+        "https://podium.example/api/v1/linear/graphql",
+        "http://127.0.0.1:9999/graphql",
+    )
 
     updated = service.update_instance(
         instance.id,
@@ -549,22 +619,67 @@ def test_service_initialization_marks_stale_running_instances_stopped(tmp_path: 
 
 
 @pytest.mark.asyncio
-async def test_start_instance_passes_conductor_linear_api_key_to_runtime_env(tmp_path: Path) -> None:
+async def test_service_initialization_recovers_live_running_instance_pid(tmp_path: Path) -> None:
+    store = ConductorStore(tmp_path / "conductor-data")
+    repo = make_repo(tmp_path)
+    process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        instance = InstanceRecord.create(
+            id="inst-1",
+            name="Alpha",
+            repo_source_type="local_path",
+            repo_source_value=str(repo),
+            resolved_repo_path=str(repo),
+            instance_dir=str(tmp_path / "conductor-data" / "instances" / "inst-1"),
+            workflow_path=str(tmp_path / "conductor-data" / "instances" / "inst-1" / "WORKFLOW.md"),
+            workspace_root=str(tmp_path / "conductor-data" / "instances" / "inst-1" / "workspace"),
+            persistence_path=str(tmp_path / "conductor-data" / "instances" / "inst-1" / "state" / "performer.json"),
+            log_path=str(tmp_path / "conductor-data" / "instances" / "inst-1" / "logs" / "performer-000001.log"),
+            http_port=8801,
+            linear_project="ENG",
+            linear_filters={"labels": ["codex"]},
+            workflow_profile="default",
+            workflow_inputs={},
+        ).with_updates(process_status="running", pid=process.pid)
+        store.save_instance(instance)
+
+        service = ConductorService(store=store, data_root=tmp_path / "conductor-data")
+
+        reloaded = store.get_instance("inst-1")
+        assert reloaded is not None
+        assert reloaded.process_status == "running"
+        assert reloaded.pid == process.pid
+        stopped = await service.stop_instance("inst-1")
+        assert stopped.process_status == "stopped"
+        assert process.poll() is not None
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=5)
+
+
+@pytest.mark.asyncio
+async def test_start_instance_passes_podium_proxy_token_to_runtime_env(tmp_path: Path) -> None:
     store = ConductorStore(tmp_path / "conductor-data")
     runtime = CapturingRuntime()
     service = ConductorService(store=store, data_root=tmp_path / "conductor-data", runtime_manager=runtime)
     repo = make_repo(tmp_path)
     instance = service.create_instance(make_request(repo))
-    service.update_settings(ConductorSettings(linear_api_key="conductor-token"))
+    service.update_settings(
+        ConductorSettings(
+            podium_url="https://podium.example",
+            podium_proxy_token="proxy-token",
+        )
+    )
 
     started = await service.start_instance(instance.id)
 
     assert started.process_status == "running"
-    assert runtime.env == {"LINEAR_API_KEY": "conductor-token"}
+    assert runtime.env == {"PODIUM_PROXY_TOKEN": "proxy-token"}
 
 
 @pytest.mark.asyncio
-async def test_start_instance_requires_conductor_linear_api_key(tmp_path: Path) -> None:
+async def test_start_instance_does_not_require_conductor_linear_api_key(tmp_path: Path) -> None:
     runtime = CapturingRuntime()
     service = ConductorService(
         store=ConductorStore(tmp_path / "conductor-data"),
@@ -574,8 +689,7 @@ async def test_start_instance_requires_conductor_linear_api_key(tmp_path: Path) 
     repo = make_repo(tmp_path)
     instance = service.create_instance(make_request(repo))
 
-    with pytest.raises(ConductorServiceError) as exc:
-        await service.start_instance(instance.id)
+    started = await service.start_instance(instance.id)
 
-    assert exc.value.code == "missing_conductor_linear_api_key"
-    assert runtime.env is None
+    assert started.process_status == "running"
+    assert runtime.env == {}

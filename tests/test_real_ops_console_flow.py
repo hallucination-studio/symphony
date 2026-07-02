@@ -272,6 +272,7 @@ async def test_real_ops_console_flow_writes_snapshot_and_surfaces_it(tmp_path: P
         workflow = workflow.replace("https://api.linear.app/graphql", f"http://127.0.0.1:{linear.port}/graphql")
         workflow = workflow.replace("  command: codex app-server", f"  command: {fake_codex} app-server")
         workflow = workflow.replace("agent:\n  max_concurrent_agents: 10\n  max_turns: 20\n", "agent:\n  max_concurrent_agents: 10\n  max_turns: 1\n")
+        workflow = workflow.replace("acceptance:\n  enabled: true\n", "acceptance:\n  enabled: false\n")
         workflow = workflow.replace("server:\n", "polling:\n  interval_ms: 100\nserver:\n", 1)
         updated = service.update_instance(instance.id, InstancePatchRequest(workflow_content=workflow))
 

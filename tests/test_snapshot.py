@@ -14,7 +14,7 @@ from performer_api.config import (
     PersistenceConfig,
     WorkspaceConfig,
 )
-from performer_api.models import ContinuationEntry, Issue, RetryEntry, RunningEntry, RuntimeTokens, utc_now
+from performer_api.models import BlockedEntry, ContinuationEntry, Issue, RetryEntry, RunningEntry, RuntimeTokens, utc_now
 from performer.orchestrator import OrchestratorState
 from performer.snapshot import build_runtime_snapshot, build_issue_snapshot
 
@@ -134,7 +134,7 @@ def test_runtime_snapshot_includes_running_retry_totals_and_rate_limits(tmp_path
 
     snapshot = build_runtime_snapshot(make_config(tmp_path), state)
 
-    assert snapshot["counts"] == {"running": 1, "retrying": 1, "continuing": 1}
+    assert snapshot["counts"] == {"running": 1, "retrying": 1, "continuing": 1, "blocked": 0}
     assert snapshot["running"][0]["issue_id"] == "issue-1"
     assert snapshot["running"][0]["issue_identifier"] == "MT-1"
     assert snapshot["running"][0]["issue_url"] == "https://linear.app/x/issue/MT-1"
@@ -289,6 +289,32 @@ def test_issue_snapshot_returns_continuation_details(tmp_path: Path) -> None:
     assert detail["retry"] is None
     assert detail["continuation"]["last_message"] == "continuing"
     assert detail["last_error"] is None
+
+
+def test_issue_snapshot_returns_blocked_runtime_error_details(tmp_path: Path) -> None:
+    state = OrchestratorState(
+        blocked={
+            "issue-1": BlockedEntry(
+                issue_id="issue-1",
+                identifier="MT-1",
+                attempt=2,
+                blocked_at=utc_now(),
+                error="runtime_permission_blocked: writing outside of the project",
+                issue_url="https://linear.app/x/issue/MT-1",
+                last_message="writing outside of the project",
+            )
+        }
+    )
+
+    detail = build_issue_snapshot(make_config(tmp_path), state, "MT-1")
+
+    assert detail is not None
+    assert detail["status"] == "blocked"
+    assert detail["phase"] == "error"
+    assert detail["status_label"] == "performer:error"
+    assert detail["attempts"]["current_retry_attempt"] == 2
+    assert detail["blocked"]["last_message"] == "writing outside of the project"
+    assert detail["last_error"] == "runtime_permission_blocked: writing outside of the project"
 
 
 def test_issue_snapshot_returns_none_for_unknown_issue(tmp_path: Path) -> None:

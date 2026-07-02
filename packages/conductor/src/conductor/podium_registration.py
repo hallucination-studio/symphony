@@ -18,7 +18,13 @@ def register_with_podium(settings: ConductorSettings) -> dict[str, object]:
     base_url = settings.podium_url.strip().rstrip("/")
     if not base_url:
         return {"status": "skipped", "reason": "podium_url_unset"}
-    payload = ConductorRegistrationRequest(conductor_id=settings.conductor_id).to_dict()
+    payload = ConductorRegistrationRequest(
+        conductor_id=settings.conductor_id,
+        callback_url=settings.podium_callback_url.strip() or None,
+        dispatch_token=settings.podium_dispatch_token.strip() or None,
+        proxy_token=settings.podium_proxy_token.strip() or None,
+        routing={"project_slug": "", "workspace_id": ""},
+    ).to_dict()
     body = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
     headers = {"Content-Type": "application/json"}
     if settings.podium_token.strip():

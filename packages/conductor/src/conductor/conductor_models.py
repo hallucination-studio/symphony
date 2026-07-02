@@ -30,16 +30,24 @@ class ConductorSettings:
     linear_api_key: str = ""
     podium_url: str = ""
     podium_token: str = ""
+    podium_callback_url: str = ""
+    podium_dispatch_token: str = ""
+    podium_proxy_token: str = ""
     conductor_id: str = field(default_factory=lambda: uuid4().hex)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
     def to_public_dict(self) -> dict[str, Any]:
+        podium_proxy_configured = bool(self.podium_url.strip() and self.podium_proxy_token.strip())
         return {
             "linear_api_key_configured": bool(self.linear_api_key.strip()),
+            "linear_application_connected": podium_proxy_configured or bool(self.linear_api_key.strip()),
             "podium_url": self.podium_url,
             "podium_token_configured": bool(self.podium_token.strip()),
+            "podium_callback_url": self.podium_callback_url,
+            "podium_dispatch_token_configured": bool(self.podium_dispatch_token.strip()),
+            "podium_proxy_token_configured": bool(self.podium_proxy_token.strip()),
             "conductor_id": self.conductor_id,
         }
 
@@ -49,6 +57,9 @@ class ConductorSettings:
             linear_api_key=str(payload.get("linear_api_key") or ""),
             podium_url=str(payload.get("podium_url") or ""),
             podium_token=str(payload.get("podium_token") or ""),
+            podium_callback_url=str(payload.get("podium_callback_url") or ""),
+            podium_dispatch_token=str(payload.get("podium_dispatch_token") or ""),
+            podium_proxy_token=str(payload.get("podium_proxy_token") or ""),
             conductor_id=str(payload.get("conductor_id") or uuid4().hex),
         )
 

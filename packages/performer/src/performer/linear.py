@@ -85,6 +85,7 @@ query PerformerIssueStates($ids: [ID!], $projectSlug: String!) {
       id
       identifier
       title
+      description
       state { name }
       project { slugId name }
       assignee { id }
@@ -102,6 +103,22 @@ mutation PerformerCommentIssue($issueId: String!, $body: String!) {
   commentCreate(input: { issueId: $issueId, body: $body }) {
     success
     comment { id }
+  }
+}
+"""
+
+
+ISSUE_COMMENTS_QUERY = """
+query PerformerIssueComments($issueId: String!, $first: Int!) {
+  issue(id: $issueId) {
+    comments(first: $first) {
+      nodes {
+        id
+        body
+        createdAt
+        user { id name }
+      }
+    }
   }
 }
 """
@@ -385,6 +402,24 @@ class LinearClient:
             "success": bool(result.get("success")),
             "comment_id": comment.get("id") if isinstance(comment, dict) else None,
         }
+
+    async def fetch_issue_comments(self, issue_id: str, *, first: int = 20) -> list[dict[str, Any]]:
+        payload = await self.graphql(ISSUE_COMMENTS_QUERY, {"issueId": issue_id, "first": first})
+        nodes = ((((payload.get("data") or {}).get("issue") or {}).get("comments") or {}).get("nodes") or [])
+        comments: list[dict[str, Any]] = []
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            user = node.get("user") if isinstance(node.get("user"), dict) else None
+            comments.append(
+                {
+                    "id": node.get("id"),
+                    "body": node.get("body") or "",
+                    "created_at": node.get("createdAt"),
+                    "user": {"id": user.get("id"), "name": user.get("name")} if user else None,
+                }
+            )
+        return comments
 
     async def transition_issue(self, issue_id: str, state_id: str) -> dict[str, Any]:
         payload = await self.graphql(ISSUE_UPDATE_STATE_MUTATION, {"issueId": issue_id, "stateId": state_id})
@@ -731,6 +766,9 @@ class LinearTracker:
 
     async def comment_issue(self, issue_id: str, body: str) -> dict[str, Any]:
         return await self.client.comment_issue(issue_id, body)
+
+    async def fetch_issue_comments(self, issue_id: str, *, first: int = 20) -> list[dict[str, Any]]:
+        return await self.client.fetch_issue_comments(issue_id, first=first)
 
     async def transition_issue(self, issue_id: str, state_id: str) -> dict[str, Any]:
         return await self.client.transition_issue(issue_id, state_id)

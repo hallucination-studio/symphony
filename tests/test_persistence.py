@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import timedelta
 from pathlib import Path
 
-from performer_api.models import ContinuationEntry, Issue, RetryEntry, RunningEntry, RuntimeTokens, utc_now
+from performer_api.models import BlockedEntry, ContinuationEntry, Issue, RetryEntry, RunningEntry, RuntimeTokens, utc_now
 from performer_api.persistence import PersistenceStore, PersistedSession, PersistedState
 
 
@@ -33,6 +33,17 @@ def test_persistence_store_round_trips_retry_entries_and_sessions(tmp_path: Path
                 due_at_ms=234567,
                 issue_url="https://linear.app/x/issue/MT-3",
                 last_message="max turns reached; continuing",
+            )
+        ],
+        blocked=[
+            BlockedEntry(
+                issue_id="issue-4",
+                identifier="MT-4",
+                attempt=2,
+                blocked_at=due_at,
+                error="runtime_permission_blocked: writing outside of the project",
+                issue_url="https://linear.app/x/issue/MT-4",
+                last_message="writing outside of the project",
             )
         ],
         sessions=[
@@ -82,6 +93,12 @@ def test_persistence_store_round_trips_retry_entries_and_sessions(tmp_path: Path
     assert loaded.continuations[0].phase == "continuing"
     assert loaded.continuations[0].status_label == "performer:continuing"
     assert loaded.continuations[0].last_message == "max turns reached; continuing"
+    assert loaded.blocked[0].issue_id == "issue-4"
+    assert loaded.blocked[0].identifier == "MT-4"
+    assert loaded.blocked[0].attempt == 2
+    assert loaded.blocked[0].phase == "error"
+    assert loaded.blocked[0].status_label == "performer:error"
+    assert loaded.blocked[0].error == "runtime_permission_blocked: writing outside of the project"
     assert loaded.sessions[0].issue_id == "issue-2"
     assert loaded.sessions[0].session_id == "thread-turn"
     assert loaded.sessions[0].worker_host == "builder-1"

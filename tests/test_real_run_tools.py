@@ -45,6 +45,33 @@ def test_runtime_claims_audit_flags_errorless_retry_and_claim_stall() -> None:
     assert "log_repeated_running_0_claimed_positive" in result["failures"]
 
 
+def test_runtime_claims_audit_allows_blocked_human_approval_state() -> None:
+    tool = load_tool("runtime_claims_audit")
+
+    result = tool.audit_runtime_state(
+        {
+            "sessions": [],
+            "retry_attempts": [],
+            "continuations": [],
+            "blocked": [
+                {
+                    "issue_id": "issue-1",
+                    "identifier": "HELL-1",
+                    "attempt": 2,
+                    "error": "runtime_permission_blocked: writing outside of the project",
+                    "phase": "error",
+                    "status_label": "performer:error",
+                }
+            ],
+        },
+        "performer_dispatch_summary dispatched=0 skipped=1 running=0 claimed=1",
+    )
+
+    assert result["pass"] is True
+    assert result["counts"]["blocked"] == 1
+    assert result["blocked"][0]["identifier"] == "HELL-1"
+
+
 def test_linear_tree_audit_requires_gate_and_evidence_parent_links() -> None:
     tool = load_tool("linear_tree_audit")
 

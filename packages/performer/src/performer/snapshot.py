@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from performer_api.config import ServiceConfig
-from performer_api.models import ContinuationEntry, RetryEntry, RunningEntry, RuntimeTokens, utc_now
+from performer_api.models import BlockedEntry, ContinuationEntry, RetryEntry, RunningEntry, RuntimeTokens, utc_now
 from .orchestrator import OrchestratorState
 from .workspace import sanitize_workspace_key
 
@@ -14,17 +14,20 @@ def build_runtime_snapshot(config: ServiceConfig, state: OrchestratorState) -> d
     running = [_running_row(entry) for entry in state.running.values()]
     retrying = [_retry_row(entry) for entry in state.retry_attempts.values()]
     continuing = [_continuation_row(entry) for entry in state.continuations.values()]
+    blocked = [_blocked_row(entry) for entry in state.blocked.values()]
     return {
         "generated_at": _iso(now),
         "counts": {
             "running": len(running),
             "retrying": len(retrying),
             "continuing": len(continuing),
+            "blocked": len(blocked),
         },
         "running": running,
         "retrying": retrying,
         "continuing": continuing,
-        "issues": running + retrying + continuing,
+        "blocked": blocked,
+        "issues": running + retrying + continuing + blocked,
         "codex_totals": _totals_row(state, now),
         "rate_limits": state.codex_rate_limits,
         "config": {
@@ -59,7 +62,11 @@ def build_issue_snapshot(
         (entry for entry in state.continuations.values() if entry.identifier.lower() == normalized),
         None,
     )
-    if running_entry is None and retry_entry is None and continuation_entry is None:
+    blocked_entry = next(
+        (entry for entry in state.blocked.values() if entry.identifier.lower() == normalized),
+        None,
+    )
+    if running_entry is None and retry_entry is None and continuation_entry is None and blocked_entry is None:
         return None
 
     issue_id = (
@@ -68,6 +75,8 @@ def build_issue_snapshot(
         else retry_entry.issue_id
         if retry_entry is not None
         else continuation_entry.issue_id
+        if continuation_entry is not None
+        else blocked_entry.issue_id
     )
     identifier = (
         running_entry.issue.identifier
@@ -75,13 +84,15 @@ def build_issue_snapshot(
         else retry_entry.identifier
         if retry_entry is not None
         else continuation_entry.identifier
+        if continuation_entry is not None
+        else blocked_entry.identifier
     )
     return {
         "issue_identifier": identifier,
         "issue_id": issue_id,
-        "status": _issue_status(running_entry, retry_entry, continuation_entry),
-        "phase": _issue_phase(running_entry, retry_entry, continuation_entry),
-        "status_label": _issue_status_label(running_entry, retry_entry, continuation_entry),
+        "status": _issue_status(running_entry, retry_entry, continuation_entry, blocked_entry),
+        "phase": _issue_phase(running_entry, retry_entry, continuation_entry, blocked_entry),
+        "status_label": _issue_status_label(running_entry, retry_entry, continuation_entry, blocked_entry),
         "workspace": {
             "path": (
                 running_entry.workspace_path
@@ -90,15 +101,16 @@ def build_issue_snapshot(
             ),
         },
         "attempts": {
-            "restart_count": _restart_count(running_entry, retry_entry, continuation_entry),
-            "current_retry_attempt": _current_retry_attempt(running_entry, retry_entry, continuation_entry),
+            "restart_count": _restart_count(running_entry, retry_entry, continuation_entry, blocked_entry),
+            "current_retry_attempt": _current_retry_attempt(running_entry, retry_entry, continuation_entry, blocked_entry),
         },
         "running": _running_row(running_entry) if running_entry is not None else None,
         "retry": _retry_row(retry_entry) if retry_entry is not None else None,
         "continuation": _continuation_row(continuation_entry) if continuation_entry is not None else None,
+        "blocked": _blocked_row(blocked_entry) if blocked_entry is not None else None,
         "logs": {"codex_session_logs": []},
-        "recent_events": _recent_events(running_entry, retry_entry, continuation_entry),
-        "last_error": retry_entry.error if retry_entry is not None else None,
+        "recent_events": _recent_events(running_entry, retry_entry, continuation_entry, blocked_entry),
+        "last_error": retry_entry.error if retry_entry is not None else blocked_entry.error if blocked_entry is not None else None,
         "tracked": {},
     }
 
@@ -160,6 +172,21 @@ def _continuation_row(entry: ContinuationEntry) -> dict[str, Any]:
     }
 
 
+def _blocked_row(entry: BlockedEntry) -> dict[str, Any]:
+    return {
+        "issue_id": entry.issue_id,
+        "issue_identifier": entry.identifier,
+        "issue_url": entry.issue_url,
+        "attempt": entry.attempt,
+        "blocked_at": _iso(entry.blocked_at),
+        "error": entry.error,
+        "last_message": entry.last_message,
+        "phase": entry.phase,
+        "status_label": entry.status_label,
+        "recent_events": entry.recent_events,
+    }
+
+
 def _totals_row(state: OrchestratorState, now: datetime) -> dict[str, Any]:
     active_seconds = sum(max((now - entry.started_at).total_seconds(), 0) for entry in state.running.values())
     return {
@@ -182,8 +209,9 @@ def _restart_count(
     running: RunningEntry | None,
     retry: RetryEntry | None,
     continuation: ContinuationEntry | None = None,
+    blocked: BlockedEntry | None = None,
 ) -> int:
-    attempt = _current_retry_attempt(running, retry, continuation)
+    attempt = _current_retry_attempt(running, retry, continuation, blocked)
     return max(attempt - 1, 0)
 
 
@@ -191,6 +219,7 @@ def _current_retry_attempt(
     running: RunningEntry | None,
     retry: RetryEntry | None,
     continuation: ContinuationEntry | None = None,
+    blocked: BlockedEntry | None = None,
 ) -> int:
     if running is not None:
         return running.retry_attempt
@@ -198,6 +227,8 @@ def _current_retry_attempt(
         return retry.attempt
     if continuation is not None:
         return continuation.attempt
+    if blocked is not None:
+        return blocked.attempt
     return 0
 
 
@@ -205,6 +236,7 @@ def _recent_events(
     running: RunningEntry | None,
     retry: RetryEntry | None = None,
     continuation: ContinuationEntry | None = None,
+    blocked: BlockedEntry | None = None,
 ) -> list[dict[str, Any]]:
     if running is not None and running.recent_events:
         return running.recent_events
@@ -212,6 +244,8 @@ def _recent_events(
         return retry.recent_events
     if continuation is not None and continuation.recent_events:
         return continuation.recent_events
+    if blocked is not None and blocked.recent_events:
+        return blocked.recent_events
     entry = running
     if entry is None or entry.last_codex_event is None:
         return []
@@ -228,11 +262,14 @@ def _issue_status(
     running: RunningEntry | None,
     retry: RetryEntry | None,
     continuation: ContinuationEntry | None,
+    blocked: BlockedEntry | None,
 ) -> str:
     if running is not None:
         return "running"
     if retry is not None:
         return "retrying"
+    if blocked is not None:
+        return "blocked"
     return "continuing"
 
 
@@ -240,11 +277,14 @@ def _issue_phase(
     running: RunningEntry | None,
     retry: RetryEntry | None,
     continuation: ContinuationEntry | None,
+    blocked: BlockedEntry | None,
 ) -> str:
     if running is not None:
         return running.phase
     if retry is not None:
         return retry.phase
+    if blocked is not None:
+        return blocked.phase
     return continuation.phase
 
 
@@ -252,11 +292,14 @@ def _issue_status_label(
     running: RunningEntry | None,
     retry: RetryEntry | None,
     continuation: ContinuationEntry | None,
+    blocked: BlockedEntry | None,
 ) -> str:
     if running is not None:
         return running.status_label
     if retry is not None:
         return retry.status_label
+    if blocked is not None:
+        return blocked.status_label
     return continuation.status_label
 
 

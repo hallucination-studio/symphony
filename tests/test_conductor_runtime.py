@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 
 from conductor.conductor_models import InstanceRecord
-from conductor.conductor_runtime import ConductorRuntimeManager
+from conductor.conductor_runtime import ConductorRuntimeManager, LogQuery
 
 
 class FakeStream:
@@ -93,13 +93,60 @@ async def test_start_launches_performer_process_and_captures_logs(tmp_path: Path
     assert captured["kwargs"]["env"]["LINEAR_API_KEY"] == "conductor-token"
     assert started.process_status == "running"
     assert started.pid == 4242
-    assert await wait_for_log(Path(instance.log_path), "daemon started\nwarning line\n") == "daemon started\nwarning line\n"
+    current_log = Path(instance.instance_dir) / "logs" / "performer-000001.log"
+    assert started.log_path == str(current_log)
+    assert Path(instance.log_path).read_text(encoding="utf-8") == ""
+    assert await wait_for_log(current_log, "daemon started\nwarning line\n") == "daemon started\nwarning line\n"
 
     stopped = await manager.stop(started)
 
     assert process.terminated is True
     assert stopped.process_status == "stopped"
     assert stopped.pid is None
+
+
+@pytest.mark.asyncio
+async def test_restart_creates_new_generation_without_truncating_previous_log(tmp_path: Path) -> None:
+    processes = [FakeProcess(), FakeProcess()]
+
+    async def process_factory(*args: str, **kwargs: Any) -> FakeProcess:
+        return processes.pop(0)
+
+    manager = ConductorRuntimeManager(process_factory=process_factory, command="performer")
+    instance = make_instance(tmp_path)
+
+    first = await manager.start(instance, env={})
+    first_log = Path(first.log_path)
+    assert await wait_for_log(first_log, "daemon started\nwarning line\n") == "daemon started\nwarning line\n"
+    await manager.stop(first)
+
+    second = await manager.start(first, env={})
+
+    assert first_log.read_text(encoding="utf-8") == "daemon started\nwarning line\n"
+    assert Path(second.log_path).name == "performer-000002.log"
+    assert Path(second.instance_dir, "logs", "current.log").read_text(encoding="utf-8") == str(Path(second.log_path))
+
+
+def test_query_logs_supports_tail_order_limit_and_previous_generation(tmp_path: Path) -> None:
+    manager = ConductorRuntimeManager(command="performer")
+    instance = make_instance(tmp_path)
+    logs_dir = Path(instance.instance_dir) / "logs"
+    logs_dir.mkdir(parents=True)
+    previous = logs_dir / "performer-000001.log"
+    current = logs_dir / "performer-000002.log"
+    previous.write_text("old-1\nold-2\n", encoding="utf-8")
+    current.write_text("new-1\nnew-2\nnew-3\n", encoding="utf-8")
+
+    desc = manager.query_logs(instance.with_updates(log_path=str(current)), LogQuery(tail=2, order="desc"))
+    asc = manager.query_logs(instance.with_updates(log_path=str(current)), LogQuery(tail=2, order="asc"))
+    limited = manager.query_logs(instance.with_updates(log_path=str(current)), LogQuery(limit_bytes=6, order="asc"))
+    previous_result = manager.query_logs(instance.with_updates(log_path=str(current)), LogQuery(previous=True, order="asc"))
+
+    assert desc.lines == ["new-3", "new-2"]
+    assert asc.lines == ["new-2", "new-3"]
+    assert "".join(line + "\n" for line in limited.lines).encode()[-6:] == b"new-3\n"
+    assert previous_result.generation == 1
+    assert previous_result.lines == ["old-1", "old-2"]
 
 
 def test_default_command_falls_back_to_python_module_in_editable_repo() -> None:

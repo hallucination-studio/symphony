@@ -41,9 +41,17 @@ def test_generate_workflow_content_injects_managed_runtime_resources(tmp_path: P
     assert f"path: {instance.persistence_path}" in content
     assert "agent:" in content
     assert "max_turns: 20" in content
+    assert "acceptance:" in content
+    assert "enabled: true" in content
+    assert "mode: block_done" in content
+    assert "review_state: In Review" in content
+    assert "gate_passed_label: performer:gate/passed" in content
     assert "server:" not in content
     assert "observability:" not in content
     assert "project_slug: ENG" in content
+    assert "endpoint: https://podium.example/api/v1/linear/graphql" in content
+    assert "api_key: $PODIUM_PROXY_TOKEN" in content
+    assert "api_key: $LINEAR_API_KEY" not in content
     assert "Keep issues moving" in content
     assert "Current Linear issue:" in content
     assert "Identifier: {{ issue.identifier }}" in content
@@ -52,18 +60,17 @@ def test_generate_workflow_content_injects_managed_runtime_resources(tmp_path: P
     assert "{{ issue.description or 'No description provided.' }}" in content
     assert "after_create: |" not in content
     assert "rsync -a --delete" not in content
-    assert "Work in this prepared repository workspace." in content
-    assert "When the requested work is implemented and verified" in content
-    assert "create a Linear comment" in content
-    assert "move the issue out of the active states" in content
-    assert "Configured terminal states: Closed, Cancelled, Canceled, Done." in content
-    assert "query CurrentIssueTeam" in content
-    assert "query TerminalState" in content
-    assert "team { id key name }" in content
-    assert "query TerminalState($teamId: ID!)" in content
-    assert "workflowStates(first: 50, filter: { team: { id: { eq: $teamId } } })" in content
-    assert "states: workflowStates" not in content
-    assert "mutation CompleteIssue" in content
+    assert "Prepared workspace root:" in content
+    assert "Work only in the prepared workspace root." in content
+    assert "Acceptance gates are enabled by default." in content
+    assert "Do not move the issue to Done yourself" in content
+    assert "Implementation summary:" in content
+    assert "Test commands and exact output:" in content
+    assert "Remaining risks:" in content
+    assert "/symphony approve-runtime-error {{ issue.identifier }}" in content
+    assert "query CurrentIssue" in content
+    assert "mutation UpdateIssueEvidence" in content
+    assert "mutation CompleteIssue" not in content
     assert "commentCreate" in content
     assert "issueUpdate" in content
     assert "linear_graphql" in content

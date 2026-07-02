@@ -21,6 +21,7 @@ def audit_runtime_state(state: dict[str, Any], log_text: str = "") -> dict[str, 
     sessions = _list(state.get("sessions"))
     retries = _list(state.get("retry_attempts"))
     continuations = _list(state.get("continuations"))
+    blocked = _list(state.get("blocked"))
     failures: list[str] = []
     warnings: list[str] = []
 
@@ -37,8 +38,17 @@ def audit_runtime_state(state: dict[str, Any], log_text: str = "") -> dict[str, 
         if status_label not in {None, "performer:continuing"}:
             failures.append(f"continuation_unexpected_label:{continuation.get('identifier')}:{status_label}")
 
+    for blocked_entry in blocked:
+        if blocked_entry.get("error") is None:
+            failures.append(f"blocked_without_error:{blocked_entry.get('identifier') or blocked_entry.get('issue_identifier')}")
+        if blocked_entry.get("phase") not in {None, "error"}:
+            failures.append(f"blocked_unexpected_phase:{blocked_entry.get('identifier')}:{blocked_entry.get('phase')}")
+        status_label = blocked_entry.get("status_label")
+        if status_label not in {None, "performer:error"}:
+            failures.append(f"blocked_unexpected_label:{blocked_entry.get('identifier')}:{status_label}")
+
     repeated_claim_stalls = _claim_stalls(log_text)
-    if repeated_claim_stalls:
+    if repeated_claim_stalls and not blocked:
         failures.append("log_repeated_running_0_claimed_positive")
 
     return {
@@ -46,11 +56,13 @@ def audit_runtime_state(state: dict[str, Any], log_text: str = "") -> dict[str, 
             "sessions": len(sessions),
             "retry_attempts": len(retries),
             "continuations": len(continuations),
+            "blocked": len(blocked),
             "log_claim_stalls": len(repeated_claim_stalls),
         },
         "sessions": [_session_row(session) for session in sessions],
         "retry_attempts": [_scheduled_row(retry) for retry in retries],
         "continuations": [_scheduled_row(continuation) for continuation in continuations],
+        "blocked": [_scheduled_row(blocked_entry) for blocked_entry in blocked],
         "log_claim_stalls": repeated_claim_stalls,
         "warnings": warnings,
         "failures": failures,
