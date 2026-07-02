@@ -350,6 +350,8 @@ class ManagedPodiumState:
                 continue
             if group.get("linear_agent_app_user_id") and group.get("linear_agent_app_user_id") != event.get("agent_app_user_id"):
                 continue
+            if group.get("linear_agent_app_user_id") and group.get("linear_agent_app_user_id") != event.get("issue_delegate_id"):
+                continue
             dispatch_id = f"dispatch_{len(self.dispatches) + 1}"
             self.dispatches[dispatch_id] = {
                 "dispatch_id": dispatch_id,
@@ -469,4 +471,5 @@ def normalize_agent_session_event(payload: dict[str, Any]) -> dict[str, str]:
             or payload.get("agent_app_user_id")
             or ""
         ),
+        "issue_delegate_id": str(((issue.get("delegate") or {}) if isinstance(issue.get("delegate"), dict) else {}).get("id") or ""),
     }

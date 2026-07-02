@@ -475,6 +475,24 @@ tracker:
     assert config.tracker.assignee_id == "user-123"
 
 
+def test_tracker_required_delegate_id_config_is_preserved(tmp_path: Path) -> None:
+    workflow_path = tmp_path / "WORKFLOW.md"
+    write_workflow(
+        workflow_path,
+        """
+tracker:
+  kind: linear
+  project_slug: MT
+  api_key: linear-token
+  required_delegate_id: app-user-123
+""",
+    )
+
+    config = ServiceConfig.from_workflow(load_workflow(workflow_path), workflow_path)
+
+    assert config.tracker.required_delegate_id == "app-user-123"
+
+
 def test_tracker_assignee_id_env_reference_is_resolved(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

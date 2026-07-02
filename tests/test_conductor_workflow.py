@@ -92,7 +92,7 @@ def test_task_profile_is_default_managed_profile_without_acceptance_gate(tmp_pat
     assert "performer:" not in content
 
 
-def test_managed_workflow_omits_agent_delegation_identity_from_performer_tracker(tmp_path: Path) -> None:
+def test_managed_workflow_requires_agent_delegation_identity_in_performer_tracker(tmp_path: Path) -> None:
     instance = make_instance(tmp_path).with_updates(
         linear_filters={
             "linear_agent_app_user_id": "app-user-1",
@@ -102,6 +102,7 @@ def test_managed_workflow_omits_agent_delegation_identity_from_performer_tracker
 
     content = generate_workflow_content(instance, podium_url="https://podium.example")
 
+    assert "required_delegate_id: app-user-1" in content
     assert "linear_agent_app_user_id:" not in content
     assert "assignee_id:" not in content
     assert "required_labels:" not in content

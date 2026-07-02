@@ -212,7 +212,46 @@ class Orchestrator:
         issue = issues[0] if issues else None
         if issue is None:
             return {"status": "skipped", "issue_id": issue_id, "reason": "issue_not_found"}
+        if self.config.acceptance.enabled:
+            acceptance = self.config.acceptance
+            state_key = issue.state_key()
+            if state_key == normalize_state_key(acceptance.review_state):
+                reason = self.dispatch_skip_reason_without_acceptance(issue)
+                if reason is not None:
+                    return {"status": "skipped", "issue_id": issue.id, "reason": reason}
+                await self._run_acceptance_gate_for_issue(issue, completion_verdict=None)
+                return {"status": "accepted", "issue_id": issue.id, "reason": "acceptance_review_state"}
+            if state_key == normalize_state_key(acceptance.done_state):
+                reason = self.dispatch_skip_reason_without_acceptance(issue)
+                if reason is not None:
+                    return {"status": "skipped", "issue_id": issue.id, "reason": reason}
+                if _has_passed_acceptance_gate(issue, acceptance):
+                    self.state.completed.add(issue.id)
+                else:
+                    await self._handle_direct_done_bypass(issue)
+                return {"status": "accepted", "issue_id": issue.id, "reason": "acceptance_done_state"}
         reason = self.dispatch_skip_reason_for_event(issue)
+        if reason == "acceptance_preflight_required":
+            await self._acceptance_preflight(issue)
+            issue = Issue(
+                id=issue.id,
+                identifier=issue.identifier,
+                title=issue.title,
+                state=self.config.acceptance.implementation_state,
+                description=issue.description,
+                priority=issue.priority,
+                branch_name=issue.branch_name,
+                url=issue.url,
+                labels=issue.labels,
+                blocked_by=issue.blocked_by,
+                created_at=issue.created_at,
+                updated_at=issue.updated_at,
+                assignee_id=issue.assignee_id,
+                delegate_id=issue.delegate_id,
+                project_slug=issue.project_slug,
+                project_name=issue.project_name,
+            )
+            reason = self.dispatch_skip_reason_for_event(issue)
         if reason is not None:
             return {"status": "skipped", "issue_id": issue.id, "reason": reason}
         selected_worker_host = worker_host or self._select_worker_host()
@@ -403,6 +442,8 @@ class Orchestrator:
             return "project_mismatch"
         if not self._matches_assignee(issue):
             return "assignee_mismatch"
+        if not self._matches_required_delegate(issue):
+            return "delegate_mismatch"
         if issue.has_required_labels(self.config.tracker.required_labels) is False:
             return "missing_required_labels"
         if issue.state_key() == "todo" and issue.has_non_terminal_blocker(self.config.tracker.terminal_states):
@@ -432,6 +473,8 @@ class Orchestrator:
             return "project_mismatch"
         if not self._matches_assignee(issue):
             return "assignee_mismatch"
+        if not self._matches_required_delegate(issue):
+            return "delegate_mismatch"
         if issue.state_key() == "todo" and issue.has_non_terminal_blocker(self.config.tracker.terminal_states):
             return "blocked_by_non_terminal_dependency"
         if self.available_slots() <= 0:
@@ -494,6 +537,8 @@ class Orchestrator:
             return "project_mismatch"
         if not self._matches_assignee(issue):
             return "assignee_mismatch"
+        if not self._matches_required_delegate(issue):
+            return "delegate_mismatch"
         if issue.has_required_labels(self.config.tracker.required_labels) is False:
             return "missing_required_labels"
         if self.available_slots() <= 0:
@@ -552,6 +597,7 @@ class Orchestrator:
             title=title,
             description=description,
             label_names=[self.config.acceptance.gate_type_label],
+            delegate_id=issue.delegate_id,
         )
 
     async def _handle_gate_plan_needs_more_info(self, issue: Issue, plan: GatePlanReport) -> None:
@@ -784,6 +830,7 @@ class Orchestrator:
             title=f"[Evidence] {issue.identifier}: {gate.get('title', 'Gate review')}",
             description=_evidence_issue_description(issue, gate, report, raw_report, workspace_path),
             label_names=[self.config.acceptance.evidence_type_label],
+            delegate_id=issue.delegate_id,
         )
 
     async def _transition_issue_by_state_name(self, issue_id: str, state_name: str) -> None:
@@ -1631,12 +1678,20 @@ class Orchestrator:
             return True
         return issue.assignee_id == configured
 
+    def _matches_required_delegate(self, issue: Issue) -> bool:
+        configured = self.config.tracker.required_delegate_id
+        if not configured:
+            return True
+        return issue.delegate_id == configured
+
     def _is_run_eligible(self, issue: Issue) -> bool:
         if not self._is_active(issue):
             return False
         if self.config.tracker.kind == "linear" and issue.project_slug != self.config.tracker.project_slug:
             return False
         if not self._matches_assignee(issue):
+            return False
+        if not self._matches_required_delegate(issue):
             return False
         if not issue.has_required_labels(self.config.tracker.required_labels):
             return False
@@ -2320,6 +2375,7 @@ def _issue_with_verification_context(issue: Issue, verdict: Any) -> Issue:
         created_at=issue.created_at,
         updated_at=issue.updated_at,
         assignee_id=issue.assignee_id,
+        delegate_id=issue.delegate_id,
         project_slug=issue.project_slug,
         project_name=issue.project_name,
     )
@@ -2350,6 +2406,7 @@ def _issue_with_retry_context(issue: Issue, retry: RetryEntry) -> Issue:
         created_at=issue.created_at,
         updated_at=issue.updated_at,
         assignee_id=issue.assignee_id,
+        delegate_id=issue.delegate_id,
         project_slug=issue.project_slug,
         project_name=issue.project_name,
     )

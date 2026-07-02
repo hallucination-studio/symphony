@@ -45,9 +45,11 @@ def generate_workflow_content(instance: InstanceRecord, *, podium_url: str = "ht
     goal = str(instance.workflow_inputs.get("goal") or "Move the Linear queue forward.")
     active_states = instance.linear_filters.get("active_states") or ["Todo", "In Progress"]
     terminal_states = instance.linear_filters.get("terminal_states") or ["Closed", "Cancelled", "Canceled", "Done"]
+    required_delegate_id = str(instance.linear_filters.get("linear_agent_app_user_id") or "").strip()
 
     active_yaml = "\n".join(f"    - {state}" for state in active_states)
     terminal_yaml = "\n".join(f"    - {state}" for state in terminal_states)
+    delegate_yaml = f"  required_delegate_id: {required_delegate_id}\n" if required_delegate_id else ""
     lifecycle_labels_enabled = "true" if profile == "gated-task" else "false"
     acceptance_enabled = "true" if profile == "gated-task" else "false"
     max_concurrent_agents = 1 if profile == "smoke" else 10
@@ -95,6 +97,7 @@ def generate_workflow_content(instance: InstanceRecord, *, podium_url: str = "ht
         f"  endpoint: {podium_url.strip().rstrip('/')}/api/v1/linear/graphql\n"
         f"  project_slug: {instance.linear_project}\n"
         "  api_key: $PODIUM_PROXY_TOKEN\n"
+        f"{delegate_yaml}"
         f"  lifecycle_labels_enabled: {lifecycle_labels_enabled}\n"
         "  active_states:\n"
         f"{active_yaml}\n"

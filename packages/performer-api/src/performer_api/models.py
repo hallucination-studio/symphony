@@ -87,6 +87,7 @@ class Issue:
     created_at: datetime | None = None
     updated_at: datetime | None = None
     assignee_id: str | None = None
+    delegate_id: str | None = None
     project_slug: str | None = None
     project_name: str | None = None
 

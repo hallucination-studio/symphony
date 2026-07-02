@@ -263,6 +263,11 @@ class PodiumServer:
                 continue
             if project_slug and project_slug != event.get("project_slug"):
                 continue
+            expected_agent = str(routing.get("agent_app_user_id") or routing.get("linear_agent_app_user_id") or "")
+            if expected_agent and expected_agent != event.get("agent_app_user_id"):
+                continue
+            if expected_agent and expected_agent != event.get("issue_delegate_id"):
+                continue
             matches.append(registration)
         return matches
 
@@ -379,6 +384,7 @@ def _normalize_agent_session_event(payload: dict[str, Any]) -> dict[str, Any]:
             or payload.get("agent_app_user_id")
             or ""
         ),
+        "issue_delegate_id": str(((issue.get("delegate") or {}) if isinstance(issue.get("delegate"), dict) else {}).get("id") or ""),
         "raw_action": str(payload.get("action") or ""),
     }
 

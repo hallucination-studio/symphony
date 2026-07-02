@@ -107,6 +107,7 @@ class FakeTracker:
         title: str,
         description: str,
         parent_id: str | None = None,
+        delegate_id: str | None = None,
     ) -> dict[str, Any]:
         created = {
             "id": f"issue-{len(self.created_issues) + 1}",
@@ -118,6 +119,7 @@ class FakeTracker:
             "title": title,
             "description": description,
             "parent_id": parent_id,
+            "delegate_id": delegate_id,
             "url": f"https://linear.app/x/issue/MT-A{len(self.created_issues) + 1}",
         }
         self.created_issues.append(created)
@@ -151,6 +153,7 @@ class FakeTracker:
         title: str,
         description: str,
         label_names: list[str],
+        delegate_id: str | None = None,
     ) -> dict[str, Any]:
         return await self.create_issue(
             team_id="team-1",
@@ -160,6 +163,7 @@ class FakeTracker:
             title=title,
             description=description,
             parent_id=parent_issue_id,
+            delegate_id=delegate_id,
         )
 
     async def fetch_child_issues(
@@ -382,6 +386,29 @@ def make_config_with_assignee(tmp_path: Path, assignee_id: str) -> ServiceConfig
     )
 
 
+def make_config_with_required_delegate(tmp_path: Path, delegate_id: str) -> ServiceConfig:
+    config = make_config(tmp_path)
+    return ServiceConfig(
+        tracker=TrackerConfig(
+            kind=config.tracker.kind,
+            endpoint=config.tracker.endpoint,
+            project_slug=config.tracker.project_slug,
+            api_key=config.tracker.api_key,
+            required_delegate_id=delegate_id,
+            required_labels=config.tracker.required_labels,
+            active_states=config.tracker.active_states,
+            terminal_states=config.tracker.terminal_states,
+        ),
+        polling=config.polling,
+        workspace=config.workspace,
+        hooks=config.hooks,
+        agent=config.agent,
+        codex=config.codex,
+        prompt_template=config.prompt_template,
+        workflow_path=config.workflow_path,
+    )
+
+
 def make_config_with_codex_command(tmp_path: Path, command: str) -> ServiceConfig:
     config = make_config(tmp_path)
     return ServiceConfig(
@@ -506,7 +533,7 @@ class ControlledCompletingRunner:
 
 @pytest.mark.asyncio
 async def test_tick_dispatches_candidate_issues_from_tracker(tmp_path: Path) -> None:
-    tracker = FakeTracker(candidates=[issue("MT-1")])
+    tracker = FakeTracker(candidates=[issue("MT-1", delegate_id="agent-user-1")])
     runner = FakeRunner()
     orchestrator = Orchestrator(make_config(tmp_path), tracker, runner)
 
@@ -555,6 +582,103 @@ async def test_dispatch_issue_by_id_still_respects_linear_agent_assignee(tmp_pat
 
     assert result == {"status": "skipped", "issue_id": "mt-1", "reason": "assignee_mismatch"}
     assert runner.started == []
+
+
+@pytest.mark.asyncio
+async def test_dispatch_issue_by_id_requires_linear_agent_delegate(tmp_path: Path) -> None:
+    tracker = FakeTracker()
+    tracker.refreshed = [issue("MT-1", delegate_id=None)]
+    runner = FakeRunner()
+    orchestrator = Orchestrator(make_config_with_required_delegate(tmp_path, "agent-user-1"), tracker, runner)
+
+    result = await orchestrator.dispatch_issue_by_id("mt-1")
+
+    assert result == {"status": "skipped", "issue_id": "mt-1", "reason": "delegate_mismatch"}
+    assert runner.started == []
+
+
+@pytest.mark.asyncio
+async def test_dispatch_issue_by_id_runs_gated_todo_preflight_then_dispatches(tmp_path: Path) -> None:
+    tracker = FakeTracker()
+    tracker.refreshed = [issue("MT-1", delegate_id="agent-user-1")]
+    runner = FakeRunner()
+    planner = FakeGatePlanner(
+        {
+            "gates": [
+                {
+                    "title": "Behavior",
+                    "purpose": "Verify the user-visible behavior only.",
+                    "acceptance_criteria": ["The feature works for the requested case."],
+                    "required_evidence": ["Focused test output for the requested case."],
+                }
+            ]
+        }
+    )
+    orchestrator = Orchestrator(
+        replace(
+            make_config_with_required_delegate(tmp_path, "agent-user-1"),
+            acceptance=AcceptanceConfig(enabled=True),
+        ),
+        tracker,
+        runner,
+        gate_planner=planner,
+    )
+
+    result = await orchestrator.dispatch_issue_by_id("mt-1")
+
+    assert result == {"status": "dispatched", "issue_id": "mt-1", "issue_identifier": "MT-1"}
+    assert tracker.created_issues[0]["parent_id"] == "mt-1"
+    assert ("mt-1", "In Progress") in tracker.transitions
+    assert [started[0].identifier for started in runner.started] == ["MT-1"]
+
+
+@pytest.mark.asyncio
+async def test_dispatch_issue_by_id_runs_gate_for_review_issue(tmp_path: Path) -> None:
+    tracker = FakeTracker()
+    tracker.refreshed = [issue("MT-1", state="In Review", delegate_id="agent-user-1")]
+    tracker.children["mt-1"] = [
+        {
+            "id": "gate-1",
+            "identifier": "MT-G1",
+            "title": "[Gate] MT-1: Behavior",
+            "description": "Purpose: verify behavior",
+            "label_ids": ["performer:type/gate"],
+            "labels": ["performer:type/gate"],
+            "state": "Todo",
+            "url": "https://linear.app/x/issue/MT-G1",
+            "delegate_id": "agent-user-1",
+        }
+    ]
+    acceptance_runner = FakeAcceptanceRunner(
+        """
+{
+  "score": 4,
+  "result": "pass",
+  "score_reason": "Implementation evidence, focused tests, and risk notes support the change.",
+  "evidence_citations": ["linear.issue.MT-1"],
+  "residual_findings": [],
+  "recommended_next_action": "Close the gate and original issue."
+}
+"""
+    )
+    orchestrator = Orchestrator(
+        replace(
+            make_config_with_required_delegate(tmp_path, "agent-user-1"),
+            acceptance=AcceptanceConfig(enabled=True),
+        ),
+        tracker,
+        FakeRunner(),
+        acceptance_runner=acceptance_runner,
+    )
+
+    result = await orchestrator.dispatch_issue_by_id("mt-1")
+
+    assert result == {"status": "accepted", "issue_id": "mt-1", "reason": "acceptance_review_state"}
+    assert acceptance_runner.calls
+    evidence = tracker.children["gate-1"][0]
+    assert evidence["delegate_id"] == "agent-user-1"
+    assert tracker.transitions == [(evidence["id"], "Done"), ("gate-1", "Done"), ("mt-1", "Done")]
+    assert "mt-1" in orchestrator.state.completed
 
 
 @pytest.mark.asyncio
@@ -760,6 +884,25 @@ async def test_tick_dispatches_candidate_assigned_to_configured_user(tmp_path: P
     await orchestrator.tick()
 
     assert [started[0].identifier for started in runner.started] == ["MT-1"]
+
+
+@pytest.mark.asyncio
+async def test_acceptance_preflight_requires_linear_agent_delegate(tmp_path: Path) -> None:
+    tracker = FakeTracker(candidates=[issue("MT-1", delegate_id=None)])
+    runner = FakeRunner()
+    orchestrator = Orchestrator(
+        replace(
+            make_config_with_required_delegate(tmp_path, "agent-user-1"),
+            acceptance=AcceptanceConfig(enabled=True),
+        ),
+        tracker,
+        runner,
+    )
+
+    await orchestrator.tick()
+
+    assert tracker.created_issues == []
+    assert runner.started == []
 
 
 @pytest.mark.asyncio
@@ -1013,8 +1156,8 @@ async def test_acceptance_enabled_creates_gate_issue_instead_of_marking_original
         "Test commands and exact output: pytest tests/test_target.py -q -> passed.\n"
         "Remaining risks: none."
     )
-    tracker = FakeTracker(candidates=[issue("MT-1", state="In Progress", description=description)])
-    tracker.refreshed = [issue("MT-1", state="In Progress", description=description)]
+    tracker = FakeTracker(candidates=[issue("MT-1", state="In Progress", description=description, delegate_id="agent-user-1")])
+    tracker.refreshed = [issue("MT-1", state="In Progress", description=description, delegate_id="agent-user-1")]
     tracker.children["mt-1"] = [
         {
             "id": "gate-1",
@@ -1023,6 +1166,7 @@ async def test_acceptance_enabled_creates_gate_issue_instead_of_marking_original
             "label_ids": ["performer:type/gate"],
             "labels": ["performer:type/gate"],
             "state": "Todo",
+            "delegate_id": "agent-user-1",
         }
     ]
     orchestrator = Orchestrator(make_config_with_acceptance(tmp_path), tracker, CompletingRunner())
@@ -1036,6 +1180,46 @@ async def test_acceptance_enabled_creates_gate_issue_instead_of_marking_original
     assert ("mt-1", "performer:done") not in tracker.lifecycle_labels
     assert any(label == "performer:gate/pending" for _, label in tracker.lifecycle_labels)
     assert tracker.transitions[-1] == ("mt-1", "In Review")
+
+
+@pytest.mark.asyncio
+async def test_acceptance_enabled_leaves_review_for_conductor_coordinated_gate(tmp_path: Path) -> None:
+    description = (
+        "Implementation summary: created requested behavior.\n"
+        "Test commands and exact output: pytest tests/test_target.py -q -> passed.\n"
+        "Remaining risks: none."
+    )
+    tracker = FakeTracker(candidates=[issue("MT-1", state="In Progress", description=description, delegate_id="agent-user-1")])
+    tracker.refreshed = [issue("MT-1", state="In Progress", description=description, delegate_id="agent-user-1")]
+    tracker.children["mt-1"] = [
+        {
+            "id": "gate-1",
+            "identifier": "MT-G1",
+            "title": "[Gate] MT-1: Behavior",
+            "label_ids": ["performer:type/gate"],
+            "labels": ["performer:type/gate"],
+            "state": "Todo",
+            "delegate_id": "agent-user-1",
+        }
+    ]
+    acceptance_runner = FakeAcceptanceRunner(
+        '{"score":4,"passed":true,"summary":"Looks good.","findings":[],"evidence":["pytest passed"]}'
+    )
+    orchestrator = Orchestrator(
+        make_config_with_acceptance(tmp_path),
+        tracker,
+        CompletingRunner(),
+        acceptance_runner=acceptance_runner,
+    )
+
+    await orchestrator.tick()
+    await orchestrator.wait_for_idle()
+
+    assert acceptance_runner.calls == []
+    assert tracker.created_issues == []
+    assert tracker.transitions[-1] == ("mt-1", "In Review")
+    assert ("mt-1", "Done") not in tracker.transitions
+    assert "mt-1" not in orchestrator.state.claimed
 
 
 @pytest.mark.asyncio
@@ -1075,7 +1259,7 @@ async def test_acceptance_enabled_does_not_enter_review_without_implementation_e
 async def test_acceptance_todo_preflight_creates_marker_plan_and_moves_to_in_progress(
     tmp_path: Path,
 ) -> None:
-    tracker = FakeTracker(candidates=[issue("MT-1")])
+    tracker = FakeTracker(candidates=[issue("MT-1", delegate_id="agent-user-1")])
     runner = FakeRunner()
     planner = FakeGatePlanner(
         {
@@ -1102,6 +1286,7 @@ async def test_acceptance_todo_preflight_creates_marker_plan_and_moves_to_in_pro
     assert runner.started == []
     assert len(tracker.created_issues) == 2
     assert [created["parent_id"] for created in tracker.created_issues] == ["mt-1", "mt-1"]
+    assert [created["delegate_id"] for created in tracker.created_issues] == ["agent-user-1", "agent-user-1"]
     assert [created["label_ids"] for created in tracker.created_issues] == [
         ["performer:type/gate"],
         ["performer:type/gate"],
@@ -1124,7 +1309,7 @@ async def test_acceptance_todo_preflight_creates_marker_plan_and_moves_to_in_pro
 async def test_acceptance_todo_preflight_reuses_existing_gate_children(
     tmp_path: Path,
 ) -> None:
-    tracker = FakeTracker(candidates=[issue("MT-1")])
+    tracker = FakeTracker(candidates=[issue("MT-1", delegate_id="agent-user-1")])
     tracker.children["mt-1"] = [
         {
             "id": "gate-1",
@@ -1133,6 +1318,7 @@ async def test_acceptance_todo_preflight_reuses_existing_gate_children(
             "label_ids": ["performer:type/gate"],
             "labels": ["performer:type/gate"],
             "state": "Todo",
+            "delegate_id": "agent-user-1",
         }
     ]
     planner = FakeGatePlanner({"gates": []})

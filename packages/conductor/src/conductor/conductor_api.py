@@ -173,7 +173,7 @@ class ConductorApiServer:
         else:
             instance_id, action = suffix, ""
         if method == "GET" and not action:
-            instance = self.service.get_instance(instance_id)
+            instance = await self.service.get_instance_coordinated(instance_id)
             if instance is None:
                 return 404, {"error": {"code": "instance_not_found", "message": f"Instance not found: {instance_id}"}}
             return 200, {"instance": instance.to_dict()}

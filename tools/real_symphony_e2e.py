@@ -127,9 +127,10 @@ def read_json_object_if_ready(path: Path, default: dict[str, Any]) -> dict[str, 
 
 async def linear_graphql(token: str, query: str, variables: dict[str, Any]) -> dict[str, Any]:
     last_error: Exception | None = None
-    for attempt in range(1, 4):
+    max_attempts = 8
+    for attempt in range(1, max_attempts + 1):
         try:
-            async with httpx.AsyncClient(timeout=30, trust_env=False) as client:
+            async with httpx.AsyncClient(timeout=45, trust_env=False) as client:
                 response = await client.post(
                     LINEAR_ENDPOINT,
                     json={"query": query, "variables": variables},
@@ -141,9 +142,9 @@ async def linear_graphql(token: str, query: str, variables: dict[str, Any]) -> d
             return payload["data"]
         except (httpx.HTTPError, TimeoutError) as exc:
             last_error = exc
-            if attempt == 3:
+            if attempt == max_attempts:
                 break
-            await asyncio.sleep(attempt)
+            await asyncio.sleep(min(2 ** (attempt - 1), 20))
     raise RuntimeError(f"Linear GraphQL request failed after retries: {last_error!r}") from last_error
 
 
@@ -320,6 +321,7 @@ async def fetch_linear_issue_tree(token: str, issue_id: str) -> dict[str, Any]:
                     identifier
                     title
                     state { name type }
+                    delegate { id name }
                     labels { nodes { name } }
                     comments(first: 20) { nodes { body createdAt } }
                     children(first: 50) {
@@ -328,6 +330,7 @@ async def fetch_linear_issue_tree(token: str, issue_id: str) -> dict[str, Any]:
                         identifier
                         title
                         state { name type }
+                        delegate { id name }
                         labels { nodes { name } }
                         comments(first: 20) { nodes { body createdAt } }
                       }
@@ -438,6 +441,7 @@ def patch_workflow(workflow_path: Path, *, acceptance_gates: bool, permission_ap
         task_instruction = (
             "E2E task: Create SYMPHONY_REAL_E2E_RESULT.md in the current working directory returned by `pwd`; do not write to any source repository path outside `pwd`. The file must include the Linear issue identifier "
             "and one sentence saying Podium, Conductor, and Performer reached Codex successfully. Run `pytest tests/test_smoke.py -q`. "
+            "Do not inspect git status, do not clean pytest caches, and do not remove generated `__pycache__`; those are outside this task's acceptance criteria. "
         )
     if acceptance_gates:
         task_instruction += (
@@ -506,7 +510,19 @@ async def wait_for_run(
         last_ops = read_json_object_if_ready(ops_path, last_ops)
         state = last_state
         ops = last_ops
-        final_issue = await fetch_linear_issue(token, issue_id)
+        try:
+            final_issue = await fetch_linear_issue(token, issue_id)
+        except RuntimeError as exc:
+            samples.append(
+                {
+                    "at": utc_now(),
+                    "issue_state": "unknown",
+                    "process_status": "unknown",
+                    "linear_fetch_error": str(exc),
+                }
+            )
+            await asyncio.sleep(5)
+            continue
         status, runtime_body = http_json("GET", api_url(conductor_port, f"/api/instances/{instance_id}"), timeout=2)
         process_status = None
         if status == 200 and isinstance(runtime_body, dict):
@@ -788,7 +804,7 @@ No-op.
             "repo_source_value": str(fixture),
             "linear_project": linear["project"]["slugId"],
             "linear_filters": {"linear_agent_app_user_id": agent_app_user_id, "active_states": ["Todo", "In Progress"]},
-            "workflow_profile": "task",
+            "workflow_profile": "gated-task" if args.acceptance_gates else "task",
             "workflow_inputs": {"goal": "Run the real Symphony e2e matrix task."},
         }
         status, body = http_json("POST", api_url(conductor_port, "/api/instances/preview-workflow"), payload)
@@ -967,6 +983,20 @@ No-op.
                 "performer:gate/passed" in issue_labels and not gate_failed and "Acceptance score:" in gate_comments,
                 labels=issue_labels,
                 gate_failed=gate_failed,
+            )
+            delegated_acceptance_issues = [*gates, *evidence_issues]
+            evidence.check(
+                "acceptance:all-gate-and-evidence-issues-delegated",
+                bool(delegated_acceptance_issues)
+                and all((item.get("delegate") or {}).get("id") == agent_app_user_id for item in delegated_acceptance_issues),
+                expected_agent_app_user_id=agent_app_user_id,
+                issues=[
+                    {
+                        "identifier": item["identifier"],
+                        "delegate": item.get("delegate"),
+                    }
+                    for item in delegated_acceptance_issues
+                ],
             )
 
         for method, path, payload in [

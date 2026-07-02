@@ -65,6 +65,7 @@ class ConductorService:
         self.data_root = data_root
         self.runtime_manager = runtime_manager or ConductorRuntimeManager()
         self.data_root.mkdir(parents=True, exist_ok=True)
+        self._gated_followups_started: set[tuple[str, str, str]] = set()
         self._normalize_stale_runtime_state()
 
     def list_instances(self) -> list[InstanceRecord]:
@@ -116,6 +117,10 @@ class ConductorService:
             dispatch_issue_id=issue_id or issue_identifier,
         )
         self.store.update_instance(started)
+        followup = await self._coordinate_gated_followup(started, issue_id=issue_id or issue_identifier)
+        if followup is not None:
+            started = followup
+            self.store.update_instance(started)
         return {
             "status": "accepted",
             "issue_id": issue_id or None,
@@ -124,6 +129,78 @@ class ConductorService:
             "agent_session_id": event.get("agent_session_id") or None,
             "agent_app_user_id": agent_app_user_id,
         }
+
+    async def _coordinate_gated_followup(self, instance: InstanceRecord, *, issue_id: str) -> InstanceRecord | None:
+        if instance.workflow_profile != "gated-task":
+            return None
+        refresh = getattr(self.runtime_manager, "refresh", None)
+        if not callable(refresh):
+            return None
+        refreshed = refresh(instance)
+        if refreshed.process_status not in {"exited", "stopped"}:
+            return None
+        if refreshed.last_exit_code not in {0, None}:
+            return None
+        snapshot = OpsStore(Path(instance.persistence_path).parent / "ops.json").load()
+        issue = snapshot.issues.get(issue_id)
+        if issue is None or issue.state != "completed" or issue.run_count != 1:
+            return None
+        stage = self._next_gated_followup_stage(refreshed, issue_id)
+        if stage is None:
+            return None
+        followup_key = (instance.id, issue_id, stage)
+        self._gated_followups_started.add(followup_key)
+        staged = self._with_gated_followup_stage(refreshed, issue_id, stage)
+        followup = await self.runtime_manager.start(
+            staged.with_updates(process_status="starting"),
+            env=self._runtime_env(),
+            dispatch_issue_id=issue_id,
+        )
+        return followup
+
+    async def get_instance_coordinated(self, instance_id: str) -> InstanceRecord | None:
+        instance = self.get_instance(instance_id)
+        if instance is None:
+            return None
+        issue_id = self._pending_gated_followup_issue_id(instance)
+        if issue_id is None:
+            return instance
+        followup = await self._coordinate_gated_followup(instance, issue_id=issue_id)
+        if followup is None:
+            return self.store.get_instance(instance_id) or instance
+        self.store.update_instance(followup)
+        return followup
+
+    def _pending_gated_followup_issue_id(self, instance: InstanceRecord) -> str | None:
+        if instance.workflow_profile != "gated-task":
+            return None
+        snapshot = OpsStore(Path(instance.persistence_path).parent / "ops.json").load()
+        candidates = [
+            issue
+            for issue in snapshot.issues.values()
+            if issue.state == "completed"
+            and issue.run_count == 1
+            and self._next_gated_followup_stage(instance, issue.issue_id) is not None
+        ]
+        if not candidates:
+            return None
+        candidates.sort(key=lambda issue: issue.last_activity_at or issue.issue_identifier or issue.issue_id, reverse=True)
+        return candidates[0].issue_id
+
+    def _next_gated_followup_stage(self, instance: InstanceRecord, issue_id: str) -> str | None:
+        persisted = set(instance.gated_followup_stages.get(issue_id, []))
+        for stage in ("plan", "gate"):
+            if stage not in persisted and (instance.id, issue_id, stage) not in self._gated_followups_started:
+                return stage
+        return None
+
+    def _with_gated_followup_stage(self, instance: InstanceRecord, issue_id: str, stage: str) -> InstanceRecord:
+        stages = {key: list(value) for key, value in instance.gated_followup_stages.items()}
+        issue_stages = list(stages.get(issue_id, []))
+        if stage not in issue_stages:
+            issue_stages.append(stage)
+        stages[issue_id] = issue_stages
+        return instance.with_updates(gated_followup_stages=stages)
 
     def dashboard(self) -> dict[str, Any]:
         instances = self.store.list_instances()

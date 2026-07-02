@@ -255,6 +255,7 @@ async def test_agent_session_event_is_normalized_with_linear_agent_app_user() ->
         "issue_identifier": "ENG-1",
         "agent_session_id": "session-1",
         "agent_app_user_id": "app-user-1",
+        "issue_delegate_id": "",
         "raw_action": "created",
     }
     assert received[0]["registration"]["conductor_id"] == "cond-1"
@@ -469,6 +470,19 @@ async def test_runtime_enrollment_token_is_one_time_and_dispatch_can_be_acked() 
                 },
             },
         )
+        missing_delegate_webhook = await client.post(
+            "/api/v1/linear/webhooks/agent-session",
+            json={
+                "type": "AgentSessionEvent",
+                "action": "created",
+                "workspace": {"id": "workspace-1"},
+                "agentSession": {
+                    "id": "session-no-delegate",
+                    "appUserId": "app-user-1",
+                    "issue": {"id": "issue-no-delegate", "identifier": "ENG-0", "project": {"slugId": "ENG"}},
+                },
+            },
+        )
         webhook = await client.post(
             "/api/v1/linear/webhooks/agent-session",
             json={
@@ -478,7 +492,12 @@ async def test_runtime_enrollment_token_is_one_time_and_dispatch_can_be_acked() 
                 "agentSession": {
                     "id": "session-1",
                     "appUserId": "app-user-1",
-                    "issue": {"id": "issue-1", "identifier": "ENG-1", "project": {"slugId": "ENG"}},
+                    "issue": {
+                        "id": "issue-1",
+                        "identifier": "ENG-1",
+                        "project": {"slugId": "ENG"},
+                        "delegate": {"id": "app-user-1"},
+                    },
                 },
             },
         )
@@ -502,6 +521,8 @@ async def test_runtime_enrollment_token_is_one_time_and_dispatch_can_be_acked() 
     assert reused.json()["error"]["code"] == "enrollment_token_used"
     assert wrong_agent_webhook.status_code == 200
     assert wrong_agent_webhook.json()["queued"] == 0
+    assert missing_delegate_webhook.status_code == 200
+    assert missing_delegate_webhook.json()["queued"] == 0
     assert webhook.status_code == 200
     assert webhook.json()["queued"] == 1
     assert lease.status_code == 200
