@@ -4,13 +4,28 @@ import argparse
 import asyncio
 import os
 
+import uvicorn
+
+from .app import create_app
 from .server import PodiumServer
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the Symphony Podium SaaS boundary.")
-    parser.add_argument("--host", default="127.0.0.1", help="Bind host")
-    parser.add_argument("--port", type=int, default=8090, help="Bind port")
+    subparsers = parser.add_subparsers(dest="command")
+    api_parser = subparsers.add_parser("api", help="Run the managed FastAPI control plane")
+    api_parser.add_argument("--host", default="127.0.0.1", help="Bind host")
+    api_parser.add_argument("--port", type=int, default=8090, help="Bind port")
+    legacy_parser = subparsers.add_parser("legacy-dev", help="Run the legacy local stdlib prototype")
+    legacy_parser.add_argument("--host", default="127.0.0.1", help="Bind host")
+    legacy_parser.add_argument("--port", type=int, default=8090, help="Bind port")
+    legacy_parser.add_argument("--token", default=None, help="Bearer token for conductor registration")
+    legacy_parser.add_argument("--linear-client-id", default=None, help="Linear OAuth application client id")
+    legacy_parser.add_argument("--linear-client-secret", default=None, help="Linear OAuth application client secret")
+    legacy_parser.add_argument("--linear-redirect-uri", default=None, help="Linear OAuth redirect URI")
+    legacy_parser.add_argument("--linear-webhook-secret", default=None, help="Linear OAuth application webhook secret")
+    legacy_parser.add_argument("--linear-installations-path", default=None, help="Path to persist Linear OAuth installations")
+    parser.set_defaults(command="api", host="127.0.0.1", port=8090)
     parser.add_argument("--token", default=None, help="Bearer token for conductor registration")
     parser.add_argument("--linear-client-id", default=None, help="Linear OAuth application client id")
     parser.add_argument("--linear-client-secret", default=None, help="Linear OAuth application client secret")
@@ -49,6 +64,13 @@ async def run_server(
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    if args.command == "api":
+        app = create_app(
+            session_cookie_name=os.environ.get("PODIUM_SESSION_COOKIE_NAME", "podium_session"),
+            linear_webhook_secret=os.environ.get("LINEAR_WEBHOOK_SECRET", ""),
+        )
+        uvicorn.run(app, host=args.host, port=args.port)
+        return 0
     try:
         asyncio.run(
             run_server(

@@ -81,3 +81,32 @@ def test_store_saves_and_loads_conductor_settings(tmp_path: Path) -> None:
     assert public["podium_token_configured"] is False
     assert public["podium_url"] == ""
     assert public["conductor_id"]
+
+
+def test_managed_runtime_settings_round_trip_without_public_tokens(tmp_path: Path) -> None:
+    store = ConductorStore(tmp_path / "conductor-data")
+
+    store.save_settings(
+        ConductorSettings(
+            podium_url="https://podium.example",
+            podium_runtime_id="runtime-1",
+            podium_runtime_token="runtime-secret",
+            podium_proxy_token="proxy-secret",
+            podium_ws_url="wss://podium.example/api/v1/runtime/ws",
+            runtime_group_id="group-1",
+            managed_mode=True,
+        )
+    )
+    loaded = store.get_settings()
+    public = loaded.to_public_dict()
+
+    assert loaded.podium_runtime_token == "runtime-secret"
+    assert loaded.podium_proxy_token == "proxy-secret"
+    assert loaded.managed_mode is True
+    assert public["managed_mode"] is True
+    assert public["podium_runtime_id"] == "runtime-1"
+    assert public["runtime_group_id"] == "group-1"
+    assert public["podium_runtime_token_configured"] is True
+    assert public["podium_proxy_token_configured"] is True
+    assert "runtime-secret" not in str(public)
+    assert "proxy-secret" not in str(public)

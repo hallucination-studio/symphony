@@ -541,8 +541,21 @@ class ConductorService:
 
     def _generate_workflow(self, instance: InstanceRecord) -> str:
         try:
-            podium_url = self.store.get_settings().podium_url.strip() or "https://podium.example"
-            return generate_workflow_content(instance, podium_url=podium_url)
+            settings = self.store.get_settings()
+            podium_url = settings.podium_url.strip() or "https://podium.example"
+            content = generate_workflow_content(instance, podium_url=podium_url)
+            if (
+                settings.linear_api_key.strip()
+                and not settings.managed_mode
+                and not settings.podium_url.strip()
+                and not settings.podium_proxy_token.strip()
+            ):
+                content = content.replace(
+                    "endpoint: https://podium.example/api/v1/linear/graphql",
+                    "endpoint: https://api.linear.app/graphql",
+                )
+                content = content.replace("api_key: $PODIUM_PROXY_TOKEN", "api_key: $LINEAR_API_KEY")
+            return content
         except ConductorValidationError as exc:
             raise ConductorServiceError(exc.code, str(exc)) from exc
 
@@ -570,6 +583,15 @@ class ConductorService:
         proxy_token = settings.podium_proxy_token.strip()
         if proxy_token:
             env["PODIUM_PROXY_TOKEN"] = proxy_token
+        runtime_token = settings.podium_runtime_token.strip()
+        if runtime_token:
+            env["PODIUM_RUNTIME_TOKEN"] = runtime_token
+        runtime_id = settings.podium_runtime_id.strip()
+        if runtime_id:
+            env["PODIUM_RUNTIME_ID"] = runtime_id
+        runtime_group_id = settings.runtime_group_id.strip()
+        if runtime_group_id:
+            env["PODIUM_RUNTIME_GROUP_ID"] = runtime_group_id
         linear_api_key = settings.linear_api_key.strip()
         if linear_api_key and not proxy_token:
             env["LINEAR_API_KEY"] = linear_api_key

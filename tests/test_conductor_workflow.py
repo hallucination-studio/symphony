@@ -7,6 +7,7 @@ from conductor.conductor_workflow import (
     ConductorValidationError,
     generate_workflow_content,
     validate_instance_workflow,
+    workflow_profiles,
 )
 
 
@@ -42,7 +43,7 @@ def test_generate_workflow_content_injects_managed_runtime_resources(tmp_path: P
     assert "agent:" in content
     assert "max_turns: 20" in content
     assert "acceptance:" in content
-    assert "enabled: true" in content
+    assert "enabled: false" in content
     assert "mode: block_done" in content
     assert "review_state: In Review" in content
     assert "gate_passed_label: performer:gate/passed" in content
@@ -62,11 +63,8 @@ def test_generate_workflow_content_injects_managed_runtime_resources(tmp_path: P
     assert "rsync -a --delete" not in content
     assert "Prepared workspace root:" in content
     assert "Work only in the prepared workspace root." in content
-    assert "Acceptance gates are enabled by default." in content
-    assert "Do not move the issue to Done yourself" in content
-    assert "Implementation summary:" in content
-    assert "Test commands and exact output:" in content
-    assert "Remaining risks:" in content
+    assert "Acceptance gates are disabled for this managed profile." in content
+    assert "Complete the issue directly" in content
     assert "/symphony approve-runtime-error {{ issue.identifier }}" in content
     assert "query CurrentIssue" in content
     assert "mutation UpdateIssueEvidence" in content
@@ -74,6 +72,30 @@ def test_generate_workflow_content_injects_managed_runtime_resources(tmp_path: P
     assert "commentCreate" in content
     assert "issueUpdate" in content
     assert "linear_graphql" in content
+
+
+def test_task_profile_is_default_managed_profile_without_acceptance_gate(tmp_path: Path) -> None:
+    instance = make_instance(tmp_path).with_updates(workflow_profile="task")
+
+    content = generate_workflow_content(instance, podium_url="https://podium.example")
+
+    assert "acceptance:\n  enabled: false\n" in content
+    assert "endpoint: https://podium.example/api/v1/linear/graphql" in content
+    assert "api_key: $PODIUM_PROXY_TOKEN" in content
+
+
+def test_gated_task_profile_keeps_acceptance_gate(tmp_path: Path) -> None:
+    instance = make_instance(tmp_path).with_updates(workflow_profile="gated-task")
+
+    content = generate_workflow_content(instance, podium_url="https://podium.example")
+
+    assert "acceptance:\n  enabled: true\n" in content
+
+
+def test_available_profiles_include_smoke_task_and_gated_task() -> None:
+    names = [profile["name"] for profile in workflow_profiles()]
+
+    assert names == ["smoke", "task", "gated-task"]
 
 
 def test_validate_instance_workflow_reports_yaml_errors(tmp_path: Path) -> None:

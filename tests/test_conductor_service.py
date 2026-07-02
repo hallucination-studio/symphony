@@ -200,6 +200,19 @@ def test_create_instance_uses_configured_podium_proxy_endpoint(tmp_path: Path) -
     instance = service.create_instance(make_request(repo))
 
     assert "endpoint: https://podium.internal/api/v1/linear/graphql" in instance.workflow_content
+    assert "api_key: $PODIUM_PROXY_TOKEN" in instance.workflow_content
+
+
+def test_create_instance_uses_linear_api_key_only_for_legacy_local_mode(tmp_path: Path) -> None:
+    repo = make_repo(tmp_path)
+    service = make_service(tmp_path)
+    service.update_settings(ConductorSettings(linear_api_key="linear-token"))
+
+    instance = service.create_instance(make_request(repo))
+
+    assert "endpoint: https://api.linear.app/graphql" in instance.workflow_content
+    assert "api_key: $LINEAR_API_KEY" in instance.workflow_content
+    assert "$PODIUM_PROXY_TOKEN" not in instance.workflow_content
 
 
 def test_create_instance_reuses_existing_workspace_without_resyncing(tmp_path: Path) -> None:
@@ -668,14 +681,22 @@ async def test_start_instance_passes_podium_proxy_token_to_runtime_env(tmp_path:
     service.update_settings(
         ConductorSettings(
             podium_url="https://podium.example",
+            podium_runtime_id="runtime-1",
+            podium_runtime_token="runtime-token",
             podium_proxy_token="proxy-token",
+            runtime_group_id="group-1",
         )
     )
 
     started = await service.start_instance(instance.id)
 
     assert started.process_status == "running"
-    assert runtime.env == {"PODIUM_PROXY_TOKEN": "proxy-token"}
+    assert runtime.env == {
+        "PODIUM_PROXY_TOKEN": "proxy-token",
+        "PODIUM_RUNTIME_GROUP_ID": "group-1",
+        "PODIUM_RUNTIME_ID": "runtime-1",
+        "PODIUM_RUNTIME_TOKEN": "runtime-token",
+    }
 
 
 @pytest.mark.asyncio

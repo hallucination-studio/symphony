@@ -556,6 +556,6 @@ async def test_api_supports_runtime_actions_and_repo_inspection(tmp_path: Path) 
         status, _, body = await request(server.port, "GET", "/api/templates/workflow-profiles")
         assert status == 200
         profiles = json.loads(body)
-        assert profiles["profiles"][0]["name"] == "default"
+        assert [profile["name"] for profile in profiles["profiles"]] == ["smoke", "task", "gated-task"]
     finally:
         await server.stop()

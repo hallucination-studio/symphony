@@ -17,15 +17,26 @@ class ConductorValidationError(Exception):
 def workflow_profiles() -> list[dict[str, str]]:
     return [
         {
-            "name": "default",
-            "label": "Default",
-            "description": "General Performer instance profile with managed runtime resources.",
-        }
+            "name": "smoke",
+            "label": "Smoke",
+            "description": "One simple managed issue execution with acceptance disabled.",
+        },
+        {
+            "name": "task",
+            "label": "Task",
+            "description": "Normal managed task execution with acceptance disabled.",
+        },
+        {
+            "name": "gated-task",
+            "label": "Gated Task",
+            "description": "Managed task execution with the acceptance gate enabled.",
+        },
     ]
 
 
 def generate_workflow_content(instance: InstanceRecord, *, podium_url: str = "https://podium.example") -> str:
-    if instance.workflow_profile != "default":
+    profile = "task" if instance.workflow_profile == "default" else instance.workflow_profile
+    if profile not in {"smoke", "task", "gated-task"}:
         raise ConductorValidationError(
             "unknown_workflow_profile",
             f"Unknown workflow profile: {instance.workflow_profile}",
@@ -39,6 +50,17 @@ def generate_workflow_content(instance: InstanceRecord, *, podium_url: str = "ht
     label_yaml = "\n".join(f"    - {label}" for label in labels) if labels else "    []"
     active_yaml = "\n".join(f"    - {state}" for state in active_states)
     terminal_yaml = "\n".join(f"    - {state}" for state in terminal_states)
+    acceptance_enabled = "true" if profile == "gated-task" else "false"
+    max_concurrent_agents = 1 if profile == "smoke" else 10
+    max_turns = 8 if profile == "smoke" else 20
+    acceptance_guidance = (
+        "Acceptance gates are enabled. Before handing off, leave concrete evidence on the Linear issue "
+        "description with fields named exactly `Implementation summary:`, `Test commands and exact output:`, and "
+        "`Remaining risks:`. Do not move the issue to Done yourself; Performer will move it to review, run gate child "
+        "issues, create evidence child issues, and close the tree if acceptance passes.\n"
+        if profile == "gated-task"
+        else "Acceptance gates are disabled for this managed profile. Complete the issue directly with clear implementation, verification, and risk notes.\n"
+    )
     return (
         "---\n"
         "tracker:\n"
@@ -58,11 +80,11 @@ def generate_workflow_content(instance: InstanceRecord, *, podium_url: str = "ht
         "persistence:\n"
         f"  path: {instance.persistence_path}\n"
         "agent:\n"
-        "  max_concurrent_agents: 10\n"
-        "  max_turns: 20\n"
+        f"  max_concurrent_agents: {max_concurrent_agents}\n"
+        f"  max_turns: {max_turns}\n"
         "  max_retry_backoff_ms: 300000\n"
         "acceptance:\n"
-        "  enabled: true\n"
+        f"  enabled: {acceptance_enabled}\n"
         "  mode: block_done\n"
         "  minimum_score: 3\n"
         "  require_findings_for_score_3: true\n"
@@ -96,10 +118,7 @@ def generate_workflow_content(instance: InstanceRecord, *, podium_url: str = "ht
         "- URL: {{ issue.url or 'No URL provided.' }}\n"
         "- State: {{ issue.state }}\n"
         "- Description: {{ issue.description or 'No description provided.' }}\n"
-        "Acceptance gates are enabled by default. Before handing off, leave concrete evidence on the Linear issue "
-        "description with fields named exactly `Implementation summary:`, `Test commands and exact output:`, and "
-        "`Remaining risks:`. Do not move the issue to Done yourself; Performer will move it to review, run gate child "
-        "issues, create evidence child issues, and close the tree if acceptance passes.\n"
+        f"{acceptance_guidance}"
         "If Performer posts a runtime permission or sandbox error and labels the issue `performer:error`, a human must "
         "inspect the error, fix or approve the environment, then comment this exact command on the Linear issue to "
         "resume: `/symphony approve-runtime-error {{ issue.identifier }}`.\n"

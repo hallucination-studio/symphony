@@ -32,7 +32,12 @@ class ConductorSettings:
     podium_token: str = ""
     podium_callback_url: str = ""
     podium_dispatch_token: str = ""
+    podium_runtime_id: str = ""
+    podium_runtime_token: str = ""
     podium_proxy_token: str = ""
+    podium_ws_url: str = ""
+    runtime_group_id: str = ""
+    managed_mode: bool = False
     conductor_id: str = field(default_factory=lambda: uuid4().hex)
 
     def to_dict(self) -> dict[str, Any]:
@@ -47,7 +52,12 @@ class ConductorSettings:
             "podium_token_configured": bool(self.podium_token.strip()),
             "podium_callback_url": self.podium_callback_url,
             "podium_dispatch_token_configured": bool(self.podium_dispatch_token.strip()),
+            "podium_runtime_id": self.podium_runtime_id,
+            "podium_runtime_token_configured": bool(self.podium_runtime_token.strip()),
             "podium_proxy_token_configured": bool(self.podium_proxy_token.strip()),
+            "podium_ws_url": self.podium_ws_url,
+            "runtime_group_id": self.runtime_group_id,
+            "managed_mode": self.managed_mode,
             "conductor_id": self.conductor_id,
         }
 
@@ -59,7 +69,12 @@ class ConductorSettings:
             podium_token=str(payload.get("podium_token") or ""),
             podium_callback_url=str(payload.get("podium_callback_url") or ""),
             podium_dispatch_token=str(payload.get("podium_dispatch_token") or ""),
+            podium_runtime_id=str(payload.get("podium_runtime_id") or ""),
+            podium_runtime_token=str(payload.get("podium_runtime_token") or ""),
             podium_proxy_token=str(payload.get("podium_proxy_token") or ""),
+            podium_ws_url=str(payload.get("podium_ws_url") or ""),
+            runtime_group_id=str(payload.get("runtime_group_id") or ""),
+            managed_mode=bool(payload.get("managed_mode") or False),
             conductor_id=str(payload.get("conductor_id") or uuid4().hex),
         )
 

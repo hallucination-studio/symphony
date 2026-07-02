@@ -8,6 +8,7 @@ import json
 import httpx
 import pytest
 
+from podium.app import create_app
 from podium.server import PodiumServer
 
 
@@ -325,3 +326,89 @@ async def test_linear_graphql_proxy_accepts_raw_proxy_token_for_performer_tracke
 
 def _signature(body: bytes, secret: str) -> str:
     return hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+
+
+@pytest.mark.asyncio
+async def test_managed_auth_register_login_me_logout_with_turnstile_mock() -> None:
+    app = create_app(
+        turnstile_verifier=lambda token, ip=None: token == "valid-turnstile",
+        secure_cookies=False,
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://podium.test") as client:
+        invalid = await client.post(
+            "/api/v1/auth/register",
+            json={"email": "user@example.com", "password": "correct horse battery staple", "turnstile_token": "bad"},
+        )
+        created = await client.post(
+            "/api/v1/auth/register",
+            json={"email": "user@example.com", "password": "correct horse battery staple", "turnstile_token": "valid-turnstile"},
+        )
+        me = await client.get("/api/v1/auth/me")
+        logout = await client.post("/api/v1/auth/logout")
+        logged_out = await client.get("/api/v1/auth/me")
+
+    assert invalid.status_code == 400
+    assert invalid.json()["error"]["code"] == "invalid_turnstile"
+    assert created.status_code == 200
+    assert created.json()["user"] == {"id": "user_1", "email": "user@example.com"}
+    assert "password" not in created.text
+    assert "session" not in created.json()
+    assert me.status_code == 200
+    assert me.json()["user"]["email"] == "user@example.com"
+    assert logout.status_code == 200
+    assert logged_out.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_runtime_enrollment_token_is_one_time_and_dispatch_can_be_acked() -> None:
+    app = create_app(secure_cookies=False)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://podium.test") as client:
+        token_response = await client.post(
+            "/api/v1/runtime/enrollment-tokens",
+            json={"runtime_group_id": "group-1", "linear_workspace_id": "workspace-1", "project_slug": "ENG"},
+        )
+        enrollment_token = token_response.json()["enrollment_token"]
+        enrolled = await client.post("/api/v1/runtime/enroll", json={"enrollment_token": enrollment_token})
+        reused = await client.post("/api/v1/runtime/enroll", json={"enrollment_token": enrollment_token})
+        webhook = await client.post(
+            "/api/v1/linear/webhooks/agent-session",
+            json={
+                "type": "AgentSessionEvent",
+                "action": "created",
+                "workspace": {"id": "workspace-1"},
+                "agentSession": {
+                    "id": "session-1",
+                    "issue": {"id": "issue-1", "identifier": "ENG-1", "project": {"slugId": "ENG"}},
+                },
+            },
+        )
+        runtime_token = enrolled.json()["runtime_token"]
+        lease = await client.post(
+            "/api/v1/runtime/dispatches/lease",
+            headers={"Authorization": f"Bearer {runtime_token}"},
+        )
+        dispatch_id = lease.json()["dispatch"]["dispatch_id"]
+        ack = await client.post(
+            "/api/v1/runtime/dispatches/ack",
+            headers={"Authorization": f"Bearer {runtime_token}"},
+            json={"dispatch_id": dispatch_id, "status": "accepted"},
+        )
+
+    assert token_response.status_code == 200
+    assert enrolled.status_code == 200
+    assert enrolled.json()["websocket_url"] == "ws://podium.test/api/v1/runtime/ws"
+    assert enrolled.json()["proxy_token"]
+    assert reused.status_code == 400
+    assert reused.json()["error"]["code"] == "enrollment_token_used"
+    assert webhook.status_code == 200
+    assert webhook.json()["queued"] == 1
+    assert lease.status_code == 200
+    assert lease.json()["dispatch"]["issue_id"] == "issue-1"
+    assert lease.json()["dispatch"]["issue_identifier"] == "ENG-1"
+    assert lease.json()["dispatch"]["linear_workspace_id"] == "workspace-1"
+    assert lease.json()["dispatch"]["project_slug"] == "ENG"
+    assert lease.json()["dispatch"]["workflow_profile"] == "task"
+    assert ack.status_code == 200
+    assert ack.json()["dispatch"]["status"] == "accepted"
