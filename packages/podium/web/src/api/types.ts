@@ -1,4 +1,9 @@
 // Shared types mirroring the Podium BFF JSON contracts.
+//
+// These mirror the dataclasses in packages/podium/src/podium/models.py.
+// The onboarding progress the backend returns is intentionally flat
+// (current_step + completed_steps + next_action); the rich, per-step view
+// the UI renders is derived client-side in ../lib/onboarding.ts.
 
 export type OnboardingStepStatus =
   | "not_started"
@@ -14,30 +19,32 @@ export type OnboardingStepKey =
   | "smoke_check"
   | "complete";
 
-export interface OnboardingStep {
-  key: OnboardingStepKey | string;
-  title: string;
-  status: OnboardingStepStatus;
-  summary?: string | null;
-  blocking_reason?: string | null;
-  cta_label?: string | null;
-}
-
 export interface OnboardingProgress {
-  current_step: string;
-  steps: OnboardingStep[];
-  next_action?: string | null;
+  current_step: OnboardingStepKey | string;
+  completed_steps: (OnboardingStepKey | string)[];
+  next_action: string;
+  metadata?: Record<string, unknown>;
 }
 
 export interface SessionIdentity {
   workspace_id: string;
-  [key: string]: unknown;
+  user_id?: string | null;
+  app_user_id?: string | null;
 }
 
+export type LinearConnectionState =
+  | "not_connected"
+  | "connected"
+  | "expired"
+  | "error";
+
 export interface LinearStatus {
-  state: string;
   workspace_id: string;
-  [key: string]: unknown;
+  state: LinearConnectionState | string;
+  health?: string;
+  scope?: string | null;
+  app_user_id?: string | null;
+  expires_at?: string | null;
 }
 
 export interface Bootstrap {
@@ -56,24 +63,61 @@ export interface LinearScope {
   projects: LinearScopeEntity[];
 }
 
+export type RepositoryMode = "local_path" | "git_url";
+
+export type ValidationState = "pending" | "valid" | "invalid";
+
 export interface RepositoryMapping {
-  mode: "local_path" | "git_url" | string;
+  mode: RepositoryMode | string;
   value: string;
-  [key: string]: unknown;
+  validation_state: ValidationState | string;
+  validation_message?: string | null;
+}
+
+export type SmokeCheckStatus = "pending" | "running" | "passed" | "failed";
+
+export interface SmokeCheckItem {
+  name: string;
+  passed: boolean;
 }
 
 export interface SmokeCheckResult {
-  [key: string]: unknown;
+  status: SmokeCheckStatus | string;
+  checks: SmokeCheckItem[];
+  recommendations: string[];
+  timestamp: string;
 }
 
 export interface RuntimeRecord {
-  id: string;
-  [key: string]: unknown;
+  runtime_id: string;
+  online: boolean;
+  last_heartbeat?: string | null;
+  version?: string | null;
+  metadata?: Record<string, unknown>;
 }
+
+export type RunStatus =
+  | "pending"
+  | "running"
+  | "success"
+  | "failed"
+  | "cancelled";
 
 export interface RunSummary {
-  id: string;
-  [key: string]: unknown;
+  run_id: string;
+  issue_identifier?: string | null;
+  runtime_id?: string | null;
+  status: RunStatus | string;
+  started_at?: string | null;
+  completed_at?: string | null;
+  duration_seconds?: number | null;
+  failure_reason?: string | null;
 }
 
-export type RepositoryMode = "local_path" | "git_url";
+export interface EnrollmentStatus {
+  workspace_id: string;
+  token_pending: boolean;
+  runtime_count: number;
+  online_count: number;
+  enrolled: boolean;
+}

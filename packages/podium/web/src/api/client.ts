@@ -1,5 +1,6 @@
 import type {
   Bootstrap,
+  EnrollmentStatus,
   LinearScope,
   OnboardingProgress,
   RepositoryMapping,
@@ -118,8 +119,8 @@ export const api = {
 
   runtimeStatus(
     workspaceId: string = DEFAULT_WORKSPACE_ID,
-  ): Promise<Record<string, unknown>> {
-    return request(
+  ): Promise<EnrollmentStatus> {
+    return request<EnrollmentStatus>(
       withWorkspace("/api/v1/onboarding/runtime/status", workspaceId),
     );
   },

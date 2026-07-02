@@ -1,16 +1,20 @@
-import type { OnboardingStepStatus } from "../api/types";
+import { statusLabel, statusTone } from "../lib/format";
 
-const LABELS: Record<string, string> = {
-  not_started: "Not started",
-  in_progress: "In progress",
-  blocked: "Blocked",
-  completed: "Completed",
-};
-
-export function StatusBadge({ status }: { status: OnboardingStepStatus | string }) {
+/**
+ * The one badge used everywhere. Accepts any raw status string from the API
+ * and renders it with a consistent label + one of four tones.
+ */
+export function StatusBadge({
+  status,
+  label,
+}: {
+  status: string;
+  label?: string;
+}) {
   return (
-    <span className="badge" data-status={status}>
-      {LABELS[status] ?? status}
+    <span className="badge" data-tone={statusTone(status)}>
+      <span className="badge-dot" aria-hidden />
+      {label ?? statusLabel(status)}
     </span>
   );
 }

@@ -1,0 +1,133 @@
+import type {
+  OnboardingProgress,
+  OnboardingStepKey,
+  OnboardingStepStatus,
+} from "../api/types";
+
+// The Podium BFF returns a flat progress object (current_step +
+// completed_steps + next_action). The UI wants a rich, ordered step list with
+// per-step status, copy, and a route to act on it. We derive that here so the
+// Home card, Setup wizard, and Action Center all speak the same vocabulary.
+
+export interface DerivedStep {
+  key: OnboardingStepKey;
+  title: string;
+  description: string;
+  ctaLabel: string;
+  status: OnboardingStepStatus;
+  // Path (relative to /setup) for the wizard sub-view.
+  path: string;
+}
+
+interface StepDef {
+  key: OnboardingStepKey;
+  title: string;
+  description: string;
+  ctaLabel: string;
+  path: string;
+}
+
+// Ordered to match STEP_ORDER in onboarding_service.py (minus the terminal
+// "complete" pseudo-step, which is not something the user acts on).
+export const STEP_DEFS: StepDef[] = [
+  {
+    key: "linear_connect",
+    title: "Connect Linear",
+    description:
+      "Authorize Podium to read issues from your Linear workspace so it can route work to runtimes.",
+    ctaLabel: "Connect Linear",
+    path: "linear",
+  },
+  {
+    key: "scope_selection",
+    title: "Choose scope",
+    description:
+      "Pick the teams and projects Podium is allowed to act on. Start narrow — you can widen later.",
+    ctaLabel: "Select scope",
+    path: "scope",
+  },
+  {
+    key: "repository_mapping",
+    title: "Map repository",
+    description:
+      "Tell Podium where your code lives so runtimes can check it out.",
+    ctaLabel: "Map repository",
+    path: "repository",
+  },
+  {
+    key: "runtime_enrollment",
+    title: "Install runtime",
+    description:
+      "Run one install command on the machine that will execute agent work.",
+    ctaLabel: "Install runtime",
+    path: "runtime",
+  },
+  {
+    key: "smoke_check",
+    title: "Run smoke check",
+    description:
+      "Verify Linear, repository, and runtime are wired together end to end.",
+    ctaLabel: "Run smoke check",
+    path: "smoke-check",
+  },
+];
+
+export const STEP_ORDER: OnboardingStepKey[] = STEP_DEFS.map((s) => s.key);
+
+/** Is the whole onboarding flow finished? */
+export function isOnboardingComplete(progress: OnboardingProgress): boolean {
+  return progress.current_step === "complete";
+}
+
+/**
+ * Derive the ordered, per-step view the UI renders.
+ *
+ * A step is `completed` if it appears in completed_steps. The single
+ * `current_step` is `in_progress`. Everything after it is `not_started`.
+ * A step is `blocked` only when it is current AND an earlier prerequisite is
+ * still incomplete (the state machine should prevent this, but we surface it
+ * defensively rather than silently mislabel).
+ */
+export function deriveSteps(progress: OnboardingProgress): DerivedStep[] {
+  const completed = new Set(progress.completed_steps);
+  const current = progress.current_step;
+  let seenCurrent = false;
+
+  return STEP_DEFS.map((def) => {
+    let status: OnboardingStepStatus;
+    if (completed.has(def.key)) {
+      status = "completed";
+    } else if (def.key === current) {
+      status = "in_progress";
+      seenCurrent = true;
+    } else if (!seenCurrent) {
+      // Before the current step but not marked complete: a gap in the chain.
+      status = "blocked";
+    } else {
+      status = "not_started";
+    }
+    return {
+      key: def.key,
+      title: def.title,
+      description: def.description,
+      ctaLabel: def.ctaLabel,
+      status,
+      path: def.path,
+    };
+  });
+}
+
+/** The step the user should act on next (current, or first incomplete). */
+export function activeStep(progress: OnboardingProgress): DerivedStep | null {
+  const steps = deriveSteps(progress);
+  return (
+    steps.find((s) => s.key === progress.current_step) ??
+    steps.find((s) => s.status !== "completed") ??
+    null
+  );
+}
+
+export function completedCount(progress: OnboardingProgress): number {
+  return STEP_ORDER.filter((key) => progress.completed_steps.includes(key))
+    .length;
+}
