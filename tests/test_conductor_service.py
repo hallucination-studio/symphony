@@ -99,9 +99,11 @@ def write_sample_ops_snapshot(instance: InstanceRecord) -> None:
 class CapturingRuntime:
     def __init__(self) -> None:
         self.env: dict[str, str] | None = None
+        self.dispatch_issue_id: str | None = None
 
-    async def start(self, instance, *, env: dict[str, str] | None = None):
+    async def start(self, instance, *, env: dict[str, str] | None = None, dispatch_issue_id: str | None = None):
         self.env = env
+        self.dispatch_issue_id = dispatch_issue_id
         return instance.with_updates(process_status="running", pid=4242)
 
     async def stop(self, instance):
@@ -731,3 +733,61 @@ async def test_start_instance_does_not_require_conductor_linear_api_key(tmp_path
 
     assert started.process_status == "running"
     assert runtime.env == {}
+
+
+@pytest.mark.asyncio
+async def test_dispatch_podium_event_starts_one_shot_performer_for_matching_project(tmp_path: Path) -> None:
+    runtime = CapturingRuntime()
+    service = ConductorService(
+        store=ConductorStore(tmp_path / "conductor-data"),
+        data_root=tmp_path / "conductor-data",
+        runtime_manager=runtime,
+    )
+    service.update_settings(ConductorSettings(podium_proxy_token="proxy-token"))
+    repo = make_repo(tmp_path)
+    instance = service.create_instance(
+        make_request(repo).with_overrides(linear_project="ENG", linear_filters={"assignee_id": "agent-user-1"})
+    )
+
+    result = await service.dispatch_podium_event(
+        {
+            "issue_id": "issue-1",
+            "issue_identifier": "ENG-1",
+            "project_slug": "ENG",
+            "agent_session_id": "session-1",
+        }
+    )
+
+    assert result == {
+        "status": "accepted",
+        "issue_id": "issue-1",
+        "issue_identifier": "ENG-1",
+        "instance_id": instance.id,
+        "agent_session_id": "session-1",
+    }
+    assert runtime.dispatch_issue_id == "issue-1"
+    assert runtime.env == {"PODIUM_PROXY_TOKEN": "proxy-token"}
+
+
+@pytest.mark.asyncio
+async def test_dispatch_podium_event_skips_when_no_instance_matches_project(tmp_path: Path) -> None:
+    runtime = CapturingRuntime()
+    service = ConductorService(
+        store=ConductorStore(tmp_path / "conductor-data"),
+        data_root=tmp_path / "conductor-data",
+        runtime_manager=runtime,
+    )
+    repo = make_repo(tmp_path)
+    service.create_instance(make_request(repo).with_overrides(linear_project="ENG"))
+
+    result = await service.dispatch_podium_event(
+        {"issue_id": "issue-1", "issue_identifier": "OPS-1", "project_slug": "OPS"}
+    )
+
+    assert result == {
+        "status": "skipped",
+        "issue_id": "issue-1",
+        "issue_identifier": "OPS-1",
+        "reason": "no_matching_instance",
+    }
+    assert runtime.dispatch_issue_id is None

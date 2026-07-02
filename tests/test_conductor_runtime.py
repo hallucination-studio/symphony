@@ -156,3 +156,14 @@ def test_default_command_falls_back_to_python_module_in_editable_repo() -> None:
         assert manager._command_args("WORKFLOW.md") == (manager.command, "WORKFLOW.md")
     else:
         assert manager._command_args("WORKFLOW.md") == (manager.command, "-m", "performer.cli", "WORKFLOW.md")
+
+
+def test_command_args_can_target_event_dispatch_issue() -> None:
+    manager = ConductorRuntimeManager(command="performer")
+
+    assert manager._command_args("WORKFLOW.md", dispatch_issue_id="issue-1") == (
+        "performer",
+        "WORKFLOW.md",
+        "--dispatch-issue-id",
+        "issue-1",
+    )

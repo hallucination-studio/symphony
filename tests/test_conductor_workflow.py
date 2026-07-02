@@ -52,6 +52,8 @@ def test_generate_workflow_content_injects_managed_runtime_resources(tmp_path: P
     assert "project_slug: ENG" in content
     assert "endpoint: https://podium.example/api/v1/linear/graphql" in content
     assert "api_key: $PODIUM_PROXY_TOKEN" in content
+    assert "required_labels:" not in content
+    assert "    - codex" not in content
     assert "api_key: $LINEAR_API_KEY" not in content
     assert "Keep issues moving" in content
     assert "Current Linear issue:" in content
@@ -83,6 +85,21 @@ def test_task_profile_is_default_managed_profile_without_acceptance_gate(tmp_pat
     assert "acceptance:\n  enabled: false\n" in content
     assert "endpoint: https://podium.example/api/v1/linear/graphql" in content
     assert "api_key: $PODIUM_PROXY_TOKEN" in content
+
+
+def test_managed_workflow_can_scope_to_linear_agent_assignee(tmp_path: Path) -> None:
+    instance = make_instance(tmp_path).with_updates(
+        linear_filters={
+            "assignee_id": "agent-user-1",
+            "labels": ["legacy-label-that-should-not-dispatch"],
+        }
+    )
+
+    content = generate_workflow_content(instance, podium_url="https://podium.example")
+
+    assert "assignee_id: agent-user-1" in content
+    assert "required_labels:" not in content
+    assert "legacy-label-that-should-not-dispatch" not in content
 
 
 def test_gated_task_profile_keeps_acceptance_gate(tmp_path: Path) -> None:

@@ -212,7 +212,7 @@ class Orchestrator:
         issue = issues[0] if issues else None
         if issue is None:
             return {"status": "skipped", "issue_id": issue_id, "reason": "issue_not_found"}
-        reason = self.dispatch_skip_reason(issue)
+        reason = self.dispatch_skip_reason_for_event(issue)
         if reason is not None:
             return {"status": "skipped", "issue_id": issue.id, "reason": reason}
         selected_worker_host = worker_host or self._select_worker_host()
@@ -405,6 +405,33 @@ class Orchestrator:
             return "assignee_mismatch"
         if issue.has_required_labels(self.config.tracker.required_labels) is False:
             return "missing_required_labels"
+        if issue.state_key() == "todo" and issue.has_non_terminal_blocker(self.config.tracker.terminal_states):
+            return "blocked_by_non_terminal_dependency"
+        if self.available_slots() <= 0:
+            return "no_available_slots"
+        if self._available_state_slots(issue.state) <= 0:
+            return "no_available_state_slots"
+        return None
+
+    def dispatch_skip_reason_for_event(self, issue: Issue) -> str | None:
+        if not issue.id or not issue.identifier or not issue.title or not issue.state:
+            return "missing_required_issue_fields"
+        if issue.id in self.state.running or issue.id in self.state.claimed:
+            return "already_running_or_claimed"
+        if not self._is_active(issue):
+            return "inactive_state"
+        if self.config.acceptance.enabled:
+            acceptance = self.config.acceptance
+            if issue.state_key() == normalize_state_key(acceptance.review_state):
+                return "acceptance_review_state"
+            if issue.state_key() == normalize_state_key(acceptance.done_state):
+                return "acceptance_done_state"
+            if issue.state_key() == normalize_state_key(acceptance.todo_state):
+                return "acceptance_preflight_required"
+        if self.config.tracker.kind == "linear" and issue.project_slug != self.config.tracker.project_slug:
+            return "project_mismatch"
+        if not self._matches_assignee(issue):
+            return "assignee_mismatch"
         if issue.state_key() == "todo" and issue.has_non_terminal_blocker(self.config.tracker.terminal_states):
             return "blocked_by_non_terminal_dependency"
         if self.available_slots() <= 0:

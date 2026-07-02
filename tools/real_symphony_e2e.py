@@ -81,9 +81,22 @@ def allocate_port() -> int:
         return int(sock.getsockname()[1])
 
 
-def http_json(method: str, url: str, payload: dict[str, Any] | None = None, *, timeout: int = 30) -> tuple[int, Any]:
-    body = None if payload is None else json.dumps(payload).encode()
-    request = urllib.request.Request(url, data=body, method=method, headers={"Content-Type": "application/json"})
+def http_json(
+    method: str,
+    url: str,
+    payload: dict[str, Any] | bytes | None = None,
+    *,
+    timeout: int = 30,
+    headers: dict[str, str] | None = None,
+) -> tuple[int, Any]:
+    if isinstance(payload, bytes):
+        body = payload
+    else:
+        body = None if payload is None else json.dumps(payload).encode()
+    request_headers = {"Content-Type": "application/json"}
+    if headers:
+        request_headers.update(headers)
+    request = urllib.request.Request(url, data=body, method=method, headers=request_headers)
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             raw = response.read().decode()
@@ -103,16 +116,25 @@ def http_json(method: str, url: str, payload: dict[str, Any] | None = None, *, t
 
 
 async def linear_graphql(token: str, query: str, variables: dict[str, Any]) -> dict[str, Any]:
-    async with httpx.AsyncClient(timeout=30, trust_env=False) as client:
-        response = await client.post(
-            LINEAR_ENDPOINT,
-            json={"query": query, "variables": variables},
-            headers={"Authorization": token, "Content-Type": "application/json"},
-        )
-    payload = response.json()
-    if response.status_code != 200 or payload.get("errors"):
-        raise RuntimeError(json.dumps({"status": response.status_code, "payload": payload}, indent=2))
-    return payload["data"]
+    last_error: Exception | None = None
+    for attempt in range(1, 4):
+        try:
+            async with httpx.AsyncClient(timeout=30, trust_env=False) as client:
+                response = await client.post(
+                    LINEAR_ENDPOINT,
+                    json={"query": query, "variables": variables},
+                    headers={"Authorization": token, "Content-Type": "application/json"},
+                )
+            payload = response.json()
+            if response.status_code != 200 or payload.get("errors"):
+                raise RuntimeError(json.dumps({"status": response.status_code, "payload": payload}, indent=2))
+            return payload["data"]
+        except (httpx.HTTPError, TimeoutError) as exc:
+            last_error = exc
+            if attempt == 3:
+                break
+            await asyncio.sleep(attempt)
+    raise RuntimeError(f"Linear GraphQL request failed after retries: {last_error!r}") from last_error
 
 
 async def create_linear_issue(token: str, project_slug: str, run_id: str) -> dict[str, Any]:
@@ -146,21 +168,6 @@ async def create_linear_issue(token: str, project_slug: str, run_id: str) -> dic
     todo = next((state for state in states if state["name"].lower() == "todo"), None)
     if todo is None:
         todo = next(state for state in states if state["type"] == "unstarted")
-    label_name = f"codex-{run_id}"
-    label = (
-        await linear_graphql(
-            token,
-            """
-            mutation CreateLabel($name: String!, $teamId: String!) {
-              issueLabelCreate(input: { name: $name, teamId: $teamId }) {
-                success
-                issueLabel { id name }
-              }
-            }
-            """,
-            {"name": label_name, "teamId": team["id"]},
-        )
-    )["issueLabelCreate"]["issueLabel"]
     issue = (
         await linear_graphql(
             token,
@@ -184,8 +191,7 @@ async def create_linear_issue(token: str, project_slug: str, run_id: str) -> dic
                     "teamId": team["id"],
                     "projectId": project["id"],
                     "stateId": todo["id"],
-                    "labelIds": [label["id"]],
-                    "title": f"Symphony real e2e matrix {run_id}",
+                    "title": f"Symphony managed agent dispatch {run_id}",
                     "description": (
                         "Real Symphony e2e task. Create SYMPHONY_REAL_E2E_RESULT.md at the workspace root, "
                         "include this Linear issue identifier, say Podium, Conductor, and Performer reached Codex, "
@@ -195,7 +201,7 @@ async def create_linear_issue(token: str, project_slug: str, run_id: str) -> dic
             },
         )
     )["issueCreate"]["issue"]
-    return {"project": project, "team": team, "todo_state": todo, "label": label, "issue": issue}
+    return {"project": project, "team": team, "todo_state": todo, "issue": issue}
 
 
 async def fetch_linear_issue(token: str, issue_id: str) -> dict[str, Any]:
@@ -404,6 +410,13 @@ def api_url(port: int, path: str) -> str:
     return f"http://127.0.0.1:{port}{path}"
 
 
+def linear_webhook_signature(secret: str, payload: bytes) -> str:
+    import hashlib
+    import hmac
+
+    return hmac.new(secret.encode(), payload, hashlib.sha256).hexdigest()
+
+
 async def wait_for_run(
     *,
     token: str,
@@ -419,6 +432,7 @@ async def wait_for_run(
     ops_path = state_path.parent / "ops.json"
     result_path = Path(instance["workspace_root"]) / "SYMPHONY_REAL_E2E_RESULT.md"
     log_path = Path(instance["log_path"])
+    instance_id = str(instance["id"])
     deadline = time.monotonic() + timeout_seconds
     samples: list[dict[str, Any]] = []
     final_issue: dict[str, Any] | None = None
@@ -431,10 +445,15 @@ async def wait_for_run(
         state = json.loads(state_path.read_text()) if state_path.exists() else {}
         ops = json.loads(ops_path.read_text()) if ops_path.exists() else {}
         final_issue = await fetch_linear_issue(token, issue_id)
+        status, runtime_body = http_json("GET", api_url(conductor_port, f"/api/instances/{instance_id}"), timeout=2)
+        process_status = None
+        if status == 200 and isinstance(runtime_body, dict):
+            process_status = (runtime_body.get("instance") or {}).get("process_status")
         run_statuses = [run.get("status") for run in ops.get("runs", {}).values()]
         sample = {
             "at": utc_now(),
             "issue_state": final_issue["state"]["name"],
+            "process_status": process_status,
             "sessions": len(state.get("sessions", [])),
             "retry_attempts": len(state.get("retry_attempts", [])),
             "continuations": len(state.get("continuations", [])),
@@ -489,6 +508,7 @@ async def wait_for_run(
             and state.get("blocked", []) == []
             and run_statuses
             and all(status != "running" for status in run_statuses)
+            and process_status in {"exited", "stopped"}
         ):
             break
         await asyncio.sleep(5)
@@ -532,6 +552,10 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
     bin_dir = Path.cwd() / ".venv" / "bin"
     run_id = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S") + "-" + uuid.uuid4().hex[:6]
     run_id = f"symphony-e2e-matrix-{run_id}"
+    workspace_id = f"real-workspace-{run_id}"
+    dispatch_token = f"dispatch-{uuid.uuid4().hex}"
+    proxy_token = f"proxy-{uuid.uuid4().hex}"
+    webhook_secret = f"webhook-{uuid.uuid4().hex}"
     evidence.data["run_id"] = run_id
     evidence.write()
 
@@ -564,12 +588,38 @@ No-op.
     podium_port = allocate_port()
     conductor_port = allocate_port()
     data_root = root / "conductor-data"
+    linear_installations_path = root / "podium-linear-installations.json"
+    linear_installations_path.write_text(
+        json.dumps(
+            {
+                workspace_id: {
+                    "access_token": token,
+                    "scope": "read,write",
+                    "app_user_id": "real-e2e",
+                }
+            },
+            indent=2,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    podium_env = dict(env)
+    podium_env["LINEAR_WEBHOOK_SECRET"] = webhook_secret
     processes: list[ManagedProcess] = []
     try:
         podium = start_process(
             "podium",
-            [str(bin_dir / "podium"), "--port", str(podium_port)],
-            env=env,
+            [
+                str(bin_dir / "podium"),
+                "legacy-dev",
+                "--port",
+                str(podium_port),
+                "--linear-installations-path",
+                str(linear_installations_path),
+                "--linear-webhook-secret",
+                webhook_secret,
+            ],
+            env=podium_env,
             stdout_path=root / "podium.log",
         )
         processes.append(podium)
@@ -578,8 +628,6 @@ No-op.
         for path in ["/api/v1/health"]:
             status, body = http_json("GET", api_url(podium_port, path))
             evidence.check(f"podium-api:{path}", status == 200, status=status, body=body)
-        status, body = http_json("POST", api_url(podium_port, "/api/v1/conductors/register"), {"conductor_id": "matrix-probe"})
-        evidence.check("podium-api:/api/v1/conductors/register", status == 200, status=status, body=body)
 
         conductor = start_process(
             "conductor",
@@ -593,15 +641,41 @@ No-op.
         status, body = http_json(
             "PATCH",
             api_url(conductor_port, "/api/settings"),
-            {"linear_api_key": token, "podium_url": f"http://127.0.0.1:{podium_port}"},
+            {
+                "podium_url": f"http://127.0.0.1:{podium_port}",
+                "podium_callback_url": api_url(conductor_port, "/api/podium/dispatch"),
+                "podium_dispatch_token": dispatch_token,
+                "podium_proxy_token": proxy_token,
+                "managed_mode": True,
+            },
         )
-        evidence.check("conductor-api:/api/settings PATCH", status == 200 and body["settings"]["linear_api_key_configured"], status=status, body=body["settings"])
+        evidence.check(
+            "conductor-api:/api/settings PATCH",
+            status == 200
+            and body["settings"]["linear_application_connected"]
+            and body["settings"]["podium_dispatch_token_configured"]
+            and body["settings"]["podium_proxy_token_configured"]
+            and body["settings"]["managed_mode"],
+            status=status,
+            body=body["settings"],
+        )
+        status, body = http_json(
+            "POST",
+            api_url(podium_port, "/api/v1/conductors/register"),
+            {
+                "conductor_id": f"matrix-{run_id}",
+                "callback_url": api_url(conductor_port, "/api/podium/dispatch"),
+                "dispatch_token": dispatch_token,
+                "proxy_token": proxy_token,
+                "routing": {"workspace_id": workspace_id},
+            },
+        )
+        evidence.check("podium-api:/api/v1/conductors/register managed-callback", status == 200, status=status, body=body)
         for method, path, payload in [
             ("GET", "/api/settings", None),
             ("GET", "/api/dashboard", None),
             ("GET", "/api/instances", None),
             ("GET", "/api/templates/workflow-profiles", None),
-            ("POST", "/api/podium/register", {}),
             ("POST", "/api/repo/inspect", {"repo_source_type": "local_path", "repo_source_value": str(fixture)}),
             ("POST", "/api/repo/clone", {"repo_url": "https://example.invalid/repo.git", "target_path": str(root / "non-empty-clone")}),
         ]:
@@ -620,8 +694,8 @@ No-op.
             "repo_source_type": "local_path",
             "repo_source_value": str(fixture),
             "linear_project": linear["project"]["slugId"],
-            "linear_filters": {"labels": [linear["label"]["name"]], "active_states": ["Todo", "In Progress"]},
-            "workflow_profile": "default",
+            "linear_filters": {"active_states": ["Todo", "In Progress"]},
+            "workflow_profile": "task",
             "workflow_inputs": {"goal": "Run the real Symphony e2e matrix task."},
         }
         status, body = http_json("POST", api_url(conductor_port, "/api/instances/preview-workflow"), payload)
@@ -667,14 +741,39 @@ No-op.
         status, body = http_json("GET", api_url(conductor_port, f"/api/instances/{instance_id}"))
         evidence.check("conductor-daemon:restart-recovers-instance-metadata", status == 200 and body["instance"]["id"] == instance_id, status=status, process_status=body.get("instance", {}).get("process_status"))
 
-        # Performer online, offline, online again through Conductor controls.
-        status, body = http_json("POST", api_url(conductor_port, f"/api/instances/{instance_id}/start"), {})
-        evidence.check("conductor-api:POST /api/instances/{id}/start", status == 200 and body["instance"]["process_status"] == "running", status=status)
-        instance = body["instance"]
-        status, body = http_json("POST", api_url(conductor_port, f"/api/instances/{instance_id}/stop"), {})
-        evidence.check("performer-lifecycle:offline-stop", status == 200 and body["instance"]["process_status"] == "stopped", status=status)
-        status, body = http_json("POST", api_url(conductor_port, f"/api/instances/{instance_id}/start"), {})
-        evidence.check("performer-lifecycle:online-restart", status == 200 and body["instance"]["process_status"] == "running", status=status)
+        webhook_payload = {
+            "type": "AgentSessionEvent",
+            "action": "created",
+            "workspace": {"id": workspace_id},
+            "agentSession": {
+                "id": f"session-{uuid.uuid4().hex}",
+                "issue": {
+                    "id": linear["issue"]["id"],
+                    "identifier": linear["issue"]["identifier"],
+                    "project": {"slugId": linear["project"]["slugId"]},
+                },
+            },
+        }
+        raw_webhook = json.dumps(webhook_payload).encode()
+        status, body = http_json(
+            "POST",
+            api_url(podium_port, "/api/v1/linear/webhooks/agent-session"),
+            raw_webhook,
+            headers={"Linear-Signature": linear_webhook_signature(webhook_secret, raw_webhook)},
+        )
+        evidence.check(
+            "podium-api:/api/v1/linear/webhooks/agent-session dispatches-conductor",
+            status == 200 and body.get("dispatched") == 1,
+            status=status,
+            body=body,
+        )
+        status, body = http_json("GET", api_url(conductor_port, f"/api/instances/{instance_id}"))
+        evidence.check(
+            "conductor-dispatch:agent-session-starts-one-shot",
+            status == 200 and body.get("instance", {}).get("process_status") == "running",
+            status=status,
+            process_status=body.get("instance", {}).get("process_status") if isinstance(body, dict) else None,
+        )
         instance = body["instance"]
 
         run_result = await wait_for_run(
@@ -786,9 +885,6 @@ No-op.
             status, body = http_json("GET", api_url(conductor_port, f"/api/runs/{ops_run_id}"))
             evidence.check("conductor-api:GET /api/runs/{id}", status == 200, status=status)
 
-        status, body = http_json("POST", api_url(conductor_port, f"/api/instances/{instance_id}/restart"), {})
-        evidence.check("conductor-api:POST /api/instances/{id}/restart", status == 200, status=status, process_status=body.get("instance", {}).get("process_status"))
-        live_restart_pid = body.get("instance", {}).get("pid")
         conductor.stop()
         processes.remove(conductor)
         conductor = start_process(
@@ -802,12 +898,11 @@ No-op.
         status, body = http_json("GET", api_url(conductor_port, f"/api/instances/{instance_id}"))
         recovered = body.get("instance", {}) if isinstance(body, dict) else {}
         evidence.check(
-            "conductor-daemon:restart-recovers-live-performer",
-            status == 200 and recovered.get("process_status") == "running" and recovered.get("pid") == live_restart_pid,
+            "conductor-daemon:restart-recovers-completed-one-shot",
+            status == 200 and recovered.get("process_status") in {"exited", "stopped"},
             status=status,
             process_status=recovered.get("process_status"),
             pid=recovered.get("pid"),
-            expected_pid=live_restart_pid,
         )
         status, body = http_json("POST", api_url(conductor_port, f"/api/instances/{instance_id}/stop"), {})
         evidence.check("conductor-api:POST /api/instances/{id}/stop", status == 200, status=status)
@@ -818,8 +913,8 @@ No-op.
             "repo_source_type": "local_path",
             "repo_source_value": str(disposable_fixture),
             "linear_project": linear["project"]["slugId"],
-            "linear_filters": {"labels": [f"never-{run_id}"], "active_states": ["Todo"]},
-            "workflow_profile": "default",
+            "linear_filters": {"active_states": ["Todo"]},
+            "workflow_profile": "task",
             "workflow_inputs": {},
         }
         status, body = http_json("POST", api_url(conductor_port, "/api/instances"), disposable_payload)
@@ -851,7 +946,7 @@ def main() -> int:
     try:
         report = asyncio.run(run(args))
     except Exception as exc:
-        print(f"real_symphony_e2e failed: {exc}", file=sys.stderr)
+        print(f"real_symphony_e2e failed: {exc!r}", file=sys.stderr)
         return 1
     print(json.dumps({"report": str(args.out / "real-symphony-e2e-report.json"), "failures": len(report["failures"])}, indent=2))
     return 0 if not report["failures"] else 2

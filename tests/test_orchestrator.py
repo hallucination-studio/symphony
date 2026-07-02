@@ -531,6 +531,32 @@ async def test_dispatch_issue_by_id_does_not_scan_candidate_list(tmp_path: Path)
 
 
 @pytest.mark.asyncio
+async def test_dispatch_issue_by_id_does_not_require_legacy_label(tmp_path: Path) -> None:
+    tracker = FakeTracker()
+    tracker.refreshed = [issue("MT-1", labels=[])]
+    runner = FakeRunner()
+    orchestrator = Orchestrator(make_config_with_labels(tmp_path, required_labels=["codex"]), tracker, runner)
+
+    result = await orchestrator.dispatch_issue_by_id("mt-1")
+
+    assert result == {"status": "dispatched", "issue_id": "mt-1", "issue_identifier": "MT-1"}
+    assert [started[0].identifier for started in runner.started] == ["MT-1"]
+
+
+@pytest.mark.asyncio
+async def test_dispatch_issue_by_id_still_respects_linear_agent_assignee(tmp_path: Path) -> None:
+    tracker = FakeTracker()
+    tracker.refreshed = [issue("MT-1", assignee_id="other-user")]
+    runner = FakeRunner()
+    orchestrator = Orchestrator(make_config_with_assignee(tmp_path, "agent-user-1"), tracker, runner)
+
+    result = await orchestrator.dispatch_issue_by_id("mt-1")
+
+    assert result == {"status": "skipped", "issue_id": "mt-1", "reason": "assignee_mismatch"}
+    assert runner.started == []
+
+
+@pytest.mark.asyncio
 async def test_dispatch_issue_by_id_skips_already_claimed_issue(tmp_path: Path) -> None:
     tracker = FakeTracker()
     tracker.refreshed = [issue("MT-1")]
