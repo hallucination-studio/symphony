@@ -547,11 +547,10 @@ class ConductorService:
             if (
                 settings.linear_api_key.strip()
                 and not settings.managed_mode
-                and not settings.podium_url.strip()
                 and not settings.podium_proxy_token.strip()
             ):
                 content = content.replace(
-                    "endpoint: https://podium.example/api/v1/linear/graphql",
+                    f"endpoint: {podium_url.rstrip('/')}/api/v1/linear/graphql",
                     "endpoint: https://api.linear.app/graphql",
                 )
                 content = content.replace("api_key: $PODIUM_PROXY_TOKEN", "api_key: $LINEAR_API_KEY")

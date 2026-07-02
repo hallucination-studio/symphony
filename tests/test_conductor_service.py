@@ -215,6 +215,23 @@ def test_create_instance_uses_linear_api_key_only_for_legacy_local_mode(tmp_path
     assert "$PODIUM_PROXY_TOKEN" not in instance.workflow_content
 
 
+def test_create_instance_prefers_linear_api_key_when_podium_url_has_no_proxy_token(tmp_path: Path) -> None:
+    repo = make_repo(tmp_path)
+    service = make_service(tmp_path)
+    service.update_settings(
+        ConductorSettings(
+            linear_api_key="linear-token",
+            podium_url="http://127.0.0.1:8090",
+        )
+    )
+
+    instance = service.create_instance(make_request(repo))
+
+    assert "endpoint: https://api.linear.app/graphql" in instance.workflow_content
+    assert "api_key: $LINEAR_API_KEY" in instance.workflow_content
+    assert "$PODIUM_PROXY_TOKEN" not in instance.workflow_content
+
+
 def test_create_instance_reuses_existing_workspace_without_resyncing(tmp_path: Path) -> None:
     service = make_service(tmp_path)
     repo = make_repo(tmp_path)

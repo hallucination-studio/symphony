@@ -65,6 +65,13 @@ def test_podium_parse_args_accepts_helpful_defaults() -> None:
     assert args.port == 8090
 
 
+def test_podium_parse_args_accepts_legacy_top_level_port() -> None:
+    args = parse_podium_args(["--port", "8123"])
+
+    assert args.command == "api"
+    assert args.port == 8123
+
+
 
 def test_build_config_from_explicit_workflow_path(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("LINEAR_API_KEY", "linear-token")

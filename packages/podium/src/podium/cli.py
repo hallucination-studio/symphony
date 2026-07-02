@@ -26,6 +26,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     legacy_parser.add_argument("--linear-webhook-secret", default=None, help="Linear OAuth application webhook secret")
     legacy_parser.add_argument("--linear-installations-path", default=None, help="Path to persist Linear OAuth installations")
     parser.set_defaults(command="api", host="127.0.0.1", port=8090)
+    parser.add_argument("--host", default="127.0.0.1", help=argparse.SUPPRESS)
+    parser.add_argument("--port", type=int, default=8090, help=argparse.SUPPRESS)
     parser.add_argument("--token", default=None, help="Bearer token for conductor registration")
     parser.add_argument("--linear-client-id", default=None, help="Linear OAuth application client id")
     parser.add_argument("--linear-client-secret", default=None, help="Linear OAuth application client secret")
