@@ -64,11 +64,12 @@ def test_generate_workflow_content_injects_managed_runtime_resources(tmp_path: P
     assert "Prepared workspace root:" in content
     assert "Work only in the prepared workspace root." in content
     assert "Acceptance gates are disabled for this managed profile." in content
-    assert "Complete the issue directly" in content
+    assert "transition the issue to Done" in content
     assert "/symphony approve-runtime-error {{ issue.identifier }}" in content
     assert "query CurrentIssue" in content
     assert "mutation UpdateIssueEvidence" in content
-    assert "mutation CompleteIssue" not in content
+    assert "mutation CompleteIssue" in content
+    assert "stateId" in content
     assert "commentCreate" in content
     assert "issueUpdate" in content
     assert "linear_graphql" in content
@@ -90,6 +91,7 @@ def test_gated_task_profile_keeps_acceptance_gate(tmp_path: Path) -> None:
     content = generate_workflow_content(instance, podium_url="https://podium.example")
 
     assert "acceptance:\n  enabled: true\n" in content
+    assert "Do not move the issue to Done yourself" in content
 
 
 def test_available_profiles_include_smoke_task_and_gated_task() -> None:

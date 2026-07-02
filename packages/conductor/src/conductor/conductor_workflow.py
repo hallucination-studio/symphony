@@ -59,7 +59,11 @@ def generate_workflow_content(instance: InstanceRecord, *, podium_url: str = "ht
         "`Remaining risks:`. Do not move the issue to Done yourself; Performer will move it to review, run gate child "
         "issues, create evidence child issues, and close the tree if acceptance passes.\n"
         if profile == "gated-task"
-        else "Acceptance gates are disabled for this managed profile. Complete the issue directly with clear implementation, verification, and risk notes.\n"
+        else "Acceptance gates are disabled for this managed profile. After implementing and verifying the request, "
+        "update the Linear issue description with fields named exactly `Implementation summary:`, "
+        "`Test commands and exact output:`, and `Remaining risks:`, create a handoff comment, then transition "
+        "the issue to Done using linear_graphql. Do not leave the issue in Todo, In Progress, or another active state "
+        "after verification passes.\n"
     )
     return (
         "---\n"
@@ -148,6 +152,22 @@ def generate_workflow_content(instance: InstanceRecord, *, podium_url: str = "ht
         "  }\n"
         "}\n"
         f"variables: {{\"issueId\": \"{{{{ issue.id }}}}\", \"body\": \"Implemented and ready for acceptance review.\"}}\n"
+        "4. If acceptance gates are disabled and verification passed, transition the issue to Done. First query the issue team states:\n"
+        "query IssueTeamStates($issueId: String!) {\n"
+        "  issue(id: $issueId) {\n"
+        "    id\n"
+        "    team { states(first: 50) { nodes { id name type } } }\n"
+        "  }\n"
+        "}\n"
+        f"variables: {{\"issueId\": \"{{{{ issue.id }}}}\"}}\n"
+        "Then use the `Done` state id, or the first state with type `completed` if no state is literally named Done:\n"
+        "mutation CompleteIssue($issueId: String!, $stateId: String!) {\n"
+        "  issueUpdate(id: $issueId, input: { stateId: $stateId }) {\n"
+        "    success\n"
+        "    issue { id identifier state { name } }\n"
+        "  }\n"
+        "}\n"
+        f"variables: {{\"issueId\": \"{{{{ issue.id }}}}\", \"stateId\": \"<done state id>\"}}\n"
     )
 
 
