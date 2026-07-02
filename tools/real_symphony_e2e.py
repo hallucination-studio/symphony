@@ -115,6 +115,16 @@ def http_json(
         return exc.code, parsed
 
 
+def read_json_object_if_ready(path: Path, default: dict[str, Any]) -> dict[str, Any]:
+    if not path.exists():
+        return default
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return default
+    return payload if isinstance(payload, dict) else default
+
+
 async def linear_graphql(token: str, query: str, variables: dict[str, Any]) -> dict[str, Any]:
     last_error: Exception | None = None
     for attempt in range(1, 4):
@@ -455,13 +465,17 @@ async def wait_for_run(
     samples: list[dict[str, Any]] = []
     final_issue: dict[str, Any] | None = None
     approved_blocked_events: set[str] = set()
+    last_state: dict[str, Any] = {}
+    last_ops: dict[str, Any] = {}
     while time.monotonic() < deadline:
         if not log_path.exists():
             generated = sorted((instance_root / "logs").glob("performer-*.log"))
             if generated:
                 log_path = generated[-1]
-        state = json.loads(state_path.read_text()) if state_path.exists() else {}
-        ops = json.loads(ops_path.read_text()) if ops_path.exists() else {}
+        last_state = read_json_object_if_ready(state_path, last_state)
+        last_ops = read_json_object_if_ready(ops_path, last_ops)
+        state = last_state
+        ops = last_ops
         final_issue = await fetch_linear_issue(token, issue_id)
         status, runtime_body = http_json("GET", api_url(conductor_port, f"/api/instances/{instance_id}"), timeout=2)
         process_status = None
@@ -542,8 +556,8 @@ async def wait_for_run(
     final_issue_path.write_text(json.dumps(final_issue, indent=2, sort_keys=True), encoding="utf-8")
     evidence.artifact("final_issue", final_issue_path)
     return {
-        "state": json.loads(state_path.read_text()) if state_path.exists() else {},
-        "ops": json.loads(ops_path.read_text()) if ops_path.exists() else {},
+        "state": read_json_object_if_ready(state_path, last_state),
+        "ops": read_json_object_if_ready(ops_path, last_ops),
         "issue": final_issue,
         "result_path": str(result_path),
         "log_path": str(log_path),
