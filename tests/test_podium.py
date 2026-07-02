@@ -4,6 +4,7 @@ import asyncio
 import hmac
 import hashlib
 import json
+from urllib.parse import parse_qs, urlparse
 
 import httpx
 import pytest
@@ -131,6 +132,39 @@ async def test_podium_oauth_callback_saves_token_without_echoing_secret() -> Non
     assert payload["installation"]["scope"] == "read,write"
     assert b"access-abc" not in body
     assert b"refresh-secret" not in body
+
+
+@pytest.mark.asyncio
+async def test_podium_oauth_start_generates_linear_app_actor_authorize_url() -> None:
+    server = PodiumServer(
+        linear_client_id="client-1",
+        linear_client_secret="client-secret",
+        linear_redirect_uri="https://podium.example/api/v1/linear/oauth/callback",
+    )
+    await server.start(port=0)
+    try:
+        assert server.port is not None
+        status, _, body = await request(
+            server.port,
+            "GET",
+            "/api/v1/linear/oauth/start?state=workspace-1",
+        )
+    finally:
+        await server.stop()
+
+    payload = json.loads(body)
+    parsed = urlparse(payload["authorize_url"])
+    query = parse_qs(parsed.query)
+    assert status == 200
+    assert parsed.scheme == "https"
+    assert parsed.netloc == "linear.app"
+    assert parsed.path == "/oauth/authorize"
+    assert query["client_id"] == ["client-1"]
+    assert query["redirect_uri"] == ["https://podium.example/api/v1/linear/oauth/callback"]
+    assert query["response_type"] == ["code"]
+    assert query["actor"] == ["app"]
+    assert query["state"] == ["workspace-1"]
+    assert "app:assignable" in query["scope"][0].split(",")
 
 
 @pytest.mark.asyncio

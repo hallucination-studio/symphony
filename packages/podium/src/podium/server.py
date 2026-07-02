@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlencode
 
 import httpx
 
@@ -117,6 +117,8 @@ class PodiumServer:
             return 200, RawResponse.text("Podium\n", "text/plain; charset=utf-8")
         if method == "GET" and path == "/api/v1/health":
             return 200, {"status": "ok"}
+        if method == "GET" and path == "/api/v1/linear/oauth/start":
+            return self._linear_oauth_start(query)
         if method == "GET" and path == "/api/v1/linear/oauth/callback":
             return self._linear_oauth_callback(query)
         if method == "POST" and path == "/api/v1/conductors/register":
@@ -138,6 +140,23 @@ class PodiumServer:
         if method == "POST" and path == "/api/v1/linear/graphql":
             return await self._linear_graphql_proxy(raw_body, headers)
         return 404, {"error": {"code": "not_found", "message": f"Route not found: {path}"}}
+
+    def _linear_oauth_start(self, query: dict[str, str]) -> tuple[int, dict[str, Any]]:
+        if not self.linear_client_id or not self.linear_redirect_uri:
+            return 400, {"error": {"code": "linear_oauth_not_configured", "message": "Linear OAuth is not configured"}}
+        state = str(query.get("state") or "").strip()
+        if not state:
+            return 400, {"error": {"code": "missing_state", "message": "OAuth state is required"}}
+        scope = str(query.get("scope") or "read,write,app:assignable").strip()
+        params = {
+            "client_id": self.linear_client_id,
+            "redirect_uri": self.linear_redirect_uri,
+            "response_type": "code",
+            "scope": scope,
+            "state": state,
+            "actor": "app",
+        }
+        return 200, {"authorize_url": f"https://linear.app/oauth/authorize?{urlencode(params)}", "state": state}
 
     def _linear_oauth_callback(self, query: dict[str, str]) -> tuple[int, dict[str, Any]]:
         code = str(query.get("code") or "").strip()

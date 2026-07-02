@@ -161,7 +161,9 @@ async def fetch_linear_viewer(token: str) -> dict[str, Any]:
     )["viewer"]
 
 
-async def create_linear_issue(token: str, project_slug: str, run_id: str) -> dict[str, Any]:
+async def create_linear_issue(
+    token: str, project_slug: str, run_id: str, *, delegate_id: str | None = None
+) -> dict[str, Any]:
     project = (
         await linear_graphql(
             token,
@@ -206,6 +208,8 @@ async def create_linear_issue(token: str, project_slug: str, run_id: str) -> dic
                   url
                   state { name type }
                   assignee { id name }
+                  delegate { id name }
+                  agentSessions(first: 5) { nodes { id status appUser { id name } } }
                   labels { nodes { name } }
                 }
               }
@@ -222,6 +226,7 @@ async def create_linear_issue(token: str, project_slug: str, run_id: str) -> dic
                         "include this Linear issue identifier, say Podium, Conductor, and Performer reached Codex, "
                         "and run pytest tests/test_smoke.py -q."
                     ),
+                    **({"delegateId": delegate_id} if delegate_id else {}),
                 }
             },
         )
@@ -242,6 +247,8 @@ async def fetch_linear_issue(token: str, issue_id: str) -> dict[str, Any]:
                 url
                 state { name type }
                 assignee { id name }
+                delegate { id name }
+                agentSessions(first: 5) { nodes { id status appUser { id name } } }
                 labels { nodes { name } }
                 comments(first: 20) { nodes { body createdAt } }
               }
@@ -250,6 +257,28 @@ async def fetch_linear_issue(token: str, issue_id: str) -> dict[str, Any]:
             {"id": issue_id},
         )
     )["issue"]
+
+
+async def delegate_linear_issue(token: str, issue_id: str, delegate_id: str) -> dict[str, Any]:
+    return (
+        await linear_graphql(
+            token,
+            """
+            mutation DelegateIssue($issueId: String!, $delegateId: String!) {
+              issueUpdate(id: $issueId, input: { delegateId: $delegateId }) {
+                success
+                issue {
+                  id
+                  identifier
+                  delegate { id name }
+                  agentSessions(first: 5) { nodes { id status appUser { id name } } }
+                }
+              }
+            }
+            """,
+            {"issueId": issue_id, "delegateId": delegate_id},
+        )
+    )["issueUpdate"]["issue"]
 
 
 async def comment_linear_issue(token: str, issue_id: str, body: str) -> dict[str, Any]:
@@ -282,6 +311,8 @@ async def fetch_linear_issue_tree(token: str, issue_id: str) -> dict[str, Any]:
                 url
                 state { name type }
                 assignee { id name }
+                delegate { id name }
+                agentSessions(first: 5) { nodes { id status appUser { id name } } }
                 labels { nodes { name } }
                 children(first: 50) {
                   nodes {
@@ -717,15 +748,24 @@ No-op.
             evidence.check(f"conductor-api:{method} {path}", status in {200, 201}, status=status, body=body)
 
         viewer = await fetch_linear_viewer(token)
-        agent_app_user_id = os.environ.get("LINEAR_AGENT_APP_USER_ID", "").strip() or "real-e2e-agent-app-user"
+        agent_app_user_id = os.environ.get("LINEAR_AGENT_APP_USER_ID", "").strip()
+        if not agent_app_user_id and not args.simulate_agent_webhook:
+            raise RuntimeError(
+                "LINEAR_AGENT_APP_USER_ID is required for real custom-agent delegation. "
+                "Set it to the Linear app user's id, or pass --simulate-agent-webhook for the legacy simulated webhook flow."
+            )
+        agent_app_user_id = agent_app_user_id or "real-e2e-agent-app-user"
         evidence.data["linear_agent_app_user_id"] = agent_app_user_id
         evidence.check(
             "linear-agent:app-user-selected",
             bool(agent_app_user_id),
-            source="LINEAR_AGENT_APP_USER_ID" if os.environ.get("LINEAR_AGENT_APP_USER_ID", "").strip() else "e2e-default",
+            source="LINEAR_AGENT_APP_USER_ID" if os.environ.get("LINEAR_AGENT_APP_USER_ID", "").strip() else "simulated-default",
             viewer={key: viewer.get(key) for key in ["id", "name", "email"]},
         )
         linear = await create_linear_issue(token, args.project_slug, run_id)
+        if not args.simulate_agent_webhook:
+            linear["issue"] = await delegate_linear_issue(token, linear["issue"]["id"], agent_app_user_id)
+            linear["issue"] = await fetch_linear_issue(token, linear["issue"]["id"])
         issue_path = root / "business-issue.json"
         issue_path.write_text(json.dumps(linear, indent=2, sort_keys=True), encoding="utf-8")
         evidence.artifact("business_issue", issue_path)
@@ -734,6 +774,13 @@ No-op.
             ((linear["issue"].get("assignee") or {}).get("id")) != agent_app_user_id,
             expected_agent_app_user_id=agent_app_user_id,
             actual_assignee=linear["issue"].get("assignee"),
+        )
+        evidence.check(
+            "linear-agent:issue-delegated-to-custom-agent",
+            args.simulate_agent_webhook or ((linear["issue"].get("delegate") or {}).get("id") == agent_app_user_id),
+            expected_agent_app_user_id=agent_app_user_id,
+            actual_delegate=linear["issue"].get("delegate"),
+            simulated=args.simulate_agent_webhook,
         )
         payload = {
             "name": f"Matrix {run_id}",
@@ -787,18 +834,22 @@ No-op.
         status, body = http_json("GET", api_url(conductor_port, f"/api/instances/{instance_id}"))
         evidence.check("conductor-daemon:restart-recovers-instance-metadata", status == 200 and body["instance"]["id"] == instance_id, status=status, process_status=body.get("instance", {}).get("process_status"))
 
+        linear_agent_sessions = ((linear["issue"].get("agentSessions") or {}).get("nodes") or [])
+        linear_agent_session = linear_agent_sessions[0] if linear_agent_sessions else {}
         webhook_payload = {
             "type": "AgentSessionEvent",
             "action": "created",
             "workspace": {"id": workspace_id},
             "agentSession": {
-                "id": f"session-{uuid.uuid4().hex}",
+                "id": linear_agent_session.get("id") or f"session-{uuid.uuid4().hex}",
                 "appUserId": agent_app_user_id,
+                "appUser": {"id": agent_app_user_id},
                 "issue": {
                     "id": linear["issue"]["id"],
                     "identifier": linear["issue"]["identifier"],
                     "project": {"slugId": linear["project"]["slugId"]},
                     "assignee": linear["issue"].get("assignee"),
+                    "delegate": linear["issue"].get("delegate"),
                 },
             },
         }
@@ -858,9 +909,11 @@ No-op.
             )
             evidence.check(
                 "real-flow:linear-agent-app-user-dispatched",
-                bool(agent_app_user_id),
+                args.simulate_agent_webhook or ((issue.get("delegate") or {}).get("id") == agent_app_user_id),
                 expected_agent_app_user_id=agent_app_user_id,
+                actual_delegate=issue.get("delegate"),
                 actual_assignee=issue.get("assignee"),
+                simulated=args.simulate_agent_webhook,
             )
             evidence.check("real-flow:workspace-result", result_path.exists(), path=str(result_path))
             evidence.check(
@@ -991,6 +1044,11 @@ def parser() -> argparse.ArgumentParser:
     arg_parser.add_argument("--project-slug", default=DEFAULT_PROJECT_SLUG)
     arg_parser.add_argument("--acceptance-gates", action=argparse.BooleanOptionalAction, default=True)
     arg_parser.add_argument("--permission-approval-probe", action="store_true")
+    arg_parser.add_argument(
+        "--simulate-agent-webhook",
+        action="store_true",
+        help="Use a synthetic AgentSessionEvent instead of requiring the Linear issue to be delegated to the app user.",
+    )
     arg_parser.add_argument("--timeout", type=int, default=420)
     return arg_parser
 
