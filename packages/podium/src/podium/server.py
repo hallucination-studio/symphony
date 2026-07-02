@@ -210,7 +210,7 @@ class PodiumServer:
         return 200, response_payload
 
     async def _forward_linear_graphql(self, payload: dict[str, Any], access_token: str) -> dict[str, Any]:
-        headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
+        headers = {"Authorization": linear_authorization_header(access_token), "Content-Type": "application/json"}
         if callable(self.linear_graphql_transport):
             request = httpx.Request("POST", "https://api.linear.app/graphql", json=payload, headers=headers)
             response = await self.linear_graphql_transport(request)
@@ -351,6 +351,15 @@ def _normalize_agent_session_event(payload: dict[str, Any]) -> dict[str, Any]:
         "agent_session_id": str(session.get("id") or payload.get("agent_session_id") or ""),
         "raw_action": str(payload.get("action") or ""),
     }
+
+
+def linear_authorization_header(token: str) -> str:
+    token = token.strip()
+    if token.lower().startswith("bearer "):
+        return token
+    if token.startswith("lin_api_"):
+        return token
+    return f"Bearer {token}"
 
 
 def _int(value: Any, default: int) -> int:

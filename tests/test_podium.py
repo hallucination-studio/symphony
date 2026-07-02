@@ -324,6 +324,48 @@ async def test_linear_graphql_proxy_accepts_raw_proxy_token_for_performer_tracke
     assert json.loads(body) == {"data": {"viewer": {"id": "me"}}}
 
 
+@pytest.mark.asyncio
+async def test_linear_graphql_proxy_forwards_linear_api_key_without_bearer_prefix() -> None:
+    requests: list[dict[str, object]] = []
+
+    async def proxy_transport(request: httpx.Request) -> httpx.Response:
+        requests.append({"authorization": request.headers.get("Authorization")})
+        return httpx.Response(200, json={"data": {"viewer": {"id": "me"}}}, request=request)
+
+    server = PodiumServer(
+        linear_installations={
+            "workspace-1": {"access_token": "lin_api_real_key", "workspace_id": "workspace-1"}
+        },
+        linear_graphql_transport=proxy_transport,
+    )
+    await server.start(port=0)
+    try:
+        assert server.port is not None
+        await request(
+            server.port,
+            "POST",
+            "/api/v1/conductors/register",
+            {
+                "conductor_id": "cond-1",
+                "proxy_token": "proxy-secret",
+                "routing": {"workspace_id": "workspace-1", "project_slug": "ENG"},
+            },
+        )
+        status, _, body = await request(
+            server.port,
+            "POST",
+            "/api/v1/linear/graphql",
+            {"query": "query Viewer { viewer { id } }"},
+            headers={"Authorization": "proxy-secret"},
+        )
+    finally:
+        await server.stop()
+
+    assert status == 200
+    assert json.loads(body) == {"data": {"viewer": {"id": "me"}}}
+    assert requests == [{"authorization": "lin_api_real_key"}]
+
+
 def _signature(body: bytes, secret: str) -> str:
     return hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
 
