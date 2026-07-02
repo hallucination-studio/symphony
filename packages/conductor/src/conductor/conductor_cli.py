@@ -39,3 +39,7 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         return 0
     return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

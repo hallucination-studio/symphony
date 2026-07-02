@@ -43,6 +43,12 @@ def test_conductor_default_data_root_is_dot_performer() -> None:
     assert args.data_root == ".conductor"
 
 
+def test_conductor_module_exposes_main_entrypoint() -> None:
+    from conductor import conductor_cli
+
+    assert callable(conductor_cli.main)
+
+
 def test_parse_args_accepts_positional_workflow_path() -> None:
     args = parse_args(["custom/WORKFLOW.md", "--once"])
 
