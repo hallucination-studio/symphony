@@ -35,6 +35,10 @@ def create_app(
     app = FastAPI(title="Symphony Podium")
     app.state.podium = state
 
+    @app.get("/")
+    async def root() -> dict[str, str]:
+        return {"service": "Podium"}
+
     @app.get("/api/v1/health")
     async def health() -> dict[str, str]:
         return {"status": "ok"}

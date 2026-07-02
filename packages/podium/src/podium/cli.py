@@ -32,7 +32,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--linear-redirect-uri", default=None, help="Linear OAuth redirect URI")
     parser.add_argument("--linear-webhook-secret", default=None, help="Linear OAuth application webhook secret")
     parser.add_argument("--linear-installations-path", default=None, help="Path to persist Linear OAuth installations")
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.command is None:
+        args.command = "legacy-dev" if args.token or args.linear_installations_path else "api"
+    return args
 
 
 async def run_server(
