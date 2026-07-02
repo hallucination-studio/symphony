@@ -1,6 +1,7 @@
 import type {
   Bootstrap,
   EnrollmentStatus,
+  EnrollmentToken,
   LinearScope,
   OnboardingProgress,
   RepositoryMapping,
@@ -110,8 +111,8 @@ export const api = {
 
   enrollmentToken(
     workspaceId: string = DEFAULT_WORKSPACE_ID,
-  ): Promise<{ enrollment_token: string; workspace_id: string }> {
-    return request("/api/v1/onboarding/runtime/enrollment-token", {
+  ): Promise<EnrollmentToken> {
+    return request<EnrollmentToken>("/api/v1/onboarding/runtime/enrollment-token", {
       method: "POST",
       body: JSON.stringify({ workspace_id: workspaceId }),
     });

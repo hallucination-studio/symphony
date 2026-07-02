@@ -121,3 +121,11 @@ export interface EnrollmentStatus {
   online_count: number;
   enrolled: boolean;
 }
+
+export interface EnrollmentToken {
+  enrollment_token: string;
+  workspace_id: string;
+  // Backend-composed install one-liner; never hardcoded in the frontend.
+  install_command: string;
+  expires_at?: string | null;
+}

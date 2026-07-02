@@ -9,8 +9,13 @@ import { ActionPanel } from "../../components/ActionPanel";
 import { useToast } from "../../components/Toast";
 import type { StepProps } from "./types";
 
-function installCommand(token: string): string {
-  return `curl -fsSL https://get.podium.dev/install.sh | sh -s -- --enrollment-token ${token}`;
+function expiryLabel(expiresAt?: string | null): string {
+  if (!expiresAt) return "Single-use token — regenerate if it expires";
+  const when = new Date(expiresAt);
+  if (Number.isNaN(when.getTime())) {
+    return "Single-use token — regenerate if it expires";
+  }
+  return `Single-use token — expires ${when.toLocaleString()}`;
 }
 
 export function RuntimeStep({
@@ -21,7 +26,9 @@ export function RuntimeStep({
 }: StepProps) {
   const generate = useEnrollmentToken();
   const { notify } = useToast();
+  const [command, setCommand] = useState<string | null>(null);
   const [token, setToken] = useState<string | null>(null);
+  const [expiresAt, setExpiresAt] = useState<string | null>(null);
 
   // Poll enrollment status while we have a token, so the card can flip to
   // "connected" the moment a runtime checks in.
@@ -31,7 +38,9 @@ export function RuntimeStep({
   async function handleGenerate() {
     try {
       const res = await generate.mutateAsync();
+      setCommand(res.install_command);
       setToken(res.enrollment_token);
+      setExpiresAt(res.expires_at ?? null);
       notify("Enrollment token generated", "success");
     } catch {
       notify("Couldn't generate a token. Try again.", "error");
@@ -56,7 +65,7 @@ export function RuntimeStep({
       nextDisabled={!isOnline}
       hideNext={!token && !isOnline}
     >
-      {!token ? (
+      {!command || !token ? (
         <ActionPanel
           tone="info"
           title="Generate an install command"
@@ -67,9 +76,9 @@ export function RuntimeStep({
         />
       ) : (
         <InstallCommandCard
-          command={installCommand(token)}
+          command={command}
           token={token}
-          expiresLabel="Single-use token — regenerate if it expires"
+          expiresLabel={expiryLabel(expiresAt)}
           phase={phase}
           onRegenerate={handleGenerate}
           regenerating={generate.isPending}

@@ -57,6 +57,9 @@ describe("SetupPage repository step", () => {
     mockApi.enrollmentToken.mockResolvedValue({
       enrollment_token: "tok",
       workspace_id: "default",
+      install_command:
+        "curl -fsSL https://podium.example/install.sh | bash -s -- --enrollment-token tok",
+      expires_at: "2026-07-02T12:00:00Z",
     });
     mockApi.runtimeStatus.mockResolvedValue({ online_count: 0 });
   });
@@ -147,6 +150,44 @@ describe("SetupPage repository step", () => {
     expect(
       await screen.findByText(/repository mode isn't supported/i),
     ).toBeInTheDocument();
+  });
+});
+
+describe("SetupPage runtime step", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockApi.bootstrap.mockResolvedValue(
+      bootstrap("runtime_enrollment", [
+        "linear_connect",
+        "scope_selection",
+        "repository_mapping",
+      ]),
+    );
+    mockApi.runtimeStatus.mockResolvedValue({ online_count: 0 });
+    mockApi.enrollmentToken.mockResolvedValue({
+      enrollment_token: "tok",
+      workspace_id: "default",
+      install_command:
+        "curl -fsSL https://podium.example/install.sh | bash -s -- --enrollment-token tok",
+      expires_at: "2026-07-02T12:00:00Z",
+    });
+  });
+
+  it("renders the backend-provided install command, not a hardcoded host", async () => {
+    renderWithProviders(<SetupPage />, {
+      route: "/setup/runtime",
+      path: "/setup/:step",
+    });
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: /generate install command/i }),
+    );
+
+    const command = await screen.findByText(
+      "curl -fsSL https://podium.example/install.sh | bash -s -- --enrollment-token tok",
+    );
+    expect(command).toBeInTheDocument();
+    expect(command.textContent).not.toContain("get.podium.dev");
   });
 });
 

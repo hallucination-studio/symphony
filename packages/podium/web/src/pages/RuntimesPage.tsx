@@ -13,10 +13,6 @@ import { useToast } from "../components/Toast";
 import { formatDateTime, relativeTime } from "../lib/format";
 import type { RuntimeRecord } from "../api/types";
 
-function installCommand(token: string): string {
-  return `curl -fsSL https://get.podium.dev/install.sh | sh -s -- --enrollment-token ${token}`;
-}
-
 export default function RuntimesPage() {
   const { data, isLoading, error } = useRuntimes();
   const runtimes = data?.runtimes ?? [];
@@ -96,6 +92,7 @@ function RuntimeDrawer({
 }) {
   const generate = useEnrollmentToken();
   const { notify } = useToast();
+  const [command, setCommand] = useState<string | null>(null);
   const [token, setToken] = useState<string | null>(null);
 
   const hostname =
@@ -106,6 +103,7 @@ function RuntimeDrawer({
   async function regenerate() {
     try {
       const res = await generate.mutateAsync();
+      setCommand(res.install_command);
       setToken(res.enrollment_token);
       notify("New install command ready", "success");
     } catch {
@@ -137,9 +135,9 @@ function RuntimeDrawer({
       {!runtime.online ? (
         <div style={{ marginTop: "var(--space-5)" }}>
           <div className="scope-section-title">Reconnect this runtime</div>
-          {token ? (
+          {command && token ? (
             <InstallCommandCard
-              command={installCommand(token)}
+              command={command}
               token={token}
               expiresLabel="Single-use token"
               phase={phase}
