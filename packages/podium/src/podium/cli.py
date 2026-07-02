@@ -3,8 +3,11 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
+from pathlib import Path
 
 from .server import PodiumServer
+
+_PACKAGED_STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -38,6 +41,7 @@ async def run_server(
         linear_redirect_uri=linear_redirect_uri or os.environ.get("LINEAR_REDIRECT_URI"),
         linear_webhook_secret=linear_webhook_secret or os.environ.get("LINEAR_WEBHOOK_SECRET"),
         linear_installations_path=linear_installations_path or os.environ.get("PODIUM_LINEAR_INSTALLATIONS_PATH"),
+        static_dir=_PACKAGED_STATIC_DIR if _PACKAGED_STATIC_DIR.is_dir() else None,
     )
     await server.start(host=host, port=port)
     try:

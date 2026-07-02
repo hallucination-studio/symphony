@@ -17,6 +17,7 @@ from podium.linear_service import LinearService
 from podium.onboarding_service import OnboardingService
 from podium.routes import RawResponse, Router
 from podium.runtime_service import RuntimeService
+from podium.static_files import StaticFiles
 from podium.store import PodiumStore
 
 
@@ -56,6 +57,7 @@ class PodiumServer:
         linear_graphql_transport: Callable[[httpx.Request], Awaitable[httpx.Response]] | httpx.AsyncBaseTransport | None = None,
         dispatch_callback: Callable[[dict[str, Any], ConductorRegistrationRequest], Awaitable[None]] | None = None,
         data_dir: str | Path | None = None,
+        static_dir: str | Path | None = None,
     ):
         self.token = token or ""
         self.linear_service = LinearService(
@@ -74,6 +76,7 @@ class PodiumServer:
             linear_connected=lambda workspace_id: self.linear_service.get_installation(workspace_id) is not None,
         )
         self.runtime_service = RuntimeService(self.store)
+        self.static_files = StaticFiles(static_dir) if static_dir is not None else None
         self.router = Router(self)
         self.dispatch_callback = dispatch_callback or self._default_dispatch
         self.conductors: dict[str, ConductorRegistrationRequest] = {}

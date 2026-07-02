@@ -64,10 +64,13 @@ class Router:
         server = self.server
 
         # ===== Static / health =====
-        if method == "GET" and path == "/":
-            return 200, RawResponse.text("Podium\n", "text/plain; charset=utf-8")
         if method == "GET" and path == "/api/v1/health":
             return 200, {"status": "ok"}
+        if method == "GET" and path == "/":
+            static = self._serve_static(path)
+            if static is not None:
+                return static
+            return 200, RawResponse.text("Podium\n", "text/plain; charset=utf-8")
 
         # ===== Legacy Linear OAuth callback =====
         if method == "GET" and path == "/api/v1/linear/oauth/callback":
@@ -123,7 +126,19 @@ class Router:
             run_id = path[len("/api/v1/runs/"):]
             return self._run_detail(run_id)
 
+        # ===== Static assets / SPA fallback (non-API GET only) =====
+        if method == "GET" and not path.startswith("/api/"):
+            static = self._serve_static(path)
+            if static is not None:
+                return static
+
         return 404, _error("not_found", f"Route not found: {path}")
+
+    def _serve_static(self, path: str) -> tuple[int, RawResponse] | None:
+        static_files = getattr(self.server, "static_files", None)
+        if static_files is None:
+            return None
+        return static_files.serve(path)
 
     # ===== BFF handlers =====
 
