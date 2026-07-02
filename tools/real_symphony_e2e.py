@@ -573,8 +573,10 @@ No-op.
             stdout_path=root / "podium.log",
         )
         processes.append(podium)
-        for path in ["/", "/api/v1/health"]:
-            status, body = await wait_for_http_ready(api_url(podium_port, path))
+        status, body = await wait_for_http_ready(api_url(podium_port, "/"))
+        evidence.check("podium-api:/", status == 200, status=status, body=body)
+        for path in ["/api/v1/health"]:
+            status, body = http_json("GET", api_url(podium_port, path))
             evidence.check(f"podium-api:{path}", status == 200, status=status, body=body)
         status, body = http_json("POST", api_url(podium_port, "/api/v1/conductors/register"), {"conductor_id": "matrix-probe"})
         evidence.check("podium-api:/api/v1/conductors/register", status == 200, status=status, body=body)

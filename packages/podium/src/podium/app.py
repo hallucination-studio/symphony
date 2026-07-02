@@ -130,6 +130,16 @@ def create_app(
         }
         return {"enrollment_token": token, "runtime_group_id": runtime_group_id}
 
+    @app.post("/api/v1/conductors/register")
+    async def legacy_conductor_register(request: Request) -> dict[str, Any]:
+        payload = await request.json()
+        conductor_id = str(payload.get("conductor_id") or "")
+        return {
+            "status": "accepted",
+            "message": "accepted",
+            "conductor_id": conductor_id,
+        }
+
     @app.post("/api/v1/runtime/enroll")
     async def enroll_runtime(request: Request) -> JSONResponse:
         payload = await request.json()
