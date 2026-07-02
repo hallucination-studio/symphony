@@ -121,18 +121,32 @@ async def test_full_onboarding_flow_reaches_complete(tmp_path) -> None:
         assert repo_payload["repository"]["validation_state"] == "valid"
         assert repo_payload["onboarding"]["current_step"] == "runtime_enrollment"
 
-        # 5. Generate enrollment token
+        # 5. Generate enrollment token (backend also composes the install command)
         status, body = await request(
             port, "POST", "/api/v1/onboarding/runtime/enrollment-token",
             {"workspace_id": ws},
         )
         assert status == 200
-        assert json.loads(body)["enrollment_token"]
+        token_payload = json.loads(body)
+        token = token_payload["enrollment_token"]
+        assert token
+        assert "--enrollment-token" in token_payload["install_command"]
 
-        # 6. The enrolled runtime comes online (external heartbeat, not an
-        #    onboarding HTTP call). This alone must drive runtime_enrollment
-        #    complete via derived-step reconciliation.
-        server.runtime_service.record_heartbeat("rt-1")
+        # 6. A real runtime (Conductor) enrolls purely over HTTP using the
+        #    one-time token, then heartbeats. No in-process service calls: this
+        #    alone must drive runtime_enrollment complete via derived-step
+        #    reconciliation.
+        status, body = await request(
+            port, "POST", "/api/v1/runtimes/enroll",
+            {"enrollment_token": token, "hostname": "runtime-host", "version": "1.0.0"},
+        )
+        assert status == 200
+        runtime_id = json.loads(body)["runtime_id"]
+
+        status, body = await request(
+            port, "POST", f"/api/v1/runtimes/{runtime_id}/heartbeat", {"status": "online"}
+        )
+        assert status == 200
 
         status, body = await request(port, "GET", f"/api/v1/onboarding/runtime/status?workspace_id={ws}")
         assert status == 200

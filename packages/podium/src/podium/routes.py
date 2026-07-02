@@ -113,6 +113,11 @@ class Router:
             return self._onboarding_smoke_result(query)
 
         # ===== BFF: runtimes =====
+        if method == "POST" and path == "/api/v1/runtimes/enroll":
+            return self._runtime_enroll(raw_body)
+        if method == "POST" and path.startswith("/api/v1/runtimes/") and path.endswith("/heartbeat"):
+            runtime_id = path[len("/api/v1/runtimes/"):-len("/heartbeat")]
+            return self._runtime_heartbeat(runtime_id, raw_body)
         if method == "GET" and path == "/api/v1/runtimes":
             return self._list_runtimes()
         if method == "GET" and path.startswith("/api/v1/runtimes/"):
@@ -216,8 +221,14 @@ class Router:
         if error:
             return error
         workspace_id = str(payload.get("workspace_id") or "default")
-        token = self.server.runtime_service.generate_enrollment_token(workspace_id)
-        return 200, {"enrollment_token": token, "workspace_id": workspace_id}
+        server = self.server
+        token = server.runtime_service.generate_enrollment_token(workspace_id)
+        return 200, {
+            "enrollment_token": token,
+            "workspace_id": workspace_id,
+            "install_command": server.build_install_command(token),
+            "expires_at": server.runtime_service.enrollment_token_expires_at(token),
+        }
 
     def _onboarding_runtime_status(self, query: dict[str, str]) -> tuple[int, dict[str, Any]]:
         workspace_id = str(query.get("workspace_id") or "default")
@@ -241,6 +252,45 @@ class Router:
     def _list_runtimes(self) -> tuple[int, dict[str, Any]]:
         runtimes = self.server.runtime_service.list_runtimes()
         return 200, {"runtimes": [r.to_dict() for r in runtimes]}
+
+    def _runtime_enroll(self, raw_body: bytes) -> tuple[int, dict[str, Any]]:
+        """
+        POST /api/v1/runtimes/enroll — a real runtime (Conductor) enrolls with a
+        one-time enrollment token, coming online. Closes the onboarding loop.
+        """
+        payload, error = _parse_json(raw_body)
+        if error:
+            return error
+        token = str(payload.get("enrollment_token") or "").strip()
+        if not token:
+            return 400, _error("invalid_enrollment_token", "enrollment_token is required")
+        metadata = payload.get("metadata")
+        record = self.server.runtime_service.enroll_runtime(
+            token,
+            hostname=str(payload["hostname"]) if payload.get("hostname") else None,
+            version=str(payload["version"]) if payload.get("version") else None,
+            metadata=metadata if isinstance(metadata, dict) else None,
+        )
+        if record is None:
+            return 400, _error(
+                "invalid_enrollment_token",
+                "Enrollment token is invalid, expired, or already used. Generate a new one in the runtime setup step.",
+            )
+        return 200, record.to_dict()
+
+    def _runtime_heartbeat(self, runtime_id: str, raw_body: bytes) -> tuple[int, dict[str, Any]]:
+        """POST /api/v1/runtimes/:id/heartbeat — keep an enrolled runtime online."""
+        payload, error = _parse_json(raw_body)
+        if error:
+            return error
+        record = self.server.runtime_service.heartbeat(
+            runtime_id,
+            version=str(payload["version"]) if payload.get("version") else None,
+            status=str(payload["status"]) if payload.get("status") else None,
+        )
+        if record is None:
+            return 404, _error("not_found", f"Runtime not found: {runtime_id}")
+        return 200, record.to_dict()
 
     def _runtime_detail(self, runtime_id: str) -> tuple[int, dict[str, Any]]:
         record = self.server.runtime_service.get_runtime(runtime_id)

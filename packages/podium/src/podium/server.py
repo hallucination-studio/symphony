@@ -58,8 +58,13 @@ class PodiumServer:
         dispatch_callback: Callable[[dict[str, Any], ConductorRegistrationRequest], Awaitable[None]] | None = None,
         data_dir: str | Path | None = None,
         static_dir: str | Path | None = None,
+        podium_base_url: str | None = None,
     ):
         self.token = token or ""
+        # Base URL the runtime installer is served from. Backend-owned so the
+        # install command is never hardcoded in the frontend. Defaults to a
+        # clearly-placeholder host; deployments should set this explicitly.
+        self.podium_base_url = (podium_base_url or "https://podium.example").rstrip("/")
         self.linear_service = LinearService(
             client_id=linear_client_id or "",
             client_secret=linear_client_secret or "",
@@ -73,7 +78,7 @@ class PodiumServer:
         self.store = PodiumStore(data_dir=data_dir)
         self.onboarding_service = OnboardingService(
             self.store,
-            linear_connected=lambda workspace_id: self.linear_service.get_installation(workspace_id) is not None,
+            linear_connected=self._linear_connected,
         )
         self.runtime_service = RuntimeService(self.store)
         self.static_files = StaticFiles(static_dir) if static_dir is not None else None
@@ -87,6 +92,32 @@ class PodiumServer:
     @property
     def linear_installations(self) -> dict[str, dict[str, Any]]:
         return self.linear_service.installations
+
+    def _linear_connected(self, workspace_id: str) -> bool:
+        """
+        True only when Linear is healthily connected for the workspace.
+
+        An EXPIRED (or ERROR) installation is treated as NOT connected so the
+        onboarding predicate agrees with the Integrations page, which asks the
+        user to reconnect in those states. LinearService installations remain
+        the single source of truth.
+        """
+        from podium.models import ConnectionState
+
+        status = self.linear_service.connection_status(workspace_id)
+        return status is not None and status.state == ConnectionState.CONNECTED
+
+    def build_install_command(self, enrollment_token: str) -> str:
+        """
+        Compose the runtime install one-liner from the enrollment token.
+
+        Shape matches docs/product/runtime-installer-and-updates.md and is built
+        server-side from the configurable base URL — never hardcoded in the UI.
+        """
+        return (
+            f"curl -fsSL {self.podium_base_url}/install.sh | bash -s -- "
+            f"--enrollment-token {enrollment_token}"
+        )
 
     async def start(self, *, host: str = "127.0.0.1", port: int = 0) -> None:
         self._server = await asyncio.start_server(self._handle_connection, host, port)

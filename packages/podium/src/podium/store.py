@@ -139,6 +139,29 @@ class PodiumStore:
             data["last_heartbeat"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
             self._save_json("runtime_records.json", self._runtime_records)
 
+    def record_runtime_heartbeat(
+        self,
+        runtime_id: str,
+        *,
+        version: str | None = None,
+        online: bool = True,
+    ) -> RuntimeRecord | None:
+        """
+        Update an existing runtime's heartbeat, online flag, and optional version.
+
+        Returns the updated record, or None if the runtime does not exist. Unlike
+        update_runtime_heartbeat, this never auto-creates a record.
+        """
+        data = self._runtime_records.get(runtime_id)
+        if data is None:
+            return None
+        data["online"] = online
+        data["last_heartbeat"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        if version:
+            data["version"] = version
+        self._save_json("runtime_records.json", self._runtime_records)
+        return RuntimeRecord.from_dict(data)
+
     # ===== Onboarding Progress =====
 
     def get_onboarding_progress(self, workspace_id: str) -> OnboardingProgress | None:

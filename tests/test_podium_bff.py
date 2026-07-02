@@ -267,6 +267,173 @@ async def test_onboarding_runtime_enrollment_token_generated() -> None:
 
 
 @pytest.mark.asyncio
+async def test_onboarding_enrollment_token_returns_install_command() -> None:
+    server = PodiumServer(
+        linear_installations={"workspace-1": {"workspace_id": "workspace-1", "access_token": "t"}},
+        podium_base_url="https://podium.test",
+    )
+    await server.start(port=0)
+    try:
+        status, _, body = await request(
+            server.port,
+            "POST",
+            "/api/v1/onboarding/runtime/enrollment-token",
+            {"workspace_id": "workspace-1"},
+        )
+    finally:
+        await server.stop()
+
+    assert status == 200
+    payload = json.loads(body)
+    token = payload["enrollment_token"]
+    assert payload["install_command"] == (
+        f"curl -fsSL https://podium.test/install.sh | bash -s -- --enrollment-token {token}"
+    )
+    assert payload["expires_at"]
+    # No hardcoded frontend host leaks into the backend-composed command.
+    assert "get.podium.dev" not in payload["install_command"]
+
+
+# ===== Runtime enrollment over HTTP (closes the onboarding loop) =====
+
+
+@pytest.mark.asyncio
+async def test_runtime_enroll_over_http_brings_runtime_online() -> None:
+    server = _server()
+    await server.start(port=0)
+    try:
+        _, _, token_body = await request(
+            server.port,
+            "POST",
+            "/api/v1/onboarding/runtime/enrollment-token",
+            {"workspace_id": "workspace-1"},
+        )
+        token = json.loads(token_body)["enrollment_token"]
+
+        status, _, body = await request(
+            server.port,
+            "POST",
+            "/api/v1/runtimes/enroll",
+            {"enrollment_token": token, "hostname": "host-1", "version": "1.2.3"},
+        )
+        assert status == 200
+        enrolled = json.loads(body)
+        runtime_id = enrolled["runtime_id"]
+        assert runtime_id
+        assert enrolled["online"] is True
+
+        # The workspace now reports an online runtime purely over HTTP.
+        status, _, status_body = await request(
+            server.port,
+            "GET",
+            "/api/v1/onboarding/runtime/status?workspace_id=workspace-1",
+        )
+        assert json.loads(status_body)["online_count"] == 1
+
+        # The enrolled runtime is visible in the listing.
+        _, _, list_body = await request(server.port, "GET", "/api/v1/runtimes")
+        assert any(r["runtime_id"] == runtime_id and r["online"] for r in json.loads(list_body)["runtimes"])
+    finally:
+        await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_runtime_enroll_rejects_unknown_token() -> None:
+    server = _server()
+    await server.start(port=0)
+    try:
+        status, _, body = await request(
+            server.port,
+            "POST",
+            "/api/v1/runtimes/enroll",
+            {"enrollment_token": "never-issued"},
+        )
+    finally:
+        await server.stop()
+
+    assert status == 400
+    assert json.loads(body)["error"]["code"] == "invalid_enrollment_token"
+
+
+@pytest.mark.asyncio
+async def test_runtime_enroll_token_is_single_use() -> None:
+    server = _server()
+    await server.start(port=0)
+    try:
+        _, _, token_body = await request(
+            server.port,
+            "POST",
+            "/api/v1/onboarding/runtime/enrollment-token",
+            {"workspace_id": "workspace-1"},
+        )
+        token = json.loads(token_body)["enrollment_token"]
+        first, _, _ = await request(
+            server.port, "POST", "/api/v1/runtimes/enroll", {"enrollment_token": token}
+        )
+        second, _, body = await request(
+            server.port, "POST", "/api/v1/runtimes/enroll", {"enrollment_token": token}
+        )
+    finally:
+        await server.stop()
+
+    assert first == 200
+    assert second == 400
+    assert json.loads(body)["error"]["code"] == "invalid_enrollment_token"
+
+
+@pytest.mark.asyncio
+async def test_runtime_heartbeat_updates_timestamp_and_keeps_online() -> None:
+    server = _server()
+    await server.start(port=0)
+    try:
+        _, _, token_body = await request(
+            server.port,
+            "POST",
+            "/api/v1/onboarding/runtime/enrollment-token",
+            {"workspace_id": "workspace-1"},
+        )
+        token = json.loads(token_body)["enrollment_token"]
+        _, _, enroll_body = await request(
+            server.port, "POST", "/api/v1/runtimes/enroll", {"enrollment_token": token}
+        )
+        runtime_id = json.loads(enroll_body)["runtime_id"]
+
+        status, _, body = await request(
+            server.port,
+            "POST",
+            f"/api/v1/runtimes/{runtime_id}/heartbeat",
+            {"version": "2.0.0", "status": "online"},
+        )
+    finally:
+        await server.stop()
+
+    assert status == 200
+    payload = json.loads(body)
+    assert payload["runtime_id"] == runtime_id
+    assert payload["online"] is True
+    assert payload["last_heartbeat"] is not None
+    assert payload["version"] == "2.0.0"
+
+
+@pytest.mark.asyncio
+async def test_runtime_heartbeat_unknown_runtime_returns_404() -> None:
+    server = _server()
+    await server.start(port=0)
+    try:
+        status, _, body = await request(
+            server.port,
+            "POST",
+            "/api/v1/runtimes/does-not-exist/heartbeat",
+            {},
+        )
+    finally:
+        await server.stop()
+
+    assert status == 404
+    assert json.loads(body)["error"]["code"] == "not_found"
+
+
+@pytest.mark.asyncio
 async def test_onboarding_runtime_status_reports_enrollment() -> None:
     server = _server()
     await server.start(port=0)

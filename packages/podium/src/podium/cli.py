@@ -20,6 +20,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--linear-redirect-uri", default=None, help="Linear OAuth redirect URI")
     parser.add_argument("--linear-webhook-secret", default=None, help="Linear OAuth application webhook secret")
     parser.add_argument("--linear-installations-path", default=None, help="Path to persist Linear OAuth installations")
+    parser.add_argument("--podium-base-url", default=None, help="Public base URL Podium serves the runtime installer from (used to compose the install command)")
     return parser.parse_args(argv)
 
 
@@ -33,6 +34,7 @@ async def run_server(
     linear_redirect_uri: str | None = None,
     linear_webhook_secret: str | None = None,
     linear_installations_path: str | None = None,
+    podium_base_url: str | None = None,
 ) -> None:
     server = PodiumServer(
         token=token or os.environ.get("PODIUM_TOKEN"),
@@ -41,6 +43,7 @@ async def run_server(
         linear_redirect_uri=linear_redirect_uri or os.environ.get("LINEAR_REDIRECT_URI"),
         linear_webhook_secret=linear_webhook_secret or os.environ.get("LINEAR_WEBHOOK_SECRET"),
         linear_installations_path=linear_installations_path or os.environ.get("PODIUM_LINEAR_INSTALLATIONS_PATH"),
+        podium_base_url=podium_base_url or os.environ.get("PODIUM_BASE_URL"),
         static_dir=_PACKAGED_STATIC_DIR if _PACKAGED_STATIC_DIR.is_dir() else None,
     )
     await server.start(host=host, port=port)
@@ -64,6 +67,7 @@ def main(argv: list[str] | None = None) -> int:
                 linear_redirect_uri=args.linear_redirect_uri,
                 linear_webhook_secret=args.linear_webhook_secret,
                 linear_installations_path=args.linear_installations_path,
+                podium_base_url=args.podium_base_url,
             )
         )
     except KeyboardInterrupt:
