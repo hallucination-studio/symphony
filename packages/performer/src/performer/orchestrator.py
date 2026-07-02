@@ -440,12 +440,8 @@ class Orchestrator:
                 return "acceptance_preflight_required"
         if self.config.tracker.kind == "linear" and issue.project_slug != self.config.tracker.project_slug:
             return "project_mismatch"
-        if not self._matches_assignee(issue):
-            return "assignee_mismatch"
         if not self._matches_required_delegate(issue):
             return "delegate_mismatch"
-        if issue.has_required_labels(self.config.tracker.required_labels) is False:
-            return "missing_required_labels"
         if issue.state_key() == "todo" and issue.has_non_terminal_blocker(self.config.tracker.terminal_states):
             return "blocked_by_non_terminal_dependency"
         if self.available_slots() <= 0:
@@ -471,8 +467,6 @@ class Orchestrator:
                 return "acceptance_preflight_required"
         if self.config.tracker.kind == "linear" and issue.project_slug != self.config.tracker.project_slug:
             return "project_mismatch"
-        if not self._matches_assignee(issue):
-            return "assignee_mismatch"
         if not self._matches_required_delegate(issue):
             return "delegate_mismatch"
         if issue.state_key() == "todo" and issue.has_non_terminal_blocker(self.config.tracker.terminal_states):
@@ -535,12 +529,8 @@ class Orchestrator:
             return "already_running_or_claimed"
         if self.config.tracker.kind == "linear" and issue.project_slug != self.config.tracker.project_slug:
             return "project_mismatch"
-        if not self._matches_assignee(issue):
-            return "assignee_mismatch"
         if not self._matches_required_delegate(issue):
             return "delegate_mismatch"
-        if issue.has_required_labels(self.config.tracker.required_labels) is False:
-            return "missing_required_labels"
         if self.available_slots() <= 0:
             return "no_available_slots"
         return None
@@ -1672,12 +1662,6 @@ class Orchestrator:
         terminal = {normalize_state_key(state) for state in self.config.tracker.terminal_states}
         return issue.state_key() in terminal
 
-    def _matches_assignee(self, issue: Issue) -> bool:
-        configured = self.config.tracker.assignee_id
-        if not configured:
-            return True
-        return issue.assignee_id == configured
-
     def _matches_required_delegate(self, issue: Issue) -> bool:
         configured = self.config.tracker.required_delegate_id
         if not configured:
@@ -1689,11 +1673,7 @@ class Orchestrator:
             return False
         if self.config.tracker.kind == "linear" and issue.project_slug != self.config.tracker.project_slug:
             return False
-        if not self._matches_assignee(issue):
-            return False
         if not self._matches_required_delegate(issue):
-            return False
-        if not issue.has_required_labels(self.config.tracker.required_labels):
             return False
         if issue.state_key() == "todo" and issue.has_non_terminal_blocker(self.config.tracker.terminal_states):
             return False

@@ -24,19 +24,36 @@ class ConductorApiServer:
     def __init__(self, service: ConductorService):
         self.service = service
         self._server: asyncio.AbstractServer | None = None
+        self._podium_poll_task: asyncio.Task[None] | None = None
         self.port: int | None = None
 
     async def start(self, *, host: str = "127.0.0.1", port: int = 0) -> None:
         self._server = await asyncio.start_server(self._handle_connection, host, port)
         socket = self._server.sockets[0]
         self.port = int(socket.getsockname()[1])
+        self._podium_poll_task = asyncio.create_task(self._poll_podium_dispatches())
 
     async def stop(self) -> None:
+        if self._podium_poll_task is not None:
+            self._podium_poll_task.cancel()
+            try:
+                await self._podium_poll_task
+            except asyncio.CancelledError:
+                pass
+            self._podium_poll_task = None
         if self._server is None:
             return
         self._server.close()
         await self._server.wait_closed()
         self._server = None
+
+    async def _poll_podium_dispatches(self) -> None:
+        while True:
+            try:
+                await self.service.poll_podium_dispatch_once()
+            except Exception:
+                pass
+            await asyncio.sleep(1)
 
     async def _handle_connection(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
@@ -125,12 +142,6 @@ class ConductorApiServer:
             if method == "PATCH" and path == "/api/settings":
                 settings = self.service.update_settings_json(body)
                 return 200, {"settings": settings.to_public_dict()}
-            if method == "POST" and path == "/api/podium/register":
-                return 200, {"registration": self.service.register_with_podium()}
-            if method == "POST" and path == "/api/podium/dispatch":
-                if not self._authorized_dispatch(headers or {}):
-                    return 401, {"error": {"code": "unauthorized", "message": "Unauthorized"}}
-                return 200, {"dispatch": await self.service.dispatch_podium_event(body)}
             if method == "POST" and path == "/api/instances/preview-workflow":
                 instance, validation = self.service.preview_instance(InstanceCreateRequest(**body))
                 return 200, {
@@ -156,12 +167,6 @@ class ConductorApiServer:
                 "error": {"code": exc.code, "message": str(exc), "diagnostics": exc.diagnostics}
             }
         return 404, {"error": {"code": "not_found", "message": f"Route not found: {path}"}}
-
-    def _authorized_dispatch(self, headers: dict[str, str]) -> bool:
-        token = self.service.settings().podium_dispatch_token.strip()
-        if not token:
-            return False
-        return headers.get("authorization") == f"Bearer {token}"
 
     async def _route_instance(
         self, method: str, path: str, body: dict[str, Any], query: dict[str, str] | None = None

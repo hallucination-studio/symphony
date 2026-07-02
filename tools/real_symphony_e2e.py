@@ -631,8 +631,6 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
     run_id = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S") + "-" + uuid.uuid4().hex[:6]
     run_id = f"symphony-e2e-matrix-{run_id}"
     workspace_id = f"real-workspace-{run_id}"
-    dispatch_token = f"dispatch-{uuid.uuid4().hex}"
-    proxy_token = f"proxy-{uuid.uuid4().hex}"
     webhook_secret = f"webhook-{uuid.uuid4().hex}"
     evidence.data["run_id"] = run_id
     evidence.write()
@@ -645,57 +643,24 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
         run_cmd(name, command, evidence, env=env)
 
     fixture = make_fixture_repo(root / "fixture-repo")
-    performer_once_workflow = root / "performer-once-WORKFLOW.md"
-    performer_once_workflow.write_text(
-        f"""---
-tracker:
-  kind: linear
-  project_slug: {args.project_slug}
-  api_key: $LINEAR_API_KEY
-  required_labels:
-    - never-{run_id}
-codex:
-  command: codex app-server
----
-No-op.
-""",
-        encoding="utf-8",
-    )
-    run_cmd("performer-once-startup-validation", [str(bin_dir / "performer"), str(performer_once_workflow), "--once"], evidence, env=env)
 
     podium_port = allocate_port()
     conductor_port = allocate_port()
     data_root = root / "conductor-data"
-    linear_installations_path = root / "podium-linear-installations.json"
-    linear_installations_path.write_text(
-        json.dumps(
-            {
-                workspace_id: {
-                    "access_token": token,
-                    "scope": "read,write",
-                "app_user_id": os.environ.get("LINEAR_AGENT_APP_USER_ID", "").strip() or "real-e2e-agent-app-user",
-                }
-            },
-            indent=2,
-            sort_keys=True,
-        ),
-        encoding="utf-8",
-    )
     podium_env = dict(env)
     podium_env["LINEAR_WEBHOOK_SECRET"] = webhook_secret
+    podium_env["PODIUM_LINEAR_ACCESS_TOKEN"] = token
     processes: list[ManagedProcess] = []
     try:
         podium = start_process(
             "podium",
             [
                 str(bin_dir / "podium"),
-                "legacy-dev",
+                "api",
+                "--host",
+                "127.0.0.1",
                 "--port",
                 str(podium_port),
-                "--linear-installations-path",
-                str(linear_installations_path),
-                "--linear-webhook-secret",
-                webhook_secret,
             ],
             env=podium_env,
             stdout_path=root / "podium.log",
@@ -706,6 +671,48 @@ No-op.
         for path in ["/api/v1/health"]:
             status, body = http_json("GET", api_url(podium_port, path))
             evidence.check(f"podium-api:{path}", status == 200, status=status, body=body)
+
+        viewer = await fetch_linear_viewer(token)
+        agent_app_user_id = os.environ.get("LINEAR_AGENT_APP_USER_ID", "").strip()
+        if not agent_app_user_id and not args.simulate_agent_webhook:
+            raise RuntimeError(
+                "LINEAR_AGENT_APP_USER_ID is required for real custom-agent delegation. "
+                "Set it to the Linear app user's id."
+            )
+        agent_app_user_id = agent_app_user_id or "real-e2e-agent-app-user"
+        evidence.data["linear_agent_app_user_id"] = agent_app_user_id
+        evidence.check(
+            "linear-agent:app-user-selected",
+            bool(agent_app_user_id),
+            source="LINEAR_AGENT_APP_USER_ID" if os.environ.get("LINEAR_AGENT_APP_USER_ID", "").strip() else "simulated-default",
+            viewer={key: viewer.get(key) for key in ["id", "name", "email"]},
+        )
+        status, enrollment_body = http_json(
+            "POST",
+            api_url(podium_port, "/api/v1/runtime/enrollment-tokens"),
+            {
+                "runtime_group_id": f"group-{run_id}",
+                "linear_workspace_id": workspace_id,
+                "project_slug": args.project_slug,
+                "linear_agent_app_user_id": agent_app_user_id,
+                "workflow_profile": "gated-task" if args.acceptance_gates else "task",
+            },
+        )
+        evidence.check("podium-api:/api/v1/runtime/enrollment-tokens", status == 200, status=status, body=enrollment_body)
+        status, enrolled_runtime = http_json(
+            "POST",
+            api_url(podium_port, "/api/v1/runtime/enroll"),
+            {"enrollment_token": enrollment_body.get("enrollment_token") if isinstance(enrollment_body, dict) else ""},
+        )
+        evidence.check(
+            "podium-api:/api/v1/runtime/enroll",
+            status == 200
+            and bool(enrolled_runtime.get("runtime_id"))
+            and bool(enrolled_runtime.get("runtime_token"))
+            and bool(enrolled_runtime.get("proxy_token")),
+            status=status,
+            body={key: bool(enrolled_runtime.get(key)) for key in ["runtime_id", "runtime_token", "proxy_token"]},
+        )
 
         conductor = start_process(
             "conductor",
@@ -721,9 +728,11 @@ No-op.
             api_url(conductor_port, "/api/settings"),
             {
                 "podium_url": f"http://127.0.0.1:{podium_port}",
-                "podium_callback_url": api_url(conductor_port, "/api/podium/dispatch"),
-                "podium_dispatch_token": dispatch_token,
-                "podium_proxy_token": proxy_token,
+                "podium_runtime_id": enrolled_runtime["runtime_id"],
+                "podium_runtime_token": enrolled_runtime["runtime_token"],
+                "podium_proxy_token": enrolled_runtime["proxy_token"],
+                "podium_ws_url": enrolled_runtime["websocket_url"],
+                "runtime_group_id": enrolled_runtime["runtime_group_id"],
                 "managed_mode": True,
             },
         )
@@ -731,24 +740,12 @@ No-op.
             "conductor-api:/api/settings PATCH",
             status == 200
             and body["settings"]["linear_application_connected"]
-            and body["settings"]["podium_dispatch_token_configured"]
+            and body["settings"]["podium_runtime_token_configured"]
             and body["settings"]["podium_proxy_token_configured"]
             and body["settings"]["managed_mode"],
             status=status,
             body=body["settings"],
         )
-        status, body = http_json(
-            "POST",
-            api_url(podium_port, "/api/v1/conductors/register"),
-            {
-                "conductor_id": f"matrix-{run_id}",
-                "callback_url": api_url(conductor_port, "/api/podium/dispatch"),
-                "dispatch_token": dispatch_token,
-                "proxy_token": proxy_token,
-                "routing": {"workspace_id": workspace_id},
-            },
-        )
-        evidence.check("podium-api:/api/v1/conductors/register managed-callback", status == 200, status=status, body=body)
         for method, path, payload in [
             ("GET", "/api/settings", None),
             ("GET", "/api/dashboard", None),
@@ -763,21 +760,6 @@ No-op.
             status, body = http_json(method, api_url(conductor_port, path), payload)
             evidence.check(f"conductor-api:{method} {path}", status in {200, 201}, status=status, body=body)
 
-        viewer = await fetch_linear_viewer(token)
-        agent_app_user_id = os.environ.get("LINEAR_AGENT_APP_USER_ID", "").strip()
-        if not agent_app_user_id and not args.simulate_agent_webhook:
-            raise RuntimeError(
-                "LINEAR_AGENT_APP_USER_ID is required for real custom-agent delegation. "
-                "Set it to the Linear app user's id, or pass --simulate-agent-webhook for the legacy simulated webhook flow."
-            )
-        agent_app_user_id = agent_app_user_id or "real-e2e-agent-app-user"
-        evidence.data["linear_agent_app_user_id"] = agent_app_user_id
-        evidence.check(
-            "linear-agent:app-user-selected",
-            bool(agent_app_user_id),
-            source="LINEAR_AGENT_APP_USER_ID" if os.environ.get("LINEAR_AGENT_APP_USER_ID", "").strip() else "simulated-default",
-            viewer={key: viewer.get(key) for key in ["id", "name", "email"]},
-        )
         linear = await create_linear_issue(token, args.project_slug, run_id)
         if not args.simulate_agent_webhook:
             linear["issue"] = await delegate_linear_issue(token, linear["issue"]["id"], agent_app_user_id)
@@ -877,19 +859,32 @@ No-op.
             headers={"Linear-Signature": linear_webhook_signature(webhook_secret, raw_webhook)},
         )
         evidence.check(
-            "podium-api:/api/v1/linear/webhooks/agent-session dispatches-conductor",
-            status == 200 and body.get("dispatched") == 1,
+            "podium-api:/api/v1/linear/webhooks/agent-session queues-dispatch",
+            status == 200 and body.get("queued") == 1,
             status=status,
             body=body,
         )
-        status, body = http_json("GET", api_url(conductor_port, f"/api/instances/{instance_id}"))
+        dispatch_instance_status = 0
+        dispatch_instance_body: dict[str, Any] = {}
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            dispatch_instance_status, dispatch_instance_body = http_json(
+                "GET", api_url(conductor_port, f"/api/instances/{instance_id}")
+            )
+            process_status = dispatch_instance_body.get("instance", {}).get("process_status")
+            if dispatch_instance_status == 200 and process_status in {"running", "exited"}:
+                break
+            await asyncio.sleep(0.5)
         evidence.check(
             "conductor-dispatch:agent-session-starts-one-shot",
-            status == 200 and body.get("instance", {}).get("process_status") == "running",
-            status=status,
-            process_status=body.get("instance", {}).get("process_status") if isinstance(body, dict) else None,
+            dispatch_instance_status == 200
+            and dispatch_instance_body.get("instance", {}).get("process_status") in {"running", "exited"},
+            status=dispatch_instance_status,
+            process_status=dispatch_instance_body.get("instance", {}).get("process_status")
+            if isinstance(dispatch_instance_body, dict)
+            else None,
         )
-        instance = body["instance"]
+        instance = dispatch_instance_body["instance"]
 
         run_result = await wait_for_run(
             token=token,

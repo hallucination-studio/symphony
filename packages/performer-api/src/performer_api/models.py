@@ -110,13 +110,6 @@ class Issue:
     def state_key(self) -> str:
         return normalize_state_key(self.state)
 
-    def has_required_labels(self, required_labels: list[str]) -> bool:
-        if any(not str(label).strip() for label in required_labels):
-            return False
-        issue_labels = set(self.labels)
-        normalized_required = normalize_labels(required_labels)
-        return all(label in issue_labels for label in normalized_required)
-
     def has_non_terminal_blocker(self, terminal_states: list[str]) -> bool:
         terminal = {normalize_state_key(state) for state in terminal_states}
         for blocker in self.blocked_by:

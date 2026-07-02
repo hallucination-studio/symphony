@@ -150,7 +150,6 @@ def make_service_config(tmp_path: Path, *, project_slug: str, api_key: str, work
             endpoint="https://api.linear.app/graphql",
             project_slug=project_slug,
             api_key=api_key,
-            required_labels=["codex"],
         ),
         polling=PollingConfig(),
         workspace=WorkspaceConfig(root=tmp_path / workspace),

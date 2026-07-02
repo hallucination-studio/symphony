@@ -107,7 +107,7 @@ A routing rule maps Linear work to runtime capacity:
 
 - Linear workspace
 - project or team
-- label filters
+- Linear custom agent delegate
 - issue states
 - repository mapping
 - runtime group
@@ -119,7 +119,7 @@ Example:
 {
   "workspace_id": "linear-workspace-id",
   "project_slug": "d17d2f7a038d",
-  "required_labels": ["symphony"],
+  "linear_agent_app_user_id": "linear-app-user-id",
   "runtime_group": "default",
   "repo_mapping_id": "repo-123"
 }

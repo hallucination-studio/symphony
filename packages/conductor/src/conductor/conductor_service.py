@@ -5,6 +5,7 @@ from typing import Any
 import shutil
 import subprocess
 from datetime import datetime, timezone
+import httpx
 
 from .conductor_models import (
     ConductorSettings,
@@ -22,7 +23,6 @@ from .conductor_workflow import (
     validate_instance_workflow,
     workflow_profiles,
 )
-from .podium_registration import PodiumRegistrationError, register_with_podium
 from performer_api.ops_models import OpsSnapshot
 from performer_api.ops_projection import build_issue_detail, build_issue_list, build_run_detail, build_trace_stream
 from performer_api.ops_retention import RetentionPolicy
@@ -83,12 +83,6 @@ class ConductorService:
         merged.update(payload)
         return self.update_settings(ConductorSettings.from_dict(merged))
 
-    def register_with_podium(self) -> dict[str, object]:
-        try:
-            return register_with_podium(self.store.get_settings())
-        except PodiumRegistrationError as exc:
-            raise ConductorServiceError(exc.code, str(exc)) from exc
-
     async def dispatch_podium_event(self, event: dict[str, Any]) -> dict[str, Any]:
         issue_id = str(event.get("issue_id") or "").strip()
         issue_identifier = str(event.get("issue_identifier") or "").strip()
@@ -129,6 +123,32 @@ class ConductorService:
             "agent_session_id": event.get("agent_session_id") or None,
             "agent_app_user_id": agent_app_user_id,
         }
+
+    async def poll_podium_dispatch_once(self) -> dict[str, Any]:
+        settings = self.store.get_settings()
+        podium_url = settings.podium_url.strip().rstrip("/")
+        runtime_token = settings.podium_runtime_token.strip()
+        if not podium_url or not runtime_token:
+            return {"status": "skipped", "reason": "runtime_not_configured"}
+        headers = {"Authorization": f"Bearer {runtime_token}"}
+        async with httpx.AsyncClient(timeout=10, trust_env=False) as client:
+            lease_response = await client.post(f"{podium_url}/api/v1/runtime/dispatches/lease", headers=headers)
+            if lease_response.status_code == 401:
+                return {"status": "skipped", "reason": "runtime_unauthorized"}
+            lease_response.raise_for_status()
+            leased = lease_response.json().get("dispatch")
+            if not leased:
+                return {"status": "idle"}
+            result = await self.dispatch_podium_event(leased)
+            await client.post(
+                f"{podium_url}/api/v1/runtime/dispatches/ack",
+                headers=headers,
+                json={
+                    "dispatch_id": leased.get("dispatch_id"),
+                    "status": result.get("status", "accepted"),
+                },
+            )
+            return {"status": "leased", "dispatch": leased, "result": result}
 
     async def _coordinate_gated_followup(self, instance: InstanceRecord, *, issue_id: str) -> InstanceRecord | None:
         if instance.workflow_profile != "gated-task":
@@ -655,18 +675,7 @@ class ConductorService:
         try:
             settings = self.store.get_settings()
             podium_url = settings.podium_url.strip() or "https://podium.example"
-            content = generate_workflow_content(instance, podium_url=podium_url)
-            if (
-                settings.linear_api_key.strip()
-                and not settings.managed_mode
-                and not settings.podium_proxy_token.strip()
-            ):
-                content = content.replace(
-                    f"endpoint: {podium_url.rstrip('/')}/api/v1/linear/graphql",
-                    "endpoint: https://api.linear.app/graphql",
-                )
-                content = content.replace("api_key: $PODIUM_PROXY_TOKEN", "api_key: $LINEAR_API_KEY")
-            return content
+            return generate_workflow_content(instance, podium_url=podium_url)
         except ConductorValidationError as exc:
             raise ConductorServiceError(exc.code, str(exc)) from exc
 
@@ -716,9 +725,6 @@ class ConductorService:
         runtime_group_id = settings.runtime_group_id.strip()
         if runtime_group_id:
             env["PODIUM_RUNTIME_GROUP_ID"] = runtime_group_id
-        linear_api_key = settings.linear_api_key.strip()
-        if linear_api_key and not proxy_token:
-            env["LINEAR_API_KEY"] = linear_api_key
         return env
 
     def _normalize_stale_runtime_state(self) -> None:

@@ -131,16 +131,6 @@ def create_app(
         }
         return {"enrollment_token": token, "runtime_group_id": runtime_group_id}
 
-    @app.post("/api/v1/conductors/register")
-    async def legacy_conductor_register(request: Request) -> dict[str, Any]:
-        payload = await request.json()
-        conductor_id = str(payload.get("conductor_id") or "")
-        return {
-            "status": "accepted",
-            "message": "accepted",
-            "conductor_id": conductor_id,
-        }
-
     @app.post("/api/v1/runtime/enroll")
     async def enroll_runtime(request: Request) -> JSONResponse:
         payload = await request.json()
@@ -249,6 +239,8 @@ def create_app(
             state.proxy_audit.append({"runtime_id": runtime["id"], "allowed": False, "reason": "runtime_disabled", "timestamp": utc_now_iso()})
             return error_response(401, "runtime_disabled", "Runtime is disabled")
         payload = await request.json()
+        upstream_token = os.environ.get("PODIUM_LINEAR_ACCESS_TOKEN", "").strip()
+        upstream_endpoint = os.environ.get("PODIUM_LINEAR_ENDPOINT", "https://api.linear.app/graphql").strip()
         state.proxy_audit.append(
             {
                 "runtime_id": runtime["id"],
@@ -257,6 +249,18 @@ def create_app(
                 "timestamp": utc_now_iso(),
             }
         )
+        if upstream_token:
+            async with httpx.AsyncClient(timeout=30, trust_env=False) as client:
+                upstream = await client.post(
+                    upstream_endpoint,
+                    json=payload,
+                    headers={"Authorization": upstream_token, "Content-Type": "application/json"},
+                )
+            try:
+                upstream_payload = upstream.json()
+            except json.JSONDecodeError:
+                upstream_payload = {"errors": [{"message": upstream.text}]}
+            return JSONResponse(upstream_payload, status_code=upstream.status_code)
         return JSONResponse({"data": {}})
 
     return app

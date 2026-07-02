@@ -316,11 +316,9 @@ async def test_api_supports_conductor_settings_without_echoing_secret(tmp_path: 
         status, _, body = await request(server.port, "GET", "/api/settings")
         assert status == 200
         settings = json.loads(body)["settings"]
-        assert settings["linear_api_key_configured"] is False
         assert settings["linear_application_connected"] is False
         assert settings["podium_url"] == ""
-        assert settings["podium_token_configured"] is False
-        assert settings["podium_dispatch_token_configured"] is False
+        assert settings["podium_runtime_token_configured"] is False
         assert settings["podium_proxy_token_configured"] is False
         assert settings["conductor_id"]
 
@@ -331,68 +329,52 @@ async def test_api_supports_conductor_settings_without_echoing_secret(tmp_path: 
             {
                 "linear_api_key": "linear-token",
                 "podium_dispatch_token": "dispatch-token",
+                "podium_url": "https://podium.example",
+                "podium_runtime_token": "runtime-token",
                 "podium_proxy_token": "proxy-token",
+                "managed_mode": True,
             },
         )
 
         assert status == 200
         settings = json.loads(body)["settings"]
-        assert settings["linear_api_key_configured"] is True
         assert settings["linear_application_connected"] is True
-        assert settings["podium_token_configured"] is False
-        assert settings["podium_dispatch_token_configured"] is True
+        assert settings["podium_runtime_token_configured"] is True
         assert settings["podium_proxy_token_configured"] is True
+        assert settings["managed_mode"] is True
 
         status, _, body = await request(server.port, "GET", "/api/settings")
 
         assert status == 200
-        assert json.loads(body)["settings"]["linear_api_key_configured"] is True
+        assert json.loads(body)["settings"]["podium_runtime_token_configured"] is True
         assert b"linear-token" not in body
         assert b"dispatch-token" not in body
+        assert b"runtime-token" not in body
         assert b"proxy-token" not in body
     finally:
         await server.stop()
 
 
 @pytest.mark.asyncio
-async def test_api_dispatch_endpoint_requires_dispatch_token_and_triggers_one_shot_dispatch(
+async def test_legacy_podium_dispatch_endpoint_is_removed(
     tmp_path: Path,
 ) -> None:
     service = make_service(tmp_path)
-    service.update_settings(ConductorSettings(podium_dispatch_token="dispatch-token"))
-    calls: list[dict[str, object]] = []
-
-    async def dispatch(event: dict[str, object]) -> dict[str, object]:
-        calls.append(event)
-        return {"status": "accepted", "issue_id": event.get("issue_id")}
-
-    service.dispatch_podium_event = dispatch  # type: ignore[method-assign]
     server = ConductorApiServer(service)
     await server.start(port=0)
     try:
         assert server.port is not None
-        unauthorized_status, _, unauthorized_body = await request(
-            server.port,
-            "POST",
-            "/api/podium/dispatch",
-            {"issue_id": "issue-1"},
-            headers={"Authorization": "Bearer wrong"},
-        )
         status, _, body = await request(
             server.port,
             "POST",
             "/api/podium/dispatch",
             {"issue_id": "issue-1", "agent_session_id": "session-1"},
-            headers={"Authorization": "Bearer dispatch-token"},
         )
     finally:
         await server.stop()
 
-    assert unauthorized_status == 401
-    assert json.loads(unauthorized_body)["error"]["code"] == "unauthorized"
-    assert status == 200
-    assert json.loads(body)["dispatch"] == {"status": "accepted", "issue_id": "issue-1"}
-    assert calls == [{"issue_id": "issue-1", "agent_session_id": "session-1"}]
+    assert status == 404
+    assert json.loads(body)["error"]["code"] == "not_found"
 
 
 @pytest.mark.asyncio

@@ -43,15 +43,13 @@ class TextTransport(httpx.AsyncBaseTransport):
         return httpx.Response(200, text="not json", request=request)
 
 
-def make_config(*, assignee_id: str | None = None, required_delegate_id: str | None = None) -> TrackerConfig:
+def make_config(*, required_delegate_id: str | None = None) -> TrackerConfig:
     return TrackerConfig(
         kind="linear",
         endpoint="https://api.linear.app/graphql",
         project_slug="MT",
         api_key="linear-token",
-        assignee_id=assignee_id,
         required_delegate_id=required_delegate_id,
-        required_labels=["codex"],
     )
 
 
@@ -123,32 +121,6 @@ async def test_fetch_candidate_issues_uses_project_and_active_states() -> None:
 
 
 @pytest.mark.asyncio
-async def test_fetch_candidate_issues_filters_by_configured_assignee() -> None:
-    transport = RecordingTransport(
-        [
-            {
-                "data": {
-                    "issues": {
-                        "nodes": [issue_node()],
-                        "pageInfo": {"hasNextPage": False, "endCursor": None},
-                    }
-                }
-            }
-        ]
-    )
-    client = LinearClient("https://api.linear.app/graphql", "linear-token", transport=transport)
-
-    issues = await client.fetch_candidate_issues(make_config(assignee_id="codex-user"))
-
-    assert [issue.identifier for issue in issues] == ["MT-1"]
-    request = transport.requests[0]
-    variables = request["json"]["variables"]
-    assert variables["assigneeId"] == "codex-user"
-    assert "$assigneeId: ID" in request["json"]["query"]
-    assert "assignee: { id: { eq: $assigneeId } }" in request["json"]["query"]
-
-
-@pytest.mark.asyncio
 async def test_fetch_candidate_issues_filters_by_configured_delegate() -> None:
     transport = RecordingTransport(
         [
@@ -172,34 +144,6 @@ async def test_fetch_candidate_issues_filters_by_configured_delegate() -> None:
     assert variables["delegateId"] == "app-user-1"
     assert "$delegateId: ID" in request["json"]["query"]
     assert "delegate: { id: { eq: $delegateId } }" in request["json"]["query"]
-
-
-@pytest.mark.asyncio
-async def test_fetch_issues_by_states_filters_by_configured_assignee() -> None:
-    transport = RecordingTransport(
-        [
-            {
-                "data": {
-                    "issues": {
-                        "nodes": [issue_node()],
-                        "pageInfo": {"hasNextPage": False, "endCursor": None},
-                    }
-                }
-            }
-        ]
-    )
-    client = LinearClient("https://api.linear.app/graphql", "linear-token", transport=transport)
-    tracker = LinearTracker(make_config(assignee_id="codex-user"), client=client)
-
-    issues = await tracker.fetch_issues_by_states(["Done"])
-
-    assert [issue.identifier for issue in issues] == ["MT-1"]
-    request = transport.requests[0]
-    variables = request["json"]["variables"]
-    assert variables["stateNames"] == ["Done"]
-    assert variables["assigneeId"] == "codex-user"
-    assert "$assigneeId: ID" in request["json"]["query"]
-    assert "assignee: { id: { eq: $assigneeId } }" in request["json"]["query"]
 
 
 @pytest.mark.asyncio

@@ -293,19 +293,12 @@ async def asyncio_sleep() -> None:
 
 
 def make_config(tmp_path: Path, *, max_concurrent: int = 10) -> ServiceConfig:
-    return make_config_with_labels(tmp_path, required_labels=["codex"], max_concurrent=max_concurrent)
-
-
-def make_config_with_labels(
-    tmp_path: Path, *, required_labels: list[str], max_concurrent: int = 10
-) -> ServiceConfig:
     return ServiceConfig(
         tracker=TrackerConfig(
             kind="linear",
             endpoint="https://api.linear.app/graphql",
             project_slug="MT",
             api_key="linear-token",
-            required_labels=required_labels,
         ),
         polling=PollingConfig(interval_ms=30_000),
         workspace=WorkspaceConfig(root=tmp_path),
@@ -363,29 +356,6 @@ def make_config_with_acceptance(tmp_path: Path) -> ServiceConfig:
     )
 
 
-def make_config_with_assignee(tmp_path: Path, assignee_id: str) -> ServiceConfig:
-    config = make_config(tmp_path)
-    return ServiceConfig(
-        tracker=TrackerConfig(
-            kind=config.tracker.kind,
-            endpoint=config.tracker.endpoint,
-            project_slug=config.tracker.project_slug,
-            api_key=config.tracker.api_key,
-            assignee_id=assignee_id,
-            required_labels=config.tracker.required_labels,
-            active_states=config.tracker.active_states,
-            terminal_states=config.tracker.terminal_states,
-        ),
-        polling=config.polling,
-        workspace=config.workspace,
-        hooks=config.hooks,
-        agent=config.agent,
-        codex=config.codex,
-        prompt_template=config.prompt_template,
-        workflow_path=config.workflow_path,
-    )
-
-
 def make_config_with_required_delegate(tmp_path: Path, delegate_id: str) -> ServiceConfig:
     config = make_config(tmp_path)
     return ServiceConfig(
@@ -395,7 +365,6 @@ def make_config_with_required_delegate(tmp_path: Path, delegate_id: str) -> Serv
             project_slug=config.tracker.project_slug,
             api_key=config.tracker.api_key,
             required_delegate_id=delegate_id,
-            required_labels=config.tracker.required_labels,
             active_states=config.tracker.active_states,
             terminal_states=config.tracker.terminal_states,
         ),
@@ -445,7 +414,6 @@ def make_custom_tracker_config(tmp_path: Path) -> ServiceConfig:
             endpoint="https://tracker.example/api",
             project_slug="",
             api_key="",
-            required_labels=[],
         ),
         polling=PollingConfig(interval_ms=30_000),
         workspace=WorkspaceConfig(root=tmp_path),
@@ -563,7 +531,7 @@ async def test_dispatch_issue_by_id_does_not_require_legacy_label(tmp_path: Path
     tracker = FakeTracker()
     tracker.refreshed = [issue("MT-1", labels=[])]
     runner = FakeRunner()
-    orchestrator = Orchestrator(make_config_with_labels(tmp_path, required_labels=["codex"]), tracker, runner)
+    orchestrator = Orchestrator(make_config(tmp_path), tracker, runner)
 
     result = await orchestrator.dispatch_issue_by_id("mt-1")
 
@@ -572,16 +540,16 @@ async def test_dispatch_issue_by_id_does_not_require_legacy_label(tmp_path: Path
 
 
 @pytest.mark.asyncio
-async def test_dispatch_issue_by_id_still_respects_linear_agent_assignee(tmp_path: Path) -> None:
+async def test_dispatch_issue_by_id_ignores_linear_assignee_for_custom_agent_delegate(tmp_path: Path) -> None:
     tracker = FakeTracker()
     tracker.refreshed = [issue("MT-1", assignee_id="other-user")]
     runner = FakeRunner()
-    orchestrator = Orchestrator(make_config_with_assignee(tmp_path, "agent-user-1"), tracker, runner)
+    orchestrator = Orchestrator(make_config(tmp_path), tracker, runner)
 
     result = await orchestrator.dispatch_issue_by_id("mt-1")
 
-    assert result == {"status": "skipped", "issue_id": "mt-1", "reason": "assignee_mismatch"}
-    assert runner.started == []
+    assert result == {"status": "dispatched", "issue_id": "mt-1", "issue_identifier": "MT-1"}
+    assert [started[0].identifier for started in runner.started] == ["MT-1"]
 
 
 @pytest.mark.asyncio
@@ -699,7 +667,7 @@ async def test_dispatch_issue_by_id_skips_already_claimed_issue(tmp_path: Path) 
 async def test_dispatch_and_codex_events_update_lifecycle_labels_and_phase(tmp_path: Path) -> None:
     tracker = FakeTracker(candidates=[issue("MT-1", labels=["codex2"])])
     runner = FakeRunner()
-    config = make_config_with_labels(tmp_path, required_labels=["codex2"])
+    config = make_config(tmp_path)
     orchestrator = Orchestrator(config, tracker, runner)
 
     await orchestrator.tick()
@@ -783,7 +751,7 @@ async def test_tick_logs_candidate_summary_and_skip_reasons(
     import logging
 
     caplog.set_level(logging.INFO)
-    tracker = FakeTracker(candidates=[issue("MT-1"), issue("MT-2", labels=["other"])])
+    tracker = FakeTracker(candidates=[issue("MT-1"), issue("MT-2", project_slug="OTHER")])
     runner = FakeRunner()
     orchestrator = Orchestrator(make_config(tmp_path), tracker, runner)
 
@@ -791,7 +759,7 @@ async def test_tick_logs_candidate_summary_and_skip_reasons(
 
     assert "performer_dispatch_scan candidate_count=2 available_slots=10" in caplog.text
     assert "performer_dispatch_candidate outcome=dispatch issue_id=mt-1 issue_identifier=MT-1 worker_host=local" in caplog.text
-    assert "performer_dispatch_candidate outcome=skip issue_id=mt-2 issue_identifier=MT-2 reason=missing_required_labels" in caplog.text
+    assert "performer_dispatch_candidate outcome=skip issue_id=mt-2 issue_identifier=MT-2 reason=project_mismatch" in caplog.text
     assert "performer_dispatch_summary dispatched=1 skipped=1 running=1 claimed=1" in caplog.text
 
 
@@ -864,22 +832,10 @@ async def test_tick_allows_non_linear_tracker_issue_without_project_slug(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_tick_rejects_candidate_assigned_to_another_user(tmp_path: Path) -> None:
+async def test_tick_ignores_linear_assignee_for_custom_agent_delegate(tmp_path: Path) -> None:
     tracker = FakeTracker(candidates=[issue("MT-1", assignee_id="other-user")])
     runner = FakeRunner()
-    orchestrator = Orchestrator(make_config_with_assignee(tmp_path, "codex-user"), tracker, runner)
-
-    await orchestrator.tick()
-
-    assert runner.started == []
-    assert orchestrator.state.running == {}
-
-
-@pytest.mark.asyncio
-async def test_tick_dispatches_candidate_assigned_to_configured_user(tmp_path: Path) -> None:
-    tracker = FakeTracker(candidates=[issue("MT-1", assignee_id="codex-user")])
-    runner = FakeRunner()
-    orchestrator = Orchestrator(make_config_with_assignee(tmp_path, "codex-user"), tracker, runner)
+    orchestrator = Orchestrator(make_config(tmp_path), tracker, runner)
 
     await orchestrator.tick()
 
@@ -903,18 +859,6 @@ async def test_acceptance_preflight_requires_linear_agent_delegate(tmp_path: Pat
 
     assert tracker.created_issues == []
     assert runner.started == []
-
-
-@pytest.mark.asyncio
-async def test_blank_required_label_matches_no_issue(tmp_path: Path) -> None:
-    tracker = FakeTracker(candidates=[issue("MT-1")])
-    runner = FakeRunner()
-    orchestrator = Orchestrator(make_config_with_labels(tmp_path, required_labels=[""]), tracker, runner)
-
-    await orchestrator.tick()
-
-    assert runner.started == []
-    assert orchestrator.state.running == {}
 
 
 @pytest.mark.asyncio
@@ -2429,16 +2373,16 @@ async def test_reconcile_terminal_running_issue_cleans_workspace(tmp_path: Path)
 
 
 @pytest.mark.asyncio
-async def test_reconcile_active_issue_that_loses_required_label_stops_without_cleanup(tmp_path: Path) -> None:
+async def test_reconcile_active_issue_that_loses_required_delegate_stops_without_cleanup(tmp_path: Path) -> None:
     from performer.workspace import WorkspaceManager
 
-    tracker = FakeTracker(candidates=[issue("MT-1")])
+    tracker = FakeTracker(candidates=[issue("MT-1", delegate_id="agent-user-1")])
     runner = FakeRunner()
     workspace_manager = WorkspaceManager(WorkspaceConfig(root=tmp_path), HooksConfig())
     workspace = await workspace_manager.create_for_issue("MT-1")
-    orchestrator = Orchestrator(make_config(tmp_path), tracker, runner)
+    orchestrator = Orchestrator(make_config_with_required_delegate(tmp_path, "agent-user-1"), tracker, runner)
     await orchestrator.tick()
-    tracker.refreshed = [issue("MT-1", labels=[])]
+    tracker.refreshed = [issue("MT-1", delegate_id="other-agent")]
 
     await orchestrator.reconcile_running()
 
@@ -2575,11 +2519,11 @@ async def test_due_retry_dispatches_when_issue_is_still_candidate(tmp_path: Path
 
 
 @pytest.mark.asyncio
-async def test_due_retry_releases_claim_when_issue_is_no_longer_candidate(tmp_path: Path) -> None:
-    tracker = FakeTracker(candidates=[issue("MT-1", labels=[])])
+async def test_due_retry_releases_claim_when_issue_loses_required_delegate(tmp_path: Path) -> None:
+    tracker = FakeTracker(candidates=[issue("MT-1", delegate_id="other-agent")])
     runner = FakeRunner()
-    orchestrator = Orchestrator(make_config(tmp_path), tracker, runner)
-    orchestrator._schedule_retry(issue("MT-1"), 2, error="retry", delay_ms=-1)
+    orchestrator = Orchestrator(make_config_with_required_delegate(tmp_path, "agent-user-1"), tracker, runner)
+    orchestrator._schedule_retry(issue("MT-1", delegate_id="agent-user-1"), 2, error="retry", delay_ms=-1)
 
     await orchestrator.process_due_retries()
 

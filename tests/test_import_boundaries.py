@@ -33,4 +33,4 @@ def test_package_import_boundaries() -> None:
     assert not (imports["podium"] & {"performer", "conductor"})
     assert "performer_api" in imports["performer"]
     assert "performer_api" in imports["conductor"]
-    assert "performer_api" in imports["podium"]
+    assert "performer_api" not in imports["podium"]

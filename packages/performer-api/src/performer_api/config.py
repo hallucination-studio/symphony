@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .models import normalize_labels, normalize_state_key
+from .models import normalize_state_key
 from .workflow import WorkflowDefinition
 
 
@@ -22,9 +22,7 @@ class TrackerConfig:
     endpoint: str
     project_slug: str
     api_key: str
-    assignee_id: str | None = None
     required_delegate_id: str | None = None
-    required_labels: list[str] = field(default_factory=list)
     lifecycle_labels_enabled: bool = True
     active_states: list[str] = field(default_factory=lambda: ["Todo", "In Progress"])
     terminal_states: list[str] = field(
@@ -277,9 +275,7 @@ def _tracker_config(raw: dict[str, Any], workflow_path: Path) -> TrackerConfig:
         endpoint=endpoint,
         project_slug=_string(raw.get("project_slug"), "") or "",
         api_key=_resolve_env(_string(raw.get("api_key"))) or "",
-        assignee_id=_resolve_env(_string(raw.get("assignee_id"))),
         required_delegate_id=_resolve_env(_string(raw.get("required_delegate_id"))),
-        required_labels=_normalize_required_labels(raw.get("required_labels") or []),
         lifecycle_labels_enabled=_bool(raw.get("lifecycle_labels_enabled"), True),
         active_states=list(raw.get("active_states") or ["Todo", "In Progress"]),
         terminal_states=list(
@@ -319,19 +315,11 @@ def _tracker_with_acceptance_scan_states(
         endpoint=tracker.endpoint,
         project_slug=tracker.project_slug,
         api_key=tracker.api_key,
-        assignee_id=tracker.assignee_id,
         required_delegate_id=tracker.required_delegate_id,
-        required_labels=tracker.required_labels,
         lifecycle_labels_enabled=tracker.lifecycle_labels_enabled,
         active_states=active_states,
         terminal_states=tracker.terminal_states,
     )
-
-
-def _normalize_required_labels(labels: list[str] | None) -> list[str]:
-    if not labels:
-        return []
-    return [str(label).strip().lower() for label in labels]
 
 
 def _polling_config(raw: dict[str, Any]) -> PollingConfig:

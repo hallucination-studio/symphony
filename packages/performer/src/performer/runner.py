@@ -142,9 +142,7 @@ class AgentRunner:
             return False
         if self.config.tracker.kind == "linear" and issue.project_slug != self.config.tracker.project_slug:
             return False
-        if not self._matches_assignee(issue):
-            return False
-        if not issue.has_required_labels(self.config.tracker.required_labels):
+        if not self._matches_required_delegate(issue):
             return False
         if issue.state_key() == "todo" and issue.has_non_terminal_blocker(self.config.tracker.terminal_states):
             return False
@@ -155,11 +153,11 @@ class AgentRunner:
         terminal = {normalize_state_key(state) for state in self.config.tracker.terminal_states}
         return issue.state_key() in active and issue.state_key() not in terminal
 
-    def _matches_assignee(self, issue: Issue) -> bool:
-        configured = self.config.tracker.assignee_id
+    def _matches_required_delegate(self, issue: Issue) -> bool:
+        configured = self.config.tracker.required_delegate_id
         if not configured:
             return True
-        return issue.assignee_id == configured
+        return issue.delegate_id == configured
 
     def _telemetry_recorder(self) -> ExecutionTelemetryRecorder | None:
         if self.config.persistence.path is None:

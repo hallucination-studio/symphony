@@ -101,7 +101,6 @@ def make_config(tmp_path: Path) -> ServiceConfig:
             endpoint="https://api.linear.app/graphql",
             project_slug="MT",
             api_key="linear-token",
-            required_labels=["codex"],
         ),
         polling=PollingConfig(),
         workspace=WorkspaceConfig(root=tmp_path),
@@ -143,7 +142,7 @@ def make_config_with_acceptance(tmp_path: Path) -> ServiceConfig:
     )
 
 
-def make_config_with_assignee(tmp_path: Path, assignee_id: str) -> ServiceConfig:
+def make_config_with_required_delegate(tmp_path: Path, delegate_id: str) -> ServiceConfig:
     config = make_config(tmp_path)
     return ServiceConfig(
         tracker=TrackerConfig(
@@ -151,8 +150,7 @@ def make_config_with_assignee(tmp_path: Path, assignee_id: str) -> ServiceConfig
             endpoint=config.tracker.endpoint,
             project_slug=config.tracker.project_slug,
             api_key=config.tracker.api_key,
-            assignee_id=assignee_id,
-            required_labels=config.tracker.required_labels,
+            required_delegate_id=delegate_id,
             active_states=config.tracker.active_states,
             terminal_states=config.tracker.terminal_states,
         ),
@@ -410,7 +408,7 @@ async def test_runner_writes_run_attempt_turn_ops_snapshot(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
-async def test_continuation_stops_when_required_label_removed(tmp_path: Path) -> None:
+async def test_continuation_ignores_label_changes(tmp_path: Path) -> None:
     codex = FakeCodex()
     runner = AgentRunner(
         make_config(tmp_path),
@@ -427,14 +425,14 @@ async def test_continuation_stops_when_required_label_removed(tmp_path: Path) ->
 
     assert codex.kwargs is not None
     continuation = codex.kwargs["continuation_provider"]
-    assert await continuation(1) is None
+    assert await continuation(1) is not None
 
 
 @pytest.mark.asyncio
-async def test_continuation_stops_when_assignee_changes(tmp_path: Path) -> None:
+async def test_continuation_stops_when_delegate_changes(tmp_path: Path) -> None:
     codex = FakeCodex()
     runner = AgentRunner(
-        make_config_with_assignee(tmp_path, "codex-user"),
+        make_config_with_required_delegate(tmp_path, "agent-user-1"),
         WorkspaceManager(WorkspaceConfig(root=tmp_path), HooksConfig()),
         codex_client=codex,
         tracker=FakeTracker(
@@ -445,7 +443,7 @@ async def test_continuation_stops_when_assignee_changes(tmp_path: Path) -> None:
                 state="Todo",
                 labels=["codex"],
                 project_slug="MT",
-                assignee_id="other-user",
+                delegate_id="other-agent",
             )
         ),
     )
@@ -458,7 +456,7 @@ async def test_continuation_stops_when_assignee_changes(tmp_path: Path) -> None:
             state="Todo",
             labels=["codex"],
             project_slug="MT",
-            assignee_id="codex-user",
+            delegate_id="agent-user-1",
         ),
         None,
         lambda event: None,

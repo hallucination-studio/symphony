@@ -95,5 +95,6 @@ The first managed version may use bearer runtime tokens and HTTPS transport
 instead of mTLS, as long as tokens are scoped, revocable, and never printed in
 logs.
 
-The first version may keep direct `LINEAR_API_KEY` support only as a local
-development fallback. It should not be part of the managed onboarding path.
+The managed path does not use direct `LINEAR_API_KEY` runtime credentials.
+Linear tokens are held by Podium and exposed to customer runtimes only through
+scoped proxy tokens.

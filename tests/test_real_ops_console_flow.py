@@ -255,7 +255,13 @@ async def test_real_ops_console_flow_writes_snapshot_and_surfaces_it(tmp_path: P
         monkeypatch.setenv("PATH", f"{fake_codex.parent}:{os.environ.get('PATH', '')}")
 
         service = make_service(tmp_path)
-        service.update_settings(ConductorSettings(linear_api_key="conductor-token"))
+        service.update_settings(
+            ConductorSettings(
+                podium_url="https://podium.example",
+                podium_proxy_token="proxy-token",
+                managed_mode=True,
+            )
+        )
         instance = service.create_instance(
             InstanceCreateRequest(
                 name="Alpha",
@@ -270,7 +276,8 @@ async def test_real_ops_console_flow_writes_snapshot_and_surfaces_it(tmp_path: P
         )
         workflow = Path(instance.workflow_path).read_text(encoding="utf-8")
         assert "lifecycle_labels_enabled: false" in workflow
-        workflow = workflow.replace("https://api.linear.app/graphql", f"http://127.0.0.1:{linear.port}/graphql")
+        workflow = workflow.replace("https://podium.example/api/v1/linear/graphql", f"http://127.0.0.1:{linear.port}/graphql")
+        workflow = workflow.replace("$PODIUM_PROXY_TOKEN", "conductor-token")
         workflow = workflow.replace("  command: codex app-server", f"  command: {fake_codex} app-server")
         workflow = workflow.replace("agent:\n  max_concurrent_agents: 10\n  max_turns: 20\n", "agent:\n  max_concurrent_agents: 10\n  max_turns: 1\n")
         workflow = workflow.replace("acceptance:\n  enabled: true\n", "acceptance:\n  enabled: false\n")

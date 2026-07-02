@@ -26,7 +26,6 @@ def make_config(tmp_path: Path) -> ServiceConfig:
             endpoint="https://api.linear.app/graphql",
             project_slug="MT",
             api_key="linear-token",
-            required_labels=["codex"],
         ),
         polling=PollingConfig(interval_ms=30_000),
         workspace=WorkspaceConfig(root=tmp_path / "workspaces"),

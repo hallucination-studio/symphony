@@ -72,14 +72,14 @@ def test_store_prevents_duplicate_ids(tmp_path: Path) -> None:
 def test_store_saves_and_loads_conductor_settings(tmp_path: Path) -> None:
     store = ConductorStore(tmp_path / "conductor-data")
 
-    store.save_settings(ConductorSettings(linear_api_key="linear-token"))
+    store.save_settings(ConductorSettings(podium_url="https://podium.example", managed_mode=True))
     loaded = store.get_settings()
 
-    assert loaded.linear_api_key == "linear-token"
+    assert loaded.podium_url == "https://podium.example"
+    assert loaded.managed_mode is True
     public = loaded.to_public_dict()
-    assert public["linear_api_key_configured"] is True
-    assert public["podium_token_configured"] is False
-    assert public["podium_url"] == ""
+    assert public["podium_url"] == "https://podium.example"
+    assert public["managed_mode"] is True
     assert public["conductor_id"]
 
 

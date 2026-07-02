@@ -291,7 +291,6 @@ def config_with_verification(
             endpoint="https://api.linear.app/graphql",
             project_slug="MT",
             api_key="linear-token",
-            required_labels=["codex"],
         ),
         polling=PollingConfig(interval_ms=100),
         workspace=WorkspaceConfig(root=tmp_path),
@@ -335,8 +334,6 @@ tracker:
   kind: linear
   project_slug: MT
   api_key: linear-token
-  required_labels:
-    - codex
   active_states:
 {active_yaml}
 agent:
@@ -430,7 +427,6 @@ async def test_flow_001_dispatch_run_and_human_review_handoff_has_reviewer_evide
             endpoint="https://api.linear.app/graphql",
             project_slug="MT",
             api_key="test-token",
-            required_labels=["performer"],
             active_states=["Todo", "In Progress"],
             terminal_states=["Done", "Canceled"],
         ),
@@ -810,7 +806,6 @@ async def test_flow_008_concurrency_and_claiming_prevent_duplicate_work(
                 endpoint="https://api.linear.app/graphql",
                 project_slug="MT",
                 api_key="linear-token",
-                required_labels=["codex"],
             ),
             polling=PollingConfig(interval_ms=100),
             workspace=WorkspaceConfig(root=tmp_path),
@@ -1090,7 +1085,6 @@ async def test_flow_014_stall_detection_kills_silent_session_and_retries(tmp_pat
             endpoint="https://api.linear.app/graphql",
             project_slug="MT",
             api_key="linear-token",
-            required_labels=["codex"],
         ),
         polling=PollingConfig(interval_ms=100),
         workspace=WorkspaceConfig(root=tmp_path),
@@ -1378,7 +1372,6 @@ async def test_flow_019_secret_used_for_linear_request_but_never_logged(
                 endpoint="https://api.linear.test/graphql",
                 api_key=os.environ["LINEAR_API_KEY"],
                 project_slug="ENG",
-                required_labels=["performer"],
             )
         )
     logging.getLogger("performer.flow").warning("candidate fetch failed category=%s", exc.value.code)
@@ -1501,7 +1494,14 @@ async def test_flow_021_codex_protocol_failures_do_not_become_success(
 
 @pytest.mark.asyncio
 async def test_flow_020_linear_pagination_normalization_sorting_and_error_categories(tmp_path: Path) -> None:
-    def node(identifier: str, *, priority: int, label: str, created: str) -> dict[str, Any]:
+    def node(
+        identifier: str,
+        *,
+        priority: int,
+        label: str,
+        created: str,
+        delegate_id: str | None = "agent-user-1",
+    ) -> dict[str, Any]:
         return {
             "id": identifier.lower(),
             "identifier": identifier,
@@ -1515,6 +1515,7 @@ async def test_flow_020_linear_pagination_normalization_sorting_and_error_catego
             "state": {"name": "Todo"},
             "project": {"slugId": "ENG", "name": "Engineering"},
             "assignee": {"id": "user-1"},
+            "delegate": {"id": delegate_id} if delegate_id else None,
             "labels": {"nodes": [{"name": label}]},
             "inverseRelations": {"nodes": []},
         }
@@ -1535,7 +1536,15 @@ async def test_flow_020_linear_pagination_normalization_sorting_and_error_catego
             {
                 "data": {
                     "issues": {
-                        "nodes": [node("ENG-20C", priority=0, label="other", created="2026-07-03T00:00:00Z")],
+                        "nodes": [
+                            node(
+                                "ENG-20C",
+                                priority=0,
+                                label="other",
+                                created="2026-07-03T00:00:00Z",
+                                delegate_id="other-agent",
+                            )
+                        ],
                         "pageInfo": {"hasNextPage": False, "endCursor": None},
                     }
                 }
@@ -1547,12 +1556,12 @@ async def test_flow_020_linear_pagination_normalization_sorting_and_error_catego
         endpoint="https://api.linear.test/graphql",
         project_slug="ENG",
         api_key="linear-token",
-        required_labels=["ready"],
+        required_delegate_id="agent-user-1",
     )
     client = LinearClient(config.endpoint, config.api_key, transport=transport)
 
     candidates = await client.fetch_candidate_issues(config, page_size=2)
-    eligible = [candidate for candidate in candidates if candidate.has_required_labels(config.required_labels)]
+    eligible = [candidate for candidate in candidates if candidate.delegate_id == config.required_delegate_id]
     sorted_eligible = sort_for_dispatch(eligible)
     error_codes = []
     for response in [{"errors": [{"message": "bad"}]}, "not-json"]:
@@ -1570,9 +1579,9 @@ async def test_flow_020_linear_pagination_normalization_sorting_and_error_catego
         title="linear pagination normalization and dispatch sorting feed scheduler correctly",
         source_sections=["4.1.1", "5.3.1", "8.2", "11.1", "11.2", "11.3", "11.4"],
         profile="core tracker",
-        initial_state={"project_slug": "ENG", "required_labels": ["ready"]},
-        trigger="Fetch two Linear pages and run eligibility/sorting",
-        observed_transitions=["page_1_fetched", "cursor-1_used", "labels_normalized", "missing_label_filtered", "ENG-20A_sorted_first"],
+        initial_state={"project_slug": "ENG", "required_delegate_id": "agent-user-1"},
+        trigger="Fetch two Linear pages and run delegate eligibility/sorting",
+        observed_transitions=["page_1_fetched", "cursor-1_used", "delegate_normalized", "delegate_mismatch_filtered", "ENG-20A_sorted_first"],
         workspace_evidence={"not_required": True},
         tracker_evidence={"requests": transport.requests, "normalized": [candidate.__dict__ for candidate in candidates]},
         codex_evidence={"not_applicable": True},
@@ -1793,7 +1802,7 @@ async def test_flow_026_ssh_worker_extension_preserves_orchestrator_authority(tm
     tracker = FlowTracker(candidates=[issue("ENG-26A", id="eng-26a"), issue("ENG-26B", id="eng-26b")])
     runner = FlowCompletingRunner()
     config = ServiceConfig(
-        tracker=TrackerConfig(kind="linear", endpoint="https://api.linear.app/graphql", project_slug="MT", api_key="linear-token", required_labels=["codex"]),
+        tracker=TrackerConfig(kind="linear", endpoint="https://api.linear.app/graphql", project_slug="MT", api_key="linear-token"),
         polling=PollingConfig(interval_ms=100),
         workspace=WorkspaceConfig(root=Path("/remote/performer")),
         hooks=HooksConfig(),

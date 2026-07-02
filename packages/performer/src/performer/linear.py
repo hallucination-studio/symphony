@@ -37,19 +37,17 @@ pageInfo { hasNextPage endCursor }
 """
 
 
-def _issues_query(operation_name: str, *, include_assignee_filter: bool, include_delegate_filter: bool) -> str:
-    assignee_variable = ", $assigneeId: ID" if include_assignee_filter else ""
+def _issues_query(operation_name: str, *, include_delegate_filter: bool) -> str:
     delegate_variable = ", $delegateId: ID" if include_delegate_filter else ""
-    assignee_filter = "\n      assignee: { id: { eq: $assigneeId } }" if include_assignee_filter else ""
     delegate_filter = "\n      delegate: { id: { eq: $delegateId } }" if include_delegate_filter else ""
     return f"""
-query {operation_name}($projectSlug: String!, $stateNames: [String!], $first: Int!, $after: String{assignee_variable}{delegate_variable}) {{
+query {operation_name}($projectSlug: String!, $stateNames: [String!], $first: Int!, $after: String{delegate_variable}) {{
   issues(
     first: $first
     after: $after
     filter: {{
       project: {{ slugId: {{ eq: $projectSlug }} }}
-      state: {{ name: {{ in: $stateNames }} }}{assignee_filter}{delegate_filter}
+      state: {{ name: {{ in: $stateNames }} }}{delegate_filter}
     }}
   ) {{
     {ISSUE_FIELDS}
@@ -58,8 +56,8 @@ query {operation_name}($projectSlug: String!, $stateNames: [String!], $first: In
 """
 
 
-CANDIDATE_QUERY = _issues_query("PerformerCandidateIssues", include_assignee_filter=False, include_delegate_filter=False)
-ISSUES_BY_STATES_QUERY = _issues_query("PerformerIssuesByStates", include_assignee_filter=False, include_delegate_filter=False)
+CANDIDATE_QUERY = _issues_query("PerformerCandidateIssues", include_delegate_filter=False)
+ISSUES_BY_STATES_QUERY = _issues_query("PerformerIssuesByStates", include_delegate_filter=False)
 
 
 def _issues_query_and_variables(
@@ -69,7 +67,6 @@ def _issues_query_and_variables(
     *,
     page_size: int,
 ) -> tuple[str, dict[str, Any]]:
-    include_assignee_filter = config.assignee_id is not None
     include_delegate_filter = config.required_delegate_id is not None
     variables: dict[str, Any] = {
         "projectSlug": config.project_slug,
@@ -77,13 +74,10 @@ def _issues_query_and_variables(
         "first": page_size,
         "after": None,
     }
-    if config.assignee_id is not None:
-        variables["assigneeId"] = config.assignee_id
     if config.required_delegate_id is not None:
         variables["delegateId"] = config.required_delegate_id
     return _issues_query(
         operation_name,
-        include_assignee_filter=include_assignee_filter,
         include_delegate_filter=include_delegate_filter,
     ), variables
 
