@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -624,6 +625,31 @@ async def test_lifecycle_label_failures_do_not_block_dispatch(tmp_path: Path, ca
     assert [started[0].identifier for started in runner.started] == ["MT-1"]
     assert "performer_lifecycle_label outcome=failed" in caplog.text
     assert "label=performer:starting" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_labels_can_be_disabled_for_managed_custom_agent_dispatch(tmp_path: Path) -> None:
+    tracker = FakeTracker(candidates=[issue("MT-1")])
+    runner = FakeRunner()
+    base_config = make_config(tmp_path)
+    config = replace(base_config, tracker=replace(base_config.tracker, lifecycle_labels_enabled=False))
+    orchestrator = Orchestrator(config, tracker, runner)
+
+    await orchestrator.tick()
+    orchestrator.on_codex_event(
+        "mt-1",
+        {
+            "event": "turn_started",
+            "thread_id": "thread-1",
+            "turn_id": "turn-1",
+            "session_id": "thread-1-turn-1",
+        },
+    )
+    await asyncio_sleep()
+
+    assert [started[0].identifier for started in runner.started] == ["MT-1"]
+    assert tracker.lifecycle_labels == []
+    assert orchestrator.state.running["mt-1"].status_label == "performer:running"
 
 
 @pytest.mark.asyncio

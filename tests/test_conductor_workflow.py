@@ -45,8 +45,10 @@ def test_generate_workflow_content_injects_managed_runtime_resources(tmp_path: P
     assert "acceptance:" in content
     assert "enabled: false" in content
     assert "mode: block_done" in content
-    assert "review_state: In Review" in content
-    assert "gate_passed_label: performer:gate/passed" in content
+    assert "lifecycle_labels_enabled: false" in content
+    assert "review_state:" not in content
+    assert "gate_passed_label:" not in content
+    assert "performer:" not in content
     assert "server:" not in content
     assert "observability:" not in content
     assert "project_slug: ENG" in content
@@ -68,6 +70,7 @@ def test_generate_workflow_content_injects_managed_runtime_resources(tmp_path: P
     assert "Acceptance gates are disabled for this managed profile." in content
     assert "transition the issue to Done" in content
     assert "/symphony approve-runtime-error {{ issue.identifier }}" in content
+    assert "records a runtime permission or sandbox error" in content
     assert "query CurrentIssue" in content
     assert "mutation UpdateIssueEvidence" in content
     assert "mutation CompleteIssue" in content
@@ -85,6 +88,8 @@ def test_task_profile_is_default_managed_profile_without_acceptance_gate(tmp_pat
     assert "acceptance:\n  enabled: false\n" in content
     assert "endpoint: https://podium.example/api/v1/linear/graphql" in content
     assert "api_key: $PODIUM_PROXY_TOKEN" in content
+    assert "lifecycle_labels_enabled: false" in content
+    assert "performer:" not in content
 
 
 def test_managed_workflow_omits_agent_delegation_identity_from_performer_tracker(tmp_path: Path) -> None:
@@ -109,6 +114,8 @@ def test_gated_task_profile_keeps_acceptance_gate(tmp_path: Path) -> None:
     content = generate_workflow_content(instance, podium_url="https://podium.example")
 
     assert "acceptance:\n  enabled: true\n" in content
+    assert "lifecycle_labels_enabled: true" in content
+    assert "gate_passed_label: performer:gate/passed" in content
     assert "Do not move the issue to Done yourself" in content
 
 

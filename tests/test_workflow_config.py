@@ -496,6 +496,24 @@ tracker:
     assert config.tracker.assignee_id == "user-456"
 
 
+def test_tracker_lifecycle_labels_enabled_can_be_disabled(tmp_path: Path) -> None:
+    workflow_path = tmp_path / "WORKFLOW.md"
+    write_workflow(
+        workflow_path,
+        """
+tracker:
+  kind: linear
+  project_slug: MT
+  api_key: linear-token
+  lifecycle_labels_enabled: false
+""",
+    )
+
+    config = ServiceConfig.from_workflow(load_workflow(workflow_path), workflow_path)
+
+    assert config.tracker.lifecycle_labels_enabled is False
+
+
 def test_service_config_validation_requires_api_key(tmp_path: Path) -> None:
     workflow_path = tmp_path / "WORKFLOW.md"
     write_workflow(

@@ -1510,6 +1510,8 @@ class Orchestrator:
         }
 
     def _sync_lifecycle_label_background(self, issue_id: str, label_name: str) -> None:
+        if not self.config.tracker.lifecycle_labels_enabled:
+            return
         self._desired_lifecycle_labels[issue_id] = label_name
         try:
             loop = asyncio.get_running_loop()
@@ -1551,6 +1553,8 @@ class Orchestrator:
     async def _sync_lifecycle_label(
         self, issue_id: str, label_name: str, *, only_if_current: bool = False
     ) -> None:
+        if not self.config.tracker.lifecycle_labels_enabled:
+            return
         if only_if_current:
             if self._desired_lifecycle_labels.get(issue_id) != label_name:
                 return

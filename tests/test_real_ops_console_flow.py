@@ -269,6 +269,7 @@ async def test_real_ops_console_flow_writes_snapshot_and_surfaces_it(tmp_path: P
             )
         )
         workflow = Path(instance.workflow_path).read_text(encoding="utf-8")
+        assert "lifecycle_labels_enabled: false" in workflow
         workflow = workflow.replace("https://api.linear.app/graphql", f"http://127.0.0.1:{linear.port}/graphql")
         workflow = workflow.replace("  command: codex app-server", f"  command: {fake_codex} app-server")
         workflow = workflow.replace("agent:\n  max_concurrent_agents: 10\n  max_turns: 20\n", "agent:\n  max_concurrent_agents: 10\n  max_turns: 1\n")
@@ -323,6 +324,6 @@ async def test_real_ops_console_flow_writes_snapshot_and_surfaces_it(tmp_path: P
         assert issues[0]["issue_identifier"] == "ENG-1"
         assert runs[0]["turn_count"] == 1
         assert any(event["event_type"] == "turn_tokens_updated" for event in traces)
-        assert linear.created_labels
+        assert not linear.created_labels
     finally:
         await linear.stop()

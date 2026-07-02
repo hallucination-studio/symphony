@@ -48,6 +48,7 @@ def generate_workflow_content(instance: InstanceRecord, *, podium_url: str = "ht
 
     active_yaml = "\n".join(f"    - {state}" for state in active_states)
     terminal_yaml = "\n".join(f"    - {state}" for state in terminal_states)
+    lifecycle_labels_enabled = "true" if profile == "gated-task" else "false"
     acceptance_enabled = "true" if profile == "gated-task" else "false"
     max_concurrent_agents = 1 if profile == "smoke" else 10
     max_turns = 8 if profile == "smoke" else 20
@@ -63,6 +64,30 @@ def generate_workflow_content(instance: InstanceRecord, *, podium_url: str = "ht
         "the issue to Done using linear_graphql. Do not leave the issue in Todo, In Progress, or another active state "
         "after verification passes.\n"
     )
+    acceptance_config = (
+        "acceptance:\n"
+        f"  enabled: {acceptance_enabled}\n"
+        "  mode: block_done\n"
+        "  minimum_score: 3\n"
+        "  require_findings_for_score_3: true\n"
+        "  auto_retry_on_fail: true\n"
+    )
+    if profile == "gated-task":
+        acceptance_config += (
+            "  todo_state: Todo\n"
+            "  implementation_state: In Progress\n"
+            "  review_state: In Review\n"
+            "  done_state: Done\n"
+            "  task_type_label: performer:type/task\n"
+            "  gate_type_label: performer:type/gate\n"
+            "  evidence_type_label: performer:type/evidence\n"
+            "  gate_pending_label: performer:gate/pending\n"
+            "  gate_passed_label: performer:gate/passed\n"
+            "  gate_pass_with_findings_label: performer:gate/pass-with-findings\n"
+            "  gate_failed_label: performer:gate/failed\n"
+            "  score_label_prefix: performer:score/\n"
+        )
+
     return (
         "---\n"
         "tracker:\n"
@@ -70,6 +95,7 @@ def generate_workflow_content(instance: InstanceRecord, *, podium_url: str = "ht
         f"  endpoint: {podium_url.strip().rstrip('/')}/api/v1/linear/graphql\n"
         f"  project_slug: {instance.linear_project}\n"
         "  api_key: $PODIUM_PROXY_TOKEN\n"
+        f"  lifecycle_labels_enabled: {lifecycle_labels_enabled}\n"
         "  active_states:\n"
         f"{active_yaml}\n"
         "  terminal_states:\n"
@@ -83,24 +109,7 @@ def generate_workflow_content(instance: InstanceRecord, *, podium_url: str = "ht
         f"  max_concurrent_agents: {max_concurrent_agents}\n"
         f"  max_turns: {max_turns}\n"
         "  max_retry_backoff_ms: 300000\n"
-        "acceptance:\n"
-        f"  enabled: {acceptance_enabled}\n"
-        "  mode: block_done\n"
-        "  minimum_score: 3\n"
-        "  require_findings_for_score_3: true\n"
-        "  auto_retry_on_fail: true\n"
-        "  todo_state: Todo\n"
-        "  implementation_state: In Progress\n"
-        "  review_state: In Review\n"
-        "  done_state: Done\n"
-        "  task_type_label: performer:type/task\n"
-        "  gate_type_label: performer:type/gate\n"
-        "  evidence_type_label: performer:type/evidence\n"
-        "  gate_pending_label: performer:gate/pending\n"
-        "  gate_passed_label: performer:gate/passed\n"
-        "  gate_pass_with_findings_label: performer:gate/pass-with-findings\n"
-        "  gate_failed_label: performer:gate/failed\n"
-        "  score_label_prefix: performer:score/\n"
+        f"{acceptance_config}"
         "codex:\n"
         "  command: codex app-server\n"
         "---\n"
@@ -119,8 +128,8 @@ def generate_workflow_content(instance: InstanceRecord, *, podium_url: str = "ht
         "- State: {{ issue.state }}\n"
         "- Description: {{ issue.description or 'No description provided.' }}\n"
         f"{acceptance_guidance}"
-        "If Performer posts a runtime permission or sandbox error and labels the issue `performer:error`, a human must "
-        "inspect the error, fix or approve the environment, then comment this exact command on the Linear issue to "
+        "If Performer records a runtime permission or sandbox error, a human must inspect the error, fix or approve "
+        "the environment, then comment this exact command on the Linear issue to "
         "resume: `/symphony approve-runtime-error {{ issue.identifier }}`.\n"
         "Use one linear_graphql call per GraphQL operation when updating Linear evidence. For example:\n"
         "1. Read the current issue description:\n"
