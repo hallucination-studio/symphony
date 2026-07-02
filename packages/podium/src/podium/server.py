@@ -1,14 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-import hmac
-import hashlib
 import json
-from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable
-from urllib.parse import parse_qs
 
 import httpx
 
@@ -18,39 +13,33 @@ from performer_api.registration import (
     RegistrationError,
 )
 
-
-@dataclass(frozen=True)
-class RawResponse:
-    body: bytes
-    content_type: str
-
-    @classmethod
-    def text(cls, content: str, content_type: str) -> RawResponse:
-        return cls(content.encode(), content_type)
+from podium.linear_service import LinearService
+from podium.onboarding_service import OnboardingService
+from podium.routes import RawResponse, Router
+from podium.runtime_service import RuntimeService
+from podium.store import PodiumStore
 
 
 class PodiumServer:
     """
     Podium HTTP server for Symphony agent orchestration.
 
-    Current responsibilities:
-    1. Conductor registration and routing (POST /api/v1/conductors/register)
-    2. Linear webhook ingestion (POST /api/v1/linear/webhooks/agent-session)
-    3. Linear GraphQL proxy with OAuth token injection (POST /api/v1/linear/graphql)
-    4. Linear OAuth callback handling (GET /api/v1/linear/oauth/callback)
+    Thin orchestrator that wires together:
+    - Router (routes.py) - HTTP routing to handlers
+    - LinearService (linear_service.py) - OAuth, webhooks, GraphQL proxy
+    - RuntimeService (runtime_service.py) - runtime enrollment and run visibility
+    - OnboardingService (onboarding_service.py) - onboarding state machine
+    - PodiumStore (store.py) - JSON persistence
 
-    EXTENSION POINTS for web frontend refactoring:
-    - Add session management middleware for browser-based authentication
-    - Add CORS configuration for cross-origin requests from web UI
-    - Extract routing to a separate Router class for better organization
-    - Add WebSocket support for real-time updates to web clients
-    - Add rate limiting and request validation middleware
-    - Add structured logging with request tracing
+    Legacy routes preserved with exact behavior:
+    1. POST /api/v1/conductors/register
+    2. POST /api/v1/linear/webhooks/agent-session
+    3. POST /api/v1/linear/graphql
+    4. GET  /api/v1/linear/oauth/callback
 
     CRITICAL CONSTRAINTS:
     - Linear OAuth tokens (access_token, refresh_token) must NEVER appear in responses
     - Existing conductor/webhook/proxy routes must preserve exact behavior
-    - All secret redaction tests must continue passing after refactoring
     """
 
     def __init__(
@@ -66,20 +55,32 @@ class PodiumServer:
         linear_installations_path: str | Path | None = None,
         linear_graphql_transport: Callable[[httpx.Request], Awaitable[httpx.Response]] | httpx.AsyncBaseTransport | None = None,
         dispatch_callback: Callable[[dict[str, Any], ConductorRegistrationRequest], Awaitable[None]] | None = None,
+        data_dir: str | Path | None = None,
     ):
         self.token = token or ""
-        self.linear_client_id = linear_client_id or ""
-        self.linear_client_secret = linear_client_secret or ""
-        self.linear_redirect_uri = linear_redirect_uri or ""
-        self.linear_webhook_secret = linear_webhook_secret or ""
-        self.linear_token_exchange = linear_token_exchange or self._default_linear_token_exchange
-        self.linear_installations_path = Path(linear_installations_path) if linear_installations_path else None
-        self.linear_installations = dict(linear_installations or self._load_linear_installations())
-        self.linear_graphql_transport = linear_graphql_transport
+        self.linear_service = LinearService(
+            client_id=linear_client_id or "",
+            client_secret=linear_client_secret or "",
+            redirect_uri=linear_redirect_uri or "",
+            webhook_secret=linear_webhook_secret or "",
+            token_exchange=linear_token_exchange,
+            installations=linear_installations,
+            installations_path=linear_installations_path,
+            graphql_transport=linear_graphql_transport,
+        )
+        self.store = PodiumStore(data_dir=data_dir)
+        self.onboarding_service = OnboardingService(self.store)
+        self.runtime_service = RuntimeService(self.store)
+        self.router = Router(self)
         self.dispatch_callback = dispatch_callback or self._default_dispatch
         self.conductors: dict[str, ConductorRegistrationRequest] = {}
         self._server: asyncio.AbstractServer | None = None
         self.port: int | None = None
+
+    # Backwards-compatible access to Linear installations (tests/CLI may inspect)
+    @property
+    def linear_installations(self) -> dict[str, dict[str, Any]]:
+        return self.linear_service.installations
 
     async def start(self, *, host: str = "127.0.0.1", port: int = 0) -> None:
         self._server = await asyncio.start_server(self._handle_connection, host, port)
@@ -94,6 +95,8 @@ class PodiumServer:
         self._server = None
 
     async def _handle_connection(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        from urllib.parse import parse_qs
+
         try:
             request_line = await reader.readline()
             if not request_line:
@@ -106,7 +109,7 @@ class PodiumServer:
                 raw_body = await reader.readexactly(content_length)
             raw_path, _, raw_query = path.partition("?")
             query = {key: values[-1] for key, values in parse_qs(raw_query).items() if values}
-            status, payload = await self._route(method.upper(), raw_path, raw_body, headers, query)
+            status, payload = await self.router.route(method.upper(), raw_path, raw_body, headers, query)
             self._write_response(writer, status, payload)
             await writer.drain()
         except Exception as exc:
@@ -127,131 +130,31 @@ class PodiumServer:
                 key, value = decoded.split(":", 1)
                 headers[key.strip().lower()] = value.strip()
 
-    async def _route(
-        self,
-        method: str,
-        path: str,
-        raw_body: bytes,
-        headers: dict[str, str],
-        query: dict[str, str] | None = None,
-    ) -> tuple[int, dict[str, Any] | RawResponse]:
-        """
-        Route HTTP requests to appropriate handlers.
+    # ===== Legacy handlers (behavior preserved exactly) =====
 
-        CRITICAL: Preserve exact behavior of existing routes during refactoring:
-        - POST /api/v1/conductors/register (conductor registration)
-        - POST /api/v1/linear/webhooks/agent-session (Linear webhook ingestion)
-        - POST /api/v1/linear/graphql (GraphQL proxy with OAuth token injection)
-
-        EXTENSION POINTS for web frontend / BFF APIs:
-        - Add routes under /api/web/* for browser-facing APIs
-        - Add routes under /api/bff/* for backend-for-frontend patterns
-        - Consider extracting route handling to a router class for better organization
-        - Session/auth middleware can be injected before route dispatch
-        - CORS handling should wrap this method's return values
-
-        SECURITY: All new routes must:
-        - Never expose Linear OAuth tokens (access_token, refresh_token) in responses
-        - Validate JSON input and return 400 with error code on parse failures
-        - Use proper authorization (Bearer tokens, session cookies, etc.)
-        - Redact secrets from all error messages and logs
-        """
-        query = query or {}
-        if method == "GET" and path == "/":
-            return 200, RawResponse.text("Podium\n", "text/plain; charset=utf-8")
-        if method == "GET" and path == "/api/v1/health":
-            return 200, {"status": "ok"}
-        if method == "GET" and path == "/api/v1/linear/oauth/callback":
-            return self._linear_oauth_callback(query)
-        if method == "POST" and path == "/api/v1/conductors/register":
-            # CRITICAL: Do not modify this route's behavior - conductors depend on exact response shape
-            if self.token and headers.get("authorization") != f"Bearer {self.token}":
-                return 401, {"error": {"code": "unauthorized", "message": "Unauthorized"}}
-            try:
-                payload = json.loads(raw_body.decode() or "{}")
-            except json.JSONDecodeError:
-                return 400, {"error": {"code": "invalid_json", "message": "Request body must be valid JSON"}}
-            try:
-                request = ConductorRegistrationRequest.from_dict(payload)
-            except RegistrationError as exc:
-                return 400, {"error": {"code": exc.code, "message": str(exc)}}
-            self.conductors[request.conductor_id] = request
-            response = ConductorRegistrationResponse(status="accepted", conductor_id=request.conductor_id)
-            return 200, response.to_dict()
-        if method == "POST" and path == "/api/v1/linear/webhooks/agent-session":
-            # CRITICAL: Do not modify webhook signature validation or dispatch logic
-            return await self._linear_agent_session_webhook(raw_body, headers)
-        if method == "POST" and path == "/api/v1/linear/graphql":
-            # CRITICAL: Linear OAuth tokens must stay inside Podium - never in responses
-            return await self._linear_graphql_proxy(raw_body, headers)
-        # EXTENSION POINT: Add new web/BFF routes here
-        # Example:
-        #   if method == "GET" and path.startswith("/api/web/"):
-        #       return await self._handle_web_api(method, path, raw_body, headers, query)
-        return 404, {"error": {"code": "not_found", "message": f"Route not found: {path}"}}
-
-    def _linear_oauth_callback(self, query: dict[str, str]) -> tuple[int, dict[str, Any]]:
-        """
-        Handle Linear OAuth callback after user authorizes the app.
-
-        CRITICAL: access_token and refresh_token are stored internally but NEVER returned in response.
-        Tests verify that tokens do not appear in response body.
-
-        EXTENSION POINT: After refactoring to web UI:
-        - Add browser session creation here so user stays logged in
-        - Return a redirect response (302) to the web UI instead of JSON
-        - Consider adding a state parameter validation for CSRF protection
-        - Log successful installations for monitoring/debugging
-        """
-        code = str(query.get("code") or "").strip()
-        if not code:
-            return 400, {"error": {"code": "missing_code", "message": "OAuth code is required"}}
-        exchanged = self.linear_token_exchange(code)
-        workspace_id = str(
-            exchanged.get("workspace_id")
-            or exchanged.get("organization_id")
-            or query.get("state")
-            or "default"
-        )
-        expires_in = _int(exchanged.get("expires_in"), 0)
-        expires_at = None
-        if expires_in > 0:
-            expires_at = (datetime.now(timezone.utc) + timedelta(seconds=expires_in)).isoformat().replace("+00:00", "Z")
-        installation = {
-            "workspace_id": workspace_id,
-            "access_token": str(exchanged.get("access_token") or ""),
-            "refresh_token": str(exchanged.get("refresh_token") or ""),
-            "expires_at": expires_at,
-            "scope": str(exchanged.get("scope") or ""),
-            "app_user_id": str(exchanged.get("app_user_id") or ""),
-        }
-        self.linear_installations[workspace_id] = installation
-        self._save_linear_installations()
-        return 200, {
-            "installation": {
-                "workspace_id": workspace_id,
-                "scope": installation["scope"],
-                "app_user_id": installation["app_user_id"],
-                "expires_at": expires_at,
-            }
-        }
-
-    async def _linear_agent_session_webhook(
+    def register_conductor(
         self, raw_body: bytes, headers: dict[str, str]
     ) -> tuple[int, dict[str, Any]]:
-        """
-        Handle Linear AgentSessionEvent webhooks.
+        """POST /api/v1/conductors/register - conductor registration and routing."""
+        if self.token and headers.get("authorization") != f"Bearer {self.token}":
+            return 401, {"error": {"code": "unauthorized", "message": "Unauthorized"}}
+        try:
+            payload = json.loads(raw_body.decode() or "{}")
+        except json.JSONDecodeError:
+            return 400, {"error": {"code": "invalid_json", "message": "Request body must be valid JSON"}}
+        try:
+            request = ConductorRegistrationRequest.from_dict(payload)
+        except RegistrationError as exc:
+            return 400, {"error": {"code": exc.code, "message": str(exc)}}
+        self.conductors[request.conductor_id] = request
+        response = ConductorRegistrationResponse(status="accepted", conductor_id=request.conductor_id)
+        return 200, response.to_dict()
 
-        CRITICAL: Signature validation and dispatch logic must remain unchanged.
-        Tests verify signature rejection, event filtering, and multi-conductor dispatch.
-
-        EXTENSION POINT: After web UI refactoring:
-        - Broadcast events to connected WebSocket clients for real-time UI updates
-        - Store events in a database for audit trail and replay
-        - Add webhook delivery retry logic with exponential backoff
-        - Consider adding a webhook event queue for better reliability
-        """
-        if self.linear_webhook_secret and not self._valid_linear_signature(raw_body, headers):
+    async def handle_agent_session_webhook(
+        self, raw_body: bytes, headers: dict[str, str]
+    ) -> tuple[int, dict[str, Any]]:
+        """POST /api/v1/linear/webhooks/agent-session - Linear webhook ingestion."""
+        if self.linear_service.webhook_secret and not self.linear_service.valid_signature(raw_body, headers):
             return 401, {"error": {"code": "invalid_signature", "message": "Invalid Linear webhook signature"}}
         try:
             payload = json.loads(raw_body.decode() or "{}")
@@ -267,61 +170,25 @@ class PodiumServer:
             dispatched += 1
         return 200, {"status": "accepted", "dispatched": dispatched}
 
-    async def _linear_graphql_proxy(
+    async def handle_graphql_proxy(
         self, raw_body: bytes, headers: dict[str, str]
     ) -> tuple[int, dict[str, Any]]:
-        """
-        Proxy GraphQL requests to Linear API with OAuth token injection.
-
-        CRITICAL: Linear OAuth access_token must NEVER appear in responses.
-        Proxy tokens are validated against registered conductors.
-        Tests verify unauthorized rejection, missing installation errors, and token redaction.
-
-        EXTENSION POINT: After web UI refactoring:
-        - Add browser session-based authentication as alternative to proxy tokens
-        - Add GraphQL query allowlisting/validation for security
-        - Add response caching for frequently requested queries
-        - Consider adding GraphQL query cost analysis to prevent abuse
-        - Add request/response logging for debugging (with token redaction)
-        """
+        """POST /api/v1/linear/graphql - GraphQL proxy with OAuth token injection."""
         registration = self._registration_for_proxy(headers.get("authorization") or "")
         if registration is None:
             return 401, {"error": {"code": "unauthorized", "message": "Unauthorized"}}
         workspace_id = str(registration.routing.get("workspace_id") or "")
-        installation = self.linear_installations.get(workspace_id)
+        installation = self.linear_service.get_installation(workspace_id)
         if not installation:
             return 400, {"error": {"code": "linear_installation_not_found", "message": "Linear installation not found"}}
         try:
             payload = json.loads(raw_body.decode() or "{}")
         except json.JSONDecodeError:
             return 400, {"error": {"code": "invalid_json", "message": "Request body must be valid JSON"}}
-        response_payload = await self._forward_linear_graphql(payload, str(installation.get("access_token") or ""))
+        response_payload = await self.linear_service.forward_graphql(
+            payload, str(installation.get("access_token") or "")
+        )
         return 200, response_payload
-
-    async def _forward_linear_graphql(self, payload: dict[str, Any], access_token: str) -> dict[str, Any]:
-        headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
-        if callable(self.linear_graphql_transport):
-            request = httpx.Request("POST", "https://api.linear.app/graphql", json=payload, headers=headers)
-            response = await self.linear_graphql_transport(request)
-        else:
-            async with httpx.AsyncClient(
-                timeout=30,
-                transport=self.linear_graphql_transport,
-                trust_env=False,
-            ) as client:
-                response = await client.post("https://api.linear.app/graphql", json=payload, headers=headers)
-        try:
-            data = response.json()
-        except json.JSONDecodeError as exc:
-            raise RuntimeError("Linear response was not valid JSON") from exc
-        if not isinstance(data, dict):
-            raise RuntimeError("Linear response was not an object")
-        return data
-
-    def _valid_linear_signature(self, raw_body: bytes, headers: dict[str, str]) -> bool:
-        actual = headers.get("linear-signature") or headers.get("x-linear-signature") or ""
-        expected = hmac.new(self.linear_webhook_secret.encode(), raw_body, hashlib.sha256).hexdigest()
-        return hmac.compare_digest(actual, expected)
 
     def _matching_conductors(self, event: dict[str, Any]) -> list[ConductorRegistrationRequest]:
         matches: list[ConductorRegistrationRequest] = []
@@ -337,6 +204,8 @@ class PodiumServer:
         return matches
 
     def _registration_for_proxy(self, authorization: str) -> ConductorRegistrationRequest | None:
+        import hmac
+
         prefix = "Bearer "
         token = authorization.removeprefix(prefix) if authorization.startswith(prefix) else authorization
         token = token.strip()
@@ -346,47 +215,6 @@ class PodiumServer:
             if registration.proxy_token and hmac.compare_digest(registration.proxy_token, token):
                 return registration
         return None
-
-    def _default_linear_token_exchange(self, code: str) -> dict[str, Any]:
-        if not self.linear_client_id or not self.linear_client_secret or not self.linear_redirect_uri:
-            raise RuntimeError("Linear OAuth token exchange is not configured")
-        data = {
-            "client_id": self.linear_client_id,
-            "client_secret": self.linear_client_secret,
-            "redirect_uri": self.linear_redirect_uri,
-            "code": code,
-            "grant_type": "authorization_code",
-        }
-        try:
-            response = httpx.post("https://api.linear.app/oauth/token", data=data, timeout=30, trust_env=False)
-        except httpx.HTTPError as exc:
-            raise RuntimeError(f"Linear OAuth token exchange failed: {exc}") from exc
-        if response.status_code != 200:
-            raise RuntimeError(f"Linear OAuth token exchange returned HTTP {response.status_code}: {response.text}")
-        payload = response.json()
-        if not isinstance(payload, dict):
-            raise RuntimeError("Linear OAuth token exchange returned a non-object response")
-        return payload
-
-    def _load_linear_installations(self) -> dict[str, dict[str, Any]]:
-        if self.linear_installations_path is None or not self.linear_installations_path.exists():
-            return {}
-        try:
-            payload = json.loads(self.linear_installations_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return {}
-        if not isinstance(payload, dict):
-            return {}
-        return {str(key): value for key, value in payload.items() if isinstance(value, dict)}
-
-    def _save_linear_installations(self) -> None:
-        if self.linear_installations_path is None:
-            return
-        self.linear_installations_path.parent.mkdir(parents=True, exist_ok=True)
-        self.linear_installations_path.write_text(
-            json.dumps(self.linear_installations, indent=2, sort_keys=True),
-            encoding="utf-8",
-        )
 
     async def _default_dispatch(self, payload: dict[str, Any], registration: ConductorRegistrationRequest) -> None:
         if not registration.callback_url:
@@ -440,10 +268,3 @@ def _normalize_agent_session_event(payload: dict[str, Any]) -> dict[str, Any]:
         "agent_session_id": str(session.get("id") or payload.get("agent_session_id") or ""),
         "raw_action": str(payload.get("action") or ""),
     }
-
-
-def _int(value: Any, default: int) -> int:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return default
