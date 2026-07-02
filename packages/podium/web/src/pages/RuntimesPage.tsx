@@ -1,37 +1,165 @@
-import { useRuntimes } from "../api/hooks";
+import { useState } from "react";
+import { useEnrollmentToken, useRuntimes } from "../api/hooks";
 import { PageHeader, QueryState } from "../components/PageState";
+import { Card } from "../components/Card";
+import { EmptyState } from "../components/EmptyState";
+import { StatusBadge } from "../components/StatusBadge";
+import { Drawer, DetailList } from "../components/Drawer";
+import {
+  InstallCommandCard,
+  type EnrollmentPhase,
+} from "../components/InstallCommandCard";
+import { useToast } from "../components/Toast";
+import { formatDateTime, relativeTime } from "../lib/format";
+import type { RuntimeRecord } from "../api/types";
+
+function installCommand(token: string): string {
+  return `curl -fsSL https://get.podium.dev/install.sh | sh -s -- --enrollment-token ${token}`;
+}
 
 export default function RuntimesPage() {
   const { data, isLoading, error } = useRuntimes();
   const runtimes = data?.runtimes ?? [];
+  const [selected, setSelected] = useState<RuntimeRecord | null>(null);
 
   return (
     <>
       <PageHeader
         title="Runtimes"
-        description="Enrolled execution runtimes for this workspace."
+        description="Machines enrolled to execute agent work."
       />
       <QueryState isLoading={isLoading} error={error}>
         {runtimes.length === 0 ? (
-          <div className="card">
-            <p className="muted" style={{ margin: 0 }}>
-              No runtimes enrolled yet.
-            </p>
-          </div>
+          <Card>
+            <EmptyState
+              icon="🖥️"
+              title="No runtimes yet"
+              description="Install your first runtime to start executing agent work."
+              actionLabel="Install a runtime"
+              actionTo="/setup/runtime"
+            />
+          </Card>
         ) : (
-          <div className="card">
-            <ul className="step-list">
+          <Card>
+            <ul className="runtime-list">
               {runtimes.map((runtime) => (
-                <li className="step" key={runtime.id}>
-                  <div className="step-body">
-                    <div className="step-title code">{runtime.id}</div>
-                  </div>
+                <li key={runtime.runtime_id}>
+                  <button
+                    type="button"
+                    className="runtime-row"
+                    data-selected={
+                      runtime.runtime_id === selected?.runtime_id || undefined
+                    }
+                    onClick={() => setSelected(runtime)}
+                  >
+                    <div>
+                      <div className="runtime-id">{runtime.runtime_id}</div>
+                      <div className="runtime-sub">
+                        {runtime.version
+                          ? `v${runtime.version}`
+                          : "version unknown"}
+                        {" · "}
+                        {runtime.last_heartbeat
+                          ? `heartbeat ${relativeTime(runtime.last_heartbeat)}`
+                          : "no heartbeat"}
+                      </div>
+                    </div>
+                    <div className="runtime-meta">
+                      <StatusBadge
+                        status={runtime.online ? "online" : "offline"}
+                      />
+                    </div>
+                  </button>
                 </li>
               ))}
             </ul>
-          </div>
+          </Card>
         )}
       </QueryState>
+
+      {selected ? (
+        <RuntimeDrawer
+          runtime={selected}
+          onClose={() => setSelected(null)}
+        />
+      ) : null}
     </>
+  );
+}
+
+function RuntimeDrawer({
+  runtime,
+  onClose,
+}: {
+  runtime: RuntimeRecord;
+  onClose: () => void;
+}) {
+  const generate = useEnrollmentToken();
+  const { notify } = useToast();
+  const [token, setToken] = useState<string | null>(null);
+
+  const hostname =
+    typeof runtime.metadata?.hostname === "string"
+      ? (runtime.metadata.hostname as string)
+      : null;
+
+  async function regenerate() {
+    try {
+      const res = await generate.mutateAsync();
+      setToken(res.enrollment_token);
+      notify("New install command ready", "success");
+    } catch {
+      notify("Couldn't regenerate the command. Try again.", "error");
+    }
+  }
+
+  const phase: EnrollmentPhase = runtime.online ? "online" : "idle";
+
+  return (
+    <Drawer title={runtime.runtime_id} onClose={onClose}>
+      <div className="row-between" style={{ marginBottom: "var(--space-4)" }}>
+        <span className="muted">Status</span>
+        <StatusBadge status={runtime.online ? "online" : "offline"} />
+      </div>
+
+      <DetailList
+        rows={[
+          { key: "Runtime ID", value: <code className="code">{runtime.runtime_id}</code> },
+          { key: "Version", value: runtime.version ?? "—" },
+          { key: "Hostname", value: hostname ?? "—" },
+          {
+            key: "Last heartbeat",
+            value: formatDateTime(runtime.last_heartbeat),
+          },
+        ]}
+      />
+
+      {!runtime.online ? (
+        <div style={{ marginTop: "var(--space-5)" }}>
+          <div className="scope-section-title">Reconnect this runtime</div>
+          {token ? (
+            <InstallCommandCard
+              command={installCommand(token)}
+              token={token}
+              expiresLabel="Single-use token"
+              phase={phase}
+              onRegenerate={regenerate}
+              regenerating={generate.isPending}
+            />
+          ) : (
+            <button
+              type="button"
+              className="link-button"
+              onClick={regenerate}
+              disabled={generate.isPending}
+            >
+              {generate.isPending
+                ? "Generating…"
+                : "Regenerate install command"}
+            </button>
+          )}
+        </div>
+      ) : null}
+    </Drawer>
   );
 }

@@ -40,6 +40,7 @@ export default function App() {
         <Routes>
           <Route path="/" element={<HomePage />} />
           <Route path="/setup" element={<SetupPage />} />
+          <Route path="/setup/:step" element={<SetupPage />} />
           <Route path="/integrations" element={<IntegrationsPage />} />
           <Route path="/runtimes" element={<RuntimesPage />} />
           <Route path="/runs" element={<RunsPage />} />
