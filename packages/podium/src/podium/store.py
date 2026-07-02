@@ -18,14 +18,14 @@ class PodiumStore:
     Simple JSON file persistence for Podium data.
 
     Manages:
-    - Linear installations (workspace OAuth tokens)
     - Routing rules (workspace -> conductor mappings)
     - Runtime records (enrolled agents)
     - Onboarding progress (per workspace)
     - Repository mappings (per workspace)
 
-    SECURITY: Linear OAuth tokens (access_token, refresh_token) are stored here
-    but NEVER exposed in UI-facing responses.
+    Linear OAuth installations are owned exclusively by LinearService, which is
+    the single source of truth for connection state; the store does not persist
+    a second copy.
     """
 
     def __init__(self, data_dir: str | Path | None = None):
@@ -38,7 +38,6 @@ class PodiumStore:
         self.data_dir = Path(data_dir) if data_dir else None
 
         # In-memory caches
-        self._linear_installations: dict[str, dict[str, Any]] = {}
         self._routing_rules: dict[str, dict[str, Any]] = {}
         self._runtime_records: dict[str, dict[str, Any]] = {}
         self._onboarding_progress: dict[str, dict[str, Any]] = {}
@@ -53,7 +52,6 @@ class PodiumStore:
         if not self.data_dir:
             return
 
-        self._linear_installations = self._load_json("linear_installations.json")
         self._routing_rules = self._load_json("routing_rules.json")
         self._runtime_records = self._load_json("runtime_records.json")
         self._onboarding_progress = self._load_json("onboarding_progress.json")
@@ -88,21 +86,6 @@ class PodiumStore:
             json.dumps(data, indent=2, sort_keys=True),
             encoding="utf-8"
         )
-
-    # ===== Linear Installations =====
-
-    def get_linear_installation(self, workspace_id: str) -> dict[str, Any] | None:
-        """Get Linear installation for workspace (includes OAuth tokens)."""
-        return self._linear_installations.get(workspace_id)
-
-    def save_linear_installation(self, workspace_id: str, installation: dict[str, Any]) -> None:
-        """Save Linear installation (OAuth tokens)."""
-        self._linear_installations[workspace_id] = installation
-        self._save_json("linear_installations.json", self._linear_installations)
-
-    def list_linear_installations(self) -> dict[str, dict[str, Any]]:
-        """List all Linear installations."""
-        return dict(self._linear_installations)
 
     # ===== Routing Rules =====
 
@@ -198,22 +181,3 @@ class PodiumStore:
         """Save repository mapping for workspace."""
         self._repository_mappings[workspace_id] = mapping.to_dict()
         self._save_json("repository_mappings.json", self._repository_mappings)
-
-    # ===== Query Helpers =====
-
-    def get_workspace_context(self, workspace_id: str) -> dict[str, Any]:
-        """
-        Get complete workspace context (for UI bootstrap).
-
-        Returns UI-safe data only - no OAuth tokens.
-        """
-        installation = self.get_linear_installation(workspace_id)
-        progress = self.get_onboarding_progress(workspace_id)
-        mapping = self.get_repository_mapping(workspace_id)
-
-        return {
-            "workspace_id": workspace_id,
-            "linear_connected": installation is not None,
-            "onboarding_progress": progress.to_dict() if progress else None,
-            "repository_mapping": mapping.to_dict() if mapping else None,
-        }

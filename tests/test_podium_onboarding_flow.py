@@ -6,7 +6,6 @@ import json
 import httpx
 import pytest
 
-from podium.models import OnboardingStep
 from podium.server import PodiumServer
 
 
@@ -87,10 +86,14 @@ async def test_full_onboarding_flow_reaches_complete(tmp_path) -> None:
         port = server.port
         assert port is not None
 
-        # 1. Bootstrap - fresh workspace starts at linear_connect
+        # 1. Bootstrap - Linear is already connected in this fixture, so the
+        #    derived linear_connect step is reconciled and the flow opens at
+        #    scope_selection. No direct complete_step calls anywhere below.
         status, body = await request(port, "GET", f"/api/v1/bootstrap?workspace_id={ws}")
         assert status == 200
-        assert json.loads(body)["onboarding"]["current_step"] == "linear_connect"
+        boot = json.loads(body)
+        assert boot["onboarding"]["current_step"] == "scope_selection"
+        assert "linear_connect" in boot["onboarding"]["completed_steps"]
         assert b"secret-linear-token" not in body
 
         # 2. Linear scope discovery
@@ -100,12 +103,7 @@ async def test_full_onboarding_flow_reaches_complete(tmp_path) -> None:
         assert scope_data["teams"][0]["id"] == "team-1"
         assert b"secret-linear-token" not in body
 
-        # 3. Complete linear_connect step by saving scope selection.
-        #    (Linear is already connected in this fixture; scope selection advances the flow.)
-        #    First mark linear_connect complete via the onboarding service to reflect connection.
-        server.onboarding_service.complete_step(ws, OnboardingStep.LINEAR_CONNECT)
-
-        # 4. Save scope
+        # 3. Save scope (advances past linear_connect + scope_selection over HTTP)
         status, body = await request(
             port, "POST", "/api/v1/onboarding/scope",
             {"workspace_id": ws, "teams": ["team-1"], "projects": ["proj-1"]},
@@ -113,7 +111,7 @@ async def test_full_onboarding_flow_reaches_complete(tmp_path) -> None:
         assert status == 200
         assert json.loads(body)["onboarding"]["current_step"] == "repository_mapping"
 
-        # 5. Save repository
+        # 4. Save repository
         status, body = await request(
             port, "POST", "/api/v1/onboarding/repository",
             {"workspace_id": ws, "mode": "git_url", "value": "https://github.com/acme/repo.git"},
@@ -123,7 +121,7 @@ async def test_full_onboarding_flow_reaches_complete(tmp_path) -> None:
         assert repo_payload["repository"]["validation_state"] == "valid"
         assert repo_payload["onboarding"]["current_step"] == "runtime_enrollment"
 
-        # 6. Generate enrollment token
+        # 5. Generate enrollment token
         status, body = await request(
             port, "POST", "/api/v1/onboarding/runtime/enrollment-token",
             {"workspace_id": ws},
@@ -131,15 +129,20 @@ async def test_full_onboarding_flow_reaches_complete(tmp_path) -> None:
         assert status == 200
         assert json.loads(body)["enrollment_token"]
 
-        # 7. Runtime comes online (heartbeat) and completes enrollment step
+        # 6. The enrolled runtime comes online (external heartbeat, not an
+        #    onboarding HTTP call). This alone must drive runtime_enrollment
+        #    complete via derived-step reconciliation.
         server.runtime_service.record_heartbeat("rt-1")
-        server.onboarding_service.complete_step(ws, OnboardingStep.RUNTIME_ENROLLMENT)
 
         status, body = await request(port, "GET", f"/api/v1/onboarding/runtime/status?workspace_id={ws}")
         assert status == 200
         assert json.loads(body)["online_count"] == 1
 
-        # 8. Smoke check - all prerequisites met, should pass and complete onboarding
+        status, body = await request(port, "GET", f"/api/v1/onboarding/status?workspace_id={ws}")
+        assert status == 200
+        assert "runtime_enrollment" in json.loads(body)["completed_steps"]
+
+        # 7. Smoke check - all prerequisites met, should pass and complete onboarding
         status, body = await request(
             port, "POST", "/api/v1/onboarding/smoke-check", {"workspace_id": ws}
         )
@@ -148,7 +151,7 @@ async def test_full_onboarding_flow_reaches_complete(tmp_path) -> None:
         assert smoke["status"] == "passed"
         assert smoke["recommendations"] == []
 
-        # 9. Final bootstrap - onboarding complete
+        # 8. Final bootstrap - onboarding complete, reached over HTTP only
         status, body = await request(port, "GET", f"/api/v1/bootstrap?workspace_id={ws}")
         assert status == 200
         final = json.loads(body)

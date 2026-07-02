@@ -16,6 +16,16 @@ def _service() -> tuple[OnboardingService, PodiumStore]:
     return OnboardingService(store), store
 
 
+def _service_with_linear(connected: set[str]) -> tuple[OnboardingService, PodiumStore]:
+    """Service whose Linear-connection check is backed by an explicit set.
+
+    Mirrors the server wiring where LinearService (not the store) is the source
+    of truth for connection state.
+    """
+    store = PodiumStore()
+    return OnboardingService(store, linear_connected=lambda ws: ws in connected), store
+
+
 def test_progress_starts_at_linear_connect() -> None:
     service, _ = _service()
     progress = service.get_progress("ws-1")
@@ -61,8 +71,7 @@ def test_smoke_check_fails_when_prerequisites_missing() -> None:
 
 
 def test_smoke_check_passes_when_all_prerequisites_met() -> None:
-    service, store = _service()
-    store.save_linear_installation("ws-1", {"workspace_id": "ws-1", "access_token": "tok"})
+    service, store = _service_with_linear({"ws-1"})
     service.save_repository("ws-1", "local_path", "/srv/repo")
     store.save_runtime_record(RuntimeRecord(runtime_id="rt-1", online=True, last_heartbeat="now"))
 
@@ -72,8 +81,7 @@ def test_smoke_check_passes_when_all_prerequisites_met() -> None:
 
 
 def test_smoke_check_passing_completes_onboarding() -> None:
-    service, store = _service()
-    store.save_linear_installation("ws-1", {"workspace_id": "ws-1", "access_token": "tok"})
+    service, store = _service_with_linear({"ws-1"})
     service.save_repository("ws-1", "local_path", "/srv/repo")
     store.save_runtime_record(RuntimeRecord(runtime_id="rt-1", online=True, last_heartbeat="now"))
 
@@ -87,3 +95,27 @@ def test_get_smoke_result_returns_latest() -> None:
     assert service.get_smoke_result("ws-1") is None
     service.run_smoke_check("ws-1")
     assert service.get_smoke_result("ws-1") is not None
+
+
+def test_linear_connection_marks_linear_connect_complete_on_read() -> None:
+    service, _ = _service_with_linear({"ws-1"})
+    progress = service.get_progress("ws-1")
+    assert OnboardingStep.LINEAR_CONNECT in progress.completed_steps
+    assert progress.current_step == OnboardingStep.SCOPE_SELECTION
+
+
+def test_online_runtime_marks_runtime_enrollment_complete_on_read() -> None:
+    service, store = _service()
+    store.save_runtime_record(RuntimeRecord(runtime_id="rt-1", online=True, last_heartbeat="now"))
+    progress = service.get_progress("ws-1")
+    assert OnboardingStep.RUNTIME_ENROLLMENT in progress.completed_steps
+
+
+def test_completing_later_step_does_not_snap_back_when_linear_connected() -> None:
+    # Regression: with Linear connected, completing repository_mapping must not
+    # reset current_step to linear_connect.
+    service, _ = _service_with_linear({"ws-1"})
+    service.save_scope("ws-1", {"teams": ["ENG"]})
+    _, progress = service.save_repository("ws-1", "git_url", "https://github.com/acme/repo.git")
+    assert progress.current_step == OnboardingStep.RUNTIME_ENROLLMENT
+    assert OnboardingStep.LINEAR_CONNECT in progress.completed_steps

@@ -49,29 +49,69 @@ class OnboardingService:
 
     def __init__(self, store: PodiumStore, linear_connected: Callable[[str], bool] | None = None):
         self.store = store
-        # Callable to check Linear connection for a workspace. Defaults to the
-        # store's own installation record. The server injects a LinearService-backed
-        # checker so OAuth installations are the single source of truth.
-        self._linear_connected = linear_connected or (
-            lambda workspace_id: self.store.get_linear_installation(workspace_id) is not None
-        )
+        # Callable to check Linear connection for a workspace. The server injects a
+        # LinearService-backed checker so OAuth installations are the single source of
+        # truth. When unset, no workspace is considered connected.
+        self._linear_connected = linear_connected or (lambda _workspace_id: False)
         # workspace_id -> latest SmokeCheckResult
         self._smoke_results: dict[str, SmokeCheckResult] = {}
 
     def get_progress(self, workspace_id: str) -> OnboardingProgress:
-        """Get current onboarding progress, creating a default if none exists."""
-        return self.store.get_or_create_onboarding_progress(workspace_id)
+        """
+        Get current onboarding progress, creating a default if none exists.
+
+        Reconciles steps that are driven by live external state (Linear
+        connection, runtime online) so HTTP reads reflect real progress.
+        """
+        return self.sync_derived_steps(workspace_id)
+
+    def sync_derived_steps(self, workspace_id: str) -> OnboardingProgress:
+        """
+        Mark steps that are driven by live external signals complete.
+
+        LINEAR_CONNECT completes once the workspace has a Linear installation
+        (via the OAuth callback). RUNTIME_ENROLLMENT completes once any runtime
+        has come online (via heartbeat/enrollment). This lets the state machine
+        advance over HTTP without callers invoking complete_step directly.
+
+        Returns the (possibly updated) progress.
+        """
+        progress = self.store.get_or_create_onboarding_progress(workspace_id)
+        derived = self._derived_completed_steps(workspace_id)
+        if any(step not in progress.completed_steps for step in derived):
+            # Persist by completing the current step again; complete_step folds
+            # in the derived steps and recomputes current_step/next_action.
+            progress = self.complete_step(workspace_id, progress.current_step)
+        return progress
+
+    def _derived_completed_steps(self, workspace_id: str) -> list[OnboardingStep]:
+        """Steps that live external signals imply are already complete."""
+        derived: list[OnboardingStep] = []
+        if self._linear_connected(workspace_id):
+            derived.append(OnboardingStep.LINEAR_CONNECT)
+        if self._any_runtime_online():
+            derived.append(OnboardingStep.RUNTIME_ENROLLMENT)
+        return derived
+
+    def _any_runtime_online(self) -> bool:
+        """True if at least one enrolled runtime is currently online."""
+        return any(r.online for r in self.store.list_runtime_records())
 
     def complete_step(self, workspace_id: str, step: OnboardingStep, **metadata: Any) -> OnboardingProgress:
         """
         Mark a step complete and advance to the next incomplete step.
 
+        Externally-driven steps (Linear connect, runtime enrollment) are folded
+        in from live signals so completing a later step never snaps current_step
+        back to an already-satisfied earlier step.
+
         Returns the updated progress.
         """
         progress = self.store.get_or_create_onboarding_progress(workspace_id)
         completed = list(progress.completed_steps)
-        if step not in completed:
-            completed.append(step)
+        for candidate in [step, *self._derived_completed_steps(workspace_id)]:
+            if candidate != OnboardingStep.COMPLETE and candidate not in completed:
+                completed.append(candidate)
 
         # Determine next step: first step (in order) not yet completed
         next_step = OnboardingStep.COMPLETE
@@ -131,7 +171,8 @@ class OnboardingService:
         Run smoke checks against the workspace configuration.
 
         Checks Linear connection, repository mapping, and runtime enrollment.
-        Stores and returns the result.
+        Stores and returns the result. On pass, completing SMOKE_CHECK also
+        folds in externally-driven steps so onboarding reaches COMPLETE.
         """
         checks: list[dict[str, Any]] = []
         recommendations: list[str] = []

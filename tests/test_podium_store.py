@@ -11,23 +11,6 @@ from podium.models import (
 from podium.store import PodiumStore
 
 
-def test_store_persists_linear_installation_to_disk(tmp_path) -> None:
-    store = PodiumStore(data_dir=tmp_path)
-    store.save_linear_installation("ws-1", {"workspace_id": "ws-1", "access_token": "secret"})
-
-    reloaded = PodiumStore(data_dir=tmp_path)
-    assert reloaded.get_linear_installation("ws-1") == {
-        "workspace_id": "ws-1",
-        "access_token": "secret",
-    }
-
-
-def test_store_in_memory_when_no_data_dir() -> None:
-    store = PodiumStore()
-    store.save_linear_installation("ws-1", {"workspace_id": "ws-1"})
-    assert store.get_linear_installation("ws-1") == {"workspace_id": "ws-1"}
-
-
 def test_store_persists_runtime_record_and_queries_by_id(tmp_path) -> None:
     store = PodiumStore(data_dir=tmp_path)
     record = RuntimeRecord(runtime_id="rt-1", online=True, last_heartbeat="2026-01-01T00:00:00Z")
@@ -86,12 +69,3 @@ def test_store_persists_repository_mapping(tmp_path) -> None:
 
     reloaded = PodiumStore(data_dir=tmp_path)
     assert reloaded.get_repository_mapping("ws-1") == mapping
-
-
-def test_store_workspace_context_excludes_tokens(tmp_path) -> None:
-    store = PodiumStore(data_dir=tmp_path)
-    store.save_linear_installation("ws-1", {"workspace_id": "ws-1", "access_token": "secret-token"})
-
-    context = store.get_workspace_context("ws-1")
-    assert "secret-token" not in str(context)
-    assert context["linear_connected"] is True
