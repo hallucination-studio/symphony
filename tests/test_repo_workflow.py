@@ -35,6 +35,7 @@ def test_repo_workflow_enables_acceptance_gates_by_default() -> None:
     assert config.acceptance.enabled is True
     assert config.acceptance.review_state == "In Review"
     assert config.acceptance.gate_type_label == "performer:type/gate"
+    assert config.acceptance.gate_planner_mode == "strict"
     assert config.acceptance.evidence_type_label == "performer:type/evidence"
     assert "Do not move the issue to Done yourself" in workflow.prompt_template
     assert "Implementation summary:" in workflow.prompt_template

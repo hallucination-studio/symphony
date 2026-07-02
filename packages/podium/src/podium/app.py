@@ -200,7 +200,13 @@ def create_app(
         if runtime is None:
             return error_response(401, "unauthorized", "Unauthorized")
         payload = await request.json()
-        dispatch = state.ack_dispatch(str(runtime["id"]), str(payload.get("dispatch_id") or ""), str(payload.get("status") or "accepted"))
+        dispatch = state.ack_dispatch(
+            str(runtime["id"]),
+            str(payload.get("dispatch_id") or ""),
+            str(payload.get("status") or "accepted"),
+            reason=payload.get("reason") if isinstance(payload.get("reason"), str) else None,
+            runtime_phase=payload.get("runtime_phase") if isinstance(payload.get("runtime_phase"), str) else None,
+        )
         if dispatch is None:
             return error_response(404, "dispatch_not_found", "Dispatch not found")
         return JSONResponse({"dispatch": dispatch_public(dispatch)})
@@ -222,7 +228,13 @@ def create_app(
                     state.presence[runtime_id] = utc_now_iso()
                     await websocket.send_json({"type": "ping"})
                 elif kind == "dispatch.ack":
-                    dispatch = state.ack_dispatch(runtime_id, str(message.get("dispatch_id") or ""), str(message.get("status") or "accepted"))
+                    dispatch = state.ack_dispatch(
+                        runtime_id,
+                        str(message.get("dispatch_id") or ""),
+                        str(message.get("status") or "accepted"),
+                        reason=message.get("reason") if isinstance(message.get("reason"), str) else None,
+                        runtime_phase=message.get("runtime_phase") if isinstance(message.get("runtime_phase"), str) else None,
+                    )
                     await websocket.send_json({"type": "dispatch.ack.ok", "dispatch": dispatch_public(dispatch) if dispatch else None})
                 else:
                     await websocket.send_json({"type": "error", "code": "unsupported_message"})
@@ -369,6 +381,8 @@ class ManagedPodiumState:
                 "routing_rule_id": group["id"],
                 "workflow_profile": group.get("workflow_profile") or "task",
                 "status": "queued",
+                "reason": "",
+                "runtime_phase": "",
                 "leased_runtime_id": None,
                 "leased_until": None,
                 "created_at": utc_now_iso(),
@@ -394,11 +408,23 @@ class ManagedPodiumState:
             return dispatch
         return None
 
-    def ack_dispatch(self, runtime_id: str, dispatch_id: str, status: str) -> dict[str, Any] | None:
+    def ack_dispatch(
+        self,
+        runtime_id: str,
+        dispatch_id: str,
+        status: str,
+        *,
+        reason: str | None = None,
+        runtime_phase: str | None = None,
+    ) -> dict[str, Any] | None:
         dispatch = self.dispatches.get(dispatch_id)
         if dispatch is None or dispatch.get("leased_runtime_id") != runtime_id:
             return None
         dispatch["status"] = status
+        if reason is not None:
+            dispatch["reason"] = reason
+        if runtime_phase is not None:
+            dispatch["runtime_phase"] = runtime_phase
         return dispatch
 
 
@@ -434,6 +460,8 @@ def dispatch_public(dispatch: dict[str, Any]) -> dict[str, Any]:
         "routing_rule_id": dispatch["routing_rule_id"],
         "workflow_profile": dispatch["workflow_profile"],
         "status": dispatch["status"],
+        "reason": dispatch.get("reason") or "",
+        "runtime_phase": dispatch.get("runtime_phase") or "",
     }
 
 

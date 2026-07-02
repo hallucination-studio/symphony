@@ -139,11 +139,18 @@ async def test_agent_session_webhook_queues_only_delegated_custom_agent_dispatch
 
         ack = await client.post(
             "/api/v1/runtime/dispatches/ack",
-            json={"dispatch_id": dispatch["dispatch_id"], "status": "completed"},
+            json={
+                "dispatch_id": dispatch["dispatch_id"],
+                "status": "completed",
+                "reason": "completed_by_runtime",
+                "runtime_phase": "completed",
+            },
             headers={"Authorization": f"Bearer {enrolled['runtime_token']}"},
         )
         assert ack.status_code == 200
         assert ack.json()["dispatch"]["status"] == "completed"
+        assert ack.json()["dispatch"]["reason"] == "completed_by_runtime"
+        assert ack.json()["dispatch"]["runtime_phase"] == "completed"
 
 
 @pytest.mark.asyncio

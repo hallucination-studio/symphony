@@ -47,6 +47,27 @@ LIFECYCLE_LABELS = {
     "failed": f"{LIFECYCLE_LABEL_PREFIX}failed",
     "done": f"{LIFECYCLE_LABEL_PREFIX}done",
 }
+PHASE_LABELS = {
+    "queued": "performer:phase/queued",
+    "dispatch_received": "performer:phase/queued",
+    "implementation_running": "performer:phase/implementation",
+    "implementation_done": "performer:phase/implementation",
+    "review_running": "performer:phase/review",
+    "completed": "performer:phase/done",
+    "failed": "performer:phase/failed",
+}
+DISPATCH_LABELS = {
+    "accepted": "performer:dispatch/accepted",
+    "skipped": "performer:dispatch/skipped",
+    "failed": "performer:dispatch/failed",
+}
+RETRY_LABELS = {
+    "pending": "performer:retry/pending",
+    "exhausted": "performer:retry/exhausted",
+}
+ERROR_LABELS = {
+    "human_blocked": "performer:error/human-blocked",
+}
 
 
 @dataclass(frozen=True)
@@ -161,6 +182,7 @@ class RunningEntry:
     last_raw_codex_message: str | None = None
     phase: str = "starting"
     status_label: str = LIFECYCLE_LABELS["starting"]
+    runtime_phase: str = "dispatch_received"
     workspace_path: str | None = None
     recent_events: list[dict[str, Any]] = field(default_factory=list)
     tokens: RuntimeTokens = field(default_factory=RuntimeTokens)
@@ -180,6 +202,7 @@ class RetryEntry:
     issue_url: str | None = None
     phase: str = "retrying"
     status_label: str = LIFECYCLE_LABELS["retrying"]
+    runtime_phase: str = "failed"
     last_message: str | None = None
     recent_events: list[dict[str, Any]] = field(default_factory=list)
 
@@ -194,6 +217,7 @@ class ContinuationEntry:
     issue_url: str | None = None
     phase: str = "continuing"
     status_label: str = LIFECYCLE_LABELS["continuing"]
+    runtime_phase: str = "implementation_done"
     last_message: str | None = None
     recent_events: list[dict[str, Any]] = field(default_factory=list)
 
@@ -208,6 +232,7 @@ class BlockedEntry:
     issue_url: str | None = None
     phase: str = "error"
     status_label: str = LIFECYCLE_LABELS["error"]
+    runtime_phase: str = "failed"
     last_message: str | None = None
     recent_events: list[dict[str, Any]] = field(default_factory=list)
 

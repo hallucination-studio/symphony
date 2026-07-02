@@ -468,6 +468,40 @@ def patch_workflow(workflow_path: Path, *, acceptance_gates: bool, permission_ap
     return workflow
 
 
+def patch_e2e_gate_mode(workflow: str, *, gate_mode: str) -> str:
+    if gate_mode not in {"smoke", "strict"}:
+        raise ValueError(f"unsupported e2e gate mode: {gate_mode}")
+    if "acceptance:\n" not in workflow:
+        return workflow
+    lines = workflow.splitlines()
+    output: list[str] = []
+    in_acceptance = False
+    inserted = False
+    for line in lines:
+        if line.startswith("acceptance:"):
+            in_acceptance = True
+            inserted = False
+            output.append(line)
+            continue
+        if in_acceptance and line == "" and not inserted:
+            output.append(f"  gate_planner_mode: {gate_mode}")
+            inserted = True
+        if in_acceptance and line and not line.startswith(" "):
+            if not inserted:
+                output.append(f"  gate_planner_mode: {gate_mode}")
+                inserted = True
+            in_acceptance = False
+        if in_acceptance and line.strip().startswith("gate_planner_mode:"):
+            if not inserted:
+                output.append(f"  gate_planner_mode: {gate_mode}")
+                inserted = True
+            continue
+        output.append(line)
+    if in_acceptance and not inserted:
+        output.append(f"  gate_planner_mode: {gate_mode}")
+    return "\n".join(output) + ("\n" if workflow.endswith("\n") else "")
+
+
 def api_url(port: int, path: str) -> str:
     return f"http://127.0.0.1:{port}{path}"
 
@@ -487,6 +521,7 @@ async def wait_for_run(
     conductor_port: int,
     evidence: Evidence,
     timeout_seconds: int,
+    stage_timeout_seconds: int,
     permission_approval_probe: bool = False,
 ) -> dict[str, Any]:
     instance_root = Path(instance["instance_dir"])
@@ -501,6 +536,13 @@ async def wait_for_run(
     approved_blocked_events: set[str] = set()
     last_state: dict[str, Any] = {}
     last_ops: dict[str, Any] = {}
+    stages: dict[str, str] = {}
+
+    def mark_stage(name: str, passed: bool, **details: Any) -> None:
+        if passed and name not in stages:
+            stages[name] = utc_now()
+            evidence.check(f"stage:{name}", True, **details)
+
     while time.monotonic() < deadline:
         if not log_path.exists():
             generated = sorted((instance_root / "logs").glob("performer-*.log"))
@@ -540,6 +582,9 @@ async def wait_for_run(
             "run_statuses": run_statuses,
         }
         samples.append(sample)
+        mark_stage("webhook_queued", True, issue_id=issue_id)
+        mark_stage("process_running_or_exited", process_status in {"running", "exited", "stopped"}, process_status=process_status)
+        mark_stage("implementation_result_exists", result_path.exists(), path=str(result_path))
         blocked = [entry for entry in state.get("blocked", []) if isinstance(entry, dict)]
         for blocked_entry in blocked:
             blocked_issue_id = str(blocked_entry.get("issue_id") or "")
@@ -601,12 +646,21 @@ async def wait_for_run(
     final_issue_path = evidence.out.parent / "final-issue.json"
     final_issue_path.write_text(json.dumps(final_issue, indent=2, sort_keys=True), encoding="utf-8")
     evidence.artifact("final_issue", final_issue_path)
+    stage_snapshot = {
+        "observed": stages,
+        "stage_timeout_seconds": stage_timeout_seconds,
+        "last_sample": samples[-1] if samples else None,
+    }
+    stage_snapshot_path = evidence.out.parent / "stage-snapshot.json"
+    stage_snapshot_path.write_text(json.dumps(stage_snapshot, indent=2, sort_keys=True), encoding="utf-8")
+    evidence.artifact("stage_snapshot", stage_snapshot_path)
     return {
         "state": read_json_object_if_ready(state_path, last_state),
         "ops": read_json_object_if_ready(ops_path, last_ops),
         "issue": final_issue,
         "result_path": str(result_path),
         "log_path": str(log_path),
+        "samples": samples,
     }
 
 
@@ -809,6 +863,8 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
             acceptance_gates=args.acceptance_gates,
             permission_approval_probe=args.permission_approval_probe,
         )
+        if args.acceptance_gates:
+            workflow = patch_e2e_gate_mode(workflow, gate_mode=args.e2e_gate_mode)
         status, body = http_json("POST", api_url(conductor_port, f"/api/instances/{instance_id}/validate-workflow"), {"workflow_content": workflow})
         evidence.check(f"conductor-api:POST /api/instances/{instance_id}/validate-workflow patched", status == 200, status=status)
         status, body = http_json("PATCH", api_url(conductor_port, f"/api/instances/{instance_id}"), {"workflow_content": workflow})
@@ -893,6 +949,7 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
             conductor_port=conductor_port,
             evidence=evidence,
             timeout_seconds=args.timeout,
+            stage_timeout_seconds=args.stage_timeout,
             permission_approval_probe=args.permission_approval_probe,
         )
         if args.permission_approval_probe:
@@ -954,6 +1011,25 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
                 for grandchild in gate["children"]["nodes"]
                 if any(label["name"] == "performer:type/evidence" for label in grandchild["labels"]["nodes"])
             ]
+            evidence.check(
+                "stage:gate_created",
+                bool(gates),
+                gates=[{"identifier": gate["identifier"], "state": gate["state"]} for gate in gates],
+            )
+            evidence.check(
+                "stage:evidence_created",
+                bool(evidence_issues),
+                evidence=[{"identifier": item["identifier"], "state": item["state"]} for item in evidence_issues],
+            )
+            evidence.check(
+                "stage:final_done",
+                tree["state"]["type"] in {"completed", "canceled"}
+                and all(gate["state"]["type"] in {"completed", "canceled"} for gate in gates)
+                and all(item["state"]["type"] in {"completed", "canceled"} for item in evidence_issues),
+                issue_state=tree["state"],
+                gates=[{"identifier": gate["identifier"], "state": gate["state"]} for gate in gates],
+                evidence=[{"identifier": item["identifier"], "state": item["state"]} for item in evidence_issues],
+            )
             gate_failed = any(
                 any(label["name"] == "performer:gate/failed" for label in node["labels"]["nodes"])
                 for node in [tree, *gates]
@@ -1068,6 +1144,8 @@ def parser() -> argparse.ArgumentParser:
     arg_parser.add_argument("--out", type=Path, default=Path(".test-real-flow/e2e-matrix"))
     arg_parser.add_argument("--project-slug", default=DEFAULT_PROJECT_SLUG)
     arg_parser.add_argument("--acceptance-gates", action=argparse.BooleanOptionalAction, default=True)
+    arg_parser.add_argument("--e2e-gate-mode", choices=["smoke", "strict"], default="smoke")
+    arg_parser.add_argument("--stage-timeout", type=int, default=120)
     arg_parser.add_argument("--permission-approval-probe", action="store_true")
     arg_parser.add_argument(
         "--simulate-agent-webhook",

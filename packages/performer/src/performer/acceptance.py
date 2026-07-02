@@ -116,6 +116,30 @@ class CodexGatePlanner:
         return str(result)
 
 
+class SmokeGatePlanner:
+    async def plan_gates(self, *, issue: Any, workspace_path: str | None = None) -> str:
+        _ = workspace_path
+        identifier = getattr(issue, "identifier", "issue")
+        return json.dumps(
+            {
+                "gates": [
+                    {
+                        "title": "Smoke completion evidence",
+                        "purpose": f"Verify {identifier} produced the deterministic E2E result and evidence.",
+                        "acceptance_criteria": [
+                            "The workspace contains SYMPHONY_REAL_E2E_RESULT.md for the delegated issue.",
+                            "The Linear issue includes implementation summary, test output, and remaining risks.",
+                        ],
+                        "required_evidence": [
+                            "Workspace result file content.",
+                            "Linear issue evidence fields and pytest tests/test_smoke.py -q output.",
+                        ],
+                    }
+                ]
+            }
+        )
+
+
 def build_gate_planner_prompt(*, issue: Any) -> str:
     issue_identifier = getattr(issue, "identifier", "")
     issue_title = getattr(issue, "title", "")

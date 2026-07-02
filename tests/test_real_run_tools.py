@@ -15,6 +15,7 @@ def load_tool(name: str):
     spec = importlib.util.spec_from_file_location(name, ROOT / "tools" / f"{name}.py")
     module = importlib.util.module_from_spec(spec)
     assert spec and spec.loader
+    sys.modules[name] = module
     spec.loader.exec_module(module)
     return module
 
@@ -141,3 +142,22 @@ def test_real_run_observer_diagnoses_review_phase_state_mismatch() -> None:
     )
 
     assert findings == ["linear_state_phase_mismatch:review_phase_without_in_review_state"]
+
+
+def test_real_symphony_e2e_patches_smoke_gate_mode() -> None:
+    tool = load_tool("real_symphony_e2e")
+    workflow = "acceptance:\n  enabled: true\n  mode: block_done\n\ncodex:\n  command: codex app-server\n"
+
+    patched = tool.patch_e2e_gate_mode(workflow, gate_mode="smoke")
+
+    assert "acceptance:\n  enabled: true\n  mode: block_done\n  gate_planner_mode: smoke\n\ncodex:" in patched
+
+
+def test_real_symphony_e2e_replaces_existing_gate_mode() -> None:
+    tool = load_tool("real_symphony_e2e")
+    workflow = "acceptance:\n  enabled: true\n  gate_planner_mode: strict\ncodex:\n  command: codex app-server\n"
+
+    patched = tool.patch_e2e_gate_mode(workflow, gate_mode="smoke")
+
+    assert "gate_planner_mode: smoke" in patched
+    assert "gate_planner_mode: strict" not in patched

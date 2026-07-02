@@ -135,6 +135,7 @@ class AcceptanceConfig:
     rework_phase_label: str = "performer:phase/rework"
     marker_name: str = "PERFORMER ACCEPTANCE"
     plan_revision: int = 1
+    gate_planner_mode: str = "strict"
     direct_done_bypass_policy: str = "review_with_evidence"
     gate_pending_label: str = "performer:gate/pending"
     gate_passed_label: str = "performer:gate/passed"
@@ -510,6 +511,10 @@ def _acceptance_config(raw: dict[str, Any]) -> AcceptanceConfig:
         ),
         marker_name=_string(raw.get("marker_name"), defaults.marker_name) or defaults.marker_name,
         plan_revision=_int(raw.get("plan_revision"), defaults.plan_revision, positive=True),
+        gate_planner_mode=(
+            _string(raw.get("gate_planner_mode"), defaults.gate_planner_mode)
+            or defaults.gate_planner_mode
+        ),
         direct_done_bypass_policy=(
             _string(raw.get("direct_done_bypass_policy"), defaults.direct_done_bypass_policy)
             or defaults.direct_done_bypass_policy

@@ -11,13 +11,18 @@ from .acceptance import (
     CodexGatePlanner,
     GatePlan,
     GatePlanReport,
+    SmokeGatePlanner,
     parse_acceptance_report,
     parse_gate_plan_report,
 )
 from performer_api.config import ConfigError, ServiceConfig
 from .completion_verifier import CompletionVerifier
 from performer_api.models import (
+    DISPATCH_LABELS,
+    ERROR_LABELS,
     LIFECYCLE_LABELS,
+    PHASE_LABELS,
+    RETRY_LABELS,
     BlockedEntry,
     ContinuationEntry,
     Issue,
@@ -200,6 +205,7 @@ class Orchestrator:
             self.config.validate_for_dispatch()
         except ConfigError as exc:
             logger.warning("performer_event_dispatch_validation failed code=%s reason=%s", exc.code, exc)
+            self._sync_label_group_background(issue_id, DISPATCH_LABELS["skipped"], prefix="performer:dispatch/")
             return {"status": "skipped", "issue_id": issue_id, "reason": exc.code}
         await self.process_blocked_approvals()
         await self.process_due_continuations()
@@ -208,9 +214,11 @@ class Orchestrator:
             issues = await self.tracker.fetch_issue_states_by_ids([issue_id])
         except Exception as exc:
             logger.warning("performer_event_dispatch failed issue_id=%s reason=%s", issue_id, exc)
+            self._sync_label_group_background(issue_id, DISPATCH_LABELS["failed"], prefix="performer:dispatch/")
             return {"status": "failed", "issue_id": issue_id, "reason": str(exc)}
         issue = issues[0] if issues else None
         if issue is None:
+            self._sync_label_group_background(issue_id, DISPATCH_LABELS["skipped"], prefix="performer:dispatch/")
             return {"status": "skipped", "issue_id": issue_id, "reason": "issue_not_found"}
         if self.config.acceptance.enabled:
             acceptance = self.config.acceptance
@@ -218,12 +226,14 @@ class Orchestrator:
             if state_key == normalize_state_key(acceptance.review_state):
                 reason = self.dispatch_skip_reason_without_acceptance(issue)
                 if reason is not None:
+                    self._sync_label_group_background(issue.id, DISPATCH_LABELS["skipped"], prefix="performer:dispatch/")
                     return {"status": "skipped", "issue_id": issue.id, "reason": reason}
                 await self._run_acceptance_gate_for_issue(issue, completion_verdict=None)
                 return {"status": "accepted", "issue_id": issue.id, "reason": "acceptance_review_state"}
             if state_key == normalize_state_key(acceptance.done_state):
                 reason = self.dispatch_skip_reason_without_acceptance(issue)
                 if reason is not None:
+                    self._sync_label_group_background(issue.id, DISPATCH_LABELS["skipped"], prefix="performer:dispatch/")
                     return {"status": "skipped", "issue_id": issue.id, "reason": reason}
                 if _has_passed_acceptance_gate(issue, acceptance):
                     self.state.completed.add(issue.id)
@@ -253,13 +263,20 @@ class Orchestrator:
             )
             reason = self.dispatch_skip_reason_for_event(issue)
         if reason is not None:
+            self._sync_label_group_background(issue.id, DISPATCH_LABELS["skipped"], prefix="performer:dispatch/")
             return {"status": "skipped", "issue_id": issue.id, "reason": reason}
         selected_worker_host = worker_host or self._select_worker_host()
         if self.config.worker.ssh_hosts and selected_worker_host is None:
+            self._sync_label_group_background(issue.id, DISPATCH_LABELS["skipped"], prefix="performer:dispatch/")
             return {"status": "skipped", "issue_id": issue.id, "reason": "no_available_worker_host"}
         self.dispatch_issue(issue, attempt=None, worker_host=selected_worker_host)
         await asyncio.sleep(0)
-        return {"status": "dispatched", "issue_id": issue.id, "issue_identifier": issue.identifier}
+        return {
+            "status": "accepted",
+            "issue_id": issue.id,
+            "issue_identifier": issue.identifier,
+            "runtime_phase": "dispatch_received",
+        }
 
     async def process_blocked_approvals(self) -> None:
         if not self.state.blocked:
@@ -493,8 +510,10 @@ class Orchestrator:
             retry_attempt=attempt or 0,
             worker_host=worker_host,
         )
-        self._set_running_phase(issue.id, "starting")
+        self._set_running_phase(issue.id, "starting", runtime_phase="dispatch_received")
         self._sync_lifecycle_label_background(issue.id, LIFECYCLE_LABELS["starting"])
+        self._sync_label_group_background(issue.id, DISPATCH_LABELS["accepted"], prefix="performer:dispatch/")
+        self._sync_label_group_background(issue.id, PHASE_LABELS["implementation_running"], prefix="performer:phase/")
         self._persist_state()
 
     async def _process_acceptance_state_candidate(self, issue: Issue) -> bool:
@@ -538,7 +557,7 @@ class Orchestrator:
     async def _acceptance_preflight(self, issue: Issue) -> dict[str, Any] | None:
         gates = await self._fetch_gate_issues(issue)
         if not gates:
-            planner = self.gate_planner or CodexGatePlanner(self.config)
+            planner = self.gate_planner or self._gate_planner()
             raw_plan = await planner.plan_gates(issue=issue, workspace_path=str(self.config.workspace.root))
             plan = parse_gate_plan_report(raw_plan)
             if plan.needs_more_info:
@@ -766,6 +785,7 @@ class Orchestrator:
             return
         if len(reviewed_gates) == len(gates):
             await self._sync_label_group(issue.id, self.config.acceptance.gate_passed_label, prefix="performer:gate/")
+            await self._sync_label_group(issue.id, PHASE_LABELS["completed"], prefix="performer:phase/")
             await self._transition_issue_by_state_name(issue.id, self.config.acceptance.done_state)
             self.state.completed.add(issue.id)
             self.state.claimed.discard(issue.id)
@@ -800,6 +820,7 @@ class Orchestrator:
         if report.accepted:
             await self._transition_issue_by_state_name(acceptance_issue_id, self.config.acceptance.done_state)
             await self._transition_issue_by_state_name(issue.id, self.config.acceptance.done_state)
+            await self._sync_label_group(issue.id, PHASE_LABELS["completed"], prefix="performer:phase/")
             self.state.completed.add(issue.id)
         else:
             await self._transition_issue_by_state_name(issue.id, self.config.acceptance.implementation_state)
@@ -895,6 +916,7 @@ class Orchestrator:
             return
         self.state.ended_runtime_seconds += max((utc_now() - entry.started_at).total_seconds(), 0)
         if normal:
+            entry.runtime_phase = "implementation_done"
             # 🆕 完成验证
             try:
                 from pathlib import Path
@@ -923,6 +945,11 @@ class Orchestrator:
                                     delay_ms=None,
                                 )
                                 await self._sync_lifecycle_label(updated_issue.id, LIFECYCLE_LABELS["retrying"])
+                                await self._sync_label_group(
+                                    updated_issue.id,
+                                    RETRY_LABELS["pending"],
+                                    prefix="performer:retry/",
+                                )
                                 logger.warning(
                                     "performer_completion_review_blocked issue_id=%s reason=%s",
                                     issue_id,
@@ -971,6 +998,7 @@ class Orchestrator:
                         self.state.claimed.discard(issue_id)
                         self.state.retry_attempts.pop(issue_id, None)
                         await self._sync_lifecycle_label(entry.issue.id, LIFECYCLE_LABELS["done"])
+                        await self._sync_label_group(entry.issue.id, PHASE_LABELS["completed"], prefix="performer:phase/")
                         logger.info(f"performer_completion_verified issue_id={issue_id} reason={verdict.reason}")
                     elif refreshed_issue is not None:
                         await self._comment_handoff_preserved(entry, refreshed_issue)
@@ -998,6 +1026,7 @@ class Orchestrator:
                             delay_ms=None
                         )
                         await self._sync_lifecycle_label(updated_issue.id, LIFECYCLE_LABELS["retrying"])
+                        await self._sync_label_group(updated_issue.id, RETRY_LABELS["pending"], prefix="performer:retry/")
                     else:
                         # 不自动重试，标记失败并等待人工介入
                         logger.error(f"performer_completion_verification_failed_no_retry issue_id={issue_id}")
@@ -1005,6 +1034,7 @@ class Orchestrator:
                         self.state.claimed.discard(issue_id)
                         self.state.retry_attempts.pop(issue_id, None)
                         await self._sync_lifecycle_label(entry.issue.id, LIFECYCLE_LABELS["failed"])
+                        await self._sync_label_group(entry.issue.id, PHASE_LABELS["failed"], prefix="performer:phase/")
 
                 else:  # NEEDS_HUMAN
                     # 需要人工审查，不自动标记完成
@@ -1023,6 +1053,11 @@ class Orchestrator:
                                 delay_ms=None,
                             )
                             await self._sync_lifecycle_label(updated_issue.id, LIFECYCLE_LABELS["retrying"])
+                            await self._sync_label_group(
+                                updated_issue.id,
+                                RETRY_LABELS["pending"],
+                                prefix="performer:retry/",
+                            )
                             return
                         await self._sync_label_group(
                             review_issue.id,
@@ -1047,6 +1082,7 @@ class Orchestrator:
                     self.state.retry_attempts.pop(issue_id, None)
                     if not self.config.acceptance.enabled:
                         await self._sync_lifecycle_label(entry.issue.id, LIFECYCLE_LABELS["failed"])
+                        await self._sync_label_group(entry.issue.id, PHASE_LABELS["failed"], prefix="performer:phase/")
 
             except Exception as exc:
                 # 验证器本身异常也不能直接放行为完成
@@ -1061,17 +1097,25 @@ class Orchestrator:
                     delay_ms=None,
                 )
                 await self._sync_lifecycle_label(entry.issue.id, LIFECYCLE_LABELS["retrying"])
+                await self._sync_label_group(entry.issue.id, RETRY_LABELS["pending"], prefix="performer:retry/")
         else:
             next_attempt = max(entry.retry_attempt + 1, 1)
             retry_error = f"worker exited: {error}"
             if entry.human_blocked_reason:
                 self._schedule_blocked(entry, error=entry.human_blocked_reason, attempt=next_attempt)
                 await self._sync_lifecycle_label(entry.issue.id, LIFECYCLE_LABELS["error"])
+                await self._sync_label_group(entry.issue.id, ERROR_LABELS["human_blocked"], prefix="performer:error/")
             else:
                 self._schedule_retry(entry.issue, next_attempt, error=retry_error, delay_ms=None)
                 await self._sync_lifecycle_label(entry.issue.id, LIFECYCLE_LABELS["retrying"])
+                await self._sync_label_group(entry.issue.id, RETRY_LABELS["pending"], prefix="performer:retry/")
                 await self._comment_worker_failure(entry, retry_error, next_attempt)
         self._persist_state()
+
+    def _gate_planner(self) -> GatePlannerProtocol:
+        if self.config.acceptance.gate_planner_mode == "smoke":
+            return SmokeGatePlanner()
+        return CodexGatePlanner(self.config)
 
     def _completion_workspace_path(self, entry: RunningEntry):
         from pathlib import Path
@@ -1274,11 +1318,13 @@ class Orchestrator:
             due_at_ms=due_at_ms,
             error=error,
             issue_url=issue.url,
-            phase="retrying",
-            status_label=LIFECYCLE_LABELS["retrying"],
+            phase="retry_pending",
+            status_label=RETRY_LABELS["pending"],
+            runtime_phase="failed",
             last_message=retry_context or error,
         )
         self._sync_lifecycle_label_background(issue.id, LIFECYCLE_LABELS["retrying"])
+        self._sync_label_group_background(issue.id, RETRY_LABELS["pending"], prefix="performer:retry/")
         self._persist_state()
 
     def _schedule_blocked(self, entry: RunningEntry, *, error: str, attempt: int) -> None:
@@ -1292,11 +1338,13 @@ class Orchestrator:
             blocked_at=utc_now(),
             error=error,
             issue_url=entry.issue.url,
-            phase="error",
-            status_label=LIFECYCLE_LABELS["error"],
+            phase="human_blocked",
+            status_label=ERROR_LABELS["human_blocked"],
+            runtime_phase="failed",
             last_message=entry.last_codex_message or error,
             recent_events=list(entry.recent_events),
         )
+        self._sync_label_group_background(entry.issue.id, ERROR_LABELS["human_blocked"], prefix="performer:error/")
         self._persist_state()
 
     def _schedule_continuation(
@@ -1463,7 +1511,9 @@ class Orchestrator:
             entry.human_blocked_reason = blocked_reason
             entry.phase = "error"
             entry.status_label = LIFECYCLE_LABELS["error"]
+            entry.runtime_phase = "failed"
             self._sync_lifecycle_label_background(entry.issue.id, LIFECYCLE_LABELS["error"])
+            self._sync_label_group_background(entry.issue.id, ERROR_LABELS["human_blocked"], prefix="performer:error/")
             self._comment_runtime_error_background(entry, event)
             if entry.task is not None and not entry.task.done():
                 entry.task.cancel()
@@ -1486,30 +1536,37 @@ class Orchestrator:
             self._apply_absolute_tokens(entry, tokens)
         self._persist_state()
 
-    def _set_running_phase(self, issue_id: str, phase: str) -> None:
+    def _set_running_phase(self, issue_id: str, phase: str, *, runtime_phase: str | None = None) -> None:
         entry = self.state.running.get(issue_id)
         if entry is None:
             return
         entry.phase = phase
         entry.status_label = LIFECYCLE_LABELS.get(phase, f"performer:{phase}")
+        if runtime_phase is not None:
+            entry.runtime_phase = runtime_phase
 
     def _apply_phase_from_event(self, entry: RunningEntry, event: dict[str, Any]) -> None:
         event_name = event.get("event")
         if event_name in {"process_launch", "session_started"}:
             entry.phase = "starting"
             entry.status_label = LIFECYCLE_LABELS["starting"]
+            entry.runtime_phase = "dispatch_received"
         elif event_name == "turn_started":
             if entry.human_blocked_reason:
                 return
             entry.phase = "running"
             entry.status_label = LIFECYCLE_LABELS["running"]
+            entry.runtime_phase = "implementation_running"
             self._sync_lifecycle_label_background(entry.issue.id, LIFECYCLE_LABELS["running"])
+            self._sync_label_group_background(entry.issue.id, PHASE_LABELS["implementation_running"], prefix="performer:phase/")
         elif event_name in {"request_timeout", "stderr", "turn_failed", "turn_cancelled", "turn_ended_with_error"}:
             was_error = entry.phase == "error"
             entry.phase = "error"
             entry.status_label = LIFECYCLE_LABELS["error"]
+            entry.runtime_phase = "failed"
             if not was_error:
                 self._sync_lifecycle_label_background(entry.issue.id, LIFECYCLE_LABELS["error"])
+                self._sync_label_group_background(entry.issue.id, PHASE_LABELS["failed"], prefix="performer:phase/")
                 self._comment_runtime_error_background(entry, event)
             if entry.human_blocked_reason and entry.task is not None and not entry.task.done():
                 entry.task.cancel()
@@ -1518,6 +1575,7 @@ class Orchestrator:
                 return
             entry.phase = "running"
             entry.status_label = LIFECYCLE_LABELS["running"]
+            entry.runtime_phase = "implementation_done"
 
     def _append_recent_event(self, entry: RunningEntry, event: dict[str, Any]) -> None:
         row = {
@@ -1555,6 +1613,15 @@ class Orchestrator:
         except RuntimeError:
             return
         loop.create_task(self._sync_lifecycle_label(issue_id, label_name, only_if_current=True))
+
+    def _sync_label_group_background(self, issue_id: str, label_name: str, *, prefix: str) -> None:
+        if not self.config.tracker.lifecycle_labels_enabled:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        loop.create_task(self._sync_label_group(issue_id, label_name, prefix=prefix))
 
     def _comment_runtime_error_background(self, entry: RunningEntry, event: dict[str, Any]) -> None:
         try:

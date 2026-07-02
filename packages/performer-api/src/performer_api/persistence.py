@@ -24,6 +24,7 @@ class PersistedSession:
     last_raw_message: str | None = None
     phase: str = "running"
     status_label: str = "performer:running"
+    runtime_phase: str = "implementation_running"
     workspace_path: str | None = None
     recent_events: list[dict[str, Any]] = field(default_factory=list)
     turn_count: int = 0
@@ -65,6 +66,7 @@ class PersistedState:
                     last_raw_message=entry.last_raw_codex_message,
                     phase=entry.phase,
                     status_label=entry.status_label,
+                    runtime_phase=entry.runtime_phase,
                     workspace_path=entry.workspace_path,
                     recent_events=list(entry.recent_events),
                     turn_count=entry.turn_count,
@@ -163,6 +165,7 @@ def _retry_to_json(entry: RetryEntry) -> dict[str, Any]:
         "issue_url": entry.issue_url,
         "phase": entry.phase,
         "status_label": entry.status_label,
+        "runtime_phase": entry.runtime_phase,
         "last_message": entry.last_message,
         "recent_events": entry.recent_events,
     }
@@ -190,6 +193,7 @@ def _retry_from_json(payload: dict[str, Any]) -> RetryEntry | None:
         status_label=payload.get("status_label")
         if isinstance(payload.get("status_label"), str)
         else "performer:retrying",
+        runtime_phase=payload.get("runtime_phase") if isinstance(payload.get("runtime_phase"), str) else "failed",
         last_message=payload.get("last_message") if isinstance(payload.get("last_message"), str) else None,
         recent_events=_list_of_dicts(payload.get("recent_events")),
     )
@@ -204,6 +208,7 @@ def _continuation_to_json(entry: ContinuationEntry) -> dict[str, Any]:
         "issue_url": entry.issue_url,
         "phase": entry.phase,
         "status_label": entry.status_label,
+        "runtime_phase": entry.runtime_phase,
         "last_message": entry.last_message,
         "recent_events": entry.recent_events,
     }
@@ -228,6 +233,9 @@ def _continuation_from_json(payload: dict[str, Any]) -> ContinuationEntry | None
         issue_url=payload.get("issue_url") if isinstance(payload.get("issue_url"), str) else None,
         phase="continuing",
         status_label="performer:continuing",
+        runtime_phase=payload.get("runtime_phase")
+        if isinstance(payload.get("runtime_phase"), str)
+        else "implementation_done",
         last_message=payload.get("last_message") if isinstance(payload.get("last_message"), str) else None,
         recent_events=_list_of_dicts(payload.get("recent_events")),
     )
@@ -243,6 +251,7 @@ def _blocked_to_json(entry: BlockedEntry) -> dict[str, Any]:
         "issue_url": entry.issue_url,
         "phase": entry.phase,
         "status_label": entry.status_label,
+        "runtime_phase": entry.runtime_phase,
         "last_message": entry.last_message,
         "recent_events": entry.recent_events,
     }
@@ -272,6 +281,7 @@ def _blocked_from_json(payload: dict[str, Any]) -> BlockedEntry | None:
         issue_url=payload.get("issue_url") if isinstance(payload.get("issue_url"), str) else None,
         phase=payload.get("phase") if isinstance(payload.get("phase"), str) else "error",
         status_label=payload.get("status_label") if isinstance(payload.get("status_label"), str) else "performer:error",
+        runtime_phase=payload.get("runtime_phase") if isinstance(payload.get("runtime_phase"), str) else "failed",
         last_message=payload.get("last_message") if isinstance(payload.get("last_message"), str) else None,
         recent_events=_list_of_dicts(payload.get("recent_events")),
     )
@@ -309,6 +319,7 @@ def _session_to_json(session: PersistedSession) -> dict[str, Any]:
         "last_raw_message": session.last_raw_message,
         "phase": session.phase,
         "status_label": session.status_label,
+        "runtime_phase": session.runtime_phase,
         "workspace_path": session.workspace_path,
         "recent_events": session.recent_events,
         "turn_count": session.turn_count,
@@ -344,6 +355,9 @@ def _session_from_json(payload: dict[str, Any]) -> PersistedSession | None:
         status_label=payload.get("status_label")
         if isinstance(payload.get("status_label"), str)
         else "performer:running",
+        runtime_phase=payload.get("runtime_phase")
+        if isinstance(payload.get("runtime_phase"), str)
+        else _runtime_phase_from_legacy_session_phase(payload.get("phase")),
         workspace_path=payload.get("workspace_path") if isinstance(payload.get("workspace_path"), str) else None,
         recent_events=_list_of_dicts(payload.get("recent_events")),
         turn_count=payload.get("turn_count") if isinstance(payload.get("turn_count"), int) else 0,
@@ -390,3 +404,13 @@ def _list_of_dicts(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, list):
         return []
     return [item for item in value if isinstance(item, dict)]
+
+
+def _runtime_phase_from_legacy_session_phase(value: Any) -> str:
+    if value == "done":
+        return "completed"
+    if value == "error":
+        return "failed"
+    if value == "starting":
+        return "dispatch_received"
+    return "implementation_running"

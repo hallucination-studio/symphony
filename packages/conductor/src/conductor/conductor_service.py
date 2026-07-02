@@ -146,6 +146,8 @@ class ConductorService:
                 json={
                     "dispatch_id": leased.get("dispatch_id"),
                     "status": result.get("status", "accepted"),
+                    "reason": result.get("reason"),
+                    "runtime_phase": result.get("runtime_phase"),
                 },
             )
             return {"status": "leased", "dispatch": leased, "result": result}
