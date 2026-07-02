@@ -246,7 +246,16 @@ class ConductorService:
         return self.retention_status()
 
     def get_instance(self, instance_id: str) -> InstanceRecord | None:
-        return self.store.get_instance(instance_id)
+        instance = self.store.get_instance(instance_id)
+        if instance is None:
+            return None
+        refresh = getattr(self.runtime_manager, "refresh", None)
+        if not callable(refresh):
+            return instance
+        refreshed = refresh(instance)
+        if refreshed != instance:
+            self.store.update_instance(refreshed)
+        return refreshed
 
     def create_instance(self, request: InstanceCreateRequest) -> InstanceRecord:
         instance, validation = self._build_instance_candidate(request, persist_workflow=True)

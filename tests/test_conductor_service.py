@@ -100,6 +100,7 @@ class CapturingRuntime:
     def __init__(self) -> None:
         self.env: dict[str, str] | None = None
         self.dispatch_issue_id: str | None = None
+        self.refreshed_instance = None
 
     async def start(self, instance, *, env: dict[str, str] | None = None, dispatch_issue_id: str | None = None):
         self.env = env
@@ -112,6 +113,11 @@ class CapturingRuntime:
     async def restart(self, instance, *, env: dict[str, str] | None = None):
         self.env = env
         return instance.with_updates(process_status="running", pid=4242)
+
+    def refresh(self, instance):
+        if self.refreshed_instance is not None:
+            return self.refreshed_instance
+        return instance
 
     def runtime_snapshot(self, instance):
         return {"instance_id": instance.id, "process_status": instance.process_status}
@@ -150,6 +156,28 @@ def test_conductor_service_lists_issue_run_trace_and_retention(tmp_path: Path) -
     assert service.get_run("run-1")["run"]["run_id"] == "run-1"
     assert traces[0]["event_type"] == "issue_dispatched"
     assert retention["pinned_issue_count"] == 0
+
+
+def test_get_instance_refreshes_exited_runtime_state(tmp_path: Path) -> None:
+    runtime = CapturingRuntime()
+    service = ConductorService(
+        store=ConductorStore(tmp_path / "conductor-data"),
+        data_root=tmp_path / "conductor-data",
+        runtime_manager=runtime,
+    )
+    repo = make_repo(tmp_path)
+    instance = service.create_instance(make_request(repo))
+    running = instance.with_updates(process_status="running", pid=4242)
+    service.store.update_instance(running)
+    runtime.refreshed_instance = running.with_updates(process_status="exited", pid=None, last_exit_code=0)
+
+    refreshed = service.get_instance(instance.id)
+
+    assert refreshed is not None
+    assert refreshed.process_status == "exited"
+    assert refreshed.pid is None
+    assert refreshed.last_exit_code == 0
+    assert service.store.get_instance(instance.id).process_status == "exited"
 
 
 def test_conductor_service_pins_issue_and_collects_retention(tmp_path: Path) -> None:

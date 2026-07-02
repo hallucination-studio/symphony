@@ -138,6 +138,16 @@ class ConductorRuntimeManager:
         stopped = await self.stop(instance)
         return await self.start(stopped, env=env)
 
+    def refresh(self, instance: InstanceRecord) -> InstanceRecord:
+        handle = self._handles.get(instance.id)
+        if handle is None:
+            return instance
+        returncode = getattr(handle.process, "returncode", None)
+        if returncode is None:
+            return instance.with_updates(process_status="running", pid=getattr(handle.process, "pid", None))
+        self._handles.pop(instance.id, None)
+        return instance.with_updates(process_status="exited", pid=None, last_exit_code=returncode)
+
     def runtime_snapshot(self, instance: InstanceRecord) -> dict[str, object]:
         handle = self._handles.get(instance.id)
         process_status = instance.process_status
