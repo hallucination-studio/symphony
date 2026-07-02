@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
 
 from podium.models import (
     OnboardingProgress,
@@ -47,8 +47,14 @@ class OnboardingService:
     and updates the human-readable next_action.
     """
 
-    def __init__(self, store: PodiumStore):
+    def __init__(self, store: PodiumStore, linear_connected: Callable[[str], bool] | None = None):
         self.store = store
+        # Callable to check Linear connection for a workspace. Defaults to the
+        # store's own installation record. The server injects a LinearService-backed
+        # checker so OAuth installations are the single source of truth.
+        self._linear_connected = linear_connected or (
+            lambda workspace_id: self.store.get_linear_installation(workspace_id) is not None
+        )
         # workspace_id -> latest SmokeCheckResult
         self._smoke_results: dict[str, SmokeCheckResult] = {}
 
@@ -131,8 +137,7 @@ class OnboardingService:
         recommendations: list[str] = []
 
         # Check 1: Linear connected
-        installation = self.store.get_linear_installation(workspace_id)
-        linear_ok = installation is not None
+        linear_ok = self._linear_connected(workspace_id)
         checks.append({"name": "linear_connection", "passed": linear_ok})
         if not linear_ok:
             recommendations.append("Connect your Linear workspace")

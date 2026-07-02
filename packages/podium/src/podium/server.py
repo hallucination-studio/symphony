@@ -69,7 +69,10 @@ class PodiumServer:
             graphql_transport=linear_graphql_transport,
         )
         self.store = PodiumStore(data_dir=data_dir)
-        self.onboarding_service = OnboardingService(self.store)
+        self.onboarding_service = OnboardingService(
+            self.store,
+            linear_connected=lambda workspace_id: self.linear_service.get_installation(workspace_id) is not None,
+        )
         self.runtime_service = RuntimeService(self.store)
         self.router = Router(self)
         self.dispatch_callback = dispatch_callback or self._default_dispatch
