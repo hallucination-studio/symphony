@@ -1,7 +1,12 @@
+import { useState, type FormEvent } from "react";
+import { useNavigate } from "react-router-dom";
+import { useQueryClient } from "@tanstack/react-query";
 import { useBootstrap, useStartLinear } from "../api/hooks";
+import { useMe } from "../auth/useSession";
+import { api } from "../api/client";
 import { PageHeader, QueryState } from "../components/PageState";
 import { Card } from "../components/Card";
-import { LinkButton } from "../components/Button";
+import { Button, LinkButton } from "../components/Button";
 import { ActionPanel } from "../components/ActionPanel";
 import { StatusBadge } from "../components/StatusBadge";
 import { DetailList } from "../components/Drawer";
@@ -9,13 +14,15 @@ import { useToast } from "../components/Toast";
 import { formatDateTime } from "../lib/format";
 import { completedCount, isOnboardingComplete, STEP_ORDER } from "../lib/onboarding";
 import type {
+  AuthUser,
   Bootstrap,
+  LinearAppConfig,
   LinearStatus,
   OnboardingProgress,
-  SessionIdentity,
 } from "../api/types";
 
 export default function AccountPage() {
+  const me = useMe();
   const bootstrap = useBootstrap();
 
   return (
@@ -24,61 +31,219 @@ export default function AccountPage() {
         title="Account"
         description="Your workspace identity and connected services."
       />
+      <QueryState isLoading={me.isLoading} error={me.isError ? new Error("Couldn't load your account.") : null}>
+        {me.user ? <IdentityCard user={me.user} /> : null}
+      </QueryState>
+      <div className="page-stack">
+        <LinearApplicationCard />
+      </div>
       <QueryState isLoading={bootstrap.isLoading} error={bootstrap.error}>
-        {bootstrap.data ? <Account data={bootstrap.data} /> : null}
+        {bootstrap.data ? <ServicesCards data={bootstrap.data} /> : null}
       </QueryState>
     </>
   );
 }
 
-function Account({ data }: { data: Bootstrap }) {
-  const { session, linear, onboarding } = data;
+function IdentityCard({ user }: { user: AuthUser }) {
+  const navigate = useNavigate();
+  const qc = useQueryClient();
+  const { notify } = useToast();
+  const [loggingOut, setLoggingOut] = useState(false);
+
+  async function logout() {
+    setLoggingOut(true);
+    try {
+      await api.logout();
+      qc.clear();
+      navigate("/login");
+    } catch {
+      notify("Couldn't sign out. Try again.", "error");
+      setLoggingOut(false);
+    }
+  }
+
   return (
     <div className="page-stack">
-      <WorkspaceCard session={session} />
-      <LinearIdentityCard linear={linear} />
-      <OnboardingCard onboarding={onboarding} />
+      <Card
+        title="Account"
+        description="Your personal, self-serve workspace (V1)."
+        actions={
+          <Button variant="secondary" onClick={logout} loading={loggingOut}>
+            Log out
+          </Button>
+        }
+      >
+        <DetailList
+          rows={[
+            { key: "Email", value: <span>{user.email}</span> },
+            {
+              key: "Workspace",
+              value: <code className="code">{user.workspace_id}</code>,
+            },
+            {
+              key: "User",
+              value: <code className="code">{user.user_id}</code>,
+            },
+          ]}
+        />
+      </Card>
     </div>
   );
 }
 
-function WorkspaceCard({ session }: { session: SessionIdentity }) {
-  const hasUser = Boolean(session.user_id || session.app_user_id);
+function LinearApplicationCard() {
+  const { notify } = useToast();
+  // The current config isn't exposed on GET; reflect it optimistically from
+  // mutation results. Default assumption: the official shared Podium app.
+  const [config, setConfig] = useState<LinearAppConfig | null>(null);
+  const [clientId, setClientId] = useState("");
+  const [clientSecret, setClientSecret] = useState("");
+  const [redirectUri, setRedirectUri] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [clearing, setClearing] = useState(false);
+
+  const custom = config?.configured ?? false;
+
+  async function save(e: FormEvent) {
+    e.preventDefault();
+    setError(null);
+    if (!clientId.trim() || !clientSecret.trim()) {
+      setError("Client ID and client secret are required.");
+      return;
+    }
+    setSaving(true);
+    try {
+      const res = await api.setLinearApp({
+        client_id: clientId.trim(),
+        client_secret: clientSecret.trim(),
+        redirect_uri: redirectUri.trim() || undefined,
+      });
+      setConfig(res.linear_app);
+      // Never keep the secret in memory / never echo it back.
+      setClientSecret("");
+      notify("Custom Linear app saved", "success");
+    } catch {
+      setError("Couldn't save the custom app. Check your values and try again.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function useOfficial() {
+    setClearing(true);
+    try {
+      await api.clearLinearApp();
+      setConfig(null);
+      setClientId("");
+      setClientSecret("");
+      setRedirectUri("");
+      notify("Switched to the official Podium app", "success");
+    } catch {
+      notify("Couldn't switch to the official app. Try again.", "error");
+    } finally {
+      setClearing(false);
+    }
+  }
+
   return (
     <Card
-      title="Workspace"
-      description="This is a personal, self-serve workspace (V1)."
+      title="Linear application"
+      description="Use the official shared Podium app, or bring your own Linear OAuth app."
     >
-      <DetailList
-        rows={[
-          {
-            key: "Workspace",
-            value: <code className="code">{session.workspace_id}</code>,
-          },
-          ...(session.user_id
-            ? [
-                {
-                  key: "User",
-                  value: <code className="code">{session.user_id}</code>,
-                },
-              ]
-            : []),
-          ...(session.app_user_id
-            ? [
-                {
-                  key: "App user",
-                  value: <code className="code">{session.app_user_id}</code>,
-                },
-              ]
-            : []),
-        ]}
-      />
-      {!hasUser ? (
-        <p className="muted" style={{ marginTop: "var(--space-3)" }}>
-          No user profile yet.
-        </p>
-      ) : null}
+      <div className="row-between" style={{ marginBottom: "var(--space-4)" }}>
+        <span className="muted">Mode</span>
+        {custom ? (
+          <StatusBadge status="healthy" label="Custom app configured" />
+        ) : (
+          <span className="muted">Using official Podium app</span>
+        )}
+      </div>
+
+      {custom && config ? (
+        <>
+          <DetailList
+            rows={[
+              {
+                key: "Client ID",
+                value: <code className="code">{config.client_id}</code>,
+              },
+              {
+                key: "Redirect URI",
+                value: config.redirect_uri ? (
+                  <code className="code">{config.redirect_uri}</code>
+                ) : (
+                  <span className="muted">Default</span>
+                ),
+              },
+            ]}
+          />
+          <div style={{ marginTop: "var(--space-4)" }}>
+            <ActionPanel
+              tone="info"
+              title="Use official app"
+              description="Switch back to the shared Podium Linear app and remove your custom credentials."
+              actionLabel="Use official app"
+              onAction={useOfficial}
+              actionLoading={clearing}
+            />
+          </div>
+        </>
+      ) : (
+        <form onSubmit={save}>
+          <label className="field">
+            <span className="field-label">Client ID</span>
+            <input
+              className="text-input"
+              aria-label="Client ID"
+              value={clientId}
+              onChange={(e) => setClientId(e.target.value)}
+            />
+          </label>
+          <label className="field">
+            <span className="field-label">Client secret</span>
+            <input
+              className="text-input"
+              type="password"
+              aria-label="Client secret"
+              autoComplete="off"
+              value={clientSecret}
+              onChange={(e) => setClientSecret(e.target.value)}
+            />
+            <span className="field-hint">Write-only — never displayed after saving.</span>
+          </label>
+          <label className="field">
+            <span className="field-label">Redirect URI (optional)</span>
+            <input
+              className="text-input"
+              aria-label="Redirect URI (optional)"
+              value={redirectUri}
+              onChange={(e) => setRedirectUri(e.target.value)}
+            />
+          </label>
+
+          {error ? (
+            <p className="field-error" role="alert">
+              {error}
+            </p>
+          ) : null}
+
+          <Button type="submit" loading={saving}>
+            Save custom app
+          </Button>
+        </form>
+      )}
     </Card>
+  );
+}
+
+function ServicesCards({ data }: { data: Bootstrap }) {
+  const { linear, onboarding } = data;
+  return (
+    <div className="page-stack">
+      <LinearIdentityCard linear={linear} />
+      <OnboardingCard onboarding={onboarding} />
+    </div>
   );
 }
 
