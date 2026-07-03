@@ -112,6 +112,7 @@ export interface ConductorBinding {
     retries?: number;
     continuations?: number;
     blocked?: number;
+    pending_human?: number;
     failures?: number;
     queue_depth?: number;
     running?: boolean;

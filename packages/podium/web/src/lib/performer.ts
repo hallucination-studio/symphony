@@ -69,7 +69,7 @@ export interface PerformerMetric {
 
 /**
  * The queue + throughput numbers for a Performer, ordered so the operational
- * signals (queue depth, blocked, failures) lead. Zero values still render so
+ * signals (queue depth, pending human actions, failures) lead. Zero values still render so
  * the row shape stays stable across Performers.
  */
 export function performerMetrics(binding: ConductorBinding): PerformerMetric[] {
@@ -78,6 +78,7 @@ export function performerMetrics(binding: ConductorBinding): PerformerMetric[] {
   return [
     { label: "Queued", value: queueDepth },
     { label: "Retries", value: metrics.retries ?? 0 },
+    { label: "Human", value: metrics.pending_human ?? 0, tone: "negative" },
     { label: "Blocked", value: metrics.blocked ?? 0, tone: "negative" },
     { label: "Failures", value: metrics.failures ?? 0, tone: "negative" },
     { label: "Tokens", value: metrics.tokens ?? 0 },

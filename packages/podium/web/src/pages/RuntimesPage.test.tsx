@@ -37,7 +37,7 @@ function conductorWithPerformer() {
         workflow_profile: "task",
         process_status: "running",
         constraint_labels: ["symphony:performer/checkout-flow", "symphony:profile/task"],
-        metrics: { retries: 2, blocked: 1, failures: 0, tokens: 1500, queue_depth: 3 },
+        metrics: { retries: 2, blocked: 1, pending_human: 1, failures: 0, tokens: 1500, queue_depth: 3 },
         queue: { queue_depth: 3, running: true },
       },
     ],
@@ -69,6 +69,7 @@ describe("RuntimesPage", () => {
     expect(screen.getByText("checkout-flow")).toBeInTheDocument();
     expect(screen.getByText("agent-42")).toBeInTheDocument();
     expect(screen.getByText("Queued")).toBeInTheDocument();
+    expect(screen.getByText("Human")).toBeInTheDocument();
   });
 
   it("opens a Performer drawer and loads its logs", async () => {
