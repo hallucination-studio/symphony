@@ -5,12 +5,10 @@ export function Drawer({
   title,
   onClose,
   children,
-  footer,
 }: {
   title: ReactNode;
   onClose: () => void;
   children: ReactNode;
-  footer?: ReactNode;
 }) {
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
@@ -45,7 +43,6 @@ export function Drawer({
           </button>
         </div>
         {children}
-        {footer ? <div className="step-shell-footer">{footer}</div> : null}
       </aside>
     </div>
   );

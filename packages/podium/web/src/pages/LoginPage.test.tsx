@@ -3,6 +3,7 @@ import { screen, fireEvent, waitFor } from "@testing-library/react";
 import { renderWithProviders } from "../test/utils";
 import LoginPage from "./LoginPage";
 import { api, ApiError } from "../api/client";
+import { setTurnstileTokenProvider } from "../lib/turnstile";
 
 const navigate = vi.fn();
 
@@ -24,6 +25,7 @@ const mockApi = api as unknown as { login: ReturnType<typeof vi.fn> };
 describe("LoginPage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    setTurnstileTokenProvider(() => "token-login");
   });
 
   it("submits credentials and navigates home on success", async () => {
@@ -41,7 +43,11 @@ describe("LoginPage", () => {
     fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
 
     await waitFor(() =>
-      expect(mockApi.login).toHaveBeenCalledWith("a@b.com", "password123", "dev"),
+      expect(mockApi.login).toHaveBeenCalledWith(
+        "a@b.com",
+        "password123",
+        "token-login",
+      ),
     );
     await waitFor(() => expect(navigate).toHaveBeenCalledWith("/"));
   });

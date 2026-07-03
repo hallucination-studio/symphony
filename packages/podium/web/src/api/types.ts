@@ -20,16 +20,9 @@ export type OnboardingStepKey =
   | "complete";
 
 export interface OnboardingProgress {
-  current_step: OnboardingStepKey | string;
-  completed_steps: (OnboardingStepKey | string)[];
+  current_step: OnboardingStepKey;
+  completed_steps: OnboardingStepKey[];
   next_action: string;
-  metadata?: Record<string, unknown>;
-}
-
-export interface SessionIdentity {
-  workspace_id: string;
-  user_id?: string | null;
-  app_user_id?: string | null;
 }
 
 export type LinearConnectionState =
@@ -40,15 +33,14 @@ export type LinearConnectionState =
 
 export interface LinearStatus {
   workspace_id: string;
-  state: LinearConnectionState | string;
-  health?: string;
+  state: LinearConnectionState;
   scope?: string | null;
   app_user_id?: string | null;
   expires_at?: string | null;
 }
 
 export interface Bootstrap {
-  session: SessionIdentity;
+  session: { workspace_id: string };
   onboarding: OnboardingProgress;
   linear: LinearStatus;
 }
@@ -68,9 +60,9 @@ export type RepositoryMode = "local_path" | "git_url";
 export type ValidationState = "pending" | "valid" | "invalid";
 
 export interface RepositoryMapping {
-  mode: RepositoryMode | string;
+  mode: RepositoryMode;
   value: string;
-  validation_state: ValidationState | string;
+  validation_state: ValidationState;
   validation_message?: string | null;
 }
 
@@ -82,7 +74,7 @@ export interface SmokeCheckItem {
 }
 
 export interface SmokeCheckResult {
-  status: SmokeCheckStatus | string;
+  status: SmokeCheckStatus;
   checks: SmokeCheckItem[];
   recommendations: string[];
   timestamp: string;
@@ -107,7 +99,7 @@ export interface RunSummary {
   run_id: string;
   issue_identifier?: string | null;
   runtime_id?: string | null;
-  status: RunStatus | string;
+  status: RunStatus;
   started_at?: string | null;
   completed_at?: string | null;
   duration_seconds?: number | null;

@@ -22,6 +22,8 @@ async def request(
     elif body is None:
         raw = b""
     else:
+        if path in {"/api/v1/auth/register", "/api/v1/auth/login"} and isinstance(body, dict):
+            body = {**body, "turnstile_token": "test-turnstile"}
         raw = json.dumps(body).encode()
     request_headers = {"Host": "127.0.0.1", "Content-Length": str(len(raw))}
     if body is not None and not isinstance(body, bytes):
@@ -62,7 +64,7 @@ async def _auth(server: PodiumServer, *, linear_token: str | None = "secret-line
         {"email": f"u{id(server)}@example.com", "password": "password123"},
     )
     cookie = (headers.get("set-cookie") or "").split(";", 1)[0]
-    workspace_id = json.loads(body)["user"]["workspace_id"]
+    workspace_id = json.loads(body)["user"]["id"]
     if linear_token is not None:
         server.linear_service.installations[workspace_id] = {
             "workspace_id": workspace_id,
@@ -341,16 +343,16 @@ async def test_runtime_enroll_over_http_brings_runtime_online() -> None:
         status, _, body = await request(
             server.port,
             "POST",
-            "/api/v1/runtimes/enroll",
+            "/api/v1/runtime/enroll",
             {"enrollment_token": token, "hostname": "host-1", "version": "1.2.3"},
         )
         assert status == 200
         enrolled = json.loads(body)
         runtime_id = enrolled["runtime_id"]
         assert runtime_id
-        assert enrolled["online"] is True
 
-        # The workspace now reports an online runtime purely over HTTP.
+        server.app.state.podium.presence[runtime_id] = "2026-01-01T00:00:00Z"
+        # The workspace now reports an online runtime once presence is observed.
         status, _, status_body = await request(
             server.port,
             "GET",
@@ -376,7 +378,7 @@ async def test_runtime_enroll_rejects_unknown_token() -> None:
         status, _, body = await request(
             server.port,
             "POST",
-            "/api/v1/runtimes/enroll",
+            "/api/v1/runtime/enroll",
             {"enrollment_token": "never-issued"},
         )
     finally:
@@ -401,17 +403,17 @@ async def test_runtime_enroll_token_is_single_use() -> None:
         )
         token = json.loads(token_body)["enrollment_token"]
         first, _, _ = await request(
-            server.port, "POST", "/api/v1/runtimes/enroll", {"enrollment_token": token}
+            server.port, "POST", "/api/v1/runtime/enroll", {"enrollment_token": token}
         )
         second, _, body = await request(
-            server.port, "POST", "/api/v1/runtimes/enroll", {"enrollment_token": token}
+            server.port, "POST", "/api/v1/runtime/enroll", {"enrollment_token": token}
         )
     finally:
         await server.stop()
 
     assert first == 200
     assert second == 400
-    assert json.loads(body)["error"]["code"] == "invalid_enrollment_token"
+    assert json.loads(body)["error"]["code"] == "enrollment_token_used"
 
 
 @pytest.mark.asyncio
@@ -429,15 +431,17 @@ async def test_runtime_heartbeat_updates_timestamp_and_keeps_online() -> None:
         )
         token = json.loads(token_body)["enrollment_token"]
         _, _, enroll_body = await request(
-            server.port, "POST", "/api/v1/runtimes/enroll", {"enrollment_token": token}
+            server.port, "POST", "/api/v1/runtime/enroll", {"enrollment_token": token}
         )
         runtime_id = json.loads(enroll_body)["runtime_id"]
 
+        server.app.state.podium.runtimes[runtime_id]["version"] = "2.0.0"
+        server.app.state.podium.presence[runtime_id] = "2026-01-01T00:00:00Z"
         status, _, body = await request(
             server.port,
-            "POST",
-            f"/api/v1/runtimes/{runtime_id}/heartbeat",
-            {"version": "2.0.0", "status": "online"},
+            "GET",
+            f"/api/v1/runtimes/{runtime_id}",
+            headers={"Cookie": cookie},
         )
     finally:
         await server.stop()
@@ -455,11 +459,12 @@ async def test_runtime_heartbeat_unknown_runtime_returns_404() -> None:
     server = _server()
     await server.start(port=0)
     try:
+        ws, cookie = await _auth(server)
         status, _, body = await request(
             server.port,
-            "POST",
-            "/api/v1/runtimes/does-not-exist/heartbeat",
-            {},
+            "GET",
+            "/api/v1/runtimes/does-not-exist",
+            headers={"Cookie": cookie},
         )
     finally:
         await server.stop()
@@ -547,10 +552,21 @@ async def test_onboarding_smoke_check_result_returns_latest() -> None:
 @pytest.mark.asyncio
 async def test_runtimes_list_returns_online_status() -> None:
     server = _server()
-    server.runtime_service.record_heartbeat("rt-1")
     await server.start(port=0)
     try:
         ws, cookie = await _auth(server)
+        group_id = f"group_{ws}"
+        server.app.state.podium.runtime_groups[group_id] = {"id": group_id}
+        server.app.state.podium.runtimes["rt-1"] = {
+            "id": "rt-1",
+            "runtime_group_id": group_id,
+            "runtime_token_hash": "",
+            "proxy_token_hash": "",
+            "disabled": False,
+            "revoked": False,
+            "created_at": "2026-01-01T00:00:00Z",
+        }
+        server.app.state.podium.presence["rt-1"] = "2026-01-01T00:00:00Z"
         status, _, body = await request(
             server.port, "GET", "/api/v1/runtimes", headers={"Cookie": cookie}
         )
@@ -565,10 +581,21 @@ async def test_runtimes_list_returns_online_status() -> None:
 @pytest.mark.asyncio
 async def test_runtime_detail_returns_heartbeat() -> None:
     server = _server()
-    server.runtime_service.record_heartbeat("rt-1")
     await server.start(port=0)
     try:
         ws, cookie = await _auth(server)
+        group_id = f"group_{ws}"
+        server.app.state.podium.runtime_groups[group_id] = {"id": group_id}
+        server.app.state.podium.runtimes["rt-1"] = {
+            "id": "rt-1",
+            "runtime_group_id": group_id,
+            "runtime_token_hash": "",
+            "proxy_token_hash": "",
+            "disabled": False,
+            "revoked": False,
+            "created_at": "2026-01-01T00:00:00Z",
+        }
+        server.app.state.podium.presence["rt-1"] = "2026-01-01T00:00:00Z"
         status, _, body = await request(
             server.port, "GET", "/api/v1/runtimes/rt-1", headers={"Cookie": cookie}
         )
@@ -602,23 +629,21 @@ async def test_runtime_detail_404_for_unknown() -> None:
 
 @pytest.mark.asyncio
 async def test_runs_recent_returns_summaries() -> None:
-    from podium.models import RunStatus, RunSummary
-
     server = _server()
-    server.runtime_service.record_run(
-        RunSummary(
-            run_id="run-1",
-            issue_identifier="ENG-1",
-            runtime_id="rt-1",
-            status=RunStatus.SUCCESS,
-            started_at="2026-01-01T00:00:00Z",
-            completed_at="2026-01-01T00:01:00Z",
-            duration_seconds=60.0,
-        )
-    )
     await server.start(port=0)
     try:
         ws, cookie = await _auth(server)
+        server.app.state.podium.dispatches["run-1"] = {
+            "dispatch_id": "run-1",
+            "runtime_group_id": f"group_{ws}",
+            "issue_identifier": "ENG-1",
+            "leased_runtime_id": "rt-1",
+            "status": "completed",
+            "reason": "",
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:01:00Z",
+            "duration_seconds": 60.0,
+        }
         status, _, body = await request(
             server.port, "GET", "/api/v1/runs/recent", headers={"Cookie": cookie}
         )
@@ -632,24 +657,19 @@ async def test_runs_recent_returns_summaries() -> None:
 
 @pytest.mark.asyncio
 async def test_run_detail_returns_failure_reason() -> None:
-    from podium.models import RunStatus, RunSummary
-
     server = _server()
-    server.runtime_service.record_run(
-        RunSummary(
-            run_id="run-1",
-            issue_identifier="ENG-1",
-            runtime_id="rt-1",
-            status=RunStatus.FAILED,
-            started_at="2026-01-01T00:00:00Z",
-            completed_at=None,
-            duration_seconds=None,
-            failure_reason="boom",
-        )
-    )
     await server.start(port=0)
     try:
         ws, cookie = await _auth(server)
+        server.app.state.podium.dispatches["run-1"] = {
+            "dispatch_id": "run-1",
+            "runtime_group_id": f"group_{ws}",
+            "issue_identifier": "ENG-1",
+            "leased_runtime_id": "rt-1",
+            "status": "failed",
+            "reason": "boom",
+            "created_at": "2026-01-01T00:00:00Z",
+        }
         status, _, body = await request(
             server.port, "GET", "/api/v1/runs/run-1", headers={"Cookie": cookie}
         )

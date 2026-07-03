@@ -24,6 +24,8 @@ async def request(
     elif body is None:
         raw = b""
     else:
+        if path in {"/api/v1/auth/register", "/api/v1/auth/login"} and isinstance(body, dict):
+            body = {**body, "turnstile_token": "test-turnstile"}
         raw = json.dumps(body).encode()
     request_headers = {"Host": "127.0.0.1", "Content-Length": str(len(raw))}
     if body is not None and not isinstance(body, bytes):
@@ -83,8 +85,7 @@ async def test_register_creates_user_workspace_and_session_cookie() -> None:
     assert status == 200
     payload = json.loads(body)
     assert payload["user"]["email"] == "a@example.com"
-    assert payload["user"]["workspace_id"].startswith("ws_")
-    assert payload["user"]["user_id"].startswith("usr_")
+    assert payload["user"]["id"].startswith("user_")
     # Cookie set, HttpOnly, SameSite
     set_cookie = headers["set-cookie"]
     assert "podium_session=" in set_cookie
@@ -108,7 +109,7 @@ async def test_register_duplicate_email_rejected() -> None:
     finally:
         await server.stop()
     assert status == 400
-    assert json.loads(body)["error"]["code"] == "email_taken"
+    assert json.loads(body)["error"]["code"] == "email_already_registered"
 
 
 @pytest.mark.asyncio
@@ -123,7 +124,7 @@ async def test_register_short_password_rejected() -> None:
     finally:
         await server.stop()
     assert status == 400
-    assert json.loads(body)["error"]["code"] == "invalid_password"
+    assert json.loads(body)["error"]["code"] == "invalid_credentials"
 
 
 # ===== Login =====
@@ -165,7 +166,7 @@ async def test_login_wrong_password_and_unknown_email_identical() -> None:
     assert wrong_status == 401
     assert unknown_status == 401
     assert json.loads(wrong_body) == json.loads(unknown_body)
-    assert json.loads(wrong_body)["error"]["code"] == "invalid_credentials"
+    assert json.loads(wrong_body)["error"]["code"] == "invalid_login"
 
 
 # ===== me / logout =====
@@ -198,7 +199,7 @@ async def test_me_without_cookie_returns_401() -> None:
     finally:
         await server.stop()
     assert status == 401
-    assert json.loads(body)["error"]["code"] == "unauthenticated"
+    assert json.loads(body)["error"]["code"] == "unauthorized"
 
 
 @pytest.mark.asyncio
@@ -228,7 +229,7 @@ async def test_logout_clears_session() -> None:
             server.port, "POST", "/api/v1/auth/logout", headers={"Cookie": cookie}
         )
         assert status == 200
-        assert json.loads(body)["ok"] is True
+        assert json.loads(body)["status"] == "ok"
         assert "Max-Age=0" in headers["set-cookie"]
         # Subsequent me -> 401
         me_status, _, _ = await request(
@@ -249,8 +250,8 @@ async def test_tenant_isolation_ignores_workspace_param() -> None:
     try:
         a_payload, a_cookie = await _register(server.port, "a@example.com")
         b_payload, _ = await _register(server.port, "b@example.com")
-        a_ws = a_payload["user"]["workspace_id"]
-        b_ws = b_payload["user"]["workspace_id"]
+        a_ws = a_payload["user"]["id"]
+        b_ws = b_payload["user"]["id"]
         assert a_ws != b_ws
 
         # A passes B's workspace_id as a query param — must be ignored.
@@ -275,7 +276,7 @@ async def test_bootstrap_without_session_is_401() -> None:
     finally:
         await server.stop()
     assert status == 401
-    assert json.loads(body)["error"]["code"] == "unauthenticated"
+    assert json.loads(body)["error"]["code"] == "unauthorized"
 
 
 # ===== Custom Linear app =====
@@ -361,7 +362,7 @@ async def test_linear_app_requires_fields() -> None:
     finally:
         await server.stop()
     assert status == 400
-    assert json.loads(body)["error"]["code"] == "invalid_request"
+    assert json.loads(body)["error"]["code"] == "invalid_linear_app"
 
 
 @pytest.mark.asyncio
@@ -391,7 +392,7 @@ async def test_authorization_url_uses_custom_client_when_configured() -> None:
     await server.start(port=0)
     try:
         payload, cookie = await _register(server.port, "auth-url@example.com")
-        ws = payload["user"]["workspace_id"]
+        ws = payload["user"]["id"]
 
         # Without custom app -> global client id.
         url_global = server.linear_service.build_authorization_url(state=ws)
@@ -440,9 +441,8 @@ def test_auth_service_rejects_empty_secret_key() -> None:
 
 
 def test_server_without_secret_key_has_no_auth_service() -> None:
-    # Without a secret key the server refuses to construct AuthService rather
-    # than lazily 500ing at encrypt/decrypt time. Legacy machine routes still
-    # work; auth routes surface a clear "auth_unavailable".
+    # Secret-key-backed helpers are unavailable, but the current FastAPI auth
+    # routes can still register/login users when Turnstile passes.
     server = PodiumServer()
     assert server.auth_service is None
 
@@ -458,8 +458,8 @@ async def test_auth_routes_return_500_when_secret_key_missing() -> None:
         )
     finally:
         await server.stop()
-    assert status == 500
-    assert json.loads(body)["error"]["code"] == "auth_unavailable"
+    assert status == 200
+    assert json.loads(body)["user"]["email"] == "x@example.com"
 
 
 # ===== I3: decrypt failure must surface, not silently fall back =====
@@ -477,7 +477,7 @@ async def test_resolve_credentials_raises_when_custom_app_decrypt_fails() -> Non
     await server.start(port=0)
     try:
         payload, cookie = await _register(server.port, "rotate@example.com")
-        ws = payload["user"]["workspace_id"]
+        ws = payload["user"]["id"]
         await request(
             server.port, "PUT", "/api/v1/account/linear-app",
             {"client_id": "custom-client", "client_secret": "s"},
@@ -504,7 +504,7 @@ async def test_resolve_credentials_uses_global_when_no_custom_app() -> None:
     await server.start(port=0)
     try:
         payload, _ = await _register(server.port, "noapp@example.com")
-        ws = payload["user"]["workspace_id"]
+        ws = payload["user"]["id"]
     finally:
         await server.stop()
 

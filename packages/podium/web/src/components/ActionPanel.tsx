@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import { Button } from "./Button";
 
-type ActionTone = "info" | "warning" | "critical" | "success";
+export type ActionTone = "info" | "warning" | "critical" | "success";
 
 /**
  * A problem framed as an action: one-line explanation + a single recommended
@@ -15,7 +15,6 @@ export function ActionPanel({
   actionLabel,
   onAction,
   actionLoading,
-  secondary,
 }: {
   tone?: ActionTone;
   title: string;
@@ -23,7 +22,6 @@ export function ActionPanel({
   actionLabel?: string;
   onAction?: () => void;
   actionLoading?: boolean;
-  secondary?: ReactNode;
 }) {
   return (
     <div className="action-panel" data-tone={tone}>
@@ -35,7 +33,6 @@ export function ActionPanel({
       </div>
       {actionLabel && onAction ? (
         <div className="action-panel-actions">
-          {secondary}
           <Button
             variant={tone === "critical" ? "danger" : "primary"}
             onClick={onAction}

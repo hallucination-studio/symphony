@@ -84,9 +84,8 @@ export function isOnboardingComplete(progress: OnboardingProgress): boolean {
  *
  * A step is `completed` if it appears in completed_steps. The single
  * `current_step` is `in_progress`. Everything after it is `not_started`.
- * A step is `blocked` only when it is current AND an earlier prerequisite is
- * still incomplete (the state machine should prevent this, but we surface it
- * defensively rather than silently mislabel).
+ * Backend ordering gaps are rendered as `not_started`; the state machine
+ * should prevent them, and a red blocked state would imply user action.
  */
 export function deriveSteps(progress: OnboardingProgress): DerivedStep[] {
   const completed = new Set(progress.completed_steps);
@@ -101,8 +100,7 @@ export function deriveSteps(progress: OnboardingProgress): DerivedStep[] {
       status = "in_progress";
       seenCurrent = true;
     } else if (!seenCurrent) {
-      // Before the current step but not marked complete: a gap in the chain.
-      status = "blocked";
+      status = "not_started";
     } else {
       status = "not_started";
     }

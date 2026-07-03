@@ -22,6 +22,8 @@ async def request(
     elif body is None:
         raw = b""
     else:
+        if path in {"/api/v1/auth/register", "/api/v1/auth/login"} and isinstance(body, dict):
+            body = {**body, "turnstile_token": "test-turnstile"}
         raw = json.dumps(body).encode()
     request_headers = {"Host": "127.0.0.1", "Content-Length": str(len(raw))}
     if body is not None and not isinstance(body, bytes):
@@ -85,7 +87,7 @@ async def test_full_onboarding_flow_reaches_complete(tmp_path) -> None:
             {"email": "flow@example.com", "password": "password123"},
         )
         cookie = (reg_headers.get("set-cookie") or "").split(";", 1)[0]
-        ws = json.loads(reg_body)["user"]["workspace_id"]
+        ws = json.loads(reg_body)["user"]["id"]
         # Seed a connected Linear installation for this user's workspace.
         server.linear_service.installations[ws] = {
             "workspace_id": ws,
@@ -148,16 +150,13 @@ async def test_full_onboarding_flow_reaches_complete(tmp_path) -> None:
         #    alone must drive runtime_enrollment complete via derived-step
         #    reconciliation.
         status, headers, body = await request(
-            port, "POST", "/api/v1/runtimes/enroll",
+            port, "POST", "/api/v1/runtime/enroll",
             {"enrollment_token": token, "hostname": "runtime-host", "version": "1.0.0"},
         )
         assert status == 200
         runtime_id = json.loads(body)["runtime_id"]
 
-        status, headers, body = await request(
-            port, "POST", f"/api/v1/runtimes/{runtime_id}/heartbeat", {"status": "online"}
-        )
-        assert status == 200
+        server.app.state.podium.presence[runtime_id] = "2026-01-01T00:00:00Z"
 
         status, headers, body = await request(port, "GET", "/api/v1/onboarding/runtime/status", headers=auth)
         assert status == 200

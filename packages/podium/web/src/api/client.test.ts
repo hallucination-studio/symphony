@@ -55,13 +55,13 @@ describe("api client", () => {
     });
   });
 
-  it("login POSTs email + password + turnstile_token", async () => {
+  it("login POSTs email + password + injected turnstile_token", async () => {
     const fetchMock = mockFetch(200, {
       user: { id: "user_1", email: "a@b.com" },
     });
     global.fetch = fetchMock;
 
-    await api.login("a@b.com", "password123");
+    await api.login("a@b.com", "password123", "token-login");
 
     const [path, init] = fetchMock.mock.calls[0];
     expect(path).toBe("/api/v1/auth/login");
@@ -69,17 +69,17 @@ describe("api client", () => {
     expect(JSON.parse(init.body)).toEqual({
       email: "a@b.com",
       password: "password123",
-      turnstile_token: "dev",
+      turnstile_token: "token-login",
     });
   });
 
-  it("register POSTs email + password + turnstile_token", async () => {
+  it("register POSTs email + password + injected turnstile_token", async () => {
     const fetchMock = mockFetch(200, {
       user: { id: "user_1", email: "a@b.com" },
     });
     global.fetch = fetchMock;
 
-    await api.register("a@b.com", "password123");
+    await api.register("a@b.com", "password123", "token-register");
 
     const [path, init] = fetchMock.mock.calls[0];
     expect(path).toBe("/api/v1/auth/register");
@@ -87,7 +87,7 @@ describe("api client", () => {
     expect(JSON.parse(init.body)).toEqual({
       email: "a@b.com",
       password: "password123",
-      turnstile_token: "dev",
+      turnstile_token: "token-register",
     });
   });
 

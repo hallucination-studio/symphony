@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { screen } from "@testing-library/react";
+import { screen, waitFor } from "@testing-library/react";
 import { renderWithProviders } from "./test/utils";
 import App from "./App";
 import { api, ApiError } from "./api/client";
@@ -47,6 +47,15 @@ describe("App auth gate", () => {
     expect(await screen.findByRole("button", { name: "Sign in" })).toBeInTheDocument();
     expect(screen.queryByRole("navigation")).not.toBeInTheDocument();
     expect(screen.queryByText("Home")).not.toBeInTheDocument();
+  });
+
+  it("does not treat a bare 401 as signed out", async () => {
+    mockApi.me.mockRejectedValue(new ApiError(401, "no"));
+    renderWithProviders(<App />, { route: "/" });
+
+    await waitFor(() => expect(mockApi.me).toHaveBeenCalled());
+    expect(screen.getByText(/loading/i)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Sign in" })).not.toBeInTheDocument();
   });
 
   it("renders the app shell when authenticated", async () => {

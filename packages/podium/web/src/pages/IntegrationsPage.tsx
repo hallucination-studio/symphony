@@ -1,10 +1,10 @@
-import { useBootstrap, useStartLinear } from "../api/hooks";
+import { useBootstrap } from "../api/hooks";
 import { PageHeader, QueryState } from "../components/PageState";
 import { Card } from "../components/Card";
 import { Button } from "../components/Button";
 import { StatusBadge } from "../components/StatusBadge";
 import { DetailList } from "../components/Drawer";
-import { useToast } from "../components/Toast";
+import { linearHealth, useConnectLinear } from "../lib/linear";
 import type { LinearStatus } from "../api/types";
 
 export default function IntegrationsPage() {
@@ -24,56 +24,37 @@ export default function IntegrationsPage() {
 }
 
 function LinearCard({ linear }: { linear: LinearStatus }) {
-  const start = useStartLinear();
-  const { notify } = useToast();
-  const connected = linear.state === "connected";
-  const broken = linear.state === "expired" || linear.state === "error";
-
-  async function connect() {
-    try {
-      const { authorization_url } = await start.mutateAsync();
-      window.location.assign(authorization_url);
-    } catch {
-      notify("Couldn't start Linear connection. Try again.", "error");
-    }
-  }
-
-  const healthStatus = connected
-    ? "healthy"
-    : broken
-      ? "degraded"
-      : "not_connected";
+  const { connect, isPending } = useConnectLinear();
+  const health = linearHealth(linear);
 
   return (
     <Card
       title="Linear"
       description="Issue source for routing work to runtimes."
       actions={
-        connected ? (
+        health.connected ? (
           <Button
             variant="secondary"
             onClick={connect}
-            loading={start.isPending}
+            loading={isPending}
           >
             Reconnect
           </Button>
         ) : (
-          <Button onClick={connect} loading={start.isPending}>
-            {broken ? "Reconnect" : "Connect Linear"}
+          <Button onClick={connect} loading={isPending}>
+            {health.broken ? "Reconnect" : "Connect Linear"}
           </Button>
         )
       }
     >
       <div className="row-between" style={{ marginBottom: "var(--space-4)" }}>
         <span className="muted">Connection</span>
-        <StatusBadge status={healthStatus} />
+        <StatusBadge status={health.status} />
       </div>
 
-      {broken ? (
+      {health.broken ? (
         <p className="field-error" style={{ marginBottom: "var(--space-4)" }}>
-          {linear.state === "expired"
-            ? "Access token expired. Reconnect to restore routing."
-            : "Connection error. Reconnect to restore routing."}
+          {health.description}
         </p>
       ) : null}
 
@@ -90,7 +71,7 @@ function LinearCard({ linear }: { linear: LinearStatus }) {
               <code className="code">{linear.scope}</code>
             ) : (
               <span className="muted">
-                {connected ? "Default scopes" : "—"}
+                {health.connected ? "Default scopes" : "—"}
               </span>
             ),
           },

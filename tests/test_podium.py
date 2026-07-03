@@ -154,6 +154,124 @@ async def test_agent_session_webhook_queues_only_delegated_custom_agent_dispatch
 
 
 @pytest.mark.asyncio
+async def test_bff_lists_runtimes_for_signed_in_workspace() -> None:
+    app = create_app(
+        turnstile_verifier=lambda token, _ip: token == "turnstile-ok",
+        secure_cookies=False,
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://podium.test",
+    ) as client:
+        register = await client.post(
+            "/api/v1/auth/register",
+            json={
+                "email": "runtime-list@example.com",
+                "password": "correct-horse",
+                "turnstile_token": "turnstile-ok",
+            },
+        )
+        assert register.status_code == 200
+
+        token_response = await client.post(
+            "/api/v1/onboarding/runtime/enrollment-token",
+        )
+        enrolled = await client.post(
+            "/api/v1/runtime/enroll",
+            json={"enrollment_token": token_response.json()["enrollment_token"]},
+        )
+        runtime_id = enrolled.json()["runtime_id"]
+        app.state.podium.presence[runtime_id] = "2026-01-01T00:00:00Z"
+
+        response = await client.get("/api/v1/runtimes")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["runtimes"] == [
+        {
+            "runtime_id": runtime_id,
+            "online": True,
+            "last_heartbeat": "2026-01-01T00:00:00Z",
+            "version": None,
+            "metadata": {},
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_bff_recent_runs_and_detail_derive_from_runtime_dispatches() -> None:
+    secret = "webhook-secret"
+    app = create_app(
+        turnstile_verifier=lambda token, _ip: token == "turnstile-ok",
+        secure_cookies=False,
+        linear_webhook_secret=secret,
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://podium.test",
+    ) as client:
+        register = await client.post(
+            "/api/v1/auth/register",
+            json={
+                "email": "runs-list@example.com",
+                "password": "correct-horse",
+                "turnstile_token": "turnstile-ok",
+            },
+        )
+        assert register.status_code == 200
+        workspace_id = register.json()["user"]["id"]
+
+        token_response = await client.post(
+            "/api/v1/runtime/enrollment-tokens",
+            json={
+                "runtime_group_id": f"group_{workspace_id}",
+                "linear_workspace_id": "workspace-1",
+                "project_slug": "ENG",
+                "linear_agent_app_user_id": "app-user-1",
+            },
+        )
+        enrolled = (
+            await client.post(
+                "/api/v1/runtime/enroll",
+                json={"enrollment_token": token_response.json()["enrollment_token"]},
+            )
+        ).json()
+        payload = _agent_session_payload(delegate_id="app-user-1")
+        raw = json.dumps(payload).encode()
+        queued = await client.post(
+            "/api/v1/linear/webhooks/agent-session",
+            content=raw,
+            headers={"Linear-Signature": _signature(raw, secret), "Content-Type": "application/json"},
+        )
+        assert queued.status_code == 200
+        lease = await client.post(
+            "/api/v1/runtime/dispatches/lease",
+            headers={"Authorization": f"Bearer {enrolled['runtime_token']}"},
+        )
+        dispatch = lease.json()["dispatch"]
+        ack = await client.post(
+            "/api/v1/runtime/dispatches/ack",
+            json={
+                "dispatch_id": dispatch["dispatch_id"],
+                "status": "completed",
+                "reason": "completed_by_runtime",
+            },
+            headers={"Authorization": f"Bearer {enrolled['runtime_token']}"},
+        )
+        assert ack.status_code == 200
+
+        recent = await client.get("/api/v1/runs/recent?limit=5")
+        detail = await client.get(f"/api/v1/runs/{dispatch['dispatch_id']}")
+
+    assert recent.status_code == 200
+    assert recent.json()["runs"][0]["run_id"] == dispatch["dispatch_id"]
+    assert recent.json()["runs"][0]["status"] == "success"
+    assert recent.json()["runs"][0]["runtime_id"] == enrolled["runtime_id"]
+    assert detail.status_code == 200
+    assert detail.json()["issue_identifier"] == "ENG-1"
+
+
+@pytest.mark.asyncio
 async def test_webhook_rejects_invalid_signature_and_invalid_json() -> None:
     secret = "webhook-secret"
     async with app_client(linear_webhook_secret=secret) as client:

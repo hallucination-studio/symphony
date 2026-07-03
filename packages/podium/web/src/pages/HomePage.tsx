@@ -4,23 +4,22 @@ import { Card } from "../components/Card";
 import { LinkButton } from "../components/Button";
 import { ActionPanel } from "../components/ActionPanel";
 import { EmptyState } from "../components/EmptyState";
+import { OnboardingProgress as OnboardingProgressView } from "../components/OnboardingProgress";
 import { RunSummaryList } from "../components/RunSummaryList";
 import { StatusBadge } from "../components/StatusBadge";
 import { PageHeader, QueryState } from "../components/PageState";
 import {
   activeStep,
-  completedCount,
-  deriveSteps,
   isOnboardingComplete,
-  STEP_ORDER,
 } from "../lib/onboarding";
+import { linearHealth } from "../lib/linear";
 import type {
   Bootstrap,
-  LinearStatus,
   OnboardingProgress,
   RunSummary,
   SmokeCheckResult,
 } from "../api/types";
+import type { GlobalStatus } from "../lib/format";
 
 export default function HomePage() {
   const bootstrap = useBootstrap();
@@ -61,13 +60,12 @@ function Home({
   const navigate = useNavigate();
   const { onboarding, linear } = data;
   const complete = isOnboardingComplete(onboarding);
-  const done = completedCount(onboarding);
-  const total = STEP_ORDER.length;
   const next = activeStep(onboarding);
+  const linearState = linearHealth(linear);
+  const runtimeState = runtimeHealthStatus(onboarding);
 
   return (
     <div className="home-grid">
-      {/* Action Center — the single most important thing to do right now. */}
       <div className="span-2">
         {complete ? (
           <ActionPanel
@@ -88,7 +86,6 @@ function Home({
         ) : null}
       </div>
 
-      {/* Setup progress */}
       <Card
         title="Setup progress"
         description={
@@ -102,50 +99,21 @@ function Home({
           ) : undefined
         }
       >
-        <div className="progress-summary">
-          <span className="progress-count">
-            {done}/{total}
-          </span>
-          <span className="muted">steps done</span>
-        </div>
-        <div className="progress-bar">
-          <div
-            className="progress-bar-fill"
-            style={{ width: `${(done / total) * 100}%` }}
-          />
-        </div>
-        <ol className="step-list">
-          {deriveSteps(onboarding).map((step, i) => (
-            <li className="step" key={step.key} data-status={step.status}>
-              <span className="step-indicator" data-status={step.status}>
-                {step.status === "completed"
-                  ? "✓"
-                  : step.status === "blocked"
-                    ? "!"
-                    : i + 1}
-              </span>
-              <div className="step-body">
-                <div className="step-title">{step.title}</div>
-              </div>
-              <StatusBadge status={step.status} />
-            </li>
-          ))}
-        </ol>
+        <OnboardingProgressView onboarding={onboarding} showSteps />
       </Card>
 
-      {/* System health */}
       <Card title="System health" description="Live status of core services">
         <div className="health-list">
           <HealthRow
             label="Linear"
-            status={linearHealthStatus(linear)}
-            hint={linearHint(linear)}
+            status={linearState.status}
+            hint={linearState.hint}
           />
           <HealthRow
             label="Runtime"
-            status={runtimeHealthStatus(onboarding)}
+            status={runtimeState}
             hint={
-              runtimeHealthStatus(onboarding) === "online"
+              runtimeState === "online"
                 ? "At least one runtime online"
                 : "No runtime online"
             }
@@ -165,7 +133,6 @@ function Home({
         </div>
       </Card>
 
-      {/* Recent runs */}
       <Card
         className="span-2"
         title="Recent runs"
@@ -198,7 +165,7 @@ function HealthRow({
   hint,
 }: {
   label: string;
-  status: string;
+  status: GlobalStatus;
   hint: string;
 }) {
   return (
@@ -212,28 +179,19 @@ function HealthRow({
   );
 }
 
-function linearHealthStatus(linear: LinearStatus): string {
-  if (linear.state === "connected") return "healthy";
-  if (linear.state === "expired" || linear.state === "error") return "degraded";
-  return "not_started";
-}
-function linearHint(linear: LinearStatus): string {
-  if (linear.state === "connected") return "Connected";
-  if (linear.state === "expired") return "Token expired — reconnect";
-  if (linear.state === "error") return "Connection error — reconnect";
-  return "Not connected";
-}
-function runtimeHealthStatus(onboarding: OnboardingProgress): string {
+function runtimeHealthStatus(onboarding: OnboardingProgress): GlobalStatus {
   return onboarding.completed_steps.includes("runtime_enrollment")
     ? "online"
     : "offline";
 }
-function smokeHealthStatus(smoke: SmokeCheckResult | null): string {
+
+function smokeHealthStatus(smoke: SmokeCheckResult | null): GlobalStatus {
   if (!smoke) return "not_started";
   if (smoke.status === "passed") return "healthy";
   if (smoke.status === "failed") return "failed";
   return "in_progress";
 }
+
 function smokeHint(smoke: SmokeCheckResult | null): string {
   if (!smoke) return "Not run yet";
   if (smoke.status === "passed") return "All checks passed";

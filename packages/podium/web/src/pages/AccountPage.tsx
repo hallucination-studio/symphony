@@ -1,18 +1,20 @@
 import { useState, type FormEvent } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
-import { useBootstrap, useStartLinear } from "../api/hooks";
+import { useBootstrap } from "../api/hooks";
 import { useMe } from "../auth/useSession";
 import { api } from "../api/client";
 import { PageHeader, QueryState } from "../components/PageState";
 import { Card } from "../components/Card";
 import { Button, LinkButton } from "../components/Button";
 import { ActionPanel } from "../components/ActionPanel";
+import { OnboardingProgress as OnboardingProgressView } from "../components/OnboardingProgress";
 import { StatusBadge } from "../components/StatusBadge";
 import { DetailList } from "../components/Drawer";
 import { useToast } from "../components/Toast";
 import { formatDateTime } from "../lib/format";
-import { completedCount, isOnboardingComplete, STEP_ORDER } from "../lib/onboarding";
+import { linearHealth, useConnectLinear } from "../lib/linear";
+import { isOnboardingComplete } from "../lib/onboarding";
 import type {
   AuthUser,
   Bootstrap,
@@ -31,7 +33,7 @@ export default function AccountPage() {
         title="Account"
         description="Your workspace identity and connected services."
       />
-      <QueryState isLoading={me.isLoading} error={me.isError ? new Error("Couldn't load your account.") : null}>
+      <QueryState isLoading={me.isLoading} error={null}>
         {me.user ? <IdentityCard user={me.user} /> : null}
       </QueryState>
       <div className="page-stack">
@@ -248,25 +250,9 @@ function ServicesCards({ data }: { data: Bootstrap }) {
 }
 
 function LinearIdentityCard({ linear }: { linear: LinearStatus }) {
-  const start = useStartLinear();
-  const { notify } = useToast();
-  const connected = linear.state === "connected";
-  const broken = linear.state === "expired" || linear.state === "error";
-
-  const healthStatus = connected
-    ? "healthy"
-    : broken
-      ? "degraded"
-      : "not_connected";
-
-  async function connect() {
-    try {
-      const { authorization_url } = await start.mutateAsync();
-      window.location.assign(authorization_url);
-    } catch {
-      notify("Couldn't start Linear connection. Try again.", "error");
-    }
-  }
+  const { connect, isPending } = useConnectLinear();
+  const health = linearHealth(linear);
+  const connected = health.connected;
 
   return (
     <Card
@@ -275,7 +261,7 @@ function LinearIdentityCard({ linear }: { linear: LinearStatus }) {
     >
       <div className="row-between" style={{ marginBottom: "var(--space-4)" }}>
         <span className="muted">Connection</span>
-        <StatusBadge status={healthStatus} />
+        <StatusBadge status={health.status} />
       </div>
 
       <DetailList
@@ -320,18 +306,12 @@ function LinearIdentityCard({ linear }: { linear: LinearStatus }) {
       ) : (
         <div style={{ marginTop: "var(--space-4)" }}>
           <ActionPanel
-            tone={broken ? "warning" : "info"}
-            title={broken ? "Reconnect Linear" : "Connect Linear"}
-            description={
-              linear.state === "expired"
-                ? "Access token expired. Reconnect to restore routing."
-                : linear.state === "error"
-                  ? "Connection error. Reconnect to restore routing."
-                  : "Authorize Podium to read issues from your Linear workspace."
-            }
-            actionLabel={broken ? "Reconnect Linear" : "Connect Linear"}
+            tone={health.tone === "success" ? "info" : health.tone}
+            title={health.title}
+            description={health.description}
+            actionLabel={health.actionLabel}
             onAction={connect}
-            actionLoading={start.isPending}
+            actionLoading={isPending}
           />
         </div>
       )}
@@ -341,8 +321,6 @@ function LinearIdentityCard({ linear }: { linear: LinearStatus }) {
 
 function OnboardingCard({ onboarding }: { onboarding: OnboardingProgress }) {
   const complete = isOnboardingComplete(onboarding);
-  const done = completedCount(onboarding);
-  const total = STEP_ORDER.length;
 
   return (
     <Card
@@ -354,18 +332,7 @@ function OnboardingCard({ onboarding }: { onboarding: OnboardingProgress }) {
         </LinkButton>
       }
     >
-      <div className="progress-summary">
-        <span className="progress-count">
-          {done}/{total}
-        </span>
-        <span className="muted">steps done</span>
-      </div>
-      <div className="progress-bar">
-        <div
-          className="progress-bar-fill"
-          style={{ width: `${(done / total) * 100}%` }}
-        />
-      </div>
+      <OnboardingProgressView onboarding={onboarding} />
     </Card>
   );
 }

@@ -1,15 +1,12 @@
 import { useState } from "react";
-import { useEnrollmentToken, useRuntimes } from "../api/hooks";
+import { useRuntimes } from "../api/hooks";
 import { PageHeader, QueryState } from "../components/PageState";
 import { Card } from "../components/Card";
 import { EmptyState } from "../components/EmptyState";
 import { StatusBadge } from "../components/StatusBadge";
 import { Drawer, DetailList } from "../components/Drawer";
-import {
-  InstallCommandCard,
-  type EnrollmentPhase,
-} from "../components/InstallCommandCard";
-import { useToast } from "../components/Toast";
+import { InstallCommandCard } from "../components/InstallCommandCard";
+import { useEnrollment } from "../lib/enrollment";
 import { formatDateTime, relativeTime } from "../lib/format";
 import type { RuntimeRecord } from "../api/types";
 
@@ -90,28 +87,16 @@ function RuntimeDrawer({
   runtime: RuntimeRecord;
   onClose: () => void;
 }) {
-  const generate = useEnrollmentToken();
-  const { notify } = useToast();
-  const [command, setCommand] = useState<string | null>(null);
-  const [token, setToken] = useState<string | null>(null);
+  const enrollment = useEnrollment({
+    online: runtime.online,
+    successMessage: "New install command ready",
+    errorMessage: "Couldn't regenerate the command. Try again.",
+  });
 
   const hostname =
     typeof runtime.metadata?.hostname === "string"
       ? (runtime.metadata.hostname as string)
       : null;
-
-  async function regenerate() {
-    try {
-      const res = await generate.mutateAsync();
-      setCommand(res.install_command);
-      setToken(res.enrollment_token);
-      notify("New install command ready", "success");
-    } catch {
-      notify("Couldn't regenerate the command. Try again.", "error");
-    }
-  }
-
-  const phase: EnrollmentPhase = runtime.online ? "online" : "idle";
 
   return (
     <Drawer title={runtime.runtime_id} onClose={onClose}>
@@ -135,23 +120,23 @@ function RuntimeDrawer({
       {!runtime.online ? (
         <div style={{ marginTop: "var(--space-5)" }}>
           <div className="scope-section-title">Reconnect this runtime</div>
-          {command && token ? (
+          {enrollment.command && enrollment.token ? (
             <InstallCommandCard
-              command={command}
-              token={token}
-              expiresLabel="Single-use token"
-              phase={phase}
-              onRegenerate={regenerate}
-              regenerating={generate.isPending}
+              command={enrollment.command}
+              token={enrollment.token}
+              expiresLabel={enrollment.expiresLabel}
+              phase={enrollment.phase}
+              onRegenerate={enrollment.regenerate}
+              regenerating={enrollment.regenerating}
             />
           ) : (
             <button
               type="button"
               className="link-button"
-              onClick={regenerate}
-              disabled={generate.isPending}
+              onClick={enrollment.regenerate}
+              disabled={enrollment.regenerating}
             >
-              {generate.isPending
+              {enrollment.regenerating
                 ? "Generating…"
                 : "Regenerate install command"}
             </button>

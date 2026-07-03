@@ -15,9 +15,13 @@ export type GlobalStatus =
   | "running"
   | "passed"
   | "success"
-  | "cancelled";
+  | "cancelled"
+  | "connected"
+  | "not_connected"
+  | "expired"
+  | "error";
 
-const STATUS_LABELS: Record<string, string> = {
+const STATUS_LABELS: Record<GlobalStatus, string> = {
   not_started: "Not started",
   in_progress: "In progress",
   blocked: "Blocked",
@@ -42,7 +46,7 @@ const STATUS_LABELS: Record<string, string> = {
 // small and legible regardless of how many raw status strings exist.
 export type StatusTone = "positive" | "progress" | "negative" | "neutral";
 
-const STATUS_TONE: Record<string, StatusTone> = {
+const STATUS_TONE: Record<GlobalStatus, StatusTone> = {
   completed: "positive",
   healthy: "positive",
   online: "positive",
@@ -63,12 +67,12 @@ const STATUS_TONE: Record<string, StatusTone> = {
   not_connected: "neutral",
 };
 
-export function statusLabel(status: string): string {
-  return STATUS_LABELS[status] ?? humanize(status);
+export function statusLabel(status: GlobalStatus): string {
+  return STATUS_LABELS[status];
 }
 
-export function statusTone(status: string): StatusTone {
-  return STATUS_TONE[status] ?? "neutral";
+export function statusTone(status: GlobalStatus): StatusTone {
+  return STATUS_TONE[status];
 }
 
 export function humanize(value: string): string {

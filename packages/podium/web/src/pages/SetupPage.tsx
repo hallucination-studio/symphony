@@ -8,13 +8,25 @@ import {
   type DerivedStep,
 } from "../lib/onboarding";
 import type { Bootstrap } from "../api/types";
+import type { ComponentType } from "react";
 import { LinearConnectStep } from "./setup/LinearConnectStep";
 import { ScopeStep } from "./setup/ScopeStep";
 import { RepositoryStep } from "./setup/RepositoryStep";
 import { RuntimeStep } from "./setup/RuntimeStep";
 import { SmokeCheckStep } from "./setup/SmokeCheckStep";
+import type { StepProps } from "./setup/types";
 
 const STEP_COUNT = STEP_DEFS.length;
+type SetupStepKey = Exclude<Bootstrap["onboarding"]["current_step"], "complete">;
+type StandardStepKey = Exclude<SetupStepKey, "linear_connect">;
+type SetupStepComponent = ComponentType<StepProps> | typeof LinearConnectStep;
+const STEP_COMPONENTS = {
+  linear_connect: LinearConnectStep,
+  scope_selection: ScopeStep,
+  repository_mapping: RepositoryStep,
+  runtime_enrollment: RuntimeStep,
+  smoke_check: SmokeCheckStep,
+} satisfies Record<SetupStepKey, SetupStepComponent>;
 
 export default function SetupPage() {
   const bootstrap = useBootstrap();
@@ -71,18 +83,20 @@ function SetupBody({ data }: { data: Bootstrap }) {
             linear={data.linear}
             connected={data.linear.state === "connected"}
           />
-        ) : currentDef.key === "scope_selection" ? (
-          <ScopeStep {...stepProps} />
-        ) : currentDef.key === "repository_mapping" ? (
-          <RepositoryStep {...stepProps} />
-        ) : currentDef.key === "runtime_enrollment" ? (
-          <RuntimeStep {...stepProps} />
         ) : (
-          <SmokeCheckStep {...stepProps} />
+          <StandardStep stepKey={currentDef.key as StandardStepKey} {...stepProps} />
         )}
       </div>
     </div>
   );
+}
+
+function StandardStep({
+  stepKey,
+  ...props
+}: StepProps & { stepKey: StandardStepKey }) {
+  const CurrentStep = STEP_COMPONENTS[stepKey];
+  return <CurrentStep {...props} />;
 }
 
 function SetupNav({

@@ -1,8 +1,8 @@
-import { useStartLinear } from "../../api/hooks";
 import { SetupStepShell } from "../../components/SetupStepShell";
 import { ActionPanel } from "../../components/ActionPanel";
 import { StatusBadge } from "../../components/StatusBadge";
-import { useToast } from "../../components/Toast";
+import { linearHealth, useConnectLinear } from "../../lib/linear";
+import type { LinearStatus } from "../../api/types";
 import type { StepProps } from "./types";
 
 export function LinearConnectStep({
@@ -12,23 +12,11 @@ export function LinearConnectStep({
   connected,
   onNext,
 }: StepProps & {
-  linear?: { state: string };
+  linear: LinearStatus;
   connected: boolean;
 }) {
-  const start = useStartLinear();
-  const { notify } = useToast();
-
-  const broken = linear?.state === "expired" || linear?.state === "error";
-
-  async function handleConnect() {
-    try {
-      const { authorization_url } = await start.mutateAsync();
-      // Hand off to Linear's OAuth screen.
-      window.location.assign(authorization_url);
-    } catch {
-      notify("Couldn't start Linear connection. Try again.", "error");
-    }
-  }
+  const { connect, isPending } = useConnectLinear();
+  const health = linearHealth(linear);
 
   return (
     <SetupStepShell
@@ -46,18 +34,14 @@ export function LinearConnectStep({
           title="Linear connected"
           description="Your workspace is authorized. Continue to choose scope."
         />
-      ) : broken ? (
+      ) : health.broken ? (
         <ActionPanel
           tone="critical"
-          title={
-            linear?.state === "expired"
-              ? "Linear access expired"
-              : "Linear connection error"
-          }
+          title={health.title}
           description="Reconnect to restore access to your workspace."
-          actionLabel="Reconnect Linear"
-          onAction={handleConnect}
-          actionLoading={start.isPending}
+          actionLabel={health.actionLabel}
+          onAction={connect}
+          actionLoading={isPending}
         />
       ) : (
         <div className="stack">
@@ -70,8 +54,8 @@ export function LinearConnectStep({
             title="Authorize Linear"
             description="You'll be redirected to Linear to approve access, then brought back here."
             actionLabel="Connect Linear"
-            onAction={handleConnect}
-            actionLoading={start.isPending}
+            onAction={connect}
+            actionLoading={isPending}
           />
         </div>
       )}

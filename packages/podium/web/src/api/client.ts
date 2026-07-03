@@ -62,7 +62,7 @@ export const api = {
   register(
     email: string,
     password: string,
-    turnstileToken = "dev",
+    turnstileToken: string,
   ): Promise<{ user: AuthUser }> {
     return request("/api/v1/auth/register", {
       method: "POST",
@@ -73,7 +73,7 @@ export const api = {
   login(
     email: string,
     password: string,
-    turnstileToken = "dev",
+    turnstileToken: string,
   ): Promise<{ user: AuthUser }> {
     return request("/api/v1/auth/login", {
       method: "POST",
@@ -108,10 +108,6 @@ export const api = {
   // ===== Onboarding / workspace =====
   bootstrap(): Promise<Bootstrap> {
     return request<Bootstrap>("/api/v1/bootstrap");
-  },
-
-  onboardingStatus(): Promise<OnboardingProgress> {
-    return request<OnboardingProgress>("/api/v1/onboarding/status");
   },
 
   startLinear(): Promise<{ authorization_url: string; workspace_id: string }> {

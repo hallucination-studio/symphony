@@ -3,8 +3,7 @@ import { api, ApiError } from "../api/client";
 import type { AuthUser } from "../api/types";
 
 /**
- * Current-session query. A 401 (`unauthorized`) is a normal "signed out"
- * state, not a UI error — callers read `isUnauthenticated` for that.
+ * Current-session query. A 401 (`unauthorized`) is a normal signed-out state.
  */
 export function useMe() {
   const query = useQuery({
@@ -14,20 +13,16 @@ export function useMe() {
     staleTime: 60_000,
   });
 
-  // Main's backend returns 401 with code `unauthorized` for signed-out.
   const isUnauthenticated =
     query.error instanceof ApiError &&
     query.error.status === 401 &&
-    (query.error.code === "unauthorized" || query.error.code === undefined);
-
+    query.error.code === "unauthorized";
+  const hasUnexpectedError = query.isError && !isUnauthenticated;
   const user: AuthUser | undefined = query.data?.user;
 
   return {
     user,
-    isLoading: query.isLoading,
-    // Surface only unexpected errors (network, 5xx) as real errors.
-    isError: query.isError && !isUnauthenticated,
-    isUnauthenticated,
+    isLoading: query.isLoading || hasUnexpectedError,
     isAuthenticated: Boolean(user),
   };
 }

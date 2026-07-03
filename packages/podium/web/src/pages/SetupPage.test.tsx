@@ -3,7 +3,8 @@ import { fireEvent, screen, waitFor } from "@testing-library/react";
 import { renderWithProviders } from "../test/utils";
 import SetupPage from "./SetupPage";
 import { api, ApiError } from "../api/client";
-import type { Bootstrap } from "../api/types";
+import * as navigation from "../lib/navigation";
+import type { Bootstrap, OnboardingStepKey } from "../api/types";
 
 vi.mock("../api/client", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../api/client")>();
@@ -25,7 +26,10 @@ vi.mock("../api/client", async (importOriginal) => {
 
 const mockApi = api as unknown as Record<string, ReturnType<typeof vi.fn>>;
 
-function bootstrap(current: string, completed: string[]): Bootstrap {
+function bootstrap(
+  current: OnboardingStepKey,
+  completed: OnboardingStepKey[],
+): Bootstrap {
   return {
     session: { workspace_id: "default" },
     onboarding: {
@@ -46,7 +50,7 @@ const advancedOnboarding = {
   current_step: "runtime_enrollment",
   completed_steps: ["linear_connect", "scope_selection", "repository_mapping"],
   next_action: "",
-};
+} satisfies Bootstrap["onboarding"];
 
 describe("SetupPage repository step", () => {
   beforeEach(() => {
@@ -187,6 +191,35 @@ describe("SetupPage runtime step", () => {
     expect(command).toBeInTheDocument();
     expect(command.textContent).not.toContain("get.podium.dev");
   });
+
+  it("updates the install command when regenerated", async () => {
+    mockApi.enrollmentToken
+      .mockResolvedValueOnce({
+        enrollment_token: "tok-1",
+        workspace_id: "default",
+        install_command: "install --token tok-1",
+        expires_at: "2026-07-02T12:00:00Z",
+      })
+      .mockResolvedValueOnce({
+        enrollment_token: "tok-2",
+        workspace_id: "default",
+        install_command: "install --token tok-2",
+        expires_at: "2026-07-02T13:00:00Z",
+      });
+
+    renderWithProviders(<SetupPage />, {
+      route: "/setup/runtime",
+      path: "/setup/:step",
+    });
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: /generate install command/i }),
+    );
+    expect(await screen.findByText("install --token tok-1")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /regenerate command/i }));
+    expect(await screen.findByText("install --token tok-2")).toBeInTheDocument();
+  });
 });
 
 describe("SetupPage linear step", () => {
@@ -206,5 +239,27 @@ describe("SetupPage linear step", () => {
     mockApi.bootstrap.mockResolvedValue(bootstrap("linear_connect", []));
     renderWithProviders(<SetupPage />, { route: "/setup/linear", path: "/setup/:step" });
     expect(await screen.findByText("Authorize Linear")).toBeInTheDocument();
+  });
+
+  it("starts Linear OAuth and redirects through the shared connect path", async () => {
+    mockApi.bootstrap.mockResolvedValue(bootstrap("linear_connect", []));
+    mockApi.startLinear.mockResolvedValue({
+      authorization_url: "https://linear.example/oauth",
+      workspace_id: "default",
+    });
+    const assign = vi
+      .spyOn(navigation, "assignLocation")
+      .mockImplementation(() => undefined);
+
+    renderWithProviders(<SetupPage />, { route: "/setup/linear", path: "/setup/:step" });
+
+    const connectButtons = await screen.findAllByRole("button", {
+      name: /connect linear/i,
+    });
+    fireEvent.click(connectButtons[connectButtons.length - 1]);
+
+    await waitFor(() => expect(mockApi.startLinear).toHaveBeenCalled());
+    expect(assign).toHaveBeenCalledWith("https://linear.example/oauth");
+    assign.mockRestore();
   });
 });

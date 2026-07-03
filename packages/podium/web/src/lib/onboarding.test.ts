@@ -5,11 +5,11 @@ import {
   deriveSteps,
   isOnboardingComplete,
 } from "./onboarding";
-import type { OnboardingProgress } from "../api/types";
+import type { OnboardingProgress, OnboardingStepKey } from "../api/types";
 
 function progress(
-  current: string,
-  completed: string[],
+  current: OnboardingStepKey,
+  completed: OnboardingStepKey[],
 ): OnboardingProgress {
   return {
     current_step: current,
@@ -31,7 +31,7 @@ describe("deriveSteps", () => {
     expect(byKey.smoke_check).toBe("not_started");
   });
 
-  it("flags a gap in the chain as blocked", () => {
+  it("marks a gap in the chain as not started", () => {
     // current is smoke_check but an earlier step was never completed.
     const steps = deriveSteps(
       progress("smoke_check", [
@@ -41,7 +41,7 @@ describe("deriveSteps", () => {
       ]),
     );
     const repo = steps.find((s) => s.key === "repository_mapping");
-    expect(repo?.status).toBe("blocked");
+    expect(repo?.status).toBe("not_started");
   });
 
   it("treats every step as completed when flow is complete", () => {

@@ -3,6 +3,7 @@ import { Link, useNavigate } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "../api/client";
 import { Button } from "../components/Button";
+import { getTurnstileToken } from "../lib/turnstile";
 
 export default function RegisterPage() {
   const navigate = useNavigate();
@@ -28,7 +29,7 @@ export default function RegisterPage() {
 
     setSubmitting(true);
     try {
-      await api.register(email, password, "dev");
+      await api.register(email, password, getTurnstileToken());
       await qc.invalidateQueries({ queryKey: ["me"] });
       navigate("/");
     } catch (err) {

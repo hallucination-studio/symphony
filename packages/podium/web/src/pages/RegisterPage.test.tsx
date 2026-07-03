@@ -3,6 +3,7 @@ import { screen, fireEvent, waitFor } from "@testing-library/react";
 import { renderWithProviders } from "../test/utils";
 import RegisterPage from "./RegisterPage";
 import { api, ApiError } from "../api/client";
+import { setTurnstileTokenProvider } from "../lib/turnstile";
 
 const navigate = vi.fn();
 
@@ -24,6 +25,7 @@ const mockApi = api as unknown as { register: ReturnType<typeof vi.fn> };
 describe("RegisterPage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    setTurnstileTokenProvider(() => "token-register");
   });
 
   it("blocks submission when passwords don't match", async () => {
@@ -65,7 +67,7 @@ describe("RegisterPage", () => {
       expect(mockApi.register).toHaveBeenCalledWith(
         "a@b.com",
         "password123",
-        "dev",
+        "token-register",
       ),
     );
     await waitFor(() => expect(navigate).toHaveBeenCalledWith("/"));

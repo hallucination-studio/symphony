@@ -13,13 +13,6 @@ export function useBootstrap() {
   });
 }
 
-export function useOnboardingStatus() {
-  return useQuery({
-    queryKey: ["onboarding"],
-    queryFn: () => api.onboardingStatus(),
-  });
-}
-
 export function useLinearScope(enabled = true) {
   return useQuery({
     queryKey: ["linear", "scope"],
@@ -36,26 +29,10 @@ export function useRuntimes() {
   });
 }
 
-export function useRuntime(id: string | null) {
-  return useQuery({
-    queryKey: ["runtime", id],
-    queryFn: () => api.runtime(id as string),
-    enabled: Boolean(id),
-  });
-}
-
 export function useRecentRuns(limit = 10) {
   return useQuery({
     queryKey: ["runs", "recent", limit],
     queryFn: () => api.recentRuns(limit),
-  });
-}
-
-export function useRun(id: string | null) {
-  return useQuery({
-    queryKey: ["run", id],
-    queryFn: () => api.run(id as string),
-    enabled: Boolean(id),
   });
 }
 
@@ -87,7 +64,6 @@ function useInvalidateOnboarding() {
   const qc = useQueryClient();
   return () => {
     qc.invalidateQueries({ queryKey: ["bootstrap"] });
-    qc.invalidateQueries({ queryKey: ["onboarding"] });
   };
 }
 

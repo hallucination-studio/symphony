@@ -1,14 +1,14 @@
 import { statusLabel, statusTone } from "../lib/format";
+import type { GlobalStatus } from "../lib/format";
 
 /**
- * The one badge used everywhere. Accepts any raw status string from the API
- * and renders it with a consistent label + one of four tones.
+ * The one badge used everywhere for the UI's known status vocabulary.
  */
 export function StatusBadge({
   status,
   label,
 }: {
-  status: string;
+  status: GlobalStatus;
   label?: string;
 }) {
   return (
