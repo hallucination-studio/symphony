@@ -38,6 +38,31 @@ Current hard renames:
 - Use structured models and parsers already in the codebase instead of ad hoc string manipulation for workflow config, persisted state, ops snapshots, registration payloads, and Linear data.
 - Tests should cover both the role-local behavior and the cross-role contract. Add or update import-boundary tests when package relationships change.
 
+## Podium UI / Design System
+
+Podium is the only user-facing surface, and its visual identity is captured in a
+DESIGN.md file. Before making **any** UI change to the Podium web app, read
+`packages/podium/web/DESIGN.md` and follow it. This is mandatory for every
+frontend edit, however small.
+
+- The DESIGN.md YAML tokens are normative and mirror the CSS custom properties in
+  `packages/podium/web/src/styles/tokens.css`. Consume design values through
+  those `--color-*`, `--space-*`, `--radius-*`, and `--font-*` variables — never
+  hardcode hex codes, pixel font sizes, or radii in components.
+- If you need a value that is not yet a token, add it to DESIGN.md (and
+  `tokens.css`) first, then use it. Keep the two in sync.
+- After any change to DESIGN.md, lint it and keep it clean (0 errors, 0
+  warnings):
+
+  ```bash
+  cd packages/podium/web && npm run design:lint
+  ```
+
+- Keep Podium onboarding-first and restrained: one indigo accent, near-white
+  surfaces, hairline borders over heavy shadows, system fonts only. Never render
+  Linear tokens, session cookies, passwords, or client secrets in the UI.
+
+
 ## Standard Commands
 
 Run the full local suite:

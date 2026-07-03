@@ -9,7 +9,8 @@
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
-    "lint": "eslint . --max-warnings 0"
+    "lint": "eslint . --max-warnings 0",
+    "design:lint": "npx -p @google/design.md designmd lint DESIGN.md"
   },
   "dependencies": {
     "@tanstack/react-query": "5.62.7",
