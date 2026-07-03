@@ -60,6 +60,7 @@ const ZH: Record<string, string> = {
   "Create account": "创建账号",
   "Create one": "创建一个",
   "Create your account": "创建账号",
+  "Debug sign-in enabled. Waiting for session…": "Debug 登录已启用，正在等待会话…",
   "Custom Linear app saved": "自定义 Linear 应用已保存",
   "Custom app configured": "已配置自定义应用",
   "Default": "默认",

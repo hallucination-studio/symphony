@@ -101,6 +101,7 @@ def create_app(
     pg_store: Any | None = None,
     redis_store: Any | None = None,
     config: PodiumConfig | None = None,
+    debug_auth: bool = False,
 ) -> FastAPI:
     state = ManagedPodiumState(
         turnstile_verifier=turnstile_verifier or verify_turnstile_with_cloudflare,
@@ -114,6 +115,7 @@ def create_app(
         pg_store=pg_store,
         redis_store=redis_store,
         config=config or PodiumConfig.from_env(),
+        debug_auth=debug_auth,
     )
     app = FastAPI(title="Symphony Podium")
     app.state.podium = state
@@ -223,6 +225,12 @@ def create_app(
         podium_session = request.cookies.get(state.session_cookie_name)
         user = await state.user_for_session(podium_session or "")
         if user is None:
+            if state.debug_auth:
+                user = state.ensure_debug_user()
+                session_token = await state.create_session(str(user["id"]))
+                json_response = JSONResponse({"user": public_user(user)})
+                state.set_session_cookie(json_response, session_token)
+                return json_response
             return error_response(401, "unauthorized", "Unauthorized")
         return JSONResponse({"user": public_user(user)})
 
@@ -835,6 +843,7 @@ class ManagedPodiumState:
     pg_store: Any | None = None
     redis_store: Any | None = None
     config: PodiumConfig = field(default_factory=PodiumConfig.from_env)
+    debug_auth: bool = False
     durable: Any = field(default_factory=lambda: InMemoryPodiumBusinessState())
 
     def __post_init__(self) -> None:
@@ -1286,6 +1295,21 @@ class ManagedPodiumState:
     def user_by_email(self, email: str) -> dict[str, Any] | None:
         user_id = self.user_ids_by_email.get(email)
         return self.users.get(user_id or "")
+
+    def ensure_debug_user(self) -> dict[str, Any]:
+        user_id = "debug"
+        user = self.users.get(user_id)
+        if user is None:
+            user = {
+                "id": user_id,
+                "email": "debug@podium.local",
+                "password_hash": "",
+                "created_at": utc_now_iso(),
+            }
+            self.users[user_id] = user
+            self.user_ids_by_email["debug@podium.local"] = user_id
+            self.persist_users()
+        return user
 
     async def create_session(self, user_id: str) -> str:
         token = secrets.token_urlsafe(32)

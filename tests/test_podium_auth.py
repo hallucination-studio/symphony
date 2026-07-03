@@ -257,6 +257,42 @@ async def test_me_without_cookie_returns_401() -> None:
 
 
 @pytest.mark.asyncio
+async def test_debug_auth_me_creates_internal_session_when_enabled() -> None:
+    app = create_app(
+        secure_cookies=False,
+        secret_key=SECRET,
+        debug_auth=True,
+    )
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
+        response = await client.get("/api/v1/auth/me")
+
+    assert response.status_code == 200
+    assert response.json()["user"] == {
+        "id": "debug",
+        "email": "debug@podium.local",
+        "linear_app": None,
+    }
+    assert "podium_session=" in response.headers["set-cookie"]
+
+
+@pytest.mark.asyncio
+async def test_debug_auth_me_reuses_internal_session() -> None:
+    app = create_app(
+        secure_cookies=False,
+        secret_key=SECRET,
+        debug_auth=True,
+    )
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
+        first = await client.get("/api/v1/auth/me")
+        second = await client.get("/api/v1/auth/me")
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert second.json()["user"]["id"] == "debug"
+    assert len(app.state.podium.users) == 1
+
+
+@pytest.mark.asyncio
 async def test_expired_session_returns_401() -> None:
     from datetime import timedelta
 

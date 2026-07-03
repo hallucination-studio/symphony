@@ -27,6 +27,7 @@ const mockApi = api as unknown as {
 describe("App auth gate", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.unstubAllEnvs();
     mockApi.recentRuns.mockResolvedValue({ runs: [] });
     mockApi.smokeCheckResult.mockRejectedValue(new Error("404"));
     mockApi.bootstrap.mockResolvedValue({
@@ -55,6 +56,17 @@ describe("App auth gate", () => {
 
     await waitFor(() => expect(mockApi.me).toHaveBeenCalled());
     expect(screen.getByText(/loading/i)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Sign in" })).not.toBeInTheDocument();
+  });
+
+  it("keeps waiting for debug auth instead of rendering login when enabled", async () => {
+    vi.stubEnv("VITE_PODIUM_DEBUG_AUTH", "true");
+    mockApi.me.mockRejectedValue(new ApiError(401, "no", "unauthorized"));
+    renderWithProviders(<App />, { route: "/" });
+
+    expect(
+      await screen.findByText("Debug sign-in enabled. Waiting for session…"),
+    ).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Sign in" })).not.toBeInTheDocument();
   });
 

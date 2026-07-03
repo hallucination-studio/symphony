@@ -32,6 +32,7 @@ class PodiumServer:
         pg_store: Any | None = None,
         redis_store: Any | None = None,
         config: PodiumConfig | None = None,
+        debug_auth: bool = False,
     ) -> None:
         self.secret_key = secret_key
         self.data_dir = data_dir
@@ -44,6 +45,7 @@ class PodiumServer:
         self.pg_store = pg_store
         self.redis_store = redis_store
         self.config = config or PodiumConfig.from_env()
+        self.debug_auth = debug_auth
         self.port: int | None = None
         self.store = PodiumStore(data_dir=data_dir)
         self.auth_service = AuthService(self.store, secret_key) if secret_key.strip() else None
@@ -75,6 +77,7 @@ class PodiumServer:
                 pg_store=self.pg_store,
                 redis_store=self.redis_store,
                 config=self.config,
+                debug_auth=self.debug_auth,
             )
         else:
             self.app = create_app(
@@ -93,6 +96,7 @@ class PodiumServer:
                 pg_store=self.pg_store,
                 redis_store=self.redis_store,
                 config=self.config,
+                debug_auth=self.debug_auth,
             )
         self.linear_service.installations = self.app.state.podium.linear_installations
         self.app.state.podium.server_wrapper = self

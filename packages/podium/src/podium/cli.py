@@ -9,6 +9,10 @@ import uvicorn
 from .app import create_app
 
 
+def env_flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the Symphony Podium SaaS boundary.")
     subparsers = parser.add_subparsers(dest="command")
@@ -37,6 +41,7 @@ def main(argv: list[str] | None = None) -> int:
         linear_client_secret=os.environ.get("LINEAR_CLIENT_SECRET", ""),
         linear_redirect_uri=os.environ.get("LINEAR_REDIRECT_URI", ""),
         podium_base_url=os.environ.get("PODIUM_BASE_URL", "https://podium.example"),
+        debug_auth=env_flag("PODIUM_DEBUG_AUTH"),
     )
     uvicorn.run(app, host=args.host, port=args.port)
     return 0
