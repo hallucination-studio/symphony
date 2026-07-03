@@ -129,6 +129,8 @@ The final response must be evidence-backed and specific:
 
 For orchestration, acceptance, Linear, Conductor, Codex, retry, or continuation behavior, local tests are necessary but not sufficient when the behavior spans the running product. Use the real-run tools in this file and `docs/real-run-testing-guide.md`.
 
+For Podium onboarding, Podium Web, runtime enrollment, installed Conductor behavior, Podium dispatch routing, or Linear delegated work, use the `Podium Web To Linear Acceptance` scenario in `docs/real-run-testing-guide.md`. That file is the canonical test procedure for the browser -> Podium -> install command -> local Conductor -> Linear issue -> Performer -> Podium run-completion path; keep new lessons and required checks there rather than duplicating the full flow in this file.
+
 This follows the Superpowers verification rule: evidence before claims, always.
 
 ## Acceptance Scoring Rubric
@@ -258,6 +260,25 @@ A real run must:
 5. Use real `codex app-server` when the scenario says real Codex.
 6. Record Linear tree, runtime state, ops snapshot, logs, and cleanup evidence.
 7. Archive/audit the test project before and after the scenario.
+
+For Podium-managed flows, the real run must additionally follow `docs/real-run-testing-guide.md#podium-web-to-linear-acceptance`:
+
+1. Start Podium with `PODIUM_LINEAR_ACCESS_TOKEN="$LINEAR_API_KEY"`.
+2. Start Podium Web and verify onboarding/runtime/runs with Chrome MCP or an equivalent real browser.
+3. Create the Conductor enrollment token from Podium and run the generated install command locally.
+4. Verify the installed Conductor reports managed mode, Podium runtime/proxy tokens, and the Podium WebSocket URL.
+5. Create a real git fixture repo and a real Linear issue delegated to `$LINEAR_AGENT_APP_USER_ID`.
+6. Send the webhook for the actual registered Podium workspace/user id, then let Conductor and Performer complete the work.
+7. Verify Podium `/api/v1/runs/recent`, Linear issue state/comments/labels, Performer logs, fixture repo contents, and smoke tests.
+
+Focused regression files for this path include:
+
+- `tests/test_podium_runtime_onboarding.py`
+- `tests/test_conductor_podium_channels.py`
+- `tests/test_podium_conductor_channels.py`
+- `tests/test_podium.py::test_agent_session_webhook_queues_only_delegated_custom_agent_dispatch_and_runtime_acks`
+- `tests/test_completion_verifier.py`
+- `tests/test_no_podium_memory_state.py`
 
 The harness may create the initial issue and observe state. It must not manually:
 
