@@ -58,6 +58,7 @@ def create_app(
     linear_redirect_uri: str = "",
     linear_token_exchange: Callable[[str, str], dict[str, Any]] | None = None,
     linear_scope_fetch: Callable[[str, str], dict[str, Any]] | None = None,
+    podium_base_url: str = "https://podium.example",
 ) -> FastAPI:
     state = ManagedPodiumState(
         turnstile_verifier=turnstile_verifier or verify_turnstile_with_cloudflare,
@@ -366,6 +367,72 @@ def create_app(
                 "projects": ((data.get("projects") or {}).get("nodes") if isinstance(data.get("projects"), dict) else []) or [],
             }
         return JSONResponse({"teams": result.get("teams") or [], "projects": result.get("projects") or []})
+
+    def group_for_workspace(workspace_id: str) -> str:
+        group_id = f"group_{workspace_id}"
+        state.runtime_groups.setdefault(
+            group_id,
+            {
+                "id": group_id,
+                "linear_workspace_id": workspace_id,
+                "project_slug": "",
+                "linear_agent_app_user_id": "",
+                "workflow_profile": "task",
+            },
+        )
+        return group_id
+
+    @app.post("/api/v1/onboarding/runtime/enrollment-token")
+    async def onboarding_enrollment_token(request: Request) -> JSONResponse:
+        user = _require_user(request)
+        if user is None:
+            return error_response(401, "unauthorized", "Unauthorized")
+        workspace_id = str(user["id"])
+        group_id = group_for_workspace(workspace_id)
+        token = secrets.token_urlsafe(32)
+        token_hash = hash_secret(token)
+        expires_at = datetime.now(timezone.utc) + timedelta(hours=1)
+        state.enrollment_tokens[token_hash] = {
+            "runtime_group_id": group_id,
+            "used": False,
+            "expires_at": expires_at,
+        }
+        install_command = (
+            f"curl -fsSL {podium_base_url}/install.sh | bash -s -- "
+            f"--enrollment-token {token}"
+        )
+        return JSONResponse(
+            {
+                "enrollment_token": token,
+                "install_command": install_command,
+                "expires_at": expires_at.isoformat().replace("+00:00", "Z"),
+            }
+        )
+
+    @app.get("/api/v1/onboarding/runtime/status")
+    async def onboarding_runtime_status(request: Request) -> JSONResponse:
+        user = _require_user(request)
+        if user is None:
+            return error_response(401, "unauthorized", "Unauthorized")
+        workspace_id = str(user["id"])
+        group_id = f"group_{workspace_id}"
+        runtimes = [r for r in state.runtimes.values() if r["runtime_group_id"] == group_id]
+        online = [r for r in runtimes if r["id"] in state.presence]
+        token_pending = any(
+            not row["used"] and row["runtime_group_id"] == group_id
+            for row in state.enrollment_tokens.values()
+        )
+        if online:
+            onboarding.mark_runtime_enrolled(workspace_id)
+        return JSONResponse(
+            {
+                "workspace_id": workspace_id,
+                "token_pending": token_pending,
+                "runtime_count": len(runtimes),
+                "online_count": len(online),
+                "enrolled": len(runtimes) > 0,
+            }
+        )
 
     @app.post("/api/v1/runtime/enrollment-tokens")
     async def create_enrollment_token(request: Request) -> dict[str, str]:

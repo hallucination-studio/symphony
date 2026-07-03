@@ -36,6 +36,7 @@ def main(argv: list[str] | None = None) -> int:
         linear_client_id=os.environ.get("LINEAR_CLIENT_ID", ""),
         linear_client_secret=os.environ.get("LINEAR_CLIENT_SECRET", ""),
         linear_redirect_uri=os.environ.get("LINEAR_REDIRECT_URI", ""),
+        podium_base_url=os.environ.get("PODIUM_BASE_URL", "https://podium.example"),
     )
     uvicorn.run(app, host=args.host, port=args.port)
     return 0
