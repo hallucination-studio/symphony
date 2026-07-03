@@ -1,7 +1,9 @@
 import type {
+  AuthUser,
   Bootstrap,
   EnrollmentStatus,
   EnrollmentToken,
+  LinearAppConfig,
   LinearScope,
   OnboardingProgress,
   RepositoryMapping,
@@ -10,8 +12,6 @@ import type {
   RuntimeRecord,
   SmokeCheckResult,
 } from "./types";
-
-export const DEFAULT_WORKSPACE_ID = "default";
 
 export class ApiError extends Error {
   status: number;
@@ -30,6 +30,8 @@ async function request<T>(
   init?: RequestInit,
 ): Promise<T> {
   const response = await fetch(path, {
+    // Send/receive the podium_session cookie on every request.
+    credentials: "include",
     headers: {
       Accept: "application/json",
       ...(init?.body ? { "Content-Type": "application/json" } : {}),
@@ -53,94 +55,101 @@ async function request<T>(
   return data as T;
 }
 
-function withWorkspace(path: string, workspaceId: string): string {
-  const separator = path.includes("?") ? "&" : "?";
-  return `${path}${separator}workspace_id=${encodeURIComponent(workspaceId)}`;
-}
-
-// Typed client covering every Podium BFF endpoint.
+// Typed client covering every Podium BFF endpoint. The backend now derives the
+// workspace from the session cookie, so requests never carry a workspace_id.
 export const api = {
-  bootstrap(workspaceId: string = DEFAULT_WORKSPACE_ID): Promise<Bootstrap> {
-    return request<Bootstrap>(withWorkspace("/api/v1/bootstrap", workspaceId));
-  },
-
-  onboardingStatus(
-    workspaceId: string = DEFAULT_WORKSPACE_ID,
-  ): Promise<OnboardingProgress> {
-    return request<OnboardingProgress>(
-      withWorkspace("/api/v1/onboarding/status", workspaceId),
-    );
-  },
-
-  startLinear(
-    workspaceId: string = DEFAULT_WORKSPACE_ID,
-  ): Promise<{ authorization_url: string; workspace_id: string }> {
-    return request("/api/v1/onboarding/linear/start", {
+  // ===== Auth =====
+  register(email: string, password: string): Promise<{ user: AuthUser }> {
+    return request("/api/v1/auth/register", {
       method: "POST",
-      body: JSON.stringify({ workspace_id: workspaceId }),
+      body: JSON.stringify({ email, password }),
     });
   },
 
-  linearScope(workspaceId: string = DEFAULT_WORKSPACE_ID): Promise<LinearScope> {
-    return request<LinearScope>(
-      withWorkspace("/api/v1/onboarding/linear/scope", workspaceId),
-    );
+  login(email: string, password: string): Promise<{ user: AuthUser }> {
+    return request("/api/v1/auth/login", {
+      method: "POST",
+      body: JSON.stringify({ email, password }),
+    });
+  },
+
+  logout(): Promise<{ ok: boolean }> {
+    return request("/api/v1/auth/logout", { method: "POST" });
+  },
+
+  me(): Promise<{ user: AuthUser }> {
+    return request("/api/v1/auth/me");
+  },
+
+  // ===== Account / Linear application =====
+  setLinearApp(input: {
+    client_id: string;
+    client_secret: string;
+    redirect_uri?: string;
+  }): Promise<{ linear_app: LinearAppConfig }> {
+    return request("/api/v1/account/linear-app", {
+      method: "PUT",
+      body: JSON.stringify(input),
+    });
+  },
+
+  clearLinearApp(): Promise<{ ok: boolean; linear_app: null }> {
+    return request("/api/v1/account/linear-app", { method: "DELETE" });
+  },
+
+  // ===== Onboarding / workspace =====
+  bootstrap(): Promise<Bootstrap> {
+    return request<Bootstrap>("/api/v1/bootstrap");
+  },
+
+  onboardingStatus(): Promise<OnboardingProgress> {
+    return request<OnboardingProgress>("/api/v1/onboarding/status");
+  },
+
+  startLinear(): Promise<{ authorization_url: string; workspace_id: string }> {
+    return request("/api/v1/onboarding/linear/start", { method: "POST" });
+  },
+
+  linearScope(): Promise<LinearScope> {
+    return request<LinearScope>("/api/v1/onboarding/linear/scope");
   },
 
   saveScope(
-    workspaceId: string,
     teams: string[],
     projects: string[],
   ): Promise<{ onboarding: OnboardingProgress }> {
     return request("/api/v1/onboarding/scope", {
       method: "POST",
-      body: JSON.stringify({ workspace_id: workspaceId, teams, projects }),
+      body: JSON.stringify({ teams, projects }),
     });
   },
 
   saveRepository(
-    workspaceId: string,
     mode: RepositoryMode,
     value: string,
   ): Promise<{ repository: RepositoryMapping; onboarding: OnboardingProgress }> {
     return request("/api/v1/onboarding/repository", {
       method: "POST",
-      body: JSON.stringify({ workspace_id: workspaceId, mode, value }),
+      body: JSON.stringify({ mode, value }),
     });
   },
 
-  enrollmentToken(
-    workspaceId: string = DEFAULT_WORKSPACE_ID,
-  ): Promise<EnrollmentToken> {
+  enrollmentToken(): Promise<EnrollmentToken> {
     return request<EnrollmentToken>("/api/v1/onboarding/runtime/enrollment-token", {
       method: "POST",
-      body: JSON.stringify({ workspace_id: workspaceId }),
     });
   },
 
-  runtimeStatus(
-    workspaceId: string = DEFAULT_WORKSPACE_ID,
-  ): Promise<EnrollmentStatus> {
-    return request<EnrollmentStatus>(
-      withWorkspace("/api/v1/onboarding/runtime/status", workspaceId),
-    );
+  runtimeStatus(): Promise<EnrollmentStatus> {
+    return request<EnrollmentStatus>("/api/v1/onboarding/runtime/status");
   },
 
-  runSmokeCheck(
-    workspaceId: string = DEFAULT_WORKSPACE_ID,
-  ): Promise<SmokeCheckResult> {
-    return request("/api/v1/onboarding/smoke-check", {
-      method: "POST",
-      body: JSON.stringify({ workspace_id: workspaceId }),
-    });
+  runSmokeCheck(): Promise<SmokeCheckResult> {
+    return request("/api/v1/onboarding/smoke-check", { method: "POST" });
   },
 
-  smokeCheckResult(
-    workspaceId: string = DEFAULT_WORKSPACE_ID,
-  ): Promise<SmokeCheckResult> {
-    return request<SmokeCheckResult>(
-      withWorkspace("/api/v1/onboarding/smoke-check/result", workspaceId),
-    );
+  smokeCheckResult(): Promise<SmokeCheckResult> {
+    return request<SmokeCheckResult>("/api/v1/onboarding/smoke-check/result");
   },
 
   runtimes(): Promise<{ runtimes: RuntimeRecord[] }> {

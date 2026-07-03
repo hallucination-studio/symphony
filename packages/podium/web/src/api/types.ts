@@ -122,6 +122,18 @@ export interface EnrollmentStatus {
   enrolled: boolean;
 }
 
+export interface AuthUser {
+  user_id: string;
+  email: string;
+  workspace_id: string;
+}
+
+export interface LinearAppConfig {
+  client_id: string;
+  redirect_uri?: string | null;
+  configured: boolean;
+}
+
 export interface EnrollmentToken {
   enrollment_token: string;
   workspace_id: string;

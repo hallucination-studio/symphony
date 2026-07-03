@@ -32,7 +32,7 @@ export function RuntimeStep({
 
   // Poll enrollment status while we have a token, so the card can flip to
   // "connected" the moment a runtime checks in.
-  const status = useRuntimeStatus("default", token != null);
+  const status = useRuntimeStatus(token != null);
   const isOnline = (status.data?.online_count ?? 0) > 0;
 
   async function handleGenerate() {

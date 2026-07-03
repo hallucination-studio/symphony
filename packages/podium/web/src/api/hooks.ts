@@ -3,30 +3,27 @@ import {
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
-import { api, DEFAULT_WORKSPACE_ID } from "./client";
+import { api } from "./client";
 import type { RepositoryMode } from "./types";
 
-export function useBootstrap(workspaceId: string = DEFAULT_WORKSPACE_ID) {
+export function useBootstrap() {
   return useQuery({
-    queryKey: ["bootstrap", workspaceId],
-    queryFn: () => api.bootstrap(workspaceId),
+    queryKey: ["bootstrap"],
+    queryFn: () => api.bootstrap(),
   });
 }
 
-export function useOnboardingStatus(workspaceId: string = DEFAULT_WORKSPACE_ID) {
+export function useOnboardingStatus() {
   return useQuery({
-    queryKey: ["onboarding", workspaceId],
-    queryFn: () => api.onboardingStatus(workspaceId),
+    queryKey: ["onboarding"],
+    queryFn: () => api.onboardingStatus(),
   });
 }
 
-export function useLinearScope(
-  workspaceId: string = DEFAULT_WORKSPACE_ID,
-  enabled = true,
-) {
+export function useLinearScope(enabled = true) {
   return useQuery({
-    queryKey: ["linear", "scope", workspaceId],
-    queryFn: () => api.linearScope(workspaceId),
+    queryKey: ["linear", "scope"],
+    queryFn: () => api.linearScope(),
     enabled,
     retry: false,
   });
@@ -62,12 +59,10 @@ export function useRun(id: string | null) {
   });
 }
 
-export function useSmokeCheckResult(
-  workspaceId: string = DEFAULT_WORKSPACE_ID,
-) {
+export function useSmokeCheckResult() {
   return useQuery({
-    queryKey: ["smoke-check", workspaceId],
-    queryFn: () => api.smokeCheckResult(workspaceId),
+    queryKey: ["smoke-check"],
+    queryFn: () => api.smokeCheckResult(),
     retry: false,
   });
 }
@@ -76,13 +71,10 @@ export function useSmokeCheckResult(
  * Runtime enrollment status. `polling` switches on a short interval so the
  * Install step can watch for the runtime coming online without a refresh.
  */
-export function useRuntimeStatus(
-  workspaceId: string = DEFAULT_WORKSPACE_ID,
-  polling = false,
-) {
+export function useRuntimeStatus(polling = false) {
   return useQuery({
-    queryKey: ["runtime-status", workspaceId],
-    queryFn: () => api.runtimeStatus(workspaceId),
+    queryKey: ["runtime-status"],
+    queryFn: () => api.runtimeStatus(),
     refetchInterval: polling ? 3000 : false,
   });
 }
@@ -99,41 +91,41 @@ function useInvalidateOnboarding() {
   };
 }
 
-export function useStartLinear(workspaceId: string = DEFAULT_WORKSPACE_ID) {
+export function useStartLinear() {
   return useMutation({
-    mutationFn: () => api.startLinear(workspaceId),
+    mutationFn: () => api.startLinear(),
   });
 }
 
-export function useSaveScope(workspaceId: string = DEFAULT_WORKSPACE_ID) {
+export function useSaveScope() {
   const invalidate = useInvalidateOnboarding();
   return useMutation({
     mutationFn: ({ teams, projects }: { teams: string[]; projects: string[] }) =>
-      api.saveScope(workspaceId, teams, projects),
+      api.saveScope(teams, projects),
     onSuccess: invalidate,
   });
 }
 
-export function useSaveRepository(workspaceId: string = DEFAULT_WORKSPACE_ID) {
+export function useSaveRepository() {
   const invalidate = useInvalidateOnboarding();
   return useMutation({
     mutationFn: ({ mode, value }: { mode: RepositoryMode; value: string }) =>
-      api.saveRepository(workspaceId, mode, value),
+      api.saveRepository(mode, value),
     onSuccess: invalidate,
   });
 }
 
-export function useEnrollmentToken(workspaceId: string = DEFAULT_WORKSPACE_ID) {
+export function useEnrollmentToken() {
   return useMutation({
-    mutationFn: () => api.enrollmentToken(workspaceId),
+    mutationFn: () => api.enrollmentToken(),
   });
 }
 
-export function useRunSmokeCheck(workspaceId: string = DEFAULT_WORKSPACE_ID) {
+export function useRunSmokeCheck() {
   const invalidate = useInvalidateOnboarding();
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: () => api.runSmokeCheck(workspaceId),
+    mutationFn: () => api.runSmokeCheck(),
     onSuccess: () => {
       invalidate();
       qc.invalidateQueries({ queryKey: ["smoke-check"] });

@@ -80,7 +80,6 @@ describe("SetupPage repository step", () => {
 
     await waitFor(() =>
       expect(mockApi.saveRepository).toHaveBeenCalledWith(
-        "default",
         "local_path",
         "/srv/repo",
       ),
@@ -111,7 +110,6 @@ describe("SetupPage repository step", () => {
 
     await waitFor(() =>
       expect(mockApi.saveRepository).toHaveBeenCalledWith(
-        "default",
         "git_url",
         "https://example.com/r.git",
       ),

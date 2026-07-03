@@ -1,11 +1,14 @@
-import { NavLink, Route, Routes } from "react-router-dom";
+import { Navigate, NavLink, Route, Routes } from "react-router-dom";
 import HomePage from "./pages/HomePage";
 import SetupPage from "./pages/SetupPage";
 import IntegrationsPage from "./pages/IntegrationsPage";
 import RuntimesPage from "./pages/RuntimesPage";
 import RunsPage from "./pages/RunsPage";
 import AccountPage from "./pages/AccountPage";
-import { useBootstrap } from "./api/hooks";
+import LoginPage from "./pages/LoginPage";
+import RegisterPage from "./pages/RegisterPage";
+import { useMe } from "./auth/useSession";
+import type { AuthUser } from "./api/types";
 
 const NAV = [
   { to: "/", label: "Home", end: true },
@@ -17,6 +20,30 @@ const NAV = [
 ];
 
 export default function App() {
+  const { user, isLoading, isAuthenticated } = useMe();
+
+  if (isLoading) {
+    return (
+      <div className="auth-layout">
+        <div className="state-message">Loading…</div>
+      </div>
+    );
+  }
+
+  if (!isAuthenticated) {
+    return (
+      <Routes>
+        <Route path="/login" element={<LoginPage />} />
+        <Route path="/register" element={<RegisterPage />} />
+        <Route path="*" element={<Navigate to="/login" replace />} />
+      </Routes>
+    );
+  }
+
+  return <AppShell user={user!} />;
+}
+
+function AppShell({ user }: { user: AuthUser }) {
   return (
     <div className="app">
       <aside className="sidebar">
@@ -38,7 +65,7 @@ export default function App() {
             </NavLink>
           ))}
         </nav>
-        <AccountChip />
+        <AccountChip user={user} />
       </aside>
       <main className="main">
         <Routes>
@@ -49,6 +76,9 @@ export default function App() {
           <Route path="/runtimes" element={<RuntimesPage />} />
           <Route path="/runs" element={<RunsPage />} />
           <Route path="/account" element={<AccountPage />} />
+          {/* Signed-in users hitting auth routes go home. */}
+          <Route path="/login" element={<Navigate to="/" replace />} />
+          <Route path="/register" element={<Navigate to="/" replace />} />
           <Route
             path="*"
             element={<p className="state-message">Page not found.</p>}
@@ -59,17 +89,7 @@ export default function App() {
   );
 }
 
-function AccountChip() {
-  const bootstrap = useBootstrap();
-  const session = bootstrap.data?.session;
-  const linear = bootstrap.data?.linear;
-  const connected = linear?.state === "connected";
-  const tone = connected
-    ? "positive"
-    : linear?.state === "expired" || linear?.state === "error"
-      ? "negative"
-      : "neutral";
-
+function AccountChip({ user }: { user: AuthUser }) {
   return (
     <NavLink
       to="/account"
@@ -77,16 +97,10 @@ function AccountChip() {
         isActive ? "account-chip active" : "account-chip"
       }
     >
-      <span
-        className="account-chip-dot"
-        data-tone={tone}
-        aria-hidden
-      />
+      <span className="account-chip-dot" data-tone="positive" aria-hidden />
       <span className="account-chip-body">
-        <span className="account-chip-label">Workspace</span>
-        <span className="account-chip-value">
-          {session?.workspace_id ?? "—"}
-        </span>
+        <span className="account-chip-label">Signed in</span>
+        <span className="account-chip-value">{user.email}</span>
       </span>
     </NavLink>
   );
