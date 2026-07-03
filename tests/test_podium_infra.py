@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import ast
+from pathlib import Path
+
 import fakeredis.aioredis
 
 from podium.app import create_app
 from podium.config import PodiumConfig
 from podium.store.postgres import PgMigrator
 from podium.store.redis import RedisStore
+
+APP_PATH = Path("packages/podium/src/podium/app.py")
 
 
 def test_config_reads_podium_database_and_redis_urls(monkeypatch) -> None:
@@ -84,3 +89,30 @@ def test_create_app_exposes_injected_infra() -> None:
     assert app.state.podium.pg_store is pg_store
     assert app.state.podium.redis_store is redis_store
     assert app.state.podium.config is config
+
+
+def test_managed_podium_state_does_not_declare_business_collections() -> None:
+    tree = ast.parse(APP_PATH.read_text(encoding="utf-8"))
+    state_class = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "ManagedPodiumState"
+    )
+
+    offenders: list[str] = []
+    for node in state_class.body:
+        if not isinstance(node, ast.AnnAssign) or not isinstance(node.annotation, ast.Subscript):
+            continue
+        name = node.target.id if isinstance(node.target, ast.Name) else "<unknown>"
+        annotation = ast.unparse(node.annotation)
+        if annotation.startswith(("dict[", "list[")):
+            offenders.append(name)
+
+    assert offenders == []
+
+
+def test_podium_app_no_longer_uses_legacy_onboarding_store() -> None:
+    source = APP_PATH.read_text(encoding="utf-8")
+
+    assert "from .onboarding import OnboardingStore" not in source
+    assert "app.state.onboarding" not in source

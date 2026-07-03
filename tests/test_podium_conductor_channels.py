@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 from typing import Any
 
@@ -10,11 +12,12 @@ from fastapi.testclient import TestClient
 from podium.app import create_app
 
 
-def make_app():
+def make_app(*, linear_webhook_secret: str = "", linear_graphql_transport: Any = None):
     return create_app(
         turnstile_verifier=lambda token, _ip: token == "turnstile-ok",
         secure_cookies=False,
-        linear_webhook_secret="",
+        linear_webhook_secret=linear_webhook_secret,
+        linear_graphql_transport=linear_graphql_transport,
     )
 
 
@@ -58,6 +61,10 @@ def agent_session_payload(*, workspace_id: str, project_slug: str, delegate_id: 
             },
         },
     }
+
+
+def signature(raw: bytes, secret: str) -> str:
+    return hmac.new(secret.encode(), raw, hashlib.sha256).hexdigest()
 
 
 @pytest.mark.asyncio
@@ -174,6 +181,170 @@ async def test_dispatch_routes_by_project_binding_not_single_workspace_group() -
     assert dispatch["project_binding_id"].endswith(":inst-b")
     assert dispatch["project_slug"] == "BETA"
     assert dispatch["instance_id"] == "inst-b"
+
+
+@pytest.mark.asyncio
+async def test_webhook_rejects_invalid_signature_and_invalid_json() -> None:
+    secret = "webhook-secret"
+    app = make_app(linear_webhook_secret=secret)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
+        bad_signature = await client.post(
+            "/api/v1/linear/webhooks/agent-session",
+            json={"type": "AgentSessionEvent"},
+            headers={"Linear-Signature": "bad"},
+        )
+
+        bad_raw = b"{"
+        bad_json = await client.post(
+            "/api/v1/linear/webhooks/agent-session",
+            content=bad_raw,
+            headers={"Linear-Signature": signature(bad_raw, secret)},
+        )
+
+    assert bad_signature.status_code == 401
+    assert bad_signature.json()["error"]["code"] == "invalid_signature"
+    assert bad_json.status_code == 400
+    assert bad_json.json()["error"]["code"] == "invalid_json"
+
+
+@pytest.mark.asyncio
+async def test_signed_webhook_queues_dispatch_and_runtime_ack_completes_it() -> None:
+    secret = "webhook-secret"
+    app = make_app(linear_webhook_secret=secret)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
+        user_id = await register(client, "signed-routing@example.com")
+        enrolled = await enroll_conductor(client)
+        await client.post(
+            "/api/v1/runtime/report",
+            headers={"Authorization": f"Bearer {enrolled['runtime_token']}"},
+            json={
+                "bindings": [
+                    {
+                        "instance_id": "inst-a",
+                        "project_slug": "ALPHA",
+                        "agent_app_user_id": "agent-alpha",
+                        "workflow_profile": "gated-task",
+                    }
+                ]
+            },
+        )
+
+        rejected_payload = agent_session_payload(
+            workspace_id=user_id,
+            project_slug="ALPHA",
+            delegate_id="other-agent",
+        )
+        rejected_raw = json.dumps(rejected_payload).encode()
+        rejected = await client.post(
+            "/api/v1/linear/webhooks/agent-session",
+            content=rejected_raw,
+            headers={"Content-Type": "application/json", "Linear-Signature": signature(rejected_raw, secret)},
+        )
+
+        queued_payload = agent_session_payload(
+            workspace_id=user_id,
+            project_slug="ALPHA",
+            delegate_id="agent-alpha",
+        )
+        queued_raw = json.dumps(queued_payload).encode()
+        queued = await client.post(
+            "/api/v1/linear/webhooks/agent-session",
+            content=queued_raw,
+            headers={"Content-Type": "application/json", "Linear-Signature": signature(queued_raw, secret)},
+        )
+        lease = await client.post(
+            "/api/v1/runtime/dispatches/lease",
+            headers={"Authorization": f"Bearer {enrolled['runtime_token']}"},
+        )
+        dispatch = lease.json()["dispatch"]
+        ack = await client.post(
+            "/api/v1/runtime/dispatches/ack",
+            headers={"Authorization": f"Bearer {enrolled['runtime_token']}"},
+            json={
+                "dispatch_id": dispatch["dispatch_id"],
+                "status": "completed",
+                "reason": "completed_by_runtime",
+                "runtime_phase": "completed",
+            },
+        )
+
+    assert rejected.status_code == 200
+    assert rejected.json()["queued"] == 0
+    assert queued.status_code == 200
+    assert queued.json()["queued"] == 1
+    assert dispatch["issue_id"] == "issue-1"
+    assert dispatch["issue_identifier"] == "ALPHA-1"
+    assert dispatch["workflow_profile"] == "gated-task"
+    assert ack.status_code == 200
+    assert ack.json()["dispatch"]["status"] == "completed"
+    assert ack.json()["dispatch"]["reason"] == "completed_by_runtime"
+    assert ack.json()["dispatch"]["runtime_phase"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_linear_proxy_requires_proxy_token_and_audits_requests() -> None:
+    seen_authorization: list[str] = []
+
+    def linear_transport(request: httpx.Request) -> httpx.Response:
+        seen_authorization.append(request.headers["Authorization"])
+        return httpx.Response(200, json={"data": {"viewer": {"id": "viewer-1"}}})
+
+    app = make_app(linear_graphql_transport=linear_transport)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
+        user_id = await register(client, "proxy@example.com")
+        enrolled = await enroll_conductor(client)
+
+        unauthorized = await client.post("/api/v1/linear/graphql", json={"query": "{ viewer { id } }"})
+        missing_installation = await client.post(
+            "/api/v1/linear/graphql",
+            json={"operationName": "Viewer", "query": "{ viewer { id } }"},
+            headers={"Authorization": f"Bearer {enrolled['proxy_token']}"},
+        )
+
+        app.state.podium.linear_installations[user_id] = {
+            "workspace_id": user_id,
+            "access_token": "oauth-installation-token",
+            "scope": "read write",
+            "expires_at": None,
+        }
+        allowed = await client.post(
+            "/api/v1/linear/graphql",
+            json={"operationName": "Viewer", "query": "{ viewer { id } }"},
+            headers={"Authorization": f"Bearer {enrolled['proxy_token']}"},
+        )
+
+    assert unauthorized.status_code == 401
+    assert missing_installation.status_code == 400
+    assert missing_installation.json()["error"]["code"] == "linear_installation_not_found"
+    assert allowed.status_code == 200
+    assert allowed.json() == {"data": {"viewer": {"id": "viewer-1"}}}
+    assert seen_authorization == ["oauth-installation-token"]
+
+
+@pytest.mark.asyncio
+async def test_linear_proxy_can_use_environment_access_token_without_workspace_installation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, str | None] = {}
+
+    def linear_transport(request: httpx.Request) -> httpx.Response:
+        captured["authorization"] = request.headers.get("Authorization")
+        return httpx.Response(200, json={"data": {"viewer": {"id": "viewer-1"}}})
+
+    monkeypatch.setenv("PODIUM_LINEAR_ACCESS_TOKEN", "operator-linear-token")
+    app = make_app(linear_graphql_transport=linear_transport)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
+        await register(client, "env-proxy@example.com")
+        enrolled = await enroll_conductor(client)
+        proxied = await client.post(
+            "/api/v1/linear/graphql",
+            json={"query": "query { viewer { id } }"},
+            headers={"Authorization": f"Bearer {enrolled['proxy_token']}"},
+        )
+
+    assert proxied.status_code == 200
+    assert proxied.json() == {"data": {"viewer": {"id": "viewer-1"}}}
+    assert captured["authorization"] == "operator-linear-token"
 
 
 def test_runtime_ws_presence_dispatch_wakeup_and_log_fetch_roundtrip() -> None:

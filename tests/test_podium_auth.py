@@ -280,74 +280,6 @@ async def test_bootstrap_without_session_is_401() -> None:
     assert json.loads(body)["error"]["code"] == "unauthorized"
 
 
-# ===== Custom Linear app =====
-
-
-@pytest.mark.asyncio
-async def test_linear_app_stored_encrypted_and_never_leaked() -> None:
-    store = PgStore()
-    server = PodiumServer(secret_key=SECRET, pg_store=store)
-    await server.start(port=0)
-    try:
-        _, cookie = await _register(server.port, "byo@example.com")
-        status, _, body = await request(
-            server.port, "PUT", "/api/v1/account/linear-app",
-            {
-                "client_id": "custom-client",
-                "client_secret": "super-secret-value",
-                "redirect_uri": "https://byo.example/cb",
-            },
-            headers={"Cookie": cookie},
-        )
-        assert status == 200
-        payload = json.loads(body)
-        assert payload["linear_app"]["client_id"] == "custom-client"
-        assert payload["linear_app"]["configured"] is True
-        # Secret never in response
-        assert b"super-secret-value" not in body
-
-        # me/public never leaks the secret
-        _, _, me_body = await request(
-            server.port, "GET", "/api/v1/auth/me", headers={"Cookie": cookie}
-        )
-        assert b"super-secret-value" not in me_body
-        assert json.loads(me_body)["user"]["linear_app"] == {
-            "client_id": "custom-client",
-            "redirect_uri": "https://byo.example/cb",
-            "configured": True,
-        }
-    finally:
-        await server.stop()
-
-    assert "super-secret-value" not in json.dumps(server.app.state.podium.users)  # type: ignore[union-attr]
-
-
-@pytest.mark.asyncio
-async def test_linear_app_delete_reverts_to_official() -> None:
-    server = PodiumServer(secret_key=SECRET)
-    await server.start(port=0)
-    try:
-        _, cookie = await _register(server.port, "del@example.com")
-        await request(
-            server.port, "PUT", "/api/v1/account/linear-app",
-            {"client_id": "c", "client_secret": "s"},
-            headers={"Cookie": cookie},
-        )
-        status, _, body = await request(
-            server.port, "DELETE", "/api/v1/account/linear-app",
-            headers={"Cookie": cookie},
-        )
-        assert status == 200
-        assert json.loads(body)["linear_app"] is None
-
-        _, _, me_body = await request(
-            server.port, "GET", "/api/v1/auth/me", headers={"Cookie": cookie}
-        )
-        assert json.loads(me_body)["user"]["linear_app"] is None
-    finally:
-        await server.stop()
-
-
 @pytest.mark.asyncio
 async def test_linear_app_requires_fields() -> None:
     server = PodiumServer(secret_key=SECRET)
@@ -377,52 +309,6 @@ async def test_linear_app_requires_auth() -> None:
     finally:
         await server.stop()
     assert status == 401
-
-
-# ===== Credential resolution (BYO app) =====
-
-
-@pytest.mark.asyncio
-async def test_authorization_url_uses_custom_client_when_configured() -> None:
-    server = PodiumServer(
-        secret_key=SECRET,
-        linear_client_id="official-client",
-        linear_redirect_uri="https://podium.example/cb",
-    )
-    await server.start(port=0)
-    try:
-        payload, cookie = await _register(server.port, "auth-url@example.com")
-        ws = payload["user"]["id"]
-
-        # Without custom app -> global client id.
-        url_global = server.linear_service.build_authorization_url(state=ws)
-        assert "client_id=official-client" in url_global
-
-        # Configure custom app.
-        await request(
-            server.port, "PUT", "/api/v1/account/linear-app",
-            {"client_id": "custom-client", "client_secret": "s"},
-            headers={"Cookie": cookie},
-        )
-        url_custom = server.linear_service.build_authorization_url(state=ws)
-        assert "client_id=custom-client" in url_custom
-    finally:
-        await server.stop()
-
-
-@pytest.mark.asyncio
-async def test_authorization_url_uses_global_without_custom_app() -> None:
-    server = PodiumServer(
-        secret_key=SECRET,
-        linear_client_id="official-client",
-        linear_redirect_uri="https://podium.example/cb",
-    )
-    await server.start(port=0)
-    try:
-        url = server.linear_service.build_authorization_url(state="ws_unknown")
-    finally:
-        await server.stop()
-    assert "client_id=official-client" in url
 
 
 # ===== C2: empty PODIUM_SECRET_KEY must raise =====

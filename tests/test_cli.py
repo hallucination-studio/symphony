@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from performer import cli
+from conductor import conductor_cli
 from podium.cli import parse_args as parse_podium_args
 from performer.cli import (
     apply_runtime_config,
@@ -43,9 +44,23 @@ def test_conductor_default_data_root_is_dot_performer() -> None:
 
 
 def test_conductor_module_exposes_main_entrypoint() -> None:
-    from conductor import conductor_cli
-
     assert callable(conductor_cli.main)
+
+
+def test_conductor_main_does_not_load_dotenv_from_launch_directory(tmp_path: Path, monkeypatch) -> None:
+    env_path = tmp_path / ".env"
+    env_path.write_text("LINEAR_API_KEY=linear-token\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("LINEAR_API_KEY", raising=False)
+
+    async def fake_run_server(**_kwargs) -> None:
+        import os
+
+        assert "LINEAR_API_KEY" not in os.environ
+
+    monkeypatch.setattr(conductor_cli, "run_server", fake_run_server)
+
+    assert conductor_cli.main([]) == 0
 
 
 def test_parse_args_accepts_positional_workflow_path() -> None:
