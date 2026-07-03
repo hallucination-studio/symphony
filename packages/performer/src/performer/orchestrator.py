@@ -1007,18 +1007,38 @@ class Orchestrator:
                             self._persist_state()
                             return
                         else:
-                            logger.info(
-                                "performer_completion_verified_continuing issue_id=%s reason=%s state=%s",
-                                issue_id,
-                                verdict.reason,
-                                refreshed_issue.state,
-                            )
-                            self._schedule_continuation(
-                                refreshed_issue,
-                                max(entry.retry_attempt + 1, 1),
-                                delay_ms=1_000,
-                                last_message=verdict.reason,
-                            )
+                            if self.config.completion_verification.enabled:
+                                await self._transition_issue_by_state_name(
+                                    refreshed_issue.id,
+                                    self.config.acceptance.done_state,
+                                )
+                                self.state.completed.add(issue_id)
+                                self.state.claimed.discard(issue_id)
+                                self.state.retry_attempts.pop(issue_id, None)
+                                await self._sync_label_group(
+                                    refreshed_issue.id,
+                                    PHASE_LABELS["completed"],
+                                    prefix="performer:phase/",
+                                )
+                                logger.info(
+                                    "performer_completion_verified_done issue_id=%s reason=%s previous_state=%s",
+                                    issue_id,
+                                    verdict.reason,
+                                    refreshed_issue.state,
+                                )
+                            else:
+                                logger.info(
+                                    "performer_completion_verified_continuing issue_id=%s reason=%s state=%s",
+                                    issue_id,
+                                    verdict.reason,
+                                    refreshed_issue.state,
+                                )
+                                self._schedule_continuation(
+                                    refreshed_issue,
+                                    max(entry.retry_attempt + 1, 1),
+                                    delay_ms=1_000,
+                                    last_message=verdict.reason,
+                                )
                     elif refreshed_issue is not None and self._is_terminal(refreshed_issue):
                         if self.config.acceptance.enabled:
                             await self._handle_direct_done_bypass(refreshed_issue)
