@@ -7,7 +7,7 @@ import json
 import httpx
 import pytest
 
-from podium.linear_service import LinearService
+from podium.linear_service import LinearService, LinearCreds
 from podium.models import ConnectionState
 
 
@@ -17,7 +17,7 @@ def _signature(body: bytes, secret: str) -> str:
 
 def test_oauth_callback_stores_tokens_without_echoing() -> None:
     service = LinearService(
-        token_exchange=lambda code: {
+        token_exchange=lambda code, state: {
             "access_token": f"access-{code}",
             "refresh_token": "refresh-secret",
             "expires_in": 3600,
@@ -89,3 +89,54 @@ def test_build_authorization_url_includes_state_and_client() -> None:
     assert url.startswith("https://linear.app/oauth/authorize?")
     assert "state=ws-1" in url
     assert "client_id=client-1" in url
+
+
+def test_oauth_callback_missing_state_returns_400() -> None:
+    # M1: there is no default tenant; a missing/empty state must be rejected
+    # rather than keying an installation to "default".
+    service = LinearService(token_exchange=lambda code, state: {"workspace_id": "ws"})
+    status, payload = service.handle_oauth_callback({"code": "abc"})
+    assert status == 400
+    assert payload["error"]["code"] == "missing_state"
+
+    status, payload = service.handle_oauth_callback({"code": "abc", "state": "   "})
+    assert status == 400
+    assert payload["error"]["code"] == "missing_state"
+
+
+def test_linear_service_has_no_shared_pending_state() -> None:
+    # C1: shared mutable instance state (_pending_state) must be gone entirely,
+    # so interleaved OAuth callbacks cannot cross tenant credentials.
+    service = LinearService()
+    assert not hasattr(service, "_pending_state")
+
+
+def test_token_exchange_uses_state_specific_credentials() -> None:
+    # C1: credentials are resolved from the explicitly-threaded state, not from
+    # shared instance state — so workspace X always uses X's creds regardless of
+    # any other in-flight workspace.
+    creds_by_ws = {
+        "ws-a": LinearCreds(client_id="app-a", client_secret="secret-a", redirect_uri="https://a/cb"),
+        "ws-b": LinearCreds(client_id="app-b", client_secret="secret-b", redirect_uri="https://b/cb"),
+    }
+
+    seen: list[tuple[str, str]] = []
+
+    def exchange(code: str, state: str) -> dict[str, object]:
+        creds = service.resolve_credentials(state)
+        seen.append((code, creds.client_id))
+        return {"workspace_id": state, "access_token": f"tok-{state}"}
+
+    service = LinearService(
+        token_exchange=exchange,
+        credentials_resolver=lambda ws: creds_by_ws[ws],
+    )
+
+    # Interleave two callbacks; each must use its own workspace's client_id.
+    service.handle_oauth_callback({"code": "code-a", "state": "ws-a"})
+    service.handle_oauth_callback({"code": "code-b", "state": "ws-b"})
+    assert seen == [("code-a", "app-a"), ("code-b", "app-b")]
+
+    # And authorization URLs are workspace-specific too.
+    assert "client_id=app-a" in service.build_authorization_url(state="ws-a")
+    assert "client_id=app-b" in service.build_authorization_url(state="ws-b")

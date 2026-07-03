@@ -50,7 +50,7 @@ class LinearService:
         client_secret: str = "",
         redirect_uri: str = "",
         webhook_secret: str = "",
-        token_exchange: Callable[[str], dict[str, Any]] | None = None,
+        token_exchange: Callable[[str, str], dict[str, Any]] | None = None,
         installations: dict[str, dict[str, Any]] | None = None,
         installations_path: str | Path | None = None,
         graphql_transport: Callable[[httpx.Request], Awaitable[httpx.Response]] | httpx.AsyncBaseTransport | None = None,
@@ -65,7 +65,6 @@ class LinearService:
         self.installations = dict(installations or self._load_installations())
         self.graphql_transport = graphql_transport
         self.credentials_resolver = credentials_resolver or self._global_credentials
-        self._pending_state = ""
 
     def _global_credentials(self, workspace_id: str) -> LinearCreds:
         """Default resolver: always the official global credentials."""
@@ -75,8 +74,14 @@ class LinearService:
             redirect_uri=self.redirect_uri,
         )
 
-    def resolve_credentials(self, workspace_id: str) -> LinearCreds:
-        return self.credentials_resolver(workspace_id)
+    def resolve_credentials(self, state: str) -> LinearCreds:
+        """Resolve OAuth credentials for the given ``state`` (workspace_id).
+
+        The state/workspace_id is passed explicitly by callers; this method
+        never reads shared instance state, so concurrent OAuth flows for
+        different tenants cannot cross-contaminate credentials.
+        """
+        return self.credentials_resolver(state)
 
     # ===== OAuth =====
 
@@ -89,13 +94,16 @@ class LinearService:
         code = str(query.get("code") or "").strip()
         if not code:
             return 400, {"error": {"code": "missing_code", "message": "OAuth code is required"}}
-        self._pending_state = str(query.get("state") or "").strip()
-        exchanged = self.token_exchange(code)
+        state = str(query.get("state") or "").strip()
+        if not state:
+            return 400, {"error": {"code": "missing_state", "message": "OAuth state is required"}}
+        # Thread state explicitly through the exchange; never stash it on self,
+        # so interleaved callbacks for different tenants cannot cross.
+        exchanged = self.token_exchange(code, state)
         workspace_id = str(
             exchanged.get("workspace_id")
             or exchanged.get("organization_id")
-            or query.get("state")
-            or "default"
+            or state
         )
         expires_in = _int(exchanged.get("expires_in"), 0)
         expires_at = None
@@ -180,8 +188,7 @@ class LinearService:
 
     # ===== Internal =====
 
-    def _default_token_exchange(self, code: str) -> dict[str, Any]:
-        state = getattr(self, "_pending_state", "") or ""
+    def _default_token_exchange(self, code: str, state: str) -> dict[str, Any]:
         creds = self.resolve_credentials(state)
         if not creds.client_id or not creds.client_secret or not creds.redirect_uri:
             raise RuntimeError("Linear OAuth token exchange is not configured")

@@ -104,7 +104,7 @@ async def test_podium_oauth_callback_saves_token_without_echoing_secret() -> Non
         linear_client_id="client-1",
         linear_client_secret="client-secret",
         linear_redirect_uri="https://podium.example/api/v1/linear/oauth/callback",
-        linear_token_exchange=lambda code: {
+        linear_token_exchange=lambda code, state: {
             "access_token": f"access-{code}",
             "refresh_token": "refresh-secret",
             "expires_in": 3600,
@@ -466,7 +466,7 @@ async def test_oauth_callback_does_not_leak_tokens_in_response() -> None:
         linear_client_id="client-1",
         linear_client_secret="client-secret",
         linear_redirect_uri="https://podium.example/callback",
-        linear_token_exchange=lambda code: {
+        linear_token_exchange=lambda code, state: {
             "access_token": "super-secret-access-token",
             "refresh_token": "super-secret-refresh-token",
             "expires_in": 3600,
