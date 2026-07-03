@@ -10,6 +10,8 @@ from podium.models import (
     OnboardingStep,
     RepositoryMapping,
     RuntimeRecord,
+    Session,
+    User,
 )
 
 
@@ -43,6 +45,11 @@ class PodiumStore:
         self._onboarding_progress: dict[str, dict[str, Any]] = {}
         self._repository_mappings: dict[str, dict[str, Any]] = {}
 
+        # Auth caches
+        self._users: dict[str, dict[str, Any]] = {}
+        self._email_index: dict[str, str] = {}  # email(lower) -> user_id
+        self._sessions: dict[str, dict[str, Any]] = {}
+
         # Load from disk if path provided
         if self.data_dir:
             self._load_all()
@@ -56,6 +63,13 @@ class PodiumStore:
         self._runtime_records = self._load_json("runtime_records.json")
         self._onboarding_progress = self._load_json("onboarding_progress.json")
         self._repository_mappings = self._load_json("repository_mappings.json")
+        self._users = self._load_json("users.json")
+        self._sessions = self._load_json("sessions.json")
+        self._email_index = {
+            str(data.get("email") or "").lower(): user_id
+            for user_id, data in self._users.items()
+            if data.get("email")
+        }
 
     def _load_json(self, filename: str) -> dict[str, Any]:
         """Load JSON file from data directory."""
@@ -204,3 +218,45 @@ class PodiumStore:
         """Save repository mapping for workspace."""
         self._repository_mappings[workspace_id] = mapping.to_dict()
         self._save_json("repository_mappings.json", self._repository_mappings)
+
+    # ===== Users =====
+
+    def get_user(self, user_id: str) -> User | None:
+        """Get a user by ID."""
+        data = self._users.get(user_id)
+        if not data:
+            return None
+        return User.from_dict(data)
+
+    def get_user_by_email(self, email_lower: str) -> User | None:
+        """Get a user by lowercased email."""
+        user_id = self._email_index.get(email_lower.lower())
+        if not user_id:
+            return None
+        return self.get_user(user_id)
+
+    def save_user(self, user: User) -> None:
+        """Persist a user and maintain the email index."""
+        self._users[user.user_id] = user.to_dict()
+        self._email_index[user.email.lower()] = user.user_id
+        self._save_json("users.json", self._users)
+
+    # ===== Sessions =====
+
+    def get_session(self, session_id: str) -> Session | None:
+        """Get a session by ID."""
+        data = self._sessions.get(session_id)
+        if not data:
+            return None
+        return Session.from_dict(data)
+
+    def save_session(self, session: Session) -> None:
+        """Persist a session."""
+        self._sessions[session.session_id] = session.to_dict()
+        self._save_json("sessions.json", self._sessions)
+
+    def delete_session(self, session_id: str) -> None:
+        """Delete a session if present."""
+        if session_id in self._sessions:
+            del self._sessions[session_id]
+            self._save_json("sessions.json", self._sessions)
