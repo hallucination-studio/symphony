@@ -38,9 +38,10 @@ class AuthService:
     """Registration, login, sessions, and custom-app secret encryption.
 
     Passwords are hashed with argon2. Custom Linear app secrets are encrypted
-    with Fernet using a key deterministically derived from ``secret_key``. If
-    ``secret_key`` is empty, encryption/decryption raise a clear RuntimeError
-    rather than silently storing plaintext.
+    with Fernet using a key deterministically derived from ``secret_key``. An
+    empty/blank ``secret_key`` raises ``RuntimeError`` at construction rather
+    than allowing a half-configured state where sessions work but secrets
+    cannot be handled.
     """
 
     def __init__(
@@ -52,15 +53,17 @@ class AuthService:
     ):
         self.store = store
         self._secret_key = secret_key or ""
+        if not self._secret_key.strip():
+            raise RuntimeError(
+                "PODIUM_SECRET_KEY is required and must not be empty; refusing to "
+                "construct AuthService in a half-configured state"
+            )
         self.session_ttl = session_ttl
         self._hasher = PasswordHasher()
-        if self._secret_key:
-            fernet_key = base64.urlsafe_b64encode(
-                hashlib.sha256(self._secret_key.encode()).digest()
-            )
-            self._fernet: Fernet | None = Fernet(fernet_key)
-        else:
-            self._fernet = None
+        fernet_key = base64.urlsafe_b64encode(
+            hashlib.sha256(self._secret_key.encode()).digest()
+        )
+        self._fernet: Fernet = Fernet(fernet_key)
 
     # ===== Registration / login =====
 
@@ -138,17 +141,9 @@ class AuthService:
     # ===== Secret encryption =====
 
     def encrypt_secret(self, plaintext: str) -> str:
-        if self._fernet is None:
-            raise RuntimeError(
-                "PODIUM_SECRET_KEY is not configured; cannot encrypt secrets"
-            )
         return self._fernet.encrypt(plaintext.encode()).decode()
 
     def decrypt_secret(self, ciphertext: str) -> str:
-        if self._fernet is None:
-            raise RuntimeError(
-                "PODIUM_SECRET_KEY is not configured; cannot decrypt secrets"
-            )
         return self._fernet.decrypt(ciphertext.encode()).decode()
 
     # ===== Custom Linear app =====

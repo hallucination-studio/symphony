@@ -52,7 +52,7 @@ class PodiumServer:
         linear_client_secret: str | None = None,
         linear_redirect_uri: str | None = None,
         linear_webhook_secret: str | None = None,
-        linear_token_exchange: Callable[[str], dict[str, Any]] | None = None,
+        linear_token_exchange: Callable[[str, str], dict[str, Any]] | None = None,
         linear_installations: dict[str, dict[str, Any]] | None = None,
         linear_installations_path: str | Path | None = None,
         linear_graphql_transport: Callable[[httpx.Request], Awaitable[httpx.Response]] | httpx.AsyncBaseTransport | None = None,
@@ -71,7 +71,13 @@ class PodiumServer:
         # clearly-placeholder host; deployments should set this explicitly.
         self.podium_base_url = (podium_base_url or "https://podium.example").rstrip("/")
         self.store = PodiumStore(data_dir=data_dir)
-        self.auth_service = AuthService(self.store, self.secret_key)
+        # AuthService requires a real secret key. When PODIUM_SECRET_KEY is
+        # unset we refuse to construct it (rather than lazily 500ing at
+        # encrypt/decrypt time); auth routes surface a clear "auth_unavailable"
+        # error while legacy machine routes keep working.
+        self.auth_service = (
+            AuthService(self.store, self.secret_key) if self.secret_key.strip() else None
+        )
         self.linear_service = LinearService(
             client_id=linear_client_id or "",
             client_secret=linear_client_secret or "",
@@ -106,6 +112,12 @@ class PodiumServer:
         If the workspace's user configured a custom Linear app, use its
         client_id / decrypted client_secret / redirect_uri. Otherwise fall back
         to the official global credentials.
+
+        SECURITY (I3): when a custom app IS configured but its secret cannot be
+        decrypted (e.g. PODIUM_SECRET_KEY was rotated), we do NOT silently
+        revert to the official global app — that would be a dangerous silent
+        degradation. Instead the decrypt error propagates so it surfaces. The
+        clean global path is used only when NO custom app is configured.
         """
         ls = self.linear_service
         global_creds = LinearCreds(
@@ -120,13 +132,19 @@ class PodiumServer:
                 continue
             app = data.get("linear_app")
             if not isinstance(app, dict) or not app.get("client_secret_encrypted"):
+                # No custom app configured for this workspace: clean global path.
                 return global_creds
-            try:
-                secret = self.auth_service.decrypt_secret(
-                    str(app.get("client_secret_encrypted") or "")
+            # A custom app IS configured. Decryption failures must surface
+            # rather than silently downgrading to the official app. If auth is
+            # unavailable we also cannot honor the custom app.
+            if self.auth_service is None:
+                raise RuntimeError(
+                    "Custom Linear app is configured but authentication is not "
+                    "available to decrypt its secret (missing PODIUM_SECRET_KEY)"
                 )
-            except Exception:
-                return global_creds
+            secret = self.auth_service.decrypt_secret(
+                str(app.get("client_secret_encrypted") or "")
+            )
             return LinearCreds(
                 client_id=str(app.get("client_id") or ""),
                 client_secret=secret,

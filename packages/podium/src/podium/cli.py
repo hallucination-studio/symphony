@@ -42,6 +42,13 @@ async def run_server(
 ) -> None:
     if secure_cookies is None:
         secure_cookies = (os.environ.get("PODIUM_SECURE_COOKIES") or "").lower() in {"1", "true", "yes", "on"}
+    resolved_secret_key = secret_key or os.environ.get("PODIUM_SECRET_KEY")
+    if not (resolved_secret_key or "").strip():
+        raise SystemExit(
+            "PODIUM_SECRET_KEY is required (pass --secret-key or set the "
+            "PODIUM_SECRET_KEY environment variable). Refusing to start in a "
+            "half-configured state where sessions work but secrets cannot be handled."
+        )
     server = PodiumServer(
         token=token or os.environ.get("PODIUM_TOKEN"),
         linear_client_id=linear_client_id or os.environ.get("LINEAR_CLIENT_ID"),
@@ -50,7 +57,7 @@ async def run_server(
         linear_webhook_secret=linear_webhook_secret or os.environ.get("LINEAR_WEBHOOK_SECRET"),
         linear_installations_path=linear_installations_path or os.environ.get("PODIUM_LINEAR_INSTALLATIONS_PATH"),
         podium_base_url=podium_base_url or os.environ.get("PODIUM_BASE_URL"),
-        secret_key=secret_key or os.environ.get("PODIUM_SECRET_KEY"),
+        secret_key=resolved_secret_key,
         secure_cookies=secure_cookies,
         static_dir=_PACKAGED_STATIC_DIR if _PACKAGED_STATIC_DIR.is_dir() else None,
     )

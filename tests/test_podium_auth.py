@@ -415,3 +415,91 @@ async def test_authorization_url_uses_global_without_custom_app() -> None:
     finally:
         await server.stop()
     assert "client_id=official-client" in url
+
+
+# ===== C2: empty PODIUM_SECRET_KEY must raise =====
+
+
+def test_auth_service_rejects_empty_secret_key() -> None:
+    from podium.auth_service import AuthService
+    from podium.store import PodiumStore
+
+    store = PodiumStore()
+    for bad in ("", "   "):
+        with pytest.raises((RuntimeError, ValueError)):
+            AuthService(store, bad)
+    # A real key constructs fine.
+    AuthService(store, SECRET)
+
+
+def test_server_without_secret_key_has_no_auth_service() -> None:
+    # Without a secret key the server refuses to construct AuthService rather
+    # than lazily 500ing at encrypt/decrypt time. Legacy machine routes still
+    # work; auth routes surface a clear "auth_unavailable".
+    server = PodiumServer()
+    assert server.auth_service is None
+
+
+@pytest.mark.asyncio
+async def test_auth_routes_return_500_when_secret_key_missing() -> None:
+    server = PodiumServer()
+    await server.start(port=0)
+    try:
+        status, _, body = await request(
+            server.port, "POST", "/api/v1/auth/register",
+            {"email": "x@example.com", "password": "password123"},
+        )
+    finally:
+        await server.stop()
+    assert status == 500
+    assert json.loads(body)["error"]["code"] == "auth_unavailable"
+
+
+# ===== I3: decrypt failure must surface, not silently fall back =====
+
+
+@pytest.mark.asyncio
+async def test_resolve_credentials_raises_when_custom_app_decrypt_fails() -> None:
+    # A custom app is configured but the secret key is rotated so decrypt fails.
+    # This must surface (raise), not silently revert to the official app.
+    server = PodiumServer(
+        secret_key=SECRET,
+        linear_client_id="official-client",
+        linear_redirect_uri="https://podium.example/cb",
+    )
+    await server.start(port=0)
+    try:
+        payload, cookie = await _register(server.port, "rotate@example.com")
+        ws = payload["user"]["workspace_id"]
+        await request(
+            server.port, "PUT", "/api/v1/account/linear-app",
+            {"client_id": "custom-client", "client_secret": "s"},
+            headers={"Cookie": cookie},
+        )
+    finally:
+        await server.stop()
+
+    # Simulate key rotation: swap AuthService to one with a different key.
+    from podium.auth_service import AuthService
+
+    server.auth_service = AuthService(server.store, "a-completely-different-key")
+    with pytest.raises(Exception):
+        server._resolve_linear_credentials(ws)
+
+
+@pytest.mark.asyncio
+async def test_resolve_credentials_uses_global_when_no_custom_app() -> None:
+    server = PodiumServer(
+        secret_key=SECRET,
+        linear_client_id="official-client",
+        linear_redirect_uri="https://podium.example/cb",
+    )
+    await server.start(port=0)
+    try:
+        payload, _ = await _register(server.port, "noapp@example.com")
+        ws = payload["user"]["workspace_id"]
+    finally:
+        await server.stop()
+
+    creds = server._resolve_linear_credentials(ws)
+    assert creds.client_id == "official-client"
