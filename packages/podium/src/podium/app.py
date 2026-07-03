@@ -1131,6 +1131,11 @@ class ManagedPodiumState:
                 "agent_app_user_id": str(raw_binding.get("agent_app_user_id") or raw_binding.get("linear_agent_app_user_id") or ""),
                 "workflow_profile": str(raw_binding.get("workflow_profile") or "task"),
                 "process_status": str(raw_binding.get("process_status") or ""),
+                "constraint_labels": [
+                    str(label)
+                    for label in (raw_binding.get("constraint_labels") or [])
+                    if isinstance(label, str) and label
+                ],
                 "repo_source": raw_binding.get("repo_source") if isinstance(raw_binding.get("repo_source"), dict) else {},
                 "updated_at": utc_now_iso(),
             }

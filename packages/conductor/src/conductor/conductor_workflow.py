@@ -137,9 +137,10 @@ def generate_workflow_content(instance: InstanceRecord, *, podium_url: str = "ht
         "- State: {{ issue.state }}\n"
         "- Description: {{ issue.description or 'No description provided.' }}\n"
         f"{acceptance_guidance}"
-        "If Performer records a runtime permission or sandbox error, a human must inspect the error, fix or approve "
-        "the environment, then comment this exact command on the Linear issue to "
-        "resume: `/symphony approve-runtime-error {{ issue.identifier }}`.\n"
+        "If Performer records a runtime permission, sandbox error, or other failure needing judgment, it creates a "
+        "`[Human Action]` Linear child issue. A human must inspect the child issue, add any required Human response, "
+        "fix or approve the environment, and move that child issue to Done. Parent issue comments are informational "
+        "only and never resume Performer.\n"
         "Return the required structured result to Performer. Do not call Linear directly.\n"
     )
 
@@ -219,6 +220,8 @@ def _resource_collisions(instance: InstanceRecord, others: list[InstanceRecord])
     for other in others:
         if other.id == instance.id:
             continue
+        if instance.name and other.name == instance.name:
+            diagnostics.append(f"name collides with instance {other.id}")
         if other.instance_dir == instance.instance_dir:
             diagnostics.append(f"instance_dir collides with instance {other.id}")
         if other.workspace_root == instance.workspace_root:

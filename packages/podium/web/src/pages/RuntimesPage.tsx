@@ -251,6 +251,21 @@ function PerformerDrawer({
         }))}
       />
 
+      {performer.constraint_labels && performer.constraint_labels.length > 0 ? (
+        <>
+          <div className="scope-section-title" style={{ marginTop: "var(--space-5)" }}>
+            Linear project labels
+          </div>
+          <div className="constraint-chips">
+            {performer.constraint_labels.map((label) => (
+              <span className="constraint-chip" key={label}>
+                <span className="constraint-value">{label}</span>
+              </span>
+            ))}
+          </div>
+        </>
+      ) : null}
+
       <div className="scope-section-title" style={{ marginTop: "var(--space-5)" }}>
         Conductor
       </div>

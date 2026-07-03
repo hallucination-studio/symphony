@@ -83,6 +83,7 @@ async def test_runtime_report_upserts_conductor_bindings_metrics_and_log_tail() 
                         "agent_app_user_id": "agent-alpha",
                         "workflow_profile": "gated-task",
                         "process_status": "running",
+                        "constraint_labels": ["symphony:performer/Alpha", "symphony:profile/gated-task"],
                         "repo_source": {"type": "local_path", "value": "/repo/a"},
                     },
                     {
@@ -128,6 +129,11 @@ async def test_runtime_report_upserts_conductor_bindings_metrics_and_log_tail() 
     assert [binding["project_slug"] for binding in conductor["bindings"]] == ["ALPHA", "BETA"]
     assert conductor["bindings"][0]["metrics"]["tokens"] == 10
     assert conductor["bindings"][0]["queue"]["queue_depth"] == 6
+    assert conductor["bindings"][0]["constraint_labels"] == [
+        "symphony:performer/Alpha",
+        "symphony:profile/gated-task",
+    ]
+    assert conductor["bindings"][1]["constraint_labels"] == []
     assert logs.status_code == 200
     assert logs.json()["logs"]["lines"] == ["newest", "older"]
     assert logs.json()["logs"]["cursor"] == 123

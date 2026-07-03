@@ -47,6 +47,7 @@ WORKSPACE_INIT_EXCLUDES = {
 }
 REPOSITORY_INTEGRATION_LABEL = "performer:type/repository-integration"
 REPOSITORY_HANDOFF_MARKER_NAME = "SYMPHONY REPOSITORY HANDOFF"
+PROJECT_LABEL_PREFIX = "symphony:"
 
 
 class ConductorServiceError(Exception):
@@ -108,8 +109,10 @@ query RepositoryHandoffChildren($issueId: String!) {
         title: str,
         description: str,
         label_names: list[str],
+        assignee_id: str | None = None,
         delegate_id: str | None = None,
     ) -> dict[str, Any]:
+        _ = assignee_id
         context = await self._creation_context(parent_issue_id)
         label_ids = [await self._ensure_label_id(context["team_id"], name) for name in label_names]
         payload = await self.graphql(
@@ -262,6 +265,100 @@ mutation RepositoryHandoffCreateLabel($name: String!, $teamId: String!) {
         return str(label["id"])
 
 
+class ProjectLabelLinearProxy(RepositoryHandoffLinearProxy):
+    """Reads and writes project-level labels through Podium's Linear proxy.
+
+    Linear models project labels (`ProjectLabel`) separately from issue labels,
+    so this cannot reuse `issueLabel*`. `projectUpdate.labelIds` is a full
+    replacement; callers merge before writing (see `_merge_project_labels`).
+    """
+
+    async def find_project_id(self, project_slug: str) -> str | None:
+        payload = await self.graphql(
+            """
+query ProjectLabelFindProject($slug: String!) {
+  projects(filter: { slugId: { eq: $slug } }, first: 1) {
+    nodes { id slugId name }
+  }
+}
+""",
+            {"slug": project_slug},
+        )
+        nodes = (((payload.get("data") or {}).get("projects") or {}).get("nodes") or [])
+        for node in nodes:
+            if isinstance(node, dict) and node.get("id"):
+                return str(node["id"])
+        return None
+
+    async def fetch_project_labels(self, project_id: str) -> list[dict[str, str]]:
+        payload = await self.graphql(
+            """
+query ProjectLabels($projectId: String!) {
+  project(id: $projectId) {
+    id
+    labels(first: 100) { nodes { id name } }
+  }
+}
+""",
+            {"projectId": project_id},
+        )
+        project = ((payload.get("data") or {}).get("project") or {})
+        nodes = ((project.get("labels") or {}).get("nodes") or []) if isinstance(project, dict) else []
+        return [
+            {"id": str(node.get("id")), "name": str(node.get("name") or "")}
+            for node in nodes
+            if isinstance(node, dict) and node.get("id")
+        ]
+
+    async def ensure_project_label_id(self, name: str) -> str:
+        payload = await self.graphql(
+            """
+query ProjectLabelByName($name: String!) {
+  projectLabels(filter: { name: { eq: $name } }, first: 20) {
+    nodes { id name }
+  }
+}
+""",
+            {"name": name},
+        )
+        nodes = (((payload.get("data") or {}).get("projectLabels") or {}).get("nodes") or [])
+        for node in nodes:
+            if isinstance(node, dict) and node.get("id"):
+                return str(node["id"])
+        payload = await self.graphql(
+            """
+mutation ProjectLabelCreate($name: String!) {
+  projectLabelCreate(input: { name: $name }) {
+    success
+    projectLabel { id name }
+  }
+}
+""",
+            {"name": name},
+        )
+        label = (((payload.get("data") or {}).get("projectLabelCreate") or {}).get("projectLabel") or {})
+        if not isinstance(label, dict) or not label.get("id"):
+            raise ConductorServiceError("linear_project_label_create_failed", f"Could not create project label: {name}")
+        return str(label["id"])
+
+    async def set_project_labels(self, project_id: str, label_ids: list[str]) -> dict[str, Any]:
+        payload = await self.graphql(
+            """
+mutation ProjectSetLabels($projectId: String!, $labelIds: [String!]) {
+  projectUpdate(id: $projectId, input: { labelIds: $labelIds }) {
+    success
+    project { id }
+  }
+}
+""",
+            {"projectId": project_id, "labelIds": label_ids},
+        )
+        result = ((payload.get("data") or {}).get("projectUpdate") or {})
+        if not result.get("success"):
+            raise ConductorServiceError("linear_project_update_failed", "projectUpdate returned success=false")
+        return {"success": True, "project_id": project_id, "label_ids": label_ids}
+
+
 class ConductorService:
     def __init__(
         self,
@@ -274,7 +371,11 @@ class ConductorService:
         self.data_root = data_root
         self.runtime_manager = runtime_manager or ConductorRuntimeManager()
         self.repository_handoff_tracker_factory = self._repository_handoff_tracker
+        self.project_label_proxy_factory = self._project_label_proxy
         self._active_podium_dispatches: dict[str, dict[str, str]] = {}
+        # instance_id -> last-synced desired-label signature, so the background
+        # loop only calls Linear when an instance's scope actually changes.
+        self._project_label_signatures: dict[str, str] = {}
         self.data_root.mkdir(parents=True, exist_ok=True)
         self._normalize_stale_runtime_state()
 
@@ -384,6 +485,7 @@ class ConductorService:
                     "agent_app_user_id": agent_app_user_id,
                     "workflow_profile": instance.workflow_profile,
                     "process_status": instance.process_status,
+                    "constraint_labels": _desired_project_labels(instance),
                     "repo_source": {"type": instance.repo_source_type, "value": instance.repo_source_value},
                 }
             )
@@ -477,6 +579,7 @@ class ConductorService:
     async def coordinate_background_once(self) -> dict[str, Any]:
         closeout = await self.coordinate_repository_handoff_closeouts()
         dispatch_acks = await self.ack_completed_podium_dispatches()
+        project_labels_synced = await self.sync_project_labels_once()
         gated_followups_started = 0
         resumed = 0
         for instance in self.store.list_instances():
@@ -500,9 +603,31 @@ class ConductorService:
         return {
             "repository_handoff": closeout,
             "dispatch_acks": dispatch_acks,
+            "project_labels_synced": project_labels_synced,
             "gated_followups_started": gated_followups_started,
             "resumed": resumed,
         }
+
+    async def sync_project_labels_once(self) -> int:
+        """Sync project labels for instances whose scope changed since last run.
+
+        Best-effort: a Linear failure for one instance is swallowed so it retries
+        next tick without blocking the rest of the background loop.
+        """
+        synced = 0
+        for instance in self.store.list_instances():
+            signature = "\0".join([instance.linear_project, *_desired_project_labels(instance)])
+            if self._project_label_signatures.get(instance.id) == signature:
+                continue
+            try:
+                result = await self.sync_instance_project_labels(instance)
+            except Exception:
+                continue
+            if result.get("status") in {"synced", "unchanged"}:
+                self._project_label_signatures[instance.id] = signature
+            if result.get("status") == "synced":
+                synced += 1
+        return synced
 
     async def ack_completed_podium_dispatches(
         self,
@@ -730,6 +855,40 @@ class ConductorService:
             endpoint=f"{endpoint_base}/api/v1/linear/graphql",
             api_key=settings.podium_proxy_token.strip(),
         )
+
+    def _project_label_proxy(self, instance: InstanceRecord) -> Any:
+        settings = self.store.get_settings()
+        endpoint_base = settings.podium_url.strip().rstrip("/") or "https://podium.example"
+        return ProjectLabelLinearProxy(
+            endpoint=f"{endpoint_base}/api/v1/linear/graphql",
+            api_key=settings.podium_proxy_token.strip(),
+        )
+
+    async def sync_instance_project_labels(self, instance: InstanceRecord) -> dict[str, Any]:
+        """Mirror an instance's routing scope onto its Linear project as labels.
+
+        Best-effort and idempotent: only the `symphony:` label namespace is
+        touched, user-owned project labels are preserved. Skipped when the proxy
+        is unconfigured or the project can't be resolved by slug.
+        """
+        settings = self.store.get_settings()
+        if not settings.podium_proxy_token.strip():
+            return {"status": "skipped", "reason": "proxy_not_configured"}
+        project_slug = str(instance.linear_project or "").strip()
+        if not project_slug:
+            return {"status": "skipped", "reason": "missing_project_slug"}
+        proxy = self.project_label_proxy_factory(instance)
+        project_id = await proxy.find_project_id(project_slug)
+        if not project_id:
+            return {"status": "skipped", "reason": "project_not_found", "project_slug": project_slug}
+        existing = await proxy.fetch_project_labels(project_id)
+        existing_names = [row["name"] for row in existing]
+        desired = _merge_project_labels(existing_names, _desired_project_labels(instance))
+        if set(desired) == set(existing_names):
+            return {"status": "unchanged", "project_id": project_id, "labels": desired}
+        label_ids = [await proxy.ensure_project_label_id(name) for name in desired]
+        await proxy.set_project_labels(project_id, label_ids)
+        return {"status": "synced", "project_id": project_id, "labels": desired}
 
     async def _resume_pending_performer_work(self, instance: InstanceRecord) -> InstanceRecord | None:
         refresh = getattr(self.runtime_manager, "refresh", None)
@@ -1533,6 +1692,34 @@ def _hostname() -> str:
 
 def _linear_agent_app_user_id(filters: dict[str, Any]) -> str:
     return str(filters.get("linear_agent_app_user_id") or filters.get("agent_app_user_id") or "").strip()
+
+
+def _desired_project_labels(instance: InstanceRecord) -> list[str]:
+    """The `symphony:` project labels that mirror an instance's routing scope.
+
+    Human-readable and keyed on the instance name (unique per Conductor) so the
+    Linear project shows exactly which Performers and profiles target it.
+    """
+    labels = [f"{PROJECT_LABEL_PREFIX}performer/{instance.name}"]
+    profile = str(instance.workflow_profile or "").strip()
+    if profile:
+        labels.append(f"{PROJECT_LABEL_PREFIX}profile/{profile}")
+    return labels
+
+
+def _merge_project_labels(existing: list[str], desired: list[str]) -> list[str]:
+    """Replace only the `symphony:` namespace, preserving user-owned labels.
+
+    Linear's `projectUpdate.labelIds` is a full replacement, so the caller must
+    send the complete set: every non-`symphony:` label kept as-is plus the
+    desired managed labels.
+    """
+    kept = [label for label in existing if not label.startswith(PROJECT_LABEL_PREFIX)]
+    merged = list(kept)
+    for label in desired:
+        if label not in merged:
+            merged.append(label)
+    return merged
 
 
 def _first_pending_performer_issue_id(persisted: PersistedState) -> str | None:

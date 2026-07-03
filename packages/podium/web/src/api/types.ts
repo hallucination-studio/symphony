@@ -102,6 +102,9 @@ export interface ConductorBinding {
   agent_app_user_id: string;
   workflow_profile: string;
   process_status: string;
+  // `symphony:` labels Conductor mirrors onto the Linear project for this
+  // Performer. Present once the Conductor has reported.
+  constraint_labels?: string[];
   repo_source?: Record<string, unknown>;
   metrics?: {
     tokens?: number;

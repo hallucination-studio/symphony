@@ -36,6 +36,7 @@ function conductorWithPerformer() {
         agent_app_user_id: "agent-42",
         workflow_profile: "task",
         process_status: "running",
+        constraint_labels: ["symphony:performer/checkout-flow", "symphony:profile/task"],
         metrics: { retries: 2, blocked: 1, failures: 0, tokens: 1500, queue_depth: 3 },
         queue: { queue_depth: 3, running: true },
       },
@@ -90,6 +91,8 @@ describe("RuntimesPage", () => {
     await waitFor(() => expect(mockApi.instanceLogs).toHaveBeenCalled());
     expect(await screen.findByText("performer boot ok")).toBeInTheDocument();
     expect(screen.getByText("Performer logs")).toBeInTheDocument();
+    expect(screen.getByText("Linear project labels")).toBeInTheDocument();
+    expect(screen.getByText("symphony:performer/checkout-flow")).toBeInTheDocument();
   });
 
   it("flags a Performer that is missing constraints as unscoped", async () => {

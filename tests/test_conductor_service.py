@@ -194,6 +194,28 @@ class FakeRepositoryHandoffTracker:
         return {"success": True, "comment_id": f"comment-{len(self.comments)}"}
 
 
+class FakeProjectLabelProxy:
+    def __init__(self, *, project_id: str | None = "proj-1", existing: list[str] | None = None) -> None:
+        self._project_id = project_id
+        self.labels: list[str] = list(existing or [])
+        self.set_calls: list[list[str]] = []
+
+    async def find_project_id(self, project_slug: str) -> str | None:
+        return self._project_id
+
+    async def fetch_project_labels(self, project_id: str) -> list[dict[str, str]]:
+        return [{"id": f"id-{name}", "name": name} for name in self.labels]
+
+    async def ensure_project_label_id(self, name: str) -> str:
+        return f"id-{name}"
+
+    async def set_project_labels(self, project_id: str, label_ids: list[str]) -> dict[str, object]:
+        names = [label_id.removeprefix("id-") for label_id in label_ids]
+        self.set_calls.append(names)
+        self.labels = names
+        return {"success": True, "project_id": project_id, "label_ids": label_ids}
+
+
 def test_conductor_service_lists_issue_run_trace_and_retention(tmp_path: Path) -> None:
     service = make_service(tmp_path)
     repo = make_repo(tmp_path)
@@ -685,6 +707,84 @@ def test_create_instance_rejects_same_local_repo_binding(tmp_path: Path) -> None
         service.create_instance(make_request(repo, name="Beta"))
 
     assert exc.value.code == "resource_collision"
+
+
+def test_create_instance_rejects_duplicate_name(tmp_path: Path) -> None:
+    service = make_service(tmp_path)
+    repo_a = make_repo(tmp_path, "repo-a")
+    repo_b = make_repo(tmp_path, "repo-b")
+    service.create_instance(make_request(repo_a, name="Alpha"))
+
+    with pytest.raises(ConductorServiceError) as exc:
+        service.create_instance(make_request(repo_b, name="Alpha"))
+
+    assert exc.value.code == "resource_collision"
+    assert any("name collides" in diag for diag in exc.value.diagnostics)
+
+
+@pytest.mark.asyncio
+async def test_sync_instance_project_labels_merges_managed_namespace(tmp_path: Path) -> None:
+    proxy = FakeProjectLabelProxy(existing=["team-owned", "symphony:performer/old"])
+    service = make_service(tmp_path)
+    service.update_settings(service.settings().__class__(podium_proxy_token="proxy-token"))
+    service.project_label_proxy_factory = lambda instance: proxy
+    repo = make_repo(tmp_path)
+    instance = service.create_instance(make_request(repo, name="Alpha").with_overrides(workflow_profile="task"))
+
+    result = await service.sync_instance_project_labels(instance)
+
+    assert result["status"] == "synced"
+    # User label preserved; stale managed label dropped; new managed labels added.
+    assert "team-owned" in proxy.labels
+    assert "symphony:performer/Alpha" in proxy.labels
+    assert "symphony:profile/task" in proxy.labels
+    assert "symphony:performer/old" not in proxy.labels
+
+
+@pytest.mark.asyncio
+async def test_sync_instance_project_labels_noop_when_unchanged(tmp_path: Path) -> None:
+    proxy = FakeProjectLabelProxy(
+        existing=["symphony:performer/Alpha", "symphony:profile/task", "keep"]
+    )
+    service = make_service(tmp_path)
+    service.update_settings(service.settings().__class__(podium_proxy_token="proxy-token"))
+    service.project_label_proxy_factory = lambda instance: proxy
+    repo = make_repo(tmp_path)
+    instance = service.create_instance(make_request(repo, name="Alpha").with_overrides(workflow_profile="task"))
+
+    result = await service.sync_instance_project_labels(instance)
+
+    assert result["status"] == "unchanged"
+    assert proxy.set_calls == []
+
+
+@pytest.mark.asyncio
+async def test_sync_project_labels_once_debounces_after_first_sync(tmp_path: Path) -> None:
+    proxy = FakeProjectLabelProxy(existing=[])
+    service = make_service(tmp_path)
+    service.update_settings(service.settings().__class__(podium_proxy_token="proxy-token"))
+    service.project_label_proxy_factory = lambda instance: proxy
+    repo = make_repo(tmp_path)
+    service.create_instance(make_request(repo, name="Alpha"))
+
+    first = await service.sync_project_labels_once()
+    second = await service.sync_project_labels_once()
+
+    assert first == 1
+    assert second == 0
+    assert len(proxy.set_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_sync_instance_project_labels_skips_without_proxy_token(tmp_path: Path) -> None:
+    service = make_service(tmp_path)
+    repo = make_repo(tmp_path)
+    instance = service.create_instance(make_request(repo, name="Alpha"))
+
+    result = await service.sync_instance_project_labels(instance)
+
+    assert result["status"] == "skipped"
+    assert result["reason"] == "proxy_not_configured"
 
 
 def test_update_instance_revalidates_workflow_and_persists_raw_edits(tmp_path: Path) -> None:
