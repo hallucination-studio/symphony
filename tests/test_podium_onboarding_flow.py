@@ -15,7 +15,7 @@ async def request(
     path: str,
     body: object | bytes | None = None,
     headers: dict[str, str] | None = None,
-) -> tuple[int, bytes]:
+) -> tuple[int, dict[str, str], bytes]:
     reader, writer = await asyncio.open_connection("127.0.0.1", port)
     if isinstance(body, bytes):
         raw = body
@@ -47,7 +47,7 @@ async def request(
     response_body = await reader.readexactly(int(response_headers.get("content-length", "0")))
     writer.close()
     await writer.wait_closed()
-    return status, response_body
+    return status, response_headers, response_body
 
 
 @pytest.mark.asyncio
@@ -71,25 +71,33 @@ async def test_full_onboarding_flow_reaches_complete(tmp_path) -> None:
 
     server = PodiumServer(
         data_dir=tmp_path,
-        linear_installations={
-            "workspace-1": {
-                "workspace_id": "workspace-1",
-                "access_token": "secret-linear-token",
-                "scope": "read,write",
-            }
-        },
+        secret_key="test-secret",
         linear_graphql_transport=proxy_transport,
     )
-    ws = "workspace-1"
     await server.start(port=0)
     try:
         port = server.port
         assert port is not None
 
+        # Establish a session; the workspace is derived from the user.
+        _, reg_headers, reg_body = await request(
+            port, "POST", "/api/v1/auth/register",
+            {"email": "flow@example.com", "password": "password123"},
+        )
+        cookie = (reg_headers.get("set-cookie") or "").split(";", 1)[0]
+        ws = json.loads(reg_body)["user"]["workspace_id"]
+        # Seed a connected Linear installation for this user's workspace.
+        server.linear_service.installations[ws] = {
+            "workspace_id": ws,
+            "access_token": "secret-linear-token",
+            "scope": "read,write",
+        }
+        auth = {"Cookie": cookie}
+
         # 1. Bootstrap - Linear is already connected in this fixture, so the
         #    derived linear_connect step is reconciled and the flow opens at
         #    scope_selection. No direct complete_step calls anywhere below.
-        status, body = await request(port, "GET", f"/api/v1/bootstrap?workspace_id={ws}")
+        status, headers, body = await request(port, "GET", "/api/v1/bootstrap", headers=auth)
         assert status == 200
         boot = json.loads(body)
         assert boot["onboarding"]["current_step"] == "scope_selection"
@@ -97,24 +105,26 @@ async def test_full_onboarding_flow_reaches_complete(tmp_path) -> None:
         assert b"secret-linear-token" not in body
 
         # 2. Linear scope discovery
-        status, body = await request(port, "GET", f"/api/v1/onboarding/linear/scope?workspace_id={ws}")
+        status, headers, body = await request(port, "GET", "/api/v1/onboarding/linear/scope", headers=auth)
         assert status == 200
         scope_data = json.loads(body)
         assert scope_data["teams"][0]["id"] == "team-1"
         assert b"secret-linear-token" not in body
 
         # 3. Save scope (advances past linear_connect + scope_selection over HTTP)
-        status, body = await request(
+        status, headers, body = await request(
             port, "POST", "/api/v1/onboarding/scope",
-            {"workspace_id": ws, "teams": ["team-1"], "projects": ["proj-1"]},
+            {"teams": ["team-1"], "projects": ["proj-1"]},
+            headers=auth,
         )
         assert status == 200
         assert json.loads(body)["onboarding"]["current_step"] == "repository_mapping"
 
         # 4. Save repository
-        status, body = await request(
+        status, headers, body = await request(
             port, "POST", "/api/v1/onboarding/repository",
-            {"workspace_id": ws, "mode": "git_url", "value": "https://github.com/acme/repo.git"},
+            {"mode": "git_url", "value": "https://github.com/acme/repo.git"},
+            headers=auth,
         )
         assert status == 200
         repo_payload = json.loads(body)
@@ -122,9 +132,10 @@ async def test_full_onboarding_flow_reaches_complete(tmp_path) -> None:
         assert repo_payload["onboarding"]["current_step"] == "runtime_enrollment"
 
         # 5. Generate enrollment token (backend also composes the install command)
-        status, body = await request(
+        status, headers, body = await request(
             port, "POST", "/api/v1/onboarding/runtime/enrollment-token",
-            {"workspace_id": ws},
+            {},
+            headers=auth,
         )
         assert status == 200
         token_payload = json.loads(body)
@@ -136,29 +147,29 @@ async def test_full_onboarding_flow_reaches_complete(tmp_path) -> None:
         #    one-time token, then heartbeats. No in-process service calls: this
         #    alone must drive runtime_enrollment complete via derived-step
         #    reconciliation.
-        status, body = await request(
+        status, headers, body = await request(
             port, "POST", "/api/v1/runtimes/enroll",
             {"enrollment_token": token, "hostname": "runtime-host", "version": "1.0.0"},
         )
         assert status == 200
         runtime_id = json.loads(body)["runtime_id"]
 
-        status, body = await request(
+        status, headers, body = await request(
             port, "POST", f"/api/v1/runtimes/{runtime_id}/heartbeat", {"status": "online"}
         )
         assert status == 200
 
-        status, body = await request(port, "GET", f"/api/v1/onboarding/runtime/status?workspace_id={ws}")
+        status, headers, body = await request(port, "GET", "/api/v1/onboarding/runtime/status", headers=auth)
         assert status == 200
         assert json.loads(body)["online_count"] == 1
 
-        status, body = await request(port, "GET", f"/api/v1/onboarding/status?workspace_id={ws}")
+        status, headers, body = await request(port, "GET", "/api/v1/onboarding/status", headers=auth)
         assert status == 200
         assert "runtime_enrollment" in json.loads(body)["completed_steps"]
 
         # 7. Smoke check - all prerequisites met, should pass and complete onboarding
-        status, body = await request(
-            port, "POST", "/api/v1/onboarding/smoke-check", {"workspace_id": ws}
+        status, headers, body = await request(
+            port, "POST", "/api/v1/onboarding/smoke-check", {}, headers=auth
         )
         assert status == 200
         smoke = json.loads(body)
@@ -166,7 +177,7 @@ async def test_full_onboarding_flow_reaches_complete(tmp_path) -> None:
         assert smoke["recommendations"] == []
 
         # 8. Final bootstrap - onboarding complete, reached over HTTP only
-        status, body = await request(port, "GET", f"/api/v1/bootstrap?workspace_id={ws}")
+        status, headers, body = await request(port, "GET", "/api/v1/bootstrap", headers=auth)
         assert status == 200
         final = json.loads(body)
         assert final["onboarding"]["current_step"] == "complete"
@@ -178,24 +189,35 @@ async def test_full_onboarding_flow_reaches_complete(tmp_path) -> None:
 @pytest.mark.asyncio
 async def test_onboarding_state_persists_across_server_restart(tmp_path) -> None:
     """Onboarding progress written to disk survives a server restart."""
-    ws = "workspace-1"
-
-    server1 = PodiumServer(data_dir=tmp_path)
+    server1 = PodiumServer(data_dir=tmp_path, secret_key="test-secret")
     await server1.start(port=0)
     try:
+        _, reg_headers, reg_body = await request(
+            server1.port, "POST", "/api/v1/auth/register",
+            {"email": "persist@example.com", "password": "password123"},
+        )
+        cookie = (reg_headers.get("set-cookie") or "").split(";", 1)[0]
         await request(
             server1.port, "POST", "/api/v1/onboarding/repository",
-            {"workspace_id": ws, "mode": "local_path", "value": "/srv/repo"},
+            {"mode": "local_path", "value": "/srv/repo"},
+            headers={"Cookie": cookie},
         )
     finally:
         await server1.stop()
 
     # New server instance loads from the same data_dir
-    server2 = PodiumServer(data_dir=tmp_path)
+    server2 = PodiumServer(data_dir=tmp_path, secret_key="test-secret")
     await server2.start(port=0)
     try:
-        status, body = await request(
-            server2.port, "GET", f"/api/v1/onboarding/status?workspace_id={ws}"
+        # Log in again to obtain a fresh session for the same user.
+        _, login_headers, _ = await request(
+            server2.port, "POST", "/api/v1/auth/login",
+            {"email": "persist@example.com", "password": "password123"},
+        )
+        cookie = (login_headers.get("set-cookie") or "").split(";", 1)[0]
+        status, _, body = await request(
+            server2.port, "GET", "/api/v1/onboarding/status",
+            headers={"Cookie": cookie},
         )
         assert status == 200
         payload = json.loads(body)

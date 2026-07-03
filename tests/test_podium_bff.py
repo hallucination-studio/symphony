@@ -51,16 +51,26 @@ async def request(
 
 
 def _server() -> PodiumServer:
-    return PodiumServer(
-        linear_installations={
-            "workspace-1": {
-                "workspace_id": "workspace-1",
-                "access_token": "secret-linear-token",
-                "scope": "read,write",
-                "app_user_id": "app-1",
-            }
-        },
+    return PodiumServer(secret_key="test-secret")
+
+
+async def _auth(server: PodiumServer, *, linear_token: str | None = "secret-linear-token") -> tuple[str, str]:
+    """Register a user over HTTP, seed a Linear installation for their
+    workspace, and return (workspace_id, cookie)."""
+    _, headers, body = await request(
+        server.port, "POST", "/api/v1/auth/register",
+        {"email": f"u{id(server)}@example.com", "password": "password123"},
     )
+    cookie = (headers.get("set-cookie") or "").split(";", 1)[0]
+    workspace_id = json.loads(body)["user"]["workspace_id"]
+    if linear_token is not None:
+        server.linear_service.installations[workspace_id] = {
+            "workspace_id": workspace_id,
+            "access_token": linear_token,
+            "scope": "read,write",
+            "app_user_id": "app-1",
+        }
+    return workspace_id, cookie
 
 
 # ===== Bootstrap =====
@@ -71,15 +81,16 @@ async def test_bootstrap_returns_session_and_onboarding_state() -> None:
     server = _server()
     await server.start(port=0)
     try:
+        ws, cookie = await _auth(server)
         status, _, body = await request(
-            server.port, "GET", "/api/v1/bootstrap?workspace_id=workspace-1"
+            server.port, "GET", "/api/v1/bootstrap", headers={"Cookie": cookie}
         )
     finally:
         await server.stop()
 
     assert status == 200
     payload = json.loads(body)
-    assert payload["session"]["workspace_id"] == "workspace-1"
+    assert payload["session"]["workspace_id"] == ws
     assert payload["onboarding"]["current_step"]
     assert "next_action" in payload["onboarding"]
     assert b"secret-linear-token" not in body
@@ -90,8 +101,9 @@ async def test_bootstrap_reports_linear_connection_status() -> None:
     server = _server()
     await server.start(port=0)
     try:
+        ws, cookie = await _auth(server)
         status, _, body = await request(
-            server.port, "GET", "/api/v1/bootstrap?workspace_id=workspace-1"
+            server.port, "GET", "/api/v1/bootstrap", headers={"Cookie": cookie}
         )
     finally:
         await server.stop()
@@ -109,8 +121,9 @@ async def test_onboarding_status_returns_progress() -> None:
     server = _server()
     await server.start(port=0)
     try:
+        ws, cookie = await _auth(server)
         status, _, body = await request(
-            server.port, "GET", "/api/v1/onboarding/status?workspace_id=workspace-1"
+            server.port, "GET", "/api/v1/onboarding/status", headers={"Cookie": cookie}
         )
     finally:
         await server.stop()
@@ -127,16 +140,19 @@ async def test_onboarding_status_returns_progress() -> None:
 @pytest.mark.asyncio
 async def test_onboarding_linear_start_returns_authorization_url() -> None:
     server = PodiumServer(
+        secret_key="test-secret",
         linear_client_id="client-1",
         linear_redirect_uri="https://podium.example/cb",
     )
     await server.start(port=0)
     try:
+        ws, cookie = await _auth(server, linear_token=None)
         status, _, body = await request(
             server.port,
             "POST",
             "/api/v1/onboarding/linear/start",
-            {"workspace_id": "workspace-1"},
+            {},
+            headers={"Cookie": cookie},
         )
     finally:
         await server.stop()
@@ -161,17 +177,17 @@ async def test_onboarding_linear_scope_lists_projects_and_teams() -> None:
         )
 
     server = PodiumServer(
-        linear_installations={
-            "workspace-1": {"workspace_id": "workspace-1", "access_token": "secret-linear-token"}
-        },
+        secret_key="test-secret",
         linear_graphql_transport=proxy_transport,
     )
     await server.start(port=0)
     try:
+        ws, cookie = await _auth(server)
         status, _, body = await request(
             server.port,
             "GET",
-            "/api/v1/onboarding/linear/scope?workspace_id=workspace-1",
+            "/api/v1/onboarding/linear/scope",
+            headers={"Cookie": cookie},
         )
     finally:
         await server.stop()
@@ -188,11 +204,13 @@ async def test_onboarding_scope_saves_selection() -> None:
     server = _server()
     await server.start(port=0)
     try:
+        ws, cookie = await _auth(server)
         status, _, body = await request(
             server.port,
             "POST",
             "/api/v1/onboarding/scope",
-            {"workspace_id": "workspace-1", "teams": ["team-1"], "projects": ["proj-1"]},
+            {"teams": ["team-1"], "projects": ["proj-1"]},
+            headers={"Cookie": cookie},
         )
     finally:
         await server.stop()
@@ -210,11 +228,13 @@ async def test_onboarding_repository_saves_git_url_mapping() -> None:
     server = _server()
     await server.start(port=0)
     try:
+        ws, cookie = await _auth(server)
         status, _, body = await request(
             server.port,
             "POST",
             "/api/v1/onboarding/repository",
-            {"workspace_id": "workspace-1", "mode": "git_url", "value": "https://github.com/acme/repo.git"},
+            {"mode": "git_url", "value": "https://github.com/acme/repo.git"},
+            headers={"Cookie": cookie},
         )
     finally:
         await server.stop()
@@ -229,11 +249,13 @@ async def test_onboarding_repository_rejects_invalid_git_url() -> None:
     server = _server()
     await server.start(port=0)
     try:
+        ws, cookie = await _auth(server)
         status, _, body = await request(
             server.port,
             "POST",
             "/api/v1/onboarding/repository",
-            {"workspace_id": "workspace-1", "mode": "git_url", "value": "not-a-url"},
+            {"mode": "git_url", "value": "not-a-url"},
+            headers={"Cookie": cookie},
         )
     finally:
         await server.stop()
@@ -251,11 +273,13 @@ async def test_onboarding_runtime_enrollment_token_generated() -> None:
     server = _server()
     await server.start(port=0)
     try:
+        ws, cookie = await _auth(server)
         status, _, body = await request(
             server.port,
             "POST",
             "/api/v1/onboarding/runtime/enrollment-token",
-            {"workspace_id": "workspace-1"},
+            {},
+            headers={"Cookie": cookie},
         )
     finally:
         await server.stop()
@@ -269,16 +293,18 @@ async def test_onboarding_runtime_enrollment_token_generated() -> None:
 @pytest.mark.asyncio
 async def test_onboarding_enrollment_token_returns_install_command() -> None:
     server = PodiumServer(
-        linear_installations={"workspace-1": {"workspace_id": "workspace-1", "access_token": "t"}},
+        secret_key="test-secret",
         podium_base_url="https://podium.test",
     )
     await server.start(port=0)
     try:
+        ws, cookie = await _auth(server, linear_token="t")
         status, _, body = await request(
             server.port,
             "POST",
             "/api/v1/onboarding/runtime/enrollment-token",
-            {"workspace_id": "workspace-1"},
+            {},
+            headers={"Cookie": cookie},
         )
     finally:
         await server.stop()
@@ -302,11 +328,13 @@ async def test_runtime_enroll_over_http_brings_runtime_online() -> None:
     server = _server()
     await server.start(port=0)
     try:
+        ws, cookie = await _auth(server)
         _, _, token_body = await request(
             server.port,
             "POST",
             "/api/v1/onboarding/runtime/enrollment-token",
-            {"workspace_id": "workspace-1"},
+            {},
+            headers={"Cookie": cookie},
         )
         token = json.loads(token_body)["enrollment_token"]
 
@@ -326,12 +354,15 @@ async def test_runtime_enroll_over_http_brings_runtime_online() -> None:
         status, _, status_body = await request(
             server.port,
             "GET",
-            "/api/v1/onboarding/runtime/status?workspace_id=workspace-1",
+            "/api/v1/onboarding/runtime/status",
+            headers={"Cookie": cookie},
         )
         assert json.loads(status_body)["online_count"] == 1
 
         # The enrolled runtime is visible in the listing.
-        _, _, list_body = await request(server.port, "GET", "/api/v1/runtimes")
+        _, _, list_body = await request(
+            server.port, "GET", "/api/v1/runtimes", headers={"Cookie": cookie}
+        )
         assert any(r["runtime_id"] == runtime_id and r["online"] for r in json.loads(list_body)["runtimes"])
     finally:
         await server.stop()
@@ -360,11 +391,13 @@ async def test_runtime_enroll_token_is_single_use() -> None:
     server = _server()
     await server.start(port=0)
     try:
+        ws, cookie = await _auth(server)
         _, _, token_body = await request(
             server.port,
             "POST",
             "/api/v1/onboarding/runtime/enrollment-token",
-            {"workspace_id": "workspace-1"},
+            {},
+            headers={"Cookie": cookie},
         )
         token = json.loads(token_body)["enrollment_token"]
         first, _, _ = await request(
@@ -386,11 +419,13 @@ async def test_runtime_heartbeat_updates_timestamp_and_keeps_online() -> None:
     server = _server()
     await server.start(port=0)
     try:
+        ws, cookie = await _auth(server)
         _, _, token_body = await request(
             server.port,
             "POST",
             "/api/v1/onboarding/runtime/enrollment-token",
-            {"workspace_id": "workspace-1"},
+            {},
+            headers={"Cookie": cookie},
         )
         token = json.loads(token_body)["enrollment_token"]
         _, _, enroll_body = await request(
@@ -438,10 +473,12 @@ async def test_onboarding_runtime_status_reports_enrollment() -> None:
     server = _server()
     await server.start(port=0)
     try:
+        ws, cookie = await _auth(server)
         status, _, body = await request(
             server.port,
             "GET",
-            "/api/v1/onboarding/runtime/status?workspace_id=workspace-1",
+            "/api/v1/onboarding/runtime/status",
+            headers={"Cookie": cookie},
         )
     finally:
         await server.stop()
@@ -460,11 +497,13 @@ async def test_onboarding_smoke_check_triggers_and_returns_result() -> None:
     server = _server()
     await server.start(port=0)
     try:
+        ws, cookie = await _auth(server)
         status, _, body = await request(
             server.port,
             "POST",
             "/api/v1/onboarding/smoke-check",
-            {"workspace_id": "workspace-1"},
+            {},
+            headers={"Cookie": cookie},
         )
     finally:
         await server.stop()
@@ -480,16 +519,19 @@ async def test_onboarding_smoke_check_result_returns_latest() -> None:
     server = _server()
     await server.start(port=0)
     try:
+        ws, cookie = await _auth(server)
         await request(
             server.port,
             "POST",
             "/api/v1/onboarding/smoke-check",
-            {"workspace_id": "workspace-1"},
+            {},
+            headers={"Cookie": cookie},
         )
         status, _, body = await request(
             server.port,
             "GET",
-            "/api/v1/onboarding/smoke-check/result?workspace_id=workspace-1",
+            "/api/v1/onboarding/smoke-check/result",
+            headers={"Cookie": cookie},
         )
     finally:
         await server.stop()
@@ -508,7 +550,10 @@ async def test_runtimes_list_returns_online_status() -> None:
     server.runtime_service.record_heartbeat("rt-1")
     await server.start(port=0)
     try:
-        status, _, body = await request(server.port, "GET", "/api/v1/runtimes")
+        ws, cookie = await _auth(server)
+        status, _, body = await request(
+            server.port, "GET", "/api/v1/runtimes", headers={"Cookie": cookie}
+        )
     finally:
         await server.stop()
 
@@ -523,7 +568,10 @@ async def test_runtime_detail_returns_heartbeat() -> None:
     server.runtime_service.record_heartbeat("rt-1")
     await server.start(port=0)
     try:
-        status, _, body = await request(server.port, "GET", "/api/v1/runtimes/rt-1")
+        ws, cookie = await _auth(server)
+        status, _, body = await request(
+            server.port, "GET", "/api/v1/runtimes/rt-1", headers={"Cookie": cookie}
+        )
     finally:
         await server.stop()
 
@@ -538,7 +586,10 @@ async def test_runtime_detail_404_for_unknown() -> None:
     server = _server()
     await server.start(port=0)
     try:
-        status, _, body = await request(server.port, "GET", "/api/v1/runtimes/nope")
+        ws, cookie = await _auth(server)
+        status, _, body = await request(
+            server.port, "GET", "/api/v1/runtimes/nope", headers={"Cookie": cookie}
+        )
     finally:
         await server.stop()
 
@@ -567,7 +618,10 @@ async def test_runs_recent_returns_summaries() -> None:
     )
     await server.start(port=0)
     try:
-        status, _, body = await request(server.port, "GET", "/api/v1/runs/recent")
+        ws, cookie = await _auth(server)
+        status, _, body = await request(
+            server.port, "GET", "/api/v1/runs/recent", headers={"Cookie": cookie}
+        )
     finally:
         await server.stop()
 
@@ -595,7 +649,10 @@ async def test_run_detail_returns_failure_reason() -> None:
     )
     await server.start(port=0)
     try:
-        status, _, body = await request(server.port, "GET", "/api/v1/runs/run-1")
+        ws, cookie = await _auth(server)
+        status, _, body = await request(
+            server.port, "GET", "/api/v1/runs/run-1", headers={"Cookie": cookie}
+        )
     finally:
         await server.stop()
 
@@ -609,7 +666,10 @@ async def test_run_detail_404_for_unknown() -> None:
     server = _server()
     await server.start(port=0)
     try:
-        status, _, body = await request(server.port, "GET", "/api/v1/runs/nope")
+        ws, cookie = await _auth(server)
+        status, _, body = await request(
+            server.port, "GET", "/api/v1/runs/nope", headers={"Cookie": cookie}
+        )
     finally:
         await server.stop()
 
