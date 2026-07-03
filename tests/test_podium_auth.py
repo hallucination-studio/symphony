@@ -183,7 +183,10 @@ async def test_me_with_valid_cookie_returns_user() -> None:
     finally:
         await server.stop()
     assert status == 200
-    assert json.loads(body)["user"]["email"] == "me@example.com"
+    payload = json.loads(body)
+    assert payload["user"]["email"] == "me@example.com"
+    # A brand-new user has no custom Linear app configured.
+    assert payload["user"]["linear_app"] is None
 
 
 @pytest.mark.asyncio
@@ -305,7 +308,11 @@ async def test_linear_app_stored_encrypted_and_never_leaked(tmp_path) -> None:
             server.port, "GET", "/api/v1/auth/me", headers={"Cookie": cookie}
         )
         assert b"super-secret-value" not in me_body
-        assert json.loads(me_body)["user"]["linear_app"]["client_id"] == "custom-client"
+        assert json.loads(me_body)["user"]["linear_app"] == {
+            "client_id": "custom-client",
+            "redirect_uri": "https://byo.example/cb",
+            "configured": True,
+        }
     finally:
         await server.stop()
 
