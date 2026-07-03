@@ -6,6 +6,8 @@ import json
 import httpx
 import pytest
 
+from podium.app import create_app
+from podium.config import PodiumConfig
 from podium.server import PodiumServer
 from podium.store.postgres import PgStore
 
@@ -126,6 +128,57 @@ async def test_register_short_password_rejected() -> None:
         await server.stop()
     assert status == 400
     assert json.loads(body)["error"]["code"] == "invalid_credentials"
+
+
+@pytest.mark.asyncio
+async def test_register_accepts_empty_turnstile_when_disabled() -> None:
+    app = create_app(
+        turnstile_verifier=lambda _token, _ip: False,
+        secure_cookies=False,
+        config=PodiumConfig(turnstile_site_key=""),
+    )
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
+        response = await client.post(
+            "/api/v1/auth/register",
+            json={"email": "disabled@example.com", "password": "password123", "turnstile_token": ""},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["user"]["email"] == "disabled@example.com"
+
+
+@pytest.mark.asyncio
+async def test_register_accepts_empty_turnstile_when_secret_key_missing() -> None:
+    app = create_app(
+        turnstile_verifier=lambda _token, _ip: False,
+        secure_cookies=False,
+        config=PodiumConfig(turnstile_site_key="site-key"),
+    )
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
+        response = await client.post(
+            "/api/v1/auth/register",
+            json={"email": "missing-secret@example.com", "password": "password123", "turnstile_token": ""},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["user"]["email"] == "missing-secret@example.com"
+
+
+@pytest.mark.asyncio
+async def test_register_rejects_empty_turnstile_when_site_and_secret_key_configured() -> None:
+    app = create_app(
+        turnstile_verifier=lambda _token, _ip: True,
+        secure_cookies=False,
+        config=PodiumConfig(turnstile_site_key="site-key", turnstile_secret_key="secret-key"),
+    )
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
+        response = await client.post(
+            "/api/v1/auth/register",
+            json={"email": "enabled@example.com", "password": "password123", "turnstile_token": ""},
+        )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "invalid_turnstile"
 
 
 # ===== Login =====

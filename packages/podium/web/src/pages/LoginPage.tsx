@@ -3,7 +3,7 @@ import { Link, useNavigate } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "../api/client";
 import { Button } from "../components/Button";
-import { getTurnstileToken } from "../lib/turnstile";
+import { useTurnstile } from "../components/TurnstileWidget";
 
 export default function LoginPage() {
   const navigate = useNavigate();
@@ -12,13 +12,15 @@ export default function LoginPage() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const turnstile = useTurnstile();
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
     setError(null);
+    if (!turnstile.ready) return;
     setSubmitting(true);
     try {
-      await api.login(email, password, getTurnstileToken());
+      await api.login(email, password, turnstile.token);
       await qc.invalidateQueries({ queryKey: ["me"] });
       navigate("/");
     } catch (err) {
@@ -64,13 +66,20 @@ export default function LoginPage() {
             />
           </label>
 
+          {turnstile.widget}
+
           {error ? (
             <p className="field-error" role="alert">
               {error}
             </p>
           ) : null}
 
-          <Button type="submit" loading={submitting} className="auth-submit">
+          <Button
+            type="submit"
+            loading={submitting}
+            disabled={!turnstile.ready}
+            className="auth-submit"
+          >
             Sign in
           </Button>
         </form>

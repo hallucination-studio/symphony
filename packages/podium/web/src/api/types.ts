@@ -45,6 +45,13 @@ export interface Bootstrap {
   linear: LinearStatus;
 }
 
+export interface PodiumConfig {
+  turnstile: {
+    enabled: boolean;
+    site_key: string;
+  };
+}
+
 export interface LinearScopeEntity {
   id: string;
   name: string;

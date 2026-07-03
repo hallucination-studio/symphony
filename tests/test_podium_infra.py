@@ -4,6 +4,7 @@ import ast
 from pathlib import Path
 
 import fakeredis.aioredis
+from fastapi.testclient import TestClient
 
 from podium.app import create_app
 from podium.config import PodiumConfig
@@ -16,11 +17,47 @@ APP_PATH = Path("packages/podium/src/podium/app.py")
 def test_config_reads_podium_database_and_redis_urls(monkeypatch) -> None:
     monkeypatch.setenv("PODIUM_DATABASE_URL", "postgresql://podium@localhost/podium")
     monkeypatch.setenv("PODIUM_REDIS_URL", "redis://localhost:6379/3")
+    monkeypatch.setenv("CLOUDFLARE_TURNSTILE_SITE_KEY", "  site-key-123  ")
 
     config = PodiumConfig.from_env()
 
     assert config.database_url == "postgresql://podium@localhost/podium"
     assert config.redis_url == "redis://localhost:6379/3"
+    assert config.turnstile_site_key == "site-key-123"
+    assert config.turnstile_secret_key == ""
+
+
+def test_public_config_reports_turnstile_disabled_without_site_key() -> None:
+    app = create_app(
+        config=PodiumConfig(turnstile_site_key="", turnstile_secret_key="secret-key"),
+        secure_cookies=False,
+    )
+
+    config = app.state.podium.public_config()
+
+    assert config == {"turnstile": {"enabled": False, "site_key": ""}}
+    assert TestClient(app).get("/api/v1/config").json() == config
+
+
+def test_public_config_reports_turnstile_disabled_without_secret_key() -> None:
+    app = create_app(config=PodiumConfig(turnstile_site_key="site-key"), secure_cookies=False)
+
+    config = app.state.podium.public_config()
+
+    assert config == {"turnstile": {"enabled": False, "site_key": ""}}
+    assert TestClient(app).get("/api/v1/config").json() == config
+
+
+def test_public_config_reports_turnstile_enabled_with_site_and_secret_key() -> None:
+    app = create_app(
+        config=PodiumConfig(turnstile_site_key="site-key", turnstile_secret_key="secret-key"),
+        secure_cookies=False,
+    )
+
+    config = app.state.podium.public_config()
+
+    assert config == {"turnstile": {"enabled": True, "site_key": "site-key"}}
+    assert TestClient(app).get("/api/v1/config").json() == config
 
 
 def test_pg_migrator_exposes_phase_0_schema() -> None:

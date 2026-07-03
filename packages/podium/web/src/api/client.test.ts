@@ -37,6 +37,21 @@ describe("api client", () => {
     expect(result.session.workspace_id).toBe("ws_abc");
   });
 
+  it("config requests public runtime config with credentials", async () => {
+    const fetchMock = mockFetch(200, {
+      turnstile: { enabled: false, site_key: "" },
+    });
+    global.fetch = fetchMock;
+
+    const result = await api.config();
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/config",
+      expect.objectContaining({ credentials: "include" }),
+    );
+    expect(result.turnstile.enabled).toBe(false);
+  });
+
   it("saveRepository POSTs a JSON body without workspace_id", async () => {
     const fetchMock = mockFetch(200, {
       repository: { mode: "git_url", value: "https://example.com/repo.git" },

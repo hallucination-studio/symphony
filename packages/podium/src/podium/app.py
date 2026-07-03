@@ -151,6 +151,10 @@ def create_app(
     async def health() -> dict[str, str]:
         return {"status": "ok"}
 
+    @app.get("/api/v1/config")
+    async def public_config() -> dict[str, Any]:
+        return state.public_config()
+
     @app.get("/install.sh")
     async def install_script() -> Response:
         return Response(
@@ -1262,12 +1266,22 @@ class ManagedPodiumState:
         }
 
     async def verify_turnstile(self, token: str, ip: str | None) -> bool:
+        if not self.turnstile_enabled:
+            return True
         if not token:
             return False
         result = self.turnstile_verifier(token, ip)
         if inspect.isawaitable(result):
             result = await result
         return bool(result)
+
+    @property
+    def turnstile_enabled(self) -> bool:
+        return bool(self.config.turnstile_site_key.strip() and self.config.turnstile_secret_key.strip())
+
+    def public_config(self) -> dict[str, Any]:
+        site_key = self.config.turnstile_site_key.strip()
+        return {"turnstile": {"enabled": self.turnstile_enabled, "site_key": site_key if self.turnstile_enabled else ""}}
 
     def user_by_email(self, email: str) -> dict[str, Any] | None:
         user_id = self.user_ids_by_email.get(email)

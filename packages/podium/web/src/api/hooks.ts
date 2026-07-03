@@ -13,6 +13,15 @@ export function useBootstrap() {
   });
 }
 
+export function useConfig() {
+  return useQuery({
+    queryKey: ["config"],
+    queryFn: () => api.config(),
+    staleTime: Infinity,
+    gcTime: 60 * 60 * 1000,
+  });
+}
+
 export function useLinearScope(enabled = true) {
   return useQuery({
     queryKey: ["linear", "scope"],

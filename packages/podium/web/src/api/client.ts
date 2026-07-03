@@ -8,6 +8,7 @@ import type {
   LinearAppConfig,
   LinearScope,
   OnboardingProgress,
+  PodiumConfig,
   RepositoryMapping,
   RepositoryMode,
   RunSummary,
@@ -60,6 +61,11 @@ async function request<T>(
 // Typed client covering every Podium BFF endpoint. The backend now derives the
 // workspace from the session cookie, so requests never carry a workspace_id.
 export const api = {
+  // ===== Public runtime config =====
+  config(): Promise<PodiumConfig> {
+    return request<PodiumConfig>("/api/v1/config");
+  },
+
   // ===== Auth =====
   register(
     email: string,

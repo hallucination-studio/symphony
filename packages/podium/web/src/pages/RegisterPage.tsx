@@ -3,7 +3,7 @@ import { Link, useNavigate } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "../api/client";
 import { Button } from "../components/Button";
-import { getTurnstileToken } from "../lib/turnstile";
+import { useTurnstile } from "../components/TurnstileWidget";
 
 export default function RegisterPage() {
   const navigate = useNavigate();
@@ -13,6 +13,7 @@ export default function RegisterPage() {
   const [confirm, setConfirm] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const turnstile = useTurnstile();
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
@@ -26,10 +27,11 @@ export default function RegisterPage() {
       setError("Passwords don't match.");
       return;
     }
+    if (!turnstile.ready) return;
 
     setSubmitting(true);
     try {
-      await api.register(email, password, getTurnstileToken());
+      await api.register(email, password, turnstile.token);
       await qc.invalidateQueries({ queryKey: ["me"] });
       navigate("/");
     } catch (err) {
@@ -90,13 +92,20 @@ export default function RegisterPage() {
             />
           </label>
 
+          {turnstile.widget}
+
           {error ? (
             <p className="field-error" role="alert">
               {error}
             </p>
           ) : null}
 
-          <Button type="submit" loading={submitting} className="auth-submit">
+          <Button
+            type="submit"
+            loading={submitting}
+            disabled={!turnstile.ready}
+            className="auth-submit"
+          >
             Create account
           </Button>
         </form>
