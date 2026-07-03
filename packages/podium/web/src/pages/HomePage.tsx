@@ -81,7 +81,7 @@ function Home({
         ) : next ? (
           <ActionPanel
             tone="info"
-            title={onboarding.next_action || t(next.title)}
+            title={t(onboarding.next_action || next.title)}
             description={t(next.description)}
             actionLabel={t(next.ctaLabel)}
             onAction={() => navigate(`/setup/${next.path}`)}
