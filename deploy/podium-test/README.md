@@ -2,6 +2,13 @@
 
 This directory contains the single-node test deployment for Podium.
 
+Current test environment:
+
+- URL: `https://podium.hallu.info`
+- Origin: `52.68.15.209`
+- Host path: `/opt/podium`
+- Runtime: Docker Compose, with Podium bound to origin HTTP port `80`
+
 The intended flow is:
 
 1. GitHub Actions publishes `ghcr.io/hallucination-studio/symphony-podium:latest`, `:beta`, and `:<git-sha>` on every `main` push.
@@ -61,3 +68,24 @@ curl -fsS https://$PODIUM_DOMAIN/api/v1/health
 For Cloudflare, point DNS at the server and enable proxying. Use Cloudflare SSL
 mode `Flexible` when the origin is plain HTTP-only. The default
 `PODIUM_HTTP_BIND=0.0.0.0:80` binds Podium to the origin's HTTP port directly.
+
+## GHCR Access
+
+The test host tracks:
+
+```env
+PODIUM_IMAGE=ghcr.io/hallucination-studio/symphony-podium:beta
+```
+
+If the package is public, no Docker login is required. If GHCR returns
+`unauthorized`, make the package public in GitHub Packages or log in on the host
+with a GitHub token that has `read:packages`.
+
+After access works:
+
+```bash
+cd /opt/podium
+docker compose pull podium
+docker compose up -d podium watchtower
+curl -fsS http://127.0.0.1/api/v1/health
+```
