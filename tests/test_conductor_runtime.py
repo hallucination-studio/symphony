@@ -207,6 +207,31 @@ def test_refresh_marks_missing_pid_exited_without_runtime_handle(tmp_path: Path)
 
 
 @pytest.mark.asyncio
+async def test_recovered_process_log_query_reports_pipe_warning(tmp_path: Path) -> None:
+    process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        manager = ConductorRuntimeManager(command="performer")
+        instance = make_instance(tmp_path).with_updates(process_status="running", pid=process.pid)
+        log_path = Path(instance.instance_dir) / "logs" / "performer-000001.log"
+        log_path.parent.mkdir(parents=True)
+        log_path.write_text("before restart\n", encoding="utf-8")
+        instance = instance.with_updates(log_path=str(log_path))
+
+        recovered = manager.recover(instance)
+        assert recovered is not None
+        logs = manager.query_logs(recovered, LogQuery(order="asc"))
+
+        assert logs.lines == ["before restart"]
+        assert logs.warnings == [
+            "stdout/stderr pipes could not be reattached after Conductor restart; showing persisted log file only"
+        ]
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=5)
+
+
+@pytest.mark.asyncio
 async def test_stop_recovers_running_pid_when_handle_cache_is_empty(tmp_path: Path) -> None:
     process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
     try:

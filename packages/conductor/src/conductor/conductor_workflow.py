@@ -79,7 +79,6 @@ def generate_workflow_content(instance: InstanceRecord, *, podium_url: str = "ht
             "  implementation_state: In Progress\n"
             "  review_state: In Review\n"
             "  done_state: Done\n"
-            "  task_type_label: performer:type/task\n"
             "  gate_type_label: performer:type/gate\n"
             "  evidence_type_label: performer:type/evidence\n"
             "  gate_pending_label: performer:gate/pending\n"

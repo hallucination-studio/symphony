@@ -522,7 +522,7 @@ def test_instance_runtime_includes_persisted_performer_issue_details(tmp_path: P
                     last_message="working",
                     last_raw_message="item/agentMessage/delta",
                     phase="running",
-                    status_label="performer:running",
+                    status_label="performer:phase/implementation",
                     workspace_path=str(Path(instance.workspace_root) / "ENG-1"),
                     recent_events=[
                         {
@@ -551,7 +551,7 @@ def test_instance_runtime_includes_persisted_performer_issue_details(tmp_path: P
                     error="worker exited: boom",
                     issue_url="https://linear.app/x/issue/ENG-2",
                     phase="retrying",
-                    status_label="performer:retrying",
+                    status_label="performer:phase/implementation",
                 )
             ],
             continuations=[
@@ -607,7 +607,7 @@ def test_instance_runtime_includes_persisted_performer_issue_details(tmp_path: P
     }
     assert runtime["performer"]["running"][0]["issue_identifier"] == "ENG-1"
     assert runtime["performer"]["running"][0]["phase"] == "running"
-    assert runtime["performer"]["running"][0]["status_label"] == "performer:running"
+    assert runtime["performer"]["running"][0]["status_label"] == "performer:phase/implementation"
     assert runtime["performer"]["running"][0]["turn_count"] == 3
     assert runtime["performer"]["running"][0]["tokens"]["cached_tokens"] == 5
     assert runtime["performer"]["running"][0]["tokens"]["total_tokens"] == 33
@@ -616,10 +616,10 @@ def test_instance_runtime_includes_persisted_performer_issue_details(tmp_path: P
     assert runtime["performer"]["retrying"][0]["error"] == "worker exited: boom"
     assert runtime["performer"]["continuing"][0]["issue_identifier"] == "ENG-3"
     assert runtime["performer"]["continuing"][0]["phase"] == "continuing"
-    assert runtime["performer"]["continuing"][0]["status_label"] == "performer:continuing"
+    assert runtime["performer"]["continuing"][0]["status_label"] == "performer:phase/implementation"
     assert runtime["performer"]["blocked"][0]["issue_identifier"] == "ENG-4"
     assert runtime["performer"]["blocked"][0]["phase"] == "error"
-    assert runtime["performer"]["blocked"][0]["status_label"] == "performer:error"
+    assert runtime["performer"]["blocked"][0]["status_label"] == "performer:phase/blocked"
     assert runtime["performer"]["human_interventions"][0]["issue_identifier"] == "ENG-5"
     assert runtime["performer"]["human_interventions"][0]["child_identifier"] == "ENG-H1"
     assert runtime["performer"]["human_interventions"][0]["child_url"] == "https://linear.app/x/issue/ENG-H1"
@@ -1301,6 +1301,91 @@ async def test_refresh_instance_restarts_exited_performer_with_pending_retry(tmp
     assert refreshed is not None
     assert refreshed.process_status == "running"
     assert runtime.started_dispatch_issue_ids == ["issue-1"]
+
+
+@pytest.mark.asyncio
+async def test_background_restarts_crashed_performer_with_pending_work(tmp_path: Path) -> None:
+    runtime = CapturingRuntime()
+    service = ConductorService(
+        store=ConductorStore(tmp_path / "conductor-data"),
+        data_root=tmp_path / "conductor-data",
+        runtime_manager=runtime,
+    )
+    repo = make_repo(tmp_path)
+    instance = service.create_instance(make_request(repo))
+    service.store.update_instance(instance.with_updates(process_status="running", pid=4242))
+    runtime.refreshed_instance = instance.with_updates(process_status="exited", pid=None, last_exit_code=1)
+    PersistenceStore(Path(instance.persistence_path)).save(
+        PersistedState(
+            retry_attempts=[
+                RetryEntry(
+                    issue_id="issue-1",
+                    identifier="ENG-1",
+                    attempt=1,
+                    due_at=utc_now(),
+                    due_at_ms=0,
+                    error="worker crashed",
+                )
+            ]
+        )
+    )
+
+    result = await service.coordinate_background_once()
+    restarted = service.store.get_instance(instance.id)
+
+    assert result["crash_restarts"] == 1
+    assert restarted is not None
+    assert restarted.process_status == "running"
+    assert restarted.restart_count == 1
+    assert restarted.restart_window_started_at
+    assert restarted.restart_next_at
+    assert runtime.started_dispatch_issue_ids == ["issue-1"]
+
+
+@pytest.mark.asyncio
+async def test_background_marks_crash_loop_after_repeated_crashes(tmp_path: Path) -> None:
+    runtime = CapturingRuntime()
+    service = ConductorService(
+        store=ConductorStore(tmp_path / "conductor-data"),
+        data_root=tmp_path / "conductor-data",
+        runtime_manager=runtime,
+    )
+    repo = make_repo(tmp_path)
+    instance = service.create_instance(make_request(repo))
+    crashed = instance.with_updates(
+        process_status="exited",
+        pid=None,
+        last_exit_code=1,
+        restart_count=3,
+        restart_window_started_at=utc_now().isoformat().replace("+00:00", "Z"),
+        restart_next_at=None,
+    )
+    service.store.update_instance(crashed)
+    runtime.refreshed_instance = crashed
+    PersistenceStore(Path(instance.persistence_path)).save(
+        PersistedState(
+            retry_attempts=[
+                RetryEntry(
+                    issue_id="issue-1",
+                    identifier="ENG-1",
+                    attempt=1,
+                    due_at=utc_now(),
+                    due_at_ms=0,
+                    error="worker crashed",
+                )
+            ]
+        )
+    )
+
+    result = await service.coordinate_background_once()
+    updated = service.store.get_instance(instance.id)
+
+    assert result["crash_loops"] == 1
+    assert updated is not None
+    assert updated.process_status == "crash_loop"
+    assert updated.restart_count == 4
+    assert "crashed more than 3 times" in (updated.last_error or "")
+    assert runtime.started_dispatch_issue_ids == []
 
 
 @pytest.mark.asyncio

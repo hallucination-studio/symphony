@@ -33,7 +33,7 @@ def test_runtime_claims_audit_flags_errorless_retry_and_claim_stall() -> None:
                     "attempt": 2,
                     "error": None,
                     "phase": "done",
-                    "status_label": "performer:done",
+                    "status_label": "performer:phase/done",
                 }
             ],
             "continuations": [],
@@ -61,7 +61,7 @@ def test_runtime_claims_audit_allows_blocked_human_approval_state() -> None:
                     "attempt": 2,
                     "error": "runtime_permission_blocked: writing outside of the project",
                     "phase": "error",
-                    "status_label": "performer:error",
+                    "status_label": "performer:phase/blocked",
                 }
             ],
         },

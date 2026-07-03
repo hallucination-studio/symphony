@@ -35,7 +35,7 @@ def audit_runtime_state(state: dict[str, Any], log_text: str = "") -> dict[str, 
         if continuation.get("phase") not in {None, "continuing"}:
             failures.append(f"continuation_unexpected_phase:{continuation.get('identifier')}:{continuation.get('phase')}")
         status_label = continuation.get("status_label")
-        if status_label not in {None, "performer:continuing"}:
+        if status_label not in {None, "performer:phase/implementation"}:
             failures.append(f"continuation_unexpected_label:{continuation.get('identifier')}:{status_label}")
 
     for blocked_entry in blocked:
@@ -44,7 +44,7 @@ def audit_runtime_state(state: dict[str, Any], log_text: str = "") -> dict[str, 
         if blocked_entry.get("phase") not in {None, "error"}:
             failures.append(f"blocked_unexpected_phase:{blocked_entry.get('identifier')}:{blocked_entry.get('phase')}")
         status_label = blocked_entry.get("status_label")
-        if status_label not in {None, "performer:error"}:
+        if status_label not in {None, "performer:phase/blocked"}:
             failures.append(f"blocked_unexpected_label:{blocked_entry.get('identifier')}:{status_label}")
 
     repeated_claim_stalls = _claim_stalls(log_text)

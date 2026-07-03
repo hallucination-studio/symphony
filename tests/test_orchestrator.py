@@ -620,7 +620,6 @@ async def test_dispatch_issue_by_id_ignores_linear_assignee_for_custom_agent_del
     }
     assert [started[0].identifier for started in runner.started] == ["MT-1"]
     await asyncio_sleep()
-    assert ("mt-1", "performer:dispatch/accepted") in tracker.lifecycle_labels
     assert ("mt-1", "performer:phase/implementation") in tracker.lifecycle_labels
 
 
@@ -710,7 +709,7 @@ async def test_preflight_needs_more_info_creates_human_action_child_and_does_not
     assert child["title"] == "[Human Action] MT-1: Need more information"
     assert "Which repository should be changed?" in child["description"]
     assert "performer:type/human-action" in child["label_ids"]
-    assert "performer:human/needs-input" in child["label_ids"]
+    assert "performer:human/needs-input" not in child["label_ids"]
 
 
 @pytest.mark.asyncio
@@ -864,12 +863,9 @@ async def test_dispatch_and_codex_events_update_lifecycle_labels_and_phase(tmp_p
     await asyncio_sleep()
 
     entry = orchestrator.state.running["mt-1"]
-    assert ("mt-1", "performer:starting") in tracker.lifecycle_labels
-    assert ("mt-1", "performer:running") in tracker.lifecycle_labels
-    assert ("mt-1", "performer:dispatch/accepted") in tracker.lifecycle_labels
     assert entry.phase == "running"
     assert entry.runtime_phase == "implementation_running"
-    assert entry.status_label == "performer:running"
+    assert entry.status_label == "performer:phase/implementation"
     assert ("mt-1", "performer:phase/implementation") in tracker.lifecycle_labels
     assert entry.recent_events[-1]["event"] == "turn_started"
     assert entry.recent_events[-1]["raw_event"]["session_id"] == "thread-1-turn-1"
@@ -897,7 +893,7 @@ async def test_retry_failure_marks_retry_pending_label(tmp_path: Path) -> None:
     intervention = orchestrator.state.human_interventions["mt-1"]
     assert intervention.kind == "runtime_error"
     assert intervention.error == "worker exited: proxy timeout"
-    assert ("mt-1", "performer:human/pending") in tracker.lifecycle_labels
+    assert ("mt-1", "performer:phase/blocked") in tracker.lifecycle_labels
 
 
 @pytest.mark.asyncio
@@ -949,7 +945,7 @@ async def test_human_blocked_runtime_error_marks_human_blocked_label(tmp_path: P
 
     assert orchestrator.state.human_interventions["mt-1"].kind == "runtime_permission"
     assert orchestrator.state.human_interventions["mt-1"].error == "permission denied"
-    assert ("mt-1", "performer:error/human-blocked") in tracker.lifecycle_labels
+    assert ("mt-1", "performer:phase/blocked") in tracker.lifecycle_labels
 
 
 @pytest.mark.asyncio
@@ -965,8 +961,27 @@ async def test_lifecycle_label_failures_do_not_block_dispatch(tmp_path: Path, ca
     await orchestrator.tick()
 
     assert [started[0].identifier for started in runner.started] == ["MT-1"]
-    assert "performer_lifecycle_label outcome=failed" in caplog.text
-    assert "label=performer:starting" in caplog.text
+    assert "performer_label_group outcome=failed" in caplog.text
+    assert "label=performer:phase/implementation" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_wait_for_idle_drains_background_label_tasks(tmp_path: Path) -> None:
+    class ImmediateRunner:
+        async def run_issue(
+            self, issue: Issue, attempt: int | None, on_event: Any, *, worker_host: str | None = None
+        ) -> None:
+            return None
+
+    tracker = FakeTracker(candidates=[issue("MT-1")])
+    runner = ImmediateRunner()
+    orchestrator = Orchestrator(make_config(tmp_path), tracker, runner)
+
+    await orchestrator.tick()
+    await orchestrator.wait_for_idle()
+
+    assert orchestrator._background_label_tasks == set()
+    assert ("mt-1", "performer:phase/implementation") in tracker.lifecycle_labels
 
 
 @pytest.mark.asyncio
@@ -991,7 +1006,7 @@ async def test_lifecycle_labels_can_be_disabled_for_managed_custom_agent_dispatc
 
     assert [started[0].identifier for started in runner.started] == ["MT-1"]
     assert tracker.lifecycle_labels == []
-    assert orchestrator.state.running["mt-1"].status_label == "performer:running"
+    assert orchestrator.state.running["mt-1"].status_label == "performer:phase/implementation"
 
 
 @pytest.mark.asyncio
@@ -1199,7 +1214,7 @@ async def test_worker_failure_schedules_exponential_retry(tmp_path: Path) -> Non
     assert intervention.kind == "runtime_error"
     assert intervention.error == "worker exited: boom"
     assert "mt-1" in orchestrator.state.claimed
-    assert ("mt-1", "performer:human/pending") in tracker.lifecycle_labels
+    assert ("mt-1", "performer:phase/blocked") in tracker.lifecycle_labels
     assert tracker.created_issues[-1]["title"] == "[Human Action] MT-1: Runtime error needs review"
     assert "worker exited: boom" in tracker.created_issues[-1]["description"]
 
@@ -1307,8 +1322,8 @@ async def test_normal_worker_exit_schedules_continuation_for_still_active_issue(
     assert "mt-1" not in orchestrator.state.retry_attempts
     assert continuation.attempt == 1
     assert continuation.phase == "continuing"
-    assert continuation.status_label == "performer:continuing"
-    assert orchestrator._desired_lifecycle_labels["mt-1"] == "performer:continuing"
+    assert continuation.status_label == "performer:phase/implementation"
+    assert orchestrator._desired_lifecycle_labels["mt-1"] == "performer:phase/implementation"
 
 
 @pytest.mark.asyncio
@@ -1340,7 +1355,7 @@ async def test_normal_worker_exit_records_completed_bookkeeping_for_terminal_iss
     assert "mt-1" in orchestrator.state.completed
     assert "mt-1" not in orchestrator.state.claimed
     assert "mt-1" not in orchestrator.state.retry_attempts
-    assert ("mt-1", "performer:done") in tracker.lifecycle_labels
+    assert ("mt-1", "performer:phase/done") in tracker.lifecycle_labels
 
 
 @pytest.mark.asyncio
@@ -1371,7 +1386,7 @@ async def test_acceptance_enabled_creates_gate_issue_instead_of_marking_original
     assert "mt-1" not in orchestrator.state.completed
     assert tracker.created_issues == []
     assert tracker.created_relations == []
-    assert ("mt-1", "performer:done") not in tracker.lifecycle_labels
+    assert ("mt-1", "performer:phase/done") not in tracker.lifecycle_labels
     assert any(label == "performer:gate/pending" for _, label in tracker.lifecycle_labels)
     assert tracker.transitions[-1] == ("mt-1", "In Review")
 
@@ -1527,8 +1542,8 @@ async def test_acceptance_todo_preflight_creates_marker_plan_and_moves_to_in_pro
     ]
     assert tracker.created_relations == []
     assert tracker.transitions == [("mt-1", "In Progress")]
-    assert any(label == "performer:type/task" for _, label in tracker.lifecycle_labels)
-    assert any(label == "performer:phase/planned" for _, label in tracker.lifecycle_labels)
+    assert not any(label == "performer:type/task" for _, label in tracker.lifecycle_labels)
+    assert any(label == "performer:phase/queued" for _, label in tracker.lifecycle_labels)
     assert tracker.description_updates
     _, marker, block = tracker.description_updates[0]
     assert marker == "PERFORMER ACCEPTANCE"
@@ -1583,14 +1598,14 @@ async def test_reconcile_terminal_running_issue_waits_for_worker_when_acceptance
     assert "mt-1" in orchestrator.state.running
     assert "mt-1" in orchestrator.state.claimed
     assert tracker.created_issues == []
-    assert ("mt-1", "performer:done") not in tracker.lifecycle_labels
+    assert ("mt-1", "performer:phase/done") not in tracker.lifecycle_labels
 
     runner.release.set()
     await orchestrator.wait_for_idle()
 
     assert tracker.created_issues == []
     assert tracker.created_relations == []
-    assert ("mt-1", "performer:done") not in tracker.lifecycle_labels
+    assert ("mt-1", "performer:phase/done") not in tracker.lifecycle_labels
 
 
 @pytest.mark.asyncio
@@ -1635,7 +1650,7 @@ async def test_acceptance_score_4_marks_original_done_after_gate_passes(tmp_path
     assert evidence["label_ids"] == ["performer:type/evidence"]
     assert tracker.transitions == [(evidence["id"], "Done"), ("gate-1", "Done"), ("mt-1", "Done")]
     assert ("gate-1", "performer:gate/passed") in tracker.lifecycle_labels
-    assert ("gate-1", "performer:score/4") in tracker.lifecycle_labels
+    assert ("gate-1", "performer:score/4/4") in tracker.lifecycle_labels
     assert tracker.comments[-1][0] == "gate-1"
     assert "Acceptance score: 4" in tracker.comments[-1][1]
     snapshot = OpsStore(ops_snapshot_path_from_persistence_path(orchestrator.config.persistence.path)).load()
@@ -1683,7 +1698,7 @@ async def test_acceptance_rejected_keeps_original_blocked_with_failed_gate(tmp_p
     assert "mt-1" not in orchestrator.state.completed
     assert tracker.transitions == [("mt-1", "In Progress")]
     assert ("gate-1", "performer:gate/failed") in tracker.lifecycle_labels
-    assert ("gate-1", "performer:score/2") in tracker.lifecycle_labels
+    assert ("gate-1", "performer:score/2/4") in tracker.lifecycle_labels
     assert tracker.children["gate-1"][0]["label_ids"] == ["performer:type/evidence"]
     assert tracker.comments[-1][0] == "gate-1"
     assert "Gate rejection reasons:" in tracker.comments[-1][1]
@@ -1911,7 +1926,7 @@ async def test_acceptance_done_with_passed_gate_is_not_treated_as_bypass(tmp_pat
             issue(
                 "MT-1",
                 state="Done",
-                labels=["codex", "performer:gate/passed", "performer:score/4"],
+                labels=["codex", "performer:gate/passed", "performer:score/4/4"],
                 description="Implementation summary: done\nTest command: pytest\nRemaining risks: none",
             )
         ]
@@ -1951,8 +1966,8 @@ async def test_completion_verification_failure_retries_instead_of_marking_done(t
     assert "mt-1" not in orchestrator.state.completed
     assert "mt-1" in orchestrator.state.retry_attempts
     assert "mt-1" in orchestrator.state.claimed
-    assert ("mt-1", "performer:retrying") in tracker.lifecycle_labels
-    assert ("mt-1", "performer:retry/pending") in tracker.lifecycle_labels
+    assert ("mt-1", "performer:phase/implementation") in tracker.lifecycle_labels
+    assert ("mt-1", "performer:retry/pending") not in tracker.lifecycle_labels
     assert tracker.comments[-1][0] == "mt-1"
     assert "Verification failed after agent claimed success." in tracker.comments[-1][1]
     assert "workspace_changes" in tracker.comments[-1][1]
@@ -1991,7 +2006,7 @@ async def test_completion_verification_needs_human_does_not_mark_done(tmp_path: 
     assert "mt-1" not in orchestrator.state.completed
     assert "mt-1" not in orchestrator.state.retry_attempts
     assert "mt-1" not in orchestrator.state.claimed
-    assert tracker.lifecycle_labels[-1] != ("mt-1", "performer:done")
+    assert tracker.lifecycle_labels[-1] != ("mt-1", "performer:phase/done")
     assert tracker.comments[-1][0] == "mt-1"
     assert "human review is required" in tracker.comments[-1][1].lower()
 
@@ -2062,7 +2077,7 @@ async def test_completion_verification_needs_human_does_not_create_legacy_accept
     assert tracker.created_issues == []
     assert tracker.created_relations == []
     assert acceptance_runner.calls == []
-    assert ("mt-1", "performer:done") not in tracker.lifecycle_labels
+    assert ("mt-1", "performer:phase/done") not in tracker.lifecycle_labels
 
 
 @pytest.mark.asyncio
@@ -2372,9 +2387,9 @@ async def test_request_timeout_updates_last_message_with_readable_error(tmp_path
 
     assert orchestrator.state.running["mt-1"].last_codex_message == "initialize timed out"
     assert orchestrator.state.running["mt-1"].phase == "error"
-    assert orchestrator.state.running["mt-1"].status_label == "performer:error"
+    assert orchestrator.state.running["mt-1"].status_label == "performer:phase/failed"
     await asyncio_sleep()
-    assert ("mt-1", "performer:error") in tracker.lifecycle_labels
+    assert ("mt-1", "performer:phase/failed") in tracker.lifecycle_labels
     assert ("mt-1", "performer:failed") not in tracker.lifecycle_labels
     assert tracker.comments[-1][0] == "mt-1"
     assert "Performer runtime error" in tracker.comments[-1][1]
@@ -2402,21 +2417,21 @@ async def test_permission_runtime_error_blocks_for_human_approval(tmp_path: Path
     assert "mt-1" not in orchestrator.state.running
     assert "mt-1" not in orchestrator.state.retry_attempts
     assert orchestrator.state.human_interventions["mt-1"].kind == "runtime_permission"
-    assert orchestrator.state.human_interventions["mt-1"].status_label == "performer:human/pending"
+    assert orchestrator.state.human_interventions["mt-1"].status_label == "performer:phase/blocked"
     assert "runtime_permission_blocked" in (orchestrator.state.human_interventions["mt-1"].error or "")
     child = tracker.created_issues[-1]
     assert child["parent_id"] == "mt-1"
     assert child["assignee_id"] == "human-1"
     assert child["title"] == "[Human Action] MT-1: Runtime approval required"
     assert "performer:type/human-action" in child["label_ids"]
-    assert "performer:human/pending" in child["label_ids"]
-    assert "performer:human/runtime-approval" in child["label_ids"]
+    assert "performer:human/pending" not in child["label_ids"]
+    assert "performer:human/runtime-approval" not in child["label_ids"]
     assert "Human response:" in child["description"]
     persisted = store.load()
     assert persisted.human_interventions[0].issue_id == "mt-1"
     assert persisted.retry_attempts == []
-    assert ("mt-1", "performer:error") in tracker.lifecycle_labels
-    assert ("mt-1", "performer:error/human-blocked") in tracker.lifecycle_labels
+    assert ("mt-1", "performer:phase/blocked") in tracker.lifecycle_labels
+    assert ("mt-1", "performer:error/human-blocked") not in tracker.lifecycle_labels
     assert ("mt-1", "performer:retrying") not in tracker.lifecycle_labels
     assert "paused" in tracker.comments[-1][1]
     assert "/symphony approve-runtime-error" not in tracker.comments[-1][1]
@@ -2445,8 +2460,8 @@ async def test_permission_output_event_blocks_for_human_approval(tmp_path: Path)
     assert "mt-1" not in orchestrator.state.retry_attempts
     assert orchestrator.state.human_interventions["mt-1"].kind == "runtime_permission"
     assert "runtime_permission_blocked" in (orchestrator.state.human_interventions["mt-1"].error or "")
-    assert ("mt-1", "performer:error") in tracker.lifecycle_labels
-    assert ("mt-1", "performer:error/human-blocked") in tracker.lifecycle_labels
+    assert ("mt-1", "performer:phase/blocked") in tracker.lifecycle_labels
+    assert ("mt-1", "performer:error/human-blocked") not in tracker.lifecycle_labels
     assert "/symphony approve-runtime-error" not in tracker.comments[-1][1]
 
 
@@ -2559,7 +2574,7 @@ async def test_done_human_action_child_resumes_runtime_error(tmp_path: Path) -> 
     assert "mt-1" in orchestrator.state.running
     assert runner.started[-1][0].id == "mt-1"
     assert runner.started[-1][1] == 1
-    assert ("mt-1", "performer:retrying") in tracker.lifecycle_labels
+    assert ("mt-1", "performer:phase/implementation") in tracker.lifecycle_labels
     persisted = store.load()
     assert persisted.human_interventions == []
     assert persisted.retry_attempts == []
@@ -2837,6 +2852,33 @@ async def test_stall_detection_comments_on_linear_issue(tmp_path: Path) -> None:
     child = tracker.created_issues[-1]
     assert child["parent_id"] == "mt-1"
     assert "stalled" in child["description"]
+
+
+@pytest.mark.asyncio
+async def test_hard_turn_timeout_cancels_even_when_events_keep_arriving(tmp_path: Path) -> None:
+    tracker = FakeTracker(candidates=[issue("MT-1")])
+    runner = FakeRunner()
+    config = make_config(tmp_path)
+    config = ServiceConfig(
+        tracker=config.tracker,
+        polling=config.polling,
+        workspace=config.workspace,
+        hooks=config.hooks,
+        agent=config.agent,
+        codex=CodexConfig(stall_timeout_ms=60_000, hard_turn_timeout_ms=1),
+        prompt_template=config.prompt_template,
+        workflow_path=config.workflow_path,
+    )
+    orchestrator = Orchestrator(config, tracker, runner)
+    await orchestrator.tick()
+    entry = orchestrator.state.running["mt-1"]
+    entry.turn_started_at = utc_now() - timedelta(seconds=10)
+    entry.last_codex_timestamp = utc_now()
+
+    await orchestrator.reconcile_running()
+
+    assert orchestrator.state.human_interventions["mt-1"].kind == "runtime_error"
+    assert orchestrator.state.human_interventions["mt-1"].error == "turn_timeout"
 
 
 @pytest.mark.asyncio

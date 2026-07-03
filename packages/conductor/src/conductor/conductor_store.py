@@ -32,6 +32,9 @@ INSTANCE_COLUMNS = (
     "pid",
     "last_exit_code",
     "last_error",
+    "restart_count",
+    "restart_window_started_at",
+    "restart_next_at",
     "created_at",
     "updated_at",
 )
@@ -350,6 +353,9 @@ class ConductorStore:
                   pid INTEGER,
                   last_exit_code INTEGER,
                   last_error TEXT,
+                  restart_count INTEGER NOT NULL DEFAULT 0,
+                  restart_window_started_at TEXT,
+                  restart_next_at TEXT,
                   created_at TEXT NOT NULL,
                   updated_at TEXT NOT NULL
                 );
@@ -392,6 +398,9 @@ class ConductorStore:
                   ON gated_followup_markers(status, updated_at);
                 """
             )
+            _ensure_column(connection, "instances", "restart_count", "INTEGER NOT NULL DEFAULT 0")
+            _ensure_column(connection, "instances", "restart_window_started_at", "TEXT")
+            _ensure_column(connection, "instances", "restart_next_at", "TEXT")
 
     def _set_runtime_action_status(self, action_id: str, *, status: str, error: str | None = None) -> None:
         with self.connect() as connection:
@@ -479,6 +488,9 @@ def _instance_values(instance: InstanceRecord) -> tuple[Any, ...]:
         instance.pid,
         instance.last_exit_code,
         instance.last_error,
+        instance.restart_count,
+        instance.restart_window_started_at,
+        instance.restart_next_at,
         instance.created_at,
         instance.updated_at,
     )
@@ -508,9 +520,18 @@ def _instance_from_row(row: sqlite3.Row) -> InstanceRecord:
         pid=row["pid"],
         last_exit_code=row["last_exit_code"],
         last_error=row["last_error"],
+        restart_count=int(row["restart_count"] or 0),
+        restart_window_started_at=row["restart_window_started_at"],
+        restart_next_at=row["restart_next_at"],
         created_at=str(row["created_at"]),
         updated_at=str(row["updated_at"]),
     )
+
+
+def _ensure_column(connection: sqlite3.Connection, table: str, name: str, definition: str) -> None:
+    columns = {str(row["name"]) for row in connection.execute(f"PRAGMA table_info({table})").fetchall()}
+    if name not in columns:
+        connection.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
 
 
 def _runtime_action_from_row(row: sqlite3.Row) -> dict[str, Any]:

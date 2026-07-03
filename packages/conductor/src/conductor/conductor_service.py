@@ -5,7 +5,7 @@ from typing import Any
 import shutil
 import subprocess
 import socket
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import httpx
 
 from .conductor_models import (
@@ -373,6 +373,10 @@ class ConductorService:
         self.repository_handoff_tracker_factory = self._repository_handoff_tracker
         self.project_label_proxy_factory = self._project_label_proxy
         self._active_podium_dispatches: dict[str, dict[str, str]] = {}
+        self._podium_connection: dict[str, Any] = {
+            "poll": {"status": "idle", "last_error": None, "updated_at": None},
+            "ws": {"status": "idle", "last_error": None, "updated_at": None},
+        }
         # instance_id -> last-synced desired-label signature, so the background
         # loop only calls Linear when an instance's scope actually changes.
         self._project_label_signatures: dict[str, str] = {}
@@ -583,9 +587,19 @@ class ConductorService:
         project_labels_synced = await self.sync_project_labels_once()
         gated_followups_started = 0
         resumed = 0
+        crash_restarts = 0
+        crash_loops = 0
         for instance in self.store.list_instances():
             current = self.get_instance(instance.id)
             if current is None:
+                continue
+            crash_recovery = await self._restart_crashed_performer(current)
+            if crash_recovery is not None:
+                self.store.update_instance(crash_recovery)
+                if crash_recovery.process_status == "crash_loop":
+                    crash_loops += 1
+                else:
+                    crash_restarts += 1
                 continue
             resume = await self._resume_pending_performer_work(current)
             if resume is not None:
@@ -607,6 +621,8 @@ class ConductorService:
             "project_labels_synced": project_labels_synced,
             "gated_followups_started": gated_followups_started,
             "resumed": resumed,
+            "crash_restarts": crash_restarts,
+            "crash_loops": crash_loops,
         }
 
     async def sync_project_labels_once(self) -> int:
@@ -915,6 +931,52 @@ class ConductorService:
             dispatch_issue_id=issue_id,
         )
 
+    async def _restart_crashed_performer(self, instance: InstanceRecord) -> InstanceRecord | None:
+        if instance.process_status != "exited" or instance.last_exit_code in {0, None}:
+            return None
+        persisted = PersistenceStore(Path(instance.persistence_path)).load()
+        if not _has_pending_performer_work(persisted):
+            return None
+        now = datetime.now(timezone.utc)
+        next_at = _parse_iso(instance.restart_next_at)
+        if next_at is not None and now < next_at:
+            return None
+        window_started = _parse_iso(instance.restart_window_started_at)
+        if window_started is None or now - window_started > timedelta(minutes=10):
+            window_started = now
+            restart_count = 0
+        else:
+            restart_count = instance.restart_count
+        restart_count += 1
+        if restart_count > 3:
+            return instance.with_updates(
+                process_status="crash_loop",
+                pid=None,
+                restart_count=restart_count,
+                restart_window_started_at=_iso(window_started),
+                restart_next_at=None,
+                last_error="performer crashed more than 3 times within 10 minutes",
+            )
+        delay_seconds = min(5 * (2 ** (restart_count - 1)), 60)
+        issue_id = _first_pending_performer_issue_id(persisted)
+        restarted = await self.runtime_manager.start(
+            instance.with_updates(
+                process_status="starting",
+                restart_count=restart_count,
+                restart_window_started_at=_iso(window_started),
+                restart_next_at=_iso(now + timedelta(seconds=delay_seconds)),
+                last_error=None,
+            ),
+            env=self._runtime_env(),
+            dispatch_issue_id=issue_id,
+        )
+        return restarted.with_updates(
+            restart_count=restart_count,
+            restart_window_started_at=_iso(window_started),
+            restart_next_at=_iso(now + timedelta(seconds=delay_seconds)),
+            last_error=None,
+        )
+
     def _pending_gated_followup_issue_id(self, instance: InstanceRecord) -> str | None:
         if instance.workflow_profile != "gated-task":
             return None
@@ -1018,6 +1080,15 @@ class ConductorService:
                 "blocked": blocked_count,
                 "pending_human": pending_human_count,
             },
+            "podium_connection": self._podium_connection,
+        }
+
+    def update_podium_connection(self, channel: str, *, status: str, error: str | None = None) -> None:
+        sanitized = _sanitize_connection_error(error)
+        self._podium_connection[channel] = {
+            "status": status,
+            "last_error": sanitized,
+            "updated_at": utc_now().isoformat().replace("+00:00", "Z"),
         }
 
     def list_issues(self) -> list[dict[str, Any]]:
@@ -1716,12 +1787,39 @@ def _merge_project_labels(existing: list[str], desired: list[str]) -> list[str]:
 
 
 def _first_pending_performer_issue_id(persisted: PersistedState) -> str | None:
-    for collection in (persisted.retry_attempts, persisted.continuations, persisted.blocked):
+    for collection in (persisted.retry_attempts, persisted.continuations, persisted.blocked, persisted.human_interventions):
         for entry in collection:
             issue_id = str(getattr(entry, "issue_id", "") or "").strip()
             if issue_id:
                 return issue_id
     return None
+
+
+def _has_pending_performer_work(persisted: PersistedState) -> bool:
+    return _first_pending_performer_issue_id(persisted) is not None
+
+
+def _parse_iso(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _iso(value: datetime) -> str:
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _sanitize_connection_error(error: str | None) -> str | None:
+    if error is None:
+        return None
+    text = str(error)
+    for marker in ("Bearer ", "token=", "access_token="):
+        if marker in text:
+            text = text.split(marker, 1)[0] + marker + "[redacted]"
+    return text[:500]
 
 
 def _repository_handoff_marker(source_issue_id: str) -> str:

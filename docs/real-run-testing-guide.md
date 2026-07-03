@@ -159,7 +159,7 @@ Common real-run failure signatures:
 Any real-run scenario that needs human judgment must validate the Linear child issue flow:
 
 1. Performer creates a direct child issue titled `[Human Action] <parent>: ...`.
-2. The child has `performer:type/human-action` plus `performer:human/pending` and the specific reason label.
+2. The child has `performer:type/human-action`; the parent issue has `performer:phase/blocked`.
 3. The child description contains the reason, required action, `Human response`, and the instruction to move the child to `Done`.
 4. The human completes the child issue and moves that child issue to `Done`.
 5. Performer resumes only from the child issue state. Parent issue comments, including command-like comments, are informational only and do not count as acceptance evidence.
@@ -186,13 +186,13 @@ Use these terms consistently:
 
 A continuation should appear as:
 
-- `performer:continuing`;
 - `continuations` in persisted runtime;
 - `continuing` in snapshots and Conductor runtime.
+- an active Linear phase such as `performer:phase/implementation`.
 
 It should not appear as:
 
-- `performer:retrying`;
+- `performer:retrying` or `performer:retry/*`;
 - an error-bearing `retry_attempts` row;
 - a failure count in dashboards.
 

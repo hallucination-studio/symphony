@@ -108,19 +108,46 @@ class CodexSdkClient:
             }
         )
         schema = output_schema or STRUCTURED_RESULT_SCHEMA
-        turn = await self._start_sdk_turn(thread, prompt, schema)
-        turn_id = _string_attr(turn, "id")
-        if turn_id is None:
-            turn_id = "turn"
-        session_id = f"{thread_id}-{turn_id}"
-        emit({"event": "turn_started", "backend": "sdk", "thread_id": thread_id, "turn_id": turn_id, "session_id": session_id})
         requires_handoff = output_schema is None
-        final_response, structured = await self._consume_turn(turn, emit, validate_structured=requires_handoff)
-        if requires_handoff and structured is None:
-            structured = _parse_structured_result(final_response)
-        if requires_handoff and structured is None:
-            emit({"event": "turn_failed", "backend": "sdk", "thread_id": thread_id, "turn_id": turn_id, "session_id": session_id, "message": "invalid_structured_output"})
-            raise CodexError("invalid_structured_output", "Codex SDK turn did not produce the required structured JSON result")
+        final_response: str | None = None
+        structured: dict[str, Any] | None = None
+        turn_id = "turn"
+        session_id = f"{thread_id}-{turn_id}"
+        turn_prompt = prompt
+        for attempt in range(1, 3):
+            try:
+                turn = await self._start_sdk_turn(thread, turn_prompt, schema)
+                turn_id = _string_attr(turn, "id") or "turn"
+                session_id = f"{thread_id}-{turn_id}"
+                emit({"event": "turn_started", "backend": "sdk", "thread_id": thread_id, "turn_id": turn_id, "session_id": session_id})
+                final_response, structured = await self._consume_turn(turn, emit, validate_structured=requires_handoff)
+                if requires_handoff and structured is None:
+                    structured = _parse_structured_result(final_response)
+                if requires_handoff and structured is None:
+                    raise CodexError("invalid_structured_output", "Codex SDK turn did not produce the required structured JSON result")
+                break
+            except Exception as exc:
+                code = exc.code if isinstance(exc, CodexError) else "sdk_transport_error"
+                if attempt >= 2 or not _is_transient_codex_error(code):
+                    if isinstance(exc, CodexError):
+                        raise
+                    raise CodexError(code, str(exc)) from exc
+                emit(
+                    {
+                        "event": "turn_retrying",
+                        "backend": "sdk",
+                        "thread_id": thread_id,
+                        "turn_id": turn_id,
+                        "session_id": session_id,
+                        "message": code,
+                        "attempt": attempt + 1,
+                    }
+                )
+                if code == "invalid_structured_output":
+                    turn_prompt = (
+                        f"{prompt}\n\nYour previous response did not match the required JSON schema. "
+                        "Reply again with only valid JSON for the required structured result."
+                    )
         emit({"event": "turn_completed", "backend": "sdk", "thread_id": thread_id, "turn_id": turn_id, "session_id": session_id, "message": final_response})
         return CodexRunResult(
             True,
@@ -236,6 +263,17 @@ def _valid_structured_result(value: Any) -> bool:
         if not isinstance(raw, list) or not all(isinstance(item, str) for item in raw):
             return False
     return True
+
+
+def _is_transient_codex_error(code: str) -> bool:
+    return code in {
+        "invalid_structured_output",
+        "sdk_transport_error",
+        "response_error",
+        "rate_limit",
+        "timeout",
+        "connection_error",
+    }
 
 
 async def _maybe_await(value: Any) -> Any:

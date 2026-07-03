@@ -91,6 +91,9 @@ class InstanceRecord:
     pid: int | None = None
     last_exit_code: int | None = None
     last_error: str | None = None
+    restart_count: int = 0
+    restart_window_started_at: str | None = None
+    restart_next_at: str | None = None
     created_at: str = ""
     updated_at: str = ""
 
@@ -150,6 +153,9 @@ class InstanceRecord:
     def from_dict(cls, payload: dict[str, Any]) -> InstanceRecord:
         payload = dict(payload)
         payload.setdefault("gated_followup_stages", {})
+        payload.setdefault("restart_count", 0)
+        payload.setdefault("restart_window_started_at", None)
+        payload.setdefault("restart_next_at", None)
         return cls(**payload)
 
 

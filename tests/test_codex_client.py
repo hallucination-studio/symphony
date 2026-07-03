@@ -118,6 +118,46 @@ async def test_sdk_backend_rejects_invalid_structured_output(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
+async def test_sdk_backend_reasks_once_for_invalid_structured_output(tmp_path: Path) -> None:
+    class FlakyThread(FakeSdkThread):
+        def __init__(self, thread_id: str):
+            super().__init__(thread_id)
+            self.calls = 0
+
+        def turn(self, *args: Any, **kwargs: Any) -> Any:
+            self.calls += 1
+            self.prompts.append((args, kwargs))
+            if self.calls == 1:
+                class BadTurn:
+                    id = "turn-bad"
+
+                    async def run(self) -> dict[str, Any]:
+                        return {"final_response": "not json"}
+
+                return BadTurn()
+            return FakeSdkTurn()
+
+    class FlakySdk(FakeSdk):
+        def __init__(self):
+            super().__init__()
+            self.thread = FlakyThread("thread-flaky")
+
+        async def thread_start(self, **kwargs: Any) -> FlakyThread:
+            return self.thread
+
+    fake_sdk = FlakySdk()
+    events: list[dict[str, Any]] = []
+    client = CodexSdkClient(CodexConfig(), sdk_factory=lambda config: fake_sdk)
+
+    result = await client.run_session(tmp_path, "Do work", "MT-1: Build", on_event=events.append)
+
+    assert result.structured_result is not None
+    assert fake_sdk.thread.calls == 2
+    assert "previous response did not match" in fake_sdk.thread.prompts[1][0][0]
+    assert [event["event"] for event in events if event["event"] == "turn_retrying"]
+
+
+@pytest.mark.asyncio
 async def test_sdk_backend_emits_token_usage_from_result(tmp_path: Path) -> None:
     events: list[dict[str, Any]] = []
     client = CodexSdkClient(CodexConfig(), sdk_factory=lambda config: FakeSdk())

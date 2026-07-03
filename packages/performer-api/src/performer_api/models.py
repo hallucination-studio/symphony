@@ -5,6 +5,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
+from .labels import HUMAN_INTERVENTION_KIND_LABELS, HUMAN_INTERVENTION_LABELS, PHASE_LABELS
+
 
 def normalize_state_key(value: str) -> str:
     return value.strip().lower()
@@ -34,56 +36,6 @@ def utc_now() -> datetime:
 
 def monotonic_ms() -> int:
     return int(time.monotonic() * 1000)
-
-
-LIFECYCLE_LABEL_PREFIX = "performer:"
-LIFECYCLE_LABELS = {
-    "queued": f"{LIFECYCLE_LABEL_PREFIX}queued",
-    "starting": f"{LIFECYCLE_LABEL_PREFIX}starting",
-    "running": f"{LIFECYCLE_LABEL_PREFIX}running",
-    "error": f"{LIFECYCLE_LABEL_PREFIX}error",
-    "continuing": f"{LIFECYCLE_LABEL_PREFIX}continuing",
-    "retrying": f"{LIFECYCLE_LABEL_PREFIX}retrying",
-    "failed": f"{LIFECYCLE_LABEL_PREFIX}failed",
-    "done": f"{LIFECYCLE_LABEL_PREFIX}done",
-}
-PHASE_LABELS = {
-    "queued": "performer:phase/queued",
-    "dispatch_received": "performer:phase/queued",
-    "implementation_running": "performer:phase/implementation",
-    "implementation_done": "performer:phase/implementation",
-    "review_running": "performer:phase/review",
-    "completed": "performer:phase/done",
-    "failed": "performer:phase/failed",
-}
-DISPATCH_LABELS = {
-    "accepted": "performer:dispatch/accepted",
-    "skipped": "performer:dispatch/skipped",
-    "failed": "performer:dispatch/failed",
-}
-RETRY_LABELS = {
-    "pending": "performer:retry/pending",
-    "exhausted": "performer:retry/exhausted",
-}
-ERROR_LABELS = {
-    "human_blocked": "performer:error/human-blocked",
-}
-HUMAN_INTERVENTION_LABELS = {
-    "type": "performer:type/human-action",
-    "pending": "performer:human/pending",
-    "resolved": "performer:human/resolved",
-    "needs_input": "performer:human/needs-input",
-    "runtime_approval": "performer:human/runtime-approval",
-    "runtime_error": "performer:human/runtime-error",
-    "verification": "performer:human/verification",
-}
-HUMAN_INTERVENTION_KIND_LABELS = {
-    "preflight_needs_input": HUMAN_INTERVENTION_LABELS["needs_input"],
-    "codex_needs_input": HUMAN_INTERVENTION_LABELS["needs_input"],
-    "runtime_permission": HUMAN_INTERVENTION_LABELS["runtime_approval"],
-    "runtime_error": HUMAN_INTERVENTION_LABELS["runtime_error"],
-    "verification_needs_human": HUMAN_INTERVENTION_LABELS["verification"],
-}
 
 
 @dataclass(frozen=True)
@@ -193,10 +145,11 @@ class RunningEntry:
     worker_host: str | None = None
     last_codex_event: str | None = None
     last_codex_timestamp: datetime | None = None
+    turn_started_at: datetime | None = None
     last_codex_message: str | None = None
     last_raw_codex_message: str | None = None
     phase: str = "starting"
-    status_label: str = LIFECYCLE_LABELS["starting"]
+    status_label: str = PHASE_LABELS["implementation_running"]
     runtime_phase: str = "dispatch_received"
     workspace_path: str | None = None
     recent_events: list[dict[str, Any]] = field(default_factory=list)
@@ -217,7 +170,7 @@ class RetryEntry:
     error: str | None = None
     issue_url: str | None = None
     phase: str = "retrying"
-    status_label: str = LIFECYCLE_LABELS["retrying"]
+    status_label: str = PHASE_LABELS["implementation_running"]
     runtime_phase: str = "failed"
     last_message: str | None = None
     recent_events: list[dict[str, Any]] = field(default_factory=list)
@@ -232,7 +185,7 @@ class ContinuationEntry:
     due_at_ms: int
     issue_url: str | None = None
     phase: str = "continuing"
-    status_label: str = LIFECYCLE_LABELS["continuing"]
+    status_label: str = PHASE_LABELS["implementation_running"]
     runtime_phase: str = "implementation_done"
     last_message: str | None = None
     recent_events: list[dict[str, Any]] = field(default_factory=list)
@@ -247,7 +200,7 @@ class BlockedEntry:
     error: str
     issue_url: str | None = None
     phase: str = "error"
-    status_label: str = LIFECYCLE_LABELS["error"]
+    status_label: str = PHASE_LABELS["blocked"]
     runtime_phase: str = "failed"
     last_message: str | None = None
     recent_events: list[dict[str, Any]] = field(default_factory=list)
@@ -268,7 +221,7 @@ class HumanInterventionEntry:
     resume_strategy: str = "retry"
     issue_url: str | None = None
     phase: str = "human_pending"
-    status_label: str = HUMAN_INTERVENTION_LABELS["pending"]
+    status_label: str = PHASE_LABELS["blocked"]
     runtime_phase: str = "human_pending"
     last_message: str | None = None
     recent_events: list[dict[str, Any]] = field(default_factory=list)

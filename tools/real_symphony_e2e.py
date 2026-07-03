@@ -623,7 +623,7 @@ async def wait_for_run(
             evidence.check(
                 "runtime-error:blocked-visible",
                 blocked_entry.get("phase") == "error"
-                and blocked_entry.get("status_label") == "performer:error"
+                and blocked_entry.get("status_label") == "performer:phase/blocked"
                 and bool(blocked_entry.get("error")),
                 blocked=blocked_entry,
             )

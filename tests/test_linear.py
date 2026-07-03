@@ -863,7 +863,7 @@ async def test_set_issue_lifecycle_label_replaces_only_performer_labels() -> Non
             {
                 "data": {
                     "issueLabels": {
-                        "nodes": [{"id": "label-retrying", "name": "performer:retrying"}]
+                            "nodes": [{"id": "label-implementation", "name": "performer:phase/implementation"}]
                     }
                 }
             },
@@ -877,7 +877,7 @@ async def test_set_issue_lifecycle_label_replaces_only_performer_labels() -> Non
                             "labels": {
                                 "nodes": [
                                     {"id": "label-business", "name": "codex2"},
-                                    {"id": "label-retrying", "name": "performer:retrying"},
+                                        {"id": "label-implementation", "name": "performer:phase/implementation"},
                                 ]
                             },
                         },
@@ -889,27 +889,27 @@ async def test_set_issue_lifecycle_label_replaces_only_performer_labels() -> Non
     client = LinearClient("https://api.linear.app/graphql", "linear-token", transport=transport)
     tracker = LinearTracker(make_config(), client=client)
 
-    result = await tracker.set_issue_lifecycle_label("issue-1", "performer:retrying")
+    result = await tracker.set_issue_lifecycle_label("issue-1", "performer:phase/implementation")
 
     assert result == {
         "success": True,
         "issue_id": "issue-1",
         "identifier": "MT-1",
-        "label": "performer:retrying",
-        "label_ids": ["label-business", "label-retrying"],
+        "label": "performer:phase/implementation",
+        "label_ids": ["label-business", "label-implementation"],
     }
     assert "issue(id: $issueId)" in transport.requests[0]["json"]["query"]
     assert transport.requests[0]["json"]["variables"] == {"issueId": "issue-1"}
     assert "issueLabels" in transport.requests[1]["json"]["query"]
     assert transport.requests[1]["json"]["variables"] == {
-        "name": "performer:retrying",
+        "name": "performer:phase/implementation",
         "teamId": "team-1",
     }
     update_request = transport.requests[2]["json"]
     assert "issueUpdate" in update_request["query"]
     assert update_request["variables"] == {
         "issueId": "issue-1",
-        "labelIds": ["label-business", "label-retrying"],
+        "labelIds": ["label-business", "label-implementation"],
     }
 
 
@@ -927,7 +927,7 @@ async def test_set_issue_lifecycle_label_preserves_type_gate_and_score_labels() 
                             "nodes": [
                                 {"id": "label-task", "name": "performer:type/task"},
                                 {"id": "label-gate", "name": "performer:gate/pending"},
-                                {"id": "label-score", "name": "performer:score/3"},
+                                {"id": "label-score", "name": "performer:score/3/4"},
                                 {"id": "label-old", "name": "performer:running"},
                             ]
                         },
@@ -937,7 +937,7 @@ async def test_set_issue_lifecycle_label_preserves_type_gate_and_score_labels() 
             {
                 "data": {
                     "issueLabels": {
-                        "nodes": [{"id": "label-done", "name": "performer:done"}]
+                        "nodes": [{"id": "label-done", "name": "performer:phase/done"}]
                     }
                 }
             },
@@ -952,8 +952,8 @@ async def test_set_issue_lifecycle_label_preserves_type_gate_and_score_labels() 
                                 "nodes": [
                                     {"id": "label-task", "name": "performer:type/task"},
                                     {"id": "label-gate", "name": "performer:gate/pending"},
-                                    {"id": "label-score", "name": "performer:score/3"},
-                                    {"id": "label-done", "name": "performer:done"},
+                                    {"id": "label-score", "name": "performer:score/3/4"},
+                                        {"id": "label-done", "name": "performer:phase/done"},
                                 ]
                             },
                         },
@@ -964,13 +964,13 @@ async def test_set_issue_lifecycle_label_preserves_type_gate_and_score_labels() 
     )
     client = LinearClient("https://api.linear.app/graphql", "linear-token", transport=transport)
 
-    result = await client.set_issue_lifecycle_label("issue-1", "performer:done")
+    result = await client.set_issue_lifecycle_label("issue-1", "performer:phase/done")
 
-    assert result["label_ids"] == ["label-task", "label-gate", "label-score", "label-done"]
+    assert result["label_ids"] == ["label-gate", "label-score", "label-done"]
     update_request = transport.requests[2]["json"]
     assert update_request["variables"] == {
         "issueId": "issue-1",
-        "labelIds": ["label-task", "label-gate", "label-score", "label-done"],
+        "labelIds": ["label-gate", "label-score", "label-done"],
     }
 
 
@@ -989,7 +989,7 @@ async def test_set_issue_label_group_replaces_only_matching_prefix() -> None:
                                 {"id": "label-business", "name": "codex2"},
                                 {"id": "label-done", "name": "performer:done"},
                                 {"id": "label-old-gate", "name": "performer:gate/pending"},
-                                {"id": "label-score", "name": "performer:score/3"},
+                                {"id": "label-score", "name": "performer:score/3/4"},
                             ]
                         },
                     }
@@ -1013,7 +1013,7 @@ async def test_set_issue_label_group_replaces_only_matching_prefix() -> None:
                                 "nodes": [
                                     {"id": "label-business", "name": "codex2"},
                                     {"id": "label-done", "name": "performer:done"},
-                                    {"id": "label-score", "name": "performer:score/3"},
+                                    {"id": "label-score", "name": "performer:score/3/4"},
                                     {"id": "label-passed", "name": "performer:gate/passed"},
                                 ]
                             },
@@ -1069,7 +1069,7 @@ async def test_set_issue_lifecycle_label_creates_missing_label_for_issue_team() 
                             "labels": {
                                 "nodes": [
                                     {"id": "label-business", "name": "codex"},
-                                    {"id": "label-starting", "name": "performer:starting"},
+                                    {"id": "label-starting", "name": "performer:phase/implementation"},
                                 ]
                             },
                         },
@@ -1080,12 +1080,12 @@ async def test_set_issue_lifecycle_label_creates_missing_label_for_issue_team() 
     )
     client = LinearClient("https://api.linear.app/graphql", "linear-token", transport=transport)
 
-    result = await client.set_issue_lifecycle_label("issue-1", "performer:starting")
+    result = await client.set_issue_lifecycle_label("issue-1", "performer:phase/implementation")
 
     assert result["label_ids"] == ["label-business", "label-starting"]
     create_request = transport.requests[2]["json"]
     assert "issueLabelCreate" in create_request["query"]
-    assert create_request["variables"] == {"name": "performer:starting", "teamId": "team-1"}
+    assert create_request["variables"] == {"name": "performer:phase/implementation", "teamId": "team-1"}
 
 
 @pytest.mark.asyncio

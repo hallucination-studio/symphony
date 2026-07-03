@@ -131,7 +131,7 @@ For orchestration, acceptance, Linear, Conductor, Codex, retry, or continuation 
 
 For Podium onboarding, Podium Web, runtime enrollment, installed Conductor behavior, Podium dispatch routing, or Linear delegated work, use the `Podium Web To Linear Acceptance` scenario in `docs/real-run-testing-guide.md`. That file is the canonical test procedure for the browser -> Podium -> install command -> local Conductor -> Linear issue -> Performer -> Podium run-completion path; keep new lessons and required checks there rather than duplicating the full flow in this file.
 
-Human intervention must use Linear child issues. When Performer needs input, runtime approval, failure review, or verifier judgment, it must create a `[Human Action]` child issue with `performer:type/human-action` and the relevant `performer:human/*` labels. A real acceptance run is only valid if the human completes that child issue and moves it to `Done`; parent issue comments or command-like comments are informational only and must not resume Performer.
+Human intervention must use Linear child issues. When Performer needs input, runtime approval, failure review, or verifier judgment, it must create a `[Human Action]` child issue with `performer:type/human-action` and mark the parent `performer:phase/blocked`. The specific reason belongs in the child issue title/description and runtime ops evidence, not in additional Linear reason labels. A real acceptance run is only valid if the human completes that child issue and moves it to `Done`; parent issue comments or command-like comments are informational only and must not resume Performer.
 
 This follows the Superpowers verification rule: evidence before claims, always.
 
@@ -321,9 +321,10 @@ Use these meanings:
 
 Expected continuation evidence:
 
-- `performer:continuing` label;
 - persisted `continuations`;
 - snapshot `continuing`;
+- ops/runtime trace showing continuation scheduling;
+- Linear parent phase remains an active phase such as `performer:phase/implementation`;
 - no `retry_attempts` row with `error: null`;
 - not counted as a retry/failure.
 

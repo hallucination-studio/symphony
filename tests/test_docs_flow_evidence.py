@@ -922,7 +922,7 @@ async def test_flow_009_normal_exit_schedules_short_continuation(tmp_path: Path)
 
     assert continuation is not None
     assert continuation.attempt == 1
-    assert continuation.status_label == "performer:continuing"
+    assert continuation.status_label == "performer:phase/implementation"
     assert "eng-9" not in orchestrator.state.retry_attempts
     assert "eng-9" in orchestrator.state.claimed
     assert bundle["final_state"]["continuing"] is True

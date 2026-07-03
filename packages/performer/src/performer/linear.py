@@ -6,7 +6,8 @@ from typing import Any
 import httpx
 
 from performer_api.config import TrackerConfig
-from performer_api.models import LIFECYCLE_LABELS, BlockerRef, Issue
+from performer_api.labels import LEGACY_LABEL_PREFIXES, LEGACY_LABELS
+from performer_api.models import BlockerRef, Issue
 
 
 class LinearError(Exception):
@@ -684,11 +685,13 @@ class LinearClient:
     async def set_issue_lifecycle_label(self, issue_id: str, label_name: str) -> dict[str, Any]:
         context = await self._fetch_issue_label_context(issue_id)
         target = await self._ensure_issue_label(context["team_id"], label_name)
-        lifecycle_labels = {label.lower() for label in LIFECYCLE_LABELS.values()}
+        legacy_prefixes = tuple(prefix.lower() for prefix in LEGACY_LABEL_PREFIXES)
+        legacy_labels = {label.lower() for label in LEGACY_LABELS}
         preserved = [
             label
             for label in context["labels"]
-            if str(label.get("name") or "").lower() not in lifecycle_labels
+            if str(label.get("name") or "").lower() not in legacy_labels
+            and not str(label.get("name") or "").lower().startswith(legacy_prefixes)
         ]
         label_ids = [label["id"] for label in preserved if label.get("id")]
         if target["id"] not in label_ids:

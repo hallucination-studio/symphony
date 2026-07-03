@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .labels import GATE_LABELS, PHASE_LABELS, SCORE_LABEL_PREFIX, TYPE_LABELS
 from .models import normalize_state_key
 from .workflow import WorkflowDefinition
 
@@ -70,6 +71,7 @@ class CodexConfig:
     thread_sandbox: Any = None
     turn_sandbox_policy: Any = None
     turn_timeout_ms: int = 3_600_000
+    hard_turn_timeout_ms: int = 3_600_000
     read_timeout_ms: int = 5_000
     stall_timeout_ms: int = 300_000
 
@@ -125,28 +127,28 @@ class AcceptanceConfig:
     minimum_score: int = 3
     require_findings_for_score_3: bool = True
     auto_retry_on_fail: bool = True
-    task_type_label: str = "performer:type/task"
-    acceptance_type_label: str = "performer:type/acceptance"
-    gate_type_label: str = "performer:type/gate"
-    evidence_type_label: str = "performer:type/evidence"
-    needs_more_info_label: str = "performer:needs-more-info"
+    task_type_label: str = ""
+    acceptance_type_label: str = ""
+    gate_type_label: str = TYPE_LABELS["gate"]
+    evidence_type_label: str = TYPE_LABELS["evidence"]
+    needs_more_info_label: str = PHASE_LABELS["blocked"]
     todo_state: str = "Todo"
     implementation_state: str = "In Progress"
     review_state: str = "In Review"
     done_state: str = "Done"
-    planned_phase_label: str = "performer:phase/planned"
-    implementation_phase_label: str = "performer:phase/implementation"
-    review_phase_label: str = "performer:phase/review"
-    rework_phase_label: str = "performer:phase/rework"
+    planned_phase_label: str = PHASE_LABELS["queued"]
+    implementation_phase_label: str = PHASE_LABELS["implementation_running"]
+    review_phase_label: str = PHASE_LABELS["review_running"]
+    rework_phase_label: str = PHASE_LABELS["rework"]
     marker_name: str = "PERFORMER ACCEPTANCE"
     plan_revision: int = 1
     gate_planner_mode: str = "strict"
     direct_done_bypass_policy: str = "review_with_evidence"
-    gate_pending_label: str = "performer:gate/pending"
-    gate_passed_label: str = "performer:gate/passed"
-    gate_pass_with_findings_label: str = "performer:gate/pass-with-findings"
-    gate_failed_label: str = "performer:gate/failed"
-    score_label_prefix: str = "performer:score/"
+    gate_pending_label: str = GATE_LABELS["pending"]
+    gate_passed_label: str = GATE_LABELS["passed"]
+    gate_pass_with_findings_label: str = GATE_LABELS["pass_with_findings"]
+    gate_failed_label: str = GATE_LABELS["failed"]
+    score_label_prefix: str = SCORE_LABEL_PREFIX
 
 
 @dataclass(frozen=True)
@@ -404,6 +406,7 @@ def _codex_config(raw: dict[str, Any]) -> CodexConfig:
         thread_sandbox=raw.get("thread_sandbox"),
         turn_sandbox_policy=raw.get("turn_sandbox_policy"),
         turn_timeout_ms=_int(raw.get("turn_timeout_ms"), 3_600_000),
+        hard_turn_timeout_ms=_int(raw.get("hard_turn_timeout_ms"), _int(raw.get("turn_timeout_ms"), 3_600_000)),
         read_timeout_ms=_int(raw.get("read_timeout_ms"), 5_000, positive=True),
         stall_timeout_ms=_int(raw.get("stall_timeout_ms"), 300_000),
     )

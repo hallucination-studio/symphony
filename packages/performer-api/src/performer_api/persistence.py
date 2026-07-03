@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .labels import PHASE_LABELS
 from .models import (
     BlockedEntry,
     ContinuationEntry,
@@ -43,7 +44,7 @@ class PersistedSession:
     last_message: str | None = None
     last_raw_message: str | None = None
     phase: str = "running"
-    status_label: str = "performer:running"
+    status_label: str = PHASE_LABELS["implementation_running"]
     runtime_phase: str = "implementation_running"
     workspace_path: str | None = None
     recent_events: list[dict[str, Any]] = field(default_factory=list)
@@ -241,7 +242,7 @@ def _retry_from_json(payload: dict[str, Any]) -> RetryEntry | None:
         phase=payload.get("phase") if isinstance(payload.get("phase"), str) else "retrying",
         status_label=payload.get("status_label")
         if isinstance(payload.get("status_label"), str)
-        else "performer:retrying",
+        else PHASE_LABELS["implementation_running"],
         runtime_phase=payload.get("runtime_phase") if isinstance(payload.get("runtime_phase"), str) else "failed",
         last_message=payload.get("last_message") if isinstance(payload.get("last_message"), str) else None,
         recent_events=_list_of_dicts(payload.get("recent_events")),
@@ -281,7 +282,7 @@ def _continuation_from_json(payload: dict[str, Any]) -> ContinuationEntry | None
         due_at_ms=monotonic_ms() + delay_ms,
         issue_url=payload.get("issue_url") if isinstance(payload.get("issue_url"), str) else None,
         phase="continuing",
-        status_label="performer:continuing",
+        status_label=PHASE_LABELS["implementation_running"],
         runtime_phase=payload.get("runtime_phase")
         if isinstance(payload.get("runtime_phase"), str)
         else "implementation_done",
@@ -329,7 +330,7 @@ def _blocked_from_json(payload: dict[str, Any]) -> BlockedEntry | None:
         error=error,
         issue_url=payload.get("issue_url") if isinstance(payload.get("issue_url"), str) else None,
         phase=payload.get("phase") if isinstance(payload.get("phase"), str) else "error",
-        status_label=payload.get("status_label") if isinstance(payload.get("status_label"), str) else "performer:error",
+        status_label=payload.get("status_label") if isinstance(payload.get("status_label"), str) else PHASE_LABELS["blocked"],
         runtime_phase=payload.get("runtime_phase") if isinstance(payload.get("runtime_phase"), str) else "failed",
         last_message=payload.get("last_message") if isinstance(payload.get("last_message"), str) else None,
         recent_events=_list_of_dicts(payload.get("recent_events")),
@@ -391,7 +392,7 @@ def _human_intervention_from_json(payload: dict[str, Any]) -> HumanInterventionE
         phase=payload.get("phase") if isinstance(payload.get("phase"), str) else "human_pending",
         status_label=payload.get("status_label")
         if isinstance(payload.get("status_label"), str)
-        else "performer:human/pending",
+        else PHASE_LABELS["blocked"],
         runtime_phase=payload.get("runtime_phase") if isinstance(payload.get("runtime_phase"), str) else "human_pending",
         last_message=payload.get("last_message") if isinstance(payload.get("last_message"), str) else None,
         recent_events=_list_of_dicts(payload.get("recent_events")),
@@ -465,7 +466,7 @@ def _session_from_json(payload: dict[str, Any]) -> PersistedSession | None:
         phase=payload.get("phase") if isinstance(payload.get("phase"), str) else "running",
         status_label=payload.get("status_label")
         if isinstance(payload.get("status_label"), str)
-        else "performer:running",
+        else PHASE_LABELS["implementation_running"],
         runtime_phase=payload.get("runtime_phase")
         if isinstance(payload.get("runtime_phase"), str)
         else _runtime_phase_from_legacy_session_phase(payload.get("phase")),

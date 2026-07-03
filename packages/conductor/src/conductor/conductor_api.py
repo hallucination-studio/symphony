@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import dataclass
+import random
 from typing import Any
 from urllib.parse import parse_qs
 
@@ -59,26 +60,42 @@ class ConductorApiServer:
         self._server = None
 
     async def _poll_podium_dispatches(self) -> None:
+        delay = 1.0
         while True:
             try:
-                await self.service.poll_podium_dispatch_once()
+                result = await self.service.poll_podium_dispatch_once()
+                if result.get("reason") == "runtime_unauthorized":
+                    self.service.update_podium_connection("poll", status="unauthorized", error="runtime_unauthorized")
+                    await asyncio.sleep(60)
+                    continue
+                self.service.update_podium_connection("poll", status="connected", error=None)
                 await self.service.coordinate_background_once()
                 self._report_tick += 1
                 if self._report_tick >= 10:
                     self._report_tick = 0
                     await self.service.post_podium_report()
-            except Exception:
-                pass
-            await asyncio.sleep(1)
+                delay = 1.0
+            except Exception as exc:
+                self.service.update_podium_connection("poll", status="error", error=str(exc))
+                delay = min(max(delay * 2, 5), 60)
+            await asyncio.sleep(_jitter(delay))
 
     async def _run_podium_ws(self) -> None:
         client = PodiumRuntimeClient(self.service)
+        delay = 5.0
         while True:
             try:
-                await client.run_ws_once()
-            except Exception:
-                pass
-            await asyncio.sleep(5)
+                result = await client.run_ws_once()
+                if result.get("reason") == "runtime_unauthorized":
+                    self.service.update_podium_connection("ws", status="unauthorized", error="runtime_unauthorized")
+                    return
+                status = "connected" if result.get("status") == "ok" else str(result.get("status") or "idle")
+                self.service.update_podium_connection("ws", status=status, error=None)
+                delay = 5.0
+            except Exception as exc:
+                self.service.update_podium_connection("ws", status="error", error=str(exc))
+                delay = min(max(delay * 2, 5), 60)
+            await asyncio.sleep(_jitter(delay))
 
     async def _handle_connection(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
@@ -280,6 +297,10 @@ def _int(value: Any, default: int) -> int:
     if isinstance(value, int) and not isinstance(value, bool):
         return value
     return default
+
+
+def _jitter(seconds: float) -> float:
+    return seconds + random.uniform(0, min(seconds * 0.1, 3.0))
 
 
 def _optional_int(value: Any, default: int | None) -> int | None:

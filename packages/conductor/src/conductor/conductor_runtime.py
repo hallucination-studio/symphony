@@ -20,6 +20,7 @@ class RuntimeHandle:
     process: Any
     log_task: asyncio.Task[None]
     process_status: str
+    recovered: bool = False
 
 
 class RecoveredProcess:
@@ -171,11 +172,12 @@ class ConductorRuntimeManager:
         if instance.pid is None or not _pid_alive(instance.pid):
             return None
         if instance.id not in self._handles:
-            log_task = asyncio.create_task(_noop_log_task())
+            log_task = asyncio.create_task(self._follow_recovered_process(instance.pid))
             self._handles[instance.id] = RuntimeHandle(
                 process=RecoveredProcess(instance.pid),
                 log_task=log_task,
                 process_status="running",
+                recovered=True,
             )
         return instance.with_updates(process_status="running", pid=instance.pid)
 
@@ -202,6 +204,10 @@ class ConductorRuntimeManager:
         lines = raw.decode("utf-8", errors="replace").splitlines()
         if order == "desc":
             lines = list(reversed(lines))
+        warnings = []
+        handle = self._handles.get(instance.id)
+        if handle is not None and handle.recovered:
+            warnings.append("stdout/stderr pipes could not be reattached after Conductor restart; showing persisted log file only")
         return LogQueryResult(
             instance_id=instance.id,
             generation=generation,
@@ -210,8 +216,12 @@ class ConductorRuntimeManager:
             lines=lines,
             offset_start=offset_start,
             offset_end=offset_end,
-            warnings=[],
+            warnings=warnings,
         )
+
+    async def _follow_recovered_process(self, pid: int) -> None:
+        process = RecoveredProcess(pid)
+        await process.wait()
 
     async def _capture_logs(self, process: Any, log_path: Path) -> None:
         await asyncio.gather(
