@@ -1157,6 +1157,7 @@ class ManagedPodiumState:
                 "retries": int(instance_metrics.get("retries") or 0),
                 "continuations": int(instance_metrics.get("continuations") or 0),
                 "blocked": int(instance_metrics.get("blocked") or 0),
+                "pending_human": int(instance_metrics.get("pending_human") or 0),
                 "failures": int(instance_metrics.get("failures") or 0),
                 "queue_depth": queue_depth,
                 "running": bool(instance_queue.get("running") or binding["process_status"] == "running"),

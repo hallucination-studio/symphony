@@ -29,7 +29,7 @@ from performer_api.ops_projection import build_issue_detail, build_issue_list, b
 from performer_api.ops_retention import RetentionPolicy
 from performer_api.ops_store import OpsStore
 from performer_api.persistence import PersistenceStore, PersistedSession, PersistedState
-from performer_api.models import LIFECYCLE_LABELS, RetryEntry, monotonic_ms, utc_now
+from performer_api.models import utc_now
 
 
 WORKSPACE_INIT_EXCLUDES = {
@@ -496,6 +496,7 @@ class ConductorService:
                 "retries": int((performer.get("counts") or {}).get("retrying") or 0),
                 "continuations": int((performer.get("counts") or {}).get("continuing") or 0),
                 "blocked": int((performer.get("counts") or {}).get("blocked") or 0),
+                "pending_human": int((performer.get("counts") or {}).get("pending_human") or 0),
                 "failures": int(totals.get("failures") or 0),
             }
             queue[instance.id] = {
@@ -900,7 +901,12 @@ class ConductorService:
         if refreshed.last_exit_code not in {0, None}:
             return None
         persisted = PersistenceStore(Path(refreshed.persistence_path)).load()
-        if not (persisted.retry_attempts or persisted.continuations or persisted.blocked):
+        if not (
+            persisted.retry_attempts
+            or persisted.continuations
+            or persisted.blocked
+            or persisted.human_interventions
+        ):
             return None
         issue_id = _first_pending_performer_issue_id(persisted)
         return await self.runtime_manager.start(
@@ -969,6 +975,7 @@ class ConductorService:
         retry_count = 0
         continuation_count = 0
         blocked_count = 0
+        pending_human_count = 0
         persisted_failures = 0
         for instance in instances:
             process_statuses[instance.process_status] = process_statuses.get(instance.process_status, 0) + 1
@@ -986,6 +993,7 @@ class ConductorService:
             retry_count += len(persisted.retry_attempts)
             continuation_count += len(persisted.continuations)
             blocked_count += len(persisted.blocked)
+            pending_human_count += len(persisted.human_interventions)
             persisted_failures += sum(1 for retry in persisted.retry_attempts if retry.error)
             now = datetime.now(timezone.utc)
             for session in persisted.sessions:
@@ -1008,6 +1016,7 @@ class ConductorService:
                 "retries": retry_count,
                 "continuations": continuation_count,
                 "blocked": blocked_count,
+                "pending_human": pending_human_count,
             },
         }
 
@@ -1229,55 +1238,11 @@ class ConductorService:
         return restarted
 
     async def approve_runtime_error(self, instance_id: str, *, issue_id: str | None = None) -> dict[str, Any]:
-        current = self._require_instance(instance_id)
-        store = PersistenceStore(Path(current.persistence_path))
-        persisted = store.load()
-        if issue_id:
-            selected = [
-                entry
-                for entry in persisted.blocked
-                if entry.issue_id == issue_id or entry.identifier.lower() == issue_id.lower()
-            ]
-        else:
-            selected = list(persisted.blocked[:1])
-        if not selected:
-            raise ConductorServiceError("blocked_runtime_not_found", "No blocked runtime error matched the request")
-        approved = selected[0]
-        remaining_blocked = [entry for entry in persisted.blocked if entry.issue_id != approved.issue_id]
-        retry = RetryEntry(
-            issue_id=approved.issue_id,
-            identifier=approved.identifier,
-            attempt=approved.attempt,
-            due_at=utc_now(),
-            due_at_ms=monotonic_ms(),
-            error=f"human_approved_runtime_error: {approved.error}",
-            issue_url=approved.issue_url,
-            phase="retrying",
-            status_label=LIFECYCLE_LABELS["retrying"],
-            last_message=approved.last_message or approved.error,
-            recent_events=list(approved.recent_events),
+        _ = self._require_instance(instance_id), issue_id
+        raise ConductorServiceError(
+            "runtime_error_approval_removed",
+            "Runtime approvals must be completed through the Linear [Human Action] child issue.",
         )
-        store.save(
-            PersistedState(
-                retry_attempts=[*persisted.retry_attempts, retry],
-                continuations=list(persisted.continuations),
-                blocked=remaining_blocked,
-                sessions=list(persisted.sessions),
-            )
-        )
-        instance = current
-        if current.process_status in {"starting", "running", "unhealthy", "crash_loop"}:
-            instance = await self.runtime_manager.restart(current, env=self._runtime_env())
-            self.store.update_instance(instance)
-        return {
-            "approved": {
-                "issue_id": approved.issue_id,
-                "issue_identifier": approved.identifier,
-                "attempt": approved.attempt,
-                "error": approved.error,
-            },
-            "instance": instance.to_dict(include_workflow_content=False),
-        }
 
     def instance_runtime(self, instance_id: str) -> dict[str, object]:
         current = self._require_instance(instance_id)
@@ -1479,6 +1444,7 @@ class ConductorService:
         retrying = [_persisted_retry_row(entry) for entry in persisted.retry_attempts]
         continuing = [_persisted_continuation_row(entry) for entry in persisted.continuations]
         blocked = [_persisted_blocked_row(entry) for entry in persisted.blocked]
+        human_interventions = [_persisted_human_intervention_row(entry) for entry in persisted.human_interventions]
         return {
             "source": "persistence",
             "persistence_path": instance.persistence_path,
@@ -1487,12 +1453,14 @@ class ConductorService:
                 "retrying": len(retrying),
                 "continuing": len(continuing),
                 "blocked": len(blocked),
+                "pending_human": len(human_interventions),
             },
             "running": running,
             "retrying": retrying,
             "continuing": continuing,
             "blocked": blocked,
-            "issues": running + retrying + continuing + blocked,
+            "human_interventions": human_interventions,
+            "issues": running + retrying + continuing + blocked + human_interventions,
         }
 
     def _ops_snapshots(self) -> list[tuple[InstanceRecord, OpsSnapshot]]:
@@ -1638,11 +1606,35 @@ def _persisted_blocked_row(entry) -> dict[str, Any]:
     }
 
 
+def _persisted_human_intervention_row(entry) -> dict[str, Any]:
+    return {
+        "issue_id": entry.issue_id,
+        "issue_identifier": entry.identifier,
+        "issue_url": entry.issue_url,
+        "attempt": entry.attempt,
+        "created_at": entry.created_at.isoformat().replace("+00:00", "Z"),
+        "kind": entry.kind,
+        "error": entry.error,
+        "last_message": entry.last_message,
+        "phase": entry.phase,
+        "status_label": entry.status_label,
+        "child_issue_id": entry.child_issue_id,
+        "child_identifier": entry.child_identifier,
+        "child_url": entry.child_url,
+        "questions": entry.questions,
+        "resume_strategy": entry.resume_strategy,
+        "recent_events": entry.recent_events,
+    }
+
+
 def _runtime_metrics(performer: dict[str, Any]) -> dict[str, Any]:
     running = performer.get("running") if isinstance(performer.get("running"), list) else []
     retrying = performer.get("retrying") if isinstance(performer.get("retrying"), list) else []
     continuing = performer.get("continuing") if isinstance(performer.get("continuing"), list) else []
     blocked = performer.get("blocked") if isinstance(performer.get("blocked"), list) else []
+    human_interventions = (
+        performer.get("human_interventions") if isinstance(performer.get("human_interventions"), list) else []
+    )
     tokens = {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0, "total_tokens": 0}
     turns = 0
     for row in running:
@@ -1661,6 +1653,7 @@ def _runtime_metrics(performer: dict[str, Any]) -> dict[str, Any]:
         "retrying": len(retrying),
         "continuing": len(continuing),
         "blocked": len(blocked),
+        "pending_human": len(human_interventions),
     }
 
 

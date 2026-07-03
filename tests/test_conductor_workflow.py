@@ -71,8 +71,11 @@ def test_generate_workflow_content_injects_managed_runtime_resources(tmp_path: P
     assert "Work only in the prepared workspace root." in content
     assert "Acceptance gates are disabled for this managed profile." in content
     assert "Performer will create Linear handoff comments" in content
-    assert "/symphony approve-runtime-error {{ issue.identifier }}" in content
-    assert "records a runtime permission or sandbox error" in content
+    assert "[Human Action]" in content
+    assert "move that child issue to Done" in content
+    assert "Parent issue comments are informational only" in content
+    assert "/symphony approve-runtime-error" not in content
+    assert "runtime permission, sandbox error, or other failure needing judgment" in content
     assert "backend: sdk" in content
     assert "linear_tool_mode: disabled" in content
     assert "Return the required structured result" in content

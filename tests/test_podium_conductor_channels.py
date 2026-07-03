@@ -103,6 +103,7 @@ async def test_runtime_report_upserts_conductor_bindings_metrics_and_log_tail() 
                         "retries": 1,
                         "continuations": 2,
                         "blocked": 3,
+                        "pending_human": 4,
                         "failures": 4,
                     }
                 },
@@ -128,6 +129,7 @@ async def test_runtime_report_upserts_conductor_bindings_metrics_and_log_tail() 
     assert conductor["online"] is False
     assert [binding["project_slug"] for binding in conductor["bindings"]] == ["ALPHA", "BETA"]
     assert conductor["bindings"][0]["metrics"]["tokens"] == 10
+    assert conductor["bindings"][0]["metrics"]["pending_human"] == 4
     assert conductor["bindings"][0]["queue"]["queue_depth"] == 6
     assert conductor["bindings"][0]["constraint_labels"] == [
         "symphony:performer/Alpha",

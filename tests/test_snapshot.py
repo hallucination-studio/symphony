@@ -14,7 +14,16 @@ from performer_api.config import (
     PersistenceConfig,
     WorkspaceConfig,
 )
-from performer_api.models import BlockedEntry, ContinuationEntry, Issue, RetryEntry, RunningEntry, RuntimeTokens, utc_now
+from performer_api.models import (
+    BlockedEntry,
+    ContinuationEntry,
+    HumanInterventionEntry,
+    Issue,
+    RetryEntry,
+    RunningEntry,
+    RuntimeTokens,
+    utc_now,
+)
 from performer.orchestrator import OrchestratorState
 from performer.snapshot import build_runtime_snapshot, build_issue_snapshot
 
@@ -132,7 +141,13 @@ def test_runtime_snapshot_includes_running_retry_totals_and_rate_limits(tmp_path
 
     snapshot = build_runtime_snapshot(make_config(tmp_path), state)
 
-    assert snapshot["counts"] == {"running": 1, "retrying": 1, "continuing": 1, "blocked": 0}
+    assert snapshot["counts"] == {
+        "running": 1,
+        "retrying": 1,
+        "continuing": 1,
+        "blocked": 0,
+        "pending_human": 0,
+    }
     assert snapshot["running"][0]["issue_id"] == "issue-1"
     assert snapshot["running"][0]["issue_identifier"] == "MT-1"
     assert snapshot["running"][0]["issue_url"] == "https://linear.app/x/issue/MT-1"
@@ -172,6 +187,45 @@ def test_runtime_snapshot_includes_running_retry_totals_and_rate_limits(tmp_path
     assert snapshot["codex_totals"]["total_tokens"] == 700
     assert snapshot["codex_totals"]["seconds_running"] >= 24
     assert snapshot["rate_limits"] == {"primary": {"remaining": 10}}
+
+
+def test_runtime_snapshot_includes_pending_human_interventions(tmp_path: Path) -> None:
+    state = OrchestratorState(
+        human_interventions={
+            "issue-1": HumanInterventionEntry(
+                issue_id="issue-1",
+                identifier="MT-1",
+                child_issue_id="issue-1h",
+                child_identifier="MT-H1",
+                child_url="https://linear.app/x/issue/MT-H1",
+                kind="runtime_permission",
+                attempt=1,
+                created_at=utc_now(),
+                error="runtime_permission_blocked: approval required",
+                questions=[],
+                resume_strategy="retry",
+                issue_url="https://linear.app/x/issue/MT-1",
+                last_message="approval required",
+            )
+        }
+    )
+
+    snapshot = build_runtime_snapshot(make_config(tmp_path), state)
+    detail = build_issue_snapshot(make_config(tmp_path), state, "MT-1")
+
+    assert snapshot["counts"] == {
+        "running": 0,
+        "retrying": 0,
+        "continuing": 0,
+        "blocked": 0,
+        "pending_human": 1,
+    }
+    assert snapshot["human_interventions"][0]["child_url"] == "https://linear.app/x/issue/MT-H1"
+    assert snapshot["issues"][0]["kind"] == "runtime_permission"
+    assert detail is not None
+    assert detail["status"] == "pending_human"
+    assert detail["human_intervention"]["child_identifier"] == "MT-H1"
+    assert detail["last_error"] is None
 
 
 def test_runtime_snapshot_includes_observability_and_persistence_config(tmp_path: Path) -> None:

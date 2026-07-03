@@ -3,7 +3,16 @@ from __future__ import annotations
 from datetime import timedelta
 from pathlib import Path
 
-from performer_api.models import BlockedEntry, ContinuationEntry, Issue, RetryEntry, RunningEntry, RuntimeTokens, utc_now
+from performer_api.models import (
+    BlockedEntry,
+    ContinuationEntry,
+    HumanInterventionEntry,
+    Issue,
+    RetryEntry,
+    RunningEntry,
+    RuntimeTokens,
+    utc_now,
+)
 from performer_api.persistence import CodexThreadEntry, PersistenceStore, PersistedSession, PersistedState
 
 
@@ -43,6 +52,23 @@ def test_persistence_store_round_trips_retry_entries_and_sessions(tmp_path: Path
                 blocked_at=due_at,
                 error="runtime_permission_blocked: writing outside of the project",
                 issue_url="https://linear.app/x/issue/MT-4",
+                last_message="writing outside of the project",
+            )
+        ],
+        human_interventions=[
+            HumanInterventionEntry(
+                issue_id="issue-5",
+                identifier="MT-5",
+                child_issue_id="issue-5h",
+                child_identifier="MT-H1",
+                child_url="https://linear.app/x/issue/MT-H1",
+                kind="runtime_permission",
+                attempt=2,
+                created_at=due_at,
+                error="runtime_permission_blocked: writing outside of the project",
+                questions=["Approve the runtime action?"],
+                resume_strategy="retry",
+                issue_url="https://linear.app/x/issue/MT-5",
                 last_message="writing outside of the project",
             )
         ],
@@ -114,6 +140,18 @@ def test_persistence_store_round_trips_retry_entries_and_sessions(tmp_path: Path
     assert loaded.blocked[0].status_label == "performer:error"
     assert loaded.blocked[0].runtime_phase == "failed"
     assert loaded.blocked[0].error == "runtime_permission_blocked: writing outside of the project"
+    assert loaded.human_interventions[0].issue_id == "issue-5"
+    assert loaded.human_interventions[0].identifier == "MT-5"
+    assert loaded.human_interventions[0].child_issue_id == "issue-5h"
+    assert loaded.human_interventions[0].child_identifier == "MT-H1"
+    assert loaded.human_interventions[0].child_url == "https://linear.app/x/issue/MT-H1"
+    assert loaded.human_interventions[0].kind == "runtime_permission"
+    assert loaded.human_interventions[0].attempt == 2
+    assert loaded.human_interventions[0].created_at == due_at
+    assert loaded.human_interventions[0].error == "runtime_permission_blocked: writing outside of the project"
+    assert loaded.human_interventions[0].questions == ["Approve the runtime action?"]
+    assert loaded.human_interventions[0].resume_strategy == "retry"
+    assert loaded.human_interventions[0].status_label == "performer:human/pending"
     assert loaded.sessions[0].issue_id == "issue-2"
     assert loaded.sessions[0].session_id == "thread-turn"
     assert loaded.sessions[0].worker_host == "builder-1"

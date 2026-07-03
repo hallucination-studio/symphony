@@ -68,6 +68,22 @@ RETRY_LABELS = {
 ERROR_LABELS = {
     "human_blocked": "performer:error/human-blocked",
 }
+HUMAN_INTERVENTION_LABELS = {
+    "type": "performer:type/human-action",
+    "pending": "performer:human/pending",
+    "resolved": "performer:human/resolved",
+    "needs_input": "performer:human/needs-input",
+    "runtime_approval": "performer:human/runtime-approval",
+    "runtime_error": "performer:human/runtime-error",
+    "verification": "performer:human/verification",
+}
+HUMAN_INTERVENTION_KIND_LABELS = {
+    "preflight_needs_input": HUMAN_INTERVENTION_LABELS["needs_input"],
+    "codex_needs_input": HUMAN_INTERVENTION_LABELS["needs_input"],
+    "runtime_permission": HUMAN_INTERVENTION_LABELS["runtime_approval"],
+    "runtime_error": HUMAN_INTERVENTION_LABELS["runtime_error"],
+    "verification_needs_human": HUMAN_INTERVENTION_LABELS["verification"],
+}
 
 
 @dataclass(frozen=True)
@@ -233,6 +249,27 @@ class BlockedEntry:
     phase: str = "error"
     status_label: str = LIFECYCLE_LABELS["error"]
     runtime_phase: str = "failed"
+    last_message: str | None = None
+    recent_events: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass
+class HumanInterventionEntry:
+    issue_id: str
+    identifier: str
+    child_issue_id: str
+    child_identifier: str | None
+    child_url: str | None
+    kind: str
+    attempt: int
+    created_at: datetime
+    error: str | None = None
+    questions: list[str] = field(default_factory=list)
+    resume_strategy: str = "retry"
+    issue_url: str | None = None
+    phase: str = "human_pending"
+    status_label: str = HUMAN_INTERVENTION_LABELS["pending"]
+    runtime_phase: str = "human_pending"
     last_message: str | None = None
     recent_events: list[dict[str, Any]] = field(default_factory=list)
 

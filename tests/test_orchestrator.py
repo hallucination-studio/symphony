@@ -108,6 +108,7 @@ class FakeTracker:
         title: str,
         description: str,
         parent_id: str | None = None,
+        assignee_id: str | None = None,
         delegate_id: str | None = None,
     ) -> dict[str, Any]:
         created = {
@@ -120,6 +121,7 @@ class FakeTracker:
             "title": title,
             "description": description,
             "parent_id": parent_id,
+            "assignee_id": assignee_id,
             "delegate_id": delegate_id,
             "url": f"https://linear.app/x/issue/MT-A{len(self.created_issues) + 1}",
         }
@@ -155,6 +157,7 @@ class FakeTracker:
         description: str,
         label_names: list[str],
         delegate_id: str | None = None,
+        assignee_id: str | None = None,
     ) -> dict[str, Any]:
         return await self.create_issue(
             team_id="team-1",
@@ -164,6 +167,7 @@ class FakeTracker:
             title=title,
             description=description,
             parent_id=parent_issue_id,
+            assignee_id=assignee_id,
             delegate_id=delegate_id,
         )
 
@@ -674,6 +678,102 @@ async def test_dispatch_issue_by_id_runs_gated_todo_preflight_then_dispatches(tm
 
 
 @pytest.mark.asyncio
+async def test_preflight_needs_more_info_creates_human_action_child_and_does_not_dispatch(tmp_path: Path) -> None:
+    tracker = FakeTracker()
+    tracker.refreshed = [issue("MT-1", assignee_id="human-1", delegate_id="agent-user-1")]
+    runner = FakeRunner()
+    planner = FakeGatePlanner(
+        {
+            "needs_more_info": True,
+            "questions": ["Which repository should be changed?"],
+        }
+    )
+    orchestrator = Orchestrator(
+        replace(
+            make_config_with_required_delegate(tmp_path, "agent-user-1"),
+            acceptance=AcceptanceConfig(enabled=True),
+        ),
+        tracker,
+        runner,
+        gate_planner=planner,
+    )
+
+    result = await orchestrator.dispatch_issue_by_id("mt-1")
+
+    assert result == {"status": "skipped", "issue_id": "mt-1", "reason": "already_running_or_claimed"}
+    assert runner.started == []
+    intervention = orchestrator.state.human_interventions["mt-1"]
+    assert intervention.kind == "preflight_needs_input"
+    child = tracker.created_issues[-1]
+    assert child["parent_id"] == "mt-1"
+    assert child["assignee_id"] == "human-1"
+    assert child["title"] == "[Human Action] MT-1: Need more information"
+    assert "Which repository should be changed?" in child["description"]
+    assert "performer:type/human-action" in child["label_ids"]
+    assert "performer:human/needs-input" in child["label_ids"]
+
+
+@pytest.mark.asyncio
+async def test_done_human_action_child_without_required_response_does_not_resume(tmp_path: Path) -> None:
+    tracker = FakeTracker(candidates=[issue("MT-1")])
+    runner = FakeRunner()
+    planner = FakeGatePlanner(
+        {
+            "needs_more_info": True,
+            "questions": ["Which repository should be changed?"],
+        }
+    )
+    orchestrator = Orchestrator(
+        replace(make_config(tmp_path), acceptance=AcceptanceConfig(enabled=True)),
+        tracker,
+        runner,
+        gate_planner=planner,
+    )
+
+    await orchestrator.tick()
+    child = tracker.created_issues[-1]
+    child["state"] = "Done"
+
+    await orchestrator.tick()
+
+    assert "mt-1" in orchestrator.state.human_interventions
+    assert runner.started == []
+    assert tracker.comments[-1][0] == child["id"]
+    assert "Human response" in tracker.comments[-1][1]
+
+
+@pytest.mark.asyncio
+async def test_done_human_action_child_with_response_releases_preflight(tmp_path: Path) -> None:
+    tracker = FakeTracker(candidates=[issue("MT-1")])
+    runner = FakeRunner()
+    planner = FakeGatePlanner(
+        {
+            "needs_more_info": True,
+            "questions": ["Which repository should be changed?"],
+        }
+    )
+    orchestrator = Orchestrator(
+        replace(make_config(tmp_path), acceptance=AcceptanceConfig(enabled=True)),
+        tracker,
+        runner,
+        gate_planner=planner,
+    )
+
+    await orchestrator.tick()
+    child = tracker.created_issues[-1]
+    child["state"] = "Done"
+    child["description"] = "Human response:\nUse packages/performer.\n\nWhen finished, move this child issue to Done."
+
+    await orchestrator.process_human_interventions()
+
+    assert "mt-1" not in orchestrator.state.human_interventions
+    assert "mt-1" not in orchestrator.state.claimed
+    assert tracker.description_updates[-1][0] == "mt-1"
+    assert tracker.description_updates[-1][1] == "SYMPHONY HUMAN RESPONSE"
+    assert "Use packages/performer." in tracker.description_updates[-1][2]
+
+
+@pytest.mark.asyncio
 async def test_dispatch_issue_by_id_runs_gate_for_review_issue(tmp_path: Path) -> None:
     tracker = FakeTracker()
     tracker.refreshed = [issue("MT-1", state="In Review", delegate_id="agent-user-1")]
@@ -794,8 +894,10 @@ async def test_retry_failure_marks_retry_pending_label(tmp_path: Path) -> None:
     await orchestrator._finish_worker("mt-1", normal=False, error="proxy timeout")
     await asyncio_sleep()
 
-    assert orchestrator.state.retry_attempts["mt-1"].phase == "retry_pending"
-    assert ("mt-1", "performer:retry/pending") in tracker.lifecycle_labels
+    intervention = orchestrator.state.human_interventions["mt-1"]
+    assert intervention.kind == "runtime_error"
+    assert intervention.error == "worker exited: proxy timeout"
+    assert ("mt-1", "performer:human/pending") in tracker.lifecycle_labels
 
 
 @pytest.mark.asyncio
@@ -845,7 +947,8 @@ async def test_human_blocked_runtime_error_marks_human_blocked_label(tmp_path: P
     await orchestrator._finish_worker("mt-1", normal=False, error="cancelled")
     await asyncio_sleep()
 
-    assert orchestrator.state.blocked["mt-1"].phase == "human_blocked"
+    assert orchestrator.state.human_interventions["mt-1"].kind == "runtime_permission"
+    assert orchestrator.state.human_interventions["mt-1"].error == "permission denied"
     assert ("mt-1", "performer:error/human-blocked") in tracker.lifecycle_labels
 
 
@@ -1091,15 +1194,14 @@ async def test_worker_failure_schedules_exponential_retry(tmp_path: Path) -> Non
     await orchestrator.tick()
     await orchestrator.wait_for_idle()
 
-    retry = orchestrator.state.retry_attempts["mt-1"]
-    assert retry.attempt == 1
-    assert retry.error == "worker exited: boom"
-    assert retry.due_at_ms > 0
+    intervention = orchestrator.state.human_interventions["mt-1"]
+    assert intervention.attempt == 1
+    assert intervention.kind == "runtime_error"
+    assert intervention.error == "worker exited: boom"
     assert "mt-1" in orchestrator.state.claimed
-    assert ("mt-1", "performer:retrying") in tracker.lifecycle_labels
-    assert ("mt-1", "performer:retry/pending") in tracker.lifecycle_labels
-    assert retry.phase == "retry_pending"
-    assert retry.status_label == "performer:retry/pending"
+    assert ("mt-1", "performer:human/pending") in tracker.lifecycle_labels
+    assert tracker.created_issues[-1]["title"] == "[Human Action] MT-1: Runtime error needs review"
+    assert "worker exited: boom" in tracker.created_issues[-1]["description"]
 
 
 @pytest.mark.asyncio
@@ -1116,12 +1218,12 @@ async def test_worker_failure_comments_on_linear_issue(tmp_path: Path) -> None:
     await orchestrator.tick()
     await orchestrator.wait_for_idle()
 
-    assert len(tracker.comments) == 1
-    issue_id, body = tracker.comments[0]
-    assert issue_id == "mt-1"
-    assert "MT-1" in body
-    assert "worker exited: boom" in body
-    assert "retry" in body.lower()
+    assert tracker.comments == []
+    child = tracker.created_issues[-1]
+    assert child["parent_id"] == "mt-1"
+    assert "MT-1" in child["title"]
+    assert "worker exited: boom" in child["description"]
+    assert "move this child issue to Done" in child["description"]
 
 
 @pytest.mark.asyncio
@@ -2281,7 +2383,7 @@ async def test_request_timeout_updates_last_message_with_readable_error(tmp_path
 
 @pytest.mark.asyncio
 async def test_permission_runtime_error_blocks_for_human_approval(tmp_path: Path) -> None:
-    tracker = FakeTracker(candidates=[issue("MT-1")])
+    tracker = FakeTracker(candidates=[issue("MT-1", assignee_id="human-1")])
     runner = FakeRunner()
     store = PersistenceStore(tmp_path / "state" / "performer.json")
     orchestrator = Orchestrator(make_config(tmp_path), tracker, runner, persistence_store=store)
@@ -2299,17 +2401,25 @@ async def test_permission_runtime_error_blocks_for_human_approval(tmp_path: Path
 
     assert "mt-1" not in orchestrator.state.running
     assert "mt-1" not in orchestrator.state.retry_attempts
-    assert orchestrator.state.blocked["mt-1"].phase == "human_blocked"
-    assert orchestrator.state.blocked["mt-1"].status_label == "performer:error/human-blocked"
-    assert "runtime_permission_blocked" in orchestrator.state.blocked["mt-1"].error
+    assert orchestrator.state.human_interventions["mt-1"].kind == "runtime_permission"
+    assert orchestrator.state.human_interventions["mt-1"].status_label == "performer:human/pending"
+    assert "runtime_permission_blocked" in (orchestrator.state.human_interventions["mt-1"].error or "")
+    child = tracker.created_issues[-1]
+    assert child["parent_id"] == "mt-1"
+    assert child["assignee_id"] == "human-1"
+    assert child["title"] == "[Human Action] MT-1: Runtime approval required"
+    assert "performer:type/human-action" in child["label_ids"]
+    assert "performer:human/pending" in child["label_ids"]
+    assert "performer:human/runtime-approval" in child["label_ids"]
+    assert "Human response:" in child["description"]
     persisted = store.load()
-    assert persisted.blocked[0].issue_id == "mt-1"
+    assert persisted.human_interventions[0].issue_id == "mt-1"
     assert persisted.retry_attempts == []
     assert ("mt-1", "performer:error") in tracker.lifecycle_labels
     assert ("mt-1", "performer:error/human-blocked") in tracker.lifecycle_labels
     assert ("mt-1", "performer:retrying") not in tracker.lifecycle_labels
     assert "paused" in tracker.comments[-1][1]
-    assert "/symphony approve-runtime-error MT-1" in tracker.comments[-1][1]
+    assert "/symphony approve-runtime-error" not in tracker.comments[-1][1]
 
 
 @pytest.mark.asyncio
@@ -2333,11 +2443,11 @@ async def test_permission_output_event_blocks_for_human_approval(tmp_path: Path)
 
     assert "mt-1" not in orchestrator.state.running
     assert "mt-1" not in orchestrator.state.retry_attempts
-    assert orchestrator.state.blocked["mt-1"].phase == "human_blocked"
-    assert "runtime_permission_blocked" in orchestrator.state.blocked["mt-1"].error
+    assert orchestrator.state.human_interventions["mt-1"].kind == "runtime_permission"
+    assert "runtime_permission_blocked" in (orchestrator.state.human_interventions["mt-1"].error or "")
     assert ("mt-1", "performer:error") in tracker.lifecycle_labels
     assert ("mt-1", "performer:error/human-blocked") in tracker.lifecycle_labels
-    assert "/symphony approve-runtime-error MT-1" in tracker.comments[-1][1]
+    assert "/symphony approve-runtime-error" not in tracker.comments[-1][1]
 
 
 @pytest.mark.asyncio
@@ -2381,12 +2491,12 @@ async def test_permission_summary_event_blocks_for_human_approval(tmp_path: Path
     await asyncio_sleep()
 
     assert "mt-1" not in orchestrator.state.running
-    assert orchestrator.state.blocked["mt-1"].phase == "human_blocked"
-    assert "/symphony approve-runtime-error MT-1" in tracker.comments[-1][1]
+    assert orchestrator.state.human_interventions["mt-1"].kind == "runtime_permission"
+    assert "/symphony approve-runtime-error" not in tracker.comments[-1][1]
 
 
 @pytest.mark.asyncio
-async def test_linear_approval_comment_resumes_blocked_runtime_error(tmp_path: Path) -> None:
+async def test_old_linear_approval_comment_does_not_resume_blocked_runtime_error(tmp_path: Path) -> None:
     blocked_issue = issue("MT-1")
     tracker = FakeTracker(candidates=[blocked_issue])
     runner = FakeRunner()
@@ -2402,26 +2512,56 @@ async def test_linear_approval_comment_resumes_blocked_runtime_error(tmp_path: P
         },
     )
     await orchestrator.wait_for_idle()
-    blocked_at = orchestrator.state.blocked["mt-1"].blocked_at
+    created_at = orchestrator.state.human_interventions["mt-1"].created_at
     tracker.issue_comments["mt-1"] = [
         {
             "id": "comment-approval",
             "body": "/symphony approve-runtime-error MT-1",
-            "created_at": (blocked_at + timedelta(seconds=1)).isoformat(),
+            "created_at": (created_at + timedelta(seconds=1)).isoformat(),
             "user": {"id": "human-1", "name": "Human"},
         }
     ]
 
     await orchestrator.tick()
 
-    assert "mt-1" not in orchestrator.state.blocked
+    assert "mt-1" in orchestrator.state.human_interventions
+    assert "mt-1" not in orchestrator.state.retry_attempts
+    assert "mt-1" not in orchestrator.state.running
+    persisted = store.load()
+    assert persisted.human_interventions[0].issue_id == "mt-1"
+    assert persisted.retry_attempts == []
+
+
+@pytest.mark.asyncio
+async def test_done_human_action_child_resumes_runtime_error(tmp_path: Path) -> None:
+    blocked_issue = issue("MT-1")
+    tracker = FakeTracker(candidates=[blocked_issue])
+    runner = FakeRunner()
+    store = PersistenceStore(tmp_path / "state" / "performer.json")
+    orchestrator = Orchestrator(make_config(tmp_path), tracker, runner, persistence_store=store)
+    await orchestrator.tick()
+
+    orchestrator.on_codex_event(
+        "mt-1",
+        {
+            "event": "stderr",
+            "message": "patch rejected: writing outside of the project; approval required",
+        },
+    )
+    await orchestrator.wait_for_idle()
+    child = tracker.created_issues[-1]
+    child["state"] = "Done"
+
+    await orchestrator.tick()
+
+    assert "mt-1" not in orchestrator.state.human_interventions
     assert "mt-1" not in orchestrator.state.retry_attempts
     assert "mt-1" in orchestrator.state.running
     assert runner.started[-1][0].id == "mt-1"
     assert runner.started[-1][1] == 1
     assert ("mt-1", "performer:retrying") in tracker.lifecycle_labels
     persisted = store.load()
-    assert persisted.blocked == []
+    assert persisted.human_interventions == []
     assert persisted.retry_attempts == []
 
 
@@ -2667,7 +2807,8 @@ async def test_stall_detection_cancels_and_retries(tmp_path: Path) -> None:
 
     await orchestrator.reconcile_running()
 
-    assert "mt-1" in orchestrator.state.retry_attempts
+    assert orchestrator.state.human_interventions["mt-1"].kind == "runtime_error"
+    assert orchestrator.state.human_interventions["mt-1"].error == "stalled"
 
 
 @pytest.mark.asyncio
@@ -2692,9 +2833,10 @@ async def test_stall_detection_comments_on_linear_issue(tmp_path: Path) -> None:
 
     await orchestrator.reconcile_running()
 
-    assert len(tracker.comments) == 1
-    assert tracker.comments[0][0] == "mt-1"
-    assert "stalled" in tracker.comments[0][1]
+    assert tracker.comments == []
+    child = tracker.created_issues[-1]
+    assert child["parent_id"] == "mt-1"
+    assert "stalled" in child["description"]
 
 
 @pytest.mark.asyncio

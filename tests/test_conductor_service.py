@@ -12,7 +12,14 @@ from conductor.conductor_models import ConductorSettings, InstanceCreateRequest,
 from conductor.conductor_runtime import LogQueryResult
 from conductor.conductor_service import ConductorService, ConductorServiceError
 from conductor.conductor_store import ConductorStore
-from performer_api.models import BlockedEntry, ContinuationEntry, RetryEntry, RuntimeTokens, utc_now
+from performer_api.models import (
+    BlockedEntry,
+    ContinuationEntry,
+    HumanInterventionEntry,
+    RetryEntry,
+    RuntimeTokens,
+    utc_now,
+)
 from performer_api.ops_models import IssueRecord, OpsSnapshot, RetentionMetadata, RunRecord, TraceEvent
 from performer_api.ops_store import OpsStore
 from performer_api.persistence import PersistenceStore, PersistedSession, PersistedState
@@ -568,6 +575,20 @@ def test_instance_runtime_includes_persisted_performer_issue_details(tmp_path: P
                     issue_url="https://linear.app/x/issue/ENG-4",
                 )
             ],
+            human_interventions=[
+                HumanInterventionEntry(
+                    issue_id="issue-5",
+                    identifier="ENG-5",
+                    child_issue_id="issue-5h",
+                    child_identifier="ENG-H1",
+                    child_url="https://linear.app/x/issue/ENG-H1",
+                    kind="runtime_permission",
+                    attempt=5,
+                    created_at=utc_now(),
+                    error="runtime_permission_blocked: approval required",
+                    issue_url="https://linear.app/x/issue/ENG-5",
+                )
+            ],
         )
     )
 
@@ -577,7 +598,13 @@ def test_instance_runtime_includes_persisted_performer_issue_details(tmp_path: P
     assert runtime["workspace"]["strategy"] == "instance_repo_workspace"
     assert "reuses the prepared repository workspace" in runtime["workspace"]["description"]
     assert runtime["performer"]["source"] == "persistence"
-    assert runtime["performer"]["counts"] == {"running": 1, "retrying": 1, "continuing": 1, "blocked": 1}
+    assert runtime["performer"]["counts"] == {
+        "running": 1,
+        "retrying": 1,
+        "continuing": 1,
+        "blocked": 1,
+        "pending_human": 1,
+    }
     assert runtime["performer"]["running"][0]["issue_identifier"] == "ENG-1"
     assert runtime["performer"]["running"][0]["phase"] == "running"
     assert runtime["performer"]["running"][0]["status_label"] == "performer:running"
@@ -593,11 +620,15 @@ def test_instance_runtime_includes_persisted_performer_issue_details(tmp_path: P
     assert runtime["performer"]["blocked"][0]["issue_identifier"] == "ENG-4"
     assert runtime["performer"]["blocked"][0]["phase"] == "error"
     assert runtime["performer"]["blocked"][0]["status_label"] == "performer:error"
+    assert runtime["performer"]["human_interventions"][0]["issue_identifier"] == "ENG-5"
+    assert runtime["performer"]["human_interventions"][0]["child_identifier"] == "ENG-H1"
+    assert runtime["performer"]["human_interventions"][0]["child_url"] == "https://linear.app/x/issue/ENG-H1"
     assert runtime["metrics"]["tokens"]["cached_tokens"] == 5
     assert runtime["metrics"]["tokens"]["total_tokens"] == 33
     assert runtime["metrics"]["turns"] == 3
     assert runtime["metrics"]["retrying"] == 1
     assert runtime["metrics"]["blocked"] == 1
+    assert runtime["metrics"]["pending_human"] == 1
 
 
 def test_dashboard_aggregates_persisted_runtime_metrics(tmp_path: Path) -> None:
@@ -641,6 +672,18 @@ def test_dashboard_aggregates_persisted_runtime_metrics(tmp_path: Path) -> None:
                     issue_url=None,
                 )
             ],
+            human_interventions=[
+                HumanInterventionEntry(
+                    issue_id="issue-4",
+                    identifier="ENG-4",
+                    child_issue_id="issue-4h",
+                    child_identifier="ENG-H1",
+                    child_url=None,
+                    kind="runtime_error",
+                    attempt=1,
+                    created_at=utc_now(),
+                )
+            ],
         )
     )
 
@@ -651,6 +694,7 @@ def test_dashboard_aggregates_persisted_runtime_metrics(tmp_path: Path) -> None:
     assert dashboard["totals"]["failures"] == 1
     assert dashboard["totals"]["retries"] == 1
     assert dashboard["totals"]["continuations"] == 1
+    assert dashboard["totals"]["pending_human"] == 1
 
 
 def test_query_instance_logs_returns_structured_query_result(tmp_path: Path) -> None:

@@ -20,11 +20,14 @@ from .completion_verifier import CompletionVerifier
 from performer_api.models import (
     DISPATCH_LABELS,
     ERROR_LABELS,
+    HUMAN_INTERVENTION_KIND_LABELS,
+    HUMAN_INTERVENTION_LABELS,
     LIFECYCLE_LABELS,
     PHASE_LABELS,
     RETRY_LABELS,
     BlockedEntry,
     ContinuationEntry,
+    HumanInterventionEntry,
     Issue,
     RetryEntry,
     RunningEntry,
@@ -46,7 +49,7 @@ from .workspace import WorkspaceManager
 
 logger = logging.getLogger(__name__)
 
-APPROVE_RUNTIME_ERROR_COMMAND = "/symphony approve-runtime-error"
+HUMAN_RESPONSE_MARKER_NAME = "SYMPHONY HUMAN RESPONSE"
 
 
 class TrackerProtocol(Protocol):
@@ -84,6 +87,7 @@ class OrchestratorState:
     retry_attempts: dict[str, RetryEntry] = field(default_factory=dict)
     continuations: dict[str, ContinuationEntry] = field(default_factory=dict)
     blocked: dict[str, BlockedEntry] = field(default_factory=dict)
+    human_interventions: dict[str, HumanInterventionEntry] = field(default_factory=dict)
     completed: set[str] = field(default_factory=set)
     codex_totals: RuntimeTokens = field(default_factory=RuntimeTokens)
     codex_rate_limits: dict[str, Any] | None = None
@@ -128,6 +132,9 @@ class Orchestrator:
         for blocked in persisted.blocked:
             self.state.blocked[blocked.issue_id] = blocked
             self.state.claimed.add(blocked.issue_id)
+        for intervention in persisted.human_interventions:
+            self.state.human_interventions[intervention.issue_id] = intervention
+            self.state.claimed.add(intervention.issue_id)
         for thread in persisted.codex_threads:
             status = "resume_pending" if thread.status == "active" else thread.status
             restored = CodexThreadEntry(
@@ -149,7 +156,7 @@ class Orchestrator:
         except ConfigError as exc:
             logger.warning("performer_dispatch_validation failed code=%s reason=%s", exc.code, exc)
             return
-        await self.process_blocked_approvals()
+        await self.process_human_interventions()
         await self.process_due_continuations()
         await self.process_due_retries()
         try:
@@ -222,7 +229,7 @@ class Orchestrator:
             logger.warning("performer_event_dispatch_validation failed code=%s reason=%s", exc.code, exc)
             self._sync_label_group_background(issue_id, DISPATCH_LABELS["skipped"], prefix="performer:dispatch/")
             return {"status": "skipped", "issue_id": issue_id, "reason": exc.code}
-        await self.process_blocked_approvals()
+        await self.process_human_interventions()
         await self.process_due_continuations()
         await self.process_due_retries()
         try:
@@ -293,47 +300,41 @@ class Orchestrator:
             "runtime_phase": "dispatch_received",
         }
 
-    async def process_blocked_approvals(self) -> None:
-        if not self.state.blocked:
+    async def process_human_interventions(self) -> None:
+        if not self.state.human_interventions:
             return
-        fetch_comments = getattr(self.tracker, "fetch_issue_comments", None)
-        if not callable(fetch_comments):
+        fetch_children = getattr(self.tracker, "fetch_child_issues", None)
+        if not callable(fetch_children):
             return
-        for blocked in list(self.state.blocked.values()):
+        for intervention in list(self.state.human_interventions.values()):
             try:
-                comments = await fetch_comments(blocked.issue_id, first=20)
+                children = await fetch_children(intervention.issue_id, label_name=HUMAN_INTERVENTION_LABELS["type"])
             except Exception as exc:
                 logger.warning(
-                    "performer_blocked_approval_poll failed issue_id=%s issue_identifier=%s reason=%s",
-                    blocked.issue_id,
-                    blocked.identifier,
+                    "performer_human_intervention_poll failed issue_id=%s issue_identifier=%s reason=%s",
+                    intervention.issue_id,
+                    intervention.identifier,
                     exc,
                 )
                 continue
-            approval = _linear_runtime_approval_comment(blocked, comments)
-            if approval is None:
+            child = _find_human_child(intervention, children)
+            if child is None or normalize_state_key(str(child.get("state") or "")) != "done":
                 continue
-            issue = Issue(
-                id=blocked.issue_id,
-                identifier=blocked.identifier,
-                title=blocked.identifier,
-                state=self.config.tracker.active_states[0] if self.config.tracker.active_states else "",
-                url=blocked.issue_url,
-                project_slug=self.config.tracker.project_slug,
-            )
-            self._schedule_retry(
-                issue,
-                blocked.attempt,
-                error=f"linear_approved_runtime_error: {blocked.error}",
-                delay_ms=0,
-            )
+            response = _human_response_from_child(child)
+            if _human_intervention_requires_response(intervention) and not response:
+                await self._comment_missing_human_response(intervention)
+                continue
+            await self._resolve_human_intervention(intervention, response=response)
             logger.info(
-                "performer_blocked_approval outcome=approved issue_id=%s issue_identifier=%s comment_id=%s",
-                blocked.issue_id,
-                blocked.identifier,
-                approval.get("id"),
+                "performer_human_intervention outcome=resolved issue_id=%s issue_identifier=%s child_issue_id=%s",
+                intervention.issue_id,
+                intervention.identifier,
+                intervention.child_issue_id,
             )
         await asyncio.sleep(0)
+
+    async def process_blocked_approvals(self) -> None:
+        await self.process_human_interventions()
 
     async def startup_terminal_workspace_cleanup(self, workspace_manager: WorkspaceManager) -> None:
         try:
@@ -630,9 +631,15 @@ class Orchestrator:
             self.config.acceptance.needs_more_info_label,
             prefix="performer:needs-more-info",
         )
-        comment_issue = getattr(self.tracker, "comment_issue", None)
-        if callable(comment_issue):
-            await comment_issue(issue.id, _gate_plan_needs_more_info_comment(issue, plan.questions))
+        await self._create_human_intervention(
+            issue,
+            kind="preflight_needs_input",
+            attempt=0,
+            error="preflight needs more information",
+            questions=plan.questions,
+            resume_strategy="preflight",
+            last_message="preflight needs more information",
+        )
 
     async def _comment_gate_plan_rejected(self, issue: Issue, plan: GatePlanReport) -> None:
         comment_issue = getattr(self.tracker, "comment_issue", None)
@@ -945,6 +952,17 @@ class Orchestrator:
                 workspace_path = self._completion_workspace_path(entry)
                 if entry.structured_result is not None:
                     await self._publish_structured_result(entry)
+                    if _structured_result_needs_human(entry.structured_result):
+                        await self._create_human_intervention_for_entry(
+                            entry,
+                            kind="codex_needs_input",
+                            attempt=max(entry.retry_attempt + 1, 1),
+                            error=_structured_result_summary(entry.structured_result),
+                            questions=_structured_result_questions(entry.structured_result),
+                            resume_strategy="retry",
+                        )
+                        self._mark_codex_thread_terminal(entry, status="resume_pending")
+                        return
 
                 verdict = await self.completion_verifier.verify_completion(
                     entry.issue,
@@ -1102,6 +1120,15 @@ class Orchestrator:
                             completion_verdict=verdict,
                             workspace_path=entry.workspace_path,
                         )
+                    else:
+                        await self._create_human_intervention_for_entry(
+                            entry,
+                            kind="verification_needs_human",
+                            attempt=max(entry.retry_attempt + 1, 1),
+                            error=f"verification_needs_human: {verdict.reason}",
+                            questions=[str(verdict.reason)],
+                            resume_strategy="retry",
+                        )
                     self.state.claimed.discard(issue_id)
                     self.state.retry_attempts.pop(issue_id, None)
                     if not self.config.acceptance.enabled:
@@ -1114,27 +1141,35 @@ class Orchestrator:
                 self.state.claimed.discard(issue_id)
                 await self._comment_completion_verification_error(entry, str(exc))
                 next_attempt = max(entry.retry_attempt + 1, 1)
-                self._schedule_retry(
-                    entry.issue,
-                    next_attempt,
+                await self._create_human_intervention_for_entry(
+                    entry,
+                    kind="verification_needs_human",
+                    attempt=next_attempt,
                     error=f"verification_error: {exc}",
-                    delay_ms=None,
+                    resume_strategy="retry",
                 )
-                await self._sync_lifecycle_label(entry.issue.id, LIFECYCLE_LABELS["retrying"])
-                await self._sync_label_group(entry.issue.id, RETRY_LABELS["pending"], prefix="performer:retry/")
         else:
             next_attempt = max(entry.retry_attempt + 1, 1)
             retry_error = f"worker exited: {error}"
             self._mark_codex_thread_terminal(entry, status="failed")
             if entry.human_blocked_reason:
-                self._schedule_blocked(entry, error=entry.human_blocked_reason, attempt=next_attempt)
+                await self._create_human_intervention_for_entry(
+                    entry,
+                    kind="runtime_permission",
+                    attempt=next_attempt,
+                    error=entry.human_blocked_reason,
+                    resume_strategy="retry",
+                )
                 await self._sync_lifecycle_label(entry.issue.id, LIFECYCLE_LABELS["error"])
                 await self._sync_label_group(entry.issue.id, ERROR_LABELS["human_blocked"], prefix="performer:error/")
             else:
-                self._schedule_retry(entry.issue, next_attempt, error=retry_error, delay_ms=None)
-                await self._sync_lifecycle_label(entry.issue.id, LIFECYCLE_LABELS["retrying"])
-                await self._sync_label_group(entry.issue.id, RETRY_LABELS["pending"], prefix="performer:retry/")
-                await self._comment_worker_failure(entry, retry_error, next_attempt)
+                await self._create_human_intervention_for_entry(
+                    entry,
+                    kind="runtime_error",
+                    attempt=next_attempt,
+                    error=retry_error,
+                    resume_strategy="retry",
+                )
         self._persist_state()
 
     def _gate_planner(self) -> GatePlannerProtocol:
@@ -1372,6 +1407,7 @@ class Orchestrator:
         self.state.claimed.add(entry.issue.id)
         self.state.retry_attempts.pop(entry.issue.id, None)
         self.state.continuations.pop(entry.issue.id, None)
+        self.state.human_interventions.pop(entry.issue.id, None)
         self.state.blocked[entry.issue.id] = BlockedEntry(
             issue_id=entry.issue.id,
             identifier=entry.issue.identifier,
@@ -1388,6 +1424,150 @@ class Orchestrator:
         self._sync_label_group_background(entry.issue.id, ERROR_LABELS["human_blocked"], prefix="performer:error/")
         self._persist_state()
 
+    async def _create_human_intervention_for_entry(
+        self,
+        entry: RunningEntry,
+        *,
+        kind: str,
+        attempt: int,
+        error: str | None,
+        questions: list[str] | None = None,
+        resume_strategy: str,
+    ) -> HumanInterventionEntry | None:
+        return await self._create_human_intervention(
+            entry.issue,
+            kind=kind,
+            attempt=attempt,
+            error=error,
+            questions=questions or [],
+            resume_strategy=resume_strategy,
+            last_message=entry.last_codex_message or error,
+            recent_events=list(entry.recent_events),
+        )
+
+    async def _create_human_intervention(
+        self,
+        issue: Issue,
+        *,
+        kind: str,
+        attempt: int,
+        error: str | None,
+        questions: list[str] | None = None,
+        resume_strategy: str,
+        last_message: str | None = None,
+        recent_events: list[dict[str, Any]] | None = None,
+    ) -> HumanInterventionEntry | None:
+        create_child = getattr(self.tracker, "create_child_issue_for", None)
+        if not callable(create_child):
+            self._schedule_retry(issue, max(attempt, 1), error=error or "human intervention required", delay_ms=None)
+            return None
+        labels = [
+            HUMAN_INTERVENTION_LABELS["type"],
+            HUMAN_INTERVENTION_LABELS["pending"],
+            HUMAN_INTERVENTION_KIND_LABELS.get(kind, HUMAN_INTERVENTION_LABELS["needs_input"]),
+        ]
+        title = _human_intervention_title(issue, kind)
+        description = _human_intervention_description(
+            issue,
+            kind=kind,
+            error=error,
+            questions=questions or [],
+            last_message=last_message,
+        )
+        try:
+            child = await create_child(
+                parent_issue_id=issue.id,
+                title=title,
+                description=description,
+                label_names=labels,
+                assignee_id=issue.assignee_id,
+            )
+        except Exception as exc:
+            logger.warning(
+                "performer_human_intervention_create failed issue_id=%s issue_identifier=%s kind=%s reason=%s",
+                issue.id,
+                issue.identifier,
+                kind,
+                exc,
+            )
+            self._schedule_retry(issue, max(attempt, 1), error=error or "human intervention creation failed", delay_ms=None)
+            return None
+        child_issue_id = str(child.get("id") or "")
+        if not child_issue_id:
+            return None
+        intervention = HumanInterventionEntry(
+            issue_id=issue.id,
+            identifier=issue.identifier,
+            child_issue_id=child_issue_id,
+            child_identifier=str(child.get("identifier") or "") or None,
+            child_url=str(child.get("url") or "") or None,
+            kind=kind,
+            attempt=attempt,
+            created_at=utc_now(),
+            error=error,
+            questions=list(questions or []),
+            resume_strategy=resume_strategy,
+            issue_url=issue.url,
+            last_message=last_message,
+            recent_events=list(recent_events or []),
+        )
+        self.state.claimed.add(issue.id)
+        self.state.retry_attempts.pop(issue.id, None)
+        self.state.continuations.pop(issue.id, None)
+        self.state.blocked.pop(issue.id, None)
+        self.state.human_interventions[issue.id] = intervention
+        await self._sync_label_group(issue.id, HUMAN_INTERVENTION_LABELS["pending"], prefix="performer:human/")
+        self._persist_state()
+        return intervention
+
+    async def _resolve_human_intervention(self, intervention: HumanInterventionEntry, *, response: str | None) -> None:
+        self.state.human_interventions.pop(intervention.issue_id, None)
+        self.state.blocked.pop(intervention.issue_id, None)
+        issue = Issue(
+            id=intervention.issue_id,
+            identifier=intervention.identifier,
+            title=intervention.identifier,
+            state=self.config.tracker.active_states[0] if self.config.tracker.active_states else "",
+            url=intervention.issue_url,
+            project_slug=self.config.tracker.project_slug,
+        )
+        if response:
+            await self._write_human_response_to_parent(intervention, response)
+        await self._sync_label_group(issue.id, HUMAN_INTERVENTION_LABELS["resolved"], prefix="performer:human/")
+        if intervention.resume_strategy == "preflight":
+            self.state.claimed.discard(issue.id)
+            self._persist_state()
+            return
+        self._schedule_retry(
+            issue,
+            max(intervention.attempt, 1),
+            error=_human_resume_error(intervention, response),
+            delay_ms=0,
+        )
+
+    async def _write_human_response_to_parent(self, intervention: HumanInterventionEntry, response: str) -> None:
+        update_description = getattr(self.tracker, "update_issue_description_marker_block", None)
+        if not callable(update_description):
+            return
+        block = "\n".join(
+            [
+                f"Human action: {intervention.child_identifier or intervention.child_issue_id}",
+                f"Type: {intervention.kind}",
+                "",
+                response.strip(),
+            ]
+        )
+        await update_description(intervention.issue_id, HUMAN_RESPONSE_MARKER_NAME, block)
+
+    async def _comment_missing_human_response(self, intervention: HumanInterventionEntry) -> None:
+        comment_issue = getattr(self.tracker, "comment_issue", None)
+        if not callable(comment_issue):
+            return
+        await comment_issue(
+            intervention.child_issue_id,
+            "This human action is marked Done, but the `Human response` section is empty. Add the response there, then keep this child issue in Done.",
+        )
+
     def _schedule_continuation(
         self,
         issue: Issue,
@@ -1403,6 +1583,7 @@ class Orchestrator:
         self.state.claimed.add(issue.id)
         self.state.retry_attempts.pop(issue.id, None)
         self.state.blocked.pop(issue.id, None)
+        self.state.human_interventions.pop(issue.id, None)
         self.state.continuations[issue.id] = ContinuationEntry(
             issue_id=issue.id,
             identifier=issue.identifier,
@@ -1503,8 +1684,13 @@ class Orchestrator:
         if retry:
             self._finish_open_ops_for_issue(issue_id, status="failed", failure_summary="stalled")
             next_attempt = max(entry.retry_attempt + 1, 1)
-            self._schedule_retry(entry.issue, next_attempt, error="stalled", delay_ms=None)
-            await self._comment_worker_failure(entry, "stalled", next_attempt)
+            await self._create_human_intervention_for_entry(
+                entry,
+                kind="runtime_error",
+                attempt=next_attempt,
+                error="stalled",
+                resume_strategy="retry",
+            )
         self._persist_state()
 
     def _finish_open_ops_for_issue(self, issue_id: str, *, status: str, failure_summary: str | None) -> None:
@@ -1942,6 +2128,7 @@ class Orchestrator:
                 retry_attempts=list(self.state.retry_attempts.values()),
                 continuations=list(self.state.continuations.values()),
                 blocked=list(self.state.blocked.values()),
+                human_interventions=list(self.state.human_interventions.values()),
                 running=list(self.state.running.values()),
                 codex_threads=list(self.state.codex_threads.values()),
             )
@@ -2093,8 +2280,7 @@ def _runtime_error_comment_body(entry: RunningEntry, event: dict[str, Any]) -> s
             [
                 "This run is paused because the runtime error requires human approval or environment changes.",
                 f"Blocked reason: {entry.human_blocked_reason}",
-                "After approving or fixing the environment, comment this exact line on the Linear issue:",
-                f"{APPROVE_RUNTIME_ERROR_COMMAND} {entry.issue.identifier}",
+                "A [Human Action] child issue will be created. Complete that child issue and move it to Done to resume.",
             ]
         )
     else:
@@ -2131,27 +2317,112 @@ def _human_blocked_runtime_reason(entry: RunningEntry, event: dict[str, Any]) ->
     return None
 
 
-def _linear_runtime_approval_comment(blocked: BlockedEntry, comments: list[dict[str, Any]]) -> dict[str, Any] | None:
-    for comment in comments:
-        if not isinstance(comment, dict):
+def _human_intervention_title(issue: Issue, kind: str) -> str:
+    suffix = {
+        "preflight_needs_input": "Need more information",
+        "codex_needs_input": "Codex requested input",
+        "runtime_permission": "Runtime approval required",
+        "runtime_error": "Runtime error needs review",
+        "verification_needs_human": "Verification needs review",
+    }.get(kind, "Human action required")
+    return f"[Human Action] {issue.identifier}: {suffix}"
+
+
+def _human_intervention_description(
+    issue: Issue,
+    *,
+    kind: str,
+    error: str | None,
+    questions: list[str],
+    last_message: str | None,
+) -> str:
+    reason = {
+        "preflight_needs_input": "Performer cannot plan acceptance gates because required information is missing.",
+        "codex_needs_input": "Codex requested human input before it can continue.",
+        "runtime_permission": "The runtime hit a permission or sandbox boundary that needs human approval or an environment fix.",
+        "runtime_error": "The worker hit an execution failure that needs human review before retrying.",
+        "verification_needs_human": "Completion verification needs human judgment before Performer can continue.",
+    }.get(kind, "Performer needs a human decision before continuing.")
+    lines = [
+        reason,
+        "",
+        f"Parent issue: {issue.identifier}",
+    ]
+    if error:
+        lines.extend(["", "Last error:", error])
+    if last_message and last_message != error:
+        lines.extend(["", "Last observed message:", last_message])
+    if questions:
+        lines.append("")
+        lines.append("Questions:")
+        lines.extend(f"- {question}" for question in questions)
+    lines.extend(
+        [
+            "",
+            "Human action:",
+            _human_action_instruction(kind),
+            "",
+            "Human response:",
+            "",
+            "(Add the answer or decision here when information is required.)",
+            "",
+            "When finished, move this child issue to Done. Performer only resumes from this child issue being Done.",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _human_action_instruction(kind: str) -> str:
+    if kind in {"preflight_needs_input", "codex_needs_input"}:
+        return "Answer the questions above in the Human response section."
+    if kind == "runtime_permission":
+        return "Approve the runtime action or fix the environment so the next attempt can proceed."
+    if kind == "verification_needs_human":
+        return "Review the verifier concern and state the decision or correction in Human response if needed."
+    return "Review the failure and make any needed repository, environment, or issue updates before retry."
+
+
+def _find_human_child(
+    intervention: HumanInterventionEntry,
+    children: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    for child in children:
+        if not isinstance(child, dict):
             continue
-        created_at = parse_datetime(comment.get("created_at") or comment.get("createdAt"))
-        if created_at is None or created_at <= blocked.blocked_at:
-            continue
-        body = str(comment.get("body") or "")
-        first_line = next((line.strip() for line in body.splitlines() if line.strip()), "")
-        parts = first_line.split()
-        if len(parts) not in {2, 3}:
-            continue
-        command = " ".join(parts[:2]).lower()
-        if command != APPROVE_RUNTIME_ERROR_COMMAND:
-            continue
-        if len(parts) == 3:
-            target = parts[2].strip().lower()
-            if target not in {blocked.issue_id.lower(), blocked.identifier.lower()}:
-                continue
-        return comment
+        if str(child.get("id") or "") == intervention.child_issue_id:
+            return child
     return None
+
+
+def _human_response_from_child(child: dict[str, Any]) -> str | None:
+    description = str(child.get("description") or "")
+    marker = "Human response:"
+    if marker.lower() not in description.lower():
+        return None
+    lower = description.lower()
+    start = lower.find(marker.lower())
+    response = description[start + len(marker):]
+    stop_markers = ["When finished,", "完成后", "Move this child issue"]
+    for stop in stop_markers:
+        index = response.lower().find(stop.lower())
+        if index >= 0:
+            response = response[:index]
+    cleaned = response.strip()
+    if not cleaned or cleaned == "(Add the answer or decision here when information is required.)":
+        return None
+    return cleaned
+
+
+def _human_intervention_requires_response(intervention: HumanInterventionEntry) -> bool:
+    return intervention.kind in {"preflight_needs_input", "codex_needs_input"}
+
+
+def _human_resume_error(intervention: HumanInterventionEntry, response: str | None) -> str:
+    if response:
+        return f"human_action_resolved: {intervention.kind}: {response[:500]}"
+    if intervention.error:
+        return f"human_action_resolved: {intervention.kind}: {intervention.error}"
+    return f"human_action_resolved: {intervention.kind}"
 
 
 def _event_can_signal_human_block(event: dict[str, Any]) -> bool:
@@ -2233,6 +2504,42 @@ def _structured_result_from_issue_description(description: str) -> dict[str, Any
         "test_commands": [tests] if tests else [],
         "remaining_risks": [risks] if risks else [],
     }
+
+
+def _structured_result_needs_human(result: dict[str, Any]) -> bool:
+    next_action = str(result.get("next_action") or "").strip().lower()
+    if next_action == "needs_human":
+        return True
+    if next_action == "blocked":
+        combined = " ".join(
+            str(value or "")
+            for value in (
+                result.get("summary"),
+                result.get("questions"),
+                result.get("remaining_risks"),
+            )
+        ).lower()
+        return any(token in combined for token in ("need", "missing", "question", "clarify", "human", "input"))
+    return False
+
+
+def _structured_result_summary(result: dict[str, Any]) -> str:
+    summary = result.get("summary")
+    if isinstance(summary, str) and summary.strip():
+        return summary.strip()
+    return "Codex requested human input"
+
+
+def _structured_result_questions(result: dict[str, Any]) -> list[str]:
+    questions = result.get("questions")
+    if isinstance(questions, list):
+        return [str(question).strip() for question in questions if str(question).strip()]
+    if isinstance(questions, str) and questions.strip():
+        return [questions.strip()]
+    risks = result.get("remaining_risks")
+    if isinstance(risks, list):
+        return [str(risk).strip() for risk in risks if str(risk).strip()]
+    return []
 
 
 def _extract_evidence_section(description: str, heading: str) -> str:

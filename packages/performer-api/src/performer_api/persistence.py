@@ -6,7 +6,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .models import BlockedEntry, ContinuationEntry, RetryEntry, RunningEntry, RuntimeTokens, monotonic_ms
+from .models import (
+    BlockedEntry,
+    ContinuationEntry,
+    HumanInterventionEntry,
+    RetryEntry,
+    RunningEntry,
+    RuntimeTokens,
+    monotonic_ms,
+)
 
 
 @dataclass(frozen=True)
@@ -48,6 +56,7 @@ class PersistedState:
     retry_attempts: list[RetryEntry] = field(default_factory=list)
     continuations: list[ContinuationEntry] = field(default_factory=list)
     blocked: list[BlockedEntry] = field(default_factory=list)
+    human_interventions: list[HumanInterventionEntry] = field(default_factory=list)
     sessions: list[PersistedSession] = field(default_factory=list)
     codex_threads: list[CodexThreadEntry] = field(default_factory=list)
 
@@ -58,6 +67,7 @@ class PersistedState:
         retry_attempts: list[RetryEntry],
         continuations: list[ContinuationEntry] | None = None,
         blocked: list[BlockedEntry] | None = None,
+        human_interventions: list[HumanInterventionEntry] | None = None,
         running: list[RunningEntry],
         codex_threads: list[CodexThreadEntry] | None = None,
     ) -> PersistedState:
@@ -65,6 +75,7 @@ class PersistedState:
             retry_attempts=list(retry_attempts),
             continuations=list(continuations or []),
             blocked=list(blocked or []),
+            human_interventions=list(human_interventions or []),
             sessions=[
                 PersistedSession(
                     issue_id=entry.issue.id,
@@ -125,6 +136,7 @@ def _state_to_json(state: PersistedState) -> dict[str, Any]:
         "retry_attempts": [_retry_to_json(entry) for entry in state.retry_attempts],
         "continuations": [_continuation_to_json(entry) for entry in state.continuations],
         "blocked": [_blocked_to_json(entry) for entry in state.blocked],
+        "human_interventions": [_human_intervention_to_json(entry) for entry in state.human_interventions],
         "sessions": [_session_to_json(session) for session in state.sessions],
         "codex_threads": [_codex_thread_to_json(entry) for entry in state.codex_threads],
     }
@@ -168,6 +180,13 @@ def _state_from_json(payload: dict[str, Any]) -> PersistedState:
         for entry in [_blocked_from_json(item)]
         if entry is not None
     ]
+    human_interventions = [
+        entry
+        for item in payload.get("human_interventions", [])
+        if isinstance(item, dict)
+        for entry in [_human_intervention_from_json(item)]
+        if entry is not None
+    ]
     codex_threads = [
         entry
         for item in payload.get("codex_threads", [])
@@ -179,6 +198,7 @@ def _state_from_json(payload: dict[str, Any]) -> PersistedState:
         retry_attempts=retry_attempts,
         continuations=continuations,
         blocked=blocked,
+        human_interventions=human_interventions,
         sessions=sessions,
         codex_threads=codex_threads,
     )
@@ -311,6 +331,68 @@ def _blocked_from_json(payload: dict[str, Any]) -> BlockedEntry | None:
         phase=payload.get("phase") if isinstance(payload.get("phase"), str) else "error",
         status_label=payload.get("status_label") if isinstance(payload.get("status_label"), str) else "performer:error",
         runtime_phase=payload.get("runtime_phase") if isinstance(payload.get("runtime_phase"), str) else "failed",
+        last_message=payload.get("last_message") if isinstance(payload.get("last_message"), str) else None,
+        recent_events=_list_of_dicts(payload.get("recent_events")),
+    )
+
+
+def _human_intervention_to_json(entry: HumanInterventionEntry) -> dict[str, Any]:
+    return {
+        "issue_id": entry.issue_id,
+        "identifier": entry.identifier,
+        "child_issue_id": entry.child_issue_id,
+        "child_identifier": entry.child_identifier,
+        "child_url": entry.child_url,
+        "kind": entry.kind,
+        "attempt": entry.attempt,
+        "created_at": _iso(entry.created_at),
+        "error": entry.error,
+        "questions": entry.questions,
+        "resume_strategy": entry.resume_strategy,
+        "issue_url": entry.issue_url,
+        "phase": entry.phase,
+        "status_label": entry.status_label,
+        "runtime_phase": entry.runtime_phase,
+        "last_message": entry.last_message,
+        "recent_events": entry.recent_events,
+    }
+
+
+def _human_intervention_from_json(payload: dict[str, Any]) -> HumanInterventionEntry | None:
+    created_at = _parse_datetime(payload.get("created_at"))
+    issue_id = payload.get("issue_id")
+    identifier = payload.get("identifier")
+    child_issue_id = payload.get("child_issue_id")
+    kind = payload.get("kind")
+    attempt = payload.get("attempt")
+    if (
+        created_at is None
+        or not isinstance(issue_id, str)
+        or not isinstance(identifier, str)
+        or not isinstance(child_issue_id, str)
+        or not isinstance(kind, str)
+        or not isinstance(attempt, int)
+    ):
+        return None
+    questions = payload.get("questions")
+    return HumanInterventionEntry(
+        issue_id=issue_id,
+        identifier=identifier,
+        child_issue_id=child_issue_id,
+        child_identifier=payload.get("child_identifier") if isinstance(payload.get("child_identifier"), str) else None,
+        child_url=payload.get("child_url") if isinstance(payload.get("child_url"), str) else None,
+        kind=kind,
+        attempt=attempt,
+        created_at=created_at,
+        error=payload.get("error") if isinstance(payload.get("error"), str) else None,
+        questions=[item for item in questions if isinstance(item, str)] if isinstance(questions, list) else [],
+        resume_strategy=payload.get("resume_strategy") if isinstance(payload.get("resume_strategy"), str) else "retry",
+        issue_url=payload.get("issue_url") if isinstance(payload.get("issue_url"), str) else None,
+        phase=payload.get("phase") if isinstance(payload.get("phase"), str) else "human_pending",
+        status_label=payload.get("status_label")
+        if isinstance(payload.get("status_label"), str)
+        else "performer:human/pending",
+        runtime_phase=payload.get("runtime_phase") if isinstance(payload.get("runtime_phase"), str) else "human_pending",
         last_message=payload.get("last_message") if isinstance(payload.get("last_message"), str) else None,
         recent_events=_list_of_dicts(payload.get("recent_events")),
     )

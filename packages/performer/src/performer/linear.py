@@ -217,6 +217,7 @@ mutation PerformerCreateIssue(
   $title: String!,
   $description: String!,
   $parentId: String,
+  $assigneeId: String,
   $delegateId: String
 ) {
   issueCreate(input: {
@@ -227,6 +228,7 @@ mutation PerformerCreateIssue(
     title: $title,
     description: $description,
     parentId: $parentId,
+    assigneeId: $assigneeId,
     delegateId: $delegateId
   }) {
     success
@@ -236,6 +238,7 @@ mutation PerformerCreateIssue(
       title
       url
       state { name }
+      assignee { id }
       delegate { id }
       labels { nodes { name } }
     }
@@ -256,8 +259,17 @@ query PerformerIssueChildren($issueId: String!) {
         description
         url
         state { name }
+        assignee { id }
         delegate { id }
         labels { nodes { name } }
+        comments(first: 20) {
+          nodes {
+            id
+            body
+            createdAt
+            user { id name }
+          }
+        }
       }
     }
   }
@@ -530,6 +542,7 @@ class LinearClient:
         title: str,
         description: str,
         parent_id: str | None = None,
+        assignee_id: str | None = None,
         delegate_id: str | None = None,
     ) -> dict[str, Any]:
         payload = await self.graphql(
@@ -542,6 +555,7 @@ class LinearClient:
                 "title": title,
                 "description": description,
                 "parentId": parent_id,
+                "assigneeId": assignee_id,
                 "delegateId": delegate_id,
             },
         )
@@ -651,6 +665,7 @@ class LinearClient:
         description: str,
         label_names: list[str],
         delegate_id: str | None = None,
+        assignee_id: str | None = None,
     ) -> dict[str, Any]:
         context = await self._fetch_issue_creation_context(parent_issue_id)
         labels = [await self._ensure_issue_label(context["team_id"], label_name) for label_name in label_names]
@@ -662,6 +677,7 @@ class LinearClient:
             title=title,
             description=description,
             parent_id=parent_issue_id,
+            assignee_id=assignee_id,
             delegate_id=delegate_id,
         )
 
@@ -846,6 +862,7 @@ class LinearTracker:
         title: str,
         description: str,
         parent_id: str | None = None,
+        assignee_id: str | None = None,
         delegate_id: str | None = None,
     ) -> dict[str, Any]:
         return await self.client.create_issue(
@@ -856,6 +873,7 @@ class LinearTracker:
             title=title,
             description=description,
             parent_id=parent_id,
+            assignee_id=assignee_id,
             delegate_id=delegate_id,
         )
 
@@ -870,12 +888,14 @@ class LinearTracker:
         description: str,
         label_names: list[str],
         delegate_id: str | None = None,
+        assignee_id: str | None = None,
     ) -> dict[str, Any]:
         return await self.client.create_child_issue_for(
             parent_issue_id=parent_issue_id,
             title=title,
             description=description,
             label_names=label_names,
+            assignee_id=assignee_id,
             delegate_id=delegate_id,
         )
 
@@ -1028,6 +1048,21 @@ def _normalize_issue_dict(node: dict[str, Any]) -> dict[str, Any]:
         for label in (((node.get("labels") or {}).get("nodes")) or [])
         if isinstance(label, dict)
     ]
+    assignee = node.get("assignee") if isinstance(node.get("assignee"), dict) else None
+    delegate = node.get("delegate") if isinstance(node.get("delegate"), dict) else None
+    comments = []
+    for comment in ((((node.get("comments") or {}).get("nodes")) or []) if isinstance(node.get("comments"), dict) else []):
+        if not isinstance(comment, dict):
+            continue
+        user = comment.get("user") if isinstance(comment.get("user"), dict) else None
+        comments.append(
+            {
+                "id": comment.get("id"),
+                "body": comment.get("body") or "",
+                "created_at": comment.get("createdAt"),
+                "user": {"id": user.get("id"), "name": user.get("name")} if user else None,
+            }
+        )
     return {
         "id": node.get("id") or "",
         "identifier": node.get("identifier") or "",
@@ -1035,6 +1070,10 @@ def _normalize_issue_dict(node: dict[str, Any]) -> dict[str, Any]:
         "url": node.get("url"),
         "state": state_name or "",
         "labels": labels,
+        "description": node.get("description") if isinstance(node.get("description"), str) else None,
+        "assignee_id": assignee.get("id") if assignee else None,
+        "delegate_id": delegate.get("id") if delegate else None,
+        "comments": comments,
     }
 
 

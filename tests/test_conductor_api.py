@@ -497,14 +497,12 @@ async def test_api_supports_runtime_actions_and_repo_inspection(tmp_path: Path) 
             f"/api/instances/{instance_id}/runtime/approve-error",
             {"issue_id": "MT-1"},
         )
-        assert status == 200
+        assert status == 400
         approval = json.loads(body)
-        assert approval["approved"]["issue_identifier"] == "MT-1"
-        assert approval["instance"]["process_status"] == "running"
+        assert approval["error"]["code"] == "runtime_error_approval_removed"
         approved_state = PersistenceStore(Path(created_instance["persistence_path"])).load()
-        assert approved_state.blocked == []
-        assert approved_state.retry_attempts[0].issue_id == "issue-1"
-        assert approved_state.retry_attempts[0].status_label == "performer:retrying"
+        assert approved_state.blocked[0].issue_id == "issue-1"
+        assert approved_state.retry_attempts == []
 
         status, _, body = await request(server.port, "GET", f"/api/instances/{instance_id}/logs")
         assert status == 200

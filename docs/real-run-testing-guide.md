@@ -22,6 +22,7 @@ The harness must not:
 - transition the business issue to `In Review` or `Done`;
 - create gate or evidence issues by hand;
 - manually add pass/fail gate labels;
+- manually complete parent issue comments or command comments as control signals;
 - call private orchestrator methods to advance phases;
 - treat mock-only success as acceptance evidence.
 
@@ -87,6 +88,7 @@ A real run evidence bundle should include:
   - `sessions`
   - `retry_attempts`
   - `continuations`
+  - `human_interventions`
 - Ops snapshot excerpts for runs, attempts, turns, and important events.
 - Performer log excerpts around dispatch, worker completion, verification, gate review, fail/rework, pass/done, retry, and continuation.
 - Cleanup audit after the run.
@@ -150,6 +152,19 @@ Common real-run failure signatures:
 - Evidence issues are siblings of gates: evidence creation is not using the gate as parent.
 - Agent final answer says it did work, but business issue lacks `Implementation summary`, `Test commands and exact output`, and `Remaining risks`: do not enter review.
 - Normal max-turn continuation appears under `retry_attempts`: continuation semantics regressed.
+- A human-action scenario resumes from a parent issue comment: this is invalid in v1. Performer must create a `[Human Action]` child issue and resume only after that child issue is moved to `Done`.
+
+## Human Action Flow
+
+Any real-run scenario that needs human judgment must validate the Linear child issue flow:
+
+1. Performer creates a direct child issue titled `[Human Action] <parent>: ...`.
+2. The child has `performer:type/human-action` plus `performer:human/pending` and the specific reason label.
+3. The child description contains the reason, required action, `Human response`, and the instruction to move the child to `Done`.
+4. The human completes the child issue and moves that child issue to `Done`.
+5. Performer resumes only from the child issue state. Parent issue comments, including command-like comments, are informational only and do not count as acceptance evidence.
+
+For input requests, the `Human response` section must contain the answer. A child issue marked `Done` with an empty response must not resume the parent task.
 
 ## Codex Requirements
 

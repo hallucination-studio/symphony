@@ -57,6 +57,8 @@ class FlowTracker:
         self.fetch_state_calls: list[list[str]] = []
         self.comments: list[tuple[str, str]] = []
         self.lifecycle_labels: list[tuple[str, str]] = []
+        self.created_issues: list[dict[str, Any]] = []
+        self.children: dict[str, list[dict[str, Any]]] = {}
         self.fail_refresh = False
 
     async def fetch_candidate_issues(self) -> list[Issue]:
@@ -76,6 +78,43 @@ class FlowTracker:
     async def set_issue_lifecycle_label(self, issue_id: str, label_name: str) -> dict[str, Any]:
         self.lifecycle_labels.append((issue_id, label_name))
         return {"success": True, "issue_id": issue_id, "label": label_name}
+
+    async def set_issue_label_group(self, issue_id: str, label_name: str, *, prefix: str) -> dict[str, Any]:
+        self.lifecycle_labels.append((issue_id, label_name))
+        return {"success": True, "issue_id": issue_id, "label": label_name, "prefix": prefix}
+
+    async def create_child_issue_for(
+        self,
+        *,
+        parent_issue_id: str,
+        title: str,
+        description: str,
+        label_names: list[str],
+        assignee_id: str | None = None,
+        delegate_id: str | None = None,
+    ) -> dict[str, Any]:
+        created = {
+            "id": f"child-{len(self.created_issues) + 1}",
+            "identifier": f"FLOW-H{len(self.created_issues) + 1}",
+            "title": title,
+            "description": description,
+            "label_ids": label_names,
+            "labels": label_names,
+            "parent_id": parent_issue_id,
+            "assignee_id": assignee_id,
+            "delegate_id": delegate_id,
+            "state": "Todo",
+            "url": f"https://linear.app/x/issue/FLOW-H{len(self.created_issues) + 1}",
+        }
+        self.created_issues.append(created)
+        self.children.setdefault(parent_issue_id, []).append(created)
+        return created
+
+    async def fetch_child_issues(self, parent_issue_id: str, *, label_name: str | None = None) -> list[dict[str, Any]]:
+        children = list(self.children.get(parent_issue_id, []))
+        if label_name is None:
+            return children
+        return [child for child in children if label_name in child.get("labels", [])]
 
 
 class FlowCompletingRunner:
@@ -905,28 +944,33 @@ async def test_flow_010_abnormal_exit_uses_backoff_and_preserves_claim(
     await orchestrator.tick()
     await orchestrator.wait_for_idle()
 
-    retry = orchestrator.state.retry_attempts["eng-10"]
+    intervention = orchestrator.state.human_interventions["eng-10"]
+    child = tracker.created_issues[-1]
     bundle = flow_bundle(
         test_id="FLOW-010",
-        title="abnormal worker exit uses exponential backoff and preserves claim",
+        title="abnormal worker exit creates human-action child and preserves claim",
         source_sections=["7.3", "8.4", "14.2"],
         profile="core",
         initial_state={"issue": "ENG-10", "attempt": 0},
         trigger="Worker raises RuntimeError during first attempt",
-        observed_transitions=["Running removed", "retry attempt 1 scheduled", "claim preserved"],
+        observed_transitions=["Running removed", "human action child created", "claim preserved"],
         workspace_evidence={"not_required": True},
-        tracker_evidence={"comment": tracker.comments[-1][1] if tracker.comments else ""},
+        tracker_evidence={"child": child},
         codex_evidence={"worker_error": "boom"},
-        observability_evidence={"retry": retry.__dict__, "logs": caplog.text},
-        final_state={"claimed": "eng-10" in orchestrator.state.claimed, "retrying": "eng-10" in orchestrator.state.retry_attempts},
-        score_reason="Retry entry and Linear-style comment expose worker failure, attempt, due time, and claim preservation.",
+        observability_evidence={"human_intervention": intervention.__dict__, "logs": caplog.text},
+        final_state={
+            "claimed": "eng-10" in orchestrator.state.claimed,
+            "pending_human": "eng-10" in orchestrator.state.human_interventions,
+        },
+        score_reason="Human-action child exposes worker failure and claim preservation without parent comment control.",
     )
 
-    assert retry.attempt == 1
-    assert retry.error == "worker exited: boom"
-    assert retry.due_at_ms > 0
+    assert intervention.attempt == 1
+    assert intervention.kind == "runtime_error"
+    assert intervention.error == "worker exited: boom"
     assert "eng-10" in orchestrator.state.claimed
-    assert "worker exited: boom" in tracker.comments[-1][1]
+    assert child["title"] == "[Human Action] ENG-10: Runtime error needs review"
+    assert "worker exited: boom" in child["description"]
     assert bundle["final_state"]["claimed"] is True
 
 
@@ -1102,27 +1146,31 @@ async def test_flow_014_stall_detection_kills_silent_session_and_retries(tmp_pat
 
     await orchestrator.reconcile_running()
 
-    retry = orchestrator.state.retry_attempts["eng-14"]
+    intervention = orchestrator.state.human_interventions["eng-14"]
+    child = tracker.created_issues[-1]
     bundle = flow_bundle(
         test_id="FLOW-014",
-        title="stall detection terminates silent session and schedules retry",
+        title="stall detection terminates silent session and creates human action",
         source_sections=["5.3.6", "8.5", "10.6", "14.1", "14.2"],
         profile="core",
         initial_state={"issue": "ENG-14", "stall_timeout_ms": 1, "last_codex_event": "notification"},
         trigger="Run reconciliation after last Codex timestamp is older than stall timeout",
-        observed_transitions=["stall_elapsed_from_last_codex_timestamp", "worker_cancelled", "failure_retry_scheduled"],
+        observed_transitions=["stall_elapsed_from_last_codex_timestamp", "worker_cancelled", "human_action_created"],
         workspace_evidence={"not_required": True},
-        tracker_evidence={"comment": tracker.comments[-1][1] if tracker.comments else ""},
+        tracker_evidence={"child": child},
         codex_evidence={"last_codex_timestamp": entry.last_codex_timestamp.isoformat()},
-        observability_evidence={"retry": retry.__dict__, "claimed": "eng-14" in orchestrator.state.claimed},
-        final_state={"retrying": "eng-14" in orchestrator.state.retry_attempts, "running": "eng-14" in orchestrator.state.running},
-        score_reason="Retry status/comment show stalled reason and due retry; timestamp evidence shows stall clock source.",
+        observability_evidence={"human_intervention": intervention.__dict__, "claimed": "eng-14" in orchestrator.state.claimed},
+        final_state={
+            "pending_human": "eng-14" in orchestrator.state.human_interventions,
+            "running": "eng-14" in orchestrator.state.running,
+        },
+        score_reason="Human-action child shows stalled reason; timestamp evidence shows stall clock source.",
     )
 
-    assert retry.error == "stalled"
+    assert intervention.error == "stalled"
     assert "eng-14" in orchestrator.state.claimed
-    assert "stalled" in tracker.comments[-1][1].lower()
-    assert bundle["final_state"]["retrying"] is True
+    assert "stalled" in child["description"].lower()
+    assert bundle["final_state"]["pending_human"] is True
 
 
 def test_flow_015_dynamic_workflow_reload_changes_future_dispatch_not_inflight(
@@ -1554,4 +1602,3 @@ def test_flow_025_real_integration_profiles_skip_fail_and_pass_are_explicit(tmp_
     assert invalid.returncode != 0
     assert "invalid-token-for-flow-025" not in (invalid.stdout + invalid.stderr)
     assert bundle["final_state"]["invalid_failed"] is True
-

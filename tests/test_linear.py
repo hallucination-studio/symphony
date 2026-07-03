@@ -451,6 +451,7 @@ async def test_create_issue_uses_issue_create_with_labels() -> None:
         "title": "[Acceptance] MT-1",
         "description": "Review MT-1 evidence.",
         "parentId": None,
+        "assigneeId": None,
         "delegateId": None,
     }
 
@@ -486,12 +487,15 @@ async def test_create_issue_supports_parent_id_for_child_issues() -> None:
         title="[Gate] MT-1: Behavior",
         description="Gate details.",
         parent_id="issue-1",
+        assignee_id="human-1",
     )
 
     assert created["id"] == "gate-1"
     request = transport.requests[0]["json"]
     assert "parentId" in request["query"]
+    assert "assigneeId" in request["query"]
     assert request["variables"]["parentId"] == "issue-1"
+    assert request["variables"]["assigneeId"] == "human-1"
 
 
 @pytest.mark.asyncio
@@ -565,9 +569,22 @@ async def test_fetch_child_issues_returns_direct_children_filtered_by_label() ->
                                     "id": "gate-1",
                                     "identifier": "MT-2",
                                     "title": "[Gate] MT-1: Behavior",
+                                    "description": "Human response:\nApproved",
                                     "url": "https://linear.app/x/issue/MT-2",
                                     "state": {"name": "Todo"},
+                                    "assignee": {"id": "human-1"},
+                                    "delegate": {"id": "agent-user-1"},
                                     "labels": {"nodes": [{"name": "performer:type/gate"}]},
+                                    "comments": {
+                                        "nodes": [
+                                            {
+                                                "id": "comment-1",
+                                                "body": "Looks good",
+                                                "createdAt": "2026-07-02T03:30:00Z",
+                                                "user": {"id": "human-1", "name": "Human"},
+                                            }
+                                        ]
+                                    },
                                 },
                                 {
                                     "id": "note-1",
@@ -589,6 +606,10 @@ async def test_fetch_child_issues_returns_direct_children_filtered_by_label() ->
     children = await client.fetch_child_issues("issue-1", label_name="performer:type/gate")
 
     assert [child["id"] for child in children] == ["gate-1"]
+    assert children[0]["description"] == "Human response:\nApproved"
+    assert children[0]["assignee_id"] == "human-1"
+    assert children[0]["delegate_id"] == "agent-user-1"
+    assert children[0]["comments"][0]["body"] == "Looks good"
     request = transport.requests[0]["json"]
     assert "children" in request["query"]
     assert request["variables"] == {"issueId": "issue-1"}
@@ -652,10 +673,11 @@ async def test_create_acceptance_issue_for_uses_original_linear_context_and_type
         "stateId": "state-todo",
         "labelIds": ["label-acceptance"],
         "title": "[Acceptance] MT-1: Build",
-        "description": "Review evidence.",
-        "parentId": None,
-        "delegateId": None,
-    }
+            "description": "Review evidence.",
+            "parentId": None,
+            "assigneeId": None,
+            "delegateId": None,
+        }
 
 
 @pytest.mark.asyncio
