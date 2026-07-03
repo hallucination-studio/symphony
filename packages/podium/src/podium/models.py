@@ -55,6 +55,114 @@ class RunStatus(str, Enum):
 
 
 @dataclass(frozen=True)
+class LinearAppConfig:
+    """Per-user custom Linear OAuth application configuration.
+
+    The client secret is stored ENCRYPTED (Fernet). It is never serialized in
+    any public/UI-facing payload.
+    """
+    client_id: str
+    client_secret_encrypted: str
+    redirect_uri: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "client_id": self.client_id,
+            "client_secret_encrypted": self.client_secret_encrypted,
+            "redirect_uri": self.redirect_uri,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> LinearAppConfig:
+        return cls(
+            client_id=str(data.get("client_id") or ""),
+            client_secret_encrypted=str(data.get("client_secret_encrypted") or ""),
+            redirect_uri=str(data["redirect_uri"]) if data.get("redirect_uri") else None,
+        )
+
+    def to_public_dict(self) -> dict[str, Any]:
+        """UI-safe view — NEVER includes the secret."""
+        return {
+            "client_id": self.client_id,
+            "redirect_uri": self.redirect_uri,
+            "configured": True,
+        }
+
+
+@dataclass(frozen=True)
+class User:
+    """A registered Podium user with a dedicated workspace."""
+    user_id: str
+    email: str
+    password_hash: str
+    workspace_id: str
+    created_at: str  # ISO8601 timestamp
+    linear_app: LinearAppConfig | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "user_id": self.user_id,
+            "email": self.email,
+            "password_hash": self.password_hash,
+            "workspace_id": self.workspace_id,
+            "created_at": self.created_at,
+            "linear_app": self.linear_app.to_dict() if self.linear_app else None,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> User:
+        linear_app_data = data.get("linear_app")
+        return cls(
+            user_id=str(data.get("user_id") or ""),
+            email=str(data.get("email") or ""),
+            password_hash=str(data.get("password_hash") or ""),
+            workspace_id=str(data.get("workspace_id") or ""),
+            created_at=str(data.get("created_at") or ""),
+            linear_app=(
+                LinearAppConfig.from_dict(linear_app_data)
+                if isinstance(linear_app_data, dict)
+                else None
+            ),
+        )
+
+    def to_public_dict(self) -> dict[str, Any]:
+        """UI-safe view — NEVER includes password_hash or any secret."""
+        return {
+            "user_id": self.user_id,
+            "email": self.email,
+            "workspace_id": self.workspace_id,
+            "created_at": self.created_at,
+            "linear_app": self.linear_app.to_public_dict() if self.linear_app else None,
+        }
+
+
+@dataclass(frozen=True)
+class Session:
+    """A server-side authentication session."""
+    session_id: str
+    user_id: str
+    created_at: str  # ISO8601 timestamp
+    expires_at: str  # ISO8601 timestamp
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "session_id": self.session_id,
+            "user_id": self.user_id,
+            "created_at": self.created_at,
+            "expires_at": self.expires_at,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> Session:
+        return cls(
+            session_id=str(data.get("session_id") or ""),
+            user_id=str(data.get("user_id") or ""),
+            created_at=str(data.get("created_at") or ""),
+            expires_at=str(data.get("expires_at") or ""),
+        )
+
+
+@dataclass(frozen=True)
 class SessionIdentity:
     """User/workspace context for a session."""
     workspace_id: str
