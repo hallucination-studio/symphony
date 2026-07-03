@@ -15,6 +15,7 @@ The core product split is:
 Start here:
 
 - [Product Shape](./product-shape.md)
+- [Runtime Orchestration Architecture](./runtime-orchestration-architecture.md)
 - [Linear Application and Podium Integration](./linear-podium-integration.md)
 - [Runtime Installer and Updates](./runtime-installer-and-updates.md)
 - [Podium Web Onboarding](./podium-web-onboarding.md)
