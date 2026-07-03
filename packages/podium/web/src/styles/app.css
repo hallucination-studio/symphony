@@ -105,12 +105,12 @@
 
 .step {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   background: var(--color-surface);
-  overflow: hidden;
 }
 
 .step[data-status="in_progress"] {
@@ -118,14 +118,9 @@
   box-shadow: 0 0 0 1px var(--color-accent);
 }
 
-.step-link,
-.step > .step-indicator {
-  padding: var(--space-3) var(--space-4);
-}
-
 .step-link {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   gap: var(--space-3);
   width: 100%;
   color: inherit;
@@ -141,11 +136,11 @@
   height: 22px;
   border-radius: 999px;
   flex-shrink: 0;
-  margin-top: 1px;
   display: grid;
   place-items: center;
   font-size: 12px;
   font-weight: 700;
+  line-height: 1;
   color: #fff;
 }
 
@@ -570,7 +565,7 @@
   font-size: 14px;
 }
 .step-shell-body {
-  margin: var(--space-5) 0;
+  margin: var(--space-4) 0 0;
 }
 .step-shell-footer {
   display: flex;
