@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import { Button } from "./Button";
+import { useI18n } from "../i18n";
 
 /**
  * Consistent frame for every Setup step: eyebrow (step X of N), title,
@@ -35,14 +36,15 @@ export function SetupStepShell({
   backLabel?: string;
   hideNext?: boolean;
 }) {
+  const { t } = useI18n();
   return (
     <div className="card">
       <header className="step-shell-header">
         <div className="step-shell-eyebrow">
-          Step {stepNumber} of {stepCount}
+          {t("Step {stepNumber} of {stepCount}", { stepNumber, stepCount })}
         </div>
-        <h1 className="step-shell-title">{title}</h1>
-        <p className="step-shell-description">{description}</p>
+        <h1 className="step-shell-title">{t(title)}</h1>
+        <p className="step-shell-description">{t(description)}</p>
       </header>
 
       <div className="step-shell-body">{children}</div>
@@ -54,7 +56,7 @@ export function SetupStepShell({
           <div>
             {onBack ? (
               <Button variant="ghost" onClick={onBack}>
-                {backLabel}
+                {t(backLabel)}
               </Button>
             ) : null}
           </div>
@@ -65,7 +67,7 @@ export function SetupStepShell({
                 disabled={nextDisabled}
                 loading={nextLoading}
               >
-                {nextLabel}
+                {t(nextLabel)}
               </Button>
             ) : null}
           </div>

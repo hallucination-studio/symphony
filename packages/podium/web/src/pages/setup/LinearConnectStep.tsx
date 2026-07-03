@@ -4,6 +4,7 @@ import { StatusBadge } from "../../components/StatusBadge";
 import { linearHealth, useConnectLinear } from "../../lib/linear";
 import type { LinearStatus } from "../../api/types";
 import type { StepProps } from "./types";
+import { useI18n } from "../../i18n";
 
 export function LinearConnectStep({
   stepNumber,
@@ -17,6 +18,7 @@ export function LinearConnectStep({
 }) {
   const { connect, isPending } = useConnectLinear();
   const health = linearHealth(linear);
+  const { t } = useI18n();
 
   return (
     <SetupStepShell
@@ -31,29 +33,29 @@ export function LinearConnectStep({
       {connected ? (
         <ActionPanel
           tone="success"
-          title="Linear connected"
-          description="Your workspace is authorized. Continue to choose scope."
+          title={t("Linear connected")}
+          description={t("Your workspace is authorized. Continue to choose scope.")}
         />
       ) : health.broken ? (
         <ActionPanel
           tone="critical"
-          title={health.title}
-          description="Reconnect to restore access to your workspace."
-          actionLabel={health.actionLabel}
+          title={t(health.title)}
+          description={t("Reconnect to restore access to your workspace.")}
+          actionLabel={t(health.actionLabel)}
           onAction={connect}
           actionLoading={isPending}
         />
       ) : (
         <div className="stack">
           <div className="row-between">
-            <span>Linear workspace</span>
+            <span>{t("Linear workspace")}</span>
             <StatusBadge status="not_connected" />
           </div>
           <ActionPanel
             tone="info"
-            title="Authorize Linear"
-            description="You'll be redirected to Linear to approve access, then brought back here."
-            actionLabel="Connect Linear"
+            title={t("Authorize Linear")}
+            description={t("You will be redirected to Linear to approve access, then brought back here.")}
+            actionLabel={t("Connect Linear")}
             onAction={connect}
             actionLoading={isPending}
           />

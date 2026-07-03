@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { screen } from "@testing-library/react";
 import { SmokeCheckList } from "./SmokeCheckList";
 import type { SmokeCheckResult } from "../api/types";
+import { renderWithProviders } from "../test/utils";
 
 describe("SmokeCheckList", () => {
   it("renders passing checks without an action", () => {
@@ -15,7 +16,7 @@ describe("SmokeCheckList", () => {
       recommendations: [],
       timestamp: "2026-07-02T00:00:00Z",
     };
-    render(<SmokeCheckList result={result} />);
+    renderWithProviders(<SmokeCheckList result={result} />);
 
     expect(screen.getByText("Linear connected")).toBeInTheDocument();
     expect(screen.getByText("Runtime online")).toBeInTheDocument();
@@ -33,7 +34,7 @@ describe("SmokeCheckList", () => {
       recommendations: ["Map a valid repository", "Enroll and start a runtime agent"],
       timestamp: "2026-07-02T00:00:00Z",
     };
-    render(<SmokeCheckList result={result} />);
+    renderWithProviders(<SmokeCheckList result={result} />);
 
     expect(
       screen.getByText(/Map a valid repository in the Map repository step/i),

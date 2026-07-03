@@ -6,15 +6,17 @@ import { StatusBadge } from "../components/StatusBadge";
 import { DetailList } from "../components/Drawer";
 import { linearHealth, useConnectLinear } from "../lib/linear";
 import type { LinearStatus } from "../api/types";
+import { useI18n } from "../i18n";
 
 export default function IntegrationsPage() {
   const bootstrap = useBootstrap();
+  const { t } = useI18n();
 
   return (
     <>
       <PageHeader
-        title="Integrations"
-        description="Connected services for this workspace."
+        title={t("Integrations")}
+        description={t("Connected services for this workspace.")}
       />
       <QueryState isLoading={bootstrap.isLoading} error={bootstrap.error}>
         {bootstrap.data ? <LinearCard linear={bootstrap.data.linear} /> : null}
@@ -26,11 +28,12 @@ export default function IntegrationsPage() {
 function LinearCard({ linear }: { linear: LinearStatus }) {
   const { connect, isPending } = useConnectLinear();
   const health = linearHealth(linear);
+  const { t } = useI18n();
 
   return (
     <Card
-      title="Linear"
-      description="Issue source for routing work to runtimes."
+      title={t("Linear")}
+      description={t("Issue source for routing work to runtimes.")}
       actions={
         health.connected ? (
           <Button
@@ -38,45 +41,45 @@ function LinearCard({ linear }: { linear: LinearStatus }) {
             onClick={connect}
             loading={isPending}
           >
-            Reconnect
+            {t("Reconnect")}
           </Button>
         ) : (
           <Button onClick={connect} loading={isPending}>
-            {health.broken ? "Reconnect" : "Connect Linear"}
+            {health.broken ? t("Reconnect") : t("Connect Linear")}
           </Button>
         )
       }
     >
       <div className="row-between" style={{ marginBottom: "var(--space-4)" }}>
-        <span className="muted">Connection</span>
+        <span className="muted">{t("Connection")}</span>
         <StatusBadge status={health.status} />
       </div>
 
       {health.broken ? (
         <p className="field-error" style={{ marginBottom: "var(--space-4)" }}>
-          {health.description}
+          {t(health.description)}
         </p>
       ) : null}
 
       <DetailList
         rows={[
-          { key: "Workspace", value: <code className="code">{linear.workspace_id}</code> },
+          { key: t("Workspace"), value: <code className="code">{linear.workspace_id}</code> },
           {
-            key: "State",
+            key: t("State"),
             value: <StatusBadge status={linear.state} />,
           },
           {
-            key: "Scopes",
+            key: t("Scopes"),
             value: linear.scope ? (
               <code className="code">{linear.scope}</code>
             ) : (
               <span className="muted">
-                {health.connected ? "Default scopes" : "—"}
+                {health.connected ? t("Default scopes") : "—"}
               </span>
             ),
           },
           {
-            key: "Expires",
+            key: t("Expires"),
             value: linear.expires_at ? (
               <span>{linear.expires_at}</span>
             ) : (

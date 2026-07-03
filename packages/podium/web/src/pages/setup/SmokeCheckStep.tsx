@@ -6,6 +6,7 @@ import { SmokeCheckList } from "../../components/SmokeCheckList";
 import { useToast } from "../../components/Toast";
 import type { SmokeCheckResult } from "../../api/types";
 import type { StepProps } from "./types";
+import { useI18n } from "../../i18n";
 
 export function SmokeCheckStep({
   stepNumber,
@@ -16,6 +17,7 @@ export function SmokeCheckStep({
   const run = useRunSmokeCheck();
   const existing = useSmokeCheckResult();
   const { notify } = useToast();
+  const { t } = useI18n();
 
   // Prefer a freshly-run result; fall back to the last stored one.
   const result: SmokeCheckResult | null =
@@ -26,12 +28,12 @@ export function SmokeCheckStep({
     try {
       const res = await run.mutateAsync();
       if (res.status === "passed") {
-        notify("Smoke check passed", "success");
+        notify(t("Smoke check passed"), "success");
       } else {
-        notify("Smoke check found issues", "error");
+        notify(t("Smoke check found issues"), "error");
       }
     } catch {
-      notify("Couldn't run smoke check. Try again.", "error");
+      notify(t("Couldn't run smoke check. Try again."), "error");
     }
   }
 
@@ -54,19 +56,19 @@ export function SmokeCheckStep({
       {passed ? (
         <ActionPanel
           tone="success"
-          title="Everything checks out"
-          description="Your workspace is fully set up. Podium is ready to route issues."
+          title={t("Everything checks out")}
+          description={t("Your workspace is fully set up. Podium is ready to route issues.")}
         />
       ) : (
         <ActionPanel
           tone={result ? "warning" : "info"}
-          title={result ? "Re-run the smoke check" : "Run the smoke check"}
+          title={result ? t("Re-run the smoke check") : t("Run the smoke check")}
           description={
             result
-              ? "Fix the items below, then run again to confirm."
-              : "This runs a quick set of checks against your configuration."
+              ? t("Fix the items below, then run again to confirm.")
+              : t("This runs a quick set of checks against your configuration.")
           }
-          actionLabel={result ? "Run again" : "Run smoke check"}
+          actionLabel={result ? t("Run again") : t("Run smoke check")}
           onAction={handleRun}
           actionLoading={run.isPending}
         />

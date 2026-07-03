@@ -1,4 +1,5 @@
 import { useEffect, type ReactNode } from "react";
+import { useI18n } from "../i18n";
 
 /** Slide-in right-hand panel for row detail (runtimes, runs). */
 export function Drawer({
@@ -10,6 +11,8 @@ export function Drawer({
   onClose: () => void;
   children: ReactNode;
 }) {
+  const { t } = useI18n();
+
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       if (e.key === "Escape") onClose();
@@ -28,7 +31,7 @@ export function Drawer({
         className="drawer"
         role="dialog"
         aria-modal="true"
-        aria-label={typeof title === "string" ? title : "Detail"}
+        aria-label={typeof title === "string" ? title : t("Detail")}
         onClick={(e) => e.stopPropagation()}
       >
         <div className="drawer-header">
@@ -37,7 +40,7 @@ export function Drawer({
             type="button"
             className="drawer-close"
             onClick={onClose}
-            aria-label="Close"
+            aria-label={t("Close")}
           >
             ×
           </button>

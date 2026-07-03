@@ -15,6 +15,7 @@ import { useToast } from "../components/Toast";
 import { formatDateTime } from "../lib/format";
 import { linearHealth, useConnectLinear } from "../lib/linear";
 import { isOnboardingComplete } from "../lib/onboarding";
+import { useI18n } from "../i18n";
 import type {
   AuthUser,
   Bootstrap,
@@ -26,12 +27,13 @@ import type {
 export default function AccountPage() {
   const me = useMe();
   const bootstrap = useBootstrap();
+  const { t } = useI18n();
 
   return (
     <>
       <PageHeader
-        title="Account"
-        description="Your workspace identity and connected services."
+        title={t("Account")}
+        description={t("Your workspace identity and connected services.")}
       />
       <QueryState isLoading={me.isLoading} error={null}>
         {me.user ? <IdentityCard user={me.user} /> : null}
@@ -50,6 +52,7 @@ function IdentityCard({ user }: { user: AuthUser }) {
   const navigate = useNavigate();
   const qc = useQueryClient();
   const { notify } = useToast();
+  const { t } = useI18n();
   const [loggingOut, setLoggingOut] = useState(false);
 
   async function logout() {
@@ -59,7 +62,7 @@ function IdentityCard({ user }: { user: AuthUser }) {
       qc.clear();
       navigate("/login");
     } catch {
-      notify("Couldn't sign out. Try again.", "error");
+      notify(t("Couldn't sign out. Try again."), "error");
       setLoggingOut(false);
     }
   }
@@ -67,19 +70,19 @@ function IdentityCard({ user }: { user: AuthUser }) {
   return (
     <div className="page-stack">
       <Card
-        title="Account"
-        description="Your personal, self-serve workspace (V1)."
+        title={t("Account")}
+        description={t("Your personal, self-serve workspace (V1).")}
         actions={
           <Button variant="secondary" onClick={logout} loading={loggingOut}>
-            Log out
+            {t("Log out")}
           </Button>
         }
       >
         <DetailList
           rows={[
-            { key: "Email", value: <span>{user.email}</span> },
+            { key: t("Email"), value: <span>{user.email}</span> },
             {
-              key: "Workspace",
+              key: t("Workspace"),
               value: <code className="code">{user.id}</code>,
             },
           ]}
@@ -95,6 +98,7 @@ function LinearApplicationCard({
   initial: LinearAppConfig | null;
 }) {
   const { notify } = useToast();
+  const { t } = useI18n();
   // Seed from the real config on `me` so a refresh reflects the saved state;
   // mutation results then keep it current within the session.
   const [config, setConfig] = useState<LinearAppConfig | null>(initial);
@@ -111,7 +115,7 @@ function LinearApplicationCard({
     e.preventDefault();
     setError(null);
     if (!clientId.trim() || !clientSecret.trim()) {
-      setError("Client ID and client secret are required.");
+      setError(t("Client ID and client secret are required."));
       return;
     }
     setSaving(true);
@@ -124,9 +128,9 @@ function LinearApplicationCard({
       setConfig(res.linear_app);
       // Never keep the secret in memory / never echo it back.
       setClientSecret("");
-      notify("Custom Linear app saved", "success");
+      notify(t("Custom Linear app saved"), "success");
     } catch {
-      setError("Couldn't save the custom app. Check your values and try again.");
+      setError(t("Couldn't save the custom app. Check your values and try again."));
     } finally {
       setSaving(false);
     }
@@ -140,9 +144,9 @@ function LinearApplicationCard({
       setClientId("");
       setClientSecret("");
       setRedirectUri("");
-      notify("Switched to the official Podium app", "success");
+      notify(t("Switched to the official Podium app"), "success");
     } catch {
-      notify("Couldn't switch to the official app. Try again.", "error");
+      notify(t("Couldn't switch to the official app. Try again."), "error");
     } finally {
       setClearing(false);
     }
@@ -150,15 +154,15 @@ function LinearApplicationCard({
 
   return (
     <Card
-      title="Linear application"
-      description="Use the official shared Podium app, or bring your own Linear OAuth app."
+      title={t("Linear application")}
+      description={t("Use the official shared Podium app, or bring your own Linear OAuth app.")}
     >
       <div className="row-between" style={{ marginBottom: "var(--space-4)" }}>
-        <span className="muted">Mode</span>
+        <span className="muted">{t("Mode")}</span>
         {custom ? (
           <StatusBadge status="healthy" label="Custom app configured" />
         ) : (
-          <span className="muted">Using official Podium app</span>
+          <span className="muted">{t("Using official Podium app")}</span>
         )}
       </div>
 
@@ -167,15 +171,15 @@ function LinearApplicationCard({
           <DetailList
             rows={[
               {
-                key: "Client ID",
+                key: t("Client ID"),
                 value: <code className="code">{config.client_id}</code>,
               },
               {
-                key: "Redirect URI",
+                key: t("Redirect URI"),
                 value: config.redirect_uri ? (
                   <code className="code">{config.redirect_uri}</code>
                 ) : (
-                  <span className="muted">Default</span>
+                  <span className="muted">{t("Default")}</span>
                 ),
               },
             ]}
@@ -183,9 +187,9 @@ function LinearApplicationCard({
           <div style={{ marginTop: "var(--space-4)" }}>
             <ActionPanel
               tone="info"
-              title="Use official app"
-              description="Switch back to the shared Podium Linear app and remove your custom credentials."
-              actionLabel="Use official app"
+              title={t("Use official app")}
+              description={t("Switch back to the shared Podium Linear app and remove your custom credentials.")}
+              actionLabel={t("Use official app")}
               onAction={useOfficial}
               actionLoading={clearing}
             />
@@ -194,31 +198,31 @@ function LinearApplicationCard({
       ) : (
         <form onSubmit={save}>
           <label className="field">
-            <span className="field-label">Client ID</span>
+            <span className="field-label">{t("Client ID")}</span>
             <input
               className="text-input"
-              aria-label="Client ID"
+              aria-label={t("Client ID")}
               value={clientId}
               onChange={(e) => setClientId(e.target.value)}
             />
           </label>
           <label className="field">
-            <span className="field-label">Client secret</span>
+            <span className="field-label">{t("Client secret")}</span>
             <input
               className="text-input"
               type="password"
-              aria-label="Client secret"
+              aria-label={t("Client secret")}
               autoComplete="off"
               value={clientSecret}
               onChange={(e) => setClientSecret(e.target.value)}
             />
-            <span className="field-hint">Write-only — never displayed after saving.</span>
+            <span className="field-hint">{t("Write-only — never displayed after saving.")}</span>
           </label>
           <label className="field">
-            <span className="field-label">Redirect URI (optional)</span>
+            <span className="field-label">{t("Redirect URI (optional)")}</span>
             <input
               className="text-input"
-              aria-label="Redirect URI (optional)"
+              aria-label={t("Redirect URI (optional)")}
               value={redirectUri}
               onChange={(e) => setRedirectUri(e.target.value)}
             />
@@ -231,7 +235,7 @@ function LinearApplicationCard({
           ) : null}
 
           <Button type="submit" loading={saving}>
-            Save custom app
+            {t("Save custom app")}
           </Button>
         </form>
       )}
@@ -253,33 +257,34 @@ function LinearIdentityCard({ linear }: { linear: LinearStatus }) {
   const { connect, isPending } = useConnectLinear();
   const health = linearHealth(linear);
   const connected = health.connected;
+  const { t } = useI18n();
 
   return (
     <Card
-      title="Linear identity"
-      description="The Linear workspace Podium reads issues from."
+      title={t("Linear identity")}
+      description={t("The Linear workspace Podium reads issues from.")}
     >
       <div className="row-between" style={{ marginBottom: "var(--space-4)" }}>
-        <span className="muted">Connection</span>
+        <span className="muted">{t("Connection")}</span>
         <StatusBadge status={health.status} />
       </div>
 
       <DetailList
         rows={[
           {
-            key: "Authorized workspace",
+            key: t("Authorized workspace"),
             value: <code className="code">{linear.workspace_id}</code>,
           },
           {
-            key: "Scope",
+            key: t("Scope"),
             value: linear.scope ? (
               <code className="code">{linear.scope}</code>
             ) : (
-              <span className="muted">{connected ? "Default scopes" : "—"}</span>
+              <span className="muted">{connected ? t("Default scopes") : "—"}</span>
             ),
           },
           {
-            key: "App user",
+            key: t("App user"),
             value: linear.app_user_id ? (
               <code className="code">{linear.app_user_id}</code>
             ) : (
@@ -287,7 +292,7 @@ function LinearIdentityCard({ linear }: { linear: LinearStatus }) {
             ),
           },
           {
-            key: "Expires",
+            key: t("Expires"),
             value: linear.expires_at ? (
               <span>{formatDateTime(linear.expires_at)}</span>
             ) : (
@@ -300,16 +305,16 @@ function LinearIdentityCard({ linear }: { linear: LinearStatus }) {
       {connected ? (
         <div style={{ marginTop: "var(--space-4)" }}>
           <LinkButton to="/integrations" variant="secondary">
-            Manage in Integrations
+            {t("Manage in Integrations")}
           </LinkButton>
         </div>
       ) : (
         <div style={{ marginTop: "var(--space-4)" }}>
           <ActionPanel
             tone={health.tone === "success" ? "info" : health.tone}
-            title={health.title}
-            description={health.description}
-            actionLabel={health.actionLabel}
+            title={t(health.title)}
+            description={t(health.description)}
+            actionLabel={t(health.actionLabel)}
             onAction={connect}
             actionLoading={isPending}
           />
@@ -321,14 +326,15 @@ function LinearIdentityCard({ linear }: { linear: LinearStatus }) {
 
 function OnboardingCard({ onboarding }: { onboarding: OnboardingProgress }) {
   const complete = isOnboardingComplete(onboarding);
+  const { t } = useI18n();
 
   return (
     <Card
-      title="Onboarding"
-      description={complete ? "Setup complete" : "Finish setup to start routing"}
+      title={t("Onboarding")}
+      description={complete ? t("Setup complete") : t("Finish setup to start routing")}
       actions={
         <LinkButton to="/setup" variant="secondary">
-          {complete ? "Review setup" : "Continue setup"}
+          {complete ? t("Review setup") : t("Continue setup")}
         </LinkButton>
       }
     >

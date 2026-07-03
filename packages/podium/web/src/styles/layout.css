@@ -28,18 +28,40 @@
   width: 24px;
   height: 24px;
   border-radius: var(--radius-sm);
-  background: var(--color-accent);
+  overflow: hidden;
   display: grid;
   place-items: center;
-  color: #fff;
-  font-size: 13px;
-  font-weight: 700;
+}
+
+.brand-mark svg {
+  display: block;
+  width: 100%;
+  height: 100%;
 }
 
 .nav {
   display: flex;
   flex-direction: column;
   gap: var(--space-1);
+}
+
+.language-switch {
+  display: grid;
+  gap: var(--space-2);
+  margin-top: auto;
+  color: var(--color-text-muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.language-switch select {
+  width: 100%;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font: inherit;
+  padding: 7px 8px;
 }
 
 .nav-link {
@@ -62,7 +84,6 @@
 }
 
 .account-chip {
-  margin-top: auto;
   display: flex;
   align-items: center;
   gap: var(--space-2);

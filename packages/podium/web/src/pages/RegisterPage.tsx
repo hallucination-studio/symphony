@@ -3,7 +3,9 @@ import { Link, useNavigate } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "../api/client";
 import { Button } from "../components/Button";
+import { BrandMark } from "../components/BrandMark";
 import { useTurnstile } from "../components/TurnstileWidget";
+import { useI18n } from "../i18n";
 
 export default function RegisterPage() {
   const navigate = useNavigate();
@@ -14,17 +16,18 @@ export default function RegisterPage() {
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const turnstile = useTurnstile();
+  const { t } = useI18n();
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
     setError(null);
 
     if (password.length < 8) {
-      setError("Password must be at least 8 characters.");
+      setError(t("Password must be at least 8 characters."));
       return;
     }
     if (password !== confirm) {
-      setError("Passwords don't match.");
+      setError(t("Passwords don't match."));
       return;
     }
     if (!turnstile.ready) return;
@@ -35,7 +38,7 @@ export default function RegisterPage() {
       await qc.invalidateQueries({ queryKey: ["me"] });
       navigate("/");
     } catch (err) {
-      setError(registerErrorMessage(err));
+      setError(t(registerErrorMessage(err)));
     } finally {
       setSubmitting(false);
     }
@@ -45,21 +48,21 @@ export default function RegisterPage() {
     <div className="auth-layout">
       <div className="auth-card">
         <div className="auth-brand">
-          <span className="brand-mark">P</span>
+          <BrandMark />
           <span>Podium</span>
         </div>
-        <h1 className="auth-title">Create your account</h1>
+        <h1 className="auth-title">{t("Create your account")}</h1>
         <p className="auth-subtitle">
-          Get a personal Podium workspace in seconds.
+          {t("Get a personal Podium workspace in seconds.")}
         </p>
 
         <form onSubmit={onSubmit} noValidate>
           <label className="field">
-            <span className="field-label">Email</span>
+            <span className="field-label">{t("Email")}</span>
             <input
               className="text-input"
               type="email"
-              aria-label="Email"
+              aria-label={t("Email")}
               autoComplete="email"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
@@ -67,24 +70,24 @@ export default function RegisterPage() {
             />
           </label>
           <label className="field">
-            <span className="field-label">Password</span>
+            <span className="field-label">{t("Password")}</span>
             <input
               className="text-input"
               type="password"
-              aria-label="Password"
+              aria-label={t("Password")}
               autoComplete="new-password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               required
             />
-            <span className="field-hint">At least 8 characters.</span>
+            <span className="field-hint">{t("At least 8 characters.")}</span>
           </label>
           <label className="field">
-            <span className="field-label">Confirm password</span>
+            <span className="field-label">{t("Confirm password")}</span>
             <input
               className="text-input"
               type="password"
-              aria-label="Confirm password"
+              aria-label={t("Confirm password")}
               autoComplete="new-password"
               value={confirm}
               onChange={(e) => setConfirm(e.target.value)}
@@ -106,12 +109,12 @@ export default function RegisterPage() {
             disabled={!turnstile.ready}
             className="auth-submit"
           >
-            Create account
+            {t("Create account")}
           </Button>
         </form>
 
         <p className="auth-switch">
-          Already have an account? <Link to="/login">Sign in</Link>
+          {t("Already have an account?")} <Link to="/login">{t("Sign in")}</Link>
         </p>
       </div>
     </div>

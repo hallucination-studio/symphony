@@ -3,7 +3,9 @@ import { Link, useNavigate } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "../api/client";
 import { Button } from "../components/Button";
+import { BrandMark } from "../components/BrandMark";
 import { useTurnstile } from "../components/TurnstileWidget";
+import { useI18n } from "../i18n";
 
 export default function LoginPage() {
   const navigate = useNavigate();
@@ -13,6 +15,7 @@ export default function LoginPage() {
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const turnstile = useTurnstile();
+  const { t } = useI18n();
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
@@ -24,7 +27,7 @@ export default function LoginPage() {
       await qc.invalidateQueries({ queryKey: ["me"] });
       navigate("/");
     } catch (err) {
-      setError(loginErrorMessage(err));
+      setError(t(loginErrorMessage(err)));
     } finally {
       setSubmitting(false);
     }
@@ -34,19 +37,19 @@ export default function LoginPage() {
     <div className="auth-layout">
       <div className="auth-card">
         <div className="auth-brand">
-          <span className="brand-mark">P</span>
+          <BrandMark />
           <span>Podium</span>
         </div>
-        <h1 className="auth-title">Sign in</h1>
-        <p className="auth-subtitle">Welcome back — sign in to your workspace.</p>
+        <h1 className="auth-title">{t("Sign in")}</h1>
+        <p className="auth-subtitle">{t("Welcome back — sign in to your workspace.")}</p>
 
         <form onSubmit={onSubmit} noValidate>
           <label className="field">
-            <span className="field-label">Email</span>
+            <span className="field-label">{t("Email")}</span>
             <input
               className="text-input"
               type="email"
-              aria-label="Email"
+              aria-label={t("Email")}
               autoComplete="email"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
@@ -54,11 +57,11 @@ export default function LoginPage() {
             />
           </label>
           <label className="field">
-            <span className="field-label">Password</span>
+            <span className="field-label">{t("Password")}</span>
             <input
               className="text-input"
               type="password"
-              aria-label="Password"
+              aria-label={t("Password")}
               autoComplete="current-password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
@@ -80,12 +83,12 @@ export default function LoginPage() {
             disabled={!turnstile.ready}
             className="auth-submit"
           >
-            Sign in
+            {t("Sign in")}
           </Button>
         </form>
 
         <p className="auth-switch">
-          Don't have an account? <Link to="/register">Create one</Link>
+          {t("Don't have an account?")} <Link to="/register">{t("Create one")}</Link>
         </p>
       </div>
     </div>

@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Symphony">
-  <!-- Symphony: the conductor's downbeat. A bold stroke tracing the ictus
-       gesture, the baton tip leading as a glowing node. -->
+  <!-- App avatar for Linear / OAuth apps: the Symphony conductor's downbeat
+       at full bleed. Identical mark to the favicon for a consistent brand. -->
   <defs>
     <linearGradient id="sym-bg" x1="0" y1="0" x2="512" y2="512" gradientUnits="userSpaceOnUse">
       <stop offset="0" stop-color="#818cf8" />

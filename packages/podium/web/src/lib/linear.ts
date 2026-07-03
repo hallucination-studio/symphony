@@ -1,5 +1,6 @@
 import { useStartLinear } from "../api/hooks";
 import { useToast } from "../components/Toast";
+import { useI18n } from "../i18n";
 import { assignLocation } from "./navigation";
 import type { LinearStatus } from "../api/types";
 import type { GlobalStatus } from "./format";
@@ -76,13 +77,14 @@ export function linearHealth(linear: LinearStatus): LinearHealth {
 export function useConnectLinear() {
   const start = useStartLinear();
   const { notify } = useToast();
+  const { t } = useI18n();
 
   async function connect() {
     try {
       const { authorization_url } = await start.mutateAsync();
       assignLocation(authorization_url);
     } catch {
-      notify("Couldn't start Linear connection. Try again.", "error");
+      notify(t("Couldn't start Linear connection. Try again."), "error");
     }
   }
 

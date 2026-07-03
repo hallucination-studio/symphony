@@ -8,7 +8,9 @@ import AccountPage from "./pages/AccountPage";
 import LoginPage from "./pages/LoginPage";
 import RegisterPage from "./pages/RegisterPage";
 import { useMe } from "./auth/useSession";
+import { BrandMark } from "./components/BrandMark";
 import type { AuthUser } from "./api/types";
+import { useI18n, type Locale } from "./i18n";
 
 const NAV = [
   { to: "/", label: "Home", end: true },
@@ -21,11 +23,12 @@ const NAV = [
 
 export default function App() {
   const { user, isLoading, isAuthenticated } = useMe();
+  const { t } = useI18n();
 
   if (isLoading) {
     return (
       <div className="auth-layout">
-        <div className="state-message">Loading…</div>
+        <div className="state-message">{t("Loading…")}</div>
       </div>
     );
   }
@@ -44,11 +47,12 @@ export default function App() {
 }
 
 function AppShell({ user }: { user: AuthUser }) {
+  const { t } = useI18n();
   return (
     <div className="app">
       <aside className="sidebar">
         <div className="brand">
-          <span className="brand-mark">P</span>
+          <BrandMark />
           <span>Podium</span>
         </div>
         <nav className="nav">
@@ -61,10 +65,11 @@ function AppShell({ user }: { user: AuthUser }) {
                 isActive ? "nav-link active" : "nav-link"
               }
             >
-              {item.label}
+              {t(item.label)}
             </NavLink>
           ))}
         </nav>
+        <LanguageSwitch />
         <AccountChip user={user} />
       </aside>
       <main className="main">
@@ -81,7 +86,7 @@ function AppShell({ user }: { user: AuthUser }) {
           <Route path="/register" element={<Navigate to="/" replace />} />
           <Route
             path="*"
-            element={<p className="state-message">Page not found.</p>}
+            element={<p className="state-message">{t("Page not found.")}</p>}
           />
         </Routes>
       </main>
@@ -90,6 +95,7 @@ function AppShell({ user }: { user: AuthUser }) {
 }
 
 function AccountChip({ user }: { user: AuthUser }) {
+  const { t } = useI18n();
   return (
     <NavLink
       to="/account"
@@ -99,9 +105,26 @@ function AccountChip({ user }: { user: AuthUser }) {
     >
       <span className="account-chip-dot" data-tone="positive" aria-hidden />
       <span className="account-chip-body">
-        <span className="account-chip-label">Signed in</span>
+        <span className="account-chip-label">{t("Signed in")}</span>
         <span className="account-chip-value">{user.email}</span>
       </span>
     </NavLink>
+  );
+}
+
+function LanguageSwitch() {
+  const { locale, setLocale, t } = useI18n();
+  return (
+    <label className="language-switch">
+      <span>{t("Language")}</span>
+      <select
+        value={locale}
+        aria-label={t("Language")}
+        onChange={(e) => setLocale(e.target.value as Locale)}
+      >
+        <option value="en">EN</option>
+        <option value="zh">中文</option>
+      </select>
+    </label>
   );
 }

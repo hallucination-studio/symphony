@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useEnrollmentToken, useRuntimeStatus } from "../api/hooks";
 import { useToast } from "../components/Toast";
 import type { EnrollmentPhase } from "../components/InstallCommandCard";
+import { useI18n } from "../i18n";
 
 interface EnrollmentState {
   command: string | null;
@@ -9,13 +10,13 @@ interface EnrollmentState {
   expiresAt: string | null;
 }
 
-function expiryLabel(expiresAt?: string | null): string {
-  if (!expiresAt) return "Single-use token - regenerate if it expires";
+function expiryLabel(expiresAt: string | null | undefined, t: (key: string, values?: Record<string, string | number>) => string): string {
+  if (!expiresAt) return t("Single-use token - regenerate if it expires");
   const when = new Date(expiresAt);
   if (Number.isNaN(when.getTime())) {
-    return "Single-use token - regenerate if it expires";
+    return t("Single-use token - regenerate if it expires");
   }
-  return `Single-use token - expires ${when.toLocaleString()}`;
+  return t("Single-use token - expires {time}", { time: when.toLocaleString() });
 }
 
 export function useEnrollment({
@@ -31,6 +32,7 @@ export function useEnrollment({
 } = {}) {
   const generate = useEnrollmentToken();
   const { notify } = useToast();
+  const { t } = useI18n();
   const [state, setState] = useState<EnrollmentState>({
     command: null,
     token: null,
@@ -48,9 +50,9 @@ export function useEnrollment({
         token: res.enrollment_token,
         expiresAt: res.expires_at ?? null,
       });
-      notify(successMessage, "success");
+      notify(t(successMessage), "success");
     } catch {
-      notify(errorMessage, "error");
+      notify(t(errorMessage), "error");
     }
   }
 
@@ -64,7 +66,7 @@ export function useEnrollment({
 
   return {
     ...state,
-    expiresLabel: expiryLabel(state.expiresAt),
+    expiresLabel: expiryLabel(state.expiresAt, t),
     phase,
     isOnline,
     regenerate,

@@ -15,6 +15,7 @@ import { RepositoryStep } from "./setup/RepositoryStep";
 import { RuntimeStep } from "./setup/RuntimeStep";
 import { SmokeCheckStep } from "./setup/SmokeCheckStep";
 import type { StepProps } from "./setup/types";
+import { useI18n } from "../i18n";
 
 const STEP_COUNT = STEP_DEFS.length;
 type SetupStepKey = Exclude<Bootstrap["onboarding"]["current_step"], "complete">;
@@ -30,12 +31,13 @@ const STEP_COMPONENTS = {
 
 export default function SetupPage() {
   const bootstrap = useBootstrap();
+  const { t } = useI18n();
 
   return (
     <>
       <PageHeader
-        title="Setup"
-        description="Connect Linear, choose scope, map a repository, install a runtime, and verify."
+        title={t("Setup")}
+        description={t("Connect Linear, choose scope, map a repository, install a runtime, and verify.")}
       />
       <QueryState isLoading={bootstrap.isLoading} error={bootstrap.error}>
         {bootstrap.data ? <SetupBody data={bootstrap.data} /> : null}
@@ -108,8 +110,9 @@ function SetupNav({
   currentPath: string;
   onSelect: (path: string) => void;
 }) {
+  const { t } = useI18n();
   return (
-    <nav className="setup-nav" aria-label="Setup steps">
+    <nav className="setup-nav" aria-label={t("Setup steps")}>
       {steps.map((step, i) => (
         <button
           key={step.key}
@@ -124,7 +127,7 @@ function SetupNav({
           <span className="setup-nav-indicator" data-status={step.status}>
             {step.status === "completed" ? "✓" : i + 1}
           </span>
-          <span>{step.title}</span>
+          <span>{t(step.title)}</span>
         </button>
       ))}
     </nav>

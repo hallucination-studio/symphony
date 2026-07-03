@@ -4,6 +4,7 @@ import { SetupStepShell } from "../../components/SetupStepShell";
 import { ActionPanel } from "../../components/ActionPanel";
 import { useToast } from "../../components/Toast";
 import type { StepProps } from "./types";
+import { useI18n } from "../../i18n";
 
 export function ScopeStep({
   stepNumber,
@@ -14,6 +15,7 @@ export function ScopeStep({
   const scope = useLinearScope();
   const save = useSaveScope();
   const { notify } = useToast();
+  const { t } = useI18n();
 
   const [teams, setTeams] = useState<Set<string>>(new Set());
   const [projects, setProjects] = useState<Set<string>>(new Set());
@@ -44,10 +46,10 @@ export function ScopeStep({
         teams: [...teams],
         projects: [...projects],
       });
-      notify("Scope saved", "success");
+      notify(t("Scope saved"), "success");
       onNext();
     } catch {
-      notify("Couldn't save scope. Try again.", "error");
+      notify(t("Couldn't save scope. Try again."), "error");
     }
   }
 
@@ -66,18 +68,18 @@ export function ScopeStep({
       nextLoading={save.isPending}
     >
       {scope.isLoading ? (
-        <div className="state-message">Loading teams and projects…</div>
+        <div className="state-message">{t("Loading teams and projects…")}</div>
       ) : scope.error ? (
         <ActionPanel
           tone="critical"
-          title="Couldn't load Linear scope"
-          description="This usually means Linear isn't connected yet. Reconnect on the previous step."
-          actionLabel="Back to Connect Linear"
+          title={t("Couldn't load Linear scope")}
+          description={t("This usually means Linear isn't connected yet. Reconnect on the previous step.")}
+          actionLabel={t("Back to Connect Linear")}
           onAction={onBack ?? (() => {})}
         />
       ) : (
         <>
-          <div className="scope-section-title">Teams</div>
+          <div className="scope-section-title">{t("Teams")}</div>
           {scope.data && scope.data.teams.length > 0 ? (
             <div className="scope-list">
               {scope.data.teams.map((team) => (
@@ -92,10 +94,10 @@ export function ScopeStep({
               ))}
             </div>
           ) : (
-            <p className="muted">No teams available.</p>
+            <p className="muted">{t("No teams available.")}</p>
           )}
 
-          <div className="scope-section-title">Projects</div>
+          <div className="scope-section-title">{t("Projects")}</div>
           {scope.data && scope.data.projects.length > 0 ? (
             <div className="scope-list">
               {scope.data.projects.map((project) => (
@@ -110,11 +112,11 @@ export function ScopeStep({
               ))}
             </div>
           ) : (
-            <p className="muted">No projects available.</p>
+            <p className="muted">{t("No projects available.")}</p>
           )}
 
           {nothingSelected ? (
-            <p className="field-hint">Select at least one team or project.</p>
+            <p className="field-hint">{t("Select at least one team or project.")}</p>
           ) : null}
         </>
       )}

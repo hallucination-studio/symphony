@@ -1,6 +1,7 @@
 import { Button } from "./Button";
 import { StatusBadge } from "./StatusBadge";
 import { useCopy } from "../lib/useCopy";
+import { useI18n } from "../i18n";
 
 export type EnrollmentPhase = "idle" | "waiting" | "online";
 
@@ -25,6 +26,7 @@ export function InstallCommandCard({
   regenerating?: boolean;
 }) {
   const copy = useCopy();
+  const { t } = useI18n();
 
   return (
     <div className="install-card">
@@ -32,16 +34,16 @@ export function InstallCommandCard({
         <code className="install-command-text">{command}</code>
         <Button
           variant="secondary"
-          onClick={() => copy(command, "Install command copied")}
+          onClick={() => copy(command, t("Install command copied"))}
         >
-          Copy
+          {t("Copy")}
         </Button>
       </div>
 
       <div className="install-meta">
         {token ? (
           <span className="install-meta-item">
-            Enrollment token{" "}
+            {t("Enrollment token")}{" "}
             <code className="code install-token">{token}</code>
           </span>
         ) : null}
@@ -55,7 +57,7 @@ export function InstallCommandCard({
             onClick={onRegenerate}
             disabled={regenerating}
           >
-            {regenerating ? "Regenerating…" : "Regenerate command"}
+            {regenerating ? t("Regenerating…") : t("Regenerate command")}
           </button>
         ) : null}
       </div>
@@ -64,16 +66,16 @@ export function InstallCommandCard({
         {phase === "online" ? (
           <>
             <StatusBadge status="online" />
-            <span>Runtime connected. You&apos;re ready for the next step.</span>
+            <span>{t("Runtime connected. You're ready for the next step.")}</span>
           </>
         ) : phase === "waiting" ? (
           <>
             <span className="btn-spinner dark" aria-hidden />
-            <span>Waiting for the runtime to check in…</span>
+            <span>{t("Waiting for the runtime to check in…")}</span>
           </>
         ) : (
           <span className="muted">
-            Run the command above on your runtime machine.
+            {t("Run the command above on your runtime machine.")}
           </span>
         )}
       </div>

@@ -17,6 +17,7 @@ import {
   performerStatus,
 } from "../lib/performer";
 import type { ConductorBinding, ConductorRecord, RuntimeRecord } from "../api/types";
+import { useI18n } from "../i18n";
 
 interface SelectedPerformer {
   conductor: ConductorRecord;
@@ -35,21 +36,22 @@ export default function RuntimesPage() {
   const reportedIds = new Set(conductors.map((c) => c.conductor_id));
   const unreported = runtimes.filter((r) => !reportedIds.has(r.runtime_id));
   const isEmpty = conductors.length === 0 && runtimes.length === 0;
+  const { t } = useI18n();
 
   return (
     <>
       <PageHeader
-        title="Runtimes"
-        description="Conductors on your machines and the Performers they operate."
+        title={t("Runtimes")}
+        description={t("Conductors on your machines and the Performers they operate.")}
       />
       <QueryState isLoading={isLoading} error={error}>
         {isEmpty ? (
           <Card>
             <EmptyState
               icon="🖥️"
-              title="No runtimes yet"
-              description="Install your first Conductor to start operating Performers."
-              actionLabel="Install a runtime"
+              title={t("No runtimes yet")}
+              description={t("Install your first Conductor to start operating Performers.")}
+              actionLabel={t("Install a runtime")}
               actionTo="/setup/runtime"
             />
           </Card>
@@ -65,8 +67,8 @@ export default function RuntimesPage() {
             ))}
             {unreported.length > 0 ? (
               <Card
-                title="Awaiting first report"
-                description="Enrolled runtimes that haven't reported Performers yet."
+                title={t("Awaiting first report")}
+                description={t("Enrolled runtimes that haven't reported Performers yet.")}
               >
                 <ul className="runtime-list">
                   {unreported.map((runtime) => (
@@ -80,8 +82,8 @@ export default function RuntimesPage() {
                           <div className="runtime-id">{runtime.runtime_id}</div>
                           <div className="runtime-sub">
                             {runtime.last_heartbeat
-                              ? `heartbeat ${relativeTime(runtime.last_heartbeat)}`
-                              : "no heartbeat"}
+                              ? t("heartbeat {time}", { time: relativeTime(runtime.last_heartbeat) })
+                              : t("no heartbeat")}
                           </div>
                         </div>
                         <StatusBadge status={runtime.online ? "online" : "offline"} />
@@ -120,9 +122,10 @@ function ConductorCard({
 }) {
   const heading = conductor.label || conductor.hostname || conductor.conductor_id;
   const reported = conductor.last_report_at
-    ? `reported ${relativeTime(conductor.last_report_at)}`
-    : "no report yet";
-  const version = conductor.version ? `v${conductor.version}` : "version unknown";
+    ? relativeTime(conductor.last_report_at)
+    : null;
+  const version = conductor.version ? `v${conductor.version}` : null;
+  const { t } = useI18n();
 
   return (
     <Card>
@@ -131,8 +134,9 @@ function ConductorCard({
           <div className="conductor-name">{heading}</div>
           <div className="conductor-sub">
             {version}
+            {version ? null : t("version unknown")}
             {" · "}
-            {reported}
+            {reported ? t("reported {time}", { time: reported }) : t("no report yet")}
           </div>
         </div>
         <StatusBadge status={conductor.online ? "online" : "offline"} />
@@ -140,7 +144,7 @@ function ConductorCard({
 
       {conductor.bindings.length === 0 ? (
         <p className="conductor-empty muted">
-          No Performers configured on this Conductor yet.
+          {t("No Performers configured on this Conductor yet.")}
         </p>
       ) : (
         <ul className="performer-list">
@@ -170,6 +174,7 @@ function PerformerRow({
   const constraints = performerConstraints(performer);
   const metrics = performerMetrics(performer);
   const scoped = performerIsScoped(performer);
+  const { t } = useI18n();
 
   return (
     <li>
@@ -184,16 +189,16 @@ function PerformerRow({
             <span className="performer-name">{performer.name}</span>
             <StatusBadge status={performerStatus(performer)} />
             {performerIsRunning(performer) ? (
-              <StatusBadge status="running" label="Active" />
+              <StatusBadge status="running" label={t("Active")} />
             ) : null}
             {!scoped ? (
-              <StatusBadge status="degraded" label="Unscoped" />
+              <StatusBadge status="degraded" label={t("Unscoped")} />
             ) : null}
           </div>
           <div className="constraint-chips">
             {constraints.map((c) => (
               <span className="constraint-chip" key={c.label}>
-                <span className="constraint-key">{c.label}</span>
+                <span className="constraint-key">{t(c.label)}</span>
                 <span className="constraint-value">{c.value}</span>
               </span>
             ))}
@@ -208,7 +213,7 @@ function PerformerRow({
               >
                 {m.value.toLocaleString()}
               </span>
-              <span className="performer-metric-label">{m.label}</span>
+              <span className="performer-metric-label">{t(m.label)}</span>
             </div>
           ))}
         </div>
@@ -228,25 +233,25 @@ function PerformerDrawer({
 }) {
   const scoped = performerIsScoped(performer);
   const constraints = performerConstraints(performer);
+  const { t } = useI18n();
 
   return (
     <Drawer title={performer.name} onClose={onClose}>
       <div className="row-between" style={{ marginBottom: "var(--space-4)" }}>
-        <span className="muted">Status</span>
+        <span className="muted">{t("Status")}</span>
         <StatusBadge status={performerStatus(performer)} />
       </div>
 
       {!scoped ? (
         <p className="field-error" style={{ marginBottom: "var(--space-4)" }}>
-          This Performer is missing a project or delegate constraint, so dispatch
-          will never route work to it.
+          {t("This Performer is missing a project or delegate constraint, so dispatch will never route work to it.")}
         </p>
       ) : null}
 
-      <div className="scope-section-title">Constraints</div>
+      <div className="scope-section-title">{t("Constraints")}</div>
       <DetailList
         rows={constraints.map((c) => ({
-          key: c.label,
+          key: t(c.label),
           value: <code className="code">{c.value}</code>,
         }))}
       />
@@ -254,7 +259,7 @@ function PerformerDrawer({
       {performer.constraint_labels && performer.constraint_labels.length > 0 ? (
         <>
           <div className="scope-section-title" style={{ marginTop: "var(--space-5)" }}>
-            Linear project labels
+            {t("Linear project labels")}
           </div>
           <div className="constraint-chips">
             {performer.constraint_labels.map((label) => (
@@ -267,20 +272,20 @@ function PerformerDrawer({
       ) : null}
 
       <div className="scope-section-title" style={{ marginTop: "var(--space-5)" }}>
-        Conductor
+        {t("Conductor")}
       </div>
       <DetailList
         rows={[
           {
-            key: "Host",
+            key: t("Host"),
             value: conductor.label || conductor.hostname || conductor.conductor_id,
           },
-          { key: "Last report", value: formatDateTime(conductor.last_report_at) },
+          { key: t("Last report"), value: formatDateTime(conductor.last_report_at) },
         ]}
       />
 
       <div className="scope-section-title" style={{ marginTop: "var(--space-5)" }}>
-        Performer logs
+        {t("Performer logs")}
       </div>
       <PerformerLogs
         conductorId={conductor.conductor_id}
@@ -302,15 +307,16 @@ function PerformerLogs({
 }) {
   const { data, isLoading, error } = useInstanceLogs(conductorId, instanceId, online);
   const lines = data?.logs.lines ?? [];
+  const { t } = useI18n();
 
   if (isLoading) {
-    return <div className="log-panel muted">Loading logs…</div>;
+    return <div className="log-panel muted">{t("Loading logs…")}</div>;
   }
   if (error) {
-    return <div className="log-panel log-panel-error">Couldn't load logs.</div>;
+    return <div className="log-panel log-panel-error">{t("Couldn't load logs.")}</div>;
   }
   if (lines.length === 0) {
-    return <div className="log-panel muted">No log output reported yet.</div>;
+    return <div className="log-panel muted">{t("No log output reported yet.")}</div>;
   }
 
   return (
@@ -336,6 +342,7 @@ function ReconnectDrawer({
     successMessage: "New install command ready",
     errorMessage: "Couldn't regenerate the command. Try again.",
   });
+  const { t } = useI18n();
   const hostname =
     typeof runtime.metadata?.hostname === "string"
       ? (runtime.metadata.hostname as string)
@@ -344,22 +351,22 @@ function ReconnectDrawer({
   return (
     <Drawer title={runtime.runtime_id} onClose={onClose}>
       <div className="row-between" style={{ marginBottom: "var(--space-4)" }}>
-        <span className="muted">Status</span>
+        <span className="muted">{t("Status")}</span>
         <StatusBadge status={runtime.online ? "online" : "offline"} />
       </div>
 
       <DetailList
         rows={[
-          { key: "Runtime ID", value: <code className="code">{runtime.runtime_id}</code> },
-          { key: "Version", value: runtime.version ?? "—" },
-          { key: "Hostname", value: hostname ?? "—" },
-          { key: "Last heartbeat", value: formatDateTime(runtime.last_heartbeat) },
+          { key: t("Runtime ID"), value: <code className="code">{runtime.runtime_id}</code> },
+          { key: t("Version"), value: runtime.version ?? "—" },
+          { key: t("Hostname"), value: hostname ?? "—" },
+          { key: t("Last heartbeat"), value: formatDateTime(runtime.last_heartbeat) },
         ]}
       />
 
       {!runtime.online ? (
         <div style={{ marginTop: "var(--space-5)" }}>
-          <div className="scope-section-title">Reconnect this runtime</div>
+          <div className="scope-section-title">{t("Reconnect this runtime")}</div>
           {enrollment.command && enrollment.token ? (
             <InstallCommandCard
               command={enrollment.command}
@@ -377,8 +384,8 @@ function ReconnectDrawer({
               disabled={enrollment.regenerating}
             >
               {enrollment.regenerating
-                ? "Generating…"
-                : "Regenerate install command"}
+                ? t("Generating…")
+                : t("Regenerate install command")}
             </button>
           )}
         </div>

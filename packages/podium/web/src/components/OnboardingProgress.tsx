@@ -5,6 +5,7 @@ import {
   STEP_ORDER,
 } from "../lib/onboarding";
 import type { OnboardingProgress as OnboardingProgressData } from "../api/types";
+import { useI18n } from "../i18n";
 
 export function OnboardingProgress({
   onboarding,
@@ -15,6 +16,7 @@ export function OnboardingProgress({
 }) {
   const done = completedCount(onboarding);
   const total = STEP_ORDER.length;
+  const { t } = useI18n();
 
   return (
     <>
@@ -22,7 +24,7 @@ export function OnboardingProgress({
         <span className="progress-count">
           {done}/{total}
         </span>
-        <span className="muted">steps done</span>
+        <span className="muted">{t("steps done")}</span>
       </div>
       <div className="progress-bar">
         <div
@@ -38,7 +40,7 @@ export function OnboardingProgress({
                 {step.status === "completed" ? "✓" : i + 1}
               </span>
               <div className="step-body">
-                <div className="step-title">{step.title}</div>
+                <div className="step-title">{t(step.title)}</div>
               </div>
               <StatusBadge status={step.status} />
             </li>

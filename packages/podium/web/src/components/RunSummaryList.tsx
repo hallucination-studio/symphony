@@ -1,6 +1,7 @@
 import type { RunSummary } from "../api/types";
 import { StatusBadge } from "./StatusBadge";
 import { relativeTime } from "../lib/format";
+import { useI18n } from "../i18n";
 
 /**
  * Compact run list shared by Home (a few recent) and Runs (full list).
@@ -46,6 +47,7 @@ function RowInner({
   interactive: boolean;
   onSelect?: (run: RunSummary) => void;
 }) {
+  const { t } = useI18n();
   const content = (
     <>
       <div className="run-row-main">
@@ -59,10 +61,10 @@ function RowInner({
       <div className="run-row-meta">
         <span className="muted run-time">
           {run.completed_at
-            ? `Ended ${relativeTime(run.completed_at)}`
+            ? t("Ended {time}", { time: relativeTime(run.completed_at) })
             : run.started_at
-              ? `Started ${relativeTime(run.started_at)}`
-              : "Not started"}
+              ? t("Started {time}", { time: relativeTime(run.started_at) })
+              : t("Not started")}
         </span>
         <StatusBadge status={run.status} />
       </div>

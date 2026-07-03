@@ -3,6 +3,7 @@ import { InstallCommandCard } from "../../components/InstallCommandCard";
 import { ActionPanel } from "../../components/ActionPanel";
 import { useEnrollment } from "../../lib/enrollment";
 import type { StepProps } from "./types";
+import { useI18n } from "../../i18n";
 
 export function RuntimeStep({
   stepNumber,
@@ -11,6 +12,7 @@ export function RuntimeStep({
   onBack,
 }: StepProps) {
   const enrollment = useEnrollment({ pollRuntimeStatus: true });
+  const { t } = useI18n();
 
   return (
     <SetupStepShell
@@ -27,9 +29,9 @@ export function RuntimeStep({
       {!enrollment.command || !enrollment.token ? (
         <ActionPanel
           tone="info"
-          title="Generate an install command"
-          description="Creates a single-use enrollment token and the command to run on your runtime host."
-          actionLabel="Generate install command"
+          title={t("Generate an install command")}
+          description={t("Creates a single-use enrollment token and the command to run on your runtime host.")}
+          actionLabel={t("Generate install command")}
           onAction={enrollment.regenerate}
           actionLoading={enrollment.regenerating}
         />

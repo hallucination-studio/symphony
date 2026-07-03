@@ -6,6 +6,7 @@ import { useToast } from "../../components/Toast";
 import { ApiError } from "../../api/client";
 import type { RepositoryMode } from "../../api/types";
 import type { StepProps } from "./types";
+import { useI18n } from "../../i18n";
 
 export function RepositoryStep({
   stepNumber,
@@ -15,16 +16,17 @@ export function RepositoryStep({
 }: StepProps) {
   const save = useSaveRepository();
   const { notify } = useToast();
+  const { t } = useI18n();
 
   const [mode, setMode] = useState<RepositoryMode>("local_path");
   const [value, setValue] = useState("");
   const [error, setError] = useState<string | null>(null);
 
   function validate(): string | null {
-    if (!value.trim()) return "Repository value is required.";
+    if (!value.trim()) return t("Repository value is required.");
     if (mode === "git_url") {
       if (!/^(https?:\/\/|git@|ssh:\/\/)/.test(value.trim())) {
-        return "Git URL must start with http(s)://, git@, or ssh://.";
+        return t("Git URL must start with http(s)://, git@, or ssh://.");
       }
     }
     return null;
@@ -42,17 +44,17 @@ export function RepositoryStep({
       // The backend also validates; respect its verdict.
       if (res.repository.validation_state === "invalid") {
         setError(
-          res.repository.validation_message ?? "Repository mapping is invalid.",
+          res.repository.validation_message ?? t("Repository mapping is invalid."),
         );
         return;
       }
-      notify("Repository mapped", "success");
+      notify(t("Repository mapped"), "success");
       onNext();
     } catch (e) {
       if (e instanceof ApiError && e.code === "invalid_mode") {
-        setError("That repository mode isn't supported.");
+        setError(t("That repository mode isn't supported."));
       } else {
-        setError(e instanceof Error ? e.message : "Couldn't save repository.");
+        setError(e instanceof Error ? e.message : t("Couldn't save repository."));
       }
     }
   }
@@ -69,7 +71,7 @@ export function RepositoryStep({
       nextDisabled={!value.trim()}
       nextLoading={save.isPending}
     >
-      <div className="choice-group" role="radiogroup" aria-label="Repository source">
+      <div className="choice-group" role="radiogroup" aria-label={t("Repository source")}>
         <label
           className="choice"
           data-selected={mode === "local_path"}
@@ -87,11 +89,10 @@ export function RepositoryStep({
           />
           <div>
             <div className="choice-title">
-              The repo is already on my runtime machine
+              {t("The repo is already on my runtime machine")}
             </div>
             <div className="choice-description">
-              Point Podium at a local path. Best when you already have the code
-              checked out where the runtime runs.
+              {t("Point Podium at a local path. Best when you already have the code checked out where the runtime runs.")}
             </div>
           </div>
         </label>
@@ -112,9 +113,9 @@ export function RepositoryStep({
             }}
           />
           <div>
-            <div className="choice-title">Clone from a Git URL</div>
+            <div className="choice-title">{t("Clone from a Git URL")}</div>
             <div className="choice-description">
-              Podium's runtime will clone the repo. Use an HTTPS or SSH URL.
+              {t("Podium's runtime will clone the repo. Use an HTTPS or SSH URL.")}
             </div>
           </div>
         </label>
@@ -122,7 +123,7 @@ export function RepositoryStep({
 
       <label className="field">
         <span className="field-label">
-          {mode === "local_path" ? "Local path" : "Git URL"}
+          {mode === "local_path" ? t("Local path") : t("Git URL")}
         </span>
         <input
           className="text-input"
@@ -144,8 +145,8 @@ export function RepositoryStep({
         ) : (
           <span className="field-hint">
             {mode === "local_path"
-              ? "Absolute path on the runtime host."
-              : "Starts with http(s)://, git@, or ssh://."}
+              ? t("Absolute path on the runtime host.")
+              : t("Starts with http(s)://, git@, or ssh://.")}
           </span>
         )}
       </label>
@@ -153,8 +154,8 @@ export function RepositoryStep({
       {mode === "git_url" ? (
         <ActionPanel
           tone="info"
-          title="Private repo?"
-          description="Make sure the runtime host has credentials (deploy key or token) to clone this URL."
+          title={t("Private repo?")}
+          description={t("Make sure the runtime host has credentials (deploy key or token) to clone this URL.")}
         />
       ) : null}
     </SetupStepShell>

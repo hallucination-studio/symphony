@@ -1,5 +1,6 @@
 import type { SmokeCheckResult } from "../api/types";
 import { humanize } from "../lib/format";
+import { useI18n } from "../i18n";
 
 // Human titles + the recommended action for each known check. The backend
 // reports checks as {name, passed}; we translate a failure into something the
@@ -23,6 +24,7 @@ const CHECK_META: Record<
 };
 
 export function SmokeCheckList({ result }: { result: SmokeCheckResult }) {
+  const { t } = useI18n();
   return (
     <ul className="check-list">
       {result.checks.map((check) => {
@@ -34,11 +36,11 @@ export function SmokeCheckList({ result }: { result: SmokeCheckResult }) {
             </span>
             <div className="step-body">
               <div className="check-title">
-                {meta?.title ?? humanize(check.name)}
+                {meta ? t(meta.title) : humanize(check.name)}
               </div>
               {!check.passed ? (
                 <div className="check-action">
-                  {meta?.action ?? "Resolve this check and run again."}
+                  {meta ? t(meta.action) : t("Resolve this check and run again.")}
                 </div>
               ) : null}
             </div>

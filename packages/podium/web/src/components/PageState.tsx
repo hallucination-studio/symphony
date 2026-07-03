@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { useI18n } from "../i18n";
 
 export function PageHeader({
   title,
@@ -24,12 +25,13 @@ export function QueryState({
   error: unknown;
   children: ReactNode;
 }) {
+  const { t } = useI18n();
   if (isLoading) {
-    return <div className="state-message">Loading…</div>;
+    return <div className="state-message">{t("Loading…")}</div>;
   }
   if (error) {
     const message =
-      error instanceof Error ? error.message : "Something went wrong.";
+      error instanceof Error ? error.message : t("Something went wrong.");
     return <div className="state-message error">{message}</div>;
   }
   return <>{children}</>;

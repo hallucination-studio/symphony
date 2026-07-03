@@ -20,17 +20,19 @@ import type {
   SmokeCheckResult,
 } from "../api/types";
 import type { GlobalStatus } from "../lib/format";
+import { useI18n } from "../i18n";
 
 export default function HomePage() {
   const bootstrap = useBootstrap();
   const runs = useRecentRuns(5);
   const smoke = useSmokeCheckResult();
+  const { t } = useI18n();
 
   return (
     <>
       <PageHeader
-        title="Overview"
-        description="Where your workspace stands and what to do next."
+        title={t("Overview")}
+        description={t("Where your workspace stands and what to do next.")}
       />
       <QueryState isLoading={bootstrap.isLoading} error={bootstrap.error}>
         {bootstrap.data ? (
@@ -63,6 +65,7 @@ function Home({
   const next = activeStep(onboarding);
   const linearState = linearHealth(linear);
   const runtimeState = runtimeHealthStatus(onboarding);
+  const { t } = useI18n();
 
   return (
     <div className="home-grid">
@@ -70,31 +73,31 @@ function Home({
         {complete ? (
           <ActionPanel
             tone="success"
-            title="You're all set"
-            description="Onboarding is complete. Podium is routing issues to your runtime."
-            actionLabel="View runs"
+            title={t("You're all set")}
+            description={t("Onboarding is complete. Podium is routing issues to your runtime.")}
+            actionLabel={t("View runs")}
             onAction={() => navigate("/runs")}
           />
         ) : next ? (
           <ActionPanel
             tone="info"
-            title={onboarding.next_action || next.title}
-            description={next.description}
-            actionLabel={next.ctaLabel}
+            title={onboarding.next_action || t(next.title)}
+            description={t(next.description)}
+            actionLabel={t(next.ctaLabel)}
             onAction={() => navigate(`/setup/${next.path}`)}
           />
         ) : null}
       </div>
 
       <Card
-        title="Setup progress"
+        title={t("Setup progress")}
         description={
-          complete ? "All steps complete" : "Finish setup to start routing"
+          complete ? t("All steps complete") : t("Finish setup to start routing")
         }
         actions={
           !complete ? (
             <LinkButton to="/setup" variant="secondary">
-              Continue
+              {t("Continue")}
             </LinkButton>
           ) : undefined
         }
@@ -102,44 +105,44 @@ function Home({
         <OnboardingProgressView onboarding={onboarding} showSteps />
       </Card>
 
-      <Card title="System health" description="Live status of core services">
+      <Card title={t("System health")} description={t("Live status of core services")}>
         <div className="health-list">
           <HealthRow
-            label="Linear"
+            label={t("Linear")}
             status={linearState.status}
-            hint={linearState.hint}
+            hint={t(linearState.hint)}
           />
           <HealthRow
-            label="Runtime"
+            label={t("Runtime")}
             status={runtimeState}
             hint={
               runtimeState === "online"
-                ? "At least one runtime online"
-                : "No runtime online"
+                ? t("At least one runtime online")
+                : t("No runtime online")
             }
           />
           <HealthRow
-            label="Routing"
+            label={t("Routing")}
             status={complete ? "healthy" : "degraded"}
             hint={
-              complete ? "Issues route to runtimes" : "Finish setup to enable"
+              complete ? t("Issues route to runtimes") : t("Finish setup to enable")
             }
           />
           <HealthRow
-            label="Smoke check"
+            label={t("Smoke check")}
             status={smokeHealthStatus(smoke)}
-            hint={smokeHint(smoke)}
+            hint={t(smokeHint(smoke))}
           />
         </div>
       </Card>
 
       <Card
         className="span-2"
-        title="Recent runs"
+        title={t("Recent runs")}
         actions={
           runs.length > 0 ? (
             <LinkButton to="/runs" variant="ghost">
-              View all
+              {t("View all")}
             </LinkButton>
           ) : undefined
         }
@@ -147,8 +150,8 @@ function Home({
         <QueryState isLoading={runsLoading} error={null}>
           {runs.length === 0 ? (
             <EmptyState
-              title="No runs yet"
-              description="Once a runtime picks up an issue, runs will show up here."
+              title={t("No runs yet")}
+              description={t("Once a runtime picks up an issue, runs will show up here.")}
             />
           ) : (
             <RunSummaryList runs={runs} />
