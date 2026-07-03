@@ -14,7 +14,6 @@ from performer.cli import (
     persistence_store_from_config,
     parse_args,
 )
-from performer.codex_client import CodexAppServerClient
 from conductor.conductor_cli import parse_args as parse_conductor_args
 from performer_api.config import (
     AgentConfig,
@@ -26,7 +25,7 @@ from performer_api.config import (
     AcceptanceConfig,
     WorkspaceConfig,
 )
-from performer.acceptance import CodexAcceptanceRunner
+from performer.acceptance import CodexAcceptanceRunner, SmokeAcceptanceRunner
 from performer.linear import LinearTracker
 from performer.orchestrator import Orchestrator
 from performer.runner import AgentRunner
@@ -166,8 +165,7 @@ def test_apply_runtime_config_updates_tracker_workspace_and_codex(tmp_path: Path
     second = make_service_config(tmp_path, project_slug="NEW", api_key="new-token", workspace="new", command="new-codex")
     tracker = LinearTracker(first.tracker)
     workspace_manager = WorkspaceManager(first.workspace, first.hooks)
-    codex_client = CodexAppServerClient(first.codex)
-    runner = AgentRunner(first, workspace_manager, codex_client, tracker=tracker)
+    runner = AgentRunner(first, workspace_manager, tracker=tracker)
 
     class NoopRunner:
         async def run_issue(self, issue, attempt, on_event):
@@ -205,7 +203,7 @@ def test_apply_runtime_config_disables_existing_acceptance_runner(tmp_path: Path
     second = make_service_config(tmp_path, project_slug="NEW", api_key="new-token", workspace="new", command="new-codex")
     tracker = LinearTracker(first.tracker)
     workspace_manager = WorkspaceManager(first.workspace, first.hooks)
-    runner = AgentRunner(first, workspace_manager, CodexAppServerClient(first.codex), tracker=tracker)
+    runner = AgentRunner(first, workspace_manager, tracker=tracker)
 
     class NoopRunner:
         async def run_issue(self, issue, attempt, on_event):
@@ -240,6 +238,23 @@ def test_build_acceptance_runner_only_when_enabled(tmp_path: Path) -> None:
 
     assert build_acceptance_runner(config) is None
     assert isinstance(build_acceptance_runner(enabled), CodexAcceptanceRunner)
+
+
+def test_build_acceptance_runner_uses_smoke_runner_for_smoke_gate_mode(tmp_path: Path) -> None:
+    config = make_service_config(tmp_path, project_slug="MT", api_key="token", workspace="ws", command="codex")
+    enabled = ServiceConfig(
+        tracker=config.tracker,
+        polling=config.polling,
+        workspace=config.workspace,
+        hooks=config.hooks,
+        agent=config.agent,
+        codex=config.codex,
+        prompt_template=config.prompt_template,
+        workflow_path=config.workflow_path,
+        acceptance=AcceptanceConfig(enabled=True, gate_planner_mode="smoke"),
+    )
+
+    assert isinstance(build_acceptance_runner(enabled), SmokeAcceptanceRunner)
 
 
 def test_persistence_store_from_config_uses_configured_path(tmp_path: Path) -> None:

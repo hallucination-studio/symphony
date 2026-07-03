@@ -23,7 +23,7 @@ from .conductor_workflow import (
     validate_instance_workflow,
     workflow_profiles,
 )
-from performer_api.ops_models import OpsSnapshot
+from performer_api.ops_models import OpsSnapshot, TraceEvent
 from performer_api.ops_projection import build_issue_detail, build_issue_list, build_run_detail, build_trace_stream
 from performer_api.ops_retention import RetentionPolicy
 from performer_api.ops_store import OpsStore
@@ -111,10 +111,6 @@ class ConductorService:
             dispatch_issue_id=issue_id or issue_identifier,
         )
         self.store.update_instance(started)
-        followup = await self._coordinate_gated_followup(started, issue_id=issue_id or issue_identifier)
-        if followup is not None:
-            started = followup
-            self.store.update_instance(started)
         return {
             "status": "accepted",
             "issue_id": issue_id or None,
@@ -161,8 +157,6 @@ class ConductorService:
         refreshed = refresh(instance)
         if refreshed.process_status not in {"exited", "stopped"}:
             return None
-        if refreshed.last_exit_code not in {0, None}:
-            return None
         snapshot = OpsStore(Path(instance.persistence_path).parent / "ops.json").load()
         issue = snapshot.issues.get(issue_id)
         if issue is None or issue.state != "completed" or issue.run_count != 1:
@@ -172,26 +166,49 @@ class ConductorService:
             return None
         followup_key = (instance.id, issue_id, stage)
         self._gated_followups_started.add(followup_key)
-        staged = self._with_gated_followup_stage(refreshed, issue_id, stage)
+        self._record_gated_followup_event(refreshed, issue_id=issue_id, stage=stage, event_type="gate_followup_starting")
         followup = await self.runtime_manager.start(
-            staged.with_updates(process_status="starting"),
+            refreshed.with_updates(process_status="starting"),
             env=self._runtime_env(),
             dispatch_issue_id=issue_id,
         )
+        self._record_gated_followup_event(followup, issue_id=issue_id, stage=stage, event_type="gate_followup_started")
         return followup
 
     async def get_instance_coordinated(self, instance_id: str) -> InstanceRecord | None:
         instance = self.get_instance(instance_id)
         if instance is None:
             return None
+        resumed = await self._resume_pending_performer_work(instance)
+        if resumed is not None:
+            self.store.update_instance(resumed)
+            return resumed
         issue_id = self._pending_gated_followup_issue_id(instance)
         if issue_id is None:
             return instance
         followup = await self._coordinate_gated_followup(instance, issue_id=issue_id)
         if followup is None:
-            return self.store.get_instance(instance_id) or instance
+            return instance
+        followup = self._with_gated_followup_stage(followup, issue_id, "gate")
         self.store.update_instance(followup)
         return followup
+
+    async def _resume_pending_performer_work(self, instance: InstanceRecord) -> InstanceRecord | None:
+        refresh = getattr(self.runtime_manager, "refresh", None)
+        if not callable(refresh):
+            return None
+        refreshed = refresh(instance)
+        if refreshed.process_status not in {"exited", "stopped"}:
+            return None
+        if refreshed.last_exit_code not in {0, None}:
+            return None
+        persisted = PersistenceStore(Path(refreshed.persistence_path)).load()
+        if not (persisted.retry_attempts or persisted.continuations or persisted.blocked):
+            return None
+        return await self.runtime_manager.start(
+            refreshed.with_updates(process_status="starting"),
+            env=self._runtime_env(),
+        )
 
     def _pending_gated_followup_issue_id(self, instance: InstanceRecord) -> str | None:
         if instance.workflow_profile != "gated-task":
@@ -211,7 +228,10 @@ class ConductorService:
 
     def _next_gated_followup_stage(self, instance: InstanceRecord, issue_id: str) -> str | None:
         persisted = set(instance.gated_followup_stages.get(issue_id, []))
-        for stage in ("plan", "gate"):
+        for stage in ("gate",):
+            if stage in persisted and instance.last_exit_code not in {0, None}:
+                self._gated_followups_started.discard((instance.id, issue_id, stage))
+                return stage
             if stage not in persisted and (instance.id, issue_id, stage) not in self._gated_followups_started:
                 return stage
         return None
@@ -223,6 +243,23 @@ class ConductorService:
             issue_stages.append(stage)
         stages[issue_id] = issue_stages
         return instance.with_updates(gated_followup_stages=stages)
+
+    def _record_gated_followup_event(self, instance: InstanceRecord, *, issue_id: str, stage: str, event_type: str) -> None:
+        path = Path(instance.persistence_path).parent / "ops.json"
+        store = OpsStore(path)
+        snapshot = store.load()
+        snapshot.events.append(
+            TraceEvent(
+                event_id=f"evt-{len(snapshot.events) + 1}",
+                event_type=event_type,
+                timestamp=utc_now().isoformat().replace("+00:00", "Z"),
+                issue_id=issue_id,
+                retention_tier="summary",
+                summary=stage,
+                payload={"instance_id": instance.id, "stage": stage},
+            )
+        )
+        store.save(snapshot)
 
     def dashboard(self) -> dict[str, Any]:
         instances = self.store.list_instances()

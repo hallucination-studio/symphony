@@ -19,6 +19,7 @@ from performer_api.config import (
 from performer_api.models import Issue
 from performer_api.ops_store import OpsStore
 from performer_api.persistence import ops_snapshot_path_from_persistence_path
+from performer_api.persistence import CodexThreadEntry, PersistenceStore, PersistedState
 from performer.runner import AgentRunner
 from performer.workspace import Workspace, WorkspaceError, WorkspaceManager
 
@@ -164,16 +165,28 @@ def make_config_with_required_delegate(tmp_path: Path, delegate_id: str) -> Serv
     )
 
 
-def test_default_runner_exposes_linear_graphql_tool(tmp_path: Path) -> None:
+def test_runner_does_not_expose_linear_graphql_tool(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+    config = ServiceConfig(
+        tracker=config.tracker,
+        polling=config.polling,
+        workspace=config.workspace,
+        hooks=config.hooks,
+        agent=config.agent,
+        codex=CodexConfig(backend="sdk", linear_tool_mode="disabled"),
+        prompt_template=config.prompt_template,
+        workflow_path=config.workflow_path,
+    )
+
     runner = AgentRunner(
-        make_config(tmp_path),
+        config,
         WorkspaceManager(WorkspaceConfig(root=tmp_path), HooksConfig()),
     )
 
-    assert "linear_graphql" in runner.codex_client.tools
+    assert not hasattr(runner.codex_client, "tools")
 
 
-def test_default_runner_does_not_expose_linear_tool_for_custom_tracker(tmp_path: Path) -> None:
+def test_default_sdk_runner_does_not_expose_linear_tool_for_custom_tracker(tmp_path: Path) -> None:
     config = ServiceConfig(
         tracker=TrackerConfig(
             kind="custom",
@@ -195,7 +208,7 @@ def test_default_runner_does_not_expose_linear_tool_for_custom_tracker(tmp_path:
         WorkspaceManager(WorkspaceConfig(root=tmp_path), HooksConfig()),
     )
 
-    assert "linear_graphql" not in runner.codex_client.tools
+    assert not hasattr(runner.codex_client, "tools")
 
 
 @pytest.mark.asyncio
@@ -229,6 +242,51 @@ async def test_runner_uses_workspace_root_when_per_issue_workspace_is_disabled(t
 
     assert codex.workspace_path == workspace_root
     assert not (workspace_root / "MT-1").exists()
+
+
+@pytest.mark.asyncio
+async def test_runner_passes_existing_sdk_thread_id_from_persistence(tmp_path: Path) -> None:
+    codex = FakeCodex()
+    config = make_config_with_persistence(tmp_path)
+    config = ServiceConfig(
+        tracker=config.tracker,
+        polling=config.polling,
+        workspace=WorkspaceConfig(root=tmp_path, per_issue=False),
+        hooks=config.hooks,
+        agent=config.agent,
+        codex=CodexConfig(backend="sdk", linear_tool_mode="disabled"),
+        prompt_template=config.prompt_template,
+        workflow_path=config.workflow_path,
+        persistence=config.persistence,
+    )
+    PersistenceStore(config.persistence.path).save(
+        PersistedState(
+            codex_threads=[
+                CodexThreadEntry(
+                    issue_id="mt-1",
+                    thread_id="thread-existing",
+                    backend="sdk",
+                    workspace_path=str(tmp_path),
+                    status="resume_pending",
+                )
+            ]
+        )
+    )
+    runner = AgentRunner(
+        config,
+        WorkspaceManager(config.workspace, config.hooks),
+        codex_client=codex,
+        tracker=FakeTracker(),
+    )
+
+    await runner.run_issue(
+        Issue(id="mt-1", identifier="MT-1", title="Build", state="Todo", labels=["codex"], project_slug="MT"),
+        2,
+        lambda event: None,
+    )
+
+    assert codex.kwargs is not None
+    assert codex.kwargs["existing_thread_id"] == "thread-existing"
 
 
 @pytest.mark.asyncio

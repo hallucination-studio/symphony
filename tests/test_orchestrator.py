@@ -241,6 +241,15 @@ class FakeTracker:
         block: str,
     ) -> dict[str, Any]:
         self.description_updates.append((issue_id, marker_name, block))
+        self.refreshed = [
+            replace(
+                issue,
+                description=f"{issue.description or ''}\n\nImplementation summary:\n{block}",
+            )
+            if issue.id == issue_id
+            else issue
+            for issue in self.refreshed
+        ]
         return {"success": True, "issue_id": issue_id, "description": block}
 
 
@@ -382,7 +391,7 @@ def make_config_with_required_delegate(tmp_path: Path, delegate_id: str) -> Serv
     )
 
 
-def make_config_with_codex_command(tmp_path: Path, command: str) -> ServiceConfig:
+def make_config_with_codex_backend(tmp_path: Path, backend: str) -> ServiceConfig:
     config = make_config(tmp_path)
     return ServiceConfig(
         tracker=config.tracker,
@@ -390,7 +399,7 @@ def make_config_with_codex_command(tmp_path: Path, command: str) -> ServiceConfi
         workspace=config.workspace,
         hooks=config.hooks,
         agent=config.agent,
-        codex=CodexConfig(command=command),
+        codex=CodexConfig(backend=backend),
         prompt_template=config.prompt_template,
         workflow_path=config.workflow_path,
     )
@@ -446,7 +455,7 @@ class CompletingRunner:
     async def run_issue(
         self, issue: Issue, attempt: int | None, on_event: Any, *, worker_host: str | None = None
     ) -> None:
-        on_event({"event": "session_started", "session_id": "thread-1-turn-1", "codex_app_server_pid": 123})
+        on_event({"event": "session_started", "session_id": "thread-1-turn-1"})
         on_event(
             {
                 "event": "thread_token_usage_updated",
@@ -476,6 +485,24 @@ class CompletingRunner:
         on_event({"event": "turn_completed", "session_id": "thread-1-turn-1", "turn_id": "turn-1"})
 
 
+class StructuredCompletingRunner(CompletingRunner):
+    async def run_issue(
+        self, issue: Issue, attempt: int | None, on_event: Any, *, worker_host: str | None = None
+    ) -> Any:
+        await super().run_issue(issue, attempt, on_event, worker_host=worker_host)
+
+        class Result:
+            structured_result = {
+                "summary": "created requested artifact",
+                "test_commands": ["pytest tests/test_smoke.py -q -> 1 passed"],
+                "changed_files": ["SYMPHONY_REAL_E2E_RESULT.md"],
+                "remaining_risks": ["none"],
+                "next_action": "ready_for_review",
+            }
+
+        return Result()
+
+
 class ControlledCompletingRunner:
     def __init__(self) -> None:
         self.started = asyncio_event()
@@ -484,7 +511,7 @@ class ControlledCompletingRunner:
     async def run_issue(
         self, issue: Issue, attempt: int | None, on_event: Any, *, worker_host: str | None = None
     ) -> None:
-        on_event({"event": "session_started", "session_id": "thread-1-turn-1", "codex_app_server_pid": 123})
+        on_event({"event": "session_started", "session_id": "thread-1-turn-1"})
         on_event(
             {
                 "event": "thread_token_usage_updated",
@@ -885,7 +912,7 @@ async def test_candidate_fetch_failure_logs_and_skips_dispatch(
 
 
 @pytest.mark.asyncio
-async def test_tick_validation_failure_logs_and_skips_dispatch_after_reconcile(
+async def test_tick_rejects_non_sdk_codex_backend(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     import logging
@@ -893,13 +920,13 @@ async def test_tick_validation_failure_logs_and_skips_dispatch_after_reconcile(
     caplog.set_level(logging.WARNING)
     tracker = FakeTracker(candidates=[issue("MT-1")])
     runner = FakeRunner()
-    orchestrator = Orchestrator(make_config_with_codex_command(tmp_path, " "), tracker, runner)
+    orchestrator = Orchestrator(make_config_with_codex_backend(tmp_path, "app_server"), tracker, runner)
 
     await orchestrator.tick()
 
     assert runner.started == []
     assert "performer_dispatch_validation failed" in caplog.text
-    assert "missing_codex_command" in caplog.text
+    assert "invalid_codex_backend" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -1229,6 +1256,36 @@ async def test_acceptance_enabled_creates_gate_issue_instead_of_marking_original
 
 
 @pytest.mark.asyncio
+async def test_structured_codex_result_is_published_before_acceptance_review(tmp_path: Path) -> None:
+    tracker = FakeTracker(candidates=[issue("MT-1", state="In Progress", delegate_id="agent-user-1")])
+    tracker.refreshed = [issue("MT-1", state="In Progress", delegate_id="agent-user-1")]
+    tracker.children["mt-1"] = [
+        {
+            "id": "gate-1",
+            "identifier": "MT-G1",
+            "title": "[Gate] MT-1: Behavior",
+            "labels": ["performer:type/gate"],
+            "state": "Todo",
+            "delegate_id": "agent-user-1",
+        }
+    ]
+    orchestrator = Orchestrator(make_config_with_acceptance(tmp_path), tracker, StructuredCompletingRunner())
+
+    await orchestrator.tick()
+    await orchestrator.wait_for_idle()
+
+    assert tracker.description_updates
+    _, marker, block = tracker.description_updates[-1]
+    assert marker == "PERFORMER IMPLEMENTATION EVIDENCE"
+    assert "Implementation summary:" in block
+    assert "created requested artifact" in block
+    assert "Test commands and exact output:" in block
+    assert "pytest tests/test_smoke.py -q -> 1 passed" in block
+    assert any("Performer implementation handoff." in body for _, body in tracker.comments)
+    assert tracker.transitions[-1] == ("mt-1", "In Review")
+
+
+@pytest.mark.asyncio
 async def test_acceptance_enabled_leaves_review_for_conductor_coordinated_gate(tmp_path: Path) -> None:
     description = (
         "Implementation summary: created requested behavior.\n"
@@ -1249,7 +1306,16 @@ async def test_acceptance_enabled_leaves_review_for_conductor_coordinated_gate(t
         }
     ]
     acceptance_runner = FakeAcceptanceRunner(
-        '{"score":4,"passed":true,"summary":"Looks good.","findings":[],"evidence":["pytest passed"]}'
+        """
+{
+  "score": 4,
+  "result": "pass",
+  "score_reason": "Implementation evidence and focused test output support the requested behavior.",
+  "evidence_citations": ["linear.issue.MT-1", "pytest"],
+  "residual_findings": [],
+  "recommended_next_action": "Move the original issue to Done."
+}
+"""
     )
     orchestrator = Orchestrator(
         make_config_with_acceptance(tmp_path),
@@ -1265,6 +1331,7 @@ async def test_acceptance_enabled_leaves_review_for_conductor_coordinated_gate(t
     assert tracker.created_issues == []
     assert tracker.transitions[-1] == ("mt-1", "In Review")
     assert ("mt-1", "Done") not in tracker.transitions
+    assert "mt-1" not in orchestrator.state.completed
     assert "mt-1" not in orchestrator.state.claimed
 
 
@@ -1997,8 +2064,7 @@ async def test_codex_event_updates_session_and_token_totals(tmp_path: Path) -> N
             "thread_id": "thread-1",
             "turn_id": "turn-1",
             "session_id": "thread-1-turn-1",
-            "codex_app_server_pid": 123,
-        },
+                    },
     )
     orchestrator.on_codex_event(
         "mt-1",
@@ -2034,7 +2100,6 @@ async def test_codex_event_updates_session_and_token_totals(tmp_path: Path) -> N
     assert entry.session_id == "thread-1-turn-1"
     assert entry.thread_id == "thread-1"
     assert entry.turn_id == "turn-1"
-    assert entry.codex_app_server_pid == 123
     assert entry.tokens.input_tokens == 130
     assert entry.tokens.output_tokens == 50
     assert entry.tokens.cached_tokens == 20

@@ -68,16 +68,14 @@ def test_generate_workflow_content_injects_managed_runtime_resources(tmp_path: P
     assert "Prepared workspace root:" in content
     assert "Work only in the prepared workspace root." in content
     assert "Acceptance gates are disabled for this managed profile." in content
-    assert "transition the issue to Done" in content
+    assert "Performer will create Linear handoff comments" in content
     assert "/symphony approve-runtime-error {{ issue.identifier }}" in content
     assert "records a runtime permission or sandbox error" in content
-    assert "query CurrentIssue" in content
-    assert "mutation UpdateIssueEvidence" in content
-    assert "mutation CompleteIssue" in content
-    assert "stateId" in content
-    assert "commentCreate" in content
-    assert "issueUpdate" in content
-    assert "linear_graphql" in content
+    assert "backend: sdk" in content
+    assert "linear_tool_mode: disabled" in content
+    assert "Return the required structured result" in content
+    assert "query CurrentIssue" not in content
+    assert "linear_graphql" not in content
 
 
 def test_task_profile_is_default_managed_profile_without_acceptance_gate(tmp_path: Path) -> None:

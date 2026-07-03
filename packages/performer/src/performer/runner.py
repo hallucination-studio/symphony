@@ -6,13 +6,12 @@ from pathlib import Path
 from typing import Any, Protocol
 import logging
 
-from .codex_client import CodexAppServerClient
+from .codex_client import CodexSdkClient
 from performer_api.config import ServiceConfig
-from .linear_tool import LinearGraphQLTool
 from performer_api.models import Issue, normalize_state_key
 from performer_api.ops_store import OpsStore
 from .ops_telemetry import ExecutionTelemetryRecorder
-from performer_api.persistence import ops_snapshot_path_from_persistence_path
+from performer_api.persistence import ops_snapshot_path_from_persistence_path, PersistenceStore
 from performer_api.workflow import render_prompt
 from .workspace import WorkspaceManager
 
@@ -37,15 +36,15 @@ class AgentRunner:
     ):
         self.config = config
         self.workspace_manager = workspace_manager
-        tools = {}
-        if config.tracker.kind == "linear":
-            tools["linear_graphql"] = LinearGraphQLTool(config.tracker.endpoint, config.tracker.api_key)
-        self.codex_client = codex_client or CodexAppServerClient(config.codex, tools=tools)
+        if codex_client is not None:
+            self.codex_client = codex_client
+        else:
+            self.codex_client = CodexSdkClient(config.codex)
         self.tracker = tracker
 
     async def run_issue(
         self, issue: Issue, attempt: int | None, on_event: Any, *, worker_host: str | None = None
-    ) -> None:
+    ) -> Any:
         workspace = await self.workspace_manager.create_for_issue(issue.identifier)
         self.workspace_manager.validate_workspace_path(workspace.path)
         await self.workspace_manager.run_before_run(workspace.path)
@@ -89,7 +88,7 @@ class AgentRunner:
                     attempt_id,
                     on_event,
                 )
-            await self.codex_client.run_session(
+            result = await self.codex_client.run_session(
                 workspace.path,
                 prompt,
                 f"{issue.identifier}: {issue.title}",
@@ -97,9 +96,11 @@ class AgentRunner:
                 max_turns=self.config.agent.max_turns,
                 continuation_provider=lambda turn_count: self._continuation_prompt(issue, turn_count),
                 worker_host=worker_host,
+                existing_thread_id=self._existing_sdk_thread_id(issue.id, str(workspace.path)),
             )
             if telemetry is not None:
                 telemetry.finish_run(run_id, status="completed", failure_code=None, failure_summary=None)
+            return result
         except Exception as exc:
             if "telemetry" in locals() and telemetry is not None and "run_id" in locals():
                 telemetry.finish_run(
@@ -172,6 +173,20 @@ class AgentRunner:
         if len(parents) >= 3 and parents[2].name == "instances":
             return parents[1].name
         return "local"
+
+    def _existing_sdk_thread_id(self, issue_id: str, workspace_path: str) -> str | None:
+        if self.config.codex.backend != "sdk" or self.config.persistence.path is None:
+            return None
+        state = PersistenceStore(self.config.persistence.path).load()
+        for thread in state.codex_threads:
+            if (
+                thread.issue_id == issue_id
+                and thread.backend == "sdk"
+                and thread.workspace_path == workspace_path
+                and thread.status in {"active", "resume_pending"}
+            ):
+                return thread.thread_id
+        return None
 
     def _telemetry_event_handler(
         self,

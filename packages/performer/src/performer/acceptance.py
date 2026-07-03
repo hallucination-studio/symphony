@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from .codex_client import CodexAppServerClient
+from .codex_client import CodexSdkClient, TEXT_RESULT_SCHEMA
 from performer_api.config import ServiceConfig
 
 
@@ -41,7 +41,7 @@ class GatePlanReport:
 class CodexAcceptanceRunner:
     def __init__(self, config: ServiceConfig, *, codex_client: Any | None = None) -> None:
         self.config = config
-        self.codex_client = codex_client or CodexAppServerClient(config.codex)
+        self.codex_client = codex_client or CodexSdkClient(config.codex)
 
     async def run_acceptance(
         self,
@@ -72,9 +72,13 @@ class CodexAcceptanceRunner:
             f"Acceptance {getattr(original_issue, 'identifier', 'issue')}",
             on_event=on_event,
             max_turns=self.config.agent.max_turns,
+            output_schema=TEXT_RESULT_SCHEMA,
         )
         if isinstance(result, str):
             return result
+        final_response = getattr(result, "final_response", None)
+        if isinstance(final_response, str) and final_response.strip():
+            return final_response.strip()
         message = getattr(result, "message", None)
         if isinstance(message, str) and message.strip():
             return message.strip()
@@ -83,10 +87,72 @@ class CodexAcceptanceRunner:
         return str(result)
 
 
+class SmokeAcceptanceRunner:
+    def __init__(self, config: ServiceConfig | None = None) -> None:
+        self.config = config
+
+    async def run_acceptance(
+        self,
+        *,
+        original_issue: Any,
+        acceptance_issue: dict[str, Any],
+        completion_verdict: Any,
+        workspace_path: str | None,
+    ) -> str:
+        _ = acceptance_issue
+        identifier = getattr(original_issue, "identifier", "issue")
+        description = getattr(original_issue, "description", "") or ""
+        fallback_workspace = self.config.workspace.root if self.config is not None else Path(".")
+        workspace = Path(workspace_path or fallback_workspace)
+        result_path = workspace / "SYMPHONY_REAL_E2E_RESULT.md"
+        verdict_status = getattr(completion_verdict, "status", None)
+        has_required_evidence = all(
+            label in description
+            for label in ("Implementation summary:", "Test commands and exact output:", "Remaining risks:")
+        )
+        result_text = result_path.read_text(encoding="utf-8", errors="replace") if result_path.exists() else ""
+        has_result_file = result_path.exists() and identifier in result_text
+        verdict_ok = verdict_status in {None, "VERIFIED"}
+        accepted = verdict_ok and has_required_evidence and has_result_file
+        if accepted:
+            payload = {
+                "score": 4,
+                "result": "pass",
+                "score_reason": (
+                    "Smoke acceptance verified the completion verdict, required Linear evidence fields, "
+                    "and workspace result artifact for the delegated issue."
+                ),
+                "evidence_citations": [
+                    "completion_verdict.status",
+                    "linear.issue.description",
+                    "workspace/SYMPHONY_REAL_E2E_RESULT.md",
+                ],
+                "residual_findings": [],
+                "recommended_next_action": "Move the original issue to Done.",
+            }
+        else:
+            missing: list[str] = []
+            if not verdict_ok:
+                missing.append("completion_verdict_not_verified")
+            if not has_required_evidence:
+                missing.append("missing_required_linear_evidence_fields")
+            if not has_result_file:
+                missing.append("missing_or_invalid_workspace_result")
+            payload = {
+                "score": 2,
+                "result": "fail",
+                "score_reason": "Smoke acceptance failed: " + ", ".join(missing),
+                "evidence_citations": ["completion_verdict.status", "linear.issue.description"],
+                "residual_findings": missing,
+                "recommended_next_action": "Return the original issue to implementation.",
+            }
+        return json.dumps(payload)
+
+
 class CodexGatePlanner:
     def __init__(self, config: ServiceConfig, *, codex_client: Any | None = None) -> None:
         self.config = config
-        self.codex_client = codex_client or CodexAppServerClient(config.codex)
+        self.codex_client = codex_client or CodexSdkClient(config.codex)
 
     async def plan_gates(self, *, issue: Any, workspace_path: str | None = None) -> str:
         workspace = Path(workspace_path or self.config.workspace.root)
@@ -105,9 +171,13 @@ class CodexGatePlanner:
             f"Gate plan {getattr(issue, 'identifier', 'issue')}",
             on_event=on_event,
             max_turns=self.config.agent.max_turns,
+            output_schema=TEXT_RESULT_SCHEMA,
         )
         if isinstance(result, str):
             return result
+        final_response = getattr(result, "final_response", None)
+        if isinstance(final_response, str) and final_response.strip():
+            return final_response.strip()
         message = getattr(result, "message", None)
         if isinstance(message, str) and message.strip():
             return message.strip()

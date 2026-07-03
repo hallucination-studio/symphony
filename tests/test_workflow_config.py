@@ -84,6 +84,33 @@ workspace:
     assert "test_command_evidence" in config.completion_verification.required_checks
 
 
+def test_service_config_parses_codex_sdk_backend_fields(tmp_path: Path) -> None:
+    workflow_path = tmp_path / "WORKFLOW.md"
+    write_workflow(
+        workflow_path,
+        """
+tracker:
+  kind: linear
+  project_slug: MT
+  api_key: linear-token
+codex:
+  backend: sdk
+  model: gpt-5-codex
+  sdk_codex_bin: /usr/local/bin/codex
+  sandbox: workspace_write
+  linear_tool_mode: disabled
+""",
+    )
+
+    config = ServiceConfig.from_workflow(load_workflow(workflow_path), workflow_path)
+
+    assert config.codex.backend == "sdk"
+    assert config.codex.model == "gpt-5-codex"
+    assert config.codex.sdk_codex_bin == "/usr/local/bin/codex"
+    assert config.codex.sandbox == "workspace_write"
+    assert config.codex.linear_tool_mode == "disabled"
+
+
 def test_service_config_parses_completion_verification_extension(tmp_path: Path) -> None:
     workflow_path = tmp_path / "WORKFLOW.md"
     write_workflow(

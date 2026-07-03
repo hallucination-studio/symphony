@@ -6,7 +6,13 @@ from typing import Any
 
 import pytest
 
-from performer.acceptance import CodexAcceptanceRunner, CodexGatePlanner, parse_acceptance_report, parse_gate_plan_report
+from performer.acceptance import (
+    CodexAcceptanceRunner,
+    CodexGatePlanner,
+    SmokeAcceptanceRunner,
+    parse_acceptance_report,
+    parse_gate_plan_report,
+)
 from performer_api.config import (
     AcceptanceConfig,
     AgentConfig,
@@ -293,6 +299,74 @@ async def test_codex_acceptance_runner_returns_last_agent_message_when_client_re
 
     assert result == '{"score": 4, "result": "pass", "score_reason": "Evidence supports completion."}'
     assert callable(codex.calls[0]["kwargs"]["on_event"])
+
+
+@pytest.mark.asyncio
+async def test_smoke_acceptance_runner_passes_from_local_evidence(tmp_path: Path) -> None:
+    (tmp_path / "SYMPHONY_REAL_E2E_RESULT.md").write_text(
+        "MT-1\nPodium, Conductor, and Performer reached Codex successfully.\n",
+        encoding="utf-8",
+    )
+    issue = Issue(
+        id="mt-1",
+        identifier="MT-1",
+        title="Build",
+        state="In Review",
+        description=(
+            "Implementation summary: created file.\n"
+            "Test commands and exact output: pytest tests/test_smoke.py -q passed.\n"
+            "Remaining risks: none."
+        ),
+    )
+    verdict = CompletionVerdict(
+        status="VERIFIED",
+        reason="Completion checks passed.",
+        checks=[],
+        verified_at="2026-07-01T00:00:00Z",
+        evidence={},
+    )
+
+    raw = await SmokeAcceptanceRunner().run_acceptance(
+        original_issue=issue,
+        acceptance_issue={"id": "gate-1"},
+        completion_verdict=verdict,
+        workspace_path=str(tmp_path),
+    )
+    report = parse_acceptance_report(raw, minimum_score=3, require_findings_for_score_3=True)
+
+    assert report.accepted is True
+    assert report.score == 4
+    assert "workspace/SYMPHONY_REAL_E2E_RESULT.md" in report.evidence_citations
+
+
+@pytest.mark.asyncio
+async def test_smoke_acceptance_runner_uses_config_workspace_without_completion_verdict(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+    (tmp_path / "SYMPHONY_REAL_E2E_RESULT.md").write_text(
+        "MT-1\nPodium, Conductor, and Performer reached Codex successfully.\n",
+        encoding="utf-8",
+    )
+    issue = Issue(
+        id="mt-1",
+        identifier="MT-1",
+        title="Build",
+        state="In Review",
+        description=(
+            "Implementation summary: created file.\n"
+            "Test commands and exact output: pytest tests/test_smoke.py -q passed.\n"
+            "Remaining risks: none."
+        ),
+    )
+
+    raw = await SmokeAcceptanceRunner(config).run_acceptance(
+        original_issue=issue,
+        acceptance_issue={"id": "gate-1"},
+        completion_verdict=None,
+        workspace_path=None,
+    )
+    report = parse_acceptance_report(raw, minimum_score=3, require_findings_for_score_3=True)
+
+    assert report.accepted is True
 
 
 @pytest.mark.asyncio

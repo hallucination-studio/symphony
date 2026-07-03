@@ -77,7 +77,6 @@ def test_runtime_snapshot_includes_running_retry_totals_and_rate_limits(tmp_path
                 session_id="thread-1-turn-1",
                 thread_id="thread-1",
                 turn_id="turn-1",
-                codex_app_server_pid=123,
                 last_codex_event="turn_completed",
                 last_codex_timestamp=last_event_at,
                 last_codex_message="done",
@@ -141,7 +140,6 @@ def test_runtime_snapshot_includes_running_retry_totals_and_rate_limits(tmp_path
     assert snapshot["running"][0]["session_id"] == "thread-1-turn-1"
     assert snapshot["running"][0]["thread_id"] == "thread-1"
     assert snapshot["running"][0]["turn_id"] == "turn-1"
-    assert snapshot["running"][0]["codex_app_server_pid"] == 123
     assert snapshot["running"][0]["turn_count"] == 2
     assert snapshot["running"][0]["phase"] == "running"
     assert snapshot["running"][0]["status_label"] == "performer:running"
@@ -223,7 +221,6 @@ def test_issue_snapshot_returns_running_workspace_and_attempt_details(tmp_path: 
                 session_id="thread-1-turn-1",
                 thread_id="thread-1",
                 turn_id="turn-1",
-                codex_app_server_pid=123,
                 last_codex_event="notification",
                 last_codex_message="Working",
                 phase="running",
@@ -257,7 +254,6 @@ def test_issue_snapshot_returns_running_workspace_and_attempt_details(tmp_path: 
     assert detail["running"]["session_id"] == "thread-1-turn-1"
     assert detail["running"]["thread_id"] == "thread-1"
     assert detail["running"]["turn_id"] == "turn-1"
-    assert detail["running"]["codex_app_server_pid"] == 123
     assert detail["running"]["turn_count"] == 4
     assert detail["running"]["tokens"]["total_tokens"] == 15
     assert detail["recent_events"][0]["raw_event"]["raw_method"] == "agent/message"

@@ -4,7 +4,7 @@ from datetime import timedelta
 from pathlib import Path
 
 from performer_api.models import BlockedEntry, ContinuationEntry, Issue, RetryEntry, RunningEntry, RuntimeTokens, utc_now
-from performer_api.persistence import PersistenceStore, PersistedSession, PersistedState
+from performer_api.persistence import CodexThreadEntry, PersistenceStore, PersistedSession, PersistedState
 
 
 def test_persistence_store_round_trips_retry_entries_and_sessions(tmp_path: Path) -> None:
@@ -75,6 +75,18 @@ def test_persistence_store_round_trips_retry_entries_and_sessions(tmp_path: Path
                 tokens=RuntimeTokens(input_tokens=10, output_tokens=4, cached_tokens=3, total_tokens=17),
             )
         ],
+        codex_threads=[
+            CodexThreadEntry(
+                issue_id="issue-2",
+                thread_id="sdk-thread",
+                backend="sdk",
+                workspace_path=str(tmp_path / "workspaces" / "MT-2"),
+                last_turn_id="sdk-turn",
+                status="resume_pending",
+                last_final_response='{"summary":"done","test_commands":[],"changed_files":[],"remaining_risks":[],"next_action":"ready_for_review"}',
+                updated_at=started_at,
+            )
+        ],
     )
 
     store.save(state)
@@ -113,6 +125,11 @@ def test_persistence_store_round_trips_retry_entries_and_sessions(tmp_path: Path
     assert loaded.sessions[0].recent_events[0]["raw_event"]["raw_method"] == "turn/completed"
     assert loaded.sessions[0].tokens.cached_tokens == 3
     assert loaded.sessions[0].tokens.total_tokens == 17
+    assert loaded.codex_threads[0].issue_id == "issue-2"
+    assert loaded.codex_threads[0].thread_id == "sdk-thread"
+    assert loaded.codex_threads[0].backend == "sdk"
+    assert loaded.codex_threads[0].status == "resume_pending"
+    assert loaded.codex_threads[0].last_turn_id == "sdk-turn"
 
 
 def test_persistence_store_builds_state_from_running_entries(tmp_path: Path) -> None:

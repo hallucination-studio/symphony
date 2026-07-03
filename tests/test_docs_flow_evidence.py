@@ -14,7 +14,6 @@ from typing import Any
 import httpx
 import pytest
 
-from performer.codex_client import CodexAppServerClient, CodexError
 from performer.completion_verifier import CompletionVerifier
 from performer_api.config import (
     AgentConfig,
@@ -90,7 +89,7 @@ class FlowCompletingRunner:
         self, issue: Issue, attempt: int | None, on_event: Any, *, worker_host: str | None = None
     ) -> None:
         self.started_attempts.append(attempt)
-        on_event({"event": "session_started", "session_id": "thread-1-turn-1", "codex_app_server_pid": 123})
+        on_event({"event": "session_started", "session_id": "thread-1-turn-1"})
         on_event({"event": "turn_started", "session_id": "thread-1-turn-1", "turn_id": "turn-1"})
         on_event(
             {
@@ -131,8 +130,7 @@ class FlowHandoffRunner:
                 "thread_id": "th_1",
                 "turn_id": "turn_1",
                 "session_id": "th_1-turn_1",
-                "codex_app_server_pid": 123,
-            },
+                            },
             {"event": "turn_started", "thread_id": "th_1", "turn_id": "turn_1", "session_id": "th_1-turn_1"},
             {
                 "event": "notification",
@@ -1290,70 +1288,6 @@ async def test_flow_017_workspace_hooks_order_failure_semantics_and_operator_log
 
 
 @pytest.mark.asyncio
-async def test_flow_018_malicious_identifier_stays_inside_workspace_and_not_shell(tmp_path: Path) -> None:
-    raw_identifier = "ENG/../../x; touch /tmp/performer-flow-018-pwned"
-    marker = Path("/tmp/performer-flow-018-pwned")
-    marker.unlink(missing_ok=True)
-    manager = WorkspaceManager(
-        WorkspaceConfig(root=tmp_path / "workspaces"),
-        HooksConfig(after_create="printf hook-cwd=$PWD > hook.log"),
-    )
-
-    workspace = await manager.create_for_issue(raw_identifier)
-    await manager.run_before_run(workspace.path)
-    launch_events: list[dict[str, Any]] = []
-    captured: dict[str, Any] = {}
-    process = FlowProcess(
-        [
-            {"id": 0, "result": {"userAgent": "codex", "platformFamily": "unix", "platformOs": "macos", "codexHome": "/tmp"}},
-            {"id": 1, "result": {"thread": {"id": "thr_1"}}},
-            {"id": 2, "result": {"turn": {"id": "turn_1"}}},
-            {"method": "turn/completed", "params": {"turn": {"id": "turn_1"}, "status": "completed"}},
-        ]
-    )
-
-    async def factory(*args: Any, **kwargs: Any) -> FlowProcess:
-        captured["args"] = args
-        captured["kwargs"] = kwargs
-        return process
-
-    client = CodexAppServerClient(
-        CodexConfig(command="fake-codex app-server", read_timeout_ms=100, turn_timeout_ms=1000),
-        process_factory=factory,
-    )
-    await client.run_session(workspace.path, "Do work", "ENG-18: Security", on_event=launch_events.append)
-
-    root = (tmp_path / "workspaces").resolve()
-    bundle = flow_bundle(
-        test_id="FLOW-018",
-        title="malicious tracker identifier cannot escape workspace or shell context",
-        source_sections=["4.2", "9.5", "15.2", "15.5"],
-        profile="core security",
-        initial_state={"raw_identifier": raw_identifier},
-        trigger="Create workspace and launch Codex using malicious issue identifier",
-        observed_transitions=["identifier_sanitized", "workspace_created", "codex_launched_with_workspace_cwd"],
-        workspace_evidence={
-            "workspace_key": workspace.workspace_key,
-            "workspace_path": str(workspace.path),
-            "root": str(root),
-            "hook_log": (workspace.path / "hook.log").read_text(encoding="utf-8"),
-        },
-        tracker_evidence={"raw_identifier": raw_identifier, "sanitized": sanitize_workspace_key(raw_identifier)},
-        codex_evidence={"command_argv": captured["args"], "cwd": captured["kwargs"]["cwd"]},
-        observability_evidence={"process_launch": [event for event in launch_events if event["event"] == "process_launch"]},
-        final_state={"marker_exists": marker.exists(), "path_inside_root": root in workspace.path.resolve().parents},
-        score_reason="Bundle shows raw and sanitized identifiers, root containment, hook cwd, Codex argv/cwd, and absence of shell side effect.",
-    )
-
-    assert workspace.workspace_key == "ENG_.._.._x__touch__tmp_performer-flow-018-pwned"
-    assert root in workspace.path.resolve().parents
-    assert captured["kwargs"]["cwd"] == str(workspace.path)
-    assert captured["args"] == ("bash", "-lc", "fake-codex app-server")
-    assert not marker.exists()
-    assert bundle["final_state"]["path_inside_root"] is True
-
-
-@pytest.mark.asyncio
 async def test_flow_019_secret_used_for_linear_request_but_never_logged(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1401,97 +1335,6 @@ async def test_flow_019_secret_used_for_linear_request_but_never_logged(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("variant", "lines", "hang_stdout", "expected_code"),
-    [
-        ("startup_response_timeout", [], True, "response_timeout"),
-        (
-            "turn_failure_signal",
-            [
-                {"id": 0, "result": {"userAgent": "codex", "platformFamily": "unix", "platformOs": "macos", "codexHome": "/tmp"}},
-                {"id": 1, "result": {"thread": {"id": "thr_1"}}},
-                {"id": 2, "result": {"turn": {"id": "turn_1"}}},
-                {"method": "turn/failed", "params": {"turn": {"id": "turn_1"}, "error": "bad"}},
-            ],
-            False,
-            "turn_failed",
-        ),
-        (
-            "turn_cancellation_signal",
-            [
-                {"id": 0, "result": {"userAgent": "codex", "platformFamily": "unix", "platformOs": "macos", "codexHome": "/tmp"}},
-                {"id": 1, "result": {"thread": {"id": "thr_1"}}},
-                {"id": 2, "result": {"turn": {"id": "turn_1"}}},
-                {"method": "turn/cancelled", "params": {"turn": {"id": "turn_1"}, "status": "cancelled"}},
-            ],
-            False,
-            "turn_cancelled",
-        ),
-        (
-            "subprocess_exit_before_terminal_event",
-            [
-                {"id": 0, "result": {"userAgent": "codex", "platformFamily": "unix", "platformOs": "macos", "codexHome": "/tmp"}},
-                {"id": 1, "result": {"thread": {"id": "thr_1"}}},
-                {"id": 2, "result": {"turn": {"id": "turn_1"}}},
-            ],
-            False,
-            "port_exit",
-        ),
-        (
-            "malformed_message_then_terminal_failure",
-            [
-                {"id": 0, "result": {"userAgent": "codex", "platformFamily": "unix", "platformOs": "macos", "codexHome": "/tmp"}},
-                {"id": 1, "result": {"thread": {"id": "thr_1"}}},
-                {"id": 2, "result": {"turn": {"id": "turn_1"}}},
-                {"method": "turn/failed", "params": {"turn": {"id": "turn_1"}, "error": "after malformed"}},
-            ],
-            False,
-            "turn_failed",
-        ),
-    ],
-)
-async def test_flow_021_codex_protocol_failures_do_not_become_success(
-    tmp_path: Path,
-    variant: str,
-    lines: list[dict[str, Any]],
-    hang_stdout: bool,
-    expected_code: str,
-) -> None:
-    process = FlowProcess(lines, hang_stdout=hang_stdout)
-
-    async def factory(*args: Any, **kwargs: Any) -> FlowProcess:
-        return process
-
-    events: list[dict[str, Any]] = []
-    client = CodexAppServerClient(
-        CodexConfig(read_timeout_ms=1 if expected_code == "response_timeout" else 100, turn_timeout_ms=1000),
-        process_factory=factory,
-    )
-
-    with pytest.raises(CodexError) as exc:
-        await client.run_session(tmp_path, "Do work", f"ENG-21: {variant}", on_event=events.append)
-
-    bundle = flow_bundle(
-        test_id="FLOW-021",
-        title=f"codex protocol failure variant {variant} maps to retryable failure",
-        source_sections=["10.3", "10.4", "10.6", "14.1", "14.2"],
-        profile="core|quality_overlay",
-        initial_state={"variant": variant},
-        trigger="Run Codex fake protocol failure stream",
-        observed_transitions=["worker_phase_started", f"codex_error -> {exc.value.code}", "no_verified_completion"],
-        workspace_evidence={"workspace_path": str(tmp_path)},
-        tracker_evidence={"next_action": "failure_retry"},
-        codex_evidence={"events": events, "sent": process.sent},
-        observability_evidence={"error_code": exc.value.code, "process_killed": process.killed},
-        final_state={"success": False, "error_code": exc.value.code},
-        score_reason="Each protocol failure variant produces a stable CodexError code and never returns a successful turn result.",
-    )
-
-    assert exc.value.code == expected_code
-    assert not any(event.get("event") == "turn_completed" for event in events if expected_code != "turn_failed")
-    assert bundle["final_state"]["success"] is False
-
-
 @pytest.mark.asyncio
 async def test_flow_020_linear_pagination_normalization_sorting_and_error_categories(tmp_path: Path) -> None:
     def node(
@@ -1598,90 +1441,6 @@ async def test_flow_020_linear_pagination_normalization_sorting_and_error_catego
     assert "linear_graphql_errors" in error_codes
     assert "linear_api_status" in error_codes
     assert bundle["final_state"]["dispatch_first"] == "ENG-20A"
-
-
-@pytest.mark.asyncio
-async def test_flow_022_interactive_protocol_events_resolve_without_stalling(tmp_path: Path) -> None:
-    policy = {
-        "approval_policy": "auto_approve",
-        "user_input_policy": "fail",
-        "unsupported_tool_policy": "structured_failure_and_continue",
-    }
-    approval_process = FlowProcess(
-        [
-            {"id": 0, "result": {"userAgent": "codex", "platformFamily": "unix", "platformOs": "macos", "codexHome": "/tmp"}},
-            {"id": 1, "result": {"thread": {"id": "thr_1"}}},
-            {"id": 2, "result": {"turn": {"id": "turn_1"}}},
-            {"id": 77, "method": "exec_command/approval_request", "params": {"command": "pytest"}},
-            {"id": 78, "method": "file_change/approval_request", "params": {"path": "x.py"}},
-            {"method": "turn/completed", "params": {"turn": {"id": "turn_1"}, "status": "completed"}},
-        ]
-    )
-    unsupported_process = FlowProcess(
-        [
-            {"id": 0, "result": {"userAgent": "codex", "platformFamily": "unix", "platformOs": "macos", "codexHome": "/tmp"}},
-            {"id": 1, "result": {"thread": {"id": "thr_1"}}},
-            {"id": 2, "result": {"turn": {"id": "turn_1"}}},
-            {"id": 99, "method": "tool/unknown", "params": {"name": "bad"}},
-            {"method": "turn/completed", "params": {"turn": {"id": "turn_1"}, "status": "completed"}},
-        ]
-    )
-    input_process = FlowProcess(
-        [
-            {"id": 0, "result": {"userAgent": "codex", "platformFamily": "unix", "platformOs": "macos", "codexHome": "/tmp"}},
-            {"id": 1, "result": {"thread": {"id": "thr_1"}}},
-            {"id": 2, "result": {"turn": {"id": "turn_1"}}},
-            {"id": 88, "method": "tool/request_user_input", "params": {"prompt": "Need input"}},
-        ]
-    )
-
-    async def run_with(process: FlowProcess) -> tuple[list[dict[str, Any]], str | None, float]:
-        async def factory(*args: Any, **kwargs: Any) -> FlowProcess:
-            return process
-
-        events: list[dict[str, Any]] = []
-        started = time.monotonic()
-        error_code: str | None = None
-        client = CodexAppServerClient(CodexConfig(read_timeout_ms=100, turn_timeout_ms=1000), process_factory=factory)
-        try:
-            await client.run_session(tmp_path, "Do work", "ENG-22", on_event=events.append)
-        except CodexError as exc:
-            error_code = exc.code
-        return events, error_code, time.monotonic() - started
-
-    approval_events, approval_error, approval_elapsed = await run_with(approval_process)
-    unsupported_events, unsupported_error, unsupported_elapsed = await run_with(unsupported_process)
-    input_events, input_error, input_elapsed = await run_with(input_process)
-
-    bundle = flow_bundle(
-        test_id="FLOW-022",
-        title="interactive protocol events follow documented policies without stalls",
-        source_sections=["10.5", "17.5"],
-        profile="core",
-        initial_state={"policy": policy},
-        trigger="Run approval, user-input-required, and unsupported-tool event streams",
-        observed_transitions=["approval_auto_approved", "user_input_failed_fast", "unsupported_tool_structured_error"],
-        workspace_evidence={"workspace_path": str(tmp_path)},
-        tracker_evidence={"not_applicable": True},
-        codex_evidence={"approval_sent": approval_process.sent, "unsupported_sent": unsupported_process.sent, "input_sent": input_process.sent},
-        observability_evidence={
-            "approval_events": approval_events,
-            "unsupported_events": unsupported_events,
-            "input_events": input_events,
-            "elapsed": [approval_elapsed, unsupported_elapsed, input_elapsed],
-        },
-        final_state={"approval_error": approval_error, "unsupported_error": unsupported_error, "input_error": input_error},
-        score_reason="Policy, response payloads, events, and elapsed times show no interactive variant can stall indefinitely.",
-    )
-
-    assert approval_error is None
-    assert {"id": 77, "result": {"decision": "approved_for_session"}} in approval_process.sent
-    assert {"id": 78, "result": {"decision": "acceptForSession"}} in approval_process.sent
-    assert unsupported_error is None
-    assert any(message.get("id") == 99 and "error" in message for message in unsupported_process.sent)
-    assert input_error == "turn_input_required"
-    assert max(approval_elapsed, unsupported_elapsed, input_elapsed) < 1
-    assert bundle["final_state"]["input_error"] == "turn_input_required"
 
 
 def test_flow_023_token_and_runtime_metrics_use_latest_absolute_totals(tmp_path: Path) -> None:
@@ -1796,75 +1555,3 @@ def test_flow_025_real_integration_profiles_skip_fail_and_pass_are_explicit(tmp_
     assert "invalid-token-for-flow-025" not in (invalid.stdout + invalid.stderr)
     assert bundle["final_state"]["invalid_failed"] is True
 
-
-@pytest.mark.asyncio
-async def test_flow_026_ssh_worker_extension_preserves_orchestrator_authority(tmp_path: Path) -> None:
-    tracker = FlowTracker(candidates=[issue("ENG-26A", id="eng-26a"), issue("ENG-26B", id="eng-26b")])
-    runner = FlowCompletingRunner()
-    config = ServiceConfig(
-        tracker=TrackerConfig(kind="linear", endpoint="https://api.linear.app/graphql", project_slug="MT", api_key="linear-token"),
-        polling=PollingConfig(interval_ms=100),
-        workspace=WorkspaceConfig(root=Path("/remote/performer")),
-        hooks=HooksConfig(),
-        agent=AgentConfig(max_concurrent_agents=2),
-        codex=CodexConfig(),
-        prompt_template="Do {{ issue.identifier }}",
-        workflow_path=tmp_path / "WORKFLOW.md",
-        worker=WorkerConfig(ssh_hosts=["host-a", "host-b"], max_concurrent_agents_per_host=1),
-        completion_verification=CompletionVerificationConfig(enabled=True, required_checks=[]),
-    )
-    orchestrator = Orchestrator(config, tracker, runner)
-    orchestrator.state.running["busy"] = RunningEntry(
-        issue=issue("BUSY", id="busy"),
-        task=None,
-        started_at=utc_now(),
-        retry_attempt=0,
-        worker_host="host-a",
-    )
-    tracker.refreshed = [issue("BUSY", id="busy", state="In Progress")]
-
-    await orchestrator.tick()
-    await runner.started.wait()
-    selected = orchestrator.state.running["eng-26a"].worker_host
-    all_saturated_tracker = FlowTracker(candidates=[issue("ENG-26C", id="eng-26c")])
-    saturated_runner = FlowCompletingRunner()
-    saturated = Orchestrator(config, all_saturated_tracker, saturated_runner)
-    saturated.state.running["busy-a"] = RunningEntry(issue=issue("A", id="busy-a"), task=None, started_at=utc_now(), retry_attempt=0, worker_host="host-a")
-    saturated.state.running["busy-b"] = RunningEntry(issue=issue("B", id="busy-b"), task=None, started_at=utc_now(), retry_attempt=0, worker_host="host-b")
-    all_saturated_tracker.refreshed = [
-        issue("A", id="busy-a", state="In Progress"),
-        issue("B", id="busy-b", state="In Progress"),
-    ]
-    await saturated.tick()
-
-    process = FlowProcess([], hang_stdout=True)
-
-    async def factory(*args: Any, **kwargs: Any) -> FlowProcess:
-        return process
-
-    client = CodexAppServerClient(CodexConfig(read_timeout_ms=1), process_factory=factory)
-    with pytest.raises(CodexError):
-        await client.run_session(Path("/remote/performer/ENG-26A"), "Do work", "ENG-26A", worker_host="host-b")
-    ssh_args = process.sent
-
-    bundle = flow_bundle(
-        test_id="FLOW-026",
-        title="ssh worker extension preserves claims, host caps, and remote launch authority",
-        source_sections=["Appendix A"],
-        profile="optional extension",
-        initial_state={"ssh_hosts": ["host-a", "host-b"], "host_a_saturated": True},
-        trigger="Dispatch with host-a saturated, then all hosts saturated, then launch SSH client",
-        observed_transitions=["host-b_selected", "claim_owned_by_orchestrator", "all_hosts_wait", "ssh_launch_attempted"],
-        workspace_evidence={"remote_root": "/remote/performer"},
-        tracker_evidence={"candidate_fetch_calls": tracker.fetch_candidate_calls},
-        codex_evidence={"selected_host": selected, "ssh_sent_messages": ssh_args},
-        observability_evidence={"running_hosts": [entry.worker_host for entry in orchestrator.state.running.values()], "saturated_running": list(saturated.state.running)},
-        final_state={"selected_host": selected, "saturated_started": saturated_runner.started_attempts},
-        score_reason="Bundle shows orchestrator-owned claim/running state, host-b selection under per-host cap, all-host saturation waiting, and SSH launch path.",
-    )
-
-    assert selected == "host-b"
-    assert "eng-26a" in orchestrator.state.claimed
-    assert saturated_runner.started_attempts == []
-    assert "eng-26c" not in saturated.state.claimed
-    assert bundle["final_state"]["selected_host"] == "host-b"

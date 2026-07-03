@@ -175,7 +175,6 @@ class RunningEntry:
     thread_id: str | None = None
     turn_id: str | None = None
     worker_host: str | None = None
-    codex_app_server_pid: int | None = None
     last_codex_event: str | None = None
     last_codex_timestamp: datetime | None = None
     last_codex_message: str | None = None
@@ -189,6 +188,7 @@ class RunningEntry:
     last_reported_tokens: RuntimeTokens = field(default_factory=RuntimeTokens)
     turn_count: int = 0
     human_blocked_reason: str | None = None
+    structured_result: dict[str, Any] | None = None
 
 
 @dataclass

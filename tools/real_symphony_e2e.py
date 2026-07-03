@@ -12,6 +12,7 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+import shutil
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -396,6 +397,9 @@ def make_fixture_repo(path: Path) -> Path:
 
 def patch_workflow(workflow_path: Path, *, acceptance_gates: bool, permission_approval_probe: bool = False) -> str:
     workflow = workflow_path.read_text(encoding="utf-8")
+    codex_bin = shutil.which("codex")
+    if codex_bin and "  sdk_codex_bin:" not in workflow:
+        workflow = workflow.replace("codex:\n", f"codex:\n  sdk_codex_bin: {codex_bin}\n", 1)
     workflow = workflow.replace(
         "  max_concurrent_agents: 10\n  max_turns: 20\n",
         "  max_concurrent_agents: 1\n  max_turns: 2\n" if acceptance_gates else "  max_concurrent_agents: 1\n  max_turns: 1\n",
@@ -570,6 +574,15 @@ async def wait_for_run(
         if status == 200 and isinstance(runtime_body, dict):
             process_status = (runtime_body.get("instance") or {}).get("process_status")
         run_statuses = [run.get("status") for run in ops.get("runs", {}).values()]
+        event_types = [
+            event.get("event_type")
+            for event in ops.get("events", {}).values()
+            if isinstance(event, dict)
+        ] if isinstance(ops.get("events"), dict) else [
+            event.get("event_type")
+            for event in ops.get("events", [])
+            if isinstance(event, dict)
+        ]
         sample = {
             "at": utc_now(),
             "issue_state": final_issue["state"]["name"],
@@ -580,11 +593,27 @@ async def wait_for_run(
             "blocked": len(state.get("blocked", [])),
             "result_exists": result_path.exists(),
             "run_statuses": run_statuses,
+            "event_types": event_types[-20:],
         }
         samples.append(sample)
         mark_stage("webhook_queued", True, issue_id=issue_id)
         mark_stage("process_running_or_exited", process_status in {"running", "exited", "stopped"}, process_status=process_status)
         mark_stage("implementation_result_exists", result_path.exists(), path=str(result_path))
+        mark_stage(
+            "implementation_review_ready",
+            final_issue["state"]["name"] == "In Review" or final_issue["state"]["type"] in {"completed", "canceled"},
+            issue_state=final_issue["state"],
+        )
+        mark_stage(
+            "gate_followup_started",
+            "gate_followup_started" in event_types,
+            event_types=event_types[-20:],
+        )
+        mark_stage(
+            "gate_one_shot_completed",
+            "gate_followup_started" in event_types and run_statuses and all(status != "running" for status in run_statuses),
+            run_statuses=run_statuses,
+        )
         blocked = [entry for entry in state.get("blocked", []) if isinstance(entry, dict)]
         for blocked_entry in blocked:
             blocked_issue_id = str(blocked_entry.get("issue_id") or "")

@@ -60,7 +60,12 @@ class AgentConfig:
 
 @dataclass(frozen=True)
 class CodexConfig:
-    command: str = "codex app-server"
+    backend: str = "sdk"
+    command: str = ""
+    model: str | None = None
+    sdk_codex_bin: str | None = None
+    sandbox: str | None = None
+    linear_tool_mode: str = "disabled"
     approval_policy: Any = None
     thread_sandbox: Any = None
     turn_sandbox_policy: Any = None
@@ -195,8 +200,13 @@ class ServiceConfig:
             raise ConfigError("missing_tracker_api_key", "tracker.api_key is required")
         if self.tracker.kind == "linear" and not self.tracker.project_slug:
             raise ConfigError("missing_tracker_project_slug", "tracker.project_slug is required")
-        if not self.codex.command.strip():
-            raise ConfigError("missing_codex_command", "codex.command is required")
+        if self.codex.backend != "sdk":
+            raise ConfigError("invalid_codex_backend", "codex.backend must be sdk")
+        if self.codex.linear_tool_mode != "disabled":
+            raise ConfigError(
+                "invalid_codex_linear_tool_mode",
+                "codex.linear_tool_mode must be disabled",
+            )
 
     def validate_for_dispatch(self) -> None:
         self.validate_static()
@@ -373,7 +383,12 @@ def _agent_config(raw: dict[str, Any]) -> AgentConfig:
 
 def _codex_config(raw: dict[str, Any]) -> CodexConfig:
     return CodexConfig(
-        command=_string(raw.get("command"), "codex app-server") or "",
+        backend=_string(raw.get("backend"), "sdk") or "sdk",
+        command=_string(raw.get("command"), "") or "",
+        model=_string(raw.get("model")),
+        sdk_codex_bin=_string(raw.get("sdk_codex_bin")),
+        sandbox=_string(raw.get("sandbox")),
+        linear_tool_mode=_string(raw.get("linear_tool_mode"), "disabled") or "disabled",
         approval_policy=raw.get("approval_policy"),
         thread_sandbox=raw.get("thread_sandbox"),
         turn_sandbox_policy=raw.get("turn_sandbox_policy"),

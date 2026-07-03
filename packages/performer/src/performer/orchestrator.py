@@ -35,7 +35,7 @@ from performer_api.models import (
     sort_for_dispatch,
     utc_now,
 )
-from performer_api.persistence import PersistedState, PersistenceStore
+from performer_api.persistence import CodexThreadEntry, PersistedState, PersistenceStore
 from performer_api.persistence import ops_snapshot_path_from_persistence_path
 from performer_api.ops_store import OpsStore
 from .linear import format_linear_milestone_comment
@@ -65,7 +65,7 @@ class TrackerProtocol(Protocol):
 class RunnerProtocol(Protocol):
     async def run_issue(
         self, issue: Issue, attempt: int | None, on_event: Any, *, worker_host: str | None = None
-    ) -> None: ...
+    ) -> Any: ...
 
 
 class AcceptanceRunnerProtocol(Protocol):
@@ -87,6 +87,7 @@ class OrchestratorState:
     codex_totals: RuntimeTokens = field(default_factory=RuntimeTokens)
     codex_rate_limits: dict[str, Any] | None = None
     ended_runtime_seconds: float = 0
+    codex_threads: dict[str, CodexThreadEntry] = field(default_factory=dict)
 
 
 class Orchestrator:
@@ -126,6 +127,19 @@ class Orchestrator:
         for blocked in persisted.blocked:
             self.state.blocked[blocked.issue_id] = blocked
             self.state.claimed.add(blocked.issue_id)
+        for thread in persisted.codex_threads:
+            status = "resume_pending" if thread.status == "active" else thread.status
+            restored = CodexThreadEntry(
+                issue_id=thread.issue_id,
+                thread_id=thread.thread_id,
+                backend=thread.backend,
+                workspace_path=thread.workspace_path,
+                last_turn_id=thread.last_turn_id,
+                status=status,
+                last_final_response=thread.last_final_response,
+                updated_at=utc_now() if status != thread.status else thread.updated_at,
+            )
+            self.state.codex_threads[restored.issue_id] = restored
 
     async def tick(self) -> None:
         await self.reconcile_running()
@@ -877,7 +891,11 @@ class Orchestrator:
             attempt or 0,
         )
         try:
-            await self.runner.run_issue(issue, attempt, on_event, worker_host=worker_host)
+            result = await self.runner.run_issue(issue, attempt, on_event, worker_host=worker_host)
+            entry = self.state.running.get(issue.id)
+            structured_result = getattr(result, "structured_result", None)
+            if entry is not None and isinstance(structured_result, dict):
+                entry.structured_result = structured_result
         except asyncio.CancelledError:
             session_id = self._session_id_for_log(issue.id)
             logger.info(
@@ -923,6 +941,8 @@ class Orchestrator:
 
                 ops_snapshot = self._load_ops_snapshot()
                 workspace_path = self._completion_workspace_path(entry)
+                if entry.structured_result is not None:
+                    await self._publish_structured_result(entry)
 
                 verdict = await self.completion_verifier.verify_completion(
                     entry.issue,
@@ -973,6 +993,7 @@ class Orchestrator:
                             self.state.claimed.discard(issue_id)
                             self.state.retry_attempts.pop(issue_id, None)
                             logger.info("performer_completion_verified_review issue_id=%s", issue_id)
+                            self._persist_state()
                             return
                         else:
                             logger.info(
@@ -993,6 +1014,7 @@ class Orchestrator:
                             self.state.claimed.discard(issue_id)
                             self.state.retry_attempts.pop(issue_id, None)
                             logger.info("performer_acceptance_direct_done_handled issue_id=%s", issue_id)
+                            self._persist_state()
                             return
                         self.state.completed.add(issue_id)
                         self.state.claimed.discard(issue_id)
@@ -1101,6 +1123,7 @@ class Orchestrator:
         else:
             next_attempt = max(entry.retry_attempt + 1, 1)
             retry_error = f"worker exited: {error}"
+            self._mark_codex_thread_terminal(entry, status="failed")
             if entry.human_blocked_reason:
                 self._schedule_blocked(entry, error=entry.human_blocked_reason, attempt=next_attempt)
                 await self._sync_lifecycle_label(entry.issue.id, LIFECYCLE_LABELS["error"])
@@ -1189,6 +1212,22 @@ class Orchestrator:
                 entry.issue.id,
                 entry.issue.identifier,
             )
+
+    async def _publish_structured_result(self, entry: RunningEntry) -> None:
+        result = entry.structured_result
+        if self.config.tracker.kind != "linear" or not isinstance(result, dict):
+            return
+        block = _structured_result_evidence_block(result)
+        update_description = getattr(self.tracker, "update_issue_description_marker_block", None)
+        if callable(update_description):
+            await update_description(entry.issue.id, "PERFORMER IMPLEMENTATION EVIDENCE", block)
+        else:
+            update_issue = getattr(self.tracker, "update_issue_description", None)
+            if callable(update_issue):
+                await update_issue(entry.issue.id, _description_with_structured_result(entry.issue.description or "", result))
+        comment_issue = getattr(self.tracker, "comment_issue", None)
+        if callable(comment_issue):
+            await comment_issue(entry.issue.id, _structured_result_comment_body(entry, result))
 
     async def _comment_completion_verification_error(self, entry: RunningEntry, error: str) -> None:
         if self.config.tracker.kind != "linear":
@@ -1491,9 +1530,6 @@ class Orchestrator:
         turn_id = event.get("turn_id")
         if isinstance(turn_id, str) and turn_id:
             entry.turn_id = turn_id
-        pid = event.get("codex_app_server_pid")
-        if isinstance(pid, int):
-            entry.codex_app_server_pid = pid
         cwd = event.get("cwd")
         if isinstance(cwd, str) and cwd:
             entry.workspace_path = cwd
@@ -1534,7 +1570,45 @@ class Orchestrator:
         tokens = self._extract_absolute_tokens(event)
         if tokens is not None:
             self._apply_absolute_tokens(entry, tokens)
+        self._apply_codex_thread_event(entry, event)
         self._persist_state()
+
+    def _apply_codex_thread_event(self, entry: RunningEntry, event: dict[str, Any]) -> None:
+        if self.config.codex.backend != "sdk":
+            return
+        thread_id = event.get("thread_id")
+        if not isinstance(thread_id, str) or not thread_id:
+            return
+        status = "active"
+        if event.get("event") == "turn_completed":
+            status = "completed"
+        elif event.get("event") in {"turn_failed", "turn_cancelled", "turn_ended_with_error"}:
+            status = "failed"
+        final_response = event.get("message") if event.get("event") == "turn_completed" else None
+        self.state.codex_threads[entry.issue.id] = CodexThreadEntry(
+            issue_id=entry.issue.id,
+            thread_id=thread_id,
+            backend="sdk",
+            workspace_path=entry.workspace_path or str(self.config.workspace.root),
+            last_turn_id=entry.turn_id,
+            status=status,
+            last_final_response=final_response if isinstance(final_response, str) else None,
+            updated_at=utc_now(),
+        )
+
+    def _mark_codex_thread_terminal(self, entry: RunningEntry, *, status: str) -> None:
+        if self.config.codex.backend != "sdk" or not entry.thread_id:
+            return
+        self.state.codex_threads[entry.issue.id] = CodexThreadEntry(
+            issue_id=entry.issue.id,
+            thread_id=entry.thread_id,
+            backend="sdk",
+            workspace_path=entry.workspace_path or str(self.config.workspace.root),
+            last_turn_id=entry.turn_id,
+            status=status,
+            last_final_response=None,
+            updated_at=utc_now(),
+        )
 
     def _set_running_phase(self, issue_id: str, phase: str, *, runtime_phase: str | None = None) -> None:
         entry = self.state.running.get(issue_id)
@@ -1830,6 +1904,7 @@ class Orchestrator:
                 continuations=list(self.state.continuations.values()),
                 blocked=list(self.state.blocked.values()),
                 running=list(self.state.running.values()),
+                codex_threads=list(self.state.codex_threads.values()),
             )
         )
 
@@ -2079,6 +2154,63 @@ def _completion_verdict_comment_body(entry: RunningEntry, verdict: Any, *, next_
         lines.extend(["", f"Last observed message: {entry.last_codex_message}"])
     lines.extend(["", action_line])
     return "\n".join(lines)
+
+
+def _description_with_structured_result(existing: str, result: dict[str, Any]) -> str:
+    block = _structured_result_evidence_block(result)
+    marker = "<!-- PERFORMER IMPLEMENTATION EVIDENCE -->"
+    if marker in existing:
+        return existing.split(marker, 1)[0].rstrip() + "\n\n" + marker + "\n" + block
+    prefix = existing.rstrip()
+    return f"{prefix}\n\n{marker}\n{block}".strip()
+
+
+def _structured_result_evidence_block(result: dict[str, Any]) -> str:
+    return "\n".join(
+        [
+            "Implementation summary:",
+            str(result.get("summary") or "").strip() or "No summary provided.",
+            "",
+            "Test commands and exact output:",
+            _structured_list(result.get("test_commands")),
+            "",
+            "Remaining risks:",
+            _structured_list(result.get("remaining_risks")) or "None.",
+            "",
+            "Changed files:",
+            _structured_list(result.get("changed_files")) or "None reported.",
+        ]
+    )
+
+
+def _structured_result_comment_body(entry: RunningEntry, result: dict[str, Any]) -> str:
+    lines = [
+        "Performer implementation handoff.",
+        "",
+        f"Issue: {entry.issue.identifier}",
+        "",
+        "Implementation summary:",
+        str(result.get("summary") or "").strip() or "No summary provided.",
+        "",
+        "Test commands and exact output:",
+        _structured_list(result.get("test_commands")),
+        "",
+        "Changed files:",
+        _structured_list(result.get("changed_files")) or "None reported.",
+        "",
+        "Remaining risks:",
+        _structured_list(result.get("remaining_risks")) or "None.",
+        "",
+        f"Next action: {result.get('next_action') or 'unknown'}",
+    ]
+    return "\n".join(lines)
+
+
+def _structured_list(value: Any) -> str:
+    if not isinstance(value, list):
+        return ""
+    items = [str(item).strip() for item in value if str(item).strip()]
+    return "\n".join(f"- {item}" for item in items)
 
 
 def _completion_verification_error_comment_body(entry: RunningEntry, error: str) -> str:

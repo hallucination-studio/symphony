@@ -5,7 +5,7 @@ import asyncio
 import logging
 from pathlib import Path
 
-from .acceptance import CodexAcceptanceRunner
+from .acceptance import CodexAcceptanceRunner, SmokeAcceptanceRunner
 from performer_api.config import ServiceConfig, load_env_file
 from .linear import LinearTracker
 from .orchestrator import Orchestrator
@@ -47,13 +47,17 @@ def apply_runtime_config(
     elif isinstance(orchestrator.acceptance_runner, CodexAcceptanceRunner):
         orchestrator.acceptance_runner.config = config
         orchestrator.acceptance_runner.codex_client.config = config.codex
+    elif isinstance(orchestrator.acceptance_runner, SmokeAcceptanceRunner):
+        orchestrator.acceptance_runner = build_acceptance_runner(config)
     elif orchestrator.acceptance_runner is None:
         orchestrator.acceptance_runner = build_acceptance_runner(config)
 
 
-def build_acceptance_runner(config: ServiceConfig) -> CodexAcceptanceRunner | None:
+def build_acceptance_runner(config: ServiceConfig) -> CodexAcceptanceRunner | SmokeAcceptanceRunner | None:
     if not config.acceptance.enabled:
         return None
+    if config.acceptance.gate_planner_mode == "smoke":
+        return SmokeAcceptanceRunner(config)
     return CodexAcceptanceRunner(config)
 
 
