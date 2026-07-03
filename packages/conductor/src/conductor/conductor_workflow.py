@@ -88,6 +88,11 @@ def generate_workflow_content(instance: InstanceRecord, *, podium_url: str = "ht
             "  gate_failed_label: performer:gate/failed\n"
             "  score_label_prefix: performer:score/\n"
         )
+    repository_handoff_config = (
+        "repository_handoff:\n"
+        f"  enabled: {'true' if profile in {'task', 'gated-task'} else 'false'}\n"
+        f"  bundle_root: {Path(instance.persistence_path).parent / 'handoffs'}\n"
+    )
 
     return (
         "---\n"
@@ -112,6 +117,7 @@ def generate_workflow_content(instance: InstanceRecord, *, podium_url: str = "ht
         f"  max_turns: {max_turns}\n"
         "  max_retry_backoff_ms: 300000\n"
         f"{acceptance_config}"
+        f"{repository_handoff_config}"
         "codex:\n"
         "  backend: sdk\n"
         "  linear_tool_mode: disabled\n"

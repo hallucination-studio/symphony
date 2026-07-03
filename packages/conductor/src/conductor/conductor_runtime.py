@@ -141,8 +141,10 @@ class ConductorRuntimeManager:
     def refresh(self, instance: InstanceRecord) -> InstanceRecord:
         handle = self._handles.get(instance.id)
         if handle is None:
+            if instance.process_status in {"running", "starting"} and instance.pid is not None and not _pid_alive(instance.pid):
+                return instance.with_updates(process_status="exited", pid=None, last_exit_code=0)
             return instance
-        returncode = getattr(handle.process, "returncode", None)
+        returncode = _process_returncode(handle.process)
         if returncode is None:
             return instance.with_updates(process_status="running", pid=getattr(handle.process, "pid", None))
         self._handles.pop(instance.id, None)
@@ -153,7 +155,7 @@ class ConductorRuntimeManager:
         process_status = instance.process_status
         pid = instance.pid
         if handle is not None:
-            returncode = getattr(handle.process, "returncode", None)
+            returncode = _process_returncode(handle.process)
             process_status = "running" if returncode is None else "exited"
             pid = getattr(handle.process, "pid", None) if returncode is None else None
         return {
@@ -390,3 +392,13 @@ def _pid_alive(pid: int) -> bool:
     except PermissionError:
         return True
     return True
+
+
+def _process_returncode(process: Any) -> int | None:
+    poll = getattr(process, "poll", None)
+    if callable(poll):
+        try:
+            return poll()
+        except Exception:
+            pass
+    return getattr(process, "returncode", None)

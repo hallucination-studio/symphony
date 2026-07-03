@@ -204,6 +204,26 @@ class TraceEvent:
         return _record_from_dict(cls, payload)
 
 
+@dataclass(frozen=True)
+class RepositoryHandoffReport:
+    issue_id: str
+    issue_identifier: str
+    workspace_path: str
+    structured_result: dict[str, Any] | None
+    git_snapshot: dict[str, Any]
+    artifact_manifest: list[dict[str, Any]]
+    bundle: dict[str, Any]
+    recommended_next_action: str
+    generated_at: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> RepositoryHandoffReport:
+        return _record_from_dict(cls, payload)
+
+
 @dataclass
 class OpsSnapshot:
     issues: dict[str, IssueRecord] = field(default_factory=dict)

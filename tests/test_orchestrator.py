@@ -15,6 +15,7 @@ from performer_api.config import (
     HooksConfig,
     PersistenceConfig,
     PollingConfig,
+    RepositoryHandoffConfig,
     ServiceConfig,
     TrackerConfig,
     WorkerConfig,
@@ -366,6 +367,24 @@ def make_config_with_acceptance(tmp_path: Path) -> ServiceConfig:
         workflow_path=config.workflow_path,
         completion_verification=config.completion_verification,
         acceptance=AcceptanceConfig(enabled=True),
+    )
+
+
+def make_config_with_acceptance_handoff(tmp_path: Path) -> ServiceConfig:
+    config = make_config_with_acceptance(tmp_path)
+    return ServiceConfig(
+        tracker=config.tracker,
+        polling=config.polling,
+        workspace=config.workspace,
+        hooks=config.hooks,
+        agent=config.agent,
+        codex=config.codex,
+        prompt_template=config.prompt_template,
+        workflow_path=config.workflow_path,
+        completion_verification=config.completion_verification,
+        acceptance=config.acceptance,
+        persistence=PersistenceConfig(path=tmp_path / "state" / "performer.json"),
+        repository_handoff=RepositoryHandoffConfig(enabled=True),
     )
 
 
@@ -1500,7 +1519,7 @@ async def test_acceptance_score_4_marks_original_done_after_gate_passes(tmp_path
 """
     )
     orchestrator = Orchestrator(
-        make_config_with_acceptance(tmp_path),
+        make_config_with_acceptance_handoff(tmp_path),
         tracker,
         CompletingRunner(),
         acceptance_runner=acceptance_runner,
@@ -1517,6 +1536,10 @@ async def test_acceptance_score_4_marks_original_done_after_gate_passes(tmp_path
     assert ("gate-1", "performer:score/4") in tracker.lifecycle_labels
     assert tracker.comments[-1][0] == "gate-1"
     assert "Acceptance score: 4" in tracker.comments[-1][1]
+    snapshot = OpsStore(ops_snapshot_path_from_persistence_path(orchestrator.config.persistence.path)).load()
+    handoff_events = [event for event in snapshot.events if event.event_type == "repository_handoff_report.v1"]
+    assert len(handoff_events) == 1
+    assert handoff_events[0].issue_id == "mt-1"
 
 
 @pytest.mark.asyncio

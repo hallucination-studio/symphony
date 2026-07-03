@@ -193,6 +193,27 @@ acceptance:
     assert config.acceptance.score_label_prefix == "performer:score/"
 
 
+def test_service_config_parses_repository_handoff_extension(tmp_path: Path) -> None:
+    workflow_path = tmp_path / "WORKFLOW.md"
+    write_workflow(
+        workflow_path,
+        """
+tracker:
+  kind: linear
+  project_slug: MT
+  api_key: linear-token
+repository_handoff:
+  enabled: true
+  bundle_root: ./state/handoffs
+""",
+    )
+
+    config = ServiceConfig.from_workflow(load_workflow(workflow_path), workflow_path)
+
+    assert config.repository_handoff.enabled is True
+    assert config.repository_handoff.bundle_root == (tmp_path / "state" / "handoffs").resolve()
+
+
 def test_acceptance_enabled_extends_candidate_scan_states(tmp_path: Path) -> None:
     workflow_path = tmp_path / "WORKFLOW.md"
     write_workflow(

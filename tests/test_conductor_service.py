@@ -140,6 +140,59 @@ class CapturingRuntime:
         )
 
 
+class FakeRepositoryHandoffTracker:
+    def __init__(self) -> None:
+        self.children: list[dict[str, object]] = []
+        self.comments: list[tuple[str, str]] = []
+        self.updated_descriptions: list[tuple[str, str, str]] = []
+
+    async def fetch_child_issues(self, parent_issue_id: str, *, label_name: str | None = None) -> list[dict[str, object]]:
+        return [
+            child
+            for child in self.children
+            if child.get("parent_issue_id") == parent_issue_id
+            and (label_name is None or label_name in child.get("labels", []))
+        ]
+
+    async def create_child_issue_for(
+        self,
+        *,
+        parent_issue_id: str,
+        title: str,
+        description: str,
+        label_names: list[str],
+        delegate_id: str | None = None,
+    ) -> dict[str, object]:
+        issue = {
+            "id": f"child-{len(self.children) + 1}",
+            "identifier": f"ENG-{len(self.children) + 100}",
+            "title": title,
+            "description": description,
+            "labels": list(label_names),
+            "parent_issue_id": parent_issue_id,
+            "delegate_id": delegate_id,
+            "url": f"https://linear.test/{len(self.children) + 100}",
+        }
+        self.children.append(issue)
+        return issue
+
+    async def update_issue_description_marker_block(
+        self,
+        issue_id: str,
+        marker_name: str,
+        block: str,
+    ) -> dict[str, object]:
+        self.updated_descriptions.append((issue_id, marker_name, block))
+        for child in self.children:
+            if child["id"] == issue_id:
+                child["description"] = block
+        return {"success": True, "issue_id": issue_id, "description": block}
+
+    async def comment_issue(self, issue_id: str, body: str) -> dict[str, object]:
+        self.comments.append((issue_id, body))
+        return {"success": True, "comment_id": f"comment-{len(self.comments)}"}
+
+
 def test_conductor_service_lists_issue_run_trace_and_retention(tmp_path: Path) -> None:
     service = make_service(tmp_path)
     repo = make_repo(tmp_path)
@@ -158,6 +211,84 @@ def test_conductor_service_lists_issue_run_trace_and_retention(tmp_path: Path) -
     assert service.get_run("run-1")["run"]["run_id"] == "run-1"
     assert traces[0]["event_type"] == "issue_dispatched"
     assert retention["pinned_issue_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_repository_handoff_closeout_creates_child_once_and_updates_on_rerun(tmp_path: Path) -> None:
+    tracker = FakeRepositoryHandoffTracker()
+    service = make_service(tmp_path)
+    service.repository_handoff_tracker_factory = lambda instance: tracker
+    repo = make_repo(tmp_path)
+    instance = service.create_instance(
+        make_request(repo).with_overrides(
+            linear_filters={
+                "linear_agent_app_user_id": "app-user-1",
+                "integration_agent_mention": "@integration-agent",
+            }
+        )
+    )
+    ops_store = OpsStore(Path(instance.persistence_path).parent / "ops.json")
+    ops_store.save(
+        OpsSnapshot(
+            events=[
+                TraceEvent(
+                    event_id="evt-1",
+                    event_type="repository_handoff_report.v1",
+                    timestamp="2026-07-03T00:00:00Z",
+                    issue_id="issue-1",
+                    retention_tier="summary",
+                    payload={
+                        "issue_id": "issue-1",
+                        "issue_identifier": "ENG-1",
+                        "workspace_path": instance.workspace_root,
+                        "structured_result": {
+                            "implementation_summary": "Changed README",
+                            "test_commands_and_exact_output": "pytest -q\n1 passed",
+                            "remaining_risks": "none",
+                        },
+                        "git_snapshot": {
+                            "is_git_repo": True,
+                            "repo_root": instance.workspace_root,
+                            "branch": "main",
+                            "head_sha": "abc123",
+                            "status_porcelain": " M README.md",
+                            "diff_stat": "README.md | 2 +",
+                            "changed_files": ["README.md"],
+                        },
+                        "artifact_manifest": [{"path": "changes.patch", "size": 12, "sha256": "abc"}],
+                        "bundle": {
+                            "type": "local_bundle",
+                            "path": str(Path(instance.persistence_path).parent / "handoffs" / "ENG-1"),
+                            "changes_patch_path": str(Path(instance.persistence_path).parent / "handoffs" / "ENG-1" / "changes.patch"),
+                            "manifest_path": str(Path(instance.persistence_path).parent / "handoffs" / "ENG-1" / "manifest.json"),
+                        },
+                        "recommended_next_action": "create_repository_integration_issue",
+                        "generated_at": "2026-07-03T00:00:00Z",
+                    },
+                )
+            ]
+        )
+    )
+
+    first = await service.coordinate_repository_handoff_closeouts()
+    second = await service.coordinate_repository_handoff_closeouts()
+
+    assert first["closed_out"] == 1
+    assert second["closed_out"] == 0
+    assert len(tracker.children) == 1
+    child = tracker.children[0]
+    assert child["title"] == "Integrate ENG-1 implementation"
+    assert child["delegate_id"] == "app-user-1"
+    assert "performer:type/repository-integration" in child["labels"]
+    assert "<!-- SYMPHONY REPOSITORY HANDOFF source_issue_id=issue-1 -->" in str(child["description"])
+    assert "changes.patch" in str(child["description"])
+    assert tracker.comments
+    assert "@integration-agent" in tracker.comments[0][1]
+    snapshot = ops_store.load()
+    closeouts = [event for event in snapshot.events if event.event_type == "repository_handoff_closeout.v1"]
+    assert len(closeouts) == 1
+    assert closeouts[0].payload["status"] == "completed"
+    assert closeouts[0].payload["child_issue_id"] == "child-1"
 
 
 def test_get_instance_refreshes_exited_runtime_state(tmp_path: Path) -> None:
@@ -888,6 +1019,51 @@ async def test_refresh_instance_coordinates_gated_followup_after_business_one_sh
     stored = service.store.get_instance(instance.id)
     assert stored is not None
     assert stored.gated_followup_stages == {"issue-1": ["gate"]}
+
+
+@pytest.mark.asyncio
+async def test_background_coordination_starts_gated_followup_without_instance_get(tmp_path: Path) -> None:
+    runtime = CapturingRuntime()
+    service = ConductorService(
+        store=ConductorStore(tmp_path / "conductor-data"),
+        data_root=tmp_path / "conductor-data",
+        runtime_manager=runtime,
+    )
+    repo = make_repo(tmp_path)
+    instance = service.create_instance(
+        make_request(repo).with_overrides(
+            workflow_profile="gated-task",
+            linear_filters={"linear_agent_app_user_id": "app-user-1", "active_states": ["Todo", "In Progress"]},
+        )
+    )
+    service.store.update_instance(instance.with_updates(process_status="running", pid=4242))
+    runtime.refreshed_instance = instance.with_updates(process_status="exited", pid=None, last_exit_code=0)
+    OpsStore(Path(instance.persistence_path).parent / "ops.json").save(
+        OpsSnapshot(
+            issues={
+                "issue-1": IssueRecord(
+                    issue_id="issue-1",
+                    issue_identifier="ENG-1",
+                    title="Build it",
+                    state="completed",
+                    run_count=1,
+                )
+            },
+            runs={
+                "run-1": RunRecord(
+                    run_id="run-1",
+                    issue_id="issue-1",
+                    instance_id=instance.id,
+                    status="completed",
+                )
+            },
+        )
+    )
+
+    result = await service.coordinate_background_once()
+
+    assert result["gated_followups_started"] == 1
+    assert runtime.started_dispatch_issue_ids == ["issue-1"]
 
 
 @pytest.mark.asyncio

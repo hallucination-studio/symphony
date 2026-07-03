@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import subprocess
 from typing import Any
 
 import pytest
@@ -12,6 +13,7 @@ from performer_api.config import (
     HooksConfig,
     PersistenceConfig,
     PollingConfig,
+    RepositoryHandoffConfig,
     ServiceConfig,
     TrackerConfig,
     WorkspaceConfig,
@@ -463,6 +465,89 @@ async def test_runner_writes_run_attempt_turn_ops_snapshot(tmp_path: Path) -> No
         "thread_token_usage_updated",
         "turn_completed",
     ]
+
+
+@pytest.mark.asyncio
+async def test_runner_emits_repository_handoff_report_ops_event_without_linear_child_issue(tmp_path: Path) -> None:
+    codex = FakeCodex()
+    workspace_root = tmp_path / "repo"
+    workspace_root.mkdir()
+    subprocess.run(["git", "-C", str(workspace_root), "init"], check=True, stdout=subprocess.PIPE)
+    subprocess.run(["git", "-C", str(workspace_root), "config", "user.email", "test@example.com"], check=True)
+    subprocess.run(["git", "-C", str(workspace_root), "config", "user.name", "Test User"], check=True)
+    (workspace_root / "README.md").write_text("before\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(workspace_root), "add", "README.md"], check=True)
+    subprocess.run(["git", "-C", str(workspace_root), "commit", "-m", "initial"], check=True, stdout=subprocess.PIPE)
+    (workspace_root / "README.md").write_text("after\n", encoding="utf-8")
+    config = make_config_with_persistence(tmp_path)
+    config = ServiceConfig(
+        tracker=config.tracker,
+        polling=config.polling,
+        workspace=WorkspaceConfig(root=workspace_root, per_issue=False),
+        hooks=config.hooks,
+        agent=config.agent,
+        codex=config.codex,
+        prompt_template=config.prompt_template,
+        workflow_path=config.workflow_path,
+        persistence=config.persistence,
+        repository_handoff=RepositoryHandoffConfig(enabled=True),
+    )
+    tracker = FakeTracker()
+    runner = AgentRunner(
+        config,
+        WorkspaceManager(config.workspace, config.hooks),
+        codex_client=codex,
+        tracker=tracker,
+    )
+
+    await runner.run_issue(
+        Issue(id="mt-1", identifier="MT-1", title="Build", state="Todo", labels=["codex"], project_slug="MT"),
+        1,
+        lambda event: None,
+    )
+
+    snapshot = OpsStore(ops_snapshot_path_from_persistence_path(config.persistence.path)).load()
+    events = [event for event in snapshot.events if event.event_type == "repository_handoff_report.v1"]
+    assert len(events) == 1
+    assert events[0].payload["issue_identifier"] == "MT-1"
+    assert Path(events[0].payload["bundle"]["changes_patch_path"]).exists()
+    assert not hasattr(tracker, "create_child_issue_for")
+
+
+@pytest.mark.asyncio
+async def test_runner_defers_repository_handoff_when_acceptance_is_enabled(tmp_path: Path) -> None:
+    codex = FakeCodex()
+    workspace_root = tmp_path / "repo"
+    workspace_root.mkdir()
+    config = make_config_with_persistence(tmp_path)
+    config = ServiceConfig(
+        tracker=config.tracker,
+        polling=config.polling,
+        workspace=WorkspaceConfig(root=workspace_root, per_issue=False),
+        hooks=config.hooks,
+        agent=config.agent,
+        codex=config.codex,
+        prompt_template=config.prompt_template,
+        workflow_path=config.workflow_path,
+        persistence=config.persistence,
+        acceptance=AcceptanceConfig(enabled=True),
+        repository_handoff=RepositoryHandoffConfig(enabled=True),
+    )
+    runner = AgentRunner(
+        config,
+        WorkspaceManager(config.workspace, config.hooks),
+        codex_client=codex,
+        tracker=FakeTracker(),
+    )
+
+    await runner.run_issue(
+        Issue(id="mt-1", identifier="MT-1", title="Build", state="Todo", labels=["codex"], project_slug="MT"),
+        1,
+        lambda event: None,
+    )
+
+    snapshot = OpsStore(ops_snapshot_path_from_persistence_path(config.persistence.path)).load()
+    assert [event for event in snapshot.events if event.event_type == "repository_handoff_report.v1"] == []
 
 
 @pytest.mark.asyncio

@@ -150,6 +150,12 @@ class AcceptanceConfig:
 
 
 @dataclass(frozen=True)
+class RepositoryHandoffConfig:
+    enabled: bool = False
+    bundle_root: Path | None = None
+
+
+@dataclass(frozen=True)
 class ServiceConfig:
     tracker: TrackerConfig
     polling: PollingConfig
@@ -167,6 +173,7 @@ class ServiceConfig:
         default_factory=CompletionVerificationConfig
     )
     acceptance: AcceptanceConfig = field(default_factory=AcceptanceConfig)
+    repository_handoff: RepositoryHandoffConfig = field(default_factory=RepositoryHandoffConfig)
 
     @classmethod
     def from_workflow(cls, workflow: WorkflowDefinition, workflow_path: Path) -> ServiceConfig:
@@ -191,6 +198,10 @@ class ServiceConfig:
                 workflow_path,
             ),
             acceptance=acceptance,
+            repository_handoff=_repository_handoff_config(
+                _map(raw.get("repository_handoff")),
+                workflow_path,
+            ),
             prompt_template=workflow.prompt_template,
             workflow_path=workflow_path,
         )
@@ -548,4 +559,15 @@ def _acceptance_config(raw: dict[str, Any]) -> AcceptanceConfig:
         ),
         gate_failed_label=_string(raw.get("gate_failed_label"), defaults.gate_failed_label) or defaults.gate_failed_label,
         score_label_prefix=_string(raw.get("score_label_prefix"), defaults.score_label_prefix) or defaults.score_label_prefix,
+    )
+
+
+def _repository_handoff_config(raw: dict[str, Any], workflow_path: Path) -> RepositoryHandoffConfig:
+    return RepositoryHandoffConfig(
+        enabled=_bool(raw.get("enabled"), False),
+        bundle_root=(
+            _resolve_path(_string(raw.get("bundle_root")), workflow_path)
+            if _string(raw.get("bundle_root"))
+            else None
+        ),
     )

@@ -51,6 +51,7 @@ class ConductorApiServer:
         while True:
             try:
                 await self.service.poll_podium_dispatch_once()
+                await self.service.coordinate_background_once()
             except Exception:
                 pass
             await asyncio.sleep(1)

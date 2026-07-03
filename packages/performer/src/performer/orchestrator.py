@@ -40,6 +40,7 @@ from performer_api.persistence import ops_snapshot_path_from_persistence_path
 from performer_api.ops_store import OpsStore
 from .linear import format_linear_milestone_comment
 from .ops_telemetry import ExecutionTelemetryRecorder
+from .repository_handoff import build_repository_handoff_report
 from .workspace import WorkspaceManager
 
 
@@ -801,6 +802,7 @@ class Orchestrator:
             await self._sync_label_group(issue.id, self.config.acceptance.gate_passed_label, prefix="performer:gate/")
             await self._sync_label_group(issue.id, PHASE_LABELS["completed"], prefix="performer:phase/")
             await self._transition_issue_by_state_name(issue.id, self.config.acceptance.done_state)
+            self._record_repository_handoff_after_acceptance(issue, workspace_path=workspace_path)
             self.state.completed.add(issue.id)
             self.state.claimed.discard(issue.id)
             self.state.retry_attempts.pop(issue.id, None)
@@ -1517,6 +1519,43 @@ class Orchestrator:
             failure_summary=failure_summary,
         )
 
+    def _record_repository_handoff_after_acceptance(self, issue: Issue, *, workspace_path: str | None) -> None:
+        if not self.config.repository_handoff.enabled or self.config.persistence.path is None:
+            return
+        if self._repository_handoff_report_exists(issue.id):
+            return
+        candidate = Path(workspace_path) if workspace_path else self.config.workspace.root
+        try:
+            report = build_repository_handoff_report(
+                issue_id=issue.id,
+                issue_identifier=issue.identifier,
+                workspace_path=candidate,
+                structured_result=_structured_result_from_issue_description(issue.description or ""),
+                bundle_root=self._repository_handoff_bundle_root(),
+            )
+        except Exception as exc:
+            logger.exception("performer_repository_handoff_report_failed issue_id=%s reason=%s", issue.id, exc)
+            return
+        recorder = ExecutionTelemetryRecorder(OpsStore(ops_snapshot_path_from_persistence_path(self.config.persistence.path)))
+        recorder.record_repository_handoff_report(report)
+
+    def _repository_handoff_report_exists(self, issue_id: str) -> bool:
+        if self.config.persistence.path is None:
+            return False
+        snapshot = OpsStore(ops_snapshot_path_from_persistence_path(self.config.persistence.path)).load()
+        return any(
+            event.event_type == "repository_handoff_report.v1" and event.issue_id == issue_id
+            for event in snapshot.events
+        )
+
+    def _repository_handoff_bundle_root(self) -> Path:
+        configured = self.config.repository_handoff.bundle_root
+        if configured is not None:
+            return configured
+        if self.config.persistence.path is not None:
+            return self.config.persistence.path.parent / "handoffs"
+        return self.config.workspace.root.parent / ".symphony-handoffs"
+
     def on_codex_event(self, issue_id: str, event: dict[str, Any]) -> None:
         entry = self.state.running.get(issue_id)
         if not entry:
@@ -2181,6 +2220,35 @@ def _structured_result_evidence_block(result: dict[str, Any]) -> str:
             _structured_list(result.get("changed_files")) or "None reported.",
         ]
     )
+
+
+def _structured_result_from_issue_description(description: str) -> dict[str, Any] | None:
+    summary = _extract_evidence_section(description, "Implementation summary:")
+    tests = _extract_evidence_section(description, "Test commands and exact output:")
+    risks = _extract_evidence_section(description, "Remaining risks:")
+    if not any((summary, tests, risks)):
+        return None
+    return {
+        "summary": summary or "",
+        "test_commands": [tests] if tests else [],
+        "remaining_risks": [risks] if risks else [],
+    }
+
+
+def _extract_evidence_section(description: str, heading: str) -> str:
+    start = description.lower().find(heading.lower())
+    if start < 0:
+        return ""
+    body_start = start + len(heading)
+    next_positions = [
+        position
+        for marker in ("Implementation summary:", "Test commands and exact output:", "Remaining risks:", "Changed files:")
+        if marker.lower() != heading.lower()
+        for position in [description.lower().find(marker.lower(), body_start)]
+        if position >= 0
+    ]
+    body_end = min(next_positions) if next_positions else len(description)
+    return description[body_start:body_end].strip()
 
 
 def _structured_result_comment_body(entry: RunningEntry, result: dict[str, Any]) -> str:

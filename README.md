@@ -131,6 +131,8 @@ Conductor managed settings are populated from Podium runtime enrollment: `podium
 
 This build supports `local_path` repository sources for instance creation and repo inspection. On create, Conductor initializes an instance-level repository workspace once when the managed workspace is empty, then reuses that workspace for future runs. The Git clone flow is still a stub and returns a structured API error.
 
+Managed `task` and `gated-task` profiles now enable repository handoff reporting. Performer writes a local bundle under the instance state directory with a patch, manifest, git snapshot, and copied untracked artifacts; Conductor owns the Linear closeout by creating or updating a `performer:type/repository-integration` child issue and commenting on the source issue. This is separate from workspace cleanup and does not commit, push, merge, or delete the workspace.
+
 To persist retry timers and running session metadata across daemon restarts:
 
 ```yaml

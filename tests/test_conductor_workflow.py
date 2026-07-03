@@ -44,6 +44,8 @@ def test_generate_workflow_content_injects_managed_runtime_resources(tmp_path: P
     assert "max_turns: 20" in content
     assert "acceptance:" in content
     assert "enabled: false" in content
+    assert "repository_handoff:" in content
+    assert "bundle_root:" in content
     assert "mode: block_done" in content
     assert "lifecycle_labels_enabled: false" in content
     assert "review_state:" not in content
@@ -87,6 +89,7 @@ def test_task_profile_is_default_managed_profile_without_acceptance_gate(tmp_pat
     assert "endpoint: https://podium.example/api/v1/linear/graphql" in content
     assert "api_key: $PODIUM_PROXY_TOKEN" in content
     assert "lifecycle_labels_enabled: false" in content
+    assert "repository_handoff:\n  enabled: true\n" in content
     assert "performer:" not in content
 
 
@@ -116,6 +119,7 @@ def test_gated_task_profile_keeps_acceptance_gate(tmp_path: Path) -> None:
     assert "lifecycle_labels_enabled: true" in content
     assert "gate_passed_label: performer:gate/passed" in content
     assert "Do not move the issue to Done yourself" in content
+    assert "repository_handoff:\n  enabled: true\n" in content
 
 
 def test_available_profiles_include_smoke_task_and_gated_task() -> None:

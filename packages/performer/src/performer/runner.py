@@ -13,6 +13,7 @@ from performer_api.ops_store import OpsStore
 from .ops_telemetry import ExecutionTelemetryRecorder
 from performer_api.persistence import ops_snapshot_path_from_persistence_path, PersistenceStore
 from performer_api.workflow import render_prompt
+from .repository_handoff import build_repository_handoff_report
 from .workspace import WorkspaceManager
 
 logger = logging.getLogger(__name__)
@@ -99,6 +100,22 @@ class AgentRunner:
                 existing_thread_id=self._existing_sdk_thread_id(issue.id, str(workspace.path)),
             )
             if telemetry is not None:
+                if self.config.repository_handoff.enabled and not self.config.acceptance.enabled:
+                    telemetry.record_repository_handoff_report(
+                        build_repository_handoff_report(
+                            issue_id=issue.id,
+                            issue_identifier=issue.identifier,
+                            workspace_path=workspace.path,
+                            structured_result=(
+                                result.structured_result
+                                if isinstance(getattr(result, "structured_result", None), dict)
+                                else None
+                            ),
+                            bundle_root=self._repository_handoff_bundle_root(),
+                        ),
+                        run_id=run_id,
+                        attempt_id=attempt_id,
+                    )
                 telemetry.finish_run(run_id, status="completed", failure_code=None, failure_summary=None)
             return result
         except Exception as exc:
@@ -173,6 +190,15 @@ class AgentRunner:
         if len(parents) >= 3 and parents[2].name == "instances":
             return parents[1].name
         return "local"
+
+    def _repository_handoff_bundle_root(self) -> Path:
+        configured = self.config.repository_handoff.bundle_root
+        if configured is not None:
+            return configured
+        persistence_path = self.config.persistence.path
+        if persistence_path is not None:
+            return persistence_path.parent / "handoffs"
+        return self.config.workspace.root.parent / ".symphony-handoffs"
 
     def _existing_sdk_thread_id(self, issue_id: str, workspace_path: str) -> str | None:
         if self.config.codex.backend != "sdk" or self.config.persistence.path is None:
