@@ -14,8 +14,8 @@ services:
       PODIUM_DATA_DIR: /var/lib/podium
     volumes:
       - podium-data:/var/lib/podium
-    ports:
-      - "${PODIUM_HTTP_BIND:-127.0.0.1:8090}:8090"
+    expose:
+      - "8090"
     labels:
       - com.centurylinklabs.watchtower.enable=true
     healthcheck:
@@ -46,6 +46,17 @@ services:
     command: ["redis-server", "--appendonly", "yes", "--maxmemory", "128mb", "--maxmemory-policy", "allkeys-lru"]
     volumes:
       - redis-data:/data
+
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    depends_on:
+      podium:
+        condition: service_healthy
+    ports:
+      - "${PODIUM_HTTP_BIND:-0.0.0.0:80}:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
 
   watchtower:
     image: containrrr/watchtower:latest

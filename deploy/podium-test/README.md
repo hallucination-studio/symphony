@@ -7,12 +7,12 @@ Current test environment:
 - URL: `https://podium.hallu.info`
 - Origin: `52.68.15.209`
 - Host path: `/opt/podium`
-- Runtime: Docker Compose, with Podium bound to origin HTTP port `80`
+- Runtime: Docker Compose, with Nginx bound to origin HTTP port `80`
 
 The intended flow is:
 
 1. GitHub Actions publishes `ghcr.io/hallucination-studio/symphony-podium:latest`, `:beta`, and `:<git-sha>` on every `main` push.
-2. The Lightsail host runs Docker Compose with Podium, PostgreSQL, Redis, and Watchtower.
+2. The Lightsail host runs Docker Compose with Nginx, Podium, PostgreSQL, Redis, and Watchtower.
 3. Watchtower watches only labeled containers and updates the Podium container when the `beta` image digest changes.
 4. Cloudflare terminates TLS. The origin exposes Podium over HTTP.
 
@@ -67,7 +67,8 @@ curl -fsS https://$PODIUM_DOMAIN/api/v1/health
 
 For Cloudflare, point DNS at the server and enable proxying. Use Cloudflare SSL
 mode `Flexible` when the origin is plain HTTP-only. The default
-`PODIUM_HTTP_BIND=0.0.0.0:80` binds Podium to the origin's HTTP port directly.
+`PODIUM_HTTP_BIND=0.0.0.0:80` binds Nginx to the origin's HTTP port and proxies
+to Podium on the Docker network.
 
 ## GHCR Access
 

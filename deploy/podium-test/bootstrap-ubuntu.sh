@@ -50,6 +50,7 @@ else
 fi
 
 install -m 0644 "${SOURCE_DIR}/docker-compose.yml" "${DEPLOY_DIR}/docker-compose.yml"
+install -m 0644 "${SOURCE_DIR}/nginx.conf" "${DEPLOY_DIR}/nginx.conf"
 rm -f "${DEPLOY_DIR}/Caddyfile"
 
 if [[ ! -f "${DEPLOY_DIR}/.env" ]]; then
@@ -59,10 +60,10 @@ if [[ ! -f "${DEPLOY_DIR}/.env" ]]; then
   sed -i "s/replace-with-a-long-random-secret/${podium_secret}/" "${DEPLOY_DIR}/.env"
   sed -i "s/replace-with-a-long-random-password/${postgres_password}/" "${DEPLOY_DIR}/.env"
   chown "${DEPLOY_USER}:${DEPLOY_USER}" "${DEPLOY_DIR}/.env"
-  echo "Created ${DEPLOY_DIR}/.env. Edit PODIUM_DOMAIN, CADDY_ACME_EMAIL, and Linear settings before starting."
+  echo "Created ${DEPLOY_DIR}/.env. Edit PODIUM_DOMAIN and Linear settings before starting."
 fi
 
-chown "${DEPLOY_USER}:${DEPLOY_USER}" "${DEPLOY_DIR}/docker-compose.yml" "${DEPLOY_DIR}/Caddyfile"
+chown "${DEPLOY_USER}:${DEPLOY_USER}" "${DEPLOY_DIR}/docker-compose.yml" "${DEPLOY_DIR}/nginx.conf"
 
 ufw allow OpenSSH || true
 ufw allow 80/tcp || true
