@@ -1,7 +1,14 @@
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   podium:
     image: ${PODIUM_IMAGE:-ghcr.io/hallucination-studio/symphony-podium:beta}
     restart: unless-stopped
+    logging: *default-logging
     depends_on:
       postgres:
         condition: service_healthy
@@ -28,6 +35,7 @@ services:
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
+    logging: *default-logging
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-podium}
       POSTGRES_USER: ${POSTGRES_USER:-podium}
@@ -43,6 +51,7 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
+    logging: *default-logging
     command: ["redis-server", "--appendonly", "yes", "--maxmemory", "128mb", "--maxmemory-policy", "allkeys-lru"]
     volumes:
       - redis-data:/data
@@ -50,6 +59,7 @@ services:
   nginx:
     image: nginx:1.27-alpine
     restart: unless-stopped
+    logging: *default-logging
     depends_on:
       podium:
         condition: service_healthy
@@ -61,6 +71,7 @@ services:
   watchtower:
     image: containrrr/watchtower:latest
     restart: unless-stopped
+    logging: *default-logging
     environment:
       DOCKER_API_VERSION: "1.44"
     command: ["--interval", "60", "--cleanup", "--label-enable", "--rolling-restart"]

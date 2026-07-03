@@ -5,6 +5,7 @@ DEPLOY_USER="${DEPLOY_USER:-dev}"
 DEPLOY_DIR="${DEPLOY_DIR:-/opt/podium}"
 REPO_URL="${REPO_URL:-https://github.com/hallucination-studio/symphony.git}"
 REPO_REF="${REPO_REF:-main}"
+SWAP_SIZE="${SWAP_SIZE:-2G}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 if [[ "$(id -u)" -ne 0 ]]; then
@@ -27,6 +28,21 @@ echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.
 
 apt-get update
 apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+
+if ! swapon --show | grep -q /swapfile; then
+  fallocate -l "${SWAP_SIZE}" /swapfile || dd if=/dev/zero of=/swapfile bs=1M count=2048
+  chmod 600 /swapfile
+  mkswap /swapfile
+  swapon /swapfile
+fi
+if ! grep -q "^/swapfile " /etc/fstab; then
+  echo "/swapfile none swap sw 0 0" >> /etc/fstab
+fi
+cat >/etc/sysctl.d/99-symphony-test.conf <<'EOF'
+vm.overcommit_memory=1
+vm.swappiness=10
+EOF
+sysctl -p /etc/sysctl.d/99-symphony-test.conf
 
 if ! id "${DEPLOY_USER}" >/dev/null 2>&1; then
   adduser --disabled-password --gecos "" "${DEPLOY_USER}"

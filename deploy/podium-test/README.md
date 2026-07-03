@@ -31,7 +31,8 @@ curl -fsSL https://raw.githubusercontent.com/hallucination-studio/symphony/main/
 ```
 
 The script installs Git, Docker Engine, the Docker Compose plugin, creates a `dev`
-user, opens port `80/tcp`, and copies the Compose files into `/opt/podium`.
+user, creates a 2GB swap file, applies Redis-friendly kernel settings, opens
+port `80/tcp`, and copies the Compose files into `/opt/podium`.
 
 ## Configure
 
@@ -69,6 +70,13 @@ For Cloudflare, point DNS at the server and enable proxying. Use Cloudflare SSL
 mode `Flexible` when the origin is plain HTTP-only. The default
 `PODIUM_HTTP_BIND=0.0.0.0:80` binds Nginx to the origin's HTTP port and proxies
 to Podium on the Docker network.
+
+Compose applies Docker `json-file` log rotation to every service:
+
+```yaml
+max-size: 10m
+max-file: 3
+```
 
 ## GHCR Access
 
