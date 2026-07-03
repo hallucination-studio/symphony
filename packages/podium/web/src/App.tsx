@@ -4,6 +4,8 @@ import SetupPage from "./pages/SetupPage";
 import IntegrationsPage from "./pages/IntegrationsPage";
 import RuntimesPage from "./pages/RuntimesPage";
 import RunsPage from "./pages/RunsPage";
+import AccountPage from "./pages/AccountPage";
+import { useBootstrap } from "./api/hooks";
 
 const NAV = [
   { to: "/", label: "Home", end: true },
@@ -11,6 +13,7 @@ const NAV = [
   { to: "/integrations", label: "Integrations", end: false },
   { to: "/runtimes", label: "Runtimes", end: false },
   { to: "/runs", label: "Runs", end: false },
+  { to: "/account", label: "Account", end: false },
 ];
 
 export default function App() {
@@ -35,6 +38,7 @@ export default function App() {
             </NavLink>
           ))}
         </nav>
+        <AccountChip />
       </aside>
       <main className="main">
         <Routes>
@@ -44,6 +48,7 @@ export default function App() {
           <Route path="/integrations" element={<IntegrationsPage />} />
           <Route path="/runtimes" element={<RuntimesPage />} />
           <Route path="/runs" element={<RunsPage />} />
+          <Route path="/account" element={<AccountPage />} />
           <Route
             path="*"
             element={<p className="state-message">Page not found.</p>}
@@ -51,5 +56,38 @@ export default function App() {
         </Routes>
       </main>
     </div>
+  );
+}
+
+function AccountChip() {
+  const bootstrap = useBootstrap();
+  const session = bootstrap.data?.session;
+  const linear = bootstrap.data?.linear;
+  const connected = linear?.state === "connected";
+  const tone = connected
+    ? "positive"
+    : linear?.state === "expired" || linear?.state === "error"
+      ? "negative"
+      : "neutral";
+
+  return (
+    <NavLink
+      to="/account"
+      className={({ isActive }) =>
+        isActive ? "account-chip active" : "account-chip"
+      }
+    >
+      <span
+        className="account-chip-dot"
+        data-tone={tone}
+        aria-hidden
+      />
+      <span className="account-chip-body">
+        <span className="account-chip-label">Workspace</span>
+        <span className="account-chip-value">
+          {session?.workspace_id ?? "—"}
+        </span>
+      </span>
+    </NavLink>
   );
 }
