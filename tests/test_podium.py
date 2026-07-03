@@ -9,13 +9,25 @@ import httpx
 import pytest
 
 from podium.app import create_app
+from podium.store.postgres import PgStore
 
 
-def app_client(*, linear_webhook_secret: str = "") -> httpx.AsyncClient:
+def app_client(*, linear_webhook_secret: str = "", linear_graphql_transport: Any = None) -> httpx.AsyncClient:
     app = create_app(
         turnstile_verifier=lambda token, _ip: token == "turnstile-ok",
         secure_cookies=False,
         linear_webhook_secret=linear_webhook_secret,
+        linear_graphql_transport=linear_graphql_transport,
+    )
+    transport = httpx.ASGITransport(app=app)
+    return httpx.AsyncClient(transport=transport, base_url="http://podium.test")
+
+
+def app_client_with_store(store: object) -> httpx.AsyncClient:
+    app = create_app(
+        turnstile_verifier=lambda token, _ip: token == "turnstile-ok",
+        secure_cookies=False,
+        pg_store=store,
     )
     transport = httpx.ASGITransport(app=app)
     return httpx.AsyncClient(transport=transport, base_url="http://podium.test")
@@ -57,6 +69,25 @@ async def test_auth_register_login_logout_without_echoing_secrets() -> None:
 
 
 @pytest.mark.asyncio
+async def test_auth_session_survives_app_reconstruction_with_injected_store() -> None:
+    store = PgStore()
+    async with app_client_with_store(store) as client:
+        register = await client.post(
+            "/api/v1/auth/register",
+            json={"email": "restart@example.com", "password": "correct-horse", "turnstile_token": "turnstile-ok"},
+        )
+        assert register.status_code == 200
+        session_cookie = register.cookies["podium_session"]
+
+    async with app_client_with_store(store) as restarted:
+        restarted.cookies.set("podium_session", session_cookie)
+        me = await restarted.get("/api/v1/auth/me")
+
+    assert me.status_code == 200
+    assert me.json()["user"]["email"] == "restart@example.com"
+
+
+@pytest.mark.asyncio
 async def test_runtime_enrollment_token_can_be_used_once() -> None:
     async with app_client() as client:
         token_response = await client.post(
@@ -84,6 +115,45 @@ async def test_runtime_enrollment_token_can_be_used_once() -> None:
         second = await client.post("/api/v1/runtime/enroll", json={"enrollment_token": enrollment_token})
         assert second.status_code == 400
         assert second.json()["error"]["code"] == "enrollment_token_used"
+
+
+@pytest.mark.asyncio
+async def test_linear_proxy_can_use_environment_access_token_without_workspace_installation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def linear_transport(request: httpx.Request) -> httpx.Response:
+        captured["authorization"] = request.headers.get("Authorization")
+        return httpx.Response(200, json={"data": {"viewer": {"id": "viewer-1"}}})
+
+    monkeypatch.setenv("PODIUM_LINEAR_ACCESS_TOKEN", "operator-linear-token")
+    async with app_client(linear_graphql_transport=linear_transport) as client:
+        token_response = await client.post(
+            "/api/v1/runtime/enrollment-tokens",
+            json={
+                "runtime_group_id": "group-1",
+                "linear_workspace_id": "ephemeral-workspace",
+                "project_slug": "ENG",
+                "linear_agent_app_user_id": "app-user-1",
+            },
+        )
+        enrolled = (
+            await client.post(
+                "/api/v1/runtime/enroll",
+                json={"enrollment_token": token_response.json()["enrollment_token"]},
+            )
+        ).json()
+
+        proxied = await client.post(
+            "/api/v1/linear/graphql",
+            json={"query": "query { viewer { id } }"},
+            headers={"Authorization": f"Bearer {enrolled['proxy_token']}"},
+        )
+
+    assert proxied.status_code == 200
+    assert proxied.json() == {"data": {"viewer": {"id": "viewer-1"}}}
+    assert captured["authorization"] == "operator-linear-token"
 
 
 @pytest.mark.asyncio
@@ -295,7 +365,13 @@ async def test_webhook_rejects_invalid_signature_and_invalid_json() -> None:
 
 @pytest.mark.asyncio
 async def test_linear_proxy_requires_proxy_token_and_audits_requests() -> None:
-    async with app_client() as client:
+    seen_authorization: list[str] = []
+
+    def linear_transport(request: httpx.Request) -> httpx.Response:
+        seen_authorization.append(request.headers["Authorization"])
+        return httpx.Response(200, json={"data": {"viewer": {"id": "viewer-1"}}})
+
+    async with app_client(linear_graphql_transport=linear_transport) as client:
         token_response = await client.post(
             "/api/v1/runtime/enrollment-tokens",
             json={"runtime_group_id": "group-1", "linear_workspace_id": "workspace-1", "project_slug": "ENG"},
@@ -315,8 +391,23 @@ async def test_linear_proxy_requires_proxy_token_and_audits_requests() -> None:
             json={"operationName": "Viewer", "query": "{ viewer { id } }"},
             headers={"Authorization": f"Bearer {enrolled['proxy_token']}"},
         )
+        assert allowed.status_code == 400
+        assert allowed.json()["error"]["code"] == "linear_installation_not_found"
+
+        client._transport.app.state.podium.linear_installations["workspace-1"] = {
+            "workspace_id": "workspace-1",
+            "access_token": "oauth-installation-token",
+            "scope": "read write",
+            "expires_at": None,
+        }
+        allowed = await client.post(
+            "/api/v1/linear/graphql",
+            json={"operationName": "Viewer", "query": "{ viewer { id } }"},
+            headers={"Authorization": f"Bearer {enrolled['proxy_token']}"},
+        )
         assert allowed.status_code == 200
-        assert allowed.json() == {"data": {}}
+        assert allowed.json() == {"data": {"viewer": {"id": "viewer-1"}}}
+        assert seen_authorization == ["oauth-installation-token"]
 
 
 def _agent_session_payload(*, delegate_id: str) -> dict[str, Any]:

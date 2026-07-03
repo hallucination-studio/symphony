@@ -26,6 +26,25 @@ export function useRuntimes() {
   return useQuery({
     queryKey: ["runtimes"],
     queryFn: () => api.runtimes(),
+    // Conductors report metrics/queue/logs on a short cycle; keep the view live.
+    refetchInterval: 5000,
+  });
+}
+
+/**
+ * Tail of a Performer's log for the detail drawer. `live` polls on a short
+ * interval so operators can watch a run without refreshing.
+ */
+export function useInstanceLogs(
+  conductorId: string | null,
+  instanceId: string | null,
+  live = true,
+) {
+  return useQuery({
+    queryKey: ["instance-logs", conductorId, instanceId],
+    queryFn: () => api.instanceLogs(conductorId!, instanceId!, { tail: 200, order: "desc" }),
+    enabled: Boolean(conductorId && instanceId),
+    refetchInterval: live ? 3000 : false,
   });
 }
 

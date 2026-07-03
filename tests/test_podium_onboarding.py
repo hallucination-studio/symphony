@@ -1,19 +1,17 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 import httpx
 import pytest
 
 from podium.app import create_app
-from podium.onboarding import OnboardingStore
+from podium.store.postgres import PgStore
 
 
-def app_client(*, data_dir: str | None = None) -> httpx.AsyncClient:
+def app_client(*, pg_store: PgStore | None = None) -> httpx.AsyncClient:
     app = create_app(
         turnstile_verifier=lambda token, _ip: token == "turnstile-ok",
         secure_cookies=False,
-        data_dir=data_dir,
+        pg_store=pg_store,
     )
     transport = httpx.ASGITransport(app=app)
     return httpx.AsyncClient(transport=transport, base_url="http://podium.test")
@@ -105,8 +103,9 @@ async def test_smoke_check_flow() -> None:
 
 
 @pytest.mark.asyncio
-async def test_onboarding_persists_across_store_instances(tmp_path: Path) -> None:
-    async with app_client(data_dir=str(tmp_path)) as client:
+async def test_onboarding_persists_across_app_instances_with_injected_store() -> None:
+    store = PgStore()
+    async with app_client(pg_store=store) as client:
         await _register(client)
         await client.post(
             "/api/v1/onboarding/scope",
@@ -114,10 +113,16 @@ async def test_onboarding_persists_across_store_instances(tmp_path: Path) -> Non
         )
         await client.post("/api/v1/onboarding/smoke-check")
 
-    reloaded = OnboardingStore(data_dir=str(tmp_path))
-    progress = reloaded.get("user_1")
-    assert "scope_selection" in progress["completed_steps"]
-    assert "smoke_check" in progress["completed_steps"]
-    smoke = reloaded.get_smoke_result("user_1")
-    assert smoke is not None
-    assert smoke["status"] == "passed"
+    async with app_client(pg_store=store) as restarted:
+        login = await restarted.post(
+            "/api/v1/auth/login",
+            json={"email": "user@example.com", "password": "correct-horse", "turnstile_token": "turnstile-ok"},
+        )
+        assert login.status_code == 200
+        progress = await restarted.get("/api/v1/onboarding/status")
+        smoke = await restarted.get("/api/v1/onboarding/smoke-check/result")
+
+    assert "scope_selection" in progress.json()["completed_steps"]
+    assert "smoke_check" in progress.json()["completed_steps"]
+    assert smoke.status_code == 200
+    assert smoke.json()["status"] == "passed"

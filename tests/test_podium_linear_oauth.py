@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import urllib.parse
+import json
 
 import httpx
 import pytest
 
 from podium.app import create_app
+from podium.store.postgres import PgStore
 
 
 OFFICIAL_KWARGS = dict(
@@ -150,6 +152,34 @@ async def test_callback_stores_installation_and_marks_onboarding() -> None:
 
         status = await client.get("/api/v1/onboarding/status")
         assert "linear_connect" in status.json()["completed_steps"]
+
+
+@pytest.mark.asyncio
+async def test_callback_persists_installation_across_app_restart_without_public_secret_leak() -> None:
+    def fake_exchange(code: str, state: str) -> dict[str, object]:
+        return {"access_token": "SECRET-token", "scope": "read,write", "expires_in": 3600}
+
+    store = PgStore()
+    client, _app = app_client(pg_store=store, linear_token_exchange=fake_exchange)
+    async with client:
+        await _register(client)
+        callback = await client.get(
+            "/api/v1/linear/oauth/callback",
+            params={"code": "the-code", "state": "user_1"},
+        )
+        assert callback.status_code == 200
+
+    restarted_client, _restarted_app = app_client(pg_store=store)
+    async with restarted_client:
+        login = await restarted_client.post(
+            "/api/v1/auth/login",
+            json={"email": "user@example.com", "password": "correct-horse", "turnstile_token": "turnstile-ok"},
+        )
+        assert login.status_code == 200
+        boot = await restarted_client.get("/api/v1/bootstrap")
+        assert boot.status_code == 200
+        assert boot.json()["linear"]["state"] == "connected"
+        assert "SECRET-token" not in boot.text
 
 
 @pytest.mark.asyncio

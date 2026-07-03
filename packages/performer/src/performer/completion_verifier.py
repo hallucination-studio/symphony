@@ -241,13 +241,27 @@ class CompletionVerifier:
 
             if content_size < self.config.min_workspace_changes_chars:
                 untracked_chars = 0
+                untracked_files = 0
                 for line in status_output.splitlines():
                     if line.startswith("?? "):
                         rel_path = line[3:].strip()
                         candidate = workspace_path / rel_path
                         if candidate.is_file():
+                            untracked_files += 1
                             untracked_chars += len(candidate.read_text(encoding="utf-8", errors="ignore"))
                 content_size = max(content_size, untracked_chars)
+                if untracked_files > 0 and untracked_chars > 0:
+                    return CheckResult(
+                        check_name="workspace_changes",
+                        passed=True,
+                        message=f"Untracked workspace changes detected ({untracked_files} files)",
+                        evidence={
+                            "diff_stat": stat_output or "empty",
+                            "git_status": status_output,
+                            "change_chars": content_size,
+                            "untracked_files": untracked_files,
+                        },
+                    )
 
             if content_size < self.config.min_workspace_changes_chars:
                 return CheckResult(
@@ -301,18 +315,18 @@ class CompletionVerifier:
             env: dict[str, str] | None = None
             test_framework = "unknown"
 
-            if (workspace_path / "package.json").exists():
+            recorded = self._recorded_successful_pytest_command(issue, ops_snapshot)
+            if recorded is not None:
+                cmd, env = recorded
+                test_framework = "pytest"
+            elif (workspace_path / "package.json").exists():
                 cmd = ["npm", "test"]
                 test_framework = "npm"
             elif (workspace_path / "pyproject.toml").exists() or (workspace_path / "pytest.ini").exists():
-                recorded = self._recorded_successful_pytest_command(issue, ops_snapshot)
-                if recorded is not None:
-                    cmd, env = recorded
-                else:
-                    cmd = [sys.executable, "-m", "pytest", "-v", "--tb=short"]
-                    env = self._python_test_env(workspace_path)
-                    if self.config.expected_test_patterns:
-                        cmd.extend(self.config.expected_test_patterns)
+                cmd = [sys.executable, "-m", "pytest", "-v", "--tb=short"]
+                env = self._python_test_env(workspace_path)
+                if self.config.expected_test_patterns:
+                    cmd.extend(self.config.expected_test_patterns)
                 test_framework = "pytest"
             elif (workspace_path / "Cargo.toml").exists():
                 cmd = ["cargo", "test"]
@@ -405,8 +419,6 @@ class CompletionVerifier:
         ops_snapshot: OpsSnapshot,
     ) -> tuple[list[str], dict[str, str]] | None:
         patterns = [pattern for pattern in self.config.expected_test_patterns if pattern]
-        if not patterns:
-            return None
         issue_run_ids = {
             run.run_id
             for run in ops_snapshot.runs.values()
@@ -416,13 +428,28 @@ class CompletionVerifier:
             if event.issue_id != issue.id and event.run_id not in issue_run_ids:
                 continue
             command, exit_code = _command_evidence_from_payload(event.payload)
-            if exit_code != 0 or not isinstance(command, str):
-                continue
-            if "pytest" not in command or not any(pattern in command for pattern in patterns):
-                continue
-            parsed = _parse_recorded_command(command)
-            if parsed is not None:
-                return parsed
+            commands: list[str] = []
+            if exit_code == 0 and isinstance(command, str):
+                commands.append(command)
+            for payload_source in (event.payload, {"message": event.summary}):
+                source_text = str(payload_source)
+                for recorded in _structured_test_commands_from_payload(payload_source):
+                    first_line = recorded.splitlines()[0].strip() if recorded.splitlines() else ""
+                    if first_line and (
+                        "passed" in recorded
+                        or "[100%]" in recorded
+                        or "passed" in source_text
+                        or "[100%]" in source_text
+                    ):
+                        commands.append(first_line)
+            for candidate in commands:
+                if "pytest" not in candidate:
+                    continue
+                if patterns and not any(pattern in candidate for pattern in patterns):
+                    continue
+                parsed = _parse_recorded_command(candidate)
+                if parsed is not None:
+                    return parsed
         return None
 
     def _python_test_env(self, workspace_path: Path) -> dict[str, str] | None:

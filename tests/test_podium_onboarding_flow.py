@@ -7,6 +7,7 @@ import httpx
 import pytest
 
 from podium.server import PodiumServer
+from podium.store.postgres import PgStore
 
 
 async def request(
@@ -186,9 +187,10 @@ async def test_full_onboarding_flow_reaches_complete(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_onboarding_state_persists_across_server_restart(tmp_path) -> None:
-    """Onboarding progress written to disk survives a server restart."""
-    server1 = PodiumServer(data_dir=tmp_path, secret_key="test-secret")
+async def test_onboarding_state_persists_across_server_restart() -> None:
+    """Onboarding progress survives when server instances share the durable store."""
+    store = PgStore()
+    server1 = PodiumServer(secret_key="test-secret", pg_store=store)
     await server1.start(port=0)
     try:
         _, reg_headers, reg_body = await request(
@@ -204,8 +206,7 @@ async def test_onboarding_state_persists_across_server_restart(tmp_path) -> None
     finally:
         await server1.stop()
 
-    # New server instance loads from the same data_dir
-    server2 = PodiumServer(data_dir=tmp_path, secret_key="test-secret")
+    server2 = PodiumServer(secret_key="test-secret", pg_store=store)
     await server2.start(port=0)
     try:
         # Log in again to obtain a fresh session for the same user.

@@ -326,6 +326,142 @@ async def test_verify_completion_accepts_untracked_file_as_workspace_change(tmp_
 
 
 @pytest.mark.asyncio
+async def test_verify_completion_accepts_small_untracked_file_as_workspace_change(tmp_path: Path) -> None:
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=workspace, check=True)
+    (workspace / "RESULT.md").write_text("ok\n", encoding="utf-8")
+    verifier = CompletionVerifier(
+        CompletionVerificationConfig(
+            required_checks=["workspace_changes"],
+            optional_checks=[],
+            min_workspace_changes_chars=50,
+        ),
+        FakeTracker(),
+    )
+
+    verdict = await verifier.verify_completion(issue(), workspace, OpsSnapshot())
+
+    assert verdict.status == "VERIFIED"
+    assert any(check.check_name == "workspace_changes" and check.passed for check in verdict.checks)
+
+
+@pytest.mark.asyncio
+async def test_verify_completion_replays_structured_pytest_command_without_project_metadata(tmp_path: Path) -> None:
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=workspace, check=True)
+    (workspace / "tests").mkdir()
+    (workspace / "tests" / "test_smoke.py").write_text("def test_smoke():\n    assert True\n", encoding="utf-8")
+    snapshot = OpsSnapshot(
+        runs={"run-1": RunRecord(run_id="run-1", issue_id="mt-1", instance_id="inst-1", status="completed")},
+        events=[
+            TraceEvent(
+                event_id="evt-1",
+                event_type="turn_completed",
+                timestamp="2026-07-03T00:00:00Z",
+                issue_id="mt-1",
+                run_id="run-1",
+                payload={
+                    "structured_result": {
+                        "test_commands": [
+                            "pytest tests/test_smoke.py -q\n. [100%]\n1 passed in 0.01s",
+                        ]
+                    }
+                },
+            )
+        ],
+    )
+    verifier = CompletionVerifier(
+        CompletionVerificationConfig(
+            required_checks=["test_results"],
+            optional_checks=[],
+            expected_test_patterns=["tests/test_smoke.py"],
+        ),
+        FakeTracker(),
+    )
+
+    verdict = await verifier.verify_completion(issue(), workspace, snapshot)
+
+    assert verdict.status == "VERIFIED"
+    assert any(check.check_name == "test_results" and check.passed for check in verdict.checks)
+
+
+@pytest.mark.asyncio
+async def test_verify_completion_replays_any_structured_pytest_command_without_expected_patterns(tmp_path: Path) -> None:
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=workspace, check=True)
+    (workspace / "tests").mkdir()
+    (workspace / "tests" / "test_smoke.py").write_text("def test_smoke():\n    assert True\n", encoding="utf-8")
+    snapshot = OpsSnapshot(
+        runs={"run-1": RunRecord(run_id="run-1", issue_id="mt-1", instance_id="inst-1", status="completed")},
+        events=[
+            TraceEvent(
+                event_id="evt-1",
+                event_type="turn_completed",
+                timestamp="2026-07-03T00:00:00Z",
+                issue_id="mt-1",
+                run_id="run-1",
+                payload={
+                    "structured_result": {
+                        "test_commands": [
+                            "pytest tests/test_smoke.py -q\n. [100%]\n1 passed in 0.01s",
+                        ]
+                    }
+                },
+            )
+        ],
+    )
+    verifier = CompletionVerifier(
+        CompletionVerificationConfig(
+            required_checks=["test_results"],
+            optional_checks=[],
+        ),
+        FakeTracker(),
+    )
+
+    verdict = await verifier.verify_completion(issue(), workspace, snapshot)
+
+    assert verdict.status == "VERIFIED"
+    assert any(check.check_name == "test_results" and check.passed for check in verdict.checks)
+
+
+@pytest.mark.asyncio
+async def test_verify_completion_replays_pytest_command_from_summary_with_output_text(tmp_path: Path) -> None:
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=workspace, check=True)
+    (workspace / "tests").mkdir()
+    (workspace / "tests" / "test_smoke.py").write_text("def test_smoke():\n    assert True\n", encoding="utf-8")
+    snapshot = OpsSnapshot(
+        runs={"run-1": RunRecord(run_id="run-1", issue_id="mt-1", instance_id="inst-1", status="completed")},
+        events=[
+            TraceEvent(
+                event_id="evt-1",
+                event_type="turn_completed",
+                timestamp="2026-07-03T00:00:00Z",
+                issue_id="mt-1",
+                run_id="run-1",
+                summary=(
+                    '{"test_commands":["pytest tests/test_smoke.py -q"],'
+                    '"summary":"pytest tests/test_smoke.py -q\\n. [100%]\\n1 passed in 0.01s"}'
+                ),
+            )
+        ],
+    )
+    verifier = CompletionVerifier(
+        CompletionVerificationConfig(required_checks=["test_results"], optional_checks=[]),
+        FakeTracker(),
+    )
+
+    verdict = await verifier.verify_completion(issue(), workspace, snapshot)
+
+    assert verdict.status == "VERIFIED"
+    assert any(check.check_name == "test_results" and check.passed for check in verdict.checks)
+
+
+@pytest.mark.asyncio
 async def test_verify_completion_skips_test_command_requirement_without_expected_patterns(
     tmp_path: Path,
 ) -> None:

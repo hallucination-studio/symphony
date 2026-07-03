@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import secrets
 from datetime import datetime, timezone
 from typing import Any
 
@@ -11,22 +10,13 @@ from .store import PodiumStore
 class RuntimeService:
     def __init__(self, store: PodiumStore) -> None:
         self.store = store
-        self.pending_tokens: dict[str, str] = {}
 
-    def generate_enrollment_token(self, workspace_id: str) -> str:
-        token = secrets.token_urlsafe(32)
-        self.pending_tokens[token] = workspace_id
-        return token
-
-    def consume_enrollment_token(self, token: str) -> str | None:
-        return self.pending_tokens.pop(token, None)
-
-    def enrollment_status(self, workspace_id: str) -> dict[str, Any]:
+    def enrollment_status(self, workspace_id: str, *, token_pending: bool = False) -> dict[str, Any]:
         records = self.store.list_runtime_records()
         online = [record for record in records if record.online]
         return {
             "workspace_id": workspace_id,
-            "token_pending": workspace_id in self.pending_tokens.values(),
+            "token_pending": token_pending,
             "runtime_count": len(records),
             "online_count": len(online),
             "enrolled": len(records) > 0,

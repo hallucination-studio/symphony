@@ -8,6 +8,7 @@ from urllib.parse import parse_qs
 
 from .conductor_models import InstanceCreateRequest, InstancePatchRequest
 from .conductor_service import ConductorService, ConductorServiceError
+from .podium_client import PodiumRuntimeClient
 
 
 @dataclass(frozen=True)
@@ -25,6 +26,8 @@ class ConductorApiServer:
         self.service = service
         self._server: asyncio.AbstractServer | None = None
         self._podium_poll_task: asyncio.Task[None] | None = None
+        self._podium_ws_task: asyncio.Task[None] | None = None
+        self._report_tick = 0
         self.port: int | None = None
 
     async def start(self, *, host: str = "127.0.0.1", port: int = 0) -> None:
@@ -32,8 +35,16 @@ class ConductorApiServer:
         socket = self._server.sockets[0]
         self.port = int(socket.getsockname()[1])
         self._podium_poll_task = asyncio.create_task(self._poll_podium_dispatches())
+        self._podium_ws_task = asyncio.create_task(self._run_podium_ws())
 
     async def stop(self) -> None:
+        if self._podium_ws_task is not None:
+            self._podium_ws_task.cancel()
+            try:
+                await self._podium_ws_task
+            except asyncio.CancelledError:
+                pass
+            self._podium_ws_task = None
         if self._podium_poll_task is not None:
             self._podium_poll_task.cancel()
             try:
@@ -52,9 +63,22 @@ class ConductorApiServer:
             try:
                 await self.service.poll_podium_dispatch_once()
                 await self.service.coordinate_background_once()
+                self._report_tick += 1
+                if self._report_tick >= 10:
+                    self._report_tick = 0
+                    await self.service.post_podium_report()
             except Exception:
                 pass
             await asyncio.sleep(1)
+
+    async def _run_podium_ws(self) -> None:
+        client = PodiumRuntimeClient(self.service)
+        while True:
+            try:
+                await client.run_ws_once()
+            except Exception:
+                pass
+            await asyncio.sleep(5)
 
     async def _handle_connection(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:

@@ -7,6 +7,7 @@ import httpx
 import pytest
 
 from podium.server import PodiumServer
+from podium.store.postgres import PgStore
 
 SECRET = "test-secret-key-abc123"
 
@@ -283,8 +284,9 @@ async def test_bootstrap_without_session_is_401() -> None:
 
 
 @pytest.mark.asyncio
-async def test_linear_app_stored_encrypted_and_never_leaked(tmp_path) -> None:
-    server = PodiumServer(secret_key=SECRET, data_dir=tmp_path)
+async def test_linear_app_stored_encrypted_and_never_leaked() -> None:
+    store = PgStore()
+    server = PodiumServer(secret_key=SECRET, pg_store=store)
     await server.start(port=0)
     try:
         _, cookie = await _register(server.port, "byo@example.com")
@@ -317,9 +319,7 @@ async def test_linear_app_stored_encrypted_and_never_leaked(tmp_path) -> None:
     finally:
         await server.stop()
 
-    # Raw secret bytes NOT present on disk
-    users_json = (tmp_path / "users.json").read_bytes()
-    assert b"super-secret-value" not in users_json
+    assert "super-secret-value" not in json.dumps(server.app.state.podium.users)  # type: ignore[union-attr]
 
 
 @pytest.mark.asyncio

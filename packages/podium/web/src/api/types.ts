@@ -88,6 +88,65 @@ export interface RuntimeRecord {
   metadata?: Record<string, unknown>;
 }
 
+// One enrolled Performer: a single project-scoped execution binding a
+// Conductor operates. The backend contract calls this a "binding"; the UI
+// speaks of it as a Performer, which matches the `performer` package role.
+export interface ConductorBinding {
+  id: string;
+  conductor_id: string;
+  user_id: string;
+  instance_id: string;
+  name: string;
+  linear_project: string;
+  project_slug: string;
+  agent_app_user_id: string;
+  workflow_profile: string;
+  process_status: string;
+  repo_source?: Record<string, unknown>;
+  metrics?: {
+    tokens?: number;
+    runtime_seconds?: number;
+    retries?: number;
+    continuations?: number;
+    blocked?: number;
+    failures?: number;
+    queue_depth?: number;
+    running?: boolean;
+  };
+  queue?: {
+    queue_depth?: number;
+    running?: boolean;
+  };
+}
+
+export interface ConductorRecord {
+  id: string;
+  conductor_id: string;
+  runtime_id: string;
+  hostname: string;
+  label: string;
+  version: string;
+  online: boolean;
+  last_report_at?: string | null;
+  bindings: ConductorBinding[];
+}
+
+// A single line from a Performer's log tail. The runtime report sends plain
+// strings; the WS log-fetch path can attach a timestamp — accept both.
+export type InstanceLogLine =
+  | string
+  | { text?: string; message?: string; line?: string; timestamp?: string | null };
+
+export interface InstanceLogs {
+  conductor_id: string;
+  instance_id: string;
+  generation?: string | number | null;
+  order: string;
+  lines: InstanceLogLine[];
+  cursor?: number;
+  offset_end?: number;
+}
+
 export type RunStatus =
   | "pending"
   | "running"

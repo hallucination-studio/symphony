@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from .models import (
+from ..models import (
     OnboardingProgress,
     OnboardingStep,
     RepositoryMapping,
@@ -81,7 +81,7 @@ class PodiumStore:
         metadata: dict[str, Any] | None = None,
         timestamp: str | None = None,
     ) -> RuntimeRecord:
-        from .app import utc_now_iso
+        from ..app import utc_now_iso
 
         existing = self.runtime_records.get(runtime_id)
         record = RuntimeRecord(

@@ -1,8 +1,10 @@
 import type {
   AuthUser,
   Bootstrap,
+  ConductorRecord,
   EnrollmentStatus,
   EnrollmentToken,
+  InstanceLogs,
   LinearAppConfig,
   LinearScope,
   OnboardingProgress,
@@ -156,13 +158,31 @@ export const api = {
     return request<SmokeCheckResult>("/api/v1/onboarding/smoke-check/result");
   },
 
-  runtimes(): Promise<{ runtimes: RuntimeRecord[] }> {
+  runtimes(): Promise<{ runtimes: RuntimeRecord[]; conductors?: ConductorRecord[] }> {
     return request("/api/v1/runtimes");
   },
 
   runtime(id: string): Promise<RuntimeRecord> {
     return request<RuntimeRecord>(
       `/api/v1/runtimes/${encodeURIComponent(id)}`,
+    );
+  },
+
+  // Tail of a Performer's log, as reported by its Conductor. `order=desc`
+  // returns newest-first; the backend serves the cached tail synchronously.
+  instanceLogs(
+    conductorId: string,
+    instanceId: string,
+    opts: { tail?: number; order?: "asc" | "desc" } = {},
+  ): Promise<{ logs: InstanceLogs }> {
+    const params = new URLSearchParams();
+    if (opts.tail != null) params.set("tail", String(opts.tail));
+    if (opts.order) params.set("order", opts.order);
+    const query = params.toString();
+    return request(
+      `/api/v1/runtimes/${encodeURIComponent(conductorId)}/instances/${encodeURIComponent(
+        instanceId,
+      )}/logs${query ? `?${query}` : ""}`,
     );
   },
 

@@ -58,6 +58,19 @@ async def test_enrollment_token_shape_and_install_command() -> None:
 
 
 @pytest.mark.asyncio
+async def test_install_script_exists_and_uses_enrollment_token() -> None:
+    async with _make_app() as client:
+        response = await client.get("/install.sh")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/x-shellscript")
+    script = response.text
+    assert "--enrollment-token" in script
+    assert "/api/v1/runtime/enroll" in script
+    assert "/api/settings" in script
+
+
+@pytest.mark.asyncio
 async def test_status_before_and_after_enrollment() -> None:
     async with _make_app() as client:
         await _register(client)

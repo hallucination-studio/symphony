@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -202,3 +204,23 @@ def test_refresh_marks_missing_pid_exited_without_runtime_handle(tmp_path: Path)
     assert refreshed.process_status == "exited"
     assert refreshed.pid is None
     assert refreshed.last_exit_code == 0
+
+
+@pytest.mark.asyncio
+async def test_stop_recovers_running_pid_when_handle_cache_is_empty(tmp_path: Path) -> None:
+    process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        manager = ConductorRuntimeManager(command="performer")
+        instance = make_instance(tmp_path).with_updates(process_status="running", pid=process.pid)
+
+        recovered = manager.recover(instance)
+        assert recovered is not None
+        stopped = await manager.stop(recovered)
+
+        assert stopped.process_status == "stopped"
+        assert stopped.pid is None
+        assert process.poll() is not None
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=5)

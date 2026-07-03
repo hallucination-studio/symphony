@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 import shutil
 import subprocess
+import socket
 from datetime import datetime, timezone
 import httpx
 
@@ -273,8 +274,8 @@ class ConductorService:
         self.data_root = data_root
         self.runtime_manager = runtime_manager or ConductorRuntimeManager()
         self.repository_handoff_tracker_factory = self._repository_handoff_tracker
+        self._active_podium_dispatches: dict[str, dict[str, str]] = {}
         self.data_root.mkdir(parents=True, exist_ok=True)
-        self._gated_followups_started: set[tuple[str, str, str]] = set()
         self._normalize_stale_runtime_state()
 
     def list_instances(self) -> list[InstanceRecord]:
@@ -319,6 +320,12 @@ class ConductorService:
             env=self._runtime_env(),
             dispatch_issue_id=issue_id or issue_identifier,
         )
+        dispatch_id = str(event.get("dispatch_id") or "").strip()
+        if dispatch_id:
+            self._active_podium_dispatches[instance.id] = {
+                "dispatch_id": dispatch_id,
+                "issue_id": issue_id,
+            }
         self.store.update_instance(started)
         return {
             "status": "accepted",
@@ -357,8 +364,119 @@ class ConductorService:
             )
             return {"status": "leased", "dispatch": leased, "result": result}
 
+    def build_podium_report(self, *, log_tail_lines: int = 200) -> dict[str, Any]:
+        settings = self.store.get_settings()
+        dashboard = self.dashboard()
+        bindings: list[dict[str, Any]] = []
+        metrics: dict[str, dict[str, Any]] = {}
+        queue: dict[str, dict[str, Any]] = {}
+        log_tail: dict[str, dict[str, Any]] = {}
+        totals = dashboard.get("totals") if isinstance(dashboard.get("totals"), dict) else {}
+        instances = self.store.list_instances()
+        for instance in instances:
+            agent_app_user_id = _linear_agent_app_user_id(instance.linear_filters)
+            bindings.append(
+                {
+                    "instance_id": instance.id,
+                    "name": instance.name,
+                    "linear_project": instance.linear_project,
+                    "project_slug": instance.linear_project,
+                    "agent_app_user_id": agent_app_user_id,
+                    "workflow_profile": instance.workflow_profile,
+                    "process_status": instance.process_status,
+                    "repo_source": {"type": instance.repo_source_type, "value": instance.repo_source_value},
+                }
+            )
+            performer = self._performer_runtime_from_persistence(instance)
+            metrics[instance.id] = {
+                "tokens": int(totals.get("tokens") or 0),
+                "runtime_seconds": float(totals.get("runtime_seconds") or 0),
+                "retries": int((performer.get("counts") or {}).get("retrying") or 0),
+                "continuations": int((performer.get("counts") or {}).get("continuing") or 0),
+                "blocked": int((performer.get("counts") or {}).get("blocked") or 0),
+                "failures": int(totals.get("failures") or 0),
+            }
+            queue[instance.id] = {
+                "queued": 0,
+                "leased": 0,
+                "running": 1 if instance.process_status == "running" else 0,
+            }
+            logs = self.query_instance_logs(instance.id, tail=log_tail_lines, order="desc")
+            log_tail[instance.id] = {
+                "generation": logs.get("generation"),
+                "offset_end": logs.get("offset_end", 0),
+                "lines": logs.get("lines") or [],
+            }
+        return {
+            "conductor_id": settings.conductor_id,
+            "hostname": _hostname(),
+            "label": "",
+            "version": "",
+            "bindings": bindings,
+            "metrics": metrics,
+            "queue": queue,
+            "log_tail": log_tail,
+        }
+
+    async def post_podium_report(
+        self,
+        *,
+        transport: httpx.AsyncBaseTransport | None = None,
+        log_tail_lines: int = 200,
+    ) -> dict[str, Any]:
+        settings = self.store.get_settings()
+        podium_url = settings.podium_url.strip().rstrip("/")
+        runtime_token = settings.podium_runtime_token.strip()
+        if not podium_url or not runtime_token:
+            return {"status": "skipped", "reason": "runtime_not_configured"}
+        async with httpx.AsyncClient(timeout=10, trust_env=False, transport=transport) as client:
+            response = await client.post(
+                f"{podium_url}/api/v1/runtime/report",
+                headers={"Authorization": f"Bearer {runtime_token}"},
+                json=self.build_podium_report(log_tail_lines=log_tail_lines),
+            )
+        if response.status_code == 401:
+            return {"status": "skipped", "reason": "runtime_unauthorized"}
+        response.raise_for_status()
+        payload = response.json()
+        return payload if isinstance(payload, dict) else {"status": "ok"}
+
+    async def handle_podium_ws_command(
+        self,
+        command: dict[str, Any],
+        *,
+        post_log_chunk: Any | None = None,
+    ) -> dict[str, Any]:
+        kind = str(command.get("type") or "")
+        if kind == "dispatch.available":
+            dispatch = command.get("dispatch") if isinstance(command.get("dispatch"), dict) else command
+            return await self.dispatch_podium_event(dispatch)
+        if kind == "log.fetch":
+            instance_id = str(command.get("instance_id") or "")
+            logs = self.query_instance_logs(
+                instance_id,
+                tail=_optional_int(command.get("tail"), 200),
+                previous=bool(command.get("previous")),
+                order=str(command.get("order") or "desc"),
+            )
+            payload = {
+                "request_id": str(command.get("request_id") or ""),
+                "instance_id": instance_id,
+                "generation": logs.get("generation"),
+                "offset_start": logs.get("offset_start", 0),
+                "offset_end": logs.get("offset_end", 0),
+                "order": logs.get("order") or "desc",
+                "lines": logs.get("lines") or [],
+            }
+            if post_log_chunk is not None:
+                await post_log_chunk(payload)
+                return {"status": "posted", "request_id": payload["request_id"]}
+            return {"status": "log_chunk_ready", "chunk": payload}
+        return {"status": "ignored", "reason": "unsupported_command"}
+
     async def coordinate_background_once(self) -> dict[str, Any]:
         closeout = await self.coordinate_repository_handoff_closeouts()
+        dispatch_acks = await self.ack_completed_podium_dispatches()
         gated_followups_started = 0
         resumed = 0
         for instance in self.store.list_instances():
@@ -381,9 +499,60 @@ class ConductorService:
             gated_followups_started += 1
         return {
             "repository_handoff": closeout,
+            "dispatch_acks": dispatch_acks,
             "gated_followups_started": gated_followups_started,
             "resumed": resumed,
         }
+
+    async def ack_completed_podium_dispatches(
+        self,
+        *,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> dict[str, Any]:
+        if not self._active_podium_dispatches:
+            return {"acked": 0, "failed": 0, "skipped": 0}
+        settings = self.store.get_settings()
+        podium_url = settings.podium_url.strip().rstrip("/")
+        runtime_token = settings.podium_runtime_token.strip()
+        if not podium_url or not runtime_token:
+            return {"acked": 0, "failed": 0, "skipped": len(self._active_podium_dispatches)}
+        acked = 0
+        failed = 0
+        skipped = 0
+        async with httpx.AsyncClient(timeout=10, trust_env=False, transport=transport) as client:
+            for instance_id, active in list(self._active_podium_dispatches.items()):
+                instance = self.store.get_instance(instance_id)
+                if instance is None:
+                    self._active_podium_dispatches.pop(instance_id, None)
+                    skipped += 1
+                    continue
+                refreshed = self.get_instance(instance_id) or instance
+                if refreshed.process_status not in {"exited", "stopped"}:
+                    skipped += 1
+                    continue
+                snapshot = OpsStore(Path(refreshed.persistence_path).parent / "ops.json").load()
+                issue = snapshot.issues.get(active["issue_id"])
+                if issue is None or issue.state not in {"completed", "failed", "blocked"}:
+                    skipped += 1
+                    continue
+                status = "completed" if issue.state == "completed" else "failed"
+                reason = "completed_by_runtime" if issue.state == "completed" else (issue.failure_reason or issue.state)
+                response = await client.post(
+                    f"{podium_url}/api/v1/runtime/dispatches/ack",
+                    headers={"Authorization": f"Bearer {runtime_token}"},
+                    json={
+                        "dispatch_id": active["dispatch_id"],
+                        "status": status,
+                        "reason": reason,
+                        "runtime_phase": issue.state,
+                    },
+                )
+                if response.status_code >= 400:
+                    failed += 1
+                    continue
+                self._active_podium_dispatches.pop(instance_id, None)
+                acked += 1
+        return {"acked": acked, "failed": failed, "skipped": skipped}
 
     async def _coordinate_gated_followup(self, instance: InstanceRecord, *, issue_id: str) -> InstanceRecord | None:
         if instance.workflow_profile != "gated-task":
@@ -401,14 +570,19 @@ class ConductorService:
         stage = self._next_gated_followup_stage(refreshed, issue_id)
         if stage is None:
             return None
-        followup_key = (instance.id, issue_id, stage)
-        self._gated_followups_started.add(followup_key)
+        if not self.store.claim_gated_followup_marker(instance.id, issue_id, stage):
+            return None
         self._record_gated_followup_event(refreshed, issue_id=issue_id, stage=stage, event_type="gate_followup_starting")
-        followup = await self.runtime_manager.start(
-            refreshed.with_updates(process_status="starting"),
-            env=self._runtime_env(),
-            dispatch_issue_id=issue_id,
-        )
+        try:
+            followup = await self.runtime_manager.start(
+                refreshed.with_updates(process_status="starting"),
+                env=self._runtime_env(),
+                dispatch_issue_id=issue_id,
+            )
+        except Exception as exc:
+            self.store.mark_gated_followup_failed(instance.id, issue_id, stage, str(exc))
+            raise
+        self.store.mark_gated_followup_started(instance.id, issue_id, stage)
         self._record_gated_followup_event(followup, issue_id=issue_id, stage=stage, event_type="gate_followup_started")
         return followup
 
@@ -569,9 +743,11 @@ class ConductorService:
         persisted = PersistenceStore(Path(refreshed.persistence_path)).load()
         if not (persisted.retry_attempts or persisted.continuations or persisted.blocked):
             return None
+        issue_id = _first_pending_performer_issue_id(persisted)
         return await self.runtime_manager.start(
             refreshed.with_updates(process_status="starting"),
             env=self._runtime_env(),
+            dispatch_issue_id=issue_id,
         )
 
     def _pending_gated_followup_issue_id(self, instance: InstanceRecord) -> str | None:
@@ -594,9 +770,8 @@ class ConductorService:
         persisted = set(instance.gated_followup_stages.get(issue_id, []))
         for stage in ("gate",):
             if stage in persisted and instance.last_exit_code not in {0, None}:
-                self._gated_followups_started.discard((instance.id, issue_id, stage))
                 return stage
-            if stage not in persisted and (instance.id, issue_id, stage) not in self._gated_followups_started:
+            if stage not in persisted:
                 return stage
         return None
 
@@ -1338,8 +1513,35 @@ def _int(value: Any) -> int:
     return 0
 
 
+def _optional_int(value: Any, default: int | None) -> int | None:
+    if value is None:
+        return default
+    if isinstance(value, str) and value.strip().lower() in {"", "none", "null", "all"}:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _hostname() -> str:
+    try:
+        return socket.gethostname()
+    except OSError:
+        return ""
+
+
 def _linear_agent_app_user_id(filters: dict[str, Any]) -> str:
     return str(filters.get("linear_agent_app_user_id") or filters.get("agent_app_user_id") or "").strip()
+
+
+def _first_pending_performer_issue_id(persisted: PersistedState) -> str | None:
+    for collection in (persisted.retry_attempts, persisted.continuations, persisted.blocked):
+        for entry in collection:
+            issue_id = str(getattr(entry, "issue_id", "") or "").strip()
+            if issue_id:
+                return issue_id
+    return None
 
 
 def _repository_handoff_marker(source_issue_id: str) -> str:

@@ -10,12 +10,10 @@ def _service() -> tuple[RuntimeService, PodiumStore]:
     return RuntimeService(store), store
 
 
-def test_generate_enrollment_token_is_unique_and_pending() -> None:
+def test_enrollment_status_accepts_external_token_pending_state() -> None:
     service, _ = _service()
-    token_a = service.generate_enrollment_token("ws-1")
-    token_b = service.generate_enrollment_token("ws-2")
-    assert token_a != token_b
-    assert service.enrollment_status("ws-1")["token_pending"] is True
+    assert service.enrollment_status("ws-1", token_pending=True)["token_pending"] is True
+    assert service.enrollment_status("ws-1", token_pending=False)["token_pending"] is False
 
 
 def test_enrollment_status_reports_online_runtimes() -> None:

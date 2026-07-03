@@ -9,6 +9,7 @@ import uvicorn
 
 from .app import create_app
 from .auth_service import AuthService
+from .config import PodiumConfig
 from .linear_service import LinearCredentials, LinearService
 from .runtime_service import RuntimeService
 from .store import PodiumStore
@@ -28,6 +29,9 @@ class PodiumServer:
         linear_webhook_secret: str = "",
         linear_graphql_transport: Callable[..., Any] | None = None,
         podium_base_url: str = "https://podium.example",
+        pg_store: Any | None = None,
+        redis_store: Any | None = None,
+        config: PodiumConfig | None = None,
     ) -> None:
         self.secret_key = secret_key
         self.data_dir = data_dir
@@ -37,6 +41,9 @@ class PodiumServer:
         self.linear_webhook_secret = linear_webhook_secret
         self.linear_graphql_transport = linear_graphql_transport
         self.podium_base_url = podium_base_url
+        self.pg_store = pg_store
+        self.redis_store = redis_store
+        self.config = config or PodiumConfig.from_env()
         self.port: int | None = None
         self.store = PodiumStore(data_dir=data_dir)
         self.auth_service = AuthService(self.store, secret_key) if secret_key.strip() else None
@@ -65,6 +72,9 @@ class PodiumServer:
                 linear_scope_fetch=None,
                 linear_graphql_transport=self.linear_graphql_transport,
                 podium_base_url=self.podium_base_url,
+                pg_store=self.pg_store,
+                redis_store=self.redis_store,
+                config=self.config,
             )
         else:
             self.app = create_app(
@@ -80,8 +90,11 @@ class PodiumServer:
                 linear_scope_fetch=None,
                 linear_graphql_transport=self.linear_graphql_transport,
                 podium_base_url=self.podium_base_url,
+                pg_store=self.pg_store,
+                redis_store=self.redis_store,
+                config=self.config,
             )
-        self.app.state.podium.linear_installations = self.linear_service.installations
+        self.linear_service.installations = self.app.state.podium.linear_installations
         self.app.state.podium.server_wrapper = self
         if self.auth_service is not None:
             self.app.state.podium.session_ttl = self.auth_service.session_ttl
