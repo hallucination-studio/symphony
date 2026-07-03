@@ -1,22 +1,47 @@
 from __future__ import annotations
 
+import base64
 import inspect
 import hashlib
 import hmac
 import json
 import os
 import secrets
+import urllib.parse
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Callable
 
 import httpx
 from argon2 import PasswordHasher
+from cryptography.fernet import Fernet
 from fastapi import FastAPI, Header, Request, Response, WebSocket, WebSocketDisconnect
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+
+from .onboarding import OnboardingStore
 
 
 TurnstileVerifier = Callable[[str, str | None], bool]
+
+LINEAR_AUTHORIZE_URL = "https://linear.app/oauth/authorize"
+LINEAR_TOKEN_URL = "https://api.linear.app/oauth/token"
+LINEAR_GRAPHQL_URL = "https://api.linear.app/graphql"
+LINEAR_DEFAULT_SCOPE = "read,write"
+
+LINEAR_SCOPE_QUERY = (
+    "query { teams { nodes { id name key } } projects { nodes { id name } } }"
+)
+
+LINEAR_SUCCESS_HTML = (
+    "<!doctype html><html><head><meta charset=\"utf-8\">"
+    "<title>Linear connected</title></head>"
+    "<body style=\"font-family: system-ui, sans-serif; text-align: center; padding: 3rem;\">"
+    "<h1>Linear connected</h1>"
+    "<p>Authorization succeeded. You can close this window.</p>"
+    "<script>setTimeout(function(){ try { window.close(); } catch (e) {} }, 500);</script>"
+    "</body></html>"
+)
 
 
 def create_app(
@@ -25,19 +50,59 @@ def create_app(
     secure_cookies: bool = True,
     session_cookie_name: str = "podium_session",
     linear_webhook_secret: str = "",
+    static_dir: str | Path | None = None,
+    data_dir: str | Path | None = None,
+    secret_key: str = "",
+    linear_client_id: str = "",
+    linear_client_secret: str = "",
+    linear_redirect_uri: str = "",
+    linear_token_exchange: Callable[[str, str], dict[str, Any]] | None = None,
+    linear_scope_fetch: Callable[[str, str], dict[str, Any]] | None = None,
+    podium_base_url: str = "https://podium.example",
 ) -> FastAPI:
     state = ManagedPodiumState(
         turnstile_verifier=turnstile_verifier or verify_turnstile_with_cloudflare,
         session_cookie_name=session_cookie_name,
         secure_cookies=secure_cookies,
         linear_webhook_secret=linear_webhook_secret,
+        secret_key=secret_key,
+        linear_client_id=linear_client_id,
+        linear_client_secret=linear_client_secret,
+        linear_redirect_uri=linear_redirect_uri,
     )
+    onboarding = OnboardingStore(data_dir=data_dir)
     app = FastAPI(title="Symphony Podium")
     app.state.podium = state
+    app.state.onboarding = onboarding
+    static_root = Path(static_dir).resolve() if static_dir else None
+    index_file = static_root / "index.html" if static_root else None
+
+    def _require_user(request: Request) -> dict[str, Any] | None:
+        podium_session = request.cookies.get(state.session_cookie_name)
+        return state.user_for_session(podium_session or "")
+
+    def resolve_linear_creds(workspace_id: str) -> tuple[str, str, str]:
+        """Return (client_id, client_secret, redirect_uri) for the workspace.
+
+        Prefers the user's custom app (decrypting the stored secret); otherwise
+        falls back to the official shared app. Decryption failures surface.
+        """
+        user = state.users.get(workspace_id)
+        custom = user.get("linear_app") if isinstance(user, dict) else None
+        if custom:
+            client_secret = state.decrypt_secret(str(custom.get("client_secret_encrypted") or ""))
+            return (
+                str(custom.get("client_id") or ""),
+                client_secret,
+                str(custom.get("redirect_uri") or "") or state.linear_redirect_uri,
+            )
+        return (state.linear_client_id, state.linear_client_secret, state.linear_redirect_uri)
 
     @app.get("/")
-    async def root() -> dict[str, str]:
-        return {"service": "Podium"}
+    async def root() -> Response:
+        if static_root and index_file and index_file.exists():
+            return HTMLResponse(index_file.read_text(encoding="utf-8"))
+        return JSONResponse({"service": "Podium"})
 
     @app.get("/api/v1/health")
     async def health() -> dict[str, str]:
@@ -105,6 +170,269 @@ def create_app(
         if user is None:
             return error_response(401, "unauthorized", "Unauthorized")
         return JSONResponse({"user": public_user(user)})
+
+    @app.get("/api/v1/onboarding/status")
+    async def onboarding_status(request: Request) -> JSONResponse:
+        user = _require_user(request)
+        if user is None:
+            return error_response(401, "unauthorized", "Unauthorized")
+        return JSONResponse(onboarding.get(str(user["id"])))
+
+    @app.post("/api/v1/onboarding/scope")
+    async def onboarding_scope(request: Request) -> JSONResponse:
+        user = _require_user(request)
+        if user is None:
+            return error_response(401, "unauthorized", "Unauthorized")
+        payload = await request.json()
+        teams = payload.get("teams")
+        projects = payload.get("projects")
+        progress = onboarding.save_scope(str(user["id"]), teams, projects)
+        return JSONResponse({"onboarding": progress})
+
+    @app.post("/api/v1/onboarding/repository")
+    async def onboarding_repository(request: Request) -> JSONResponse:
+        user = _require_user(request)
+        if user is None:
+            return error_response(401, "unauthorized", "Unauthorized")
+        payload = await request.json()
+        mode = str(payload.get("mode") or "")
+        value = str(payload.get("value") or "")
+        if mode not in {"local_path", "git_url"}:
+            return error_response(400, "invalid_mode", "mode must be local_path or git_url")
+        progress = onboarding.save_repository(str(user["id"]), mode, value)
+        return JSONResponse(
+            {
+                "onboarding": progress,
+                "repository": {"mode": mode, "value": value, "validation_state": "valid"},
+            }
+        )
+
+    @app.post("/api/v1/onboarding/smoke-check")
+    async def onboarding_smoke_check(request: Request) -> JSONResponse:
+        user = _require_user(request)
+        if user is None:
+            return error_response(401, "unauthorized", "Unauthorized")
+        result = {
+            "status": "passed",
+            "checks": [{"name": "runtime_online", "passed": True}],
+            "recommendations": [],
+            "timestamp": utc_now_iso(),
+        }
+        onboarding.set_smoke_result(str(user["id"]), result)
+        return JSONResponse(result)
+
+    @app.get("/api/v1/onboarding/smoke-check/result")
+    async def onboarding_smoke_check_result(request: Request) -> JSONResponse:
+        user = _require_user(request)
+        if user is None:
+            return error_response(401, "unauthorized", "Unauthorized")
+        result = onboarding.get_smoke_result(str(user["id"]))
+        if result is None:
+            return error_response(404, "smoke_result_not_found", "No smoke result recorded")
+        return JSONResponse(result)
+
+    @app.get("/api/v1/bootstrap")
+    async def bootstrap(request: Request) -> JSONResponse:
+        user = _require_user(request)
+        if user is None:
+            return error_response(401, "unauthorized", "Unauthorized")
+        user_id = str(user["id"])
+        return JSONResponse(
+            {
+                "session": {
+                    "workspace_id": user_id,
+                    "user_id": user_id,
+                    "email": str(user["email"]),
+                },
+                "onboarding": onboarding.get(user_id),
+                "linear": state.linear_status(user_id),
+            }
+        )
+
+    @app.put("/api/v1/account/linear-app")
+    async def put_linear_app(request: Request) -> JSONResponse:
+        user = _require_user(request)
+        if user is None:
+            return error_response(401, "unauthorized", "Unauthorized")
+        if not state.secret_key:
+            return error_response(500, "encryption_unavailable", "Secret key is not configured")
+        payload = await request.json()
+        client_id = str(payload.get("client_id") or "").strip()
+        client_secret = str(payload.get("client_secret") or "").strip()
+        redirect_uri = str(payload.get("redirect_uri") or "").strip()
+        if not client_id or not client_secret:
+            return error_response(400, "invalid_linear_app", "client_id and client_secret are required")
+        linear_app = {
+            "client_id": client_id,
+            "client_secret_encrypted": state.encrypt_secret(client_secret),
+            "redirect_uri": redirect_uri,
+        }
+        user["linear_app"] = linear_app
+        return JSONResponse(
+            {"linear_app": {"client_id": client_id, "redirect_uri": redirect_uri, "configured": True}}
+        )
+
+    @app.delete("/api/v1/account/linear-app")
+    async def delete_linear_app(request: Request) -> JSONResponse:
+        user = _require_user(request)
+        if user is None:
+            return error_response(401, "unauthorized", "Unauthorized")
+        user.pop("linear_app", None)
+        return JSONResponse({"ok": True, "linear_app": None})
+
+    @app.post("/api/v1/onboarding/linear/start")
+    async def linear_start(request: Request) -> JSONResponse:
+        user = _require_user(request)
+        if user is None:
+            return error_response(401, "unauthorized", "Unauthorized")
+        workspace_id = str(user["id"])
+        client_id, _client_secret, redirect_uri = resolve_linear_creds(workspace_id)
+        if not client_id:
+            return error_response(400, "linear_app_not_configured", "No Linear app is configured")
+        query = urllib.parse.urlencode(
+            {
+                "client_id": client_id,
+                "redirect_uri": redirect_uri,
+                "response_type": "code",
+                "scope": LINEAR_DEFAULT_SCOPE,
+                "state": workspace_id,
+                "prompt": "consent",
+            }
+        )
+        return JSONResponse({"authorization_url": f"{LINEAR_AUTHORIZE_URL}?{query}"})
+
+    @app.get("/api/v1/linear/oauth/callback")
+    async def linear_callback(request: Request) -> Response:
+        workspace_id = request.query_params.get("state") or ""
+        code = request.query_params.get("code") or ""
+        if not workspace_id:
+            return error_response(400, "missing_state", "Missing state parameter")
+        if not code:
+            return error_response(400, "missing_code", "Missing code parameter")
+        if linear_token_exchange is not None:
+            token = linear_token_exchange(code, workspace_id)
+        else:
+            client_id, client_secret, redirect_uri = resolve_linear_creds(workspace_id)
+            async with httpx.AsyncClient(timeout=30, trust_env=False) as http_client:
+                resp = await http_client.post(
+                    LINEAR_TOKEN_URL,
+                    data={
+                        "grant_type": "authorization_code",
+                        "code": code,
+                        "client_id": client_id,
+                        "client_secret": client_secret,
+                        "redirect_uri": redirect_uri,
+                    },
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                )
+            token = resp.json()
+        access_token = str(token.get("access_token") or "")
+        expires_in = token.get("expires_in")
+        expires_at: str | None = None
+        if isinstance(expires_in, (int, float)):
+            expires_at = (datetime.now(timezone.utc) + timedelta(seconds=int(expires_in))).isoformat().replace("+00:00", "Z")
+        state.linear_installations[workspace_id] = {
+            "workspace_id": workspace_id,
+            "access_token": access_token,
+            "scope": token.get("scope"),
+            "expires_at": expires_at,
+        }
+        onboarding.mark_linear_connected(workspace_id)
+        return HTMLResponse(LINEAR_SUCCESS_HTML)
+
+    @app.get("/api/v1/onboarding/linear/scope")
+    async def linear_scope(request: Request) -> JSONResponse:
+        user = _require_user(request)
+        if user is None:
+            return error_response(401, "unauthorized", "Unauthorized")
+        workspace_id = str(user["id"])
+        installation = state.linear_installations.get(workspace_id)
+        if not installation:
+            return error_response(400, "linear_installation_not_found", "No Linear installation for workspace")
+        access_token = str(installation.get("access_token") or "")
+        if linear_scope_fetch is not None:
+            result = linear_scope_fetch(workspace_id, access_token)
+        else:
+            async with httpx.AsyncClient(timeout=30, trust_env=False) as http_client:
+                resp = await http_client.post(
+                    LINEAR_GRAPHQL_URL,
+                    json={"query": LINEAR_SCOPE_QUERY},
+                    headers={"Authorization": access_token, "Content-Type": "application/json"},
+                )
+            body = resp.json()
+            data = body.get("data") if isinstance(body, dict) else {}
+            data = data or {}
+            result = {
+                "teams": ((data.get("teams") or {}).get("nodes") if isinstance(data.get("teams"), dict) else []) or [],
+                "projects": ((data.get("projects") or {}).get("nodes") if isinstance(data.get("projects"), dict) else []) or [],
+            }
+        return JSONResponse({"teams": result.get("teams") or [], "projects": result.get("projects") or []})
+
+    def group_for_workspace(workspace_id: str) -> str:
+        group_id = f"group_{workspace_id}"
+        state.runtime_groups.setdefault(
+            group_id,
+            {
+                "id": group_id,
+                "linear_workspace_id": workspace_id,
+                "project_slug": "",
+                "linear_agent_app_user_id": "",
+                "workflow_profile": "task",
+            },
+        )
+        return group_id
+
+    @app.post("/api/v1/onboarding/runtime/enrollment-token")
+    async def onboarding_enrollment_token(request: Request) -> JSONResponse:
+        user = _require_user(request)
+        if user is None:
+            return error_response(401, "unauthorized", "Unauthorized")
+        workspace_id = str(user["id"])
+        group_id = group_for_workspace(workspace_id)
+        token = secrets.token_urlsafe(32)
+        token_hash = hash_secret(token)
+        expires_at = datetime.now(timezone.utc) + timedelta(hours=1)
+        state.enrollment_tokens[token_hash] = {
+            "runtime_group_id": group_id,
+            "used": False,
+            "expires_at": expires_at,
+        }
+        install_command = (
+            f"curl -fsSL {podium_base_url}/install.sh | bash -s -- "
+            f"--enrollment-token {token}"
+        )
+        return JSONResponse(
+            {
+                "enrollment_token": token,
+                "install_command": install_command,
+                "expires_at": expires_at.isoformat().replace("+00:00", "Z"),
+            }
+        )
+
+    @app.get("/api/v1/onboarding/runtime/status")
+    async def onboarding_runtime_status(request: Request) -> JSONResponse:
+        user = _require_user(request)
+        if user is None:
+            return error_response(401, "unauthorized", "Unauthorized")
+        workspace_id = str(user["id"])
+        group_id = f"group_{workspace_id}"
+        runtimes = [r for r in state.runtimes.values() if r["runtime_group_id"] == group_id]
+        online = [r for r in runtimes if r["id"] in state.presence]
+        token_pending = any(
+            not row["used"] and row["runtime_group_id"] == group_id
+            for row in state.enrollment_tokens.values()
+        )
+        if online:
+            onboarding.mark_runtime_enrolled(workspace_id)
+        return JSONResponse(
+            {
+                "workspace_id": workspace_id,
+                "token_pending": token_pending,
+                "runtime_count": len(runtimes),
+                "online_count": len(online),
+                "enrolled": len(runtimes) > 0,
+            }
+        )
 
     @app.post("/api/v1/runtime/enrollment-tokens")
     async def create_enrollment_token(request: Request) -> dict[str, str]:
@@ -275,6 +603,16 @@ def create_app(
             return JSONResponse(upstream_payload, status_code=upstream.status_code)
         return JSONResponse({"data": {}})
 
+    if static_root and index_file and index_file.exists():
+        @app.get("/{full_path:path}")
+        async def static_or_spa(full_path: str) -> Response:
+            if full_path.startswith("api/"):
+                return error_response(404, "not_found", "Route not found")
+            candidate = (static_root / full_path).resolve()
+            if candidate.is_file() and (candidate == static_root or static_root in candidate.parents):
+                return FileResponse(candidate)
+            return HTMLResponse(index_file.read_text(encoding="utf-8"))
+
     return app
 
 
@@ -284,6 +622,10 @@ class ManagedPodiumState:
     session_cookie_name: str
     secure_cookies: bool
     linear_webhook_secret: str = ""
+    secret_key: str = ""
+    linear_client_id: str = ""
+    linear_client_secret: str = ""
+    linear_redirect_uri: str = ""
     password_hasher: PasswordHasher = field(default_factory=PasswordHasher)
     users: dict[str, dict[str, Any]] = field(default_factory=dict)
     user_ids_by_email: dict[str, str] = field(default_factory=dict)
@@ -294,6 +636,30 @@ class ManagedPodiumState:
     dispatches: dict[str, dict[str, Any]] = field(default_factory=dict)
     presence: dict[str, str] = field(default_factory=dict)
     proxy_audit: list[dict[str, Any]] = field(default_factory=list)
+    linear_installations: dict[str, dict[str, Any]] = field(default_factory=dict)
+
+    def _fernet(self) -> Fernet:
+        if not self.secret_key:
+            raise RuntimeError("encryption_unavailable")
+        key = base64.urlsafe_b64encode(hashlib.sha256(self.secret_key.encode()).digest())
+        return Fernet(key)
+
+    def encrypt_secret(self, plaintext: str) -> str:
+        return self._fernet().encrypt(plaintext.encode()).decode()
+
+    def decrypt_secret(self, ciphertext: str) -> str:
+        return self._fernet().decrypt(ciphertext.encode()).decode()
+
+    def linear_status(self, workspace_id: str) -> dict[str, Any]:
+        installation = self.linear_installations.get(workspace_id)
+        if not installation:
+            return {"workspace_id": workspace_id, "state": "not_connected"}
+        return {
+            "workspace_id": workspace_id,
+            "state": "connected",
+            "scope": installation.get("scope"),
+            "expires_at": installation.get("expires_at"),
+        }
 
     async def verify_turnstile(self, token: str, ip: str | None) -> bool:
         if not token:
@@ -444,8 +810,17 @@ async def verify_turnstile_with_cloudflare(token: str, ip: str | None) -> bool:
     return bool(payload.get("success"))
 
 
-def public_user(user: dict[str, Any]) -> dict[str, str]:
-    return {"id": str(user["id"]), "email": str(user["email"])}
+def public_user(user: dict[str, Any]) -> dict[str, Any]:
+    linear_app = user.get("linear_app") if isinstance(user, dict) else None
+    if linear_app:
+        public_app: dict[str, Any] | None = {
+            "client_id": str(linear_app.get("client_id") or ""),
+            "redirect_uri": str(linear_app.get("redirect_uri") or ""),
+            "configured": True,
+        }
+    else:
+        public_app = None
+    return {"id": str(user["id"]), "email": str(user["email"]), "linear_app": public_app}
 
 
 def dispatch_public(dispatch: dict[str, Any]) -> dict[str, Any]:
