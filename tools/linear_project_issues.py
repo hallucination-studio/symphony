@@ -17,16 +17,36 @@ async def graphql(query: str, variables: dict[str, Any]) -> dict[str, Any]:
     token = os.environ.get("LINEAR_API_KEY", "").strip()
     if not token:
         raise RuntimeError("LINEAR_API_KEY is required")
-    async with httpx.AsyncClient(timeout=30, trust_env=False) as client:
-        response = await client.post(
-            ENDPOINT,
-            json={"query": query, "variables": variables},
-            headers={"Authorization": token, "Content-Type": "application/json"},
-        )
-    payload = response.json()
-    if response.status_code != 200 or payload.get("errors"):
-        raise RuntimeError(json.dumps({"status": response.status_code, "payload": payload}, indent=2))
-    return payload["data"]
+    last_error: Exception | None = None
+    for attempt in range(1, 6):
+        try:
+            async with httpx.AsyncClient(timeout=30, trust_env=False) as client:
+                response = await client.post(
+                    ENDPOINT,
+                    json={"query": query, "variables": variables},
+                    headers={"Authorization": token, "Content-Type": "application/json"},
+                )
+            try:
+                payload = response.json()
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(
+                    json.dumps(
+                        {
+                            "status": response.status_code,
+                            "body_tail": response.text[-500:],
+                        },
+                        indent=2,
+                    )
+                ) from exc
+            if response.status_code != 200 or payload.get("errors"):
+                raise RuntimeError(json.dumps({"status": response.status_code, "payload": payload}, indent=2))
+            return payload["data"]
+        except (httpx.HTTPError, RuntimeError) as exc:
+            last_error = exc
+            if attempt == 5:
+                break
+            await asyncio.sleep(min(2 ** (attempt - 1), 10))
+    raise RuntimeError(f"Linear GraphQL request failed after retries: {last_error}") from last_error
 
 
 async def project_by_name(name: str) -> dict[str, Any]:

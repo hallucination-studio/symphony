@@ -36,10 +36,14 @@ stricter approvals or sandboxing.
 Important boundary:
 
 - Performer is a scheduler/runner and tracker reader.
-- Ticket writes (state transitions, comments, PR links) are typically performed by the coding agent
-  using tools available in the workflow/runtime environment.
+- Ticket writes (state transitions, comments, PR links) may be performed by the coding agent in
+  legacy workflows, but managed Conductor profiles keep repository integration closeout outside the
+  Codex turn.
 - A successful run can end at a workflow-defined handoff state (for example `Human Review`), not
   necessarily `Done`.
+- Repository handoff closeout is distinct from workspace cleanup: Performer may preserve the
+  workspace while writing a local bundle/report, and Conductor may create integration follow-up
+  issues without deleting the workspace.
 
 ## 2. Goals and Non-Goals
 
@@ -429,6 +433,22 @@ Fields:
   - State keys are normalized (`lowercase`) for lookup.
   - Invalid entries (non-positive or non-numeric) are ignored.
 
+#### 5.3.6 `repository_handoff` (object)
+
+Fields:
+
+- `enabled` (boolean)
+  - Default: `false`.
+  - Managed Conductor `task` and `gated-task` profiles enable this explicitly.
+- `bundle_root` (path string or `$VAR`, OPTIONAL)
+  - Default when enabled with persistence: `<directory-containing-persistence-file>/handoffs`.
+  - Relative paths resolve relative to the directory containing `WORKFLOW.md`.
+
+When enabled, Performer writes a local repository handoff bundle after a successful agent run and
+emits a `repository_handoff_report.v1` ops event. The bundle includes a git snapshot, tracked patch,
+manifest, and copied untracked files. Performer does not commit, push, merge, or create integration
+child issues as part of this step.
+
 #### 5.3.6 `codex` (object)
 
 Fields:
@@ -814,6 +834,23 @@ When the service starts:
 3. If the terminal-issues fetch fails, log a warning and continue startup.
 
 This prevents stale terminal workspaces from accumulating after restarts.
+
+### 8.7 Repository Handoff Closeout
+
+Repository handoff closeout is a Conductor-owned policy loop for managed workflows.
+
+1. Performer emits `repository_handoff_report.v1` with workspace path, git snapshot, bundle paths,
+   artifact manifest, structured result, and recommended next action.
+2. Conductor scans ops events after Performer completion or on coordinated instance refresh.
+3. Conductor creates or updates one Linear child issue labelled
+   `performer:type/repository-integration` with marker
+   `<!-- SYMPHONY REPOSITORY HANDOFF source_issue_id=<id> -->`.
+4. Conductor comments on the source issue with bundle, patch, manifest, and child issue references.
+5. Conductor records `repository_handoff_closeout.v1` for idempotency and failure visibility.
+
+This closeout loop MUST NOT start a new Codex thread and MUST NOT perform commit, push, or merge
+operations. If the workspace is not a git repository, the report remains valid and the integration
+child issue becomes a manual review task.
 
 ## 9. Workspace Management and Safety
 

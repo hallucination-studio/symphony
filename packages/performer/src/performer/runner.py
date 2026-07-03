@@ -6,14 +6,14 @@ from pathlib import Path
 from typing import Any, Protocol
 import logging
 
-from .codex_client import CodexAppServerClient
+from .codex_client import CodexSdkClient
 from performer_api.config import ServiceConfig
-from .linear_tool import LinearGraphQLTool
 from performer_api.models import Issue, normalize_state_key
 from performer_api.ops_store import OpsStore
 from .ops_telemetry import ExecutionTelemetryRecorder
-from performer_api.persistence import ops_snapshot_path_from_persistence_path
+from performer_api.persistence import ops_snapshot_path_from_persistence_path, PersistenceStore
 from performer_api.workflow import render_prompt
+from .repository_handoff import build_repository_handoff_report
 from .workspace import WorkspaceManager
 
 logger = logging.getLogger(__name__)
@@ -37,15 +37,15 @@ class AgentRunner:
     ):
         self.config = config
         self.workspace_manager = workspace_manager
-        tools = {}
-        if config.tracker.kind == "linear":
-            tools["linear_graphql"] = LinearGraphQLTool(config.tracker.endpoint, config.tracker.api_key)
-        self.codex_client = codex_client or CodexAppServerClient(config.codex, tools=tools)
+        if codex_client is not None:
+            self.codex_client = codex_client
+        else:
+            self.codex_client = CodexSdkClient(config.codex)
         self.tracker = tracker
 
     async def run_issue(
         self, issue: Issue, attempt: int | None, on_event: Any, *, worker_host: str | None = None
-    ) -> None:
+    ) -> Any:
         workspace = await self.workspace_manager.create_for_issue(issue.identifier)
         self.workspace_manager.validate_workspace_path(workspace.path)
         await self.workspace_manager.run_before_run(workspace.path)
@@ -89,7 +89,7 @@ class AgentRunner:
                     attempt_id,
                     on_event,
                 )
-            await self.codex_client.run_session(
+            result = await self.codex_client.run_session(
                 workspace.path,
                 prompt,
                 f"{issue.identifier}: {issue.title}",
@@ -97,9 +97,27 @@ class AgentRunner:
                 max_turns=self.config.agent.max_turns,
                 continuation_provider=lambda turn_count: self._continuation_prompt(issue, turn_count),
                 worker_host=worker_host,
+                existing_thread_id=self._existing_sdk_thread_id(issue.id, str(workspace.path)),
             )
             if telemetry is not None:
+                if self.config.repository_handoff.enabled and not self.config.acceptance.enabled:
+                    telemetry.record_repository_handoff_report(
+                        build_repository_handoff_report(
+                            issue_id=issue.id,
+                            issue_identifier=issue.identifier,
+                            workspace_path=workspace.path,
+                            structured_result=(
+                                result.structured_result
+                                if isinstance(getattr(result, "structured_result", None), dict)
+                                else None
+                            ),
+                            bundle_root=self._repository_handoff_bundle_root(),
+                        ),
+                        run_id=run_id,
+                        attempt_id=attempt_id,
+                    )
                 telemetry.finish_run(run_id, status="completed", failure_code=None, failure_summary=None)
+            return result
         except Exception as exc:
             if "telemetry" in locals() and telemetry is not None and "run_id" in locals():
                 telemetry.finish_run(
@@ -142,9 +160,7 @@ class AgentRunner:
             return False
         if self.config.tracker.kind == "linear" and issue.project_slug != self.config.tracker.project_slug:
             return False
-        if not self._matches_assignee(issue):
-            return False
-        if not issue.has_required_labels(self.config.tracker.required_labels):
+        if not self._matches_required_delegate(issue):
             return False
         if issue.state_key() == "todo" and issue.has_non_terminal_blocker(self.config.tracker.terminal_states):
             return False
@@ -155,11 +171,11 @@ class AgentRunner:
         terminal = {normalize_state_key(state) for state in self.config.tracker.terminal_states}
         return issue.state_key() in active and issue.state_key() not in terminal
 
-    def _matches_assignee(self, issue: Issue) -> bool:
-        configured = self.config.tracker.assignee_id
+    def _matches_required_delegate(self, issue: Issue) -> bool:
+        configured = self.config.tracker.required_delegate_id
         if not configured:
             return True
-        return issue.assignee_id == configured
+        return issue.delegate_id == configured
 
     def _telemetry_recorder(self) -> ExecutionTelemetryRecorder | None:
         if self.config.persistence.path is None:
@@ -174,6 +190,29 @@ class AgentRunner:
         if len(parents) >= 3 and parents[2].name == "instances":
             return parents[1].name
         return "local"
+
+    def _repository_handoff_bundle_root(self) -> Path:
+        configured = self.config.repository_handoff.bundle_root
+        if configured is not None:
+            return configured
+        persistence_path = self.config.persistence.path
+        if persistence_path is not None:
+            return persistence_path.parent / "handoffs"
+        return self.config.workspace.root.parent / ".symphony-handoffs"
+
+    def _existing_sdk_thread_id(self, issue_id: str, workspace_path: str) -> str | None:
+        if self.config.codex.backend != "sdk" or self.config.persistence.path is None:
+            return None
+        state = PersistenceStore(self.config.persistence.path).load()
+        for thread in state.codex_threads:
+            if (
+                thread.issue_id == issue_id
+                and thread.backend == "sdk"
+                and thread.workspace_path == workspace_path
+                and thread.status in {"active", "resume_pending"}
+            ):
+                return thread.thread_id
+        return None
 
     def _telemetry_event_handler(
         self,

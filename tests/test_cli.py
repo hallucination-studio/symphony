@@ -14,7 +14,6 @@ from performer.cli import (
     persistence_store_from_config,
     parse_args,
 )
-from performer.codex_client import CodexAppServerClient
 from conductor.conductor_cli import parse_args as parse_conductor_args
 from performer_api.config import (
     AgentConfig,
@@ -26,7 +25,7 @@ from performer_api.config import (
     AcceptanceConfig,
     WorkspaceConfig,
 )
-from performer.acceptance import CodexAcceptanceRunner
+from performer.acceptance import CodexAcceptanceRunner, SmokeAcceptanceRunner
 from performer.linear import LinearTracker
 from performer.orchestrator import Orchestrator
 from performer.runner import AgentRunner
@@ -43,6 +42,12 @@ def test_conductor_default_data_root_is_dot_performer() -> None:
     assert args.data_root == ".conductor"
 
 
+def test_conductor_module_exposes_main_entrypoint() -> None:
+    from conductor import conductor_cli
+
+    assert callable(conductor_cli.main)
+
+
 def test_parse_args_accepts_positional_workflow_path() -> None:
     args = parse_args(["custom/WORKFLOW.md", "--once"])
 
@@ -50,11 +55,26 @@ def test_parse_args_accepts_positional_workflow_path() -> None:
     assert args.once is True
 
 
+def test_parse_args_accepts_event_dispatch_issue_id() -> None:
+    args = parse_args(["custom/WORKFLOW.md", "--dispatch-issue-id", "issue-123"])
+
+    assert args.workflow == "custom/WORKFLOW.md"
+    assert args.dispatch_issue_id == "issue-123"
+
+
 def test_podium_parse_args_accepts_helpful_defaults() -> None:
     args = parse_podium_args([])
 
+    assert args.command == "api"
     assert args.host == "127.0.0.1"
     assert args.port == 8090
+
+
+def test_podium_parse_args_accepts_legacy_top_level_port() -> None:
+    args = parse_podium_args(["--port", "8123"])
+
+    assert args.command == "api"
+    assert args.port == 8123
 
 
 
@@ -129,7 +149,6 @@ def make_service_config(tmp_path: Path, *, project_slug: str, api_key: str, work
             endpoint="https://api.linear.app/graphql",
             project_slug=project_slug,
             api_key=api_key,
-            required_labels=["codex"],
         ),
         polling=PollingConfig(),
         workspace=WorkspaceConfig(root=tmp_path / workspace),
@@ -146,8 +165,7 @@ def test_apply_runtime_config_updates_tracker_workspace_and_codex(tmp_path: Path
     second = make_service_config(tmp_path, project_slug="NEW", api_key="new-token", workspace="new", command="new-codex")
     tracker = LinearTracker(first.tracker)
     workspace_manager = WorkspaceManager(first.workspace, first.hooks)
-    codex_client = CodexAppServerClient(first.codex)
-    runner = AgentRunner(first, workspace_manager, codex_client, tracker=tracker)
+    runner = AgentRunner(first, workspace_manager, tracker=tracker)
 
     class NoopRunner:
         async def run_issue(self, issue, attempt, on_event):
@@ -185,7 +203,7 @@ def test_apply_runtime_config_disables_existing_acceptance_runner(tmp_path: Path
     second = make_service_config(tmp_path, project_slug="NEW", api_key="new-token", workspace="new", command="new-codex")
     tracker = LinearTracker(first.tracker)
     workspace_manager = WorkspaceManager(first.workspace, first.hooks)
-    runner = AgentRunner(first, workspace_manager, CodexAppServerClient(first.codex), tracker=tracker)
+    runner = AgentRunner(first, workspace_manager, tracker=tracker)
 
     class NoopRunner:
         async def run_issue(self, issue, attempt, on_event):
@@ -222,6 +240,23 @@ def test_build_acceptance_runner_only_when_enabled(tmp_path: Path) -> None:
     assert isinstance(build_acceptance_runner(enabled), CodexAcceptanceRunner)
 
 
+def test_build_acceptance_runner_uses_smoke_runner_for_smoke_gate_mode(tmp_path: Path) -> None:
+    config = make_service_config(tmp_path, project_slug="MT", api_key="token", workspace="ws", command="codex")
+    enabled = ServiceConfig(
+        tracker=config.tracker,
+        polling=config.polling,
+        workspace=config.workspace,
+        hooks=config.hooks,
+        agent=config.agent,
+        codex=config.codex,
+        prompt_template=config.prompt_template,
+        workflow_path=config.workflow_path,
+        acceptance=AcceptanceConfig(enabled=True, gate_planner_mode="smoke"),
+    )
+
+    assert isinstance(build_acceptance_runner(enabled), SmokeAcceptanceRunner)
+
+
 def test_persistence_store_from_config_uses_configured_path(tmp_path: Path) -> None:
     workflow = tmp_path / "WORKFLOW.md"
     workflow.write_text(
@@ -250,6 +285,61 @@ def test_persistence_store_from_config_returns_none_when_unconfigured(tmp_path: 
 
     assert persistence_store_from_config(config) is None
 
+
+@pytest.mark.asyncio
+async def test_run_dispatch_issue_invokes_event_dispatch_without_polling(tmp_path: Path, monkeypatch) -> None:
+    workflow = tmp_path / "WORKFLOW.md"
+    workflow.write_text("placeholder", encoding="utf-8")
+    calls: list[object] = []
+
+    class Tracker:
+        pass
+
+    class Runner:
+        def __init__(self, *args, **kwargs):
+            pass
+
+    class Workspace:
+        def __init__(self, *args, **kwargs):
+            pass
+
+    class Store:
+        pass
+
+    class DispatchOnlyOrchestrator:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def load_persisted_state(self):
+            calls.append("load")
+
+        async def startup_terminal_workspace_cleanup(self, workspace_manager):
+            calls.append("cleanup")
+
+        async def dispatch_issue_by_id(self, issue_id):
+            calls.append(("dispatch_issue_by_id", issue_id))
+            return {"status": "dispatched", "issue_id": issue_id}
+
+        async def tick(self):
+            calls.append("tick")
+
+        async def wait_for_idle(self):
+            calls.append("idle")
+
+    config = make_service_config(tmp_path, project_slug="MT", api_key="token", workspace="ws", command="codex")
+    monkeypatch.setattr(cli, "build_config_from_path", lambda path: config)
+    monkeypatch.setattr(cli, "validate_tracker_config", lambda tracker_config: None)
+    monkeypatch.setattr(cli, "create_tracker", lambda tracker_config: Tracker())
+    monkeypatch.setattr(cli, "WorkspaceManager", Workspace)
+    monkeypatch.setattr(cli, "AgentRunner", Runner)
+    monkeypatch.setattr(cli, "persistence_store_from_config", lambda config: Store())
+    monkeypatch.setattr(cli, "build_acceptance_runner", lambda config: None)
+    monkeypatch.setattr(cli, "Orchestrator", DispatchOnlyOrchestrator)
+
+    result = await cli.run_dispatch_issue(workflow, "issue-123")
+
+    assert result == {"status": "dispatched", "issue_id": "issue-123"}
+    assert calls == ["load", "cleanup", ("dispatch_issue_by_id", "issue-123"), "idle"]
 
 
 def test_main_returns_nonzero_on_startup_failure(monkeypatch) -> None:

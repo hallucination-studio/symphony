@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .models import normalize_labels, normalize_state_key
+from .models import normalize_state_key
 from .workflow import WorkflowDefinition
 
 
@@ -22,8 +22,8 @@ class TrackerConfig:
     endpoint: str
     project_slug: str
     api_key: str
-    assignee_id: str | None = None
-    required_labels: list[str] = field(default_factory=list)
+    required_delegate_id: str | None = None
+    lifecycle_labels_enabled: bool = True
     active_states: list[str] = field(default_factory=lambda: ["Todo", "In Progress"])
     terminal_states: list[str] = field(
         default_factory=lambda: ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]
@@ -60,7 +60,12 @@ class AgentConfig:
 
 @dataclass(frozen=True)
 class CodexConfig:
-    command: str = "codex app-server"
+    backend: str = "sdk"
+    command: str = ""
+    model: str | None = None
+    sdk_codex_bin: str | None = None
+    sandbox: str | None = None
+    linear_tool_mode: str = "disabled"
     approval_policy: Any = None
     thread_sandbox: Any = None
     turn_sandbox_policy: Any = None
@@ -135,12 +140,19 @@ class AcceptanceConfig:
     rework_phase_label: str = "performer:phase/rework"
     marker_name: str = "PERFORMER ACCEPTANCE"
     plan_revision: int = 1
+    gate_planner_mode: str = "strict"
     direct_done_bypass_policy: str = "review_with_evidence"
     gate_pending_label: str = "performer:gate/pending"
     gate_passed_label: str = "performer:gate/passed"
     gate_pass_with_findings_label: str = "performer:gate/pass-with-findings"
     gate_failed_label: str = "performer:gate/failed"
     score_label_prefix: str = "performer:score/"
+
+
+@dataclass(frozen=True)
+class RepositoryHandoffConfig:
+    enabled: bool = False
+    bundle_root: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -161,6 +173,7 @@ class ServiceConfig:
         default_factory=CompletionVerificationConfig
     )
     acceptance: AcceptanceConfig = field(default_factory=AcceptanceConfig)
+    repository_handoff: RepositoryHandoffConfig = field(default_factory=RepositoryHandoffConfig)
 
     @classmethod
     def from_workflow(cls, workflow: WorkflowDefinition, workflow_path: Path) -> ServiceConfig:
@@ -185,6 +198,10 @@ class ServiceConfig:
                 workflow_path,
             ),
             acceptance=acceptance,
+            repository_handoff=_repository_handoff_config(
+                _map(raw.get("repository_handoff")),
+                workflow_path,
+            ),
             prompt_template=workflow.prompt_template,
             workflow_path=workflow_path,
         )
@@ -194,8 +211,13 @@ class ServiceConfig:
             raise ConfigError("missing_tracker_api_key", "tracker.api_key is required")
         if self.tracker.kind == "linear" and not self.tracker.project_slug:
             raise ConfigError("missing_tracker_project_slug", "tracker.project_slug is required")
-        if not self.codex.command.strip():
-            raise ConfigError("missing_codex_command", "codex.command is required")
+        if self.codex.backend != "sdk":
+            raise ConfigError("invalid_codex_backend", "codex.backend must be sdk")
+        if self.codex.linear_tool_mode != "disabled":
+            raise ConfigError(
+                "invalid_codex_linear_tool_mode",
+                "codex.linear_tool_mode must be disabled",
+            )
 
     def validate_for_dispatch(self) -> None:
         self.validate_static()
@@ -275,8 +297,8 @@ def _tracker_config(raw: dict[str, Any], workflow_path: Path) -> TrackerConfig:
         endpoint=endpoint,
         project_slug=_string(raw.get("project_slug"), "") or "",
         api_key=_resolve_env(_string(raw.get("api_key"))) or "",
-        assignee_id=_resolve_env(_string(raw.get("assignee_id"))),
-        required_labels=_normalize_required_labels(raw.get("required_labels") or []),
+        required_delegate_id=_resolve_env(_string(raw.get("required_delegate_id"))),
+        lifecycle_labels_enabled=_bool(raw.get("lifecycle_labels_enabled"), True),
         active_states=list(raw.get("active_states") or ["Todo", "In Progress"]),
         terminal_states=list(
             raw.get("terminal_states") or ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]
@@ -315,17 +337,11 @@ def _tracker_with_acceptance_scan_states(
         endpoint=tracker.endpoint,
         project_slug=tracker.project_slug,
         api_key=tracker.api_key,
-        assignee_id=tracker.assignee_id,
-        required_labels=tracker.required_labels,
+        required_delegate_id=tracker.required_delegate_id,
+        lifecycle_labels_enabled=tracker.lifecycle_labels_enabled,
         active_states=active_states,
         terminal_states=tracker.terminal_states,
     )
-
-
-def _normalize_required_labels(labels: list[str] | None) -> list[str]:
-    if not labels:
-        return []
-    return [str(label).strip().lower() for label in labels]
 
 
 def _polling_config(raw: dict[str, Any]) -> PollingConfig:
@@ -378,7 +394,12 @@ def _agent_config(raw: dict[str, Any]) -> AgentConfig:
 
 def _codex_config(raw: dict[str, Any]) -> CodexConfig:
     return CodexConfig(
-        command=_string(raw.get("command"), "codex app-server") or "",
+        backend=_string(raw.get("backend"), "sdk") or "sdk",
+        command=_string(raw.get("command"), "") or "",
+        model=_string(raw.get("model")),
+        sdk_codex_bin=_string(raw.get("sdk_codex_bin")),
+        sandbox=_string(raw.get("sandbox")),
+        linear_tool_mode=_string(raw.get("linear_tool_mode"), "disabled") or "disabled",
         approval_policy=raw.get("approval_policy"),
         thread_sandbox=raw.get("thread_sandbox"),
         turn_sandbox_policy=raw.get("turn_sandbox_policy"),
@@ -516,6 +537,10 @@ def _acceptance_config(raw: dict[str, Any]) -> AcceptanceConfig:
         ),
         marker_name=_string(raw.get("marker_name"), defaults.marker_name) or defaults.marker_name,
         plan_revision=_int(raw.get("plan_revision"), defaults.plan_revision, positive=True),
+        gate_planner_mode=(
+            _string(raw.get("gate_planner_mode"), defaults.gate_planner_mode)
+            or defaults.gate_planner_mode
+        ),
         direct_done_bypass_policy=(
             _string(raw.get("direct_done_bypass_policy"), defaults.direct_done_bypass_policy)
             or defaults.direct_done_bypass_policy
@@ -534,4 +559,15 @@ def _acceptance_config(raw: dict[str, Any]) -> AcceptanceConfig:
         ),
         gate_failed_label=_string(raw.get("gate_failed_label"), defaults.gate_failed_label) or defaults.gate_failed_label,
         score_label_prefix=_string(raw.get("score_label_prefix"), defaults.score_label_prefix) or defaults.score_label_prefix,
+    )
+
+
+def _repository_handoff_config(raw: dict[str, Any], workflow_path: Path) -> RepositoryHandoffConfig:
+    return RepositoryHandoffConfig(
+        enabled=_bool(raw.get("enabled"), False),
+        bundle_root=(
+            _resolve_path(_string(raw.get("bundle_root")), workflow_path)
+            if _string(raw.get("bundle_root"))
+            else None
+        ),
     )

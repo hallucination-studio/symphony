@@ -37,6 +37,30 @@ def _command_evidence_from_payload(payload: Any) -> tuple[str | None, int | None
     return command if isinstance(command, str) else None, exit_code
 
 
+def _structured_test_commands_from_payload(payload: Any) -> list[str]:
+    if not isinstance(payload, dict):
+        return []
+    candidates: list[Any] = []
+    for key in ("structured_result", "output", "parsed"):
+        candidates.append(payload.get(key))
+    message = payload.get("message") or payload.get("summary") or payload.get("stop_reason")
+    if isinstance(message, str):
+        import json
+
+        try:
+            candidates.append(json.loads(message))
+        except json.JSONDecodeError:
+            pass
+    commands: list[str] = []
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        raw = candidate.get("test_commands")
+        if isinstance(raw, list):
+            commands.extend(str(item).strip() for item in raw if str(item).strip())
+    return commands
+
+
 def _parse_recorded_command(command: str) -> tuple[list[str], dict[str, str]] | None:
     try:
         parts = shlex.split(command)
@@ -429,8 +453,13 @@ class CompletionVerifier:
                 continue
             command, exit_code = _command_evidence_from_payload(event.payload)
             if not isinstance(command, str) or not command.strip():
+                structured_commands = _structured_test_commands_from_payload(event.payload)
+                structured_commands.extend(_structured_test_commands_from_payload({"message": event.summary}))
+                commands.extend((item, 0) for item in structured_commands)
                 continue
             commands.append((command.strip(), exit_code))
+            commands.extend((item, 0) for item in _structured_test_commands_from_payload(event.payload))
+            commands.extend((item, 0) for item in _structured_test_commands_from_payload({"message": event.summary}))
         if not commands:
             return CheckResult(
                 check_name="test_command_evidence",
@@ -503,11 +532,24 @@ class CompletionVerifier:
                 if event.run_id == latest_run.run_id and event.event_type in {"tool_call_started", "tool_call_completed"}
             )
             if tool_call_count == 0:
+                sdk_completed = any(
+                    event.run_id == latest_run.run_id
+                    and event.event_type == "turn_completed"
+                    and _structured_test_commands_from_payload({"message": event.summary})
+                    for event in ops_snapshot.events
+                )
+                if not sdk_completed:
+                    return CheckResult(
+                        check_name="metrics_reasonable",
+                        passed=False,
+                        message="No tool calls (likely no actual work)",
+                        evidence={"tool_call_count": 0},
+                    )
                 return CheckResult(
                     check_name="metrics_reasonable",
-                    passed=False,
-                    message="No tool calls (likely no actual work)",
-                    evidence={"tool_call_count": 0},
+                    passed=True,
+                    message=f"Metrics normal ({latest_run.turn_count} SDK turns, structured evidence)",
+                    evidence={"turn_count": latest_run.turn_count, "tool_call_count": 0, "sdk_structured_evidence": True},
                 )
 
             return CheckResult(

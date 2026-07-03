@@ -5,7 +5,7 @@ from datetime import timezone
 from typing import Any
 
 from performer_api.models import utc_now
-from performer_api.ops_models import AttemptRecord, IssueRecord, RunRecord, TraceEvent, TurnRecord
+from performer_api.ops_models import AttemptRecord, IssueRecord, RepositoryHandoffReport, RunRecord, TraceEvent, TurnRecord
 from performer_api.ops_store import OpsStore
 
 
@@ -111,6 +111,25 @@ class ExecutionTelemetryRecorder:
         snapshot = self.store.load()
         snapshot.events.append(event)
         self.store.save(snapshot)
+
+    def record_repository_handoff_report(
+        self,
+        report: RepositoryHandoffReport,
+        *,
+        run_id: str | None = None,
+        attempt_id: str | None = None,
+    ) -> None:
+        self.record_event(
+            self.make_event(
+                "repository_handoff_report.v1",
+                issue_id=report.issue_id,
+                run_id=run_id,
+                attempt_id=attempt_id,
+                retention_tier="summary",
+                summary=report.recommended_next_action,
+                payload=report.to_dict(),
+            )
+        )
 
     def update_turn_tokens(
         self,

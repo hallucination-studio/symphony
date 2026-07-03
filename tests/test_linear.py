@@ -43,14 +43,13 @@ class TextTransport(httpx.AsyncBaseTransport):
         return httpx.Response(200, text="not json", request=request)
 
 
-def make_config(*, assignee_id: str | None = None) -> TrackerConfig:
+def make_config(*, required_delegate_id: str | None = None) -> TrackerConfig:
     return TrackerConfig(
         kind="linear",
         endpoint="https://api.linear.app/graphql",
         project_slug="MT",
         api_key="linear-token",
-        assignee_id=assignee_id,
-        required_labels=["codex"],
+        required_delegate_id=required_delegate_id,
     )
 
 
@@ -68,6 +67,7 @@ def issue_node(**overrides: Any) -> dict[str, Any]:
         "state": {"name": "Todo"},
         "project": {"slugId": "MT", "name": "Main project"},
         "assignee": {"id": "codex-user"},
+        "delegate": None,
         "labels": {"nodes": [{"name": " Codex "}, {"name": "Backend"}]},
         "inverseRelations": {
             "nodes": [
@@ -121,13 +121,13 @@ async def test_fetch_candidate_issues_uses_project_and_active_states() -> None:
 
 
 @pytest.mark.asyncio
-async def test_fetch_candidate_issues_filters_by_configured_assignee() -> None:
+async def test_fetch_candidate_issues_filters_by_configured_delegate() -> None:
     transport = RecordingTransport(
         [
             {
                 "data": {
                     "issues": {
-                        "nodes": [issue_node()],
+                        "nodes": [issue_node(delegate={"id": "app-user-1"})],
                         "pageInfo": {"hasNextPage": False, "endCursor": None},
                     }
                 }
@@ -136,42 +136,14 @@ async def test_fetch_candidate_issues_filters_by_configured_assignee() -> None:
     )
     client = LinearClient("https://api.linear.app/graphql", "linear-token", transport=transport)
 
-    issues = await client.fetch_candidate_issues(make_config(assignee_id="codex-user"))
+    issues = await client.fetch_candidate_issues(make_config(required_delegate_id="app-user-1"))
 
-    assert [issue.identifier for issue in issues] == ["MT-1"]
+    assert [issue.delegate_id for issue in issues] == ["app-user-1"]
     request = transport.requests[0]
     variables = request["json"]["variables"]
-    assert variables["assigneeId"] == "codex-user"
-    assert "$assigneeId: ID" in request["json"]["query"]
-    assert "assignee: { id: { eq: $assigneeId } }" in request["json"]["query"]
-
-
-@pytest.mark.asyncio
-async def test_fetch_issues_by_states_filters_by_configured_assignee() -> None:
-    transport = RecordingTransport(
-        [
-            {
-                "data": {
-                    "issues": {
-                        "nodes": [issue_node()],
-                        "pageInfo": {"hasNextPage": False, "endCursor": None},
-                    }
-                }
-            }
-        ]
-    )
-    client = LinearClient("https://api.linear.app/graphql", "linear-token", transport=transport)
-    tracker = LinearTracker(make_config(assignee_id="codex-user"), client=client)
-
-    issues = await tracker.fetch_issues_by_states(["Done"])
-
-    assert [issue.identifier for issue in issues] == ["MT-1"]
-    request = transport.requests[0]
-    variables = request["json"]["variables"]
-    assert variables["stateNames"] == ["Done"]
-    assert variables["assigneeId"] == "codex-user"
-    assert "$assigneeId: ID" in request["json"]["query"]
-    assert "assignee: { id: { eq: $assigneeId } }" in request["json"]["query"]
+    assert variables["delegateId"] == "app-user-1"
+    assert "$delegateId: ID" in request["json"]["query"]
+    assert "delegate: { id: { eq: $delegateId } }" in request["json"]["query"]
 
 
 @pytest.mark.asyncio
@@ -479,6 +451,7 @@ async def test_create_issue_uses_issue_create_with_labels() -> None:
         "title": "[Acceptance] MT-1",
         "description": "Review MT-1 evidence.",
         "parentId": None,
+        "delegateId": None,
     }
 
 
@@ -519,6 +492,63 @@ async def test_create_issue_supports_parent_id_for_child_issues() -> None:
     request = transport.requests[0]["json"]
     assert "parentId" in request["query"]
     assert request["variables"]["parentId"] == "issue-1"
+
+
+@pytest.mark.asyncio
+async def test_create_issue_updates_delegate_when_create_does_not_apply_delegate() -> None:
+    transport = RecordingTransport(
+        [
+            {
+                "data": {
+                    "issueCreate": {
+                        "success": True,
+                        "issue": {
+                            "id": "gate-1",
+                            "identifier": "MT-2",
+                            "title": "[Gate] MT-1: Behavior",
+                            "url": "https://linear.app/x/issue/MT-2",
+                            "state": {"name": "Todo"},
+                            "delegate": None,
+                            "labels": {"nodes": [{"name": "performer:type/gate"}]},
+                        },
+                    }
+                }
+            },
+            {
+                "data": {
+                    "issueUpdate": {
+                        "success": True,
+                        "issue": {
+                            "id": "gate-1",
+                            "identifier": "MT-2",
+                            "delegate": {"id": "agent-user-1"},
+                        },
+                    }
+                }
+            },
+        ]
+    )
+    client = LinearClient("https://api.linear.app/graphql", "linear-token", transport=transport)
+
+    created = await client.create_issue(
+        team_id="team-1",
+        project_id="project-1",
+        state_id="state-todo",
+        label_ids=["label-gate"],
+        title="[Gate] MT-1: Behavior",
+        description="Gate details.",
+        parent_id="issue-1",
+        delegate_id="agent-user-1",
+    )
+
+    assert created["delegate"]["id"] == "agent-user-1"
+    assert "issueCreate" in transport.requests[0]["json"]["query"]
+    update_request = transport.requests[1]["json"]
+    assert "issueUpdate" in update_request["query"]
+    assert update_request["variables"] == {
+        "issueId": "gate-1",
+        "delegateId": "agent-user-1",
+    }
 
 
 @pytest.mark.asyncio
@@ -624,6 +654,7 @@ async def test_create_acceptance_issue_for_uses_original_linear_context_and_type
         "title": "[Acceptance] MT-1: Build",
         "description": "Review evidence.",
         "parentId": None,
+        "delegateId": None,
     }
 
 

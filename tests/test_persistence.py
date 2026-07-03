@@ -4,7 +4,7 @@ from datetime import timedelta
 from pathlib import Path
 
 from performer_api.models import BlockedEntry, ContinuationEntry, Issue, RetryEntry, RunningEntry, RuntimeTokens, utc_now
-from performer_api.persistence import PersistenceStore, PersistedSession, PersistedState
+from performer_api.persistence import CodexThreadEntry, PersistenceStore, PersistedSession, PersistedState
 
 
 def test_persistence_store_round_trips_retry_entries_and_sessions(tmp_path: Path) -> None:
@@ -75,6 +75,18 @@ def test_persistence_store_round_trips_retry_entries_and_sessions(tmp_path: Path
                 tokens=RuntimeTokens(input_tokens=10, output_tokens=4, cached_tokens=3, total_tokens=17),
             )
         ],
+        codex_threads=[
+            CodexThreadEntry(
+                issue_id="issue-2",
+                thread_id="sdk-thread",
+                backend="sdk",
+                workspace_path=str(tmp_path / "workspaces" / "MT-2"),
+                last_turn_id="sdk-turn",
+                status="resume_pending",
+                last_final_response='{"summary":"done","test_commands":[],"changed_files":[],"remaining_risks":[],"next_action":"ready_for_review"}',
+                updated_at=started_at,
+            )
+        ],
     )
 
     store.save(state)
@@ -84,6 +96,7 @@ def test_persistence_store_round_trips_retry_entries_and_sessions(tmp_path: Path
     assert loaded.retry_attempts[0].identifier == "MT-1"
     assert loaded.retry_attempts[0].attempt == 3
     assert loaded.retry_attempts[0].error == "retry poll failed"
+    assert loaded.retry_attempts[0].runtime_phase == "failed"
     assert loaded.retry_attempts[0].issue_url == "https://linear.app/x/issue/MT-1"
     assert loaded.retry_attempts[0].due_at == due_at
     assert loaded.retry_attempts[0].due_at_ms > 0
@@ -92,12 +105,14 @@ def test_persistence_store_round_trips_retry_entries_and_sessions(tmp_path: Path
     assert loaded.continuations[0].attempt == 4
     assert loaded.continuations[0].phase == "continuing"
     assert loaded.continuations[0].status_label == "performer:continuing"
+    assert loaded.continuations[0].runtime_phase == "implementation_done"
     assert loaded.continuations[0].last_message == "max turns reached; continuing"
     assert loaded.blocked[0].issue_id == "issue-4"
     assert loaded.blocked[0].identifier == "MT-4"
     assert loaded.blocked[0].attempt == 2
     assert loaded.blocked[0].phase == "error"
     assert loaded.blocked[0].status_label == "performer:error"
+    assert loaded.blocked[0].runtime_phase == "failed"
     assert loaded.blocked[0].error == "runtime_permission_blocked: writing outside of the project"
     assert loaded.sessions[0].issue_id == "issue-2"
     assert loaded.sessions[0].session_id == "thread-turn"
@@ -105,10 +120,16 @@ def test_persistence_store_round_trips_retry_entries_and_sessions(tmp_path: Path
     assert loaded.sessions[0].last_raw_message == "turn/completed"
     assert loaded.sessions[0].phase == "running"
     assert loaded.sessions[0].status_label == "performer:running"
+    assert loaded.sessions[0].runtime_phase == "implementation_running"
     assert loaded.sessions[0].workspace_path == str(tmp_path / "workspaces" / "MT-2")
     assert loaded.sessions[0].recent_events[0]["raw_event"]["raw_method"] == "turn/completed"
     assert loaded.sessions[0].tokens.cached_tokens == 3
     assert loaded.sessions[0].tokens.total_tokens == 17
+    assert loaded.codex_threads[0].issue_id == "issue-2"
+    assert loaded.codex_threads[0].thread_id == "sdk-thread"
+    assert loaded.codex_threads[0].backend == "sdk"
+    assert loaded.codex_threads[0].status == "resume_pending"
+    assert loaded.codex_threads[0].last_turn_id == "sdk-turn"
 
 
 def test_persistence_store_builds_state_from_running_entries(tmp_path: Path) -> None:
@@ -149,6 +170,7 @@ def test_persistence_store_builds_state_from_running_entries(tmp_path: Path) -> 
     assert state.sessions[0].last_raw_message == "item/agentMessage/delta"
     assert state.sessions[0].phase == "running"
     assert state.sessions[0].status_label == "performer:running"
+    assert state.sessions[0].runtime_phase == "dispatch_received"
     assert state.sessions[0].workspace_path == str(tmp_path / "workspaces" / "MT-1")
     assert state.sessions[0].recent_events[0]["message"] == "working"
     assert state.sessions[0].tokens.cached_tokens == 1

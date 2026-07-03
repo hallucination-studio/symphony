@@ -10,6 +10,18 @@ from .models import BlockedEntry, ContinuationEntry, RetryEntry, RunningEntry, R
 
 
 @dataclass(frozen=True)
+class CodexThreadEntry:
+    issue_id: str
+    thread_id: str
+    backend: str
+    workspace_path: str
+    last_turn_id: str | None = None
+    status: str = "active"
+    last_final_response: str | None = None
+    updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+@dataclass(frozen=True)
 class PersistedSession:
     issue_id: str
     issue_identifier: str
@@ -24,6 +36,7 @@ class PersistedSession:
     last_raw_message: str | None = None
     phase: str = "running"
     status_label: str = "performer:running"
+    runtime_phase: str = "implementation_running"
     workspace_path: str | None = None
     recent_events: list[dict[str, Any]] = field(default_factory=list)
     turn_count: int = 0
@@ -36,6 +49,7 @@ class PersistedState:
     continuations: list[ContinuationEntry] = field(default_factory=list)
     blocked: list[BlockedEntry] = field(default_factory=list)
     sessions: list[PersistedSession] = field(default_factory=list)
+    codex_threads: list[CodexThreadEntry] = field(default_factory=list)
 
     @classmethod
     def from_runtime(
@@ -45,6 +59,7 @@ class PersistedState:
         continuations: list[ContinuationEntry] | None = None,
         blocked: list[BlockedEntry] | None = None,
         running: list[RunningEntry],
+        codex_threads: list[CodexThreadEntry] | None = None,
     ) -> PersistedState:
         return cls(
             retry_attempts=list(retry_attempts),
@@ -65,6 +80,7 @@ class PersistedState:
                     last_raw_message=entry.last_raw_codex_message,
                     phase=entry.phase,
                     status_label=entry.status_label,
+                    runtime_phase=entry.runtime_phase,
                     workspace_path=entry.workspace_path,
                     recent_events=list(entry.recent_events),
                     turn_count=entry.turn_count,
@@ -72,6 +88,7 @@ class PersistedState:
                 )
                 for entry in running
             ],
+            codex_threads=list(codex_threads or []),
         )
 
 
@@ -109,6 +126,7 @@ def _state_to_json(state: PersistedState) -> dict[str, Any]:
         "continuations": [_continuation_to_json(entry) for entry in state.continuations],
         "blocked": [_blocked_to_json(entry) for entry in state.blocked],
         "sessions": [_session_to_json(session) for session in state.sessions],
+        "codex_threads": [_codex_thread_to_json(entry) for entry in state.codex_threads],
     }
 
 
@@ -150,7 +168,20 @@ def _state_from_json(payload: dict[str, Any]) -> PersistedState:
         for entry in [_blocked_from_json(item)]
         if entry is not None
     ]
-    return PersistedState(retry_attempts=retry_attempts, continuations=continuations, blocked=blocked, sessions=sessions)
+    codex_threads = [
+        entry
+        for item in payload.get("codex_threads", [])
+        if isinstance(item, dict)
+        for entry in [_codex_thread_from_json(item)]
+        if entry is not None
+    ]
+    return PersistedState(
+        retry_attempts=retry_attempts,
+        continuations=continuations,
+        blocked=blocked,
+        sessions=sessions,
+        codex_threads=codex_threads,
+    )
 
 
 def _retry_to_json(entry: RetryEntry) -> dict[str, Any]:
@@ -163,6 +194,7 @@ def _retry_to_json(entry: RetryEntry) -> dict[str, Any]:
         "issue_url": entry.issue_url,
         "phase": entry.phase,
         "status_label": entry.status_label,
+        "runtime_phase": entry.runtime_phase,
         "last_message": entry.last_message,
         "recent_events": entry.recent_events,
     }
@@ -190,6 +222,7 @@ def _retry_from_json(payload: dict[str, Any]) -> RetryEntry | None:
         status_label=payload.get("status_label")
         if isinstance(payload.get("status_label"), str)
         else "performer:retrying",
+        runtime_phase=payload.get("runtime_phase") if isinstance(payload.get("runtime_phase"), str) else "failed",
         last_message=payload.get("last_message") if isinstance(payload.get("last_message"), str) else None,
         recent_events=_list_of_dicts(payload.get("recent_events")),
     )
@@ -204,6 +237,7 @@ def _continuation_to_json(entry: ContinuationEntry) -> dict[str, Any]:
         "issue_url": entry.issue_url,
         "phase": entry.phase,
         "status_label": entry.status_label,
+        "runtime_phase": entry.runtime_phase,
         "last_message": entry.last_message,
         "recent_events": entry.recent_events,
     }
@@ -228,6 +262,9 @@ def _continuation_from_json(payload: dict[str, Any]) -> ContinuationEntry | None
         issue_url=payload.get("issue_url") if isinstance(payload.get("issue_url"), str) else None,
         phase="continuing",
         status_label="performer:continuing",
+        runtime_phase=payload.get("runtime_phase")
+        if isinstance(payload.get("runtime_phase"), str)
+        else "implementation_done",
         last_message=payload.get("last_message") if isinstance(payload.get("last_message"), str) else None,
         recent_events=_list_of_dicts(payload.get("recent_events")),
     )
@@ -243,6 +280,7 @@ def _blocked_to_json(entry: BlockedEntry) -> dict[str, Any]:
         "issue_url": entry.issue_url,
         "phase": entry.phase,
         "status_label": entry.status_label,
+        "runtime_phase": entry.runtime_phase,
         "last_message": entry.last_message,
         "recent_events": entry.recent_events,
     }
@@ -272,6 +310,7 @@ def _blocked_from_json(payload: dict[str, Any]) -> BlockedEntry | None:
         issue_url=payload.get("issue_url") if isinstance(payload.get("issue_url"), str) else None,
         phase=payload.get("phase") if isinstance(payload.get("phase"), str) else "error",
         status_label=payload.get("status_label") if isinstance(payload.get("status_label"), str) else "performer:error",
+        runtime_phase=payload.get("runtime_phase") if isinstance(payload.get("runtime_phase"), str) else "failed",
         last_message=payload.get("last_message") if isinstance(payload.get("last_message"), str) else None,
         recent_events=_list_of_dicts(payload.get("recent_events")),
     )
@@ -309,6 +348,7 @@ def _session_to_json(session: PersistedSession) -> dict[str, Any]:
         "last_raw_message": session.last_raw_message,
         "phase": session.phase,
         "status_label": session.status_label,
+        "runtime_phase": session.runtime_phase,
         "workspace_path": session.workspace_path,
         "recent_events": session.recent_events,
         "turn_count": session.turn_count,
@@ -344,6 +384,9 @@ def _session_from_json(payload: dict[str, Any]) -> PersistedSession | None:
         status_label=payload.get("status_label")
         if isinstance(payload.get("status_label"), str)
         else "performer:running",
+        runtime_phase=payload.get("runtime_phase")
+        if isinstance(payload.get("runtime_phase"), str)
+        else _runtime_phase_from_legacy_session_phase(payload.get("phase")),
         workspace_path=payload.get("workspace_path") if isinstance(payload.get("workspace_path"), str) else None,
         recent_events=_list_of_dicts(payload.get("recent_events")),
         turn_count=payload.get("turn_count") if isinstance(payload.get("turn_count"), int) else 0,
@@ -353,6 +396,50 @@ def _session_from_json(payload: dict[str, Any]) -> PersistedSession | None:
             cached_tokens=_int(tokens.get("cached_tokens")),
             total_tokens=_int(tokens.get("total_tokens")),
         ),
+    )
+
+
+def _codex_thread_to_json(entry: CodexThreadEntry) -> dict[str, Any]:
+    return {
+        "issue_id": entry.issue_id,
+        "thread_id": entry.thread_id,
+        "backend": entry.backend,
+        "workspace_path": entry.workspace_path,
+        "last_turn_id": entry.last_turn_id,
+        "status": entry.status,
+        "last_final_response": entry.last_final_response,
+        "updated_at": _iso(entry.updated_at),
+    }
+
+
+def _codex_thread_from_json(payload: dict[str, Any]) -> CodexThreadEntry | None:
+    issue_id = payload.get("issue_id")
+    thread_id = payload.get("thread_id")
+    backend = payload.get("backend")
+    workspace_path = payload.get("workspace_path")
+    updated_at = _parse_datetime(payload.get("updated_at")) or _utc_now()
+    if (
+        not isinstance(issue_id, str)
+        or not issue_id
+        or not isinstance(thread_id, str)
+        or not thread_id
+        or not isinstance(backend, str)
+        or not backend
+        or not isinstance(workspace_path, str)
+        or not workspace_path
+    ):
+        return None
+    return CodexThreadEntry(
+        issue_id=issue_id,
+        thread_id=thread_id,
+        backend=backend,
+        workspace_path=workspace_path,
+        last_turn_id=payload.get("last_turn_id") if isinstance(payload.get("last_turn_id"), str) else None,
+        status=payload.get("status") if isinstance(payload.get("status"), str) else "active",
+        last_final_response=payload.get("last_final_response")
+        if isinstance(payload.get("last_final_response"), str)
+        else None,
+        updated_at=updated_at,
     )
 
 
@@ -390,3 +477,13 @@ def _list_of_dicts(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, list):
         return []
     return [item for item in value if isinstance(item, dict)]
+
+
+def _runtime_phase_from_legacy_session_phase(value: Any) -> str:
+    if value == "done":
+        return "completed"
+    if value == "error":
+        return "failed"
+    if value == "starting":
+        return "dispatch_received"
+    return "implementation_running"

@@ -47,6 +47,27 @@ LIFECYCLE_LABELS = {
     "failed": f"{LIFECYCLE_LABEL_PREFIX}failed",
     "done": f"{LIFECYCLE_LABEL_PREFIX}done",
 }
+PHASE_LABELS = {
+    "queued": "performer:phase/queued",
+    "dispatch_received": "performer:phase/queued",
+    "implementation_running": "performer:phase/implementation",
+    "implementation_done": "performer:phase/implementation",
+    "review_running": "performer:phase/review",
+    "completed": "performer:phase/done",
+    "failed": "performer:phase/failed",
+}
+DISPATCH_LABELS = {
+    "accepted": "performer:dispatch/accepted",
+    "skipped": "performer:dispatch/skipped",
+    "failed": "performer:dispatch/failed",
+}
+RETRY_LABELS = {
+    "pending": "performer:retry/pending",
+    "exhausted": "performer:retry/exhausted",
+}
+ERROR_LABELS = {
+    "human_blocked": "performer:error/human-blocked",
+}
 
 
 @dataclass(frozen=True)
@@ -87,6 +108,7 @@ class Issue:
     created_at: datetime | None = None
     updated_at: datetime | None = None
     assignee_id: str | None = None
+    delegate_id: str | None = None
     project_slug: str | None = None
     project_name: str | None = None
 
@@ -108,13 +130,6 @@ class Issue:
 
     def state_key(self) -> str:
         return normalize_state_key(self.state)
-
-    def has_required_labels(self, required_labels: list[str]) -> bool:
-        if any(not str(label).strip() for label in required_labels):
-            return False
-        issue_labels = set(self.labels)
-        normalized_required = normalize_labels(required_labels)
-        return all(label in issue_labels for label in normalized_required)
 
     def has_non_terminal_blocker(self, terminal_states: list[str]) -> bool:
         terminal = {normalize_state_key(state) for state in terminal_states}
@@ -160,19 +175,20 @@ class RunningEntry:
     thread_id: str | None = None
     turn_id: str | None = None
     worker_host: str | None = None
-    codex_app_server_pid: int | None = None
     last_codex_event: str | None = None
     last_codex_timestamp: datetime | None = None
     last_codex_message: str | None = None
     last_raw_codex_message: str | None = None
     phase: str = "starting"
     status_label: str = LIFECYCLE_LABELS["starting"]
+    runtime_phase: str = "dispatch_received"
     workspace_path: str | None = None
     recent_events: list[dict[str, Any]] = field(default_factory=list)
     tokens: RuntimeTokens = field(default_factory=RuntimeTokens)
     last_reported_tokens: RuntimeTokens = field(default_factory=RuntimeTokens)
     turn_count: int = 0
     human_blocked_reason: str | None = None
+    structured_result: dict[str, Any] | None = None
 
 
 @dataclass
@@ -186,6 +202,7 @@ class RetryEntry:
     issue_url: str | None = None
     phase: str = "retrying"
     status_label: str = LIFECYCLE_LABELS["retrying"]
+    runtime_phase: str = "failed"
     last_message: str | None = None
     recent_events: list[dict[str, Any]] = field(default_factory=list)
 
@@ -200,6 +217,7 @@ class ContinuationEntry:
     issue_url: str | None = None
     phase: str = "continuing"
     status_label: str = LIFECYCLE_LABELS["continuing"]
+    runtime_phase: str = "implementation_done"
     last_message: str | None = None
     recent_events: list[dict[str, Any]] = field(default_factory=list)
 
@@ -214,6 +232,7 @@ class BlockedEntry:
     issue_url: str | None = None
     phase: str = "error"
     status_label: str = LIFECYCLE_LABELS["error"]
+    runtime_phase: str = "failed"
     last_message: str | None = None
     recent_events: list[dict[str, Any]] = field(default_factory=list)
 

@@ -1,94 +1,38 @@
 from __future__ import annotations
 
 import argparse
-import asyncio
 import os
 from pathlib import Path
 
-from .server import PodiumServer
+import uvicorn
 
-_PACKAGED_STATIC_DIR = Path(__file__).resolve().parent / "static"
+from .app import create_app
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the Symphony Podium SaaS boundary.")
-    parser.add_argument("--host", default="127.0.0.1", help="Bind host")
-    parser.add_argument("--port", type=int, default=8090, help="Bind port")
-    parser.add_argument("--token", default=None, help="Bearer token for conductor registration")
-    parser.add_argument("--linear-client-id", default=None, help="Linear OAuth application client id")
-    parser.add_argument("--linear-client-secret", default=None, help="Linear OAuth application client secret")
-    parser.add_argument("--linear-redirect-uri", default=None, help="Linear OAuth redirect URI")
-    parser.add_argument("--linear-webhook-secret", default=None, help="Linear OAuth application webhook secret")
-    parser.add_argument("--linear-installations-path", default=None, help="Path to persist Linear OAuth installations")
-    parser.add_argument("--podium-base-url", default=None, help="Public base URL Podium serves the runtime installer from (used to compose the install command)")
-    parser.add_argument("--secret-key", default=None, help="Secret key for password/session/secret encryption (PODIUM_SECRET_KEY)")
-    parser.add_argument("--secure-cookies", action="store_true", default=None, help="Set the Secure attribute on session cookies (production/HTTPS)")
-    return parser.parse_args(argv)
-
-
-async def run_server(
-    *,
-    host: str,
-    port: int,
-    token: str | None,
-    linear_client_id: str | None = None,
-    linear_client_secret: str | None = None,
-    linear_redirect_uri: str | None = None,
-    linear_webhook_secret: str | None = None,
-    linear_installations_path: str | None = None,
-    podium_base_url: str | None = None,
-    secret_key: str | None = None,
-    secure_cookies: bool | None = None,
-) -> None:
-    if secure_cookies is None:
-        secure_cookies = (os.environ.get("PODIUM_SECURE_COOKIES") or "").lower() in {"1", "true", "yes", "on"}
-    resolved_secret_key = secret_key or os.environ.get("PODIUM_SECRET_KEY")
-    if not (resolved_secret_key or "").strip():
-        raise SystemExit(
-            "PODIUM_SECRET_KEY is required (pass --secret-key or set the "
-            "PODIUM_SECRET_KEY environment variable). Refusing to start in a "
-            "half-configured state where sessions work but secrets cannot be handled."
-        )
-    server = PodiumServer(
-        token=token or os.environ.get("PODIUM_TOKEN"),
-        linear_client_id=linear_client_id or os.environ.get("LINEAR_CLIENT_ID"),
-        linear_client_secret=linear_client_secret or os.environ.get("LINEAR_CLIENT_SECRET"),
-        linear_redirect_uri=linear_redirect_uri or os.environ.get("LINEAR_REDIRECT_URI"),
-        linear_webhook_secret=linear_webhook_secret or os.environ.get("LINEAR_WEBHOOK_SECRET"),
-        linear_installations_path=linear_installations_path or os.environ.get("PODIUM_LINEAR_INSTALLATIONS_PATH"),
-        podium_base_url=podium_base_url or os.environ.get("PODIUM_BASE_URL"),
-        secret_key=resolved_secret_key,
-        secure_cookies=secure_cookies,
-        static_dir=_PACKAGED_STATIC_DIR if _PACKAGED_STATIC_DIR.is_dir() else None,
-    )
-    await server.start(host=host, port=port)
-    try:
-        while True:
-            await asyncio.sleep(3600)
-    finally:
-        await server.stop()
+    subparsers = parser.add_subparsers(dest="command")
+    api_parser = subparsers.add_parser("api", help="Run the managed FastAPI control plane")
+    api_parser.add_argument("--host", default="127.0.0.1", help="Bind host")
+    api_parser.add_argument("--port", type=int, default=8090, help="Bind port")
+    parser.set_defaults(command="api", host="127.0.0.1", port=8090)
+    parser.add_argument("--host", default="127.0.0.1", help=argparse.SUPPRESS)
+    parser.add_argument("--port", type=int, default=8090, help=argparse.SUPPRESS)
+    args = parser.parse_args(argv)
+    if args.command is None:
+        args.command = "api"
+    return args
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    try:
-        asyncio.run(
-            run_server(
-                host=args.host,
-                port=args.port,
-                token=args.token,
-                linear_client_id=args.linear_client_id,
-                linear_client_secret=args.linear_client_secret,
-                linear_redirect_uri=args.linear_redirect_uri,
-                linear_webhook_secret=args.linear_webhook_secret,
-                linear_installations_path=args.linear_installations_path,
-                podium_base_url=args.podium_base_url,
-                secret_key=args.secret_key,
-                secure_cookies=args.secure_cookies,
-            )
-        )
-    except KeyboardInterrupt:
-        return 0
+    default_static = Path(__file__).resolve().parent / "static"
+    app = create_app(
+        session_cookie_name=os.environ.get("PODIUM_SESSION_COOKIE_NAME", "podium_session"),
+        linear_webhook_secret=os.environ.get("LINEAR_WEBHOOK_SECRET", ""),
+        static_dir=str(default_static) if default_static.exists() else None,
+    )
+    uvicorn.run(app, host=args.host, port=args.port)
     return 0
 
 

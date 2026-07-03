@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 
 from conductor.conductor_models import InstanceRecord
-from conductor.conductor_runtime import ConductorRuntimeManager, LogQuery
+from conductor.conductor_runtime import ConductorRuntimeManager, LogQuery, RuntimeHandle
 
 
 class FakeStream:
@@ -156,3 +156,49 @@ def test_default_command_falls_back_to_python_module_in_editable_repo() -> None:
         assert manager._command_args("WORKFLOW.md") == (manager.command, "WORKFLOW.md")
     else:
         assert manager._command_args("WORKFLOW.md") == (manager.command, "-m", "performer.cli", "WORKFLOW.md")
+
+
+def test_command_args_can_target_event_dispatch_issue() -> None:
+    manager = ConductorRuntimeManager(command="performer")
+
+    assert manager._command_args("WORKFLOW.md", dispatch_issue_id="issue-1") == (
+        "performer",
+        "WORKFLOW.md",
+        "--dispatch-issue-id",
+        "issue-1",
+    )
+
+
+def test_refresh_polls_process_before_reporting_running(tmp_path: Path) -> None:
+    class PollingProcess:
+        pid = 4242
+        returncode = None
+
+        def poll(self):
+            self.returncode = 0
+            return 0
+
+    manager = ConductorRuntimeManager(command="performer")
+    instance = make_instance(tmp_path).with_updates(process_status="running", pid=4242)
+    manager._handles[instance.id] = RuntimeHandle(
+        process=PollingProcess(),
+        log_task=None,  # type: ignore[arg-type]
+        process_status="running",
+    )
+
+    refreshed = manager.refresh(instance)
+
+    assert refreshed.process_status == "exited"
+    assert refreshed.pid is None
+    assert refreshed.last_exit_code == 0
+
+
+def test_refresh_marks_missing_pid_exited_without_runtime_handle(tmp_path: Path) -> None:
+    manager = ConductorRuntimeManager(command="performer")
+    instance = make_instance(tmp_path).with_updates(process_status="running", pid=999999)
+
+    refreshed = manager.refresh(instance)
+
+    assert refreshed.process_status == "exited"
+    assert refreshed.pid is None
+    assert refreshed.last_exit_code == 0

@@ -12,6 +12,7 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+import shutil
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -81,9 +82,22 @@ def allocate_port() -> int:
         return int(sock.getsockname()[1])
 
 
-def http_json(method: str, url: str, payload: dict[str, Any] | None = None, *, timeout: int = 30) -> tuple[int, Any]:
-    body = None if payload is None else json.dumps(payload).encode()
-    request = urllib.request.Request(url, data=body, method=method, headers={"Content-Type": "application/json"})
+def http_json(
+    method: str,
+    url: str,
+    payload: dict[str, Any] | bytes | None = None,
+    *,
+    timeout: int = 30,
+    headers: dict[str, str] | None = None,
+) -> tuple[int, Any]:
+    if isinstance(payload, bytes):
+        body = payload
+    else:
+        body = None if payload is None else json.dumps(payload).encode()
+    request_headers = {"Content-Type": "application/json"}
+    if headers:
+        request_headers.update(headers)
+    request = urllib.request.Request(url, data=body, method=method, headers=request_headers)
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             raw = response.read().decode()
@@ -102,20 +116,56 @@ def http_json(method: str, url: str, payload: dict[str, Any] | None = None, *, t
         return exc.code, parsed
 
 
+def read_json_object_if_ready(path: Path, default: dict[str, Any]) -> dict[str, Any]:
+    if not path.exists():
+        return default
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return default
+    return payload if isinstance(payload, dict) else default
+
+
 async def linear_graphql(token: str, query: str, variables: dict[str, Any]) -> dict[str, Any]:
-    async with httpx.AsyncClient(timeout=30, trust_env=False) as client:
-        response = await client.post(
-            LINEAR_ENDPOINT,
-            json={"query": query, "variables": variables},
-            headers={"Authorization": token, "Content-Type": "application/json"},
+    last_error: Exception | None = None
+    max_attempts = 8
+    for attempt in range(1, max_attempts + 1):
+        try:
+            async with httpx.AsyncClient(timeout=45, trust_env=False) as client:
+                response = await client.post(
+                    LINEAR_ENDPOINT,
+                    json={"query": query, "variables": variables},
+                    headers={"Authorization": token, "Content-Type": "application/json"},
+                )
+            payload = response.json()
+            if response.status_code != 200 or payload.get("errors"):
+                raise RuntimeError(json.dumps({"status": response.status_code, "payload": payload}, indent=2))
+            return payload["data"]
+        except (httpx.HTTPError, TimeoutError) as exc:
+            last_error = exc
+            if attempt == max_attempts:
+                break
+            await asyncio.sleep(min(2 ** (attempt - 1), 20))
+    raise RuntimeError(f"Linear GraphQL request failed after retries: {last_error!r}") from last_error
+
+
+async def fetch_linear_viewer(token: str) -> dict[str, Any]:
+    return (
+        await linear_graphql(
+            token,
+            """
+            query Viewer {
+              viewer { id name email }
+            }
+            """,
+            {},
         )
-    payload = response.json()
-    if response.status_code != 200 or payload.get("errors"):
-        raise RuntimeError(json.dumps({"status": response.status_code, "payload": payload}, indent=2))
-    return payload["data"]
+    )["viewer"]
 
 
-async def create_linear_issue(token: str, project_slug: str, run_id: str) -> dict[str, Any]:
+async def create_linear_issue(
+    token: str, project_slug: str, run_id: str, *, delegate_id: str | None = None
+) -> dict[str, Any]:
     project = (
         await linear_graphql(
             token,
@@ -146,21 +196,6 @@ async def create_linear_issue(token: str, project_slug: str, run_id: str) -> dic
     todo = next((state for state in states if state["name"].lower() == "todo"), None)
     if todo is None:
         todo = next(state for state in states if state["type"] == "unstarted")
-    label_name = f"codex-{run_id}"
-    label = (
-        await linear_graphql(
-            token,
-            """
-            mutation CreateLabel($name: String!, $teamId: String!) {
-              issueLabelCreate(input: { name: $name, teamId: $teamId }) {
-                success
-                issueLabel { id name }
-              }
-            }
-            """,
-            {"name": label_name, "teamId": team["id"]},
-        )
-    )["issueLabelCreate"]["issueLabel"]
     issue = (
         await linear_graphql(
             token,
@@ -174,6 +209,9 @@ async def create_linear_issue(token: str, project_slug: str, run_id: str) -> dic
                   title
                   url
                   state { name type }
+                  assignee { id name }
+                  delegate { id name }
+                  agentSessions(first: 5) { nodes { id status appUser { id name } } }
                   labels { nodes { name } }
                 }
               }
@@ -184,18 +222,18 @@ async def create_linear_issue(token: str, project_slug: str, run_id: str) -> dic
                     "teamId": team["id"],
                     "projectId": project["id"],
                     "stateId": todo["id"],
-                    "labelIds": [label["id"]],
-                    "title": f"Symphony real e2e matrix {run_id}",
+                    "title": f"Symphony managed agent dispatch {run_id}",
                     "description": (
                         "Real Symphony e2e task. Create SYMPHONY_REAL_E2E_RESULT.md at the workspace root, "
                         "include this Linear issue identifier, say Podium, Conductor, and Performer reached Codex, "
                         "and run pytest tests/test_smoke.py -q."
                     ),
+                    **({"delegateId": delegate_id} if delegate_id else {}),
                 }
             },
         )
     )["issueCreate"]["issue"]
-    return {"project": project, "team": team, "todo_state": todo, "label": label, "issue": issue}
+    return {"project": project, "team": team, "todo_state": todo, "issue": issue}
 
 
 async def fetch_linear_issue(token: str, issue_id: str) -> dict[str, Any]:
@@ -210,6 +248,9 @@ async def fetch_linear_issue(token: str, issue_id: str) -> dict[str, Any]:
                 title
                 url
                 state { name type }
+                assignee { id name }
+                delegate { id name }
+                agentSessions(first: 5) { nodes { id status appUser { id name } } }
                 labels { nodes { name } }
                 comments(first: 20) { nodes { body createdAt } }
               }
@@ -218,6 +259,28 @@ async def fetch_linear_issue(token: str, issue_id: str) -> dict[str, Any]:
             {"id": issue_id},
         )
     )["issue"]
+
+
+async def delegate_linear_issue(token: str, issue_id: str, delegate_id: str) -> dict[str, Any]:
+    return (
+        await linear_graphql(
+            token,
+            """
+            mutation DelegateIssue($issueId: String!, $delegateId: String!) {
+              issueUpdate(id: $issueId, input: { delegateId: $delegateId }) {
+                success
+                issue {
+                  id
+                  identifier
+                  delegate { id name }
+                  agentSessions(first: 5) { nodes { id status appUser { id name } } }
+                }
+              }
+            }
+            """,
+            {"issueId": issue_id, "delegateId": delegate_id},
+        )
+    )["issueUpdate"]["issue"]
 
 
 async def comment_linear_issue(token: str, issue_id: str, body: str) -> dict[str, Any]:
@@ -249,6 +312,9 @@ async def fetch_linear_issue_tree(token: str, issue_id: str) -> dict[str, Any]:
                 title
                 url
                 state { name type }
+                assignee { id name }
+                delegate { id name }
+                agentSessions(first: 5) { nodes { id status appUser { id name } } }
                 labels { nodes { name } }
                 children(first: 50) {
                   nodes {
@@ -256,6 +322,7 @@ async def fetch_linear_issue_tree(token: str, issue_id: str) -> dict[str, Any]:
                     identifier
                     title
                     state { name type }
+                    delegate { id name }
                     labels { nodes { name } }
                     comments(first: 20) { nodes { body createdAt } }
                     children(first: 50) {
@@ -264,6 +331,7 @@ async def fetch_linear_issue_tree(token: str, issue_id: str) -> dict[str, Any]:
                         identifier
                         title
                         state { name type }
+                        delegate { id name }
                         labels { nodes { name } }
                         comments(first: 20) { nodes { body createdAt } }
                       }
@@ -299,6 +367,19 @@ def start_process(name: str, command: list[str], *, env: dict[str, str], stdout_
     return ManagedProcess(name=name, process=process)
 
 
+async def wait_for_http_ready(url: str, *, timeout_seconds: float = 10.0) -> tuple[int, Any]:
+    deadline = time.monotonic() + timeout_seconds
+    last_error: str | None = None
+    while time.monotonic() < deadline:
+        try:
+            status, body = http_json("GET", url, timeout=2)
+            return status, body
+        except urllib.error.URLError as exc:
+            last_error = str(exc)
+        await asyncio.sleep(0.2)
+    raise RuntimeError(f"HTTP service not ready at {url}: {last_error or 'timed out'}")
+
+
 def make_fixture_repo(path: Path) -> Path:
     if path.exists():
         subprocess.run(["rm", "-rf", str(path)], check=True)
@@ -316,6 +397,9 @@ def make_fixture_repo(path: Path) -> Path:
 
 def patch_workflow(workflow_path: Path, *, acceptance_gates: bool, permission_approval_probe: bool = False) -> str:
     workflow = workflow_path.read_text(encoding="utf-8")
+    codex_bin = shutil.which("codex")
+    if codex_bin and "  sdk_codex_bin:" not in workflow:
+        workflow = workflow.replace("codex:\n", f"codex:\n  sdk_codex_bin: {codex_bin}\n", 1)
     workflow = workflow.replace(
         "  max_concurrent_agents: 10\n  max_turns: 20\n",
         "  max_concurrent_agents: 1\n  max_turns: 2\n" if acceptance_gates else "  max_concurrent_agents: 1\n  max_turns: 1\n",
@@ -361,6 +445,7 @@ def patch_workflow(workflow_path: Path, *, acceptance_gates: bool, permission_ap
         task_instruction = (
             "E2E task: Create SYMPHONY_REAL_E2E_RESULT.md in the current working directory returned by `pwd`; do not write to any source repository path outside `pwd`. The file must include the Linear issue identifier "
             "and one sentence saying Podium, Conductor, and Performer reached Codex successfully. Run `pytest tests/test_smoke.py -q`. "
+            "Do not inspect git status, do not clean pytest caches, and do not remove generated `__pycache__`; those are outside this task's acceptance criteria. "
         )
     if acceptance_gates:
         task_instruction += (
@@ -387,8 +472,49 @@ def patch_workflow(workflow_path: Path, *, acceptance_gates: bool, permission_ap
     return workflow
 
 
+def patch_e2e_gate_mode(workflow: str, *, gate_mode: str) -> str:
+    if gate_mode not in {"smoke", "strict"}:
+        raise ValueError(f"unsupported e2e gate mode: {gate_mode}")
+    if "acceptance:\n" not in workflow:
+        return workflow
+    lines = workflow.splitlines()
+    output: list[str] = []
+    in_acceptance = False
+    inserted = False
+    for line in lines:
+        if line.startswith("acceptance:"):
+            in_acceptance = True
+            inserted = False
+            output.append(line)
+            continue
+        if in_acceptance and line == "" and not inserted:
+            output.append(f"  gate_planner_mode: {gate_mode}")
+            inserted = True
+        if in_acceptance and line and not line.startswith(" "):
+            if not inserted:
+                output.append(f"  gate_planner_mode: {gate_mode}")
+                inserted = True
+            in_acceptance = False
+        if in_acceptance and line.strip().startswith("gate_planner_mode:"):
+            if not inserted:
+                output.append(f"  gate_planner_mode: {gate_mode}")
+                inserted = True
+            continue
+        output.append(line)
+    if in_acceptance and not inserted:
+        output.append(f"  gate_planner_mode: {gate_mode}")
+    return "\n".join(output) + ("\n" if workflow.endswith("\n") else "")
+
+
 def api_url(port: int, path: str) -> str:
     return f"http://127.0.0.1:{port}{path}"
+
+
+def linear_webhook_signature(secret: str, payload: bytes) -> str:
+    import hashlib
+    import hmac
+
+    return hmac.new(secret.encode(), payload, hashlib.sha256).hexdigest()
 
 
 async def wait_for_run(
@@ -399,6 +525,7 @@ async def wait_for_run(
     conductor_port: int,
     evidence: Evidence,
     timeout_seconds: int,
+    stage_timeout_seconds: int,
     permission_approval_probe: bool = False,
 ) -> dict[str, Any]:
     instance_root = Path(instance["instance_dir"])
@@ -406,30 +533,87 @@ async def wait_for_run(
     ops_path = state_path.parent / "ops.json"
     result_path = Path(instance["workspace_root"]) / "SYMPHONY_REAL_E2E_RESULT.md"
     log_path = Path(instance["log_path"])
+    instance_id = str(instance["id"])
     deadline = time.monotonic() + timeout_seconds
     samples: list[dict[str, Any]] = []
     final_issue: dict[str, Any] | None = None
     approved_blocked_events: set[str] = set()
+    last_state: dict[str, Any] = {}
+    last_ops: dict[str, Any] = {}
+    stages: dict[str, str] = {}
+
+    def mark_stage(name: str, passed: bool, **details: Any) -> None:
+        if passed and name not in stages:
+            stages[name] = utc_now()
+            evidence.check(f"stage:{name}", True, **details)
+
     while time.monotonic() < deadline:
         if not log_path.exists():
             generated = sorted((instance_root / "logs").glob("performer-*.log"))
             if generated:
                 log_path = generated[-1]
-        state = json.loads(state_path.read_text()) if state_path.exists() else {}
-        ops = json.loads(ops_path.read_text()) if ops_path.exists() else {}
-        final_issue = await fetch_linear_issue(token, issue_id)
+        last_state = read_json_object_if_ready(state_path, last_state)
+        last_ops = read_json_object_if_ready(ops_path, last_ops)
+        state = last_state
+        ops = last_ops
+        try:
+            final_issue = await fetch_linear_issue(token, issue_id)
+        except RuntimeError as exc:
+            samples.append(
+                {
+                    "at": utc_now(),
+                    "issue_state": "unknown",
+                    "process_status": "unknown",
+                    "linear_fetch_error": str(exc),
+                }
+            )
+            await asyncio.sleep(5)
+            continue
+        status, runtime_body = http_json("GET", api_url(conductor_port, f"/api/instances/{instance_id}"), timeout=2)
+        process_status = None
+        if status == 200 and isinstance(runtime_body, dict):
+            process_status = (runtime_body.get("instance") or {}).get("process_status")
         run_statuses = [run.get("status") for run in ops.get("runs", {}).values()]
+        event_types = [
+            event.get("event_type")
+            for event in ops.get("events", {}).values()
+            if isinstance(event, dict)
+        ] if isinstance(ops.get("events"), dict) else [
+            event.get("event_type")
+            for event in ops.get("events", [])
+            if isinstance(event, dict)
+        ]
         sample = {
             "at": utc_now(),
             "issue_state": final_issue["state"]["name"],
+            "process_status": process_status,
             "sessions": len(state.get("sessions", [])),
             "retry_attempts": len(state.get("retry_attempts", [])),
             "continuations": len(state.get("continuations", [])),
             "blocked": len(state.get("blocked", [])),
             "result_exists": result_path.exists(),
             "run_statuses": run_statuses,
+            "event_types": event_types[-20:],
         }
         samples.append(sample)
+        mark_stage("webhook_queued", True, issue_id=issue_id)
+        mark_stage("process_running_or_exited", process_status in {"running", "exited", "stopped"}, process_status=process_status)
+        mark_stage("implementation_result_exists", result_path.exists(), path=str(result_path))
+        mark_stage(
+            "implementation_review_ready",
+            final_issue["state"]["name"] == "In Review" or final_issue["state"]["type"] in {"completed", "canceled"},
+            issue_state=final_issue["state"],
+        )
+        mark_stage(
+            "gate_followup_started",
+            "gate_followup_started" in event_types,
+            event_types=event_types[-20:],
+        )
+        mark_stage(
+            "gate_one_shot_completed",
+            "gate_followup_started" in event_types and run_statuses and all(status != "running" for status in run_statuses),
+            run_statuses=run_statuses,
+        )
         blocked = [entry for entry in state.get("blocked", []) if isinstance(entry, dict)]
         for blocked_entry in blocked:
             blocked_issue_id = str(blocked_entry.get("issue_id") or "")
@@ -476,6 +660,7 @@ async def wait_for_run(
             and state.get("blocked", []) == []
             and run_statuses
             and all(status != "running" for status in run_statuses)
+            and process_status in {"exited", "stopped"}
         ):
             break
         await asyncio.sleep(5)
@@ -490,12 +675,21 @@ async def wait_for_run(
     final_issue_path = evidence.out.parent / "final-issue.json"
     final_issue_path.write_text(json.dumps(final_issue, indent=2, sort_keys=True), encoding="utf-8")
     evidence.artifact("final_issue", final_issue_path)
+    stage_snapshot = {
+        "observed": stages,
+        "stage_timeout_seconds": stage_timeout_seconds,
+        "last_sample": samples[-1] if samples else None,
+    }
+    stage_snapshot_path = evidence.out.parent / "stage-snapshot.json"
+    stage_snapshot_path.write_text(json.dumps(stage_snapshot, indent=2, sort_keys=True), encoding="utf-8")
+    evidence.artifact("stage_snapshot", stage_snapshot_path)
     return {
-        "state": json.loads(state_path.read_text()) if state_path.exists() else {},
-        "ops": json.loads(ops_path.read_text()) if ops_path.exists() else {},
+        "state": read_json_object_if_ready(state_path, last_state),
+        "ops": read_json_object_if_ready(ops_path, last_ops),
         "issue": final_issue,
         "result_path": str(result_path),
         "log_path": str(log_path),
+        "samples": samples,
     }
 
 
@@ -519,6 +713,8 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
     bin_dir = Path.cwd() / ".venv" / "bin"
     run_id = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S") + "-" + uuid.uuid4().hex[:6]
     run_id = f"symphony-e2e-matrix-{run_id}"
+    workspace_id = f"real-workspace-{run_id}"
+    webhook_secret = f"webhook-{uuid.uuid4().hex}"
     evidence.data["run_id"] = run_id
     evidence.write()
 
@@ -530,42 +726,76 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
         run_cmd(name, command, evidence, env=env)
 
     fixture = make_fixture_repo(root / "fixture-repo")
-    performer_once_workflow = root / "performer-once-WORKFLOW.md"
-    performer_once_workflow.write_text(
-        f"""---
-tracker:
-  kind: linear
-  project_slug: {args.project_slug}
-  api_key: $LINEAR_API_KEY
-  required_labels:
-    - never-{run_id}
-codex:
-  command: codex app-server
----
-No-op.
-""",
-        encoding="utf-8",
-    )
-    run_cmd("performer-once-startup-validation", [str(bin_dir / "performer"), str(performer_once_workflow), "--once"], evidence, env=env)
 
     podium_port = allocate_port()
     conductor_port = allocate_port()
     data_root = root / "conductor-data"
+    podium_env = dict(env)
+    podium_env["LINEAR_WEBHOOK_SECRET"] = webhook_secret
+    podium_env["PODIUM_LINEAR_ACCESS_TOKEN"] = token
     processes: list[ManagedProcess] = []
     try:
         podium = start_process(
             "podium",
-            [str(bin_dir / "podium"), "--port", str(podium_port)],
-            env=env,
+            [
+                str(bin_dir / "podium"),
+                "api",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                str(podium_port),
+            ],
+            env=podium_env,
             stdout_path=root / "podium.log",
         )
         processes.append(podium)
-        await asyncio.sleep(1)
-        for path in ["/", "/api/v1/health"]:
+        status, body = await wait_for_http_ready(api_url(podium_port, "/"))
+        evidence.check("podium-api:/", status == 200, status=status, body=body)
+        for path in ["/api/v1/health"]:
             status, body = http_json("GET", api_url(podium_port, path))
             evidence.check(f"podium-api:{path}", status == 200, status=status, body=body)
-        status, body = http_json("POST", api_url(podium_port, "/api/v1/conductors/register"), {"conductor_id": "matrix-probe"})
-        evidence.check("podium-api:/api/v1/conductors/register", status == 200, status=status, body=body)
+
+        viewer = await fetch_linear_viewer(token)
+        agent_app_user_id = os.environ.get("LINEAR_AGENT_APP_USER_ID", "").strip()
+        if not agent_app_user_id and not args.simulate_agent_webhook:
+            raise RuntimeError(
+                "LINEAR_AGENT_APP_USER_ID is required for real custom-agent delegation. "
+                "Set it to the Linear app user's id."
+            )
+        agent_app_user_id = agent_app_user_id or "real-e2e-agent-app-user"
+        evidence.data["linear_agent_app_user_id"] = agent_app_user_id
+        evidence.check(
+            "linear-agent:app-user-selected",
+            bool(agent_app_user_id),
+            source="LINEAR_AGENT_APP_USER_ID" if os.environ.get("LINEAR_AGENT_APP_USER_ID", "").strip() else "simulated-default",
+            viewer={key: viewer.get(key) for key in ["id", "name", "email"]},
+        )
+        status, enrollment_body = http_json(
+            "POST",
+            api_url(podium_port, "/api/v1/runtime/enrollment-tokens"),
+            {
+                "runtime_group_id": f"group-{run_id}",
+                "linear_workspace_id": workspace_id,
+                "project_slug": args.project_slug,
+                "linear_agent_app_user_id": agent_app_user_id,
+                "workflow_profile": "gated-task" if args.acceptance_gates else "task",
+            },
+        )
+        evidence.check("podium-api:/api/v1/runtime/enrollment-tokens", status == 200, status=status, body=enrollment_body)
+        status, enrolled_runtime = http_json(
+            "POST",
+            api_url(podium_port, "/api/v1/runtime/enroll"),
+            {"enrollment_token": enrollment_body.get("enrollment_token") if isinstance(enrollment_body, dict) else ""},
+        )
+        evidence.check(
+            "podium-api:/api/v1/runtime/enroll",
+            status == 200
+            and bool(enrolled_runtime.get("runtime_id"))
+            and bool(enrolled_runtime.get("runtime_token"))
+            and bool(enrolled_runtime.get("proxy_token")),
+            status=status,
+            body={key: bool(enrolled_runtime.get(key)) for key in ["runtime_id", "runtime_token", "proxy_token"]},
+        )
 
         conductor = start_process(
             "conductor",
@@ -574,21 +804,36 @@ No-op.
             stdout_path=root / "conductor.log",
         )
         processes.append(conductor)
-        await asyncio.sleep(1)
-        status, body = http_json("GET", api_url(conductor_port, "/"))
+        status, body = await wait_for_http_ready(api_url(conductor_port, "/"))
         evidence.check("conductor-api:/", status == 200, status=status, body=body)
         status, body = http_json(
             "PATCH",
             api_url(conductor_port, "/api/settings"),
-            {"linear_api_key": token, "podium_url": f"http://127.0.0.1:{podium_port}"},
+            {
+                "podium_url": f"http://127.0.0.1:{podium_port}",
+                "podium_runtime_id": enrolled_runtime["runtime_id"],
+                "podium_runtime_token": enrolled_runtime["runtime_token"],
+                "podium_proxy_token": enrolled_runtime["proxy_token"],
+                "podium_ws_url": enrolled_runtime["websocket_url"],
+                "runtime_group_id": enrolled_runtime["runtime_group_id"],
+                "managed_mode": True,
+            },
         )
-        evidence.check("conductor-api:/api/settings PATCH", status == 200 and body["settings"]["linear_api_key_configured"], status=status, body=body["settings"])
+        evidence.check(
+            "conductor-api:/api/settings PATCH",
+            status == 200
+            and body["settings"]["linear_application_connected"]
+            and body["settings"]["podium_runtime_token_configured"]
+            and body["settings"]["podium_proxy_token_configured"]
+            and body["settings"]["managed_mode"],
+            status=status,
+            body=body["settings"],
+        )
         for method, path, payload in [
             ("GET", "/api/settings", None),
             ("GET", "/api/dashboard", None),
             ("GET", "/api/instances", None),
             ("GET", "/api/templates/workflow-profiles", None),
-            ("POST", "/api/podium/register", {}),
             ("POST", "/api/repo/inspect", {"repo_source_type": "local_path", "repo_source_value": str(fixture)}),
             ("POST", "/api/repo/clone", {"repo_url": "https://example.invalid/repo.git", "target_path": str(root / "non-empty-clone")}),
         ]:
@@ -599,16 +844,32 @@ No-op.
             evidence.check(f"conductor-api:{method} {path}", status in {200, 201}, status=status, body=body)
 
         linear = await create_linear_issue(token, args.project_slug, run_id)
+        if not args.simulate_agent_webhook:
+            linear["issue"] = await delegate_linear_issue(token, linear["issue"]["id"], agent_app_user_id)
+            linear["issue"] = await fetch_linear_issue(token, linear["issue"]["id"])
         issue_path = root / "business-issue.json"
         issue_path.write_text(json.dumps(linear, indent=2, sort_keys=True), encoding="utf-8")
         evidence.artifact("business_issue", issue_path)
+        evidence.check(
+            "linear-agent:issue-left-human-assignee-unchanged",
+            ((linear["issue"].get("assignee") or {}).get("id")) != agent_app_user_id,
+            expected_agent_app_user_id=agent_app_user_id,
+            actual_assignee=linear["issue"].get("assignee"),
+        )
+        evidence.check(
+            "linear-agent:issue-delegated-to-custom-agent",
+            args.simulate_agent_webhook or ((linear["issue"].get("delegate") or {}).get("id") == agent_app_user_id),
+            expected_agent_app_user_id=agent_app_user_id,
+            actual_delegate=linear["issue"].get("delegate"),
+            simulated=args.simulate_agent_webhook,
+        )
         payload = {
             "name": f"Matrix {run_id}",
             "repo_source_type": "local_path",
             "repo_source_value": str(fixture),
             "linear_project": linear["project"]["slugId"],
-            "linear_filters": {"labels": [linear["label"]["name"]], "active_states": ["Todo", "In Progress"]},
-            "workflow_profile": "default",
+            "linear_filters": {"linear_agent_app_user_id": agent_app_user_id, "active_states": ["Todo", "In Progress"]},
+            "workflow_profile": "gated-task" if args.acceptance_gates else "task",
             "workflow_inputs": {"goal": "Run the real Symphony e2e matrix task."},
         }
         status, body = http_json("POST", api_url(conductor_port, "/api/instances/preview-workflow"), payload)
@@ -631,6 +892,8 @@ No-op.
             acceptance_gates=args.acceptance_gates,
             permission_approval_probe=args.permission_approval_probe,
         )
+        if args.acceptance_gates:
+            workflow = patch_e2e_gate_mode(workflow, gate_mode=args.e2e_gate_mode)
         status, body = http_json("POST", api_url(conductor_port, f"/api/instances/{instance_id}/validate-workflow"), {"workflow_content": workflow})
         evidence.check(f"conductor-api:POST /api/instances/{instance_id}/validate-workflow patched", status == 200, status=status)
         status, body = http_json("PATCH", api_url(conductor_port, f"/api/instances/{instance_id}"), {"workflow_content": workflow})
@@ -650,19 +913,63 @@ No-op.
             stdout_path=root / "conductor-restarted.log",
         )
         processes.append(conductor)
-        await asyncio.sleep(1)
+        await wait_for_http_ready(api_url(conductor_port, "/"))
         status, body = http_json("GET", api_url(conductor_port, f"/api/instances/{instance_id}"))
         evidence.check("conductor-daemon:restart-recovers-instance-metadata", status == 200 and body["instance"]["id"] == instance_id, status=status, process_status=body.get("instance", {}).get("process_status"))
 
-        # Performer online, offline, online again through Conductor controls.
-        status, body = http_json("POST", api_url(conductor_port, f"/api/instances/{instance_id}/start"), {})
-        evidence.check("conductor-api:POST /api/instances/{id}/start", status == 200 and body["instance"]["process_status"] == "running", status=status)
-        instance = body["instance"]
-        status, body = http_json("POST", api_url(conductor_port, f"/api/instances/{instance_id}/stop"), {})
-        evidence.check("performer-lifecycle:offline-stop", status == 200 and body["instance"]["process_status"] == "stopped", status=status)
-        status, body = http_json("POST", api_url(conductor_port, f"/api/instances/{instance_id}/start"), {})
-        evidence.check("performer-lifecycle:online-restart", status == 200 and body["instance"]["process_status"] == "running", status=status)
-        instance = body["instance"]
+        linear_agent_sessions = ((linear["issue"].get("agentSessions") or {}).get("nodes") or [])
+        linear_agent_session = linear_agent_sessions[0] if linear_agent_sessions else {}
+        webhook_payload = {
+            "type": "AgentSessionEvent",
+            "action": "created",
+            "workspace": {"id": workspace_id},
+            "agentSession": {
+                "id": linear_agent_session.get("id") or f"session-{uuid.uuid4().hex}",
+                "appUserId": agent_app_user_id,
+                "appUser": {"id": agent_app_user_id},
+                "issue": {
+                    "id": linear["issue"]["id"],
+                    "identifier": linear["issue"]["identifier"],
+                    "project": {"slugId": linear["project"]["slugId"]},
+                    "assignee": linear["issue"].get("assignee"),
+                    "delegate": linear["issue"].get("delegate"),
+                },
+            },
+        }
+        raw_webhook = json.dumps(webhook_payload).encode()
+        status, body = http_json(
+            "POST",
+            api_url(podium_port, "/api/v1/linear/webhooks/agent-session"),
+            raw_webhook,
+            headers={"Linear-Signature": linear_webhook_signature(webhook_secret, raw_webhook)},
+        )
+        evidence.check(
+            "podium-api:/api/v1/linear/webhooks/agent-session queues-dispatch",
+            status == 200 and body.get("queued") == 1,
+            status=status,
+            body=body,
+        )
+        dispatch_instance_status = 0
+        dispatch_instance_body: dict[str, Any] = {}
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            dispatch_instance_status, dispatch_instance_body = http_json(
+                "GET", api_url(conductor_port, f"/api/instances/{instance_id}")
+            )
+            process_status = dispatch_instance_body.get("instance", {}).get("process_status")
+            if dispatch_instance_status == 200 and process_status in {"running", "exited"}:
+                break
+            await asyncio.sleep(0.5)
+        evidence.check(
+            "conductor-dispatch:agent-session-starts-one-shot",
+            dispatch_instance_status == 200
+            and dispatch_instance_body.get("instance", {}).get("process_status") in {"running", "exited"},
+            status=dispatch_instance_status,
+            process_status=dispatch_instance_body.get("instance", {}).get("process_status")
+            if isinstance(dispatch_instance_body, dict)
+            else None,
+        )
+        instance = dispatch_instance_body["instance"]
 
         run_result = await wait_for_run(
             token=token,
@@ -671,6 +978,7 @@ No-op.
             conductor_port=conductor_port,
             evidence=evidence,
             timeout_seconds=args.timeout,
+            stage_timeout_seconds=args.stage_timeout,
             permission_approval_probe=args.permission_approval_probe,
         )
         if args.permission_approval_probe:
@@ -695,6 +1003,14 @@ No-op.
                 issue["state"]["type"] in {"completed", "canceled"},
                 identifier=issue["identifier"],
                 state=issue["state"],
+            )
+            evidence.check(
+                "real-flow:linear-agent-app-user-dispatched",
+                args.simulate_agent_webhook or ((issue.get("delegate") or {}).get("id") == agent_app_user_id),
+                expected_agent_app_user_id=agent_app_user_id,
+                actual_delegate=issue.get("delegate"),
+                actual_assignee=issue.get("assignee"),
+                simulated=args.simulate_agent_webhook,
             )
             evidence.check("real-flow:workspace-result", result_path.exists(), path=str(result_path))
             evidence.check(
@@ -724,6 +1040,25 @@ No-op.
                 for grandchild in gate["children"]["nodes"]
                 if any(label["name"] == "performer:type/evidence" for label in grandchild["labels"]["nodes"])
             ]
+            evidence.check(
+                "stage:gate_created",
+                bool(gates),
+                gates=[{"identifier": gate["identifier"], "state": gate["state"]} for gate in gates],
+            )
+            evidence.check(
+                "stage:evidence_created",
+                bool(evidence_issues),
+                evidence=[{"identifier": item["identifier"], "state": item["state"]} for item in evidence_issues],
+            )
+            evidence.check(
+                "stage:final_done",
+                tree["state"]["type"] in {"completed", "canceled"}
+                and all(gate["state"]["type"] in {"completed", "canceled"} for gate in gates)
+                and all(item["state"]["type"] in {"completed", "canceled"} for item in evidence_issues),
+                issue_state=tree["state"],
+                gates=[{"identifier": gate["identifier"], "state": gate["state"]} for gate in gates],
+                evidence=[{"identifier": item["identifier"], "state": item["state"]} for item in evidence_issues],
+            )
             gate_failed = any(
                 any(label["name"] == "performer:gate/failed" for label in node["labels"]["nodes"])
                 for node in [tree, *gates]
@@ -749,6 +1084,20 @@ No-op.
                 labels=issue_labels,
                 gate_failed=gate_failed,
             )
+            delegated_acceptance_issues = [*gates, *evidence_issues]
+            evidence.check(
+                "acceptance:all-gate-and-evidence-issues-delegated",
+                bool(delegated_acceptance_issues)
+                and all((item.get("delegate") or {}).get("id") == agent_app_user_id for item in delegated_acceptance_issues),
+                expected_agent_app_user_id=agent_app_user_id,
+                issues=[
+                    {
+                        "identifier": item["identifier"],
+                        "delegate": item.get("delegate"),
+                    }
+                    for item in delegated_acceptance_issues
+                ],
+            )
 
         for method, path, payload in [
             ("GET", "/api/issues", None),
@@ -773,9 +1122,6 @@ No-op.
             status, body = http_json("GET", api_url(conductor_port, f"/api/runs/{ops_run_id}"))
             evidence.check("conductor-api:GET /api/runs/{id}", status == 200, status=status)
 
-        status, body = http_json("POST", api_url(conductor_port, f"/api/instances/{instance_id}/restart"), {})
-        evidence.check("conductor-api:POST /api/instances/{id}/restart", status == 200, status=status, process_status=body.get("instance", {}).get("process_status"))
-        live_restart_pid = body.get("instance", {}).get("pid")
         conductor.stop()
         processes.remove(conductor)
         conductor = start_process(
@@ -785,16 +1131,15 @@ No-op.
             stdout_path=root / "conductor-live-recovered.log",
         )
         processes.append(conductor)
-        await asyncio.sleep(1)
+        await wait_for_http_ready(api_url(conductor_port, "/"))
         status, body = http_json("GET", api_url(conductor_port, f"/api/instances/{instance_id}"))
         recovered = body.get("instance", {}) if isinstance(body, dict) else {}
         evidence.check(
-            "conductor-daemon:restart-recovers-live-performer",
-            status == 200 and recovered.get("process_status") == "running" and recovered.get("pid") == live_restart_pid,
+            "conductor-daemon:restart-recovers-completed-one-shot",
+            status == 200 and recovered.get("process_status") in {"exited", "stopped"},
             status=status,
             process_status=recovered.get("process_status"),
             pid=recovered.get("pid"),
-            expected_pid=live_restart_pid,
         )
         status, body = http_json("POST", api_url(conductor_port, f"/api/instances/{instance_id}/stop"), {})
         evidence.check("conductor-api:POST /api/instances/{id}/stop", status == 200, status=status)
@@ -805,8 +1150,8 @@ No-op.
             "repo_source_type": "local_path",
             "repo_source_value": str(disposable_fixture),
             "linear_project": linear["project"]["slugId"],
-            "linear_filters": {"labels": [f"never-{run_id}"], "active_states": ["Todo"]},
-            "workflow_profile": "default",
+            "linear_filters": {"linear_agent_app_user_id": agent_app_user_id, "active_states": ["Todo"]},
+            "workflow_profile": "task",
             "workflow_inputs": {},
         }
         status, body = http_json("POST", api_url(conductor_port, "/api/instances"), disposable_payload)
@@ -828,7 +1173,14 @@ def parser() -> argparse.ArgumentParser:
     arg_parser.add_argument("--out", type=Path, default=Path(".test-real-flow/e2e-matrix"))
     arg_parser.add_argument("--project-slug", default=DEFAULT_PROJECT_SLUG)
     arg_parser.add_argument("--acceptance-gates", action=argparse.BooleanOptionalAction, default=True)
+    arg_parser.add_argument("--e2e-gate-mode", choices=["smoke", "strict"], default="smoke")
+    arg_parser.add_argument("--stage-timeout", type=int, default=120)
     arg_parser.add_argument("--permission-approval-probe", action="store_true")
+    arg_parser.add_argument(
+        "--simulate-agent-webhook",
+        action="store_true",
+        help="Use a synthetic AgentSessionEvent instead of requiring the Linear issue to be delegated to the app user.",
+    )
     arg_parser.add_argument("--timeout", type=int, default=420)
     return arg_parser
 
@@ -838,7 +1190,7 @@ def main() -> int:
     try:
         report = asyncio.run(run(args))
     except Exception as exc:
-        print(f"real_symphony_e2e failed: {exc}", file=sys.stderr)
+        print(f"real_symphony_e2e failed: {exc!r}", file=sys.stderr)
         return 1
     print(json.dumps({"report": str(args.out / "real-symphony-e2e-report.json"), "failures": len(report["failures"])}, indent=2))
     return 0 if not report["failures"] else 2

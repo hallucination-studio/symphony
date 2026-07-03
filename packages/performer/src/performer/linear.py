@@ -29,6 +29,7 @@ nodes {
   state { name }
   project { slugId name }
   assignee { id }
+  delegate { id }
   labels { nodes { name } }
   inverseRelations { nodes { type issue { id identifier state { name } } } }
 }
@@ -36,17 +37,17 @@ pageInfo { hasNextPage endCursor }
 """
 
 
-def _issues_query(operation_name: str, *, include_assignee_filter: bool) -> str:
-    assignee_variable = ", $assigneeId: ID" if include_assignee_filter else ""
-    assignee_filter = "\n      assignee: { id: { eq: $assigneeId } }" if include_assignee_filter else ""
+def _issues_query(operation_name: str, *, include_delegate_filter: bool) -> str:
+    delegate_variable = ", $delegateId: ID" if include_delegate_filter else ""
+    delegate_filter = "\n      delegate: { id: { eq: $delegateId } }" if include_delegate_filter else ""
     return f"""
-query {operation_name}($projectSlug: String!, $stateNames: [String!], $first: Int!, $after: String{assignee_variable}) {{
+query {operation_name}($projectSlug: String!, $stateNames: [String!], $first: Int!, $after: String{delegate_variable}) {{
   issues(
     first: $first
     after: $after
     filter: {{
       project: {{ slugId: {{ eq: $projectSlug }} }}
-      state: {{ name: {{ in: $stateNames }} }}{assignee_filter}
+      state: {{ name: {{ in: $stateNames }} }}{delegate_filter}
     }}
   ) {{
     {ISSUE_FIELDS}
@@ -55,8 +56,8 @@ query {operation_name}($projectSlug: String!, $stateNames: [String!], $first: In
 """
 
 
-CANDIDATE_QUERY = _issues_query("PerformerCandidateIssues", include_assignee_filter=False)
-ISSUES_BY_STATES_QUERY = _issues_query("PerformerIssuesByStates", include_assignee_filter=False)
+CANDIDATE_QUERY = _issues_query("PerformerCandidateIssues", include_delegate_filter=False)
+ISSUES_BY_STATES_QUERY = _issues_query("PerformerIssuesByStates", include_delegate_filter=False)
 
 
 def _issues_query_and_variables(
@@ -66,16 +67,19 @@ def _issues_query_and_variables(
     *,
     page_size: int,
 ) -> tuple[str, dict[str, Any]]:
-    include_assignee_filter = config.assignee_id is not None
+    include_delegate_filter = config.required_delegate_id is not None
     variables: dict[str, Any] = {
         "projectSlug": config.project_slug,
         "stateNames": state_names,
         "first": page_size,
         "after": None,
     }
-    if config.assignee_id is not None:
-        variables["assigneeId"] = config.assignee_id
-    return _issues_query(operation_name, include_assignee_filter=include_assignee_filter), variables
+    if config.required_delegate_id is not None:
+        variables["delegateId"] = config.required_delegate_id
+    return _issues_query(
+        operation_name,
+        include_delegate_filter=include_delegate_filter,
+    ), variables
 
 
 ISSUE_STATES_QUERY = """
@@ -89,6 +93,7 @@ query PerformerIssueStates($ids: [ID!], $projectSlug: String!) {
       state { name }
       project { slugId name }
       assignee { id }
+      delegate { id }
       labels { nodes { name } }
       url
       inverseRelations { nodes { type issue { id identifier state { name } } } }
@@ -211,7 +216,8 @@ mutation PerformerCreateIssue(
   $labelIds: [String!],
   $title: String!,
   $description: String!,
-  $parentId: String
+  $parentId: String,
+  $delegateId: String
 ) {
   issueCreate(input: {
     teamId: $teamId,
@@ -220,7 +226,8 @@ mutation PerformerCreateIssue(
     labelIds: $labelIds,
     title: $title,
     description: $description,
-    parentId: $parentId
+    parentId: $parentId,
+    delegateId: $delegateId
   }) {
     success
     issue {
@@ -229,6 +236,7 @@ mutation PerformerCreateIssue(
       title
       url
       state { name }
+      delegate { id }
       labels { nodes { name } }
     }
   }
@@ -248,6 +256,7 @@ query PerformerIssueChildren($issueId: String!) {
         description
         url
         state { name }
+        delegate { id }
         labels { nodes { name } }
       }
     }
@@ -323,6 +332,20 @@ mutation PerformerUpdateIssueLabels($issueId: String!, $labelIds: [String!]) {
       id
       identifier
       labels { nodes { id name } }
+    }
+  }
+}
+"""
+
+
+ISSUE_UPDATE_DELEGATE_MUTATION = """
+mutation PerformerUpdateIssueDelegate($issueId: String!, $delegateId: String!) {
+  issueUpdate(id: $issueId, input: { delegateId: $delegateId }) {
+    success
+    issue {
+      id
+      identifier
+      delegate { id }
     }
   }
 }
@@ -507,6 +530,7 @@ class LinearClient:
         title: str,
         description: str,
         parent_id: str | None = None,
+        delegate_id: str | None = None,
     ) -> dict[str, Any]:
         payload = await self.graphql(
             ISSUE_CREATE_MUTATION,
@@ -518,12 +542,27 @@ class LinearClient:
                 "title": title,
                 "description": description,
                 "parentId": parent_id,
+                "delegateId": delegate_id,
             },
         )
         result = ((payload.get("data") or {}).get("issueCreate") or {})
         issue = result.get("issue") if isinstance(result, dict) else {}
         if not result.get("success") or not isinstance(issue, dict) or not issue.get("id"):
             raise LinearError("linear_issue_create_failed", "Linear issueCreate returned success=false")
+        current_delegate = issue.get("delegate") if isinstance(issue.get("delegate"), dict) else None
+        if delegate_id and (current_delegate or {}).get("id") != delegate_id:
+            issue = await self.update_issue_delegate(str(issue["id"]), delegate_id)
+        return issue
+
+    async def update_issue_delegate(self, issue_id: str, delegate_id: str) -> dict[str, Any]:
+        payload = await self.graphql(
+            ISSUE_UPDATE_DELEGATE_MUTATION,
+            {"issueId": issue_id, "delegateId": delegate_id},
+        )
+        result = ((payload.get("data") or {}).get("issueUpdate") or {})
+        issue = result.get("issue") if isinstance(result, dict) else {}
+        if not result.get("success") or not isinstance(issue, dict) or not issue.get("id"):
+            raise LinearError("linear_issue_delegate_update_failed", "Linear issueUpdate delegate returned success=false")
         return issue
 
     async def fetch_child_issues(self, parent_issue_id: str, *, label_name: str | None = None) -> list[dict[str, Any]]:
@@ -611,6 +650,7 @@ class LinearClient:
         title: str,
         description: str,
         label_names: list[str],
+        delegate_id: str | None = None,
     ) -> dict[str, Any]:
         context = await self._fetch_issue_creation_context(parent_issue_id)
         labels = [await self._ensure_issue_label(context["team_id"], label_name) for label_name in label_names]
@@ -622,6 +662,7 @@ class LinearClient:
             title=title,
             description=description,
             parent_id=parent_issue_id,
+            delegate_id=delegate_id,
         )
 
     async def set_issue_lifecycle_label(self, issue_id: str, label_name: str) -> dict[str, Any]:
@@ -805,6 +846,7 @@ class LinearTracker:
         title: str,
         description: str,
         parent_id: str | None = None,
+        delegate_id: str | None = None,
     ) -> dict[str, Any]:
         return await self.client.create_issue(
             team_id=team_id,
@@ -814,6 +856,7 @@ class LinearTracker:
             title=title,
             description=description,
             parent_id=parent_id,
+            delegate_id=delegate_id,
         )
 
     async def fetch_child_issues(self, parent_issue_id: str, *, label_name: str | None = None) -> list[dict[str, Any]]:
@@ -826,12 +869,14 @@ class LinearTracker:
         title: str,
         description: str,
         label_names: list[str],
+        delegate_id: str | None = None,
     ) -> dict[str, Any]:
         return await self.client.create_child_issue_for(
             parent_issue_id=parent_issue_id,
             title=title,
             description=description,
             label_names=label_names,
+            delegate_id=delegate_id,
         )
 
     async def create_issue_relation(
@@ -954,6 +999,7 @@ def _normalize_issue(node: dict[str, Any]) -> Issue:
     state_name = state.get("name") if isinstance(state, dict) else state
     project = node.get("project")
     assignee = node.get("assignee")
+    delegate = node.get("delegate")
     return Issue(
         id=node.get("id") or "",
         identifier=node.get("identifier") or "",
@@ -968,6 +1014,7 @@ def _normalize_issue(node: dict[str, Any]) -> Issue:
         created_at=node.get("createdAt"),
         updated_at=node.get("updatedAt"),
         assignee_id=assignee.get("id") if isinstance(assignee, dict) else None,
+        delegate_id=delegate.get("id") if isinstance(delegate, dict) else None,
         project_slug=project.get("slugId") if isinstance(project, dict) else None,
         project_name=project.get("name") if isinstance(project, dict) else None,
     )

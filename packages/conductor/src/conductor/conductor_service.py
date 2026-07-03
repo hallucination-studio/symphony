@@ -5,6 +5,7 @@ from typing import Any
 import shutil
 import subprocess
 from datetime import datetime, timezone
+import httpx
 
 from .conductor_models import (
     ConductorSettings,
@@ -22,8 +23,7 @@ from .conductor_workflow import (
     validate_instance_workflow,
     workflow_profiles,
 )
-from .podium_registration import PodiumRegistrationError, register_with_podium
-from performer_api.ops_models import OpsSnapshot
+from performer_api.ops_models import OpsSnapshot, TraceEvent
 from performer_api.ops_projection import build_issue_detail, build_issue_list, build_run_detail, build_trace_stream
 from performer_api.ops_retention import RetentionPolicy
 from performer_api.ops_store import OpsStore
@@ -44,6 +44,8 @@ WORKSPACE_INIT_EXCLUDES = {
     "node_modules",
     "target",
 }
+REPOSITORY_INTEGRATION_LABEL = "performer:type/repository-integration"
+REPOSITORY_HANDOFF_MARKER_NAME = "SYMPHONY REPOSITORY HANDOFF"
 
 
 class ConductorServiceError(Exception):
@@ -51,6 +53,212 @@ class ConductorServiceError(Exception):
         super().__init__(message)
         self.code = code
         self.diagnostics = diagnostics or []
+
+
+class RepositoryHandoffLinearProxy:
+    def __init__(self, *, endpoint: str, api_key: str):
+        self.endpoint = endpoint
+        self.api_key = api_key
+
+    async def graphql(self, query: str, variables: dict[str, Any] | None = None) -> dict[str, Any]:
+        headers = {"Authorization": self.api_key, "Content-Type": "application/json"}
+        async with httpx.AsyncClient(timeout=30, trust_env=False) as client:
+            response = await client.post(self.endpoint, json={"query": query, "variables": variables or {}}, headers=headers)
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise ConductorServiceError("linear_unknown_payload", "Linear response was not an object")
+        if payload.get("errors"):
+            raise ConductorServiceError("linear_graphql_errors", str(payload["errors"]))
+        return payload
+
+    async def fetch_child_issues(self, parent_issue_id: str, *, label_name: str | None = None) -> list[dict[str, Any]]:
+        payload = await self.graphql(
+            """
+query RepositoryHandoffChildren($issueId: String!) {
+  issue(id: $issueId) {
+    children(first: 100) {
+      nodes {
+        id
+        identifier
+        title
+        description
+        url
+        delegate { id }
+        labels { nodes { name } }
+      }
+    }
+  }
+}
+""",
+            {"issueId": parent_issue_id},
+        )
+        nodes = ((((payload.get("data") or {}).get("issue") or {}).get("children") or {}).get("nodes") or [])
+        children = [_normalize_linear_issue_dict(node) for node in nodes if isinstance(node, dict)]
+        if label_name is None:
+            return children
+        wanted = label_name.strip().lower()
+        return [child for child in children if wanted in {str(label).lower() for label in child.get("labels", [])}]
+
+    async def create_child_issue_for(
+        self,
+        *,
+        parent_issue_id: str,
+        title: str,
+        description: str,
+        label_names: list[str],
+        delegate_id: str | None = None,
+    ) -> dict[str, Any]:
+        context = await self._creation_context(parent_issue_id)
+        label_ids = [await self._ensure_label_id(context["team_id"], name) for name in label_names]
+        payload = await self.graphql(
+            """
+mutation RepositoryHandoffCreateChild(
+  $teamId: String!,
+  $projectId: String!,
+  $stateId: String!,
+  $labelIds: [String!],
+  $title: String!,
+  $description: String!,
+  $parentId: String,
+  $delegateId: String
+) {
+  issueCreate(input: {
+    teamId: $teamId,
+    projectId: $projectId,
+    stateId: $stateId,
+    labelIds: $labelIds,
+    title: $title,
+    description: $description,
+    parentId: $parentId,
+    delegateId: $delegateId
+  }) {
+    success
+    issue {
+      id
+      identifier
+      title
+      description
+      url
+      delegate { id }
+      labels { nodes { name } }
+    }
+  }
+}
+""",
+            {
+                "teamId": context["team_id"],
+                "projectId": context["project_id"],
+                "stateId": context["state_id"],
+                "labelIds": label_ids,
+                "title": title,
+                "description": description,
+                "parentId": parent_issue_id,
+                "delegateId": delegate_id,
+            },
+        )
+        result = ((payload.get("data") or {}).get("issueCreate") or {})
+        issue = result.get("issue") if isinstance(result, dict) else {}
+        if not result.get("success") or not isinstance(issue, dict) or not issue.get("id"):
+            raise ConductorServiceError("linear_issue_create_failed", "Linear issueCreate returned success=false")
+        return _normalize_linear_issue_dict(issue)
+
+    async def update_issue_description_marker_block(
+        self,
+        issue_id: str,
+        marker_name: str,
+        block: str,
+    ) -> dict[str, Any]:
+        payload = await self.graphql(
+            """
+query RepositoryHandoffDescription($issueId: String!) {
+  issue(id: $issueId) { id identifier description }
+}
+""",
+            {"issueId": issue_id},
+        )
+        issue = ((payload.get("data") or {}).get("issue") or {})
+        current = str(issue.get("description") or "") if isinstance(issue, dict) else ""
+        description = _replace_marker_block(current, marker_name, block)
+        payload = await self.graphql(
+            """
+mutation RepositoryHandoffUpdateDescription($issueId: String!, $description: String!) {
+  issueUpdate(id: $issueId, input: { description: $description }) {
+    success
+    issue { id identifier description }
+  }
+}
+""",
+            {"issueId": issue_id, "description": description},
+        )
+        result = ((payload.get("data") or {}).get("issueUpdate") or {})
+        return {"success": bool(result.get("success")), "issue_id": issue_id, "description": description}
+
+    async def comment_issue(self, issue_id: str, body: str) -> dict[str, Any]:
+        payload = await self.graphql(
+            """
+mutation RepositoryHandoffComment($issueId: String!, $body: String!) {
+  commentCreate(input: { issueId: $issueId, body: $body }) {
+    success
+    comment { id }
+  }
+}
+""",
+            {"issueId": issue_id, "body": body},
+        )
+        result = ((payload.get("data") or {}).get("commentCreate") or {})
+        comment = result.get("comment") if isinstance(result, dict) else {}
+        return {"success": bool(result.get("success")), "comment_id": comment.get("id") if isinstance(comment, dict) else None}
+
+    async def _creation_context(self, issue_id: str) -> dict[str, str]:
+        payload = await self.graphql(
+            """
+query RepositoryHandoffCreationContext($issueId: String!) {
+  issue(id: $issueId) {
+    team { id }
+    project { id }
+    state { id }
+  }
+}
+""",
+            {"issueId": issue_id},
+        )
+        issue = ((payload.get("data") or {}).get("issue") or {})
+        team = issue.get("team") if isinstance(issue, dict) and isinstance(issue.get("team"), dict) else {}
+        project = issue.get("project") if isinstance(issue, dict) and isinstance(issue.get("project"), dict) else {}
+        state = issue.get("state") if isinstance(issue, dict) and isinstance(issue.get("state"), dict) else {}
+        return {"team_id": str(team.get("id") or ""), "project_id": str(project.get("id") or ""), "state_id": str(state.get("id") or "")}
+
+    async def _ensure_label_id(self, team_id: str, label_name: str) -> str:
+        payload = await self.graphql(
+            """
+query RepositoryHandoffLabelByName($name: String!, $teamId: ID!) {
+  issueLabels(first: 20, filter: { name: { eq: $name }, team: { id: { eq: $teamId } } }) {
+    nodes { id name }
+  }
+}
+""",
+            {"name": label_name, "teamId": team_id},
+        )
+        nodes = (((payload.get("data") or {}).get("issueLabels") or {}).get("nodes") or [])
+        for node in nodes:
+            if isinstance(node, dict) and node.get("id"):
+                return str(node["id"])
+        payload = await self.graphql(
+            """
+mutation RepositoryHandoffCreateLabel($name: String!, $teamId: String!) {
+  issueLabelCreate(input: { name: $name, teamId: $teamId }) {
+    success
+    issueLabel { id name }
+  }
+}
+""",
+            {"name": label_name, "teamId": team_id},
+        )
+        label = (((payload.get("data") or {}).get("issueLabelCreate") or {}).get("issueLabel") or {})
+        if not isinstance(label, dict) or not label.get("id"):
+            raise ConductorServiceError("linear_label_create_failed", f"Could not create Linear label: {label_name}")
+        return str(label["id"])
 
 
 class ConductorService:
@@ -64,7 +272,9 @@ class ConductorService:
         self.store = store
         self.data_root = data_root
         self.runtime_manager = runtime_manager or ConductorRuntimeManager()
+        self.repository_handoff_tracker_factory = self._repository_handoff_tracker
         self.data_root.mkdir(parents=True, exist_ok=True)
+        self._gated_followups_started: set[tuple[str, str, str]] = set()
         self._normalize_stale_runtime_state()
 
     def list_instances(self) -> list[InstanceRecord]:
@@ -82,22 +292,338 @@ class ConductorService:
         merged.update(payload)
         return self.update_settings(ConductorSettings.from_dict(merged))
 
-    def register_with_podium(self) -> dict[str, object]:
-        try:
-            return register_with_podium(self.store.get_settings())
-        except PodiumRegistrationError as exc:
-            raise ConductorServiceError(exc.code, str(exc)) from exc
-
     async def dispatch_podium_event(self, event: dict[str, Any]) -> dict[str, Any]:
         issue_id = str(event.get("issue_id") or "").strip()
         issue_identifier = str(event.get("issue_identifier") or "").strip()
         if not issue_id and not issue_identifier:
             raise ConductorServiceError("missing_issue_id", "Podium dispatch event requires issue_id or issue_identifier")
+        project_slug = str(event.get("project_slug") or "").strip()
+        agent_app_user_id = str(event.get("agent_app_user_id") or event.get("app_user_id") or "").strip()
+        if not agent_app_user_id:
+            return {
+                "status": "skipped",
+                "issue_id": issue_id or None,
+                "issue_identifier": issue_identifier or None,
+                "reason": "missing_linear_agent_app_user",
+            }
+        instance = self._instance_for_podium_event(project_slug=project_slug, agent_app_user_id=agent_app_user_id)
+        if instance is None:
+            return {
+                "status": "skipped",
+                "issue_id": issue_id or None,
+                "issue_identifier": issue_identifier or None,
+                "reason": "no_matching_instance",
+            }
+        started = await self.runtime_manager.start(
+            instance,
+            env=self._runtime_env(),
+            dispatch_issue_id=issue_id or issue_identifier,
+        )
+        self.store.update_instance(started)
         return {
             "status": "accepted",
             "issue_id": issue_id or None,
             "issue_identifier": issue_identifier or None,
+            "instance_id": instance.id,
+            "agent_session_id": event.get("agent_session_id") or None,
+            "agent_app_user_id": agent_app_user_id,
         }
+
+    async def poll_podium_dispatch_once(self) -> dict[str, Any]:
+        settings = self.store.get_settings()
+        podium_url = settings.podium_url.strip().rstrip("/")
+        runtime_token = settings.podium_runtime_token.strip()
+        if not podium_url or not runtime_token:
+            return {"status": "skipped", "reason": "runtime_not_configured"}
+        headers = {"Authorization": f"Bearer {runtime_token}"}
+        async with httpx.AsyncClient(timeout=10, trust_env=False) as client:
+            lease_response = await client.post(f"{podium_url}/api/v1/runtime/dispatches/lease", headers=headers)
+            if lease_response.status_code == 401:
+                return {"status": "skipped", "reason": "runtime_unauthorized"}
+            lease_response.raise_for_status()
+            leased = lease_response.json().get("dispatch")
+            if not leased:
+                return {"status": "idle"}
+            result = await self.dispatch_podium_event(leased)
+            await client.post(
+                f"{podium_url}/api/v1/runtime/dispatches/ack",
+                headers=headers,
+                json={
+                    "dispatch_id": leased.get("dispatch_id"),
+                    "status": result.get("status", "accepted"),
+                    "reason": result.get("reason"),
+                    "runtime_phase": result.get("runtime_phase"),
+                },
+            )
+            return {"status": "leased", "dispatch": leased, "result": result}
+
+    async def coordinate_background_once(self) -> dict[str, Any]:
+        closeout = await self.coordinate_repository_handoff_closeouts()
+        gated_followups_started = 0
+        resumed = 0
+        for instance in self.store.list_instances():
+            current = self.get_instance(instance.id)
+            if current is None:
+                continue
+            resume = await self._resume_pending_performer_work(current)
+            if resume is not None:
+                self.store.update_instance(resume)
+                resumed += 1
+                continue
+            issue_id = self._pending_gated_followup_issue_id(current)
+            if issue_id is None:
+                continue
+            followup = await self._coordinate_gated_followup(current, issue_id=issue_id)
+            if followup is None:
+                continue
+            followup = self._with_gated_followup_stage(followup, issue_id, "gate")
+            self.store.update_instance(followup)
+            gated_followups_started += 1
+        return {
+            "repository_handoff": closeout,
+            "gated_followups_started": gated_followups_started,
+            "resumed": resumed,
+        }
+
+    async def _coordinate_gated_followup(self, instance: InstanceRecord, *, issue_id: str) -> InstanceRecord | None:
+        if instance.workflow_profile != "gated-task":
+            return None
+        refresh = getattr(self.runtime_manager, "refresh", None)
+        if not callable(refresh):
+            return None
+        refreshed = refresh(instance)
+        if refreshed.process_status not in {"exited", "stopped"}:
+            return None
+        snapshot = OpsStore(Path(instance.persistence_path).parent / "ops.json").load()
+        issue = snapshot.issues.get(issue_id)
+        if issue is None or issue.state != "completed" or issue.run_count != 1:
+            return None
+        stage = self._next_gated_followup_stage(refreshed, issue_id)
+        if stage is None:
+            return None
+        followup_key = (instance.id, issue_id, stage)
+        self._gated_followups_started.add(followup_key)
+        self._record_gated_followup_event(refreshed, issue_id=issue_id, stage=stage, event_type="gate_followup_starting")
+        followup = await self.runtime_manager.start(
+            refreshed.with_updates(process_status="starting"),
+            env=self._runtime_env(),
+            dispatch_issue_id=issue_id,
+        )
+        self._record_gated_followup_event(followup, issue_id=issue_id, stage=stage, event_type="gate_followup_started")
+        return followup
+
+    async def get_instance_coordinated(self, instance_id: str) -> InstanceRecord | None:
+        instance = self.get_instance(instance_id)
+        if instance is None:
+            return None
+        await self.coordinate_repository_handoff_closeouts(instance_id=instance_id)
+        resumed = await self._resume_pending_performer_work(instance)
+        if resumed is not None:
+            self.store.update_instance(resumed)
+            return resumed
+        issue_id = self._pending_gated_followup_issue_id(instance)
+        if issue_id is None:
+            return instance
+        followup = await self._coordinate_gated_followup(instance, issue_id=issue_id)
+        if followup is None:
+            return instance
+        followup = self._with_gated_followup_stage(followup, issue_id, "gate")
+        self.store.update_instance(followup)
+        return followup
+
+    async def coordinate_repository_handoff_closeouts(self, *, instance_id: str | None = None) -> dict[str, Any]:
+        rows = self._ops_stores()
+        if instance_id is not None:
+            rows = [row for row in rows if row[0].id == instance_id]
+        closed_out = 0
+        failed = 0
+        skipped = 0
+        for instance, store, snapshot in rows:
+            closeout_source_ids = {
+                str(event.payload.get("source_event_id") or "")
+                for event in snapshot.events
+                if event.event_type == "repository_handoff_closeout.v1"
+                and event.payload.get("status") == "completed"
+            }
+            for event in list(snapshot.events):
+                if event.event_type != "repository_handoff_report.v1":
+                    continue
+                if event.event_id in closeout_source_ids:
+                    skipped += 1
+                    continue
+                try:
+                    result = await self._closeout_repository_handoff(instance, event)
+                except Exception as exc:
+                    failed += 1
+                    snapshot = store.load()
+                    snapshot.events.append(
+                        _repository_handoff_closeout_event(
+                            snapshot,
+                            source_event=event,
+                            status="failed",
+                            payload={"failure_reason": str(exc), "instance_id": instance.id},
+                        )
+                    )
+                    store.save(snapshot)
+                    continue
+                snapshot = store.load()
+                snapshot.events.append(
+                    _repository_handoff_closeout_event(
+                        snapshot,
+                        source_event=event,
+                        status="completed",
+                        payload={**result, "instance_id": instance.id},
+                    )
+                )
+                store.save(snapshot)
+                closed_out += 1
+        return {"closed_out": closed_out, "failed": failed, "skipped": skipped}
+
+    async def _closeout_repository_handoff(self, instance: InstanceRecord, event: TraceEvent) -> dict[str, Any]:
+        report = dict(event.payload)
+        issue_id = str(report.get("issue_id") or event.issue_id or "").strip()
+        issue_identifier = str(report.get("issue_identifier") or issue_id).strip()
+        if not issue_id:
+            raise ConductorServiceError("repository_handoff_missing_issue_id", "Repository handoff report missing issue_id")
+        tracker = self.repository_handoff_tracker_factory(instance)
+        child = await self._find_repository_integration_child(tracker, issue_id)
+        description = _repository_integration_description(report, instance=instance)
+        delegate_id = _linear_agent_app_user_id(instance.linear_filters) or None
+        mode = "updated"
+        if child is None:
+            create_child = getattr(tracker, "create_child_issue_for", None)
+            if not callable(create_child):
+                raise ConductorServiceError("repository_handoff_tracker_missing_create", "Tracker cannot create child issue")
+            child = await create_child(
+                parent_issue_id=issue_id,
+                title=f"Integrate {issue_identifier} implementation",
+                description=description,
+                label_names=[REPOSITORY_INTEGRATION_LABEL],
+                delegate_id=delegate_id,
+            )
+            mode = "created"
+        else:
+            update_description = getattr(tracker, "update_issue_description_marker_block", None)
+            if callable(update_description):
+                await update_description(
+                    str(child.get("id") or ""),
+                    REPOSITORY_HANDOFF_MARKER_NAME,
+                    description,
+                )
+        comment_result = await self._comment_repository_handoff(tracker, issue_id, report, child, instance)
+        return {
+            "status": "completed",
+            "closeout_mode": mode,
+            "child_issue_id": child.get("id"),
+            "child_issue_identifier": child.get("identifier"),
+            "child_issue_url": child.get("url"),
+            "comment_result": comment_result,
+            "source_event_id": event.event_id,
+        }
+
+    async def _find_repository_integration_child(self, tracker: Any, source_issue_id: str) -> dict[str, Any] | None:
+        fetch_children = getattr(tracker, "fetch_child_issues", None)
+        if not callable(fetch_children):
+            return None
+        children = await fetch_children(source_issue_id, label_name=REPOSITORY_INTEGRATION_LABEL)
+        marker = _repository_handoff_marker(source_issue_id)
+        for child in children:
+            if marker in str(child.get("description") or ""):
+                return child
+        return children[0] if children else None
+
+    async def _comment_repository_handoff(
+        self,
+        tracker: Any,
+        issue_id: str,
+        report: dict[str, Any],
+        child: dict[str, Any],
+        instance: InstanceRecord,
+    ) -> dict[str, Any] | None:
+        comment_issue = getattr(tracker, "comment_issue", None)
+        if not callable(comment_issue):
+            return None
+        mention = str(instance.linear_filters.get("integration_agent_mention") or "").strip()
+        if not mention:
+            mention = _linear_agent_app_user_id(instance.linear_filters)
+        body = _repository_handoff_comment(report, child=child, mention=mention)
+        return await comment_issue(issue_id, body)
+
+    def _repository_handoff_tracker(self, instance: InstanceRecord) -> Any:
+        settings = self.store.get_settings()
+        endpoint_base = settings.podium_url.strip().rstrip("/") or "https://podium.example"
+        return RepositoryHandoffLinearProxy(
+            endpoint=f"{endpoint_base}/api/v1/linear/graphql",
+            api_key=settings.podium_proxy_token.strip(),
+        )
+
+    async def _resume_pending_performer_work(self, instance: InstanceRecord) -> InstanceRecord | None:
+        refresh = getattr(self.runtime_manager, "refresh", None)
+        if not callable(refresh):
+            return None
+        refreshed = refresh(instance)
+        if refreshed.process_status not in {"exited", "stopped"}:
+            return None
+        if refreshed.last_exit_code not in {0, None}:
+            return None
+        persisted = PersistenceStore(Path(refreshed.persistence_path)).load()
+        if not (persisted.retry_attempts or persisted.continuations or persisted.blocked):
+            return None
+        return await self.runtime_manager.start(
+            refreshed.with_updates(process_status="starting"),
+            env=self._runtime_env(),
+        )
+
+    def _pending_gated_followup_issue_id(self, instance: InstanceRecord) -> str | None:
+        if instance.workflow_profile != "gated-task":
+            return None
+        snapshot = OpsStore(Path(instance.persistence_path).parent / "ops.json").load()
+        candidates = [
+            issue
+            for issue in snapshot.issues.values()
+            if issue.state == "completed"
+            and issue.run_count == 1
+            and self._next_gated_followup_stage(instance, issue.issue_id) is not None
+        ]
+        if not candidates:
+            return None
+        candidates.sort(key=lambda issue: issue.last_activity_at or issue.issue_identifier or issue.issue_id, reverse=True)
+        return candidates[0].issue_id
+
+    def _next_gated_followup_stage(self, instance: InstanceRecord, issue_id: str) -> str | None:
+        persisted = set(instance.gated_followup_stages.get(issue_id, []))
+        for stage in ("gate",):
+            if stage in persisted and instance.last_exit_code not in {0, None}:
+                self._gated_followups_started.discard((instance.id, issue_id, stage))
+                return stage
+            if stage not in persisted and (instance.id, issue_id, stage) not in self._gated_followups_started:
+                return stage
+        return None
+
+    def _with_gated_followup_stage(self, instance: InstanceRecord, issue_id: str, stage: str) -> InstanceRecord:
+        stages = {key: list(value) for key, value in instance.gated_followup_stages.items()}
+        issue_stages = list(stages.get(issue_id, []))
+        if stage not in issue_stages:
+            issue_stages.append(stage)
+        stages[issue_id] = issue_stages
+        return instance.with_updates(gated_followup_stages=stages)
+
+    def _record_gated_followup_event(self, instance: InstanceRecord, *, issue_id: str, stage: str, event_type: str) -> None:
+        path = Path(instance.persistence_path).parent / "ops.json"
+        store = OpsStore(path)
+        snapshot = store.load()
+        snapshot.events.append(
+            TraceEvent(
+                event_id=f"evt-{len(snapshot.events) + 1}",
+                event_type=event_type,
+                timestamp=utc_now().isoformat().replace("+00:00", "Z"),
+                issue_id=issue_id,
+                retention_tier="summary",
+                summary=stage,
+                payload={"instance_id": instance.id, "stage": stage},
+            )
+        )
+        store.save(snapshot)
 
     def dashboard(self) -> dict[str, Any]:
         instances = self.store.list_instances()
@@ -229,7 +755,16 @@ class ConductorService:
         return self.retention_status()
 
     def get_instance(self, instance_id: str) -> InstanceRecord | None:
-        return self.store.get_instance(instance_id)
+        instance = self.store.get_instance(instance_id)
+        if instance is None:
+            return None
+        refresh = getattr(self.runtime_manager, "refresh", None)
+        if not callable(refresh):
+            return instance
+        refreshed = refresh(instance)
+        if refreshed != instance:
+            self.store.update_instance(refreshed)
+        return refreshed
 
     def create_instance(self, request: InstanceCreateRequest) -> InstanceRecord:
         instance, validation = self._build_instance_candidate(request, persist_workflow=True)
@@ -541,7 +1076,8 @@ class ConductorService:
 
     def _generate_workflow(self, instance: InstanceRecord) -> str:
         try:
-            podium_url = self.store.get_settings().podium_url.strip() or "https://podium.example"
+            settings = self.store.get_settings()
+            podium_url = settings.podium_url.strip() or "https://podium.example"
             return generate_workflow_content(instance, podium_url=podium_url)
         except ConductorValidationError as exc:
             raise ConductorServiceError(exc.code, str(exc)) from exc
@@ -554,6 +1090,19 @@ class ConductorService:
         if current is None:
             raise ConductorServiceError("instance_not_found", f"Instance not found: {instance_id}")
         return current
+
+    def _instance_for_podium_event(self, *, project_slug: str, agent_app_user_id: str) -> InstanceRecord | None:
+        candidates = self.store.list_instances()
+        if project_slug:
+            candidates = [instance for instance in candidates if instance.linear_project == project_slug]
+        candidates = [
+            instance
+            for instance in candidates
+            if _linear_agent_app_user_id(instance.linear_filters) == agent_app_user_id
+        ]
+        if not candidates:
+            return None
+        return candidates[0]
 
     def _allocate_instance_id(self) -> str:
         existing = {instance.id for instance in self.store.list_instances()}
@@ -570,9 +1119,15 @@ class ConductorService:
         proxy_token = settings.podium_proxy_token.strip()
         if proxy_token:
             env["PODIUM_PROXY_TOKEN"] = proxy_token
-        linear_api_key = settings.linear_api_key.strip()
-        if linear_api_key and not proxy_token:
-            env["LINEAR_API_KEY"] = linear_api_key
+        runtime_token = settings.podium_runtime_token.strip()
+        if runtime_token:
+            env["PODIUM_RUNTIME_TOKEN"] = runtime_token
+        runtime_id = settings.podium_runtime_id.strip()
+        if runtime_id:
+            env["PODIUM_RUNTIME_ID"] = runtime_id
+        runtime_group_id = settings.runtime_group_id.strip()
+        if runtime_group_id:
+            env["PODIUM_RUNTIME_GROUP_ID"] = runtime_group_id
         return env
 
     def _normalize_stale_runtime_state(self) -> None:
@@ -642,6 +1197,37 @@ def json_stable(payload: dict[str, Any]) -> str:
     import json
 
     return json.dumps(payload, separators=(",", ":"), sort_keys=True)
+
+
+def _normalize_linear_issue_dict(node: dict[str, Any]) -> dict[str, Any]:
+    labels = node.get("labels") if isinstance(node.get("labels"), dict) else {}
+    label_nodes = labels.get("nodes") if isinstance(labels, dict) else []
+    delegate = node.get("delegate") if isinstance(node.get("delegate"), dict) else None
+    return {
+        "id": node.get("id"),
+        "identifier": node.get("identifier"),
+        "title": node.get("title"),
+        "description": node.get("description") or "",
+        "url": node.get("url"),
+        "delegate_id": delegate.get("id") if delegate else None,
+        "labels": [
+            str(label.get("name") or "")
+            for label in (label_nodes or [])
+            if isinstance(label, dict) and label.get("name")
+        ],
+    }
+
+
+def _replace_marker_block(current: str, marker_name: str, block: str) -> str:
+    start = f"<!-- {marker_name}:START -->"
+    end = f"<!-- {marker_name}:END -->"
+    replacement = f"{start}\n{block.strip()}\n{end}"
+    if start in current and end in current:
+        prefix, rest = current.split(start, 1)
+        _old, suffix = rest.split(end, 1)
+        return f"{prefix.rstrip()}\n\n{replacement}\n\n{suffix.lstrip()}".strip()
+    base = current.strip()
+    return f"{base}\n\n{replacement}".strip() if base else replacement
 
 
 def _persisted_session_row(session: PersistedSession) -> dict[str, Any]:
@@ -750,3 +1336,107 @@ def _int(value: Any) -> int:
     if isinstance(value, int):
         return value
     return 0
+
+
+def _linear_agent_app_user_id(filters: dict[str, Any]) -> str:
+    return str(filters.get("linear_agent_app_user_id") or filters.get("agent_app_user_id") or "").strip()
+
+
+def _repository_handoff_marker(source_issue_id: str) -> str:
+    return f"<!-- {REPOSITORY_HANDOFF_MARKER_NAME} source_issue_id={source_issue_id} -->"
+
+
+def _repository_handoff_closeout_event(
+    snapshot: OpsSnapshot,
+    *,
+    source_event: TraceEvent,
+    status: str,
+    payload: dict[str, Any],
+) -> TraceEvent:
+    return TraceEvent(
+        event_id=f"evt-{len(snapshot.events) + 1}",
+        event_type="repository_handoff_closeout.v1",
+        timestamp=utc_now().isoformat().replace("+00:00", "Z"),
+        issue_id=source_event.issue_id,
+        run_id=source_event.run_id,
+        attempt_id=source_event.attempt_id,
+        retention_tier="summary",
+        summary=status,
+        payload={"status": status, "source_event_id": source_event.event_id, **payload},
+    )
+
+
+def _repository_integration_description(report: dict[str, Any], *, instance: InstanceRecord) -> str:
+    issue_id = str(report.get("issue_id") or "")
+    issue_identifier = str(report.get("issue_identifier") or issue_id)
+    bundle = report.get("bundle") if isinstance(report.get("bundle"), dict) else {}
+    git_snapshot = report.get("git_snapshot") if isinstance(report.get("git_snapshot"), dict) else {}
+    structured = report.get("structured_result") if isinstance(report.get("structured_result"), dict) else {}
+    changed_files = git_snapshot.get("changed_files") if isinstance(git_snapshot.get("changed_files"), list) else []
+    manifest = report.get("artifact_manifest") if isinstance(report.get("artifact_manifest"), list) else []
+    return "\n".join(
+        [
+            _repository_handoff_marker(issue_id),
+            f"# Integrate {issue_identifier} implementation",
+            "",
+            f"Source issue: {issue_identifier} (`{issue_id}`)",
+            "Closeout mode: local_bundle",
+            f"Workspace path: `{report.get('workspace_path') or instance.workspace_root}`",
+            f"Bundle path: `{bundle.get('path') or ''}`",
+            f"Patch path: `{bundle.get('changes_patch_path') or ''}`",
+            f"Manifest path: `{bundle.get('manifest_path') or ''}`",
+            "",
+            "## Git Snapshot",
+            f"- Repository root: `{git_snapshot.get('repo_root') or 'workspace-only'}`",
+            f"- Branch: `{git_snapshot.get('branch') or 'unknown'}`",
+            f"- HEAD: `{git_snapshot.get('head_sha') or 'unknown'}`",
+            f"- Status: `{git_snapshot.get('status_porcelain') or 'clean-or-unavailable'}`",
+            f"- Diff stat: `{git_snapshot.get('diff_stat') or 'none'}`",
+            f"- Changed files: {', '.join(str(item) for item in changed_files) if changed_files else 'none'}",
+            "",
+            "## Test Evidence",
+            str(
+                structured.get("test_commands_and_exact_output")
+                or structured.get("tests")
+                or "See source issue implementation evidence."
+            ),
+            "",
+            "## Integration Steps",
+            "1. Inspect `changes.patch` and the manifest.",
+            "2. Apply tracked changes to the target repository branch without committing automatically.",
+            "3. Review copied untracked artifacts under the bundle `untracked/` directory.",
+            "4. Run the test evidence commands or equivalent repository verification.",
+            "",
+            "## Completion Criteria",
+            "- Required changes are integrated into the target branch.",
+            "- Verification passes after integration.",
+            "- Source issue remains traceable through this child issue and local bundle paths.",
+            "",
+            "## Artifact Manifest",
+            "\n".join(
+                f"- `{item.get('path')}` size={item.get('size')} sha256={item.get('sha256')}"
+                for item in manifest[:25]
+                if isinstance(item, dict)
+            )
+            or "No artifacts listed.",
+        ]
+    )
+
+
+def _repository_handoff_comment(report: dict[str, Any], *, child: dict[str, Any], mention: str) -> str:
+    issue_identifier = str(report.get("issue_identifier") or report.get("issue_id") or "source issue")
+    bundle = report.get("bundle") if isinstance(report.get("bundle"), dict) else {}
+    child_ref = child.get("url") or child.get("identifier") or child.get("id") or "integration child issue"
+    mention_line = f"{mention} " if mention else ""
+    return "\n".join(
+        [
+            f"{mention_line}Repository handoff is ready for {issue_identifier}.",
+            "",
+            f"Integration child: {child_ref}",
+            f"Bundle: `{bundle.get('path') or ''}`",
+            f"Patch: `{bundle.get('changes_patch_path') or ''}`",
+            f"Manifest: `{bundle.get('manifest_path') or ''}`",
+            "",
+            "Performer produced the local handoff bundle only. Conductor created this integration follow-up; no commit, push, or merge was performed.",
+        ]
+    )

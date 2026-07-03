@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import subprocess
 from typing import Any
 
 import pytest
@@ -12,6 +13,7 @@ from performer_api.config import (
     HooksConfig,
     PersistenceConfig,
     PollingConfig,
+    RepositoryHandoffConfig,
     ServiceConfig,
     TrackerConfig,
     WorkspaceConfig,
@@ -19,6 +21,7 @@ from performer_api.config import (
 from performer_api.models import Issue
 from performer_api.ops_store import OpsStore
 from performer_api.persistence import ops_snapshot_path_from_persistence_path
+from performer_api.persistence import CodexThreadEntry, PersistenceStore, PersistedState
 from performer.runner import AgentRunner
 from performer.workspace import Workspace, WorkspaceError, WorkspaceManager
 
@@ -101,7 +104,6 @@ def make_config(tmp_path: Path) -> ServiceConfig:
             endpoint="https://api.linear.app/graphql",
             project_slug="MT",
             api_key="linear-token",
-            required_labels=["codex"],
         ),
         polling=PollingConfig(),
         workspace=WorkspaceConfig(root=tmp_path),
@@ -143,7 +145,7 @@ def make_config_with_acceptance(tmp_path: Path) -> ServiceConfig:
     )
 
 
-def make_config_with_assignee(tmp_path: Path, assignee_id: str) -> ServiceConfig:
+def make_config_with_required_delegate(tmp_path: Path, delegate_id: str) -> ServiceConfig:
     config = make_config(tmp_path)
     return ServiceConfig(
         tracker=TrackerConfig(
@@ -151,8 +153,7 @@ def make_config_with_assignee(tmp_path: Path, assignee_id: str) -> ServiceConfig
             endpoint=config.tracker.endpoint,
             project_slug=config.tracker.project_slug,
             api_key=config.tracker.api_key,
-            assignee_id=assignee_id,
-            required_labels=config.tracker.required_labels,
+            required_delegate_id=delegate_id,
             active_states=config.tracker.active_states,
             terminal_states=config.tracker.terminal_states,
         ),
@@ -166,16 +167,28 @@ def make_config_with_assignee(tmp_path: Path, assignee_id: str) -> ServiceConfig
     )
 
 
-def test_default_runner_exposes_linear_graphql_tool(tmp_path: Path) -> None:
+def test_runner_does_not_expose_linear_graphql_tool(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+    config = ServiceConfig(
+        tracker=config.tracker,
+        polling=config.polling,
+        workspace=config.workspace,
+        hooks=config.hooks,
+        agent=config.agent,
+        codex=CodexConfig(backend="sdk", linear_tool_mode="disabled"),
+        prompt_template=config.prompt_template,
+        workflow_path=config.workflow_path,
+    )
+
     runner = AgentRunner(
-        make_config(tmp_path),
+        config,
         WorkspaceManager(WorkspaceConfig(root=tmp_path), HooksConfig()),
     )
 
-    assert "linear_graphql" in runner.codex_client.tools
+    assert not hasattr(runner.codex_client, "tools")
 
 
-def test_default_runner_does_not_expose_linear_tool_for_custom_tracker(tmp_path: Path) -> None:
+def test_default_sdk_runner_does_not_expose_linear_tool_for_custom_tracker(tmp_path: Path) -> None:
     config = ServiceConfig(
         tracker=TrackerConfig(
             kind="custom",
@@ -197,7 +210,7 @@ def test_default_runner_does_not_expose_linear_tool_for_custom_tracker(tmp_path:
         WorkspaceManager(WorkspaceConfig(root=tmp_path), HooksConfig()),
     )
 
-    assert "linear_graphql" not in runner.codex_client.tools
+    assert not hasattr(runner.codex_client, "tools")
 
 
 @pytest.mark.asyncio
@@ -231,6 +244,51 @@ async def test_runner_uses_workspace_root_when_per_issue_workspace_is_disabled(t
 
     assert codex.workspace_path == workspace_root
     assert not (workspace_root / "MT-1").exists()
+
+
+@pytest.mark.asyncio
+async def test_runner_passes_existing_sdk_thread_id_from_persistence(tmp_path: Path) -> None:
+    codex = FakeCodex()
+    config = make_config_with_persistence(tmp_path)
+    config = ServiceConfig(
+        tracker=config.tracker,
+        polling=config.polling,
+        workspace=WorkspaceConfig(root=tmp_path, per_issue=False),
+        hooks=config.hooks,
+        agent=config.agent,
+        codex=CodexConfig(backend="sdk", linear_tool_mode="disabled"),
+        prompt_template=config.prompt_template,
+        workflow_path=config.workflow_path,
+        persistence=config.persistence,
+    )
+    PersistenceStore(config.persistence.path).save(
+        PersistedState(
+            codex_threads=[
+                CodexThreadEntry(
+                    issue_id="mt-1",
+                    thread_id="thread-existing",
+                    backend="sdk",
+                    workspace_path=str(tmp_path),
+                    status="resume_pending",
+                )
+            ]
+        )
+    )
+    runner = AgentRunner(
+        config,
+        WorkspaceManager(config.workspace, config.hooks),
+        codex_client=codex,
+        tracker=FakeTracker(),
+    )
+
+    await runner.run_issue(
+        Issue(id="mt-1", identifier="MT-1", title="Build", state="Todo", labels=["codex"], project_slug="MT"),
+        2,
+        lambda event: None,
+    )
+
+    assert codex.kwargs is not None
+    assert codex.kwargs["existing_thread_id"] == "thread-existing"
 
 
 @pytest.mark.asyncio
@@ -410,7 +468,90 @@ async def test_runner_writes_run_attempt_turn_ops_snapshot(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
-async def test_continuation_stops_when_required_label_removed(tmp_path: Path) -> None:
+async def test_runner_emits_repository_handoff_report_ops_event_without_linear_child_issue(tmp_path: Path) -> None:
+    codex = FakeCodex()
+    workspace_root = tmp_path / "repo"
+    workspace_root.mkdir()
+    subprocess.run(["git", "-C", str(workspace_root), "init"], check=True, stdout=subprocess.PIPE)
+    subprocess.run(["git", "-C", str(workspace_root), "config", "user.email", "test@example.com"], check=True)
+    subprocess.run(["git", "-C", str(workspace_root), "config", "user.name", "Test User"], check=True)
+    (workspace_root / "README.md").write_text("before\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(workspace_root), "add", "README.md"], check=True)
+    subprocess.run(["git", "-C", str(workspace_root), "commit", "-m", "initial"], check=True, stdout=subprocess.PIPE)
+    (workspace_root / "README.md").write_text("after\n", encoding="utf-8")
+    config = make_config_with_persistence(tmp_path)
+    config = ServiceConfig(
+        tracker=config.tracker,
+        polling=config.polling,
+        workspace=WorkspaceConfig(root=workspace_root, per_issue=False),
+        hooks=config.hooks,
+        agent=config.agent,
+        codex=config.codex,
+        prompt_template=config.prompt_template,
+        workflow_path=config.workflow_path,
+        persistence=config.persistence,
+        repository_handoff=RepositoryHandoffConfig(enabled=True),
+    )
+    tracker = FakeTracker()
+    runner = AgentRunner(
+        config,
+        WorkspaceManager(config.workspace, config.hooks),
+        codex_client=codex,
+        tracker=tracker,
+    )
+
+    await runner.run_issue(
+        Issue(id="mt-1", identifier="MT-1", title="Build", state="Todo", labels=["codex"], project_slug="MT"),
+        1,
+        lambda event: None,
+    )
+
+    snapshot = OpsStore(ops_snapshot_path_from_persistence_path(config.persistence.path)).load()
+    events = [event for event in snapshot.events if event.event_type == "repository_handoff_report.v1"]
+    assert len(events) == 1
+    assert events[0].payload["issue_identifier"] == "MT-1"
+    assert Path(events[0].payload["bundle"]["changes_patch_path"]).exists()
+    assert not hasattr(tracker, "create_child_issue_for")
+
+
+@pytest.mark.asyncio
+async def test_runner_defers_repository_handoff_when_acceptance_is_enabled(tmp_path: Path) -> None:
+    codex = FakeCodex()
+    workspace_root = tmp_path / "repo"
+    workspace_root.mkdir()
+    config = make_config_with_persistence(tmp_path)
+    config = ServiceConfig(
+        tracker=config.tracker,
+        polling=config.polling,
+        workspace=WorkspaceConfig(root=workspace_root, per_issue=False),
+        hooks=config.hooks,
+        agent=config.agent,
+        codex=config.codex,
+        prompt_template=config.prompt_template,
+        workflow_path=config.workflow_path,
+        persistence=config.persistence,
+        acceptance=AcceptanceConfig(enabled=True),
+        repository_handoff=RepositoryHandoffConfig(enabled=True),
+    )
+    runner = AgentRunner(
+        config,
+        WorkspaceManager(config.workspace, config.hooks),
+        codex_client=codex,
+        tracker=FakeTracker(),
+    )
+
+    await runner.run_issue(
+        Issue(id="mt-1", identifier="MT-1", title="Build", state="Todo", labels=["codex"], project_slug="MT"),
+        1,
+        lambda event: None,
+    )
+
+    snapshot = OpsStore(ops_snapshot_path_from_persistence_path(config.persistence.path)).load()
+    assert [event for event in snapshot.events if event.event_type == "repository_handoff_report.v1"] == []
+
+
+@pytest.mark.asyncio
+async def test_continuation_ignores_label_changes(tmp_path: Path) -> None:
     codex = FakeCodex()
     runner = AgentRunner(
         make_config(tmp_path),
@@ -427,14 +568,14 @@ async def test_continuation_stops_when_required_label_removed(tmp_path: Path) ->
 
     assert codex.kwargs is not None
     continuation = codex.kwargs["continuation_provider"]
-    assert await continuation(1) is None
+    assert await continuation(1) is not None
 
 
 @pytest.mark.asyncio
-async def test_continuation_stops_when_assignee_changes(tmp_path: Path) -> None:
+async def test_continuation_stops_when_delegate_changes(tmp_path: Path) -> None:
     codex = FakeCodex()
     runner = AgentRunner(
-        make_config_with_assignee(tmp_path, "codex-user"),
+        make_config_with_required_delegate(tmp_path, "agent-user-1"),
         WorkspaceManager(WorkspaceConfig(root=tmp_path), HooksConfig()),
         codex_client=codex,
         tracker=FakeTracker(
@@ -445,7 +586,7 @@ async def test_continuation_stops_when_assignee_changes(tmp_path: Path) -> None:
                 state="Todo",
                 labels=["codex"],
                 project_slug="MT",
-                assignee_id="other-user",
+                delegate_id="other-agent",
             )
         ),
     )
@@ -458,7 +599,7 @@ async def test_continuation_stops_when_assignee_changes(tmp_path: Path) -> None:
             state="Todo",
             labels=["codex"],
             project_slug="MT",
-            assignee_id="codex-user",
+            delegate_id="agent-user-1",
         ),
         None,
         lambda event: None,

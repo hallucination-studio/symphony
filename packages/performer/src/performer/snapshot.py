@@ -125,7 +125,6 @@ def _running_row(entry: RunningEntry) -> dict[str, Any]:
         "thread_id": entry.thread_id,
         "turn_id": entry.turn_id,
         "worker_host": entry.worker_host,
-        "codex_app_server_pid": entry.codex_app_server_pid,
         "phase": entry.phase,
         "status_label": entry.status_label,
         "workspace_path": entry.workspace_path,

@@ -5,7 +5,6 @@ import json
 import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import socket
-import stat
 import threading
 from pathlib import Path
 
@@ -178,42 +177,50 @@ def allocate_port() -> int:
         return int(sock.getsockname()[1])
 
 
-def make_fake_codex_script(tmp_path: Path) -> Path:
-    script = tmp_path / "bin" / "codex"
-    script.parent.mkdir(parents=True, exist_ok=True)
-    script.write_text(
-        """#!/usr/bin/env python3
+def make_fake_openai_codex_package(tmp_path: Path) -> Path:
+    package_root = tmp_path / "fake-sdk"
+    module = package_root / "openai_codex.py"
+    package_root.mkdir(parents=True, exist_ok=True)
+    module.write_text(
+        """
 import json
-import sys
-import time
 
-responses = []
-tool_called = False
-for line in sys.stdin:
-    message = json.loads(line)
-    method = message.get("method")
-    if method == "initialize":
-        print(json.dumps({"id": message["id"], "result": {"userAgent": "fake-codex", "platformFamily": "unix", "platformOs": "linux", "codexHome": "/tmp/fake-codex"}}), flush=True)
-    elif method == "initialized":
-        continue
-    elif method == "thread/start":
-        print(json.dumps({"id": message["id"], "result": {"thread": {"id": "thr_1"}}}), flush=True)
-    elif method == "turn/start":
-        print(json.dumps({"id": message["id"], "result": {"turn": {"id": "turn_1"}}}), flush=True)
-        print(json.dumps({"method": "thread/tokenUsage/updated", "params": {"turnId": "turn_1", "total_token_usage": {"input_tokens": 12, "output_tokens": 4, "cached_tokens": 2, "total_tokens": 18}}}), flush=True)
-        print(json.dumps({"id": 77, "method": "item/tool/call", "params": {"tool": "linear_graphql", "arguments": {"query": "query CurrentIssueTeam($issueId: String!) { issue(id: $issueId) { id } }", "variables": {"issueId": "issue-1"}}}}), flush=True)
-    elif message.get("id") == 77:
-        tool_called = True
-        print(json.dumps({"method": "turn/completed", "params": {"turn": {"id": "turn_1"}, "status": "completed"}}), flush=True)
-        time.sleep(0.1)
-        break
+class CodexConfig:
+    def __init__(self, codex_bin=None):
+        self.codex_bin = codex_bin
 
-sys.exit(0 if tool_called else 1)
+class _Run:
+    id = "turn_1"
+    async def run(self):
+        return {
+            "final_response": json.dumps({
+                "summary": "Implementation summary:\\nUpdated the requested issue through the SDK fake.\\n\\nTest commands and exact output:\\npytest -q -> passed\\n\\nRemaining risks:\\nNone.",
+                "test_commands": ["pytest -q -> passed"],
+                "changed_files": ["README.md"],
+                "remaining_risks": [],
+                "next_action": "ready_for_review",
+            }),
+            "usage": {"input_tokens": 12, "output_tokens": 4, "cached_tokens": 2, "total_tokens": 18},
+        }
+
+class _Thread:
+    id = "thr_1"
+    def run(self, prompt, output_schema=None):
+        return _Run()
+
+class AsyncCodex:
+    def __init__(self, config=None):
+        self.config = config
+    async def thread_start(self, **kwargs):
+        return _Thread()
+    async def thread_resume(self, thread_id, **kwargs):
+        thread = _Thread()
+        thread.id = thread_id
+        return thread
 """,
         encoding="utf-8",
     )
-    script.chmod(script.stat().st_mode | stat.S_IXUSR)
-    return script
+    return package_root
 
 
 async def wait_for(condition, *, timeout: float = 10.0, interval: float = 0.05) -> None:
@@ -251,11 +258,17 @@ async def test_real_ops_console_flow_writes_snapshot_and_surfaces_it(tmp_path: P
     await linear.start()
     try:
         repo = make_repo(tmp_path)
-        fake_codex = make_fake_codex_script(tmp_path)
-        monkeypatch.setenv("PATH", f"{fake_codex.parent}:{os.environ.get('PATH', '')}")
+        fake_sdk = make_fake_openai_codex_package(tmp_path)
+        monkeypatch.setenv("PYTHONPATH", f"{fake_sdk}:{os.environ.get('PYTHONPATH', '')}")
 
         service = make_service(tmp_path)
-        service.update_settings(ConductorSettings(linear_api_key="conductor-token"))
+        service.update_settings(
+            ConductorSettings(
+                podium_url="https://podium.example",
+                podium_proxy_token="proxy-token",
+                managed_mode=True,
+            )
+        )
         instance = service.create_instance(
             InstanceCreateRequest(
                 name="Alpha",
@@ -269,8 +282,9 @@ async def test_real_ops_console_flow_writes_snapshot_and_surfaces_it(tmp_path: P
             )
         )
         workflow = Path(instance.workflow_path).read_text(encoding="utf-8")
-        workflow = workflow.replace("https://api.linear.app/graphql", f"http://127.0.0.1:{linear.port}/graphql")
-        workflow = workflow.replace("  command: codex app-server", f"  command: {fake_codex} app-server")
+        assert "lifecycle_labels_enabled: false" in workflow
+        workflow = workflow.replace("https://podium.example/api/v1/linear/graphql", f"http://127.0.0.1:{linear.port}/graphql")
+        workflow = workflow.replace("$PODIUM_PROXY_TOKEN", "conductor-token")
         workflow = workflow.replace("agent:\n  max_concurrent_agents: 10\n  max_turns: 20\n", "agent:\n  max_concurrent_agents: 10\n  max_turns: 1\n")
         workflow = workflow.replace("acceptance:\n  enabled: true\n", "acceptance:\n  enabled: false\n")
         workflow = workflow.replace("server:\n", "polling:\n  interval_ms: 100\nserver:\n", 1)
@@ -323,6 +337,6 @@ async def test_real_ops_console_flow_writes_snapshot_and_surfaces_it(tmp_path: P
         assert issues[0]["issue_identifier"] == "ENG-1"
         assert runs[0]["turn_count"] == 1
         assert any(event["event_type"] == "turn_tokens_updated" for event in traces)
-        assert linear.created_labels
+        assert not linear.created_labels
     finally:
         await linear.stop()

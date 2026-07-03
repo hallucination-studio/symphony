@@ -17,28 +17,83 @@ class ConductorValidationError(Exception):
 def workflow_profiles() -> list[dict[str, str]]:
     return [
         {
-            "name": "default",
-            "label": "Default",
-            "description": "General Performer instance profile with managed runtime resources.",
-        }
+            "name": "smoke",
+            "label": "Smoke",
+            "description": "One simple managed issue execution with acceptance disabled.",
+        },
+        {
+            "name": "task",
+            "label": "Task",
+            "description": "Normal managed task execution with acceptance disabled.",
+        },
+        {
+            "name": "gated-task",
+            "label": "Gated Task",
+            "description": "Managed task execution with the acceptance gate enabled.",
+        },
     ]
 
 
 def generate_workflow_content(instance: InstanceRecord, *, podium_url: str = "https://podium.example") -> str:
-    if instance.workflow_profile != "default":
+    profile = "task" if instance.workflow_profile == "default" else instance.workflow_profile
+    if profile not in {"smoke", "task", "gated-task"}:
         raise ConductorValidationError(
             "unknown_workflow_profile",
             f"Unknown workflow profile: {instance.workflow_profile}",
-        )
+    )
 
     goal = str(instance.workflow_inputs.get("goal") or "Move the Linear queue forward.")
-    labels = instance.linear_filters.get("labels") or []
     active_states = instance.linear_filters.get("active_states") or ["Todo", "In Progress"]
     terminal_states = instance.linear_filters.get("terminal_states") or ["Closed", "Cancelled", "Canceled", "Done"]
+    required_delegate_id = str(instance.linear_filters.get("linear_agent_app_user_id") or "").strip()
 
-    label_yaml = "\n".join(f"    - {label}" for label in labels) if labels else "    []"
     active_yaml = "\n".join(f"    - {state}" for state in active_states)
     terminal_yaml = "\n".join(f"    - {state}" for state in terminal_states)
+    delegate_yaml = f"  required_delegate_id: {required_delegate_id}\n" if required_delegate_id else ""
+    lifecycle_labels_enabled = "true" if profile == "gated-task" else "false"
+    acceptance_enabled = "true" if profile == "gated-task" else "false"
+    max_concurrent_agents = 1 if profile == "smoke" else 10
+    max_turns = 8 if profile == "smoke" else 20
+    acceptance_guidance = (
+        "Acceptance gates are enabled. Before handing off, leave concrete evidence on the Linear issue "
+        "description with fields named exactly `Implementation summary:`, `Test commands and exact output:`, and "
+        "`Remaining risks:`. Do not move the issue to Done yourself; Performer will move it to review, run gate child "
+        "issues, create evidence child issues, and close the tree if acceptance passes.\n"
+        if profile == "gated-task"
+        else "Acceptance gates are disabled for this managed profile. After implementing and verifying the request, "
+        "update the Linear issue description with fields named exactly `Implementation summary:`, "
+        "`Test commands and exact output:`, and `Remaining risks:`. Performer will create Linear handoff comments "
+        "and state transitions after verification passes.\n"
+    )
+    acceptance_config = (
+        "acceptance:\n"
+        f"  enabled: {acceptance_enabled}\n"
+        "  mode: block_done\n"
+        "  minimum_score: 3\n"
+        "  require_findings_for_score_3: true\n"
+        "  auto_retry_on_fail: true\n"
+    )
+    if profile == "gated-task":
+        acceptance_config += (
+            "  todo_state: Todo\n"
+            "  implementation_state: In Progress\n"
+            "  review_state: In Review\n"
+            "  done_state: Done\n"
+            "  task_type_label: performer:type/task\n"
+            "  gate_type_label: performer:type/gate\n"
+            "  evidence_type_label: performer:type/evidence\n"
+            "  gate_pending_label: performer:gate/pending\n"
+            "  gate_passed_label: performer:gate/passed\n"
+            "  gate_pass_with_findings_label: performer:gate/pass-with-findings\n"
+            "  gate_failed_label: performer:gate/failed\n"
+            "  score_label_prefix: performer:score/\n"
+        )
+    repository_handoff_config = (
+        "repository_handoff:\n"
+        f"  enabled: {'true' if profile in {'task', 'gated-task'} else 'false'}\n"
+        f"  bundle_root: {Path(instance.persistence_path).parent / 'handoffs'}\n"
+    )
+
     return (
         "---\n"
         "tracker:\n"
@@ -46,8 +101,8 @@ def generate_workflow_content(instance: InstanceRecord, *, podium_url: str = "ht
         f"  endpoint: {podium_url.strip().rstrip('/')}/api/v1/linear/graphql\n"
         f"  project_slug: {instance.linear_project}\n"
         "  api_key: $PODIUM_PROXY_TOKEN\n"
-        "  required_labels:\n"
-        f"{label_yaml}\n"
+        f"{delegate_yaml}"
+        f"  lifecycle_labels_enabled: {lifecycle_labels_enabled}\n"
         "  active_states:\n"
         f"{active_yaml}\n"
         "  terminal_states:\n"
@@ -58,29 +113,14 @@ def generate_workflow_content(instance: InstanceRecord, *, podium_url: str = "ht
         "persistence:\n"
         f"  path: {instance.persistence_path}\n"
         "agent:\n"
-        "  max_concurrent_agents: 10\n"
-        "  max_turns: 20\n"
+        f"  max_concurrent_agents: {max_concurrent_agents}\n"
+        f"  max_turns: {max_turns}\n"
         "  max_retry_backoff_ms: 300000\n"
-        "acceptance:\n"
-        "  enabled: true\n"
-        "  mode: block_done\n"
-        "  minimum_score: 3\n"
-        "  require_findings_for_score_3: true\n"
-        "  auto_retry_on_fail: true\n"
-        "  todo_state: Todo\n"
-        "  implementation_state: In Progress\n"
-        "  review_state: In Review\n"
-        "  done_state: Done\n"
-        "  task_type_label: performer:type/task\n"
-        "  gate_type_label: performer:type/gate\n"
-        "  evidence_type_label: performer:type/evidence\n"
-        "  gate_pending_label: performer:gate/pending\n"
-        "  gate_passed_label: performer:gate/passed\n"
-        "  gate_pass_with_findings_label: performer:gate/pass-with-findings\n"
-        "  gate_failed_label: performer:gate/failed\n"
-        "  score_label_prefix: performer:score/\n"
+        f"{acceptance_config}"
+        f"{repository_handoff_config}"
         "codex:\n"
-        "  command: codex app-server\n"
+        "  backend: sdk\n"
+        "  linear_tool_mode: disabled\n"
         "---\n"
         f'You are operating the Performer instance "{instance.name}" for Linear project {instance.linear_project}.\n'
         f"Prepared workspace root: {instance.workspace_root}\n"
@@ -96,39 +136,11 @@ def generate_workflow_content(instance: InstanceRecord, *, podium_url: str = "ht
         "- URL: {{ issue.url or 'No URL provided.' }}\n"
         "- State: {{ issue.state }}\n"
         "- Description: {{ issue.description or 'No description provided.' }}\n"
-        "Acceptance gates are enabled by default. Before handing off, leave concrete evidence on the Linear issue "
-        "description with fields named exactly `Implementation summary:`, `Test commands and exact output:`, and "
-        "`Remaining risks:`. Do not move the issue to Done yourself; Performer will move it to review, run gate child "
-        "issues, create evidence child issues, and close the tree if acceptance passes.\n"
-        "If Performer posts a runtime permission or sandbox error and labels the issue `performer:error`, a human must "
-        "inspect the error, fix or approve the environment, then comment this exact command on the Linear issue to "
+        f"{acceptance_guidance}"
+        "If Performer records a runtime permission or sandbox error, a human must inspect the error, fix or approve "
+        "the environment, then comment this exact command on the Linear issue to "
         "resume: `/symphony approve-runtime-error {{ issue.identifier }}`.\n"
-        "Use one linear_graphql call per GraphQL operation when updating Linear evidence. For example:\n"
-        "1. Read the current issue description:\n"
-        "query CurrentIssue($issueId: String!) {\n"
-        "  issue(id: $issueId) {\n"
-        "    id\n"
-        "    identifier\n"
-        "    description\n"
-        "  }\n"
-        "}\n"
-        f"variables: {{\"issueId\": \"{{{{ issue.id }}}}\"}}\n"
-        "2. Update the issue description with the required evidence fields:\n"
-        "mutation UpdateIssueEvidence($issueId: String!, $description: String!) {\n"
-        "  issueUpdate(id: $issueId, input: { description: $description }) {\n"
-        "    success\n"
-        "    issue { id identifier }\n"
-        "  }\n"
-        "}\n"
-        f"variables: {{\"issueId\": \"{{{{ issue.id }}}}\", \"description\": \"<existing description plus evidence fields>\"}}\n"
-        "3. Create a handoff comment with the implementation and verification summary:\n"
-        "mutation HandoffIssueComment($issueId: String!, $body: String!) {\n"
-        "  commentCreate(input: { issueId: $issueId, body: $body }) {\n"
-        "    success\n"
-        "    comment { id }\n"
-        "  }\n"
-        "}\n"
-        f"variables: {{\"issueId\": \"{{{{ issue.id }}}}\", \"body\": \"Implemented and ready for acceptance review.\"}}\n"
+        "Return the required structured result to Performer. Do not call Linear directly.\n"
     )
 
 

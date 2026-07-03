@@ -185,7 +185,6 @@ def _tracker_config(project_slug: str, api_key: str, label_name: str):
         endpoint=LINEAR_ENDPOINT,
         project_slug=project_slug,
         api_key=api_key,
-        required_labels=[label_name],
         active_states=["Todo", "In Progress"],
         terminal_states=["Done", "Canceled", "Cancelled", "Closed"],
     )
@@ -404,7 +403,13 @@ async def _run_conductor_instance(
 ) -> dict[str, Any]:
     store = ConductorStore(tmp_path / "conductor-data")
     service = ConductorService(store=store, data_root=tmp_path / "conductor-data")
-    service.update_settings(ConductorSettings(linear_api_key=api_key))
+    service.update_settings(
+        ConductorSettings(
+            podium_url="https://podium.example",
+            podium_proxy_token="proxy-token",
+            managed_mode=True,
+        )
+    )
     instance = service.create_instance(
         InstanceCreateRequest(
             name="HELL real flow",
@@ -418,6 +423,8 @@ async def _run_conductor_instance(
         )
     )
     workflow = Path(instance.workflow_path).read_text(encoding="utf-8")
+    workflow = workflow.replace("https://podium.example/api/v1/linear/graphql", LINEAR_ENDPOINT)
+    workflow = workflow.replace("$PODIUM_PROXY_TOKEN", api_key)
     workflow = workflow.replace("  command: codex app-server", f"  command: {codex_script} app-server")
     workflow = workflow.replace(
         "agent:\n  max_concurrent_agents: 10\n  max_turns: 20\n",

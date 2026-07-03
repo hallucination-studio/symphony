@@ -5,7 +5,7 @@ import asyncio
 import logging
 from pathlib import Path
 
-from .acceptance import CodexAcceptanceRunner
+from .acceptance import CodexAcceptanceRunner, SmokeAcceptanceRunner
 from performer_api.config import ServiceConfig, load_env_file
 from .linear import LinearTracker
 from .orchestrator import Orchestrator
@@ -47,13 +47,17 @@ def apply_runtime_config(
     elif isinstance(orchestrator.acceptance_runner, CodexAcceptanceRunner):
         orchestrator.acceptance_runner.config = config
         orchestrator.acceptance_runner.codex_client.config = config.codex
+    elif isinstance(orchestrator.acceptance_runner, SmokeAcceptanceRunner):
+        orchestrator.acceptance_runner = build_acceptance_runner(config)
     elif orchestrator.acceptance_runner is None:
         orchestrator.acceptance_runner = build_acceptance_runner(config)
 
 
-def build_acceptance_runner(config: ServiceConfig) -> CodexAcceptanceRunner | None:
+def build_acceptance_runner(config: ServiceConfig) -> CodexAcceptanceRunner | SmokeAcceptanceRunner | None:
     if not config.acceptance.enabled:
         return None
+    if config.acceptance.gate_planner_mode == "smoke":
+        return SmokeAcceptanceRunner(config)
     return CodexAcceptanceRunner(config)
 
 
@@ -91,6 +95,28 @@ async def run_daemon(config: ServiceConfig, *, once: bool = False) -> None:
         await asyncio.sleep(config.polling.interval_ms / 1000)
 
 
+async def run_dispatch_issue(workflow_path: Path, issue_id: str) -> dict[str, object]:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    config = build_config_from_path(workflow_path)
+    validate_tracker_config(config.tracker)
+    tracker = create_tracker(config.tracker)
+    workspace_manager = WorkspaceManager(config.workspace, config.hooks)
+    runner = AgentRunner(config, workspace_manager, tracker=tracker)
+    orchestrator = Orchestrator(
+        config,
+        tracker,
+        runner,
+        workspace_manager=workspace_manager,
+        persistence_store=persistence_store_from_config(config),
+        acceptance_runner=build_acceptance_runner(config),
+    )
+    orchestrator.load_persisted_state()
+    await orchestrator.startup_terminal_workspace_cleanup(workspace_manager)
+    result = await orchestrator.dispatch_issue_by_id(issue_id)
+    await orchestrator.wait_for_idle()
+    return result
+
+
 async def run_reloading_daemon(workflow_path: Path, *, once: bool = False) -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     reloader = WorkflowReloader(workflow_path)
@@ -126,6 +152,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the Performer Linear/Codex daemon.")
     parser.add_argument("workflow", nargs="?", help="Path to WORKFLOW.md")
     parser.add_argument("--once", action="store_true", help="Run one poll cycle and exit after workers finish.")
+    parser.add_argument("--dispatch-issue-id", default=None, help="Run one event-driven dispatch for a Linear issue id.")
     return parser.parse_args(argv)
 
 
@@ -133,7 +160,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     path = Path(args.workflow).resolve() if args.workflow else default_workflow_path().resolve()
     try:
-        asyncio.run(run_reloading_daemon(path, once=args.once))
+        if args.dispatch_issue_id:
+            asyncio.run(run_dispatch_issue(path, args.dispatch_issue_id))
+        else:
+            asyncio.run(run_reloading_daemon(path, once=args.once))
     except KeyboardInterrupt:
         return 0
     except Exception as exc:

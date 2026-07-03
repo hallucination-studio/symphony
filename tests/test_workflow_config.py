@@ -68,7 +68,6 @@ tracker:
   kind: linear
   project_slug: MT
   api_key: $LINEAR_API_KEY
-  required_labels: ["Codex"]
 workspace:
   root: workspaces
 """,
@@ -77,13 +76,39 @@ workspace:
     config = ServiceConfig.from_workflow(load_workflow(workflow_path), workflow_path)
 
     assert config.tracker.api_key == "linear-token"
-    assert config.tracker.required_labels == ["codex"]
     assert config.workspace.root == tmp_path / "workspaces"
     assert config.codex.approval_policy is None
     assert config.codex.thread_sandbox is None
     assert config.codex.turn_sandbox_policy is None
     assert config.agent.max_concurrent_agents == 10
     assert "test_command_evidence" in config.completion_verification.required_checks
+
+
+def test_service_config_parses_codex_sdk_backend_fields(tmp_path: Path) -> None:
+    workflow_path = tmp_path / "WORKFLOW.md"
+    write_workflow(
+        workflow_path,
+        """
+tracker:
+  kind: linear
+  project_slug: MT
+  api_key: linear-token
+codex:
+  backend: sdk
+  model: gpt-5-codex
+  sdk_codex_bin: /usr/local/bin/codex
+  sandbox: workspace_write
+  linear_tool_mode: disabled
+""",
+    )
+
+    config = ServiceConfig.from_workflow(load_workflow(workflow_path), workflow_path)
+
+    assert config.codex.backend == "sdk"
+    assert config.codex.model == "gpt-5-codex"
+    assert config.codex.sdk_codex_bin == "/usr/local/bin/codex"
+    assert config.codex.sandbox == "workspace_write"
+    assert config.codex.linear_tool_mode == "disabled"
 
 
 def test_service_config_parses_completion_verification_extension(tmp_path: Path) -> None:
@@ -166,6 +191,27 @@ acceptance:
     assert config.acceptance.gate_pass_with_findings_label == "performer:gate/pass-with-findings"
     assert config.acceptance.gate_failed_label == "performer:gate/failed"
     assert config.acceptance.score_label_prefix == "performer:score/"
+
+
+def test_service_config_parses_repository_handoff_extension(tmp_path: Path) -> None:
+    workflow_path = tmp_path / "WORKFLOW.md"
+    write_workflow(
+        workflow_path,
+        """
+tracker:
+  kind: linear
+  project_slug: MT
+  api_key: linear-token
+repository_handoff:
+  enabled: true
+  bundle_root: ./state/handoffs
+""",
+    )
+
+    config = ServiceConfig.from_workflow(load_workflow(workflow_path), workflow_path)
+
+    assert config.repository_handoff.enabled is True
+    assert config.repository_handoff.bundle_root == (tmp_path / "state" / "handoffs").resolve()
 
 
 def test_acceptance_enabled_extends_candidate_scan_states(tmp_path: Path) -> None:
@@ -439,7 +485,7 @@ tracker:
     assert config.tracker.project_slug == ""
 
 
-def test_service_config_preserves_blank_required_label(tmp_path: Path) -> None:
+def test_service_config_ignores_legacy_required_labels(tmp_path: Path) -> None:
     workflow_path = tmp_path / "WORKFLOW.md"
     write_workflow(
         workflow_path,
@@ -454,10 +500,10 @@ tracker:
 
     config = ServiceConfig.from_workflow(load_workflow(workflow_path), workflow_path)
 
-    assert config.tracker.required_labels == ["codex", ""]
+    assert not hasattr(config.tracker, "required_labels")
 
 
-def test_tracker_assignee_id_config_is_preserved(tmp_path: Path) -> None:
+def test_tracker_assignee_id_config_is_ignored(tmp_path: Path) -> None:
     workflow_path = tmp_path / "WORKFLOW.md"
     write_workflow(
         workflow_path,
@@ -472,13 +518,10 @@ tracker:
 
     config = ServiceConfig.from_workflow(load_workflow(workflow_path), workflow_path)
 
-    assert config.tracker.assignee_id == "user-123"
+    assert not hasattr(config.tracker, "assignee_id")
 
 
-def test_tracker_assignee_id_env_reference_is_resolved(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("LINEAR_ASSIGNEE_ID", "user-456")
+def test_tracker_required_delegate_id_config_is_preserved(tmp_path: Path) -> None:
     workflow_path = tmp_path / "WORKFLOW.md"
     write_workflow(
         workflow_path,
@@ -487,13 +530,31 @@ tracker:
   kind: linear
   project_slug: MT
   api_key: linear-token
-  assignee_id: $LINEAR_ASSIGNEE_ID
+  required_delegate_id: app-user-123
 """,
     )
 
     config = ServiceConfig.from_workflow(load_workflow(workflow_path), workflow_path)
 
-    assert config.tracker.assignee_id == "user-456"
+    assert config.tracker.required_delegate_id == "app-user-123"
+
+
+def test_tracker_lifecycle_labels_enabled_can_be_disabled(tmp_path: Path) -> None:
+    workflow_path = tmp_path / "WORKFLOW.md"
+    write_workflow(
+        workflow_path,
+        """
+tracker:
+  kind: linear
+  project_slug: MT
+  api_key: linear-token
+  lifecycle_labels_enabled: false
+""",
+    )
+
+    config = ServiceConfig.from_workflow(load_workflow(workflow_path), workflow_path)
+
+    assert config.tracker.lifecycle_labels_enabled is False
 
 
 def test_service_config_validation_requires_api_key(tmp_path: Path) -> None:

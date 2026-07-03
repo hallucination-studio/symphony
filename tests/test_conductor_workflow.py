@@ -7,6 +7,7 @@ from conductor.conductor_workflow import (
     ConductorValidationError,
     generate_workflow_content,
     validate_instance_workflow,
+    workflow_profiles,
 )
 
 
@@ -42,15 +43,21 @@ def test_generate_workflow_content_injects_managed_runtime_resources(tmp_path: P
     assert "agent:" in content
     assert "max_turns: 20" in content
     assert "acceptance:" in content
-    assert "enabled: true" in content
+    assert "enabled: false" in content
+    assert "repository_handoff:" in content
+    assert "bundle_root:" in content
     assert "mode: block_done" in content
-    assert "review_state: In Review" in content
-    assert "gate_passed_label: performer:gate/passed" in content
+    assert "lifecycle_labels_enabled: false" in content
+    assert "review_state:" not in content
+    assert "gate_passed_label:" not in content
+    assert "performer:" not in content
     assert "server:" not in content
     assert "observability:" not in content
     assert "project_slug: ENG" in content
     assert "endpoint: https://podium.example/api/v1/linear/graphql" in content
     assert "api_key: $PODIUM_PROXY_TOKEN" in content
+    assert "required_labels:" not in content
+    assert "    - codex" not in content
     assert "api_key: $LINEAR_API_KEY" not in content
     assert "Keep issues moving" in content
     assert "Current Linear issue:" in content
@@ -62,18 +69,63 @@ def test_generate_workflow_content_injects_managed_runtime_resources(tmp_path: P
     assert "rsync -a --delete" not in content
     assert "Prepared workspace root:" in content
     assert "Work only in the prepared workspace root." in content
-    assert "Acceptance gates are enabled by default." in content
-    assert "Do not move the issue to Done yourself" in content
-    assert "Implementation summary:" in content
-    assert "Test commands and exact output:" in content
-    assert "Remaining risks:" in content
+    assert "Acceptance gates are disabled for this managed profile." in content
+    assert "Performer will create Linear handoff comments" in content
     assert "/symphony approve-runtime-error {{ issue.identifier }}" in content
-    assert "query CurrentIssue" in content
-    assert "mutation UpdateIssueEvidence" in content
-    assert "mutation CompleteIssue" not in content
-    assert "commentCreate" in content
-    assert "issueUpdate" in content
-    assert "linear_graphql" in content
+    assert "records a runtime permission or sandbox error" in content
+    assert "backend: sdk" in content
+    assert "linear_tool_mode: disabled" in content
+    assert "Return the required structured result" in content
+    assert "query CurrentIssue" not in content
+    assert "linear_graphql" not in content
+
+
+def test_task_profile_is_default_managed_profile_without_acceptance_gate(tmp_path: Path) -> None:
+    instance = make_instance(tmp_path).with_updates(workflow_profile="task")
+
+    content = generate_workflow_content(instance, podium_url="https://podium.example")
+
+    assert "acceptance:\n  enabled: false\n" in content
+    assert "endpoint: https://podium.example/api/v1/linear/graphql" in content
+    assert "api_key: $PODIUM_PROXY_TOKEN" in content
+    assert "lifecycle_labels_enabled: false" in content
+    assert "repository_handoff:\n  enabled: true\n" in content
+    assert "performer:" not in content
+
+
+def test_managed_workflow_requires_agent_delegation_identity_in_performer_tracker(tmp_path: Path) -> None:
+    instance = make_instance(tmp_path).with_updates(
+        linear_filters={
+            "linear_agent_app_user_id": "app-user-1",
+            "labels": ["legacy-label-that-should-not-dispatch"],
+        }
+    )
+
+    content = generate_workflow_content(instance, podium_url="https://podium.example")
+
+    assert "required_delegate_id: app-user-1" in content
+    assert "linear_agent_app_user_id:" not in content
+    assert "assignee_id:" not in content
+    assert "required_labels:" not in content
+    assert "legacy-label-that-should-not-dispatch" not in content
+
+
+def test_gated_task_profile_keeps_acceptance_gate(tmp_path: Path) -> None:
+    instance = make_instance(tmp_path).with_updates(workflow_profile="gated-task")
+
+    content = generate_workflow_content(instance, podium_url="https://podium.example")
+
+    assert "acceptance:\n  enabled: true\n" in content
+    assert "lifecycle_labels_enabled: true" in content
+    assert "gate_passed_label: performer:gate/passed" in content
+    assert "Do not move the issue to Done yourself" in content
+    assert "repository_handoff:\n  enabled: true\n" in content
+
+
+def test_available_profiles_include_smoke_task_and_gated_task() -> None:
+    names = [profile["name"] for profile in workflow_profiles()]
+
+    assert names == ["smoke", "task", "gated-task"]
 
 
 def test_validate_instance_workflow_reports_yaml_errors(tmp_path: Path) -> None:

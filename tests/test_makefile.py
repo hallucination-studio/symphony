@@ -27,6 +27,7 @@ def test_readme_real_integration_test_command_pins_repo_src() -> None:
     readme = Path("README.md").read_text(encoding="utf-8")
 
     assert (
-        "PERFORMER_REAL_INTEGRATION=1 LINEAR_API_KEY=... PYTHONPATH=$(pwd)/packages/performer-api/src:$(pwd)/packages/performer/src:$(pwd)/packages/conductor/src:$(pwd)/packages/podium/src .venv/bin/python -m pytest "
-        "tests/test_real_integration.py -q" in readme
+        "PYTHONPATH=$(pwd)/packages/performer-api/src:$(pwd)/packages/performer/src:$(pwd)/packages/conductor/src:$(pwd)/packages/podium/src "
+        ".venv/bin/python tools/real_symphony_e2e.py --project-slug <linear-project-slug> --acceptance-gates --timeout 600"
+        in readme
     )

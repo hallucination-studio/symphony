@@ -99,9 +99,14 @@ def write_sample_ops_snapshot(instance: InstanceRecord) -> None:
 class CapturingRuntime:
     def __init__(self) -> None:
         self.env: dict[str, str] | None = None
+        self.dispatch_issue_id: str | None = None
+        self.started_dispatch_issue_ids: list[str | None] = []
+        self.refreshed_instance = None
 
-    async def start(self, instance, *, env: dict[str, str] | None = None):
+    async def start(self, instance, *, env: dict[str, str] | None = None, dispatch_issue_id: str | None = None):
         self.env = env
+        self.dispatch_issue_id = dispatch_issue_id
+        self.started_dispatch_issue_ids.append(dispatch_issue_id)
         return instance.with_updates(process_status="running", pid=4242)
 
     async def stop(self, instance):
@@ -110,6 +115,11 @@ class CapturingRuntime:
     async def restart(self, instance, *, env: dict[str, str] | None = None):
         self.env = env
         return instance.with_updates(process_status="running", pid=4242)
+
+    def refresh(self, instance):
+        if self.refreshed_instance is not None:
+            return self.refreshed_instance
+        return instance
 
     def runtime_snapshot(self, instance):
         return {"instance_id": instance.id, "process_status": instance.process_status}
@@ -130,6 +140,59 @@ class CapturingRuntime:
         )
 
 
+class FakeRepositoryHandoffTracker:
+    def __init__(self) -> None:
+        self.children: list[dict[str, object]] = []
+        self.comments: list[tuple[str, str]] = []
+        self.updated_descriptions: list[tuple[str, str, str]] = []
+
+    async def fetch_child_issues(self, parent_issue_id: str, *, label_name: str | None = None) -> list[dict[str, object]]:
+        return [
+            child
+            for child in self.children
+            if child.get("parent_issue_id") == parent_issue_id
+            and (label_name is None or label_name in child.get("labels", []))
+        ]
+
+    async def create_child_issue_for(
+        self,
+        *,
+        parent_issue_id: str,
+        title: str,
+        description: str,
+        label_names: list[str],
+        delegate_id: str | None = None,
+    ) -> dict[str, object]:
+        issue = {
+            "id": f"child-{len(self.children) + 1}",
+            "identifier": f"ENG-{len(self.children) + 100}",
+            "title": title,
+            "description": description,
+            "labels": list(label_names),
+            "parent_issue_id": parent_issue_id,
+            "delegate_id": delegate_id,
+            "url": f"https://linear.test/{len(self.children) + 100}",
+        }
+        self.children.append(issue)
+        return issue
+
+    async def update_issue_description_marker_block(
+        self,
+        issue_id: str,
+        marker_name: str,
+        block: str,
+    ) -> dict[str, object]:
+        self.updated_descriptions.append((issue_id, marker_name, block))
+        for child in self.children:
+            if child["id"] == issue_id:
+                child["description"] = block
+        return {"success": True, "issue_id": issue_id, "description": block}
+
+    async def comment_issue(self, issue_id: str, body: str) -> dict[str, object]:
+        self.comments.append((issue_id, body))
+        return {"success": True, "comment_id": f"comment-{len(self.comments)}"}
+
+
 def test_conductor_service_lists_issue_run_trace_and_retention(tmp_path: Path) -> None:
     service = make_service(tmp_path)
     repo = make_repo(tmp_path)
@@ -148,6 +211,106 @@ def test_conductor_service_lists_issue_run_trace_and_retention(tmp_path: Path) -
     assert service.get_run("run-1")["run"]["run_id"] == "run-1"
     assert traces[0]["event_type"] == "issue_dispatched"
     assert retention["pinned_issue_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_repository_handoff_closeout_creates_child_once_and_updates_on_rerun(tmp_path: Path) -> None:
+    tracker = FakeRepositoryHandoffTracker()
+    service = make_service(tmp_path)
+    service.repository_handoff_tracker_factory = lambda instance: tracker
+    repo = make_repo(tmp_path)
+    instance = service.create_instance(
+        make_request(repo).with_overrides(
+            linear_filters={
+                "linear_agent_app_user_id": "app-user-1",
+                "integration_agent_mention": "@integration-agent",
+            }
+        )
+    )
+    ops_store = OpsStore(Path(instance.persistence_path).parent / "ops.json")
+    ops_store.save(
+        OpsSnapshot(
+            events=[
+                TraceEvent(
+                    event_id="evt-1",
+                    event_type="repository_handoff_report.v1",
+                    timestamp="2026-07-03T00:00:00Z",
+                    issue_id="issue-1",
+                    retention_tier="summary",
+                    payload={
+                        "issue_id": "issue-1",
+                        "issue_identifier": "ENG-1",
+                        "workspace_path": instance.workspace_root,
+                        "structured_result": {
+                            "implementation_summary": "Changed README",
+                            "test_commands_and_exact_output": "pytest -q\n1 passed",
+                            "remaining_risks": "none",
+                        },
+                        "git_snapshot": {
+                            "is_git_repo": True,
+                            "repo_root": instance.workspace_root,
+                            "branch": "main",
+                            "head_sha": "abc123",
+                            "status_porcelain": " M README.md",
+                            "diff_stat": "README.md | 2 +",
+                            "changed_files": ["README.md"],
+                        },
+                        "artifact_manifest": [{"path": "changes.patch", "size": 12, "sha256": "abc"}],
+                        "bundle": {
+                            "type": "local_bundle",
+                            "path": str(Path(instance.persistence_path).parent / "handoffs" / "ENG-1"),
+                            "changes_patch_path": str(Path(instance.persistence_path).parent / "handoffs" / "ENG-1" / "changes.patch"),
+                            "manifest_path": str(Path(instance.persistence_path).parent / "handoffs" / "ENG-1" / "manifest.json"),
+                        },
+                        "recommended_next_action": "create_repository_integration_issue",
+                        "generated_at": "2026-07-03T00:00:00Z",
+                    },
+                )
+            ]
+        )
+    )
+
+    first = await service.coordinate_repository_handoff_closeouts()
+    second = await service.coordinate_repository_handoff_closeouts()
+
+    assert first["closed_out"] == 1
+    assert second["closed_out"] == 0
+    assert len(tracker.children) == 1
+    child = tracker.children[0]
+    assert child["title"] == "Integrate ENG-1 implementation"
+    assert child["delegate_id"] == "app-user-1"
+    assert "performer:type/repository-integration" in child["labels"]
+    assert "<!-- SYMPHONY REPOSITORY HANDOFF source_issue_id=issue-1 -->" in str(child["description"])
+    assert "changes.patch" in str(child["description"])
+    assert tracker.comments
+    assert "@integration-agent" in tracker.comments[0][1]
+    snapshot = ops_store.load()
+    closeouts = [event for event in snapshot.events if event.event_type == "repository_handoff_closeout.v1"]
+    assert len(closeouts) == 1
+    assert closeouts[0].payload["status"] == "completed"
+    assert closeouts[0].payload["child_issue_id"] == "child-1"
+
+
+def test_get_instance_refreshes_exited_runtime_state(tmp_path: Path) -> None:
+    runtime = CapturingRuntime()
+    service = ConductorService(
+        store=ConductorStore(tmp_path / "conductor-data"),
+        data_root=tmp_path / "conductor-data",
+        runtime_manager=runtime,
+    )
+    repo = make_repo(tmp_path)
+    instance = service.create_instance(make_request(repo))
+    running = instance.with_updates(process_status="running", pid=4242)
+    service.store.update_instance(running)
+    runtime.refreshed_instance = running.with_updates(process_status="exited", pid=None, last_exit_code=0)
+
+    refreshed = service.get_instance(instance.id)
+
+    assert refreshed is not None
+    assert refreshed.process_status == "exited"
+    assert refreshed.pid is None
+    assert refreshed.last_exit_code == 0
+    assert service.store.get_instance(instance.id).process_status == "exited"
 
 
 def test_conductor_service_pins_issue_and_collects_retention(tmp_path: Path) -> None:
@@ -200,6 +363,23 @@ def test_create_instance_uses_configured_podium_proxy_endpoint(tmp_path: Path) -
     instance = service.create_instance(make_request(repo))
 
     assert "endpoint: https://podium.internal/api/v1/linear/graphql" in instance.workflow_content
+    assert "api_key: $PODIUM_PROXY_TOKEN" in instance.workflow_content
+
+
+def test_create_instance_uses_podium_proxy_even_without_proxy_token_configured(tmp_path: Path) -> None:
+    repo = make_repo(tmp_path)
+    service = make_service(tmp_path)
+    service.update_settings(
+        ConductorSettings(
+            podium_url="http://127.0.0.1:8090",
+        )
+    )
+
+    instance = service.create_instance(make_request(repo))
+
+    assert "endpoint: http://127.0.0.1:8090/api/v1/linear/graphql" in instance.workflow_content
+    assert "api_key: $PODIUM_PROXY_TOKEN" in instance.workflow_content
+    assert "$LINEAR_API_KEY" not in instance.workflow_content
 
 
 def test_create_instance_reuses_existing_workspace_without_resyncing(tmp_path: Path) -> None:
@@ -668,14 +848,22 @@ async def test_start_instance_passes_podium_proxy_token_to_runtime_env(tmp_path:
     service.update_settings(
         ConductorSettings(
             podium_url="https://podium.example",
+            podium_runtime_id="runtime-1",
+            podium_runtime_token="runtime-token",
             podium_proxy_token="proxy-token",
+            runtime_group_id="group-1",
         )
     )
 
     started = await service.start_instance(instance.id)
 
     assert started.process_status == "running"
-    assert runtime.env == {"PODIUM_PROXY_TOKEN": "proxy-token"}
+    assert runtime.env == {
+        "PODIUM_PROXY_TOKEN": "proxy-token",
+        "PODIUM_RUNTIME_GROUP_ID": "group-1",
+        "PODIUM_RUNTIME_ID": "runtime-1",
+        "PODIUM_RUNTIME_TOKEN": "runtime-token",
+    }
 
 
 @pytest.mark.asyncio
@@ -693,3 +881,472 @@ async def test_start_instance_does_not_require_conductor_linear_api_key(tmp_path
 
     assert started.process_status == "running"
     assert runtime.env == {}
+
+
+@pytest.mark.asyncio
+async def test_dispatch_podium_event_starts_one_shot_performer_for_matching_linear_agent_app_user(tmp_path: Path) -> None:
+    runtime = CapturingRuntime()
+    service = ConductorService(
+        store=ConductorStore(tmp_path / "conductor-data"),
+        data_root=tmp_path / "conductor-data",
+        runtime_manager=runtime,
+    )
+    service.update_settings(ConductorSettings(podium_proxy_token="proxy-token"))
+    repo = make_repo(tmp_path)
+    instance = service.create_instance(
+        make_request(repo).with_overrides(linear_project="ENG", linear_filters={"linear_agent_app_user_id": "app-user-1"})
+    )
+
+    result = await service.dispatch_podium_event(
+        {
+            "issue_id": "issue-1",
+            "issue_identifier": "ENG-1",
+            "project_slug": "ENG",
+            "agent_session_id": "session-1",
+            "agent_app_user_id": "app-user-1",
+            "assignee_id": "human-user-1",
+        }
+    )
+
+    assert result == {
+        "status": "accepted",
+        "issue_id": "issue-1",
+        "issue_identifier": "ENG-1",
+        "instance_id": instance.id,
+        "agent_session_id": "session-1",
+        "agent_app_user_id": "app-user-1",
+    }
+    assert runtime.dispatch_issue_id == "issue-1"
+    assert runtime.env == {"PODIUM_PROXY_TOKEN": "proxy-token"}
+
+
+@pytest.mark.asyncio
+async def test_dispatch_podium_event_coordinates_gated_followup_after_business_one_shot_exits(tmp_path: Path) -> None:
+    runtime = CapturingRuntime()
+    service = ConductorService(
+        store=ConductorStore(tmp_path / "conductor-data"),
+        data_root=tmp_path / "conductor-data",
+        runtime_manager=runtime,
+    )
+    repo = make_repo(tmp_path)
+    instance = service.create_instance(
+        make_request(repo).with_overrides(
+            workflow_profile="gated-task",
+            linear_filters={"linear_agent_app_user_id": "app-user-1", "active_states": ["Todo", "In Progress"]},
+        )
+    )
+    service.store.update_instance(instance.with_updates(process_status="running", pid=4242))
+    runtime.refreshed_instance = instance.with_updates(process_status="exited", pid=None, last_exit_code=0)
+    OpsStore(Path(instance.persistence_path).parent / "ops.json").save(
+        OpsSnapshot(
+            issues={
+                "issue-1": IssueRecord(
+                    issue_id="issue-1",
+                    issue_identifier="ENG-1",
+                    title="Build it",
+                    state="completed",
+                    run_count=1,
+                )
+            },
+            runs={
+                "run-1": RunRecord(
+                    run_id="run-1",
+                    issue_id="issue-1",
+                    instance_id=instance.id,
+                    status="completed",
+                )
+            },
+        )
+    )
+
+    result = await service.dispatch_podium_event(
+        {
+            "issue_id": "issue-1",
+            "issue_identifier": "ENG-1",
+            "project_slug": "ENG",
+            "agent_app_user_id": "app-user-1",
+        }
+    )
+
+    assert result["status"] == "accepted"
+    assert runtime.started_dispatch_issue_ids == ["issue-1"]
+
+
+@pytest.mark.asyncio
+async def test_refresh_instance_coordinates_gated_followup_after_business_one_shot_exits(tmp_path: Path) -> None:
+    runtime = CapturingRuntime()
+    service = ConductorService(
+        store=ConductorStore(tmp_path / "conductor-data"),
+        data_root=tmp_path / "conductor-data",
+        runtime_manager=runtime,
+    )
+    repo = make_repo(tmp_path)
+    instance = service.create_instance(
+        make_request(repo).with_overrides(
+            workflow_profile="gated-task",
+            linear_filters={"linear_agent_app_user_id": "app-user-1", "active_states": ["Todo", "In Progress"]},
+        )
+    )
+    service.store.update_instance(instance.with_updates(process_status="running", pid=4242))
+    runtime.refreshed_instance = instance.with_updates(process_status="exited", pid=None, last_exit_code=0)
+    OpsStore(Path(instance.persistence_path).parent / "ops.json").save(
+        OpsSnapshot(
+            issues={
+                "issue-1": IssueRecord(
+                    issue_id="issue-1",
+                    issue_identifier="ENG-1",
+                    title="Build it",
+                    state="completed",
+                    run_count=1,
+                )
+            },
+            runs={
+                "run-1": RunRecord(
+                    run_id="run-1",
+                    issue_id="issue-1",
+                    instance_id=instance.id,
+                    status="completed",
+                )
+            },
+        )
+    )
+
+    refreshed = await service.get_instance_coordinated(instance.id)
+
+    assert refreshed is not None
+    assert refreshed.process_status == "running"
+    assert runtime.started_dispatch_issue_ids == ["issue-1"]
+    stored = service.store.get_instance(instance.id)
+    assert stored is not None
+    assert stored.gated_followup_stages == {"issue-1": ["gate"]}
+
+
+@pytest.mark.asyncio
+async def test_background_coordination_starts_gated_followup_without_instance_get(tmp_path: Path) -> None:
+    runtime = CapturingRuntime()
+    service = ConductorService(
+        store=ConductorStore(tmp_path / "conductor-data"),
+        data_root=tmp_path / "conductor-data",
+        runtime_manager=runtime,
+    )
+    repo = make_repo(tmp_path)
+    instance = service.create_instance(
+        make_request(repo).with_overrides(
+            workflow_profile="gated-task",
+            linear_filters={"linear_agent_app_user_id": "app-user-1", "active_states": ["Todo", "In Progress"]},
+        )
+    )
+    service.store.update_instance(instance.with_updates(process_status="running", pid=4242))
+    runtime.refreshed_instance = instance.with_updates(process_status="exited", pid=None, last_exit_code=0)
+    OpsStore(Path(instance.persistence_path).parent / "ops.json").save(
+        OpsSnapshot(
+            issues={
+                "issue-1": IssueRecord(
+                    issue_id="issue-1",
+                    issue_identifier="ENG-1",
+                    title="Build it",
+                    state="completed",
+                    run_count=1,
+                )
+            },
+            runs={
+                "run-1": RunRecord(
+                    run_id="run-1",
+                    issue_id="issue-1",
+                    instance_id=instance.id,
+                    status="completed",
+                )
+            },
+        )
+    )
+
+    result = await service.coordinate_background_once()
+
+    assert result["gated_followups_started"] == 1
+    assert runtime.started_dispatch_issue_ids == ["issue-1"]
+
+
+@pytest.mark.asyncio
+async def test_refresh_instance_restarts_exited_performer_with_pending_retry(tmp_path: Path) -> None:
+    runtime = CapturingRuntime()
+    service = ConductorService(
+        store=ConductorStore(tmp_path / "conductor-data"),
+        data_root=tmp_path / "conductor-data",
+        runtime_manager=runtime,
+    )
+    repo = make_repo(tmp_path)
+    instance = service.create_instance(
+        make_request(repo).with_overrides(
+            workflow_profile="gated-task",
+            linear_filters={"linear_agent_app_user_id": "app-user-1", "active_states": ["Todo", "In Progress"]},
+        )
+    )
+    service.store.update_instance(instance.with_updates(process_status="running", pid=4242))
+    runtime.refreshed_instance = instance.with_updates(process_status="exited", pid=None, last_exit_code=0)
+    PersistenceStore(Path(instance.persistence_path)).save(
+        PersistedState(
+            retry_attempts=[
+                RetryEntry(
+                    issue_id="issue-1",
+                    identifier="ENG-1",
+                    attempt=1,
+                    due_at=utc_now(),
+                    due_at_ms=0,
+                    error="worker exited: 429",
+                )
+            ]
+        )
+    )
+
+    refreshed = await service.get_instance_coordinated(instance.id)
+
+    assert refreshed is not None
+    assert refreshed.process_status == "running"
+    assert runtime.started_dispatch_issue_ids == [None]
+
+
+@pytest.mark.asyncio
+async def test_refresh_instance_does_not_repeat_gated_followup_after_gate_run_started(tmp_path: Path) -> None:
+    runtime = CapturingRuntime()
+    service = ConductorService(
+        store=ConductorStore(tmp_path / "conductor-data"),
+        data_root=tmp_path / "conductor-data",
+        runtime_manager=runtime,
+    )
+    repo = make_repo(tmp_path)
+    instance = service.create_instance(
+        make_request(repo).with_overrides(
+            workflow_profile="gated-task",
+            linear_filters={"linear_agent_app_user_id": "app-user-1", "active_states": ["Todo", "In Progress"]},
+        )
+    )
+    service.store.update_instance(instance.with_updates(process_status="running", pid=4242))
+    runtime.refreshed_instance = instance.with_updates(process_status="exited", pid=None, last_exit_code=0)
+    OpsStore(Path(instance.persistence_path).parent / "ops.json").save(
+        OpsSnapshot(
+            issues={
+                "issue-1": IssueRecord(
+                    issue_id="issue-1",
+                    issue_identifier="ENG-1",
+                    title="Build it",
+                    state="completed",
+                    run_count=1,
+                )
+            },
+            runs={
+                "run-1": RunRecord(
+                    run_id="run-1",
+                    issue_id="issue-1",
+                    instance_id=instance.id,
+                    status="completed",
+                )
+            },
+        )
+    )
+
+    first = await service.get_instance_coordinated(instance.id)
+    assert first is not None
+    runtime.refreshed_instance = first.with_updates(process_status="exited", pid=None, last_exit_code=0)
+    second = await service.get_instance_coordinated(instance.id)
+
+    assert second is not None
+    assert second.process_status == "exited"
+    assert runtime.started_dispatch_issue_ids == ["issue-1"]
+
+
+@pytest.mark.asyncio
+async def test_refresh_instance_does_not_restart_gated_followups_after_service_restart(tmp_path: Path) -> None:
+    runtime = CapturingRuntime()
+    store = ConductorStore(tmp_path / "conductor-data")
+    service = ConductorService(
+        store=store,
+        data_root=tmp_path / "conductor-data",
+        runtime_manager=runtime,
+    )
+    repo = make_repo(tmp_path)
+    instance = service.create_instance(
+        make_request(repo).with_overrides(
+            workflow_profile="gated-task",
+            linear_filters={"linear_agent_app_user_id": "app-user-1", "active_states": ["Todo", "In Progress"]},
+        )
+    )
+    service.store.update_instance(instance.with_updates(process_status="running", pid=4242))
+    runtime.refreshed_instance = instance.with_updates(process_status="exited", pid=None, last_exit_code=0)
+    OpsStore(Path(instance.persistence_path).parent / "ops.json").save(
+        OpsSnapshot(
+            issues={
+                "issue-1": IssueRecord(
+                    issue_id="issue-1",
+                    issue_identifier="ENG-1",
+                    title="Build it",
+                    state="completed",
+                    run_count=1,
+                )
+            },
+            runs={
+                "run-1": RunRecord(
+                    run_id="run-1",
+                    issue_id="issue-1",
+                    instance_id=instance.id,
+                    status="completed",
+                )
+            },
+        )
+    )
+
+    first = await service.get_instance_coordinated(instance.id)
+    assert first is not None
+    runtime.refreshed_instance = first.with_updates(process_status="exited", pid=None, last_exit_code=0)
+    second = await service.get_instance_coordinated(instance.id)
+    assert second is not None
+    assert runtime.started_dispatch_issue_ids == ["issue-1"]
+
+    completed = second.with_updates(process_status="exited", pid=None, last_exit_code=0)
+    service.store.update_instance(completed)
+    restarted_runtime = CapturingRuntime()
+    restarted_runtime.refreshed_instance = completed
+    restarted = ConductorService(
+        store=store,
+        data_root=tmp_path / "conductor-data",
+        runtime_manager=restarted_runtime,
+    )
+
+    after_restart = await restarted.get_instance_coordinated(instance.id)
+
+    assert after_restart is not None
+    assert after_restart.process_status == "exited"
+    assert restarted_runtime.started_dispatch_issue_ids == []
+
+
+@pytest.mark.asyncio
+async def test_refresh_instance_retries_gated_followup_after_failed_process_exit(tmp_path: Path) -> None:
+    runtime = CapturingRuntime()
+    service = ConductorService(
+        store=ConductorStore(tmp_path / "conductor-data"),
+        data_root=tmp_path / "conductor-data",
+        runtime_manager=runtime,
+    )
+    repo = make_repo(tmp_path)
+    instance = service.create_instance(
+        make_request(repo).with_overrides(
+            workflow_profile="gated-task",
+            linear_filters={"linear_agent_app_user_id": "app-user-1", "active_states": ["Todo", "In Progress"]},
+        )
+    )
+    failed = instance.with_updates(
+        process_status="exited",
+        pid=None,
+        last_exit_code=2,
+        gated_followup_stages={"issue-1": ["gate"]},
+    )
+    service.store.update_instance(failed)
+    runtime.refreshed_instance = failed
+    OpsStore(Path(instance.persistence_path).parent / "ops.json").save(
+        OpsSnapshot(
+            issues={
+                "issue-1": IssueRecord(
+                    issue_id="issue-1",
+                    issue_identifier="ENG-1",
+                    title="Build it",
+                    state="completed",
+                    run_count=1,
+                )
+            },
+            runs={
+                "run-1": RunRecord(
+                    run_id="run-1",
+                    issue_id="issue-1",
+                    instance_id=instance.id,
+                    status="completed",
+                )
+            },
+        )
+    )
+
+    refreshed = await service.get_instance_coordinated(instance.id)
+
+    assert refreshed is not None
+    assert refreshed.process_status == "running"
+    assert runtime.started_dispatch_issue_ids == ["issue-1"]
+
+
+@pytest.mark.asyncio
+async def test_dispatch_podium_event_skips_when_no_instance_matches_project(tmp_path: Path) -> None:
+    runtime = CapturingRuntime()
+    service = ConductorService(
+        store=ConductorStore(tmp_path / "conductor-data"),
+        data_root=tmp_path / "conductor-data",
+        runtime_manager=runtime,
+    )
+    repo = make_repo(tmp_path)
+    service.create_instance(make_request(repo).with_overrides(linear_project="ENG"))
+
+    result = await service.dispatch_podium_event(
+        {"issue_id": "issue-1", "issue_identifier": "OPS-1", "project_slug": "OPS", "agent_app_user_id": "app-user-1"}
+    )
+
+    assert result == {
+        "status": "skipped",
+        "issue_id": "issue-1",
+        "issue_identifier": "OPS-1",
+        "reason": "no_matching_instance",
+    }
+    assert runtime.dispatch_issue_id is None
+
+
+@pytest.mark.asyncio
+async def test_dispatch_podium_event_requires_linear_agent_app_user(tmp_path: Path) -> None:
+    runtime = CapturingRuntime()
+    service = ConductorService(
+        store=ConductorStore(tmp_path / "conductor-data"),
+        data_root=tmp_path / "conductor-data",
+        runtime_manager=runtime,
+    )
+    repo = make_repo(tmp_path)
+    service.create_instance(
+        make_request(repo).with_overrides(linear_project="ENG", linear_filters={"linear_agent_app_user_id": "app-user-1"})
+    )
+
+    result = await service.dispatch_podium_event(
+        {"issue_id": "issue-1", "issue_identifier": "ENG-1", "project_slug": "ENG", "agent_session_id": "session-1"}
+    )
+
+    assert result == {
+        "status": "skipped",
+        "issue_id": "issue-1",
+        "issue_identifier": "ENG-1",
+        "reason": "missing_linear_agent_app_user",
+    }
+    assert runtime.dispatch_issue_id is None
+
+
+@pytest.mark.asyncio
+async def test_dispatch_podium_event_skips_when_linear_agent_app_user_does_not_match_instance(tmp_path: Path) -> None:
+    runtime = CapturingRuntime()
+    service = ConductorService(
+        store=ConductorStore(tmp_path / "conductor-data"),
+        data_root=tmp_path / "conductor-data",
+        runtime_manager=runtime,
+    )
+    repo = make_repo(tmp_path)
+    service.create_instance(
+        make_request(repo).with_overrides(linear_project="ENG", linear_filters={"linear_agent_app_user_id": "app-user-1"})
+    )
+
+    result = await service.dispatch_podium_event(
+        {
+            "issue_id": "issue-1",
+            "issue_identifier": "ENG-1",
+            "project_slug": "ENG",
+            "agent_session_id": "session-1",
+            "agent_app_user_id": "other-app-user",
+        }
+    )
+
+    assert result == {
+        "status": "skipped",
+        "issue_id": "issue-1",
+        "issue_identifier": "ENG-1",
+        "reason": "no_matching_instance",
+    }
+    assert runtime.dispatch_issue_id is None
