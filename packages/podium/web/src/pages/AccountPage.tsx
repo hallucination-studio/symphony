@@ -35,7 +35,7 @@ export default function AccountPage() {
         {me.user ? <IdentityCard user={me.user} /> : null}
       </QueryState>
       <div className="page-stack">
-        <LinearApplicationCard />
+        <LinearApplicationCard initial={me.user?.linear_app ?? null} />
       </div>
       <QueryState isLoading={bootstrap.isLoading} error={bootstrap.error}>
         {bootstrap.data ? <ServicesCards data={bootstrap.data} /> : null}
@@ -91,11 +91,15 @@ function IdentityCard({ user }: { user: AuthUser }) {
   );
 }
 
-function LinearApplicationCard() {
+function LinearApplicationCard({
+  initial,
+}: {
+  initial: LinearAppConfig | null;
+}) {
   const { notify } = useToast();
-  // The current config isn't exposed on GET; reflect it optimistically from
-  // mutation results. Default assumption: the official shared Podium app.
-  const [config, setConfig] = useState<LinearAppConfig | null>(null);
+  // Seed from the real config on `me` so a refresh reflects the saved state;
+  // mutation results then keep it current within the session.
+  const [config, setConfig] = useState<LinearAppConfig | null>(initial);
   const [clientId, setClientId] = useState("");
   const [clientSecret, setClientSecret] = useState("");
   const [redirectUri, setRedirectUri] = useState("");

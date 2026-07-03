@@ -126,6 +126,7 @@ export interface AuthUser {
   user_id: string;
   email: string;
   workspace_id: string;
+  linear_app?: LinearAppConfig | null;
 }
 
 export interface LinearAppConfig {
