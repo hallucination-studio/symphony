@@ -21,6 +21,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--linear-webhook-secret", default=None, help="Linear OAuth application webhook secret")
     parser.add_argument("--linear-installations-path", default=None, help="Path to persist Linear OAuth installations")
     parser.add_argument("--podium-base-url", default=None, help="Public base URL Podium serves the runtime installer from (used to compose the install command)")
+    parser.add_argument("--secret-key", default=None, help="Secret key for password/session/secret encryption (PODIUM_SECRET_KEY)")
+    parser.add_argument("--secure-cookies", action="store_true", default=None, help="Set the Secure attribute on session cookies (production/HTTPS)")
     return parser.parse_args(argv)
 
 
@@ -35,7 +37,11 @@ async def run_server(
     linear_webhook_secret: str | None = None,
     linear_installations_path: str | None = None,
     podium_base_url: str | None = None,
+    secret_key: str | None = None,
+    secure_cookies: bool | None = None,
 ) -> None:
+    if secure_cookies is None:
+        secure_cookies = (os.environ.get("PODIUM_SECURE_COOKIES") or "").lower() in {"1", "true", "yes", "on"}
     server = PodiumServer(
         token=token or os.environ.get("PODIUM_TOKEN"),
         linear_client_id=linear_client_id or os.environ.get("LINEAR_CLIENT_ID"),
@@ -44,6 +50,8 @@ async def run_server(
         linear_webhook_secret=linear_webhook_secret or os.environ.get("LINEAR_WEBHOOK_SECRET"),
         linear_installations_path=linear_installations_path or os.environ.get("PODIUM_LINEAR_INSTALLATIONS_PATH"),
         podium_base_url=podium_base_url or os.environ.get("PODIUM_BASE_URL"),
+        secret_key=secret_key or os.environ.get("PODIUM_SECRET_KEY"),
+        secure_cookies=secure_cookies,
         static_dir=_PACKAGED_STATIC_DIR if _PACKAGED_STATIC_DIR.is_dir() else None,
     )
     await server.start(host=host, port=port)
@@ -68,6 +76,8 @@ def main(argv: list[str] | None = None) -> int:
                 linear_webhook_secret=args.linear_webhook_secret,
                 linear_installations_path=args.linear_installations_path,
                 podium_base_url=args.podium_base_url,
+                secret_key=args.secret_key,
+                secure_cookies=args.secure_cookies,
             )
         )
     except KeyboardInterrupt:

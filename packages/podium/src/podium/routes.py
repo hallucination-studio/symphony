@@ -4,7 +4,7 @@ import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from podium.models import RepositoryMappingMode, SessionIdentity
+from podium.models import RepositoryMappingMode, SessionIdentity, User
 
 if TYPE_CHECKING:
     from podium.server import PodiumServer
@@ -18,6 +18,25 @@ class RawResponse:
     @classmethod
     def text(cls, content: str, content_type: str) -> "RawResponse":
         return cls(content.encode(), content_type)
+
+
+# Cookie name for the server-side session.
+SESSION_COOKIE = "podium_session"
+
+
+@dataclass(frozen=True)
+class SetCookie:
+    """Directive for the server to emit a Set-Cookie header.
+
+    ``value=""`` with ``max_age=0`` clears the cookie.
+    """
+    name: str
+    value: str
+    max_age: int | None = None
+
+
+class Unauthenticated(Exception):
+    """Raised internally when a protected route has no valid session."""
 
 
 def _error(code: str, message: str) -> dict[str, Any]:
@@ -52,6 +71,9 @@ class Router:
 
     def __init__(self, server: "PodiumServer"):
         self.server = server
+        # Set by handlers during a single route() call; the server reads it
+        # synchronously immediately after route() returns (no interleaving).
+        self.pending_cookie: SetCookie | None = None
 
     async def route(
         self,
@@ -61,6 +83,7 @@ class Router:
         headers: dict[str, str],
         query: dict[str, str],
     ) -> tuple[int, dict[str, Any] | RawResponse]:
+        self.pending_cookie = None
         server = self.server
 
         # ===== Static / health =====
@@ -88,48 +111,80 @@ class Router:
         if method == "POST" and path == "/api/v1/linear/graphql":
             return await server.handle_graphql_proxy(raw_body, headers)
 
-        # ===== BFF: bootstrap =====
-        if method == "GET" and path == "/api/v1/bootstrap":
-            return self._bootstrap(query)
+        # ===== Auth =====
+        if method == "POST" and path == "/api/v1/auth/register":
+            return self._auth_register(raw_body)
+        if method == "POST" and path == "/api/v1/auth/login":
+            return self._auth_login(raw_body)
+        if method == "POST" and path == "/api/v1/auth/logout":
+            return self._auth_logout(headers)
+        if method == "GET" and path == "/api/v1/auth/me":
+            return self._auth_me(headers)
 
-        # ===== BFF: onboarding =====
-        if method == "GET" and path == "/api/v1/onboarding/status":
-            return self._onboarding_status(query)
-        if method == "POST" and path == "/api/v1/onboarding/linear/start":
-            return self._onboarding_linear_start(raw_body)
-        if method == "GET" and path == "/api/v1/onboarding/linear/scope":
-            return await self._onboarding_linear_scope(query)
-        if method == "POST" and path == "/api/v1/onboarding/scope":
-            return self._onboarding_scope(raw_body)
-        if method == "POST" and path == "/api/v1/onboarding/repository":
-            return self._onboarding_repository(raw_body)
-        if method == "POST" and path == "/api/v1/onboarding/runtime/enrollment-token":
-            return self._onboarding_enrollment_token(raw_body)
-        if method == "GET" and path == "/api/v1/onboarding/runtime/status":
-            return self._onboarding_runtime_status(query)
-        if method == "POST" and path == "/api/v1/onboarding/smoke-check":
-            return self._onboarding_smoke_check(raw_body)
-        if method == "GET" and path == "/api/v1/onboarding/smoke-check/result":
-            return self._onboarding_smoke_result(query)
+        # ===== Account: custom Linear app =====
+        if method == "PUT" and path == "/api/v1/account/linear-app":
+            return self._account_set_linear_app(raw_body, headers)
+        if method == "DELETE" and path == "/api/v1/account/linear-app":
+            return self._account_clear_linear_app(headers)
+
+        # ===== BFF: bootstrap (session-derived workspace) =====
+        if method == "GET" and path == "/api/v1/bootstrap":
+            try:
+                return self._bootstrap(headers)
+            except Unauthenticated:
+                return self._unauthenticated()
+
+        # ===== BFF: onboarding (session-derived workspace) =====
+        try:
+            if method == "GET" and path == "/api/v1/onboarding/status":
+                return self._onboarding_status(headers)
+            if method == "POST" and path == "/api/v1/onboarding/linear/start":
+                return self._onboarding_linear_start(raw_body, headers)
+            if method == "GET" and path == "/api/v1/onboarding/linear/scope":
+                return await self._onboarding_linear_scope(headers)
+            if method == "POST" and path == "/api/v1/onboarding/scope":
+                return self._onboarding_scope(raw_body, headers)
+            if method == "POST" and path == "/api/v1/onboarding/repository":
+                return self._onboarding_repository(raw_body, headers)
+            if method == "POST" and path == "/api/v1/onboarding/runtime/enrollment-token":
+                return self._onboarding_enrollment_token(raw_body, headers)
+            if method == "GET" and path == "/api/v1/onboarding/runtime/status":
+                return self._onboarding_runtime_status(headers)
+            if method == "POST" and path == "/api/v1/onboarding/smoke-check":
+                return self._onboarding_smoke_check(raw_body, headers)
+            if method == "GET" and path == "/api/v1/onboarding/smoke-check/result":
+                return self._onboarding_smoke_result(headers)
+        except Unauthenticated:
+            return self._unauthenticated()
 
         # ===== BFF: runtimes =====
+        # Machine-called enroll/heartbeat routes are token/enrollment-based, NOT
+        # user-session gated.
         if method == "POST" and path == "/api/v1/runtimes/enroll":
             return self._runtime_enroll(raw_body)
         if method == "POST" and path.startswith("/api/v1/runtimes/") and path.endswith("/heartbeat"):
             runtime_id = path[len("/api/v1/runtimes/"):-len("/heartbeat")]
             return self._runtime_heartbeat(runtime_id, raw_body)
-        if method == "GET" and path == "/api/v1/runtimes":
-            return self._list_runtimes()
-        if method == "GET" and path.startswith("/api/v1/runtimes/"):
-            runtime_id = path[len("/api/v1/runtimes/"):]
-            return self._runtime_detail(runtime_id)
+        # Listing/detail are user-facing but runtime records are global today.
+        try:
+            if method == "GET" and path == "/api/v1/runtimes":
+                self._require_user(headers)
+                return self._list_runtimes()
+            if method == "GET" and path.startswith("/api/v1/runtimes/"):
+                self._require_user(headers)
+                runtime_id = path[len("/api/v1/runtimes/"):]
+                return self._runtime_detail(runtime_id)
 
-        # ===== BFF: runs =====
-        if method == "GET" and path == "/api/v1/runs/recent":
-            return self._recent_runs(query)
-        if method == "GET" and path.startswith("/api/v1/runs/"):
-            run_id = path[len("/api/v1/runs/"):]
-            return self._run_detail(run_id)
+            # ===== BFF: runs =====
+            if method == "GET" and path == "/api/v1/runs/recent":
+                self._require_user(headers)
+                return self._recent_runs(query)
+            if method == "GET" and path.startswith("/api/v1/runs/"):
+                self._require_user(headers)
+                run_id = path[len("/api/v1/runs/"):]
+                return self._run_detail(run_id)
+        except Unauthenticated:
+            return self._unauthenticated()
 
         # ===== Static assets / SPA fallback (non-API GET only) =====
         if method == "GET" and not path.startswith("/api/"):
@@ -145,12 +200,135 @@ class Router:
             return None
         return static_files.serve(path)
 
+    # ===== Session helpers =====
+
+    def _session_id(self, headers: dict[str, str]) -> str:
+        """Extract the podium_session cookie value from the Cookie header."""
+        raw = headers.get("cookie") or ""
+        for part in raw.split(";"):
+            name, _, value = part.strip().partition("=")
+            if name == SESSION_COOKIE:
+                return value.strip()
+        return ""
+
+    def _current_user(self, headers: dict[str, str]) -> User | None:
+        auth = getattr(self.server, "auth_service", None)
+        if auth is None:
+            return None
+        return auth.session_user(self._session_id(headers))
+
+    def _require_user(self, headers: dict[str, str]) -> User:
+        user = self._current_user(headers)
+        if user is None:
+            raise Unauthenticated()
+        return user
+
+    def _unauthenticated(self) -> tuple[int, dict[str, Any]]:
+        return 401, _error("unauthenticated", "Authentication required")
+
+    def _auth_unavailable(self) -> tuple[int, dict[str, Any]]:
+        return 500, _error(
+            "auth_unavailable",
+            "Authentication is not configured (missing PODIUM_SECRET_KEY)",
+        )
+
+    # ===== Auth handlers =====
+
+    def _auth_register(self, raw_body: bytes) -> tuple[int, dict[str, Any]]:
+        from podium.auth_service import AuthError
+
+        auth = getattr(self.server, "auth_service", None)
+        if auth is None:
+            return self._auth_unavailable()
+        payload, error = _parse_json(raw_body)
+        if error:
+            return error
+        try:
+            user = auth.register(
+                str(payload.get("email") or ""),
+                str(payload.get("password") or ""),
+            )
+            session = auth.create_session(user)
+        except AuthError as exc:
+            return 400, _error(exc.code, exc.message)
+        self.pending_cookie = SetCookie(SESSION_COOKIE, session.session_id)
+        return 200, {"user": user.to_public_dict()}
+
+    def _auth_login(self, raw_body: bytes) -> tuple[int, dict[str, Any]]:
+        from podium.auth_service import AuthError
+
+        auth = getattr(self.server, "auth_service", None)
+        if auth is None:
+            return self._auth_unavailable()
+        payload, error = _parse_json(raw_body)
+        if error:
+            return error
+        try:
+            user = auth.authenticate(
+                str(payload.get("email") or ""),
+                str(payload.get("password") or ""),
+            )
+            session = auth.create_session(user)
+        except AuthError as exc:
+            return 401, _error(exc.code, exc.message)
+        self.pending_cookie = SetCookie(SESSION_COOKIE, session.session_id)
+        return 200, {"user": user.to_public_dict()}
+
+    def _auth_logout(self, headers: dict[str, str]) -> tuple[int, dict[str, Any]]:
+        auth = getattr(self.server, "auth_service", None)
+        if auth is not None:
+            auth.delete_session(self._session_id(headers))
+        self.pending_cookie = SetCookie(SESSION_COOKIE, "", max_age=0)
+        return 200, {"ok": True}
+
+    def _auth_me(self, headers: dict[str, str]) -> tuple[int, dict[str, Any]]:
+        user = self._current_user(headers)
+        if user is None:
+            return self._unauthenticated()
+        return 200, {"user": user.to_public_dict()}
+
+    # ===== Account: custom Linear app =====
+
+    def _account_set_linear_app(
+        self, raw_body: bytes, headers: dict[str, str]
+    ) -> tuple[int, dict[str, Any]]:
+        user = self._current_user(headers)
+        if user is None:
+            return self._unauthenticated()
+        auth = self.server.auth_service
+        payload, error = _parse_json(raw_body)
+        if error:
+            return error
+        client_id = str(payload.get("client_id") or "").strip()
+        client_secret = str(payload.get("client_secret") or "").strip()
+        redirect_uri = payload.get("redirect_uri")
+        redirect_uri = str(redirect_uri).strip() if redirect_uri else None
+        if not client_id or not client_secret:
+            return 400, _error(
+                "invalid_request", "client_id and client_secret are required"
+            )
+        try:
+            updated = auth.set_linear_app(user, client_id, client_secret, redirect_uri)
+        except RuntimeError as exc:
+            return 500, _error("encryption_unavailable", str(exc))
+        return 200, {"linear_app": updated.linear_app.to_public_dict()}
+
+    def _account_clear_linear_app(
+        self, headers: dict[str, str]
+    ) -> tuple[int, dict[str, Any]]:
+        user = self._current_user(headers)
+        if user is None:
+            return self._unauthenticated()
+        self.server.auth_service.clear_linear_app(user)
+        return 200, {"ok": True, "linear_app": None}
+
     # ===== BFF handlers =====
 
-    def _bootstrap(self, query: dict[str, str]) -> tuple[int, dict[str, Any]]:
-        workspace_id = str(query.get("workspace_id") or "default")
+    def _bootstrap(self, headers: dict[str, str]) -> tuple[int, dict[str, Any]]:
+        user = self._require_user(headers)
+        workspace_id = user.workspace_id
         server = self.server
-        session = SessionIdentity(workspace_id=workspace_id)
+        session = SessionIdentity(workspace_id=workspace_id, user_id=user.user_id)
         progress = server.onboarding_service.get_progress(workspace_id)
         linear_status = server.linear_service.connection_status(workspace_id)
         return 200, {
@@ -159,21 +337,27 @@ class Router:
             "linear": linear_status.to_dict() if linear_status else {"state": "not_connected", "workspace_id": workspace_id},
         }
 
-    def _onboarding_status(self, query: dict[str, str]) -> tuple[int, dict[str, Any]]:
-        workspace_id = str(query.get("workspace_id") or "default")
-        progress = self.server.onboarding_service.get_progress(workspace_id)
+    def _onboarding_status(self, headers: dict[str, str]) -> tuple[int, dict[str, Any]]:
+        user = self._require_user(headers)
+        progress = self.server.onboarding_service.get_progress(user.workspace_id)
         return 200, progress.to_dict()
 
-    def _onboarding_linear_start(self, raw_body: bytes) -> tuple[int, dict[str, Any]]:
+    def _onboarding_linear_start(
+        self, raw_body: bytes, headers: dict[str, str]
+    ) -> tuple[int, dict[str, Any]]:
+        user = self._require_user(headers)
         payload, error = _parse_json(raw_body)
         if error:
             return error
-        workspace_id = str(payload.get("workspace_id") or "default")
+        workspace_id = user.workspace_id
         url = self.server.linear_service.build_authorization_url(state=workspace_id)
         return 200, {"authorization_url": url, "workspace_id": workspace_id}
 
-    async def _onboarding_linear_scope(self, query: dict[str, str]) -> tuple[int, dict[str, Any]]:
-        workspace_id = str(query.get("workspace_id") or "default")
+    async def _onboarding_linear_scope(
+        self, headers: dict[str, str]
+    ) -> tuple[int, dict[str, Any]]:
+        user = self._require_user(headers)
+        workspace_id = user.workspace_id
         server = self.server
         installation = server.linear_service.get_installation(workspace_id)
         if not installation:
@@ -190,11 +374,14 @@ class Router:
         projects = (data.get("projects") or {}).get("nodes") or []
         return 200, {"teams": teams, "projects": projects}
 
-    def _onboarding_scope(self, raw_body: bytes) -> tuple[int, dict[str, Any]]:
+    def _onboarding_scope(
+        self, raw_body: bytes, headers: dict[str, str]
+    ) -> tuple[int, dict[str, Any]]:
+        user = self._require_user(headers)
         payload, error = _parse_json(raw_body)
         if error:
             return error
-        workspace_id = str(payload.get("workspace_id") or "default")
+        workspace_id = user.workspace_id
         scope = {
             "teams": payload.get("teams") or [],
             "projects": payload.get("projects") or [],
@@ -202,11 +389,14 @@ class Router:
         progress = self.server.onboarding_service.save_scope(workspace_id, scope)
         return 200, {"onboarding": progress.to_dict()}
 
-    def _onboarding_repository(self, raw_body: bytes) -> tuple[int, dict[str, Any]]:
+    def _onboarding_repository(
+        self, raw_body: bytes, headers: dict[str, str]
+    ) -> tuple[int, dict[str, Any]]:
+        user = self._require_user(headers)
         payload, error = _parse_json(raw_body)
         if error:
             return error
-        workspace_id = str(payload.get("workspace_id") or "default")
+        workspace_id = user.workspace_id
         mode = str(payload.get("mode") or "")
         value = str(payload.get("value") or "")
         try:
@@ -216,11 +406,14 @@ class Router:
         mapping, progress = self.server.onboarding_service.save_repository(workspace_id, mode, value)
         return 200, {"repository": mapping.to_dict(), "onboarding": progress.to_dict()}
 
-    def _onboarding_enrollment_token(self, raw_body: bytes) -> tuple[int, dict[str, Any]]:
+    def _onboarding_enrollment_token(
+        self, raw_body: bytes, headers: dict[str, str]
+    ) -> tuple[int, dict[str, Any]]:
+        user = self._require_user(headers)
         payload, error = _parse_json(raw_body)
         if error:
             return error
-        workspace_id = str(payload.get("workspace_id") or "default")
+        workspace_id = user.workspace_id
         server = self.server
         token = server.runtime_service.generate_enrollment_token(workspace_id)
         return 200, {
@@ -230,21 +423,27 @@ class Router:
             "expires_at": server.runtime_service.enrollment_token_expires_at(token),
         }
 
-    def _onboarding_runtime_status(self, query: dict[str, str]) -> tuple[int, dict[str, Any]]:
-        workspace_id = str(query.get("workspace_id") or "default")
-        return 200, self.server.runtime_service.enrollment_status(workspace_id)
+    def _onboarding_runtime_status(
+        self, headers: dict[str, str]
+    ) -> tuple[int, dict[str, Any]]:
+        user = self._require_user(headers)
+        return 200, self.server.runtime_service.enrollment_status(user.workspace_id)
 
-    def _onboarding_smoke_check(self, raw_body: bytes) -> tuple[int, dict[str, Any]]:
+    def _onboarding_smoke_check(
+        self, raw_body: bytes, headers: dict[str, str]
+    ) -> tuple[int, dict[str, Any]]:
+        user = self._require_user(headers)
         payload, error = _parse_json(raw_body)
         if error:
             return error
-        workspace_id = str(payload.get("workspace_id") or "default")
-        result = self.server.onboarding_service.run_smoke_check(workspace_id)
+        result = self.server.onboarding_service.run_smoke_check(user.workspace_id)
         return 200, result.to_dict()
 
-    def _onboarding_smoke_result(self, query: dict[str, str]) -> tuple[int, dict[str, Any]]:
-        workspace_id = str(query.get("workspace_id") or "default")
-        result = self.server.onboarding_service.get_smoke_result(workspace_id)
+    def _onboarding_smoke_result(
+        self, headers: dict[str, str]
+    ) -> tuple[int, dict[str, Any]]:
+        user = self._require_user(headers)
+        result = self.server.onboarding_service.get_smoke_result(user.workspace_id)
         if not result:
             return 404, _error("not_found", "No smoke check result found")
         return 200, result.to_dict()

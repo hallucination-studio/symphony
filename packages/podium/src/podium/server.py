@@ -13,7 +13,8 @@ from performer_api.registration import (
     RegistrationError,
 )
 
-from podium.linear_service import LinearService
+from podium.linear_service import LinearCreds, LinearService
+from podium.auth_service import AuthService
 from podium.onboarding_service import OnboardingService
 from podium.routes import RawResponse, Router
 from podium.runtime_service import RuntimeService
@@ -59,12 +60,18 @@ class PodiumServer:
         data_dir: str | Path | None = None,
         static_dir: str | Path | None = None,
         podium_base_url: str | None = None,
+        secret_key: str | None = None,
+        secure_cookies: bool = False,
     ):
         self.token = token or ""
+        self.secret_key = secret_key or ""
+        self.secure_cookies = secure_cookies
         # Base URL the runtime installer is served from. Backend-owned so the
         # install command is never hardcoded in the frontend. Defaults to a
         # clearly-placeholder host; deployments should set this explicitly.
         self.podium_base_url = (podium_base_url or "https://podium.example").rstrip("/")
+        self.store = PodiumStore(data_dir=data_dir)
+        self.auth_service = AuthService(self.store, self.secret_key)
         self.linear_service = LinearService(
             client_id=linear_client_id or "",
             client_secret=linear_client_secret or "",
@@ -74,8 +81,8 @@ class PodiumServer:
             installations=linear_installations,
             installations_path=linear_installations_path,
             graphql_transport=linear_graphql_transport,
+            credentials_resolver=self._resolve_linear_credentials,
         )
-        self.store = PodiumStore(data_dir=data_dir)
         self.onboarding_service = OnboardingService(
             self.store,
             linear_connected=self._linear_connected,
@@ -92,6 +99,40 @@ class PodiumServer:
     @property
     def linear_installations(self) -> dict[str, dict[str, Any]]:
         return self.linear_service.installations
+
+    def _resolve_linear_credentials(self, workspace_id: str) -> LinearCreds:
+        """Resolve OAuth credentials for a workspace.
+
+        If the workspace's user configured a custom Linear app, use its
+        client_id / decrypted client_secret / redirect_uri. Otherwise fall back
+        to the official global credentials.
+        """
+        ls = self.linear_service
+        global_creds = LinearCreds(
+            client_id=ls.client_id,
+            client_secret=ls.client_secret,
+            redirect_uri=ls.redirect_uri,
+        )
+        # Find the user owning this workspace. V1 volumes are small; a scan is
+        # acceptable and keeps LinearService decoupled from the user model.
+        for data in self.store._users.values():
+            if str(data.get("workspace_id") or "") != workspace_id:
+                continue
+            app = data.get("linear_app")
+            if not isinstance(app, dict) or not app.get("client_secret_encrypted"):
+                return global_creds
+            try:
+                secret = self.auth_service.decrypt_secret(
+                    str(app.get("client_secret_encrypted") or "")
+                )
+            except Exception:
+                return global_creds
+            return LinearCreds(
+                client_id=str(app.get("client_id") or ""),
+                client_secret=secret,
+                redirect_uri=str(app.get("redirect_uri") or "") or ls.redirect_uri,
+            )
+        return global_creds
 
     def _linear_connected(self, workspace_id: str) -> bool:
         """
@@ -147,7 +188,8 @@ class PodiumServer:
             raw_path, _, raw_query = path.partition("?")
             query = {key: values[-1] for key, values in parse_qs(raw_query).items() if values}
             status, payload = await self.router.route(method.upper(), raw_path, raw_body, headers, query)
-            self._write_response(writer, status, payload)
+            set_cookie = self.router.pending_cookie
+            self._write_response(writer, status, payload, set_cookie=set_cookie)
             await writer.drain()
         except Exception as exc:
             self._write_response(writer, 500, {"error": {"code": "internal_error", "message": str(exc)}})
@@ -265,7 +307,14 @@ class PodiumServer:
                 headers={"Authorization": f"Bearer {registration.dispatch_token}"},
             )
 
-    def _write_response(self, writer: asyncio.StreamWriter, status: int, payload: dict[str, Any] | RawResponse) -> None:
+    def _write_response(
+        self,
+        writer: asyncio.StreamWriter,
+        status: int,
+        payload: dict[str, Any] | RawResponse,
+        *,
+        set_cookie: Any = None,
+    ) -> None:
         if isinstance(payload, RawResponse):
             body = payload.body
             content_type = payload.content_type
@@ -279,16 +328,31 @@ class PodiumServer:
             404: "Not Found",
             500: "Internal Server Error",
         }.get(status, "OK")
+        cookie_header = ""
+        if set_cookie is not None:
+            cookie_header = self._format_set_cookie(set_cookie)
         writer.write(
             (
                 f"HTTP/1.1 {status} {reason}\r\n"
                 f"Content-Type: {content_type}\r\n"
                 f"Content-Length: {len(body)}\r\n"
-                "Connection: close\r\n"
+                + cookie_header
+                + "Connection: close\r\n"
                 "\r\n"
             ).encode()
             + body
         )
+
+    def _format_set_cookie(self, set_cookie: Any) -> str:
+        attrs = [f"{set_cookie.name}={set_cookie.value}"]
+        attrs.append("Path=/")
+        attrs.append("HttpOnly")
+        attrs.append("SameSite=Lax")
+        if self.secure_cookies:
+            attrs.append("Secure")
+        if set_cookie.max_age is not None:
+            attrs.append(f"Max-Age={set_cookie.max_age}")
+        return "Set-Cookie: " + "; ".join(attrs) + "\r\n"
 
 
 def _normalize_agent_session_event(payload: dict[str, Any]) -> dict[str, Any]:
