@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { screen, fireEvent } from "@testing-library/react";
+import { screen, fireEvent, waitFor } from "@testing-library/react";
 import { renderWithProviders } from "../test/utils";
 import RegisterPage from "./RegisterPage";
 import { api, ApiError } from "../api/client";
@@ -44,9 +44,36 @@ describe("RegisterPage", () => {
     expect(mockApi.register).not.toHaveBeenCalled();
   });
 
+  it("registers and navigates home on success, sending a turnstile token", async () => {
+    mockApi.register.mockResolvedValue({
+      user: { id: "user_1", email: "a@b.com" },
+    });
+    renderWithProviders(<RegisterPage />);
+
+    fireEvent.change(screen.getByLabelText("Email"), {
+      target: { value: "a@b.com" },
+    });
+    fireEvent.change(screen.getByLabelText("Password"), {
+      target: { value: "password123" },
+    });
+    fireEvent.change(screen.getByLabelText("Confirm password"), {
+      target: { value: "password123" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Create account" }));
+
+    await waitFor(() =>
+      expect(mockApi.register).toHaveBeenCalledWith(
+        "a@b.com",
+        "password123",
+        "dev",
+      ),
+    );
+    await waitFor(() => expect(navigate).toHaveBeenCalledWith("/"));
+  });
+
   it("shows a friendly error when the email is already taken", async () => {
     mockApi.register.mockRejectedValue(
-      new ApiError(400, "Email already registered", "email_taken"),
+      new ApiError(400, "Email already registered", "email_already_registered"),
     );
     renderWithProviders(<RegisterPage />);
 

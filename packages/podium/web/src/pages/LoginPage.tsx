@@ -17,7 +17,7 @@ export default function LoginPage() {
     setError(null);
     setSubmitting(true);
     try {
-      await api.login(email, password);
+      await api.login(email, password, "dev");
       await qc.invalidateQueries({ queryKey: ["me"] });
       navigate("/");
     } catch (err) {
@@ -84,7 +84,7 @@ export default function LoginPage() {
 
 function loginErrorMessage(err: unknown): string {
   if (err instanceof ApiError) {
-    if (err.code === "invalid_credentials") {
+    if (err.code === "invalid_login") {
       return "Invalid email or password";
     }
     return err.message;

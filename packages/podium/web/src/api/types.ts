@@ -122,10 +122,11 @@ export interface EnrollmentStatus {
   enrolled: boolean;
 }
 
+// Main's auth user shape: `{id, email, linear_app?}`. The UI derives a
+// workspace id from `user.id` (V1 = one workspace per user).
 export interface AuthUser {
-  user_id: string;
+  id: string;
   email: string;
-  workspace_id: string;
   linear_app?: LinearAppConfig | null;
 }
 

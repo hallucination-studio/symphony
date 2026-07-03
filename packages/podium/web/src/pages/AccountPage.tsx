@@ -78,11 +78,7 @@ function IdentityCard({ user }: { user: AuthUser }) {
             { key: "Email", value: <span>{user.email}</span> },
             {
               key: "Workspace",
-              value: <code className="code">{user.workspace_id}</code>,
-            },
-            {
-              key: "User",
-              value: <code className="code">{user.user_id}</code>,
+              value: <code className="code">{user.id}</code>,
             },
           ]}
         />

@@ -41,7 +41,7 @@ describe("App auth gate", () => {
   });
 
   it("renders the login page (no sidebar) when unauthenticated", async () => {
-    mockApi.me.mockRejectedValue(new ApiError(401, "no", "unauthenticated"));
+    mockApi.me.mockRejectedValue(new ApiError(401, "no", "unauthorized"));
     renderWithProviders(<App />, { route: "/" });
 
     expect(await screen.findByRole("button", { name: "Sign in" })).toBeInTheDocument();
@@ -51,7 +51,7 @@ describe("App auth gate", () => {
 
   it("renders the app shell when authenticated", async () => {
     mockApi.me.mockResolvedValue({
-      user: { user_id: "u1", email: "a@b.com", workspace_id: "ws_abc" },
+      user: { id: "user_1", email: "a@b.com" },
     });
     renderWithProviders(<App />, { route: "/" });
 

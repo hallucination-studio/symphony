@@ -28,7 +28,7 @@ describe("LoginPage", () => {
 
   it("submits credentials and navigates home on success", async () => {
     mockApi.login.mockResolvedValue({
-      user: { user_id: "u1", email: "a@b.com", workspace_id: "ws" },
+      user: { id: "user_1", email: "a@b.com" },
     });
     renderWithProviders(<LoginPage />);
 
@@ -41,14 +41,14 @@ describe("LoginPage", () => {
     fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
 
     await waitFor(() =>
-      expect(mockApi.login).toHaveBeenCalledWith("a@b.com", "password123"),
+      expect(mockApi.login).toHaveBeenCalledWith("a@b.com", "password123", "dev"),
     );
     await waitFor(() => expect(navigate).toHaveBeenCalledWith("/"));
   });
 
   it("shows a friendly error for invalid credentials", async () => {
     mockApi.login.mockRejectedValue(
-      new ApiError(401, "Invalid email or password", "invalid_credentials"),
+      new ApiError(401, "Invalid email or password", "invalid_login"),
     );
     renderWithProviders(<LoginPage />);
 

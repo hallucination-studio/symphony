@@ -59,17 +59,25 @@ async function request<T>(
 // workspace from the session cookie, so requests never carry a workspace_id.
 export const api = {
   // ===== Auth =====
-  register(email: string, password: string): Promise<{ user: AuthUser }> {
+  register(
+    email: string,
+    password: string,
+    turnstileToken = "dev",
+  ): Promise<{ user: AuthUser }> {
     return request("/api/v1/auth/register", {
       method: "POST",
-      body: JSON.stringify({ email, password }),
+      body: JSON.stringify({ email, password, turnstile_token: turnstileToken }),
     });
   },
 
-  login(email: string, password: string): Promise<{ user: AuthUser }> {
+  login(
+    email: string,
+    password: string,
+    turnstileToken = "dev",
+  ): Promise<{ user: AuthUser }> {
     return request("/api/v1/auth/login", {
       method: "POST",
-      body: JSON.stringify({ email, password }),
+      body: JSON.stringify({ email, password, turnstile_token: turnstileToken }),
     });
   },
 

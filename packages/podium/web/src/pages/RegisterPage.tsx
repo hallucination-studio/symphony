@@ -28,7 +28,7 @@ export default function RegisterPage() {
 
     setSubmitting(true);
     try {
-      await api.register(email, password);
+      await api.register(email, password, "dev");
       await qc.invalidateQueries({ queryKey: ["me"] });
       navigate("/");
     } catch (err) {
@@ -110,8 +110,11 @@ export default function RegisterPage() {
 
 function registerErrorMessage(err: unknown): string {
   if (err instanceof ApiError) {
-    if (err.code === "email_taken") {
+    if (err.code === "email_already_registered") {
       return "That email is already registered — sign in instead.";
+    }
+    if (err.code === "invalid_credentials") {
+      return "Enter a valid email and a password of at least 8 characters.";
     }
     return err.message;
   }

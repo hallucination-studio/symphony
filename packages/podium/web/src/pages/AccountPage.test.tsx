@@ -31,9 +31,8 @@ const mockApi = api as unknown as {
 
 function user(overrides: Partial<AuthUser> = {}): AuthUser {
   return {
-    user_id: "u_1",
+    id: "user_1",
     email: "user@example.com",
-    workspace_id: "ws_abc",
     ...overrides,
   };
 }
@@ -62,7 +61,7 @@ describe("AccountPage", () => {
     renderWithProviders(<AccountPage />);
 
     expect(await screen.findByText("user@example.com")).toBeInTheDocument();
-    expect(screen.getByText("ws_abc")).toBeInTheDocument();
+    expect(screen.getByText("user_1")).toBeInTheDocument();
   });
 
   it("logs out via api.logout", async () => {
