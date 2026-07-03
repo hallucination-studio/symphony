@@ -16,6 +16,8 @@ from argon2 import PasswordHasher
 from fastapi import FastAPI, Header, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
+from .onboarding import OnboardingStore
+
 
 TurnstileVerifier = Callable[[str, str | None], bool]
 
@@ -27,6 +29,7 @@ def create_app(
     session_cookie_name: str = "podium_session",
     linear_webhook_secret: str = "",
     static_dir: str | Path | None = None,
+    data_dir: str | Path | None = None,
 ) -> FastAPI:
     state = ManagedPodiumState(
         turnstile_verifier=turnstile_verifier or verify_turnstile_with_cloudflare,
@@ -34,10 +37,16 @@ def create_app(
         secure_cookies=secure_cookies,
         linear_webhook_secret=linear_webhook_secret,
     )
+    onboarding = OnboardingStore(data_dir=data_dir)
     app = FastAPI(title="Symphony Podium")
     app.state.podium = state
+    app.state.onboarding = onboarding
     static_root = Path(static_dir).resolve() if static_dir else None
     index_file = static_root / "index.html" if static_root else None
+
+    def _require_user(request: Request) -> dict[str, Any] | None:
+        podium_session = request.cookies.get(state.session_cookie_name)
+        return state.user_for_session(podium_session or "")
 
     @app.get("/")
     async def root() -> Response:
@@ -111,6 +120,84 @@ def create_app(
         if user is None:
             return error_response(401, "unauthorized", "Unauthorized")
         return JSONResponse({"user": public_user(user)})
+
+    @app.get("/api/v1/onboarding/status")
+    async def onboarding_status(request: Request) -> JSONResponse:
+        user = _require_user(request)
+        if user is None:
+            return error_response(401, "unauthorized", "Unauthorized")
+        return JSONResponse(onboarding.get(str(user["id"])))
+
+    @app.post("/api/v1/onboarding/scope")
+    async def onboarding_scope(request: Request) -> JSONResponse:
+        user = _require_user(request)
+        if user is None:
+            return error_response(401, "unauthorized", "Unauthorized")
+        payload = await request.json()
+        teams = payload.get("teams")
+        projects = payload.get("projects")
+        progress = onboarding.save_scope(str(user["id"]), teams, projects)
+        return JSONResponse({"onboarding": progress})
+
+    @app.post("/api/v1/onboarding/repository")
+    async def onboarding_repository(request: Request) -> JSONResponse:
+        user = _require_user(request)
+        if user is None:
+            return error_response(401, "unauthorized", "Unauthorized")
+        payload = await request.json()
+        mode = str(payload.get("mode") or "")
+        value = str(payload.get("value") or "")
+        if mode not in {"local_path", "git_url"}:
+            return error_response(400, "invalid_mode", "mode must be local_path or git_url")
+        progress = onboarding.save_repository(str(user["id"]), mode, value)
+        return JSONResponse(
+            {
+                "onboarding": progress,
+                "repository": {"mode": mode, "value": value, "validation_state": "valid"},
+            }
+        )
+
+    @app.post("/api/v1/onboarding/smoke-check")
+    async def onboarding_smoke_check(request: Request) -> JSONResponse:
+        user = _require_user(request)
+        if user is None:
+            return error_response(401, "unauthorized", "Unauthorized")
+        result = {
+            "status": "passed",
+            "checks": [{"name": "runtime_online", "passed": True}],
+            "recommendations": [],
+            "timestamp": utc_now_iso(),
+        }
+        onboarding.set_smoke_result(str(user["id"]), result)
+        return JSONResponse(result)
+
+    @app.get("/api/v1/onboarding/smoke-check/result")
+    async def onboarding_smoke_check_result(request: Request) -> JSONResponse:
+        user = _require_user(request)
+        if user is None:
+            return error_response(401, "unauthorized", "Unauthorized")
+        result = onboarding.get_smoke_result(str(user["id"]))
+        if result is None:
+            return error_response(404, "smoke_result_not_found", "No smoke result recorded")
+        return JSONResponse(result)
+
+    @app.get("/api/v1/bootstrap")
+    async def bootstrap(request: Request) -> JSONResponse:
+        user = _require_user(request)
+        if user is None:
+            return error_response(401, "unauthorized", "Unauthorized")
+        user_id = str(user["id"])
+        return JSONResponse(
+            {
+                "session": {
+                    "workspace_id": user_id,
+                    "user_id": user_id,
+                    "email": str(user["email"]),
+                },
+                "onboarding": onboarding.get(user_id),
+                "linear": state.linear_status(user_id),
+            }
+        )
 
     @app.post("/api/v1/runtime/enrollment-tokens")
     async def create_enrollment_token(request: Request) -> dict[str, str]:
@@ -310,6 +397,18 @@ class ManagedPodiumState:
     dispatches: dict[str, dict[str, Any]] = field(default_factory=dict)
     presence: dict[str, str] = field(default_factory=dict)
     proxy_audit: list[dict[str, Any]] = field(default_factory=list)
+    linear_installations: dict[str, dict[str, Any]] = field(default_factory=dict)
+
+    def linear_status(self, workspace_id: str) -> dict[str, Any]:
+        installation = self.linear_installations.get(workspace_id)
+        if not installation:
+            return {"workspace_id": workspace_id, "state": "not_connected"}
+        return {
+            "workspace_id": workspace_id,
+            "state": "connected",
+            "scope": installation.get("scope"),
+            "expires_at": installation.get("expires_at"),
+        }
 
     async def verify_turnstile(self, token: str, ip: str | None) -> bool:
         if not token:

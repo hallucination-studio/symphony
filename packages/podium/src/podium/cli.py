@@ -31,6 +31,7 @@ def main(argv: list[str] | None = None) -> int:
         session_cookie_name=os.environ.get("PODIUM_SESSION_COOKIE_NAME", "podium_session"),
         linear_webhook_secret=os.environ.get("LINEAR_WEBHOOK_SECRET", ""),
         static_dir=str(default_static) if default_static.exists() else None,
+        data_dir=os.environ.get("PODIUM_DATA_DIR"),
     )
     uvicorn.run(app, host=args.host, port=args.port)
     return 0
