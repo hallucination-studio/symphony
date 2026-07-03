@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -18,6 +19,14 @@ def _int(value: Any, default: int) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+@dataclass(frozen=True)
+class LinearCreds:
+    """Resolved OAuth client credentials for a given workspace."""
+    client_id: str
+    client_secret: str
+    redirect_uri: str
 
 
 class LinearService:
@@ -45,6 +54,7 @@ class LinearService:
         installations: dict[str, dict[str, Any]] | None = None,
         installations_path: str | Path | None = None,
         graphql_transport: Callable[[httpx.Request], Awaitable[httpx.Response]] | httpx.AsyncBaseTransport | None = None,
+        credentials_resolver: Callable[[str], LinearCreds] | None = None,
     ):
         self.client_id = client_id or ""
         self.client_secret = client_secret or ""
@@ -54,6 +64,19 @@ class LinearService:
         self.installations_path = Path(installations_path) if installations_path else None
         self.installations = dict(installations or self._load_installations())
         self.graphql_transport = graphql_transport
+        self.credentials_resolver = credentials_resolver or self._global_credentials
+        self._pending_state = ""
+
+    def _global_credentials(self, workspace_id: str) -> LinearCreds:
+        """Default resolver: always the official global credentials."""
+        return LinearCreds(
+            client_id=self.client_id,
+            client_secret=self.client_secret,
+            redirect_uri=self.redirect_uri,
+        )
+
+    def resolve_credentials(self, workspace_id: str) -> LinearCreds:
+        return self.credentials_resolver(workspace_id)
 
     # ===== OAuth =====
 
@@ -66,6 +89,7 @@ class LinearService:
         code = str(query.get("code") or "").strip()
         if not code:
             return 400, {"error": {"code": "missing_code", "message": "OAuth code is required"}}
+        self._pending_state = str(query.get("state") or "").strip()
         exchanged = self.token_exchange(code)
         workspace_id = str(
             exchanged.get("workspace_id")
@@ -97,10 +121,16 @@ class LinearService:
         }
 
     def build_authorization_url(self, *, state: str, scope: str = "read,write") -> str:
-        """Build a Linear OAuth authorization URL for starting the flow."""
+        """Build a Linear OAuth authorization URL for starting the flow.
+
+        Uses the workspace's resolved credentials (``state`` carries the
+        workspace_id), so a user's custom Linear app mints the token when
+        configured; otherwise the official global client is used.
+        """
+        creds = self.resolve_credentials(state)
         params = {
-            "client_id": self.client_id,
-            "redirect_uri": self.redirect_uri,
+            "client_id": creds.client_id,
+            "redirect_uri": creds.redirect_uri,
             "response_type": "code",
             "scope": scope,
             "state": state,
@@ -151,12 +181,14 @@ class LinearService:
     # ===== Internal =====
 
     def _default_token_exchange(self, code: str) -> dict[str, Any]:
-        if not self.client_id or not self.client_secret or not self.redirect_uri:
+        state = getattr(self, "_pending_state", "") or ""
+        creds = self.resolve_credentials(state)
+        if not creds.client_id or not creds.client_secret or not creds.redirect_uri:
             raise RuntimeError("Linear OAuth token exchange is not configured")
         data = {
-            "client_id": self.client_id,
-            "client_secret": self.client_secret,
-            "redirect_uri": self.redirect_uri,
+            "client_id": creds.client_id,
+            "client_secret": creds.client_secret,
+            "redirect_uri": creds.redirect_uri,
             "code": code,
             "grant_type": "authorization_code",
         }
