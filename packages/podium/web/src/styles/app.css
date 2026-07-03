@@ -507,11 +507,17 @@
   display: flex;
   align-items: center;
   gap: var(--space-3);
+  width: 100%;
   padding: var(--space-2) var(--space-3);
+  border: 1px solid transparent;
   border-radius: var(--radius-sm);
+  background: transparent;
   color: var(--color-text-muted);
+  font-family: inherit;
   font-size: 14px;
   font-weight: 500;
+  text-align: left;
+  cursor: pointer;
 }
 .setup-nav-item:hover {
   background: var(--color-bg);
