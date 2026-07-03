@@ -32,6 +32,10 @@ def main(argv: list[str] | None = None) -> int:
         linear_webhook_secret=os.environ.get("LINEAR_WEBHOOK_SECRET", ""),
         static_dir=str(default_static) if default_static.exists() else None,
         data_dir=os.environ.get("PODIUM_DATA_DIR"),
+        secret_key=os.environ.get("PODIUM_SECRET_KEY", ""),
+        linear_client_id=os.environ.get("LINEAR_CLIENT_ID", ""),
+        linear_client_secret=os.environ.get("LINEAR_CLIENT_SECRET", ""),
+        linear_redirect_uri=os.environ.get("LINEAR_REDIRECT_URI", ""),
     )
     uvicorn.run(app, host=args.host, port=args.port)
     return 0

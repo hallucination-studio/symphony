@@ -29,7 +29,7 @@ async def test_auth_register_login_logout_without_echoing_secrets() -> None:
             json={"email": "User@example.com", "password": "correct-horse", "turnstile_token": "turnstile-ok"},
         )
         assert register.status_code == 200
-        assert register.json()["user"] == {"id": "user_1", "email": "user@example.com"}
+        assert register.json()["user"] == {"id": "user_1", "email": "user@example.com", "linear_app": None}
         assert "password_hash" not in register.text
         assert "podium_session" in register.cookies
 
