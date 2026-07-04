@@ -171,6 +171,26 @@ def test_command_args_can_target_event_dispatch_issue() -> None:
     )
 
 
+def test_command_args_include_phase_request_and_result_paths() -> None:
+    manager = ConductorRuntimeManager(command="performer")
+
+    assert manager._command_args(
+        "WORKFLOW.md",
+        dispatch_issue_id="issue-1",
+        advance_request_path="/tmp/request.json",
+        phase_result_path="/tmp/result.json",
+    ) == (
+        "performer",
+        "WORKFLOW.md",
+        "--dispatch-issue-id",
+        "issue-1",
+        "--advance-request-path",
+        "/tmp/request.json",
+        "--phase-result-path",
+        "/tmp/result.json",
+    )
+
+
 def test_refresh_polls_process_before_reporting_running(tmp_path: Path) -> None:
     class PollingProcess:
         pid = 4242

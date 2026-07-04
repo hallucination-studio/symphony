@@ -12,8 +12,7 @@ from conductor.conductor_runtime import ConductorRuntimeManager
 from conductor.podium_client import PodiumRuntimeClient
 from conductor.conductor_service import ConductorService
 from conductor.conductor_store import ConductorStore
-from performer_api.ops_models import IssueRecord, OpsSnapshot, RunRecord
-from performer_api.ops_store import OpsStore
+from performer_api.phase import RunPhase
 from podium.app import create_app
 from tests.test_conductor_service import CapturingRuntime, make_repo, make_request
 
@@ -43,6 +42,22 @@ def test_build_podium_report_includes_bindings_metrics_queue_and_log_tail(tmp_pa
     service = make_channel_service(tmp_path)
     repo = make_repo(tmp_path)
     instance = service.create_instance(make_request(repo))
+    waiting = service.store.upsert_orchestration_run(
+        instance_id=instance.id,
+        issue_id="issue-1",
+        issue_identifier="ENG-1",
+        workflow_profile="default",
+        dispatch_id=None,
+    )
+    failed = service.store.upsert_orchestration_run(
+        instance_id=instance.id,
+        issue_id="issue-2",
+        issue_identifier="ENG-2",
+        workflow_profile="default",
+        dispatch_id=None,
+    )
+    service.store.update_orchestration_run(waiting.run_id, phase=RunPhase.AWAITING_HUMAN, status="waiting")
+    service.store.update_orchestration_run(failed.run_id, phase=RunPhase.FAILED, status="failed", retry_count=2)
     current = Path(instance.instance_dir) / "logs" / "performer-000001.log"
     current.write_text("one\ntwo\nthree\n", encoding="utf-8")
     service.store.update_instance(instance.with_updates(log_path=str(current), process_status="running"))
@@ -53,6 +68,10 @@ def test_build_podium_report_includes_bindings_metrics_queue_and_log_tail(tmp_pa
     assert report["bindings"][0]["project_slug"] == "ENG"
     assert report["bindings"][0]["process_status"] == "running"
     assert report["metrics"][instance.id]["tokens"] == 0
+    assert report["metrics"][instance.id]["retries"] == 2
+    assert report["metrics"][instance.id]["blocked"] == 1
+    assert report["metrics"][instance.id]["pending_human"] == 1
+    assert report["metrics"][instance.id]["failures"] == 1
     assert report["queue"][instance.id]["running"] == 1
     assert report["log_tail"][instance.id]["lines"] == ["three", "two"]
 
@@ -96,21 +115,20 @@ async def test_ack_completed_podium_dispatch_posts_runtime_completion(tmp_path: 
     repo = make_repo(tmp_path)
     instance = service.create_instance(make_request(repo).with_overrides(linear_filters={"agent_app_user_id": "agent-alpha"}))
     service.store.update_instance(instance.with_updates(process_status="exited", last_exit_code=0))
-    OpsStore(Path(instance.persistence_path).parent / "ops.json").save(
-        OpsSnapshot(
-            issues={
-                "issue-1": IssueRecord(
-                    issue_id="issue-1",
-                    issue_identifier="ENG-1",
-                    title="Task",
-                    state="completed",
-                    run_count=1,
-                )
-            },
-            runs={"run-1": RunRecord(run_id="run-1", issue_id="issue-1", instance_id=instance.id, status="completed")},
-        )
+    run = service.store.upsert_orchestration_run(
+        instance_id=instance.id,
+        issue_id="issue-1",
+        issue_identifier="ENG-1",
+        workflow_profile="default",
+        dispatch_id="dispatch-1",
     )
-    service._active_podium_dispatches[instance.id] = {"dispatch_id": "dispatch-1", "issue_id": "issue-1"}
+    service.store.update_orchestration_run(
+        run.run_id,
+        phase=RunPhase.DONE,
+        status="completed",
+        last_reason="completed_by_runtime",
+        ack_status="pending",
+    )
     captured: dict[str, Any] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -128,7 +146,7 @@ async def test_ack_completed_podium_dispatch_posts_runtime_completion(tmp_path: 
         "dispatch_id": "dispatch-1",
         "status": "completed",
         "reason": "completed_by_runtime",
-        "runtime_phase": "completed",
+        "runtime_phase": "done",
     }
 
 

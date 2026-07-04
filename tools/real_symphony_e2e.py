@@ -300,6 +300,64 @@ async def comment_linear_issue(token: str, issue_id: str, body: str) -> dict[str
     )["commentCreate"]
 
 
+async def fetch_linear_human_action_issue(token: str, issue_id: str) -> dict[str, Any]:
+    return (
+        await linear_graphql(
+            token,
+            """
+            query HumanActionIssue($issueId: String!) {
+              issue(id: $issueId) {
+                id
+                identifier
+                description
+                state { name type }
+                team {
+                  states(first: 50) {
+                    nodes { id name type }
+                  }
+                }
+              }
+            }
+            """,
+            {"issueId": issue_id},
+        )
+    )["issue"]
+
+
+async def update_linear_issue_description(token: str, issue_id: str, description: str) -> dict[str, Any]:
+    return (
+        await linear_graphql(
+            token,
+            """
+            mutation UpdateHumanActionDescription($issueId: String!, $description: String!) {
+              issueUpdate(id: $issueId, input: { description: $description }) {
+                success
+                issue { id identifier }
+              }
+            }
+            """,
+            {"issueId": issue_id, "description": description},
+        )
+    )["issueUpdate"]
+
+
+async def move_linear_issue_to_state(token: str, issue_id: str, state_id: str) -> dict[str, Any]:
+    return (
+        await linear_graphql(
+            token,
+            """
+            mutation MoveHumanActionIssue($issueId: String!, $stateId: String!) {
+              issueUpdate(id: $issueId, input: { stateId: $stateId }) {
+                success
+                issue { id identifier state { name type } }
+              }
+            }
+            """,
+            {"issueId": issue_id, "stateId": state_id},
+        )
+    )["issueUpdate"]
+
+
 async def fetch_linear_issue_tree(token: str, issue_id: str) -> dict[str, Any]:
     return (
         await linear_graphql(
@@ -510,6 +568,151 @@ def api_url(port: int, path: str) -> str:
     return f"http://127.0.0.1:{port}{path}"
 
 
+def write_wait_artifacts(
+    *,
+    evidence: Evidence,
+    samples: list[dict[str, Any]],
+    result_path: Path,
+    final_issue: dict[str, Any],
+    state_path: Path,
+    last_state: dict[str, Any],
+    ops_path: Path,
+    last_ops: dict[str, Any],
+    log_path: Path,
+    stages: dict[str, str],
+    stage_timeout_seconds: int,
+) -> dict[str, Any]:
+    samples_path = evidence.out.parent / "runtime-samples.json"
+    samples_path.write_text(json.dumps(samples, indent=2, sort_keys=True), encoding="utf-8")
+    evidence.artifact("runtime_samples", samples_path)
+    if result_path.exists():
+        result_copy = evidence.out.parent / "workspace-result.txt"
+        result_copy.write_text(result_path.read_text(encoding="utf-8", errors="replace"), encoding="utf-8")
+        evidence.artifact("workspace_result", result_copy)
+    final_issue_path = evidence.out.parent / "final-issue.json"
+    final_issue_path.write_text(json.dumps(final_issue, indent=2, sort_keys=True), encoding="utf-8")
+    evidence.artifact("final_issue", final_issue_path)
+    stage_snapshot = {
+        "observed": stages,
+        "stage_timeout_seconds": stage_timeout_seconds,
+        "last_sample": samples[-1] if samples else None,
+    }
+    stage_snapshot_path = evidence.out.parent / "stage-snapshot.json"
+    stage_snapshot_path.write_text(json.dumps(stage_snapshot, indent=2, sort_keys=True), encoding="utf-8")
+    evidence.artifact("stage_snapshot", stage_snapshot_path)
+    return {
+        "state": read_json_object_if_ready(state_path, last_state),
+        "ops": read_json_object_if_ready(ops_path, last_ops),
+        "issue": final_issue,
+        "result_path": str(result_path),
+        "log_path": str(log_path),
+        "samples": samples,
+    }
+
+
+def conductor_human_actions(runs_payload: dict[str, Any]) -> list[dict[str, Any]]:
+    runs = runs_payload.get("runs")
+    if not isinstance(runs, list):
+        return []
+    actions: list[dict[str, Any]] = []
+    for run in runs:
+        if not isinstance(run, dict) or run.get("phase") != "awaiting_human":
+            continue
+        human_action = run.get("human_action")
+        if not isinstance(human_action, dict):
+            human_action = {}
+        actions.append(
+            {
+                "run_id": str(run.get("run_id") or ""),
+                "issue_id": str(run.get("issue_id") or ""),
+                "issue_identifier": str(run.get("issue_identifier") or "") or None,
+                "phase": str(run.get("phase") or ""),
+                "status": str(run.get("status") or ""),
+                "last_reason": str(run.get("last_reason") or "") or None,
+                "child_issue_id": str(human_action.get("child_issue_id") or "") or None,
+                "child_identifier": str(human_action.get("child_identifier") or "") or None,
+                "child_url": str(human_action.get("child_url") or "") or None,
+                "kind": str(human_action.get("kind") or "") or None,
+            }
+        )
+    return actions
+
+
+def human_action_description_with_response(description: str, response: str) -> str:
+    marker = "Human response:"
+    response = response.strip()
+    if marker.lower() not in description.lower():
+        return f"{description.rstrip()}\n\n{marker}\n{response}\n"
+    lower = description.lower()
+    start = lower.find(marker.lower()) + len(marker)
+    stop = len(description)
+    for candidate in ["When finished,", "完成后", "Move this child issue"]:
+        index = lower.find(candidate.lower(), start)
+        if index >= 0:
+            stop = min(stop, index)
+    prefix = description[:start].rstrip()
+    suffix = description[stop:].lstrip("\n")
+    if suffix:
+        return f"{prefix}\n{response}\n\n{suffix}"
+    return f"{prefix}\n{response}\n"
+
+
+def should_complete_conductor_human_action(action: dict[str, Any], completed_run_ids: set[str]) -> bool:
+    run_id = str(action.get("run_id") or "")
+    child_issue_id = str(action.get("child_issue_id") or "")
+    return bool(run_id and child_issue_id and run_id not in completed_run_ids)
+
+
+def done_state_id_for_human_action(issue: dict[str, Any]) -> str | None:
+    team = issue.get("team") if isinstance(issue.get("team"), dict) else {}
+    states = ((team.get("states") or {}).get("nodes") or []) if isinstance(team, dict) else []
+    for state in states:
+        if not isinstance(state, dict):
+            continue
+        if str(state.get("type") or "") == "completed" and state.get("id"):
+            return str(state["id"])
+    for state in states:
+        if not isinstance(state, dict):
+            continue
+        if str(state.get("name") or "").strip().lower() == "done" and state.get("id"):
+            return str(state["id"])
+    return None
+
+
+async def complete_conductor_human_action(
+    token: str,
+    action: dict[str, Any],
+    *,
+    response: str,
+) -> dict[str, Any]:
+    child_issue_id = str(action.get("child_issue_id") or "").strip()
+    if not child_issue_id:
+        return {"status": "skipped", "reason": "missing_child_issue_id", "action": action}
+    issue = await fetch_linear_human_action_issue(token, child_issue_id)
+    state = issue.get("state") if isinstance(issue.get("state"), dict) else {}
+    if str(state.get("type") or "") == "completed" or str(state.get("name") or "").strip().lower() == "done":
+        return {"status": "already_done", "child_issue_id": child_issue_id, "child_identifier": issue.get("identifier")}
+    description = human_action_description_with_response(str(issue.get("description") or ""), response)
+    updated = await update_linear_issue_description(token, child_issue_id, description)
+    done_state_id = done_state_id_for_human_action(issue)
+    if not done_state_id:
+        return {
+            "status": "failed",
+            "reason": "done_state_not_found",
+            "child_issue_id": child_issue_id,
+            "description_updated": bool(updated.get("success")),
+        }
+    moved = await move_linear_issue_to_state(token, child_issue_id, done_state_id)
+    moved_issue = moved.get("issue") if isinstance(moved, dict) and isinstance(moved.get("issue"), dict) else {}
+    return {
+        "status": "completed" if moved.get("success") else "failed",
+        "child_issue_id": child_issue_id,
+        "child_identifier": moved_issue.get("identifier") or issue.get("identifier"),
+        "description_updated": bool(updated.get("success")),
+        "state": moved_issue.get("state"),
+    }
+
+
 def linear_webhook_signature(secret: str, payload: bytes) -> str:
     import hashlib
     import hmac
@@ -538,6 +741,8 @@ async def wait_for_run(
     samples: list[dict[str, Any]] = []
     final_issue: dict[str, Any] | None = None
     approved_blocked_events: set[str] = set()
+    completed_phase_human_actions: set[str] = set()
+    completed_phase_human_runs: set[str] = set()
     last_state: dict[str, Any] = {}
     last_ops: dict[str, Any] = {}
     stages: dict[str, str] = {}
@@ -573,6 +778,8 @@ async def wait_for_run(
         process_status = None
         if status == 200 and isinstance(runtime_body, dict):
             process_status = (runtime_body.get("instance") or {}).get("process_status")
+        runs_status, runs_body = http_json("GET", api_url(conductor_port, "/api/runs"), timeout=2)
+        phase_human_actions = conductor_human_actions(runs_body if runs_status == 200 and isinstance(runs_body, dict) else {})
         run_statuses = [run.get("status") for run in ops.get("runs", {}).values()]
         event_types = [
             event.get("event_type")
@@ -593,6 +800,7 @@ async def wait_for_run(
             "blocked": len(state.get("blocked", [])),
             "result_exists": result_path.exists(),
             "run_statuses": run_statuses,
+            "phase_human_actions": phase_human_actions,
             "event_types": event_types[-20:],
         }
         samples.append(sample)
@@ -642,6 +850,61 @@ async def wait_for_run(
             approved_blocked_events.add(blocked_key)
             await asyncio.sleep(2)
             break
+        if phase_human_actions:
+            evidence.check(
+                "human-action:conductor-phase-awaiting-human",
+                True,
+                actions=phase_human_actions,
+            )
+            for action in phase_human_actions:
+                run_id = str(action.get("run_id") or "")
+                child_issue_id = str(action.get("child_issue_id") or "")
+                if run_id in completed_phase_human_runs and child_issue_id not in completed_phase_human_actions:
+                    evidence.check(
+                        "human-action:repeat-awaiting-human-after-resume",
+                        False,
+                        action=action,
+                        reason="same Conductor run requested another human action after automatic resume",
+                    )
+                    return write_wait_artifacts(
+                        evidence=evidence,
+                        samples=samples,
+                        result_path=result_path,
+                        final_issue=final_issue,
+                        state_path=state_path,
+                        last_state=last_state,
+                        ops_path=ops_path,
+                        last_ops=last_ops,
+                        log_path=log_path,
+                        stages=stages,
+                        stage_timeout_seconds=stage_timeout_seconds,
+                    )
+                if not should_complete_conductor_human_action(action, completed_phase_human_runs):
+                    continue
+                response = (
+                    "Reviewed by the real Symphony E2E harness. "
+                    "Apply any required local environment fix and retry the managed run."
+                )
+                try:
+                    completion = await complete_conductor_human_action(token, action, response=response)
+                except Exception as exc:
+                    evidence.check(
+                        "human-action:linear-child-complete",
+                        False,
+                        child_issue_id=child_issue_id,
+                        error=str(exc),
+                    )
+                    continue
+                completed_phase_human_actions.add(child_issue_id)
+                completed_phase_human_runs.add(run_id)
+                evidence.check(
+                    "human-action:linear-child-complete",
+                    completion.get("status") in {"completed", "already_done"},
+                    action=action,
+                    completion=completion,
+                )
+            await asyncio.sleep(2)
+            continue
         if permission_approval_probe:
             check_names = {check.get("name") for check in evidence.data.get("checks", []) if check.get("passed")}
             if (
@@ -664,33 +927,20 @@ async def wait_for_run(
         ):
             break
         await asyncio.sleep(5)
-    samples_path = evidence.out.parent / "runtime-samples.json"
-    samples_path.write_text(json.dumps(samples, indent=2, sort_keys=True), encoding="utf-8")
-    evidence.artifact("runtime_samples", samples_path)
-    if result_path.exists():
-        result_copy = evidence.out.parent / "workspace-result.txt"
-        result_copy.write_text(result_path.read_text(encoding="utf-8", errors="replace"), encoding="utf-8")
-        evidence.artifact("workspace_result", result_copy)
     final_issue = final_issue or await fetch_linear_issue(token, issue_id)
-    final_issue_path = evidence.out.parent / "final-issue.json"
-    final_issue_path.write_text(json.dumps(final_issue, indent=2, sort_keys=True), encoding="utf-8")
-    evidence.artifact("final_issue", final_issue_path)
-    stage_snapshot = {
-        "observed": stages,
-        "stage_timeout_seconds": stage_timeout_seconds,
-        "last_sample": samples[-1] if samples else None,
-    }
-    stage_snapshot_path = evidence.out.parent / "stage-snapshot.json"
-    stage_snapshot_path.write_text(json.dumps(stage_snapshot, indent=2, sort_keys=True), encoding="utf-8")
-    evidence.artifact("stage_snapshot", stage_snapshot_path)
-    return {
-        "state": read_json_object_if_ready(state_path, last_state),
-        "ops": read_json_object_if_ready(ops_path, last_ops),
-        "issue": final_issue,
-        "result_path": str(result_path),
-        "log_path": str(log_path),
-        "samples": samples,
-    }
+    return write_wait_artifacts(
+        evidence=evidence,
+        samples=samples,
+        result_path=result_path,
+        final_issue=final_issue,
+        state_path=state_path,
+        last_state=last_state,
+        ops_path=ops_path,
+        last_ops=last_ops,
+        log_path=log_path,
+        stages=stages,
+        stage_timeout_seconds=stage_timeout_seconds,
+    )
 
 
 async def run(args: argparse.Namespace) -> dict[str, Any]:

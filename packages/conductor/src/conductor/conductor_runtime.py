@@ -98,6 +98,8 @@ class ConductorRuntimeManager:
         *,
         env: dict[str, str] | None = None,
         dispatch_issue_id: str | None = None,
+        advance_request_path: str | None = None,
+        phase_result_path: str | None = None,
     ) -> InstanceRecord:
         existing = self._handles.get(instance.id)
         if existing is not None and getattr(existing.process, "returncode", None) is None:
@@ -112,7 +114,12 @@ class ConductorRuntimeManager:
         self._write_current_pointer(log_path)
         Path(instance.resolved_repo_path).mkdir(parents=True, exist_ok=True)
         process = await self.process_factory(
-            *self._command_args(instance.workflow_path, dispatch_issue_id=dispatch_issue_id),
+            *self._command_args(
+                instance.workflow_path,
+                dispatch_issue_id=dispatch_issue_id,
+                advance_request_path=advance_request_path,
+                phase_result_path=phase_result_path,
+            ),
             cwd=instance.resolved_repo_path,
             env=self._process_env(env),
             stdout=asyncio.subprocess.PIPE,
@@ -280,13 +287,24 @@ class ConductorRuntimeManager:
         env["PYTHONPATH"] = os.pathsep.join(paths)
         return env
 
-    def _command_args(self, workflow_path: str, *, dispatch_issue_id: str | None = None) -> tuple[str, ...]:
+    def _command_args(
+        self,
+        workflow_path: str,
+        *,
+        dispatch_issue_id: str | None = None,
+        advance_request_path: str | None = None,
+        phase_result_path: str | None = None,
+    ) -> tuple[str, ...]:
         if self.command == sys.executable:
             args = (self.command, "-m", "performer.cli", workflow_path)
         else:
             args = (self.command, workflow_path)
         if dispatch_issue_id:
-            return (*args, "--dispatch-issue-id", dispatch_issue_id)
+            args = (*args, "--dispatch-issue-id", dispatch_issue_id)
+        if advance_request_path:
+            args = (*args, "--advance-request-path", advance_request_path)
+        if phase_result_path:
+            args = (*args, "--phase-result-path", phase_result_path)
         return args
 
     def _allocate_generation_log(self, instance: InstanceRecord) -> tuple[Path, int]:

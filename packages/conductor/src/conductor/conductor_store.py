@@ -6,6 +6,9 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from performer_api.phase import RunPhase
+
+from .conductor_phase import OrchestrationEvent, OrchestrationRun, new_run, with_updates
 from .conductor_models import ConductorSettings, InstanceRecord, utc_now_iso
 
 
@@ -313,6 +316,269 @@ class ConductorStore:
             ).fetchone()
         return dict(row) if row is not None else None
 
+    def upsert_orchestration_run(
+        self,
+        *,
+        instance_id: str,
+        issue_id: str,
+        issue_identifier: str | None,
+        workflow_profile: str | None,
+        dispatch_id: str | None,
+    ) -> OrchestrationRun:
+        now = utc_now_iso()
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM orchestration_runs WHERE instance_id = ? AND issue_id = ?",
+                (instance_id, issue_id),
+            ).fetchone()
+            if row is None:
+                run = new_run(
+                    instance_id=instance_id,
+                    issue_id=issue_id,
+                    issue_identifier=issue_identifier,
+                    workflow_profile=workflow_profile,
+                    dispatch_id=dispatch_id,
+                    now=now,
+                )
+                connection.execute(
+                    """
+                    INSERT INTO orchestration_runs (
+                      run_id,
+                      instance_id,
+                      issue_id,
+                      issue_identifier,
+                      phase,
+                      status,
+                      attempt,
+                      workflow_profile,
+                      dispatch_id,
+                      request_path,
+                      result_path,
+                      workspace_path,
+                      ops_snapshot_path,
+                      human_action_json,
+                      human_response,
+                      last_reason,
+                      last_error,
+                      process_pid,
+                      crash_count,
+                      retry_count,
+                      next_run_at,
+                      ack_status,
+                      acked_at,
+                      created_at,
+                      updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    _orchestration_run_values(run),
+                )
+                _append_orchestration_event(
+                    connection,
+                    run_id=run.run_id,
+                    instance_id=instance_id,
+                    issue_id=issue_id,
+                    event_type="dispatch.created",
+                    from_phase=None,
+                    to_phase=RunPhase.QUEUED,
+                    reason=None,
+                    payload={"dispatch_id": dispatch_id, "issue_identifier": issue_identifier},
+                    now=now,
+                )
+                return run
+            run = _orchestration_run_from_row(row)
+            updated = with_updates(
+                run,
+                issue_identifier=issue_identifier or run.issue_identifier,
+                workflow_profile=workflow_profile or run.workflow_profile,
+                dispatch_id=dispatch_id or run.dispatch_id,
+                updated_at=now,
+            )
+            connection.execute(
+                """
+                UPDATE orchestration_runs
+                SET issue_identifier = ?,
+                    workflow_profile = ?,
+                    dispatch_id = ?,
+                    updated_at = ?
+                WHERE run_id = ?
+                """,
+                (
+                    updated.issue_identifier,
+                    updated.workflow_profile,
+                    updated.dispatch_id,
+                    now,
+                    updated.run_id,
+                ),
+            )
+            _append_orchestration_event(
+                connection,
+                run_id=updated.run_id,
+                instance_id=updated.instance_id,
+                issue_id=updated.issue_id,
+                event_type="dispatch.duplicate",
+                from_phase=run.phase,
+                to_phase=updated.phase,
+                reason=None,
+                payload={"dispatch_id": dispatch_id, "issue_identifier": issue_identifier},
+                now=now,
+            )
+        return updated
+
+    def get_orchestration_run(self, run_id: str) -> OrchestrationRun | None:
+        with self.connect() as connection:
+            row = connection.execute("SELECT * FROM orchestration_runs WHERE run_id = ?", (run_id,)).fetchone()
+        return _orchestration_run_from_row(row) if row is not None else None
+
+    def get_orchestration_run_by_issue(self, instance_id: str, issue_id: str) -> OrchestrationRun | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM orchestration_runs WHERE instance_id = ? AND issue_id = ?",
+                (instance_id, issue_id),
+            ).fetchone()
+        return _orchestration_run_from_row(row) if row is not None else None
+
+    def list_orchestration_runs(
+        self,
+        *,
+        instance_id: str | None = None,
+        phases: set[RunPhase] | None = None,
+        ack_status: str | None = None,
+    ) -> list[OrchestrationRun]:
+        clauses: list[str] = []
+        values: list[Any] = []
+        if instance_id is not None:
+            clauses.append("instance_id = ?")
+            values.append(instance_id)
+        if phases:
+            clauses.append(f"phase IN ({', '.join('?' for _ in phases)})")
+            values.extend(sorted(phase.value for phase in phases))
+        if ack_status is not None:
+            clauses.append("ack_status = ?")
+            values.append(ack_status)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        with self.connect() as connection:
+            rows = connection.execute(
+                f"SELECT * FROM orchestration_runs {where} ORDER BY updated_at DESC, run_id",
+                values,
+            ).fetchall()
+        return [_orchestration_run_from_row(row) for row in rows]
+
+    def list_due_orchestration_runs(self, *, now: str | None = None, instance_id: str | None = None) -> list[OrchestrationRun]:
+        now = now or utc_now_iso()
+        clauses = ["phase = ?", "status = ?", "(next_run_at IS NULL OR next_run_at <= ?)"]
+        values: list[Any] = [RunPhase.QUEUED.value, "queued", now]
+        if instance_id is not None:
+            clauses.append("instance_id = ?")
+            values.append(instance_id)
+        with self.connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT *
+                FROM orchestration_runs
+                WHERE {' AND '.join(clauses)}
+                ORDER BY COALESCE(next_run_at, created_at), created_at, run_id
+                """,
+                values,
+            ).fetchall()
+        return [_orchestration_run_from_row(row) for row in rows]
+
+    def update_orchestration_run(self, run_id: str, **changes: Any) -> OrchestrationRun:
+        current = self.get_orchestration_run(run_id)
+        if current is None:
+            raise FileNotFoundError(f"Orchestration run does not exist: {run_id}")
+        normalized = {key: _normalize_run_change(key, value) for key, value in changes.items()}
+        updated = with_updates(current, **normalized, updated_at=utc_now_iso())
+        with self.connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE orchestration_runs
+                SET phase = ?,
+                    status = ?,
+                    attempt = ?,
+                    workflow_profile = ?,
+                    dispatch_id = ?,
+                    request_path = ?,
+                    result_path = ?,
+                    workspace_path = ?,
+                    ops_snapshot_path = ?,
+                    human_action_json = ?,
+                    human_response = ?,
+                    last_reason = ?,
+                    last_error = ?,
+                    process_pid = ?,
+                    crash_count = ?,
+                    retry_count = ?,
+                    next_run_at = ?,
+                    ack_status = ?,
+                    acked_at = ?,
+                    updated_at = ?
+                WHERE run_id = ?
+                """,
+                (
+                    updated.phase.value,
+                    updated.status,
+                    updated.attempt,
+                    updated.workflow_profile,
+                    updated.dispatch_id,
+                    updated.request_path,
+                    updated.result_path,
+                    updated.workspace_path,
+                    updated.ops_snapshot_path,
+                    _json_dumps(updated.human_action),
+                    updated.human_response,
+                    updated.last_reason,
+                    updated.last_error,
+                    updated.process_pid,
+                    updated.crash_count,
+                    updated.retry_count,
+                    updated.next_run_at,
+                    updated.ack_status,
+                    updated.acked_at,
+                    updated.updated_at,
+                    run_id,
+                ),
+            )
+            if cursor.rowcount == 0:
+                raise FileNotFoundError(f"Orchestration run does not exist: {run_id}")
+        return updated
+
+    def append_orchestration_event(
+        self,
+        *,
+        run_id: str,
+        instance_id: str,
+        issue_id: str,
+        event_type: str,
+        from_phase: RunPhase | None,
+        to_phase: RunPhase | None,
+        reason: str | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> str:
+        now = utc_now_iso()
+        with self.connect() as connection:
+            return _append_orchestration_event(
+                connection,
+                run_id=run_id,
+                instance_id=instance_id,
+                issue_id=issue_id,
+                event_type=event_type,
+                from_phase=from_phase,
+                to_phase=to_phase,
+                reason=reason,
+                payload=payload or {},
+                now=now,
+            )
+
+    def list_orchestration_events(self, run_id: str) -> list[OrchestrationEvent]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM orchestration_events WHERE run_id = ? ORDER BY created_at, event_id",
+                (run_id,),
+            ).fetchall()
+        return [_orchestration_event_from_row(row) for row in rows]
+
     def _init_db(self) -> None:
         with self.connect() as connection:
             connection.executescript(
@@ -396,6 +662,59 @@ class ConductorStore:
 
                 CREATE INDEX IF NOT EXISTS idx_gated_followup_markers_status
                   ON gated_followup_markers(status, updated_at);
+
+                CREATE TABLE IF NOT EXISTS orchestration_runs (
+                  run_id TEXT PRIMARY KEY,
+                  instance_id TEXT NOT NULL,
+                  issue_id TEXT NOT NULL,
+                  issue_identifier TEXT,
+                  phase TEXT NOT NULL,
+                  status TEXT NOT NULL,
+                  attempt INTEGER NOT NULL DEFAULT 1,
+                  workflow_profile TEXT,
+                  dispatch_id TEXT,
+                  request_path TEXT,
+                  result_path TEXT,
+                  workspace_path TEXT,
+                  ops_snapshot_path TEXT,
+                  human_action_json TEXT NOT NULL DEFAULT '{}',
+                  human_response TEXT,
+                  last_reason TEXT,
+                  last_error TEXT,
+                  process_pid INTEGER,
+                  crash_count INTEGER NOT NULL DEFAULT 0,
+                  retry_count INTEGER NOT NULL DEFAULT 0,
+                  next_run_at TEXT,
+                  ack_status TEXT,
+                  acked_at TEXT,
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL
+                );
+
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_orchestration_runs_instance_issue
+                  ON orchestration_runs(instance_id, issue_id);
+                CREATE INDEX IF NOT EXISTS idx_orchestration_runs_due
+                  ON orchestration_runs(phase, status, next_run_at);
+                CREATE INDEX IF NOT EXISTS idx_orchestration_runs_ack
+                  ON orchestration_runs(ack_status, updated_at);
+
+                CREATE TABLE IF NOT EXISTS orchestration_events (
+                  event_id TEXT PRIMARY KEY,
+                  run_id TEXT NOT NULL,
+                  instance_id TEXT NOT NULL,
+                  issue_id TEXT NOT NULL,
+                  event_type TEXT NOT NULL,
+                  from_phase TEXT,
+                  to_phase TEXT,
+                  reason TEXT,
+                  payload_json TEXT NOT NULL,
+                  created_at TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_orchestration_events_run
+                  ON orchestration_events(run_id, created_at);
+                CREATE INDEX IF NOT EXISTS idx_orchestration_events_issue
+                  ON orchestration_events(instance_id, issue_id, created_at);
                 """
             )
             _ensure_column(connection, "instances", "restart_count", "INTEGER NOT NULL DEFAULT 0")
@@ -526,6 +845,139 @@ def _instance_from_row(row: sqlite3.Row) -> InstanceRecord:
         created_at=str(row["created_at"]),
         updated_at=str(row["updated_at"]),
     )
+
+
+def _orchestration_run_values(run: OrchestrationRun) -> tuple[Any, ...]:
+    return (
+        run.run_id,
+        run.instance_id,
+        run.issue_id,
+        run.issue_identifier,
+        run.phase.value,
+        run.status,
+        run.attempt,
+        run.workflow_profile,
+        run.dispatch_id,
+        run.request_path,
+        run.result_path,
+        run.workspace_path,
+        run.ops_snapshot_path,
+        _json_dumps(run.human_action),
+        run.human_response,
+        run.last_reason,
+        run.last_error,
+        run.process_pid,
+        run.crash_count,
+        run.retry_count,
+        run.next_run_at,
+        run.ack_status,
+        run.acked_at,
+        run.created_at,
+        run.updated_at,
+    )
+
+
+def _orchestration_run_from_row(row: sqlite3.Row) -> OrchestrationRun:
+    return OrchestrationRun(
+        run_id=str(row["run_id"]),
+        instance_id=str(row["instance_id"]),
+        issue_id=str(row["issue_id"]),
+        issue_identifier=row["issue_identifier"],
+        phase=RunPhase(str(row["phase"])),
+        status=str(row["status"]),
+        attempt=int(row["attempt"] or 1),
+        workflow_profile=row["workflow_profile"],
+        dispatch_id=row["dispatch_id"],
+        request_path=row["request_path"],
+        result_path=row["result_path"],
+        workspace_path=row["workspace_path"],
+        ops_snapshot_path=row["ops_snapshot_path"],
+        human_action=_json_loads_dict(row["human_action_json"]),
+        human_response=row["human_response"],
+        last_reason=row["last_reason"],
+        last_error=row["last_error"],
+        process_pid=row["process_pid"],
+        crash_count=int(row["crash_count"] or 0),
+        retry_count=int(row["retry_count"] or 0),
+        next_run_at=row["next_run_at"],
+        ack_status=row["ack_status"],
+        acked_at=row["acked_at"],
+        created_at=str(row["created_at"]),
+        updated_at=str(row["updated_at"]),
+    )
+
+
+def _append_orchestration_event(
+    connection: sqlite3.Connection,
+    *,
+    run_id: str,
+    instance_id: str,
+    issue_id: str,
+    event_type: str,
+    from_phase: RunPhase | None,
+    to_phase: RunPhase | None,
+    reason: str | None,
+    payload: dict[str, Any],
+    now: str,
+) -> str:
+    event_id = f"evt-{uuid4().hex}"
+    connection.execute(
+        """
+        INSERT INTO orchestration_events (
+          event_id,
+          run_id,
+          instance_id,
+          issue_id,
+          event_type,
+          from_phase,
+          to_phase,
+          reason,
+          payload_json,
+          created_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            event_id,
+            run_id,
+            instance_id,
+            issue_id,
+            event_type,
+            from_phase.value if from_phase is not None else None,
+            to_phase.value if to_phase is not None else None,
+            reason,
+            _json_dumps(payload),
+            now,
+        ),
+    )
+    return event_id
+
+
+def _orchestration_event_from_row(row: sqlite3.Row) -> OrchestrationEvent:
+    return OrchestrationEvent.from_dict(
+        {
+            "event_id": row["event_id"],
+            "run_id": row["run_id"],
+            "instance_id": row["instance_id"],
+            "issue_id": row["issue_id"],
+            "event_type": row["event_type"],
+            "from_phase": row["from_phase"],
+            "to_phase": row["to_phase"],
+            "reason": row["reason"],
+            "payload": _json_loads_dict(row["payload_json"]),
+            "created_at": row["created_at"],
+        }
+    )
+
+
+def _normalize_run_change(key: str, value: Any) -> Any:
+    if key == "phase" and isinstance(value, RunPhase):
+        return value
+    if key == "phase" and value is not None:
+        return RunPhase(str(value))
+    if key == "status" and hasattr(value, "value"):
+        return value.value
+    return value
 
 
 def _ensure_column(connection: sqlite3.Connection, table: str, name: str, definition: str) -> None:

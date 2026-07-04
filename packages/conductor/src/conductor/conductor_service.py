@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 import shutil
@@ -18,6 +19,7 @@ from .conductor_models import (
 from .conductor_runtime import ConductorRuntimeManager
 from .conductor_runtime import LogQuery
 from .conductor_store import ConductorStore
+from .conductor_phase import PhaseReducer, PhaseTransitionError
 from .conductor_workflow import (
     ConductorValidationError,
     generate_workflow_content,
@@ -28,8 +30,9 @@ from performer_api.ops_models import OpsSnapshot, TraceEvent
 from performer_api.ops_projection import build_issue_detail, build_issue_list, build_run_detail, build_trace_stream
 from performer_api.ops_retention import RetentionPolicy
 from performer_api.ops_store import OpsStore
+from performer_api.phase import PhaseAdvanceRequest, PhaseAdvanceResult, RunPhase
 from performer_api.persistence import PersistenceStore, PersistedSession, PersistedState
-from performer_api.models import utc_now
+from performer_api.models import normalize_state_key, utc_now
 
 
 WORKSPACE_INIT_EXCLUDES = {
@@ -47,6 +50,8 @@ WORKSPACE_INIT_EXCLUDES = {
 }
 REPOSITORY_INTEGRATION_LABEL = "performer:type/repository-integration"
 REPOSITORY_HANDOFF_MARKER_NAME = "SYMPHONY REPOSITORY HANDOFF"
+HUMAN_ACTION_LABEL = "performer:type/human-action"
+HUMAN_RESPONSE_MARKER_NAME = "SYMPHONY HUMAN RESPONSE"
 PROJECT_LABEL_PREFIX = "symphony:"
 
 
@@ -80,12 +85,13 @@ class RepositoryHandoffLinearProxy:
 query RepositoryHandoffChildren($issueId: String!) {
   issue(id: $issueId) {
     children(first: 100) {
-      nodes {
+        nodes {
         id
         identifier
         title
         description
         url
+        state { name type }
         delegate { id }
         labels { nodes { name } }
       }
@@ -370,9 +376,9 @@ class ConductorService:
         self.store = store
         self.data_root = data_root
         self.runtime_manager = runtime_manager or ConductorRuntimeManager()
+        self.phase_reducer = PhaseReducer(store)
         self.repository_handoff_tracker_factory = self._repository_handoff_tracker
         self.project_label_proxy_factory = self._project_label_proxy
-        self._active_podium_dispatches: dict[str, dict[str, str]] = {}
         self._podium_connection: dict[str, Any] = {
             "poll": {"status": "idle", "last_error": None, "updated_at": None},
             "ws": {"status": "idle", "last_error": None, "updated_at": None},
@@ -420,18 +426,19 @@ class ConductorService:
                 "issue_identifier": issue_identifier or None,
                 "reason": "no_matching_instance",
             }
-        started = await self.runtime_manager.start(
-            instance,
-            env=self._runtime_env(),
-            dispatch_issue_id=issue_id or issue_identifier,
-        )
         dispatch_id = str(event.get("dispatch_id") or "").strip()
-        if dispatch_id:
-            self._active_podium_dispatches[instance.id] = {
-                "dispatch_id": dispatch_id,
-                "issue_id": issue_id,
-            }
-        self.store.update_instance(started)
+        run = self.phase_reducer.dispatch_received(
+            instance_id=instance.id,
+            issue_id=issue_id or issue_identifier,
+            issue_identifier=issue_identifier or None,
+            workflow_profile=instance.workflow_profile,
+            dispatch_id=dispatch_id or None,
+        )
+        if run.phase is RunPhase.QUEUED:
+            refreshed = self.get_instance(instance.id) or instance
+            if refreshed.process_status not in {"running", "starting"} and _run_due(run):
+                started = await self._start_orchestration_run(run, refreshed)
+                self.store.update_instance(started)
         return {
             "status": "accepted",
             "issue_id": issue_id or None,
@@ -493,15 +500,15 @@ class ConductorService:
                     "repo_source": {"type": instance.repo_source_type, "value": instance.repo_source_value},
                 }
             )
-            performer = self._performer_runtime_from_persistence(instance)
+            performer = self._performer_runtime_from_phase_runs(instance)
             metrics[instance.id] = {
                 "tokens": int(totals.get("tokens") or 0),
                 "runtime_seconds": float(totals.get("runtime_seconds") or 0),
-                "retries": int((performer.get("counts") or {}).get("retrying") or 0),
+                "retries": _performer_retry_metric(performer),
                 "continuations": int((performer.get("counts") or {}).get("continuing") or 0),
                 "blocked": int((performer.get("counts") or {}).get("blocked") or 0),
                 "pending_human": int((performer.get("counts") or {}).get("pending_human") or 0),
-                "failures": int(totals.get("failures") or 0),
+                "failures": _performer_failure_metric(performer),
             }
             queue[instance.id] = {
                 "queued": 0,
@@ -583,6 +590,12 @@ class ConductorService:
 
     async def coordinate_background_once(self) -> dict[str, Any]:
         closeout = await self.coordinate_repository_handoff_closeouts()
+        phase_runs_started = await self._start_due_orchestration_runs()
+        phase_results_applied = await self._apply_phase_result_files()
+        phase_crash_retries, phase_crash_failures = await self._record_phase_crashes()
+        phase_human_actions = await self._coordinate_phase_human_actions()
+        if phase_human_actions["completed"]:
+            phase_runs_started += await self._start_due_orchestration_runs()
         dispatch_acks = await self.ack_completed_podium_dispatches()
         project_labels_synced = await self.sync_project_labels_once()
         gated_followups_started = 0
@@ -601,24 +614,32 @@ class ConductorService:
                 else:
                     crash_restarts += 1
                 continue
-            resume = await self._resume_pending_performer_work(current)
-            if resume is not None:
-                self.store.update_instance(resume)
-                resumed += 1
-                continue
-            issue_id = self._pending_gated_followup_issue_id(current)
-            if issue_id is None:
-                continue
-            followup = await self._coordinate_gated_followup(current, issue_id=issue_id)
-            if followup is None:
-                continue
-            followup = self._with_gated_followup_stage(followup, issue_id, "gate")
-            self.store.update_instance(followup)
-            gated_followups_started += 1
+            if not self._managed_mode_enabled():
+                resume = await self._resume_pending_performer_work(current)
+                if resume is not None:
+                    self.store.update_instance(resume)
+                    resumed += 1
+                    continue
+                issue_id = self._pending_gated_followup_issue_id(current)
+                if issue_id is None:
+                    continue
+                followup = await self._coordinate_gated_followup(current, issue_id=issue_id)
+                if followup is None:
+                    continue
+                followup = self._with_gated_followup_stage(followup, issue_id, "gate")
+                self.store.update_instance(followup)
+                gated_followups_started += 1
         return {
             "repository_handoff": closeout,
             "dispatch_acks": dispatch_acks,
             "project_labels_synced": project_labels_synced,
+            "phase_runs_started": phase_runs_started,
+            "phase_results_applied": phase_results_applied,
+            "phase_crash_retries": phase_crash_retries,
+            "phase_crash_failures": phase_crash_failures,
+            "phase_human_actions_completed": phase_human_actions["completed"],
+            "phase_human_actions_missing_response": phase_human_actions["missing_response"],
+            "phase_human_actions_failed": phase_human_actions["failed"],
             "gated_followups_started": gated_followups_started,
             "resumed": resumed,
             "crash_restarts": crash_restarts,
@@ -651,50 +672,258 @@ class ConductorService:
         *,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> dict[str, Any]:
-        if not self._active_podium_dispatches:
+        await self._apply_phase_result_files()
+        pending_runs = [
+            run
+            for run in self.store.list_orchestration_runs(ack_status="pending")
+            if run.dispatch_id and run.phase in {RunPhase.DONE, RunPhase.FAILED}
+        ]
+        if not pending_runs:
             return {"acked": 0, "failed": 0, "skipped": 0}
         settings = self.store.get_settings()
         podium_url = settings.podium_url.strip().rstrip("/")
         runtime_token = settings.podium_runtime_token.strip()
         if not podium_url or not runtime_token:
-            return {"acked": 0, "failed": 0, "skipped": len(self._active_podium_dispatches)}
+            return {"acked": 0, "failed": 0, "skipped": len(pending_runs)}
         acked = 0
         failed = 0
         skipped = 0
         async with httpx.AsyncClient(timeout=10, trust_env=False, transport=transport) as client:
-            for instance_id, active in list(self._active_podium_dispatches.items()):
-                instance = self.store.get_instance(instance_id)
-                if instance is None:
-                    self._active_podium_dispatches.pop(instance_id, None)
-                    skipped += 1
-                    continue
-                refreshed = self.get_instance(instance_id) or instance
-                if refreshed.process_status not in {"exited", "stopped"}:
-                    skipped += 1
-                    continue
-                snapshot = OpsStore(Path(refreshed.persistence_path).parent / "ops.json").load()
-                issue = snapshot.issues.get(active["issue_id"])
-                if issue is None or issue.state not in {"completed", "failed", "blocked"}:
-                    skipped += 1
-                    continue
-                status = "completed" if issue.state == "completed" else "failed"
-                reason = "completed_by_runtime" if issue.state == "completed" else (issue.failure_reason or issue.state)
+            for run in pending_runs:
+                status = "completed" if run.phase is RunPhase.DONE else "failed"
+                reason = run.last_reason or ("completed_by_runtime" if status == "completed" else "failed_by_runtime")
                 response = await client.post(
                     f"{podium_url}/api/v1/runtime/dispatches/ack",
                     headers={"Authorization": f"Bearer {runtime_token}"},
                     json={
-                        "dispatch_id": active["dispatch_id"],
+                        "dispatch_id": run.dispatch_id,
                         "status": status,
                         "reason": reason,
-                        "runtime_phase": issue.state,
+                        "runtime_phase": run.phase.value,
                     },
                 )
                 if response.status_code >= 400:
                     failed += 1
                     continue
-                self._active_podium_dispatches.pop(instance_id, None)
+                self.phase_reducer.acked(run.run_id)
                 acked += 1
         return {"acked": acked, "failed": failed, "skipped": skipped}
+
+    async def _start_due_orchestration_runs(self) -> int:
+        started_count = 0
+        for run in self.store.list_due_orchestration_runs():
+            instance = self.store.get_instance(run.instance_id)
+            if instance is None:
+                continue
+            refreshed = self.get_instance(instance.id) or instance
+            if refreshed.process_status in {"running", "starting"}:
+                continue
+            try:
+                started = await self._start_orchestration_run(run, refreshed)
+            except PhaseTransitionError:
+                continue
+            self.store.update_instance(started)
+            started_count += 1
+        return started_count
+
+    async def _start_orchestration_run(self, run, instance: InstanceRecord) -> InstanceRecord:
+        paths = self._phase_file_paths(instance, run.run_id)
+        result_path = paths["result_path"]
+        if result_path.exists():
+            result_path.unlink()
+        request = PhaseAdvanceRequest(
+            run_id=run.run_id,
+            instance_id=run.instance_id,
+            issue_id=run.issue_id,
+            issue_identifier=run.issue_identifier,
+            current_phase=run.phase,
+            attempt=run.attempt,
+            human_response=run.human_response,
+            workflow_profile=run.workflow_profile or instance.workflow_profile,
+            workspace_context={
+                "instance_dir": instance.instance_dir,
+                "workspace_root": instance.workspace_root,
+                "persistence_path": instance.persistence_path,
+                "ops_snapshot_path": str(Path(instance.persistence_path).parent / "ops.json"),
+            },
+        )
+        _write_json_atomic(paths["request_path"], request.to_dict())
+        started = await self.runtime_manager.start(
+            instance.with_updates(process_status="starting"),
+            env=self._runtime_env(),
+            dispatch_issue_id=run.issue_id,
+            advance_request_path=str(paths["request_path"]),
+            phase_result_path=str(result_path),
+        )
+        self.phase_reducer.performer_started(
+            run.run_id,
+            request_path=str(paths["request_path"]),
+            result_path=str(result_path),
+            pid=started.pid,
+        )
+        return started
+
+    async def _apply_phase_result_files(self) -> int:
+        applied = 0
+        runs = self.store.list_orchestration_runs(phases={RunPhase.IMPLEMENTING, RunPhase.REVIEWING, RunPhase.REWORKING})
+        for run in runs:
+            if not run.result_path:
+                continue
+            path = Path(run.result_path)
+            if not path.exists():
+                continue
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            try:
+                self.phase_reducer.performer_result(PhaseAdvanceResult.from_dict(payload))
+            except PhaseTransitionError:
+                continue
+            applied += 1
+        return applied
+
+    async def _record_phase_crashes(self) -> tuple[int, int]:
+        retries = 0
+        failures = 0
+        runs = self.store.list_orchestration_runs(phases={RunPhase.IMPLEMENTING, RunPhase.REVIEWING, RunPhase.REWORKING})
+        for run in runs:
+            instance = self.store.get_instance(run.instance_id)
+            if instance is None:
+                continue
+            refreshed = self.get_instance(instance.id) or instance
+            if refreshed.process_status != "exited" or refreshed.last_exit_code in {0, None}:
+                continue
+            if run.result_path and Path(run.result_path).exists():
+                continue
+            try:
+                updated = self.phase_reducer.performer_crashed(run.run_id, exit_code=refreshed.last_exit_code)
+            except PhaseTransitionError:
+                continue
+            if updated.phase is RunPhase.FAILED:
+                failures += 1
+                self.store.update_instance(
+                    refreshed.with_updates(
+                        process_status="crash_loop",
+                        pid=None,
+                        last_error=updated.last_error,
+                        restart_count=updated.crash_count,
+                    )
+                )
+            else:
+                retries += 1
+        return retries, failures
+
+    async def _coordinate_phase_human_actions(self) -> dict[str, int]:
+        if not self._managed_mode_enabled():
+            return {"completed": 0, "missing_response": 0, "failed": 0}
+        completed = 0
+        missing_response = 0
+        failed = 0
+        for run in self.store.list_orchestration_runs(phases={RunPhase.AWAITING_HUMAN}):
+            instance = self.store.get_instance(run.instance_id)
+            if instance is None:
+                continue
+            tracker = self.repository_handoff_tracker_factory(instance)
+            fetch_children = getattr(tracker, "fetch_child_issues", None)
+            if not callable(fetch_children):
+                continue
+            try:
+                children = await fetch_children(run.issue_id, label_name=HUMAN_ACTION_LABEL)
+            except Exception:
+                failed += 1
+                continue
+            child = _find_phase_human_child(run.human_action, children)
+            if child is None or not _linear_issue_is_done(child):
+                continue
+            response = _human_response_from_child(child)
+            child_issue_id = str(child.get("id") or run.human_action.get("child_issue_id") or "")
+            if _phase_human_action_requires_response(run.human_action) and not response:
+                missing_response += 1
+                if not self._phase_human_event_recorded(
+                    run.run_id,
+                    "human.response_missing",
+                    child_issue_id=child_issue_id,
+                ):
+                    await self._comment_missing_phase_human_response(tracker, child_issue_id)
+                    self.store.append_orchestration_event(
+                        run_id=run.run_id,
+                        instance_id=run.instance_id,
+                        issue_id=run.issue_id,
+                        event_type="human.response_missing",
+                        from_phase=run.phase,
+                        to_phase=run.phase,
+                        reason="missing_human_response",
+                        payload={
+                            "child_issue_id": child_issue_id,
+                            "child_identifier": child.get("identifier") or run.human_action.get("child_identifier"),
+                        },
+                    )
+                continue
+            human_response = response or "Human action completed."
+            await self._write_phase_human_response_to_parent(
+                tracker,
+                run,
+                child=child,
+                human_response=human_response,
+            )
+            try:
+                self.phase_reducer.human_completed(run.run_id, human_response=human_response)
+            except PhaseTransitionError:
+                failed += 1
+                continue
+            completed += 1
+        return {"completed": completed, "missing_response": missing_response, "failed": failed}
+
+    async def _comment_missing_phase_human_response(self, tracker: Any, child_issue_id: str) -> None:
+        if not child_issue_id:
+            return
+        comment_issue = getattr(tracker, "comment_issue", None)
+        if not callable(comment_issue):
+            return
+        await comment_issue(
+            child_issue_id,
+            "This human action is marked Done, but the `Human response` section is empty. Add the response there, then keep this child issue in Done.",
+        )
+
+    async def _write_phase_human_response_to_parent(
+        self,
+        tracker: Any,
+        run,
+        *,
+        child: dict[str, Any],
+        human_response: str,
+    ) -> None:
+        update_description = getattr(tracker, "update_issue_description_marker_block", None)
+        if not callable(update_description):
+            return
+        block = "\n".join(
+            [
+                f"Human action: {child.get('identifier') or child.get('id') or run.human_action.get('child_identifier') or run.human_action.get('child_issue_id')}",
+                f"Type: {run.human_action.get('kind') or 'human_action'}",
+                "",
+                human_response.strip(),
+            ]
+        )
+        await update_description(run.issue_id, HUMAN_RESPONSE_MARKER_NAME, block)
+
+    def _phase_human_event_recorded(self, run_id: str, event_type: str, *, child_issue_id: str) -> bool:
+        for event in self.store.list_orchestration_events(run_id):
+            if event.event_type != event_type:
+                continue
+            if not child_issue_id or str(event.payload.get("child_issue_id") or "") == child_issue_id:
+                return True
+        return False
+
+    def _phase_file_paths(self, instance: InstanceRecord, run_id: str) -> dict[str, Path]:
+        root = Path(instance.instance_dir) / "state" / "orchestration" / run_id
+        root.mkdir(parents=True, exist_ok=True)
+        return {
+            "request_path": root / "advance-request.json",
+            "result_path": root / "phase-result.json",
+        }
 
     async def _coordinate_gated_followup(self, instance: InstanceRecord, *, issue_id: str) -> InstanceRecord | None:
         if instance.workflow_profile != "gated-task":
@@ -733,6 +962,8 @@ class ConductorService:
         if instance is None:
             return None
         await self.coordinate_repository_handoff_closeouts(instance_id=instance_id)
+        if self._managed_mode_enabled():
+            return instance
         resumed = await self._resume_pending_performer_work(instance)
         if resumed is not None:
             self.store.update_instance(resumed)
@@ -908,6 +1139,8 @@ class ConductorService:
         return {"status": "synced", "project_id": project_id, "labels": desired}
 
     async def _resume_pending_performer_work(self, instance: InstanceRecord) -> InstanceRecord | None:
+        if self._managed_mode_enabled():
+            return None
         refresh = getattr(self.runtime_manager, "refresh", None)
         if not callable(refresh):
             return None
@@ -932,6 +1165,8 @@ class ConductorService:
         )
 
     async def _restart_crashed_performer(self, instance: InstanceRecord) -> InstanceRecord | None:
+        if self._managed_mode_enabled():
+            return None
         if instance.process_status != "exited" or instance.last_exit_code in {0, None}:
             return None
         persisted = PersistenceStore(Path(instance.persistence_path)).load()
@@ -978,6 +1213,8 @@ class ConductorService:
         )
 
     def _pending_gated_followup_issue_id(self, instance: InstanceRecord) -> str | None:
+        if self._managed_mode_enabled():
+            return None
         if instance.workflow_profile != "gated-task":
             return None
         snapshot = OpsStore(Path(instance.persistence_path).parent / "ops.json").load()
@@ -1029,6 +1266,7 @@ class ConductorService:
 
     def dashboard(self) -> dict[str, Any]:
         instances = self.store.list_instances()
+        phase_runs = self.store.list_orchestration_runs()
         process_statuses: dict[str, int] = {}
         workflow_statuses: dict[str, int] = {}
         linear_views: dict[str, dict[str, Any]] = {}
@@ -1052,11 +1290,18 @@ class ConductorService:
                 }
             linear_views[linear_key]["instances"] += 1
             persisted = PersistenceStore(Path(instance.persistence_path)).load()
-            retry_count += len(persisted.retry_attempts)
-            continuation_count += len(persisted.continuations)
-            blocked_count += len(persisted.blocked)
-            pending_human_count += len(persisted.human_interventions)
-            persisted_failures += sum(1 for retry in persisted.retry_attempts if retry.error)
+            instance_phase_runs = [run for run in phase_runs if run.instance_id == instance.id]
+            if instance_phase_runs:
+                retry_count += sum(run.retry_count for run in instance_phase_runs)
+                blocked_count += sum(1 for run in instance_phase_runs if run.phase is RunPhase.AWAITING_HUMAN)
+                pending_human_count += sum(1 for run in instance_phase_runs if run.phase is RunPhase.AWAITING_HUMAN)
+                persisted_failures += sum(1 for run in instance_phase_runs if run.phase is RunPhase.FAILED)
+            else:
+                retry_count += len(persisted.retry_attempts)
+                continuation_count += len(persisted.continuations)
+                blocked_count += len(persisted.blocked)
+                pending_human_count += len(persisted.human_interventions)
+                persisted_failures += sum(1 for retry in persisted.retry_attempts if retry.error)
             now = datetime.now(timezone.utc)
             for session in persisted.sessions:
                 total_tokens += session.tokens.total_tokens
@@ -1109,15 +1354,22 @@ class ConductorService:
         raise ConductorServiceError("issue_not_found", f"Issue not found: {issue_id}")
 
     def list_runs(self) -> list[dict[str, Any]]:
-        rows: list[dict[str, Any]] = []
-        for instance, snapshot in self._ops_snapshots():
-            for run in snapshot.runs.values():
-                row = run.to_dict()
-                row["instance_id"] = instance.id
-                rows.append(row)
+        phase_runs = self.store.list_orchestration_runs()
+        if phase_runs:
+            rows = [self._phase_run_row(run) for run in phase_runs]
+        else:
+            rows = []
+            for instance, snapshot in self._ops_snapshots():
+                for run in snapshot.runs.values():
+                    row = run.to_dict()
+                    row["instance_id"] = instance.id
+                    rows.append(row)
         return sorted(rows, key=lambda row: str(row.get("last_activity_at") or ""), reverse=True)
 
     def get_run(self, run_id: str) -> dict[str, Any]:
+        run = self.store.get_orchestration_run(run_id)
+        if run is not None:
+            return self._phase_run_detail(run)
         for instance, snapshot in self._ops_snapshots():
             if run_id in snapshot.runs:
                 detail = build_run_detail(snapshot, run_id)
@@ -1318,7 +1570,7 @@ class ConductorService:
     def instance_runtime(self, instance_id: str) -> dict[str, object]:
         current = self._require_instance(instance_id)
         runtime = dict(self.runtime_manager.runtime_snapshot(current))
-        performer = self._performer_runtime_from_persistence(current)
+        performer = self._performer_runtime_from_phase_runs(current)
         runtime["workspace"] = {
             "root": current.workspace_root,
             "strategy": "instance_repo_workspace",
@@ -1500,6 +1752,9 @@ class ConductorService:
             env["PODIUM_RUNTIME_GROUP_ID"] = runtime_group_id
         return env
 
+    def _managed_mode_enabled(self) -> bool:
+        return self.store.get_settings().managed_mode
+
     def _normalize_stale_runtime_state(self) -> None:
         for instance in self.store.list_instances():
             if instance.process_status in {"starting", "running", "unhealthy", "crash_loop"}:
@@ -1508,6 +1763,109 @@ class ConductorService:
                     self.store.update_instance(recovered)
                 else:
                     self.store.update_instance(instance.with_updates(process_status="stopped", pid=None))
+
+    def _phase_run_row(self, run) -> dict[str, Any]:
+        telemetry = self._telemetry_for_phase_run(run)
+        telemetry_run = telemetry.get("run") if isinstance(telemetry.get("run"), dict) else {}
+        return {
+            "run_id": run.run_id,
+            "issue_id": run.issue_id,
+            "issue_identifier": run.issue_identifier,
+            "instance_id": run.instance_id,
+            "phase": run.phase.value,
+            "status": run.status,
+            "attempt": run.attempt,
+            "workflow_profile": run.workflow_profile,
+            "dispatch_id": run.dispatch_id,
+            "workspace_path": run.workspace_path,
+            "ops_snapshot_path": run.ops_snapshot_path,
+            "human_action": dict(run.human_action),
+            "human_response": run.human_response,
+            "last_reason": run.last_reason,
+            "last_error": run.last_error,
+            "ack_status": run.ack_status,
+            "retry_count": run.retry_count,
+            "crash_count": run.crash_count,
+            "next_run_at": run.next_run_at,
+            "turn_count": _int(telemetry_run.get("turn_count")),
+            "total_tokens": _int(telemetry_run.get("total_tokens")),
+            "estimated_cost_usd": float(telemetry_run.get("estimated_cost_usd") or 0.0),
+            "last_activity_at": telemetry_run.get("last_activity_at"),
+        }
+
+    def _phase_run_detail(self, run) -> dict[str, Any]:
+        telemetry = self._telemetry_for_phase_run(run)
+        events = [event.to_dict() for event in self.store.list_orchestration_events(run.run_id)]
+        return {
+            "run": self._phase_run_row(run),
+            "issue": telemetry.get("issue"),
+            "attempts": telemetry.get("attempts", []),
+            "turns": telemetry.get("turns", []),
+            "events": events,
+            "metrics": telemetry.get("metrics", {}),
+            "telemetry": telemetry,
+            "instance_id": run.instance_id,
+        }
+
+    def _telemetry_for_phase_run(self, run) -> dict[str, Any]:
+        instance = self.store.get_instance(run.instance_id)
+        if instance is None:
+            return {"source": "missing_instance"}
+        snapshot = OpsStore(Path(instance.persistence_path).parent / "ops.json").load()
+        telemetry_run_id = _latest_ops_run_id_for_issue(snapshot, run.issue_id)
+        if telemetry_run_id is None:
+            return {"source": "none"}
+        detail = build_run_detail(snapshot, telemetry_run_id)
+        detail["source"] = "ops"
+        return detail
+
+    def _performer_runtime_from_phase_runs(self, instance: InstanceRecord) -> dict[str, Any]:
+        phase_runs = self.store.list_orchestration_runs(instance_id=instance.id)
+        telemetry = self._performer_runtime_from_persistence(instance)
+        if not phase_runs:
+            return telemetry
+        running: list[dict[str, Any]] = []
+        retrying: list[dict[str, Any]] = []
+        continuing: list[dict[str, Any]] = []
+        blocked: list[dict[str, Any]] = []
+        human_interventions: list[dict[str, Any]] = []
+        completed: list[dict[str, Any]] = []
+        failed: list[dict[str, Any]] = []
+        for run in phase_runs:
+            row = _phase_runtime_row(run)
+            if run.phase in {RunPhase.IMPLEMENTING, RunPhase.REVIEWING, RunPhase.REWORKING}:
+                running.append(row)
+            elif run.phase is RunPhase.QUEUED:
+                retrying.append(row) if run.retry_count or run.next_run_at else continuing.append(row)
+            elif run.phase is RunPhase.AWAITING_HUMAN:
+                blocked.append(row)
+                human_interventions.append(row)
+            elif run.phase is RunPhase.DONE:
+                completed.append(row)
+            elif run.phase is RunPhase.FAILED:
+                failed.append(row)
+        return {
+            "source": "conductor_phase",
+            "persistence_path": instance.persistence_path,
+            "counts": {
+                "running": len(running),
+                "retrying": len(retrying),
+                "continuing": len(continuing),
+                "blocked": len(blocked),
+                "pending_human": len(human_interventions),
+                "completed": len(completed),
+                "failed": len(failed),
+            },
+            "running": running,
+            "retrying": retrying,
+            "continuing": continuing,
+            "blocked": blocked,
+            "human_interventions": human_interventions,
+            "completed": completed,
+            "failed": failed,
+            "issues": running + retrying + continuing + blocked + human_interventions + completed + failed,
+            "telemetry": telemetry,
+        }
 
     def _performer_runtime_from_persistence(self, instance: InstanceRecord) -> dict[str, Any]:
         persisted = PersistenceStore(Path(instance.persistence_path)).load()
@@ -1576,12 +1934,15 @@ def _normalize_linear_issue_dict(node: dict[str, Any]) -> dict[str, Any]:
     labels = node.get("labels") if isinstance(node.get("labels"), dict) else {}
     label_nodes = labels.get("nodes") if isinstance(labels, dict) else []
     delegate = node.get("delegate") if isinstance(node.get("delegate"), dict) else None
+    state = node.get("state") if isinstance(node.get("state"), dict) else {}
     return {
         "id": node.get("id"),
         "identifier": node.get("identifier"),
         "title": node.get("title"),
         "description": node.get("description") or "",
         "url": node.get("url"),
+        "state": state.get("name") if isinstance(state, dict) else node.get("state"),
+        "state_type": state.get("type") if isinstance(state, dict) else None,
         "delegate_id": delegate.get("id") if delegate else None,
         "labels": [
             str(label.get("name") or "")
@@ -1601,6 +1962,46 @@ def _replace_marker_block(current: str, marker_name: str, block: str) -> str:
         return f"{prefix.rstrip()}\n\n{replacement}\n\n{suffix.lstrip()}".strip()
     base = current.strip()
     return f"{base}\n\n{replacement}".strip() if base else replacement
+
+
+def _find_phase_human_child(human_action: dict[str, Any], children: list[dict[str, Any]]) -> dict[str, Any] | None:
+    child_issue_id = str(human_action.get("child_issue_id") or "")
+    child_identifier = str(human_action.get("child_identifier") or "")
+    for child in children:
+        if not isinstance(child, dict):
+            continue
+        if child_issue_id and str(child.get("id") or "") == child_issue_id:
+            return child
+        if child_identifier and str(child.get("identifier") or "") == child_identifier:
+            return child
+    return None
+
+
+def _linear_issue_is_done(issue: dict[str, Any]) -> bool:
+    return normalize_state_key(str(issue.get("state") or "")) == "done" or str(issue.get("state_type") or "") == "completed"
+
+
+def _human_response_from_child(child: dict[str, Any]) -> str | None:
+    description = str(child.get("description") or "")
+    marker = "Human response:"
+    if marker.lower() not in description.lower():
+        return None
+    lower = description.lower()
+    start = lower.find(marker.lower())
+    response = description[start + len(marker):]
+    stop_markers = ["When finished,", "完成后", "Move this child issue"]
+    for stop in stop_markers:
+        index = response.lower().find(stop.lower())
+        if index >= 0:
+            response = response[:index]
+    cleaned = response.strip()
+    if not cleaned or cleaned == "(Add the answer or decision here when information is required.)":
+        return None
+    return cleaned
+
+
+def _phase_human_action_requires_response(human_action: dict[str, Any]) -> bool:
+    return str(human_action.get("kind") or "") in {"preflight_needs_input", "codex_needs_input"}
 
 
 def _persisted_session_row(session: PersistedSession) -> dict[str, Any]:
@@ -1698,6 +2099,44 @@ def _persisted_human_intervention_row(entry) -> dict[str, Any]:
     }
 
 
+def _phase_runtime_row(run) -> dict[str, Any]:
+    return {
+        "run_id": run.run_id,
+        "issue_id": run.issue_id,
+        "issue_identifier": run.issue_identifier,
+        "phase": run.phase.value,
+        "status": run.status,
+        "attempt": run.attempt,
+        "workflow_profile": run.workflow_profile,
+        "dispatch_id": run.dispatch_id,
+        "workspace_path": run.workspace_path,
+        "ops_snapshot_path": run.ops_snapshot_path,
+        "human_action": dict(run.human_action),
+        "human_response": run.human_response,
+        "last_reason": run.last_reason,
+        "last_error": run.last_error,
+        "retry_count": run.retry_count,
+        "crash_count": run.crash_count,
+        "next_run_at": run.next_run_at,
+        "ack_status": run.ack_status,
+        "created_at": run.created_at,
+        "updated_at": run.updated_at,
+    }
+
+
+def _run_due(run) -> bool:
+    next_run_at = _parse_iso(run.next_run_at)
+    return next_run_at is None or datetime.now(timezone.utc) >= next_run_at
+
+
+def _latest_ops_run_id_for_issue(snapshot: OpsSnapshot, issue_id: str) -> str | None:
+    candidates = [run for run in snapshot.runs.values() if run.issue_id == issue_id]
+    if not candidates:
+        return None
+    candidates.sort(key=lambda run: run.last_activity_at or run.completed_at or run.started_at or "", reverse=True)
+    return candidates[0].run_id
+
+
 def _runtime_metrics(performer: dict[str, Any]) -> dict[str, Any]:
     running = performer.get("running") if isinstance(performer.get("running"), list) else []
     retrying = performer.get("retrying") if isinstance(performer.get("retrying"), list) else []
@@ -1726,6 +2165,21 @@ def _runtime_metrics(performer: dict[str, Any]) -> dict[str, Any]:
         "blocked": len(blocked),
         "pending_human": len(human_interventions),
     }
+
+
+def _performer_retry_metric(performer: dict[str, Any]) -> int:
+    if performer.get("source") == "conductor_phase":
+        rows = performer.get("issues") if isinstance(performer.get("issues"), list) else []
+        return sum(_int(row.get("retry_count")) for row in rows if isinstance(row, dict))
+    counts = performer.get("counts") if isinstance(performer.get("counts"), dict) else {}
+    return _int(counts.get("retrying"))
+
+
+def _performer_failure_metric(performer: dict[str, Any]) -> int:
+    if performer.get("source") == "conductor_phase":
+        rows = performer.get("failed") if isinstance(performer.get("failed"), list) else []
+        return len(rows)
+    return 0
 
 
 def _int(value: Any) -> int:
@@ -1810,6 +2264,13 @@ def _parse_iso(value: str | None) -> datetime | None:
 
 def _iso(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, separators=(",", ":"), sort_keys=True), encoding="utf-8")
+    tmp.replace(path)
 
 
 def _sanitize_connection_error(error: str | None) -> str | None:

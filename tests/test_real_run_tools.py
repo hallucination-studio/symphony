@@ -4,6 +4,8 @@ import importlib.util
 import sys
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 TOOLS = ROOT / "tools"
@@ -161,3 +163,152 @@ def test_real_symphony_e2e_replaces_existing_gate_mode() -> None:
 
     assert "gate_planner_mode: smoke" in patched
     assert "gate_planner_mode: strict" not in patched
+
+
+def test_real_symphony_e2e_detects_conductor_phase_human_action() -> None:
+    tool = load_tool("real_symphony_e2e")
+
+    actions = tool.conductor_human_actions(
+        {
+            "runs": [
+                {
+                    "run_id": "run-1",
+                    "issue_id": "issue-1",
+                    "issue_identifier": "HELL-1",
+                    "phase": "awaiting_human",
+                    "status": "waiting",
+                    "last_reason": "codex needs local state repair",
+                    "human_action": {
+                        "child_issue_id": "child-1",
+                        "child_identifier": "HELL-2",
+                        "child_url": "https://linear.test/HELL-2",
+                        "kind": "runtime_error",
+                    },
+                },
+                {"run_id": "run-2", "phase": "done"},
+            ]
+        }
+    )
+
+    assert actions == [
+        {
+            "run_id": "run-1",
+            "issue_id": "issue-1",
+            "issue_identifier": "HELL-1",
+            "phase": "awaiting_human",
+            "status": "waiting",
+            "last_reason": "codex needs local state repair",
+            "child_issue_id": "child-1",
+            "child_identifier": "HELL-2",
+            "child_url": "https://linear.test/HELL-2",
+            "kind": "runtime_error",
+        }
+    ]
+
+
+def test_real_symphony_e2e_tracks_one_automatic_human_action_per_run() -> None:
+    tool = load_tool("real_symphony_e2e")
+    completed: set[str] = set()
+    first = {"run_id": "run-1", "child_issue_id": "child-1"}
+    second = {"run_id": "run-1", "child_issue_id": "child-2"}
+
+    assert tool.should_complete_conductor_human_action(first, completed) is True
+    completed.add("run-1")
+    assert tool.should_complete_conductor_human_action(second, completed) is False
+
+
+def test_real_symphony_e2e_writes_human_response_into_child_description() -> None:
+    tool = load_tool("real_symphony_e2e")
+
+    updated = tool.human_action_description_with_response(
+        "Runtime error.\n\nHuman response:\n\n(Add the answer or decision here when information is required.)\n\nWhen finished, move this child issue to Done.",
+        "Reviewed by the E2E harness; retry the managed run.",
+    )
+
+    assert "Human response:\nReviewed by the E2E harness; retry the managed run.\n\nWhen finished" in updated
+    assert "(Add the answer or decision here when information is required.)" not in updated
+
+
+@pytest.mark.asyncio
+async def test_real_symphony_e2e_completes_conductor_human_action_child(monkeypatch) -> None:
+    tool = load_tool("real_symphony_e2e")
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    async def fake_linear_graphql(token, query, variables):
+        del token
+        calls.append((query, variables))
+        if "query HumanActionIssue" in query:
+            return {
+                "issue": {
+                    "id": "child-1",
+                    "identifier": "HELL-2",
+                    "description": "Human response:\n\nWhen finished, move this child issue to Done.",
+                    "state": {"name": "Todo", "type": "unstarted"},
+                    "team": {
+                        "states": {
+                            "nodes": [
+                                {"id": "state-todo", "name": "Todo", "type": "unstarted"},
+                                {"id": "state-done", "name": "Done", "type": "completed"},
+                            ]
+                        }
+                    },
+                }
+            }
+        if "mutation UpdateHumanActionDescription" in query:
+            return {"issueUpdate": {"success": True, "issue": {"id": "child-1", "identifier": "HELL-2"}}}
+        if "mutation MoveHumanActionIssue" in query:
+            return {
+                "issueUpdate": {
+                    "success": True,
+                    "issue": {"id": "child-1", "identifier": "HELL-2", "state": {"name": "Done", "type": "completed"}},
+                }
+            }
+        raise AssertionError(query)
+
+    monkeypatch.setattr(tool, "linear_graphql", fake_linear_graphql)
+
+    result = await tool.complete_conductor_human_action(
+        "linear-token",
+        {
+            "run_id": "run-1",
+            "issue_identifier": "HELL-1",
+            "child_issue_id": "child-1",
+            "child_identifier": "HELL-2",
+            "kind": "runtime_error",
+        },
+        response="Reviewed by the E2E harness; retry the managed run.",
+    )
+
+    assert result["status"] == "completed"
+    assert calls[1][1]["description"].startswith("Human response:\nReviewed by the E2E harness")
+    assert calls[2][1] == {"issueId": "child-1", "stateId": "state-done"}
+
+
+def test_real_symphony_e2e_wait_artifacts_are_written_on_early_exit(tmp_path: Path) -> None:
+    tool = load_tool("real_symphony_e2e")
+    evidence = tool.Evidence(tmp_path / "report.json")
+    result_path = tmp_path / "missing-result.md"
+    state_path = tmp_path / "performer.json"
+    ops_path = tmp_path / "ops.json"
+    state_path.write_text('{"sessions": []}', encoding="utf-8")
+    ops_path.write_text('{"runs": {}}', encoding="utf-8")
+
+    result = tool.write_wait_artifacts(
+        evidence=evidence,
+        samples=[{"at": "2026-07-04T00:00:00Z", "phase": "awaiting_human"}],
+        result_path=result_path,
+        final_issue={"id": "issue-1", "identifier": "HELL-1", "state": {"name": "In Progress"}},
+        state_path=state_path,
+        last_state={},
+        ops_path=ops_path,
+        last_ops={},
+        log_path=tmp_path / "performer.log",
+        stages={"webhook_queued": "2026-07-04T00:00:00Z"},
+        stage_timeout_seconds=60,
+    )
+
+    assert Path(evidence.data["artifacts"]["runtime_samples"]).exists()
+    assert Path(evidence.data["artifacts"]["stage_snapshot"]).exists()
+    assert Path(evidence.data["artifacts"]["final_issue"]).exists()
+    assert result["state"] == {"sessions": []}
+    assert result["ops"] == {"runs": {}}

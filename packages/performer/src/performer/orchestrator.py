@@ -326,6 +326,16 @@ class Orchestrator:
     async def process_blocked_approvals(self) -> None:
         await self.process_human_interventions()
 
+    async def process_managed_human_response(self, issue_id: str, human_response: str) -> None:
+        intervention = self.state.human_interventions.get(issue_id)
+        if intervention is None:
+            return
+        await self._resolve_human_intervention(intervention, response=human_response)
+        self.state.retry_attempts.pop(issue_id, None)
+        self.state.claimed.discard(issue_id)
+        self._persist_state()
+        await asyncio.sleep(0)
+
     async def startup_terminal_workspace_cleanup(self, workspace_manager: WorkspaceManager) -> None:
         try:
             issues = await self.tracker.fetch_issues_by_states(self.config.tracker.terminal_states)
@@ -1007,7 +1017,7 @@ class Orchestrator:
                             self._persist_state()
                             return
                         else:
-                            if self.config.completion_verification.enabled:
+                            if self.config.completion_verification.enabled and verdict.checks:
                                 await self._transition_issue_by_state_name(
                                     refreshed_issue.id,
                                     self.config.acceptance.done_state,

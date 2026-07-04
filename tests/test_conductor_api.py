@@ -14,6 +14,7 @@ from conductor.conductor_store import ConductorStore
 from performer_api.models import BlockedEntry, utc_now
 from performer_api.ops_models import IssueRecord, OpsSnapshot, RunRecord, TraceEvent
 from performer_api.ops_store import OpsStore
+from performer_api.phase import RunPhase
 from performer_api.persistence import PersistedState, PersistenceStore
 
 
@@ -166,6 +167,19 @@ async def test_api_lists_issues_runs_trace_and_retention(tmp_path: Path) -> None
         assert status == 201
         instance = json.loads(body)["instance"]
         write_sample_ops_snapshot(instance)
+        phase_run = service.store.upsert_orchestration_run(
+            instance_id=str(instance["id"]),
+            issue_id="issue-1",
+            issue_identifier="ENG-1",
+            workflow_profile="default",
+            dispatch_id="dispatch-1",
+        )
+        service.store.update_orchestration_run(
+            phase_run.run_id,
+            phase=RunPhase.IMPLEMENTING,
+            status="running",
+            ops_snapshot_path=str(Path(str(instance["persistence_path"])).parent / "ops.json"),
+        )
 
         status, _, body = await request(server.port, "GET", "/api/issues")
         assert status == 200
@@ -177,11 +191,13 @@ async def test_api_lists_issues_runs_trace_and_retention(tmp_path: Path) -> None
 
         status, _, body = await request(server.port, "GET", "/api/runs")
         assert status == 200
+        assert json.loads(body)["runs"][0]["run_id"] == phase_run.run_id
+        assert json.loads(body)["runs"][0]["phase"] == "implementing"
         assert json.loads(body)["runs"][0]["turn_count"] == 7
 
-        status, _, body = await request(server.port, "GET", "/api/runs/run-1")
+        status, _, body = await request(server.port, "GET", f"/api/runs/{phase_run.run_id}")
         assert status == 200
-        assert json.loads(body)["run"]["run"]["run_id"] == "run-1"
+        assert json.loads(body)["run"]["run"]["run_id"] == phase_run.run_id
 
         status, _, body = await request(server.port, "GET", "/api/traces?issue_id=issue-1")
         assert status == 200

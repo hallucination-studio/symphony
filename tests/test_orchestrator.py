@@ -1327,7 +1327,7 @@ async def test_normal_worker_exit_schedules_continuation_for_still_active_issue(
 
 
 @pytest.mark.asyncio
-async def test_verified_completion_without_acceptance_marks_active_issue_done(tmp_path: Path) -> None:
+async def test_zero_check_verification_without_acceptance_keeps_active_issue_continuing(tmp_path: Path) -> None:
     tracker = FakeTracker(candidates=[issue("MT-1", state="Todo")])
     tracker.refreshed = [issue("MT-1", state="Todo")]
     orchestrator = Orchestrator(
@@ -1339,11 +1339,12 @@ async def test_verified_completion_without_acceptance_marks_active_issue_done(tm
     await orchestrator.tick()
     await orchestrator.wait_for_idle()
 
-    assert tracker.transitions == [("mt-1", "Done")]
-    assert "mt-1" in orchestrator.state.completed
-    assert "mt-1" not in orchestrator.state.claimed
-    assert "mt-1" not in orchestrator.state.continuations
-    assert ("mt-1", "performer:phase/done") in tracker.lifecycle_labels
+    continuation = orchestrator.state.continuations["mt-1"]
+    assert tracker.transitions == []
+    assert "mt-1" not in orchestrator.state.completed
+    assert "mt-1" in orchestrator.state.claimed
+    assert continuation.attempt == 1
+    assert ("mt-1", "performer:phase/done") not in tracker.lifecycle_labels
 
 
 @pytest.mark.asyncio
