@@ -21,11 +21,19 @@ from performer_api.config import (
     WorkerConfig,
     WorkspaceConfig,
 )
-from performer_api.models import BlockerRef, Issue, RunningEntry, utc_now
-from performer.orchestrator import Orchestrator
+from performer_api.models import BlockerRef, HumanInterventionEntry, Issue, RetryEntry, RunningEntry, utc_now
+from performer_api.phase import PhaseAdvanceRequest, RunPhase
+from performer.orchestrator import Orchestrator, _retry_delay_seconds
 from performer.ops_telemetry import ExecutionTelemetryRecorder
 from performer_api.ops_store import OpsStore
 from performer_api.persistence import PersistenceStore, ops_snapshot_path_from_persistence_path
+
+
+def test_retry_delay_seconds_rounds_up_with_phase_buffer() -> None:
+    class Entry:
+        due_at = utc_now() + timedelta(seconds=2)
+
+    assert _retry_delay_seconds(Entry()) >= 5
 
 
 class FakeTracker:
@@ -280,6 +288,28 @@ class FakeAcceptanceRunner:
         return self.report
 
 
+class CompletingPhaseRunner:
+    def __init__(self) -> None:
+        self.started: list[tuple[Issue, int | None]] = []
+
+    async def run_issue(
+        self, issue: Issue, attempt: int | None, on_event: Any, *, worker_host: str | None = None
+    ) -> Any:
+        self.started.append((issue, attempt))
+        on_event({"event": "session_started", "session_id": "thread-1-turn-1", "cwd": f"/tmp/{issue.identifier}"})
+        on_event({"event": "turn_completed", "session_id": "thread-1-turn-1", "turn_id": "turn-1"})
+
+        class Result:
+            structured_result = {
+                "summary": "implemented",
+                "test_commands": ["pytest -q -> passed"],
+                "changed_files": ["file.py"],
+                "remaining_risks": ["none"],
+            }
+
+        return Result()
+
+
 class FakeGatePlanner:
     def __init__(self, report: str | dict[str, Any]) -> None:
         self.report = report
@@ -472,6 +502,170 @@ def issue(identifier: str, **overrides: Any) -> Issue:
     }
     data.update(overrides)
     return Issue(**data)
+
+
+def _implementation_evidence() -> str:
+    return (
+        "Implementation summary: created requested behavior.\n"
+        "Test commands and exact output: pytest tests/test_target.py -q -> passed.\n"
+        "Remaining risks: none."
+    )
+
+
+def phase_request(
+    *,
+    phase: RunPhase,
+    run_id: str = "run-1",
+    issue_id: str = "mt-1",
+    issue_identifier: str = "MT-1",
+    attempt: int = 1,
+    human_response: str | None = None,
+) -> PhaseAdvanceRequest:
+    return PhaseAdvanceRequest(
+        run_id=run_id,
+        instance_id="instance-1",
+        issue_id=issue_id,
+        issue_identifier=issue_identifier,
+        current_phase=phase,
+        attempt=attempt,
+        human_response=human_response,
+        workspace_context={},
+    )
+
+
+@pytest.mark.asyncio
+async def test_phase_advance_dispatches_implementation_for_queued(tmp_path: Path) -> None:
+    tracker = FakeTracker()
+    tracker.refreshed = [issue("MT-1", state="In Progress", description=_implementation_evidence())]
+    runner = CompletingPhaseRunner()
+    orchestrator = Orchestrator(
+        replace(make_config(tmp_path), acceptance=AcceptanceConfig(enabled=True)),
+        tracker,
+        runner,
+    )
+
+    result = await orchestrator.advance(phase_request(phase=RunPhase.QUEUED))
+
+    assert [started.identifier for started, _ in runner.started] == ["MT-1"]
+    assert result.run_id == "run-1"
+    assert result.issue_id == "mt-1"
+    assert result.next_phase == RunPhase.REVIEWING
+    assert result.status == "reviewing"
+    assert "thread_id" not in result.to_dict()
+
+
+@pytest.mark.asyncio
+async def test_phase_advance_workspace_path_uses_root_when_per_issue_disabled(tmp_path: Path) -> None:
+    tracker = FakeTracker()
+    tracker.refreshed = [issue("MT-1", state="In Progress", description=_implementation_evidence())]
+    runner = CompletingPhaseRunner()
+    config = replace(make_config(tmp_path), workspace=WorkspaceConfig(root=tmp_path / "workspace", per_issue=False))
+    orchestrator = Orchestrator(config, tracker, runner)
+
+    result = await orchestrator.advance(
+        phase_request(
+            phase=RunPhase.QUEUED,
+            issue_identifier="MT-1",
+        )
+    )
+
+    assert result.workspace_path == str(tmp_path / "workspace")
+
+
+@pytest.mark.asyncio
+async def test_phase_advance_processes_due_retry_before_claim_check(tmp_path: Path) -> None:
+    tracker = FakeTracker()
+    tracker.refreshed = [issue("MT-1", state="In Progress", description=_implementation_evidence())]
+    tracker.candidates = tracker.refreshed
+    runner = CompletingPhaseRunner()
+    orchestrator = Orchestrator(
+        replace(make_config(tmp_path), acceptance=AcceptanceConfig(enabled=True)),
+        tracker,
+        runner,
+    )
+    orchestrator.state.claimed.add("mt-1")
+    orchestrator.state.retry_attempts["mt-1"] = RetryEntry(
+        issue_id="mt-1",
+        identifier="MT-1",
+        attempt=2,
+        due_at=utc_now() - timedelta(seconds=1),
+        due_at_ms=0,
+        error="verification_failed",
+        issue_url="https://linear.test/MT-1",
+        phase="retry_pending",
+        status_label="performer:phase/implementation",
+        runtime_phase="failed",
+    )
+
+    result = await orchestrator.advance(phase_request(phase=RunPhase.QUEUED, attempt=2))
+
+    assert [(started.identifier, attempt) for started, attempt in runner.started] == [("MT-1", 2)]
+    assert result.next_phase == RunPhase.REVIEWING
+
+
+@pytest.mark.asyncio
+async def test_phase_advance_dispatches_gate_for_reviewing_without_implementation(tmp_path: Path) -> None:
+    description = _implementation_evidence()
+    parent = issue("MT-1", state="In Review", description=description)
+    tracker = FakeTracker()
+    tracker.refreshed = [parent]
+    tracker.children[parent.id] = [
+        {
+            "id": "gate-1",
+            "identifier": "MT-G1",
+            "title": "[Gate] MT-1",
+            "description": "Check it",
+            "label_ids": ["performer:type/gate"],
+            "labels": ["performer:type/gate"],
+            "state": "Todo",
+        }
+    ]
+    runner = CompletingPhaseRunner()
+    acceptance_runner = FakeAcceptanceRunner(
+        """
+{
+  "score": 4,
+  "result": "pass",
+  "score_reason": "Implementation evidence and focused test output support the requested behavior.",
+  "evidence_citations": ["linear.issue.MT-1", "pytest"],
+  "residual_findings": [],
+  "recommended_next_action": "Move the original issue to Done."
+}
+"""
+    )
+    orchestrator = Orchestrator(
+        replace(make_config(tmp_path), acceptance=AcceptanceConfig(enabled=True)),
+        tracker,
+        runner,
+        acceptance_runner=acceptance_runner,
+    )
+
+    result = await orchestrator.advance(phase_request(phase=RunPhase.REVIEWING))
+
+    assert runner.started == []
+    assert len(acceptance_runner.calls) == 1
+    assert result.next_phase == RunPhase.DONE
+    assert result.status == "completed"
+    assert "thread_id" not in result.to_dict()
+
+
+@pytest.mark.asyncio
+async def test_phase_advance_dispatches_rework_as_implementation(tmp_path: Path) -> None:
+    tracker = FakeTracker()
+    tracker.refreshed = [issue("MT-1", state="In Progress", description=_implementation_evidence())]
+    runner = CompletingPhaseRunner()
+    orchestrator = Orchestrator(
+        replace(make_config(tmp_path), acceptance=AcceptanceConfig(enabled=True)),
+        tracker,
+        runner,
+    )
+
+    result = await orchestrator.advance(phase_request(phase=RunPhase.REWORKING, attempt=2))
+
+    assert [(started.identifier, attempt) for started, attempt in runner.started] == [("MT-1", 2)]
+    assert result.next_phase == RunPhase.REVIEWING
+    assert result.status == "reviewing"
+    assert "thread_id" not in result.to_dict()
 
 
 class CompletingRunner:

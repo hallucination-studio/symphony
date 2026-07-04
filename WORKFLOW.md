@@ -4,8 +4,6 @@ tracker:
   endpoint: https://api.linear.app/graphql
   project_slug: a91b3f7117c7
   api_key: $LINEAR_API_KEY
-  required_labels:
-    - codex2
   active_states:
     - Todo
     - In Progress
@@ -42,7 +40,6 @@ acceptance:
   implementation_state: In Progress
   review_state: In Review
   done_state: Done
-  task_type_label: performer:type/task
   gate_type_label: performer:type/gate
   evidence_type_label: performer:type/evidence
   gate_pending_label: performer:gate/pending

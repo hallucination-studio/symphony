@@ -166,8 +166,12 @@ class CapturingRuntime:
 class FakeRepositoryHandoffTracker:
     def __init__(self) -> None:
         self.children: list[dict[str, object]] = []
+        self.candidate_issues: list[dict[str, object]] = []
         self.comments: list[tuple[str, str]] = []
         self.updated_descriptions: list[tuple[str, str, str]] = []
+
+    async def fetch_candidate_issues(self) -> list[dict[str, object]]:
+        return list(self.candidate_issues)
 
     async def fetch_child_issues(self, parent_issue_id: str, *, label_name: str | None = None) -> list[dict[str, object]]:
         return [
@@ -239,6 +243,24 @@ class FakeProjectLabelProxy:
         return {"success": True, "project_id": project_id, "label_ids": label_ids}
 
 
+class RecordingConductorLinearTransport(httpx.AsyncBaseTransport):
+    def __init__(self, responses: list[dict[str, object]]) -> None:
+        self.responses = list(responses)
+        self.requests: list[dict[str, object]] = []
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(
+            {
+                "url": str(request.url),
+                "headers": dict(request.headers),
+                "json": json.loads(request.content.decode()),
+            }
+        )
+        if not self.responses:
+            return httpx.Response(500, json={"errors": [{"message": "unexpected request"}]})
+        return httpx.Response(200, json=self.responses.pop(0))
+
+
 def test_conductor_service_lists_issue_run_trace_and_retention(tmp_path: Path) -> None:
     service = make_service(tmp_path)
     repo = make_repo(tmp_path)
@@ -301,6 +323,7 @@ def test_list_runs_uses_conductor_phase_rows_with_ops_enrichment(tmp_path: Path)
             "human_response": None,
             "last_reason": "completed_by_runtime",
             "last_error": None,
+            "process_pid": None,
             "ack_status": "acked",
             "retry_count": 0,
             "crash_count": 0,
@@ -715,6 +738,7 @@ def test_instance_runtime_includes_persisted_performer_issue_details(tmp_path: P
     assert runtime["performer"]["running"][0]["issue_identifier"] == "ENG-1"
     assert runtime["performer"]["running"][0]["phase"] == "running"
     assert runtime["performer"]["running"][0]["status_label"] == "performer:phase/implementation"
+    assert "thread_id" not in runtime["performer"]["running"][0]
     assert runtime["performer"]["running"][0]["turn_count"] == 3
     assert runtime["performer"]["running"][0]["tokens"]["cached_tokens"] == 5
     assert runtime["performer"]["running"][0]["tokens"]["total_tokens"] == 33
@@ -993,6 +1017,52 @@ async def test_sync_instance_project_labels_skips_without_proxy_token(tmp_path: 
 
     assert result["status"] == "skipped"
     assert result["reason"] == "proxy_not_configured"
+
+
+@pytest.mark.asyncio
+async def test_managed_background_does_not_call_conductor_linear_proxy_factories(tmp_path: Path) -> None:
+    service = make_service(tmp_path)
+    service.update_settings(
+        ConductorSettings(
+            managed_mode=True,
+            podium_proxy_token="proxy-token",
+            podium_runtime_token="runtime-token",
+        )
+    )
+    repo = make_repo(tmp_path)
+    instance = service.create_instance(make_request(repo))
+    OpsStore(Path(instance.persistence_path).parent / "ops.json").save(
+        OpsSnapshot(
+            events=[
+                TraceEvent(
+                    event_id="evt-managed-handoff",
+                    event_type="repository_handoff_report.v1",
+                    timestamp="2026-07-03T00:00:00Z",
+                    issue_id="issue-1",
+                    retention_tier="summary",
+                    payload={
+                        "issue_id": "issue-1",
+                        "issue_identifier": "ENG-1",
+                        "workspace_path": instance.workspace_root,
+                    },
+                )
+            ]
+        )
+    )
+
+    def fail_repository_proxy(instance):
+        raise AssertionError("managed background must not create a Conductor Linear repository proxy")
+
+    def fail_project_proxy(instance):
+        raise AssertionError("managed background must not create a Conductor Linear project-label proxy")
+
+    service.repository_handoff_tracker_factory = fail_repository_proxy
+    service.project_label_proxy_factory = fail_project_proxy
+
+    result = await service.coordinate_background_once()
+
+    assert result["repository_handoff"] == {"closed_out": 0, "failed": 0, "skipped": 0}
+    assert result["project_labels_synced"] == 0
 
 
 def test_update_instance_revalidates_workflow_and_persists_raw_edits(tmp_path: Path) -> None:
@@ -1432,6 +1502,10 @@ async def test_background_requeues_phase_run_after_result_retry_without_persiste
     service.store.update_instance(instance.with_updates(process_status="exited", pid=None, last_exit_code=0))
 
     first = await service.coordinate_background_once()
+    delayed = service.store.get_orchestration_run(run.run_id)
+    assert delayed is not None
+    assert delayed.next_run_at is not None
+    service.store.update_orchestration_run(run.run_id, next_run_at="1970-01-01T00:00:00Z")
     second = await service.coordinate_background_once()
     updated = service.store.get_orchestration_run(run.run_id)
 
@@ -1578,7 +1652,7 @@ async def test_refresh_instance_coordinates_gated_followup_after_business_one_sh
 
 
 @pytest.mark.asyncio
-async def test_background_coordination_starts_gated_followup_without_instance_get(tmp_path: Path) -> None:
+async def test_background_coordination_does_not_start_legacy_gated_followup(tmp_path: Path) -> None:
     runtime = CapturingRuntime()
     service = ConductorService(
         store=ConductorStore(tmp_path / "conductor-data"),
@@ -1618,12 +1692,12 @@ async def test_background_coordination_starts_gated_followup_without_instance_ge
 
     result = await service.coordinate_background_once()
 
-    assert result["gated_followups_started"] == 1
-    assert runtime.started_dispatch_issue_ids == ["issue-1"]
+    assert result["gated_followups_started"] == 0
+    assert runtime.started_dispatch_issue_ids == []
 
 
 @pytest.mark.asyncio
-async def test_concurrent_services_start_gated_followup_once_with_sqlite_marker(tmp_path: Path) -> None:
+async def test_concurrent_background_coordination_does_not_start_legacy_gated_followup(tmp_path: Path) -> None:
     store = ConductorStore(tmp_path / "conductor-data")
     runtime_a = CapturingRuntime()
     runtime_b = CapturingRuntime()
@@ -1668,11 +1742,9 @@ async def test_concurrent_services_start_gated_followup_once_with_sqlite_marker(
 
     results = await asyncio.gather(service_a.coordinate_background_once(), service_b.coordinate_background_once())
 
-    assert sum(result["gated_followups_started"] for result in results) == 1
-    assert runtime_a.started_dispatch_issue_ids + runtime_b.started_dispatch_issue_ids == ["issue-1"]
-    marker = store.get_gated_followup_marker(instance.id, "issue-1", "gate")
-    assert marker is not None
-    assert marker["status"] == "started"
+    assert sum(result["gated_followups_started"] for result in results) == 0
+    assert runtime_a.started_dispatch_issue_ids + runtime_b.started_dispatch_issue_ids == []
+    assert store.get_gated_followup_marker(instance.id, "issue-1", "gate") is None
 
 
 @pytest.mark.asyncio
@@ -1788,7 +1860,7 @@ async def test_managed_background_does_not_start_gated_followup_from_ops_without
 
 
 @pytest.mark.asyncio
-async def test_managed_background_resumes_done_human_action_child_from_phase_run(tmp_path: Path) -> None:
+async def test_direct_background_resumes_done_human_action_child_from_phase_run(tmp_path: Path) -> None:
     runtime = CapturingRuntime()
     tracker = FakeRepositoryHandoffTracker()
     service = ConductorService(
@@ -1796,7 +1868,7 @@ async def test_managed_background_resumes_done_human_action_child_from_phase_run
         data_root=tmp_path / "conductor-data",
         runtime_manager=runtime,
     )
-    service.update_settings(ConductorSettings(managed_mode=True, podium_proxy_token="proxy-token"))
+    service.update_settings(ConductorSettings(managed_mode=False, podium_proxy_token="proxy-token"))
     service.repository_handoff_tracker_factory = lambda instance: tracker
     repo = make_repo(tmp_path)
     instance = service.create_instance(
@@ -1856,7 +1928,7 @@ async def test_managed_background_resumes_done_human_action_child_from_phase_run
 
 
 @pytest.mark.asyncio
-async def test_managed_background_does_not_resume_required_human_action_without_response(tmp_path: Path) -> None:
+async def test_direct_background_dispatches_new_work_from_poll_into_phase_run(tmp_path: Path) -> None:
     runtime = CapturingRuntime()
     tracker = FakeRepositoryHandoffTracker()
     service = ConductorService(
@@ -1864,7 +1936,111 @@ async def test_managed_background_does_not_resume_required_human_action_without_
         data_root=tmp_path / "conductor-data",
         runtime_manager=runtime,
     )
-    service.update_settings(ConductorSettings(managed_mode=True, podium_proxy_token="proxy-token"))
+    service.update_settings(ConductorSettings(managed_mode=False, podium_proxy_token="proxy-token"))
+    service.repository_handoff_tracker_factory = lambda instance: tracker
+    repo = make_repo(tmp_path)
+    instance = service.create_instance(
+        make_request(repo).with_overrides(
+            linear_project="ENG",
+            linear_filters={"linear_agent_app_user_id": "app-user-1", "active_states": ["Todo", "In Progress"]},
+        )
+    )
+    tracker.candidate_issues.append(
+        {
+            "id": "issue-1",
+            "identifier": "ENG-1",
+            "title": "Build the direct mode task",
+            "state": "Todo",
+        }
+    )
+
+    result = await service.coordinate_background_once()
+
+    run = service.store.get_orchestration_run_by_issue(instance.id, "issue-1")
+    assert result["direct_dispatches_received"] == 1
+    assert result["phase_runs_started"] == 1
+    assert run is not None
+    assert run.phase is RunPhase.IMPLEMENTING
+    assert runtime.started_dispatch_issue_ids == ["issue-1"]
+
+
+@pytest.mark.asyncio
+async def test_direct_default_tracker_fetches_candidate_issues_from_linear_proxy(tmp_path: Path) -> None:
+    service = make_service(tmp_path)
+    service.update_settings(
+        ConductorSettings(
+            podium_url="https://podium.example",
+            podium_proxy_token="proxy-token",
+        )
+    )
+    repo = make_repo(tmp_path)
+    instance = service.create_instance(
+        make_request(repo).with_overrides(
+            linear_project="ENG",
+            linear_filters={"linear_agent_app_user_id": "app-user-1", "active_states": ["Todo", "In Progress"]},
+        )
+    )
+    transport = RecordingConductorLinearTransport(
+        [
+            {
+                "data": {
+                    "issues": {
+                        "nodes": [
+                            {
+                                "id": "issue-1",
+                                "identifier": "ENG-1",
+                                "title": "Build the direct task",
+                                "description": "Do it",
+                                "url": "https://linear.test/ENG-1",
+                                "state": {"name": "Todo", "type": "started"},
+                                "delegate": {"id": "app-user-1"},
+                                "labels": {"nodes": [{"name": "performer:phase/queued"}]},
+                            }
+                        ],
+                        "pageInfo": {"hasNextPage": False, "endCursor": None},
+                    }
+                }
+            }
+        ]
+    )
+    tracker = service._repository_handoff_tracker(instance, transport=transport)
+
+    issues = await tracker.fetch_candidate_issues()
+
+    assert issues == [
+        {
+            "id": "issue-1",
+            "identifier": "ENG-1",
+            "title": "Build the direct task",
+            "description": "Do it",
+            "url": "https://linear.test/ENG-1",
+            "state": "Todo",
+            "state_type": "started",
+            "delegate_id": "app-user-1",
+            "labels": ["performer:phase/queued"],
+        }
+    ]
+    request = transport.requests[0]
+    assert request["url"] == "https://podium.example/api/v1/linear/graphql"
+    assert request["headers"]["authorization"] == "proxy-token"
+    variables = request["json"]["variables"]
+    assert variables["projectSlug"] == "ENG"
+    assert variables["stateNames"] == ["Todo", "In Progress"]
+    assert variables["delegateId"] == "app-user-1"
+    assert "$delegateId: ID" in request["json"]["query"]
+    assert "delegate: { id: { eq: $delegateId } }" in request["json"]["query"]
+
+
+@pytest.mark.asyncio
+async def test_direct_background_does_not_resume_required_human_action_without_response(tmp_path: Path) -> None:
+    runtime = CapturingRuntime()
+    tracker = FakeRepositoryHandoffTracker()
+    service = ConductorService(
+        store=ConductorStore(tmp_path / "conductor-data"),
+        data_root=tmp_path / "conductor-data",
+        runtime_manager=runtime,
+    )
+    service.update_settings(ConductorSettings(managed_mode=False, podium_proxy_token="proxy-token"))
     service.repository_handoff_tracker_factory = lambda instance: tracker
     repo = make_repo(tmp_path)
     instance = service.create_instance(

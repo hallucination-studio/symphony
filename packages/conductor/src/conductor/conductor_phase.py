@@ -156,11 +156,12 @@ class PhaseReducer:
         pid: int | None = None,
     ) -> OrchestrationRun:
         run = self._require_run(run_id)
-        if run.phase not in {RunPhase.QUEUED, RunPhase.REWORKING}:
+        if run.phase not in {RunPhase.QUEUED, RunPhase.REWORKING, RunPhase.REVIEWING}:
             raise PhaseTransitionError(f"Cannot start Performer from phase {run.phase.value}")
+        started_phase = RunPhase.REVIEWING if run.phase is RunPhase.REVIEWING else RunPhase.IMPLEMENTING
         updated = self.store.update_orchestration_run(
             run.run_id,
-            phase=RunPhase.IMPLEMENTING,
+            phase=started_phase,
             status=RunStatus.RUNNING,
             request_path=request_path,
             result_path=result_path,
@@ -171,7 +172,7 @@ class PhaseReducer:
         self._event(
             run,
             "performer.started",
-            to_phase=RunPhase.IMPLEMENTING,
+            to_phase=started_phase,
             payload={"request_path": request_path, "result_path": result_path, "pid": pid},
         )
         return updated
@@ -206,9 +207,11 @@ class PhaseReducer:
             updates["status"] = RunStatus.WAITING
             updates["human_action"] = result.human_action or {}
         elif result.next_phase in {RunPhase.REVIEWING, RunPhase.REWORKING}:
-            updates["status"] = RunStatus.RUNNING
+            updates["status"] = RunStatus.QUEUED
         elif result.next_phase is RunPhase.QUEUED:
-            delay = max(result.retry_delay_seconds or 0, 0)
+            delay = max(result.retry_delay_seconds or 0, 5)
+            if result.reason == "already_running_or_claimed":
+                delay = max(delay, 30)
             updates["status"] = RunStatus.QUEUED
             updates["attempt"] = run.attempt + 1
             updates["retry_count"] = run.retry_count + 1

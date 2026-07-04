@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict
 import hashlib
+import json
 from pathlib import Path
 from typing import Any, Protocol
 import logging
@@ -17,6 +18,8 @@ from .repository_handoff import build_repository_handoff_report
 from .workspace import WorkspaceManager
 
 logger = logging.getLogger(__name__)
+
+WORKSPACE_CODEX_THREAD_FILE = ".symphony-codex-thread.json"
 
 
 class RunnerCodexClient(Protocol):
@@ -97,8 +100,9 @@ class AgentRunner:
                 max_turns=self.config.agent.max_turns,
                 continuation_provider=lambda turn_count: self._continuation_prompt(issue, turn_count),
                 worker_host=worker_host,
-                existing_thread_id=self._existing_sdk_thread_id(issue.id, str(workspace.path)),
+                existing_thread_id=self._existing_sdk_thread_id(issue.id, workspace.path),
             )
+            self._write_workspace_sdk_thread(issue.id, workspace.path, result)
             if telemetry is not None:
                 if self.config.repository_handoff.enabled and not self.config.acceptance.enabled:
                     telemetry.record_repository_handoff_report(
@@ -200,19 +204,64 @@ class AgentRunner:
             return persistence_path.parent / "handoffs"
         return self.config.workspace.root.parent / ".symphony-handoffs"
 
-    def _existing_sdk_thread_id(self, issue_id: str, workspace_path: str) -> str | None:
-        if self.config.codex.backend != "sdk" or self.config.persistence.path is None:
+    def _existing_sdk_thread_id(self, issue_id: str, workspace_path: Path) -> str | None:
+        if self.config.codex.backend != "sdk":
+            return None
+        workspace_thread_id = self._workspace_sdk_thread_id(issue_id, workspace_path)
+        if workspace_thread_id:
+            return workspace_thread_id
+        if self.config.persistence.path is None:
             return None
         state = PersistenceStore(self.config.persistence.path).load()
         for thread in state.codex_threads:
             if (
                 thread.issue_id == issue_id
                 and thread.backend == "sdk"
-                and thread.workspace_path == workspace_path
+                and thread.workspace_path == str(workspace_path)
                 and thread.status in {"active", "resume_pending"}
             ):
                 return thread.thread_id
         return None
+
+    def _workspace_sdk_thread_id(self, issue_id: str, workspace_path: Path) -> str | None:
+        path = workspace_path / WORKSPACE_CODEX_THREAD_FILE
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        if payload.get("issue_id") != issue_id:
+            return None
+        if payload.get("backend") != "sdk":
+            return None
+        if payload.get("status") not in {"active", "resume_pending", "completed"}:
+            return None
+        thread_id = payload.get("thread_id")
+        return thread_id if isinstance(thread_id, str) and thread_id else None
+
+    def _write_workspace_sdk_thread(self, issue_id: str, workspace_path: Path, result: Any) -> None:
+        if self.config.codex.backend != "sdk":
+            return
+        thread_id = getattr(result, "thread_id", None)
+        if not isinstance(thread_id, str) or not thread_id:
+            return
+        payload = {
+            "issue_id": issue_id,
+            "thread_id": thread_id,
+            "backend": "sdk",
+            "workspace_path": str(workspace_path),
+            "last_turn_id": getattr(result, "turn_id", None),
+            "status": "resume_pending",
+            "last_final_response": getattr(result, "final_response", None),
+        }
+        path = workspace_path / WORKSPACE_CODEX_THREAD_FILE
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        try:
+            tmp.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+            tmp.replace(path)
+        except OSError:
+            logger.warning("performer_runner_workspace_thread_write_failed workspace=%s", workspace_path)
 
     def _telemetry_event_handler(
         self,

@@ -273,13 +273,8 @@ state or gate outcomes, not as the database of record.
 
 ### Remove or demote
 
-The following should not remain first-class Linear label families for run-state
-bookkeeping:
-
-- `performer:lifecycle/*`;
-- `performer:dispatch/*`;
-- `performer:retry/*`;
-- redundant human-subreason labels used only for workflow control.
+Old lifecycle, dispatch, retry, and redundant human-subreason label axes should
+not remain first-class Linear label families for run-state bookkeeping.
 
 These details should move to structured runtime state, ops telemetry, or human
 issue body content instead of being duplicated as parallel label axes.

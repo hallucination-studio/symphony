@@ -73,37 +73,3 @@ HUMAN_INTERVENTION_KIND_LABELS = {
     "runtime_error": TYPE_LABELS["human_action"],
     "verification_needs_human": TYPE_LABELS["human_action"],
 }
-
-LEGACY_LABEL_PREFIXES = (
-    "performer:lifecycle/",
-    "performer:dispatch/",
-    "performer:retry/",
-    "performer:error/",
-    "performer:human/",
-)
-
-LEGACY_LABELS = {
-    "performer:queued",
-    "performer:starting",
-    "performer:running",
-    "performer:continuing",
-    "performer:retrying",
-    "performer:error",
-    "performer:failed",
-    "performer:done",
-    "performer:type/task",
-    "performer:type/acceptance",
-    "performer:phase/planned",
-    "performer:dispatch/accepted",
-    "performer:dispatch/skipped",
-    "performer:dispatch/failed",
-    "performer:retry/pending",
-    "performer:retry/exhausted",
-    "performer:error/human-blocked",
-    "performer:human/pending",
-    "performer:human/resolved",
-    "performer:human/needs-input",
-    "performer:human/runtime-approval",
-    "performer:human/runtime-error",
-    "performer:human/verification",
-}

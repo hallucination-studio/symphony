@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 import shutil
@@ -63,13 +64,26 @@ class ConductorServiceError(Exception):
 
 
 class RepositoryHandoffLinearProxy:
-    def __init__(self, *, endpoint: str, api_key: str):
+    def __init__(
+        self,
+        *,
+        endpoint: str,
+        api_key: str,
+        project_slug: str = "",
+        active_states: list[str] | None = None,
+        required_delegate_id: str | None = None,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ):
         self.endpoint = endpoint
         self.api_key = api_key
+        self.project_slug = project_slug
+        self.active_states = list(active_states or ["Todo", "In Progress"])
+        self.required_delegate_id = required_delegate_id
+        self._transport = transport
 
     async def graphql(self, query: str, variables: dict[str, Any] | None = None) -> dict[str, Any]:
         headers = {"Authorization": self.api_key, "Content-Type": "application/json"}
-        async with httpx.AsyncClient(timeout=30, trust_env=False) as client:
+        async with httpx.AsyncClient(timeout=30, trust_env=False, transport=self._transport) as client:
             response = await client.post(self.endpoint, json={"query": query, "variables": variables or {}}, headers=headers)
         response.raise_for_status()
         payload = response.json()
@@ -78,6 +92,61 @@ class RepositoryHandoffLinearProxy:
         if payload.get("errors"):
             raise ConductorServiceError("linear_graphql_errors", str(payload["errors"]))
         return payload
+
+    async def fetch_candidate_issues(self) -> list[dict[str, Any]]:
+        if not self.project_slug or not self.api_key:
+            return []
+        include_delegate_filter = bool(self.required_delegate_id)
+        delegate_variable = ", $delegateId: ID" if include_delegate_filter else ""
+        delegate_filter = "\n      delegate: { id: { eq: $delegateId } }" if include_delegate_filter else ""
+        query = f"""
+query ConductorDirectCandidateIssues($projectSlug: String!, $stateNames: [String!], $first: Int!, $after: String{delegate_variable}) {{
+  issues(
+    first: $first
+    after: $after
+    filter: {{
+      project: {{ slugId: {{ eq: $projectSlug }} }}
+      state: {{ name: {{ in: $stateNames }} }}{delegate_filter}
+    }}
+  ) {{
+    nodes {{
+      id
+      identifier
+      title
+      description
+      url
+      state {{ name type }}
+      delegate {{ id }}
+      labels {{ nodes {{ name }} }}
+    }}
+    pageInfo {{ hasNextPage endCursor }}
+  }}
+}}
+"""
+        variables: dict[str, Any] = {
+            "projectSlug": self.project_slug,
+            "stateNames": self.active_states,
+            "first": 50,
+            "after": None,
+        }
+        if include_delegate_filter:
+            variables["delegateId"] = self.required_delegate_id
+        issues: list[dict[str, Any]] = []
+        while True:
+            payload = await self.graphql(query, variables)
+            connection = ((payload.get("data") or {}).get("issues") or {})
+            nodes = connection.get("nodes")
+            page_info = connection.get("pageInfo") or {}
+            if not isinstance(nodes, list):
+                raise ConductorServiceError("linear_unknown_payload", "Linear issues.nodes missing")
+            issues.extend(_normalize_linear_issue_dict(node) for node in nodes if isinstance(node, dict))
+            if not page_info.get("hasNextPage"):
+                return issues
+            end_cursor = page_info.get("endCursor")
+            if not end_cursor:
+                raise ConductorServiceError("linear_missing_end_cursor", "Linear pageInfo.endCursor missing")
+            variables = dict(variables)
+            variables["after"] = end_cursor
 
     async def fetch_child_issues(self, parent_issue_id: str, *, label_name: str | None = None) -> list[dict[str, Any]]:
         payload = await self.graphql(
@@ -565,6 +634,8 @@ class ConductorService:
         if kind == "dispatch.available":
             dispatch = command.get("dispatch") if isinstance(command.get("dispatch"), dict) else command
             return await self.dispatch_podium_event(dispatch)
+        if kind == "human.answered":
+            return self._handle_podium_human_answered(command)
         if kind == "log.fetch":
             instance_id = str(command.get("instance_id") or "")
             logs = self.query_instance_logs(
@@ -588,8 +659,35 @@ class ConductorService:
             return {"status": "log_chunk_ready", "chunk": payload}
         return {"status": "ignored", "reason": "unsupported_command"}
 
+    def _handle_podium_human_answered(self, command: dict[str, Any]) -> dict[str, Any]:
+        run_id = str(command.get("run_id") or "").strip()
+        child_issue_id = str(command.get("child_issue_id") or "").strip()
+        human_response = str(command.get("human_response") or command.get("response") or "Human action completed.").strip()
+        if not human_response:
+            human_response = "Human action completed."
+        run = self.store.get_orchestration_run(run_id) if run_id else None
+        if run is None:
+            for candidate in self.store.list_orchestration_runs(phases={RunPhase.AWAITING_HUMAN}):
+                action_child_id = str(candidate.human_action.get("child_issue_id") or "").strip()
+                if child_issue_id and action_child_id == child_issue_id:
+                    run = candidate
+                    break
+        if run is None:
+            return {"status": "ignored", "reason": "human_run_not_found"}
+        try:
+            updated = self.phase_reducer.human_completed(run.run_id, human_response=human_response)
+        except PhaseTransitionError:
+            return {"status": "ignored", "reason": "human_run_not_waiting", "run_id": run.run_id}
+        return {"status": "accepted", "run_id": updated.run_id, "issue_id": updated.issue_id}
+
     async def coordinate_background_once(self) -> dict[str, Any]:
-        closeout = await self.coordinate_repository_handoff_closeouts()
+        managed_mode = self._managed_mode_enabled()
+        closeout = (
+            {"closed_out": 0, "failed": 0, "skipped": 0}
+            if managed_mode
+            else await self.coordinate_repository_handoff_closeouts()
+        )
+        direct_dispatches_received = 0 if managed_mode else await self._poll_direct_dispatches()
         phase_runs_started = await self._start_due_orchestration_runs()
         phase_results_applied = await self._apply_phase_result_files()
         phase_crash_retries, phase_crash_failures = await self._record_phase_crashes()
@@ -597,9 +695,7 @@ class ConductorService:
         if phase_human_actions["completed"]:
             phase_runs_started += await self._start_due_orchestration_runs()
         dispatch_acks = await self.ack_completed_podium_dispatches()
-        project_labels_synced = await self.sync_project_labels_once()
-        gated_followups_started = 0
-        resumed = 0
+        project_labels_synced = 0 if managed_mode else await self.sync_project_labels_once()
         crash_restarts = 0
         crash_loops = 0
         for instance in self.store.list_instances():
@@ -614,25 +710,11 @@ class ConductorService:
                 else:
                     crash_restarts += 1
                 continue
-            if not self._managed_mode_enabled():
-                resume = await self._resume_pending_performer_work(current)
-                if resume is not None:
-                    self.store.update_instance(resume)
-                    resumed += 1
-                    continue
-                issue_id = self._pending_gated_followup_issue_id(current)
-                if issue_id is None:
-                    continue
-                followup = await self._coordinate_gated_followup(current, issue_id=issue_id)
-                if followup is None:
-                    continue
-                followup = self._with_gated_followup_stage(followup, issue_id, "gate")
-                self.store.update_instance(followup)
-                gated_followups_started += 1
         return {
             "repository_handoff": closeout,
             "dispatch_acks": dispatch_acks,
             "project_labels_synced": project_labels_synced,
+            "direct_dispatches_received": direct_dispatches_received,
             "phase_runs_started": phase_runs_started,
             "phase_results_applied": phase_results_applied,
             "phase_crash_retries": phase_crash_retries,
@@ -640,8 +722,8 @@ class ConductorService:
             "phase_human_actions_completed": phase_human_actions["completed"],
             "phase_human_actions_missing_response": phase_human_actions["missing_response"],
             "phase_human_actions_failed": phase_human_actions["failed"],
-            "gated_followups_started": gated_followups_started,
-            "resumed": resumed,
+            "gated_followups_started": 0,
+            "resumed": 0,
             "crash_restarts": crash_restarts,
             "crash_loops": crash_loops,
         }
@@ -666,6 +748,38 @@ class ConductorService:
             if result.get("status") == "synced":
                 synced += 1
         return synced
+
+    async def _poll_direct_dispatches(self) -> int:
+        received = 0
+        for instance in self.store.list_instances():
+            refreshed = self.get_instance(instance.id) or instance
+            if refreshed.process_status in {"running", "starting"}:
+                continue
+            tracker = self.repository_handoff_tracker_factory(instance)
+            fetch_candidates = getattr(tracker, "fetch_candidate_issues", None)
+            if not callable(fetch_candidates):
+                continue
+            try:
+                issues = await fetch_candidates()
+            except Exception:
+                continue
+            for issue in issues:
+                issue_id = _issue_field(issue, "id")
+                issue_identifier = _issue_field(issue, "identifier")
+                if not issue_id and not issue_identifier:
+                    continue
+                existing = self.store.get_orchestration_run_by_issue(instance.id, issue_id or issue_identifier)
+                if existing is not None and existing.phase not in {RunPhase.DONE, RunPhase.FAILED}:
+                    continue
+                self.phase_reducer.dispatch_received(
+                    instance_id=instance.id,
+                    issue_id=issue_id or issue_identifier,
+                    issue_identifier=issue_identifier or None,
+                    workflow_profile=instance.workflow_profile,
+                    dispatch_id=None,
+                )
+                received += 1
+        return received
 
     async def ack_completed_podium_dispatches(
         self,
@@ -782,6 +896,7 @@ class ConductorService:
                 self.phase_reducer.performer_result(PhaseAdvanceResult.from_dict(payload))
             except PhaseTransitionError:
                 continue
+            path.unlink(missing_ok=True)
             applied += 1
         return applied
 
@@ -817,7 +932,7 @@ class ConductorService:
         return retries, failures
 
     async def _coordinate_phase_human_actions(self) -> dict[str, int]:
-        if not self._managed_mode_enabled():
+        if self._managed_mode_enabled():
             return {"completed": 0, "missing_response": 0, "failed": 0}
         completed = 0
         missing_response = 0
@@ -1096,12 +1211,29 @@ class ConductorService:
         body = _repository_handoff_comment(report, child=child, mention=mention)
         return await comment_issue(issue_id, body)
 
-    def _repository_handoff_tracker(self, instance: InstanceRecord) -> Any:
+    def _repository_handoff_tracker(
+        self,
+        instance: InstanceRecord,
+        *,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> Any:
         settings = self.store.get_settings()
-        endpoint_base = settings.podium_url.strip().rstrip("/") or "https://podium.example"
+        endpoint_base = settings.podium_url.strip().rstrip("/")
+        endpoint = (
+            f"{endpoint_base}/api/v1/linear/graphql"
+            if endpoint_base
+            else "https://api.linear.app/graphql"
+        )
+        api_key = settings.podium_proxy_token.strip()
+        if not api_key and not self._managed_mode_enabled():
+            api_key = os.environ.get("LINEAR_API_KEY", "").strip()
         return RepositoryHandoffLinearProxy(
-            endpoint=f"{endpoint_base}/api/v1/linear/graphql",
-            api_key=settings.podium_proxy_token.strip(),
+            endpoint=endpoint,
+            api_key=api_key,
+            project_slug=instance.linear_project,
+            active_states=list(instance.linear_filters.get("active_states") or ["Todo", "In Progress"]),
+            required_delegate_id=_linear_agent_app_user_id(instance.linear_filters) or None,
+            transport=transport,
         )
 
     def _project_label_proxy(self, instance: InstanceRecord) -> Any:
@@ -1783,6 +1915,7 @@ class ConductorService:
             "human_response": run.human_response,
             "last_reason": run.last_reason,
             "last_error": run.last_error,
+            "process_pid": run.process_pid,
             "ack_status": run.ack_status,
             "retry_count": run.retry_count,
             "crash_count": run.crash_count,
@@ -1952,6 +2085,12 @@ def _normalize_linear_issue_dict(node: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _issue_field(issue: Any, field: str) -> str:
+    if isinstance(issue, dict):
+        return str(issue.get(field) or "").strip()
+    return str(getattr(issue, field, "") or "").strip()
+
+
 def _replace_marker_block(current: str, marker_name: str, block: str) -> str:
     start = f"<!-- {marker_name}:START -->"
     end = f"<!-- {marker_name}:END -->"
@@ -2010,7 +2149,6 @@ def _persisted_session_row(session: PersistedSession) -> dict[str, Any]:
         "issue_identifier": session.issue_identifier,
         "issue_url": session.issue_url,
         "session_id": session.session_id,
-        "thread_id": session.thread_id,
         "turn_id": session.turn_id,
         "worker_host": session.worker_host,
         "phase": session.phase,

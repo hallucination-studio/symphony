@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Protocol
 
 from .acceptance import (
@@ -16,6 +18,7 @@ from .acceptance import (
     parse_gate_plan_report,
 )
 from performer_api.config import ConfigError, ServiceConfig
+from performer_api.phase import PhaseAdvanceRequest, PhaseAdvanceResult, RunPhase
 from .completion_verifier import CompletionVerifier
 from performer_api.models import (
     HUMAN_INTERVENTION_LABELS,
@@ -45,6 +48,18 @@ from .workspace import WorkspaceManager
 logger = logging.getLogger(__name__)
 
 HUMAN_RESPONSE_MARKER_NAME = "SYMPHONY HUMAN RESPONSE"
+
+
+PHASE_RESULT_STATUSES: set[str] = {
+    "accepted",
+    "completed",
+    "failed",
+    "awaiting_human",
+    "retry",
+    "reviewing",
+    "reworking",
+    "skipped",
+}
 
 
 class TrackerProtocol(Protocol):
@@ -290,6 +305,237 @@ class Orchestrator:
             "runtime_phase": "dispatch_received",
         }
 
+    async def advance(self, request: PhaseAdvanceRequest) -> PhaseAdvanceResult:
+        await self.reconcile_running()
+        self._release_due_retry_for_phase(request.issue_id)
+        try:
+            self.config.validate_for_dispatch()
+        except ConfigError as exc:
+            logger.warning("performer_phase_advance_validation failed code=%s reason=%s", exc.code, exc)
+            return self._phase_result(
+                request,
+                issue_id=request.issue_id,
+                next_phase=RunPhase.FAILED,
+                status="failed",
+                reason=exc.code,
+            )
+        if request.human_response:
+            await self.process_managed_human_response(request.issue_id, request.human_response)
+        try:
+            issues = await self.tracker.fetch_issue_states_by_ids([request.issue_id])
+        except Exception as exc:
+            logger.warning("performer_phase_advance_fetch failed issue_id=%s reason=%s", request.issue_id, exc)
+            self._sync_label_group_background(request.issue_id, PHASE_LABELS["failed"], prefix="performer:phase/")
+            return self._phase_result(
+                request,
+                issue_id=request.issue_id,
+                next_phase=RunPhase.FAILED,
+                status="failed",
+                reason=str(exc),
+            )
+        issue = issues[0] if issues else None
+        if issue is None:
+            return self._phase_result(
+                request,
+                issue_id=request.issue_id,
+                next_phase=RunPhase.FAILED,
+                status="skipped",
+                reason="issue_not_found",
+            )
+        if request.current_phase in {RunPhase.QUEUED, RunPhase.REWORKING}:
+            return await self._advance_implementation_phase(request, issue)
+        if request.current_phase == RunPhase.REVIEWING:
+            return await self._advance_review_phase(request, issue)
+        if request.current_phase == RunPhase.AWAITING_HUMAN:
+            return self._phase_result(
+                request,
+                issue_id=issue.id,
+                next_phase=RunPhase.AWAITING_HUMAN,
+                status="awaiting_human",
+                reason="awaiting_human_response",
+            )
+        if request.current_phase in {RunPhase.DONE, RunPhase.FAILED}:
+            return self._phase_result(
+                request,
+                issue_id=issue.id,
+                next_phase=request.current_phase,
+                status="completed" if request.current_phase == RunPhase.DONE else "failed",
+                reason=f"terminal_phase_{request.current_phase.value}",
+            )
+        return self._phase_result(
+            request,
+            issue_id=issue.id,
+            next_phase=RunPhase.FAILED,
+            status="failed",
+            reason=f"unsupported_phase_{request.current_phase.value}",
+        )
+
+    async def _advance_implementation_phase(self, request: PhaseAdvanceRequest, issue: Issue) -> PhaseAdvanceResult:
+        reason = self.dispatch_skip_reason_for_event(issue)
+        if reason == "acceptance_preflight_required":
+            await self._acceptance_preflight(issue)
+            issue = Issue(
+                id=issue.id,
+                identifier=issue.identifier,
+                title=issue.title,
+                state=self.config.acceptance.implementation_state,
+                description=issue.description,
+                priority=issue.priority,
+                branch_name=issue.branch_name,
+                url=issue.url,
+                labels=issue.labels,
+                blocked_by=issue.blocked_by,
+                created_at=issue.created_at,
+                updated_at=issue.updated_at,
+                assignee_id=issue.assignee_id,
+                delegate_id=issue.delegate_id,
+                project_slug=issue.project_slug,
+                project_name=issue.project_name,
+            )
+            reason = self.dispatch_skip_reason_for_event(issue)
+        if reason is not None:
+            return self._phase_result(
+                request,
+                issue_id=issue.id,
+                next_phase=RunPhase.FAILED if reason in {"missing_required_issue_fields", "project_mismatch"} else request.current_phase,
+                status="skipped",
+                reason=reason,
+            )
+        selected_worker_host = self._select_worker_host()
+        if self.config.worker.ssh_hosts and selected_worker_host is None:
+            return self._phase_result(
+                request,
+                issue_id=issue.id,
+                next_phase=request.current_phase,
+                status="skipped",
+                reason="no_available_worker_host",
+            )
+        self.dispatch_issue(issue, attempt=request.attempt, worker_host=selected_worker_host)
+        await self.wait_for_idle()
+        return self._phase_result_from_runtime_state(request, issue)
+
+    async def _advance_review_phase(self, request: PhaseAdvanceRequest, issue: Issue) -> PhaseAdvanceResult:
+        reason = self.dispatch_skip_reason_without_acceptance(issue)
+        if reason is not None:
+            return self._phase_result(
+                request,
+                issue_id=issue.id,
+                next_phase=RunPhase.FAILED if reason in {"missing_required_issue_fields", "project_mismatch"} else RunPhase.REVIEWING,
+                status="skipped",
+                reason=reason,
+            )
+        await self._run_acceptance_gate_for_issue(issue, completion_verdict=None)
+        return self._phase_result_from_runtime_state(request, issue)
+
+    def _phase_result_from_runtime_state(self, request: PhaseAdvanceRequest, issue: Issue) -> PhaseAdvanceResult:
+        issue_id = issue.id
+        if issue_id in self.state.completed:
+            return self._phase_result(
+                request,
+                issue_id=issue_id,
+                next_phase=RunPhase.DONE,
+                status="completed",
+                reason="completed_by_runtime",
+            )
+        intervention = self.state.human_interventions.get(issue_id)
+        if intervention is not None:
+            return self._phase_result(
+                request,
+                issue_id=issue_id,
+                next_phase=RunPhase.AWAITING_HUMAN,
+                status="awaiting_human",
+                reason=intervention.error or "awaiting human action",
+                human_action={
+                    "child_issue_id": intervention.child_issue_id,
+                    "child_identifier": intervention.child_identifier,
+                    "child_url": intervention.child_url,
+                    "kind": intervention.kind,
+                    "questions": list(intervention.questions or []),
+                },
+            )
+        pending = self.state.retry_attempts.get(issue_id)
+        if pending is not None:
+            return self._phase_result(
+                request,
+                issue_id=issue_id,
+                next_phase=RunPhase.QUEUED,
+                status="retry",
+                reason=pending.error,
+                retry_delay_seconds=_retry_delay_seconds(pending),
+            )
+        continuation = self.state.continuations.get(issue_id)
+        if continuation is not None:
+            return self._phase_result(
+                request,
+                issue_id=issue_id,
+                next_phase=RunPhase.QUEUED,
+                status="accepted",
+                reason=continuation.last_message,
+                retry_delay_seconds=_retry_delay_seconds(continuation),
+            )
+        blocked = self.state.blocked.get(issue_id)
+        if blocked is not None:
+            return self._phase_result(
+                request,
+                issue_id=issue_id,
+                next_phase=RunPhase.FAILED,
+                status="failed",
+                reason=blocked.error or "blocked",
+            )
+        if request.current_phase == RunPhase.REVIEWING:
+            return self._phase_result(
+                request,
+                issue_id=issue_id,
+                next_phase=RunPhase.REWORKING,
+                status="reworking",
+                reason="acceptance_gate_not_completed",
+            )
+        return self._phase_result(
+            request,
+            issue_id=issue_id,
+            next_phase=RunPhase.REVIEWING,
+            status="reviewing",
+            reason="implementation_ready_for_review",
+        )
+
+    def _phase_result(
+        self,
+        request: PhaseAdvanceRequest,
+        *,
+        issue_id: str,
+        next_phase: RunPhase,
+        status: str,
+        reason: str | None,
+        retry_delay_seconds: int | None = None,
+        human_action: dict[str, Any] | None = None,
+    ) -> PhaseAdvanceResult:
+        return PhaseAdvanceResult(
+            run_id=request.run_id,
+            issue_id=issue_id,
+            next_phase=next_phase,
+            status=status if status in PHASE_RESULT_STATUSES else "failed",
+            reason=reason,
+            retry_delay_seconds=retry_delay_seconds,
+            human_action=human_action,
+            workspace_path=self._phase_workspace_path(request),
+            ops_snapshot_path=self._phase_ops_snapshot_path(request),
+        )
+
+    def _phase_workspace_path(self, request: PhaseAdvanceRequest) -> str | None:
+        configured = request.workspace_context.get("workspace_root")
+        root = Path(str(configured)) if configured else self.config.workspace.root
+        if request.issue_identifier and self.config.workspace.per_issue:
+            return str(root / request.issue_identifier)
+        return str(root) if root else None
+
+    def _phase_ops_snapshot_path(self, request: PhaseAdvanceRequest) -> str | None:
+        configured = request.workspace_context.get("ops_snapshot_path")
+        if configured:
+            return str(configured)
+        if self.config.persistence.path is None:
+            return None
+        return str(ops_snapshot_path_from_persistence_path(self.config.persistence.path))
+
     async def process_human_interventions(self) -> None:
         if not self.state.human_interventions:
             return
@@ -344,6 +590,14 @@ class Orchestrator:
             return
         for issue in issues:
             await workspace_manager.remove_for_issue(issue.identifier)
+
+    def _release_due_retry_for_phase(self, issue_id: str) -> None:
+        retry = self.state.retry_attempts.get(issue_id)
+        if retry is None or retry.due_at_ms > monotonic_ms():
+            return
+        self.state.retry_attempts.pop(issue_id, None)
+        self.state.claimed.discard(issue_id)
+        self._persist_state()
 
     async def process_due_retries(self) -> None:
         now_ms = monotonic_ms()
@@ -2177,6 +2431,16 @@ def _log_message(value: Any) -> str:
     if len(text) > 240:
         return text[:237] + "..."
     return text
+
+
+def _retry_delay_seconds(entry: Any) -> int:
+    due_at = getattr(entry, "due_at", None)
+    if not isinstance(due_at, datetime):
+        return 0
+    remaining = (due_at - datetime.now(timezone.utc)).total_seconds()
+    if remaining <= 0:
+        return 0
+    return max(math.ceil(remaining), 5)
 
 
 def _status_message_from_event(event: dict[str, Any]) -> str | None:

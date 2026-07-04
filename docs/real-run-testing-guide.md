@@ -192,7 +192,7 @@ A continuation should appear as:
 
 It should not appear as:
 
-- `performer:retrying` or `performer:retry/*`;
+- any Linear retry label; retry state belongs in persisted runtime/ops evidence, not labels;
 - an error-bearing `retry_attempts` row;
 - a failure count in dashboards.
 

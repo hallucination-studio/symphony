@@ -14,7 +14,7 @@ from conductor.conductor_store import ConductorStore
 from performer_api.models import BlockedEntry, utc_now
 from performer_api.ops_models import IssueRecord, OpsSnapshot, RunRecord, TraceEvent
 from performer_api.ops_store import OpsStore
-from performer_api.phase import RunPhase
+from performer_api.phase import PhaseAdvanceResult, RunPhase
 from performer_api.persistence import PersistedState, PersistenceStore
 
 
@@ -194,6 +194,7 @@ async def test_api_lists_issues_runs_trace_and_retention(tmp_path: Path) -> None
         assert json.loads(body)["runs"][0]["run_id"] == phase_run.run_id
         assert json.loads(body)["runs"][0]["phase"] == "implementing"
         assert json.loads(body)["runs"][0]["turn_count"] == 7
+        assert json.loads(body)["runs"][0]["process_pid"] == phase_run.process_pid
 
         status, _, body = await request(server.port, "GET", f"/api/runs/{phase_run.run_id}")
         assert status == 200
@@ -214,6 +215,67 @@ async def test_api_lists_issues_runs_trace_and_retention(tmp_path: Path) -> None
         status, _, body = await request(server.port, "POST", "/api/retention/collect")
         assert status == 200
         assert json.loads(body)["retention"]["pinned_issue_count"] == 1
+    finally:
+        await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_api_human_answered_push_resumes_phase_run(tmp_path: Path) -> None:
+    repo = make_repo(tmp_path)
+    service = make_service(tmp_path)
+    service.store.save_settings(ConductorSettings(managed_mode=True, podium_proxy_token="proxy-token"))
+    server = ConductorApiServer(service)
+    await server.start(port=0)
+    try:
+        assert server.port is not None
+        status, _, body = await request(
+            server.port,
+            "POST",
+            "/api/instances",
+            {
+                "name": "Alpha",
+                "repo_source_type": "local_path",
+                "repo_source_value": str(repo),
+                "linear_project": "ENG",
+                "linear_filters": {"labels": ["codex"]},
+                "workflow_profile": "default",
+                "workflow_inputs": {"goal": "Handle tasks"},
+            },
+        )
+        assert status == 201
+        instance = json.loads(body)["instance"]
+        run = service.phase_reducer.dispatch_received(
+            instance_id=str(instance["id"]),
+            issue_id="issue-1",
+            issue_identifier="ENG-1",
+            workflow_profile="default",
+            dispatch_id="dispatch-1",
+        )
+        service.phase_reducer.performer_started(run.run_id, request_path="/tmp/request.json", result_path="/tmp/result.json")
+        service.phase_reducer.performer_result(
+            PhaseAdvanceResult(
+                run_id=run.run_id,
+                issue_id="issue-1",
+                next_phase=RunPhase.AWAITING_HUMAN,
+                status="awaiting_human",
+                human_action={"child_issue_id": "child-1", "child_identifier": "ENG-2"},
+            )
+        )
+
+        status, _, body = await request(
+            server.port,
+            "POST",
+            f"/api/runs/{run.run_id}/human-answered",
+            {"child_issue_id": "child-1", "human_response": "Approved."},
+        )
+
+        payload = json.loads(body)
+        updated = service.store.get_orchestration_run(run.run_id)
+        assert status == 200
+        assert payload == {"status": "accepted", "run_id": run.run_id, "issue_id": "issue-1"}
+        assert updated is not None
+        assert updated.phase is RunPhase.QUEUED
+        assert updated.human_response == "Approved."
     finally:
         await server.stop()
 

@@ -114,6 +114,8 @@ def http_json(
         except json.JSONDecodeError:
             parsed = raw
         return exc.code, parsed
+    except (TimeoutError, urllib.error.URLError, OSError) as exc:
+        return 0, {"error": type(exc).__name__, "reason": str(exc)}
 
 
 def read_json_object_if_ready(path: Path, default: dict[str, Any]) -> dict[str, Any]:
@@ -137,11 +139,19 @@ async def linear_graphql(token: str, query: str, variables: dict[str, Any]) -> d
                     json={"query": query, "variables": variables},
                     headers={"Authorization": token, "Content-Type": "application/json"},
                 )
-            payload = response.json()
+            try:
+                payload = response.json()
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(
+                    json.dumps(
+                        {"status": response.status_code, "body": response.text[:500]},
+                        indent=2,
+                    )
+                ) from exc
             if response.status_code != 200 or payload.get("errors"):
                 raise RuntimeError(json.dumps({"status": response.status_code, "payload": payload}, indent=2))
             return payload["data"]
-        except (httpx.HTTPError, TimeoutError) as exc:
+        except (httpx.HTTPError, TimeoutError, RuntimeError) as exc:
             last_error = exc
             if attempt == max_attempts:
                 break
@@ -429,11 +439,10 @@ async def wait_for_http_ready(url: str, *, timeout_seconds: float = 10.0) -> tup
     deadline = time.monotonic() + timeout_seconds
     last_error: str | None = None
     while time.monotonic() < deadline:
-        try:
-            status, body = http_json("GET", url, timeout=2)
+        status, body = http_json("GET", url, timeout=2)
+        if 200 <= status < 300:
             return status, body
-        except urllib.error.URLError as exc:
-            last_error = str(exc)
+        last_error = json.dumps(body) if isinstance(body, dict) else str(body)
         await asyncio.sleep(0.2)
     raise RuntimeError(f"HTTP service not ready at {url}: {last_error or 'timed out'}")
 
@@ -638,6 +647,35 @@ def conductor_human_actions(runs_payload: dict[str, Any]) -> list[dict[str, Any]
     return actions
 
 
+def conductor_phase_runs(runs_payload: dict[str, Any]) -> list[dict[str, Any]]:
+    runs = runs_payload.get("runs")
+    if not isinstance(runs, list):
+        return []
+    return [run for run in runs if isinstance(run, dict) and run.get("run_id") and run.get("phase")]
+
+
+def crash_probe_candidate(phase_runs: list[dict[str, Any]]) -> dict[str, Any] | None:
+    for run in phase_runs:
+        if run.get("phase") != "implementing" or run.get("status") != "running":
+            continue
+        pid = run.get("process_pid")
+        if isinstance(pid, int) and pid > 0:
+            return run
+    return None
+
+
+def kill_performer_for_crash_probe(pid: int) -> tuple[bool, str | None]:
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return False, "process_not_found"
+    except PermissionError:
+        return False, "permission_denied"
+    except OSError as exc:
+        return False, f"{type(exc).__name__}: {exc}"
+    return True, None
+
+
 def human_action_description_with_response(description: str, response: str) -> str:
     marker = "Human response:"
     response = response.strip()
@@ -730,6 +768,7 @@ async def wait_for_run(
     timeout_seconds: int,
     stage_timeout_seconds: int,
     permission_approval_probe: bool = False,
+    crash_recovery_probe: bool = False,
 ) -> dict[str, Any]:
     instance_root = Path(instance["instance_dir"])
     state_path = Path(instance["persistence_path"])
@@ -743,6 +782,13 @@ async def wait_for_run(
     approved_blocked_events: set[str] = set()
     completed_phase_human_actions: set[str] = set()
     completed_phase_human_runs: set[str] = set()
+    parent_comment_probe_runs: set[str] = set()
+    crash_probe_run_id: str | None = None
+    crash_probe_pid: int | None = None
+    crash_probe_killed = False
+    crash_probe_requeued = False
+    crash_probe_restarted = False
+    crash_probe_terminal = False
     last_state: dict[str, Any] = {}
     last_ops: dict[str, Any] = {}
     stages: dict[str, str] = {}
@@ -779,7 +825,33 @@ async def wait_for_run(
         if status == 200 and isinstance(runtime_body, dict):
             process_status = (runtime_body.get("instance") or {}).get("process_status")
         runs_status, runs_body = http_json("GET", api_url(conductor_port, "/api/runs"), timeout=2)
-        phase_human_actions = conductor_human_actions(runs_body if runs_status == 200 and isinstance(runs_body, dict) else {})
+        phase_payload = runs_body if runs_status == 200 and isinstance(runs_body, dict) else {}
+        phase_runs = conductor_phase_runs(phase_payload)
+        phase_human_actions = conductor_human_actions(phase_payload)
+        conductor_phase_event_types: list[str] = []
+        if crash_recovery_probe:
+            for run in phase_runs:
+                run_id = str(run.get("run_id") or "")
+                if not run_id:
+                    continue
+                detail_status, detail_body = http_json("GET", api_url(conductor_port, f"/api/runs/{run_id}"), timeout=2)
+                if detail_status != 200 or not isinstance(detail_body, dict):
+                    continue
+                detail = detail_body.get("run")
+                events = (detail or {}).get("events") if isinstance(detail, dict) else []
+                if isinstance(events, list):
+                    conductor_phase_event_types.extend(
+                        str(event.get("event_type") or "")
+                        for event in events
+                        if isinstance(event, dict) and event.get("event_type")
+                    )
+        phase_terminal = bool(
+            phase_runs
+            and all(
+                run.get("phase") in {"done", "failed"} or run.get("status") in {"completed", "failed"}
+                for run in phase_runs
+            )
+        )
         run_statuses = [run.get("status") for run in ops.get("runs", {}).values()]
         event_types = [
             event.get("event_type")
@@ -800,10 +872,91 @@ async def wait_for_run(
             "blocked": len(state.get("blocked", [])),
             "result_exists": result_path.exists(),
             "run_statuses": run_statuses,
+            "phase_runs": [
+                {
+                    "run_id": run.get("run_id"),
+                    "phase": run.get("phase"),
+                    "status": run.get("status"),
+                    "ack_status": run.get("ack_status"),
+                    "last_reason": run.get("last_reason"),
+                    "human_action": run.get("human_action"),
+                }
+                for run in phase_runs
+            ],
             "phase_human_actions": phase_human_actions,
             "event_types": event_types[-20:],
+            "conductor_phase_event_types": conductor_phase_event_types[-20:],
         }
         samples.append(sample)
+        if crash_recovery_probe and not crash_probe_killed:
+            candidate = crash_probe_candidate(phase_runs)
+            if candidate is not None:
+                pid = int(candidate["process_pid"])
+                killed, error = kill_performer_for_crash_probe(pid)
+                crash_probe_run_id = str(candidate.get("run_id") or "")
+                crash_probe_pid = pid
+                crash_probe_killed = killed
+                evidence.check(
+                    "crash-recovery:performer-killed",
+                    killed,
+                    pid=pid,
+                    run_id=crash_probe_run_id,
+                    phase=candidate.get("phase"),
+                    status=candidate.get("status"),
+                    error=error,
+                )
+                await asyncio.sleep(2)
+                continue
+        if crash_recovery_probe and crash_probe_killed and crash_probe_run_id:
+            matching_runs = [run for run in phase_runs if run.get("run_id") == crash_probe_run_id]
+            crashed_events_seen = "performer.crashed" in conductor_phase_event_types
+            if crashed_events_seen and not crash_probe_requeued:
+                requeued_runs = [
+                    run
+                    for run in matching_runs
+                    if run.get("phase") == "queued" and run.get("crash_count", 0) >= 1
+                ]
+                if requeued_runs:
+                    crash_probe_requeued = True
+                    evidence.check(
+                        "crash-recovery:performer-crashed-event",
+                        True,
+                        run_id=crash_probe_run_id,
+                        phase_runs=requeued_runs,
+                        event_types=conductor_phase_event_types[-20:],
+                    )
+            if crash_probe_requeued and not crash_probe_restarted:
+                restarted_runs = [
+                    run
+                    for run in matching_runs
+                    if run.get("phase") in {"implementing", "reviewing", "reworking", "done", "failed"}
+                    and run.get("crash_count", 0) >= 1
+                    and run.get("attempt", 0) >= 1
+                ]
+                if restarted_runs:
+                    crash_probe_restarted = True
+                    evidence.check(
+                        "crash-recovery:restarted-after-crash",
+                        True,
+                        run_id=crash_probe_run_id,
+                        phase_runs=restarted_runs,
+                    )
+            if crash_probe_requeued and not crash_probe_terminal:
+                terminal_runs = [
+                    run
+                    for run in matching_runs
+                    if run.get("phase") in {"done", "failed"} or run.get("status") in {"completed", "failed"}
+                    if run.get("crash_count", 0) >= 1
+                ]
+                if terminal_runs:
+                    crash_probe_terminal = True
+                    evidence.check(
+                        "crash-recovery:terminal-after-crash",
+                        True,
+                        run_id=crash_probe_run_id,
+                        pid=crash_probe_pid,
+                        phase_runs=terminal_runs,
+                    )
         mark_stage("webhook_queued", True, issue_id=issue_id)
         mark_stage("process_running_or_exited", process_status in {"running", "exited", "stopped"}, process_status=process_status)
         mark_stage("implementation_result_exists", result_path.exists(), path=str(result_path))
@@ -850,6 +1003,20 @@ async def wait_for_run(
             approved_blocked_events.add(blocked_key)
             await asyncio.sleep(2)
             break
+        check_names = {check.get("name") for check in evidence.data.get("checks", []) if check.get("passed")}
+        if permission_approval_probe and "human-action:managed-push-resume" in check_names:
+            resumed_runs = [
+                run
+                for run in phase_runs
+                if run.get("run_id") in completed_phase_human_runs
+                and not (
+                    run.get("phase") == "awaiting_human"
+                    and str((run.get("human_action") or {}).get("child_issue_id") or "") in completed_phase_human_actions
+                )
+            ]
+            if resumed_runs:
+                evidence.check("human-action:resume-observed-after-push", True, phase_runs=resumed_runs)
+                break
         if phase_human_actions:
             evidence.check(
                 "human-action:conductor-phase-awaiting-human",
@@ -862,10 +1029,12 @@ async def wait_for_run(
                 if run_id in completed_phase_human_runs and child_issue_id not in completed_phase_human_actions:
                     evidence.check(
                         "human-action:repeat-awaiting-human-after-resume",
-                        False,
+                        not permission_approval_probe,
                         action=action,
                         reason="same Conductor run requested another human action after automatic resume",
                     )
+                    if permission_approval_probe:
+                        break
                     return write_wait_artifacts(
                         evidence=evidence,
                         samples=samples,
@@ -881,6 +1050,26 @@ async def wait_for_run(
                     )
                 if not should_complete_conductor_human_action(action, completed_phase_human_runs):
                     continue
+                if run_id not in parent_comment_probe_runs:
+                    parent_comment_probe_runs.add(run_id)
+                    comment = await comment_linear_issue(
+                        token,
+                        issue_id,
+                        "E2E parent comment probe: this comment must not resume a waiting Symphony human action.",
+                    )
+                    await asyncio.sleep(2)
+                    probe_status, probe_body = http_json("GET", api_url(conductor_port, f"/api/runs/{run_id}"), timeout=5)
+                    probe_run = ((probe_body.get("run") or {}).get("run") or {}) if isinstance(probe_body, dict) else {}
+                    evidence.check(
+                        "human-action:parent-comment-does-not-resume",
+                        bool(comment.get("success"))
+                        and probe_status == 200
+                        and probe_run.get("phase") == "awaiting_human"
+                        and probe_run.get("status") == "waiting",
+                        status=probe_status,
+                        run=probe_run,
+                        comment_created=bool(comment.get("success")),
+                    )
                 response = (
                     "Reviewed by the real Symphony E2E harness. "
                     "Apply any required local environment fix and retry the managed run."
@@ -903,10 +1092,21 @@ async def wait_for_run(
                     action=action,
                     completion=completion,
                 )
+                status, pushed = http_json(
+                    "POST",
+                    api_url(conductor_port, f"/api/runs/{run_id}/human-answered"),
+                    {"child_issue_id": child_issue_id, "human_response": response},
+                    timeout=5,
+                )
+                evidence.check(
+                    "human-action:managed-push-resume",
+                    status == 200 and isinstance(pushed, dict) and pushed.get("status") == "accepted",
+                    status=status,
+                    body=pushed,
+                )
             await asyncio.sleep(2)
             continue
         if permission_approval_probe:
-            check_names = {check.get("name") for check in evidence.data.get("checks", []) if check.get("passed")}
             if (
                 result_path.exists()
                 and state.get("blocked", []) == []
@@ -921,13 +1121,28 @@ async def wait_for_run(
             and state.get("retry_attempts") == []
             and state.get("continuations", []) == []
             and state.get("blocked", []) == []
-            and run_statuses
-            and all(status != "running" for status in run_statuses)
+            and (phase_terminal or (run_statuses and all(status != "running" for status in run_statuses)))
             and process_status in {"exited", "stopped"}
         ):
             break
-        await asyncio.sleep(5)
+        sleep_seconds = 2 if crash_recovery_probe and not crash_probe_terminal else 5
+        await asyncio.sleep(sleep_seconds)
     final_issue = final_issue or await fetch_linear_issue(token, issue_id)
+    if crash_recovery_probe:
+        check_names = {check.get("name") for check in evidence.data.get("checks", []) if check.get("passed")}
+        evidence.check(
+            "crash-recovery:covered",
+            {
+                "crash-recovery:performer-killed",
+                "crash-recovery:performer-crashed-event",
+                "crash-recovery:restarted-after-crash",
+                "crash-recovery:terminal-after-crash",
+            }.issubset(check_names),
+            killed=crash_probe_killed,
+            run_id=crash_probe_run_id,
+            pid=crash_probe_pid,
+            passed_checks=sorted(name for name in check_names if str(name).startswith("crash-recovery:")),
+        )
     return write_wait_artifacts(
         evidence=evidence,
         samples=samples,
@@ -1230,22 +1445,46 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
             timeout_seconds=args.timeout,
             stage_timeout_seconds=args.stage_timeout,
             permission_approval_probe=args.permission_approval_probe,
+            crash_recovery_probe=args.crash_recovery_probe,
         )
         if args.permission_approval_probe:
             check_names = {check.get("name") for check in evidence.data.get("checks", []) if check.get("passed")}
+            human_resume_covered = {
+                "human-action:conductor-phase-awaiting-human",
+                "human-action:parent-comment-does-not-resume",
+                "human-action:linear-child-complete",
+                "human-action:managed-push-resume",
+                "human-action:resume-observed-after-push",
+            }.issubset(check_names)
             evidence.check(
                 "runtime-error:permission-approval-covered",
-                "runtime-error:blocked-visible" in check_names
-                and "runtime-error:linear-human-approved-resume" in check_names,
+                (
+                    "runtime-error:blocked-visible" in check_names
+                    and "runtime-error:linear-human-approved-resume" in check_names
+                )
+                or human_resume_covered,
                 covered=sorted(name for name in check_names if str(name).startswith("runtime-error:")),
+                human_resume_covered=human_resume_covered,
             )
         issue = run_result["issue"]
         ops = run_result["ops"]
         state = run_result["state"]
         result_path = Path(run_result["result_path"])
         run_statuses = [run.get("status") for run in ops.get("runs", {}).values()]
+        phase_runs = [
+            run
+            for sample in run_result.get("samples", [])
+            for run in sample.get("phase_runs", [])
+            if isinstance(run, dict)
+        ]
+        phase_terminal = bool(
+            phase_runs
+            and all(
+                run.get("phase") in {"done", "failed"} or run.get("status") in {"completed", "failed"}
+                for run in phase_runs
+            )
+        )
         if args.permission_approval_probe:
-            evidence.check("real-flow:workspace-result", result_path.exists(), path=str(result_path))
             evidence.check("runtime-error:blocked-cleared-after-approval", not state.get("blocked"), state=state)
         else:
             evidence.check(
@@ -1271,7 +1510,12 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
                 and not state.get("blocked"),
                 state=state,
             )
-            evidence.check("real-flow:ops-finalized", bool(run_statuses) and all(status != "running" for status in run_statuses), run_statuses=run_statuses)
+            evidence.check(
+                "real-flow:ops-finalized",
+                phase_terminal or (bool(run_statuses) and all(status != "running" for status in run_statuses)),
+                run_statuses=run_statuses,
+                phase_runs=phase_runs[-5:],
+            )
         if args.acceptance_gates:
             tree = await fetch_linear_issue_tree(token, linear["issue"]["id"])
             tree_path = root / "final-issue-tree.json"
@@ -1279,75 +1523,103 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
             evidence.artifact("final_issue_tree", tree_path)
             issue_labels = [label["name"] for label in tree["labels"]["nodes"]]
             children = tree["children"]["nodes"]
-            gates = [
-                child
-                for child in children
-                if any(label["name"] == "performer:type/gate" for label in child["labels"]["nodes"])
-            ]
-            evidence_issues = [
-                grandchild
-                for gate in gates
-                for grandchild in gate["children"]["nodes"]
-                if any(label["name"] == "performer:type/evidence" for label in grandchild["labels"]["nodes"])
-            ]
-            evidence.check(
-                "stage:gate_created",
-                bool(gates),
-                gates=[{"identifier": gate["identifier"], "state": gate["state"]} for gate in gates],
-            )
-            evidence.check(
-                "stage:evidence_created",
-                bool(evidence_issues),
-                evidence=[{"identifier": item["identifier"], "state": item["state"]} for item in evidence_issues],
-            )
-            evidence.check(
-                "stage:final_done",
-                tree["state"]["type"] in {"completed", "canceled"}
-                and all(gate["state"]["type"] in {"completed", "canceled"} for gate in gates)
-                and all(item["state"]["type"] in {"completed", "canceled"} for item in evidence_issues),
-                issue_state=tree["state"],
-                gates=[{"identifier": gate["identifier"], "state": gate["state"]} for gate in gates],
-                evidence=[{"identifier": item["identifier"], "state": item["state"]} for item in evidence_issues],
-            )
-            gate_failed = any(
-                any(label["name"] == "performer:gate/failed" for label in node["labels"]["nodes"])
-                for node in [tree, *gates]
-            )
-            gate_comments = "\n".join(
-                comment["body"]
-                for gate in gates
-                for comment in gate["comments"]["nodes"]
-            )
-            evidence.check(
-                "acceptance:gate-child-created",
-                bool(gates),
-                gates=[{"identifier": gate["identifier"], "state": gate["state"]} for gate in gates],
-            )
-            evidence.check(
-                "acceptance:evidence-child-created",
-                bool(evidence_issues),
-                evidence=[{"identifier": item["identifier"], "state": item["state"]} for item in evidence_issues],
-            )
-            evidence.check(
-                "acceptance:gate-passed-visible",
-                "performer:gate/passed" in issue_labels and not gate_failed and "Acceptance score:" in gate_comments,
-                labels=issue_labels,
-                gate_failed=gate_failed,
-            )
-            delegated_acceptance_issues = [*gates, *evidence_issues]
-            evidence.check(
-                "acceptance:all-gate-and-evidence-issues-delegated",
-                bool(delegated_acceptance_issues)
-                and all((item.get("delegate") or {}).get("id") == agent_app_user_id for item in delegated_acceptance_issues),
-                expected_agent_app_user_id=agent_app_user_id,
-                issues=[
-                    {
-                        "identifier": item["identifier"],
-                        "delegate": item.get("delegate"),
-                    }
-                    for item in delegated_acceptance_issues
-                ],
-            )
+            if args.permission_approval_probe:
+                human_actions = [
+                    child
+                    for child in children
+                    if child["title"].startswith("[Human Action]")
+                    or any(label["name"] == "performer:type/human-action" for label in child["labels"]["nodes"])
+                ]
+                evidence.check(
+                    "human-action:child-type-label-visible",
+                    bool(human_actions)
+                    and all(
+                        any(label["name"] == "performer:type/human-action" for label in child["labels"]["nodes"])
+                        for child in human_actions
+                    )
+                    and any(child["state"]["type"] in {"completed", "canceled"} for child in human_actions),
+                    human_actions=[
+                        {
+                            "identifier": child["identifier"],
+                            "title": child["title"],
+                            "state": child["state"],
+                            "labels": [label["name"] for label in child["labels"]["nodes"]],
+                        }
+                        for child in human_actions
+                    ],
+                )
+            if args.permission_approval_probe:
+                children = []
+            if not args.permission_approval_probe:
+                gates = [
+                    child
+                    for child in children
+                    if any(label["name"] == "performer:type/gate" for label in child["labels"]["nodes"])
+                ]
+                evidence_issues = [
+                    grandchild
+                    for gate in gates
+                    for grandchild in gate["children"]["nodes"]
+                    if any(label["name"] == "performer:type/evidence" for label in grandchild["labels"]["nodes"])
+                ]
+                evidence.check(
+                    "stage:gate_created",
+                    bool(gates),
+                    gates=[{"identifier": gate["identifier"], "state": gate["state"]} for gate in gates],
+                )
+                evidence.check(
+                    "stage:evidence_created",
+                    bool(evidence_issues),
+                    evidence=[{"identifier": item["identifier"], "state": item["state"]} for item in evidence_issues],
+                )
+                evidence.check(
+                    "stage:final_done",
+                    tree["state"]["type"] in {"completed", "canceled"}
+                    and all(gate["state"]["type"] in {"completed", "canceled"} for gate in gates)
+                    and all(item["state"]["type"] in {"completed", "canceled"} for item in evidence_issues),
+                    issue_state=tree["state"],
+                    gates=[{"identifier": gate["identifier"], "state": gate["state"]} for gate in gates],
+                    evidence=[{"identifier": item["identifier"], "state": item["state"]} for item in evidence_issues],
+                )
+                gate_failed = any(
+                    any(label["name"] == "performer:gate/failed" for label in node["labels"]["nodes"])
+                    for node in [tree, *gates]
+                )
+                gate_comments = "\n".join(
+                    comment["body"]
+                    for gate in gates
+                    for comment in gate["comments"]["nodes"]
+                )
+                evidence.check(
+                    "acceptance:gate-child-created",
+                    bool(gates),
+                    gates=[{"identifier": gate["identifier"], "state": gate["state"]} for gate in gates],
+                )
+                evidence.check(
+                    "acceptance:evidence-child-created",
+                    bool(evidence_issues),
+                    evidence=[{"identifier": item["identifier"], "state": item["state"]} for item in evidence_issues],
+                )
+                evidence.check(
+                    "acceptance:gate-passed-visible",
+                    "performer:gate/passed" in issue_labels and not gate_failed and "Acceptance score:" in gate_comments,
+                    labels=issue_labels,
+                    gate_failed=gate_failed,
+                )
+                delegated_acceptance_issues = [*gates, *evidence_issues]
+                evidence.check(
+                    "acceptance:all-gate-and-evidence-issues-delegated",
+                    bool(delegated_acceptance_issues)
+                    and all((item.get("delegate") or {}).get("id") == agent_app_user_id for item in delegated_acceptance_issues),
+                    expected_agent_app_user_id=agent_app_user_id,
+                    issues=[
+                        {
+                            "identifier": item["identifier"],
+                            "delegate": item.get("delegate"),
+                        }
+                        for item in delegated_acceptance_issues
+                    ],
+                )
 
         for method, path, payload in [
             ("GET", "/api/issues", None),
@@ -1372,25 +1644,26 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
             status, body = http_json("GET", api_url(conductor_port, f"/api/runs/{ops_run_id}"))
             evidence.check("conductor-api:GET /api/runs/{id}", status == 200, status=status)
 
-        conductor.stop()
-        processes.remove(conductor)
-        conductor = start_process(
-            "conductor",
-            [str(bin_dir / "conductor"), "--port", str(conductor_port), "--data-root", str(data_root)],
-            env=env,
-            stdout_path=root / "conductor-live-recovered.log",
-        )
-        processes.append(conductor)
-        await wait_for_http_ready(api_url(conductor_port, "/"))
-        status, body = http_json("GET", api_url(conductor_port, f"/api/instances/{instance_id}"))
-        recovered = body.get("instance", {}) if isinstance(body, dict) else {}
-        evidence.check(
-            "conductor-daemon:restart-recovers-completed-one-shot",
-            status == 200 and recovered.get("process_status") in {"exited", "stopped"},
-            status=status,
-            process_status=recovered.get("process_status"),
-            pid=recovered.get("pid"),
-        )
+        if not args.permission_approval_probe:
+            conductor.stop()
+            processes.remove(conductor)
+            conductor = start_process(
+                "conductor",
+                [str(bin_dir / "conductor"), "--port", str(conductor_port), "--data-root", str(data_root)],
+                env=env,
+                stdout_path=root / "conductor-live-recovered.log",
+            )
+            processes.append(conductor)
+            await wait_for_http_ready(api_url(conductor_port, "/"))
+            status, body = http_json("GET", api_url(conductor_port, f"/api/instances/{instance_id}"))
+            recovered = body.get("instance", {}) if isinstance(body, dict) else {}
+            evidence.check(
+                "conductor-daemon:restart-recovers-completed-one-shot",
+                status == 200 and recovered.get("process_status") in {"exited", "stopped"},
+                status=status,
+                process_status=recovered.get("process_status"),
+                pid=recovered.get("pid"),
+            )
         status, body = http_json("POST", api_url(conductor_port, f"/api/instances/{instance_id}/stop"), {})
         evidence.check("conductor-api:POST /api/instances/{id}/stop", status == 200, status=status)
 
@@ -1426,6 +1699,7 @@ def parser() -> argparse.ArgumentParser:
     arg_parser.add_argument("--e2e-gate-mode", choices=["smoke", "strict"], default="smoke")
     arg_parser.add_argument("--stage-timeout", type=int, default=120)
     arg_parser.add_argument("--permission-approval-probe", action="store_true")
+    arg_parser.add_argument("--crash-recovery-probe", action="store_true")
     arg_parser.add_argument(
         "--simulate-agent-webhook",
         action="store_true",

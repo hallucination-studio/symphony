@@ -467,8 +467,17 @@ class ConductorStore:
 
     def list_due_orchestration_runs(self, *, now: str | None = None, instance_id: str | None = None) -> list[OrchestrationRun]:
         now = now or utc_now_iso()
-        clauses = ["phase = ?", "status = ?", "(next_run_at IS NULL OR next_run_at <= ?)"]
-        values: list[Any] = [RunPhase.QUEUED.value, "queued", now]
+        runnable_phases = {RunPhase.QUEUED, RunPhase.REVIEWING, RunPhase.REWORKING}
+        clauses = [
+            f"phase IN ({', '.join('?' for _ in runnable_phases)})",
+            "status = ?",
+            "(next_run_at IS NULL OR next_run_at <= ?)",
+        ]
+        values: list[Any] = [
+            *sorted(phase.value for phase in runnable_phases),
+            "queued",
+            now,
+        ]
         if instance_id is not None:
             clauses.append("instance_id = ?")
             values.append(instance_id)

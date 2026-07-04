@@ -94,6 +94,31 @@ async def test_sdk_backend_resumes_existing_thread(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_sdk_backend_rebuilds_thread_when_resume_fails(tmp_path: Path) -> None:
+    class ResumeFailingSdk(FakeSdk):
+        async def thread_resume(self, thread_id: str, **kwargs: Any) -> FakeSdkThread:
+            self.resumed.append((thread_id, kwargs))
+            raise RuntimeError("thread gone")
+
+    fake_sdk = ResumeFailingSdk()
+    events: list[dict[str, Any]] = []
+    client = CodexSdkClient(CodexConfig(), sdk_factory=lambda config: fake_sdk)
+
+    result = await client.run_session(
+        tmp_path,
+        "Continue",
+        "MT-1: Build",
+        existing_thread_id="thread-existing",
+        on_event=events.append,
+    )
+
+    assert result.thread_id == "thread-new"
+    assert fake_sdk.resumed == [("thread-existing", {"cwd": str(tmp_path)})]
+    assert fake_sdk.started == [{"cwd": str(tmp_path)}]
+    assert any(event["event"] == "thread_resume_failed" and event["thread_id"] == "thread-existing" for event in events)
+
+
+@pytest.mark.asyncio
 async def test_sdk_backend_rejects_invalid_structured_output(tmp_path: Path) -> None:
     class BadTurn:
         id = "turn-1"

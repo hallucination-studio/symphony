@@ -161,6 +161,15 @@ class ConductorApiServer:
                 return 200, {"retention": self.service.unpin_issue(issue_id)}
             if method == "GET" and path == "/api/runs":
                 return 200, {"runs": self.service.list_runs()}
+            if method == "POST" and path.startswith("/api/runs/") and path.endswith("/human-answered"):
+                run_id = path.removeprefix("/api/runs/").removesuffix("/human-answered")
+                command = {
+                    "type": "human.answered",
+                    "run_id": run_id,
+                    "child_issue_id": body.get("child_issue_id"),
+                    "human_response": body.get("human_response") or body.get("response"),
+                }
+                return 200, await self.service.handle_podium_ws_command(command)
             if method == "GET" and path.startswith("/api/runs/"):
                 return 200, {"run": self.service.get_run(path.removeprefix("/api/runs/"))}
             if method == "GET" and path == "/api/traces":

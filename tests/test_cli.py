@@ -415,8 +415,10 @@ async def test_run_phase_advance_writes_result_file_atomically(tmp_path: Path, m
     class Store:
         pass
 
-    class DispatchOnlyOrchestrator:
+    class AdvanceOnlyOrchestrator:
         def __init__(self, *args, **kwargs):
+            self.workspace_manager = object()
+            self.requests = []
             pass
 
         def load_persisted_state(self):
@@ -425,13 +427,18 @@ async def test_run_phase_advance_writes_result_file_atomically(tmp_path: Path, m
         async def startup_terminal_workspace_cleanup(self, workspace_manager):
             pass
 
-        async def dispatch_issue_by_id(self, issue_id):
-            return {
-                "status": "accepted",
-                "issue_id": issue_id,
-                "issue_identifier": "ENG-1",
-                "runtime_phase": "dispatch_received",
-            }
+        async def advance(self, request):
+            self.requests.append(request)
+            return cli.PhaseAdvanceResult(
+                run_id=request.run_id,
+                issue_id=request.issue_id,
+                next_phase=RunPhase.REVIEWING,
+                status="reviewing",
+                reason=f"phase={request.current_phase.value}",
+                retry_delay_seconds=None,
+                workspace_path=str(tmp_path / "workspace" / "ENG-1"),
+                ops_snapshot_path=str(tmp_path / "state" / "ops.json"),
+            )
 
         async def wait_for_idle(self):
             pass
@@ -444,19 +451,19 @@ async def test_run_phase_advance_writes_result_file_atomically(tmp_path: Path, m
     monkeypatch.setattr(cli, "AgentRunner", Runner)
     monkeypatch.setattr(cli, "persistence_store_from_config", lambda config: Store())
     monkeypatch.setattr(cli, "build_acceptance_runner", lambda config: None)
-    monkeypatch.setattr(cli, "Orchestrator", DispatchOnlyOrchestrator)
+    monkeypatch.setattr(cli, "Orchestrator", AdvanceOnlyOrchestrator)
 
     result = await cli.run_phase_advance(workflow, request_path, result_path)
     payload = json.loads(result_path.read_text(encoding="utf-8"))
 
-    assert result.next_phase is RunPhase.QUEUED
+    assert result.next_phase is RunPhase.REVIEWING
     assert payload == {
         "run_id": "run-1",
         "issue_id": "issue-123",
-        "next_phase": "queued",
-        "status": "accepted",
-        "reason": "dispatch_received",
-        "retry_delay_seconds": 0,
+        "next_phase": "reviewing",
+        "status": "reviewing",
+        "reason": "phase=queued",
+        "retry_delay_seconds": None,
         "human_action": None,
         "workspace_path": str(tmp_path / "workspace" / "ENG-1"),
         "ops_snapshot_path": str(tmp_path / "state" / "ops.json"),
@@ -465,209 +472,7 @@ async def test_run_phase_advance_writes_result_file_atomically(tmp_path: Path, m
 
 
 @pytest.mark.asyncio
-async def test_run_phase_advance_maps_completed_dispatch_to_done(tmp_path: Path, monkeypatch) -> None:
-    workflow = tmp_path / "WORKFLOW.md"
-    workflow.write_text("placeholder", encoding="utf-8")
-    request_path = tmp_path / "request.json"
-    result_path = tmp_path / "result.json"
-    request_path.write_text(
-        json.dumps(
-            PhaseAdvanceRequest(
-                run_id="run-1",
-                instance_id="inst-1",
-                issue_id="issue-123",
-                issue_identifier="ENG-1",
-                current_phase=RunPhase.QUEUED,
-                attempt=1,
-                workspace_context={},
-            ).to_dict()
-        ),
-        encoding="utf-8",
-    )
-
-    class DispatchOnlyOrchestrator:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def load_persisted_state(self):
-            pass
-
-        async def startup_terminal_workspace_cleanup(self, workspace_manager):
-            pass
-
-        async def dispatch_issue_by_id(self, issue_id):
-            return {"status": "completed", "issue_id": issue_id, "reason": "completed_by_runtime"}
-
-        async def wait_for_idle(self):
-            pass
-
-    config = make_service_config(tmp_path, project_slug="MT", api_key="token", workspace="ws", command="codex")
-    monkeypatch.setattr(cli, "build_config_from_path", lambda path: config)
-    monkeypatch.setattr(cli, "validate_tracker_config", lambda tracker_config: None)
-    monkeypatch.setattr(cli, "create_tracker", lambda tracker_config: object())
-    monkeypatch.setattr(cli, "WorkspaceManager", lambda *args, **kwargs: object())
-    monkeypatch.setattr(cli, "AgentRunner", lambda *args, **kwargs: object())
-    monkeypatch.setattr(cli, "persistence_store_from_config", lambda config: object())
-    monkeypatch.setattr(cli, "build_acceptance_runner", lambda config: None)
-    monkeypatch.setattr(cli, "Orchestrator", DispatchOnlyOrchestrator)
-
-    result = await cli.run_phase_advance(workflow, request_path, result_path)
-
-    assert result.next_phase is RunPhase.DONE
-    assert json.loads(result_path.read_text(encoding="utf-8"))["next_phase"] == "done"
-
-
-@pytest.mark.asyncio
-async def test_run_phase_advance_maps_retry_state_to_queued_result(tmp_path: Path, monkeypatch) -> None:
-    workflow = tmp_path / "WORKFLOW.md"
-    workflow.write_text("placeholder", encoding="utf-8")
-    request_path = tmp_path / "request.json"
-    result_path = tmp_path / "result.json"
-    request_path.write_text(
-        json.dumps(
-            PhaseAdvanceRequest(
-                run_id="run-1",
-                instance_id="inst-1",
-                issue_id="issue-123",
-                issue_identifier="ENG-1",
-                current_phase=RunPhase.QUEUED,
-                attempt=1,
-                workspace_context={},
-            ).to_dict()
-        ),
-        encoding="utf-8",
-    )
-
-    class DispatchOnlyOrchestrator:
-        def __init__(self, *args, **kwargs):
-            retry = RetryEntry(
-                issue_id="issue-123",
-                identifier="ENG-1",
-                attempt=2,
-                due_at=utc_now() + timedelta(seconds=60),
-                due_at_ms=0,
-                error="temporary failure",
-            )
-            self.state = SimpleNamespace(
-                completed=set(),
-                retry_attempts={"issue-123": retry},
-                continuations={},
-                blocked={},
-                human_interventions={},
-            )
-
-        def load_persisted_state(self):
-            pass
-
-        async def startup_terminal_workspace_cleanup(self, workspace_manager):
-            pass
-
-        async def dispatch_issue_by_id(self, issue_id):
-            return {"status": "accepted", "issue_id": issue_id}
-
-        async def wait_for_idle(self):
-            pass
-
-    config = make_service_config(tmp_path, project_slug="MT", api_key="token", workspace="ws", command="codex")
-    monkeypatch.setattr(cli, "build_config_from_path", lambda path: config)
-    monkeypatch.setattr(cli, "validate_tracker_config", lambda tracker_config: None)
-    monkeypatch.setattr(cli, "create_tracker", lambda tracker_config: object())
-    monkeypatch.setattr(cli, "WorkspaceManager", lambda *args, **kwargs: object())
-    monkeypatch.setattr(cli, "AgentRunner", lambda *args, **kwargs: object())
-    monkeypatch.setattr(cli, "persistence_store_from_config", lambda config: object())
-    monkeypatch.setattr(cli, "build_acceptance_runner", lambda config: None)
-    monkeypatch.setattr(cli, "Orchestrator", DispatchOnlyOrchestrator)
-
-    result = await cli.run_phase_advance(workflow, request_path, result_path)
-
-    assert result.next_phase is RunPhase.QUEUED
-    assert result.status == "retry"
-    assert result.reason == "temporary failure"
-    assert result.retry_delay_seconds is not None
-    assert result.retry_delay_seconds > 0
-
-
-@pytest.mark.asyncio
-async def test_run_phase_advance_maps_human_intervention_to_awaiting_human(tmp_path: Path, monkeypatch) -> None:
-    workflow = tmp_path / "WORKFLOW.md"
-    workflow.write_text("placeholder", encoding="utf-8")
-    request_path = tmp_path / "request.json"
-    result_path = tmp_path / "result.json"
-    request_path.write_text(
-        json.dumps(
-            PhaseAdvanceRequest(
-                run_id="run-1",
-                instance_id="inst-1",
-                issue_id="issue-123",
-                issue_identifier="ENG-1",
-                current_phase=RunPhase.QUEUED,
-                attempt=1,
-                workspace_context={},
-            ).to_dict()
-        ),
-        encoding="utf-8",
-    )
-
-    class DispatchOnlyOrchestrator:
-        def __init__(self, *args, **kwargs):
-            intervention = HumanInterventionEntry(
-                issue_id="issue-123",
-                identifier="ENG-1",
-                child_issue_id="child-1",
-                child_identifier="ENG-2",
-                child_url="https://linear.test/ENG-2",
-                kind="runtime_error",
-                attempt=2,
-                created_at=utc_now(),
-                error="needs operator input",
-                questions=["Approve retry?"],
-            )
-            self.state = SimpleNamespace(
-                completed=set(),
-                retry_attempts={},
-                continuations={},
-                blocked={},
-                human_interventions={"issue-123": intervention},
-            )
-
-        def load_persisted_state(self):
-            pass
-
-        async def startup_terminal_workspace_cleanup(self, workspace_manager):
-            pass
-
-        async def dispatch_issue_by_id(self, issue_id):
-            return {"status": "accepted", "issue_id": issue_id}
-
-        async def wait_for_idle(self):
-            pass
-
-    config = make_service_config(tmp_path, project_slug="MT", api_key="token", workspace="ws", command="codex")
-    monkeypatch.setattr(cli, "build_config_from_path", lambda path: config)
-    monkeypatch.setattr(cli, "validate_tracker_config", lambda tracker_config: None)
-    monkeypatch.setattr(cli, "create_tracker", lambda tracker_config: object())
-    monkeypatch.setattr(cli, "WorkspaceManager", lambda *args, **kwargs: object())
-    monkeypatch.setattr(cli, "AgentRunner", lambda *args, **kwargs: object())
-    monkeypatch.setattr(cli, "persistence_store_from_config", lambda config: object())
-    monkeypatch.setattr(cli, "build_acceptance_runner", lambda config: None)
-    monkeypatch.setattr(cli, "Orchestrator", DispatchOnlyOrchestrator)
-
-    result = await cli.run_phase_advance(workflow, request_path, result_path)
-
-    assert result.next_phase is RunPhase.AWAITING_HUMAN
-    assert result.status == "awaiting_human"
-    assert result.reason == "needs operator input"
-    assert result.human_action == {
-        "child_issue_id": "child-1",
-        "child_identifier": "ENG-2",
-        "child_url": "https://linear.test/ENG-2",
-        "kind": "runtime_error",
-        "questions": ["Approve retry?"],
-    }
-
-
-@pytest.mark.asyncio
-async def test_run_phase_advance_applies_conductor_human_response_before_dispatch(tmp_path: Path, monkeypatch) -> None:
+async def test_run_phase_advance_passes_conductor_human_response_to_advance(tmp_path: Path, monkeypatch) -> None:
     workflow = tmp_path / "WORKFLOW.md"
     workflow.write_text("placeholder", encoding="utf-8")
     request_path = tmp_path / "request.json"
@@ -689,27 +494,9 @@ async def test_run_phase_advance_applies_conductor_human_response_before_dispatc
     )
     calls: list[object] = []
 
-    class DispatchOnlyOrchestrator:
+    class AdvanceOnlyOrchestrator:
         def __init__(self, *args, **kwargs):
-            intervention = HumanInterventionEntry(
-                issue_id="issue-123",
-                identifier="ENG-1",
-                child_issue_id="child-1",
-                child_identifier="ENG-2",
-                child_url="https://linear.test/ENG-2",
-                kind="runtime_error",
-                attempt=2,
-                created_at=utc_now(),
-                error="needs operator input",
-                questions=[],
-            )
-            self.state = SimpleNamespace(
-                completed=set(),
-                retry_attempts={},
-                continuations={},
-                blocked={},
-                human_interventions={"issue-123": intervention},
-            )
+            self.workspace_manager = object()
 
         def load_persisted_state(self):
             calls.append("load")
@@ -717,24 +504,14 @@ async def test_run_phase_advance_applies_conductor_human_response_before_dispatc
         async def startup_terminal_workspace_cleanup(self, workspace_manager):
             calls.append("cleanup")
 
-        async def process_managed_human_response(self, issue_id, human_response):
-            calls.append(("process_managed_human_response", issue_id, human_response))
-            self.state.human_interventions.pop(issue_id, None)
-            retry = RetryEntry(
-                issue_id=issue_id,
-                identifier="ENG-1",
-                attempt=2,
-                due_at=utc_now(),
-                due_at_ms=0,
-                error=human_response,
+        async def advance(self, request):
+            calls.append(("advance", request.issue_id, request.current_phase, request.human_response))
+            return cli.PhaseAdvanceResult(
+                run_id=request.run_id,
+                issue_id=request.issue_id,
+                next_phase=RunPhase.DONE,
+                status="completed",
             )
-            self.state.retry_attempts[issue_id] = retry
-
-        async def dispatch_issue_by_id(self, issue_id):
-            calls.append(("dispatch_issue_by_id", issue_id))
-            self.state.completed.add(issue_id)
-            self.state.retry_attempts.pop(issue_id, None)
-            return {"status": "completed", "issue_id": issue_id}
 
         async def wait_for_idle(self):
             calls.append("idle")
@@ -747,7 +524,7 @@ async def test_run_phase_advance_applies_conductor_human_response_before_dispatc
     monkeypatch.setattr(cli, "AgentRunner", lambda *args, **kwargs: object())
     monkeypatch.setattr(cli, "persistence_store_from_config", lambda config: object())
     monkeypatch.setattr(cli, "build_acceptance_runner", lambda config: None)
-    monkeypatch.setattr(cli, "Orchestrator", DispatchOnlyOrchestrator)
+    monkeypatch.setattr(cli, "Orchestrator", AdvanceOnlyOrchestrator)
 
     result = await cli.run_phase_advance(workflow, request_path, result_path)
 
@@ -755,8 +532,7 @@ async def test_run_phase_advance_applies_conductor_human_response_before_dispatc
     assert calls == [
         "load",
         "cleanup",
-        ("process_managed_human_response", "issue-123", "Approved by operator."),
-        ("dispatch_issue_by_id", "issue-123"),
+        ("advance", "issue-123", RunPhase.QUEUED, "Approved by operator."),
         "idle",
     ]
 

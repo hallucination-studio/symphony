@@ -12,7 +12,7 @@ from conductor.conductor_runtime import ConductorRuntimeManager
 from conductor.podium_client import PodiumRuntimeClient
 from conductor.conductor_service import ConductorService
 from conductor.conductor_store import ConductorStore
-from performer_api.phase import RunPhase
+from performer_api.phase import PhaseAdvanceResult, RunPhase
 from podium.app import create_app
 from tests.test_conductor_service import CapturingRuntime, make_repo, make_request
 
@@ -36,6 +36,15 @@ def make_channel_service(tmp_path: Path) -> ConductorService:
         data_root=tmp_path / "conductor-data",
         runtime_manager=runtime,  # type: ignore[arg-type]
     )
+
+
+class FailingChildIssueTracker:
+    def __init__(self) -> None:
+        self.fetch_calls = 0
+
+    async def fetch_child_issues(self, parent_issue_id: str, *, label_name: str | None = None) -> list[dict[str, Any]]:
+        self.fetch_calls += 1
+        raise AssertionError("managed human.answered must not poll Linear child issues")
 
 
 def test_build_podium_report_includes_bindings_metrics_queue_and_log_tail(tmp_path: Path) -> None:
@@ -190,6 +199,54 @@ async def test_handle_podium_ws_dispatch_and_log_fetch_commands(tmp_path: Path) 
     assert fetch["status"] == "posted"
     assert posted_chunks[0]["request_id"] == "req-1"
     assert posted_chunks[0]["lines"] == ["three", "two"]
+
+
+@pytest.mark.asyncio
+async def test_handle_podium_ws_human_answered_resumes_without_child_poll(tmp_path: Path) -> None:
+    service = make_channel_service(tmp_path)
+    service.store.save_settings(ConductorSettings(managed_mode=True, podium_proxy_token="proxy-token"))
+    tracker = FailingChildIssueTracker()
+    service.repository_handoff_tracker_factory = lambda instance: tracker
+    repo = make_repo(tmp_path)
+    instance = service.create_instance(
+        make_request(repo).with_overrides(linear_filters={"agent_app_user_id": "agent-alpha"})
+    )
+    run = service.phase_reducer.dispatch_received(
+        instance_id=instance.id,
+        issue_id="issue-1",
+        issue_identifier="ENG-1",
+        workflow_profile=instance.workflow_profile,
+        dispatch_id="dispatch-1",
+    )
+    service.phase_reducer.performer_started(run.run_id, request_path="/tmp/request.json", result_path="/tmp/result.json")
+    service.phase_reducer.performer_result(
+        PhaseAdvanceResult(
+            run_id=run.run_id,
+            issue_id="issue-1",
+            next_phase=RunPhase.AWAITING_HUMAN,
+            status="awaiting_human",
+            human_action={
+                "child_issue_id": "child-1",
+                "child_identifier": "ENG-2",
+                "kind": "runtime_error",
+            },
+        )
+    )
+
+    response = await service.handle_podium_ws_command(
+        {
+            "type": "human.answered",
+            "child_issue_id": "child-1",
+            "human_response": "Restart approved.",
+        }
+    )
+
+    updated = service.store.get_orchestration_run(run.run_id)
+    assert response == {"status": "accepted", "run_id": run.run_id, "issue_id": "issue-1"}
+    assert updated is not None
+    assert updated.phase is RunPhase.QUEUED
+    assert updated.human_response == "Restart approved."
+    assert tracker.fetch_calls == 0
 
 
 @pytest.mark.asyncio

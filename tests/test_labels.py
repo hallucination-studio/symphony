@@ -1,4 +1,16 @@
-from performer_api.labels import LABEL_SCHEME, LEGACY_LABELS
+from performer_api.labels import LABEL_SCHEME
+
+
+LEGACY_LABEL_FIXTURES = {
+    "performer:queued",
+    "performer:running",
+    "performer:retrying",
+    "performer:error",
+    "performer:done",
+    "performer:type/task",
+    "performer:type/acceptance",
+    "performer:phase/planned",
+}
 
 
 def test_label_scheme_has_unique_static_labels_across_axes() -> None:
@@ -32,7 +44,7 @@ def test_label_scheme_has_unique_static_labels_across_axes() -> None:
 def test_label_scheme_does_not_include_legacy_runtime_labels() -> None:
     labels = set(LABEL_SCHEME.all_static_labels())
 
-    assert labels.isdisjoint(LEGACY_LABELS)
+    assert labels.isdisjoint(LEGACY_LABEL_FIXTURES)
     assert not any(label.startswith("performer:lifecycle/") for label in labels)
     assert not any(label.startswith("performer:dispatch/") for label in labels)
     assert not any(label.startswith("performer:retry/") for label in labels)

@@ -94,7 +94,7 @@ class CodexSdkClient:
             }
         )
         client = await self._client()
-        thread = await self._thread(client, workspace_path, existing_thread_id)
+        thread = await self._thread(client, workspace_path, existing_thread_id, emit=emit)
         thread_id = _string_attr(thread, "id") or existing_thread_id
         if not thread_id:
             raise CodexError("response_error", "Codex SDK thread did not include an id")
@@ -175,13 +175,32 @@ class CodexSdkClient:
         sdk_config = SdkCodexConfig(codex_bin=self.config.sdk_codex_bin) if self.config.sdk_codex_bin else None
         return AsyncCodex(config=sdk_config)
 
-    async def _thread(self, client: Any, workspace_path: Path, existing_thread_id: str | None) -> Any:
+    async def _thread(
+        self,
+        client: Any,
+        workspace_path: Path,
+        existing_thread_id: str | None,
+        *,
+        emit: EventCallback | None = None,
+    ) -> Any:
         kwargs = self._thread_kwargs(workspace_path)
         if existing_thread_id:
             resume = getattr(client, "thread_resume", None)
             if not callable(resume):
                 raise CodexError("sdk_missing_thread_resume", "Codex SDK client does not support thread_resume")
-            return await _maybe_await(resume(existing_thread_id, **kwargs))
+            try:
+                return await _maybe_await(resume(existing_thread_id, **kwargs))
+            except Exception as exc:
+                if emit is not None:
+                    emit(
+                        {
+                            "event": "thread_resume_failed",
+                            "backend": "sdk",
+                            "thread_id": existing_thread_id,
+                            "cwd": str(workspace_path),
+                            "message": str(exc),
+                        }
+                    )
         start = getattr(client, "thread_start", None)
         if not callable(start):
             raise CodexError("sdk_missing_thread_start", "Codex SDK client does not support thread_start")

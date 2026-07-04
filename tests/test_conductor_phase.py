@@ -80,6 +80,34 @@ def test_store_lists_due_phase_runs_and_tracks_result_paths(tmp_path: Path) -> N
     assert rows[0].result_path == "/tmp/result.json"
 
 
+def test_store_lists_reviewing_phase_run_as_due_after_implementation_result(tmp_path: Path) -> None:
+    store = ConductorStore(tmp_path / "conductor-data")
+    reducer = PhaseReducer(store)
+    run = reducer.dispatch_received(
+        instance_id="inst-1",
+        issue_id="issue-1",
+        issue_identifier="ENG-1",
+        workflow_profile="gated-task",
+        dispatch_id="dispatch-1",
+    )
+    reducer.performer_started(run.run_id, request_path="/tmp/request.json", result_path="/tmp/result.json")
+    reducer.performer_result(
+        PhaseAdvanceResult(
+            run_id=run.run_id,
+            issue_id="issue-1",
+            next_phase=RunPhase.REVIEWING,
+            status="ready_for_review",
+            reason="implementation_ready_for_review",
+        )
+    )
+
+    rows = store.list_due_orchestration_runs()
+
+    assert [row.run_id for row in rows] == [run.run_id]
+    assert rows[0].phase is RunPhase.REVIEWING
+    assert rows[0].status == RunStatus.QUEUED
+
+
 def test_phase_reducer_starts_performer_and_applies_done_result(tmp_path: Path) -> None:
     store = ConductorStore(tmp_path / "conductor-data")
     reducer = PhaseReducer(store)
@@ -122,6 +150,39 @@ def test_phase_reducer_starts_performer_and_applies_done_result(tmp_path: Path) 
     ]
 
 
+def test_phase_reducer_starts_reviewing_phase_without_rewriting_to_implementation(tmp_path: Path) -> None:
+    store = ConductorStore(tmp_path / "conductor-data")
+    reducer = PhaseReducer(store)
+    run = reducer.dispatch_received(
+        instance_id="inst-1",
+        issue_id="issue-1",
+        issue_identifier="ENG-1",
+        workflow_profile="gated-task",
+        dispatch_id="dispatch-1",
+    )
+    reducer.performer_started(run.run_id, request_path="/tmp/request.json", result_path="/tmp/result.json")
+    reducer.performer_result(
+        PhaseAdvanceResult(
+            run_id=run.run_id,
+            issue_id="issue-1",
+            next_phase=RunPhase.REVIEWING,
+            status="ready_for_review",
+            reason="implementation_ready_for_review",
+        )
+    )
+
+    started = reducer.performer_started(
+        run.run_id,
+        request_path="/tmp/review-request.json",
+        result_path="/tmp/review-result.json",
+        pid=456,
+    )
+
+    assert started.phase is RunPhase.REVIEWING
+    assert started.status == RunStatus.RUNNING
+    assert started.request_path == "/tmp/review-request.json"
+
+
 def test_phase_reducer_requeues_retry_result_with_delay(tmp_path: Path) -> None:
     store = ConductorStore(tmp_path / "conductor-data")
     reducer = PhaseReducer(store)
@@ -151,6 +212,62 @@ def test_phase_reducer_requeues_retry_result_with_delay(tmp_path: Path) -> None:
     assert queued.attempt == 2
     assert queued.next_run_at == "2026-07-04T00:00:45Z"
     assert queued.last_reason == "temporary failure"
+
+
+def test_phase_reducer_requeues_retry_result_with_minimum_delay(tmp_path: Path) -> None:
+    store = ConductorStore(tmp_path / "conductor-data")
+    reducer = PhaseReducer(store)
+    run = reducer.dispatch_received(
+        instance_id="inst-1",
+        issue_id="issue-1",
+        issue_identifier="ENG-1",
+        workflow_profile="default",
+        dispatch_id=None,
+    )
+    reducer.performer_started(run.run_id, request_path="/tmp/request.json", result_path="/tmp/result.json")
+
+    queued = reducer.performer_result(
+        PhaseAdvanceResult(
+            run_id=run.run_id,
+            issue_id="issue-1",
+            next_phase=RunPhase.QUEUED,
+            status="retry",
+            reason="temporary failure",
+            retry_delay_seconds=0,
+        ),
+        now=datetime(2026, 7, 4, tzinfo=timezone.utc),
+    )
+
+    assert queued.phase is RunPhase.QUEUED
+    assert queued.status == RunStatus.QUEUED
+    assert queued.next_run_at == "2026-07-04T00:00:05Z"
+
+
+def test_phase_reducer_backs_off_already_claimed_result(tmp_path: Path) -> None:
+    store = ConductorStore(tmp_path / "conductor-data")
+    reducer = PhaseReducer(store)
+    run = reducer.dispatch_received(
+        instance_id="inst-1",
+        issue_id="issue-1",
+        issue_identifier="ENG-1",
+        workflow_profile="default",
+        dispatch_id=None,
+    )
+    reducer.performer_started(run.run_id, request_path="/tmp/request.json", result_path="/tmp/result.json")
+
+    queued = reducer.performer_result(
+        PhaseAdvanceResult(
+            run_id=run.run_id,
+            issue_id="issue-1",
+            next_phase=RunPhase.QUEUED,
+            status="retry",
+            reason="already_running_or_claimed",
+            retry_delay_seconds=0,
+        ),
+        now=datetime(2026, 7, 4, tzinfo=timezone.utc),
+    )
+
+    assert queued.next_run_at == "2026-07-04T00:00:30Z"
 
 
 def test_phase_reducer_waits_for_human_and_resumes_with_response(tmp_path: Path) -> None:

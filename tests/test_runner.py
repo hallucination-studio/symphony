@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import subprocess
 from typing import Any
@@ -38,6 +39,19 @@ class FakeCodex:
         self.prompt = prompt
         self.title = title
         self.kwargs = kwargs
+
+
+class FakeCodexWithThread(FakeCodex):
+    async def run_session(self, workspace_path: Path, prompt: str, title: str, **kwargs: Any) -> Any:
+        await super().run_session(workspace_path, prompt, title, **kwargs)
+
+        class Result:
+            thread_id = "thread-new"
+            turn_id = "turn-new"
+            final_response = "done"
+            structured_result = None
+
+        return Result()
 
 
 class FakeCodexWithoutTurnStarted(FakeCodex):
@@ -289,6 +303,100 @@ async def test_runner_passes_existing_sdk_thread_id_from_persistence(tmp_path: P
 
     assert codex.kwargs is not None
     assert codex.kwargs["existing_thread_id"] == "thread-existing"
+
+
+@pytest.mark.asyncio
+async def test_runner_prefers_workspace_owned_sdk_thread_id(tmp_path: Path) -> None:
+    codex = FakeCodex()
+    workspace_root = tmp_path / "workspace"
+    issue_workspace = workspace_root / "MT-1"
+    issue_workspace.mkdir(parents=True)
+    (issue_workspace / ".symphony-codex-thread.json").write_text(
+        json.dumps(
+            {
+                "issue_id": "mt-1",
+                "thread_id": "thread-workspace",
+                "backend": "sdk",
+                "workspace_path": str(issue_workspace),
+                "status": "resume_pending",
+            }
+        ),
+        encoding="utf-8",
+    )
+    config = make_config_with_persistence(tmp_path)
+    config = ServiceConfig(
+        tracker=config.tracker,
+        polling=config.polling,
+        workspace=WorkspaceConfig(root=workspace_root),
+        hooks=config.hooks,
+        agent=config.agent,
+        codex=CodexConfig(backend="sdk", linear_tool_mode="disabled"),
+        prompt_template=config.prompt_template,
+        workflow_path=config.workflow_path,
+        persistence=config.persistence,
+    )
+    PersistenceStore(config.persistence.path).save(
+        PersistedState(
+            codex_threads=[
+                CodexThreadEntry(
+                    issue_id="mt-1",
+                    thread_id="thread-persistence",
+                    backend="sdk",
+                    workspace_path=str(issue_workspace),
+                    status="resume_pending",
+                )
+            ]
+        )
+    )
+    runner = AgentRunner(
+        config,
+        WorkspaceManager(config.workspace, config.hooks),
+        codex_client=codex,
+        tracker=FakeTracker(),
+    )
+
+    await runner.run_issue(
+        Issue(id="mt-1", identifier="MT-1", title="Build", state="Todo", labels=["codex"], project_slug="MT"),
+        2,
+        lambda event: None,
+    )
+
+    assert codex.kwargs is not None
+    assert codex.kwargs["existing_thread_id"] == "thread-workspace"
+
+
+@pytest.mark.asyncio
+async def test_runner_writes_sdk_thread_id_to_issue_workspace(tmp_path: Path) -> None:
+    codex = FakeCodexWithThread()
+    workspace_root = tmp_path / "workspace"
+    config = make_config(tmp_path)
+    config = ServiceConfig(
+        tracker=config.tracker,
+        polling=config.polling,
+        workspace=WorkspaceConfig(root=workspace_root),
+        hooks=config.hooks,
+        agent=config.agent,
+        codex=CodexConfig(backend="sdk", linear_tool_mode="disabled"),
+        prompt_template=config.prompt_template,
+        workflow_path=config.workflow_path,
+    )
+    runner = AgentRunner(
+        config,
+        WorkspaceManager(config.workspace, config.hooks),
+        codex_client=codex,
+        tracker=FakeTracker(),
+    )
+
+    await runner.run_issue(
+        Issue(id="mt-1", identifier="MT-1", title="Build", state="Todo", labels=["codex"], project_slug="MT"),
+        1,
+        lambda event: None,
+    )
+
+    payload = json.loads((workspace_root / "MT-1" / ".symphony-codex-thread.json").read_text(encoding="utf-8"))
+    assert payload["issue_id"] == "mt-1"
+    assert payload["thread_id"] == "thread-new"
+    assert payload["status"] == "resume_pending"
 
 
 @pytest.mark.asyncio
