@@ -97,16 +97,6 @@ async def run_daemon(config: ServiceConfig, *, once: bool = False) -> None:
         await asyncio.sleep(config.polling.interval_ms / 1000)
 
 
-async def run_dispatch_issue(workflow_path: Path, issue_id: str) -> dict[str, object]:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    orchestrator = _build_one_shot_orchestrator(workflow_path)
-    orchestrator.load_persisted_state()
-    await orchestrator.startup_terminal_workspace_cleanup(orchestrator.workspace_manager)
-    result = await orchestrator.dispatch_issue_by_id(issue_id)
-    await orchestrator.wait_for_idle()
-    return result
-
-
 async def run_phase_advance(
     workflow_path: Path,
     advance_request_path: Path,
@@ -163,7 +153,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the Performer Linear/Codex daemon.")
     parser.add_argument("workflow", nargs="?", help="Path to WORKFLOW.md")
     parser.add_argument("--once", action="store_true", help="Run one poll cycle and exit after workers finish.")
-    parser.add_argument("--dispatch-issue-id", default=None, help="Run one event-driven dispatch for a Linear issue id.")
     parser.add_argument("--advance-request-path", default=None, help="Read one managed phase advance request JSON file.")
     parser.add_argument("--phase-result-path", default=None, help="Write one managed phase result JSON file.")
     return parser.parse_args(argv)
@@ -209,8 +198,6 @@ def main(argv: list[str] | None = None) -> int:
                     Path(args.phase_result_path).resolve(),
                 )
             )
-        elif args.dispatch_issue_id:
-            asyncio.run(run_dispatch_issue(path, args.dispatch_issue_id))
         else:
             asyncio.run(run_reloading_daemon(path, once=args.once))
     except KeyboardInterrupt:

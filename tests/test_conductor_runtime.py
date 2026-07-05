@@ -108,6 +108,33 @@ async def test_start_launches_performer_process_and_captures_logs(tmp_path: Path
 
 
 @pytest.mark.asyncio
+async def test_start_does_not_inherit_sensitive_runtime_credentials(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    process = FakeProcess()
+    captured: dict[str, Any] = {}
+
+    async def process_factory(*args: str, **kwargs: Any) -> FakeProcess:
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return process
+
+    monkeypatch.setenv("LINEAR_API_KEY", "parent-linear-token")
+    monkeypatch.setenv("PODIUM_PROXY_TOKEN", "parent-proxy-token")
+    monkeypatch.setenv("PODIUM_RUNTIME_TOKEN", "parent-runtime-token")
+    manager = ConductorRuntimeManager(process_factory=process_factory, command="performer")
+    instance = make_instance(tmp_path)
+
+    await manager.start(instance, env={})
+
+    env = captured["kwargs"]["env"]
+    assert "LINEAR_API_KEY" not in env
+    assert "PODIUM_PROXY_TOKEN" not in env
+    assert "PODIUM_RUNTIME_TOKEN" not in env
+
+
+@pytest.mark.asyncio
 async def test_restart_creates_new_generation_without_truncating_previous_log(tmp_path: Path) -> None:
     processes = [FakeProcess(), FakeProcess()]
 
@@ -160,14 +187,12 @@ def test_default_command_falls_back_to_python_module_in_editable_repo() -> None:
         assert manager._command_args("WORKFLOW.md") == (manager.command, "-m", "performer.cli", "WORKFLOW.md")
 
 
-def test_command_args_can_target_event_dispatch_issue() -> None:
+def test_command_args_do_not_include_legacy_dispatch_issue() -> None:
     manager = ConductorRuntimeManager(command="performer")
 
-    assert manager._command_args("WORKFLOW.md", dispatch_issue_id="issue-1") == (
+    assert manager._command_args("WORKFLOW.md") == (
         "performer",
         "WORKFLOW.md",
-        "--dispatch-issue-id",
-        "issue-1",
     )
 
 
@@ -176,14 +201,11 @@ def test_command_args_include_phase_request_and_result_paths() -> None:
 
     assert manager._command_args(
         "WORKFLOW.md",
-        dispatch_issue_id="issue-1",
         advance_request_path="/tmp/request.json",
         phase_result_path="/tmp/result.json",
     ) == (
         "performer",
         "WORKFLOW.md",
-        "--dispatch-issue-id",
-        "issue-1",
         "--advance-request-path",
         "/tmp/request.json",
         "--phase-result-path",

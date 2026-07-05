@@ -165,6 +165,117 @@ def test_real_symphony_e2e_replaces_existing_gate_mode() -> None:
     assert "gate_planner_mode: strict" not in patched
 
 
+def test_real_symphony_e2e_simulated_webhook_sets_issue_delegate() -> None:
+    tool = load_tool("real_symphony_e2e")
+    linear = {
+        "issue": {
+            "id": "issue-1",
+            "identifier": "AI-1",
+            "assignee": None,
+            "delegate": None,
+            "agentSessions": {"nodes": []},
+        },
+        "project": {"slugId": "AI"},
+    }
+
+    payload = tool.build_agent_session_webhook_payload(
+        linear=linear,
+        workspace_id="workspace-1",
+        agent_app_user_id="agent-1",
+        simulate_agent_webhook=True,
+    )
+
+    issue = payload["agentSession"]["issue"]
+    assert issue["delegate"] == {"id": "agent-1"}
+    assert payload["agentSession"]["appUserId"] == "agent-1"
+
+
+def test_real_symphony_e2e_simulated_instance_payload_does_not_require_real_delegate() -> None:
+    tool = load_tool("real_symphony_e2e")
+
+    payload = tool.build_instance_payload(
+        run_id="run-1",
+        fixture=Path("/tmp/fixture"),
+        project_slug="AI",
+        agent_app_user_id="agent-1",
+        acceptance_gates=False,
+        simulate_agent_webhook=True,
+    )
+
+    assert payload["linear_filters"] == {"active_states": ["Todo", "In Progress"]}
+
+
+def test_real_symphony_e2e_real_instance_payload_requires_delegate() -> None:
+    tool = load_tool("real_symphony_e2e")
+
+    payload = tool.build_instance_payload(
+        run_id="run-1",
+        fixture=Path("/tmp/fixture"),
+        project_slug="AI",
+        agent_app_user_id="agent-1",
+        acceptance_gates=True,
+        simulate_agent_webhook=False,
+    )
+
+    assert payload["linear_filters"] == {
+        "linear_agent_app_user_id": "agent-1",
+        "active_states": ["Todo", "In Progress"],
+    }
+
+
+def test_real_symphony_e2e_evidence_redacts_tokens(tmp_path: Path) -> None:
+    tool = load_tool("real_symphony_e2e")
+    evidence = tool.Evidence(tmp_path / "evidence.json")
+
+    evidence.check(
+        "token-check",
+        True,
+        body={
+            "enrollment_token": "secret-enrollment",
+            "runtime_token": "secret-runtime",
+            "nested": {"proxy_token": "secret-proxy"},
+        },
+    )
+
+    text = (tmp_path / "evidence.json").read_text(encoding="utf-8")
+    assert "secret-enrollment" not in text
+    assert "secret-runtime" not in text
+    assert "secret-proxy" not in text
+    assert '"enrollment_token": "<redacted>"' in text
+    assert '"runtime_token": "<redacted>"' in text
+    assert '"proxy_token": "<redacted>"' in text
+
+
+def test_real_codex_thread_resume_probe_summarizes_resume_and_fallback() -> None:
+    tool = load_tool("real_codex_thread_resume_probe")
+
+    summary = tool.summarize_probe(
+        first_thread_id="thread-1",
+        resumed_thread_id="thread-1",
+        fallback_requested_thread_id="missing-thread",
+        fallback_thread_id="thread-2",
+        fallback_events=[{"event": "thread_resume_failed", "thread_id": "missing-thread"}],
+    )
+
+    assert summary["resume_same_thread"] is True
+    assert summary["fallback_recorded"] is True
+    assert summary["fallback_started_new_thread"] is True
+    assert summary["pass"] is True
+
+
+def test_real_codex_thread_resume_probe_uses_structured_prompt() -> None:
+    tool = load_tool("real_codex_thread_resume_probe")
+
+    prompt = tool.probe_prompt("resume probe")
+
+    assert "resume probe" in prompt
+    assert "summary" in prompt
+    assert "test_commands" in prompt
+    assert "changed_files" in prompt
+    assert "remaining_risks" in prompt
+    assert "ready_for_review" in prompt
+
+
 def test_real_symphony_e2e_detects_conductor_phase_human_action() -> None:
     tool = load_tool("real_symphony_e2e")
 

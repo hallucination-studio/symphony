@@ -195,7 +195,7 @@ async def test_handle_podium_ws_dispatch_and_log_fetch_commands(tmp_path: Path) 
     )
 
     assert dispatch["status"] == "accepted"
-    assert service.runtime_manager.started_dispatch_issue_ids == ["issue-1"]  # type: ignore[attr-defined]
+    assert service.runtime_manager.started_phase_issue_ids == ["issue-1"]  # type: ignore[attr-defined]
     assert fetch["status"] == "posted"
     assert posted_chunks[0]["request_id"] == "req-1"
     assert posted_chunks[0]["lines"] == ["three", "two"]

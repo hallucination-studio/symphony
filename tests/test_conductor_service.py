@@ -110,10 +110,10 @@ def write_sample_ops_snapshot(instance: InstanceRecord) -> None:
 class CapturingRuntime:
     def __init__(self) -> None:
         self.env: dict[str, str] | None = None
-        self.dispatch_issue_id: str | None = None
         self.advance_request_path: str | None = None
         self.phase_result_path: str | None = None
-        self.started_dispatch_issue_ids: list[str | None] = []
+        self.phase_issue_id: str | None = None
+        self.started_phase_issue_ids: list[str | None] = []
         self.refreshed_instance = None
 
     async def start(
@@ -121,15 +121,14 @@ class CapturingRuntime:
         instance,
         *,
         env: dict[str, str] | None = None,
-        dispatch_issue_id: str | None = None,
         advance_request_path: str | None = None,
         phase_result_path: str | None = None,
     ):
         self.env = env
-        self.dispatch_issue_id = dispatch_issue_id
         self.advance_request_path = advance_request_path
         self.phase_result_path = phase_result_path
-        self.started_dispatch_issue_ids.append(dispatch_issue_id)
+        self.phase_issue_id = _phase_issue_id_from_request(advance_request_path)
+        self.started_phase_issue_ids.append(self.phase_issue_id)
         return instance.with_updates(process_status="running", pid=4242)
 
     async def stop(self, instance):
@@ -161,6 +160,12 @@ class CapturingRuntime:
             offset_end=0,
             warnings=[],
         )
+
+
+def _phase_issue_id_from_request(path: str | None) -> str | None:
+    if not path:
+        return None
+    return str(json.loads(Path(path).read_text(encoding="utf-8")).get("issue_id") or "") or None
 
 
 class FakeRepositoryHandoffTracker:
@@ -1218,7 +1223,11 @@ async def test_service_initialization_recovers_live_running_instance_pid(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_start_instance_passes_podium_proxy_token_to_runtime_env(tmp_path: Path) -> None:
+async def test_start_instance_passes_podium_proxy_token_to_runtime_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("LINEAR_API_KEY", raising=False)
     store = ConductorStore(tmp_path / "conductor-data")
     runtime = CapturingRuntime()
     service = ConductorService(store=store, data_root=tmp_path / "conductor-data", runtime_manager=runtime)
@@ -1246,7 +1255,11 @@ async def test_start_instance_passes_podium_proxy_token_to_runtime_env(tmp_path:
 
 
 @pytest.mark.asyncio
-async def test_start_instance_does_not_require_conductor_linear_api_key(tmp_path: Path) -> None:
+async def test_start_instance_does_not_require_conductor_linear_api_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("LINEAR_API_KEY", raising=False)
     runtime = CapturingRuntime()
     service = ConductorService(
         store=ConductorStore(tmp_path / "conductor-data"),
@@ -1263,7 +1276,33 @@ async def test_start_instance_does_not_require_conductor_linear_api_key(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_dispatch_podium_event_starts_one_shot_performer_for_matching_linear_agent_app_user(tmp_path: Path) -> None:
+async def test_direct_start_instance_passes_linear_api_key_explicitly(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = CapturingRuntime()
+    service = ConductorService(
+        store=ConductorStore(tmp_path / "conductor-data"),
+        data_root=tmp_path / "conductor-data",
+        runtime_manager=runtime,
+    )
+    service.update_settings(ConductorSettings(managed_mode=False))
+    monkeypatch.setenv("LINEAR_API_KEY", "direct-linear-token")
+    repo = make_repo(tmp_path)
+    instance = service.create_instance(make_request(repo))
+
+    started = await service.start_instance(instance.id)
+
+    assert started.process_status == "running"
+    assert runtime.env == {"LINEAR_API_KEY": "direct-linear-token"}
+
+
+@pytest.mark.asyncio
+async def test_dispatch_podium_event_starts_one_shot_performer_for_matching_linear_agent_app_user(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("LINEAR_API_KEY", raising=False)
     runtime = CapturingRuntime()
     service = ConductorService(
         store=ConductorStore(tmp_path / "conductor-data"),
@@ -1295,7 +1334,7 @@ async def test_dispatch_podium_event_starts_one_shot_performer_for_matching_line
         "agent_session_id": "session-1",
         "agent_app_user_id": "app-user-1",
     }
-    assert runtime.dispatch_issue_id == "issue-1"
+    assert runtime.phase_issue_id == "issue-1"
     assert runtime.env == {"PODIUM_PROXY_TOKEN": "proxy-token"}
     assert runtime.advance_request_path is not None
     assert runtime.phase_result_path is not None
@@ -1343,7 +1382,7 @@ async def test_dispatch_podium_event_leaves_new_run_queued_when_instance_is_busy
 
     assert first["status"] == "accepted"
     assert second["status"] == "accepted"
-    assert runtime.started_dispatch_issue_ids == ["issue-1"]
+    assert runtime.started_phase_issue_ids == ["issue-1"]
     run = service.store.get_orchestration_run_by_issue(instance.id, "issue-2")
     assert run is not None
     assert run.phase is RunPhase.QUEUED
@@ -1388,7 +1427,7 @@ async def test_dispatch_podium_event_does_not_restart_retry_before_next_run_at(t
     )
 
     assert result["status"] == "accepted"
-    assert runtime.started_dispatch_issue_ids == []
+    assert runtime.started_phase_issue_ids == []
     updated = service.store.get_orchestration_run(run.run_id)
     assert updated is not None
     assert updated.phase is RunPhase.QUEUED
@@ -1464,6 +1503,80 @@ async def test_completed_phase_result_file_drives_podium_ack_without_performer_p
 
 
 @pytest.mark.asyncio
+async def test_managed_phase_cycle_runs_without_conductor_linear_credentials_or_calls(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = CapturingRuntime()
+    service = ConductorService(
+        store=ConductorStore(tmp_path / "conductor-data"),
+        data_root=tmp_path / "conductor-data",
+        runtime_manager=runtime,
+    )
+    service.update_settings(ConductorSettings(managed_mode=True))
+    monkeypatch.setenv("LINEAR_API_KEY", "linear-secret-that-managed-mode-must-ignore")
+    direct_linear_calls = 0
+
+    def fail_direct_linear_factory(instance):
+        nonlocal direct_linear_calls
+        direct_linear_calls += 1
+        raise AssertionError("managed mode must not construct a direct Linear tracker")
+
+    service.repository_handoff_tracker_factory = fail_direct_linear_factory
+    repo = make_repo(tmp_path)
+    instance = service.create_instance(
+        make_request(repo).with_overrides(
+            linear_project="ENG",
+            linear_filters={"linear_agent_app_user_id": "app-user-1", "active_states": ["Todo", "In Progress"]},
+        )
+    )
+
+    dispatch = await service.dispatch_podium_event(
+        {
+            "issue_id": "issue-1",
+            "issue_identifier": "ENG-1",
+            "project_slug": "ENG",
+            "agent_session_id": "session-1",
+            "agent_app_user_id": "app-user-1",
+        }
+    )
+    background_before_result = await service.coordinate_background_once()
+    run = service.store.get_orchestration_run_by_issue(instance.id, "issue-1")
+    assert run is not None
+    assert runtime.phase_result_path is not None
+    Path(runtime.phase_result_path).write_text(
+        json.dumps(
+            PhaseAdvanceResult(
+                run_id=run.run_id,
+                issue_id="issue-1",
+                next_phase=RunPhase.DONE,
+                status="completed",
+                reason="completed_by_runtime",
+            ).to_dict()
+        ),
+        encoding="utf-8",
+    )
+    service.store.update_instance(instance.with_updates(process_status="exited", pid=None, last_exit_code=0))
+
+    background_after_result = await service.coordinate_background_once()
+
+    completed = service.store.get_orchestration_run(run.run_id)
+    assert dispatch["status"] == "accepted"
+    assert background_before_result["direct_dispatches_received"] == 0
+    assert background_before_result["phase_human_actions_completed"] == 0
+    assert background_after_result["phase_results_applied"] == 1
+    assert completed is not None
+    assert completed.phase is RunPhase.DONE
+    assert completed.status == "completed"
+    assert direct_linear_calls == 0
+    assert runtime.env == {}
+    assert "PODIUM_PROXY_TOKEN" not in (runtime.env or {})
+    assert "LINEAR_API_KEY" not in (runtime.env or {})
+    assert "$LINEAR_API_KEY" not in instance.workflow_content
+    assert "linear-secret-that-managed-mode-must-ignore" not in instance.workflow_content
+
+
+@pytest.mark.asyncio
 async def test_background_requeues_phase_run_after_result_retry_without_persistence(tmp_path: Path) -> None:
     runtime = CapturingRuntime()
     service = ConductorService(
@@ -1511,7 +1624,7 @@ async def test_background_requeues_phase_run_after_result_retry_without_persiste
 
     assert first["phase_results_applied"] == 1
     assert second["phase_runs_started"] == 1
-    assert runtime.started_dispatch_issue_ids == ["issue-1", "issue-1"]
+    assert runtime.started_phase_issue_ids == ["issue-1", "issue-1"]
     assert updated is not None
     assert updated.attempt == 2
 
@@ -1599,7 +1712,7 @@ async def test_dispatch_podium_event_coordinates_gated_followup_after_business_o
     )
 
     assert result["status"] == "accepted"
-    assert runtime.started_dispatch_issue_ids == ["issue-1"]
+    assert runtime.started_phase_issue_ids == ["issue-1"]
 
 
 @pytest.mark.asyncio
@@ -1645,7 +1758,7 @@ async def test_refresh_instance_coordinates_gated_followup_after_business_one_sh
 
     assert refreshed is not None
     assert refreshed.process_status == "running"
-    assert runtime.started_dispatch_issue_ids == ["issue-1"]
+    assert runtime.started_phase_issue_ids == ["issue-1"]
     stored = service.store.get_instance(instance.id)
     assert stored is not None
     assert stored.gated_followup_stages == {"issue-1": ["gate"]}
@@ -1693,7 +1806,7 @@ async def test_background_coordination_does_not_start_legacy_gated_followup(tmp_
     result = await service.coordinate_background_once()
 
     assert result["gated_followups_started"] == 0
-    assert runtime.started_dispatch_issue_ids == []
+    assert runtime.started_phase_issue_ids == []
 
 
 @pytest.mark.asyncio
@@ -1743,7 +1856,7 @@ async def test_concurrent_background_coordination_does_not_start_legacy_gated_fo
     results = await asyncio.gather(service_a.coordinate_background_once(), service_b.coordinate_background_once())
 
     assert sum(result["gated_followups_started"] for result in results) == 0
-    assert runtime_a.started_dispatch_issue_ids + runtime_b.started_dispatch_issue_ids == []
+    assert runtime_a.started_phase_issue_ids + runtime_b.started_phase_issue_ids == []
     assert store.get_gated_followup_marker(instance.id, "issue-1", "gate") is None
 
 
@@ -1783,7 +1896,7 @@ async def test_refresh_instance_restarts_exited_performer_with_pending_retry(tmp
 
     assert refreshed is not None
     assert refreshed.process_status == "running"
-    assert runtime.started_dispatch_issue_ids == ["issue-1"]
+    assert runtime.started_phase_issue_ids == ["issue-1"]
 
 
 @pytest.mark.asyncio
@@ -1817,7 +1930,7 @@ async def test_managed_background_does_not_resume_from_performer_persistence_wit
     result = await service.coordinate_background_once()
 
     assert result["resumed"] == 0
-    assert runtime.started_dispatch_issue_ids == []
+    assert runtime.started_phase_issue_ids == []
 
 
 @pytest.mark.asyncio
@@ -1856,7 +1969,7 @@ async def test_managed_background_does_not_start_gated_followup_from_ops_without
     result = await service.coordinate_background_once()
 
     assert result["gated_followups_started"] == 0
-    assert runtime.started_dispatch_issue_ids == []
+    assert runtime.started_phase_issue_ids == []
 
 
 @pytest.mark.asyncio
@@ -1921,7 +2034,7 @@ async def test_direct_background_resumes_done_human_action_child_from_phase_run(
     assert updated is not None
     assert updated.phase is RunPhase.IMPLEMENTING
     assert updated.human_response == "Fixed the Codex state directory."
-    assert runtime.started_dispatch_issue_ids == ["issue-1"]
+    assert runtime.started_phase_issue_ids == ["issue-1"]
     assert runtime.advance_request_path is not None
     request_payload = json.loads(Path(runtime.advance_request_path).read_text(encoding="utf-8"))
     assert request_payload["human_response"] == "Fixed the Codex state directory."
@@ -1961,7 +2074,44 @@ async def test_direct_background_dispatches_new_work_from_poll_into_phase_run(tm
     assert result["phase_runs_started"] == 1
     assert run is not None
     assert run.phase is RunPhase.IMPLEMENTING
-    assert runtime.started_dispatch_issue_ids == ["issue-1"]
+    assert runtime.started_phase_issue_ids == ["issue-1"]
+
+
+@pytest.mark.asyncio
+async def test_direct_background_does_not_dispatch_system_child_issues_from_poll(tmp_path: Path) -> None:
+    runtime = CapturingRuntime()
+    tracker = FakeRepositoryHandoffTracker()
+    service = ConductorService(
+        store=ConductorStore(tmp_path / "conductor-data"),
+        data_root=tmp_path / "conductor-data",
+        runtime_manager=runtime,
+    )
+    service.update_settings(ConductorSettings(managed_mode=False, podium_proxy_token="proxy-token"))
+    service.repository_handoff_tracker_factory = lambda instance: tracker
+    repo = make_repo(tmp_path)
+    instance = service.create_instance(
+        make_request(repo).with_overrides(
+            linear_project="ENG",
+            linear_filters={"active_states": ["Todo", "In Progress"]},
+        )
+    )
+    tracker.candidate_issues.append(
+        {
+            "id": "child-1",
+            "identifier": "ENG-2",
+            "title": "[Human Action] ENG-1: Runtime error needs review",
+            "state": "Todo",
+            "labels": ["performer:type/human-action"],
+        }
+    )
+
+    result = await service.coordinate_background_once()
+
+    run = service.store.get_orchestration_run_by_issue(instance.id, "child-1")
+    assert result["direct_dispatches_received"] == 0
+    assert result["phase_runs_started"] == 0
+    assert run is None
+    assert runtime.started_phase_issue_ids == []
 
 
 @pytest.mark.asyncio
@@ -2092,7 +2242,7 @@ async def test_direct_background_does_not_resume_required_human_action_without_r
     assert result["phase_human_actions_missing_response"] == 1
     assert updated is not None
     assert updated.phase is RunPhase.AWAITING_HUMAN
-    assert runtime.started_dispatch_issue_ids == []
+    assert runtime.started_phase_issue_ids == []
     assert tracker.comments == [
         (
             "child-1",
@@ -2137,7 +2287,7 @@ async def test_background_restarts_crashed_performer_with_pending_work(tmp_path:
     assert restarted.restart_count == 1
     assert restarted.restart_window_started_at
     assert restarted.restart_next_at
-    assert runtime.started_dispatch_issue_ids == ["issue-1"]
+    assert runtime.started_phase_issue_ids == ["issue-1"]
 
 
 @pytest.mark.asyncio
@@ -2183,7 +2333,7 @@ async def test_background_marks_crash_loop_after_repeated_crashes(tmp_path: Path
     assert updated.process_status == "crash_loop"
     assert updated.restart_count == 4
     assert "crashed more than 3 times" in (updated.last_error or "")
-    assert runtime.started_dispatch_issue_ids == []
+    assert runtime.started_phase_issue_ids == []
 
 
 @pytest.mark.asyncio
@@ -2232,7 +2382,7 @@ async def test_refresh_instance_does_not_repeat_gated_followup_after_gate_run_st
 
     assert second is not None
     assert second.process_status == "exited"
-    assert runtime.started_dispatch_issue_ids == ["issue-1"]
+    assert runtime.started_phase_issue_ids == ["issue-1"]
 
 
 @pytest.mark.asyncio
@@ -2280,7 +2430,7 @@ async def test_refresh_instance_does_not_restart_gated_followups_after_service_r
     runtime.refreshed_instance = first.with_updates(process_status="exited", pid=None, last_exit_code=0)
     second = await service.get_instance_coordinated(instance.id)
     assert second is not None
-    assert runtime.started_dispatch_issue_ids == ["issue-1"]
+    assert runtime.started_phase_issue_ids == ["issue-1"]
 
     completed = second.with_updates(process_status="exited", pid=None, last_exit_code=0)
     service.store.update_instance(completed)
@@ -2296,7 +2446,7 @@ async def test_refresh_instance_does_not_restart_gated_followups_after_service_r
 
     assert after_restart is not None
     assert after_restart.process_status == "exited"
-    assert restarted_runtime.started_dispatch_issue_ids == []
+    assert restarted_runtime.started_phase_issue_ids == []
 
 
 @pytest.mark.asyncio
@@ -2348,7 +2498,7 @@ async def test_refresh_instance_retries_gated_followup_after_failed_process_exit
 
     assert refreshed is not None
     assert refreshed.process_status == "running"
-    assert runtime.started_dispatch_issue_ids == ["issue-1"]
+    assert runtime.started_phase_issue_ids == ["issue-1"]
 
 
 @pytest.mark.asyncio
@@ -2372,7 +2522,7 @@ async def test_dispatch_podium_event_skips_when_no_instance_matches_project(tmp_
         "issue_identifier": "OPS-1",
         "reason": "no_matching_instance",
     }
-    assert runtime.dispatch_issue_id is None
+    assert runtime.phase_issue_id is None
 
 
 @pytest.mark.asyncio
@@ -2398,7 +2548,7 @@ async def test_dispatch_podium_event_requires_linear_agent_app_user(tmp_path: Pa
         "issue_identifier": "ENG-1",
         "reason": "missing_linear_agent_app_user",
     }
-    assert runtime.dispatch_issue_id is None
+    assert runtime.phase_issue_id is None
 
 
 @pytest.mark.asyncio
@@ -2430,4 +2580,4 @@ async def test_dispatch_podium_event_skips_when_linear_agent_app_user_does_not_m
         "issue_identifier": "ENG-1",
         "reason": "no_matching_instance",
     }
-    assert runtime.dispatch_issue_id is None
+    assert runtime.phase_issue_id is None

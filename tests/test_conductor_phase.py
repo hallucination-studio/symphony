@@ -214,6 +214,47 @@ def test_phase_reducer_requeues_retry_result_with_delay(tmp_path: Path) -> None:
     assert queued.last_reason == "temporary failure"
 
 
+def test_phase_reducer_counts_retries_only_from_phase_results(tmp_path: Path) -> None:
+    store = ConductorStore(tmp_path / "conductor-data")
+    reducer = PhaseReducer(store)
+    run = reducer.dispatch_received(
+        instance_id="inst-1",
+        issue_id="issue-1",
+        issue_identifier="ENG-1",
+        workflow_profile="default",
+        dispatch_id=None,
+    )
+
+    reducer.performer_started(run.run_id, request_path="/tmp/request-1.json", result_path="/tmp/result-1.json")
+    first_retry = reducer.performer_result(
+        PhaseAdvanceResult(
+            run_id=run.run_id,
+            issue_id="issue-1",
+            next_phase=RunPhase.QUEUED,
+            status="retry",
+            reason="verification_failed",
+            retry_delay_seconds=5,
+        )
+    )
+    reducer.performer_started(run.run_id, request_path="/tmp/request-2.json", result_path="/tmp/result-2.json")
+    second_retry = reducer.performer_result(
+        PhaseAdvanceResult(
+            run_id=run.run_id,
+            issue_id="issue-1",
+            next_phase=RunPhase.QUEUED,
+            status="retry",
+            reason="verification_failed_again",
+            retry_delay_seconds=5,
+        )
+    )
+
+    assert first_retry.retry_count == 1
+    assert first_retry.attempt == 2
+    assert second_retry.retry_count == 2
+    assert second_retry.attempt == 3
+    assert second_retry.crash_count == 0
+
+
 def test_phase_reducer_requeues_retry_result_with_minimum_delay(tmp_path: Path) -> None:
     store = ConductorStore(tmp_path / "conductor-data")
     reducer = PhaseReducer(store)

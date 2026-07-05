@@ -75,19 +75,15 @@ def test_parse_args_accepts_positional_workflow_path() -> None:
     assert args.once is True
 
 
-def test_parse_args_accepts_event_dispatch_issue_id() -> None:
-    args = parse_args(["custom/WORKFLOW.md", "--dispatch-issue-id", "issue-123"])
-
-    assert args.workflow == "custom/WORKFLOW.md"
-    assert args.dispatch_issue_id == "issue-123"
+def test_parse_args_rejects_legacy_dispatch_issue_id() -> None:
+    with pytest.raises(SystemExit):
+        parse_args(["custom/WORKFLOW.md", "--dispatch-issue-id", "issue-123"])
 
 
 def test_parse_args_accepts_phase_request_and_result_paths() -> None:
     args = parse_args(
         [
             "custom/WORKFLOW.md",
-            "--dispatch-issue-id",
-            "issue-123",
             "--advance-request-path",
             "/tmp/request.json",
             "--phase-result-path",
@@ -321,62 +317,6 @@ def test_persistence_store_from_config_returns_none_when_unconfigured(tmp_path: 
     config = make_service_config(tmp_path, project_slug="MT", api_key="token", workspace="ws", command="codex")
 
     assert persistence_store_from_config(config) is None
-
-
-@pytest.mark.asyncio
-async def test_run_dispatch_issue_invokes_event_dispatch_without_polling(tmp_path: Path, monkeypatch) -> None:
-    workflow = tmp_path / "WORKFLOW.md"
-    workflow.write_text("placeholder", encoding="utf-8")
-    calls: list[object] = []
-
-    class Tracker:
-        pass
-
-    class Runner:
-        def __init__(self, *args, **kwargs):
-            pass
-
-    class Workspace:
-        def __init__(self, *args, **kwargs):
-            pass
-
-    class Store:
-        pass
-
-    class DispatchOnlyOrchestrator:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def load_persisted_state(self):
-            calls.append("load")
-
-        async def startup_terminal_workspace_cleanup(self, workspace_manager):
-            calls.append("cleanup")
-
-        async def dispatch_issue_by_id(self, issue_id):
-            calls.append(("dispatch_issue_by_id", issue_id))
-            return {"status": "dispatched", "issue_id": issue_id}
-
-        async def tick(self):
-            calls.append("tick")
-
-        async def wait_for_idle(self):
-            calls.append("idle")
-
-    config = make_service_config(tmp_path, project_slug="MT", api_key="token", workspace="ws", command="codex")
-    monkeypatch.setattr(cli, "build_config_from_path", lambda path: config)
-    monkeypatch.setattr(cli, "validate_tracker_config", lambda tracker_config: None)
-    monkeypatch.setattr(cli, "create_tracker", lambda tracker_config: Tracker())
-    monkeypatch.setattr(cli, "WorkspaceManager", Workspace)
-    monkeypatch.setattr(cli, "AgentRunner", Runner)
-    monkeypatch.setattr(cli, "persistence_store_from_config", lambda config: Store())
-    monkeypatch.setattr(cli, "build_acceptance_runner", lambda config: None)
-    monkeypatch.setattr(cli, "Orchestrator", DispatchOnlyOrchestrator)
-
-    result = await cli.run_dispatch_issue(workflow, "issue-123")
-
-    assert result == {"status": "dispatched", "issue_id": "issue-123"}
-    assert calls == ["load", "cleanup", ("dispatch_issue_by_id", "issue-123"), "idle"]
 
 
 @pytest.mark.asyncio

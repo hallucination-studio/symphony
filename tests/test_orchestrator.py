@@ -555,6 +555,39 @@ async def test_phase_advance_dispatches_implementation_for_queued(tmp_path: Path
 
 
 @pytest.mark.asyncio
+async def test_phase_advance_returns_inline_outcome_without_waiting_or_state_probe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tracker = FakeTracker()
+    tracker.refreshed = [issue("MT-1", state="In Progress", description=_implementation_evidence())]
+    runner = CompletingPhaseRunner()
+    orchestrator = Orchestrator(
+        replace(make_config(tmp_path), acceptance=AcceptanceConfig(enabled=True)),
+        tracker,
+        runner,
+    )
+
+    async def fail_wait_for_idle() -> None:
+        raise AssertionError("phase advance must execute inline, not through wait_for_idle")
+
+    monkeypatch.setattr(orchestrator, "wait_for_idle", fail_wait_for_idle)
+
+    result = await orchestrator.advance(phase_request(phase=RunPhase.QUEUED))
+
+    assert not hasattr(orchestrator, "_phase_result_from_runtime_state")
+    assert not hasattr(orchestrator, "_phase_outcomes")
+    assert not hasattr(orchestrator, "_record_phase_outcome")
+    assert not hasattr(orchestrator, "_pop_phase_outcome")
+    assert not hasattr(orchestrator, "_run_worker_for_phase")
+    assert hasattr(orchestrator, "phase_runtime")
+    assert [(started.identifier, attempt) for started, attempt in runner.started] == [("MT-1", 1)]
+    assert result.next_phase == RunPhase.REVIEWING
+    assert result.status == "reviewing"
+    assert orchestrator.state.running == {}
+
+
+@pytest.mark.asyncio
 async def test_phase_advance_workspace_path_uses_root_when_per_issue_disabled(tmp_path: Path) -> None:
     tracker = FakeTracker()
     tracker.refreshed = [issue("MT-1", state="In Progress", description=_implementation_evidence())]
@@ -760,117 +793,6 @@ async def test_tick_dispatches_candidate_issues_from_tracker(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
-async def test_dispatch_issue_by_id_does_not_scan_candidate_list(tmp_path: Path) -> None:
-    tracker = FakeTracker(candidates=[issue("MT-2")])
-    tracker.fail_candidates = True
-    tracker.refreshed = [issue("MT-1")]
-    runner = FakeRunner()
-    orchestrator = Orchestrator(make_config(tmp_path), tracker, runner)
-
-    result = await orchestrator.dispatch_issue_by_id("mt-1")
-
-    assert result == {
-        "status": "accepted",
-        "issue_id": "mt-1",
-        "issue_identifier": "MT-1",
-        "runtime_phase": "dispatch_received",
-    }
-    assert [started[0].identifier for started in runner.started] == ["MT-1"]
-    assert "mt-1" in orchestrator.state.running
-
-
-@pytest.mark.asyncio
-async def test_dispatch_issue_by_id_does_not_require_legacy_label(tmp_path: Path) -> None:
-    tracker = FakeTracker()
-    tracker.refreshed = [issue("MT-1", labels=[])]
-    runner = FakeRunner()
-    orchestrator = Orchestrator(make_config(tmp_path), tracker, runner)
-
-    result = await orchestrator.dispatch_issue_by_id("mt-1")
-
-    assert result == {
-        "status": "accepted",
-        "issue_id": "mt-1",
-        "issue_identifier": "MT-1",
-        "runtime_phase": "dispatch_received",
-    }
-    assert [started[0].identifier for started in runner.started] == ["MT-1"]
-
-
-@pytest.mark.asyncio
-async def test_dispatch_issue_by_id_ignores_linear_assignee_for_custom_agent_delegate(tmp_path: Path) -> None:
-    tracker = FakeTracker()
-    tracker.refreshed = [issue("MT-1", assignee_id="other-user")]
-    runner = FakeRunner()
-    orchestrator = Orchestrator(make_config(tmp_path), tracker, runner)
-
-    result = await orchestrator.dispatch_issue_by_id("mt-1")
-
-    assert result == {
-        "status": "accepted",
-        "issue_id": "mt-1",
-        "issue_identifier": "MT-1",
-        "runtime_phase": "dispatch_received",
-    }
-    assert [started[0].identifier for started in runner.started] == ["MT-1"]
-    await asyncio_sleep()
-    assert ("mt-1", "performer:phase/implementation") in tracker.lifecycle_labels
-
-
-@pytest.mark.asyncio
-async def test_dispatch_issue_by_id_requires_linear_agent_delegate(tmp_path: Path) -> None:
-    tracker = FakeTracker()
-    tracker.refreshed = [issue("MT-1", delegate_id=None)]
-    runner = FakeRunner()
-    orchestrator = Orchestrator(make_config_with_required_delegate(tmp_path, "agent-user-1"), tracker, runner)
-
-    result = await orchestrator.dispatch_issue_by_id("mt-1")
-
-    assert result == {"status": "skipped", "issue_id": "mt-1", "reason": "delegate_mismatch"}
-    assert runner.started == []
-
-
-@pytest.mark.asyncio
-async def test_dispatch_issue_by_id_runs_gated_todo_preflight_then_dispatches(tmp_path: Path) -> None:
-    tracker = FakeTracker()
-    tracker.refreshed = [issue("MT-1", delegate_id="agent-user-1")]
-    runner = FakeRunner()
-    planner = FakeGatePlanner(
-        {
-            "gates": [
-                {
-                    "title": "Behavior",
-                    "purpose": "Verify the user-visible behavior only.",
-                    "acceptance_criteria": ["The feature works for the requested case."],
-                    "required_evidence": ["Focused test output for the requested case."],
-                }
-            ]
-        }
-    )
-    orchestrator = Orchestrator(
-        replace(
-            make_config_with_required_delegate(tmp_path, "agent-user-1"),
-            acceptance=AcceptanceConfig(enabled=True),
-        ),
-        tracker,
-        runner,
-        gate_planner=planner,
-    )
-
-    result = await orchestrator.dispatch_issue_by_id("mt-1")
-
-    assert result == {
-        "status": "accepted",
-        "issue_id": "mt-1",
-        "issue_identifier": "MT-1",
-        "runtime_phase": "dispatch_received",
-    }
-    assert tracker.created_issues[0]["parent_id"] == "mt-1"
-    assert ("mt-1", "In Progress") in tracker.transitions
-    assert [started[0].identifier for started in runner.started] == ["MT-1"]
-
-
-@pytest.mark.asyncio
 async def test_preflight_needs_more_info_creates_human_action_child_and_does_not_dispatch(tmp_path: Path) -> None:
     tracker = FakeTracker()
     tracker.refreshed = [issue("MT-1", assignee_id="human-1", delegate_id="agent-user-1")]
@@ -891,9 +813,10 @@ async def test_preflight_needs_more_info_creates_human_action_child_and_does_not
         gate_planner=planner,
     )
 
-    result = await orchestrator.dispatch_issue_by_id("mt-1")
+    result = await orchestrator.advance(phase_request(phase=RunPhase.QUEUED))
 
-    assert result == {"status": "skipped", "issue_id": "mt-1", "reason": "already_running_or_claimed"}
+    assert result.next_phase == RunPhase.AWAITING_HUMAN
+    assert result.status == "awaiting_human"
     assert runner.started == []
     intervention = orchestrator.state.human_interventions["mt-1"]
     assert intervention.kind == "preflight_needs_input"
@@ -964,69 +887,6 @@ async def test_done_human_action_child_with_response_releases_preflight(tmp_path
     assert tracker.description_updates[-1][0] == "mt-1"
     assert tracker.description_updates[-1][1] == "SYMPHONY HUMAN RESPONSE"
     assert "Use packages/performer." in tracker.description_updates[-1][2]
-
-
-@pytest.mark.asyncio
-async def test_dispatch_issue_by_id_runs_gate_for_review_issue(tmp_path: Path) -> None:
-    tracker = FakeTracker()
-    tracker.refreshed = [issue("MT-1", state="In Review", delegate_id="agent-user-1")]
-    tracker.children["mt-1"] = [
-        {
-            "id": "gate-1",
-            "identifier": "MT-G1",
-            "title": "[Gate] MT-1: Behavior",
-            "description": "Purpose: verify behavior",
-            "label_ids": ["performer:type/gate"],
-            "labels": ["performer:type/gate"],
-            "state": "Todo",
-            "url": "https://linear.app/x/issue/MT-G1",
-            "delegate_id": "agent-user-1",
-        }
-    ]
-    acceptance_runner = FakeAcceptanceRunner(
-        """
-{
-  "score": 4,
-  "result": "pass",
-  "score_reason": "Implementation evidence, focused tests, and risk notes support the change.",
-  "evidence_citations": ["linear.issue.MT-1"],
-  "residual_findings": [],
-  "recommended_next_action": "Close the gate and original issue."
-}
-"""
-    )
-    orchestrator = Orchestrator(
-        replace(
-            make_config_with_required_delegate(tmp_path, "agent-user-1"),
-            acceptance=AcceptanceConfig(enabled=True),
-        ),
-        tracker,
-        FakeRunner(),
-        acceptance_runner=acceptance_runner,
-    )
-
-    result = await orchestrator.dispatch_issue_by_id("mt-1")
-
-    assert result == {"status": "accepted", "issue_id": "mt-1", "reason": "acceptance_review_state"}
-    assert acceptance_runner.calls
-    evidence = tracker.children["gate-1"][0]
-    assert evidence["delegate_id"] == "agent-user-1"
-    assert tracker.transitions == [(evidence["id"], "Done"), ("gate-1", "Done"), ("mt-1", "Done")]
-    assert "mt-1" in orchestrator.state.completed
-
-
-@pytest.mark.asyncio
-async def test_dispatch_issue_by_id_skips_already_claimed_issue(tmp_path: Path) -> None:
-    tracker = FakeTracker()
-    tracker.refreshed = [issue("MT-1")]
-    runner = FakeRunner()
-    orchestrator = Orchestrator(make_config(tmp_path), tracker, runner)
-    orchestrator.state.claimed.add("mt-1")
-
-    result = await orchestrator.dispatch_issue_by_id("mt-1")
-
-    assert result == {"status": "skipped", "issue_id": "mt-1", "reason": "already_running_or_claimed"}
-    assert runner.started == []
 
 
 @pytest.mark.asyncio

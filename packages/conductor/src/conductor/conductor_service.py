@@ -33,6 +33,7 @@ from performer_api.ops_retention import RetentionPolicy
 from performer_api.ops_store import OpsStore
 from performer_api.phase import PhaseAdvanceRequest, PhaseAdvanceResult, RunPhase
 from performer_api.persistence import PersistenceStore, PersistedSession, PersistedState
+from performer_api.labels import TYPE_LABELS
 from performer_api.models import normalize_state_key, utc_now
 
 
@@ -54,6 +55,7 @@ REPOSITORY_HANDOFF_MARKER_NAME = "SYMPHONY REPOSITORY HANDOFF"
 HUMAN_ACTION_LABEL = "performer:type/human-action"
 HUMAN_RESPONSE_MARKER_NAME = "SYMPHONY HUMAN RESPONSE"
 PROJECT_LABEL_PREFIX = "symphony:"
+SYSTEM_ISSUE_TYPE_LABELS = {label.lower() for label in TYPE_LABELS.values()}
 
 
 class ConductorServiceError(Exception):
@@ -764,6 +766,8 @@ class ConductorService:
             except Exception:
                 continue
             for issue in issues:
+                if _is_system_child_issue(issue):
+                    continue
                 issue_id = _issue_field(issue, "id")
                 issue_identifier = _issue_field(issue, "identifier")
                 if not issue_id and not issue_identifier:
@@ -865,7 +869,6 @@ class ConductorService:
         started = await self.runtime_manager.start(
             instance.with_updates(process_status="starting"),
             env=self._runtime_env(),
-            dispatch_issue_id=run.issue_id,
             advance_request_path=str(paths["request_path"]),
             phase_result_path=str(result_path),
         )
@@ -876,6 +879,25 @@ class ConductorService:
             pid=started.pid,
         )
         return started
+
+    async def _start_direct_phase_issue(
+        self,
+        instance: InstanceRecord,
+        *,
+        issue_id: str,
+        issue_identifier: str | None = None,
+        attempt: int | None = None,
+    ) -> InstanceRecord:
+        run = self.phase_reducer.dispatch_received(
+            instance_id=instance.id,
+            issue_id=issue_id,
+            issue_identifier=issue_identifier,
+            workflow_profile=instance.workflow_profile,
+            dispatch_id=None,
+        )
+        if attempt is not None and attempt > run.attempt:
+            run = self.store.update_orchestration_run(run.run_id, attempt=attempt)
+        return await self._start_orchestration_run(run, instance)
 
     async def _apply_phase_result_files(self) -> int:
         applied = 0
@@ -1060,10 +1082,10 @@ class ConductorService:
             return None
         self._record_gated_followup_event(refreshed, issue_id=issue_id, stage=stage, event_type="gate_followup_starting")
         try:
-            followup = await self.runtime_manager.start(
+            followup = await self._start_direct_phase_issue(
                 refreshed.with_updates(process_status="starting"),
-                env=self._runtime_env(),
-                dispatch_issue_id=issue_id,
+                issue_id=issue_id,
+                issue_identifier=issue.issue_identifier,
             )
         except Exception as exc:
             self.store.mark_gated_followup_failed(instance.id, issue_id, stage, str(exc))
@@ -1289,11 +1311,14 @@ class ConductorService:
             or persisted.human_interventions
         ):
             return None
-        issue_id = _first_pending_performer_issue_id(persisted)
-        return await self.runtime_manager.start(
+        pending = _first_pending_performer_issue(persisted)
+        if pending is None:
+            return None
+        return await self._start_direct_phase_issue(
             refreshed.with_updates(process_status="starting"),
-            env=self._runtime_env(),
-            dispatch_issue_id=issue_id,
+            issue_id=pending["issue_id"],
+            issue_identifier=pending.get("issue_identifier"),
+            attempt=pending.get("attempt"),
         )
 
     async def _restart_crashed_performer(self, instance: InstanceRecord) -> InstanceRecord | None:
@@ -1325,8 +1350,10 @@ class ConductorService:
                 last_error="performer crashed more than 3 times within 10 minutes",
             )
         delay_seconds = min(5 * (2 ** (restart_count - 1)), 60)
-        issue_id = _first_pending_performer_issue_id(persisted)
-        restarted = await self.runtime_manager.start(
+        pending = _first_pending_performer_issue(persisted)
+        if pending is None:
+            return None
+        restarted = await self._start_direct_phase_issue(
             instance.with_updates(
                 process_status="starting",
                 restart_count=restart_count,
@@ -1334,8 +1361,9 @@ class ConductorService:
                 restart_next_at=_iso(now + timedelta(seconds=delay_seconds)),
                 last_error=None,
             ),
-            env=self._runtime_env(),
-            dispatch_issue_id=issue_id,
+            issue_id=pending["issue_id"],
+            issue_identifier=pending.get("issue_identifier"),
+            attempt=pending.get("attempt"),
         )
         return restarted.with_updates(
             restart_count=restart_count,
@@ -1882,6 +1910,10 @@ class ConductorService:
         runtime_group_id = settings.runtime_group_id.strip()
         if runtime_group_id:
             env["PODIUM_RUNTIME_GROUP_ID"] = runtime_group_id
+        if not self._managed_mode_enabled():
+            linear_api_key = os.environ.get("LINEAR_API_KEY", "").strip()
+            if linear_api_key:
+                env["LINEAR_API_KEY"] = linear_api_key
         return env
 
     def _managed_mode_enabled(self) -> bool:
@@ -2089,6 +2121,14 @@ def _issue_field(issue: Any, field: str) -> str:
     if isinstance(issue, dict):
         return str(issue.get(field) or "").strip()
     return str(getattr(issue, field, "") or "").strip()
+
+
+def _is_system_child_issue(issue: Any) -> bool:
+    labels = issue.get("labels") if isinstance(issue, dict) else getattr(issue, "labels", [])
+    if not isinstance(labels, list):
+        return False
+    normalized = {str(label).strip().lower() for label in labels if str(label).strip()}
+    return bool(normalized & SYSTEM_ISSUE_TYPE_LABELS)
 
 
 def _replace_marker_block(current: str, marker_name: str, block: str) -> str:
@@ -2378,17 +2418,36 @@ def _merge_project_labels(existing: list[str], desired: list[str]) -> list[str]:
     return merged
 
 
-def _first_pending_performer_issue_id(persisted: PersistedState) -> str | None:
+def _first_pending_performer_issue(persisted: PersistedState) -> dict[str, Any] | None:
     for collection in (persisted.retry_attempts, persisted.continuations, persisted.blocked, persisted.human_interventions):
         for entry in collection:
             issue_id = str(getattr(entry, "issue_id", "") or "").strip()
             if issue_id:
-                return issue_id
+                return {
+                    "issue_id": issue_id,
+                    "issue_identifier": str(getattr(entry, "identifier", "") or "").strip() or None,
+                    "attempt": _optional_positive_int(getattr(entry, "attempt", None)),
+                }
     return None
+
+
+def _first_pending_performer_issue_id(persisted: PersistedState) -> str | None:
+    pending = _first_pending_performer_issue(persisted)
+    return str(pending["issue_id"]) if pending is not None else None
 
 
 def _has_pending_performer_work(persisted: PersistedState) -> bool:
     return _first_pending_performer_issue_id(persisted) is not None
+
+
+def _optional_positive_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
 
 
 def _parse_iso(value: str | None) -> datetime | None:

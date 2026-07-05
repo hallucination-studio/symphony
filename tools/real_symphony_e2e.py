@@ -23,6 +23,7 @@ import httpx
 
 LINEAR_ENDPOINT = "https://api.linear.app/graphql"
 DEFAULT_PROJECT_SLUG = "d17d2f7a038d"
+SENSITIVE_EVIDENCE_KEY_PARTS = ("secret", "password", "cookie", "authorization")
 
 
 @dataclass
@@ -56,7 +57,7 @@ class Evidence:
         }
 
     def check(self, name: str, passed: bool, **details: Any) -> None:
-        row = {"name": name, "passed": passed, **details}
+        row = redact_evidence_value({"name": name, "passed": passed, **details})
         self.data["checks"].append(row)
         if not passed:
             self.data["failures"].append(row)
@@ -70,6 +71,21 @@ class Evidence:
         self.out.parent.mkdir(parents=True, exist_ok=True)
         self.data["updated_at"] = utc_now()
         self.out.write_text(json.dumps(self.data, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def redact_evidence_value(value: Any, *, key: str | None = None) -> Any:
+    if isinstance(value, dict):
+        return {item_key: redact_evidence_value(item_value, key=str(item_key)) for item_key, item_value in value.items()}
+    if isinstance(value, list):
+        return [redact_evidence_value(item) for item in value]
+    if isinstance(value, str) and key is not None and _is_sensitive_evidence_key(key):
+        return "<redacted>"
+    return value
+
+
+def _is_sensitive_evidence_key(key: str) -> bool:
+    normalized = key.lower()
+    return normalized.endswith("_token") or any(part in normalized for part in SENSITIVE_EVIDENCE_KEY_PARTS)
 
 
 def utc_now() -> str:
@@ -758,6 +774,61 @@ def linear_webhook_signature(secret: str, payload: bytes) -> str:
     return hmac.new(secret.encode(), payload, hashlib.sha256).hexdigest()
 
 
+def build_instance_payload(
+    *,
+    run_id: str,
+    fixture: Path,
+    project_slug: str,
+    agent_app_user_id: str,
+    acceptance_gates: bool,
+    simulate_agent_webhook: bool,
+) -> dict[str, Any]:
+    linear_filters: dict[str, Any] = {"active_states": ["Todo", "In Progress"]}
+    if not simulate_agent_webhook:
+        linear_filters["linear_agent_app_user_id"] = agent_app_user_id
+    return {
+        "name": f"Matrix {run_id}",
+        "repo_source_type": "local_path",
+        "repo_source_value": str(fixture),
+        "linear_project": project_slug,
+        "linear_filters": linear_filters,
+        "workflow_profile": "gated-task" if acceptance_gates else "task",
+        "workflow_inputs": {"goal": "Run the real Symphony e2e matrix task."},
+    }
+
+
+def build_agent_session_webhook_payload(
+    *,
+    linear: dict[str, Any],
+    workspace_id: str,
+    agent_app_user_id: str,
+    simulate_agent_webhook: bool,
+) -> dict[str, Any]:
+    issue = linear["issue"]
+    linear_agent_sessions = ((issue.get("agentSessions") or {}).get("nodes") or [])
+    linear_agent_session = linear_agent_sessions[0] if linear_agent_sessions else {}
+    delegate = issue.get("delegate")
+    if simulate_agent_webhook:
+        delegate = {"id": agent_app_user_id}
+    return {
+        "type": "AgentSessionEvent",
+        "action": "created",
+        "workspace": {"id": workspace_id},
+        "agentSession": {
+            "id": linear_agent_session.get("id") or f"session-{uuid.uuid4().hex}",
+            "appUserId": agent_app_user_id,
+            "appUser": {"id": agent_app_user_id},
+            "issue": {
+                "id": issue["id"],
+                "identifier": issue["identifier"],
+                "project": {"slugId": linear["project"]["slugId"]},
+                "assignee": issue.get("assignee"),
+                "delegate": delegate,
+            },
+        },
+    }
+
+
 async def wait_for_run(
     *,
     token: str,
@@ -1328,15 +1399,20 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
             actual_delegate=linear["issue"].get("delegate"),
             simulated=args.simulate_agent_webhook,
         )
-        payload = {
-            "name": f"Matrix {run_id}",
-            "repo_source_type": "local_path",
-            "repo_source_value": str(fixture),
-            "linear_project": linear["project"]["slugId"],
-            "linear_filters": {"linear_agent_app_user_id": agent_app_user_id, "active_states": ["Todo", "In Progress"]},
-            "workflow_profile": "gated-task" if args.acceptance_gates else "task",
-            "workflow_inputs": {"goal": "Run the real Symphony e2e matrix task."},
-        }
+        payload = build_instance_payload(
+            run_id=run_id,
+            fixture=fixture,
+            project_slug=linear["project"]["slugId"],
+            agent_app_user_id=agent_app_user_id,
+            acceptance_gates=args.acceptance_gates,
+            simulate_agent_webhook=args.simulate_agent_webhook,
+        )
+        evidence.check(
+            "linear-agent:simulated-webhook-mode-does-not-verify-real-delegate",
+            not args.simulate_agent_webhook or "linear_agent_app_user_id" not in payload["linear_filters"],
+            simulated=args.simulate_agent_webhook,
+            linear_filters=sorted(payload["linear_filters"].keys()),
+        )
         status, body = http_json("POST", api_url(conductor_port, "/api/instances/preview-workflow"), payload)
         evidence.check("conductor-api:POST /api/instances/preview-workflow", status == 200, status=status)
         status, body = http_json("POST", api_url(conductor_port, "/api/instances"), payload)
@@ -1382,25 +1458,12 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
         status, body = http_json("GET", api_url(conductor_port, f"/api/instances/{instance_id}"))
         evidence.check("conductor-daemon:restart-recovers-instance-metadata", status == 200 and body["instance"]["id"] == instance_id, status=status, process_status=body.get("instance", {}).get("process_status"))
 
-        linear_agent_sessions = ((linear["issue"].get("agentSessions") or {}).get("nodes") or [])
-        linear_agent_session = linear_agent_sessions[0] if linear_agent_sessions else {}
-        webhook_payload = {
-            "type": "AgentSessionEvent",
-            "action": "created",
-            "workspace": {"id": workspace_id},
-            "agentSession": {
-                "id": linear_agent_session.get("id") or f"session-{uuid.uuid4().hex}",
-                "appUserId": agent_app_user_id,
-                "appUser": {"id": agent_app_user_id},
-                "issue": {
-                    "id": linear["issue"]["id"],
-                    "identifier": linear["issue"]["identifier"],
-                    "project": {"slugId": linear["project"]["slugId"]},
-                    "assignee": linear["issue"].get("assignee"),
-                    "delegate": linear["issue"].get("delegate"),
-                },
-            },
-        }
+        webhook_payload = build_agent_session_webhook_payload(
+            linear=linear,
+            workspace_id=workspace_id,
+            agent_app_user_id=agent_app_user_id,
+            simulate_agent_webhook=args.simulate_agent_webhook,
+        )
         raw_webhook = json.dumps(webhook_payload).encode()
         status, body = http_json(
             "POST",

@@ -8,6 +8,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Protocol
 
+from .phase_executor import PhaseExecutor
+from .phase_runtime import PhaseRuntime
 from .acceptance import (
     AcceptanceReport,
     CodexGatePlanner,
@@ -48,18 +50,6 @@ from .workspace import WorkspaceManager
 logger = logging.getLogger(__name__)
 
 HUMAN_RESPONSE_MARKER_NAME = "SYMPHONY HUMAN RESPONSE"
-
-
-PHASE_RESULT_STATUSES: set[str] = {
-    "accepted",
-    "completed",
-    "failed",
-    "awaiting_human",
-    "retry",
-    "reviewing",
-    "reworking",
-    "skipped",
-}
 
 
 class TrackerProtocol(Protocol):
@@ -129,6 +119,7 @@ class Orchestrator:
         self._worker_tasks: set[asyncio.Task[Any]] = set()
         self._background_label_tasks: set[asyncio.Task[Any]] = set()
         self._desired_lifecycle_labels: dict[str, str] = {}
+        self.phase_runtime = PhaseRuntime(self)
 
     def load_persisted_state(self) -> None:
         if self.persistence_store is None:
@@ -232,309 +223,8 @@ class Orchestrator:
         )
         await asyncio.sleep(0)
 
-    async def dispatch_issue_by_id(self, issue_id: str, *, worker_host: str | None = None) -> dict[str, Any]:
-        await self.reconcile_running()
-        try:
-            self.config.validate_for_dispatch()
-        except ConfigError as exc:
-            logger.warning("performer_event_dispatch_validation failed code=%s reason=%s", exc.code, exc)
-            return {"status": "skipped", "issue_id": issue_id, "reason": exc.code}
-        await self.process_human_interventions()
-        await self.process_due_continuations()
-        await self.process_due_retries()
-        try:
-            issues = await self.tracker.fetch_issue_states_by_ids([issue_id])
-        except Exception as exc:
-            logger.warning("performer_event_dispatch failed issue_id=%s reason=%s", issue_id, exc)
-            self._sync_label_group_background(issue_id, PHASE_LABELS["failed"], prefix="performer:phase/")
-            return {"status": "failed", "issue_id": issue_id, "reason": str(exc)}
-        issue = issues[0] if issues else None
-        if issue is None:
-            return {"status": "skipped", "issue_id": issue_id, "reason": "issue_not_found"}
-        if self.config.acceptance.enabled:
-            acceptance = self.config.acceptance
-            state_key = issue.state_key()
-            if state_key == normalize_state_key(acceptance.review_state):
-                reason = self.dispatch_skip_reason_without_acceptance(issue)
-                if reason is not None:
-                    return {"status": "skipped", "issue_id": issue.id, "reason": reason}
-                await self._run_acceptance_gate_for_issue(issue, completion_verdict=None)
-                return {"status": "accepted", "issue_id": issue.id, "reason": "acceptance_review_state"}
-            if state_key == normalize_state_key(acceptance.done_state):
-                reason = self.dispatch_skip_reason_without_acceptance(issue)
-                if reason is not None:
-                    return {"status": "skipped", "issue_id": issue.id, "reason": reason}
-                if _has_passed_acceptance_gate(issue, acceptance):
-                    self.state.completed.add(issue.id)
-                else:
-                    await self._handle_direct_done_bypass(issue)
-                return {"status": "accepted", "issue_id": issue.id, "reason": "acceptance_done_state"}
-        reason = self.dispatch_skip_reason_for_event(issue)
-        if reason == "acceptance_preflight_required":
-            await self._acceptance_preflight(issue)
-            issue = Issue(
-                id=issue.id,
-                identifier=issue.identifier,
-                title=issue.title,
-                state=self.config.acceptance.implementation_state,
-                description=issue.description,
-                priority=issue.priority,
-                branch_name=issue.branch_name,
-                url=issue.url,
-                labels=issue.labels,
-                blocked_by=issue.blocked_by,
-                created_at=issue.created_at,
-                updated_at=issue.updated_at,
-                assignee_id=issue.assignee_id,
-                delegate_id=issue.delegate_id,
-                project_slug=issue.project_slug,
-                project_name=issue.project_name,
-            )
-            reason = self.dispatch_skip_reason_for_event(issue)
-        if reason is not None:
-            return {"status": "skipped", "issue_id": issue.id, "reason": reason}
-        selected_worker_host = worker_host or self._select_worker_host()
-        if self.config.worker.ssh_hosts and selected_worker_host is None:
-            return {"status": "skipped", "issue_id": issue.id, "reason": "no_available_worker_host"}
-        self.dispatch_issue(issue, attempt=None, worker_host=selected_worker_host)
-        await asyncio.sleep(0)
-        return {
-            "status": "accepted",
-            "issue_id": issue.id,
-            "issue_identifier": issue.identifier,
-            "runtime_phase": "dispatch_received",
-        }
-
     async def advance(self, request: PhaseAdvanceRequest) -> PhaseAdvanceResult:
-        await self.reconcile_running()
-        self._release_due_retry_for_phase(request.issue_id)
-        try:
-            self.config.validate_for_dispatch()
-        except ConfigError as exc:
-            logger.warning("performer_phase_advance_validation failed code=%s reason=%s", exc.code, exc)
-            return self._phase_result(
-                request,
-                issue_id=request.issue_id,
-                next_phase=RunPhase.FAILED,
-                status="failed",
-                reason=exc.code,
-            )
-        if request.human_response:
-            await self.process_managed_human_response(request.issue_id, request.human_response)
-        try:
-            issues = await self.tracker.fetch_issue_states_by_ids([request.issue_id])
-        except Exception as exc:
-            logger.warning("performer_phase_advance_fetch failed issue_id=%s reason=%s", request.issue_id, exc)
-            self._sync_label_group_background(request.issue_id, PHASE_LABELS["failed"], prefix="performer:phase/")
-            return self._phase_result(
-                request,
-                issue_id=request.issue_id,
-                next_phase=RunPhase.FAILED,
-                status="failed",
-                reason=str(exc),
-            )
-        issue = issues[0] if issues else None
-        if issue is None:
-            return self._phase_result(
-                request,
-                issue_id=request.issue_id,
-                next_phase=RunPhase.FAILED,
-                status="skipped",
-                reason="issue_not_found",
-            )
-        if request.current_phase in {RunPhase.QUEUED, RunPhase.REWORKING}:
-            return await self._advance_implementation_phase(request, issue)
-        if request.current_phase == RunPhase.REVIEWING:
-            return await self._advance_review_phase(request, issue)
-        if request.current_phase == RunPhase.AWAITING_HUMAN:
-            return self._phase_result(
-                request,
-                issue_id=issue.id,
-                next_phase=RunPhase.AWAITING_HUMAN,
-                status="awaiting_human",
-                reason="awaiting_human_response",
-            )
-        if request.current_phase in {RunPhase.DONE, RunPhase.FAILED}:
-            return self._phase_result(
-                request,
-                issue_id=issue.id,
-                next_phase=request.current_phase,
-                status="completed" if request.current_phase == RunPhase.DONE else "failed",
-                reason=f"terminal_phase_{request.current_phase.value}",
-            )
-        return self._phase_result(
-            request,
-            issue_id=issue.id,
-            next_phase=RunPhase.FAILED,
-            status="failed",
-            reason=f"unsupported_phase_{request.current_phase.value}",
-        )
-
-    async def _advance_implementation_phase(self, request: PhaseAdvanceRequest, issue: Issue) -> PhaseAdvanceResult:
-        reason = self.dispatch_skip_reason_for_event(issue)
-        if reason == "acceptance_preflight_required":
-            await self._acceptance_preflight(issue)
-            issue = Issue(
-                id=issue.id,
-                identifier=issue.identifier,
-                title=issue.title,
-                state=self.config.acceptance.implementation_state,
-                description=issue.description,
-                priority=issue.priority,
-                branch_name=issue.branch_name,
-                url=issue.url,
-                labels=issue.labels,
-                blocked_by=issue.blocked_by,
-                created_at=issue.created_at,
-                updated_at=issue.updated_at,
-                assignee_id=issue.assignee_id,
-                delegate_id=issue.delegate_id,
-                project_slug=issue.project_slug,
-                project_name=issue.project_name,
-            )
-            reason = self.dispatch_skip_reason_for_event(issue)
-        if reason is not None:
-            return self._phase_result(
-                request,
-                issue_id=issue.id,
-                next_phase=RunPhase.FAILED if reason in {"missing_required_issue_fields", "project_mismatch"} else request.current_phase,
-                status="skipped",
-                reason=reason,
-            )
-        selected_worker_host = self._select_worker_host()
-        if self.config.worker.ssh_hosts and selected_worker_host is None:
-            return self._phase_result(
-                request,
-                issue_id=issue.id,
-                next_phase=request.current_phase,
-                status="skipped",
-                reason="no_available_worker_host",
-            )
-        self.dispatch_issue(issue, attempt=request.attempt, worker_host=selected_worker_host)
-        await self.wait_for_idle()
-        return self._phase_result_from_runtime_state(request, issue)
-
-    async def _advance_review_phase(self, request: PhaseAdvanceRequest, issue: Issue) -> PhaseAdvanceResult:
-        reason = self.dispatch_skip_reason_without_acceptance(issue)
-        if reason is not None:
-            return self._phase_result(
-                request,
-                issue_id=issue.id,
-                next_phase=RunPhase.FAILED if reason in {"missing_required_issue_fields", "project_mismatch"} else RunPhase.REVIEWING,
-                status="skipped",
-                reason=reason,
-            )
-        await self._run_acceptance_gate_for_issue(issue, completion_verdict=None)
-        return self._phase_result_from_runtime_state(request, issue)
-
-    def _phase_result_from_runtime_state(self, request: PhaseAdvanceRequest, issue: Issue) -> PhaseAdvanceResult:
-        issue_id = issue.id
-        if issue_id in self.state.completed:
-            return self._phase_result(
-                request,
-                issue_id=issue_id,
-                next_phase=RunPhase.DONE,
-                status="completed",
-                reason="completed_by_runtime",
-            )
-        intervention = self.state.human_interventions.get(issue_id)
-        if intervention is not None:
-            return self._phase_result(
-                request,
-                issue_id=issue_id,
-                next_phase=RunPhase.AWAITING_HUMAN,
-                status="awaiting_human",
-                reason=intervention.error or "awaiting human action",
-                human_action={
-                    "child_issue_id": intervention.child_issue_id,
-                    "child_identifier": intervention.child_identifier,
-                    "child_url": intervention.child_url,
-                    "kind": intervention.kind,
-                    "questions": list(intervention.questions or []),
-                },
-            )
-        pending = self.state.retry_attempts.get(issue_id)
-        if pending is not None:
-            return self._phase_result(
-                request,
-                issue_id=issue_id,
-                next_phase=RunPhase.QUEUED,
-                status="retry",
-                reason=pending.error,
-                retry_delay_seconds=_retry_delay_seconds(pending),
-            )
-        continuation = self.state.continuations.get(issue_id)
-        if continuation is not None:
-            return self._phase_result(
-                request,
-                issue_id=issue_id,
-                next_phase=RunPhase.QUEUED,
-                status="accepted",
-                reason=continuation.last_message,
-                retry_delay_seconds=_retry_delay_seconds(continuation),
-            )
-        blocked = self.state.blocked.get(issue_id)
-        if blocked is not None:
-            return self._phase_result(
-                request,
-                issue_id=issue_id,
-                next_phase=RunPhase.FAILED,
-                status="failed",
-                reason=blocked.error or "blocked",
-            )
-        if request.current_phase == RunPhase.REVIEWING:
-            return self._phase_result(
-                request,
-                issue_id=issue_id,
-                next_phase=RunPhase.REWORKING,
-                status="reworking",
-                reason="acceptance_gate_not_completed",
-            )
-        return self._phase_result(
-            request,
-            issue_id=issue_id,
-            next_phase=RunPhase.REVIEWING,
-            status="reviewing",
-            reason="implementation_ready_for_review",
-        )
-
-    def _phase_result(
-        self,
-        request: PhaseAdvanceRequest,
-        *,
-        issue_id: str,
-        next_phase: RunPhase,
-        status: str,
-        reason: str | None,
-        retry_delay_seconds: int | None = None,
-        human_action: dict[str, Any] | None = None,
-    ) -> PhaseAdvanceResult:
-        return PhaseAdvanceResult(
-            run_id=request.run_id,
-            issue_id=issue_id,
-            next_phase=next_phase,
-            status=status if status in PHASE_RESULT_STATUSES else "failed",
-            reason=reason,
-            retry_delay_seconds=retry_delay_seconds,
-            human_action=human_action,
-            workspace_path=self._phase_workspace_path(request),
-            ops_snapshot_path=self._phase_ops_snapshot_path(request),
-        )
-
-    def _phase_workspace_path(self, request: PhaseAdvanceRequest) -> str | None:
-        configured = request.workspace_context.get("workspace_root")
-        root = Path(str(configured)) if configured else self.config.workspace.root
-        if request.issue_identifier and self.config.workspace.per_issue:
-            return str(root / request.issue_identifier)
-        return str(root) if root else None
-
-    def _phase_ops_snapshot_path(self, request: PhaseAdvanceRequest) -> str | None:
-        configured = request.workspace_context.get("ops_snapshot_path")
-        if configured:
-            return str(configured)
-        if self.config.persistence.path is None:
-            return None
-        return str(ops_snapshot_path_from_persistence_path(self.config.persistence.path))
+        return await PhaseExecutor(self).advance(request)
 
     async def process_human_interventions(self) -> None:
         if not self.state.human_interventions:
@@ -905,6 +595,12 @@ class Orchestrator:
             await self._sync_label_group(issue.id, self.config.acceptance.gate_failed_label, prefix="performer:gate/")
             await self._sync_label_group(issue.id, self.config.acceptance.rework_phase_label, prefix="performer:phase/")
             await self._transition_issue_by_state_name(issue.id, self.config.acceptance.implementation_state)
+            self.phase_runtime.record_outcome(
+                issue.id,
+                next_phase=RunPhase.REWORKING,
+                status="reworking",
+                reason="implementation_evidence_missing",
+            )
             return
         await self._comment_policy_violation(issue, has_evidence=True)
         await self._transition_issue_by_state_name(issue.id, self.config.acceptance.review_state)
@@ -1060,6 +756,12 @@ class Orchestrator:
             self.state.claimed.discard(issue.id)
             self.state.retry_attempts.pop(issue.id, None)
             self.state.continuations.pop(issue.id, None)
+            self.phase_runtime.record_outcome(
+                issue.id,
+                next_phase=RunPhase.REWORKING,
+                status="reworking",
+                reason="acceptance_gate_failed",
+            )
             self._persist_state()
             return
         if len(reviewed_gates) == len(gates):
@@ -1071,6 +773,12 @@ class Orchestrator:
             self.state.claimed.discard(issue.id)
             self.state.retry_attempts.pop(issue.id, None)
             self.state.continuations.pop(issue.id, None)
+            self.phase_runtime.record_outcome(
+                issue.id,
+                next_phase=RunPhase.DONE,
+                status="completed",
+                reason="completed_by_runtime",
+            )
             self._persist_state()
 
     async def _run_legacy_acceptance_issue(
@@ -1101,8 +809,20 @@ class Orchestrator:
             await self._transition_issue_by_state_name(issue.id, self.config.acceptance.done_state)
             await self._sync_label_group(issue.id, PHASE_LABELS["completed"], prefix="performer:phase/")
             self.state.completed.add(issue.id)
+            self.phase_runtime.record_outcome(
+                issue.id,
+                next_phase=RunPhase.DONE,
+                status="completed",
+                reason="completed_by_runtime",
+            )
         else:
             await self._transition_issue_by_state_name(issue.id, self.config.acceptance.implementation_state)
+            self.phase_runtime.record_outcome(
+                issue.id,
+                next_phase=RunPhase.REWORKING,
+                status="reworking",
+                reason="acceptance_gate_failed",
+            )
 
     async def _create_evidence_issue(
         self,
@@ -1267,6 +987,12 @@ class Orchestrator:
                             )
                             self.state.claimed.discard(issue_id)
                             self.state.retry_attempts.pop(issue_id, None)
+                            self.phase_runtime.record_outcome(
+                                issue_id,
+                                next_phase=RunPhase.REVIEWING,
+                                status="reviewing",
+                                reason="implementation_ready_for_review",
+                            )
                             logger.info("performer_completion_verified_review issue_id=%s", issue_id)
                             self._persist_state()
                             return
@@ -1283,6 +1009,12 @@ class Orchestrator:
                                     refreshed_issue.id,
                                     PHASE_LABELS["completed"],
                                     prefix="performer:phase/",
+                                )
+                                self.phase_runtime.record_outcome(
+                                    issue_id,
+                                    next_phase=RunPhase.DONE,
+                                    status="completed",
+                                    reason="completed_by_runtime",
                                 )
                                 logger.info(
                                     "performer_completion_verified_done issue_id=%s reason=%s previous_state=%s",
@@ -1315,11 +1047,23 @@ class Orchestrator:
                         self.state.claimed.discard(issue_id)
                         self.state.retry_attempts.pop(issue_id, None)
                         await self._sync_label_group(entry.issue.id, PHASE_LABELS["completed"], prefix="performer:phase/")
+                        self.phase_runtime.record_outcome(
+                            issue_id,
+                            next_phase=RunPhase.DONE,
+                            status="completed",
+                            reason="completed_by_runtime",
+                        )
                         logger.info(f"performer_completion_verified issue_id={issue_id} reason={verdict.reason}")
                     elif refreshed_issue is not None:
                         await self._comment_handoff_preserved(entry, refreshed_issue)
                         self.state.claimed.discard(issue_id)
                         self.state.retry_attempts.pop(issue_id, None)
+                        self.phase_runtime.record_outcome(
+                            issue_id,
+                            next_phase=RunPhase.REVIEWING,
+                            status="reviewing",
+                            reason="implementation_handed_off",
+                        )
                     else:
                         self._schedule_continuation(
                             entry.issue,
@@ -1349,6 +1093,12 @@ class Orchestrator:
                         self.state.claimed.discard(issue_id)
                         self.state.retry_attempts.pop(issue_id, None)
                         await self._sync_label_group(entry.issue.id, PHASE_LABELS["failed"], prefix="performer:phase/")
+                        self.phase_runtime.record_outcome(
+                            issue_id,
+                            next_phase=RunPhase.FAILED,
+                            status="failed",
+                            reason=f"verification_failed: {verdict.reason}",
+                        )
 
                 else:  # NEEDS_HUMAN
                     # 需要人工审查，不自动标记完成
@@ -1404,6 +1154,12 @@ class Orchestrator:
                     self.state.retry_attempts.pop(issue_id, None)
                     if not self.config.acceptance.enabled:
                         await self._sync_label_group(entry.issue.id, PHASE_LABELS["failed"], prefix="performer:phase/")
+                        self.phase_runtime.record_outcome(
+                            issue_id,
+                            next_phase=RunPhase.AWAITING_HUMAN,
+                            status="awaiting_human",
+                            reason=f"verification_needs_human: {verdict.reason}",
+                        )
 
             except Exception as exc:
                 # 验证器本身异常也不能直接放行为完成
@@ -1668,6 +1424,13 @@ class Orchestrator:
             runtime_phase="failed",
             last_message=retry_context or error,
         )
+        self.phase_runtime.record_outcome(
+            issue.id,
+            next_phase=RunPhase.QUEUED,
+            status="retry",
+            reason=error,
+            retry_delay_seconds=_retry_delay_seconds(self.state.retry_attempts[issue.id]),
+        )
         self._sync_label_group_background(issue.id, PHASE_LABELS["implementation_running"], prefix="performer:phase/")
         self._persist_state()
 
@@ -1688,6 +1451,12 @@ class Orchestrator:
             runtime_phase="failed",
             last_message=entry.last_codex_message or error,
             recent_events=list(entry.recent_events),
+        )
+        self.phase_runtime.record_outcome(
+            entry.issue.id,
+            next_phase=RunPhase.FAILED,
+            status="failed",
+            reason=error,
         )
         self._sync_label_group_background(entry.issue.id, PHASE_LABELS["blocked"], prefix="performer:phase/")
         self._persist_state()
@@ -1782,6 +1551,19 @@ class Orchestrator:
         self.state.continuations.pop(issue.id, None)
         self.state.blocked.pop(issue.id, None)
         self.state.human_interventions[issue.id] = intervention
+        self.phase_runtime.record_outcome(
+            issue.id,
+            next_phase=RunPhase.AWAITING_HUMAN,
+            status="awaiting_human",
+            reason=intervention.error or "awaiting human action",
+            human_action={
+                "child_issue_id": intervention.child_issue_id,
+                "child_identifier": intervention.child_identifier,
+                "child_url": intervention.child_url,
+                "kind": intervention.kind,
+                "questions": list(intervention.questions or []),
+            },
+        )
         await self._sync_label_group(issue.id, PHASE_LABELS["blocked"], prefix="performer:phase/")
         self._persist_state()
         return intervention
@@ -1858,6 +1640,13 @@ class Orchestrator:
             due_at_ms=due_at_ms,
             issue_url=issue.url,
             last_message=last_message or _retry_context_from_issue(issue),
+        )
+        self.phase_runtime.record_outcome(
+            issue.id,
+            next_phase=RunPhase.QUEUED,
+            status="accepted",
+            reason=self.state.continuations[issue.id].last_message,
+            retry_delay_seconds=_retry_delay_seconds(self.state.continuations[issue.id]),
         )
         self._sync_label_group_background(issue.id, PHASE_LABELS["implementation_running"], prefix="performer:phase/")
         self._persist_state()

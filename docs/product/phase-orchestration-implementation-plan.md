@@ -21,14 +21,17 @@ only when every criterion is met with fresh evidence.
 - Tests green: `test_phase_contract`, `test_conductor_phase`, `test_cli`,
   `test_conductor_service`, `test_conductor_runtime`, `test_import_boundaries`.
 
-## Known scaffolding to remove
+## Removed scaffolding
 
-- `cli.py::run_phase_advance` calls the whole legacy `dispatch_issue_by_id`
-  regardless of `current_phase`.
-- `cli.py::_phase_result_from_state` reverse-engineers the legacy orchestrator's
-  private `state` (`completed`/`human_interventions`/`retry_attempts`/`blocked`)
-  to synthesize a `PhaseResult`. This is a bridge, not the target.
-- `PhaseAdvanceRequest.current_phase` is transmitted but never consumed.
+- `dispatch_issue_by_id` and `--dispatch-issue-id` have been removed. Performer
+  one-shot execution now enters through `--advance-request-path` /
+  `--phase-result-path`.
+- Phase results are produced by `PhaseExecutor` plus `PhaseRuntime`; Performer
+  no longer reverse-engineers
+  `completed`/`human_interventions`/`retry_attempts`/`blocked` state to
+  synthesize a result, and phase outcome storage is no longer owned by
+  `Orchestrator`.
+- `PhaseAdvanceRequest.current_phase` is consumed by `PhaseExecutor`.
 
 ---
 
@@ -45,15 +48,15 @@ reverse-reading legacy state.
    - `QUEUED` / `REWORKING` → implementation only.
    - `REVIEWING` → acceptance gate evaluation only.
    - resume with `human_response` when present.
-   Reuse the existing branches inside `dispatch_issue_by_id` (implementation
-   dispatch, `_run_acceptance_gate_for_issue`, `_handle_direct_done_bypass`) but
-   select the branch from `current_phase`, not from the Linear issue state.
+   Reuse the implementation dispatch, `_run_acceptance_gate_for_issue`, and
+   `_handle_direct_done_bypass` behavior but select the branch from
+   `current_phase`, not from the Linear issue state.
 2. Have each branch produce the `PhaseAdvanceResult` inline (next_phase, status,
    reason, human_action, workspace_path, ops_snapshot_path).
 3. Rewrite `cli.py::run_phase_advance` to call `advance` and write the returned
    result. Delete `_phase_result_from_state` and `_phase_result_from_dispatch`.
-4. Keep `dispatch_issue_by_id` for the legacy direct/`make once` path until
-   Stage 3 retires it.
+4. Direct and managed one-shot execution both use phase advance request/result
+   files; there is no legacy dispatch issue CLI path.
 
 ### Acceptance criteria
 

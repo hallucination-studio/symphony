@@ -13,6 +13,13 @@ from .conductor_models import InstanceRecord
 
 
 ProcessFactory = Callable[..., Awaitable[Any]]
+SENSITIVE_RUNTIME_ENV_KEYS = {
+    "LINEAR_API_KEY",
+    "PODIUM_PROXY_TOKEN",
+    "PODIUM_RUNTIME_GROUP_ID",
+    "PODIUM_RUNTIME_ID",
+    "PODIUM_RUNTIME_TOKEN",
+}
 
 
 @dataclass
@@ -97,7 +104,6 @@ class ConductorRuntimeManager:
         instance: InstanceRecord,
         *,
         env: dict[str, str] | None = None,
-        dispatch_issue_id: str | None = None,
         advance_request_path: str | None = None,
         phase_result_path: str | None = None,
     ) -> InstanceRecord:
@@ -116,7 +122,6 @@ class ConductorRuntimeManager:
         process = await self.process_factory(
             *self._command_args(
                 instance.workflow_path,
-                dispatch_issue_id=dispatch_issue_id,
                 advance_request_path=advance_request_path,
                 phase_result_path=phase_result_path,
             ),
@@ -270,6 +275,10 @@ class ConductorRuntimeManager:
 
     def _process_env(self, overrides: dict[str, str] | None) -> dict[str, str]:
         env = dict(os.environ)
+        override_keys = set(overrides or {})
+        for key in SENSITIVE_RUNTIME_ENV_KEYS:
+            if key not in override_keys:
+                env.pop(key, None)
         if overrides:
             env.update(overrides)
         package_root = Path(__file__).resolve().parents[3]
@@ -291,7 +300,6 @@ class ConductorRuntimeManager:
         self,
         workflow_path: str,
         *,
-        dispatch_issue_id: str | None = None,
         advance_request_path: str | None = None,
         phase_result_path: str | None = None,
     ) -> tuple[str, ...]:
@@ -299,8 +307,6 @@ class ConductorRuntimeManager:
             args = (self.command, "-m", "performer.cli", workflow_path)
         else:
             args = (self.command, workflow_path)
-        if dispatch_issue_id:
-            args = (*args, "--dispatch-issue-id", dispatch_issue_id)
         if advance_request_path:
             args = (*args, "--advance-request-path", advance_request_path)
         if phase_result_path:
