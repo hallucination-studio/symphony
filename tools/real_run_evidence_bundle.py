@@ -36,6 +36,7 @@ def bundle(args: argparse.Namespace) -> dict[str, Any]:
         "observer": copy_if_exists(args.observer, out / "runtime-samples.jsonl") if args.observer else False,
         "cleanup_before": copy_if_exists(args.cleanup_before, out / "cleanup-before.json") if args.cleanup_before else False,
         "cleanup_after": copy_if_exists(args.cleanup_after, out / "cleanup-after.json") if args.cleanup_after else False,
+        "codex_overload_probe": copy_if_exists(args.codex_overload_probe, out / "codex-overload-probe.json") if getattr(args, "codex_overload_probe", None) else False,
     }
     state_path = args.instance_root / "state" / "performer.json"
     ops_path = args.instance_root / "state" / "ops.json"
@@ -82,6 +83,7 @@ def parser() -> argparse.ArgumentParser:
     arg_parser.add_argument("--observer", type=Path, help="Observer JSONL samples.")
     arg_parser.add_argument("--cleanup-before", type=Path)
     arg_parser.add_argument("--cleanup-after", type=Path)
+    arg_parser.add_argument("--codex-overload-probe", type=Path)
     return arg_parser
 
 

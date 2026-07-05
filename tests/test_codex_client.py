@@ -13,6 +13,8 @@ import performer.codex_client as codex_client
 from performer.codex_client import CodexError, CodexSdkClient
 from performer_api.config import CodexConfig
 
+openai_errors = pytest.importorskip("openai_codex.errors")
+
 
 class FakeSdkTurn:
     id = "turn-1"
@@ -59,6 +61,142 @@ class FakeSdk:
     async def thread_resume(self, thread_id: str, **kwargs: Any) -> FakeSdkThread:
         self.resumed.append((thread_id, kwargs))
         return FakeSdkThread(thread_id)
+
+
+def server_busy(message: str = "upstream 502: server overloaded") -> Exception:
+    return openai_errors.ServerBusyError(
+        -32000,
+        message,
+        {"codex_error_info": "server_overloaded", "httpStatusCode": 502},
+    )
+
+
+def invalid_params(message: str = "invalid request shape") -> Exception:
+    return openai_errors.InvalidParamsError(-32602, message, {"httpStatusCode": 400})
+
+
+@pytest.mark.asyncio
+async def test_sdk_backend_retries_turn_overload_until_success(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    sleeps: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr(codex_client.asyncio, "sleep", fake_sleep)
+
+    class OverloadedThread(FakeSdkThread):
+        def __init__(self, thread_id: str) -> None:
+            super().__init__(thread_id)
+            self.calls = 0
+
+        def turn(self, *args: Any, **kwargs: Any) -> FakeSdkTurn:
+            self.calls += 1
+            if self.calls < 3:
+                raise server_busy()
+            return super().turn(*args, **kwargs)
+
+    class OverloadedSdk(FakeSdk):
+        def __init__(self) -> None:
+            super().__init__()
+            self.thread = OverloadedThread("thread-overload")
+
+        async def thread_start(self, **kwargs: Any) -> OverloadedThread:
+            return self.thread
+
+    fake_sdk = OverloadedSdk()
+    events: list[dict[str, Any]] = []
+    client = CodexSdkClient(
+        CodexConfig(overload_max_attempts=3, overload_initial_delay_ms=100, overload_max_delay_ms=250),
+        sdk_factory=lambda config: fake_sdk,
+    )
+
+    result = await client.run_session(tmp_path, "Do work", "MT-1: Build", on_event=events.append)
+
+    assert result.thread_id == "thread-overload"
+    assert fake_sdk.thread.calls == 3
+    assert sleeps == [0.1, 0.2]
+    retry_events = [event for event in events if event["event"] == "codex_overload_retrying"]
+    assert [event["attempt"] for event in retry_events] == [2, 3]
+    assert [event["delay_ms"] for event in retry_events] == [100, 200]
+    assert all(event["http_status"] == 502 for event in retry_events)
+    assert "upstream 502: server overloaded" in retry_events[0]["message"]
+
+
+@pytest.mark.asyncio
+async def test_sdk_backend_does_not_retry_terminal_bad_request(tmp_path: Path) -> None:
+    class BadRequestThread(FakeSdkThread):
+        def __init__(self, thread_id: str) -> None:
+            super().__init__(thread_id)
+            self.calls = 0
+
+        def turn(self, *args: Any, **kwargs: Any) -> FakeSdkTurn:
+            self.calls += 1
+            raise invalid_params()
+
+    class BadRequestSdk(FakeSdk):
+        def __init__(self) -> None:
+            super().__init__()
+            self.thread = BadRequestThread("thread-bad-request")
+
+        async def thread_start(self, **kwargs: Any) -> BadRequestThread:
+            return self.thread
+
+    fake_sdk = BadRequestSdk()
+    events: list[dict[str, Any]] = []
+    client = CodexSdkClient(CodexConfig(overload_max_attempts=3), sdk_factory=lambda config: fake_sdk)
+
+    with pytest.raises(CodexError) as exc:
+        await client.run_session(tmp_path, "Do work", "MT-1: Build", on_event=events.append)
+
+    assert exc.value.code == "codex_bad_request"
+    assert exc.value.http_status == 400
+    assert fake_sdk.thread.calls == 1
+    assert not [event for event in events if event["event"] == "codex_overload_retrying"]
+
+
+@pytest.mark.asyncio
+async def test_sdk_backend_exhausts_turn_overload_with_distinct_code(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    sleeps: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr(codex_client.asyncio, "sleep", fake_sleep)
+
+    class AlwaysOverloadedThread(FakeSdkThread):
+        def __init__(self, thread_id: str) -> None:
+            super().__init__(thread_id)
+            self.calls = 0
+
+        def turn(self, *args: Any, **kwargs: Any) -> FakeSdkTurn:
+            self.calls += 1
+            raise server_busy()
+
+    class AlwaysOverloadedSdk(FakeSdk):
+        def __init__(self) -> None:
+            super().__init__()
+            self.thread = AlwaysOverloadedThread("thread-overload")
+
+        async def thread_start(self, **kwargs: Any) -> AlwaysOverloadedThread:
+            return self.thread
+
+    fake_sdk = AlwaysOverloadedSdk()
+    events: list[dict[str, Any]] = []
+    client = CodexSdkClient(
+        CodexConfig(overload_max_attempts=3, overload_initial_delay_ms=100, overload_max_delay_ms=250),
+        sdk_factory=lambda config: fake_sdk,
+    )
+
+    with pytest.raises(CodexError) as exc:
+        await client.run_session(tmp_path, "Do work", "MT-1: Build", on_event=events.append)
+
+    assert exc.value.code == "upstream_overloaded_exhausted"
+    assert exc.value.http_status == 502
+    assert fake_sdk.thread.calls == 3
+    assert sleeps == [0.1, 0.2]
+    assert events[-1]["event"] == "codex_overload_exhausted"
+    assert events[-1]["attempts"] == 3
+    assert events[-1]["http_status"] == 502
 
 
 @pytest.mark.asyncio
@@ -283,6 +421,54 @@ async def test_sdk_backend_retries_transient_init_until_thread_succeeds(
 
 
 @pytest.mark.asyncio
+async def test_sdk_backend_retries_init_overload_with_http_status_event(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sleeps: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr(codex_client.asyncio, "sleep", fake_sleep)
+
+    class OverloadedInitSdk(FakeSdk):
+        def __init__(self) -> None:
+            super().__init__()
+            self.start_calls = 0
+
+        async def thread_start(self, **kwargs: Any) -> FakeSdkThread:
+            self.start_calls += 1
+            if self.start_calls == 1:
+                raise server_busy("upstream 503: provider overloaded")
+            return FakeSdkThread("thread-recovered")
+
+    fake_sdk = OverloadedInitSdk()
+    events: list[dict[str, Any]] = []
+    client = CodexSdkClient(
+        CodexConfig(overload_max_attempts=2, overload_initial_delay_ms=100, overload_max_delay_ms=250),
+        sdk_factory=lambda config: fake_sdk,
+    )
+
+    result = await client.run_session(tmp_path, "Do work", "MT-1: Build", on_event=events.append)
+
+    assert result.thread_id == "thread-recovered"
+    assert fake_sdk.start_calls == 2
+    assert sleeps == [0.1]
+    retry_events = [event for event in events if event["event"] == "codex_overload_retrying"]
+    assert retry_events == [
+        {
+            "event": "codex_overload_retrying",
+            "backend": "sdk",
+            "attempt": 2,
+            "delay_ms": 100,
+            "http_status": 502,
+            "message": "JSON-RPC error -32000: upstream 503: provider overloaded",
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_sdk_backend_does_not_retry_terminal_init_error(tmp_path: Path) -> None:
     class TerminalSdk(FakeSdk):
         def __init__(self) -> None:
@@ -396,6 +582,66 @@ async def test_sdk_backend_passes_codex_state_env_to_sdk_config(tmp_path: Path, 
     assert kwargs["codex_bin"] == "/bin/sh"
     assert kwargs["env"]["HOME"] == str(home)
     assert kwargs["env"]["CODEX_HOME"] == str(home / ".codex")
+
+
+@pytest.mark.asyncio
+async def test_sdk_backend_passes_config_overrides_to_sdk_config(tmp_path: Path, monkeypatch) -> None:
+    captured: dict[str, Any] = {}
+
+    class FakeSdkConfig:
+        def __init__(self, *, codex_bin: str | None = None, env: dict[str, str] | None = None, config_overrides: tuple[str, ...] = ()) -> None:
+            captured["config_kwargs"] = {
+                "codex_bin": codex_bin,
+                "env": env,
+                "config_overrides": config_overrides,
+            }
+
+    class FakeAsyncCodex:
+        def __init__(self, *, config: Any | None = None) -> None:
+            captured["sdk_config"] = config
+
+    monkeypatch.setitem(
+        sys.modules,
+        "openai_codex",
+        SimpleNamespace(AsyncCodex=FakeAsyncCodex, CodexConfig=FakeSdkConfig),
+    )
+
+    client = CodexSdkClient(
+        CodexConfig(
+            sdk_codex_bin="/bin/sh",
+            config_overrides=("model_provider=openai", "model_providers.openai.api_key=$OPENAI_API_KEY"),
+        )
+    )
+    await client._client()
+
+    assert captured["config_kwargs"]["config_overrides"] == (
+        "model_provider=openai",
+        "model_providers.openai.api_key=$OPENAI_API_KEY",
+    )
+
+
+@pytest.mark.asyncio
+async def test_sdk_backend_omits_config_overrides_for_older_sdk_config(tmp_path: Path, monkeypatch) -> None:
+    captured: dict[str, Any] = {}
+
+    class FakeSdkConfig:
+        def __init__(self, *, codex_bin: str | None = None) -> None:
+            captured["config_kwargs"] = {"codex_bin": codex_bin}
+
+    class FakeAsyncCodex:
+        def __init__(self, *, config: Any | None = None) -> None:
+            captured["sdk_config"] = config
+
+    monkeypatch.setitem(
+        sys.modules,
+        "openai_codex",
+        SimpleNamespace(AsyncCodex=FakeAsyncCodex, CodexConfig=FakeSdkConfig),
+    )
+
+    client = CodexSdkClient(CodexConfig(sdk_codex_bin="/bin/sh", config_overrides=("model_provider=openai",)))
+    await client._client()
+
+    assert captured["config_kwargs"] == {"codex_bin": "/bin/sh"}
 
 
 @pytest.mark.asyncio

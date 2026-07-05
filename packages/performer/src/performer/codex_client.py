@@ -13,11 +13,41 @@ from performer_api.config import CodexConfig
 
 logger = logging.getLogger(__name__)
 
+try:
+    from openai_codex.errors import (  # type: ignore
+        InvalidParamsError as SdkInvalidParamsError,
+        InvalidRequestError as SdkInvalidRequestError,
+        JsonRpcError as SdkJsonRpcError,
+        MethodNotFoundError as SdkMethodNotFoundError,
+        ParseError as SdkParseError,
+        RetryLimitExceededError as SdkRetryLimitExceededError,
+        ServerBusyError as SdkServerBusyError,
+        TransportClosedError as SdkTransportClosedError,
+        is_retryable_error as sdk_is_retryable_error,
+    )
+except ImportError:
+    SdkInvalidParamsError = None
+    SdkInvalidRequestError = None
+    SdkJsonRpcError = None
+    SdkMethodNotFoundError = None
+    SdkParseError = None
+    SdkRetryLimitExceededError = None
+    SdkServerBusyError = None
+    SdkTransportClosedError = None
+    sdk_is_retryable_error = None
+
 
 class CodexError(Exception):
-    def __init__(self, code: str, message: str):
+    def __init__(self, code: str, message: str, *, http_status: int | None = None):
         super().__init__(message)
         self.code = code
+        self.http_status = http_status
+
+
+@dataclass(frozen=True)
+class _SdkErrorClassification:
+    code: str
+    http_status: int | None = None
 
 
 @dataclass(frozen=True)
@@ -147,11 +177,14 @@ class CodexSdkClient:
                 )
                 raise CodexError("timeout", f"Codex SDK turn exceeded hard_turn_timeout_ms={self.config.hard_turn_timeout_ms}") from exc
             except Exception as exc:
-                code = exc.code if isinstance(exc, CodexError) else "sdk_transport_error"
-                if attempt >= 2 or not _is_transient_codex_error(code):
+                classified = _classify_sdk_exception(exc)
+                code = classified.code
+                if isinstance(exc, CodexError) and code != "invalid_structured_output":
+                    raise
+                if code != "invalid_structured_output" or attempt >= 2:
                     if isinstance(exc, CodexError):
                         raise
-                    raise CodexError(code, str(exc)) from exc
+                    raise CodexError(code, str(exc), http_status=classified.http_status) from exc
                 emit(
                     {
                         "event": "turn_retrying",
@@ -163,11 +196,10 @@ class CodexSdkClient:
                         "attempt": attempt + 1,
                     }
                 )
-                if code == "invalid_structured_output":
-                    turn_prompt = (
-                        f"{prompt}\n\nYour previous response did not match the required JSON schema. "
-                        "Reply again with only valid JSON for the required structured result."
-                    )
+                turn_prompt = (
+                    f"{prompt}\n\nYour previous response did not match the required JSON schema. "
+                    "Reply again with only valid JSON for the required structured result."
+                )
         emit({"event": "turn_completed", "backend": "sdk", "thread_id": thread_id, "turn_id": turn_id, "session_id": session_id, "message": final_response})
         await _close_sdk_client(client)
         return CodexRunResult(
@@ -207,12 +239,15 @@ class CodexSdkClient:
         emit: EventCallback,
         validate_structured: bool,
     ) -> tuple[Any, str, str, str | None, dict[str, Any] | None]:
-        turn = await self._start_sdk_turn(thread, prompt, output_schema)
-        turn_id = _string_attr(turn, "id") or "turn"
-        session_id = f"{thread_id}-{turn_id}"
-        emit({"event": "turn_started", "backend": "sdk", "thread_id": thread_id, "turn_id": turn_id, "session_id": session_id})
-        final_response, structured = await self._consume_turn(turn, emit, validate_structured=validate_structured)
-        return turn, turn_id, session_id, final_response, structured
+        async def op() -> tuple[Any, str, str, str | None, dict[str, Any] | None]:
+            turn = await self._start_sdk_turn(thread, prompt, output_schema)
+            turn_id = _string_attr(turn, "id") or "turn"
+            session_id = f"{thread_id}-{turn_id}"
+            emit({"event": "turn_started", "backend": "sdk", "thread_id": thread_id, "turn_id": turn_id, "session_id": session_id})
+            final_response, structured = await self._consume_turn(turn, emit, validate_structured=validate_structured)
+            return turn, turn_id, session_id, final_response, structured
+
+        return await self._retry_overload(op, emit=emit)
 
     async def _init_thread(
         self,
@@ -236,7 +271,10 @@ class CodexSdkClient:
             )
             try:
                 client, thread = await asyncio.wait_for(
-                    self._client_and_thread(workspace_path, existing_thread_id, emit=emit),
+                    self._retry_overload(
+                        lambda: self._client_and_thread(workspace_path, existing_thread_id, emit=emit),
+                        emit=emit,
+                    ),
                     timeout=_timeout_seconds(self.config.read_timeout_ms),
                 )
                 thread_id = _string_attr(thread, "id") or existing_thread_id
@@ -277,9 +315,11 @@ class CodexSdkClient:
                 )
                 await asyncio.sleep(delay_ms / 1000)
             except Exception as exc:
-                code = exc.code if isinstance(exc, CodexError) else "sdk_transport_error"
+                classified = _classify_sdk_exception(exc)
+                code = classified.code
                 last_code = code
                 last_message = str(exc)
+                last_http_status = classified.http_status
                 if _is_terminal_init_error(code):
                     emit(
                         {
@@ -291,7 +331,7 @@ class CodexSdkClient:
                     )
                     if isinstance(exc, CodexError):
                         raise
-                    raise CodexError(code, str(exc)) from exc
+                    raise CodexError(code, str(exc), http_status=last_http_status) from exc
                 if attempt >= attempts or not _is_transient_codex_error(code):
                     emit(
                         {
@@ -301,7 +341,7 @@ class CodexSdkClient:
                             "message": code,
                         }
                     )
-                    raise CodexError("codex_init_failed", f"{code}: {last_message}") from exc
+                    raise CodexError("codex_init_failed", f"{code}: {last_message}", http_status=last_http_status) from exc
                 delay_ms = _init_backoff_ms(self.config, attempt)
                 emit(
                     {
@@ -314,6 +354,53 @@ class CodexSdkClient:
                 )
                 await asyncio.sleep(delay_ms / 1000)
         raise CodexError("codex_init_failed", f"{last_code}: {last_message}")
+
+    async def _retry_overload(self, op: Callable[[], Any], *, emit: EventCallback) -> Any:
+        attempts = max(1, self.config.overload_max_attempts)
+        delay_ms = max(1, self.config.overload_initial_delay_ms)
+        max_delay_ms = max(1, self.config.overload_max_delay_ms)
+        for attempt in range(1, attempts + 1):
+            try:
+                return await _maybe_await(op())
+            except Exception as exc:
+                classified = _classify_sdk_exception(exc)
+                if classified.code == "codex_bad_request":
+                    emit(
+                        {
+                            "event": "codex_request_failed_terminal",
+                            "backend": "sdk",
+                            "code": classified.code,
+                            "http_status": classified.http_status,
+                            "message": str(exc),
+                        }
+                    )
+                    raise CodexError(classified.code, str(exc), http_status=classified.http_status) from exc
+                if classified.code != "upstream_overloaded":
+                    raise
+                if attempt >= attempts:
+                    emit(
+                        {
+                            "event": "codex_overload_exhausted",
+                            "backend": "sdk",
+                            "attempts": attempt,
+                            "http_status": classified.http_status,
+                            "message": str(exc),
+                        }
+                    )
+                    raise CodexError("upstream_overloaded_exhausted", str(exc), http_status=classified.http_status) from exc
+                current_delay_ms = min(delay_ms, max_delay_ms)
+                emit(
+                    {
+                        "event": "codex_overload_retrying",
+                        "backend": "sdk",
+                        "attempt": attempt + 1,
+                        "delay_ms": current_delay_ms,
+                        "http_status": classified.http_status,
+                        "message": str(exc),
+                    }
+                )
+                await asyncio.sleep(current_delay_ms / 1000)
+                delay_ms = min(max_delay_ms, delay_ms * 2)
 
     async def _client_and_thread(
         self,
@@ -340,10 +427,12 @@ class CodexSdkClient:
         except ImportError as exc:
             raise CodexError("codex_sdk_not_installed", "Install openai-codex to use codex.backend=sdk") from exc
         sdk_env = _codex_sdk_env()
-        if self.config.sdk_codex_bin or sdk_env:
+        if self.config.sdk_codex_bin or sdk_env or self.config.config_overrides:
             sdk_kwargs: dict[str, Any] = {"codex_bin": self.config.sdk_codex_bin}
             if sdk_env and _callable_accepts_keyword(SdkCodexConfig, "env"):
                 sdk_kwargs["env"] = sdk_env
+            if self.config.config_overrides and _callable_accepts_keyword(SdkCodexConfig, "config_overrides"):
+                sdk_kwargs["config_overrides"] = tuple(self.config.config_overrides)
             sdk_config = SdkCodexConfig(**sdk_kwargs)
         else:
             sdk_config = None
@@ -466,6 +555,8 @@ def _is_transient_codex_error(code: str) -> bool:
         "rate_limit",
         "timeout",
         "connection_error",
+        "upstream_overloaded",
+        "upstream_overloaded_exhausted",
     }
 
 
@@ -478,6 +569,63 @@ def _is_terminal_init_error(code: str) -> bool:
         "sdk_missing_thread_resume",
         "unsupported_sdk_worker_host",
     }
+
+
+def _classify_sdk_exception(exc: BaseException) -> _SdkErrorClassification:
+    if isinstance(exc, CodexError):
+        return _SdkErrorClassification(exc.code, exc.http_status)
+    http_status = _sdk_http_status(exc)
+    if _is_instance(exc, SdkRetryLimitExceededError):
+        return _SdkErrorClassification("upstream_overloaded", http_status)
+    if _is_instance(exc, SdkServerBusyError):
+        return _SdkErrorClassification("upstream_overloaded", http_status)
+    if _is_instance(exc, SdkInvalidParamsError) or _is_instance(exc, SdkInvalidRequestError) or _is_instance(exc, SdkMethodNotFoundError) or _is_instance(exc, SdkParseError):
+        return _SdkErrorClassification("codex_bad_request", http_status)
+    if _is_instance(exc, SdkTransportClosedError):
+        return _SdkErrorClassification("sdk_transport_error", http_status)
+    if sdk_is_retryable_error is not None:
+        try:
+            if sdk_is_retryable_error(exc):
+                return _SdkErrorClassification("upstream_overloaded", http_status)
+        except Exception:
+            pass
+    return _SdkErrorClassification("sdk_transport_error", http_status)
+
+
+def _is_instance(value: BaseException, class_obj: Any) -> bool:
+    return class_obj is not None and isinstance(value, class_obj)
+
+
+def _sdk_http_status(exc: BaseException) -> int | None:
+    data = getattr(exc, "data", None)
+    return _http_status_from_any(data)
+
+
+def _http_status_from_any(value: Any) -> int | None:
+    if isinstance(value, dict):
+        for key in ("httpStatusCode", "http_status", "status", "statusCode"):
+            parsed = _optional_int(value.get(key))
+            if parsed is not None:
+                return parsed
+        for nested in value.values():
+            parsed = _http_status_from_any(nested)
+            if parsed is not None:
+                return parsed
+    if isinstance(value, list):
+        for nested in value:
+            parsed = _http_status_from_any(nested)
+            if parsed is not None:
+                return parsed
+    return None
+
+
+def _optional_int(value: Any) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _init_backoff_ms(config: CodexConfig, completed_failures: int) -> int:

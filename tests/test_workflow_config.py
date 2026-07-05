@@ -98,11 +98,17 @@ codex:
   model: gpt-5-codex
   sdk_codex_bin: /usr/local/bin/codex
   sandbox: workspace_write
+  config_overrides:
+    - model_provider=openai
+    - model_providers.openai.api_key=$OPENAI_API_KEY
   linear_tool_mode: disabled
   read_timeout_ms: 2500
   init_max_attempts: 6
   init_backoff_ms: 250
   init_backoff_max_ms: 2000
+  overload_max_attempts: 7
+  overload_initial_delay_ms: 300
+  overload_max_delay_ms: 9000
 """,
     )
 
@@ -112,11 +118,62 @@ codex:
     assert config.codex.model == "gpt-5-codex"
     assert config.codex.sdk_codex_bin == "/usr/local/bin/codex"
     assert config.codex.sandbox == "workspace_write"
+    assert config.codex.config_overrides == (
+        "model_provider=openai",
+        "model_providers.openai.api_key=$OPENAI_API_KEY",
+    )
     assert config.codex.linear_tool_mode == "disabled"
     assert config.codex.read_timeout_ms == 2500
     assert config.codex.init_max_attempts == 6
     assert config.codex.init_backoff_ms == 250
     assert config.codex.init_backoff_max_ms == 2000
+    assert config.codex.overload_max_attempts == 7
+    assert config.codex.overload_initial_delay_ms == 300
+    assert config.codex.overload_max_delay_ms == 9000
+
+
+def test_service_config_rejects_invalid_codex_config_overrides(tmp_path: Path) -> None:
+    workflow_path = tmp_path / "WORKFLOW.md"
+    write_workflow(
+        workflow_path,
+        """
+tracker:
+  kind: linear
+  project_slug: MT
+  api_key: linear-token
+codex:
+  backend: sdk
+  config_overrides:
+    - missing-equals
+""",
+    )
+
+    with pytest.raises(ConfigError) as exc:
+        ServiceConfig.from_workflow(load_workflow(workflow_path), workflow_path)
+
+    assert exc.value.code == "invalid_codex_config_override"
+
+
+def test_service_config_rejects_raw_secret_codex_config_override_values(tmp_path: Path) -> None:
+    workflow_path = tmp_path / "WORKFLOW.md"
+    write_workflow(
+        workflow_path,
+        """
+tracker:
+  kind: linear
+  project_slug: MT
+  api_key: linear-token
+codex:
+  backend: sdk
+  config_overrides:
+    - model_providers.openai.api_key=sk-raw-secret-value
+""",
+    )
+
+    with pytest.raises(ConfigError) as exc:
+        ServiceConfig.from_workflow(load_workflow(workflow_path), workflow_path)
+
+    assert exc.value.code == "unsafe_codex_config_override"
 
 
 def test_service_config_parses_completion_verification_extension(tmp_path: Path) -> None:

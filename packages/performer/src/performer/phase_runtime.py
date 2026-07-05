@@ -17,6 +17,7 @@ PHASE_RESULT_STATUSES: set[str] = {
     "reviewing",
     "reworking",
     "skipped",
+    "upstream_overloaded",
 }
 
 
@@ -27,6 +28,8 @@ class PhaseExecutionOutcome:
     reason: str | None
     retry_delay_seconds: int | None = None
     human_action: dict[str, Any] | None = None
+    detail: str | None = None
+    http_status: int | None = None
 
 
 class PhaseRuntimeHost(Protocol):
@@ -52,6 +55,8 @@ class PhaseRuntime:
         reason: str | None,
         retry_delay_seconds: int | None = None,
         human_action: dict[str, Any] | None = None,
+        detail: str | None = None,
+        http_status: int | None = None,
     ) -> None:
         self._outcomes[issue_id] = PhaseExecutionOutcome(
             next_phase=next_phase,
@@ -59,6 +64,8 @@ class PhaseRuntime:
             reason=reason,
             retry_delay_seconds=retry_delay_seconds,
             human_action=human_action,
+            detail=detail,
+            http_status=http_status,
         )
 
     def pop_outcome(self, issue_id: str, *, default: PhaseExecutionOutcome) -> PhaseExecutionOutcome:

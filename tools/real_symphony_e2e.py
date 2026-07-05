@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import signal
 import socket
 import subprocess
@@ -405,6 +406,7 @@ async def fetch_linear_issue_tree(token: str, issue_id: str) -> dict[str, Any]:
                     id
                     identifier
                     title
+                    description
                     state { name type }
                     delegate { id name }
                     labels { nodes { name } }
@@ -414,6 +416,7 @@ async def fetch_linear_issue_tree(token: str, issue_id: str) -> dict[str, Any]:
                         id
                         identifier
                         title
+                        description
                         state { name type }
                         delegate { id name }
                         labels { nodes { name } }
@@ -489,6 +492,10 @@ def patch_workflow(
     init_backoff_max_ms: int | None = None,
     read_timeout_ms: int | None = None,
     hard_turn_timeout_ms: int | None = None,
+    overload_max_attempts: int | None = None,
+    overload_initial_delay_ms: int | None = None,
+    overload_max_delay_ms: int | None = None,
+    config_overrides: list[str] | None = None,
 ) -> str:
     workflow = workflow_path.read_text(encoding="utf-8")
     codex_bin = sdk_codex_bin or shutil.which("codex")
@@ -506,6 +513,14 @@ def patch_workflow(
         workflow = _replace_or_insert_codex_key(workflow, "read_timeout_ms", str(read_timeout_ms))
     if hard_turn_timeout_ms is not None:
         workflow = _replace_or_insert_codex_key(workflow, "hard_turn_timeout_ms", str(hard_turn_timeout_ms))
+    if overload_max_attempts is not None:
+        workflow = _replace_or_insert_codex_key(workflow, "overload_max_attempts", str(overload_max_attempts))
+    if overload_initial_delay_ms is not None:
+        workflow = _replace_or_insert_codex_key(workflow, "overload_initial_delay_ms", str(overload_initial_delay_ms))
+    if overload_max_delay_ms is not None:
+        workflow = _replace_or_insert_codex_key(workflow, "overload_max_delay_ms", str(overload_max_delay_ms))
+    if config_overrides:
+        workflow = _replace_or_insert_codex_list(workflow, "config_overrides", config_overrides)
     workflow = workflow.replace(
         "  max_concurrent_agents: 10\n  max_turns: 20\n",
         "  max_concurrent_agents: 1\n  max_turns: 2\n" if acceptance_gates else "  max_concurrent_agents: 1\n  max_turns: 1\n",
@@ -602,6 +617,40 @@ def _replace_or_insert_codex_key(workflow: str, key: str, value: str) -> str:
         output.append(line)
     if in_codex and not inserted:
         output.append(f"  {key}: {value}")
+    return "\n".join(output) + ("\n" if workflow.endswith("\n") else "")
+
+
+def _replace_or_insert_codex_list(workflow: str, key: str, values: list[str]) -> str:
+    lines = workflow.splitlines()
+    output: list[str] = []
+    in_codex = False
+    skipping_existing = False
+    inserted = False
+    key_prefix = f"  {key}:"
+    rendered = [f"  {key}:", *[f"    - {value}" for value in values]]
+    for line in lines:
+        if line.startswith("codex:"):
+            in_codex = True
+            output.append(line)
+            continue
+        if skipping_existing:
+            if line.startswith("    - "):
+                continue
+            skipping_existing = False
+        if in_codex and line and not line.startswith(" "):
+            if not inserted:
+                output.extend(rendered)
+                inserted = True
+            in_codex = False
+        if in_codex and line.startswith(key_prefix):
+            if not inserted:
+                output.extend(rendered)
+                inserted = True
+            skipping_existing = True
+            continue
+        output.append(line)
+    if in_codex and not inserted:
+        output.extend(rendered)
     return "\n".join(output) + ("\n" if workflow.endswith("\n") else "")
 
 
@@ -718,6 +767,89 @@ def conductor_phase_runs(runs_payload: dict[str, Any]) -> list[dict[str, Any]]:
     if not isinstance(runs, list):
         return []
     return [run for run in runs if isinstance(run, dict) and run.get("run_id") and run.get("phase")]
+
+
+def audit_expected_failure_run(run_result: dict[str, Any], tree: dict[str, Any], *, expected: str) -> dict[str, Any]:
+    phase_runs = [
+        run
+        for sample in run_result.get("samples", [])
+        if isinstance(sample, dict)
+        for run in sample.get("phase_runs", [])
+        if isinstance(run, dict)
+    ]
+    max_overload_count = max([_int_value(run.get("overload_count")) for run in phase_runs] or [0])
+    max_retry_count = max([_int_value(run.get("retry_count")) for run in phase_runs] or [0])
+    max_crash_count = max([_int_value(run.get("crash_count")) for run in phase_runs] or [0])
+    reasons = [str(run.get("last_reason") or "") for run in phase_runs]
+    failed_terminal = any(run.get("phase") == "failed" or run.get("status") == "failed" for run in phase_runs)
+    human_actions = _human_action_children(tree)
+    descriptions = "\n\n".join(str(child.get("description") or "") for child in human_actions)
+    if max_overload_count == 0:
+        max_overload_count = _max_counter_from_text(descriptions, "overload_count")
+    if max_retry_count == 0:
+        max_retry_count = _max_counter_from_text(descriptions, "retry_count")
+    if max_crash_count == 0:
+        max_crash_count = _max_counter_from_text(descriptions, "crash_count")
+    http_status_in_linear = "Upstream HTTP status:" in descriptions
+    raw_error_in_linear = "Last error:" in descriptions and (
+        "JSON-RPC error" in descriptions or "server overloaded" in descriptions or "invalid request" in descriptions
+    )
+    terminal_bad_request = any("codex_bad_request" in reason for reason in reasons) or "invalid request" in descriptions.lower()
+    overload_exhausted = any("upstream_overloaded_exhausted" in reason for reason in reasons) or max_overload_count > 0
+    if expected == "overload":
+        passed = (
+            failed_terminal
+            and overload_exhausted
+            and max_overload_count > 0
+            and max_retry_count == 0
+            and max_crash_count == 0
+            and raw_error_in_linear
+            and http_status_in_linear
+        )
+    elif expected == "terminal_bad_request":
+        passed = failed_terminal and terminal_bad_request and max_overload_count == 0 and raw_error_in_linear and http_status_in_linear
+    else:
+        raise ValueError(f"Unsupported expected failure: {expected}")
+    return {
+        "pass": passed,
+        "expected": expected,
+        "failed_terminal": failed_terminal,
+        "max_overload_count": max_overload_count,
+        "max_retry_count": max_retry_count,
+        "max_crash_count": max_crash_count,
+        "last_reasons": reasons[-10:],
+        "human_action_count": len(human_actions),
+        "raw_error_in_linear": raw_error_in_linear,
+        "http_status_in_linear": http_status_in_linear,
+        "terminal_bad_request": terminal_bad_request,
+        "overload_exhausted": overload_exhausted,
+    }
+
+
+def _human_action_children(tree: dict[str, Any]) -> list[dict[str, Any]]:
+    children = ((tree.get("children") or {}).get("nodes") or []) if isinstance(tree.get("children"), dict) else []
+    result: list[dict[str, Any]] = []
+    for child in children:
+        if not isinstance(child, dict):
+            continue
+        labels = ((child.get("labels") or {}).get("nodes") or []) if isinstance(child.get("labels"), dict) else []
+        if str(child.get("title") or "").startswith("[Human Action]") or any(
+            isinstance(label, dict) and label.get("name") == "performer:type/human-action" for label in labels
+        ):
+            result.append(child)
+    return result
+
+
+def _int_value(value: Any) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _max_counter_from_text(text: str, key: str) -> int:
+    values = [int(match.group(1)) for match in re.finditer(rf"{re.escape(key)}:\s*(\d+)", text)]
+    return max(values or [0])
 
 
 def crash_probe_candidate(phase_runs: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -890,6 +1022,7 @@ async def wait_for_run(
     stage_timeout_seconds: int,
     permission_approval_probe: bool = False,
     crash_recovery_probe: bool = False,
+    expected_failure: str = "none",
 ) -> dict[str, Any]:
     instance_root = Path(instance["instance_dir"])
     state_path = Path(instance["persistence_path"])
@@ -1000,6 +1133,10 @@ async def wait_for_run(
                     "status": run.get("status"),
                     "ack_status": run.get("ack_status"),
                     "last_reason": run.get("last_reason"),
+                    "retry_count": run.get("retry_count"),
+                    "crash_count": run.get("crash_count"),
+                    "init_failure_count": run.get("init_failure_count"),
+                    "overload_count": run.get("overload_count"),
                     "human_action": run.get("human_action"),
                 }
                 for run in phase_runs
@@ -1227,6 +1364,20 @@ async def wait_for_run(
                 )
             await asyncio.sleep(2)
             continue
+        if expected_failure != "none" and phase_terminal:
+            failed_with_child = any(
+                run.get("phase") == "failed"
+                and isinstance(run.get("human_action"), dict)
+                and bool((run.get("human_action") or {}).get("child_issue_id"))
+                for run in sample.get("phase_runs", [])
+            )
+            if failed_with_child:
+                evidence.check(
+                    f"expected-failure:{expected_failure}:terminal-child-created",
+                    True,
+                    phase_runs=sample.get("phase_runs", []),
+                )
+                break
         if permission_approval_probe:
             if (
                 result_path.exists()
@@ -1488,6 +1639,10 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
             init_backoff_max_ms=args.init_backoff_max_ms,
             read_timeout_ms=args.read_timeout_ms,
             hard_turn_timeout_ms=args.hard_turn_timeout_ms,
+            overload_max_attempts=args.overload_max_attempts,
+            overload_initial_delay_ms=args.overload_initial_delay_ms,
+            overload_max_delay_ms=args.overload_max_delay_ms,
+            config_overrides=args.config_override,
         )
         if args.acceptance_gates:
             workflow = patch_e2e_gate_mode(workflow, gate_mode=args.e2e_gate_mode)
@@ -1565,6 +1720,7 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
             stage_timeout_seconds=args.stage_timeout,
             permission_approval_probe=args.permission_approval_probe,
             crash_recovery_probe=args.crash_recovery_probe,
+            expected_failure=args.expected_failure,
         )
         if args.permission_approval_probe:
             check_names = {check.get("name") for check in evidence.data.get("checks", []) if check.get("passed")}
@@ -1603,8 +1759,23 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
                 for run in phase_runs
             )
         )
+        expected_failure = args.expected_failure != "none"
         if args.permission_approval_probe:
             evidence.check("runtime-error:blocked-cleared-after-approval", not state.get("blocked"), state=state)
+        elif expected_failure:
+            tree = await fetch_linear_issue_tree(token, linear["issue"]["id"])
+            tree_path = root / "final-issue-tree.json"
+            tree_path.write_text(json.dumps(tree, indent=2, sort_keys=True), encoding="utf-8")
+            evidence.artifact("final_issue_tree", tree_path)
+            failure_audit = audit_expected_failure_run(run_result, tree, expected=args.expected_failure)
+            failure_audit_path = root / "expected-failure-audit.json"
+            failure_audit_path.write_text(json.dumps(failure_audit, indent=2, sort_keys=True), encoding="utf-8")
+            evidence.artifact("expected_failure_audit", failure_audit_path)
+            evidence.check(
+                f"expected-failure:{args.expected_failure}",
+                bool(failure_audit.get("pass")),
+                audit=failure_audit,
+            )
         else:
             evidence.check(
                 "real-flow:linear-done",
@@ -1635,7 +1806,7 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
                 run_statuses=run_statuses,
                 phase_runs=phase_runs[-5:],
             )
-        if args.acceptance_gates:
+        if args.acceptance_gates and not expected_failure:
             tree = await fetch_linear_issue_tree(token, linear["issue"]["id"])
             tree_path = root / "final-issue-tree.json"
             tree_path.write_text(json.dumps(tree, indent=2, sort_keys=True), encoding="utf-8")
@@ -1825,6 +1996,11 @@ def parser() -> argparse.ArgumentParser:
     arg_parser.add_argument("--init-backoff-max-ms", type=int)
     arg_parser.add_argument("--read-timeout-ms", type=int)
     arg_parser.add_argument("--hard-turn-timeout-ms", type=int)
+    arg_parser.add_argument("--overload-max-attempts", type=int)
+    arg_parser.add_argument("--overload-initial-delay-ms", type=int)
+    arg_parser.add_argument("--overload-max-delay-ms", type=int)
+    arg_parser.add_argument("--config-override", action="append")
+    arg_parser.add_argument("--expected-failure", choices=["none", "overload", "terminal_bad_request"], default="none")
     arg_parser.add_argument(
         "--simulate-agent-webhook",
         action="store_true",

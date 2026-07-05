@@ -73,3 +73,23 @@ def test_phase_advance_result_round_trips_init_failed_status() -> None:
 
     assert payload["status"] == "init_failed"
     assert loaded == result
+
+
+def test_phase_advance_result_round_trips_raw_detail_and_http_status() -> None:
+    result = PhaseAdvanceResult(
+        run_id="run-1",
+        issue_id="issue-1",
+        next_phase=RunPhase.QUEUED,
+        status="retry",
+        reason="upstream_overloaded_exhausted",
+        detail="upstream 502: server overloaded",
+        http_status=502,
+        retry_delay_seconds=15,
+    )
+
+    payload = result.to_dict()
+    loaded = PhaseAdvanceResult.from_dict(payload)
+
+    assert payload["detail"] == "upstream 502: server overloaded"
+    assert payload["http_status"] == 502
+    assert loaded == result

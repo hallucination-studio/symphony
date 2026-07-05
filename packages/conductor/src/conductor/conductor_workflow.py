@@ -92,6 +92,21 @@ def generate_workflow_content(instance: InstanceRecord, *, podium_url: str = "ht
         f"  enabled: {'true' if profile in {'task', 'gated-task'} else 'false'}\n"
         f"  bundle_root: {Path(instance.persistence_path).parent / 'handoffs'}\n"
     )
+    codex_profile = _codex_profile(instance.workflow_inputs.get("codex_profile"))
+    codex_config = (
+        "codex:\n"
+        "  backend: sdk\n"
+        "  linear_tool_mode: disabled\n"
+    )
+    if codex_profile.get("model"):
+        codex_config += f"  model: {_yaml_scalar(codex_profile['model'])}\n"
+    if codex_profile.get("sandbox"):
+        codex_config += f"  sandbox: {_yaml_scalar(codex_profile['sandbox'])}\n"
+    config_overrides = codex_profile.get("config_overrides")
+    if isinstance(config_overrides, list) and config_overrides:
+        codex_config += "  config_overrides:\n"
+        for override in config_overrides:
+            codex_config += f"    - {_yaml_scalar(str(override))}\n"
 
     return (
         "---\n"
@@ -117,9 +132,7 @@ def generate_workflow_content(instance: InstanceRecord, *, podium_url: str = "ht
         "  max_retry_backoff_ms: 300000\n"
         f"{acceptance_config}"
         f"{repository_handoff_config}"
-        "codex:\n"
-        "  backend: sdk\n"
-        "  linear_tool_mode: disabled\n"
+        f"{codex_config}"
         "---\n"
         f'You are operating the Performer instance "{instance.name}" for Linear project {instance.linear_project}.\n'
         f"Prepared workspace root: {instance.workspace_root}\n"
@@ -142,6 +155,28 @@ def generate_workflow_content(instance: InstanceRecord, *, podium_url: str = "ht
         "only and never resume Performer.\n"
         "Return the required structured result to Performer. Do not call Linear directly.\n"
     )
+
+
+def _codex_profile(value: object) -> dict[str, object]:
+    if not isinstance(value, dict):
+        return {}
+    profile: dict[str, object] = {}
+    model = str(value.get("model") or "").strip()
+    sandbox = str(value.get("sandbox") or "").strip()
+    if model:
+        profile["model"] = model
+    if sandbox:
+        profile["sandbox"] = sandbox
+    overrides = value.get("config_overrides")
+    if isinstance(overrides, list):
+        profile["config_overrides"] = [str(override).strip() for override in overrides if str(override).strip()]
+    return profile
+
+
+def _yaml_scalar(value: str) -> str:
+    if value.startswith("$") or all(char.isalnum() or char in "._-/=$:" for char in value):
+        return value
+    return repr(value)
 
 
 def validate_instance_workflow(

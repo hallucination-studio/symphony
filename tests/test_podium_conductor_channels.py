@@ -160,7 +160,19 @@ async def test_dispatch_routes_by_project_binding_not_single_workspace_group() -
             json={
                 "bindings": [
                     {"instance_id": "inst-a", "project_slug": "ALPHA", "agent_app_user_id": "agent-alpha"},
-                    {"instance_id": "inst-b", "project_slug": "BETA", "agent_app_user_id": "agent-beta"},
+                    {
+                        "instance_id": "inst-b",
+                        "project_slug": "BETA",
+                        "agent_app_user_id": "agent-beta",
+                        "codex_profile": {
+                            "model": "gpt-5-codex",
+                            "sandbox": "workspace_write",
+                            "config_overrides": [
+                                "model_provider=openai",
+                                "model_providers.openai.api_key=$OPENAI_API_KEY",
+                            ],
+                        },
+                    },
                 ]
             },
         )
@@ -181,6 +193,15 @@ async def test_dispatch_routes_by_project_binding_not_single_workspace_group() -
     assert dispatch["project_binding_id"].endswith(":inst-b")
     assert dispatch["project_slug"] == "BETA"
     assert dispatch["instance_id"] == "inst-b"
+    assert dispatch["codex_profile"] == {
+        "model": "gpt-5-codex",
+        "sandbox": "workspace_write",
+        "config_overrides": [
+            "model_provider=openai",
+            "model_providers.openai.api_key=$OPENAI_API_KEY",
+        ],
+    }
+    assert "sk-" not in json.dumps(dispatch)
 
 
 @pytest.mark.asyncio

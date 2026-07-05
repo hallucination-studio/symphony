@@ -43,6 +43,7 @@ class OrchestrationRun:
     crash_count: int = 0
     retry_count: int = 0
     init_failure_count: int = 0
+    overload_count: int = 0
     next_run_at: str | None = None
     ack_status: str | None = None
     acked_at: str | None = None
@@ -79,6 +80,7 @@ class OrchestrationRun:
             crash_count=_int(payload.get("crash_count"), default=0),
             retry_count=_int(payload.get("retry_count"), default=0),
             init_failure_count=_int(payload.get("init_failure_count"), default=0),
+            overload_count=_int(payload.get("overload_count"), default=0),
             next_run_at=_optional_str(payload.get("next_run_at")),
             ack_status=_optional_str(payload.get("ack_status")),
             acked_at=_optional_str(payload.get("acked_at")),
@@ -128,10 +130,11 @@ class PhaseTransitionError(ValueError):
 
 
 class PhaseReducer:
-    def __init__(self, store: Any, *, crash_limit: int = 3, init_failure_limit: int = 5):
+    def __init__(self, store: Any, *, crash_limit: int = 3, init_failure_limit: int = 5, overload_limit: int = 5):
         self.store = store
         self.crash_limit = crash_limit
         self.init_failure_limit = init_failure_limit
+        self.overload_limit = overload_limit
 
     def dispatch_received(
         self,
@@ -195,6 +198,7 @@ class PhaseReducer:
         updates: dict[str, Any] = {
             "phase": result.next_phase,
             "last_reason": result.reason,
+            "last_error": result.detail,
             "workspace_path": result.workspace_path or run.workspace_path,
             "ops_snapshot_path": result.ops_snapshot_path or run.ops_snapshot_path,
             "process_pid": None,
@@ -205,7 +209,7 @@ class PhaseReducer:
         elif result.next_phase is RunPhase.FAILED:
             updates["status"] = RunStatus.FAILED
             updates["ack_status"] = "pending"
-            updates["last_error"] = result.reason
+            updates["last_error"] = result.detail or result.reason
         elif result.next_phase is RunPhase.AWAITING_HUMAN:
             updates["status"] = RunStatus.WAITING
             updates["human_action"] = result.human_action or {}
@@ -216,11 +220,11 @@ class PhaseReducer:
                 init_failure_count = run.init_failure_count + 1
                 updates["attempt"] = run.attempt + 1
                 updates["init_failure_count"] = init_failure_count
-                updates["last_error"] = result.reason
+                updates["last_error"] = result.detail or result.reason
                 if _is_terminal_init_failure(result.reason):
                     updates["phase"] = RunPhase.FAILED
                     updates["status"] = RunStatus.FAILED
-                    updates["last_error"] = result.reason
+                    updates["last_error"] = result.detail or result.reason
                     updates["ack_status"] = "pending"
                     updates["next_run_at"] = None
                     to_phase = RunPhase.FAILED
@@ -246,6 +250,36 @@ class PhaseReducer:
                         **result.to_dict(),
                         "init_failure_count": init_failure_count,
                         "init_failure_limit": self.init_failure_limit,
+                    },
+                )
+                return updated
+            elif result.status == "upstream_overloaded":
+                overload_count = run.overload_count + 1
+                updates["attempt"] = run.attempt + 1
+                updates["overload_count"] = overload_count
+                updates["last_error"] = result.detail or result.reason
+                if overload_count > self.overload_limit:
+                    updates["phase"] = RunPhase.FAILED
+                    updates["status"] = RunStatus.FAILED
+                    updates["last_error"] = "upstream overload exhausted repeatedly"
+                    updates["ack_status"] = "pending"
+                    updates["next_run_at"] = None
+                    to_phase = RunPhase.FAILED
+                else:
+                    delay = max(result.retry_delay_seconds or 0, _init_failure_delay_seconds(overload_count))
+                    updates["status"] = RunStatus.QUEUED
+                    updates["next_run_at"] = _iso(timestamp + timedelta(seconds=delay))
+                    to_phase = RunPhase.QUEUED
+                updated = self.store.update_orchestration_run(run.run_id, **updates)
+                self._event(
+                    run,
+                    "performer.upstream_overloaded",
+                    to_phase=to_phase,
+                    reason=result.reason,
+                    payload={
+                        **result.to_dict(),
+                        "overload_count": overload_count,
+                        "overload_limit": self.overload_limit,
                     },
                 )
                 return updated

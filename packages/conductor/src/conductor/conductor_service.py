@@ -498,6 +498,7 @@ class ConductorService:
                 "issue_identifier": issue_identifier or None,
                 "reason": "no_matching_instance",
             }
+        instance = self._apply_codex_profile_from_dispatch(instance, event.get("codex_profile"))
         dispatch_id = str(event.get("dispatch_id") or "").strip()
         run = self.phase_reducer.dispatch_received(
             instance_id=instance.id,
@@ -519,6 +520,20 @@ class ConductorService:
             "agent_session_id": event.get("agent_session_id") or None,
             "agent_app_user_id": agent_app_user_id,
         }
+
+    def _apply_codex_profile_from_dispatch(self, instance: InstanceRecord, profile: Any) -> InstanceRecord:
+        normalized = _sanitize_codex_profile(profile)
+        if not normalized:
+            return instance
+        workflow_inputs = dict(instance.workflow_inputs)
+        if workflow_inputs.get("codex_profile") == normalized:
+            return instance
+        workflow_inputs["codex_profile"] = normalized
+        updated = instance.with_updates(workflow_inputs=workflow_inputs)
+        updated = updated.with_updates(workflow_content=self._generate_workflow(updated))
+        self.store.update_instance(updated)
+        Path(updated.workflow_path).write_text(updated.workflow_content, encoding="utf-8")
+        return updated
 
     async def poll_podium_dispatch_once(self) -> dict[str, Any]:
         settings = self.store.get_settings()
@@ -695,6 +710,7 @@ class ConductorService:
         phase_results_applied = await self._apply_phase_result_files()
         phase_timeouts = await self._record_phase_timeouts()
         phase_crash_retries, phase_crash_failures = await self._record_phase_crashes()
+        phase_failure_human_actions_created = await self._create_phase_failure_human_actions()
         phase_human_actions = await self._coordinate_phase_human_actions()
         if phase_human_actions["completed"]:
             phase_runs_started += await self._start_due_orchestration_runs()
@@ -724,6 +740,7 @@ class ConductorService:
             "phase_timeouts": phase_timeouts,
             "phase_crash_retries": phase_crash_retries,
             "phase_crash_failures": phase_crash_failures,
+            "phase_failure_human_actions_created": phase_failure_human_actions_created,
             "phase_human_actions_completed": phase_human_actions["completed"],
             "phase_human_actions_missing_response": phase_human_actions["missing_response"],
             "phase_human_actions_failed": phase_human_actions["failed"],
@@ -732,6 +749,84 @@ class ConductorService:
             "crash_restarts": crash_restarts,
             "crash_loops": crash_loops,
         }
+
+    async def _create_phase_failure_human_actions(self) -> int:
+        created = 0
+        for run in self.store.list_orchestration_runs(phases={RunPhase.FAILED}):
+            if run.human_action.get("child_issue_id"):
+                continue
+            failure_detail = self._phase_failure_detail(run)
+            if not _phase_failure_needs_human_action(run, failure_detail):
+                continue
+            instance = self.store.get_instance(run.instance_id)
+            if instance is None:
+                continue
+            tracker = self.repository_handoff_tracker_factory(instance)
+            create_child = getattr(tracker, "create_child_issue_for", None)
+            if not callable(create_child):
+                continue
+            issue_ref = run.issue_identifier or run.issue_id
+            description = _phase_failure_human_action_description(run, failure_detail)
+            try:
+                child = await create_child(
+                    parent_issue_id=run.issue_id,
+                    title=f"[Human Action] {issue_ref}: Runtime error needs review",
+                    description=description,
+                    label_names=[HUMAN_ACTION_LABEL],
+                    delegate_id=_linear_agent_app_user_id(instance.linear_filters) or None,
+                )
+            except Exception as exc:
+                self.store.append_orchestration_event(
+                    run_id=run.run_id,
+                    instance_id=run.instance_id,
+                    issue_id=run.issue_id,
+                    event_type="human.failure_child_create_failed",
+                    from_phase=run.phase,
+                    to_phase=run.phase,
+                    reason="phase_failure_human_action",
+                    payload={"error": _safe_linear_value(exc)},
+                )
+                continue
+            human_action = {
+                "child_issue_id": child.get("id"),
+                "child_identifier": child.get("identifier"),
+                "child_url": child.get("url"),
+                "kind": "runtime_error",
+                "source": "phase_failure",
+            }
+            self.store.update_orchestration_run(run.run_id, human_action=human_action)
+            self.store.append_orchestration_event(
+                run_id=run.run_id,
+                instance_id=run.instance_id,
+                issue_id=run.issue_id,
+                event_type="human.failure_child_created",
+                from_phase=run.phase,
+                to_phase=run.phase,
+                reason="phase_failure_human_action",
+                payload=human_action,
+            )
+            created += 1
+        return created
+
+    def _phase_failure_detail(self, run) -> dict[str, Any]:
+        detail: dict[str, Any] = {
+            "reason": run.last_reason,
+            "error": run.last_error,
+            "http_status": None,
+        }
+        for event in reversed(self.store.list_orchestration_events(run.run_id)):
+            payload = event.payload if isinstance(event.payload, dict) else {}
+            if payload.get("detail") and not detail.get("error"):
+                detail["error"] = payload.get("detail")
+            elif payload.get("detail") and _phase_failure_error_is_summary(str(detail.get("error") or "")):
+                detail["error"] = payload.get("detail")
+            if payload.get("http_status") is not None:
+                detail["http_status"] = payload.get("http_status")
+            if payload.get("reason") and not detail.get("reason"):
+                detail["reason"] = payload.get("reason")
+            if detail.get("error") and detail.get("http_status") is not None:
+                break
+        return detail
 
     async def sync_project_labels_once(self) -> int:
         """Sync project labels for instances whose scope changed since last run.
@@ -1020,18 +1115,23 @@ class ConductorService:
         if updated is None:
             return
         reason = result.reason or updated.last_reason
-        if result.status not in {"retry", "init_failed", "failed"}:
+        if result.status not in {"retry", "init_failed", "failed", "upstream_overloaded"}:
             return
         title = f"Performer phase reported {result.status}"
         await self._comment_phase_diagnostic(
             updated,
             kind="result",
-            dedupe_key=f"result:{updated.attempt}:{updated.retry_count}:{updated.init_failure_count}:{result.status}:{reason or ''}",
+            dedupe_key=(
+                f"result:{updated.attempt}:{updated.retry_count}:{updated.init_failure_count}:"
+                f"{updated.overload_count}:{result.status}:{reason or ''}"
+            ),
             title=title,
             reason=reason,
             extra={
                 "next_phase": result.next_phase.value,
                 "retry_delay_seconds": result.retry_delay_seconds,
+                "detail": result.detail,
+                "http_status": result.http_status,
             },
         )
 
@@ -2110,6 +2210,7 @@ class ConductorService:
             "retry_count": run.retry_count,
             "crash_count": run.crash_count,
             "init_failure_count": run.init_failure_count,
+            "overload_count": run.overload_count,
             "next_run_at": run.next_run_at,
             "turn_count": _int(telemetry_run.get("turn_count")),
             "total_tokens": _int(telemetry_run.get("total_tokens")),
@@ -2455,6 +2556,7 @@ def _phase_runtime_row(run) -> dict[str, Any]:
         "retry_count": run.retry_count,
         "crash_count": run.crash_count,
         "init_failure_count": run.init_failure_count,
+        "overload_count": run.overload_count,
         "next_run_at": run.next_run_at,
         "ack_status": run.ack_status,
         "created_at": run.created_at,
@@ -2773,6 +2875,7 @@ def _phase_diagnostic_comment(
         f"retry_count: {run.retry_count}",
         f"crash_count: {run.crash_count}",
         f"init_failure_count: {run.init_failure_count}",
+        f"overload_count: {run.overload_count}",
     ]
     for key, value in extra.items():
         if value is None:
@@ -2788,9 +2891,107 @@ def _phase_diagnostic_comment(
     return "\n".join(lines)
 
 
+def _phase_failure_needs_human_action(run, detail: dict[str, Any]) -> bool:
+    text = " ".join(
+        str(value or "")
+        for value in (
+            run.last_reason,
+            run.last_error,
+            detail.get("reason"),
+            detail.get("error"),
+        )
+    ).lower()
+    return any(
+        marker in text
+        for marker in (
+            "upstream_overloaded",
+            "upstream overload",
+            "server overloaded",
+            "codex_bad_request",
+            "invalid request",
+            "invalid params",
+            "json-rpc error",
+        )
+    )
+
+
+def _phase_failure_human_action_description(run, detail: dict[str, Any]) -> str:
+    issue_ref = run.issue_identifier or run.issue_id
+    reason = detail.get("reason") or run.last_reason or "runtime_error"
+    error = detail.get("error") or run.last_error or reason
+    lines = [
+        "The managed Performer phase hit an execution failure that needs human review.",
+        "",
+        f"Parent issue: {issue_ref}",
+    ]
+    http_status = detail.get("http_status")
+    if http_status is not None:
+        lines.extend(["", f"Upstream HTTP status: {http_status}"])
+    lines.extend(
+        [
+            "",
+            "Last error:",
+            _safe_multiline_linear_value(error),
+            "",
+            f"Reason: {_safe_linear_value(reason)}",
+            f"Run ID: `{run.run_id}`",
+            f"attempt: {run.attempt}",
+            f"retry_count: {run.retry_count}",
+            f"crash_count: {run.crash_count}",
+            f"init_failure_count: {run.init_failure_count}",
+            f"overload_count: {run.overload_count}",
+            "",
+            "Human response:",
+            "(Add the answer or decision here when information is required.)",
+            "",
+            "When finished, move this child issue to Done.",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _phase_failure_error_is_summary(value: str) -> bool:
+    return value in {"upstream overload exhausted repeatedly", "codex init failed repeatedly"} or not value
+
+
 def _safe_linear_value(value: Any) -> str:
     text = str(value).replace("\r", " ").replace("\n", " ").strip()
     for marker in ("Bearer ", "token=", "access_token=", "refresh_token=", "api_key="):
         if marker in text:
             text = text.split(marker, 1)[0] + marker + "[redacted]"
     return text[:500]
+
+
+def _safe_multiline_linear_value(value: Any) -> str:
+    text = str(value).replace("\r", " ").strip()
+    for marker in ("Bearer ", "token=", "access_token=", "refresh_token=", "api_key="):
+        if marker in text:
+            text = text.split(marker, 1)[0] + marker + "[redacted]"
+    return text[:1000]
+
+
+def _sanitize_codex_profile(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    profile: dict[str, Any] = {}
+    model = str(value.get("model") or "").strip()
+    sandbox = str(value.get("sandbox") or "").strip()
+    if model:
+        profile["model"] = model
+    if sandbox:
+        profile["sandbox"] = sandbox
+    overrides = value.get("config_overrides")
+    if isinstance(overrides, list):
+        safe_overrides: list[str] = []
+        for item in overrides:
+            text = str(item).strip()
+            if not text or "=" not in text:
+                continue
+            key, raw_value = text.split("=", 1)
+            lowered_key = key.lower()
+            if any(marker in lowered_key for marker in ("api_key", "apikey", "token", "secret", "password")) and not raw_value.strip().startswith("$"):
+                continue
+            safe_overrides.append(text)
+        if safe_overrides:
+            profile["config_overrides"] = safe_overrides
+    return profile

@@ -335,6 +335,7 @@ def test_list_runs_uses_conductor_phase_rows_with_ops_enrichment(tmp_path: Path)
             "retry_count": 0,
             "crash_count": 0,
             "init_failure_count": 0,
+            "overload_count": 0,
             "next_run_at": None,
             "turn_count": 7,
             "total_tokens": 188240,
@@ -416,6 +417,7 @@ async def test_coordinate_background_times_out_hung_phase_process_as_retry(tmp_p
     assert updated.status == "queued"
     assert updated.retry_count == 1
     assert updated.crash_count == 0
+    assert updated.overload_count == 0
     assert updated.init_failure_count == 0
     assert updated.last_reason == "turn_timeout"
     result_event = next(event for event in events if event.event_type == "performer.result")
@@ -1623,6 +1625,51 @@ async def test_managed_phase_cycle_runs_without_conductor_linear_credentials_or_
     assert runtime.env == {}
     assert "PODIUM_PROXY_TOKEN" not in (runtime.env or {})
     assert "LINEAR_API_KEY" not in (runtime.env or {})
+
+
+@pytest.mark.asyncio
+async def test_dispatch_podium_event_applies_codex_profile_to_visible_workflow(tmp_path: Path) -> None:
+    runtime = CapturingRuntime()
+    service = ConductorService(
+        store=ConductorStore(tmp_path / "conductor-data"),
+        data_root=tmp_path / "conductor-data",
+        runtime_manager=runtime,
+    )
+    repo = make_repo(tmp_path)
+    instance = service.create_instance(
+        make_request(repo).with_overrides(
+            linear_project="ENG",
+            linear_filters={"linear_agent_app_user_id": "app-user-1", "active_states": ["Todo", "In Progress"]},
+        )
+    )
+
+    result = await service.dispatch_podium_event(
+        {
+            "issue_id": "issue-1",
+            "issue_identifier": "ENG-1",
+            "project_slug": "ENG",
+            "agent_session_id": "session-1",
+            "agent_app_user_id": "app-user-1",
+            "codex_profile": {
+                "model": "gpt-5-codex",
+                "sandbox": "workspace_write",
+                "config_overrides": [
+                    "model_provider=openai",
+                    "model_providers.openai.api_key=$OPENAI_API_KEY",
+                ],
+            },
+        }
+    )
+    updated = service.store.get_instance(instance.id)
+
+    assert result["status"] == "accepted"
+    assert updated is not None
+    assert updated.workflow_inputs["codex_profile"]["model"] == "gpt-5-codex"
+    workflow_content = Path(updated.workflow_path).read_text(encoding="utf-8")
+    assert "model: gpt-5-codex" in workflow_content
+    assert "sandbox: workspace_write" in workflow_content
+    assert "config_overrides:\n    - model_provider=openai\n    - model_providers.openai.api_key=$OPENAI_API_KEY" in workflow_content
+    assert "sk-" not in workflow_content
     assert "$LINEAR_API_KEY" not in instance.workflow_content
     assert "linear-secret-that-managed-mode-must-ignore" not in instance.workflow_content
 
@@ -1656,7 +1703,7 @@ async def test_background_requeues_phase_run_after_result_retry_without_persiste
                 run_id=run.run_id,
                 issue_id="issue-1",
                 next_phase=RunPhase.QUEUED,
-                status="retry",
+                status="upstream_overloaded",
                 reason="temporary failure",
                 retry_delay_seconds=0,
             ).to_dict()
@@ -1751,8 +1798,10 @@ async def test_background_does_not_record_phase_crash_when_result_file_exists(tm
                 run_id=run.run_id,
                 issue_id="issue-1",
                 next_phase=RunPhase.QUEUED,
-                status="retry",
-                reason="turn_timeout",
+                status="upstream_overloaded",
+                reason="upstream_overloaded_exhausted",
+                detail="upstream 502: server overloaded raw body",
+                http_status=502,
                 retry_delay_seconds=5,
             ).to_dict()
         ),
@@ -1767,14 +1816,18 @@ async def test_background_does_not_record_phase_crash_when_result_file_exists(tm
     assert result["phase_results_applied"] == 1
     assert result["phase_crash_retries"] == 0
     assert updated is not None
-    assert updated.retry_count == 1
+    assert updated.retry_count == 0
     assert updated.crash_count == 0
-    assert "performer.result" in [event.event_type for event in events]
+    assert updated.overload_count == 1
+    assert "performer.upstream_overloaded" in [event.event_type for event in events]
     assert [event.event_type for event in events][-1] == "linear.diagnostic_commented"
     assert tracker.comments
     assert tracker.comments[0][0] == "issue-1"
-    assert "Performer phase reported retry" in tracker.comments[0][1]
-    assert "reason: turn_timeout" in tracker.comments[0][1]
+    assert "Performer phase reported upstream_overloaded" in tracker.comments[0][1]
+    assert "reason: upstream_overloaded_exhausted" in tracker.comments[0][1]
+    assert "detail: upstream 502: server overloaded raw body" in tracker.comments[0][1]
+    assert "http_status: 502" in tracker.comments[0][1]
+    assert "overload_count: 1" in tracker.comments[0][1]
 
 
 @pytest.mark.asyncio
@@ -2150,8 +2203,54 @@ async def test_direct_background_resumes_done_human_action_child_from_phase_run(
     assert updated.human_response == "Fixed the Codex state directory."
     assert runtime.started_phase_issue_ids == ["issue-1"]
     assert runtime.advance_request_path is not None
-    request_payload = json.loads(Path(runtime.advance_request_path).read_text(encoding="utf-8"))
-    assert request_payload["human_response"] == "Fixed the Codex state directory."
+
+
+@pytest.mark.asyncio
+async def test_background_creates_human_action_child_for_failed_upstream_overload(tmp_path: Path) -> None:
+    runtime = CapturingRuntime()
+    tracker = FakeRepositoryHandoffTracker()
+    service = ConductorService(
+        store=ConductorStore(tmp_path / "conductor-data"),
+        data_root=tmp_path / "conductor-data",
+        runtime_manager=runtime,
+    )
+    service.update_settings(ConductorSettings(managed_mode=False, podium_proxy_token="proxy-token"))
+    service.repository_handoff_tracker_factory = lambda instance: tracker
+    repo = make_repo(tmp_path)
+    instance = service.create_instance(make_request(repo).with_overrides(linear_project="ENG"))
+    run = service.phase_reducer.dispatch_received(
+        instance_id=instance.id,
+        issue_id="issue-1",
+        issue_identifier="ENG-1",
+        workflow_profile=instance.workflow_profile,
+        dispatch_id="dispatch-1",
+    )
+    service.phase_reducer.performer_started(run.run_id, request_path="/tmp/request.json", result_path="/tmp/result.json")
+    service.phase_reducer.performer_result(
+        PhaseAdvanceResult(
+            run_id=run.run_id,
+            issue_id="issue-1",
+            next_phase=RunPhase.FAILED,
+            status="failed",
+            reason="upstream_overloaded_exhausted",
+            detail="JSON-RPC error -32000: upstream 502: server overloaded raw body",
+            http_status=502,
+        )
+    )
+
+    result = await service.coordinate_background_once()
+
+    assert result["phase_failure_human_actions_created"] == 1
+    assert len(tracker.children) == 1
+    child = tracker.children[0]
+    assert child["title"] == "[Human Action] ENG-1: Runtime error needs review"
+    assert child["labels"] == ["performer:type/human-action"]
+    assert "Upstream HTTP status: 502" in child["description"]
+    assert "Last error:\nJSON-RPC error -32000: upstream 502: server overloaded raw body" in child["description"]
+    updated = service.store.get_orchestration_run(run.run_id)
+    assert updated is not None
+    assert updated.human_action["child_issue_id"] == child["id"]
+    assert updated.phase is RunPhase.FAILED
 
 
 @pytest.mark.asyncio

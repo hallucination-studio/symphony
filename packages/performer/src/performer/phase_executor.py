@@ -202,6 +202,8 @@ class PhaseExecutor:
             reason=outcome.reason,
             retry_delay_seconds=outcome.retry_delay_seconds,
             human_action=outcome.human_action,
+            detail=outcome.detail,
+            http_status=outcome.http_status,
         )
 
     def _phase_result(
@@ -214,6 +216,8 @@ class PhaseExecutor:
         reason: str | None,
         retry_delay_seconds: int | None = None,
         human_action: dict[str, Any] | None = None,
+        detail: str | None = None,
+        http_status: int | None = None,
     ) -> PhaseAdvanceResult:
         return PhaseAdvanceResult(
             run_id=request.run_id,
@@ -222,6 +226,8 @@ class PhaseExecutor:
             status=status if status in PHASE_RESULT_STATUSES else "failed",
             reason=reason,
             retry_delay_seconds=retry_delay_seconds,
+            detail=detail,
+            http_status=http_status,
             human_action=human_action,
             workspace_path=self._phase_workspace_path(request),
             ops_snapshot_path=self._phase_ops_snapshot_path(request),

@@ -24,7 +24,7 @@ from performer_api.config import (
 from performer_api.models import BlockerRef, HumanInterventionEntry, Issue, RetryEntry, RunningEntry, utc_now
 from performer_api.phase import PhaseAdvanceRequest, RunPhase
 from performer.codex_client import CodexError
-from performer.orchestrator import Orchestrator, _retry_delay_seconds
+from performer.orchestrator import Orchestrator, _human_intervention_description, _retry_delay_seconds
 from performer.ops_telemetry import ExecutionTelemetryRecorder
 from performer_api.ops_store import OpsStore
 from performer_api.persistence import PersistenceStore, ops_snapshot_path_from_persistence_path
@@ -35,6 +35,39 @@ def test_retry_delay_seconds_rounds_up_with_phase_buffer() -> None:
         due_at = utc_now() + timedelta(seconds=2)
 
     assert _retry_delay_seconds(Entry()) >= 5
+
+
+def test_human_intervention_description_preserves_raw_error_and_http_status() -> None:
+    issue_obj = issue("MT-1")
+
+    description = _human_intervention_description(
+        issue_obj,
+        kind="runtime_error",
+        error="upstream 502: server overloaded raw body",
+        questions=[],
+        last_message=None,
+        http_status=502,
+    )
+
+    assert "Upstream HTTP status: 502" in description
+    assert "Last error:\nupstream 502: server overloaded raw body" in description
+
+
+def test_human_intervention_description_redacts_secret_like_raw_error() -> None:
+    issue_obj = issue("MT-1")
+    secret = "sk-test-secret-123456"
+
+    description = _human_intervention_description(
+        issue_obj,
+        kind="runtime_error",
+        error=f"upstream failed Authorization: Bearer {secret}",
+        questions=[],
+        last_message=None,
+        http_status=502,
+    )
+
+    assert secret not in description
+    assert "Bearer [REDACTED]" in description
 
 
 class FakeTracker:
@@ -553,6 +586,37 @@ async def test_phase_advance_dispatches_implementation_for_queued(tmp_path: Path
     assert result.next_phase == RunPhase.REVIEWING
     assert result.status == "reviewing"
     assert "thread_id" not in result.to_dict()
+
+
+@pytest.mark.asyncio
+async def test_phase_advance_maps_worker_upstream_overload_to_phase_result(tmp_path: Path) -> None:
+    class OverloadedRunner:
+        async def run_issue(
+            self, issue: Issue, attempt: int | None, on_event: Any, *, worker_host: str | None = None
+        ) -> None:
+            on_event({"event": "session_started", "session_id": "thread-1-turn-1", "cwd": f"/tmp/{issue.identifier}"})
+            raise CodexError(
+                "upstream_overloaded_exhausted",
+                "JSON-RPC error -32000: upstream 502: server overloaded raw body",
+                http_status=502,
+            )
+
+    tracker = FakeTracker()
+    tracker.refreshed = [issue("MT-1", state="In Progress", description=_implementation_evidence())]
+    orchestrator = Orchestrator(
+        replace(make_config(tmp_path), acceptance=AcceptanceConfig(enabled=True)),
+        tracker,
+        OverloadedRunner(),
+    )
+
+    result = await orchestrator.advance(phase_request(phase=RunPhase.QUEUED))
+
+    assert result.next_phase is RunPhase.QUEUED
+    assert result.status == "upstream_overloaded"
+    assert result.reason == "upstream_overloaded_exhausted"
+    assert result.detail == "JSON-RPC error -32000: upstream 502: server overloaded raw body"
+    assert result.http_status == 502
+    assert orchestrator.state.human_interventions == {}
 
 
 @pytest.mark.asyncio

@@ -455,6 +455,7 @@ def create_app(
                 "project_slug": "",
                 "linear_agent_app_user_id": "",
                 "workflow_profile": "task",
+                "codex_profile": {},
             },
         )
         return group_id
@@ -581,6 +582,7 @@ def create_app(
                 "project_slug": project_slug,
                 "linear_agent_app_user_id": str(payload.get("linear_agent_app_user_id") or payload.get("agent_app_user_id") or ""),
                 "workflow_profile": str(payload.get("workflow_profile") or "task"),
+                "codex_profile": sanitize_codex_profile(payload.get("codex_profile")),
             },
         )
         await state.save_enrollment_token(
@@ -1143,6 +1145,7 @@ class ManagedPodiumState:
                 "project_slug": str(raw_binding.get("project_slug") or raw_binding.get("linear_project") or ""),
                 "agent_app_user_id": str(raw_binding.get("agent_app_user_id") or raw_binding.get("linear_agent_app_user_id") or ""),
                 "workflow_profile": str(raw_binding.get("workflow_profile") or "task"),
+                "codex_profile": sanitize_codex_profile(raw_binding.get("codex_profile")),
                 "process_status": str(raw_binding.get("process_status") or ""),
                 "constraint_labels": [
                     str(label)
@@ -1159,6 +1162,7 @@ class ManagedPodiumState:
                 "project_slug": binding["project_slug"],
                 "linear_agent_app_user_id": binding["agent_app_user_id"],
                 "workflow_profile": binding["workflow_profile"],
+                "codex_profile": binding["codex_profile"],
                 "project_binding_id": binding_id,
             }
             instance_metrics = metrics.get(instance_id) if isinstance(metrics.get(instance_id), dict) else {}
@@ -1404,6 +1408,7 @@ class ManagedPodiumState:
                 "agent_app_user_id": event.get("agent_app_user_id") or "",
                 "routing_rule_id": group["id"],
                 "workflow_profile": group.get("workflow_profile") or "task",
+                "codex_profile": sanitize_codex_profile(group.get("codex_profile")),
                 "status": "queued",
                 "reason": "",
                 "runtime_phase": "",
@@ -1523,10 +1528,38 @@ def dispatch_public(dispatch: dict[str, Any]) -> dict[str, Any]:
         "agent_app_user_id": dispatch.get("agent_app_user_id") or "",
         "routing_rule_id": dispatch["routing_rule_id"],
         "workflow_profile": dispatch["workflow_profile"],
+        "codex_profile": sanitize_codex_profile(dispatch.get("codex_profile")),
         "status": dispatch["status"],
         "reason": dispatch.get("reason") or "",
         "runtime_phase": dispatch.get("runtime_phase") or "",
     }
+
+
+def sanitize_codex_profile(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    profile: dict[str, Any] = {}
+    model = str(value.get("model") or "").strip()
+    sandbox = str(value.get("sandbox") or "").strip()
+    if model:
+        profile["model"] = model
+    if sandbox:
+        profile["sandbox"] = sandbox
+    overrides = value.get("config_overrides")
+    if isinstance(overrides, list):
+        safe_overrides: list[str] = []
+        for item in overrides:
+            text = str(item).strip()
+            if not text or "=" not in text:
+                continue
+            key, raw_value = text.split("=", 1)
+            lowered_key = key.lower()
+            if any(marker in lowered_key for marker in ("api_key", "apikey", "token", "secret", "password")) and not raw_value.strip().startswith("$"):
+                continue
+            safe_overrides.append(text)
+        if safe_overrides:
+            profile["config_overrides"] = safe_overrides
+    return profile
 
 
 def runtime_belongs_to_workspace(

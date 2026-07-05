@@ -405,6 +405,8 @@ async def test_run_phase_advance_writes_result_file_atomically(tmp_path: Path, m
         "status": "reviewing",
         "reason": "phase=queued",
         "retry_delay_seconds": None,
+        "detail": None,
+        "http_status": None,
         "human_action": None,
         "workspace_path": str(tmp_path / "workspace" / "ENG-1"),
         "ops_snapshot_path": str(tmp_path / "state" / "ops.json"),
@@ -532,6 +534,128 @@ async def test_run_phase_advance_writes_init_failed_result_when_codex_init_fails
     assert result.status == "init_failed"
     assert payload["status"] == "init_failed"
     assert payload["reason"] == "codex_init_failed"
+
+
+@pytest.mark.asyncio
+async def test_run_phase_advance_preserves_codex_error_detail_and_http_status(tmp_path: Path, monkeypatch) -> None:
+    workflow = tmp_path / "WORKFLOW.md"
+    workflow.write_text("placeholder", encoding="utf-8")
+    request_path = tmp_path / "request.json"
+    result_path = tmp_path / "result.json"
+    request_path.write_text(
+        json.dumps(
+            PhaseAdvanceRequest(
+                run_id="run-1",
+                instance_id="inst-1",
+                issue_id="issue-123",
+                issue_identifier="ENG-1",
+                current_phase=RunPhase.QUEUED,
+                attempt=1,
+                workspace_context={},
+            ).to_dict()
+        ),
+        encoding="utf-8",
+    )
+
+    class InitFailingOrchestrator:
+        def __init__(self, *args, **kwargs):
+            self.workspace_manager = object()
+
+        def load_persisted_state(self):
+            pass
+
+        async def startup_terminal_workspace_cleanup(self, workspace_manager):
+            pass
+
+        async def advance(self, request):
+            raise cli.CodexError(
+                "codex_init_failed",
+                "upstream 502: server overloaded raw body",
+                http_status=502,
+            )
+
+        async def wait_for_idle(self):
+            pass
+
+    config = make_service_config(tmp_path, project_slug="MT", api_key="token", workspace="ws", command="codex")
+    monkeypatch.setattr(cli, "build_config_from_path", lambda path: config)
+    monkeypatch.setattr(cli, "validate_tracker_config", lambda tracker_config: None)
+    monkeypatch.setattr(cli, "create_tracker", lambda tracker_config: object())
+    monkeypatch.setattr(cli, "WorkspaceManager", lambda *args, **kwargs: object())
+    monkeypatch.setattr(cli, "AgentRunner", lambda *args, **kwargs: object())
+    monkeypatch.setattr(cli, "persistence_store_from_config", lambda config: object())
+    monkeypatch.setattr(cli, "build_acceptance_runner", lambda config: None)
+    monkeypatch.setattr(cli, "Orchestrator", InitFailingOrchestrator)
+
+    result = await cli.run_phase_advance(workflow, request_path, result_path)
+    payload = json.loads(result_path.read_text(encoding="utf-8"))
+
+    assert result.status == "init_failed"
+    assert result.reason == "codex_init_failed"
+    assert result.detail == "upstream 502: server overloaded raw body"
+    assert result.http_status == 502
+    assert payload["detail"] == "upstream 502: server overloaded raw body"
+    assert payload["http_status"] == 502
+
+
+@pytest.mark.asyncio
+async def test_run_phase_advance_maps_exhausted_upstream_overload_to_overload_status(tmp_path: Path, monkeypatch) -> None:
+    workflow = tmp_path / "WORKFLOW.md"
+    workflow.write_text("placeholder", encoding="utf-8")
+    request_path = tmp_path / "request.json"
+    result_path = tmp_path / "result.json"
+    request_path.write_text(
+        json.dumps(
+            PhaseAdvanceRequest(
+                run_id="run-1",
+                instance_id="inst-1",
+                issue_id="issue-123",
+                issue_identifier="ENG-1",
+                current_phase=RunPhase.QUEUED,
+                attempt=1,
+                workspace_context={},
+            ).to_dict()
+        ),
+        encoding="utf-8",
+    )
+
+    class OverloadedOrchestrator:
+        def __init__(self, *args, **kwargs):
+            self.workspace_manager = object()
+
+        def load_persisted_state(self):
+            pass
+
+        async def startup_terminal_workspace_cleanup(self, workspace_manager):
+            pass
+
+        async def advance(self, request):
+            raise cli.CodexError(
+                "upstream_overloaded_exhausted",
+                "JSON-RPC error -32000: upstream 502: server overloaded",
+                http_status=502,
+            )
+
+        async def wait_for_idle(self):
+            pass
+
+    config = make_service_config(tmp_path, project_slug="MT", api_key="token", workspace="ws", command="codex")
+    monkeypatch.setattr(cli, "build_config_from_path", lambda path: config)
+    monkeypatch.setattr(cli, "validate_tracker_config", lambda tracker_config: None)
+    monkeypatch.setattr(cli, "create_tracker", lambda tracker_config: object())
+    monkeypatch.setattr(cli, "WorkspaceManager", lambda *args, **kwargs: object())
+    monkeypatch.setattr(cli, "AgentRunner", lambda *args, **kwargs: object())
+    monkeypatch.setattr(cli, "persistence_store_from_config", lambda config: object())
+    monkeypatch.setattr(cli, "build_acceptance_runner", lambda config: None)
+    monkeypatch.setattr(cli, "Orchestrator", OverloadedOrchestrator)
+
+    result = await cli.run_phase_advance(workflow, request_path, result_path)
+
+    assert result.next_phase is RunPhase.QUEUED
+    assert result.status == "upstream_overloaded"
+    assert result.reason == "upstream_overloaded_exhausted"
+    assert result.detail == "JSON-RPC error -32000: upstream 502: server overloaded"
+    assert result.http_status == 502
 
 
 @pytest.mark.asyncio

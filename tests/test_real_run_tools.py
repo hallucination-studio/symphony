@@ -184,6 +184,10 @@ def test_real_symphony_e2e_patch_workflow_injects_codex_init_options(tmp_path: P
         init_backoff_max_ms=150,
         read_timeout_ms=2500,
         hard_turn_timeout_ms=30000,
+        overload_max_attempts=4,
+        overload_initial_delay_ms=125,
+        overload_max_delay_ms=1000,
+        config_overrides=["model_provider=openai"],
     )
 
     assert "  sdk_codex_bin: /tmp/codex-wrapper\n" in patched
@@ -192,6 +196,10 @@ def test_real_symphony_e2e_patch_workflow_injects_codex_init_options(tmp_path: P
     assert "  init_backoff_max_ms: 150\n" in patched
     assert "  read_timeout_ms: 2500\n" in patched
     assert "  hard_turn_timeout_ms: 30000\n" in patched
+    assert "  overload_max_attempts: 4\n" in patched
+    assert "  overload_initial_delay_ms: 125\n" in patched
+    assert "  overload_max_delay_ms: 1000\n" in patched
+    assert "  config_overrides:\n    - model_provider=openai\n" in patched
     assert "/old/codex" not in patched
 
 
@@ -276,6 +284,37 @@ def test_real_symphony_e2e_evidence_redacts_tokens(tmp_path: Path) -> None:
     assert '"proxy_token": "<redacted>"' in text
 
 
+def test_real_run_evidence_bundle_copies_codex_overload_probe(tmp_path: Path) -> None:
+    tool = load_tool("real_run_evidence_bundle")
+    instance_root = tmp_path / "instances" / "inst-1"
+    (instance_root / "state").mkdir(parents=True)
+    (instance_root / "logs").mkdir(parents=True)
+    (instance_root / "state" / "performer.json").write_text("{}", encoding="utf-8")
+    (instance_root / "logs" / "performer.log").write_text("", encoding="utf-8")
+    probe = tmp_path / "codex-overload-probe.json"
+    probe.write_text('{"pass": true, "overload_retry_count": 1}', encoding="utf-8")
+
+    manifest = tool.bundle(
+        type(
+            "Args",
+            (),
+            {
+                "instance_root": instance_root,
+                "out": tmp_path / "bundle",
+                "business_issue": None,
+                "linear_tree": None,
+                "observer": None,
+                "cleanup_before": None,
+                "cleanup_after": None,
+                "codex_overload_probe": probe,
+            },
+        )()
+    )
+
+    assert manifest["copied"]["codex_overload_probe"] is True
+    assert "codex-overload-probe.json" in manifest["files"]
+
+
 def test_real_codex_thread_resume_probe_summarizes_resume_and_fallback() -> None:
     tool = load_tool("real_codex_thread_resume_probe")
 
@@ -341,6 +380,172 @@ def test_real_codex_init_probe_recognizes_terminal_fast_failure() -> None:
     assert tool._scenario_passed(summary, "terminal_failed") is True
 
 
+def test_real_codex_overload_probe_summarizes_recovery() -> None:
+    tool = load_tool("real_codex_overload_probe")
+
+    summary = tool.summarize_events(
+        [
+            {"event": "codex_overload_retrying", "attempt": 2, "delay_ms": 250, "http_status": 502, "message": "upstream 502"},
+            {"event": "turn_started", "turn_id": "turn-1"},
+            {"event": "turn_completed", "turn_id": "turn-1"},
+        ]
+    )
+    summary.update({"outcome": "success"})
+
+    assert summary["overload_retry_count"] == 1
+    assert summary["http_statuses"] == [502]
+    assert tool.scenario_passed(summary, "overload_recovered") is True
+
+
+def test_real_codex_overload_probe_recognizes_exhaustion_and_terminal_fast_failure() -> None:
+    tool = load_tool("real_codex_overload_probe")
+
+    exhausted = tool.summarize_events(
+        [
+            {"event": "codex_overload_retrying", "attempt": 2, "delay_ms": 250, "http_status": 502, "message": "upstream 502"},
+            {"event": "codex_overload_exhausted", "attempts": 3, "http_status": 502, "message": "upstream 502"},
+        ]
+    )
+    exhausted.update({"outcome": "codex_error", "error_code": "upstream_overloaded_exhausted"})
+    terminal = tool.summarize_events(
+        [
+            {"event": "codex_request_failed_terminal", "code": "codex_bad_request", "http_status": 400, "message": "bad request"},
+        ]
+    )
+    terminal.update({"outcome": "codex_error", "error_code": "codex_bad_request"})
+
+    assert tool.scenario_passed(exhausted, "overload_exhausted") is True
+    assert tool.scenario_passed(terminal, "terminal_failed") is True
+
+
+def test_real_codex_overload_probe_fails_on_secret_leak() -> None:
+    tool = load_tool("real_codex_overload_probe")
+
+    summary = tool.summarize_events(
+        [
+            {"event": "codex_overload_retrying", "message": "Bearer sk-secret-value"},
+            {"event": "turn_completed"},
+        ]
+    )
+    summary.update({"outcome": "success"})
+
+    assert summary["secret_leak_found"] is True
+    assert tool.scenario_passed(summary, "overload_recovered") is False
+
+
+def test_codex_jsonrpc_fault_wrapper_injects_overload_then_proxies(tmp_path: Path) -> None:
+    tool = load_tool("codex_jsonrpc_fault_wrapper")
+    real_codex = tmp_path / "real-codex"
+    log_path = tmp_path / "wrapper.jsonl"
+    real_codex.write_text("#!/bin/sh\ncat\n", encoding="utf-8")
+    real_codex.chmod(0o755)
+
+    command = tool.build_real_command(
+        codex_bin=str(real_codex),
+        passthrough_args=["--config", "model_provider=openai", "app-server", "--listen", "stdio://"],
+    )
+    first = {"id": "1", "method": "turn/start", "params": {}}
+    second = {"id": "2", "method": "turn/start", "params": {}}
+    other = {"id": "3", "method": "thread/start", "params": {}}
+    state = tool.FaultState(
+        mode="overload",
+        target_method="turn/start",
+        fail_count=1,
+        http_status=502,
+        message="upstream 502: server overloaded",
+        log_path=log_path,
+    )
+
+    assert command == [str(real_codex), "--config", "model_provider=openai", "app-server", "--listen", "stdio://"]
+    assert tool.sanitized_config_overrides(command) == ["model_provider=openai"]
+    injected = tool.maybe_fault_response(first, state)
+    assert injected == {
+        "id": "1",
+        "error": {
+            "code": -32000,
+            "message": "upstream 502: server overloaded",
+            "data": {"codex_error_info": "server_overloaded", "httpStatusCode": 502},
+        },
+    }
+    assert tool.maybe_fault_response(second, state) is None
+    assert tool.maybe_fault_response(other, state) is None
+    log_text = log_path.read_text(encoding="utf-8")
+    assert "turn/start" in log_text
+    assert "server_overloaded" in log_text
+    assert "sk-" not in log_text
+
+
+def test_codex_jsonrpc_fault_wrapper_sanitizes_secret_config_values() -> None:
+    tool = load_tool("codex_jsonrpc_fault_wrapper")
+
+    assert tool.sanitized_config_overrides(
+        [
+            "/opt/homebrew/bin/codex",
+            "--config",
+            "model_provider=openai",
+            "--config",
+            "api_key=sk-secret",
+            "--config",
+            "token=$OPENAI_API_KEY",
+        ]
+    ) == ["model_provider=openai", "api_key=<redacted>", "token=$OPENAI_API_KEY"]
+
+
+def test_codex_jsonrpc_fault_wrapper_injects_terminal_bad_request(tmp_path: Path) -> None:
+    tool = load_tool("codex_jsonrpc_fault_wrapper")
+    log_path = tmp_path / "wrapper.jsonl"
+    state = tool.FaultState(
+        mode="invalid_params",
+        target_method="turn/start",
+        fail_count=5,
+        http_status=400,
+        message="terminal 400: invalid request shape",
+        log_path=log_path,
+    )
+
+    response = tool.maybe_fault_response({"id": "turn-1", "method": "turn/start"}, state)
+
+    assert response == {
+        "id": "turn-1",
+        "error": {
+            "code": -32602,
+            "message": "terminal 400: invalid request shape",
+            "data": {"httpStatusCode": 400},
+        },
+    }
+    assert tool.maybe_fault_response({"id": "turn-2", "method": "turn/start"}, state) == {
+        "id": "turn-2",
+        "error": {
+            "code": -32602,
+            "message": "terminal 400: invalid request shape",
+            "data": {"httpStatusCode": 400},
+        },
+    }
+    assert "invalid_params" in log_path.read_text(encoding="utf-8")
+
+
+def test_codex_jsonrpc_fault_wrapper_parses_sdk_passthrough_args() -> None:
+    tool = load_tool("codex_jsonrpc_fault_wrapper")
+
+    args = tool.parse_args(
+        [
+            "--real-codex-bin",
+            "/opt/homebrew/bin/codex",
+            "--mode",
+            "overload",
+            "--config",
+            "model_provider=openai",
+            "app-server",
+            "--listen",
+            "stdio://",
+        ]
+    )
+
+    assert args.real_codex_bin == "/opt/homebrew/bin/codex"
+    assert args.mode == "overload"
+    assert args.codex_args == ["--config", "model_provider=openai", "app-server", "--listen", "stdio://"]
+
+
 def test_real_symphony_e2e_detects_conductor_phase_human_action() -> None:
     tool = load_tool("real_symphony_e2e")
 
@@ -380,6 +585,98 @@ def test_real_symphony_e2e_detects_conductor_phase_human_action() -> None:
             "kind": "runtime_error",
         }
     ]
+
+
+def test_real_symphony_e2e_overload_failure_acceptance_detects_raw_status() -> None:
+    tool = load_tool("real_symphony_e2e")
+    run_result = {
+        "state": {"sessions": [], "retry_attempts": [], "continuations": [], "blocked": []},
+        "samples": [
+            {
+                "phase_runs": [
+                    {
+                        "run_id": "run-1",
+                        "phase": "queued",
+                        "status": "queued",
+                        "retry_count": 0,
+                        "crash_count": 0,
+                        "overload_count": 1,
+                        "last_reason": "upstream_overloaded_exhausted",
+                    },
+                    {
+                        "run_id": "run-1",
+                        "phase": "failed",
+                        "status": "failed",
+                        "retry_count": 0,
+                        "crash_count": 0,
+                        "overload_count": 2,
+                        "last_reason": "upstream overload exhausted repeatedly",
+                    },
+                ],
+            }
+        ],
+    }
+    tree = {
+        "children": {
+            "nodes": [
+                {
+                    "identifier": "HELL-2",
+                    "title": "[Human Action] HELL-1: Runtime error",
+                    "description": "Upstream HTTP status: 502\n\nLast error:\nJSON-RPC error -32000: upstream 502: server overloaded",
+                    "labels": {"nodes": [{"name": "performer:type/human-action"}]},
+                    "state": {"type": "unstarted"},
+                }
+            ]
+        }
+    }
+
+    summary = tool.audit_expected_failure_run(run_result, tree, expected="overload")
+
+    assert summary["pass"] is True
+    assert summary["max_overload_count"] == 2
+    assert summary["max_retry_count"] == 0
+    assert summary["max_crash_count"] == 0
+    assert summary["raw_error_in_linear"] is True
+    assert summary["http_status_in_linear"] is True
+
+
+def test_real_symphony_e2e_overload_failure_audit_reads_counters_from_child_description() -> None:
+    tool = load_tool("real_symphony_e2e")
+
+    summary = tool.audit_expected_failure_run(
+        {
+            "samples": [
+                {
+                    "phase_runs": [
+                        {
+                            "phase": "failed",
+                            "status": "failed",
+                            "last_reason": "upstream_overloaded_exhausted",
+                        }
+                    ]
+                }
+            ]
+        },
+        {
+            "children": {
+                "nodes": [
+                    {
+                        "title": "[Human Action] HELL-1",
+                        "description": (
+                            "Upstream HTTP status: 502\n\n"
+                            "Last error:\nJSON-RPC error -32000: upstream 502: server overloaded\n"
+                            "retry_count: 0\ncrash_count: 0\noverload_count: 6\n"
+                        ),
+                        "labels": {"nodes": [{"name": "performer:type/human-action"}]},
+                    }
+                ]
+            }
+        },
+        expected="overload",
+    )
+
+    assert summary["pass"] is True
+    assert summary["max_overload_count"] == 6
 
 
 def test_real_symphony_e2e_tracks_one_automatic_human_action_per_run() -> None:

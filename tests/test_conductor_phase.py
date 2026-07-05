@@ -214,6 +214,120 @@ def test_phase_reducer_requeues_retry_result_with_delay(tmp_path: Path) -> None:
     assert queued.last_reason == "temporary failure"
 
 
+def test_phase_reducer_preserves_raw_detail_and_http_status_on_retry(tmp_path: Path) -> None:
+    store = ConductorStore(tmp_path / "conductor-data")
+    reducer = PhaseReducer(store)
+    run = reducer.dispatch_received(
+        instance_id="inst-1",
+        issue_id="issue-1",
+        issue_identifier="ENG-1",
+        workflow_profile="default",
+        dispatch_id=None,
+    )
+    reducer.performer_started(run.run_id, request_path="/tmp/request.json", result_path="/tmp/result.json")
+
+    queued = reducer.performer_result(
+        PhaseAdvanceResult(
+            run_id=run.run_id,
+            issue_id="issue-1",
+            next_phase=RunPhase.QUEUED,
+            status="retry",
+            reason="upstream_overloaded_exhausted",
+            detail="upstream 502: server overloaded raw body",
+            http_status=502,
+            retry_delay_seconds=45,
+        ),
+        now=datetime(2026, 7, 4, tzinfo=timezone.utc),
+    )
+    events = store.list_orchestration_events(run.run_id)
+
+    assert queued.last_reason == "upstream_overloaded_exhausted"
+    assert queued.last_error == "upstream 502: server overloaded raw body"
+    assert events[-1].payload["detail"] == "upstream 502: server overloaded raw body"
+    assert events[-1].payload["http_status"] == 502
+
+
+def test_phase_reducer_counts_upstream_overload_independently(tmp_path: Path) -> None:
+    store = ConductorStore(tmp_path / "conductor-data")
+    reducer = PhaseReducer(store)
+    run = reducer.dispatch_received(
+        instance_id="inst-1",
+        issue_id="issue-1",
+        issue_identifier="ENG-1",
+        workflow_profile="default",
+        dispatch_id=None,
+    )
+    reducer.performer_started(run.run_id, request_path="/tmp/request.json", result_path="/tmp/result.json")
+
+    queued = reducer.performer_result(
+        PhaseAdvanceResult(
+            run_id=run.run_id,
+            issue_id="issue-1",
+            next_phase=RunPhase.QUEUED,
+            status="upstream_overloaded",
+            reason="upstream_overloaded_exhausted",
+            detail="JSON-RPC error -32000: upstream 502: server overloaded",
+            http_status=502,
+            retry_delay_seconds=1,
+        ),
+        now=datetime(2026, 7, 4, tzinfo=timezone.utc),
+    )
+    events = store.list_orchestration_events(run.run_id)
+
+    assert queued.phase is RunPhase.QUEUED
+    assert queued.status == RunStatus.QUEUED
+    assert queued.attempt == 2
+    assert queued.overload_count == 1
+    assert queued.retry_count == 0
+    assert queued.crash_count == 0
+    assert queued.init_failure_count == 0
+    assert queued.last_error == "JSON-RPC error -32000: upstream 502: server overloaded"
+    assert queued.next_run_at == "2026-07-04T00:00:05Z"
+    assert events[-1].event_type == "performer.upstream_overloaded"
+    assert events[-1].payload["overload_count"] == 1
+
+
+def test_phase_reducer_overload_circuit_breaker_is_separate_from_retry_budget(tmp_path: Path) -> None:
+    store = ConductorStore(tmp_path / "conductor-data")
+    reducer = PhaseReducer(store, overload_limit=1)
+    run = reducer.dispatch_received(
+        instance_id="inst-1",
+        issue_id="issue-1",
+        issue_identifier="ENG-1",
+        workflow_profile="default",
+        dispatch_id=None,
+    )
+    reducer.performer_started(run.run_id, request_path="/tmp/request-1.json", result_path="/tmp/result-1.json")
+    first = reducer.performer_result(
+        PhaseAdvanceResult(
+            run_id=run.run_id,
+            issue_id="issue-1",
+            next_phase=RunPhase.QUEUED,
+            status="upstream_overloaded",
+            reason="upstream_overloaded_exhausted",
+        )
+    )
+    reducer.performer_started(run.run_id, request_path="/tmp/request-2.json", result_path="/tmp/result-2.json")
+    failed = reducer.performer_result(
+        PhaseAdvanceResult(
+            run_id=run.run_id,
+            issue_id="issue-1",
+            next_phase=RunPhase.QUEUED,
+            status="upstream_overloaded",
+            reason="upstream_overloaded_exhausted",
+        )
+    )
+
+    assert first.phase is RunPhase.QUEUED
+    assert failed.phase is RunPhase.FAILED
+    assert failed.status == RunStatus.FAILED
+    assert failed.overload_count == 2
+    assert failed.retry_count == 0
+    assert failed.crash_count == 0
+    assert failed.init_failure_count == 0
+    assert failed.last_error == "upstream overload exhausted repeatedly"
+
+
 def test_phase_reducer_counts_retries_only_from_phase_results(tmp_path: Path) -> None:
     store = ConductorStore(tmp_path / "conductor-data")
     reducer = PhaseReducer(store)

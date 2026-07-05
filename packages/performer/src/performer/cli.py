@@ -124,6 +124,8 @@ async def run_phase_advance(
             timeout=phase_timeout_seconds,
         )
     except CodexError as exc:
+        detail = str(exc)
+        http_status = getattr(exc, "http_status", None)
         if exc.code == "codex_init_failed":
             result = PhaseAdvanceResult(
                 run_id=request.run_id,
@@ -131,6 +133,19 @@ async def run_phase_advance(
                 next_phase=RunPhase.QUEUED,
                 status="init_failed",
                 reason="codex_init_failed",
+                detail=detail,
+                http_status=http_status if isinstance(http_status, int) else None,
+                retry_delay_seconds=5,
+            )
+        elif exc.code == "upstream_overloaded_exhausted":
+            result = PhaseAdvanceResult(
+                run_id=request.run_id,
+                issue_id=request.issue_id,
+                next_phase=RunPhase.QUEUED,
+                status="upstream_overloaded",
+                reason=exc.code,
+                detail=detail,
+                http_status=http_status if isinstance(http_status, int) else None,
                 retry_delay_seconds=5,
             )
         elif exc.code in {"timeout", "request_timeout", "sdk_transport_error", "response_error", "rate_limit", "connection_error"}:
@@ -140,6 +155,8 @@ async def run_phase_advance(
                 next_phase=RunPhase.QUEUED,
                 status="retry",
                 reason=exc.code,
+                detail=detail,
+                http_status=http_status if isinstance(http_status, int) else None,
                 retry_delay_seconds=5,
             )
         else:

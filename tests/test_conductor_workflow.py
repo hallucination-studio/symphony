@@ -83,6 +83,40 @@ def test_generate_workflow_content_injects_managed_runtime_resources(tmp_path: P
     assert "linear_graphql" not in content
 
 
+def test_generate_workflow_content_renders_codex_profile_visible_and_parseable(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PODIUM_PROXY_TOKEN", "proxy-token")
+    instance = make_instance(tmp_path).with_updates(
+        workflow_inputs={
+            "goal": "Keep issues moving",
+            "codex_profile": {
+                "model": "gpt-5-codex",
+                "sandbox": "workspace_write",
+                "config_overrides": [
+                    "model_provider=openai",
+                    "model_providers.openai.api_key=$OPENAI_API_KEY",
+                ],
+            },
+        }
+    )
+
+    content = generate_workflow_content(instance)
+    workflow_path = tmp_path / "WORKFLOW.md"
+    workflow_path.write_text(content, encoding="utf-8")
+
+    assert "codex:\n  backend: sdk\n  linear_tool_mode: disabled\n  model: gpt-5-codex\n  sandbox: workspace_write\n  config_overrides:\n    - model_provider=openai\n    - model_providers.openai.api_key=$OPENAI_API_KEY\n" in content
+    assert "sk-" not in content
+    from performer_api.config import ServiceConfig
+    from performer_api.workflow import load_workflow
+
+    config = ServiceConfig.from_workflow(load_workflow(workflow_path), workflow_path)
+    assert config.codex.model == "gpt-5-codex"
+    assert config.codex.sandbox == "workspace_write"
+    assert config.codex.config_overrides == (
+        "model_provider=openai",
+        "model_providers.openai.api_key=$OPENAI_API_KEY",
+    )
+
+
 def test_task_profile_is_default_managed_profile_without_acceptance_gate(tmp_path: Path) -> None:
     instance = make_instance(tmp_path).with_updates(workflow_profile="task")
 

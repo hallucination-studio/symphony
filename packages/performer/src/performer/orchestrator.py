@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -894,6 +895,7 @@ class Orchestrator:
         except Exception as exc:
             session_id = self._session_id_for_log(issue.id)
             error_code = getattr(exc, "code", None)
+            http_status = getattr(exc, "http_status", None)
             logger.exception(
                 "performer_worker outcome=failed issue_id=%s issue_identifier=%s session_id=%s reason=%s issue=%s",
                 issue.id,
@@ -902,7 +904,13 @@ class Orchestrator:
                 exc,
                 issue.identifier,
             )
-            await self._finish_worker(issue.id, normal=False, error=str(exc), error_code=error_code if isinstance(error_code, str) else None)
+            await self._finish_worker(
+                issue.id,
+                normal=False,
+                error=str(exc),
+                error_code=error_code if isinstance(error_code, str) else None,
+                http_status=http_status if isinstance(http_status, int) else None,
+            )
         else:
             session_id = self._session_id_for_log(issue.id)
             logger.info(
@@ -914,7 +922,15 @@ class Orchestrator:
             )
             await self._finish_worker(issue.id, normal=True, error=None)
 
-    async def _finish_worker(self, issue_id: str, *, normal: bool, error: str | None, error_code: str | None = None) -> None:
+    async def _finish_worker(
+        self,
+        issue_id: str,
+        *,
+        normal: bool,
+        error: str | None,
+        error_code: str | None = None,
+        http_status: int | None = None,
+    ) -> None:
         entry = self.state.running.pop(issue_id, None)
         if not entry:
             return
@@ -1189,6 +1205,20 @@ class Orchestrator:
                     status="init_failed",
                     reason=error_code or "codex_init_failed",
                     retry_delay_seconds=5,
+                )
+                await self._sync_label_group(entry.issue.id, PHASE_LABELS["implementation_running"], prefix="performer:phase/")
+            elif error_code == "upstream_overloaded_exhausted":
+                self.state.claimed.discard(issue_id)
+                self.state.retry_attempts.pop(issue_id, None)
+                self.state.continuations.pop(issue_id, None)
+                self.phase_runtime.record_outcome(
+                    issue_id,
+                    next_phase=RunPhase.QUEUED,
+                    status="upstream_overloaded",
+                    reason=error_code,
+                    retry_delay_seconds=5,
+                    detail=error,
+                    http_status=http_status,
                 )
                 await self._sync_label_group(entry.issue.id, PHASE_LABELS["implementation_running"], prefix="performer:phase/")
             elif entry.human_blocked_reason:
@@ -1521,6 +1551,7 @@ class Orchestrator:
             error=error,
             questions=questions or [],
             last_message=last_message,
+            http_status=None,
         )
         try:
             child = await create_child(
@@ -2457,6 +2488,7 @@ def _human_intervention_description(
     error: str | None,
     questions: list[str],
     last_message: str | None,
+    http_status: int | None = None,
 ) -> str:
     reason = {
         "preflight_needs_input": "Performer cannot plan acceptance gates because required information is missing.",
@@ -2470,10 +2502,14 @@ def _human_intervention_description(
         "",
         f"Parent issue: {issue.identifier}",
     ]
-    if error:
-        lines.extend(["", "Last error:", error])
-    if last_message and last_message != error:
-        lines.extend(["", "Last observed message:", last_message])
+    if http_status is not None:
+        lines.extend(["", f"Upstream HTTP status: {http_status}"])
+    safe_error = _redact_human_text(error)
+    safe_last_message = _redact_human_text(last_message)
+    if safe_error:
+        lines.extend(["", "Last error:", safe_error])
+    if safe_last_message and safe_last_message != safe_error:
+        lines.extend(["", "Last observed message:", safe_last_message])
     if questions:
         lines.append("")
         lines.append("Questions:")
@@ -2492,6 +2528,15 @@ def _human_intervention_description(
         ]
     )
     return "\n".join(lines)
+
+
+def _redact_human_text(value: str | None) -> str | None:
+    if value is None:
+        return None
+    redacted = re.sub(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+", r"\1[REDACTED]", value)
+    redacted = re.sub(r"\bsk-[A-Za-z0-9_-]{8,}\b", "[REDACTED]", redacted)
+    redacted = re.sub(r"(?i)(api[_-]?key|token|secret)(\s*[=:]\s*)[^\s,;]+", r"\1\2[REDACTED]", redacted)
+    return redacted
 
 
 def _human_action_instruction(kind: str) -> str:

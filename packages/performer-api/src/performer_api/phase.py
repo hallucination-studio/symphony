@@ -25,6 +25,7 @@ PhaseStatus = Literal[
     "reviewing",
     "reworking",
     "skipped",
+    "upstream_overloaded",
 ]
 
 
@@ -68,6 +69,8 @@ class PhaseAdvanceResult:
     status: PhaseStatus | str
     reason: str | None = None
     retry_delay_seconds: int | None = None
+    detail: str | None = None
+    http_status: int | None = None
     human_action: dict[str, Any] | None = None
     workspace_path: str | None = None
     ops_snapshot_path: str | None = None
@@ -86,6 +89,8 @@ class PhaseAdvanceResult:
             status=str(payload.get("status") or "failed"),
             reason=_optional_str(payload.get("reason")),
             retry_delay_seconds=_optional_int(payload.get("retry_delay_seconds")),
+            detail=_optional_str(payload.get("detail")),
+            http_status=_optional_int(payload.get("http_status")),
             human_action=_optional_dict(payload.get("human_action")),
             workspace_path=_optional_str(payload.get("workspace_path")),
             ops_snapshot_path=_optional_str(payload.get("ops_snapshot_path")),

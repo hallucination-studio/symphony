@@ -66,6 +66,7 @@ class CodexConfig:
     model: str | None = None
     sdk_codex_bin: str | None = None
     sandbox: str | None = None
+    config_overrides: tuple[str, ...] = ()
     linear_tool_mode: str = "disabled"
     approval_policy: Any = None
     thread_sandbox: Any = None
@@ -77,6 +78,9 @@ class CodexConfig:
     init_max_attempts: int = 4
     init_backoff_ms: int = 500
     init_backoff_max_ms: int = 8_000
+    overload_max_attempts: int = 5
+    overload_initial_delay_ms: int = 250
+    overload_max_delay_ms: int = 8_000
 
 
 @dataclass(frozen=True)
@@ -404,6 +408,7 @@ def _codex_config(raw: dict[str, Any]) -> CodexConfig:
         model=_string(raw.get("model")),
         sdk_codex_bin=_string(raw.get("sdk_codex_bin")),
         sandbox=_string(raw.get("sandbox")),
+        config_overrides=_codex_config_overrides(raw.get("config_overrides")),
         linear_tool_mode=_string(raw.get("linear_tool_mode"), "disabled") or "disabled",
         approval_policy=raw.get("approval_policy"),
         thread_sandbox=raw.get("thread_sandbox"),
@@ -415,7 +420,32 @@ def _codex_config(raw: dict[str, Any]) -> CodexConfig:
         init_max_attempts=_int(raw.get("init_max_attempts"), 4, positive=True),
         init_backoff_ms=_int(raw.get("init_backoff_ms"), 500, positive=True),
         init_backoff_max_ms=_int(raw.get("init_backoff_max_ms"), 8_000, positive=True),
+        overload_max_attempts=_int(raw.get("overload_max_attempts"), 5, positive=True),
+        overload_initial_delay_ms=_int(raw.get("overload_initial_delay_ms"), 250, positive=True),
+        overload_max_delay_ms=_int(raw.get("overload_max_delay_ms"), 8_000, positive=True),
     )
+
+
+def _codex_config_overrides(value: Any) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        raise ConfigError("invalid_codex_config_override", "codex.config_overrides must be a list of KEY=VALUE strings")
+    overrides: list[str] = []
+    for item in value:
+        text = str(item).strip()
+        if not text or "=" not in text:
+            raise ConfigError("invalid_codex_config_override", "codex.config_overrides entries must be KEY=VALUE strings")
+        key, raw_value = text.split("=", 1)
+        if not key.strip() or raw_value == "":
+            raise ConfigError("invalid_codex_config_override", "codex.config_overrides entries must have non-empty keys and values")
+        lowered_key = key.lower()
+        if any(marker in lowered_key for marker in ("api_key", "apikey", "token", "secret", "password")):
+            stripped_value = raw_value.strip()
+            if not stripped_value.startswith("$"):
+                raise ConfigError("unsafe_codex_config_override", "secret-bearing codex.config_overrides values must use $VAR indirection")
+        overrides.append(text)
+    return tuple(overrides)
 
 
 def _server_config(raw: dict[str, Any]) -> ServerConfig:
