@@ -56,3 +56,20 @@ def test_phase_advance_result_round_trips_human_action_metadata() -> None:
     assert payload["next_phase"] == "awaiting_human"
     assert payload["human_action"]["child_identifier"] == "ENG-2"
     assert loaded == result
+
+
+def test_phase_advance_result_round_trips_init_failed_status() -> None:
+    result = PhaseAdvanceResult(
+        run_id="run-1",
+        issue_id="issue-1",
+        next_phase=RunPhase.QUEUED,
+        status="init_failed",
+        reason="codex init failed repeatedly",
+        retry_delay_seconds=15,
+    )
+
+    payload = result.to_dict()
+    loaded = PhaseAdvanceResult.from_dict(payload)
+
+    assert payload["status"] == "init_failed"
+    assert loaded == result

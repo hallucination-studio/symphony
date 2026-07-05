@@ -115,6 +115,7 @@ class CapturingRuntime:
         self.phase_issue_id: str | None = None
         self.started_phase_issue_ids: list[str | None] = []
         self.refreshed_instance = None
+        self.stop_calls: list[str] = []
 
     async def start(
         self,
@@ -132,6 +133,7 @@ class CapturingRuntime:
         return instance.with_updates(process_status="running", pid=4242)
 
     async def stop(self, instance):
+        self.stop_calls.append(instance.id)
         return instance.with_updates(process_status="stopped", pid=None)
 
     async def restart(self, instance, *, env: dict[str, str] | None = None):
@@ -332,6 +334,7 @@ def test_list_runs_uses_conductor_phase_rows_with_ops_enrichment(tmp_path: Path)
             "ack_status": "acked",
             "retry_count": 0,
             "crash_count": 0,
+            "init_failure_count": 0,
             "next_run_at": None,
             "turn_count": 7,
             "total_tokens": 188240,
@@ -341,6 +344,7 @@ def test_list_runs_uses_conductor_phase_rows_with_ops_enrichment(tmp_path: Path)
     ]
     assert detail["run"]["run_id"] == phase_run.run_id
     assert detail["run"]["phase"] == "done"
+    assert detail["run"]["init_failure_count"] == 0
     assert detail["telemetry"]["run"]["run_id"] == "run-1"
 
 
@@ -376,6 +380,53 @@ def test_list_runs_exposes_human_action_metadata_from_phase_rows(tmp_path: Path)
         "child_url": "https://linear.test/ENG-2",
         "kind": "runtime_error",
     }
+
+
+@pytest.mark.asyncio
+async def test_coordinate_background_times_out_hung_phase_process_as_retry(tmp_path: Path) -> None:
+    service = make_service(tmp_path)
+    runtime = CapturingRuntime()
+    tracker = FakeRepositoryHandoffTracker()
+    service.runtime_manager = runtime
+    service.repository_handoff_tracker_factory = lambda instance: tracker
+    repo = make_repo(tmp_path)
+    instance = service.create_instance(make_request(repo))
+    instance = await service._start_direct_phase_issue(
+        instance,
+        issue_id="issue-1",
+        issue_identifier="ENG-1",
+    )
+    service.store.update_instance(instance)
+    run = service.store.get_orchestration_run_by_issue(instance.id, "issue-1")
+    assert run is not None
+    with service.store.connect() as connection:
+        connection.execute(
+            "UPDATE orchestration_events SET created_at = ? WHERE run_id = ? AND event_type = 'performer.started'",
+            ("2026-07-04T00:00:00Z", run.run_id),
+        )
+
+    result = await service.coordinate_background_once()
+    updated = service.store.get_orchestration_run(run.run_id)
+    events = service.store.list_orchestration_events(run.run_id)
+
+    assert result["phase_timeouts"] == 1
+    assert runtime.stop_calls == [instance.id]
+    assert updated is not None
+    assert updated.phase is RunPhase.QUEUED
+    assert updated.status == "queued"
+    assert updated.retry_count == 1
+    assert updated.crash_count == 0
+    assert updated.init_failure_count == 0
+    assert updated.last_reason == "turn_timeout"
+    result_event = next(event for event in events if event.event_type == "performer.result")
+    assert result_event.payload["status"] == "retry"
+    assert result_event.payload["reason"] == "turn_timeout"
+    assert events[-1].event_type == "linear.diagnostic_commented"
+    assert tracker.comments
+    assert tracker.comments[0][0] == "issue-1"
+    assert "Performer phase timed out" in tracker.comments[0][1]
+    assert "retry_count: 1" in tracker.comments[0][1]
+    assert "crash_count: 0" in tracker.comments[0][1]
 
 
 @pytest.mark.asyncio
@@ -1632,11 +1683,13 @@ async def test_background_requeues_phase_run_after_result_retry_without_persiste
 @pytest.mark.asyncio
 async def test_background_records_phase_crash_without_performer_persistence(tmp_path: Path) -> None:
     runtime = CapturingRuntime()
+    tracker = FakeRepositoryHandoffTracker()
     service = ConductorService(
         store=ConductorStore(tmp_path / "conductor-data"),
         data_root=tmp_path / "conductor-data",
         runtime_manager=runtime,
     )
+    service.repository_handoff_tracker_factory = lambda instance: tracker
     repo = make_repo(tmp_path)
     instance = service.create_instance(
         make_request(repo).with_overrides(linear_project="ENG", linear_filters={"linear_agent_app_user_id": "app-user-1"})
@@ -1661,6 +1714,67 @@ async def test_background_records_phase_crash_without_performer_persistence(tmp_
     assert crashed.phase is RunPhase.QUEUED
     assert crashed.status == "queued"
     assert crashed.crash_count == 1
+    assert tracker.comments
+    assert tracker.comments[0][0] == "issue-1"
+    assert "Performer phase process exited" in tracker.comments[0][1]
+    assert "crash_count: 1" in tracker.comments[0][1]
+
+
+@pytest.mark.asyncio
+async def test_background_does_not_record_phase_crash_when_result_file_exists(tmp_path: Path) -> None:
+    runtime = CapturingRuntime()
+    tracker = FakeRepositoryHandoffTracker()
+    service = ConductorService(
+        store=ConductorStore(tmp_path / "conductor-data"),
+        data_root=tmp_path / "conductor-data",
+        runtime_manager=runtime,
+    )
+    service.repository_handoff_tracker_factory = lambda instance: tracker
+    repo = make_repo(tmp_path)
+    instance = service.create_instance(
+        make_request(repo).with_overrides(linear_project="ENG", linear_filters={"linear_agent_app_user_id": "app-user-1"})
+    )
+    await service.dispatch_podium_event(
+        {
+            "issue_id": "issue-1",
+            "issue_identifier": "ENG-1",
+            "project_slug": "ENG",
+            "agent_app_user_id": "app-user-1",
+        }
+    )
+    run = service.store.get_orchestration_run_by_issue(instance.id, "issue-1")
+    assert run is not None
+    assert run.result_path is not None
+    Path(run.result_path).write_text(
+        json.dumps(
+            PhaseAdvanceResult(
+                run_id=run.run_id,
+                issue_id="issue-1",
+                next_phase=RunPhase.QUEUED,
+                status="retry",
+                reason="turn_timeout",
+                retry_delay_seconds=5,
+            ).to_dict()
+        ),
+        encoding="utf-8",
+    )
+    service.store.update_instance(instance.with_updates(process_status="exited", pid=None, last_exit_code=1))
+
+    result = await service.coordinate_background_once()
+    updated = service.store.get_orchestration_run(run.run_id)
+    events = service.store.list_orchestration_events(run.run_id)
+
+    assert result["phase_results_applied"] == 1
+    assert result["phase_crash_retries"] == 0
+    assert updated is not None
+    assert updated.retry_count == 1
+    assert updated.crash_count == 0
+    assert "performer.result" in [event.event_type for event in events]
+    assert [event.event_type for event in events][-1] == "linear.diagnostic_commented"
+    assert tracker.comments
+    assert tracker.comments[0][0] == "issue-1"
+    assert "Performer phase reported retry" in tracker.comments[0][1]
+    assert "reason: turn_timeout" in tracker.comments[0][1]
 
 
 @pytest.mark.asyncio

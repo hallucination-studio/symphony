@@ -364,13 +364,14 @@ class ConductorStore:
                       process_pid,
                       crash_count,
                       retry_count,
+                      init_failure_count,
                       next_run_at,
                       ack_status,
                       acked_at,
                       created_at,
                       updated_at
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     _orchestration_run_values(run),
                 )
@@ -519,6 +520,7 @@ class ConductorStore:
                     process_pid = ?,
                     crash_count = ?,
                     retry_count = ?,
+                    init_failure_count = ?,
                     next_run_at = ?,
                     ack_status = ?,
                     acked_at = ?,
@@ -542,6 +544,7 @@ class ConductorStore:
                     updated.process_pid,
                     updated.crash_count,
                     updated.retry_count,
+                    updated.init_failure_count,
                     updated.next_run_at,
                     updated.ack_status,
                     updated.acked_at,
@@ -693,6 +696,7 @@ class ConductorStore:
                   process_pid INTEGER,
                   crash_count INTEGER NOT NULL DEFAULT 0,
                   retry_count INTEGER NOT NULL DEFAULT 0,
+                  init_failure_count INTEGER NOT NULL DEFAULT 0,
                   next_run_at TEXT,
                   ack_status TEXT,
                   acked_at TEXT,
@@ -728,6 +732,7 @@ class ConductorStore:
             )
             _ensure_column(connection, "instances", "restart_count", "INTEGER NOT NULL DEFAULT 0")
             _ensure_column(connection, "instances", "restart_window_started_at", "TEXT")
+            _ensure_column(connection, "orchestration_runs", "init_failure_count", "INTEGER NOT NULL DEFAULT 0")
             _ensure_column(connection, "instances", "restart_next_at", "TEXT")
 
     def _set_runtime_action_status(self, action_id: str, *, status: str, error: str | None = None) -> None:
@@ -878,6 +883,7 @@ def _orchestration_run_values(run: OrchestrationRun) -> tuple[Any, ...]:
         run.process_pid,
         run.crash_count,
         run.retry_count,
+        run.init_failure_count,
         run.next_run_at,
         run.ack_status,
         run.acked_at,
@@ -908,6 +914,7 @@ def _orchestration_run_from_row(row: sqlite3.Row) -> OrchestrationRun:
         process_pid=row["process_pid"],
         crash_count=int(row["crash_count"] or 0),
         retry_count=int(row["retry_count"] or 0),
+        init_failure_count=int(row["init_failure_count"] or 0),
         next_run_at=row["next_run_at"],
         ack_status=row["ack_status"],
         acked_at=row["acked_at"],

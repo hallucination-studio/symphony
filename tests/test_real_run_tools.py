@@ -165,6 +165,36 @@ def test_real_symphony_e2e_replaces_existing_gate_mode() -> None:
     assert "gate_planner_mode: strict" not in patched
 
 
+def test_real_symphony_e2e_patch_workflow_injects_codex_init_options(tmp_path: Path) -> None:
+    tool = load_tool("real_symphony_e2e")
+    workflow_path = tmp_path / "WORKFLOW.md"
+    workflow_path.write_text(
+        "agent:\n  max_concurrent_agents: 10\n  max_turns: 20\n\n"
+        "persistence:\n  path: state/performer.json\n\n"
+        "codex:\n  backend: sdk\n  sdk_codex_bin: /old/codex\n",
+        encoding="utf-8",
+    )
+
+    patched = tool.patch_workflow(
+        workflow_path,
+        acceptance_gates=False,
+        sdk_codex_bin="/tmp/codex-wrapper",
+        init_max_attempts=3,
+        init_backoff_ms=100,
+        init_backoff_max_ms=150,
+        read_timeout_ms=2500,
+        hard_turn_timeout_ms=30000,
+    )
+
+    assert "  sdk_codex_bin: /tmp/codex-wrapper\n" in patched
+    assert "  init_max_attempts: 3\n" in patched
+    assert "  init_backoff_ms: 100\n" in patched
+    assert "  init_backoff_max_ms: 150\n" in patched
+    assert "  read_timeout_ms: 2500\n" in patched
+    assert "  hard_turn_timeout_ms: 30000\n" in patched
+    assert "/old/codex" not in patched
+
+
 def test_real_symphony_e2e_simulated_webhook_sets_issue_delegate() -> None:
     tool = load_tool("real_symphony_e2e")
     linear = {
@@ -274,6 +304,41 @@ def test_real_codex_thread_resume_probe_uses_structured_prompt() -> None:
     assert "changed_files" in prompt
     assert "remaining_risks" in prompt
     assert "ready_for_review" in prompt
+
+
+def test_real_codex_init_probe_summarizes_transient_recovery() -> None:
+    tool = load_tool("real_codex_init_probe")
+
+    summary = tool.summarize_events(
+        [
+            {"event": "codex_init_starting", "attempt": 1},
+            {"event": "codex_init_retrying", "attempt": 2, "delay_ms": 500, "message": "connection_error"},
+            {"event": "codex_init_starting", "attempt": 2},
+            {"event": "codex_init_succeeded", "attempts": 2, "thread_id": "thread-1"},
+        ]
+    )
+    summary.update({"outcome": "success"})
+
+    assert summary["init_start_count"] == 2
+    assert summary["init_retry_count"] == 1
+    assert summary["init_succeeded"] is True
+    assert tool._scenario_passed(summary, "transient_recovered") is True
+
+
+def test_real_codex_init_probe_recognizes_terminal_fast_failure() -> None:
+    tool = load_tool("real_codex_init_probe")
+
+    summary = tool.summarize_events(
+        [
+            {"event": "codex_init_starting", "attempt": 1},
+            {"event": "codex_init_failed", "attempts": 1, "message": "codex_sdk_not_installed"},
+        ]
+    )
+    summary.update({"outcome": "codex_error", "error_code": "codex_sdk_not_installed"})
+
+    assert summary["init_start_count"] == 1
+    assert summary["init_failed"] is True
+    assert tool._scenario_passed(summary, "terminal_failed") is True
 
 
 def test_real_symphony_e2e_detects_conductor_phase_human_action() -> None:

@@ -42,6 +42,7 @@ class OrchestrationRun:
     process_pid: int | None = None
     crash_count: int = 0
     retry_count: int = 0
+    init_failure_count: int = 0
     next_run_at: str | None = None
     ack_status: str | None = None
     acked_at: str | None = None
@@ -77,6 +78,7 @@ class OrchestrationRun:
             process_pid=_optional_int(payload.get("process_pid")),
             crash_count=_int(payload.get("crash_count"), default=0),
             retry_count=_int(payload.get("retry_count"), default=0),
+            init_failure_count=_int(payload.get("init_failure_count"), default=0),
             next_run_at=_optional_str(payload.get("next_run_at")),
             ack_status=_optional_str(payload.get("ack_status")),
             acked_at=_optional_str(payload.get("acked_at")),
@@ -126,9 +128,10 @@ class PhaseTransitionError(ValueError):
 
 
 class PhaseReducer:
-    def __init__(self, store: Any, *, crash_limit: int = 3):
+    def __init__(self, store: Any, *, crash_limit: int = 3, init_failure_limit: int = 5):
         self.store = store
         self.crash_limit = crash_limit
+        self.init_failure_limit = init_failure_limit
 
     def dispatch_received(
         self,
@@ -209,13 +212,51 @@ class PhaseReducer:
         elif result.next_phase in {RunPhase.REVIEWING, RunPhase.REWORKING}:
             updates["status"] = RunStatus.QUEUED
         elif result.next_phase is RunPhase.QUEUED:
-            delay = max(result.retry_delay_seconds or 0, 5)
-            if result.reason == "already_running_or_claimed":
-                delay = max(delay, 30)
-            updates["status"] = RunStatus.QUEUED
-            updates["attempt"] = run.attempt + 1
-            updates["retry_count"] = run.retry_count + 1
-            updates["next_run_at"] = _iso(timestamp + timedelta(seconds=delay))
+            if result.status == "init_failed":
+                init_failure_count = run.init_failure_count + 1
+                updates["attempt"] = run.attempt + 1
+                updates["init_failure_count"] = init_failure_count
+                updates["last_error"] = result.reason
+                if _is_terminal_init_failure(result.reason):
+                    updates["phase"] = RunPhase.FAILED
+                    updates["status"] = RunStatus.FAILED
+                    updates["last_error"] = result.reason
+                    updates["ack_status"] = "pending"
+                    updates["next_run_at"] = None
+                    to_phase = RunPhase.FAILED
+                elif init_failure_count > self.init_failure_limit:
+                    updates["phase"] = RunPhase.FAILED
+                    updates["status"] = RunStatus.FAILED
+                    updates["last_error"] = "codex init failed repeatedly"
+                    updates["ack_status"] = "pending"
+                    updates["next_run_at"] = None
+                    to_phase = RunPhase.FAILED
+                else:
+                    delay = max(result.retry_delay_seconds or 0, _init_failure_delay_seconds(init_failure_count))
+                    updates["status"] = RunStatus.QUEUED
+                    updates["next_run_at"] = _iso(timestamp + timedelta(seconds=delay))
+                    to_phase = RunPhase.QUEUED
+                updated = self.store.update_orchestration_run(run.run_id, **updates)
+                self._event(
+                    run,
+                    "performer.init_failed",
+                    to_phase=to_phase,
+                    reason=result.reason,
+                    payload={
+                        **result.to_dict(),
+                        "init_failure_count": init_failure_count,
+                        "init_failure_limit": self.init_failure_limit,
+                    },
+                )
+                return updated
+            else:
+                delay = max(result.retry_delay_seconds or 0, 5)
+                if result.reason == "already_running_or_claimed":
+                    delay = max(delay, 30)
+                updates["status"] = RunStatus.QUEUED
+                updates["attempt"] = run.attempt + 1
+                updates["retry_count"] = run.retry_count + 1
+                updates["next_run_at"] = _iso(timestamp + timedelta(seconds=delay))
         else:
             raise PhaseTransitionError(f"Unsupported result phase {result.next_phase.value}")
         updated = self.store.update_orchestration_run(run.run_id, **updates)
@@ -388,3 +429,18 @@ def _now() -> datetime:
 
 def _iso(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _init_failure_delay_seconds(count: int) -> int:
+    return min(5 * (2 ** (max(1, count) - 1)), 60)
+
+
+def _is_terminal_init_failure(reason: str | None) -> bool:
+    return reason in {
+        "codex_sdk_not_installed",
+        "invalid_sdk_codex_bin",
+        "invalid_workspace_cwd",
+        "sdk_missing_thread_start",
+        "sdk_missing_thread_resume",
+        "unsupported_sdk_worker_host",
+    }

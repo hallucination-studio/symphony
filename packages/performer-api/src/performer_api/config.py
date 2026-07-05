@@ -74,6 +74,9 @@ class CodexConfig:
     hard_turn_timeout_ms: int = 3_600_000
     read_timeout_ms: int = 5_000
     stall_timeout_ms: int = 300_000
+    init_max_attempts: int = 4
+    init_backoff_ms: int = 500
+    init_backoff_max_ms: int = 8_000
 
 
 @dataclass(frozen=True)
@@ -409,6 +412,9 @@ def _codex_config(raw: dict[str, Any]) -> CodexConfig:
         hard_turn_timeout_ms=_int(raw.get("hard_turn_timeout_ms"), _int(raw.get("turn_timeout_ms"), 3_600_000)),
         read_timeout_ms=_int(raw.get("read_timeout_ms"), 5_000, positive=True),
         stall_timeout_ms=_int(raw.get("stall_timeout_ms"), 300_000),
+        init_max_attempts=_int(raw.get("init_max_attempts"), 4, positive=True),
+        init_backoff_ms=_int(raw.get("init_backoff_ms"), 500, positive=True),
+        init_backoff_max_ms=_int(raw.get("init_backoff_max_ms"), 8_000, positive=True),
     )
 
 

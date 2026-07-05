@@ -893,6 +893,7 @@ class Orchestrator:
             raise
         except Exception as exc:
             session_id = self._session_id_for_log(issue.id)
+            error_code = getattr(exc, "code", None)
             logger.exception(
                 "performer_worker outcome=failed issue_id=%s issue_identifier=%s session_id=%s reason=%s issue=%s",
                 issue.id,
@@ -901,7 +902,7 @@ class Orchestrator:
                 exc,
                 issue.identifier,
             )
-            await self._finish_worker(issue.id, normal=False, error=str(exc))
+            await self._finish_worker(issue.id, normal=False, error=str(exc), error_code=error_code if isinstance(error_code, str) else None)
         else:
             session_id = self._session_id_for_log(issue.id)
             logger.info(
@@ -913,7 +914,7 @@ class Orchestrator:
             )
             await self._finish_worker(issue.id, normal=True, error=None)
 
-    async def _finish_worker(self, issue_id: str, *, normal: bool, error: str | None) -> None:
+    async def _finish_worker(self, issue_id: str, *, normal: bool, error: str | None, error_code: str | None = None) -> None:
         entry = self.state.running.pop(issue_id, None)
         if not entry:
             return
@@ -1178,7 +1179,19 @@ class Orchestrator:
             next_attempt = max(entry.retry_attempt + 1, 1)
             retry_error = f"worker exited: {error}"
             self._mark_codex_thread_terminal(entry, status="failed")
-            if entry.human_blocked_reason:
+            if _is_codex_init_error_code(error_code):
+                self.state.claimed.discard(issue_id)
+                self.state.retry_attempts.pop(issue_id, None)
+                self.state.continuations.pop(issue_id, None)
+                self.phase_runtime.record_outcome(
+                    issue_id,
+                    next_phase=RunPhase.QUEUED,
+                    status="init_failed",
+                    reason=error_code or "codex_init_failed",
+                    retry_delay_seconds=5,
+                )
+                await self._sync_label_group(entry.issue.id, PHASE_LABELS["implementation_running"], prefix="performer:phase/")
+            elif entry.human_blocked_reason:
                 await self._create_human_intervention_for_entry(
                     entry,
                     kind="runtime_permission",
@@ -1754,6 +1767,13 @@ class Orchestrator:
                 error=failure_reason,
                 resume_strategy="retry",
             )
+            self.phase_runtime.record_outcome(
+                issue_id,
+                next_phase=RunPhase.QUEUED,
+                status="retry",
+                reason=failure_reason,
+                retry_delay_seconds=5,
+            )
         self._persist_state()
 
     def _finish_open_ops_for_issue(self, issue_id: str, *, status: str, failure_summary: str | None) -> None:
@@ -2230,6 +2250,18 @@ def _retry_delay_seconds(entry: Any) -> int:
     if remaining <= 0:
         return 0
     return max(math.ceil(remaining), 5)
+
+
+def _is_codex_init_error_code(code: str | None) -> bool:
+    return code in {
+        "codex_init_failed",
+        "codex_sdk_not_installed",
+        "invalid_sdk_codex_bin",
+        "invalid_workspace_cwd",
+        "sdk_missing_thread_start",
+        "sdk_missing_thread_resume",
+        "unsupported_sdk_worker_host",
+    }
 
 
 def _status_message_from_event(event: dict[str, Any]) -> str | None:

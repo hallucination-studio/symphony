@@ -23,6 +23,7 @@ from performer_api.config import (
 )
 from performer_api.models import BlockerRef, HumanInterventionEntry, Issue, RetryEntry, RunningEntry, utc_now
 from performer_api.phase import PhaseAdvanceRequest, RunPhase
+from performer.codex_client import CodexError
 from performer.orchestrator import Orchestrator, _retry_delay_seconds
 from performer.ops_telemetry import ExecutionTelemetryRecorder
 from performer_api.ops_store import OpsStore
@@ -1630,6 +1631,37 @@ async def test_acceptance_todo_preflight_creates_marker_plan_and_moves_to_in_pro
 
 
 @pytest.mark.asyncio
+async def test_phase_advance_maps_acceptance_preflight_codex_init_failure_to_init_failed(tmp_path: Path) -> None:
+    class InitFailingGatePlanner:
+        async def plan_gates(self, **kwargs: Any) -> str:
+            raise CodexError("codex_init_failed", "sdk_transport_error: upstream unavailable")
+
+    tracker = FakeTracker(candidates=[issue("MT-1", delegate_id="agent-user-1")])
+    tracker.refreshed = [issue("MT-1", delegate_id="agent-user-1")]
+    orchestrator = Orchestrator(
+        make_config_with_acceptance(tmp_path),
+        tracker,
+        FakeRunner(),
+        gate_planner=InitFailingGatePlanner(),
+    )
+
+    result = await orchestrator.advance(
+        PhaseAdvanceRequest(
+            run_id="run-1",
+            instance_id="inst-1",
+            issue_id="mt-1",
+            issue_identifier="MT-1",
+            current_phase=RunPhase.QUEUED,
+            attempt=1,
+        )
+    )
+
+    assert result.next_phase is RunPhase.QUEUED
+    assert result.status == "init_failed"
+    assert result.reason == "codex_init_failed"
+
+
+@pytest.mark.asyncio
 async def test_acceptance_todo_preflight_reuses_existing_gate_children(
     tmp_path: Path,
 ) -> None:
@@ -2899,6 +2931,11 @@ async def test_stall_detection_cancels_and_retries(tmp_path: Path) -> None:
 
     assert orchestrator.state.human_interventions["mt-1"].kind == "runtime_error"
     assert orchestrator.state.human_interventions["mt-1"].error == "stalled"
+    outcome = orchestrator.phase_runtime.pop_recorded_outcome("mt-1")
+    assert outcome is not None
+    assert outcome.next_phase is RunPhase.QUEUED
+    assert outcome.status == "retry"
+    assert outcome.reason == "stalled"
 
 
 @pytest.mark.asyncio
@@ -2954,6 +2991,11 @@ async def test_hard_turn_timeout_cancels_even_when_events_keep_arriving(tmp_path
 
     assert orchestrator.state.human_interventions["mt-1"].kind == "runtime_error"
     assert orchestrator.state.human_interventions["mt-1"].error == "turn_timeout"
+    outcome = orchestrator.phase_runtime.pop_recorded_outcome("mt-1")
+    assert outcome is not None
+    assert outcome.next_phase is RunPhase.QUEUED
+    assert outcome.status == "retry"
+    assert outcome.reason == "turn_timeout"
 
 
 @pytest.mark.asyncio

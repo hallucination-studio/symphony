@@ -110,7 +110,20 @@ class PhaseExecutor:
         host = self.host
         reason = host.dispatch_skip_reason_for_event(issue)
         if reason == "acceptance_preflight_required":
-            await host._acceptance_preflight(issue)
+            try:
+                await host._acceptance_preflight(issue)
+            except Exception as exc:
+                code = getattr(exc, "code", None)
+                if _is_codex_init_error_code(code):
+                    return self._phase_result(
+                        request,
+                        issue_id=issue.id,
+                        next_phase=RunPhase.QUEUED,
+                        status="init_failed",
+                        reason=str(code),
+                        retry_delay_seconds=5,
+                    )
+                raise
             outcome = host.phase_runtime.pop_recorded_outcome(issue.id)
             if outcome is not None:
                 return self._phase_result_from_outcome(request, issue, outcome)
@@ -228,3 +241,15 @@ class PhaseExecutor:
         if self.host.config.persistence.path is None:
             return None
         return str(ops_snapshot_path_from_persistence_path(self.host.config.persistence.path))
+
+
+def _is_codex_init_error_code(code: Any) -> bool:
+    return code in {
+        "codex_init_failed",
+        "codex_sdk_not_installed",
+        "invalid_sdk_codex_bin",
+        "invalid_workspace_cwd",
+        "sdk_missing_thread_start",
+        "sdk_missing_thread_resume",
+        "unsupported_sdk_worker_host",
+    }

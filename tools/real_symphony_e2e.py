@@ -478,11 +478,34 @@ def make_fixture_repo(path: Path) -> Path:
     return path
 
 
-def patch_workflow(workflow_path: Path, *, acceptance_gates: bool, permission_approval_probe: bool = False) -> str:
+def patch_workflow(
+    workflow_path: Path,
+    *,
+    acceptance_gates: bool,
+    permission_approval_probe: bool = False,
+    sdk_codex_bin: str | None = None,
+    init_max_attempts: int | None = None,
+    init_backoff_ms: int | None = None,
+    init_backoff_max_ms: int | None = None,
+    read_timeout_ms: int | None = None,
+    hard_turn_timeout_ms: int | None = None,
+) -> str:
     workflow = workflow_path.read_text(encoding="utf-8")
-    codex_bin = shutil.which("codex")
+    codex_bin = sdk_codex_bin or shutil.which("codex")
     if codex_bin and "  sdk_codex_bin:" not in workflow:
         workflow = workflow.replace("codex:\n", f"codex:\n  sdk_codex_bin: {codex_bin}\n", 1)
+    elif codex_bin:
+        workflow = _replace_or_insert_codex_key(workflow, "sdk_codex_bin", codex_bin)
+    if init_max_attempts is not None:
+        workflow = _replace_or_insert_codex_key(workflow, "init_max_attempts", str(init_max_attempts))
+    if init_backoff_ms is not None:
+        workflow = _replace_or_insert_codex_key(workflow, "init_backoff_ms", str(init_backoff_ms))
+    if init_backoff_max_ms is not None:
+        workflow = _replace_or_insert_codex_key(workflow, "init_backoff_max_ms", str(init_backoff_max_ms))
+    if read_timeout_ms is not None:
+        workflow = _replace_or_insert_codex_key(workflow, "read_timeout_ms", str(read_timeout_ms))
+    if hard_turn_timeout_ms is not None:
+        workflow = _replace_or_insert_codex_key(workflow, "hard_turn_timeout_ms", str(hard_turn_timeout_ms))
     workflow = workflow.replace(
         "  max_concurrent_agents: 10\n  max_turns: 20\n",
         "  max_concurrent_agents: 1\n  max_turns: 2\n" if acceptance_gates else "  max_concurrent_agents: 1\n  max_turns: 1\n",
@@ -553,6 +576,33 @@ def patch_workflow(workflow_path: Path, *, acceptance_gates: bool, permission_ap
             "Performer will move it to review, run the gate child issue, create evidence, and close the tree if the gate passes.\n"
         )
     return workflow
+
+
+def _replace_or_insert_codex_key(workflow: str, key: str, value: str) -> str:
+    lines = workflow.splitlines()
+    output: list[str] = []
+    in_codex = False
+    inserted = False
+    key_prefix = f"  {key}:"
+    for line in lines:
+        if line.startswith("codex:"):
+            in_codex = True
+            output.append(line)
+            continue
+        if in_codex and line and not line.startswith(" "):
+            if not inserted:
+                output.append(f"  {key}: {value}")
+                inserted = True
+            in_codex = False
+        if in_codex and line.startswith(key_prefix):
+            if not inserted:
+                output.append(f"  {key}: {value}")
+                inserted = True
+            continue
+        output.append(line)
+    if in_codex and not inserted:
+        output.append(f"  {key}: {value}")
+    return "\n".join(output) + ("\n" if workflow.endswith("\n") else "")
 
 
 def patch_e2e_gate_mode(workflow: str, *, gate_mode: str) -> str:
@@ -1432,6 +1482,12 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
             Path(instance["workflow_path"]),
             acceptance_gates=args.acceptance_gates,
             permission_approval_probe=args.permission_approval_probe,
+            sdk_codex_bin=args.sdk_codex_bin,
+            init_max_attempts=args.init_max_attempts,
+            init_backoff_ms=args.init_backoff_ms,
+            init_backoff_max_ms=args.init_backoff_max_ms,
+            read_timeout_ms=args.read_timeout_ms,
+            hard_turn_timeout_ms=args.hard_turn_timeout_ms,
         )
         if args.acceptance_gates:
             workflow = patch_e2e_gate_mode(workflow, gate_mode=args.e2e_gate_mode)
@@ -1763,6 +1819,12 @@ def parser() -> argparse.ArgumentParser:
     arg_parser.add_argument("--stage-timeout", type=int, default=120)
     arg_parser.add_argument("--permission-approval-probe", action="store_true")
     arg_parser.add_argument("--crash-recovery-probe", action="store_true")
+    arg_parser.add_argument("--sdk-codex-bin")
+    arg_parser.add_argument("--init-max-attempts", type=int)
+    arg_parser.add_argument("--init-backoff-ms", type=int)
+    arg_parser.add_argument("--init-backoff-max-ms", type=int)
+    arg_parser.add_argument("--read-timeout-ms", type=int)
+    arg_parser.add_argument("--hard-turn-timeout-ms", type=int)
     arg_parser.add_argument(
         "--simulate-agent-webhook",
         action="store_true",

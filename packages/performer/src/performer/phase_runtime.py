@@ -12,6 +12,7 @@ PHASE_RESULT_STATUSES: set[str] = {
     "completed",
     "failed",
     "awaiting_human",
+    "init_failed",
     "retry",
     "reviewing",
     "reworking",

@@ -35,6 +35,7 @@ from performer_api.phase import PhaseAdvanceRequest, PhaseAdvanceResult, RunPhas
 from performer_api.persistence import PersistenceStore, PersistedSession, PersistedState
 from performer_api.labels import TYPE_LABELS
 from performer_api.models import normalize_state_key, utc_now
+from performer_api.workflow import load_workflow
 
 
 WORKSPACE_INIT_EXCLUDES = {
@@ -692,6 +693,7 @@ class ConductorService:
         direct_dispatches_received = 0 if managed_mode else await self._poll_direct_dispatches()
         phase_runs_started = await self._start_due_orchestration_runs()
         phase_results_applied = await self._apply_phase_result_files()
+        phase_timeouts = await self._record_phase_timeouts()
         phase_crash_retries, phase_crash_failures = await self._record_phase_crashes()
         phase_human_actions = await self._coordinate_phase_human_actions()
         if phase_human_actions["completed"]:
@@ -719,6 +721,7 @@ class ConductorService:
             "direct_dispatches_received": direct_dispatches_received,
             "phase_runs_started": phase_runs_started,
             "phase_results_applied": phase_results_applied,
+            "phase_timeouts": phase_timeouts,
             "phase_crash_retries": phase_crash_retries,
             "phase_crash_failures": phase_crash_failures,
             "phase_human_actions_completed": phase_human_actions["completed"],
@@ -915,9 +918,11 @@ class ConductorService:
             if not isinstance(payload, dict):
                 continue
             try:
-                self.phase_reducer.performer_result(PhaseAdvanceResult.from_dict(payload))
+                result = PhaseAdvanceResult.from_dict(payload)
+                self.phase_reducer.performer_result(result)
             except PhaseTransitionError:
                 continue
+            await self._comment_phase_result_diagnostic(run.run_id, result)
             path.unlink(missing_ok=True)
             applied += 1
         return applied
@@ -939,6 +944,7 @@ class ConductorService:
                 updated = self.phase_reducer.performer_crashed(run.run_id, exit_code=refreshed.last_exit_code)
             except PhaseTransitionError:
                 continue
+            await self._comment_phase_crash_diagnostic(updated, exit_code=refreshed.last_exit_code)
             if updated.phase is RunPhase.FAILED:
                 failures += 1
                 self.store.update_instance(
@@ -952,6 +958,158 @@ class ConductorService:
             else:
                 retries += 1
         return retries, failures
+
+    async def _record_phase_timeouts(self) -> int:
+        timed_out = 0
+        runs = self.store.list_orchestration_runs(phases={RunPhase.IMPLEMENTING, RunPhase.REVIEWING, RunPhase.REWORKING})
+        now = datetime.now(timezone.utc)
+        for run in runs:
+            instance = self.store.get_instance(run.instance_id)
+            if instance is None:
+                continue
+            started_at = self._phase_started_at(run.run_id)
+            if started_at is None:
+                continue
+            timeout_seconds = self._phase_timeout_seconds(instance)
+            if timeout_seconds is None:
+                continue
+            if (now - started_at).total_seconds() <= timeout_seconds:
+                continue
+            refreshed = self.get_instance(instance.id) or instance
+            await self.runtime_manager.stop(refreshed)
+            try:
+                result = PhaseAdvanceResult(
+                    run_id=run.run_id,
+                    issue_id=run.issue_id,
+                    next_phase=RunPhase.QUEUED,
+                    status="retry",
+                    reason="turn_timeout",
+                    retry_delay_seconds=5,
+                )
+                self.phase_reducer.performer_result(result)
+            except PhaseTransitionError:
+                continue
+            await self._comment_phase_timeout_diagnostic(run.run_id)
+            timed_out += 1
+        return timed_out
+
+    def _phase_started_at(self, run_id: str) -> datetime | None:
+        for event in reversed(self.store.list_orchestration_events(run_id)):
+            if event.event_type != "performer.started":
+                continue
+            return _parse_iso(event.created_at)
+        return None
+
+    def _phase_timeout_seconds(self, instance: InstanceRecord) -> float | None:
+        try:
+            raw = load_workflow(Path(instance.workflow_path)).config
+            codex = raw.get("codex") if isinstance(raw.get("codex"), dict) else {}
+        except Exception:
+            return 3_665
+        turn_timeout_ms = _config_int(codex.get("turn_timeout_ms"), 3_600_000)
+        hard_turn_timeout_ms = _config_int(codex.get("hard_turn_timeout_ms"), turn_timeout_ms)
+        read_timeout_ms = _config_int(codex.get("read_timeout_ms"), 5_000)
+        hard_turn_timeout_ms = max(0, hard_turn_timeout_ms)
+        read_timeout_ms = max(0, read_timeout_ms)
+        if hard_turn_timeout_ms <= 0 and read_timeout_ms <= 0:
+            return None
+        return (hard_turn_timeout_ms + read_timeout_ms + 5_000) / 1000
+
+    async def _comment_phase_result_diagnostic(self, run_id: str, result: PhaseAdvanceResult) -> None:
+        updated = self.store.get_orchestration_run(run_id)
+        if updated is None:
+            return
+        reason = result.reason or updated.last_reason
+        if result.status not in {"retry", "init_failed", "failed"}:
+            return
+        title = f"Performer phase reported {result.status}"
+        await self._comment_phase_diagnostic(
+            updated,
+            kind="result",
+            dedupe_key=f"result:{updated.attempt}:{updated.retry_count}:{updated.init_failure_count}:{result.status}:{reason or ''}",
+            title=title,
+            reason=reason,
+            extra={
+                "next_phase": result.next_phase.value,
+                "retry_delay_seconds": result.retry_delay_seconds,
+            },
+        )
+
+    async def _comment_phase_timeout_diagnostic(self, run_id: str) -> None:
+        updated = self.store.get_orchestration_run(run_id)
+        if updated is None:
+            return
+        await self._comment_phase_diagnostic(
+            updated,
+            kind="timeout",
+            dedupe_key=f"timeout:{updated.attempt}:{updated.retry_count}:turn_timeout",
+            title="Performer phase timed out",
+            reason="turn_timeout",
+            extra={"timeout_accounting": "retry_count incremented; crash_count and init_failure_count unchanged"},
+        )
+
+    async def _comment_phase_crash_diagnostic(self, run, *, exit_code: int | None) -> None:
+        await self._comment_phase_diagnostic(
+            run,
+            kind="crash",
+            dedupe_key=f"crash:{run.attempt}:{run.crash_count}:{exit_code}",
+            title="Performer phase process exited",
+            reason=run.last_reason or "performer_crashed",
+            extra={"exit_code": exit_code},
+        )
+
+    async def _comment_phase_diagnostic(
+        self,
+        run,
+        *,
+        kind: str,
+        dedupe_key: str,
+        title: str,
+        reason: str | None,
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        if self._phase_diagnostic_event_recorded(run.run_id, dedupe_key):
+            return
+        instance = self.store.get_instance(run.instance_id)
+        if instance is None:
+            return
+        tracker = self.repository_handoff_tracker_factory(instance)
+        comment_issue = getattr(tracker, "comment_issue", None)
+        if not callable(comment_issue):
+            return
+        body = _phase_diagnostic_comment(title, run, reason=reason, instance=instance, extra=extra or {})
+        try:
+            result = await comment_issue(run.issue_id, body)
+        except Exception as exc:
+            self.store.append_orchestration_event(
+                run_id=run.run_id,
+                instance_id=run.instance_id,
+                issue_id=run.issue_id,
+                event_type="linear.diagnostic_comment_failed",
+                from_phase=run.phase,
+                to_phase=run.phase,
+                reason=kind,
+                payload={"dedupe_key": dedupe_key, "error": _safe_linear_value(exc)},
+            )
+            return
+        self.store.append_orchestration_event(
+            run_id=run.run_id,
+            instance_id=run.instance_id,
+            issue_id=run.issue_id,
+            event_type="linear.diagnostic_commented",
+            from_phase=run.phase,
+            to_phase=run.phase,
+            reason=kind,
+            payload={"dedupe_key": dedupe_key, "comment_result": result},
+        )
+
+    def _phase_diagnostic_event_recorded(self, run_id: str, dedupe_key: str) -> bool:
+        for event in self.store.list_orchestration_events(run_id):
+            if event.event_type != "linear.diagnostic_commented":
+                continue
+            if event.payload.get("dedupe_key") == dedupe_key:
+                return True
+        return False
 
     async def _coordinate_phase_human_actions(self) -> dict[str, int]:
         if self._managed_mode_enabled():
@@ -1951,6 +2109,7 @@ class ConductorService:
             "ack_status": run.ack_status,
             "retry_count": run.retry_count,
             "crash_count": run.crash_count,
+            "init_failure_count": run.init_failure_count,
             "next_run_at": run.next_run_at,
             "turn_count": _int(telemetry_run.get("turn_count")),
             "total_tokens": _int(telemetry_run.get("total_tokens")),
@@ -2295,6 +2454,7 @@ def _phase_runtime_row(run) -> dict[str, Any]:
         "last_error": run.last_error,
         "retry_count": run.retry_count,
         "crash_count": run.crash_count,
+        "init_failure_count": run.init_failure_count,
         "next_run_at": run.next_run_at,
         "ack_status": run.ack_status,
         "created_at": run.created_at,
@@ -2366,6 +2526,19 @@ def _int(value: Any) -> int:
     if isinstance(value, int):
         return value
     return 0
+
+
+def _config_int(value: Any, default: int) -> int:
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value.strip())
+        except ValueError:
+            return default
+    return default
 
 
 def _optional_int(value: Any, default: int | None) -> int | None:
@@ -2578,3 +2751,46 @@ def _repository_handoff_comment(report: dict[str, Any], *, child: dict[str, Any]
             "Performer produced the local handoff bundle only. Conductor created this integration follow-up; no commit, push, or merge was performed.",
         ]
     )
+
+
+def _phase_diagnostic_comment(
+    title: str,
+    run,
+    *,
+    reason: str | None,
+    instance: InstanceRecord,
+    extra: dict[str, Any],
+) -> str:
+    issue_ref = run.issue_identifier or run.issue_id
+    lines = [
+        f"{title} for {issue_ref}.",
+        "",
+        f"run_id: `{run.run_id}`",
+        f"phase: `{run.phase.value}`",
+        f"status: `{run.status}`",
+        f"reason: {_safe_linear_value(reason or run.last_reason or 'unknown')}",
+        f"attempt: {run.attempt}",
+        f"retry_count: {run.retry_count}",
+        f"crash_count: {run.crash_count}",
+        f"init_failure_count: {run.init_failure_count}",
+    ]
+    for key, value in extra.items():
+        if value is None:
+            continue
+        lines.append(f"{key}: {_safe_linear_value(value)}")
+    lines.extend(
+        [
+            "",
+            f"Local log: `{instance.log_path}`",
+            "No secret values were included in this diagnostic.",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _safe_linear_value(value: Any) -> str:
+    text = str(value).replace("\r", " ").replace("\n", " ").strip()
+    for marker in ("Bearer ", "token=", "access_token=", "refresh_token=", "api_key="):
+        if marker in text:
+            text = text.split(marker, 1)[0] + marker + "[redacted]"
+    return text[:500]

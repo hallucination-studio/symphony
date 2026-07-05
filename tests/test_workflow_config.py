@@ -99,6 +99,10 @@ codex:
   sdk_codex_bin: /usr/local/bin/codex
   sandbox: workspace_write
   linear_tool_mode: disabled
+  read_timeout_ms: 2500
+  init_max_attempts: 6
+  init_backoff_ms: 250
+  init_backoff_max_ms: 2000
 """,
     )
 
@@ -109,6 +113,10 @@ codex:
     assert config.codex.sdk_codex_bin == "/usr/local/bin/codex"
     assert config.codex.sandbox == "workspace_write"
     assert config.codex.linear_tool_mode == "disabled"
+    assert config.codex.read_timeout_ms == 2500
+    assert config.codex.init_max_attempts == 6
+    assert config.codex.init_backoff_ms == 250
+    assert config.codex.init_backoff_max_ms == 2000
 
 
 def test_service_config_parses_completion_verification_extension(tmp_path: Path) -> None:

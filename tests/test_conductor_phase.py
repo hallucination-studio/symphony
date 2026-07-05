@@ -255,6 +255,139 @@ def test_phase_reducer_counts_retries_only_from_phase_results(tmp_path: Path) ->
     assert second_retry.crash_count == 0
 
 
+def test_phase_reducer_counts_init_failures_independently_from_retries_and_crashes(tmp_path: Path) -> None:
+    store = ConductorStore(tmp_path / "conductor-data")
+    reducer = PhaseReducer(store, init_failure_limit=5)
+    run = reducer.dispatch_received(
+        instance_id="inst-1",
+        issue_id="issue-1",
+        issue_identifier="ENG-1",
+        workflow_profile="default",
+        dispatch_id=None,
+    )
+    reducer.performer_started(run.run_id, request_path="/tmp/request.json", result_path="/tmp/result.json")
+
+    queued = reducer.performer_result(
+        PhaseAdvanceResult(
+            run_id=run.run_id,
+            issue_id="issue-1",
+            next_phase=RunPhase.QUEUED,
+            status="init_failed",
+            reason="codex_init_failed",
+            retry_delay_seconds=1,
+        ),
+        now=datetime(2026, 7, 4, tzinfo=timezone.utc),
+    )
+    events = store.list_orchestration_events(run.run_id)
+
+    assert queued.phase is RunPhase.QUEUED
+    assert queued.status == RunStatus.QUEUED
+    assert queued.attempt == 2
+    assert queued.init_failure_count == 1
+    assert queued.retry_count == 0
+    assert queued.crash_count == 0
+    assert queued.next_run_at == "2026-07-04T00:00:05Z"
+    assert events[-1].event_type == "performer.init_failed"
+    assert events[-1].payload["init_failure_count"] == 1
+
+
+def test_phase_reducer_init_failure_circuit_breaker_is_separate_from_retry_budget(tmp_path: Path) -> None:
+    store = ConductorStore(tmp_path / "conductor-data")
+    reducer = PhaseReducer(store, init_failure_limit=2)
+    run = reducer.dispatch_received(
+        instance_id="inst-1",
+        issue_id="issue-1",
+        issue_identifier="ENG-1",
+        workflow_profile="default",
+        dispatch_id=None,
+    )
+
+    reducer.performer_started(run.run_id, request_path="/tmp/request-1.json", result_path="/tmp/result-1.json")
+    first = reducer.performer_result(
+        PhaseAdvanceResult(
+            run_id=run.run_id,
+            issue_id="issue-1",
+            next_phase=RunPhase.QUEUED,
+            status="init_failed",
+            reason="codex_init_failed",
+        )
+    )
+    reducer.performer_started(run.run_id, request_path="/tmp/request-2.json", result_path="/tmp/result-2.json")
+    retry = reducer.performer_result(
+        PhaseAdvanceResult(
+            run_id=run.run_id,
+            issue_id="issue-1",
+            next_phase=RunPhase.QUEUED,
+            status="retry",
+            reason="verification_failed",
+            retry_delay_seconds=5,
+        )
+    )
+    reducer.performer_started(run.run_id, request_path="/tmp/request-3.json", result_path="/tmp/result-3.json")
+    second = reducer.performer_result(
+        PhaseAdvanceResult(
+            run_id=run.run_id,
+            issue_id="issue-1",
+            next_phase=RunPhase.QUEUED,
+            status="init_failed",
+            reason="codex_init_failed",
+        )
+    )
+    reducer.performer_started(run.run_id, request_path="/tmp/request-4.json", result_path="/tmp/result-4.json")
+    failed = reducer.performer_result(
+        PhaseAdvanceResult(
+            run_id=run.run_id,
+            issue_id="issue-1",
+            next_phase=RunPhase.QUEUED,
+            status="init_failed",
+            reason="codex_init_failed",
+        )
+    )
+
+    assert first.init_failure_count == 1
+    assert retry.retry_count == 1
+    assert retry.init_failure_count == 1
+    assert second.init_failure_count == 2
+    assert second.phase is RunPhase.QUEUED
+    assert failed.phase is RunPhase.FAILED
+    assert failed.status == RunStatus.FAILED
+    assert failed.init_failure_count == 3
+    assert failed.retry_count == 1
+    assert failed.crash_count == 0
+    assert failed.last_error == "codex init failed repeatedly"
+
+
+def test_phase_reducer_terminal_init_failure_fails_fast_without_retry_budget(tmp_path: Path) -> None:
+    store = ConductorStore(tmp_path / "conductor-data")
+    reducer = PhaseReducer(store, init_failure_limit=5)
+    run = reducer.dispatch_received(
+        instance_id="inst-1",
+        issue_id="issue-1",
+        issue_identifier="ENG-1",
+        workflow_profile="default",
+        dispatch_id=None,
+    )
+    reducer.performer_started(run.run_id, request_path="/tmp/request.json", result_path="/tmp/result.json")
+
+    failed = reducer.performer_result(
+        PhaseAdvanceResult(
+            run_id=run.run_id,
+            issue_id="issue-1",
+            next_phase=RunPhase.QUEUED,
+            status="init_failed",
+            reason="invalid_sdk_codex_bin",
+        )
+    )
+
+    assert failed.phase is RunPhase.FAILED
+    assert failed.status == RunStatus.FAILED
+    assert failed.init_failure_count == 1
+    assert failed.retry_count == 0
+    assert failed.crash_count == 0
+    assert failed.next_run_at is None
+    assert failed.last_error == "invalid_sdk_codex_bin"
+
+
 def test_phase_reducer_requeues_retry_result_with_minimum_delay(tmp_path: Path) -> None:
     store = ConductorStore(tmp_path / "conductor-data")
     reducer = PhaseReducer(store)

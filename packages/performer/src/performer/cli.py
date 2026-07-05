@@ -4,11 +4,13 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 from pathlib import Path
 
 from .acceptance import CodexAcceptanceRunner, SmokeAcceptanceRunner
+from .codex_client import CodexError
 from performer_api.config import ServiceConfig, load_env_file
-from performer_api.phase import PhaseAdvanceRequest, PhaseAdvanceResult
+from performer_api.phase import PhaseAdvanceRequest, PhaseAdvanceResult, RunPhase
 from .linear import LinearTracker
 from .orchestrator import Orchestrator
 from performer_api.persistence import PersistenceStore
@@ -110,12 +112,63 @@ async def run_phase_advance(
         raise RuntimeError(f"phase advance request must be a JSON object: {advance_request_path}")
     request = PhaseAdvanceRequest.from_dict(request_payload)
     orchestrator = _build_one_shot_orchestrator(workflow_path)
+    orchestrator_config = getattr(orchestrator, "config", None)
+    if orchestrator_config is None:
+        orchestrator_config = build_config_from_path(workflow_path)
+    phase_timeout_seconds = _phase_advance_timeout_seconds(orchestrator_config)
     orchestrator.load_persisted_state()
     await orchestrator.startup_terminal_workspace_cleanup(orchestrator.workspace_manager)
-    result = await orchestrator.advance(request)
-    await orchestrator.wait_for_idle()
+    try:
+        result = await asyncio.wait_for(
+            _advance_and_wait_for_idle(orchestrator, request),
+            timeout=phase_timeout_seconds,
+        )
+    except CodexError as exc:
+        if exc.code == "codex_init_failed":
+            result = PhaseAdvanceResult(
+                run_id=request.run_id,
+                issue_id=request.issue_id,
+                next_phase=RunPhase.QUEUED,
+                status="init_failed",
+                reason="codex_init_failed",
+                retry_delay_seconds=5,
+            )
+        elif exc.code in {"timeout", "request_timeout", "sdk_transport_error", "response_error", "rate_limit", "connection_error"}:
+            result = PhaseAdvanceResult(
+                run_id=request.run_id,
+                issue_id=request.issue_id,
+                next_phase=RunPhase.QUEUED,
+                status="retry",
+                reason=exc.code,
+                retry_delay_seconds=5,
+            )
+        else:
+            raise
+    except (asyncio.TimeoutError, TimeoutError):
+        result = PhaseAdvanceResult(
+            run_id=request.run_id,
+            issue_id=request.issue_id,
+            next_phase=RunPhase.QUEUED,
+            status="retry",
+            reason="turn_timeout",
+            retry_delay_seconds=5,
+        )
     _write_json_atomic(phase_result_path, result.to_dict())
     return result
+
+
+async def _advance_and_wait_for_idle(orchestrator: Orchestrator, request: PhaseAdvanceRequest) -> PhaseAdvanceResult:
+    result = await orchestrator.advance(request)
+    await orchestrator.wait_for_idle()
+    return result
+
+
+def _phase_advance_timeout_seconds(config: ServiceConfig) -> float | None:
+    hard_turn_timeout_ms = max(0, int(config.codex.hard_turn_timeout_ms or 0))
+    read_timeout_ms = max(0, int(config.codex.read_timeout_ms or 0))
+    if hard_turn_timeout_ms <= 0 and read_timeout_ms <= 0:
+        return None
+    return (hard_turn_timeout_ms + read_timeout_ms + 5_000) / 1000
 
 
 async def run_reloading_daemon(workflow_path: Path, *, once: bool = False) -> None:
@@ -198,6 +251,7 @@ def main(argv: list[str] | None = None) -> int:
                     Path(args.phase_result_path).resolve(),
                 )
             )
+            os._exit(0)
         else:
             asyncio.run(run_reloading_daemon(path, once=args.once))
     except KeyboardInterrupt:

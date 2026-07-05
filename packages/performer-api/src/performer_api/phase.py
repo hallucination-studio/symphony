@@ -20,6 +20,7 @@ PhaseStatus = Literal[
     "completed",
     "failed",
     "awaiting_human",
+    "init_failed",
     "retry",
     "reviewing",
     "reworking",

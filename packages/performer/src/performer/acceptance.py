@@ -7,6 +7,9 @@ from typing import Any
 
 from .codex_client import CodexSdkClient, TEXT_RESULT_SCHEMA
 from performer_api.config import ServiceConfig
+from performer_api.ops_store import OpsStore
+from performer_api.persistence import ops_snapshot_path_from_persistence_path
+from .ops_telemetry import ExecutionTelemetryRecorder
 
 
 @dataclass(frozen=True)
@@ -59,21 +62,59 @@ class CodexAcceptanceRunner:
             config=self.config,
         )
         last_message: str | None = None
+        telemetry = self._telemetry_recorder()
+        telemetry_run_id: str | None = None
+        telemetry_attempt_id: str | None = None
+        if telemetry is not None:
+            issue_id = str(getattr(original_issue, "id", "") or "")
+            issue_identifier = str(getattr(original_issue, "identifier", "") or "issue")
+            telemetry_run_id = telemetry.open_run(
+                f"{issue_id}:acceptance",
+                issue_identifier,
+                self._instance_id(),
+                str(workspace),
+                "acceptance",
+                title=f"Acceptance {issue_identifier}",
+            )
+            telemetry_attempt_id = telemetry.open_attempt(telemetry_run_id, attempt_number=1)
 
         def on_event(event: dict[str, Any]) -> None:
             nonlocal last_message
             message = event.get("message")
             if isinstance(message, str) and message.strip():
                 last_message = message.strip()
+            if telemetry is not None and telemetry_run_id is not None and telemetry_attempt_id is not None:
+                event_name = event.get("event")
+                if isinstance(event_name, str):
+                    telemetry.record_event(
+                        telemetry.make_event(
+                            event_name,
+                            run_id=telemetry_run_id,
+                            attempt_id=telemetry_attempt_id,
+                            payload=dict(event),
+                        )
+                    )
 
-        result = await self.codex_client.run_session(
-            workspace,
-            prompt,
-            f"Acceptance {getattr(original_issue, 'identifier', 'issue')}",
-            on_event=on_event,
-            max_turns=self.config.agent.max_turns,
-            output_schema=TEXT_RESULT_SCHEMA,
-        )
+        try:
+            result = await self.codex_client.run_session(
+                workspace,
+                prompt,
+                f"Acceptance {getattr(original_issue, 'identifier', 'issue')}",
+                on_event=on_event,
+                max_turns=self.config.agent.max_turns,
+                output_schema=TEXT_RESULT_SCHEMA,
+            )
+        except Exception as exc:
+            if telemetry is not None and telemetry_run_id is not None:
+                telemetry.finish_run(
+                    telemetry_run_id,
+                    status="failed",
+                    failure_code=exc.__class__.__name__,
+                    failure_summary=str(exc),
+                )
+            raise
+        if telemetry is not None and telemetry_run_id is not None:
+            telemetry.finish_run(telemetry_run_id, status="completed", failure_code=None, failure_summary=None)
         if isinstance(result, str):
             return result
         final_response = getattr(result, "final_response", None)
@@ -85,6 +126,20 @@ class CodexAcceptanceRunner:
         if last_message is not None:
             return last_message
         return str(result)
+
+    def _telemetry_recorder(self) -> ExecutionTelemetryRecorder | None:
+        if self.config.persistence.path is None:
+            return None
+        return ExecutionTelemetryRecorder(OpsStore(ops_snapshot_path_from_persistence_path(self.config.persistence.path)))
+
+    def _instance_id(self) -> str:
+        persistence_path = self.config.persistence.path
+        if persistence_path is None:
+            return "local"
+        try:
+            return persistence_path.parent.parent.name
+        except IndexError:
+            return "local"
 
 
 class SmokeAcceptanceRunner:

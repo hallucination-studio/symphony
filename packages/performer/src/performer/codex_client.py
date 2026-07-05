@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import asyncio
+import inspect
 import json
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -93,11 +96,7 @@ class CodexSdkClient:
                 "cwd": str(workspace_path),
             }
         )
-        client = await self._client()
-        thread = await self._thread(client, workspace_path, existing_thread_id, emit=emit)
-        thread_id = _string_attr(thread, "id") or existing_thread_id
-        if not thread_id:
-            raise CodexError("response_error", "Codex SDK thread did not include an id")
+        client, thread, thread_id = await self._init_thread(workspace_path, existing_thread_id, emit=emit)
         emit(
             {
                 "event": "session_started",
@@ -116,16 +115,37 @@ class CodexSdkClient:
         turn_prompt = prompt
         for attempt in range(1, 3):
             try:
-                turn = await self._start_sdk_turn(thread, turn_prompt, schema)
-                turn_id = _string_attr(turn, "id") or "turn"
-                session_id = f"{thread_id}-{turn_id}"
-                emit({"event": "turn_started", "backend": "sdk", "thread_id": thread_id, "turn_id": turn_id, "session_id": session_id})
-                final_response, structured = await self._consume_turn(turn, emit, validate_structured=requires_handoff)
+                turn, turn_id, session_id, final_response, structured = await self._run_turn_with_timeout(
+                    thread,
+                    turn_prompt,
+                    schema,
+                    thread_id=thread_id,
+                    emit=emit,
+                    validate_structured=requires_handoff,
+                )
                 if requires_handoff and structured is None:
                     structured = _parse_structured_result(final_response)
                 if requires_handoff and structured is None:
                     raise CodexError("invalid_structured_output", "Codex SDK turn did not produce the required structured JSON result")
                 break
+            except (asyncio.TimeoutError, TimeoutError) as exc:
+                timeout_turn_id, timeout_session_id = _latest_turn_identity(
+                    events,
+                    thread_id=thread_id,
+                    default_turn_id=turn_id,
+                    default_session_id=session_id,
+                )
+                emit(
+                    {
+                        "event": "request_timeout",
+                        "backend": "sdk",
+                        "thread_id": thread_id,
+                        "turn_id": timeout_turn_id,
+                        "session_id": timeout_session_id,
+                        "timeout_ms": self.config.hard_turn_timeout_ms,
+                    }
+                )
+                raise CodexError("timeout", f"Codex SDK turn exceeded hard_turn_timeout_ms={self.config.hard_turn_timeout_ms}") from exc
             except Exception as exc:
                 code = exc.code if isinstance(exc, CodexError) else "sdk_transport_error"
                 if attempt >= 2 or not _is_transient_codex_error(code):
@@ -149,6 +169,7 @@ class CodexSdkClient:
                         "Reply again with only valid JSON for the required structured result."
                     )
         emit({"event": "turn_completed", "backend": "sdk", "thread_id": thread_id, "turn_id": turn_id, "session_id": session_id, "message": final_response})
+        await _close_sdk_client(client)
         return CodexRunResult(
             True,
             thread_id,
@@ -161,18 +182,171 @@ class CodexSdkClient:
             events=events,
         )
 
+    async def _run_turn_with_timeout(
+        self,
+        thread: Any,
+        prompt: str,
+        output_schema: dict[str, Any],
+        *,
+        thread_id: str,
+        emit: EventCallback,
+        validate_structured: bool,
+    ) -> tuple[Any, str, str, str | None, dict[str, Any] | None]:
+        return await asyncio.wait_for(
+            self._run_turn(thread, prompt, output_schema, thread_id=thread_id, emit=emit, validate_structured=validate_structured),
+            timeout=_timeout_seconds(self.config.hard_turn_timeout_ms),
+        )
+
+    async def _run_turn(
+        self,
+        thread: Any,
+        prompt: str,
+        output_schema: dict[str, Any],
+        *,
+        thread_id: str,
+        emit: EventCallback,
+        validate_structured: bool,
+    ) -> tuple[Any, str, str, str | None, dict[str, Any] | None]:
+        turn = await self._start_sdk_turn(thread, prompt, output_schema)
+        turn_id = _string_attr(turn, "id") or "turn"
+        session_id = f"{thread_id}-{turn_id}"
+        emit({"event": "turn_started", "backend": "sdk", "thread_id": thread_id, "turn_id": turn_id, "session_id": session_id})
+        final_response, structured = await self._consume_turn(turn, emit, validate_structured=validate_structured)
+        return turn, turn_id, session_id, final_response, structured
+
+    async def _init_thread(
+        self,
+        workspace_path: Path,
+        existing_thread_id: str | None,
+        *,
+        emit: EventCallback,
+    ) -> tuple[Any, Any, str]:
+        attempts = max(1, self.config.init_max_attempts)
+        last_code = "sdk_transport_error"
+        last_message = ""
+        for attempt in range(1, attempts + 1):
+            emit(
+                {
+                    "event": "codex_init_starting",
+                    "backend": "sdk",
+                    "cwd": str(workspace_path),
+                    "existing_thread_id": existing_thread_id,
+                    "attempt": attempt,
+                }
+            )
+            try:
+                client, thread = await asyncio.wait_for(
+                    self._client_and_thread(workspace_path, existing_thread_id, emit=emit),
+                    timeout=_timeout_seconds(self.config.read_timeout_ms),
+                )
+                thread_id = _string_attr(thread, "id") or existing_thread_id
+                if not thread_id:
+                    raise CodexError("response_error", "Codex SDK thread did not include an id")
+                emit(
+                    {
+                        "event": "codex_init_succeeded",
+                        "backend": "sdk",
+                        "attempts": attempt,
+                        "thread_id": thread_id,
+                    }
+                )
+                return client, thread, thread_id
+            except (asyncio.TimeoutError, TimeoutError) as exc:
+                code = "timeout"
+                last_code = code
+                last_message = f"Codex SDK init exceeded read_timeout_ms={self.config.read_timeout_ms}"
+                if attempt >= attempts:
+                    emit(
+                        {
+                            "event": "codex_init_failed",
+                            "backend": "sdk",
+                            "attempts": attempt,
+                            "message": code,
+                        }
+                    )
+                    raise CodexError("codex_init_failed", f"{code}: {last_message}") from exc
+                delay_ms = _init_backoff_ms(self.config, attempt)
+                emit(
+                    {
+                        "event": "codex_init_retrying",
+                        "backend": "sdk",
+                        "attempt": attempt + 1,
+                        "delay_ms": delay_ms,
+                        "message": code,
+                    }
+                )
+                await asyncio.sleep(delay_ms / 1000)
+            except Exception as exc:
+                code = exc.code if isinstance(exc, CodexError) else "sdk_transport_error"
+                last_code = code
+                last_message = str(exc)
+                if _is_terminal_init_error(code):
+                    emit(
+                        {
+                            "event": "codex_init_failed",
+                            "backend": "sdk",
+                            "attempts": attempt,
+                            "message": code,
+                        }
+                    )
+                    if isinstance(exc, CodexError):
+                        raise
+                    raise CodexError(code, str(exc)) from exc
+                if attempt >= attempts or not _is_transient_codex_error(code):
+                    emit(
+                        {
+                            "event": "codex_init_failed",
+                            "backend": "sdk",
+                            "attempts": attempt,
+                            "message": code,
+                        }
+                    )
+                    raise CodexError("codex_init_failed", f"{code}: {last_message}") from exc
+                delay_ms = _init_backoff_ms(self.config, attempt)
+                emit(
+                    {
+                        "event": "codex_init_retrying",
+                        "backend": "sdk",
+                        "attempt": attempt + 1,
+                        "delay_ms": delay_ms,
+                        "message": code,
+                    }
+                )
+                await asyncio.sleep(delay_ms / 1000)
+        raise CodexError("codex_init_failed", f"{last_code}: {last_message}")
+
+    async def _client_and_thread(
+        self,
+        workspace_path: Path,
+        existing_thread_id: str | None,
+        *,
+        emit: EventCallback,
+    ) -> tuple[Any, Any]:
+        client = await self._client()
+        thread = await self._thread(client, workspace_path, existing_thread_id, emit=emit)
+        return client, thread
+
     async def _client(self) -> Any:
         if self.sdk_factory is not None:
             client = self.sdk_factory(self.config)
             if hasattr(client, "__await__"):
                 client = await client
             return client
+        if self.config.sdk_codex_bin and not os.access(self.config.sdk_codex_bin, os.X_OK):
+            raise CodexError("invalid_sdk_codex_bin", f"Codex binary is not executable: {self.config.sdk_codex_bin}")
         try:
             from openai_codex import AsyncCodex  # type: ignore
             from openai_codex import CodexConfig as SdkCodexConfig  # type: ignore
         except ImportError as exc:
             raise CodexError("codex_sdk_not_installed", "Install openai-codex to use codex.backend=sdk") from exc
-        sdk_config = SdkCodexConfig(codex_bin=self.config.sdk_codex_bin) if self.config.sdk_codex_bin else None
+        sdk_env = _codex_sdk_env()
+        if self.config.sdk_codex_bin or sdk_env:
+            sdk_kwargs: dict[str, Any] = {"codex_bin": self.config.sdk_codex_bin}
+            if sdk_env and _callable_accepts_keyword(SdkCodexConfig, "env"):
+                sdk_kwargs["env"] = sdk_env
+            sdk_config = SdkCodexConfig(**sdk_kwargs)
+        else:
+            sdk_config = None
         return AsyncCodex(config=sdk_config)
 
     async def _thread(
@@ -295,10 +469,89 @@ def _is_transient_codex_error(code: str) -> bool:
     }
 
 
+def _is_terminal_init_error(code: str) -> bool:
+    return code in {
+        "codex_sdk_not_installed",
+        "invalid_sdk_codex_bin",
+        "invalid_workspace_cwd",
+        "sdk_missing_thread_start",
+        "sdk_missing_thread_resume",
+        "unsupported_sdk_worker_host",
+    }
+
+
+def _init_backoff_ms(config: CodexConfig, completed_failures: int) -> int:
+    base = max(1, config.init_backoff_ms)
+    cap = max(1, config.init_backoff_max_ms)
+    return min(base * (2 ** (completed_failures - 1)), cap)
+
+
+def _codex_sdk_env() -> dict[str, str]:
+    env: dict[str, str] = {}
+    home = os.environ.get("HOME")
+    codex_home = os.environ.get("CODEX_HOME")
+    if home:
+        env["HOME"] = home
+    if codex_home:
+        env["CODEX_HOME"] = codex_home
+    elif home:
+        env["CODEX_HOME"] = str(Path(home) / ".codex")
+    return env
+
+
+def _callable_accepts_keyword(value: Any, keyword: str) -> bool:
+    try:
+        signature = inspect.signature(value)
+    except (TypeError, ValueError):
+        return False
+    for parameter in signature.parameters.values():
+        if parameter.kind is inspect.Parameter.VAR_KEYWORD:
+            return True
+        if parameter.kind in {inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY}:
+            if parameter.name == keyword:
+                return True
+    return False
+
+
+def _timeout_seconds(timeout_ms: int) -> float | None:
+    if timeout_ms <= 0:
+        return None
+    return timeout_ms / 1000
+
+
+def _latest_turn_identity(
+    events: list[dict[str, Any]],
+    *,
+    thread_id: str,
+    default_turn_id: str,
+    default_session_id: str,
+) -> tuple[str, str]:
+    for event in reversed(events):
+        if event.get("event") != "turn_started":
+            continue
+        if event.get("thread_id") != thread_id:
+            continue
+        turn_id = event.get("turn_id")
+        session_id = event.get("session_id")
+        if isinstance(turn_id, str) and isinstance(session_id, str):
+            return turn_id, session_id
+    return default_turn_id, default_session_id
+
+
 async def _maybe_await(value: Any) -> Any:
     if hasattr(value, "__await__"):
         return await value
     return value
+
+
+async def _close_sdk_client(client: Any) -> None:
+    close = getattr(client, "close", None)
+    if not callable(close):
+        return
+    try:
+        await _maybe_await(close())
+    except Exception as exc:
+        logger.debug("codex_sdk_close_failed reason=%s", exc)
 
 
 async def _aiter(value: Any) -> Any:
