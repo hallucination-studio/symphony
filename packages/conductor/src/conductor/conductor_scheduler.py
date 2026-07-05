@@ -1,13 +1,24 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from performer_api.phase import PhaseAdvanceRequest
+from performer_api.phase import PhaseAdvanceRequest, RunPhase
 
 from .conductor_models import InstanceRecord
 from .conductor_phase import PhaseTransitionError
+
+
+@dataclass(frozen=True)
+class SchedulerPolicy:
+    global_capacity: int | None = None
+
+    def remaining_capacity(self, active_count: int) -> int | None:
+        if self.global_capacity is None:
+            return None
+        return max(0, self.global_capacity - active_count)
 
 
 class OrchestrationScheduler:
@@ -19,16 +30,24 @@ class OrchestrationScheduler:
         runtime_manager: Any,
         runtime_env: Callable[[], dict[str, str]],
         get_instance: Callable[[str], InstanceRecord | None],
+        policy: SchedulerPolicy | None = None,
     ):
         self.store = store
         self.phase_reducer = phase_reducer
         self.runtime_manager = runtime_manager
         self.runtime_env = runtime_env
         self.get_instance = get_instance
+        self.policy = policy or SchedulerPolicy()
 
     async def start_due_runs(self) -> int:
         started_count = 0
-        for run in self.store.list_due_orchestration_runs():
+        active_count = len(self.store.list_orchestration_runs(phases=self._active_phases()))
+        remaining_capacity = self.policy.remaining_capacity(active_count)
+        if remaining_capacity == 0:
+            return 0
+        for run in self._fair_due_runs(self.store.list_due_orchestration_runs()):
+            if remaining_capacity is not None and started_count >= remaining_capacity:
+                break
             instance = self.store.get_instance(run.instance_id)
             if instance is None:
                 continue
@@ -78,6 +97,29 @@ class OrchestrationScheduler:
             pid=started.pid,
         )
         return started
+
+    def _fair_due_runs(self, runs: list[Any]) -> list[Any]:
+        by_instance: dict[str, list[Any]] = {}
+        order: list[str] = []
+        for run in runs:
+            if run.instance_id not in by_instance:
+                by_instance[run.instance_id] = []
+                order.append(run.instance_id)
+            by_instance[run.instance_id].append(run)
+        fair: list[Any] = []
+        while any(by_instance.values()):
+            for instance_id in order:
+                queue = by_instance[instance_id]
+                if queue:
+                    fair.append(queue.pop(0))
+        return fair
+
+    def _active_phases(self) -> set[RunPhase]:
+        return {
+            RunPhase.IMPLEMENTING,
+            RunPhase.REVIEWING,
+            RunPhase.REWORKING,
+        }
 
 
 def phase_file_paths(instance: InstanceRecord, run_id: str) -> dict[str, Path]:

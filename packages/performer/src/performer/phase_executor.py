@@ -26,14 +26,14 @@ class PhaseExecutorHost(Protocol):
     tracker: Any
 
     async def reconcile_running(self) -> None: ...
-    def _release_due_retry_for_phase(self, issue_id: str) -> None: ...
+    def release_due_retry_for_phase(self, issue_id: str) -> None: ...
     async def process_managed_human_response(self, issue_id: str, human_response: str) -> None: ...
     def _sync_label_group_background(self, issue_id: str, label_name: str, *, prefix: str) -> None: ...
     def dispatch_skip_reason_for_event(self, issue: Issue) -> str | None: ...
-    async def _acceptance_preflight(self, issue: Issue) -> Any: ...
-    def _select_worker_host(self) -> str | None: ...
+    async def acceptance_preflight(self, issue: Issue) -> Any: ...
+    def select_worker_host(self) -> str | None: ...
     def dispatch_skip_reason_without_acceptance(self, issue: Issue) -> str | None: ...
-    async def _run_acceptance_gate_for_issue(self, issue: Issue, **kwargs: Any) -> None: ...
+    async def run_acceptance_gate_for_issue(self, issue: Issue, **kwargs: Any) -> None: ...
 
 
 class PhaseExecutor:
@@ -43,7 +43,7 @@ class PhaseExecutor:
     async def advance(self, request: PhaseAdvanceRequest) -> PhaseAdvanceResult:
         host = self.host
         await host.reconcile_running()
-        host._release_due_retry_for_phase(request.issue_id)
+        host.release_due_retry_for_phase(request.issue_id)
         try:
             host.config.validate_for_dispatch()
         except ConfigError as exc:
@@ -110,7 +110,7 @@ class PhaseExecutor:
         reason = host.dispatch_skip_reason_for_event(issue)
         if reason == "acceptance_preflight_required":
             try:
-                await host._acceptance_preflight(issue)
+                await host.acceptance_preflight(issue)
             except Exception as exc:
                 code = getattr(exc, "code", None)
                 if _is_codex_init_error_code(code):
@@ -153,7 +153,7 @@ class PhaseExecutor:
                 status="skipped",
                 reason=reason,
             )
-        selected_worker_host = host._select_worker_host()
+        selected_worker_host = host.select_worker_host()
         if host.config.worker.ssh_hosts and selected_worker_host is None:
             return self._phase_result(
                 request,
@@ -180,7 +180,7 @@ class PhaseExecutor:
                 status="skipped",
                 reason=reason,
             )
-        await host._run_acceptance_gate_for_issue(issue, completion_verdict=None)
+        await host.run_acceptance_gate_for_issue(issue, completion_verdict=None)
         return self._phase_result_from_outcome(
             request,
             issue,

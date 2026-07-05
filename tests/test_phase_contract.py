@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import inspect
+
+from performer.phase_executor import PhaseExecutor
 from performer_api.phase import PhaseAdvanceRequest, PhaseAdvanceResult, RunPhase
 
 
@@ -93,3 +96,9 @@ def test_phase_advance_result_round_trips_raw_detail_and_http_status() -> None:
     assert payload["detail"] == "upstream 502: server overloaded"
     assert payload["http_status"] == 502
     assert loaded == result
+
+
+def test_phase_executor_uses_public_host_ports_not_private_orchestrator_methods() -> None:
+    source = inspect.getsource(PhaseExecutor)
+
+    assert "host._" not in source

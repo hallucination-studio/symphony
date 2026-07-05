@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import inspect
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 import subprocess
@@ -11,8 +12,9 @@ import httpx
 import pytest
 
 from conductor.conductor_models import ConductorSettings, InstanceCreateRequest, InstancePatchRequest, InstanceRecord
+from conductor.conductor_linear_direct import ProjectLabelLinearProxy, RepositoryHandoffLinearProxy
 from conductor.conductor_runtime import LogQueryResult
-from conductor.conductor_service import ConductorService, ConductorServiceError
+from conductor.conductor_service import ConductorService, ConductorServiceError, CoordinationResult
 from conductor.conductor_store import ConductorStore
 from performer_api.phase import PhaseAdvanceResult, RunPhase
 from performer_api.models import (
@@ -31,6 +33,28 @@ from performer_api.persistence import PersistenceStore, PersistedSession, Persis
 def make_service(tmp_path: Path) -> ConductorService:
     store = ConductorStore(tmp_path / "conductor-data")
     return ConductorService(store=store, data_root=tmp_path / "conductor-data")
+
+
+def test_direct_linear_proxy_classes_are_not_defined_in_conductor_service() -> None:
+    import conductor.conductor_service as conductor_service_module
+
+    source = inspect.getsource(conductor_service_module)
+
+    assert "class RepositoryHandoffLinearProxy" not in source
+    assert "class ProjectLabelLinearProxy" not in source
+    assert RepositoryHandoffLinearProxy.__module__ == "conductor.conductor_linear_direct"
+    assert ProjectLabelLinearProxy.__module__ == "conductor.conductor_linear_direct"
+
+
+def test_conductor_service_constructs_long_lived_collaborators(tmp_path: Path) -> None:
+    service = make_service(tmp_path)
+
+    assert service.scheduler is service.scheduler
+    assert service.linear_projector is service.linear_projector
+    assert service.direct_ingress is service.direct_ingress
+    assert service.performer_supervisor is service.performer_supervisor
+    assert service.phase_human_actions is service.phase_human_actions
+    assert service.orchestration_remediator is service.orchestration_remediator
 
 
 def make_repo(tmp_path: Path, name: str = "repo") -> Path:
@@ -480,6 +504,49 @@ async def test_coordinate_background_times_out_hung_phase_process_as_retry(tmp_p
     assert "Performer phase timed out" in tracker.comments[0][1]
     assert "retry_count: 1" in tracker.comments[0][1]
     assert "crash_count: 0" in tracker.comments[0][1]
+
+
+@pytest.mark.asyncio
+async def test_coordinate_background_returns_structured_result_without_legacy_resumed_field(tmp_path: Path) -> None:
+    service = make_service(tmp_path)
+
+    result = await service.coordinate_background_once()
+
+    assert isinstance(result, CoordinationResult)
+    assert result["phase_runs_started"] == result.phase_runs_started
+    assert "resumed" not in result.to_dict()
+    with pytest.raises(KeyError):
+        _ = result["resumed"]
+
+
+@pytest.mark.asyncio
+async def test_managed_background_fails_fast_when_proxy_token_missing_for_linear_projection(tmp_path: Path) -> None:
+    service = make_service(tmp_path)
+    service.update_settings(ConductorSettings(managed_mode=True))
+    repo = make_repo(tmp_path)
+    instance = service.create_instance(make_request(repo))
+    run = service.phase_reducer.dispatch_received(
+        instance_id=instance.id,
+        issue_id="issue-1",
+        issue_identifier="ENG-1",
+        workflow_profile=instance.workflow_profile,
+        dispatch_id="dispatch-1",
+    )
+    service.phase_reducer.performer_started(run.run_id, request_path="/tmp/request.json", result_path="/tmp/result.json")
+    service.phase_reducer.performer_result(
+        PhaseAdvanceResult(
+            run_id=run.run_id,
+            issue_id="issue-1",
+            next_phase=RunPhase.REVIEWING,
+            status="reviewing",
+            reason="implementation_ready_for_review",
+        )
+    )
+
+    with pytest.raises(ConductorServiceError) as exc:
+        await service.coordinate_background_once()
+
+    assert exc.value.code == "managed_podium_proxy_token_required"
 
 
 @pytest.mark.asyncio
@@ -1205,6 +1272,38 @@ async def test_managed_background_does_not_call_conductor_linear_proxy_factories
     assert result["project_labels_synced"] == 0
 
 
+@pytest.mark.asyncio
+async def test_direct_background_throttles_low_frequency_linear_work_between_ticks(tmp_path: Path) -> None:
+    service = make_service(tmp_path)
+    repo = make_repo(tmp_path)
+    service.create_instance(make_request(repo))
+    closeout_calls = 0
+    project_label_calls = 0
+
+    async def closeouts() -> dict[str, int]:
+        nonlocal closeout_calls
+        closeout_calls += 1
+        return {"closed_out": 0, "failed": 0, "skipped": 0}
+
+    async def project_labels() -> int:
+        nonlocal project_label_calls
+        project_label_calls += 1
+        return 0
+
+    service.coordinate_repository_handoff_closeouts = closeouts
+    service.sync_project_labels_once = project_labels
+
+    first = await service.coordinate_background_once()
+    second = await service.coordinate_background_once()
+
+    assert first["repository_handoff"] == {"closed_out": 0, "failed": 0, "skipped": 0}
+    assert second["repository_handoff"] == {"closed_out": 0, "failed": 0, "skipped": 1}
+    assert first["project_labels_synced"] == 0
+    assert second["project_labels_synced"] == 0
+    assert closeout_calls == 1
+    assert project_label_calls == 1
+
+
 def test_update_instance_revalidates_workflow_and_persists_raw_edits(tmp_path: Path) -> None:
     service = make_service(tmp_path)
     repo = make_repo(tmp_path)
@@ -1836,16 +1935,10 @@ async def test_managed_phase_cycle_runs_without_conductor_linear_credentials_or_
         data_root=tmp_path / "conductor-data",
         runtime_manager=runtime,
     )
-    service.update_settings(ConductorSettings(managed_mode=True))
+    service.update_settings(ConductorSettings(managed_mode=True, podium_proxy_token="proxy-token"))
     monkeypatch.setenv("LINEAR_API_KEY", "linear-secret-that-managed-mode-must-ignore")
-    direct_linear_calls = 0
-
-    def fail_direct_linear_factory(instance):
-        nonlocal direct_linear_calls
-        direct_linear_calls += 1
-        raise AssertionError("managed mode must not construct a direct Linear tracker")
-
-    service.repository_handoff_tracker_factory = fail_direct_linear_factory
+    tracker = FakeRepositoryHandoffTracker()
+    service.repository_handoff_tracker_factory = lambda instance: tracker
     repo = make_repo(tmp_path)
     instance = service.create_instance(
         make_request(repo).with_overrides(
@@ -1891,9 +1984,8 @@ async def test_managed_phase_cycle_runs_without_conductor_linear_credentials_or_
     assert completed is not None
     assert completed.phase is RunPhase.DONE
     assert completed.status == "completed"
-    assert direct_linear_calls == 0
-    assert runtime.env == {}
-    assert "PODIUM_PROXY_TOKEN" not in (runtime.env or {})
+    assert tracker.phase_projections
+    assert runtime.env == {"PODIUM_PROXY_TOKEN": "proxy-token"}
     assert "LINEAR_API_KEY" not in (runtime.env or {})
 
 
@@ -2130,7 +2222,7 @@ async def test_managed_background_does_not_resume_from_performer_persistence_wit
 
     result = await service.coordinate_background_once()
 
-    assert result["resumed"] == 0
+    assert "resumed" not in result.to_dict()
     assert runtime.started_phase_issue_ids == []
 
 

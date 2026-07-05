@@ -288,6 +288,9 @@ class Orchestrator:
         self.state.claimed.discard(issue_id)
         self._persist_state()
 
+    def release_due_retry_for_phase(self, issue_id: str) -> None:
+        self._release_due_retry_for_phase(issue_id)
+
     async def process_due_retries(self) -> None:
         now_ms = monotonic_ms()
         due = [entry for entry in self.state.retry_attempts.values() if entry.due_at_ms <= now_ms]
@@ -543,6 +546,9 @@ class Orchestrator:
         await self._sync_label_group(issue.id, self.config.acceptance.gate_pending_label, prefix="performer:gate/")
         return gates[0]
 
+    async def acceptance_preflight(self, issue: Issue) -> dict[str, Any] | None:
+        return await self._acceptance_preflight(issue)
+
     async def _fetch_gate_issues(self, issue: Issue) -> list[dict[str, Any]]:
         fetch_children = getattr(self.tracker, "fetch_child_issues", None)
         if not callable(fetch_children):
@@ -768,6 +774,13 @@ class Orchestrator:
                 reason="completed_by_runtime",
             )
             self._persist_state()
+
+    async def run_acceptance_gate_for_issue(
+        self,
+        issue: Issue,
+        **kwargs: Any,
+    ) -> None:
+        await self._run_acceptance_gate_for_issue(issue, **kwargs)
 
     async def _run_legacy_acceptance_issue(
         self,
@@ -2013,6 +2026,9 @@ class Orchestrator:
             if running_count < self.config.worker.max_concurrent_agents_per_host:
                 return host
         return None
+
+    def select_worker_host(self) -> str | None:
+        return self._select_worker_host()
 
     def _session_id_for_log(self, issue_id: str) -> str:
         entry = self.state.running.get(issue_id)

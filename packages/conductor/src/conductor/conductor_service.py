@@ -7,6 +7,7 @@ from typing import Any
 import shutil
 import subprocess
 import socket
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import httpx
 
@@ -22,6 +23,7 @@ from .conductor_runtime import LogQuery
 from .conductor_scheduler import OrchestrationScheduler, phase_file_paths
 from .conductor_store import ConductorStore
 from .conductor_ingress import DirectIngress
+from .conductor_linear_direct import ProjectLabelLinearProxy, RepositoryHandoffLinearProxy
 from .conductor_phase import PhaseReducer, PhaseTransitionError
 from .conductor_linear_projector import LinearProjector
 from .conductor_performer_supervisor import PerformerSupervisor
@@ -59,7 +61,6 @@ from performer_api.ops_retention import RetentionPolicy
 from performer_api.ops_store import OpsStore
 from performer_api.phase import PhaseAdvanceResult, RunPhase
 from performer_api.persistence import PersistenceStore, PersistedSession, PersistedState
-from performer_api.labels import PHASE_LABELS, TYPE_LABELS
 from performer_api.models import normalize_state_key, utc_now
 from performer_api.workflow import load_workflow
 
@@ -80,7 +81,6 @@ WORKSPACE_INIT_EXCLUDES = {
 HUMAN_ACTION_LABEL = "performer:type/human-action"
 HUMAN_RESPONSE_MARKER_NAME = "SYMPHONY HUMAN RESPONSE"
 PROJECT_LABEL_PREFIX = "symphony:"
-SYSTEM_ISSUE_TYPE_LABELS = {label.lower() for label in TYPE_LABELS.values()}
 
 
 class ConductorServiceError(Exception):
@@ -90,488 +90,84 @@ class ConductorServiceError(Exception):
         self.diagnostics = diagnostics or []
 
 
-class RepositoryHandoffLinearProxy:
+class CoordinationResult(dict[str, Any]):
     def __init__(
         self,
         *,
-        endpoint: str,
-        api_key: str,
-        project_slug: str = "",
-        active_states: list[str] | None = None,
-        required_delegate_id: str | None = None,
-        transport: httpx.AsyncBaseTransport | None = None,
+        repository_handoff: dict[str, Any],
+        dispatch_acks: dict[str, Any],
+        project_labels_synced: int,
+        direct_dispatches_received: int,
+        phase_runs_started: int,
+        phase_results_applied: int,
+        phase_timeouts: int,
+        phase_crash_retries: int,
+        phase_crash_failures: int,
+        phase_failure_human_actions_created: int,
+        phase_human_actions_completed: int,
+        phase_human_actions_missing_response: int,
+        phase_human_actions_failed: int,
+        linear_phase_projections: int,
+        reconcile_findings: list[dict[str, Any]] | None = None,
+        remediations: dict[str, Any] | None = None,
+        crash_restarts: int = 0,
+        crash_loops: int = 0,
     ):
-        self.endpoint = endpoint
-        self.api_key = api_key
-        self.project_slug = project_slug
-        self.active_states = list(active_states or ["Todo", "In Progress"])
-        self.required_delegate_id = required_delegate_id
-        self._transport = transport
-
-    async def graphql(self, query: str, variables: dict[str, Any] | None = None) -> dict[str, Any]:
-        headers = {"Authorization": self.api_key, "Content-Type": "application/json"}
-        async with httpx.AsyncClient(timeout=30, trust_env=False, transport=self._transport) as client:
-            response = await client.post(self.endpoint, json={"query": query, "variables": variables or {}}, headers=headers)
-        response.raise_for_status()
-        payload = response.json()
-        if not isinstance(payload, dict):
-            raise ConductorServiceError("linear_unknown_payload", "Linear response was not an object")
-        if payload.get("errors"):
-            raise ConductorServiceError("linear_graphql_errors", str(payload["errors"]))
-        return payload
-
-    async def fetch_candidate_issues(self) -> list[dict[str, Any]]:
-        if not self.project_slug or not self.api_key:
-            return []
-        include_delegate_filter = bool(self.required_delegate_id)
-        delegate_variable = ", $delegateId: ID" if include_delegate_filter else ""
-        delegate_filter = "\n      delegate: { id: { eq: $delegateId } }" if include_delegate_filter else ""
-        query = f"""
-query ConductorDirectCandidateIssues($projectSlug: String!, $stateNames: [String!], $first: Int!, $after: String{delegate_variable}) {{
-  issues(
-    first: $first
-    after: $after
-    filter: {{
-      project: {{ slugId: {{ eq: $projectSlug }} }}
-      state: {{ name: {{ in: $stateNames }} }}{delegate_filter}
-    }}
-  ) {{
-    nodes {{
-      id
-      identifier
-      title
-      description
-      url
-      state {{ name type }}
-      delegate {{ id }}
-      labels {{ nodes {{ name }} }}
-    }}
-    pageInfo {{ hasNextPage endCursor }}
-  }}
-}}
-"""
-        variables: dict[str, Any] = {
-            "projectSlug": self.project_slug,
-            "stateNames": self.active_states,
-            "first": 50,
-            "after": None,
-        }
-        if include_delegate_filter:
-            variables["delegateId"] = self.required_delegate_id
-        issues: list[dict[str, Any]] = []
-        while True:
-            payload = await self.graphql(query, variables)
-            connection = ((payload.get("data") or {}).get("issues") or {})
-            nodes = connection.get("nodes")
-            page_info = connection.get("pageInfo") or {}
-            if not isinstance(nodes, list):
-                raise ConductorServiceError("linear_unknown_payload", "Linear issues.nodes missing")
-            issues.extend(_normalize_linear_issue_dict(node) for node in nodes if isinstance(node, dict))
-            if not page_info.get("hasNextPage"):
-                return issues
-            end_cursor = page_info.get("endCursor")
-            if not end_cursor:
-                raise ConductorServiceError("linear_missing_end_cursor", "Linear pageInfo.endCursor missing")
-            variables = dict(variables)
-            variables["after"] = end_cursor
-
-    async def fetch_child_issues(self, parent_issue_id: str, *, label_name: str | None = None) -> list[dict[str, Any]]:
-        payload = await self.graphql(
-            """
-query RepositoryHandoffChildren($issueId: String!) {
-  issue(id: $issueId) {
-    children(first: 100) {
-        nodes {
-        id
-        identifier
-        title
-        description
-        url
-        state { name type }
-        delegate { id }
-        labels { nodes { name } }
-      }
-    }
-  }
-}
-""",
-            {"issueId": parent_issue_id},
+        super().__init__(
+            repository_handoff=repository_handoff,
+            dispatch_acks=dispatch_acks,
+            project_labels_synced=project_labels_synced,
+            direct_dispatches_received=direct_dispatches_received,
+            phase_runs_started=phase_runs_started,
+            phase_results_applied=phase_results_applied,
+            phase_timeouts=phase_timeouts,
+            phase_crash_retries=phase_crash_retries,
+            phase_crash_failures=phase_crash_failures,
+            phase_failure_human_actions_created=phase_failure_human_actions_created,
+            phase_human_actions_completed=phase_human_actions_completed,
+            phase_human_actions_missing_response=phase_human_actions_missing_response,
+            phase_human_actions_failed=phase_human_actions_failed,
+            linear_phase_projections=linear_phase_projections,
+            reconcile_findings=list(reconcile_findings or []),
+            remediations=dict(remediations or {}),
+            crash_restarts=crash_restarts,
+            crash_loops=crash_loops,
         )
-        nodes = ((((payload.get("data") or {}).get("issue") or {}).get("children") or {}).get("nodes") or [])
-        children = [_normalize_linear_issue_dict(node) for node in nodes if isinstance(node, dict)]
-        if label_name is None:
-            return children
-        wanted = label_name.strip().lower()
-        return [child for child in children if wanted in {str(label).lower() for label in child.get("labels", [])}]
 
-    async def create_child_issue_for(
-        self,
-        *,
-        parent_issue_id: str,
-        title: str,
-        description: str,
-        label_names: list[str],
-        assignee_id: str | None = None,
-        delegate_id: str | None = None,
-    ) -> dict[str, Any]:
-        _ = assignee_id
-        context = await self._creation_context(parent_issue_id)
-        label_ids = [await self._ensure_label_id(context["team_id"], name) for name in label_names]
-        payload = await self.graphql(
-            """
-mutation RepositoryHandoffCreateChild(
-  $teamId: String!,
-  $projectId: String!,
-  $stateId: String!,
-  $labelIds: [String!],
-  $title: String!,
-  $description: String!,
-  $parentId: String,
-  $delegateId: String
-) {
-  issueCreate(input: {
-    teamId: $teamId,
-    projectId: $projectId,
-    stateId: $stateId,
-    labelIds: $labelIds,
-    title: $title,
-    description: $description,
-    parentId: $parentId,
-    delegateId: $delegateId
-  }) {
-    success
-    issue {
-      id
-      identifier
-      title
-      description
-      url
-      delegate { id }
-      labels { nodes { name } }
-    }
-  }
-}
-""",
-            {
-                "teamId": context["team_id"],
-                "projectId": context["project_id"],
-                "stateId": context["state_id"],
-                "labelIds": label_ids,
-                "title": title,
-                "description": description,
-                "parentId": parent_issue_id,
-                "delegateId": delegate_id,
-            },
-        )
-        result = ((payload.get("data") or {}).get("issueCreate") or {})
-        issue = result.get("issue") if isinstance(result, dict) else {}
-        if not result.get("success") or not isinstance(issue, dict) or not issue.get("id"):
-            raise ConductorServiceError("linear_issue_create_failed", "Linear issueCreate returned success=false")
-        return _normalize_linear_issue_dict(issue)
+    def to_dict(self) -> dict[str, Any]:
+        return dict(self)
 
-    async def update_issue_description_marker_block(
-        self,
-        issue_id: str,
-        marker_name: str,
-        block: str,
-    ) -> dict[str, Any]:
-        payload = await self.graphql(
-            """
-query RepositoryHandoffDescription($issueId: String!) {
-  issue(id: $issueId) { id identifier description }
-}
-""",
-            {"issueId": issue_id},
-        )
-        issue = ((payload.get("data") or {}).get("issue") or {})
-        current = str(issue.get("description") or "") if isinstance(issue, dict) else ""
-        description = _replace_marker_block(current, marker_name, block)
-        payload = await self.graphql(
-            """
-mutation RepositoryHandoffUpdateDescription($issueId: String!, $description: String!) {
-  issueUpdate(id: $issueId, input: { description: $description }) {
-    success
-    issue { id identifier description }
-  }
-}
-""",
-            {"issueId": issue_id, "description": description},
-        )
-        result = ((payload.get("data") or {}).get("issueUpdate") or {})
-        return {"success": bool(result.get("success")), "issue_id": issue_id, "description": description}
-
-    async def comment_issue(self, issue_id: str, body: str) -> dict[str, Any]:
-        payload = await self.graphql(
-            """
-mutation RepositoryHandoffComment($issueId: String!, $body: String!) {
-  commentCreate(input: { issueId: $issueId, body: $body }) {
-    success
-    comment { id }
-  }
-}
-""",
-            {"issueId": issue_id, "body": body},
-        )
-        result = ((payload.get("data") or {}).get("commentCreate") or {})
-        comment = result.get("comment") if isinstance(result, dict) else {}
-        return {"success": bool(result.get("success")), "comment_id": comment.get("id") if isinstance(comment, dict) else None}
-
-    async def project_issue_phase(
-        self,
-        issue_id: str,
-        *,
-        phase_label: str,
-        state_name: str | None,
-    ) -> dict[str, Any]:
-        issue = await self._issue_label_context(issue_id)
-        team_id = str(issue.get("team_id") or "")
-        if not team_id:
-            raise ConductorServiceError("linear_missing_team", "Linear issue team is required for phase projection")
-        desired_label_id = await self._ensure_label_id(team_id, phase_label)
-        kept_label_ids = [
-            str(label["id"])
-            for label in issue.get("labels", [])
-            if isinstance(label, dict)
-            and label.get("id")
-            and not str(label.get("name") or "").startswith("performer:phase/")
-        ]
-        label_ids = [*kept_label_ids, desired_label_id]
-        updated = await self.graphql(
-            """
-mutation ProjectIssuePhaseLabels($issueId: String!, $labelIds: [String!]) {
-  issueUpdate(id: $issueId, input: { labelIds: $labelIds }) {
-    success
-    issue { id identifier }
-  }
-}
-""",
-            {"issueId": issue_id, "labelIds": label_ids},
-        )
-        label_success = bool(((updated.get("data") or {}).get("issueUpdate") or {}).get("success"))
-        state_projected = False
-        if state_name and str(issue.get("state_name") or "") != state_name:
-            state_id = await self._state_id_by_name(team_id, state_name)
-            if state_id:
-                state_payload = await self.graphql(
-                    """
-mutation ProjectIssuePhaseState($issueId: String!, $stateId: String!) {
-  issueUpdate(id: $issueId, input: { stateId: $stateId }) {
-    success
-    issue { id identifier }
-  }
-}
-""",
-                    {"issueId": issue_id, "stateId": state_id},
-                )
-                state_projected = bool(((state_payload.get("data") or {}).get("issueUpdate") or {}).get("success"))
-        return {
-            "success": label_success and (state_name is None or state_projected or issue.get("state_name") == state_name),
-            "issue_id": issue_id,
-            "phase_label": phase_label,
-            "state_name": state_name,
-        }
-
-    async def issue_phase_projection_matches(
-        self,
-        issue_id: str,
-        *,
-        phase_label: str,
-        state_name: str | None,
-    ) -> bool:
-        issue = await self._issue_label_context(issue_id)
-        phase_labels = [
-            str(label.get("name") or "")
-            for label in issue.get("labels", [])
-            if isinstance(label, dict) and str(label.get("name") or "").startswith("performer:phase/")
-        ]
-        if phase_labels != [phase_label]:
-            return False
-        return state_name is None or str(issue.get("state_name") or "") == state_name
-
-    async def _issue_label_context(self, issue_id: str) -> dict[str, Any]:
-        payload = await self.graphql(
-            """
-query ProjectIssuePhaseContext($issueId: String!) {
-  issue(id: $issueId) {
-    id
-    team { id }
-    state { name }
-    labels(first: 100) { nodes { id name } }
-  }
-}
-""",
-            {"issueId": issue_id},
-        )
-        issue = ((payload.get("data") or {}).get("issue") or {})
-        labels = (((issue.get("labels") or {}).get("nodes")) or []) if isinstance(issue, dict) else []
-        state = issue.get("state") if isinstance(issue, dict) and isinstance(issue.get("state"), dict) else {}
-        team = issue.get("team") if isinstance(issue, dict) and isinstance(issue.get("team"), dict) else {}
-        return {
-            "team_id": str(team.get("id") or ""),
-            "state_name": str(state.get("name") or ""),
-            "labels": [dict(label) for label in labels if isinstance(label, dict)],
-        }
-
-    async def _state_id_by_name(self, team_id: str, state_name: str) -> str | None:
-        payload = await self.graphql(
-            """
-query ProjectIssuePhaseStateByName($teamId: ID!, $stateName: String!) {
-  workflowStates(first: 20, filter: { team: { id: { eq: $teamId } }, name: { eq: $stateName } }) {
-    nodes { id name }
-  }
-}
-""",
-            {"teamId": team_id, "stateName": state_name},
-        )
-        nodes = (((payload.get("data") or {}).get("workflowStates") or {}).get("nodes") or [])
-        for node in nodes:
-            if isinstance(node, dict) and node.get("id"):
-                return str(node["id"])
-        return None
-
-    async def _creation_context(self, issue_id: str) -> dict[str, str]:
-        payload = await self.graphql(
-            """
-query RepositoryHandoffCreationContext($issueId: String!) {
-  issue(id: $issueId) {
-    team { id }
-    project { id }
-    state { id }
-  }
-}
-""",
-            {"issueId": issue_id},
-        )
-        issue = ((payload.get("data") or {}).get("issue") or {})
-        team = issue.get("team") if isinstance(issue, dict) and isinstance(issue.get("team"), dict) else {}
-        project = issue.get("project") if isinstance(issue, dict) and isinstance(issue.get("project"), dict) else {}
-        state = issue.get("state") if isinstance(issue, dict) and isinstance(issue.get("state"), dict) else {}
-        return {"team_id": str(team.get("id") or ""), "project_id": str(project.get("id") or ""), "state_id": str(state.get("id") or "")}
-
-    async def _ensure_label_id(self, team_id: str, label_name: str) -> str:
-        payload = await self.graphql(
-            """
-query RepositoryHandoffLabelByName($name: String!, $teamId: ID!) {
-  issueLabels(first: 20, filter: { name: { eq: $name }, team: { id: { eq: $teamId } } }) {
-    nodes { id name }
-  }
-}
-""",
-            {"name": label_name, "teamId": team_id},
-        )
-        nodes = (((payload.get("data") or {}).get("issueLabels") or {}).get("nodes") or [])
-        for node in nodes:
-            if isinstance(node, dict) and node.get("id"):
-                return str(node["id"])
-        payload = await self.graphql(
-            """
-mutation RepositoryHandoffCreateLabel($name: String!, $teamId: String!) {
-  issueLabelCreate(input: { name: $name, teamId: $teamId }) {
-    success
-    issueLabel { id name }
-  }
-}
-""",
-            {"name": label_name, "teamId": team_id},
-        )
-        label = (((payload.get("data") or {}).get("issueLabelCreate") or {}).get("issueLabel") or {})
-        if not isinstance(label, dict) or not label.get("id"):
-            raise ConductorServiceError("linear_label_create_failed", f"Could not create Linear label: {label_name}")
-        return str(label["id"])
+    def __getattr__(self, key: str) -> Any:
+        try:
+            return self[key]
+        except KeyError as exc:
+            raise AttributeError(key) from exc
 
 
-class ProjectLabelLinearProxy(RepositoryHandoffLinearProxy):
-    """Reads and writes project-level labels through Podium's Linear proxy.
+@dataclass
+class CoordinationCadence:
+    repository_handoff_seconds: float = 30
+    project_labels_seconds: float = 300
+    last_repository_handoff_at: datetime | None = None
+    last_project_labels_at: datetime | None = None
 
-    Linear models project labels (`ProjectLabel`) separately from issue labels,
-    so this cannot reuse `issueLabel*`. `projectUpdate.labelIds` is a full
-    replacement; callers merge before writing (see `_merge_project_labels`).
-    """
+    def repository_handoff_due(self, now: datetime) -> bool:
+        return self._due(self.last_repository_handoff_at, self.repository_handoff_seconds, now)
 
-    async def find_project_id(self, project_slug: str) -> str | None:
-        payload = await self.graphql(
-            """
-query ProjectLabelFindProject($slug: String!) {
-  projects(filter: { slugId: { eq: $slug } }, first: 1) {
-    nodes { id slugId name }
-  }
-}
-""",
-            {"slug": project_slug},
-        )
-        nodes = (((payload.get("data") or {}).get("projects") or {}).get("nodes") or [])
-        for node in nodes:
-            if isinstance(node, dict) and node.get("id"):
-                return str(node["id"])
-        return None
+    def project_labels_due(self, now: datetime) -> bool:
+        return self._due(self.last_project_labels_at, self.project_labels_seconds, now)
 
-    async def fetch_project_labels(self, project_id: str) -> list[dict[str, str]]:
-        payload = await self.graphql(
-            """
-query ProjectLabels($projectId: String!) {
-  project(id: $projectId) {
-    id
-    labels(first: 100) { nodes { id name } }
-  }
-}
-""",
-            {"projectId": project_id},
-        )
-        project = ((payload.get("data") or {}).get("project") or {})
-        nodes = ((project.get("labels") or {}).get("nodes") or []) if isinstance(project, dict) else []
-        return [
-            {"id": str(node.get("id")), "name": str(node.get("name") or "")}
-            for node in nodes
-            if isinstance(node, dict) and node.get("id")
-        ]
+    def mark_repository_handoff(self, now: datetime) -> None:
+        self.last_repository_handoff_at = now
 
-    async def ensure_project_label_id(self, name: str) -> str:
-        payload = await self.graphql(
-            """
-query ProjectLabelByName($name: String!) {
-  projectLabels(filter: { name: { eq: $name } }, first: 20) {
-    nodes { id name }
-  }
-}
-""",
-            {"name": name},
-        )
-        nodes = (((payload.get("data") or {}).get("projectLabels") or {}).get("nodes") or [])
-        for node in nodes:
-            if isinstance(node, dict) and node.get("id"):
-                return str(node["id"])
-        payload = await self.graphql(
-            """
-mutation ProjectLabelCreate($name: String!) {
-  projectLabelCreate(input: { name: $name }) {
-    success
-    projectLabel { id name }
-  }
-}
-""",
-            {"name": name},
-        )
-        label = (((payload.get("data") or {}).get("projectLabelCreate") or {}).get("projectLabel") or {})
-        if not isinstance(label, dict) or not label.get("id"):
-            raise ConductorServiceError("linear_project_label_create_failed", f"Could not create project label: {name}")
-        return str(label["id"])
+    def mark_project_labels(self, now: datetime) -> None:
+        self.last_project_labels_at = now
 
-    async def set_project_labels(self, project_id: str, label_ids: list[str]) -> dict[str, Any]:
-        payload = await self.graphql(
-            """
-mutation ProjectSetLabels($projectId: String!, $labelIds: [String!]) {
-  projectUpdate(id: $projectId, input: { labelIds: $labelIds }) {
-    success
-    project { id }
-  }
-}
-""",
-            {"projectId": project_id, "labelIds": label_ids},
-        )
-        result = ((payload.get("data") or {}).get("projectUpdate") or {})
-        if not result.get("success"):
-            raise ConductorServiceError("linear_project_update_failed", "projectUpdate returned success=false")
-        return {"success": True, "project_id": project_id, "label_ids": label_ids}
+    @staticmethod
+    def _due(last_at: datetime | None, interval_seconds: float, now: datetime) -> bool:
+        if last_at is None:
+            return True
+        return (now - last_at).total_seconds() >= interval_seconds
 
 
 class ConductorService:
@@ -588,6 +184,38 @@ class ConductorService:
         self.phase_reducer = PhaseReducer(store)
         self.repository_handoff_tracker_factory = self._repository_handoff_tracker
         self.project_label_proxy_factory = self._project_label_proxy
+        self.linear_projector = LinearProjector(
+            store=self.store,
+            get_instance=self.store.get_instance,
+            tracker_factory=lambda instance: self.repository_handoff_tracker_factory(instance),
+        )
+        self.direct_ingress = DirectIngress(
+            store=self.store,
+            phase_reducer=self.phase_reducer,
+            list_instances=self.store.list_instances,
+            get_instance=self.get_instance,
+            tracker_factory=lambda instance: self.repository_handoff_tracker_factory(instance),
+        )
+        self.scheduler = OrchestrationScheduler(
+            store=self.store,
+            phase_reducer=self.phase_reducer,
+            runtime_manager=self.runtime_manager,
+            runtime_env=self._runtime_env,
+            get_instance=self.get_instance,
+        )
+        self.performer_supervisor = PerformerSupervisor(
+            store=self.store,
+            phase_reducer=self.phase_reducer,
+            comment_result_diagnostic=self._comment_phase_result_diagnostic,
+        )
+        self.phase_human_actions = PhaseHumanActionCoordinator(
+            store=self.store,
+            phase_reducer=self.phase_reducer,
+            managed_mode_enabled=self._managed_mode_enabled,
+            tracker_factory=lambda instance: self.repository_handoff_tracker_factory(instance),
+        )
+        self.orchestration_remediator = OrchestrationRemediator(self.store)
+        self.coordination_cadence = CoordinationCadence()
         self._podium_connection: dict[str, Any] = {
             "poll": {"status": "idle", "last_error": None, "updated_at": None},
             "ws": {"status": "idle", "last_error": None, "updated_at": None},
@@ -839,12 +467,15 @@ class ConductorService:
             return {"status": "ignored", "reason": "human_run_not_waiting", "run_id": run.run_id}
         return {"status": "accepted", "run_id": updated.run_id, "issue_id": updated.issue_id}
 
-    async def coordinate_background_once(self) -> dict[str, Any]:
+    async def coordinate_background_once(self) -> CoordinationResult:
         managed_mode = self._managed_mode_enabled()
+        if managed_mode:
+            self._require_managed_proxy_token_for_background_linear_projection()
+        now = datetime.now(timezone.utc)
         closeout = (
             {"closed_out": 0, "failed": 0, "skipped": 0}
             if managed_mode
-            else await self.coordinate_repository_handoff_closeouts()
+            else await self._run_repository_handoff_closeouts_if_due(now)
         )
         direct_dispatches_received = 0 if managed_mode else await self._poll_direct_dispatches()
         phase_runs_started = await self._start_due_orchestration_runs()
@@ -852,18 +483,14 @@ class ConductorService:
         phase_timeouts = await self._record_phase_timeouts()
         phase_crash_retries, phase_crash_failures = await self._record_phase_crashes()
         reconcile_findings = reconcile_orchestration_health(store=self.store)
-        remediations = OrchestrationRemediator(self.store).remediate(reconcile_findings)
+        remediations = self.orchestration_remediator.remediate(reconcile_findings)
         phase_failure_human_actions_created = await self._create_phase_failure_human_actions()
         phase_human_actions = await self._coordinate_phase_human_actions()
         if phase_human_actions["completed"]:
             phase_runs_started += await self._start_due_orchestration_runs()
         dispatch_acks = await self.ack_completed_podium_dispatches()
-        linear_phase_projections = (
-            await self.reconcile_linear_phase_projections_once()
-            if self._linear_phase_projection_enabled(managed_mode=managed_mode)
-            else 0
-        )
-        project_labels_synced = 0 if managed_mode else await self.sync_project_labels_once()
+        linear_phase_projections = await self.reconcile_linear_phase_projections_once()
+        project_labels_synced = 0 if managed_mode else await self._sync_project_labels_if_due(now)
         crash_restarts = 0
         crash_loops = 0
         for instance in self.store.list_instances():
@@ -878,46 +505,42 @@ class ConductorService:
                 else:
                     crash_restarts += 1
                 continue
-        return {
-            "repository_handoff": closeout,
-            "dispatch_acks": dispatch_acks,
-            "project_labels_synced": project_labels_synced,
-            "direct_dispatches_received": direct_dispatches_received,
-            "phase_runs_started": phase_runs_started,
-            "phase_results_applied": phase_results_applied,
-            "phase_timeouts": phase_timeouts,
-            "phase_crash_retries": phase_crash_retries,
-            "phase_crash_failures": phase_crash_failures,
-            "phase_failure_human_actions_created": phase_failure_human_actions_created,
-            "phase_human_actions_completed": phase_human_actions["completed"],
-            "phase_human_actions_missing_response": phase_human_actions["missing_response"],
-            "phase_human_actions_failed": phase_human_actions["failed"],
-            "linear_phase_projections": linear_phase_projections,
-            "reconcile_findings": [finding.to_dict() for finding in reconcile_findings],
-            "remediations": remediations,
-            "resumed": 0,
-            "crash_restarts": crash_restarts,
-            "crash_loops": crash_loops,
-        }
+        return CoordinationResult(
+            repository_handoff=closeout,
+            dispatch_acks=dispatch_acks,
+            project_labels_synced=project_labels_synced,
+            direct_dispatches_received=direct_dispatches_received,
+            phase_runs_started=phase_runs_started,
+            phase_results_applied=phase_results_applied,
+            phase_timeouts=phase_timeouts,
+            phase_crash_retries=phase_crash_retries,
+            phase_crash_failures=phase_crash_failures,
+            phase_failure_human_actions_created=phase_failure_human_actions_created,
+            phase_human_actions_completed=phase_human_actions["completed"],
+            phase_human_actions_missing_response=phase_human_actions["missing_response"],
+            phase_human_actions_failed=phase_human_actions["failed"],
+            linear_phase_projections=linear_phase_projections,
+            reconcile_findings=[finding.to_dict() for finding in reconcile_findings],
+            remediations=remediations,
+            crash_restarts=crash_restarts,
+            crash_loops=crash_loops,
+        )
 
     async def reconcile_linear_phase_projections_once(self, *, now: str | None = None) -> int:
-        return await LinearProjector(
-            store=self.store,
-            get_instance=self.store.get_instance,
-            tracker_factory=self.repository_handoff_tracker_factory,
-        ).reconcile_once(now=now)
+        return await self.linear_projector.reconcile_once(now=now)
 
-    def _linear_phase_projection_enabled(self, *, managed_mode: bool) -> bool:
-        if not managed_mode:
-            return True
-        return bool(self.store.get_settings().podium_proxy_token.strip())
+    def _require_managed_proxy_token_for_background_linear_projection(self) -> None:
+        if self.store.get_settings().podium_proxy_token.strip():
+            return
+        if not self.store.list_orchestration_runs():
+            return
+        raise ConductorServiceError(
+            "managed_podium_proxy_token_required",
+            "Managed mode requires a Podium Linear proxy token before projecting orchestration phase state.",
+        )
 
     def _phase_projection_recorded(self, run_id: str, event_type: str, desired: dict[str, str | None]) -> bool:
-        return LinearProjector(
-            store=self.store,
-            get_instance=self.store.get_instance,
-            tracker_factory=self.repository_handoff_tracker_factory,
-        )._projection_recorded(run_id, event_type, desired)
+        return self.linear_projector._projection_recorded(run_id, event_type, desired)
 
     async def _create_phase_failure_human_actions(self) -> int:
         created = 0
@@ -1015,14 +638,20 @@ class ConductorService:
                 synced += 1
         return synced
 
+    async def _run_repository_handoff_closeouts_if_due(self, now: datetime) -> dict[str, Any]:
+        if not self.coordination_cadence.repository_handoff_due(now):
+            return {"closed_out": 0, "failed": 0, "skipped": 1}
+        self.coordination_cadence.mark_repository_handoff(now)
+        return await self.coordinate_repository_handoff_closeouts()
+
+    async def _sync_project_labels_if_due(self, now: datetime) -> int:
+        if not self.coordination_cadence.project_labels_due(now):
+            return 0
+        self.coordination_cadence.mark_project_labels(now)
+        return await self.sync_project_labels_once()
+
     async def _poll_direct_dispatches(self) -> int:
-        return await DirectIngress(
-            store=self.store,
-            phase_reducer=self.phase_reducer,
-            list_instances=self.store.list_instances,
-            get_instance=self.get_instance,
-            tracker_factory=self.repository_handoff_tracker_factory,
-        ).poll()
+        return await self.direct_ingress.poll()
 
     async def ack_completed_podium_dispatches(
         self,
@@ -1067,19 +696,10 @@ class ConductorService:
         return {"acked": acked, "failed": failed, "skipped": skipped}
 
     async def _start_due_orchestration_runs(self) -> int:
-        return await self._scheduler().start_due_runs()
+        return await self.scheduler.start_due_runs()
 
     async def _start_orchestration_run(self, run, instance: InstanceRecord) -> InstanceRecord:
-        return await self._scheduler().start_run(run, instance)
-
-    def _scheduler(self) -> OrchestrationScheduler:
-        return OrchestrationScheduler(
-            store=self.store,
-            phase_reducer=self.phase_reducer,
-            runtime_manager=self.runtime_manager,
-            runtime_env=self._runtime_env,
-            get_instance=self.get_instance,
-        )
+        return await self.scheduler.start_run(run, instance)
 
     async def _start_direct_phase_issue(
         self,
@@ -1108,11 +728,7 @@ class ConductorService:
         return await self._start_orchestration_run(run, instance)
 
     async def _apply_phase_result_files(self) -> int:
-        return await PerformerSupervisor(
-            store=self.store,
-            phase_reducer=self.phase_reducer,
-            comment_result_diagnostic=self._comment_phase_result_diagnostic,
-        ).apply_result_files()
+        return await self.performer_supervisor.apply_result_files()
 
     async def _record_phase_crashes(self) -> tuple[int, int]:
         retries = 0
@@ -1302,12 +918,7 @@ class ConductorService:
         return False
 
     async def _coordinate_phase_human_actions(self) -> dict[str, int]:
-        return await PhaseHumanActionCoordinator(
-            store=self.store,
-            phase_reducer=self.phase_reducer,
-            managed_mode_enabled=self._managed_mode_enabled,
-            tracker_factory=self.repository_handoff_tracker_factory,
-        ).coordinate()
+        return await self.phase_human_actions.coordinate()
 
     async def _comment_missing_phase_human_response(self, tracker: Any, child_issue_id: str) -> None:
         await comment_missing_phase_human_response(tracker, child_issue_id)
@@ -2187,44 +1798,6 @@ def _normalize_linear_issue_dict(node: dict[str, Any]) -> dict[str, Any]:
             if isinstance(label, dict) and label.get("name")
         ],
     }
-
-
-def _desired_linear_phase_projection(phase: RunPhase) -> dict[str, str | None] | None:
-    if phase is RunPhase.QUEUED:
-        return {"phase_label": PHASE_LABELS["queued"], "state_name": None}
-    if phase is RunPhase.IMPLEMENTING:
-        return {"phase_label": PHASE_LABELS["implementation_running"], "state_name": "In Progress"}
-    if phase is RunPhase.REVIEWING:
-        return {"phase_label": PHASE_LABELS["review_running"], "state_name": "In Review"}
-    if phase is RunPhase.REWORKING:
-        return {"phase_label": PHASE_LABELS["rework"], "state_name": "In Progress"}
-    if phase is RunPhase.AWAITING_HUMAN:
-        return {"phase_label": PHASE_LABELS["blocked"], "state_name": None}
-    if phase is RunPhase.DONE:
-        return {"phase_label": PHASE_LABELS["completed"], "state_name": "Done"}
-    if phase is RunPhase.FAILED:
-        return {"phase_label": PHASE_LABELS["failed"], "state_name": None}
-    return None
-
-
-def _linear_projection_event_type(phase: RunPhase) -> str:
-    if phase is RunPhase.REVIEWING:
-        return "linear.projected_review_state"
-    return "linear.projected_phase"
-
-
-def _issue_field(issue: Any, field: str) -> str:
-    if isinstance(issue, dict):
-        return str(issue.get(field) or "").strip()
-    return str(getattr(issue, field, "") or "").strip()
-
-
-def _is_system_child_issue(issue: Any) -> bool:
-    labels = issue.get("labels") if isinstance(issue, dict) else getattr(issue, "labels", [])
-    if not isinstance(labels, list):
-        return False
-    normalized = {str(label).strip().lower() for label in labels if str(label).strip()}
-    return bool(normalized & SYSTEM_ISSUE_TYPE_LABELS)
 
 
 def _replace_marker_block(current: str, marker_name: str, block: str) -> str:
