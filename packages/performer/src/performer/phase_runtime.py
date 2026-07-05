@@ -93,7 +93,6 @@ class PhaseRuntime:
             worker_host=worker_host,
         )
         host._set_running_phase(issue.id, "starting", runtime_phase="dispatch_received")
-        await host._sync_label_group(issue.id, PHASE_LABELS["implementation_running"], prefix="performer:phase/")
         host._persist_state()
         await host._run_worker(issue, attempt, worker_host=worker_host)
         return self.pop_outcome(

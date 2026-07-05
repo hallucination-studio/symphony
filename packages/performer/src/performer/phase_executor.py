@@ -61,7 +61,6 @@ class PhaseExecutor:
             issues = await host.tracker.fetch_issue_states_by_ids([request.issue_id])
         except Exception as exc:
             logger.warning("performer_phase_advance_fetch failed issue_id=%s reason=%s", request.issue_id, exc)
-            host._sync_label_group_background(request.issue_id, PHASE_LABELS["failed"], prefix="performer:phase/")
             return self._phase_result(
                 request,
                 issue_id=request.issue_id,

@@ -176,6 +176,8 @@ class FakeRepositoryHandoffTracker:
         self.candidate_issues: list[dict[str, object]] = []
         self.comments: list[tuple[str, str]] = []
         self.updated_descriptions: list[tuple[str, str, str]] = []
+        self.phase_projections: list[dict[str, object]] = []
+        self.drifted_phase_issues: set[str] = set()
 
     async def fetch_candidate_issues(self) -> list[dict[str, object]]:
         return list(self.candidate_issues)
@@ -226,6 +228,29 @@ class FakeRepositoryHandoffTracker:
     async def comment_issue(self, issue_id: str, body: str) -> dict[str, object]:
         self.comments.append((issue_id, body))
         return {"success": True, "comment_id": f"comment-{len(self.comments)}"}
+
+    async def project_issue_phase(
+        self,
+        issue_id: str,
+        *,
+        phase_label: str,
+        state_name: str | None,
+    ) -> dict[str, object]:
+        projection = {"issue_id": issue_id, "phase_label": phase_label, "state_name": state_name}
+        self.phase_projections.append(projection)
+        self.drifted_phase_issues.discard(issue_id)
+        return {"success": True, **projection}
+
+    async def issue_phase_projection_matches(
+        self,
+        issue_id: str,
+        *,
+        phase_label: str,
+        state_name: str | None,
+    ) -> bool:
+        if issue_id in self.drifted_phase_issues:
+            return False
+        return {"issue_id": issue_id, "phase_label": phase_label, "state_name": state_name} in self.phase_projections
 
 
 class FakeProjectLabelProxy:
@@ -423,7 +448,7 @@ async def test_coordinate_background_times_out_hung_phase_process_as_retry(tmp_p
     result_event = next(event for event in events if event.event_type == "performer.result")
     assert result_event.payload["status"] == "retry"
     assert result_event.payload["reason"] == "turn_timeout"
-    assert events[-1].event_type == "linear.diagnostic_commented"
+    assert "linear.diagnostic_commented" in [event.event_type for event in events]
     assert tracker.comments
     assert tracker.comments[0][0] == "issue-1"
     assert "Performer phase timed out" in tracker.comments[0][1]
@@ -845,6 +870,37 @@ def test_instance_runtime_includes_conductor_phase_runs_without_persistence(tmp_
     assert runtime["performer"]["issues"][0]["phase"] == "awaiting_human"
     assert runtime["performer"]["issues"][0]["status"] == "waiting"
     assert runtime["performer"]["issues"][0]["human_action"]["child_identifier"] == "ENG-2"
+
+
+def test_phase_runtime_recovers_from_conductor_events_when_performer_json_is_deleted(tmp_path: Path) -> None:
+    service = make_service(tmp_path)
+    repo = make_repo(tmp_path)
+    instance = service.create_instance(make_request(repo))
+    run = service.phase_reducer.dispatch_received(
+        instance_id=instance.id,
+        issue_id="issue-1",
+        issue_identifier="ENG-1",
+        workflow_profile=instance.workflow_profile,
+        dispatch_id="dispatch-1",
+    )
+    service.phase_reducer.performer_started(run.run_id, request_path="/tmp/request.json", result_path="/tmp/result.json")
+    service.phase_reducer.performer_result(
+        PhaseAdvanceResult(
+            run_id=run.run_id,
+            issue_id="issue-1",
+            next_phase=RunPhase.DONE,
+            status="completed",
+            reason="completed_by_runtime",
+        )
+    )
+    Path(instance.persistence_path).unlink(missing_ok=True)
+
+    runtime = service.instance_runtime(instance.id)
+    rebuilt = service.store.rebuild_run(run.run_id)
+
+    assert rebuilt.phase is RunPhase.DONE
+    assert runtime["performer"]["source"] == "conductor_phase"
+    assert runtime["performer"]["completed"][0]["run_id"] == run.run_id
     assert runtime["performer"]["telemetry"]["source"] == "persistence"
 
 
@@ -1404,6 +1460,36 @@ async def test_dispatch_podium_event_starts_one_shot_performer_for_matching_line
 
 
 @pytest.mark.asyncio
+async def test_dispatch_podium_event_accepts_project_bound_instance_without_agent_filter(tmp_path: Path) -> None:
+    runtime = CapturingRuntime()
+    service = ConductorService(
+        store=ConductorStore(tmp_path / "conductor-data"),
+        data_root=tmp_path / "conductor-data",
+        runtime_manager=runtime,
+    )
+    repo = make_repo(tmp_path)
+    instance = service.create_instance(
+        make_request(repo).with_overrides(linear_project="ENG", linear_filters={"active_states": ["Todo", "In Progress"]})
+    )
+
+    result = await service.dispatch_podium_event(
+        {
+            "dispatch_id": "dispatch-1",
+            "issue_id": "issue-1",
+            "issue_identifier": "ENG-1",
+            "project_slug": "ENG",
+            "agent_app_user_id": "app-user-1",
+            "instance_id": instance.id,
+        }
+    )
+
+    run = service.store.get_orchestration_run_by_issue(instance.id, "issue-1")
+    assert result["status"] == "accepted"
+    assert run is not None
+    assert runtime.started_phase_issue_ids == ["issue-1"]
+
+
+@pytest.mark.asyncio
 async def test_dispatch_podium_event_leaves_new_run_queued_when_instance_is_busy(tmp_path: Path) -> None:
     runtime = CapturingRuntime()
     service = ConductorService(
@@ -1553,6 +1639,118 @@ async def test_completed_phase_result_file_drives_podium_ack_without_performer_p
         "reason": "completed_by_runtime",
         "runtime_phase": "done",
     }
+
+
+@pytest.mark.asyncio
+async def test_background_projects_linear_phase_from_conductor_run_events(tmp_path: Path) -> None:
+    service = make_service(tmp_path)
+    tracker = FakeRepositoryHandoffTracker()
+    service.repository_handoff_tracker_factory = lambda instance: tracker
+    repo = make_repo(tmp_path)
+    instance = service.create_instance(make_request(repo))
+    run = service.phase_reducer.dispatch_received(
+        instance_id=instance.id,
+        issue_id="issue-1",
+        issue_identifier="ENG-1",
+        workflow_profile=instance.workflow_profile,
+        dispatch_id=None,
+    )
+    service.phase_reducer.performer_started(run.run_id, request_path="/tmp/request.json", result_path="/tmp/result.json")
+    service.phase_reducer.performer_result(
+        PhaseAdvanceResult(
+            run_id=run.run_id,
+            issue_id="issue-1",
+            next_phase=RunPhase.REVIEWING,
+            status="reviewing",
+            reason="implementation_ready_for_review",
+        )
+    )
+
+    first = await service.coordinate_background_once()
+    second = await service.coordinate_background_once()
+    events = service.store.list_orchestration_events(run.run_id)
+
+    assert first["linear_phase_projections"] == 1
+    assert second["linear_phase_projections"] == 0
+    assert tracker.phase_projections == [
+        {"issue_id": "issue-1", "phase_label": "performer:phase/review", "state_name": "In Review"}
+    ]
+    assert "linear.projected_review_state" in [event.event_type for event in events]
+
+
+@pytest.mark.asyncio
+async def test_background_replays_linear_phase_projection_when_linear_drifts(tmp_path: Path) -> None:
+    service = make_service(tmp_path)
+    tracker = FakeRepositoryHandoffTracker()
+    service.repository_handoff_tracker_factory = lambda instance: tracker
+    repo = make_repo(tmp_path)
+    instance = service.create_instance(make_request(repo))
+    run = service.phase_reducer.dispatch_received(
+        instance_id=instance.id,
+        issue_id="issue-1",
+        issue_identifier="ENG-1",
+        workflow_profile=instance.workflow_profile,
+        dispatch_id=None,
+    )
+    service.phase_reducer.performer_started(run.run_id, request_path="/tmp/request.json", result_path="/tmp/result.json")
+    service.phase_reducer.performer_result(
+        PhaseAdvanceResult(
+            run_id=run.run_id,
+            issue_id="issue-1",
+            next_phase=RunPhase.DONE,
+            status="completed",
+            reason="completed_by_runtime",
+        )
+    )
+    await service.coordinate_background_once()
+    tracker.drifted_phase_issues.add("issue-1")
+
+    result = await service.coordinate_background_once()
+
+    assert result["linear_phase_projections"] == 1
+    assert tracker.phase_projections == [
+        {"issue_id": "issue-1", "phase_label": "performer:phase/done", "state_name": "Done"},
+        {"issue_id": "issue-1", "phase_label": "performer:phase/done", "state_name": "Done"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_managed_background_projects_linear_phase_through_podium_proxy(tmp_path: Path) -> None:
+    service = make_service(tmp_path)
+    service.update_settings(ConductorSettings(managed_mode=True, podium_proxy_token="proxy-token"))
+    tracker = FakeRepositoryHandoffTracker()
+    service.repository_handoff_tracker_factory = lambda instance: tracker
+    repo = make_repo(tmp_path)
+    instance = service.create_instance(
+        make_request(repo).with_overrides(
+            linear_project="ENG",
+            linear_filters={"linear_agent_app_user_id": "app-user-1", "active_states": ["Todo", "In Progress"]},
+        )
+    )
+    run = service.phase_reducer.dispatch_received(
+        instance_id=instance.id,
+        issue_id="issue-1",
+        issue_identifier="ENG-1",
+        workflow_profile=instance.workflow_profile,
+        dispatch_id="dispatch-1",
+    )
+    service.phase_reducer.performer_started(run.run_id, request_path="/tmp/request.json", result_path="/tmp/result.json")
+    service.phase_reducer.performer_result(
+        PhaseAdvanceResult(
+            run_id=run.run_id,
+            issue_id="issue-1",
+            next_phase=RunPhase.REVIEWING,
+            status="reviewing",
+            reason="implementation_ready_for_review",
+        )
+    )
+
+    result = await service.coordinate_background_once()
+
+    assert result["linear_phase_projections"] == 1
+    assert tracker.phase_projections == [
+        {"issue_id": "issue-1", "phase_label": "performer:phase/review", "state_name": "In Review"}
+    ]
 
 
 @pytest.mark.asyncio
@@ -1820,7 +2018,7 @@ async def test_background_does_not_record_phase_crash_when_result_file_exists(tm
     assert updated.crash_count == 0
     assert updated.overload_count == 1
     assert "performer.upstream_overloaded" in [event.event_type for event in events]
-    assert [event.event_type for event in events][-1] == "linear.diagnostic_commented"
+    assert "linear.diagnostic_commented" in [event.event_type for event in events]
     assert tracker.comments
     assert tracker.comments[0][0] == "issue-1"
     assert "Performer phase reported upstream_overloaded" in tracker.comments[0][1]

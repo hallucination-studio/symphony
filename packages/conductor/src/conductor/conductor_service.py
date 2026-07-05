@@ -21,6 +21,7 @@ from .conductor_runtime import ConductorRuntimeManager
 from .conductor_runtime import LogQuery
 from .conductor_store import ConductorStore
 from .conductor_phase import PhaseReducer, PhaseTransitionError
+from .conductor_reconcile import reconcile_orchestration_health
 from .conductor_workflow import (
     ConductorValidationError,
     generate_workflow_content,
@@ -33,7 +34,7 @@ from performer_api.ops_retention import RetentionPolicy
 from performer_api.ops_store import OpsStore
 from performer_api.phase import PhaseAdvanceRequest, PhaseAdvanceResult, RunPhase
 from performer_api.persistence import PersistenceStore, PersistedSession, PersistedState
-from performer_api.labels import TYPE_LABELS
+from performer_api.labels import PHASE_LABELS, TYPE_LABELS
 from performer_api.models import normalize_state_key, utc_now
 from performer_api.workflow import load_workflow
 
@@ -292,6 +293,119 @@ mutation RepositoryHandoffComment($issueId: String!, $body: String!) {
         comment = result.get("comment") if isinstance(result, dict) else {}
         return {"success": bool(result.get("success")), "comment_id": comment.get("id") if isinstance(comment, dict) else None}
 
+    async def project_issue_phase(
+        self,
+        issue_id: str,
+        *,
+        phase_label: str,
+        state_name: str | None,
+    ) -> dict[str, Any]:
+        issue = await self._issue_label_context(issue_id)
+        team_id = str(issue.get("team_id") or "")
+        if not team_id:
+            raise ConductorServiceError("linear_missing_team", "Linear issue team is required for phase projection")
+        desired_label_id = await self._ensure_label_id(team_id, phase_label)
+        kept_label_ids = [
+            str(label["id"])
+            for label in issue.get("labels", [])
+            if isinstance(label, dict)
+            and label.get("id")
+            and not str(label.get("name") or "").startswith("performer:phase/")
+        ]
+        label_ids = [*kept_label_ids, desired_label_id]
+        updated = await self.graphql(
+            """
+mutation ProjectIssuePhaseLabels($issueId: String!, $labelIds: [String!]) {
+  issueUpdate(id: $issueId, input: { labelIds: $labelIds }) {
+    success
+    issue { id identifier }
+  }
+}
+""",
+            {"issueId": issue_id, "labelIds": label_ids},
+        )
+        label_success = bool(((updated.get("data") or {}).get("issueUpdate") or {}).get("success"))
+        state_projected = False
+        if state_name and str(issue.get("state_name") or "") != state_name:
+            state_id = await self._state_id_by_name(team_id, state_name)
+            if state_id:
+                state_payload = await self.graphql(
+                    """
+mutation ProjectIssuePhaseState($issueId: String!, $stateId: String!) {
+  issueUpdate(id: $issueId, input: { stateId: $stateId }) {
+    success
+    issue { id identifier }
+  }
+}
+""",
+                    {"issueId": issue_id, "stateId": state_id},
+                )
+                state_projected = bool(((state_payload.get("data") or {}).get("issueUpdate") or {}).get("success"))
+        return {
+            "success": label_success and (state_name is None or state_projected or issue.get("state_name") == state_name),
+            "issue_id": issue_id,
+            "phase_label": phase_label,
+            "state_name": state_name,
+        }
+
+    async def issue_phase_projection_matches(
+        self,
+        issue_id: str,
+        *,
+        phase_label: str,
+        state_name: str | None,
+    ) -> bool:
+        issue = await self._issue_label_context(issue_id)
+        phase_labels = [
+            str(label.get("name") or "")
+            for label in issue.get("labels", [])
+            if isinstance(label, dict) and str(label.get("name") or "").startswith("performer:phase/")
+        ]
+        if phase_labels != [phase_label]:
+            return False
+        return state_name is None or str(issue.get("state_name") or "") == state_name
+
+    async def _issue_label_context(self, issue_id: str) -> dict[str, Any]:
+        payload = await self.graphql(
+            """
+query ProjectIssuePhaseContext($issueId: String!) {
+  issue(id: $issueId) {
+    id
+    team { id }
+    state { name }
+    labels(first: 100) { nodes { id name } }
+  }
+}
+""",
+            {"issueId": issue_id},
+        )
+        issue = ((payload.get("data") or {}).get("issue") or {})
+        labels = (((issue.get("labels") or {}).get("nodes")) or []) if isinstance(issue, dict) else []
+        state = issue.get("state") if isinstance(issue, dict) and isinstance(issue.get("state"), dict) else {}
+        team = issue.get("team") if isinstance(issue, dict) and isinstance(issue.get("team"), dict) else {}
+        return {
+            "team_id": str(team.get("id") or ""),
+            "state_name": str(state.get("name") or ""),
+            "labels": [dict(label) for label in labels if isinstance(label, dict)],
+        }
+
+    async def _state_id_by_name(self, team_id: str, state_name: str) -> str | None:
+        payload = await self.graphql(
+            """
+query ProjectIssuePhaseStateByName($teamId: ID!, $stateName: String!) {
+  workflowStates(first: 20, filter: { team: { id: { eq: $teamId } }, name: { eq: $stateName } }) {
+    nodes { id name }
+  }
+}
+""",
+            {"teamId": team_id, "stateName": state_name},
+        )
+        nodes = (((payload.get("data") or {}).get("workflowStates") or {}).get("nodes") or [])
+        for node in nodes:
+            if isinstance(node, dict) and node.get("id"):
+                return str(node["id"])
+        return None
+
     async def _creation_context(self, issue_id: str) -> dict[str, str]:
         payload = await self.graphql(
             """
@@ -490,7 +604,11 @@ class ConductorService:
                 "issue_identifier": issue_identifier or None,
                 "reason": "missing_linear_agent_app_user",
             }
-        instance = self._instance_for_podium_event(project_slug=project_slug, agent_app_user_id=agent_app_user_id)
+        instance = self._instance_for_podium_event(
+            project_slug=project_slug,
+            agent_app_user_id=agent_app_user_id,
+            instance_id=str(event.get("instance_id") or "").strip(),
+        )
         if instance is None:
             return {
                 "status": "skipped",
@@ -715,6 +833,12 @@ class ConductorService:
         if phase_human_actions["completed"]:
             phase_runs_started += await self._start_due_orchestration_runs()
         dispatch_acks = await self.ack_completed_podium_dispatches()
+        linear_phase_projections = (
+            await self.reconcile_linear_phase_projections_once()
+            if self._linear_phase_projection_enabled(managed_mode=managed_mode)
+            else 0
+        )
+        reconcile_findings = reconcile_orchestration_health(store=self.store)
         project_labels_synced = 0 if managed_mode else await self.sync_project_labels_once()
         crash_restarts = 0
         crash_loops = 0
@@ -744,11 +868,98 @@ class ConductorService:
             "phase_human_actions_completed": phase_human_actions["completed"],
             "phase_human_actions_missing_response": phase_human_actions["missing_response"],
             "phase_human_actions_failed": phase_human_actions["failed"],
+            "linear_phase_projections": linear_phase_projections,
+            "reconcile_findings": [finding.to_dict() for finding in reconcile_findings],
             "gated_followups_started": 0,
             "resumed": 0,
             "crash_restarts": crash_restarts,
             "crash_loops": crash_loops,
         }
+
+    async def reconcile_linear_phase_projections_once(self) -> int:
+        projected = 0
+        for run in self.store.list_orchestration_runs():
+            desired = _desired_linear_phase_projection(run.phase)
+            if desired is None:
+                continue
+            event_type = _linear_projection_event_type(run.phase)
+            instance = self.store.get_instance(run.instance_id)
+            if instance is None:
+                continue
+            tracker = self.repository_handoff_tracker_factory(instance)
+            if self._phase_projection_recorded(run.run_id, event_type, desired):
+                projection_matches = getattr(tracker, "issue_phase_projection_matches", None)
+                if not callable(projection_matches):
+                    continue
+                try:
+                    matches = await projection_matches(
+                        run.issue_id,
+                        phase_label=desired["phase_label"],
+                        state_name=desired.get("state_name"),
+                    )
+                except Exception as exc:
+                    self.store.apply_event(
+                        run.run_id,
+                        {
+                            "event_type": "linear.phase_projection_check_failed",
+                            "to_phase": run.phase,
+                            "payload": {
+                                **desired,
+                                "error": _safe_linear_value(exc),
+                            },
+                        },
+                    )
+                    continue
+                if matches:
+                    continue
+            project_issue_phase = getattr(tracker, "project_issue_phase", None)
+            if not callable(project_issue_phase):
+                continue
+            try:
+                result = await project_issue_phase(
+                    run.issue_id,
+                    phase_label=desired["phase_label"],
+                    state_name=desired.get("state_name"),
+                )
+            except Exception as exc:
+                self.store.apply_event(
+                    run.run_id,
+                    {
+                        "event_type": "linear.phase_projection_failed",
+                        "to_phase": run.phase,
+                        "payload": {
+                            **desired,
+                            "error": _safe_linear_value(exc),
+                        },
+                    },
+                )
+                continue
+            self.store.apply_event(
+                run.run_id,
+                {
+                    "event_type": event_type,
+                    "to_phase": run.phase,
+                    "payload": {
+                        **desired,
+                        "result": result if isinstance(result, dict) else {},
+                    },
+                },
+            )
+            projected += 1
+        return projected
+
+    def _linear_phase_projection_enabled(self, *, managed_mode: bool) -> bool:
+        if not managed_mode:
+            return True
+        return bool(self.store.get_settings().podium_proxy_token.strip())
+
+    def _phase_projection_recorded(self, run_id: str, event_type: str, desired: dict[str, str | None]) -> bool:
+        for event in reversed(self.store.list_orchestration_events(run_id)):
+            if event.event_type != event_type:
+                continue
+            if event.payload.get("phase_label") == desired.get("phase_label") and event.payload.get("state_name") == desired.get("state_name"):
+                return True
+        return False
 
     async def _create_phase_failure_human_actions(self) -> int:
         created = 0
@@ -776,15 +987,14 @@ class ConductorService:
                     delegate_id=_linear_agent_app_user_id(instance.linear_filters) or None,
                 )
             except Exception as exc:
-                self.store.append_orchestration_event(
-                    run_id=run.run_id,
-                    instance_id=run.instance_id,
-                    issue_id=run.issue_id,
-                    event_type="human.failure_child_create_failed",
-                    from_phase=run.phase,
-                    to_phase=run.phase,
-                    reason="phase_failure_human_action",
-                    payload={"error": _safe_linear_value(exc)},
+                self.store.apply_event(
+                    run.run_id,
+                    {
+                        "event_type": "human.failure_child_create_failed",
+                        "to_phase": run.phase,
+                        "reason": "phase_failure_human_action",
+                        "payload": {"error": _safe_linear_value(exc)},
+                    },
                 )
                 continue
             human_action = {
@@ -794,16 +1004,14 @@ class ConductorService:
                 "kind": "runtime_error",
                 "source": "phase_failure",
             }
-            self.store.update_orchestration_run(run.run_id, human_action=human_action)
-            self.store.append_orchestration_event(
-                run_id=run.run_id,
-                instance_id=run.instance_id,
-                issue_id=run.issue_id,
-                event_type="human.failure_child_created",
-                from_phase=run.phase,
-                to_phase=run.phase,
-                reason="phase_failure_human_action",
-                payload=human_action,
+            self.store.apply_event(
+                run.run_id,
+                {
+                    "event_type": "human.failure_child_created",
+                    "to_phase": run.phase,
+                    "reason": "phase_failure_human_action",
+                    "payload": {"human_action": human_action},
+                },
             )
             created += 1
         return created
@@ -994,7 +1202,14 @@ class ConductorService:
             dispatch_id=None,
         )
         if attempt is not None and attempt > run.attempt:
-            run = self.store.update_orchestration_run(run.run_id, attempt=attempt)
+            run = self.store.apply_event(
+                run.run_id,
+                {
+                    "event_type": "run.attempt_adjusted",
+                    "to_phase": run.phase,
+                    "payload": {"attempt": attempt},
+                },
+            )
         return await self._start_orchestration_run(run, instance)
 
     async def _apply_phase_result_files(self) -> int:
@@ -1181,26 +1396,24 @@ class ConductorService:
         try:
             result = await comment_issue(run.issue_id, body)
         except Exception as exc:
-            self.store.append_orchestration_event(
-                run_id=run.run_id,
-                instance_id=run.instance_id,
-                issue_id=run.issue_id,
-                event_type="linear.diagnostic_comment_failed",
-                from_phase=run.phase,
-                to_phase=run.phase,
-                reason=kind,
-                payload={"dedupe_key": dedupe_key, "error": _safe_linear_value(exc)},
+            self.store.apply_event(
+                run.run_id,
+                {
+                    "event_type": "linear.diagnostic_comment_failed",
+                    "to_phase": run.phase,
+                    "reason": kind,
+                    "payload": {"dedupe_key": dedupe_key, "error": _safe_linear_value(exc)},
+                },
             )
             return
-        self.store.append_orchestration_event(
-            run_id=run.run_id,
-            instance_id=run.instance_id,
-            issue_id=run.issue_id,
-            event_type="linear.diagnostic_commented",
-            from_phase=run.phase,
-            to_phase=run.phase,
-            reason=kind,
-            payload={"dedupe_key": dedupe_key, "comment_result": result},
+        self.store.apply_event(
+            run.run_id,
+            {
+                "event_type": "linear.diagnostic_commented",
+                "to_phase": run.phase,
+                "reason": kind,
+                "payload": {"dedupe_key": dedupe_key, "comment_result": result},
+            },
         )
 
     def _phase_diagnostic_event_recorded(self, run_id: str, dedupe_key: str) -> bool:
@@ -1243,17 +1456,16 @@ class ConductorService:
                     child_issue_id=child_issue_id,
                 ):
                     await self._comment_missing_phase_human_response(tracker, child_issue_id)
-                    self.store.append_orchestration_event(
-                        run_id=run.run_id,
-                        instance_id=run.instance_id,
-                        issue_id=run.issue_id,
-                        event_type="human.response_missing",
-                        from_phase=run.phase,
-                        to_phase=run.phase,
-                        reason="missing_human_response",
-                        payload={
-                            "child_issue_id": child_issue_id,
-                            "child_identifier": child.get("identifier") or run.human_action.get("child_identifier"),
+                    self.store.apply_event(
+                        run.run_id,
+                        {
+                            "event_type": "human.response_missing",
+                            "to_phase": run.phase,
+                            "reason": "missing_human_response",
+                            "payload": {
+                                "child_issue_id": child_issue_id,
+                                "child_identifier": child.get("identifier") or run.human_action.get("child_identifier"),
+                            },
                         },
                     )
                 continue
@@ -2131,15 +2343,25 @@ class ConductorService:
             raise ConductorServiceError("instance_not_found", f"Instance not found: {instance_id}")
         return current
 
-    def _instance_for_podium_event(self, *, project_slug: str, agent_app_user_id: str) -> InstanceRecord | None:
+    def _instance_for_podium_event(
+        self,
+        *,
+        project_slug: str,
+        agent_app_user_id: str,
+        instance_id: str = "",
+    ) -> InstanceRecord | None:
         candidates = self.store.list_instances()
+        if instance_id:
+            candidates = [instance for instance in candidates if instance.id == instance_id]
         if project_slug:
             candidates = [instance for instance in candidates if instance.linear_project == project_slug]
-        candidates = [
-            instance
-            for instance in candidates
-            if _linear_agent_app_user_id(instance.linear_filters) == agent_app_user_id
-        ]
+        filtered = []
+        for instance in candidates:
+            configured_agent = _linear_agent_app_user_id(instance.linear_filters)
+            if configured_agent and configured_agent != agent_app_user_id:
+                continue
+            filtered.append(instance)
+        candidates = filtered
         if not candidates:
             return None
         return candidates[0]
@@ -2375,6 +2597,30 @@ def _normalize_linear_issue_dict(node: dict[str, Any]) -> dict[str, Any]:
             if isinstance(label, dict) and label.get("name")
         ],
     }
+
+
+def _desired_linear_phase_projection(phase: RunPhase) -> dict[str, str | None] | None:
+    if phase is RunPhase.QUEUED:
+        return {"phase_label": PHASE_LABELS["queued"], "state_name": None}
+    if phase is RunPhase.IMPLEMENTING:
+        return {"phase_label": PHASE_LABELS["implementation_running"], "state_name": "In Progress"}
+    if phase is RunPhase.REVIEWING:
+        return {"phase_label": PHASE_LABELS["review_running"], "state_name": "In Review"}
+    if phase is RunPhase.REWORKING:
+        return {"phase_label": PHASE_LABELS["rework"], "state_name": "In Progress"}
+    if phase is RunPhase.AWAITING_HUMAN:
+        return {"phase_label": PHASE_LABELS["blocked"], "state_name": None}
+    if phase is RunPhase.DONE:
+        return {"phase_label": PHASE_LABELS["completed"], "state_name": "Done"}
+    if phase is RunPhase.FAILED:
+        return {"phase_label": PHASE_LABELS["failed"], "state_name": None}
+    return None
+
+
+def _linear_projection_event_type(phase: RunPhase) -> str:
+    if phase is RunPhase.REVIEWING:
+        return "linear.projected_review_state"
+    return "linear.projected_phase"
 
 
 def _issue_field(issue: Any, field: str) -> str:

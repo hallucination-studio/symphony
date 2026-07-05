@@ -34,3 +34,13 @@ def test_package_import_boundaries() -> None:
     assert "performer_api" in imports["performer"]
     assert "performer_api" in imports["conductor"]
     assert "performer_api" not in imports["podium"]
+
+
+def test_performer_does_not_write_authoritative_phase_labels() -> None:
+    offenders: list[str] = []
+    for path in ROOTS["performer"].rglob("*.py"):
+        text = path.read_text(encoding="utf-8")
+        if '_sync_label_group' in text and 'prefix="performer:phase/"' in text:
+            offenders.append(str(path))
+
+    assert offenders == []

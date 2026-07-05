@@ -330,17 +330,20 @@ Expected continuation evidence:
 
 ## When To Stop Waiting
 
-Stop and diagnose instead of continuing to wait when:
+Conductor reconcile now checks the former manual stop-waiting cases on each
+background coordination pass and reports structured findings instead of relying
+on a human to keep waiting and inspect logs:
 
-- logs repeatedly show `running=0 claimed=1`;
-- `already_running_or_claimed` repeats while no worker is running;
-- Linear has `performer:phase/review` but state is not `In Review`;
-- gate/evidence parent relationships are wrong;
-- evidence is missing and the issue is in review;
-- normal continuation appears in retry state;
-- the run exceeds the scenario timeout.
+- `orphan_claim_detected` / `already_claimed_without_worker`;
+- `review_phase_projection_missing`;
+- `gate_parent_relationship_drift`;
+- `review_without_evidence`;
+- `continuation_recorded_as_retry`;
+- `scenario_timeout_unresolved`;
+- `orchestration_projection_drift`.
 
-Stopping a stuck run is valid real acceptance evidence. Fix the product bug, archive the project, and rerun from a clean state.
+When a reconcile finding appears, treat it as product evidence: fix the bug,
+archive the project if a real run was involved, and rerun from a clean state.
 
 ## Current Real-Run Lessons
 

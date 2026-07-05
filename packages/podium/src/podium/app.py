@@ -1470,12 +1470,38 @@ class ManagedPodiumState:
         dispatch = self.dispatches.get(dispatch_id)
         if dispatch is None or dispatch.get("leased_runtime_id") != runtime_id:
             return None
+        if status in {"completed", "failed"} and runtime_phase not in {"done", "failed"}:
+            dispatch["status"] = "ack_drift"
+            dispatch["reason"] = "dispatch ack missing conductor terminal run event"
+            if runtime_phase is not None:
+                dispatch["runtime_phase"] = runtime_phase
+            return dispatch
         dispatch["status"] = status
         if reason is not None:
             dispatch["reason"] = reason
         if runtime_phase is not None:
             dispatch["runtime_phase"] = runtime_phase
         return dispatch
+
+    def reconcile_dispatch_acks(self) -> list[dict[str, Any]]:
+        findings: list[dict[str, Any]] = []
+        for dispatch in self.dispatches.values():
+            status = str(dispatch.get("status") or "")
+            runtime_phase = str(dispatch.get("runtime_phase") or "")
+            if status not in {"completed", "failed"}:
+                continue
+            if runtime_phase in {"done", "failed"}:
+                continue
+            findings.append(
+                {
+                    "code": "dispatch_ack_without_terminal_run_event",
+                    "dispatch_id": str(dispatch.get("dispatch_id") or ""),
+                    "issue_id": str(dispatch.get("issue_id") or ""),
+                    "runtime_phase": runtime_phase,
+                    "status": status,
+                }
+            )
+        return findings
 
 
 async def _forward_runtime_commands(websocket: WebSocket, queue: asyncio.Queue[dict[str, Any]]) -> None:

@@ -165,23 +165,21 @@ class PhaseReducer:
         if run.phase not in {RunPhase.QUEUED, RunPhase.REWORKING, RunPhase.REVIEWING}:
             raise PhaseTransitionError(f"Cannot start Performer from phase {run.phase.value}")
         started_phase = RunPhase.REVIEWING if run.phase is RunPhase.REVIEWING else RunPhase.IMPLEMENTING
-        updated = self.store.update_orchestration_run(
+        return self.store.apply_event(
             run.run_id,
-            phase=started_phase,
-            status=RunStatus.RUNNING,
-            request_path=request_path,
-            result_path=result_path,
-            process_pid=pid,
-            next_run_at=None,
-            last_error=None,
+            {
+                "event_type": "performer.started",
+                "to_phase": started_phase,
+                "payload": {
+                    "status": RunStatus.RUNNING,
+                    "request_path": request_path,
+                    "result_path": result_path,
+                    "process_pid": pid,
+                    "next_run_at": None,
+                    "last_error": None,
+                },
+            },
         )
-        self._event(
-            run,
-            "performer.started",
-            to_phase=started_phase,
-            payload={"request_path": request_path, "result_path": result_path, "pid": pid},
-        )
-        return updated
 
     def performer_result(
         self,
@@ -240,19 +238,22 @@ class PhaseReducer:
                     updates["status"] = RunStatus.QUEUED
                     updates["next_run_at"] = _iso(timestamp + timedelta(seconds=delay))
                     to_phase = RunPhase.QUEUED
-                updated = self.store.update_orchestration_run(run.run_id, **updates)
-                self._event(
-                    run,
-                    "performer.init_failed",
-                    to_phase=to_phase,
-                    reason=result.reason,
-                    payload={
-                        **result.to_dict(),
-                        "init_failure_count": init_failure_count,
-                        "init_failure_limit": self.init_failure_limit,
+                return self.store.apply_event(
+                    run.run_id,
+                    {
+                        "event_type": "performer.init_failed",
+                        "to_phase": to_phase,
+                        "reason": result.reason,
+                        "payload": {
+                            **result.to_dict(),
+                            **updates,
+                            "run_status": updates.get("status"),
+                            "status": result.status,
+                            "init_failure_count": init_failure_count,
+                            "init_failure_limit": self.init_failure_limit,
+                        },
                     },
                 )
-                return updated
             elif result.status == "upstream_overloaded":
                 overload_count = run.overload_count + 1
                 updates["attempt"] = run.attempt + 1
@@ -270,19 +271,22 @@ class PhaseReducer:
                     updates["status"] = RunStatus.QUEUED
                     updates["next_run_at"] = _iso(timestamp + timedelta(seconds=delay))
                     to_phase = RunPhase.QUEUED
-                updated = self.store.update_orchestration_run(run.run_id, **updates)
-                self._event(
-                    run,
-                    "performer.upstream_overloaded",
-                    to_phase=to_phase,
-                    reason=result.reason,
-                    payload={
-                        **result.to_dict(),
-                        "overload_count": overload_count,
-                        "overload_limit": self.overload_limit,
+                return self.store.apply_event(
+                    run.run_id,
+                    {
+                        "event_type": "performer.upstream_overloaded",
+                        "to_phase": to_phase,
+                        "reason": result.reason,
+                        "payload": {
+                            **result.to_dict(),
+                            **updates,
+                            "run_status": updates.get("status"),
+                            "status": result.status,
+                            "overload_count": overload_count,
+                            "overload_limit": self.overload_limit,
+                        },
                     },
                 )
-                return updated
             else:
                 delay = max(result.retry_delay_seconds or 0, 5)
                 if result.reason == "already_running_or_claimed":
@@ -293,29 +297,33 @@ class PhaseReducer:
                 updates["next_run_at"] = _iso(timestamp + timedelta(seconds=delay))
         else:
             raise PhaseTransitionError(f"Unsupported result phase {result.next_phase.value}")
-        updated = self.store.update_orchestration_run(run.run_id, **updates)
-        self._event(
-            run,
-            "performer.result",
-            to_phase=result.next_phase,
-            reason=result.reason,
-            payload=result.to_dict(),
+        return self.store.apply_event(
+            run.run_id,
+            {
+                "event_type": "performer.result",
+                "to_phase": result.next_phase,
+                "reason": result.reason,
+                "payload": {**result.to_dict(), **updates, "run_status": updates.get("status"), "status": result.status},
+            },
         )
-        return updated
 
     def human_completed(self, run_id: str, *, human_response: str) -> OrchestrationRun:
         run = self._require_run(run_id)
         if run.phase is not RunPhase.AWAITING_HUMAN:
             raise PhaseTransitionError(f"Cannot resume human response from phase {run.phase.value}")
-        updated = self.store.update_orchestration_run(
+        return self.store.apply_event(
             run.run_id,
-            phase=RunPhase.QUEUED,
-            status=RunStatus.QUEUED,
-            human_response=human_response,
-            next_run_at=None,
+            {
+                "event_type": "human.completed",
+                "to_phase": RunPhase.QUEUED,
+                "payload": {
+                    "phase": RunPhase.QUEUED,
+                    "status": RunStatus.QUEUED,
+                    "human_response": human_response,
+                    "next_run_at": None,
+                },
+            },
         )
-        self._event(run, "human.completed", to_phase=RunPhase.QUEUED, payload={"human_response": human_response})
-        return updated
 
     def performer_crashed(
         self,
@@ -330,41 +338,47 @@ class PhaseReducer:
         timestamp = now or _now()
         crash_count = run.crash_count + 1
         if crash_count > self.crash_limit:
-            updated = self.store.update_orchestration_run(
-                run.run_id,
-                phase=RunPhase.FAILED,
-                status=RunStatus.FAILED,
-                crash_count=crash_count,
-                process_pid=None,
-                last_error=f"performer crashed more than {self.crash_limit} times",
-                ack_status="pending",
-                next_run_at=None,
-            )
+            updates = {
+                "phase": RunPhase.FAILED,
+                "status": RunStatus.FAILED,
+                "crash_count": crash_count,
+                "process_pid": None,
+                "last_error": f"performer crashed more than {self.crash_limit} times",
+                "ack_status": "pending",
+                "next_run_at": None,
+            }
             to_phase = RunPhase.FAILED
         else:
             delay_seconds = min(5 * (2 ** (crash_count - 1)), 60)
-            updated = self.store.update_orchestration_run(
-                run.run_id,
-                phase=RunPhase.QUEUED,
-                status=RunStatus.QUEUED,
-                crash_count=crash_count,
-                process_pid=None,
-                last_error=f"performer exited with code {exit_code}",
-                next_run_at=_iso(timestamp + timedelta(seconds=delay_seconds)),
-            )
+            updates = {
+                "phase": RunPhase.QUEUED,
+                "status": RunStatus.QUEUED,
+                "crash_count": crash_count,
+                "process_pid": None,
+                "last_error": f"performer exited with code {exit_code}",
+                "next_run_at": _iso(timestamp + timedelta(seconds=delay_seconds)),
+            }
             to_phase = RunPhase.QUEUED
-        self._event(
-            run,
-            "performer.crashed",
-            to_phase=to_phase,
-            reason=f"exit_code={exit_code}",
-            payload={"exit_code": exit_code, "crash_count": crash_count},
+        return self.store.apply_event(
+            run.run_id,
+            {
+                "event_type": "performer.crashed",
+                "to_phase": to_phase,
+                "reason": f"exit_code={exit_code}",
+                "payload": {"exit_code": exit_code, **updates},
+            },
         )
-        return updated
 
     def acked(self, run_id: str) -> OrchestrationRun:
         run = self._require_run(run_id)
-        return self.store.update_orchestration_run(run_id, ack_status="acked", acked_at=_iso(_now()))
+        return self.store.apply_event(
+            run_id,
+            {
+                "event_type": "dispatch.acked",
+                "to_phase": run.phase,
+                "payload": {"ack_status": "acked", "acked_at": _iso(_now())},
+            },
+        )
 
     def _require_run(self, run_id: str) -> OrchestrationRun:
         run = self.store.get_orchestration_run(run_id)
@@ -372,29 +386,9 @@ class PhaseReducer:
             raise PhaseTransitionError(f"Run not found: {run_id}")
         return run
 
-    def _event(
-        self,
-        run: OrchestrationRun,
-        event_type: str,
-        *,
-        to_phase: RunPhase,
-        reason: str | None = None,
-        payload: dict[str, Any] | None = None,
-    ) -> None:
-        self.store.append_orchestration_event(
-            run_id=run.run_id,
-            instance_id=run.instance_id,
-            issue_id=run.issue_id,
-            event_type=event_type,
-            from_phase=run.phase,
-            to_phase=to_phase,
-            reason=reason,
-            payload=payload or {},
-        )
-
-
 def new_run(
     *,
+    run_id: str | None = None,
     instance_id: str,
     issue_id: str,
     issue_identifier: str | None,
@@ -403,7 +397,7 @@ def new_run(
     now: str,
 ) -> OrchestrationRun:
     return OrchestrationRun(
-        run_id=f"run-{uuid4().hex}",
+        run_id=run_id or f"run-{uuid4().hex}",
         instance_id=instance_id,
         issue_id=issue_id,
         issue_identifier=issue_identifier,

@@ -325,108 +325,40 @@ class ConductorStore:
         workflow_profile: str | None,
         dispatch_id: str | None,
     ) -> OrchestrationRun:
-        now = utc_now_iso()
         with self.connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 "SELECT * FROM orchestration_runs WHERE instance_id = ? AND issue_id = ?",
                 (instance_id, issue_id),
             ).fetchone()
-            if row is None:
-                run = new_run(
-                    instance_id=instance_id,
-                    issue_id=issue_id,
-                    issue_identifier=issue_identifier,
-                    workflow_profile=workflow_profile,
-                    dispatch_id=dispatch_id,
-                    now=now,
-                )
-                connection.execute(
-                    """
-                    INSERT INTO orchestration_runs (
-                      run_id,
-                      instance_id,
-                      issue_id,
-                      issue_identifier,
-                      phase,
-                      status,
-                      attempt,
-                      workflow_profile,
-                      dispatch_id,
-                      request_path,
-                      result_path,
-                      workspace_path,
-                      ops_snapshot_path,
-                      human_action_json,
-                      human_response,
-                      last_reason,
-                      last_error,
-                      process_pid,
-                      crash_count,
-                      retry_count,
-                      init_failure_count,
-                      overload_count,
-                      next_run_at,
-                      ack_status,
-                      acked_at,
-                      created_at,
-                      updated_at
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    _orchestration_run_values(run),
-                )
-                _append_orchestration_event(
-                    connection,
-                    run_id=run.run_id,
-                    instance_id=instance_id,
-                    issue_id=issue_id,
-                    event_type="dispatch.created",
-                    from_phase=None,
-                    to_phase=RunPhase.QUEUED,
-                    reason=None,
-                    payload={"dispatch_id": dispatch_id, "issue_identifier": issue_identifier},
-                    now=now,
-                )
-                return run
-            run = _orchestration_run_from_row(row)
-            updated = with_updates(
-                run,
-                issue_identifier=issue_identifier or run.issue_identifier,
-                workflow_profile=workflow_profile or run.workflow_profile,
-                dispatch_id=dispatch_id or run.dispatch_id,
-                updated_at=now,
+        if row is None:
+            run_id = f"run-{uuid4().hex}"
+            return self.apply_event(
+                run_id,
+                {
+                    "instance_id": instance_id,
+                    "issue_id": issue_id,
+                    "event_type": "dispatch.created",
+                    "to_phase": RunPhase.QUEUED,
+                    "payload": {
+                        "dispatch_id": dispatch_id,
+                        "issue_identifier": issue_identifier,
+                        "workflow_profile": workflow_profile,
+                    },
+                },
             )
-            connection.execute(
-                """
-                UPDATE orchestration_runs
-                SET issue_identifier = ?,
-                    workflow_profile = ?,
-                    dispatch_id = ?,
-                    updated_at = ?
-                WHERE run_id = ?
-                """,
-                (
-                    updated.issue_identifier,
-                    updated.workflow_profile,
-                    updated.dispatch_id,
-                    now,
-                    updated.run_id,
-                ),
-            )
-            _append_orchestration_event(
-                connection,
-                run_id=updated.run_id,
-                instance_id=updated.instance_id,
-                issue_id=updated.issue_id,
-                event_type="dispatch.duplicate",
-                from_phase=run.phase,
-                to_phase=updated.phase,
-                reason=None,
-                payload={"dispatch_id": dispatch_id, "issue_identifier": issue_identifier},
-                now=now,
-            )
-        return updated
+        run = _orchestration_run_from_row(row)
+        return self.apply_event(
+            run.run_id,
+            {
+                "event_type": "dispatch.duplicate",
+                "to_phase": run.phase,
+                "payload": {
+                    "dispatch_id": dispatch_id,
+                    "issue_identifier": issue_identifier,
+                    "workflow_profile": workflow_profile,
+                },
+            },
+        )
 
     def get_orchestration_run(self, run_id: str) -> OrchestrationRun | None:
         with self.connect() as connection:
@@ -500,64 +432,74 @@ class ConductorStore:
         if current is None:
             raise FileNotFoundError(f"Orchestration run does not exist: {run_id}")
         normalized = {key: _normalize_run_change(key, value) for key, value in changes.items()}
-        updated = with_updates(current, **normalized, updated_at=utc_now_iso())
+        return self.apply_event(
+            run_id,
+            {
+                "event_type": "projection.patch",
+                "to_phase": normalized.get("phase", current.phase),
+                "payload": normalized,
+            },
+        )
+
+    def apply_event(self, run_id: str, event: OrchestrationEvent | dict[str, Any]) -> OrchestrationRun:
+        payload = _event_payload(event)
+        event_type = _event_field(event, "event_type")
+        if not event_type:
+            raise ValueError("Orchestration event requires event_type")
+        now = utc_now_iso()
         with self.connect() as connection:
-            cursor = connection.execute(
-                """
-                UPDATE orchestration_runs
-                SET phase = ?,
-                    status = ?,
-                    attempt = ?,
-                    workflow_profile = ?,
-                    dispatch_id = ?,
-                    request_path = ?,
-                    result_path = ?,
-                    workspace_path = ?,
-                    ops_snapshot_path = ?,
-                    human_action_json = ?,
-                    human_response = ?,
-                    last_reason = ?,
-                    last_error = ?,
-                    process_pid = ?,
-                    crash_count = ?,
-                    retry_count = ?,
-                    init_failure_count = ?,
-                    overload_count = ?,
-                    next_run_at = ?,
-                    ack_status = ?,
-                    acked_at = ?,
-                    updated_at = ?
-                WHERE run_id = ?
-                """,
-                (
-                    updated.phase.value,
-                    updated.status,
-                    updated.attempt,
-                    updated.workflow_profile,
-                    updated.dispatch_id,
-                    updated.request_path,
-                    updated.result_path,
-                    updated.workspace_path,
-                    updated.ops_snapshot_path,
-                    _json_dumps(updated.human_action),
-                    updated.human_response,
-                    updated.last_reason,
-                    updated.last_error,
-                    updated.process_pid,
-                    updated.crash_count,
-                    updated.retry_count,
-                    updated.init_failure_count,
-                    updated.overload_count,
-                    updated.next_run_at,
-                    updated.ack_status,
-                    updated.acked_at,
-                    updated.updated_at,
-                    run_id,
-                ),
-            )
-            if cursor.rowcount == 0:
+            connection.execute("BEGIN IMMEDIATE")
+            current_row = connection.execute("SELECT * FROM orchestration_runs WHERE run_id = ?", (run_id,)).fetchone()
+            current = _orchestration_run_from_row(current_row) if current_row is not None else None
+            instance_id = _event_field(event, "instance_id") or (current.instance_id if current is not None else "")
+            issue_id = _event_field(event, "issue_id") or (current.issue_id if current is not None else "")
+            if not instance_id or not issue_id:
                 raise FileNotFoundError(f"Orchestration run does not exist: {run_id}")
+            from_phase = _event_phase(event, "from_phase")
+            if from_phase is None and current is not None:
+                from_phase = current.phase
+            to_phase = _event_phase(event, "to_phase")
+            if to_phase is None and current is not None:
+                to_phase = current.phase
+            reason = _optional_text(_event_value(event, "reason"))
+            event_id = _append_orchestration_event(
+                connection,
+                run_id=run_id,
+                instance_id=instance_id,
+                issue_id=issue_id,
+                event_type=event_type,
+                from_phase=from_phase,
+                to_phase=to_phase,
+                reason=reason,
+                payload=payload,
+                now=now,
+            )
+            stored_event = OrchestrationEvent(
+                event_id=event_id,
+                run_id=run_id,
+                instance_id=instance_id,
+                issue_id=issue_id,
+                event_type=event_type,
+                from_phase=from_phase,
+                to_phase=to_phase,
+                reason=reason,
+                payload=payload,
+                created_at=now,
+            )
+            updated = _project_orchestration_event(current, stored_event)
+            _write_orchestration_run_projection(connection, updated)
         return updated
+
+    def rebuild_run(self, run_id: str) -> OrchestrationRun:
+        events = self.list_orchestration_events(run_id)
+        if not events:
+            raise FileNotFoundError(f"Orchestration run has no events: {run_id}")
+        projection: OrchestrationRun | None = None
+        for event in events:
+            projection = _project_orchestration_event(projection, event)
+        if projection is None:
+            raise FileNotFoundError(f"Orchestration run has no projection: {run_id}")
+        return projection
 
     def append_orchestration_event(
         self,
@@ -571,20 +513,23 @@ class ConductorStore:
         reason: str | None = None,
         payload: dict[str, Any] | None = None,
     ) -> str:
-        now = utc_now_iso()
-        with self.connect() as connection:
-            return _append_orchestration_event(
-                connection,
-                run_id=run_id,
-                instance_id=instance_id,
-                issue_id=issue_id,
-                event_type=event_type,
-                from_phase=from_phase,
-                to_phase=to_phase,
-                reason=reason,
-                payload=payload or {},
-                now=now,
-            )
+        before = self.list_orchestration_events(run_id)
+        self.apply_event(
+            run_id,
+            {
+                "instance_id": instance_id,
+                "issue_id": issue_id,
+                "event_type": event_type,
+                "from_phase": from_phase,
+                "to_phase": to_phase,
+                "reason": reason,
+                "payload": payload or {},
+            },
+        )
+        after = self.list_orchestration_events(run_id)
+        if len(after) <= len(before):
+            raise RuntimeError(f"Orchestration event was not appended for run {run_id}")
+        return after[-1].event_id
 
     def list_orchestration_events(self, run_id: str) -> list[OrchestrationEvent]:
         with self.connect() as connection:
@@ -930,6 +875,109 @@ def _orchestration_run_from_row(row: sqlite3.Row) -> OrchestrationRun:
     )
 
 
+def _write_orchestration_run_projection(connection: sqlite3.Connection, run: OrchestrationRun) -> None:
+    connection.execute(
+        """
+        INSERT INTO orchestration_runs (
+          run_id,
+          instance_id,
+          issue_id,
+          issue_identifier,
+          phase,
+          status,
+          attempt,
+          workflow_profile,
+          dispatch_id,
+          request_path,
+          result_path,
+          workspace_path,
+          ops_snapshot_path,
+          human_action_json,
+          human_response,
+          last_reason,
+          last_error,
+          process_pid,
+          crash_count,
+          retry_count,
+          init_failure_count,
+          overload_count,
+          next_run_at,
+          ack_status,
+          acked_at,
+          created_at,
+          updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(run_id) DO UPDATE SET
+          instance_id = excluded.instance_id,
+          issue_id = excluded.issue_id,
+          issue_identifier = excluded.issue_identifier,
+          phase = excluded.phase,
+          status = excluded.status,
+          attempt = excluded.attempt,
+          workflow_profile = excluded.workflow_profile,
+          dispatch_id = excluded.dispatch_id,
+          request_path = excluded.request_path,
+          result_path = excluded.result_path,
+          workspace_path = excluded.workspace_path,
+          ops_snapshot_path = excluded.ops_snapshot_path,
+          human_action_json = excluded.human_action_json,
+          human_response = excluded.human_response,
+          last_reason = excluded.last_reason,
+          last_error = excluded.last_error,
+          process_pid = excluded.process_pid,
+          crash_count = excluded.crash_count,
+          retry_count = excluded.retry_count,
+          init_failure_count = excluded.init_failure_count,
+          overload_count = excluded.overload_count,
+          next_run_at = excluded.next_run_at,
+          ack_status = excluded.ack_status,
+          acked_at = excluded.acked_at,
+          created_at = excluded.created_at,
+          updated_at = excluded.updated_at
+        """,
+        _orchestration_run_values(run),
+    )
+
+
+def _project_orchestration_event(current: OrchestrationRun | None, event: OrchestrationEvent) -> OrchestrationRun:
+    payload = dict(event.payload)
+    if current is None:
+        if event.event_type != "dispatch.created":
+            raise FileNotFoundError(f"Cannot project {event.event_type} without an existing run")
+        return new_run(
+            run_id=event.run_id,
+            instance_id=event.instance_id,
+            issue_id=event.issue_id,
+            issue_identifier=_optional_text(payload.get("issue_identifier")),
+            workflow_profile=_optional_text(payload.get("workflow_profile")),
+            dispatch_id=_optional_text(payload.get("dispatch_id")),
+            now=event.created_at,
+        )
+
+    changes: dict[str, Any] = {"updated_at": event.created_at}
+    if event.to_phase is not None:
+        changes["phase"] = event.to_phase
+    if event.event_type == "dispatch.duplicate":
+        for key in ("issue_identifier", "workflow_profile", "dispatch_id"):
+            if payload.get(key):
+                changes[key] = payload[key]
+    elif event.event_type == "projection.patch":
+        changes.update(_normalize_projection_payload(payload))
+    elif event.event_type in {
+        "performer.started",
+        "performer.result",
+        "performer.init_failed",
+        "performer.upstream_overloaded",
+        "performer.crashed",
+        "human.completed",
+        "dispatch.acked",
+        "human.failure_child_created",
+    }:
+        changes.update(_normalize_projection_payload(payload))
+    return with_updates(current, **changes)
+
+
 def _append_orchestration_event(
     connection: sqlite3.Connection,
     *,
@@ -1001,6 +1049,78 @@ def _normalize_run_change(key: str, value: Any) -> Any:
     if key == "status" and hasattr(value, "value"):
         return value.value
     return value
+
+
+def _normalize_projection_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    normalized: dict[str, Any] = {}
+    allowed = {
+        "phase",
+        "status",
+        "attempt",
+        "workflow_profile",
+        "dispatch_id",
+        "request_path",
+        "result_path",
+        "workspace_path",
+        "ops_snapshot_path",
+        "human_action",
+        "human_response",
+        "last_reason",
+        "last_error",
+        "process_pid",
+        "crash_count",
+        "retry_count",
+        "init_failure_count",
+        "overload_count",
+        "next_run_at",
+        "ack_status",
+        "acked_at",
+        "issue_identifier",
+    }
+    for key, value in payload.items():
+        if key not in allowed:
+            continue
+        if key == "status" and "run_status" in payload:
+            continue
+        normalized[key] = _normalize_run_change(key, value)
+    if "run_status" in payload:
+        normalized["status"] = _normalize_run_change("status", payload["run_status"])
+    return normalized
+
+
+def _event_payload(event: OrchestrationEvent | dict[str, Any]) -> dict[str, Any]:
+    if isinstance(event, OrchestrationEvent):
+        return dict(event.payload)
+    value = event.get("payload", {})
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _event_field(event: OrchestrationEvent | dict[str, Any], key: str) -> str:
+    value = _event_value(event, key)
+    return str(value or "")
+
+
+def _event_value(event: OrchestrationEvent | dict[str, Any], key: str) -> Any:
+    if isinstance(event, OrchestrationEvent):
+        return getattr(event, key)
+    return event.get(key)
+
+
+def _event_phase(event: OrchestrationEvent | dict[str, Any], key: str) -> RunPhase | None:
+    value = _event_value(event, key)
+    if isinstance(value, RunPhase):
+        return value
+    if value is None:
+        return None
+    text = str(value)
+    return RunPhase(text) if text else None
+
+
+def _optional_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value)
+    return text if text else None
 
 
 def _ensure_column(connection: sqlite3.Connection, table: str, name: str, definition: str) -> None:

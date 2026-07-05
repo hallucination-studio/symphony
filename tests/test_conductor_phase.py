@@ -148,6 +148,84 @@ def test_phase_reducer_starts_performer_and_applies_done_result(tmp_path: Path) 
         "performer.started",
         "performer.result",
     ]
+    assert store.rebuild_run(run.run_id) == completed
+
+
+def test_apply_event_is_the_only_phase_projection_writer(tmp_path: Path) -> None:
+    store = ConductorStore(tmp_path / "conductor-data")
+    reducer = PhaseReducer(store)
+    run = reducer.dispatch_received(
+        instance_id="inst-1",
+        issue_id="issue-1",
+        issue_identifier="ENG-1",
+        workflow_profile="default",
+        dispatch_id="dispatch-1",
+    )
+
+    updated = store.apply_event(
+        run.run_id,
+        {
+            "event_type": "performer.started",
+            "to_phase": RunPhase.IMPLEMENTING,
+            "payload": {
+                "status": RunStatus.RUNNING,
+                "request_path": "/tmp/request.json",
+                "result_path": "/tmp/result.json",
+                "process_pid": 123,
+                "next_run_at": None,
+                "last_error": None,
+            },
+        },
+    )
+
+    assert updated.phase is RunPhase.IMPLEMENTING
+    assert updated.status == RunStatus.RUNNING
+    assert store.rebuild_run(run.run_id) == updated
+
+
+def test_rebuild_run_matches_incremental_projection_across_event_types(tmp_path: Path) -> None:
+    store = ConductorStore(tmp_path / "conductor-data")
+    reducer = PhaseReducer(store, overload_limit=1)
+    run = reducer.dispatch_received(
+        instance_id="inst-1",
+        issue_id="issue-1",
+        issue_identifier="ENG-1",
+        workflow_profile="default",
+        dispatch_id="dispatch-1",
+    )
+    reducer.performer_started(run.run_id, request_path="/tmp/request-1.json", result_path="/tmp/result-1.json")
+    retry = reducer.performer_result(
+        PhaseAdvanceResult(
+            run_id=run.run_id,
+            issue_id="issue-1",
+            next_phase=RunPhase.QUEUED,
+            status="upstream_overloaded",
+            reason="upstream_overloaded_exhausted",
+        )
+    )
+    reducer.performer_started(run.run_id, request_path="/tmp/request-2.json", result_path="/tmp/result-2.json")
+    failed = reducer.performer_result(
+        PhaseAdvanceResult(
+            run_id=run.run_id,
+            issue_id="issue-1",
+            next_phase=RunPhase.QUEUED,
+            status="upstream_overloaded",
+            reason="upstream_overloaded_exhausted",
+        )
+    )
+    with_human_action = store.apply_event(
+        run.run_id,
+        {
+            "event_type": "human.failure_child_created",
+            "to_phase": RunPhase.FAILED,
+            "payload": {"human_action": {"child_issue_id": "child-1", "kind": "runtime_error"}},
+        },
+    )
+
+    assert retry.phase is RunPhase.QUEUED
+    assert failed.phase is RunPhase.FAILED
+    assert with_human_action.human_action["child_issue_id"] == "child-1"
+    assert store.rebuild_run(run.run_id) == store.get_orchestration_run(run.run_id)
 
 
 def test_phase_reducer_starts_reviewing_phase_without_rewriting_to_implementation(tmp_path: Path) -> None:

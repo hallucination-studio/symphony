@@ -285,7 +285,7 @@ async def test_signed_webhook_queues_dispatch_and_runtime_ack_completes_it() -> 
                 "dispatch_id": dispatch["dispatch_id"],
                 "status": "completed",
                 "reason": "completed_by_runtime",
-                "runtime_phase": "completed",
+                "runtime_phase": "done",
             },
         )
 
@@ -299,7 +299,53 @@ async def test_signed_webhook_queues_dispatch_and_runtime_ack_completes_it() -> 
     assert ack.status_code == 200
     assert ack.json()["dispatch"]["status"] == "completed"
     assert ack.json()["dispatch"]["reason"] == "completed_by_runtime"
-    assert ack.json()["dispatch"]["runtime_phase"] == "completed"
+    assert ack.json()["dispatch"]["runtime_phase"] == "done"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_ack_reconcile_flags_missing_terminal_runtime_phase() -> None:
+    app = make_app()
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
+        await register(client, "dispatch-reconcile@example.com")
+        enrolled = await enroll_conductor(client)
+        await client.post(
+            "/api/v1/runtime/report",
+            headers={"Authorization": f"Bearer {enrolled['runtime_token']}"},
+            json={"bindings": [{"instance_id": "inst-a", "project_slug": "ALPHA", "agent_app_user_id": "agent-alpha"}]},
+        )
+        state = app.state.podium
+        state.dispatches["dispatch-1"] = {
+            "dispatch_id": "dispatch-1",
+            "runtime_group_id": enrolled["runtime_group_id"],
+            "project_binding_id": enrolled["runtime_group_id"],
+            "issue_id": "issue-1",
+            "issue_identifier": "ALPHA-1",
+            "linear_workspace_id": "workspace-1",
+            "project_slug": "ALPHA",
+            "agent_session_id": "session-1",
+            "agent_app_user_id": "agent-alpha",
+            "routing_rule_id": enrolled["runtime_group_id"],
+            "workflow_profile": "task",
+            "codex_profile": {},
+            "status": "completed",
+            "reason": "completed_by_runtime",
+            "runtime_phase": "reviewing",
+            "leased_runtime_id": enrolled["runtime_id"],
+            "leased_until": None,
+            "created_at": "2026-07-04T00:00:00Z",
+        }
+
+        findings = state.reconcile_dispatch_acks()
+
+    assert findings == [
+        {
+            "code": "dispatch_ack_without_terminal_run_event",
+            "dispatch_id": "dispatch-1",
+            "issue_id": "issue-1",
+            "runtime_phase": "reviewing",
+            "status": "completed",
+        }
+    ]
 
 
 @pytest.mark.asyncio
