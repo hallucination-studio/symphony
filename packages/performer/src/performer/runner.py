@@ -2,29 +2,23 @@ from __future__ import annotations
 
 from dataclasses import asdict
 import hashlib
-import json
 from pathlib import Path
 from typing import Any, Protocol
 import logging
 
+from .agent_backend import AgentBackend
 from .codex_client import CodexSdkClient
 from performer_api.config import ServiceConfig
 from performer_api.models import Issue, normalize_state_key
 from performer_api.ops_store import OpsStore
 from .ops_telemetry import ExecutionTelemetryRecorder
-from performer_api.persistence import ops_snapshot_path_from_persistence_path, PersistenceStore
+from performer_api.persistence import ops_snapshot_path_from_persistence_path
 from performer_api.workflow import render_prompt
 from .repository_handoff import build_repository_handoff_report
 from .workspace import WorkspaceManager
+from .workspace_execution_state import WorkspaceExecutionState
 
 logger = logging.getLogger(__name__)
-
-WORKSPACE_CODEX_THREAD_FILE = ".symphony-codex-thread.json"
-
-
-class RunnerCodexClient(Protocol):
-    async def run_session(self, workspace_path: Path, prompt: str, title: str, **kwargs: Any) -> Any: ...
-
 
 class RunnerTracker(Protocol):
     async def fetch_issue_states_by_ids(self, issue_ids: list[str]) -> list[Issue]: ...
@@ -35,7 +29,7 @@ class AgentRunner:
         self,
         config: ServiceConfig,
         workspace_manager: WorkspaceManager,
-        codex_client: RunnerCodexClient | None = None,
+        codex_client: AgentBackend | None = None,
         tracker: RunnerTracker | None = None,
     ):
         self.config = config
@@ -207,61 +201,12 @@ class AgentRunner:
     def _existing_sdk_thread_id(self, issue_id: str, workspace_path: Path) -> str | None:
         if self.config.codex.backend != "sdk":
             return None
-        workspace_thread_id = self._workspace_sdk_thread_id(issue_id, workspace_path)
-        if workspace_thread_id:
-            return workspace_thread_id
-        if self.config.persistence.path is None:
-            return None
-        state = PersistenceStore(self.config.persistence.path).load()
-        for thread in state.codex_threads:
-            if (
-                thread.issue_id == issue_id
-                and thread.backend == "sdk"
-                and thread.workspace_path == str(workspace_path)
-                and thread.status in {"active", "resume_pending"}
-            ):
-                return thread.thread_id
-        return None
-
-    def _workspace_sdk_thread_id(self, issue_id: str, workspace_path: Path) -> str | None:
-        path = workspace_path / WORKSPACE_CODEX_THREAD_FILE
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return None
-        if not isinstance(payload, dict):
-            return None
-        if payload.get("issue_id") != issue_id:
-            return None
-        if payload.get("backend") != "sdk":
-            return None
-        if payload.get("status") not in {"active", "resume_pending", "completed"}:
-            return None
-        thread_id = payload.get("thread_id")
-        return thread_id if isinstance(thread_id, str) and thread_id else None
+        return WorkspaceExecutionState(workspace_path).sdk_thread_id(issue_id=issue_id)
 
     def _write_workspace_sdk_thread(self, issue_id: str, workspace_path: Path, result: Any) -> None:
         if self.config.codex.backend != "sdk":
             return
-        thread_id = getattr(result, "thread_id", None)
-        if not isinstance(thread_id, str) or not thread_id:
-            return
-        payload = {
-            "issue_id": issue_id,
-            "thread_id": thread_id,
-            "backend": "sdk",
-            "workspace_path": str(workspace_path),
-            "last_turn_id": getattr(result, "turn_id", None),
-            "status": "resume_pending",
-            "last_final_response": getattr(result, "final_response", None),
-        }
-        path = workspace_path / WORKSPACE_CODEX_THREAD_FILE
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        try:
-            tmp.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
-            tmp.replace(path)
-        except OSError:
-            logger.warning("performer_runner_workspace_thread_write_failed workspace=%s", workspace_path)
+        WorkspaceExecutionState(workspace_path).write_sdk_thread(issue_id=issue_id, result=result)
 
     def _telemetry_event_handler(
         self,

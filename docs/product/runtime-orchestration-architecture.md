@@ -279,6 +279,17 @@ not remain first-class Linear label families for run-state bookkeeping.
 These details should move to structured runtime state, ops telemetry, or human
 issue body content instead of being duplicated as parallel label axes.
 
+## Run Epochs
+
+If the same Linear issue is delegated again after its current Symphony run has
+reached a terminal phase (`done` or `failed`), Conductor treats that signal as a
+new iteration of the same issue, not as a silent duplicate. It creates a new
+`run_id` with `epoch + 1`, preserves the prior run event log, and enforces that
+only one non-terminal run for the issue can exist at a time.
+
+Duplicate dispatches while a run is still non-terminal remain idempotent and are
+recorded as duplicate events on the active run.
+
 ## Why this architecture fixes the current failure modes
 
 This architecture addresses the current failure patterns directly:

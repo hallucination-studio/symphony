@@ -137,20 +137,6 @@ def test_runtime_action_claim_is_transactional_across_store_instances(tmp_path: 
     assert loaded["lease_owner"] == "worker-a"
 
 
-def test_gated_followup_marker_claim_is_unique_and_retryable_after_failure(tmp_path: Path) -> None:
-    store_a = ConductorStore(tmp_path / "conductor-data")
-    store_b = ConductorStore(tmp_path / "conductor-data")
-    instance = make_instance(tmp_path, instance_id="inst-1", name="Main", port=8801)
-    store_a.create_instance(instance)
-
-    assert store_a.claim_gated_followup_marker("inst-1", "issue-1", "gate") is True
-    assert store_b.claim_gated_followup_marker("inst-1", "issue-1", "gate") is False
-    store_a.mark_gated_followup_failed("inst-1", "issue-1", "gate", "boom")
-    assert store_b.claim_gated_followup_marker("inst-1", "issue-1", "gate") is True
-    store_b.mark_gated_followup_started("inst-1", "issue-1", "gate")
-    assert store_a.claim_gated_followup_marker("inst-1", "issue-1", "gate") is False
-
-
 def test_managed_runtime_settings_round_trip_without_public_tokens(tmp_path: Path) -> None:
     store = ConductorStore(tmp_path / "conductor-data")
 

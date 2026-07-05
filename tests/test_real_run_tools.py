@@ -261,6 +261,31 @@ def test_real_symphony_e2e_real_instance_payload_requires_delegate() -> None:
     }
 
 
+@pytest.mark.asyncio
+async def test_real_symphony_e2e_waits_for_delegate_visibility_before_webhook(monkeypatch) -> None:
+    tool = load_tool("real_symphony_e2e")
+    seen = [
+        {"id": "issue-1", "delegate": None, "agentSessions": {"nodes": []}},
+        {"id": "issue-1", "delegate": {"id": "agent-1"}, "agentSessions": {"nodes": []}},
+    ]
+
+    async def fake_fetch(_token: str, _issue_id: str) -> dict[str, object]:
+        return seen.pop(0)
+
+    monkeypatch.setattr(tool, "fetch_linear_issue", fake_fetch)
+
+    issue = await tool.wait_for_linear_delegate_visible(
+        "token",
+        "issue-1",
+        "agent-1",
+        timeout_seconds=1,
+        poll_seconds=0,
+    )
+
+    assert issue["delegate"] == {"id": "agent-1"}
+    assert seen == []
+
+
 def test_real_symphony_e2e_evidence_redacts_tokens(tmp_path: Path) -> None:
     tool = load_tool("real_symphony_e2e")
     evidence = tool.Evidence(tmp_path / "evidence.json")

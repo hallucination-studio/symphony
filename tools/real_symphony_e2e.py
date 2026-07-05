@@ -310,6 +310,25 @@ async def delegate_linear_issue(token: str, issue_id: str, delegate_id: str) -> 
     )["issueUpdate"]["issue"]
 
 
+async def wait_for_linear_delegate_visible(
+    token: str,
+    issue_id: str,
+    delegate_id: str,
+    *,
+    timeout_seconds: float = 20,
+    poll_seconds: float = 0.5,
+) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout_seconds
+    last_issue: dict[str, Any] | None = None
+    while True:
+        last_issue = await fetch_linear_issue(token, issue_id)
+        if ((last_issue.get("delegate") or {}).get("id")) == delegate_id:
+            return last_issue
+        if time.monotonic() >= deadline:
+            return last_issue
+        await asyncio.sleep(poll_seconds)
+
+
 async def comment_linear_issue(token: str, issue_id: str, body: str) -> dict[str, Any]:
     return (
         await linear_graphql(
@@ -1580,10 +1599,19 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
             status, body = http_json(method, api_url(conductor_port, path), payload)
             evidence.check(f"conductor-api:{method} {path}", status in {200, 201}, status=status, body=body)
 
-        linear = await create_linear_issue(token, args.project_slug, run_id)
+        linear = await create_linear_issue(
+            token,
+            args.project_slug,
+            run_id,
+            delegate_id=agent_app_user_id if not args.simulate_agent_webhook else None,
+        )
         if not args.simulate_agent_webhook:
             linear["issue"] = await delegate_linear_issue(token, linear["issue"]["id"], agent_app_user_id)
-            linear["issue"] = await fetch_linear_issue(token, linear["issue"]["id"])
+            linear["issue"] = await wait_for_linear_delegate_visible(
+                token,
+                linear["issue"]["id"],
+                agent_app_user_id,
+            )
         issue_path = root / "business-issue.json"
         issue_path.write_text(json.dumps(linear, indent=2, sort_keys=True), encoding="utf-8")
         evidence.artifact("business_issue", issue_path)

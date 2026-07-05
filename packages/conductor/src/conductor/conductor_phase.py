@@ -28,6 +28,7 @@ class OrchestrationRun:
     issue_identifier: str | None
     phase: RunPhase
     status: str
+    epoch: int = 1
     attempt: int = 1
     workflow_profile: str | None = None
     dispatch_id: str | None = None
@@ -53,7 +54,7 @@ class OrchestrationRun:
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
         payload["phase"] = self.phase.value
-        payload["human_action"] = dict(self.human_action)
+        payload["human_action"] = dict(self.human_action or {})
         return payload
 
     @classmethod
@@ -65,6 +66,7 @@ class OrchestrationRun:
             issue_identifier=_optional_str(payload.get("issue_identifier")),
             phase=RunPhase(str(payload.get("phase") or RunPhase.QUEUED.value)),
             status=str(payload.get("status") or RunStatus.QUEUED.value),
+            epoch=_int(payload.get("epoch"), default=1),
             attempt=_int(payload.get("attempt"), default=1),
             workflow_profile=_optional_str(payload.get("workflow_profile")),
             dispatch_id=_optional_str(payload.get("dispatch_id")),
@@ -179,6 +181,7 @@ class PhaseReducer:
                     "last_error": None,
                 },
             },
+            expected_current_phases={run.phase},
         )
 
     def performer_result(
@@ -253,6 +256,7 @@ class PhaseReducer:
                             "init_failure_limit": self.init_failure_limit,
                         },
                     },
+                    expected_current_phases={run.phase},
                 )
             elif result.status == "upstream_overloaded":
                 overload_count = run.overload_count + 1
@@ -286,6 +290,7 @@ class PhaseReducer:
                             "overload_limit": self.overload_limit,
                         },
                     },
+                    expected_current_phases={run.phase},
                 )
             else:
                 delay = max(result.retry_delay_seconds or 0, 5)
@@ -305,6 +310,7 @@ class PhaseReducer:
                 "reason": result.reason,
                 "payload": {**result.to_dict(), **updates, "run_status": updates.get("status"), "status": result.status},
             },
+            expected_current_phases={run.phase},
         )
 
     def human_completed(self, run_id: str, *, human_response: str) -> OrchestrationRun:
@@ -323,6 +329,7 @@ class PhaseReducer:
                     "next_run_at": None,
                 },
             },
+            expected_current_phases={run.phase},
         )
 
     def performer_crashed(
@@ -367,6 +374,7 @@ class PhaseReducer:
                 "reason": f"exit_code={exit_code}",
                 "payload": {"exit_code": exit_code, **updates},
             },
+            expected_current_phases={run.phase},
         )
 
     def acked(self, run_id: str) -> OrchestrationRun:
@@ -378,6 +386,7 @@ class PhaseReducer:
                 "to_phase": run.phase,
                 "payload": {"ack_status": "acked", "acked_at": _iso(_now())},
             },
+            expected_current_phases={run.phase},
         )
 
     def _require_run(self, run_id: str) -> OrchestrationRun:
@@ -394,6 +403,7 @@ def new_run(
     issue_identifier: str | None,
     workflow_profile: str | None,
     dispatch_id: str | None,
+    epoch: int = 1,
     now: str,
 ) -> OrchestrationRun:
     return OrchestrationRun(
@@ -403,6 +413,7 @@ def new_run(
         issue_identifier=issue_identifier,
         phase=RunPhase.QUEUED,
         status=RunStatus.QUEUED.value,
+        epoch=epoch,
         workflow_profile=workflow_profile,
         dispatch_id=dispatch_id,
         created_at=now,

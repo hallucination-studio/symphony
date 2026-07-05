@@ -84,7 +84,6 @@ class InstanceRecord:
     linear_filters: dict[str, Any]
     workflow_profile: str
     workflow_inputs: dict[str, Any]
-    gated_followup_stages: dict[str, list[str]] = field(default_factory=dict)
     workflow_content: str = ""
     workflow_generation_status: WorkflowGenerationStatus = "draft"
     process_status: ProcessStatus = "stopped"
@@ -152,7 +151,6 @@ class InstanceRecord:
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> InstanceRecord:
         payload = dict(payload)
-        payload.setdefault("gated_followup_stages", {})
         payload.setdefault("restart_count", 0)
         payload.setdefault("restart_window_started_at", None)
         payload.setdefault("restart_next_at", None)

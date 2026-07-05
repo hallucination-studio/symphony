@@ -8,7 +8,7 @@ from uuid import uuid4
 
 from performer_api.phase import RunPhase
 
-from .conductor_phase import OrchestrationEvent, OrchestrationRun, new_run, with_updates
+from .conductor_phase import PhaseTransitionError, OrchestrationEvent, OrchestrationRun, new_run, with_updates
 from .conductor_models import ConductorSettings, InstanceRecord, utc_now_iso
 
 
@@ -28,7 +28,6 @@ INSTANCE_COLUMNS = (
     "linear_filters_json",
     "workflow_profile",
     "workflow_inputs_json",
-    "gated_followup_stages_json",
     "workflow_content",
     "workflow_generation_status",
     "process_status",
@@ -253,69 +252,6 @@ class ConductorStore:
     def fail_runtime_action(self, action_id: str, error: str, *, retryable: bool = True) -> None:
         self._set_runtime_action_status(action_id, status="retryable" if retryable else "failed", error=error)
 
-    def claim_gated_followup_marker(self, instance_id: str, issue_id: str, stage: str) -> bool:
-        now = utc_now_iso()
-        with self.connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            row = connection.execute(
-                """
-                SELECT status
-                FROM gated_followup_markers
-                WHERE instance_id = ? AND issue_id = ? AND stage = ?
-                """,
-                (instance_id, issue_id, stage),
-            ).fetchone()
-            if row is None:
-                connection.execute(
-                    """
-                    INSERT INTO gated_followup_markers (
-                      instance_id,
-                      issue_id,
-                      stage,
-                      status,
-                      attempt,
-                      last_error,
-                      created_at,
-                      updated_at
-                    )
-                    VALUES (?, ?, ?, 'starting', 1, NULL, ?, ?)
-                    """,
-                    (instance_id, issue_id, stage, now, now),
-                )
-                return True
-            if row["status"] == "failed":
-                connection.execute(
-                    """
-                    UPDATE gated_followup_markers
-                    SET status = 'starting',
-                        attempt = attempt + 1,
-                        last_error = NULL,
-                        updated_at = ?
-                    WHERE instance_id = ? AND issue_id = ? AND stage = ? AND status = 'failed'
-                    """,
-                    (now, instance_id, issue_id, stage),
-                )
-                return True
-        return False
-
-    def mark_gated_followup_started(self, instance_id: str, issue_id: str, stage: str) -> None:
-        self._set_gated_followup_status(instance_id, issue_id, stage, status="started")
-
-    def mark_gated_followup_failed(self, instance_id: str, issue_id: str, stage: str, error: str) -> None:
-        self._set_gated_followup_status(instance_id, issue_id, stage, status="failed", error=error)
-
-    def get_gated_followup_marker(self, instance_id: str, issue_id: str, stage: str) -> dict[str, Any] | None:
-        with self.connect() as connection:
-            row = connection.execute(
-                """
-                SELECT *
-                FROM gated_followup_markers
-                WHERE instance_id = ? AND issue_id = ? AND stage = ?
-                """,
-                (instance_id, issue_id, stage),
-            ).fetchone()
-        return dict(row) if row is not None else None
-
     def upsert_orchestration_run(
         self,
         *,
@@ -327,7 +263,13 @@ class ConductorStore:
     ) -> OrchestrationRun:
         with self.connect() as connection:
             row = connection.execute(
-                "SELECT * FROM orchestration_runs WHERE instance_id = ? AND issue_id = ?",
+                """
+                SELECT *
+                FROM orchestration_runs
+                WHERE instance_id = ? AND issue_id = ?
+                ORDER BY epoch DESC, created_at DESC, run_id DESC
+                LIMIT 1
+                """,
                 (instance_id, issue_id),
             ).fetchone()
         if row is None:
@@ -347,6 +289,23 @@ class ConductorStore:
                 },
             )
         run = _orchestration_run_from_row(row)
+        if run.phase in {RunPhase.DONE, RunPhase.FAILED}:
+            run_id = f"run-{uuid4().hex}"
+            return self.apply_event(
+                run_id,
+                {
+                    "instance_id": instance_id,
+                    "issue_id": issue_id,
+                    "event_type": "dispatch.created",
+                    "to_phase": RunPhase.QUEUED,
+                    "payload": {
+                        "dispatch_id": dispatch_id,
+                        "issue_identifier": issue_identifier,
+                        "workflow_profile": workflow_profile,
+                        "epoch": run.epoch + 1,
+                    },
+                },
+            )
         return self.apply_event(
             run.run_id,
             {
@@ -368,7 +327,13 @@ class ConductorStore:
     def get_orchestration_run_by_issue(self, instance_id: str, issue_id: str) -> OrchestrationRun | None:
         with self.connect() as connection:
             row = connection.execute(
-                "SELECT * FROM orchestration_runs WHERE instance_id = ? AND issue_id = ?",
+                """
+                SELECT *
+                FROM orchestration_runs
+                WHERE instance_id = ? AND issue_id = ?
+                ORDER BY epoch DESC, created_at DESC, run_id DESC
+                LIMIT 1
+                """,
                 (instance_id, issue_id),
             ).fetchone()
         return _orchestration_run_from_row(row) if row is not None else None
@@ -441,7 +406,14 @@ class ConductorStore:
             },
         )
 
-    def apply_event(self, run_id: str, event: OrchestrationEvent | dict[str, Any]) -> OrchestrationRun:
+    def apply_event(
+        self,
+        run_id: str,
+        event: OrchestrationEvent | dict[str, Any],
+        *,
+        expected_current_phases: set[RunPhase] | None = None,
+        expected_last_event_types: set[str] | None = None,
+    ) -> OrchestrationRun:
         payload = _event_payload(event)
         event_type = _event_field(event, "event_type")
         if not event_type:
@@ -455,6 +427,31 @@ class ConductorStore:
             issue_id = _event_field(event, "issue_id") or (current.issue_id if current is not None else "")
             if not instance_id or not issue_id:
                 raise FileNotFoundError(f"Orchestration run does not exist: {run_id}")
+            if expected_current_phases is not None:
+                if current is None:
+                    raise PhaseTransitionError(f"Expected run {run_id} to exist before {event_type}")
+                expected = {_phase_value(phase) for phase in expected_current_phases}
+                if current.phase.value not in expected:
+                    raise PhaseTransitionError(
+                        f"Expected run {run_id} phase to be one of {sorted(expected)}, found {current.phase.value}"
+                    )
+            if expected_last_event_types is not None:
+                last_event = connection.execute(
+                    """
+                    SELECT event_type
+                    FROM orchestration_events
+                    WHERE run_id = ?
+                    ORDER BY created_at DESC, event_id DESC
+                    LIMIT 1
+                    """,
+                    (run_id,),
+                ).fetchone()
+                last_event_type = str(last_event["event_type"]) if last_event is not None else None
+                if last_event_type not in expected_last_event_types:
+                    raise PhaseTransitionError(
+                        f"Expected run {run_id} last event to be one of {sorted(expected_last_event_types)}, "
+                        f"found {last_event_type or 'none'}"
+                    )
             from_phase = _event_phase(event, "from_phase")
             if from_phase is None and current is not None:
                 from_phase = current.phase
@@ -572,7 +569,6 @@ class ConductorStore:
                   linear_filters_json TEXT NOT NULL,
                   workflow_profile TEXT NOT NULL,
                   workflow_inputs_json TEXT NOT NULL,
-                  gated_followup_stages_json TEXT NOT NULL,
                   workflow_content TEXT NOT NULL,
                   workflow_generation_status TEXT NOT NULL,
                   process_status TEXT NOT NULL,
@@ -607,22 +603,6 @@ class ConductorStore:
                 CREATE INDEX IF NOT EXISTS idx_runtime_actions_status ON runtime_actions(status, created_at);
                 CREATE INDEX IF NOT EXISTS idx_runtime_actions_instance ON runtime_actions(instance_id);
 
-                CREATE TABLE IF NOT EXISTS gated_followup_markers (
-                  instance_id TEXT NOT NULL,
-                  issue_id TEXT NOT NULL,
-                  stage TEXT NOT NULL,
-                  status TEXT NOT NULL,
-                  attempt INTEGER NOT NULL DEFAULT 0,
-                  last_error TEXT,
-                  created_at TEXT NOT NULL,
-                  updated_at TEXT NOT NULL,
-                  PRIMARY KEY(instance_id, issue_id, stage),
-                  FOREIGN KEY(instance_id) REFERENCES instances(id) ON DELETE CASCADE
-                );
-
-                CREATE INDEX IF NOT EXISTS idx_gated_followup_markers_status
-                  ON gated_followup_markers(status, updated_at);
-
                 CREATE TABLE IF NOT EXISTS orchestration_runs (
                   run_id TEXT PRIMARY KEY,
                   instance_id TEXT NOT NULL,
@@ -630,6 +610,7 @@ class ConductorStore:
                   issue_identifier TEXT,
                   phase TEXT NOT NULL,
                   status TEXT NOT NULL,
+                  epoch INTEGER NOT NULL DEFAULT 1,
                   attempt INTEGER NOT NULL DEFAULT 1,
                   workflow_profile TEXT,
                   dispatch_id TEXT,
@@ -653,8 +634,10 @@ class ConductorStore:
                   updated_at TEXT NOT NULL
                 );
 
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_orchestration_runs_instance_issue
-                  ON orchestration_runs(instance_id, issue_id);
+                DROP INDEX IF EXISTS idx_orchestration_runs_instance_issue;
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_orchestration_runs_active_instance_issue
+                  ON orchestration_runs(instance_id, issue_id)
+                  WHERE phase NOT IN ('done', 'failed');
                 CREATE INDEX IF NOT EXISTS idx_orchestration_runs_due
                   ON orchestration_runs(phase, status, next_run_at);
                 CREATE INDEX IF NOT EXISTS idx_orchestration_runs_ack
@@ -683,6 +666,7 @@ class ConductorStore:
             _ensure_column(connection, "instances", "restart_window_started_at", "TEXT")
             _ensure_column(connection, "orchestration_runs", "init_failure_count", "INTEGER NOT NULL DEFAULT 0")
             _ensure_column(connection, "orchestration_runs", "overload_count", "INTEGER NOT NULL DEFAULT 0")
+            _ensure_column(connection, "orchestration_runs", "epoch", "INTEGER NOT NULL DEFAULT 1")
             _ensure_column(connection, "instances", "restart_next_at", "TEXT")
 
     def _set_runtime_action_status(self, action_id: str, *, status: str, error: str | None = None) -> None:
@@ -699,39 +683,6 @@ class ConductorStore:
                 """,
                 (status, error, utc_now_iso(), action_id),
             )
-
-    def _set_gated_followup_status(
-        self,
-        instance_id: str,
-        issue_id: str,
-        stage: str,
-        *,
-        status: str,
-        error: str | None = None,
-    ) -> None:
-        now = utc_now_iso()
-        with self.connect() as connection:
-            connection.execute(
-                """
-                INSERT INTO gated_followup_markers (
-                  instance_id,
-                  issue_id,
-                  stage,
-                  status,
-                  attempt,
-                  last_error,
-                  created_at,
-                  updated_at
-                )
-                VALUES (?, ?, ?, ?, 1, ?, ?, ?)
-                ON CONFLICT(instance_id, issue_id, stage) DO UPDATE SET
-                  status = excluded.status,
-                  last_error = excluded.last_error,
-                  updated_at = excluded.updated_at
-                """,
-                (instance_id, issue_id, stage, status, error, now, now),
-            )
-
 
 def _settings_values(settings: ConductorSettings) -> tuple[Any, ...]:
     return (
@@ -764,7 +715,6 @@ def _instance_values(instance: InstanceRecord) -> tuple[Any, ...]:
         _json_dumps(instance.linear_filters),
         instance.workflow_profile,
         _json_dumps(instance.workflow_inputs),
-        _json_dumps(instance.gated_followup_stages),
         instance.workflow_content,
         instance.workflow_generation_status,
         instance.process_status,
@@ -796,7 +746,6 @@ def _instance_from_row(row: sqlite3.Row) -> InstanceRecord:
         linear_filters=_json_loads_dict(row["linear_filters_json"]),
         workflow_profile=str(row["workflow_profile"]),
         workflow_inputs=_json_loads_dict(row["workflow_inputs_json"]),
-        gated_followup_stages=_json_loads_dict(row["gated_followup_stages_json"]),
         workflow_content=str(row["workflow_content"]),
         workflow_generation_status=row["workflow_generation_status"],
         process_status=row["process_status"],
@@ -819,6 +768,7 @@ def _orchestration_run_values(run: OrchestrationRun) -> tuple[Any, ...]:
         run.issue_identifier,
         run.phase.value,
         run.status,
+        run.epoch,
         run.attempt,
         run.workflow_profile,
         run.dispatch_id,
@@ -851,6 +801,7 @@ def _orchestration_run_from_row(row: sqlite3.Row) -> OrchestrationRun:
         issue_identifier=row["issue_identifier"],
         phase=RunPhase(str(row["phase"])),
         status=str(row["status"]),
+        epoch=int(row["epoch"] or 1),
         attempt=int(row["attempt"] or 1),
         workflow_profile=row["workflow_profile"],
         dispatch_id=row["dispatch_id"],
@@ -885,6 +836,7 @@ def _write_orchestration_run_projection(connection: sqlite3.Connection, run: Orc
           issue_identifier,
           phase,
           status,
+          epoch,
           attempt,
           workflow_profile,
           dispatch_id,
@@ -907,13 +859,14 @@ def _write_orchestration_run_projection(connection: sqlite3.Connection, run: Orc
           created_at,
           updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(run_id) DO UPDATE SET
           instance_id = excluded.instance_id,
           issue_id = excluded.issue_id,
           issue_identifier = excluded.issue_identifier,
           phase = excluded.phase,
           status = excluded.status,
+          epoch = excluded.epoch,
           attempt = excluded.attempt,
           workflow_profile = excluded.workflow_profile,
           dispatch_id = excluded.dispatch_id,
@@ -952,6 +905,7 @@ def _project_orchestration_event(current: OrchestrationRun | None, event: Orches
             issue_identifier=_optional_text(payload.get("issue_identifier")),
             workflow_profile=_optional_text(payload.get("workflow_profile")),
             dispatch_id=_optional_text(payload.get("dispatch_id")),
+            epoch=_optional_int(payload.get("epoch"), default=1),
             now=event.created_at,
         )
 
@@ -974,6 +928,8 @@ def _project_orchestration_event(current: OrchestrationRun | None, event: Orches
         "dispatch.acked",
         "human.failure_child_created",
     }:
+        changes.update(_normalize_projection_payload(payload))
+    elif event.event_type.startswith("remediation."):
         changes.update(_normalize_projection_payload(payload))
     return with_updates(current, **changes)
 
@@ -1056,6 +1012,7 @@ def _normalize_projection_payload(payload: dict[str, Any]) -> dict[str, Any]:
     allowed = {
         "phase",
         "status",
+        "epoch",
         "attempt",
         "workflow_profile",
         "dispatch_id",
@@ -1116,11 +1073,24 @@ def _event_phase(event: OrchestrationEvent | dict[str, Any], key: str) -> RunPha
     return RunPhase(text) if text else None
 
 
+def _phase_value(value: RunPhase | str) -> str:
+    return value.value if isinstance(value, RunPhase) else str(value)
+
+
 def _optional_text(value: Any) -> str | None:
     if value is None:
         return None
     text = str(value)
     return text if text else None
+
+
+def _optional_int(value: Any, *, default: int) -> int:
+    if isinstance(value, bool):
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def _ensure_column(connection: sqlite3.Connection, table: str, name: str, definition: str) -> None:

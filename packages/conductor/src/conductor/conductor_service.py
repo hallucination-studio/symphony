@@ -19,9 +19,34 @@ from .conductor_models import (
 )
 from .conductor_runtime import ConductorRuntimeManager
 from .conductor_runtime import LogQuery
+from .conductor_scheduler import OrchestrationScheduler, phase_file_paths
 from .conductor_store import ConductorStore
+from .conductor_ingress import DirectIngress
 from .conductor_phase import PhaseReducer, PhaseTransitionError
+from .conductor_linear_projector import LinearProjector
+from .conductor_performer_supervisor import PerformerSupervisor
+from .conductor_phase_human_actions import (
+    PhaseHumanActionCoordinator,
+    comment_missing_phase_human_response,
+    find_phase_human_child,
+    human_response_from_child,
+    linear_issue_is_done,
+    phase_human_action_requires_response,
+    write_phase_human_response_to_parent,
+)
 from .conductor_reconcile import reconcile_orchestration_health
+from .conductor_remediation import OrchestrationRemediator
+from .conductor_repository_handoff import (
+    REPOSITORY_HANDOFF_MARKER_NAME,
+    REPOSITORY_INTEGRATION_LABEL,
+    RepositoryHandoffCoordinator,
+    comment_repository_handoff,
+    find_repository_integration_child,
+    repository_handoff_closeout_event,
+    repository_handoff_comment,
+    repository_handoff_marker,
+    repository_integration_description,
+)
 from .conductor_workflow import (
     ConductorValidationError,
     generate_workflow_content,
@@ -32,7 +57,7 @@ from performer_api.ops_models import OpsSnapshot, TraceEvent
 from performer_api.ops_projection import build_issue_detail, build_issue_list, build_run_detail, build_trace_stream
 from performer_api.ops_retention import RetentionPolicy
 from performer_api.ops_store import OpsStore
-from performer_api.phase import PhaseAdvanceRequest, PhaseAdvanceResult, RunPhase
+from performer_api.phase import PhaseAdvanceResult, RunPhase
 from performer_api.persistence import PersistenceStore, PersistedSession, PersistedState
 from performer_api.labels import PHASE_LABELS, TYPE_LABELS
 from performer_api.models import normalize_state_key, utc_now
@@ -52,8 +77,6 @@ WORKSPACE_INIT_EXCLUDES = {
     "node_modules",
     "target",
 }
-REPOSITORY_INTEGRATION_LABEL = "performer:type/repository-integration"
-REPOSITORY_HANDOFF_MARKER_NAME = "SYMPHONY REPOSITORY HANDOFF"
 HUMAN_ACTION_LABEL = "performer:type/human-action"
 HUMAN_RESPONSE_MARKER_NAME = "SYMPHONY HUMAN RESPONSE"
 PROJECT_LABEL_PREFIX = "symphony:"
@@ -828,6 +851,8 @@ class ConductorService:
         phase_results_applied = await self._apply_phase_result_files()
         phase_timeouts = await self._record_phase_timeouts()
         phase_crash_retries, phase_crash_failures = await self._record_phase_crashes()
+        reconcile_findings = reconcile_orchestration_health(store=self.store)
+        remediations = OrchestrationRemediator(self.store).remediate(reconcile_findings)
         phase_failure_human_actions_created = await self._create_phase_failure_human_actions()
         phase_human_actions = await self._coordinate_phase_human_actions()
         if phase_human_actions["completed"]:
@@ -838,7 +863,6 @@ class ConductorService:
             if self._linear_phase_projection_enabled(managed_mode=managed_mode)
             else 0
         )
-        reconcile_findings = reconcile_orchestration_health(store=self.store)
         project_labels_synced = 0 if managed_mode else await self.sync_project_labels_once()
         crash_restarts = 0
         crash_loops = 0
@@ -870,83 +894,18 @@ class ConductorService:
             "phase_human_actions_failed": phase_human_actions["failed"],
             "linear_phase_projections": linear_phase_projections,
             "reconcile_findings": [finding.to_dict() for finding in reconcile_findings],
-            "gated_followups_started": 0,
+            "remediations": remediations,
             "resumed": 0,
             "crash_restarts": crash_restarts,
             "crash_loops": crash_loops,
         }
 
-    async def reconcile_linear_phase_projections_once(self) -> int:
-        projected = 0
-        for run in self.store.list_orchestration_runs():
-            desired = _desired_linear_phase_projection(run.phase)
-            if desired is None:
-                continue
-            event_type = _linear_projection_event_type(run.phase)
-            instance = self.store.get_instance(run.instance_id)
-            if instance is None:
-                continue
-            tracker = self.repository_handoff_tracker_factory(instance)
-            if self._phase_projection_recorded(run.run_id, event_type, desired):
-                projection_matches = getattr(tracker, "issue_phase_projection_matches", None)
-                if not callable(projection_matches):
-                    continue
-                try:
-                    matches = await projection_matches(
-                        run.issue_id,
-                        phase_label=desired["phase_label"],
-                        state_name=desired.get("state_name"),
-                    )
-                except Exception as exc:
-                    self.store.apply_event(
-                        run.run_id,
-                        {
-                            "event_type": "linear.phase_projection_check_failed",
-                            "to_phase": run.phase,
-                            "payload": {
-                                **desired,
-                                "error": _safe_linear_value(exc),
-                            },
-                        },
-                    )
-                    continue
-                if matches:
-                    continue
-            project_issue_phase = getattr(tracker, "project_issue_phase", None)
-            if not callable(project_issue_phase):
-                continue
-            try:
-                result = await project_issue_phase(
-                    run.issue_id,
-                    phase_label=desired["phase_label"],
-                    state_name=desired.get("state_name"),
-                )
-            except Exception as exc:
-                self.store.apply_event(
-                    run.run_id,
-                    {
-                        "event_type": "linear.phase_projection_failed",
-                        "to_phase": run.phase,
-                        "payload": {
-                            **desired,
-                            "error": _safe_linear_value(exc),
-                        },
-                    },
-                )
-                continue
-            self.store.apply_event(
-                run.run_id,
-                {
-                    "event_type": event_type,
-                    "to_phase": run.phase,
-                    "payload": {
-                        **desired,
-                        "result": result if isinstance(result, dict) else {},
-                    },
-                },
-            )
-            projected += 1
-        return projected
+    async def reconcile_linear_phase_projections_once(self, *, now: str | None = None) -> int:
+        return await LinearProjector(
+            store=self.store,
+            get_instance=self.store.get_instance,
+            tracker_factory=self.repository_handoff_tracker_factory,
+        ).reconcile_once(now=now)
 
     def _linear_phase_projection_enabled(self, *, managed_mode: bool) -> bool:
         if not managed_mode:
@@ -954,12 +913,11 @@ class ConductorService:
         return bool(self.store.get_settings().podium_proxy_token.strip())
 
     def _phase_projection_recorded(self, run_id: str, event_type: str, desired: dict[str, str | None]) -> bool:
-        for event in reversed(self.store.list_orchestration_events(run_id)):
-            if event.event_type != event_type:
-                continue
-            if event.payload.get("phase_label") == desired.get("phase_label") and event.payload.get("state_name") == desired.get("state_name"):
-                return True
-        return False
+        return LinearProjector(
+            store=self.store,
+            get_instance=self.store.get_instance,
+            tracker_factory=self.repository_handoff_tracker_factory,
+        )._projection_recorded(run_id, event_type, desired)
 
     async def _create_phase_failure_human_actions(self) -> int:
         created = 0
@@ -1058,38 +1016,13 @@ class ConductorService:
         return synced
 
     async def _poll_direct_dispatches(self) -> int:
-        received = 0
-        for instance in self.store.list_instances():
-            refreshed = self.get_instance(instance.id) or instance
-            if refreshed.process_status in {"running", "starting"}:
-                continue
-            tracker = self.repository_handoff_tracker_factory(instance)
-            fetch_candidates = getattr(tracker, "fetch_candidate_issues", None)
-            if not callable(fetch_candidates):
-                continue
-            try:
-                issues = await fetch_candidates()
-            except Exception:
-                continue
-            for issue in issues:
-                if _is_system_child_issue(issue):
-                    continue
-                issue_id = _issue_field(issue, "id")
-                issue_identifier = _issue_field(issue, "identifier")
-                if not issue_id and not issue_identifier:
-                    continue
-                existing = self.store.get_orchestration_run_by_issue(instance.id, issue_id or issue_identifier)
-                if existing is not None and existing.phase not in {RunPhase.DONE, RunPhase.FAILED}:
-                    continue
-                self.phase_reducer.dispatch_received(
-                    instance_id=instance.id,
-                    issue_id=issue_id or issue_identifier,
-                    issue_identifier=issue_identifier or None,
-                    workflow_profile=instance.workflow_profile,
-                    dispatch_id=None,
-                )
-                received += 1
-        return received
+        return await DirectIngress(
+            store=self.store,
+            phase_reducer=self.phase_reducer,
+            list_instances=self.store.list_instances,
+            get_instance=self.get_instance,
+            tracker_factory=self.repository_handoff_tracker_factory,
+        ).poll()
 
     async def ack_completed_podium_dispatches(
         self,
@@ -1134,57 +1067,19 @@ class ConductorService:
         return {"acked": acked, "failed": failed, "skipped": skipped}
 
     async def _start_due_orchestration_runs(self) -> int:
-        started_count = 0
-        for run in self.store.list_due_orchestration_runs():
-            instance = self.store.get_instance(run.instance_id)
-            if instance is None:
-                continue
-            refreshed = self.get_instance(instance.id) or instance
-            if refreshed.process_status in {"running", "starting"}:
-                continue
-            try:
-                started = await self._start_orchestration_run(run, refreshed)
-            except PhaseTransitionError:
-                continue
-            self.store.update_instance(started)
-            started_count += 1
-        return started_count
+        return await self._scheduler().start_due_runs()
 
     async def _start_orchestration_run(self, run, instance: InstanceRecord) -> InstanceRecord:
-        paths = self._phase_file_paths(instance, run.run_id)
-        result_path = paths["result_path"]
-        if result_path.exists():
-            result_path.unlink()
-        request = PhaseAdvanceRequest(
-            run_id=run.run_id,
-            instance_id=run.instance_id,
-            issue_id=run.issue_id,
-            issue_identifier=run.issue_identifier,
-            current_phase=run.phase,
-            attempt=run.attempt,
-            human_response=run.human_response,
-            workflow_profile=run.workflow_profile or instance.workflow_profile,
-            workspace_context={
-                "instance_dir": instance.instance_dir,
-                "workspace_root": instance.workspace_root,
-                "persistence_path": instance.persistence_path,
-                "ops_snapshot_path": str(Path(instance.persistence_path).parent / "ops.json"),
-            },
+        return await self._scheduler().start_run(run, instance)
+
+    def _scheduler(self) -> OrchestrationScheduler:
+        return OrchestrationScheduler(
+            store=self.store,
+            phase_reducer=self.phase_reducer,
+            runtime_manager=self.runtime_manager,
+            runtime_env=self._runtime_env,
+            get_instance=self.get_instance,
         )
-        _write_json_atomic(paths["request_path"], request.to_dict())
-        started = await self.runtime_manager.start(
-            instance.with_updates(process_status="starting"),
-            env=self._runtime_env(),
-            advance_request_path=str(paths["request_path"]),
-            phase_result_path=str(result_path),
-        )
-        self.phase_reducer.performer_started(
-            run.run_id,
-            request_path=str(paths["request_path"]),
-            result_path=str(result_path),
-            pid=started.pid,
-        )
-        return started
 
     async def _start_direct_phase_issue(
         self,
@@ -1213,29 +1108,11 @@ class ConductorService:
         return await self._start_orchestration_run(run, instance)
 
     async def _apply_phase_result_files(self) -> int:
-        applied = 0
-        runs = self.store.list_orchestration_runs(phases={RunPhase.IMPLEMENTING, RunPhase.REVIEWING, RunPhase.REWORKING})
-        for run in runs:
-            if not run.result_path:
-                continue
-            path = Path(run.result_path)
-            if not path.exists():
-                continue
-            try:
-                payload = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                continue
-            if not isinstance(payload, dict):
-                continue
-            try:
-                result = PhaseAdvanceResult.from_dict(payload)
-                self.phase_reducer.performer_result(result)
-            except PhaseTransitionError:
-                continue
-            await self._comment_phase_result_diagnostic(run.run_id, result)
-            path.unlink(missing_ok=True)
-            applied += 1
-        return applied
+        return await PerformerSupervisor(
+            store=self.store,
+            phase_reducer=self.phase_reducer,
+            comment_result_diagnostic=self._comment_phase_result_diagnostic,
+        ).apply_result_files()
 
     async def _record_phase_crashes(self) -> tuple[int, int]:
         retries = 0
@@ -1425,75 +1302,15 @@ class ConductorService:
         return False
 
     async def _coordinate_phase_human_actions(self) -> dict[str, int]:
-        if self._managed_mode_enabled():
-            return {"completed": 0, "missing_response": 0, "failed": 0}
-        completed = 0
-        missing_response = 0
-        failed = 0
-        for run in self.store.list_orchestration_runs(phases={RunPhase.AWAITING_HUMAN}):
-            instance = self.store.get_instance(run.instance_id)
-            if instance is None:
-                continue
-            tracker = self.repository_handoff_tracker_factory(instance)
-            fetch_children = getattr(tracker, "fetch_child_issues", None)
-            if not callable(fetch_children):
-                continue
-            try:
-                children = await fetch_children(run.issue_id, label_name=HUMAN_ACTION_LABEL)
-            except Exception:
-                failed += 1
-                continue
-            child = _find_phase_human_child(run.human_action, children)
-            if child is None or not _linear_issue_is_done(child):
-                continue
-            response = _human_response_from_child(child)
-            child_issue_id = str(child.get("id") or run.human_action.get("child_issue_id") or "")
-            if _phase_human_action_requires_response(run.human_action) and not response:
-                missing_response += 1
-                if not self._phase_human_event_recorded(
-                    run.run_id,
-                    "human.response_missing",
-                    child_issue_id=child_issue_id,
-                ):
-                    await self._comment_missing_phase_human_response(tracker, child_issue_id)
-                    self.store.apply_event(
-                        run.run_id,
-                        {
-                            "event_type": "human.response_missing",
-                            "to_phase": run.phase,
-                            "reason": "missing_human_response",
-                            "payload": {
-                                "child_issue_id": child_issue_id,
-                                "child_identifier": child.get("identifier") or run.human_action.get("child_identifier"),
-                            },
-                        },
-                    )
-                continue
-            human_response = response or "Human action completed."
-            await self._write_phase_human_response_to_parent(
-                tracker,
-                run,
-                child=child,
-                human_response=human_response,
-            )
-            try:
-                self.phase_reducer.human_completed(run.run_id, human_response=human_response)
-            except PhaseTransitionError:
-                failed += 1
-                continue
-            completed += 1
-        return {"completed": completed, "missing_response": missing_response, "failed": failed}
+        return await PhaseHumanActionCoordinator(
+            store=self.store,
+            phase_reducer=self.phase_reducer,
+            managed_mode_enabled=self._managed_mode_enabled,
+            tracker_factory=self.repository_handoff_tracker_factory,
+        ).coordinate()
 
     async def _comment_missing_phase_human_response(self, tracker: Any, child_issue_id: str) -> None:
-        if not child_issue_id:
-            return
-        comment_issue = getattr(tracker, "comment_issue", None)
-        if not callable(comment_issue):
-            return
-        await comment_issue(
-            child_issue_id,
-            "This human action is marked Done, but the `Human response` section is empty. Add the response there, then keep this child issue in Done.",
-        )
+        await comment_missing_phase_human_response(tracker, child_issue_id)
 
     async def _write_phase_human_response_to_parent(
         self,
@@ -1503,18 +1320,7 @@ class ConductorService:
         child: dict[str, Any],
         human_response: str,
     ) -> None:
-        update_description = getattr(tracker, "update_issue_description_marker_block", None)
-        if not callable(update_description):
-            return
-        block = "\n".join(
-            [
-                f"Human action: {child.get('identifier') or child.get('id') or run.human_action.get('child_identifier') or run.human_action.get('child_issue_id')}",
-                f"Type: {run.human_action.get('kind') or 'human_action'}",
-                "",
-                human_response.strip(),
-            ]
-        )
-        await update_description(run.issue_id, HUMAN_RESPONSE_MARKER_NAME, block)
+        await write_phase_human_response_to_parent(tracker, run, child=child, human_response=human_response)
 
     def _phase_human_event_recorded(self, run_id: str, event_type: str, *, child_issue_id: str) -> bool:
         for event in self.store.list_orchestration_events(run_id):
@@ -1525,113 +1331,24 @@ class ConductorService:
         return False
 
     def _phase_file_paths(self, instance: InstanceRecord, run_id: str) -> dict[str, Path]:
-        root = Path(instance.instance_dir) / "state" / "orchestration" / run_id
-        root.mkdir(parents=True, exist_ok=True)
-        return {
-            "request_path": root / "advance-request.json",
-            "result_path": root / "phase-result.json",
-        }
-
-    async def _coordinate_gated_followup(self, instance: InstanceRecord, *, issue_id: str) -> InstanceRecord | None:
-        if instance.workflow_profile != "gated-task":
-            return None
-        refresh = getattr(self.runtime_manager, "refresh", None)
-        if not callable(refresh):
-            return None
-        refreshed = refresh(instance)
-        if refreshed.process_status not in {"exited", "stopped"}:
-            return None
-        snapshot = OpsStore(Path(instance.persistence_path).parent / "ops.json").load()
-        issue = snapshot.issues.get(issue_id)
-        if issue is None or issue.state != "completed" or issue.run_count != 1:
-            return None
-        stage = self._next_gated_followup_stage(refreshed, issue_id)
-        if stage is None:
-            return None
-        if not self.store.claim_gated_followup_marker(instance.id, issue_id, stage):
-            return None
-        self._record_gated_followup_event(refreshed, issue_id=issue_id, stage=stage, event_type="gate_followup_starting")
-        try:
-            followup = await self._start_direct_phase_issue(
-                refreshed.with_updates(process_status="starting"),
-                issue_id=issue_id,
-                issue_identifier=issue.issue_identifier,
-            )
-        except Exception as exc:
-            self.store.mark_gated_followup_failed(instance.id, issue_id, stage, str(exc))
-            raise
-        self.store.mark_gated_followup_started(instance.id, issue_id, stage)
-        self._record_gated_followup_event(followup, issue_id=issue_id, stage=stage, event_type="gate_followup_started")
-        return followup
+        return phase_file_paths(instance, run_id)
 
     async def get_instance_coordinated(self, instance_id: str) -> InstanceRecord | None:
         instance = self.get_instance(instance_id)
         if instance is None:
             return None
         await self.coordinate_repository_handoff_closeouts(instance_id=instance_id)
-        if self._managed_mode_enabled():
-            return instance
-        resumed = await self._resume_pending_performer_work(instance)
-        if resumed is not None:
-            self.store.update_instance(resumed)
-            return resumed
-        issue_id = self._pending_gated_followup_issue_id(instance)
-        if issue_id is None:
-            return instance
-        followup = await self._coordinate_gated_followup(instance, issue_id=issue_id)
-        if followup is None:
-            return instance
-        followup = self._with_gated_followup_stage(followup, issue_id, "gate")
-        self.store.update_instance(followup)
-        return followup
+        if not self._managed_mode_enabled():
+            human_actions = await self._coordinate_phase_human_actions()
+            if human_actions["completed"]:
+                await self._start_due_orchestration_runs()
+        return self.get_instance(instance_id)
 
     async def coordinate_repository_handoff_closeouts(self, *, instance_id: str | None = None) -> dict[str, Any]:
-        rows = self._ops_stores()
-        if instance_id is not None:
-            rows = [row for row in rows if row[0].id == instance_id]
-        closed_out = 0
-        failed = 0
-        skipped = 0
-        for instance, store, snapshot in rows:
-            closeout_source_ids = {
-                str(event.payload.get("source_event_id") or "")
-                for event in snapshot.events
-                if event.event_type == "repository_handoff_closeout.v1"
-                and event.payload.get("status") == "completed"
-            }
-            for event in list(snapshot.events):
-                if event.event_type != "repository_handoff_report.v1":
-                    continue
-                if event.event_id in closeout_source_ids:
-                    skipped += 1
-                    continue
-                try:
-                    result = await self._closeout_repository_handoff(instance, event)
-                except Exception as exc:
-                    failed += 1
-                    snapshot = store.load()
-                    snapshot.events.append(
-                        _repository_handoff_closeout_event(
-                            snapshot,
-                            source_event=event,
-                            status="failed",
-                            payload={"failure_reason": str(exc), "instance_id": instance.id},
-                        )
-                    )
-                    store.save(snapshot)
-                    continue
-                snapshot = store.load()
-                snapshot.events.append(
-                    _repository_handoff_closeout_event(
-                        snapshot,
-                        source_event=event,
-                        status="completed",
-                        payload={**result, "instance_id": instance.id},
-                    )
-                )
-                store.save(snapshot)
-                closed_out += 1
-        return {"closed_out": closed_out, "failed": failed, "skipped": skipped}
+        return await RepositoryHandoffCoordinator(
+            ops_rows=self._ops_stores,
+            tracker_factory=self.repository_handoff_tracker_factory,
+        ).coordinate(instance_id=instance_id)
 
     async def _closeout_repository_handoff(self, instance: InstanceRecord, event: TraceEvent) -> dict[str, Any]:
         report = dict(event.payload)
@@ -1639,52 +1356,13 @@ class ConductorService:
         issue_identifier = str(report.get("issue_identifier") or issue_id).strip()
         if not issue_id:
             raise ConductorServiceError("repository_handoff_missing_issue_id", "Repository handoff report missing issue_id")
-        tracker = self.repository_handoff_tracker_factory(instance)
-        child = await self._find_repository_integration_child(tracker, issue_id)
-        description = _repository_integration_description(report, instance=instance)
-        delegate_id = _linear_agent_app_user_id(instance.linear_filters) or None
-        mode = "updated"
-        if child is None:
-            create_child = getattr(tracker, "create_child_issue_for", None)
-            if not callable(create_child):
-                raise ConductorServiceError("repository_handoff_tracker_missing_create", "Tracker cannot create child issue")
-            child = await create_child(
-                parent_issue_id=issue_id,
-                title=f"Integrate {issue_identifier} implementation",
-                description=description,
-                label_names=[REPOSITORY_INTEGRATION_LABEL],
-                delegate_id=delegate_id,
-            )
-            mode = "created"
-        else:
-            update_description = getattr(tracker, "update_issue_description_marker_block", None)
-            if callable(update_description):
-                await update_description(
-                    str(child.get("id") or ""),
-                    REPOSITORY_HANDOFF_MARKER_NAME,
-                    description,
-                )
-        comment_result = await self._comment_repository_handoff(tracker, issue_id, report, child, instance)
-        return {
-            "status": "completed",
-            "closeout_mode": mode,
-            "child_issue_id": child.get("id"),
-            "child_issue_identifier": child.get("identifier"),
-            "child_issue_url": child.get("url"),
-            "comment_result": comment_result,
-            "source_event_id": event.event_id,
-        }
+        return await RepositoryHandoffCoordinator(
+            ops_rows=self._ops_stores,
+            tracker_factory=self.repository_handoff_tracker_factory,
+        ).closeout(instance, event)
 
     async def _find_repository_integration_child(self, tracker: Any, source_issue_id: str) -> dict[str, Any] | None:
-        fetch_children = getattr(tracker, "fetch_child_issues", None)
-        if not callable(fetch_children):
-            return None
-        children = await fetch_children(source_issue_id, label_name=REPOSITORY_INTEGRATION_LABEL)
-        marker = _repository_handoff_marker(source_issue_id)
-        for child in children:
-            if marker in str(child.get("description") or ""):
-                return child
-        return children[0] if children else None
+        return await find_repository_integration_child(tracker, source_issue_id)
 
     async def _comment_repository_handoff(
         self,
@@ -1694,14 +1372,7 @@ class ConductorService:
         child: dict[str, Any],
         instance: InstanceRecord,
     ) -> dict[str, Any] | None:
-        comment_issue = getattr(tracker, "comment_issue", None)
-        if not callable(comment_issue):
-            return None
-        mention = str(instance.linear_filters.get("integration_agent_mention") or "").strip()
-        if not mention:
-            mention = _linear_agent_app_user_id(instance.linear_filters)
-        body = _repository_handoff_comment(report, child=child, mention=mention)
-        return await comment_issue(issue_id, body)
+        return await comment_repository_handoff(tracker, issue_id, report, child, instance)
 
     def _repository_handoff_tracker(
         self,
@@ -1762,35 +1433,6 @@ class ConductorService:
         await proxy.set_project_labels(project_id, label_ids)
         return {"status": "synced", "project_id": project_id, "labels": desired}
 
-    async def _resume_pending_performer_work(self, instance: InstanceRecord) -> InstanceRecord | None:
-        if self._managed_mode_enabled():
-            return None
-        refresh = getattr(self.runtime_manager, "refresh", None)
-        if not callable(refresh):
-            return None
-        refreshed = refresh(instance)
-        if refreshed.process_status not in {"exited", "stopped"}:
-            return None
-        if refreshed.last_exit_code not in {0, None}:
-            return None
-        persisted = PersistenceStore(Path(refreshed.persistence_path)).load()
-        if not (
-            persisted.retry_attempts
-            or persisted.continuations
-            or persisted.blocked
-            or persisted.human_interventions
-        ):
-            return None
-        pending = _first_pending_performer_issue(persisted)
-        if pending is None:
-            return None
-        return await self._start_direct_phase_issue(
-            refreshed.with_updates(process_status="starting"),
-            issue_id=pending["issue_id"],
-            issue_identifier=pending.get("issue_identifier"),
-            attempt=pending.get("attempt"),
-        )
-
     async def _restart_crashed_performer(self, instance: InstanceRecord) -> InstanceRecord | None:
         if self._managed_mode_enabled():
             return None
@@ -1841,58 +1483,6 @@ class ConductorService:
             restart_next_at=_iso(now + timedelta(seconds=delay_seconds)),
             last_error=None,
         )
-
-    def _pending_gated_followup_issue_id(self, instance: InstanceRecord) -> str | None:
-        if self._managed_mode_enabled():
-            return None
-        if instance.workflow_profile != "gated-task":
-            return None
-        snapshot = OpsStore(Path(instance.persistence_path).parent / "ops.json").load()
-        candidates = [
-            issue
-            for issue in snapshot.issues.values()
-            if issue.state == "completed"
-            and issue.run_count == 1
-            and self._next_gated_followup_stage(instance, issue.issue_id) is not None
-        ]
-        if not candidates:
-            return None
-        candidates.sort(key=lambda issue: issue.last_activity_at or issue.issue_identifier or issue.issue_id, reverse=True)
-        return candidates[0].issue_id
-
-    def _next_gated_followup_stage(self, instance: InstanceRecord, issue_id: str) -> str | None:
-        persisted = set(instance.gated_followup_stages.get(issue_id, []))
-        for stage in ("gate",):
-            if stage in persisted and instance.last_exit_code not in {0, None}:
-                return stage
-            if stage not in persisted:
-                return stage
-        return None
-
-    def _with_gated_followup_stage(self, instance: InstanceRecord, issue_id: str, stage: str) -> InstanceRecord:
-        stages = {key: list(value) for key, value in instance.gated_followup_stages.items()}
-        issue_stages = list(stages.get(issue_id, []))
-        if stage not in issue_stages:
-            issue_stages.append(stage)
-        stages[issue_id] = issue_stages
-        return instance.with_updates(gated_followup_stages=stages)
-
-    def _record_gated_followup_event(self, instance: InstanceRecord, *, issue_id: str, stage: str, event_type: str) -> None:
-        path = Path(instance.persistence_path).parent / "ops.json"
-        store = OpsStore(path)
-        snapshot = store.load()
-        snapshot.events.append(
-            TraceEvent(
-                event_id=f"evt-{len(snapshot.events) + 1}",
-                event_type=event_type,
-                timestamp=utc_now().isoformat().replace("+00:00", "Z"),
-                issue_id=issue_id,
-                retention_tier="summary",
-                summary=stage,
-                payload={"instance_id": instance.id, "stage": stage},
-            )
-        )
-        store.save(snapshot)
 
     def dashboard(self) -> dict[str, Any]:
         instances = self.store.list_instances()
@@ -2650,43 +2240,19 @@ def _replace_marker_block(current: str, marker_name: str, block: str) -> str:
 
 
 def _find_phase_human_child(human_action: dict[str, Any], children: list[dict[str, Any]]) -> dict[str, Any] | None:
-    child_issue_id = str(human_action.get("child_issue_id") or "")
-    child_identifier = str(human_action.get("child_identifier") or "")
-    for child in children:
-        if not isinstance(child, dict):
-            continue
-        if child_issue_id and str(child.get("id") or "") == child_issue_id:
-            return child
-        if child_identifier and str(child.get("identifier") or "") == child_identifier:
-            return child
-    return None
+    return find_phase_human_child(human_action, children)
 
 
 def _linear_issue_is_done(issue: dict[str, Any]) -> bool:
-    return normalize_state_key(str(issue.get("state") or "")) == "done" or str(issue.get("state_type") or "") == "completed"
+    return linear_issue_is_done(issue)
 
 
 def _human_response_from_child(child: dict[str, Any]) -> str | None:
-    description = str(child.get("description") or "")
-    marker = "Human response:"
-    if marker.lower() not in description.lower():
-        return None
-    lower = description.lower()
-    start = lower.find(marker.lower())
-    response = description[start + len(marker):]
-    stop_markers = ["When finished,", "完成后", "Move this child issue"]
-    for stop in stop_markers:
-        index = response.lower().find(stop.lower())
-        if index >= 0:
-            response = response[:index]
-    cleaned = response.strip()
-    if not cleaned or cleaned == "(Add the answer or decision here when information is required.)":
-        return None
-    return cleaned
+    return human_response_from_child(child)
 
 
 def _phase_human_action_requires_response(human_action: dict[str, Any]) -> bool:
-    return str(human_action.get("kind") or "") in {"preflight_needs_input", "codex_needs_input"}
+    return phase_human_action_requires_response(human_action)
 
 
 def _persisted_session_row(session: PersistedSession) -> dict[str, Any]:
@@ -3002,7 +2568,7 @@ def _sanitize_connection_error(error: str | None) -> str | None:
 
 
 def _repository_handoff_marker(source_issue_id: str) -> str:
-    return f"<!-- {REPOSITORY_HANDOFF_MARKER_NAME} source_issue_id={source_issue_id} -->"
+    return repository_handoff_marker(source_issue_id)
 
 
 def _repository_handoff_closeout_event(
@@ -3012,93 +2578,15 @@ def _repository_handoff_closeout_event(
     status: str,
     payload: dict[str, Any],
 ) -> TraceEvent:
-    return TraceEvent(
-        event_id=f"evt-{len(snapshot.events) + 1}",
-        event_type="repository_handoff_closeout.v1",
-        timestamp=utc_now().isoformat().replace("+00:00", "Z"),
-        issue_id=source_event.issue_id,
-        run_id=source_event.run_id,
-        attempt_id=source_event.attempt_id,
-        retention_tier="summary",
-        summary=status,
-        payload={"status": status, "source_event_id": source_event.event_id, **payload},
-    )
+    return repository_handoff_closeout_event(snapshot, source_event=source_event, status=status, payload=payload)
 
 
 def _repository_integration_description(report: dict[str, Any], *, instance: InstanceRecord) -> str:
-    issue_id = str(report.get("issue_id") or "")
-    issue_identifier = str(report.get("issue_identifier") or issue_id)
-    bundle = report.get("bundle") if isinstance(report.get("bundle"), dict) else {}
-    git_snapshot = report.get("git_snapshot") if isinstance(report.get("git_snapshot"), dict) else {}
-    structured = report.get("structured_result") if isinstance(report.get("structured_result"), dict) else {}
-    changed_files = git_snapshot.get("changed_files") if isinstance(git_snapshot.get("changed_files"), list) else []
-    manifest = report.get("artifact_manifest") if isinstance(report.get("artifact_manifest"), list) else []
-    return "\n".join(
-        [
-            _repository_handoff_marker(issue_id),
-            f"# Integrate {issue_identifier} implementation",
-            "",
-            f"Source issue: {issue_identifier} (`{issue_id}`)",
-            "Closeout mode: local_bundle",
-            f"Workspace path: `{report.get('workspace_path') or instance.workspace_root}`",
-            f"Bundle path: `{bundle.get('path') or ''}`",
-            f"Patch path: `{bundle.get('changes_patch_path') or ''}`",
-            f"Manifest path: `{bundle.get('manifest_path') or ''}`",
-            "",
-            "## Git Snapshot",
-            f"- Repository root: `{git_snapshot.get('repo_root') or 'workspace-only'}`",
-            f"- Branch: `{git_snapshot.get('branch') or 'unknown'}`",
-            f"- HEAD: `{git_snapshot.get('head_sha') or 'unknown'}`",
-            f"- Status: `{git_snapshot.get('status_porcelain') or 'clean-or-unavailable'}`",
-            f"- Diff stat: `{git_snapshot.get('diff_stat') or 'none'}`",
-            f"- Changed files: {', '.join(str(item) for item in changed_files) if changed_files else 'none'}",
-            "",
-            "## Test Evidence",
-            str(
-                structured.get("test_commands_and_exact_output")
-                or structured.get("tests")
-                or "See source issue implementation evidence."
-            ),
-            "",
-            "## Integration Steps",
-            "1. Inspect `changes.patch` and the manifest.",
-            "2. Apply tracked changes to the target repository branch without committing automatically.",
-            "3. Review copied untracked artifacts under the bundle `untracked/` directory.",
-            "4. Run the test evidence commands or equivalent repository verification.",
-            "",
-            "## Completion Criteria",
-            "- Required changes are integrated into the target branch.",
-            "- Verification passes after integration.",
-            "- Source issue remains traceable through this child issue and local bundle paths.",
-            "",
-            "## Artifact Manifest",
-            "\n".join(
-                f"- `{item.get('path')}` size={item.get('size')} sha256={item.get('sha256')}"
-                for item in manifest[:25]
-                if isinstance(item, dict)
-            )
-            or "No artifacts listed.",
-        ]
-    )
+    return repository_integration_description(report, instance=instance)
 
 
 def _repository_handoff_comment(report: dict[str, Any], *, child: dict[str, Any], mention: str) -> str:
-    issue_identifier = str(report.get("issue_identifier") or report.get("issue_id") or "source issue")
-    bundle = report.get("bundle") if isinstance(report.get("bundle"), dict) else {}
-    child_ref = child.get("url") or child.get("identifier") or child.get("id") or "integration child issue"
-    mention_line = f"{mention} " if mention else ""
-    return "\n".join(
-        [
-            f"{mention_line}Repository handoff is ready for {issue_identifier}.",
-            "",
-            f"Integration child: {child_ref}",
-            f"Bundle: `{bundle.get('path') or ''}`",
-            f"Patch: `{bundle.get('changes_patch_path') or ''}`",
-            f"Manifest: `{bundle.get('manifest_path') or ''}`",
-            "",
-            "Performer produced the local handoff bundle only. Conductor created this integration follow-up; no commit, push, or merge was performed.",
-        ]
-    )
+    return repository_handoff_comment(report, child=child, mention=mention)
 
 
 def _phase_diagnostic_comment(
@@ -3157,6 +2645,10 @@ def _phase_failure_needs_human_action(run, detail: dict[str, Any]) -> bool:
             "invalid request",
             "invalid params",
             "json-rpc error",
+            "scenario_timeout_unresolved",
+            "linear_phase_projection_failed",
+            "gate_parent_relationship_drift",
+            "orchestration_event_rebuild_failed",
         )
     )
 

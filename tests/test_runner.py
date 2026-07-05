@@ -261,7 +261,7 @@ async def test_runner_uses_workspace_root_when_per_issue_workspace_is_disabled(t
 
 
 @pytest.mark.asyncio
-async def test_runner_passes_existing_sdk_thread_id_from_persistence(tmp_path: Path) -> None:
+async def test_runner_ignores_instance_persistence_sdk_thread_id(tmp_path: Path) -> None:
     codex = FakeCodex()
     config = make_config_with_persistence(tmp_path)
     config = ServiceConfig(
@@ -302,7 +302,7 @@ async def test_runner_passes_existing_sdk_thread_id_from_persistence(tmp_path: P
     )
 
     assert codex.kwargs is not None
-    assert codex.kwargs["existing_thread_id"] == "thread-existing"
+    assert codex.kwargs["existing_thread_id"] is None
 
 
 @pytest.mark.asyncio
@@ -311,7 +311,9 @@ async def test_runner_prefers_workspace_owned_sdk_thread_id(tmp_path: Path) -> N
     workspace_root = tmp_path / "workspace"
     issue_workspace = workspace_root / "MT-1"
     issue_workspace.mkdir(parents=True)
-    (issue_workspace / ".symphony-codex-thread.json").write_text(
+    execution_dir = issue_workspace / ".symphony"
+    execution_dir.mkdir()
+    (execution_dir / "execution.json").write_text(
         json.dumps(
             {
                 "issue_id": "mt-1",
@@ -393,7 +395,7 @@ async def test_runner_writes_sdk_thread_id_to_issue_workspace(tmp_path: Path) ->
         lambda event: None,
     )
 
-    payload = json.loads((workspace_root / "MT-1" / ".symphony-codex-thread.json").read_text(encoding="utf-8"))
+    payload = json.loads((workspace_root / "MT-1" / ".symphony" / "execution.json").read_text(encoding="utf-8"))
     assert payload["issue_id"] == "mt-1"
     assert payload["thread_id"] == "thread-new"
     assert payload["status"] == "resume_pending"

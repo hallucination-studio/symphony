@@ -1,0 +1,96 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any, Callable
+
+from performer_api.phase import PhaseAdvanceRequest
+
+from .conductor_models import InstanceRecord
+from .conductor_phase import PhaseTransitionError
+
+
+class OrchestrationScheduler:
+    def __init__(
+        self,
+        *,
+        store: Any,
+        phase_reducer: Any,
+        runtime_manager: Any,
+        runtime_env: Callable[[], dict[str, str]],
+        get_instance: Callable[[str], InstanceRecord | None],
+    ):
+        self.store = store
+        self.phase_reducer = phase_reducer
+        self.runtime_manager = runtime_manager
+        self.runtime_env = runtime_env
+        self.get_instance = get_instance
+
+    async def start_due_runs(self) -> int:
+        started_count = 0
+        for run in self.store.list_due_orchestration_runs():
+            instance = self.store.get_instance(run.instance_id)
+            if instance is None:
+                continue
+            refreshed = self.get_instance(instance.id) or instance
+            if refreshed.process_status in {"running", "starting"}:
+                continue
+            try:
+                started = await self.start_run(run, refreshed)
+            except PhaseTransitionError:
+                continue
+            self.store.update_instance(started)
+            started_count += 1
+        return started_count
+
+    async def start_run(self, run: Any, instance: InstanceRecord) -> InstanceRecord:
+        paths = phase_file_paths(instance, run.run_id)
+        result_path = paths["result_path"]
+        if result_path.exists():
+            result_path.unlink()
+        request = PhaseAdvanceRequest(
+            run_id=run.run_id,
+            instance_id=run.instance_id,
+            issue_id=run.issue_id,
+            issue_identifier=run.issue_identifier,
+            current_phase=run.phase,
+            attempt=run.attempt,
+            human_response=run.human_response,
+            workflow_profile=run.workflow_profile or instance.workflow_profile,
+            workspace_context={
+                "instance_dir": instance.instance_dir,
+                "workspace_root": instance.workspace_root,
+                "persistence_path": instance.persistence_path,
+                "ops_snapshot_path": str(Path(instance.persistence_path).parent / "ops.json"),
+            },
+        )
+        _write_json_atomic(paths["request_path"], request.to_dict())
+        started = await self.runtime_manager.start(
+            instance.with_updates(process_status="starting"),
+            env=self.runtime_env(),
+            advance_request_path=str(paths["request_path"]),
+            phase_result_path=str(result_path),
+        )
+        self.phase_reducer.performer_started(
+            run.run_id,
+            request_path=str(paths["request_path"]),
+            result_path=str(result_path),
+            pid=started.pid,
+        )
+        return started
+
+
+def phase_file_paths(instance: InstanceRecord, run_id: str) -> dict[str, Path]:
+    root = Path(instance.instance_dir) / "state" / "orchestration" / run_id
+    root.mkdir(parents=True, exist_ok=True)
+    return {
+        "request_path": root / "advance-request.json",
+        "result_path": root / "phase-result.json",
+    }
+
+
+def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, separators=(",", ":"), sort_keys=True), encoding="utf-8")
+    tmp.replace(path)

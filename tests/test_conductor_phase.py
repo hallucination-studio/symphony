@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -42,6 +43,49 @@ def test_store_upserts_duplicate_dispatch_by_instance_and_issue(tmp_path: Path) 
     assert second.status == RunStatus.QUEUED
     assert second.dispatch_id == "dispatch-2"
     assert [event.event_type for event in events] == ["dispatch.created", "dispatch.duplicate"]
+
+
+def test_store_reopens_terminal_issue_dispatch_as_new_epoch(tmp_path: Path) -> None:
+    store = ConductorStore(tmp_path / "conductor-data")
+    reducer = PhaseReducer(store)
+    first = reducer.dispatch_received(
+        instance_id="inst-1",
+        issue_id="issue-1",
+        issue_identifier="ENG-1",
+        workflow_profile="default",
+        dispatch_id="dispatch-1",
+    )
+    reducer.performer_started(first.run_id, request_path="/tmp/request.json", result_path="/tmp/result.json")
+    completed = reducer.performer_result(
+        PhaseAdvanceResult(
+            run_id=first.run_id,
+            issue_id="issue-1",
+            next_phase=RunPhase.DONE,
+            status="completed",
+            reason="completed_by_runtime",
+        )
+    )
+
+    second = reducer.dispatch_received(
+        instance_id="inst-1",
+        issue_id="issue-1",
+        issue_identifier="ENG-1",
+        workflow_profile="default",
+        dispatch_id="dispatch-2",
+    )
+
+    assert completed.run_id == first.run_id
+    assert second.run_id != first.run_id
+    assert second.epoch == 2
+    assert second.phase is RunPhase.QUEUED
+    assert store.get_orchestration_run(first.run_id) is not None
+    assert store.get_orchestration_run_by_issue("inst-1", "issue-1") == second
+    assert [event.event_type for event in store.list_orchestration_events(first.run_id)] == [
+        "dispatch.created",
+        "performer.started",
+        "performer.result",
+    ]
+    assert [event.event_type for event in store.list_orchestration_events(second.run_id)] == ["dispatch.created"]
 
 
 def test_store_lists_due_phase_runs_and_tracks_result_paths(tmp_path: Path) -> None:
@@ -181,6 +225,48 @@ def test_apply_event_is_the_only_phase_projection_writer(tmp_path: Path) -> None
     assert updated.phase is RunPhase.IMPLEMENTING
     assert updated.status == RunStatus.RUNNING
     assert store.rebuild_run(run.run_id) == updated
+
+
+def test_apply_event_rejects_concurrent_stale_phase_transition_atomically(tmp_path: Path) -> None:
+    store = ConductorStore(tmp_path / "conductor-data")
+    reducer = PhaseReducer(store)
+    run = reducer.dispatch_received(
+        instance_id="inst-1",
+        issue_id="issue-1",
+        issue_identifier="ENG-1",
+        workflow_profile="default",
+        dispatch_id="dispatch-1",
+    )
+
+    def submit(to_phase: RunPhase) -> tuple[str, RunPhase | str]:
+        try:
+            updated = store.apply_event(
+                run.run_id,
+                {
+                    "event_type": f"test.{to_phase.value}",
+                    "to_phase": to_phase,
+                    "payload": {"status": RunStatus.RUNNING if to_phase is RunPhase.IMPLEMENTING else RunStatus.FAILED},
+                },
+                expected_current_phases={RunPhase.QUEUED},
+            )
+            return ("accepted", updated.phase)
+        except PhaseTransitionError as exc:
+            return ("rejected", str(exc))
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        outcomes = list(executor.map(submit, [RunPhase.IMPLEMENTING, RunPhase.FAILED]))
+
+    accepted = [value for status, value in outcomes if status == "accepted"]
+    rejected = [value for status, value in outcomes if status == "rejected"]
+    events = store.list_orchestration_events(run.run_id)
+
+    assert len(accepted) == 1
+    assert len(rejected) == 1
+    assert "Expected run" in str(rejected[0])
+    assert [event.event_type for event in events].count("test.implementing") + [
+        event.event_type for event in events
+    ].count("test.failed") == 1
+    assert store.rebuild_run(run.run_id) == store.get_orchestration_run(run.run_id)
 
 
 def test_rebuild_run_matches_incremental_projection_across_event_types(tmp_path: Path) -> None:
