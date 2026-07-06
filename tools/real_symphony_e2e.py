@@ -191,7 +191,14 @@ async def fetch_linear_viewer(token: str) -> dict[str, Any]:
 
 
 async def create_linear_issue(
-    token: str, project_slug: str, run_id: str, *, delegate_id: str | None = None
+    token: str,
+    project_slug: str,
+    run_id: str,
+    *,
+    delegate_id: str | None = None,
+    parent_id: str | None = None,
+    title: str | None = None,
+    description: str | None = None,
 ) -> dict[str, Any]:
     project = (
         await linear_graphql(
@@ -238,6 +245,7 @@ async def create_linear_issue(
                   state { name type }
                   assignee { id name }
                   delegate { id name }
+                  parent { id identifier }
                   agentSessions(first: 5) { nodes { id status appUser { id name } } }
                   labels { nodes { name } }
                 }
@@ -249,18 +257,50 @@ async def create_linear_issue(
                     "teamId": team["id"],
                     "projectId": project["id"],
                     "stateId": todo["id"],
-                    "title": f"Symphony managed agent dispatch {run_id}",
-                    "description": (
+                    "title": title or f"Symphony managed agent dispatch {run_id}",
+                    "description": description or (
                         "Real Symphony e2e task. Create SYMPHONY_REAL_E2E_RESULT.md at the workspace root, "
                         "include this Linear issue identifier, say Podium, Conductor, and Performer reached Codex, "
                         "and run pytest tests/test_smoke.py -q."
                     ),
                     **({"delegateId": delegate_id} if delegate_id else {}),
+                    **({"parentId": parent_id} if parent_id else {}),
                 }
             },
         )
     )["issueCreate"]["issue"]
     return {"project": project, "team": team, "todo_state": todo, "issue": issue}
+
+
+async def create_linear_blocks_relation(token: str, blocker_id: str, blocked_id: str) -> dict[str, Any]:
+    result = (
+        await linear_graphql(
+            token,
+            """
+            mutation CreateBlocksRelation($input: IssueRelationCreateInput!) {
+              issueRelationCreate(input: $input) {
+                success
+                issueRelation {
+                  id
+                  type
+                  issue { id identifier title }
+                  relatedIssue { id identifier title }
+                }
+              }
+            }
+            """,
+            {
+                "input": {
+                    "issueId": blocker_id,
+                    "relatedIssueId": blocked_id,
+                    "type": "blocks",
+                }
+            },
+        )
+    )["issueRelationCreate"]
+    if not result.get("success"):
+        raise RuntimeError("Linear issueRelationCreate returned success=false")
+    return result["issueRelation"]
 
 
 async def fetch_linear_issue(token: str, issue_id: str) -> dict[str, Any]:
@@ -277,6 +317,7 @@ async def fetch_linear_issue(token: str, issue_id: str) -> dict[str, Any]:
                 state { name type }
                 assignee { id name }
                 delegate { id name }
+                parent { id identifier }
                 agentSessions(first: 5) { nodes { id status appUser { id name } } }
                 labels { nodes { name } }
                 comments(first: 20) { nodes { body createdAt } }

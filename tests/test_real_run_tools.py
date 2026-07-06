@@ -128,6 +128,246 @@ def test_linear_tree_audit_requires_gate_and_evidence_parent_links() -> None:
     assert "blocks_relation_present" in result["failures"]
 
 
+def test_linear_tree_audit_summarizes_children_and_blocks_relations() -> None:
+    tool = load_tool("linear_tree_audit")
+
+    result = tool.summarize_tree(
+        {
+            "id": "parent-1",
+            "identifier": "HELL-1",
+            "title": "Parent",
+            "state": {"name": "Todo", "type": "unstarted"},
+            "labels": {"nodes": []},
+            "children": {
+                "nodes": [
+                    {
+                        "id": "child-a",
+                        "identifier": "HELL-2",
+                        "title": "Child A",
+                        "parent": {"id": "parent-1", "identifier": "HELL-1"},
+                        "state": {"name": "Done", "type": "completed"},
+                        "labels": {"nodes": []},
+                        "children": {"nodes": []},
+                    },
+                    {
+                        "id": "child-c",
+                        "identifier": "HELL-3",
+                        "title": "Child C",
+                        "parent": {"id": "parent-1", "identifier": "HELL-1"},
+                        "state": {"name": "Todo", "type": "unstarted"},
+                        "labels": {"nodes": []},
+                        "children": {"nodes": []},
+                        "inverseRelations": {
+                            "nodes": [
+                                {
+                                    "id": "rel-1",
+                                    "type": "blocks",
+                                    "issue": {"id": "child-a", "identifier": "HELL-2", "title": "Child A"},
+                                    "relatedIssue": {"id": "child-c", "identifier": "HELL-3", "title": "Child C"},
+                                }
+                            ]
+                        },
+                    },
+                ]
+            },
+            "inverseRelations": {"nodes": []},
+        }
+    )
+
+    assert result["business_issue"]["id"] == "parent-1"
+    assert [child["id"] for child in result["children"]] == ["child-a", "child-c"]
+    assert result["blocks_relations"] == [
+        {
+            "id": "rel-1",
+            "type": "blocks",
+            "issue": {"id": "child-a", "identifier": "HELL-2", "title": "Child A"},
+            "relatedIssue": {"id": "child-c", "identifier": "HELL-3", "title": "Child C"},
+            "scope": "child",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_real_symphony_e2e_create_issue_accepts_parent_id(monkeypatch) -> None:
+    tool = load_tool("real_symphony_e2e")
+    calls: list[dict[str, object]] = []
+
+    async def fake_linear_graphql(_token: str, query: str, variables: dict[str, object]) -> dict[str, object]:
+        calls.append({"query": query, "variables": variables})
+        if "query Project" in query:
+            return {
+                "projects": {
+                    "nodes": [
+                        {
+                            "id": "project-1",
+                            "name": "HELL",
+                            "slugId": "HELL",
+                            "teams": {"nodes": [{"id": "team-1", "key": "HELL", "name": "HELL"}]},
+                        }
+                    ]
+                }
+            }
+        if "query States" in query:
+            return {"workflowStates": {"nodes": [{"id": "state-1", "name": "Todo", "type": "unstarted"}]}}
+        if "mutation CreateIssue" in query:
+            return {
+                "issueCreate": {
+                    "issue": {
+                        "id": "issue-1",
+                        "identifier": "HELL-1",
+                        "title": "Child",
+                        "url": "https://linear.app/x/issue/HELL-1",
+                        "state": {"name": "Todo", "type": "unstarted"},
+                        "assignee": None,
+                        "delegate": None,
+                        "agentSessions": {"nodes": []},
+                        "labels": {"nodes": []},
+                        "parent": {"id": "parent-1", "identifier": "HELL-0"},
+                    }
+                }
+            }
+        raise AssertionError(query)
+
+    monkeypatch.setattr(tool, "linear_graphql", fake_linear_graphql)
+
+    result = await tool.create_linear_issue("token", "HELL", "run-1", parent_id="parent-1")
+
+    create_call = calls[-1]
+    assert create_call["variables"]["input"]["parentId"] == "parent-1"
+    assert result["issue"]["parent"]["id"] == "parent-1"
+
+
+@pytest.mark.asyncio
+async def test_real_symphony_e2e_create_blocks_relation_uses_blocker_as_issue(monkeypatch) -> None:
+    tool = load_tool("real_symphony_e2e")
+    calls: list[dict[str, object]] = []
+
+    async def fake_linear_graphql(_token: str, query: str, variables: dict[str, object]) -> dict[str, object]:
+        calls.append({"query": query, "variables": variables})
+        return {
+            "issueRelationCreate": {
+                "success": True,
+                "issueRelation": {
+                    "id": "rel-1",
+                    "type": "blocks",
+                    "issue": {"id": "blocker-1", "identifier": "HELL-2"},
+                    "relatedIssue": {"id": "blocked-1", "identifier": "HELL-3"},
+                },
+            }
+        }
+
+    monkeypatch.setattr(tool, "linear_graphql", fake_linear_graphql)
+
+    relation = await tool.create_linear_blocks_relation("token", "blocker-1", "blocked-1")
+
+    assert relation["id"] == "rel-1"
+    assert "issueRelationCreate" in calls[0]["query"]
+    assert calls[0]["variables"] == {
+        "input": {
+            "issueId": "blocker-1",
+            "relatedIssueId": "blocked-1",
+            "type": "blocks",
+        }
+    }
+
+
+def test_real_concurrent_schedule_probe_assertions_pass_for_expected_timeline() -> None:
+    tool = load_tool("real_concurrent_schedule_probe")
+    report = {"checks": [], "failures": []}
+    timeline = [
+        {
+            "tick": 1,
+            "background": {"blocked_waiting": 1},
+            "started_this_tick": [{"issue_id": "A"}, {"issue_id": "B"}],
+            "runs": [
+                {"issue_id": "A", "phase": "implementing", "is_dispatchable": True},
+                {"issue_id": "B", "phase": "implementing", "is_dispatchable": True},
+                {"issue_id": "C", "phase": "queued", "is_dispatchable": False},
+            ],
+        },
+        {
+            "tick": 2,
+            "background": {"blocked_waiting": 1},
+            "started_this_tick": [],
+            "runs": [
+                {"issue_id": "A", "phase": "done", "is_dispatchable": True},
+                {"issue_id": "B", "phase": "done", "is_dispatchable": True},
+                {"issue_id": "C", "phase": "queued", "is_dispatchable": True},
+            ],
+        },
+        {
+            "tick": 3,
+            "background": {"blocked_waiting": 0},
+            "started_this_tick": [{"issue_id": "C"}],
+            "runs": [
+                {"issue_id": "A", "phase": "done", "is_dispatchable": True},
+                {"issue_id": "B", "phase": "done", "is_dispatchable": True},
+                {"issue_id": "C", "phase": "implementing", "is_dispatchable": True},
+            ],
+        },
+    ]
+
+    tool._assert_schedule(
+        report=report,
+        timeline=timeline,
+        runtime_started=[{"issue_id": "A"}, {"issue_id": "B"}, {"issue_id": "C"}],
+        child_a_id="A",
+        child_b_id="B",
+        child_c_id="C",
+        global_capacity=3,
+    )
+
+    assert [check["passed"] for check in report["checks"]] == [True, True, True, True, True]
+    assert report["failures"] == []
+
+
+def test_real_concurrent_schedule_probe_assertions_fail_when_blocked_child_starts_early() -> None:
+    tool = load_tool("real_concurrent_schedule_probe")
+    report = {"checks": [], "failures": []}
+
+    tool._assert_schedule(
+        report=report,
+        timeline=[
+            {
+                "tick": 1,
+                "background": {"blocked_waiting": 0},
+                "started_this_tick": [{"issue_id": "A"}, {"issue_id": "B"}, {"issue_id": "C"}],
+                "runs": [
+                    {"issue_id": "A", "phase": "implementing", "is_dispatchable": True},
+                    {"issue_id": "B", "phase": "implementing", "is_dispatchable": True},
+                    {"issue_id": "C", "phase": "implementing", "is_dispatchable": True},
+                ],
+            },
+            {
+                "tick": 2,
+                "background": {"blocked_waiting": 0},
+                "started_this_tick": [],
+                "runs": [
+                    {"issue_id": "A", "phase": "done", "is_dispatchable": True},
+                    {"issue_id": "B", "phase": "done", "is_dispatchable": True},
+                    {"issue_id": "C", "phase": "done", "is_dispatchable": True},
+                ],
+            },
+        ],
+        runtime_started=[{"issue_id": "A"}, {"issue_id": "B"}, {"issue_id": "C"}],
+        child_a_id="A",
+        child_b_id="B",
+        child_c_id="C",
+        global_capacity=3,
+    )
+
+    failed = {check["name"] for check in report["failures"]}
+    assert "dependency-gate:C-waits-before-A-terminal" in failed
+    assert "capacity-non-cause:C-waits-with-capacity-available" in failed
+
+
+@pytest.mark.asyncio
+async def test_real_concurrent_schedule_probe_noop_direct_ingress_returns_zero() -> None:
+    tool = load_tool("real_concurrent_schedule_probe")
+
+    assert await tool.NoopDirectIngress().poll() == 0
+
+
 def test_real_run_observer_diagnoses_review_phase_state_mismatch() -> None:
     observer = load_tool("real_run_observer")
 

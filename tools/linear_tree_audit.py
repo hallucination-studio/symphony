@@ -36,6 +36,14 @@ async def fetch_issue_tree(issue_id: str) -> dict[str, Any]:
                 parent { id identifier }
                 state { name type }
                 labels { nodes { name } }
+                inverseRelations {
+                  nodes {
+                    id
+                    type
+                    issue { id identifier title }
+                    relatedIssue { id identifier title }
+                  }
+                }
                 children(first: 100) {
                   nodes {
                     id
@@ -121,6 +129,43 @@ def audit_tree(tree: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def summarize_tree(tree: dict[str, Any]) -> dict[str, Any]:
+    children = tree.get("children", {}).get("nodes", [])
+    return {
+        "business_issue": _issue_row(tree),
+        "children": [_issue_with_relations(child) for child in children],
+        "blocks_relations": _blocks_relations(tree, scope="business")
+        + [
+            relation
+            for child in children
+            for relation in _blocks_relations(child, scope="child")
+        ],
+        "raw": tree,
+    }
+
+
+def _issue_with_relations(issue: dict[str, Any]) -> dict[str, Any]:
+    return {
+        **_issue_row(issue),
+        "blocks_relations": _blocks_relations(issue, scope="issue"),
+        "children": [_issue_row(child) for child in issue.get("children", {}).get("nodes", [])],
+    }
+
+
+def _blocks_relations(issue: dict[str, Any], *, scope: str) -> list[dict[str, Any]]:
+    return [
+        {
+            "id": relation.get("id"),
+            "type": relation.get("type"),
+            "issue": relation.get("issue"),
+            "relatedIssue": relation.get("relatedIssue"),
+            "scope": scope,
+        }
+        for relation in issue.get("inverseRelations", {}).get("nodes", [])
+        if relation.get("type") == "blocks"
+    ]
+
+
 def _issue_row(issue: dict[str, Any]) -> dict[str, Any]:
     state = issue.get("state") or {}
     return {
@@ -137,7 +182,7 @@ def _issue_row(issue: dict[str, Any]) -> dict[str, Any]:
 
 async def run(args: argparse.Namespace) -> dict[str, Any]:
     tree = await fetch_issue_tree(args.issue)
-    result = audit_tree(tree)
+    result = summarize_tree(tree) if args.mode == "summary" else audit_tree(tree)
     if args.out:
         args.out.parent.mkdir(parents=True, exist_ok=True)
         args.out.write_text(json.dumps(result, indent=2, sort_keys=True), encoding="utf-8")
@@ -147,6 +192,12 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
 def parser() -> argparse.ArgumentParser:
     arg_parser = argparse.ArgumentParser(description="Audit a Linear business issue gate/evidence tree.")
     arg_parser.add_argument("issue", help="Linear issue id or identifier accepted by Linear's issue(id:) field.")
+    arg_parser.add_argument(
+        "--mode",
+        choices=["audit", "summary"],
+        default="audit",
+        help="Use audit for gate/evidence checks or summary to export parent/child/blocks relationships.",
+    )
     arg_parser.add_argument("--out", type=Path, help="Write JSON evidence to this path.")
     return arg_parser
 
@@ -155,7 +206,7 @@ def main() -> None:
     args = parser().parse_args()
     result = asyncio.run(run(args))
     print(json.dumps(result, indent=2, sort_keys=True))
-    if not result["pass"]:
+    if args.mode == "audit" and not result["pass"]:
         raise SystemExit(1)
 
 
