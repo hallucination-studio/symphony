@@ -27,7 +27,7 @@ from performer.codex_client import CodexError
 from performer.orchestrator import Orchestrator, _human_intervention_description, _retry_delay_seconds
 from performer.ops_telemetry import ExecutionTelemetryRecorder
 from performer_api.ops_store import OpsStore
-from performer_api.persistence import PersistenceStore, ops_snapshot_path_from_persistence_path
+from performer_api.persistence import CodexThreadEntry, PersistenceStore, ops_snapshot_path_from_persistence_path
 
 
 def test_retry_delay_seconds_rounds_up_with_phase_buffer() -> None:
@@ -2837,6 +2837,95 @@ def test_orchestrator_loads_persisted_retries(tmp_path: Path) -> None:
     assert "mt-1" in second.state.retry_attempts
     assert "mt-1" in second.state.claimed
     assert second.state.retry_attempts["mt-1"].attempt == 2
+
+
+def test_orchestrator_persists_and_loads_codex_threads(tmp_path: Path) -> None:
+    store = PersistenceStore(tmp_path / "state" / "performer.json")
+    first = Orchestrator(make_config(tmp_path), FakeTracker(), FakeRunner(), persistence_store=store)
+    first.state.codex_threads["mt-1"] = CodexThreadEntry(
+        issue_id="mt-1",
+        thread_id="thread-1",
+        backend="sdk",
+        workspace_path=str(tmp_path / "workspace"),
+        last_turn_id="turn-1",
+        status="resume_pending",
+    )
+    first._persist_state()
+
+    second = Orchestrator(make_config(tmp_path), FakeTracker(), FakeRunner(), persistence_store=store)
+    second.load_persisted_state()
+
+    assert store.load().codex_threads[0].thread_id == "thread-1"
+    assert second.state.codex_threads["mt-1"].thread_id == "thread-1"
+    assert "mt-1" in second.state.claimed
+
+
+@pytest.mark.asyncio
+async def test_codex_events_persist_thread_metadata(tmp_path: Path) -> None:
+    store = PersistenceStore(tmp_path / "state" / "performer.json")
+    tracker = FakeTracker(candidates=[issue("MT-1")])
+    runner = FakeRunner()
+    orchestrator = Orchestrator(make_config(tmp_path), tracker, runner, persistence_store=store)
+
+    await orchestrator.tick()
+    orchestrator.on_codex_event(
+        "mt-1",
+        {
+            "event": "session_started",
+            "thread_id": "thread-1",
+            "turn_id": "turn-1",
+            "session_id": "thread-1-turn-1",
+            "cwd": str(tmp_path / "workspace"),
+        },
+    )
+    orchestrator.on_codex_event(
+        "mt-1",
+        {
+            "event": "turn_completed",
+            "thread_id": "thread-1",
+            "turn_id": "turn-2",
+            "session_id": "thread-1-turn-2",
+            "message": "finished",
+        },
+    )
+
+    thread = store.load().codex_threads[0]
+    assert thread.issue_id == "mt-1"
+    assert thread.thread_id == "thread-1"
+    assert thread.last_turn_id == "turn-2"
+    assert thread.workspace_path == str(tmp_path / "workspace")
+    assert thread.last_final_response == "finished"
+    assert thread.status == "resume_pending"
+
+
+@pytest.mark.asyncio
+async def test_worker_failure_marks_codex_thread_failed(tmp_path: Path) -> None:
+    class FailingRunner:
+        async def run_issue(
+            self, issue: Issue, attempt: int | None, on_event: Any, *, worker_host: str | None = None
+        ) -> None:
+            on_event(
+                {
+                    "event": "session_started",
+                    "thread_id": "thread-1",
+                    "turn_id": "turn-1",
+                    "session_id": "thread-1-turn-1",
+                    "cwd": str(tmp_path / "workspace"),
+                }
+            )
+            raise RuntimeError("boom")
+
+    store = PersistenceStore(tmp_path / "state" / "performer.json")
+    tracker = FakeTracker(candidates=[issue("MT-1")])
+    orchestrator = Orchestrator(make_config(tmp_path), tracker, FailingRunner(), persistence_store=store)
+
+    await orchestrator.tick()
+    await orchestrator.wait_for_idle()
+
+    thread = store.load().codex_threads[0]
+    assert thread.issue_id == "mt-1"
+    assert thread.thread_id == "thread-1"
+    assert thread.status == "failed"
 
 
 @pytest.mark.asyncio

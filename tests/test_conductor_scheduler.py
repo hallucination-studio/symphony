@@ -330,7 +330,7 @@ async def test_scheduler_resolves_blocker_run_across_instances(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
-async def test_scheduler_treats_blocker_as_terminal_when_any_duplicate_run_is_terminal(tmp_path: Path) -> None:
+async def test_scheduler_blocks_when_latest_blocker_epoch_is_not_done_even_if_prior_epoch_was_terminal(tmp_path: Path) -> None:
     store = ConductorStore(tmp_path / "conductor-data")
     reducer = PhaseReducer(store)
     runtime = Runtime()
@@ -379,7 +379,7 @@ async def test_scheduler_treats_blocker_as_terminal_when_any_duplicate_run_is_te
         get_instance=store.get_instance,
     )
 
-    assert scheduler.is_dispatchable(blocked) is True
+    assert scheduler.is_dispatchable(blocked) is False
 
 
 @pytest.mark.asyncio

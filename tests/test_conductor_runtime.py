@@ -24,8 +24,8 @@ class FakeStream:
 
 
 class FakeProcess:
-    def __init__(self) -> None:
-        self.pid = 4242
+    def __init__(self, pid: int = 4242) -> None:
+        self.pid = pid
         self.stdout = FakeStream([b"daemon started\n"])
         self.stderr = FakeStream([b"warning line\n"])
         self.returncode: int | None = None
@@ -40,6 +40,25 @@ class FakeProcess:
 
     async def wait(self) -> int:
         await asyncio.sleep(0)
+        if self.returncode is None:
+            self.returncode = 0
+        return self.returncode
+
+
+class PendingProcess:
+    def __init__(self, pid: int) -> None:
+        self.pid = pid
+        self.stdout = FakeStream([])
+        self.stderr = FakeStream([])
+        self.returncode: int | None = None
+
+    def terminate(self) -> None:
+        self.returncode = 0
+
+    def kill(self) -> None:
+        self.returncode = -9
+
+    async def wait(self) -> int:
         if self.returncode is None:
             self.returncode = 0
         return self.returncode
@@ -132,6 +151,36 @@ async def test_start_does_not_inherit_sensitive_runtime_credentials(
     assert "LINEAR_API_KEY" not in env
     assert "PODIUM_PROXY_TOKEN" not in env
     assert "PODIUM_RUNTIME_TOKEN" not in env
+
+
+@pytest.mark.asyncio
+async def test_concurrent_start_reserves_handle_before_process_factory_returns(tmp_path: Path) -> None:
+    calls = 0
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def process_factory(*args: str, **kwargs: Any) -> PendingProcess:
+        nonlocal calls
+        calls += 1
+        entered.set()
+        await release.wait()
+        return PendingProcess(5000 + calls)
+
+    manager = ConductorRuntimeManager(process_factory=process_factory, command="performer")
+    instance = make_instance(tmp_path)
+
+    first_task = asyncio.create_task(manager.start(instance, env={}))
+    await entered.wait()
+    second_task = asyncio.create_task(manager.start(instance, env={}))
+    await asyncio.sleep(0)
+    release.set()
+    first = await first_task
+    second = await second_task
+
+    assert calls == 1
+    assert second.process_status in {"starting", "running"}
+    assert first.pid == 5001
+    assert len(manager._handles) == 1
 
 
 @pytest.mark.asyncio
@@ -245,12 +294,29 @@ def test_refresh_marks_missing_pid_exited_without_runtime_handle(tmp_path: Path)
 
     assert refreshed.process_status == "exited"
     assert refreshed.pid is None
-    assert refreshed.last_exit_code == 0
+    assert refreshed.last_exit_code != 0
+
+
+def test_refresh_rejects_reused_pid_with_non_performer_cmdline(tmp_path: Path) -> None:
+    process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        manager = ConductorRuntimeManager(command="performer")
+        instance = make_instance(tmp_path).with_updates(process_status="running", pid=process.pid)
+
+        refreshed = manager.refresh(instance)
+
+        assert refreshed.process_status == "exited"
+        assert refreshed.pid is None
+        assert refreshed.last_exit_code != 0
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=5)
 
 
 @pytest.mark.asyncio
 async def test_recovered_process_log_query_reports_pipe_warning(tmp_path: Path) -> None:
-    process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", "performer"])
     try:
         manager = ConductorRuntimeManager(command="performer")
         instance = make_instance(tmp_path).with_updates(process_status="running", pid=process.pid)
@@ -275,7 +341,7 @@ async def test_recovered_process_log_query_reports_pipe_warning(tmp_path: Path) 
 
 @pytest.mark.asyncio
 async def test_stop_recovers_running_pid_when_handle_cache_is_empty(tmp_path: Path) -> None:
-    process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", "performer"])
     try:
         manager = ConductorRuntimeManager(command="performer")
         instance = make_instance(tmp_path).with_updates(process_status="running", pid=process.pid)

@@ -260,6 +260,7 @@ class ConductorStore:
         issue_identifier: str | None,
         workflow_profile: str | None,
         dispatch_id: str | None,
+        fencing_token: int | None = None,
         blocked_by: list[str] | None = None,
         parent_issue_id: str | None = None,
     ) -> OrchestrationRun:
@@ -287,6 +288,7 @@ class ConductorStore:
                     "to_phase": RunPhase.QUEUED,
                     "payload": {
                         "dispatch_id": dispatch_id,
+                        "fencing_token": fencing_token,
                         "issue_identifier": issue_identifier,
                         "workflow_profile": workflow_profile,
                         "blocked_by": blocked_by,
@@ -306,6 +308,7 @@ class ConductorStore:
                     "to_phase": RunPhase.QUEUED,
                     "payload": {
                         "dispatch_id": dispatch_id,
+                        "fencing_token": fencing_token,
                         "issue_identifier": issue_identifier,
                         "workflow_profile": workflow_profile,
                         "epoch": run.epoch + 1,
@@ -321,6 +324,7 @@ class ConductorStore:
                 "to_phase": run.phase,
                 "payload": {
                     "dispatch_id": dispatch_id,
+                    "fencing_token": fencing_token,
                     "issue_identifier": issue_identifier,
                     "workflow_profile": workflow_profile,
                     "blocked_by": blocked_by,
@@ -521,7 +525,15 @@ class ConductorStore:
                 created_at=now,
             )
             updated = _project_orchestration_event(current, stored_event)
-            _write_orchestration_run_projection(connection, updated)
+            try:
+                _write_orchestration_run_projection(connection, updated)
+            except sqlite3.IntegrityError as exc:
+                if "orchestration_runs.instance_id, orchestration_runs.issue_id" not in str(exc):
+                    raise
+                active_duplicate = _active_run_for_issue(connection, updated.instance_id, updated.issue_id)
+                if active_duplicate is None:
+                    raise
+                return active_duplicate
         return updated
 
     def rebuild_run(self, run_id: str) -> OrchestrationRun:
@@ -653,6 +665,7 @@ class ConductorStore:
                   attempt INTEGER NOT NULL DEFAULT 1,
                   workflow_profile TEXT,
                   dispatch_id TEXT,
+                  fencing_token INTEGER,
                   request_path TEXT,
                   result_path TEXT,
                   workspace_path TEXT,
@@ -708,6 +721,7 @@ class ConductorStore:
             _ensure_column(connection, "orchestration_runs", "epoch", "INTEGER NOT NULL DEFAULT 1")
             _ensure_column(connection, "orchestration_runs", "blocked_by_json", "TEXT NOT NULL DEFAULT '[]'")
             _ensure_column(connection, "orchestration_runs", "parent_issue_id", "TEXT")
+            _ensure_column(connection, "orchestration_runs", "fencing_token", "INTEGER")
             _ensure_column(connection, "instances", "restart_next_at", "TEXT")
 
     def _set_runtime_action_status(self, action_id: str, *, status: str, error: str | None = None) -> None:
@@ -815,6 +829,7 @@ def _orchestration_run_values(run: OrchestrationRun) -> tuple[Any, ...]:
         run.attempt,
         run.workflow_profile,
         run.dispatch_id,
+        run.fencing_token,
         run.request_path,
         run.result_path,
         run.workspace_path,
@@ -850,6 +865,7 @@ def _orchestration_run_from_row(row: sqlite3.Row) -> OrchestrationRun:
         attempt=int(row["attempt"] or 1),
         workflow_profile=row["workflow_profile"],
         dispatch_id=row["dispatch_id"],
+        fencing_token=row["fencing_token"],
         request_path=row["request_path"],
         result_path=row["result_path"],
         workspace_path=row["workspace_path"],
@@ -887,6 +903,7 @@ def _write_orchestration_run_projection(connection: sqlite3.Connection, run: Orc
           attempt,
           workflow_profile,
           dispatch_id,
+          fencing_token,
           request_path,
           result_path,
           workspace_path,
@@ -906,7 +923,7 @@ def _write_orchestration_run_projection(connection: sqlite3.Connection, run: Orc
           created_at,
           updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(run_id) DO UPDATE SET
           instance_id = excluded.instance_id,
           issue_id = excluded.issue_id,
@@ -919,6 +936,7 @@ def _write_orchestration_run_projection(connection: sqlite3.Connection, run: Orc
           attempt = excluded.attempt,
           workflow_profile = excluded.workflow_profile,
           dispatch_id = excluded.dispatch_id,
+          fencing_token = excluded.fencing_token,
           request_path = excluded.request_path,
           result_path = excluded.result_path,
           workspace_path = excluded.workspace_path,
@@ -942,6 +960,22 @@ def _write_orchestration_run_projection(connection: sqlite3.Connection, run: Orc
     )
 
 
+def _active_run_for_issue(connection: sqlite3.Connection, instance_id: str, issue_id: str) -> OrchestrationRun | None:
+    row = connection.execute(
+        """
+        SELECT *
+        FROM orchestration_runs
+        WHERE instance_id = ?
+          AND issue_id = ?
+          AND phase NOT IN ('done', 'failed')
+        ORDER BY epoch DESC, created_at DESC, run_id DESC
+        LIMIT 1
+        """,
+        (instance_id, issue_id),
+    ).fetchone()
+    return _orchestration_run_from_row(row) if row is not None else None
+
+
 def _project_orchestration_event(current: OrchestrationRun | None, event: OrchestrationEvent) -> OrchestrationRun:
     payload = dict(event.payload)
     if current is None:
@@ -956,6 +990,7 @@ def _project_orchestration_event(current: OrchestrationRun | None, event: Orches
             parent_issue_id=_optional_text(payload.get("parent_issue_id")),
             workflow_profile=_optional_text(payload.get("workflow_profile")),
             dispatch_id=_optional_text(payload.get("dispatch_id")),
+            fencing_token=_optional_int(payload.get("fencing_token"), default=None),
             epoch=_optional_int(payload.get("epoch"), default=1),
             now=event.created_at,
         )
@@ -964,7 +999,7 @@ def _project_orchestration_event(current: OrchestrationRun | None, event: Orches
     if event.to_phase is not None:
         changes["phase"] = event.to_phase
     if event.event_type == "dispatch.duplicate":
-        for key in ("issue_identifier", "workflow_profile", "dispatch_id"):
+        for key in ("issue_identifier", "workflow_profile", "dispatch_id", "fencing_token"):
             if payload.get(key):
                 changes[key] = payload[key]
         if "blocked_by" in payload:

@@ -57,6 +57,26 @@ async def test_codex_event_processor_updates_entry_tokens_rate_limits_and_recent
 
 
 @pytest.mark.asyncio
+async def test_codex_event_processor_clears_turn_started_at_on_turn_completed(tmp_path: Path) -> None:
+    orchestrator = Orchestrator(make_config(tmp_path), FakeTracker(), FakeRunner())
+    orchestrator.state.running["mt-1"] = RunningEntry(
+        issue=Issue(id="mt-1", identifier="MT-1", title="Task", state="Todo"),
+        task=None,
+        started_at=utc_now(),
+        retry_attempt=0,
+    )
+
+    orchestrator.on_codex_event("mt-1", {"event": "turn_started", "turn_id": "turn-1"})
+    assert orchestrator.state.running["mt-1"].turn_started_at is not None
+
+    orchestrator.on_codex_event("mt-1", {"event": "turn_completed", "turn_id": "turn-1"})
+
+    entry = orchestrator.state.running["mt-1"]
+    assert entry.turn_count == 1
+    assert entry.turn_started_at is None
+
+
+@pytest.mark.asyncio
 async def test_codex_event_processor_cancels_worker_when_permission_error_needs_human(tmp_path: Path) -> None:
     orchestrator = Orchestrator(make_config(tmp_path), FakeTracker(), FakeRunner())
     task = asyncio.create_task(asyncio.sleep(60))

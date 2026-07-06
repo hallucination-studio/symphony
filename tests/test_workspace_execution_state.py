@@ -26,6 +26,24 @@ def test_workspace_execution_state_reads_and_writes_thread_id(tmp_path: Path) ->
     assert payload["status"] == "resume_pending"
 
 
+def test_workspace_execution_state_failed_thread_is_not_resumable(tmp_path: Path) -> None:
+    workspace = tmp_path / "repo"
+    state = WorkspaceExecutionState(workspace)
+
+    state.write_sdk_thread_failure(
+        issue_id="issue-1",
+        thread_id="thread-1",
+        turn_id="turn-2",
+        error="codex failed",
+    )
+
+    execution_file = workspace / ".symphony" / "execution.json"
+    payload = json.loads(execution_file.read_text(encoding="utf-8"))
+    assert payload["status"] == "failed"
+    assert payload["failure_summary"] == "codex failed"
+    assert state.sdk_thread_id(issue_id="issue-1") is None
+
+
 def test_workspace_execution_state_rejects_other_issue_or_backend(tmp_path: Path) -> None:
     workspace = tmp_path / "repo"
     execution_dir = workspace / ".symphony"

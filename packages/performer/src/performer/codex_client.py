@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
 import inspect
 import json
 import os
@@ -146,15 +147,20 @@ class CodexSdkClient:
         turn_prompt: str | None = prompt
         max_turn_count = max(1, int(max_turns or 1))
         while turn_prompt is not None and turn_count < max_turn_count:
-            turn, turn_id, session_id, final_response, structured = await self._run_structured_turn(
+            validate_this_turn = requires_handoff and (turn_count + 1 >= max_turn_count or continuation_provider is None)
+            turn, turn_id, session_id, final_response, turn_structured = await self._run_structured_turn(
                 thread,
                 turn_prompt,
                 schema,
                 thread_id=thread_id,
                 emit=emit,
                 events=events,
-                validate_structured=requires_handoff,
+                validate_structured=validate_this_turn,
             )
+            if turn_structured is None:
+                turn_structured = _parse_structured_result(final_response)
+            if turn_structured is not None:
+                structured = turn_structured
             turn_count += 1
             emit(
                 {
@@ -166,7 +172,7 @@ class CodexSdkClient:
                     "message": final_response,
                 }
             )
-            if turn_count >= max_turn_count or continuation_provider is None:
+            if structured is not None or turn_count >= max_turn_count or continuation_provider is None:
                 break
             turn_prompt = await _maybe_await(continuation_provider(turn_count))
             if turn_prompt is not None and not isinstance(turn_prompt, str):
@@ -851,10 +857,13 @@ def _int_from_keys(values: dict[str, Any], *keys: str) -> int:
     return 0
 
 
+_ADAPTER_TURN_IDS = itertools.count(1)
+
+
 class _ThreadRunAdapter:
-    id = "turn"
 
     def __init__(self, thread: Any, output_schema: dict[str, Any], prompt: str):
+        self.id = f"turn-{next(_ADAPTER_TURN_IDS)}"
         self.thread = thread
         self.output_schema = output_schema
         self.prompt = prompt

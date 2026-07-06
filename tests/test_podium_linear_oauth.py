@@ -194,7 +194,27 @@ async def test_callback_missing_state_returns_400() -> None:
     async with client:
         resp = await client.get("/api/v1/linear/oauth/callback", params={"code": "the-code"})
         assert resp.status_code == 400
-        assert resp.json()["error"]["code"] == "missing_state"
+    assert resp.json()["error"]["code"] == "missing_state"
+
+
+@pytest.mark.asyncio
+async def test_linear_start_returns_structured_error_for_corrupt_custom_secret() -> None:
+    client, app = app_client()
+    async with client:
+        await _register(client)
+        await app.state.podium.set_user_linear_app(
+            "user_1",
+            {
+                "client_id": "custom-client",
+                "client_secret_encrypted": "not-a-fernet-token",
+                "redirect_uri": "https://custom.example/callback",
+            },
+        )
+
+        resp = await client.post("/api/v1/onboarding/linear/start")
+
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == "secret_decryption_failed"
 
 
 @pytest.mark.asyncio

@@ -194,6 +194,7 @@ class CapturingRuntime:
         self.started_phase_issue_ids: list[str | None] = []
         self.refreshed_instance = None
         self.stop_calls: list[str] = []
+        self.stopped_pids: list[int | None] = []
 
     async def start(
         self,
@@ -212,6 +213,7 @@ class CapturingRuntime:
 
     async def stop(self, instance):
         self.stop_calls.append(instance.id)
+        self.stopped_pids.append(instance.pid)
         return instance.with_updates(process_status="stopped", pid=None)
 
     async def restart(self, instance, *, env: dict[str, str] | None = None):
@@ -244,6 +246,17 @@ class CapturingRuntime:
 
 class NonRecoveringRuntime(CapturingRuntime):
     def recover(self, instance):
+        return None
+
+
+class PidRecoveringRuntime(CapturingRuntime):
+    def __init__(self, live_pids: set[int]) -> None:
+        super().__init__()
+        self.live_pids = set(live_pids)
+
+    def recover(self, instance):
+        if instance.pid in self.live_pids:
+            return instance.with_updates(process_status="running", pid=instance.pid)
         return None
 
 
@@ -396,6 +409,10 @@ def test_conductor_service_lists_issue_run_trace_and_retention(tmp_path: Path) -
     service = make_service(tmp_path)
     repo = make_repo(tmp_path)
     instance = service.create_instance(make_request(repo))
+    Path(instance.workflow_path).write_text(
+        "config:\n  codex:\n    hard_turn_timeout_ms: 1\n    read_timeout_ms: 0\n",
+        encoding="utf-8",
+    )
     write_sample_ops_snapshot(instance)
 
     issues = service.list_issues()
@@ -779,6 +796,127 @@ def test_service_startup_clears_orphaned_running_instance_and_run(tmp_path: Path
     assert refreshed_run.status == "queued"
     assert refreshed_run.process_pid is None
     assert refreshed_run.last_error == "orphaned performer process was not recoverable"
+
+
+def test_service_startup_clears_only_runs_with_unrecoverable_pid(tmp_path: Path) -> None:
+    data_root = tmp_path / "conductor-data"
+    store = ConductorStore(data_root)
+    service = ConductorService(
+        store=store,
+        data_root=data_root,
+        runtime_manager=CapturingRuntime(),
+    )
+    repo = make_repo(tmp_path)
+    instance = service.create_instance(make_request(repo))
+    orphaned = service.phase_reducer.dispatch_received(
+        instance_id=instance.id,
+        issue_id="issue-1",
+        issue_identifier="ENG-1",
+        workflow_profile=instance.workflow_profile,
+        dispatch_id="dispatch-1",
+    )
+    live = service.phase_reducer.dispatch_received(
+        instance_id=instance.id,
+        issue_id="issue-2",
+        issue_identifier="ENG-2",
+        workflow_profile=instance.workflow_profile,
+        dispatch_id="dispatch-2",
+    )
+    service.phase_reducer.performer_started(
+        orphaned.run_id,
+        request_path="/tmp/request-1.json",
+        result_path="/tmp/result-1.json",
+        pid=1111,
+    )
+    service.phase_reducer.performer_started(
+        live.run_id,
+        request_path="/tmp/request-2.json",
+        result_path="/tmp/result-2.json",
+        pid=2222,
+    )
+    store.update_instance(instance.with_updates(process_status="running", pid=1111))
+
+    ConductorService(
+        store=store,
+        data_root=data_root,
+        runtime_manager=PidRecoveringRuntime({2222}),
+    )
+
+    orphaned_run = store.get_orchestration_run(orphaned.run_id)
+    live_run = store.get_orchestration_run(live.run_id)
+    assert orphaned_run is not None
+    assert orphaned_run.phase is RunPhase.QUEUED
+    assert orphaned_run.process_pid is None
+    assert live_run is not None
+    assert live_run.phase is RunPhase.IMPLEMENTING
+    assert live_run.process_pid == 2222
+
+
+@pytest.mark.asyncio
+async def test_phase_timeout_stops_only_matching_run_pid(tmp_path: Path) -> None:
+    runtime = CapturingRuntime()
+    service = ConductorService(
+        store=ConductorStore(tmp_path / "conductor-data"),
+        data_root=tmp_path / "conductor-data",
+        runtime_manager=runtime,
+    )
+    repo = make_repo(tmp_path)
+    instance = service.create_instance(make_request(repo))
+    Path(instance.workflow_path).write_text(
+        "config:\n  codex:\n    hard_turn_timeout_ms: 1\n    read_timeout_ms: 0\n",
+        encoding="utf-8",
+    )
+    instance = instance.with_updates(process_status="running", pid=2222)
+    service.store.update_instance(instance)
+    first = service.phase_reducer.dispatch_received(
+        instance_id=instance.id,
+        issue_id="issue-1",
+        issue_identifier="ENG-1",
+        workflow_profile=instance.workflow_profile,
+        dispatch_id="dispatch-1",
+    )
+    second = service.phase_reducer.dispatch_received(
+        instance_id=instance.id,
+        issue_id="issue-2",
+        issue_identifier="ENG-2",
+        workflow_profile=instance.workflow_profile,
+        dispatch_id="dispatch-2",
+    )
+    service.phase_reducer.performer_started(
+        first.run_id,
+        request_path="/tmp/request-1.json",
+        result_path="/tmp/result-1.json",
+        pid=1111,
+    )
+    service.phase_reducer.performer_started(
+        second.run_id,
+        request_path="/tmp/request-2.json",
+        result_path="/tmp/result-2.json",
+        pid=2222,
+    )
+    old_started_at = "2026-07-04T00:00:01Z"
+    with service.store.connect() as connection:
+        connection.execute(
+            "UPDATE orchestration_events SET created_at = ? WHERE run_id = ? AND event_type = 'performer.started'",
+            (old_started_at, first.run_id),
+        )
+        connection.execute(
+            "UPDATE orchestration_events SET created_at = ? WHERE run_id = ? AND event_type = 'performer.started'",
+            (old_started_at, second.run_id),
+        )
+
+    timed_out = await service._record_phase_timeouts()
+
+    assert timed_out == 1
+    assert runtime.stopped_pids == [2222]
+    refreshed_first = service.store.get_orchestration_run(first.run_id)
+    refreshed_second = service.store.get_orchestration_run(second.run_id)
+    assert refreshed_first is not None
+    assert refreshed_first.phase is RunPhase.IMPLEMENTING
+    assert refreshed_first.process_pid == 1111
+    assert refreshed_second is not None
+    assert refreshed_second.phase is RunPhase.QUEUED
+    assert refreshed_second.process_pid is None
 
 
 def test_conductor_service_pins_issue_and_collects_retention(tmp_path: Path) -> None:
@@ -1552,7 +1690,7 @@ def test_service_initialization_marks_stale_running_instances_stopped(tmp_path: 
 async def test_service_initialization_recovers_live_running_instance_pid(tmp_path: Path) -> None:
     store = ConductorStore(tmp_path / "conductor-data")
     repo = make_repo(tmp_path)
-    process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", "performer"])
     try:
         instance = InstanceRecord.create(
             id="inst-1",
@@ -1765,6 +1903,7 @@ async def test_dispatch_podium_event_accepts_project_bound_instance_without_agen
     result = await service.dispatch_podium_event(
         {
             "dispatch_id": "dispatch-1",
+            "fencing_token": 7,
             "issue_id": "issue-1",
             "issue_identifier": "ENG-1",
             "project_slug": "ENG",
@@ -1884,6 +2023,7 @@ async def test_completed_phase_result_file_drives_podium_ack_without_performer_p
     result = await service.dispatch_podium_event(
         {
             "dispatch_id": "dispatch-1",
+            "fencing_token": 7,
             "issue_id": "issue-1",
             "issue_identifier": "ENG-1",
             "project_slug": "ENG",
@@ -1928,6 +2068,7 @@ async def test_completed_phase_result_file_drives_podium_ack_without_performer_p
         "status": "completed",
         "reason": "completed_by_runtime",
         "runtime_phase": "done",
+        "fencing_token": 7,
     }
 
 

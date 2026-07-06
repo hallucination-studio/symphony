@@ -54,6 +54,8 @@ async def test_enrollment_token_shape_and_install_command() -> None:
         assert token
         assert PODIUM_BASE_URL in body["install_command"]
         assert token in body["install_command"]
+        assert f"--enrollment-token {token}" not in body["install_command"]
+        assert "PODIUM_ENROLLMENT_TOKEN=" in body["install_command"]
         assert body["expires_at"].endswith("Z")
 
 
@@ -66,6 +68,12 @@ async def test_install_script_exists_and_uses_enrollment_token() -> None:
     assert response.headers["content-type"].startswith("text/x-shellscript")
     script = response.text
     assert "--enrollment-token" in script
+    assert 'ENROLLMENT_TOKEN="${PODIUM_ENROLLMENT_TOKEN:-}"' in script
+    assert 'RUNTIME_GROUP_ID="' in script
+    assert '"runtime_group_id": runtime_group_id' in script
+    assert 'token = os.environ.get("PODIUM_ENROLLMENT_TOKEN", "")' in script
+    assert '"$ENROLLMENT_TOKEN" <<' not in script
+    assert "token = sys.argv[2]" not in script
     assert "/api/v1/runtime/enroll" in script
     assert "/api/settings" in script
 

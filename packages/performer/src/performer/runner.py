@@ -68,6 +68,7 @@ class AgentRunner:
                 workspace.path,
                 worker_host or "local",
             )
+            last_sdk_thread: dict[str, str] = {}
             telemetry = self._telemetry_recorder()
             telemetry_on_event = on_event
             if telemetry is not None:
@@ -86,11 +87,22 @@ class AgentRunner:
                     attempt_id,
                     on_event,
                 )
+            downstream_on_event = telemetry_on_event
+
+            def capture_sdk_thread_event(event: dict[str, Any]) -> None:
+                if isinstance(event.get("thread_id"), str) and event["thread_id"]:
+                    last_sdk_thread["thread_id"] = event["thread_id"]
+                if isinstance(event.get("turn_id"), str) and event["turn_id"]:
+                    last_sdk_thread["turn_id"] = event["turn_id"]
+                if isinstance(event.get("cwd"), str) and event["cwd"]:
+                    last_sdk_thread["workspace_path"] = event["cwd"]
+                downstream_on_event(event)
+
             result = await self.codex_client.run_session(
                 workspace.path,
                 prompt,
                 f"{issue.identifier}: {issue.title}",
-                on_event=telemetry_on_event,
+                on_event=capture_sdk_thread_event,
                 max_turns=self.config.agent.max_turns,
                 continuation_provider=lambda turn_count: self._continuation_prompt(issue, turn_count),
                 worker_host=worker_host,
@@ -117,6 +129,15 @@ class AgentRunner:
                 telemetry.finish_run(run_id, status="completed", failure_code=None, failure_summary=None)
             return result
         except Exception as exc:
+            if self.config.codex.backend == "sdk" and "workspace" in locals():
+                thread_id = last_sdk_thread.get("thread_id") if "last_sdk_thread" in locals() else None
+                if thread_id:
+                    WorkspaceExecutionState(workspace.path).write_sdk_thread_failure(
+                        issue_id=issue.id,
+                        thread_id=thread_id,
+                        turn_id=last_sdk_thread.get("turn_id"),
+                        error=str(exc),
+                    )
             if "telemetry" in locals() and telemetry is not None and "run_id" in locals():
                 telemetry.finish_run(
                     run_id,

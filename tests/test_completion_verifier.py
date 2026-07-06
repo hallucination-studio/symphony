@@ -302,6 +302,60 @@ async def test_verify_completion_counts_tool_call_events_when_run_counter_is_zer
 
 
 @pytest.mark.asyncio
+async def test_verify_completion_uses_latest_non_acceptance_run_for_issue_metrics(tmp_path: Path) -> None:
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    (workspace / ".git").mkdir()
+    verifier = CompletionVerifier(
+        CompletionVerificationConfig(
+            required_checks=["metrics_reasonable"],
+            optional_checks=[],
+            min_duration_seconds=0,
+        ),
+        FakeTracker(),
+    )
+    snapshot = OpsSnapshot(
+        runs={
+            "run-a": RunRecord(
+                run_id="run-a",
+                issue_id="mt-1",
+                instance_id="inst-1",
+                status="completed",
+                started_at="2026-07-01T00:00:00Z",
+                turn_count=2,
+                tool_call_count=1,
+            ),
+            "run-b": RunRecord(
+                run_id="run-b",
+                issue_id="other-issue",
+                instance_id="inst-1",
+                status="completed",
+                started_at="2026-07-01T00:00:10Z",
+                turn_count=0,
+                tool_call_count=0,
+            ),
+            "mt-1:acceptance": RunRecord(
+                run_id="mt-1:acceptance",
+                issue_id="mt-1",
+                instance_id="inst-1",
+                status="completed",
+                started_at="2026-07-01T00:00:20Z",
+                turn_count=0,
+                tool_call_count=0,
+            ),
+        }
+    )
+
+    verdict = await verifier.verify_completion(issue(), workspace, snapshot)
+
+    assert verdict.status == "VERIFIED"
+    metrics = next(check for check in verdict.checks if check.check_name == "metrics_reasonable")
+    assert metrics.passed is True
+    assert metrics.evidence["run_id"] == "run-a"
+    assert metrics.evidence["turn_count"] == 2
+
+
+@pytest.mark.asyncio
 async def test_verify_completion_accepts_untracked_file_as_workspace_change(tmp_path: Path) -> None:
     workspace = tmp_path / "repo"
     workspace.mkdir()
@@ -326,6 +380,40 @@ async def test_verify_completion_accepts_untracked_file_as_workspace_change(tmp_
 
 
 @pytest.mark.asyncio
+async def test_verify_completion_uses_workspace_baseline_instead_of_head(tmp_path: Path) -> None:
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=workspace, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=workspace, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=workspace, check=True)
+    (workspace / "README.md").write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=workspace, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "base"], cwd=workspace, check=True)
+    baseline = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=workspace, text=True).strip()
+    (workspace / "README.md").write_text("previous run\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=workspace, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "previous"], cwd=workspace, check=True)
+    (workspace / ".symphony").mkdir()
+    (workspace / ".symphony" / "workspace-baseline").write_text(baseline + "\n", encoding="utf-8")
+    (workspace / "README.md").write_text("current run changed enough for verifier\n", encoding="utf-8")
+    verifier = CompletionVerifier(
+        CompletionVerificationConfig(
+            required_checks=["workspace_changes"],
+            optional_checks=[],
+            min_workspace_changes_chars=10,
+        ),
+        FakeTracker(),
+    )
+
+    verdict = await verifier.verify_completion(issue(), workspace, OpsSnapshot())
+
+    check = next(check for check in verdict.checks if check.check_name == "workspace_changes")
+    assert verdict.status == "VERIFIED"
+    assert check.passed is True
+    assert check.evidence["baseline"] == baseline
+
+
+@pytest.mark.asyncio
 async def test_verify_completion_accepts_small_untracked_file_as_workspace_change(tmp_path: Path) -> None:
     workspace = tmp_path / "repo"
     workspace.mkdir()
@@ -347,7 +435,7 @@ async def test_verify_completion_accepts_small_untracked_file_as_workspace_chang
 
 
 @pytest.mark.asyncio
-async def test_verify_completion_replays_structured_pytest_command_without_project_metadata(tmp_path: Path) -> None:
+async def test_verify_completion_rejects_structured_pytest_command_without_execution_event(tmp_path: Path) -> None:
     workspace = tmp_path / "repo"
     workspace.mkdir()
     subprocess.run(["git", "init", "-q"], cwd=workspace, check=True)
@@ -383,12 +471,12 @@ async def test_verify_completion_replays_structured_pytest_command_without_proje
 
     verdict = await verifier.verify_completion(issue(), workspace, snapshot)
 
-    assert verdict.status == "VERIFIED"
-    assert any(check.check_name == "test_results" and check.passed for check in verdict.checks)
+    assert verdict.status == "NEEDS_RETRY"
+    assert any(check.check_name == "test_results" and not check.passed for check in verdict.checks)
 
 
 @pytest.mark.asyncio
-async def test_verify_completion_replays_any_structured_pytest_command_without_expected_patterns(tmp_path: Path) -> None:
+async def test_verify_completion_rejects_any_structured_pytest_command_without_execution_event(tmp_path: Path) -> None:
     workspace = tmp_path / "repo"
     workspace.mkdir()
     subprocess.run(["git", "init", "-q"], cwd=workspace, check=True)
@@ -423,12 +511,12 @@ async def test_verify_completion_replays_any_structured_pytest_command_without_e
 
     verdict = await verifier.verify_completion(issue(), workspace, snapshot)
 
-    assert verdict.status == "VERIFIED"
-    assert any(check.check_name == "test_results" and check.passed for check in verdict.checks)
+    assert verdict.status == "NEEDS_RETRY"
+    assert any(check.check_name == "test_results" and not check.passed for check in verdict.checks)
 
 
 @pytest.mark.asyncio
-async def test_verify_completion_replays_pytest_command_from_summary_with_output_text(tmp_path: Path) -> None:
+async def test_verify_completion_rejects_pytest_command_from_summary_without_execution_event(tmp_path: Path) -> None:
     workspace = tmp_path / "repo"
     workspace.mkdir()
     subprocess.run(["git", "init", "-q"], cwd=workspace, check=True)
@@ -457,8 +545,8 @@ async def test_verify_completion_replays_pytest_command_from_summary_with_output
 
     verdict = await verifier.verify_completion(issue(), workspace, snapshot)
 
-    assert verdict.status == "VERIFIED"
-    assert any(check.check_name == "test_results" and check.passed for check in verdict.checks)
+    assert verdict.status == "NEEDS_RETRY"
+    assert any(check.check_name == "test_results" and not check.passed for check in verdict.checks)
 
 
 @pytest.mark.asyncio
@@ -484,7 +572,47 @@ async def test_verify_completion_skips_test_command_requirement_without_expected
 
 
 @pytest.mark.asyncio
-async def test_verify_completion_accepts_metrics_from_issue_events_without_run_record(
+async def test_verify_completion_rejects_self_reported_structured_test_command_evidence(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    (workspace / ".git").mkdir()
+    verifier = CompletionVerifier(
+        CompletionVerificationConfig(
+            required_checks=["test_command_evidence"],
+            optional_checks=[],
+            expected_test_patterns=["tests/test_target.py::test_fix"],
+        ),
+        FakeTracker(),
+    )
+    snapshot = OpsSnapshot(
+        events=[
+            TraceEvent(
+                event_id="evt-1",
+                event_type="turn_completed",
+                timestamp="2026-07-03T00:00:00Z",
+                issue_id="mt-1",
+                run_id="run-1",
+                payload={
+                    "structured_result": {
+                        "test_commands": ["pytest tests/test_target.py::test_fix -q"],
+                    }
+                },
+            )
+        ],
+    )
+
+    verdict = await verifier.verify_completion(issue(), workspace, snapshot)
+
+    assert verdict.status == "NEEDS_RETRY"
+    check = next(check for check in verdict.checks if check.check_name == "test_command_evidence")
+    assert check.passed is False
+    assert check.evidence["commands"] == []
+
+
+@pytest.mark.asyncio
+async def test_verify_completion_rejects_metrics_without_issue_run_record(
     tmp_path: Path,
 ) -> None:
     workspace = tmp_path / "repo"
@@ -535,5 +663,5 @@ async def test_verify_completion_accepts_metrics_from_issue_events_without_run_r
 
     verdict = await verifier.verify_completion(issue(), workspace, snapshot)
 
-    assert verdict.status == "VERIFIED"
-    assert any(check.check_name == "metrics_reasonable" and check.passed for check in verdict.checks)
+    assert verdict.status == "NEEDS_RETRY"
+    assert any(check.check_name == "metrics_reasonable" and not check.passed for check in verdict.checks)

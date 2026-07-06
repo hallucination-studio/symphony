@@ -34,6 +34,7 @@ class OrchestrationRun:
     attempt: int = 1
     workflow_profile: str | None = None
     dispatch_id: str | None = None
+    fencing_token: int | None = None
     request_path: str | None = None
     result_path: str | None = None
     workspace_path: str | None = None
@@ -75,6 +76,7 @@ class OrchestrationRun:
             attempt=_int(payload.get("attempt"), default=1),
             workflow_profile=_optional_str(payload.get("workflow_profile")),
             dispatch_id=_optional_str(payload.get("dispatch_id")),
+            fencing_token=_optional_int(payload.get("fencing_token")),
             request_path=_optional_str(payload.get("request_path")),
             result_path=_optional_str(payload.get("result_path")),
             workspace_path=_optional_str(payload.get("workspace_path")),
@@ -151,6 +153,7 @@ class PhaseReducer:
         issue_identifier: str | None,
         workflow_profile: str | None,
         dispatch_id: str | None,
+        fencing_token: int | None = None,
         blocked_by: list[str] | None = None,
         parent_issue_id: str | None = None,
     ) -> OrchestrationRun:
@@ -160,6 +163,7 @@ class PhaseReducer:
             issue_identifier=issue_identifier,
             workflow_profile=workflow_profile,
             dispatch_id=dispatch_id,
+            fencing_token=fencing_token,
             blocked_by=blocked_by or [],
             parent_issue_id=parent_issue_id,
         )
@@ -436,6 +440,7 @@ def new_run(
     issue_identifier: str | None,
     workflow_profile: str | None,
     dispatch_id: str | None,
+    fencing_token: int | None = None,
     blocked_by: list[str] | None = None,
     parent_issue_id: str | None = None,
     epoch: int = 1,
@@ -453,6 +458,7 @@ def new_run(
         epoch=epoch,
         workflow_profile=workflow_profile,
         dispatch_id=dispatch_id,
+        fencing_token=fencing_token,
         created_at=now,
         updated_at=now,
     )

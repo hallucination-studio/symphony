@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+import asyncio
 from pathlib import Path
 from typing import Any, Callable
 
@@ -31,6 +32,7 @@ class OrchestrationScheduler:
         runtime_env: Callable[[], dict[str, str]],
         get_instance: Callable[[str], InstanceRecord | None],
         policy: SchedulerPolicy | None = None,
+        start_lock_for_instance: Callable[[str], asyncio.Lock] | None = None,
     ):
         self.store = store
         self.phase_reducer = phase_reducer
@@ -38,6 +40,7 @@ class OrchestrationScheduler:
         self.runtime_env = runtime_env
         self.get_instance = get_instance
         self.policy = policy or SchedulerPolicy()
+        self.start_lock_for_instance = start_lock_for_instance
         self._last_readiness_counts = {"dispatchable": 0, "blocked_waiting": 0}
 
     async def start_due_runs(self) -> int:
@@ -80,6 +83,13 @@ class OrchestrationScheduler:
         }
 
     async def start_run(self, run: Any, instance: InstanceRecord) -> InstanceRecord:
+        if self.start_lock_for_instance is not None:
+            lock = self.start_lock_for_instance(instance.id)
+            async with lock:
+                return await self._start_run_unlocked(run, instance)
+        return await self._start_run_unlocked(run, instance)
+
+    async def _start_run_unlocked(self, run: Any, instance: InstanceRecord) -> InstanceRecord:
         paths = phase_file_paths(instance, run.run_id)
         result_path = paths["result_path"]
         if result_path.exists():
@@ -149,13 +159,10 @@ class OrchestrationScheduler:
 
     def is_dispatchable(self, run: Any) -> bool:
         for blocker_issue_id in getattr(run, "blocked_by", []) or []:
-            has_terminal = getattr(self.store, "has_terminal_orchestration_run_for_issue", None)
-            if callable(has_terminal) and has_terminal(blocker_issue_id):
-                continue
             blocker = self.store.get_latest_orchestration_run_for_issue(blocker_issue_id)
             if blocker is None:
                 return False
-            if blocker.phase not in {RunPhase.DONE, RunPhase.FAILED}:
+            if blocker.phase is not RunPhase.DONE:
                 return False
         return True
 

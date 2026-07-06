@@ -330,9 +330,12 @@ async def test_onboarding_enrollment_token_returns_install_command() -> None:
     token = payload["enrollment_token"]
     assert len(token) > 20
     assert payload["install_command"] == (
-        f"curl -fsSL https://podium.test/install.sh | bash -s -- --podium-url https://podium.test "
-        f"--enrollment-token {token}"
+        f"PODIUM_ENROLLMENT_TOKEN={token} "
+        f"curl -fsSL https://podium.test/install.sh | "
+        f"PODIUM_ENROLLMENT_TOKEN={token} "
+        f"bash -s -- --podium-url https://podium.test"
     )
+    assert f"--enrollment-token {token}" not in payload["install_command"]
     assert payload["expires_at"]
     # No hardcoded frontend host leaks into the backend-composed command.
     assert "get.podium.dev" not in payload["install_command"]

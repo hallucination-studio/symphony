@@ -54,6 +54,22 @@ class FakeCodexWithThread(FakeCodex):
         return Result()
 
 
+class FailingCodexWithThread(FakeCodex):
+    async def run_session(self, workspace_path: Path, prompt: str, title: str, **kwargs: Any) -> Any:
+        await super().run_session(workspace_path, prompt, title, **kwargs)
+        on_event = kwargs["on_event"]
+        on_event(
+            {
+                "event": "session_started",
+                "thread_id": "thread-failed",
+                "turn_id": "turn-failed",
+                "session_id": "thread-failed-turn-failed",
+                "cwd": str(workspace_path),
+            }
+        )
+        raise RuntimeError("codex failed")
+
+
 class FakeCodexWithoutTurnStarted(FakeCodex):
     async def run_session(self, workspace_path: Path, prompt: str, title: str, **kwargs: Any) -> None:
         await super().run_session(workspace_path, prompt, title, **kwargs)
@@ -399,6 +415,44 @@ async def test_runner_writes_sdk_thread_id_to_issue_workspace(tmp_path: Path) ->
     assert payload["issue_id"] == "mt-1"
     assert payload["thread_id"] == "thread-new"
     assert payload["status"] == "resume_pending"
+
+
+@pytest.mark.asyncio
+async def test_runner_marks_workspace_sdk_thread_failed_on_error(tmp_path: Path) -> None:
+    codex = FailingCodexWithThread()
+    workspace_root = tmp_path / "workspace"
+    config = make_config(tmp_path)
+    config = ServiceConfig(
+        tracker=config.tracker,
+        polling=config.polling,
+        workspace=WorkspaceConfig(root=workspace_root),
+        hooks=config.hooks,
+        agent=config.agent,
+        codex=CodexConfig(backend="sdk", linear_tool_mode="disabled"),
+        prompt_template=config.prompt_template,
+        workflow_path=config.workflow_path,
+    )
+    runner = AgentRunner(
+        config,
+        WorkspaceManager(config.workspace, config.hooks),
+        codex_client=codex,
+        tracker=FakeTracker(),
+    )
+
+    with pytest.raises(RuntimeError, match="codex failed"):
+        await runner.run_issue(
+            Issue(id="mt-1", identifier="MT-1", title="Build", state="Todo", labels=["codex"], project_slug="MT"),
+            1,
+            lambda event: None,
+        )
+
+    execution_path = workspace_root / "MT-1" / ".symphony" / "execution.json"
+    payload = json.loads(execution_path.read_text(encoding="utf-8"))
+    assert payload["issue_id"] == "mt-1"
+    assert payload["thread_id"] == "thread-failed"
+    assert payload["last_turn_id"] == "turn-failed"
+    assert payload["status"] == "failed"
+    assert "codex failed" in payload["failure_summary"]
 
 
 @pytest.mark.asyncio

@@ -7,6 +7,7 @@ import pytest
 
 from conductor.conductor_models import ConductorSettings, InstanceRecord
 from conductor.conductor_store import ConductorStore
+from performer_api.phase import RunPhase
 
 
 def make_instance(tmp_path: Path, *, instance_id: str, name: str, port: int) -> InstanceRecord:
@@ -164,3 +165,35 @@ def test_managed_runtime_settings_round_trip_without_public_tokens(tmp_path: Pat
     assert public["podium_proxy_token_configured"] is True
     assert "runtime-secret" not in str(public)
     assert "proxy-secret" not in str(public)
+
+
+def test_duplicate_active_run_projection_is_idempotent(tmp_path: Path) -> None:
+    store = ConductorStore(tmp_path / "conductor-data")
+    instance = make_instance(tmp_path, instance_id="inst-1", name="Main", port=8801)
+    store.create_instance(instance)
+    first = store.upsert_orchestration_run(
+        instance_id=instance.id,
+        issue_id="issue-1",
+        issue_identifier="ENG-1",
+        workflow_profile="default",
+        dispatch_id="dispatch-1",
+    )
+
+    duplicate = store.apply_event(
+        "run-duplicate",
+        {
+            "instance_id": instance.id,
+            "issue_id": "issue-1",
+            "event_type": "dispatch.created",
+            "to_phase": RunPhase.QUEUED,
+            "payload": {
+                "issue_identifier": "ENG-1",
+                "workflow_profile": "default",
+                "dispatch_id": "dispatch-1",
+            },
+        },
+    )
+
+    assert duplicate.run_id == first.run_id
+    active = store.list_orchestration_runs(instance_id=instance.id, phases={RunPhase.QUEUED})
+    assert [run.run_id for run in active] == [first.run_id]

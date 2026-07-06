@@ -10,7 +10,7 @@ from typing import Any, Protocol
 
 from performer_api.config import CompletionVerificationConfig
 from performer_api.models import Issue
-from performer_api.ops_models import CheckResult, CompletionVerdict, OpsSnapshot
+from performer_api.ops_models import CheckResult, CompletionVerdict, OpsSnapshot, RunRecord
 
 
 class TrackerProtocol(Protocol):
@@ -96,6 +96,15 @@ def _env_evidence(env: dict[str, str] | None) -> dict[str, str]:
     return evidence
 
 
+def _runs_for_issue(issue: Issue, ops_snapshot: OpsSnapshot) -> list[RunRecord]:
+    acceptance_run_id = f"{issue.id}:acceptance"
+    return [
+        run
+        for run in ops_snapshot.runs.values()
+        if run.issue_id == issue.id and run.run_id != acceptance_run_id
+    ]
+
+
 class CompletionVerifier:
     """
     完成验证器 - 在 Codex 报告完成后独立验证实际产出
@@ -148,7 +157,7 @@ class CompletionVerifier:
             checks.append(self._check_test_command_evidence(issue, ops_snapshot))
 
         if "metrics_reasonable" in all_check_names:
-            checks.append(self._check_metrics_reasonable(ops_snapshot))
+            checks.append(self._check_metrics_reasonable(issue, ops_snapshot))
 
         if "linear_state" in all_check_names:
             checks.append(await self._check_linear_state(issue))
@@ -229,8 +238,9 @@ class CompletionVerifier:
                     evidence={"git_status": "empty"},
                 )
 
+            baseline = self._workspace_baseline(workspace_path)
             diff_result = subprocess.run(
-                ["git", "diff", "--stat", "HEAD"],
+                ["git", "diff", "--stat", baseline],
                 cwd=workspace_path,
                 capture_output=True,
                 text=True,
@@ -260,6 +270,7 @@ class CompletionVerifier:
                             "git_status": status_output,
                             "change_chars": content_size,
                             "untracked_files": untracked_files,
+                            "baseline": baseline,
                         },
                     )
 
@@ -275,6 +286,7 @@ class CompletionVerifier:
                         "diff_stat": stat_output or "empty",
                         "git_status": status_output,
                         "change_chars": content_size,
+                        "baseline": baseline,
                     },
                 )
 
@@ -289,6 +301,7 @@ class CompletionVerifier:
                     "diff_stat": stat_output or "empty",
                     "git_status": status_output,
                     "change_chars": content_size,
+                    "baseline": baseline,
                 },
             )
 
@@ -306,6 +319,26 @@ class CompletionVerifier:
                 message=f"Check failed: {e}",
                 evidence={"error": str(e)},
             )
+
+    def _workspace_baseline(self, workspace_path: Path) -> str:
+        baseline_file = workspace_path / ".symphony" / "workspace-baseline"
+        try:
+            baseline = baseline_file.read_text(encoding="utf-8").strip()
+        except OSError:
+            return "HEAD"
+        if not baseline:
+            return "HEAD"
+        try:
+            result = subprocess.run(
+                ["git", "cat-file", "-e", f"{baseline}^{{commit}}"],
+                cwd=workspace_path,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except subprocess.TimeoutExpired:
+            return "HEAD"
+        return baseline if result.returncode == 0 else "HEAD"
 
     async def _check_test_results(self, issue: Issue, workspace_path: Path, ops_snapshot: OpsSnapshot) -> CheckResult:
         """检查测试是否通过"""
@@ -419,11 +452,7 @@ class CompletionVerifier:
         ops_snapshot: OpsSnapshot,
     ) -> tuple[list[str], dict[str, str]] | None:
         patterns = [pattern for pattern in self.config.expected_test_patterns if pattern]
-        issue_run_ids = {
-            run.run_id
-            for run in ops_snapshot.runs.values()
-            if run.issue_id == issue.id
-        }
+        issue_run_ids = {run.run_id for run in _runs_for_issue(issue, ops_snapshot)}
         for event in ops_snapshot.events:
             if event.issue_id != issue.id and event.run_id not in issue_run_ids:
                 continue
@@ -431,17 +460,6 @@ class CompletionVerifier:
             commands: list[str] = []
             if exit_code == 0 and isinstance(command, str):
                 commands.append(command)
-            for payload_source in (event.payload, {"message": event.summary}):
-                source_text = str(payload_source)
-                for recorded in _structured_test_commands_from_payload(payload_source):
-                    first_line = recorded.splitlines()[0].strip() if recorded.splitlines() else ""
-                    if first_line and (
-                        "passed" in recorded
-                        or "[100%]" in recorded
-                        or "passed" in source_text
-                        or "[100%]" in source_text
-                    ):
-                        commands.append(first_line)
             for candidate in commands:
                 if "pytest" not in candidate:
                     continue
@@ -469,12 +487,9 @@ class CompletionVerifier:
                 message="No expected test patterns configured; skipping test command evidence check",
                 evidence={"expected_test_patterns": []},
             )
-        issue_run_ids = {
-            run.run_id
-            for run in ops_snapshot.runs.values()
-            if run.issue_id == issue.id
-        }
+        issue_run_ids = {run.run_id for run in _runs_for_issue(issue, ops_snapshot)}
         commands: list[tuple[str, int | None]] = []
+        self_reported_commands: list[str] = []
         for event in ops_snapshot.events:
             if event.issue_id != issue.id and event.run_id not in issue_run_ids:
                 continue
@@ -482,17 +497,17 @@ class CompletionVerifier:
             if not isinstance(command, str) or not command.strip():
                 structured_commands = _structured_test_commands_from_payload(event.payload)
                 structured_commands.extend(_structured_test_commands_from_payload({"message": event.summary}))
-                commands.extend((item, 0) for item in structured_commands)
+                self_reported_commands.extend(structured_commands)
                 continue
             commands.append((command.strip(), exit_code))
-            commands.extend((item, 0) for item in _structured_test_commands_from_payload(event.payload))
-            commands.extend((item, 0) for item in _structured_test_commands_from_payload({"message": event.summary}))
+            self_reported_commands.extend(_structured_test_commands_from_payload(event.payload))
+            self_reported_commands.extend(_structured_test_commands_from_payload({"message": event.summary}))
         if not commands:
             return CheckResult(
                 check_name="test_command_evidence",
                 passed=False,
                 message="No test command evidence recorded in ops snapshot",
-                evidence={"expected_test_patterns": patterns},
+                evidence={"expected_test_patterns": patterns, "commands": [], "self_reported_commands": self_reported_commands},
             )
         for pattern in patterns:
             for command, exit_code in commands:
@@ -510,21 +525,23 @@ class CompletionVerifier:
             evidence={
                 "expected_test_patterns": patterns,
                 "commands": [{"command": command, "exit_code": exit_code} for command, exit_code in commands],
+                "self_reported_commands": self_reported_commands,
             },
         )
 
-    def _check_metrics_reasonable(self, ops_snapshot: OpsSnapshot) -> CheckResult:
+    def _check_metrics_reasonable(self, issue: Issue, ops_snapshot: OpsSnapshot) -> CheckResult:
         """检查 metrics 是否合理"""
         try:
-            if not ops_snapshot.runs:
+            issue_runs = _runs_for_issue(issue, ops_snapshot)
+            if not issue_runs:
                 return CheckResult(
                     check_name="metrics_reasonable",
                     passed=False,
-                    message="No run data",
-                    evidence={},
+                    message="No run data for issue",
+                    evidence={"issue_id": issue.id},
                 )
 
-            latest_run = list(ops_snapshot.runs.values())[-1]
+            latest_run = issue_runs[-1]
 
             # 检查 turn count
             if latest_run.turn_count == 0:
@@ -532,7 +549,7 @@ class CompletionVerifier:
                     check_name="metrics_reasonable",
                     passed=False,
                     message="Zero turns (no actual work)",
-                    evidence={"turn_count": 0},
+                    evidence={"issue_id": issue.id, "run_id": latest_run.run_id, "turn_count": 0},
                 )
 
             # 检查 duration
@@ -548,7 +565,7 @@ class CompletionVerifier:
                         check_name="metrics_reasonable",
                         passed=False,
                         message=f"Suspiciously fast ({duration_sec:.1f}s < {self.config.min_duration_seconds}s)",
-                        evidence={"duration_sec": duration_sec},
+                        evidence={"issue_id": issue.id, "run_id": latest_run.run_id, "duration_sec": duration_sec},
                     )
 
             # 检查 tool calls. Older telemetry snapshots may store tool calls only
@@ -570,13 +587,19 @@ class CompletionVerifier:
                         check_name="metrics_reasonable",
                         passed=False,
                         message="No tool calls (likely no actual work)",
-                        evidence={"tool_call_count": 0},
+                        evidence={"issue_id": issue.id, "run_id": latest_run.run_id, "tool_call_count": 0},
                     )
                 return CheckResult(
                     check_name="metrics_reasonable",
                     passed=True,
                     message=f"Metrics normal ({latest_run.turn_count} SDK turns, structured evidence)",
-                    evidence={"turn_count": latest_run.turn_count, "tool_call_count": 0, "sdk_structured_evidence": True},
+                    evidence={
+                        "issue_id": issue.id,
+                        "run_id": latest_run.run_id,
+                        "turn_count": latest_run.turn_count,
+                        "tool_call_count": 0,
+                        "sdk_structured_evidence": True,
+                    },
                 )
 
             return CheckResult(
@@ -584,6 +607,8 @@ class CompletionVerifier:
                 passed=True,
                 message=f"Metrics normal ({latest_run.turn_count} turns, {tool_call_count} tools)",
                 evidence={
+                    "issue_id": issue.id,
+                    "run_id": latest_run.run_id,
                     "turn_count": latest_run.turn_count,
                     "tool_call_count": tool_call_count,
                 },

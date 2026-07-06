@@ -149,6 +149,12 @@ class Orchestrator:
         for intervention in persisted.human_interventions:
             self.state.human_interventions[intervention.issue_id] = intervention
             self.state.claimed.add(intervention.issue_id)
+        for session in persisted.sessions:
+            self.state.claimed.add(session.issue_id)
+        for thread in persisted.codex_threads:
+            self.state.codex_threads[thread.issue_id] = thread
+            if thread.status in {"active", "resume_pending"}:
+                self.state.claimed.add(thread.issue_id)
 
     async def tick(self) -> None:
         await self.reconcile_running()
@@ -749,10 +755,7 @@ class Orchestrator:
                 break
         if failed:
             await self._sync_label_group(issue.id, self.config.acceptance.gate_failed_label, prefix="performer:gate/")
-            self.state.claimed.discard(issue.id)
-            self.state.retry_attempts.pop(issue.id, None)
-            self.state.continuations.pop(issue.id, None)
-            self.phase_runtime.record_outcome(
+            self._transition_issue_outcome(
                 issue.id,
                 next_phase=RunPhase.REWORKING,
                 status="reworking",
@@ -760,20 +763,18 @@ class Orchestrator:
             )
             self._persist_state()
             return
-        if len(reviewed_gates) == len(gates):
+        gate_ids = {str(gate.get("id") or "") for gate in gates if str(gate.get("id") or "")}
+        reviewed_gate_ids = {str(gate.get("id") or "") for gate in reviewed_gates if str(gate.get("id") or "")}
+        if gate_ids and reviewed_gate_ids == gate_ids:
             await self._sync_label_group(issue.id, self.config.acceptance.gate_passed_label, prefix="performer:gate/")
             self._record_repository_handoff_after_acceptance(issue, workspace_path=workspace_path)
-            self.state.completed.add(issue.id)
-            self.state.claimed.discard(issue.id)
-            self.state.retry_attempts.pop(issue.id, None)
-            self.state.continuations.pop(issue.id, None)
-            self.phase_runtime.record_outcome(
+            self._transition_issue_outcome(
                 issue.id,
                 next_phase=RunPhase.DONE,
                 status="completed",
                 reason="completed_by_runtime",
+                mark_completed=True,
             )
-            self._persist_state()
 
     async def run_acceptance_gate_for_issue(
         self,
@@ -988,27 +989,25 @@ class Orchestrator:
                                 self.config.acceptance.gate_pending_label,
                                 prefix="performer:gate/",
                             )
-                            self.state.claimed.discard(issue_id)
-                            self.state.retry_attempts.pop(issue_id, None)
-                            self.phase_runtime.record_outcome(
+                            self._transition_issue_outcome(
                                 issue_id,
                                 next_phase=RunPhase.REVIEWING,
                                 status="reviewing",
                                 reason="implementation_ready_for_review",
+                                persist=False,
                             )
                             logger.info("performer_completion_verified_review issue_id=%s", issue_id)
                             self._persist_state()
                             return
                         else:
                             if self.config.completion_verification.enabled and verdict.checks:
-                                self.state.completed.add(issue_id)
-                                self.state.claimed.discard(issue_id)
-                                self.state.retry_attempts.pop(issue_id, None)
-                                self.phase_runtime.record_outcome(
+                                self._transition_issue_outcome(
                                     issue_id,
                                     next_phase=RunPhase.DONE,
                                     status="completed",
                                     reason="completed_by_runtime",
+                                    mark_completed=True,
+                                    persist=False,
                                 )
                                 logger.info(
                                     "performer_completion_verified_done issue_id=%s reason=%s previous_state=%s",
@@ -1037,25 +1036,23 @@ class Orchestrator:
                             logger.info("performer_acceptance_direct_done_handled issue_id=%s", issue_id)
                             self._persist_state()
                             return
-                        self.state.completed.add(issue_id)
-                        self.state.claimed.discard(issue_id)
-                        self.state.retry_attempts.pop(issue_id, None)
-                        self.phase_runtime.record_outcome(
+                        self._transition_issue_outcome(
                             issue_id,
                             next_phase=RunPhase.DONE,
                             status="completed",
                             reason="completed_by_runtime",
+                            mark_completed=True,
+                            persist=False,
                         )
                         logger.info(f"performer_completion_verified issue_id={issue_id} reason={verdict.reason}")
                     elif refreshed_issue is not None:
                         await self._comment_handoff_preserved(entry, refreshed_issue)
-                        self.state.claimed.discard(issue_id)
-                        self.state.retry_attempts.pop(issue_id, None)
-                        self.phase_runtime.record_outcome(
+                        self._transition_issue_outcome(
                             issue_id,
                             next_phase=RunPhase.REVIEWING,
                             status="reviewing",
                             reason="implementation_handed_off",
+                            persist=False,
                         )
                     else:
                         self._schedule_continuation(
@@ -1082,13 +1079,12 @@ class Orchestrator:
                         # 不自动重试，标记失败并等待人工介入
                         logger.error(f"performer_completion_verification_failed_no_retry issue_id={issue_id}")
                         await self._comment_completion_verdict(entry, verdict, next_action="human_review")
-                        self.state.claimed.discard(issue_id)
-                        self.state.retry_attempts.pop(issue_id, None)
-                        self.phase_runtime.record_outcome(
+                        self._transition_issue_outcome(
                             issue_id,
                             next_phase=RunPhase.FAILED,
                             status="failed",
                             reason=f"verification_failed: {verdict.reason}",
+                            persist=False,
                         )
 
                 else:  # NEEDS_HUMAN
@@ -1198,6 +1194,45 @@ class Orchestrator:
                     resume_strategy="retry",
                 )
         self._persist_state()
+
+    def _transition_issue_outcome(
+        self,
+        issue_id: str,
+        *,
+        next_phase: RunPhase,
+        status: str,
+        reason: str | None,
+        retry_delay_seconds: int | None = None,
+        human_action: dict[str, Any] | None = None,
+        detail: str | None = None,
+        http_status: int | None = None,
+        mark_completed: bool = False,
+        keep_claimed: bool = False,
+        persist: bool = True,
+    ) -> None:
+        if mark_completed:
+            self.state.completed.add(issue_id)
+        if keep_claimed:
+            self.state.claimed.add(issue_id)
+        else:
+            self.state.claimed.discard(issue_id)
+        self.state.retry_attempts.pop(issue_id, None)
+        self.state.continuations.pop(issue_id, None)
+        self.state.blocked.pop(issue_id, None)
+        if next_phase is not RunPhase.AWAITING_HUMAN:
+            self.state.human_interventions.pop(issue_id, None)
+        self.phase_runtime.record_outcome(
+            issue_id,
+            next_phase=next_phase,
+            status=status,
+            reason=reason,
+            retry_delay_seconds=retry_delay_seconds,
+            human_action=human_action,
+            detail=detail,
+            http_status=http_status,
+        )
+        if persist:
+            self._persist_state()
 
     def _gate_planner(self) -> GatePlannerProtocol:
         if self.config.acceptance.gate_planner_mode == "smoke":
@@ -1814,6 +1849,9 @@ class Orchestrator:
         return self.config.workspace.root.parent / ".symphony-handoffs"
 
     def on_codex_event(self, issue_id: str, event: dict[str, Any]) -> None:
+        entry = self.state.running.get(issue_id)
+        if entry is not None:
+            self._apply_codex_thread_event(entry, event)
         CodexEventProcessor(
             state=self.state,
             config=self.config,
@@ -1822,10 +1860,50 @@ class Orchestrator:
         ).on_event(issue_id, event)
 
     def _apply_codex_thread_event(self, entry: RunningEntry, event: dict[str, Any]) -> None:
-        return None
+        thread_id = event.get("thread_id") or entry.thread_id
+        if not isinstance(thread_id, str) or not thread_id:
+            return
+        backend = str(event.get("backend") or "sdk")
+        workspace_path = event.get("cwd") or entry.workspace_path
+        if not isinstance(workspace_path, str) or not workspace_path:
+            workspace_path = str(self.config.workspace.root)
+        turn_id = event.get("turn_id") or entry.turn_id
+        message = event.get("message") or entry.last_codex_message
+        event_name = str(event.get("event") or "")
+        error_events = {"request_timeout", "stderr", "turn_failed", "turn_cancelled", "turn_ended_with_error"}
+        status = "failed" if event_name in error_events else "resume_pending"
+        self.state.codex_threads[entry.issue.id] = CodexThreadEntry(
+            issue_id=entry.issue.id,
+            thread_id=thread_id,
+            backend=backend,
+            workspace_path=workspace_path,
+            last_turn_id=turn_id if isinstance(turn_id, str) and turn_id else None,
+            status=status,
+            last_final_response=message if isinstance(message, str) and message else None,
+            updated_at=utc_now(),
+        )
 
     def _mark_codex_thread_terminal(self, entry: RunningEntry, *, status: str) -> None:
-        return None
+        thread_id = entry.thread_id
+        if not isinstance(thread_id, str) or not thread_id:
+            existing = self.state.codex_threads.get(entry.issue.id)
+            thread_id = existing.thread_id if existing is not None else None
+        if not isinstance(thread_id, str) or not thread_id:
+            return
+        existing = self.state.codex_threads.get(entry.issue.id)
+        workspace_path = entry.workspace_path or (existing.workspace_path if existing is not None else str(self.config.workspace.root))
+        self.state.codex_threads[entry.issue.id] = CodexThreadEntry(
+            issue_id=entry.issue.id,
+            thread_id=thread_id,
+            backend=existing.backend if existing is not None else "sdk",
+            workspace_path=workspace_path,
+            last_turn_id=entry.turn_id or (existing.last_turn_id if existing is not None else None),
+            status=status,
+            last_final_response=entry.last_codex_message or (existing.last_final_response if existing is not None else None),
+            updated_at=utc_now(),
+        )
+        if self.persistence_store is not None:
+            self._persist_state()
 
     def _set_running_phase(self, issue_id: str, phase: str, *, runtime_phase: str | None = None) -> None:
         entry = self.state.running.get(issue_id)
@@ -2079,7 +2157,7 @@ class Orchestrator:
                 blocked=list(self.state.blocked.values()),
                 human_interventions=list(self.state.human_interventions.values()),
                 running=list(self.state.running.values()),
-                codex_threads=[],
+                codex_threads=list(self.state.codex_threads.values()),
             )
         )
 

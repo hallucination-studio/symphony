@@ -293,6 +293,48 @@ async def test_debug_auth_me_reuses_internal_session() -> None:
 
 
 @pytest.mark.asyncio
+async def test_debug_auth_public_config_disables_turnstile() -> None:
+    app = create_app(
+        secure_cookies=False,
+        secret_key=SECRET,
+        debug_auth=True,
+        config=PodiumConfig(
+            turnstile_site_key="site-key",
+            turnstile_secret_key="secret-key",
+        ),
+    )
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
+        response = await client.get("/api/v1/config")
+
+    assert response.status_code == 200
+    assert response.json() == {"turnstile": {"enabled": False, "site_key": ""}}
+
+
+@pytest.mark.asyncio
+async def test_disable_turnstile_keeps_normal_auth_flow() -> None:
+    app = create_app(
+        secure_cookies=False,
+        secret_key=SECRET,
+        turnstile_verifier=lambda _token, _ip: False,
+        config=PodiumConfig(
+            turnstile_site_key="site-key",
+            turnstile_secret_key="secret-key",
+            turnstile_disabled=True,
+        ),
+    )
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
+        me_before = await client.get("/api/v1/auth/me")
+        registered = await client.post(
+            "/api/v1/auth/register",
+            json={"email": "no-captcha@example.com", "password": "correct-horse", "turnstile_token": ""},
+        )
+
+    assert me_before.status_code == 401
+    assert registered.status_code == 200
+    assert registered.json()["user"]["email"] == "no-captcha@example.com"
+
+
+@pytest.mark.asyncio
 async def test_expired_session_returns_401() -> None:
     from datetime import timedelta
 

@@ -34,16 +34,60 @@ class WorkspaceExecutionState:
         thread_id = getattr(result, "thread_id", None)
         if not isinstance(thread_id, str) or not thread_id:
             return
+        payload = self._sdk_thread_payload(
+            issue_id=issue_id,
+            thread_id=thread_id,
+            turn_id=getattr(result, "turn_id", None),
+            status="resume_pending",
+            prior_phase_summary=getattr(result, "final_response", None),
+        )
+        self._write_payload(payload)
+
+    def write_sdk_thread_failure(
+        self,
+        *,
+        issue_id: str,
+        thread_id: str,
+        turn_id: str | None = None,
+        error: str = "",
+    ) -> None:
+        if not thread_id:
+            return
+        payload = self._sdk_thread_payload(
+            issue_id=issue_id,
+            thread_id=thread_id,
+            turn_id=turn_id,
+            status="failed",
+            failure_summary=error,
+        )
+        self._write_payload(payload)
+
+    def _sdk_thread_payload(
+        self,
+        *,
+        issue_id: str,
+        thread_id: str,
+        turn_id: str | None,
+        status: str,
+        prior_phase_summary: str | None = None,
+        failure_summary: str | None = None,
+    ) -> dict[str, Any]:
         payload = {
             "issue_id": issue_id,
             "thread_id": thread_id,
             "backend": "sdk",
             "workspace_path": str(self.workspace_path),
-            "last_turn_id": getattr(result, "turn_id", None),
-            "status": "resume_pending",
-            "prior_phase_summary": getattr(result, "final_response", None),
+            "last_turn_id": turn_id,
+            "status": status,
             "notes": [],
         }
+        if prior_phase_summary is not None:
+            payload["prior_phase_summary"] = prior_phase_summary
+        if failure_summary is not None:
+            payload["failure_summary"] = failure_summary
+        return payload
+
+    def _write_payload(self, payload: dict[str, Any]) -> None:
         tmp = self.path.with_suffix(self.path.suffix + ".tmp")
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)

@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import asyncio
 import ast
 from datetime import datetime, timezone
+import json
 from pathlib import Path
 from typing import Any
 
 import httpx
 import fakeredis.aioredis
+import pytest
 from fastapi.testclient import TestClient
 
 from podium.app import create_app
@@ -28,6 +31,16 @@ def test_config_reads_podium_database_and_redis_urls(monkeypatch) -> None:
     assert config.redis_url == "redis://localhost:6379/3"
     assert config.turnstile_site_key == "site-key-123"
     assert config.turnstile_secret_key == ""
+
+
+def test_config_reads_turnstile_disable_flags(monkeypatch) -> None:
+    monkeypatch.setenv("CLOUDFLARE_TURNSTILE_SITE_KEY", "site-key")
+    monkeypatch.setenv("CLOUDFLARE_TURNSTILE_SECRET_KEY", "secret-key")
+    monkeypatch.setenv("PODIUM_DISABLE_TURNSTILE", "1")
+
+    config = PodiumConfig.from_env()
+
+    assert config.turnstile_disabled is True
 
 
 def test_public_config_reports_turnstile_disabled_without_site_key() -> None:
@@ -60,6 +73,22 @@ def test_public_config_reports_turnstile_enabled_with_site_and_secret_key() -> N
     config = app.state.podium.public_config()
 
     assert config == {"turnstile": {"enabled": True, "site_key": "site-key"}}
+    assert TestClient(app).get("/api/v1/config").json() == config
+
+
+def test_public_config_reports_turnstile_disabled_by_debug_flag() -> None:
+    app = create_app(
+        config=PodiumConfig(
+            turnstile_site_key="site-key",
+            turnstile_secret_key="secret-key",
+            turnstile_disabled=True,
+        ),
+        secure_cookies=False,
+    )
+
+    config = app.state.podium.public_config()
+
+    assert config == {"turnstile": {"enabled": False, "site_key": ""}}
     assert TestClient(app).get("/api/v1/config").json() == config
 
 
@@ -153,6 +182,10 @@ class FakePgStore:
         self.project_bindings: dict[str, dict[str, Any]] = {}
         self.dispatches: dict[str, dict[str, Any]] = {}
         self.proxy_audit_events: list[dict[str, Any]] = []
+        self.next_ids: list[str] = ["user_1"]
+
+    async def next_user_id(self) -> str:
+        return self.next_ids.pop(0)
 
     async def create_user(self, user_id: str, *, email: str, password_hash: str, created_at: str) -> dict[str, Any]:
         self.created_users.append(user_id)
@@ -221,6 +254,13 @@ class FakePgStore:
                 }
         return None
 
+    async def list_conductors_for_user(self, user_id: str) -> list[dict[str, Any]]:
+        return [
+            dict(conductor)
+            for conductor in self.conductors.values()
+            if str(conductor.get("user_id") or "") == user_id
+        ]
+
     async def upsert_dispatch(self, dispatch: dict[str, Any]) -> bool:
         for existing in self.dispatches.values():
             if (
@@ -270,6 +310,49 @@ class FakePgStore:
             return dict(dispatch)
         return None
 
+    async def ack_dispatch(
+        self,
+        conductor_id: str,
+        dispatch_id: str,
+        status: str,
+        *,
+        fencing_token: int | None,
+        reason: str = "",
+        runtime_phase: str = "",
+        completed_at: str | None = None,
+    ) -> dict[str, Any] | None:
+        if fencing_token is None:
+            return None
+        dispatch = self.dispatches.get(dispatch_id)
+        if dispatch is None:
+            return None
+        if dispatch.get("leased_runtime_id") != conductor_id:
+            return None
+        if int(dispatch.get("fencing_token") or 0) != fencing_token:
+            return None
+        dispatch["status"] = status
+        dispatch["reason"] = reason
+        dispatch["runtime_phase"] = runtime_phase
+        dispatch["updated_at"] = "2026-07-06T00:00:00Z"
+        if completed_at is not None:
+            dispatch["completed_at"] = completed_at
+        elif status in {"completed", "failed", "cancelled", "canceled"}:
+            dispatch["completed_at"] = dispatch["updated_at"]
+        return dict(dispatch)
+
+    async def reap_expired_dispatch_leases(self) -> int:
+        reaped = 0
+        for dispatch in self.dispatches.values():
+            if dispatch.get("status") != "leased":
+                continue
+            leased_until = str(dispatch.get("leased_until") or "")
+            if leased_until and leased_until < "2026-07-06T00:00:00Z":
+                dispatch["status"] = "queued"
+                dispatch["leased_runtime_id"] = None
+                dispatch["leased_until"] = None
+                reaped += 1
+        return reaped
+
     async def insert_proxy_audit_event(self, event: dict[str, Any]) -> None:
         self.proxy_audit_events.append(dict(event))
 
@@ -279,6 +362,8 @@ class FakeRedisStore:
         self.sessions: dict[str, dict[str, Any]] = {}
         self.enrollment_tokens: dict[str, dict[str, Any]] = {}
         self.saved_sessions: list[str] = []
+        self.owners: dict[str, str] = {}
+        self.command_queues: dict[str, list[dict[str, Any]]] = {}
 
     async def save_session(self, token_hash: str, *, user_id: str, ttl_seconds: int) -> None:
         self.saved_sessions.append(token_hash)
@@ -299,6 +384,33 @@ class FakeRedisStore:
 
     async def has_enrollment_token_for_group(self, runtime_group_id: str) -> bool:
         return any(row.get("runtime_group_id") == runtime_group_id for row in self.enrollment_tokens.values())
+
+    async def set_conductor_owner(self, conductor_id: str, podium_instance_id: str, *, ttl_seconds: int) -> None:
+        self.owners[conductor_id] = podium_instance_id
+
+    async def get_conductor_owner(self, conductor_id: str) -> str | None:
+        return self.owners.get(conductor_id)
+
+    async def clear_conductor_owner(self, conductor_id: str) -> None:
+        self.owners.pop(conductor_id, None)
+
+    async def publish_runtime_command(self, conductor_id: str, command: dict[str, Any]) -> None:
+        self.command_queues.setdefault(conductor_id, []).append(dict(command))
+
+    async def subscribe_runtime_commands(self, conductor_id: str) -> Any:
+        store = self
+
+        class _PubSub:
+            async def get_message(self, *, ignore_subscribe_messages: bool = True, timeout: float = 1.0) -> dict[str, Any] | None:
+                queued = store.command_queues.setdefault(conductor_id, [])
+                if not queued:
+                    return None
+                return {"type": "message", "data": json.dumps(queued.pop(0))}
+
+            async def aclose(self) -> None:
+                return None
+
+        return _PubSub()
 
 
 async def test_auth_uses_postgres_for_users_and_redis_for_sessions() -> None:
@@ -325,6 +437,52 @@ async def test_auth_uses_postgres_for_users_and_redis_for_sessions() -> None:
     assert "user_1" in pg_store.id_lookups
     assert redis_store.saved_sessions
     assert app.state.podium.users == {}
+
+
+@pytest.mark.asyncio
+async def test_pg_register_uses_store_allocated_user_id_without_scanning() -> None:
+    pg_store = FakePgStore()
+    pg_store.next_ids = ["user_42"]
+    app = create_app(
+        pg_store=pg_store,
+        redis_store=FakeRedisStore(),
+        secret_key="test-secret",
+        secure_cookies=False,
+    )
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
+        register = await client.post(
+            "/api/v1/auth/register",
+            json={"email": "atomic-user@example.com", "password": "correct-horse"},
+        )
+
+    assert register.status_code == 200
+    assert register.json()["user"]["id"] == "user_42"
+    assert pg_store.created_users == ["user_42"]
+    assert "user_1" not in pg_store.id_lookups
+
+
+@pytest.mark.asyncio
+async def test_app_lifespan_runs_dispatch_lease_reaper() -> None:
+    class ReapingState:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def reap_expired_dispatch_leases(self) -> int:
+            self.calls += 1
+            return 0
+
+    app = create_app(secret_key="test-secret", secure_cookies=False)
+    state = ReapingState()
+    app.state.podium = state
+
+    async with app.router.lifespan_context(app):
+        for _ in range(20):
+            if state.calls:
+                break
+            await asyncio.sleep(0.01)
+
+    assert state.calls >= 1
 
 
 def test_managed_podium_state_does_not_declare_business_collections() -> None:

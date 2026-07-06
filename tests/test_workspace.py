@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import logging
+import subprocess
 
 import pytest
 
@@ -11,6 +12,25 @@ from performer.workspace import WorkspaceError, WorkspaceManager, sanitize_works
 
 def test_sanitize_workspace_key_replaces_unsafe_characters() -> None:
     assert sanitize_workspace_key("MT-1 / bad:name") == "MT-1___bad_name"
+
+
+@pytest.mark.asyncio
+async def test_before_run_records_git_baseline(tmp_path: Path) -> None:
+    root = tmp_path / "workspaces"
+    workspace = root / "ENG-1"
+    workspace.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q"], cwd=workspace, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=workspace, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=workspace, check=True)
+    (workspace / "README.md").write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=workspace, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "base"], cwd=workspace, check=True)
+    baseline = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=workspace, text=True).strip()
+    manager = WorkspaceManager(WorkspaceConfig(root=root, per_issue=True), HooksConfig())
+
+    await manager.run_before_run(workspace)
+
+    assert (workspace / ".symphony" / "workspace-baseline").read_text(encoding="utf-8").strip() == baseline
 
 
 @pytest.mark.asyncio

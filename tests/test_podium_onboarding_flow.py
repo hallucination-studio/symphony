@@ -144,7 +144,8 @@ async def test_full_onboarding_flow_reaches_complete(tmp_path) -> None:
         token_payload = json.loads(body)
         token = token_payload["enrollment_token"]
         assert token
-        assert "--enrollment-token" in token_payload["install_command"]
+        assert "PODIUM_ENROLLMENT_TOKEN=" in token_payload["install_command"]
+        assert f"--enrollment-token {token}" not in token_payload["install_command"]
 
         # 6. A real runtime (Conductor) enrolls purely over HTTP using the
         #    one-time token, then heartbeats. No in-process service calls: this

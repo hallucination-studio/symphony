@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from pathlib import Path
@@ -185,6 +186,7 @@ class ConductorService:
         self.store = store
         self.data_root = data_root
         self.runtime_manager = runtime_manager or ConductorRuntimeManager()
+        self._startup_locks: dict[str, asyncio.Lock] = {}
         self.phase_reducer = PhaseReducer(store)
         self.repository_handoff_tracker_factory = self._repository_handoff_tracker
         self.project_label_proxy_factory = self._project_label_proxy
@@ -206,6 +208,7 @@ class ConductorService:
             runtime_manager=self.runtime_manager,
             runtime_env=self._runtime_env,
             get_instance=self.get_instance,
+            start_lock_for_instance=self._startup_lock_for_instance,
         )
         self.performer_supervisor = PerformerSupervisor(
             store=self.store,
@@ -279,6 +282,7 @@ class ConductorService:
             issue_identifier=issue_identifier or None,
             workflow_profile=instance.workflow_profile,
             dispatch_id=dispatch_id or None,
+            fencing_token=_optional_int(event.get("fencing_token"), None),
             blocked_by=_blocked_by_issue_ids(event.get("blocked_by")),
             parent_issue_id=_optional_dispatch_ref(event.get("parent_issue_id") or event.get("parent")),
         )
@@ -681,28 +685,38 @@ class ConductorService:
         runtime_token = settings.podium_runtime_token.strip()
         if not podium_url or not runtime_token:
             return {"acked": 0, "failed": 0, "skipped": len(pending_runs)}
+        async with httpx.AsyncClient(timeout=10, trust_env=False, transport=transport) as client:
+            async def post_ack(run: Any) -> tuple[Any, httpx.Response | Exception]:
+                status = "completed" if run.phase is RunPhase.DONE else "failed"
+                reason = run.last_reason or ("completed_by_runtime" if status == "completed" else "failed_by_runtime")
+                payload = {
+                    "dispatch_id": run.dispatch_id,
+                    "status": status,
+                    "reason": reason,
+                    "runtime_phase": run.phase.value,
+                }
+                if run.fencing_token is not None:
+                    payload["fencing_token"] = run.fencing_token
+                try:
+                    response = await client.post(
+                        f"{podium_url}/api/v1/runtime/dispatches/ack",
+                        headers={"Authorization": f"Bearer {runtime_token}"},
+                        json=payload,
+                    )
+                except Exception as exc:
+                    return run, exc
+                return run, response
+
+            results = await asyncio.gather(*(post_ack(run) for run in pending_runs))
         acked = 0
         failed = 0
         skipped = 0
-        async with httpx.AsyncClient(timeout=10, trust_env=False, transport=transport) as client:
-            for run in pending_runs:
-                status = "completed" if run.phase is RunPhase.DONE else "failed"
-                reason = run.last_reason or ("completed_by_runtime" if status == "completed" else "failed_by_runtime")
-                response = await client.post(
-                    f"{podium_url}/api/v1/runtime/dispatches/ack",
-                    headers={"Authorization": f"Bearer {runtime_token}"},
-                    json={
-                        "dispatch_id": run.dispatch_id,
-                        "status": status,
-                        "reason": reason,
-                        "runtime_phase": run.phase.value,
-                    },
-                )
-                if response.status_code >= 400:
-                    failed += 1
-                    continue
-                self.phase_reducer.acked(run.run_id)
-                acked += 1
+        for run, response in results:
+            if isinstance(response, Exception) or response.status_code >= 400:
+                failed += 1
+                continue
+            self.phase_reducer.acked(run.run_id)
+            acked += 1
         return {"acked": acked, "failed": failed, "skipped": skipped}
 
     async def _start_due_orchestration_runs(self) -> int:
@@ -710,6 +724,9 @@ class ConductorService:
 
     async def _start_orchestration_run(self, run, instance: InstanceRecord) -> InstanceRecord:
         return await self.scheduler.start_run(run, instance)
+
+    def _startup_lock_for_instance(self, instance_id: str) -> asyncio.Lock:
+        return self._startup_locks.setdefault(instance_id, asyncio.Lock())
 
     async def _start_direct_phase_issue(
         self,
@@ -779,6 +796,8 @@ class ConductorService:
         runs = self.store.list_orchestration_runs(phases={RunPhase.IMPLEMENTING, RunPhase.REVIEWING, RunPhase.REWORKING})
         now = datetime.now(timezone.utc)
         for run in runs:
+            if run.process_pid is None:
+                continue
             instance = self.store.get_instance(run.instance_id)
             if instance is None:
                 continue
@@ -791,7 +810,9 @@ class ConductorService:
             if (now - started_at).total_seconds() <= timeout_seconds:
                 continue
             refreshed = self.get_instance(instance.id) or instance
-            await self.runtime_manager.stop(refreshed)
+            if refreshed.pid != run.process_pid:
+                continue
+            await self.runtime_manager.stop(refreshed.with_updates(process_status="running", pid=run.process_pid))
             try:
                 result = PhaseAdvanceResult(
                     run_id=run.run_id,
@@ -1615,19 +1636,42 @@ class ConductorService:
     def _normalize_stale_runtime_state(self) -> None:
         for instance in self.store.list_instances():
             if instance.process_status in {"starting", "running", "unhealthy", "crash_loop"}:
-                recovered = self.runtime_manager.recover(instance)
-                if recovered is not None:
-                    self.store.update_instance(recovered)
+                active_runs = self.store.list_orchestration_runs(
+                    instance_id=instance.id,
+                    phases={RunPhase.IMPLEMENTING, RunPhase.REVIEWING, RunPhase.REWORKING},
+                )
+                candidate_pids = [
+                    pid
+                    for pid in [instance.pid, *(run.process_pid for run in active_runs)]
+                    if pid is not None
+                ]
+                recovered_by_pid: dict[int, InstanceRecord] = {}
+                for pid in dict.fromkeys(candidate_pids):
+                    recovered = self.runtime_manager.recover(instance.with_updates(process_status="running", pid=pid))
+                    if recovered is not None and recovered.pid is not None:
+                        recovered_by_pid[recovered.pid] = recovered
+                if instance.pid in recovered_by_pid:
+                    self.store.update_instance(recovered_by_pid[instance.pid])
+                elif recovered_by_pid:
+                    self.store.update_instance(next(iter(recovered_by_pid.values())))
                 else:
                     self.store.update_instance(instance.with_updates(process_status="stopped", pid=None))
-                    self._clear_orphaned_active_runs(instance.id, "orphaned performer process was not recoverable")
+                for run in active_runs:
+                    if run.process_pid not in recovered_by_pid:
+                        self._clear_orphaned_active_runs(
+                            instance.id,
+                            "orphaned performer process was not recoverable",
+                            process_pid=run.process_pid,
+                        )
 
-    def _clear_orphaned_active_runs(self, instance_id: str, reason: str) -> None:
+    def _clear_orphaned_active_runs(self, instance_id: str, reason: str, *, process_pid: int | None = None) -> None:
         runs = self.store.list_orchestration_runs(
             instance_id=instance_id,
             phases={RunPhase.IMPLEMENTING, RunPhase.REVIEWING, RunPhase.REWORKING},
         )
         for run in runs:
+            if process_pid is not None and run.process_pid != process_pid:
+                continue
             try:
                 self.phase_reducer.performer_start_failed(run.run_id, error=reason)
             except PhaseTransitionError:

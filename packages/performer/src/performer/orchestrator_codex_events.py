@@ -104,6 +104,7 @@ class CodexEventProcessor:
             entry.phase = "running"
             entry.status_label = PHASE_LABELS["implementation_running"]
             entry.runtime_phase = "implementation_done"
+            entry.turn_started_at = None
 
     def append_recent_event(self, entry: RunningEntry, event: dict[str, Any]) -> None:
         row = {

@@ -75,6 +75,21 @@ def agent_session_payload(*, workspace_id: str, project_slug: str, delegate_id: 
     }
 
 
+def agent_session_payload_without_session_id(
+    *,
+    workspace_id: str,
+    project_slug: str,
+    delegate_id: str,
+    issue_id: str,
+    identifier: str,
+) -> dict[str, Any]:
+    payload = agent_session_payload(workspace_id=workspace_id, project_slug=project_slug, delegate_id=delegate_id)
+    payload["agentSession"].pop("id", None)
+    payload["agentSession"]["issue"]["id"] = issue_id
+    payload["agentSession"]["issue"]["identifier"] = identifier
+    return payload
+
+
 def agent_session_payload_with_distinct_session_app_user(
     *,
     workspace_id: str,
@@ -351,6 +366,111 @@ async def test_injected_postgres_routes_webhook_and_lease_across_distinct_worker
 
 
 @pytest.mark.asyncio
+async def test_injected_postgres_acks_leased_dispatch_across_distinct_workers_and_requires_fencing() -> None:
+    from tests.test_podium_infra import FakePgStore, FakeRedisStore
+
+    pg_store = FakePgStore()
+    redis_store = FakeRedisStore()
+
+    enrollment_app = make_app(pg_store=pg_store, redis_store=redis_store)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=enrollment_app), base_url="http://podium.test") as client:
+        user_id = await register(client, "multiworker-ack@example.com")
+        enrolled = await enroll_conductor(client)
+        await client.post(
+            "/api/v1/runtime/report",
+            headers={"Authorization": f"Bearer {enrolled['runtime_token']}"},
+            json={"bindings": [{"instance_id": "inst-a", "project_slug": "ALPHA", "agent_app_user_id": "agent-alpha"}]},
+        )
+
+    webhook_app = make_app(pg_store=pg_store, redis_store=redis_store)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=webhook_app), base_url="http://podium.test") as client:
+        queued = await client.post(
+            "/api/v1/linear/webhooks/agent-session",
+            json=agent_session_payload(workspace_id=user_id, project_slug="ALPHA", delegate_id="agent-alpha"),
+        )
+
+    lease_app = make_app(pg_store=pg_store, redis_store=redis_store)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=lease_app), base_url="http://podium.test") as client:
+        lease = await client.post(
+            "/api/v1/runtime/dispatches/lease",
+            headers={"Authorization": f"Bearer {enrolled['runtime_token']}"},
+        )
+    dispatch = lease.json()["dispatch"]
+
+    ack_app = make_app(pg_store=pg_store, redis_store=redis_store)
+    assert ack_app.state.podium.dispatches == {}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=ack_app), base_url="http://podium.test") as client:
+        missing_fence = await client.post(
+            "/api/v1/runtime/dispatches/ack",
+            headers={"Authorization": f"Bearer {enrolled['runtime_token']}"},
+            json={"dispatch_id": dispatch["dispatch_id"], "status": "completed", "runtime_phase": "done"},
+        )
+        ack = await client.post(
+            "/api/v1/runtime/dispatches/ack",
+            headers={"Authorization": f"Bearer {enrolled['runtime_token']}"},
+            json={
+                "dispatch_id": dispatch["dispatch_id"],
+                "fencing_token": dispatch["fencing_token"],
+                "status": "completed",
+                "reason": "completed_by_runtime",
+                "runtime_phase": "done",
+            },
+        )
+
+    assert queued.status_code == 200
+    assert queued.json()["queued"] == 1
+    assert lease.status_code == 200
+    assert missing_fence.status_code == 409
+    assert missing_fence.json()["error"]["code"] == "stale_dispatch_lease"
+    assert ack.status_code == 200
+    assert ack.json()["dispatch"]["status"] == "completed"
+    assert pg_store.dispatches[dispatch["dispatch_id"]]["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_injected_postgres_reaps_expired_leased_dispatch_for_release() -> None:
+    from tests.test_podium_infra import FakePgStore, FakeRedisStore
+
+    pg_store = FakePgStore()
+    redis_store = FakeRedisStore()
+    app = make_app(pg_store=pg_store, redis_store=redis_store)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
+        user_id = await register(client, "reaper@example.com")
+        enrolled = await enroll_conductor(client)
+        await client.post(
+            "/api/v1/runtime/report",
+            headers={"Authorization": f"Bearer {enrolled['runtime_token']}"},
+            json={"bindings": [{"instance_id": "inst-a", "project_slug": "ALPHA", "agent_app_user_id": "agent-alpha"}]},
+        )
+        await client.post(
+            "/api/v1/linear/webhooks/agent-session",
+            json=agent_session_payload(workspace_id=user_id, project_slug="ALPHA", delegate_id="agent-alpha"),
+        )
+        lease = await client.post(
+            "/api/v1/runtime/dispatches/lease",
+            headers={"Authorization": f"Bearer {enrolled['runtime_token']}"},
+        )
+
+    dispatch_id = lease.json()["dispatch"]["dispatch_id"]
+    pg_store.dispatches[dispatch_id]["leased_until"] = "2026-01-01T00:00:00Z"
+
+    reaper_app = make_app(pg_store=pg_store, redis_store=redis_store)
+    reaped = await reaper_app.state.podium.reap_expired_dispatch_leases()
+
+    lease_app = make_app(pg_store=pg_store, redis_store=redis_store)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=lease_app), base_url="http://podium.test") as client:
+        renewed = await client.post(
+            "/api/v1/runtime/dispatches/lease",
+            headers={"Authorization": f"Bearer {enrolled['runtime_token']}"},
+        )
+
+    assert reaped == 1
+    assert renewed.status_code == 200
+    assert renewed.json()["dispatch"]["dispatch_id"] == dispatch_id
+    assert renewed.json()["dispatch"]["fencing_token"] == 2
+
+
+@pytest.mark.asyncio
 async def test_dispatch_routes_by_project_binding_not_single_workspace_group() -> None:
     app = make_app()
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
@@ -602,6 +722,102 @@ async def test_agent_session_webhook_is_idempotent_by_binding_and_agent_session(
 
 
 @pytest.mark.asyncio
+async def test_injected_postgres_empty_agent_session_id_dedupes_by_issue_not_binding_only() -> None:
+    from tests.test_podium_infra import FakePgStore, FakeRedisStore
+
+    pg_store = FakePgStore()
+    redis_store = FakeRedisStore()
+    app = make_app(pg_store=pg_store, redis_store=redis_store)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
+        user_id = await register(client, "empty-session@example.com")
+        enrolled = await enroll_conductor(client)
+        await client.post(
+            "/api/v1/runtime/report",
+            headers={"Authorization": f"Bearer {enrolled['runtime_token']}"},
+            json={"bindings": [{"instance_id": "inst-a", "project_slug": "ALPHA", "agent_app_user_id": "agent-alpha"}]},
+        )
+        issue_a = agent_session_payload_without_session_id(
+            workspace_id=user_id,
+            project_slug="ALPHA",
+            delegate_id="agent-alpha",
+            issue_id="issue-a",
+            identifier="ALPHA-1",
+        )
+        issue_b = agent_session_payload_without_session_id(
+            workspace_id=user_id,
+            project_slug="ALPHA",
+            delegate_id="agent-alpha",
+            issue_id="issue-b",
+            identifier="ALPHA-2",
+        )
+
+        first_a = await client.post("/api/v1/linear/webhooks/agent-session", json=issue_a)
+        second_a = await client.post("/api/v1/linear/webhooks/agent-session", json=issue_a)
+        first_b = await client.post("/api/v1/linear/webhooks/agent-session", json=issue_b)
+
+    assert first_a.status_code == 200
+    assert first_a.json()["queued"] == 1
+    assert second_a.status_code == 200
+    assert second_a.json()["queued"] == 0
+    assert first_b.status_code == 200
+    assert first_b.json()["queued"] == 1
+    assert sorted(dispatch["issue_identifier"] for dispatch in pg_store.dispatches.values()) == ["ALPHA-1", "ALPHA-2"]
+
+
+@pytest.mark.asyncio
+async def test_runtime_presence_reads_redis_owner_across_distinct_workers() -> None:
+    from tests.test_podium_infra import FakePgStore, FakeRedisStore
+
+    pg_store = FakePgStore()
+    redis_store = FakeRedisStore()
+    enrollment_app = make_app(pg_store=pg_store, redis_store=redis_store)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=enrollment_app), base_url="http://podium.test") as client:
+        user_id = await register(client, "presence-worker@example.com")
+        enrolled = await enroll_conductor(client)
+
+    await redis_store.set_conductor_owner(enrolled["runtime_id"], "podium-a", ttl_seconds=90)
+
+    list_app = make_app(pg_store=pg_store, redis_store=redis_store)
+    assert list_app.state.podium.presence == {}
+    user = await list_app.state.podium.user_by_id(user_id)
+    assert user is not None
+    token = await list_app.state.podium.create_session(user_id)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=list_app),
+        base_url="http://podium.test",
+        cookies={list_app.state.podium.session_cookie_name: token},
+    ) as client:
+        status = await client.get("/api/v1/onboarding/runtime/status")
+        runtimes = await client.get("/api/v1/runtimes")
+
+    assert status.status_code == 200
+    assert status.json()["online_count"] == 1
+    assert runtimes.status_code == 200
+    assert runtimes.json()["runtimes"][0]["online"] is True
+    assert runtimes.json()["conductors"][0]["online"] is True
+
+
+@pytest.mark.asyncio
+async def test_runtime_auth_rechecks_postgres_disabled_state_instead_of_memory_cache() -> None:
+    from tests.test_podium_infra import FakePgStore, FakeRedisStore
+
+    pg_store = FakePgStore()
+    redis_store = FakeRedisStore()
+    app = make_app(pg_store=pg_store, redis_store=redis_store)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
+        await register(client, "runtime-disabled@example.com")
+        enrolled = await enroll_conductor(client)
+
+    runtime_id = enrolled["runtime_id"]
+    app.state.podium.runtimes[runtime_id]["disabled"] = False
+    pg_store.conductors[runtime_id]["disabled"] = True
+
+    runtime = await app.state.podium.runtime_for_bearer(f"Bearer {enrolled['runtime_token']}")
+
+    assert runtime is None
+
+
+@pytest.mark.asyncio
 async def test_dispatch_lease_returns_fencing_token_and_ack_requires_current_token() -> None:
     app = make_app()
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
@@ -780,6 +996,37 @@ async def test_linear_proxy_persists_audit_event_when_postgres_is_injected() -> 
         }
     ]
     assert "oauth-installation-token" not in json.dumps(pg_store.proxy_audit_events)
+
+
+@pytest.mark.asyncio
+async def test_linear_proxy_returns_structured_error_for_corrupt_stored_token() -> None:
+    from tests.test_podium_infra import FakePgStore
+
+    pg_store = FakePgStore()
+    app = make_app(pg_store=pg_store)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
+        user_id = await register(client, "proxy-secret-error@example.com")
+        enrolled = await enroll_conductor(client)
+        await app.state.podium.save_linear_installation(
+            user_id,
+            {
+                "workspace_id": user_id,
+                "access_token": "oauth-installation-token",
+                "scope": "read write",
+                "expires_at": None,
+            },
+        )
+        pg_store.linear_installations[user_id]["access_token_encrypted"] = "not-a-fernet-token"
+
+        response = await client.post(
+            "/api/v1/linear/graphql",
+            json={"operationName": "Viewer", "query": "{ viewer { id } }"},
+            headers={"Authorization": f"Bearer {enrolled['proxy_token']}"},
+        )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "secret_decryption_failed"
+    assert pg_store.proxy_audit_events[-1]["reason"] == "secret_decryption_failed"
 
 
 @pytest.mark.asyncio

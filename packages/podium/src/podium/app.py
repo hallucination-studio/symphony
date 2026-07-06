@@ -9,15 +9,17 @@ import hmac
 import json
 import os
 import secrets
+import shlex
 import urllib.parse
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
+from contextlib import asynccontextmanager
 
 import httpx
 from argon2 import PasswordHasher
-from cryptography.fernet import Fernet
+from cryptography.fernet import Fernet, InvalidToken
 from fastapi import FastAPI, Header, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
@@ -34,6 +36,14 @@ LINEAR_DEFAULT_SCOPE = "read,write"
 LINEAR_SCOPE_QUERY = (
     "query { teams { nodes { id name key } } projects { nodes { id name } } }"
 )
+
+
+class SecretDecryptionError(RuntimeError):
+    pass
+
+
+def shlex_quote(value: str) -> str:
+    return shlex.quote(value)
 
 LINEAR_SUCCESS_HTML = (
     "<!doctype html><html><head><meta charset=\"utf-8\">"
@@ -119,8 +129,22 @@ def create_app(
         config=config or PodiumConfig.from_env(),
         debug_auth=debug_auth,
     )
-    app = FastAPI(title="Symphony Podium")
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        app.state.dispatch_reaper_task = asyncio.create_task(_dispatch_lease_reaper_loop(app))
+        try:
+            yield
+        finally:
+            task = getattr(app.state, "dispatch_reaper_task", None)
+            if task is not None:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+            app.state.dispatch_reaper_task = None
+
+    app = FastAPI(title="Symphony Podium", lifespan=lifespan)
     app.state.podium = state
+    app.state.dispatch_reaper_task = None
     static_root = Path(static_dir).resolve() if static_dir else None
     index_file = static_root / "index.html" if static_root else None
 
@@ -128,7 +152,7 @@ def create_app(
         podium_session = request.cookies.get(state.session_cookie_name)
         return await state.user_for_session(podium_session or "")
 
-    async def resolve_linear_creds(workspace_id: str) -> tuple[str, str, str]:
+    async def resolve_linear_creds(workspace_id: str) -> tuple[str, str, str] | JSONResponse:
         """Return (client_id, client_secret, redirect_uri) for the workspace.
 
         Prefers the user's custom app (decrypting the stored secret); otherwise
@@ -137,7 +161,10 @@ def create_app(
         user = await state.user_by_id(workspace_id)
         custom = user.get("linear_app") if isinstance(user, dict) else None
         if custom:
-            client_secret = state.decrypt_secret(str(custom.get("client_secret_encrypted") or ""))
+            try:
+                client_secret = state.decrypt_secret(str(custom.get("client_secret_encrypted") or ""))
+            except SecretDecryptionError:
+                return error_response(400, "secret_decryption_failed", "Stored Linear app secret could not be decrypted")
             return (
                 str(custom.get("client_id") or ""),
                 client_secret,
@@ -372,7 +399,10 @@ def create_app(
         if user is None:
             return error_response(401, "unauthorized", "Unauthorized")
         workspace_id = str(user["id"])
-        client_id, _client_secret, redirect_uri = await resolve_linear_creds(workspace_id)
+        creds = await resolve_linear_creds(workspace_id)
+        if isinstance(creds, JSONResponse):
+            return creds
+        client_id, _client_secret, redirect_uri = creds
         if not client_id:
             return error_response(400, "linear_app_not_configured", "No Linear app is configured")
         oauth_state = state.create_oauth_state(workspace_id)
@@ -404,7 +434,10 @@ def create_app(
         if linear_token_exchange is not None:
             token = linear_token_exchange(code, callback_state)
         else:
-            client_id, client_secret, redirect_uri = await resolve_linear_creds(workspace_id)
+            creds = await resolve_linear_creds(workspace_id)
+            if isinstance(creds, JSONResponse):
+                return creds
+            client_id, client_secret, redirect_uri = creds
             async with httpx.AsyncClient(timeout=30, trust_env=False) as http_client:
                 resp = await http_client.post(
                     LINEAR_TOKEN_URL,
@@ -442,7 +475,10 @@ def create_app(
         if user is None:
             return error_response(401, "unauthorized", "Unauthorized")
         workspace_id = str(user["id"])
-        installation = await state.get_linear_installation(workspace_id)
+        try:
+            installation = await state.get_linear_installation(workspace_id)
+        except SecretDecryptionError:
+            return error_response(400, "secret_decryption_failed", "Stored Linear installation token could not be decrypted")
         if not installation:
             return error_response(400, "linear_installation_not_found", "No Linear installation for workspace")
         access_token = str(installation.get("access_token") or "")
@@ -493,9 +529,10 @@ def create_app(
         expires_at = datetime.now(timezone.utc) + timedelta(hours=1)
         await state.save_enrollment_token(token_hash, runtime_group_id=group_id, expires_at=expires_at)
         install_command = (
-            f"curl -fsSL {podium_base_url}/install.sh | bash -s -- "
-            f"--podium-url {podium_base_url} "
-            f"--enrollment-token {token}"
+            f"PODIUM_ENROLLMENT_TOKEN={shlex_quote(token)} "
+            f"curl -fsSL {podium_base_url}/install.sh | "
+            f"PODIUM_ENROLLMENT_TOKEN={shlex_quote(token)} "
+            f"bash -s -- --podium-url {podium_base_url}"
         )
         return JSONResponse(
             {
@@ -512,8 +549,10 @@ def create_app(
             return error_response(401, "unauthorized", "Unauthorized")
         workspace_id = str(user["id"])
         group_id = f"group_{workspace_id}"
+        await state.list_conductors_for_user(workspace_id)
         runtimes = [r for r in state.runtimes.values() if r["runtime_group_id"] == group_id]
-        online = [r for r in runtimes if r["id"] in state.presence]
+        presence = await state.presence_snapshot([str(r["id"]) for r in runtimes])
+        online = [r for r in runtimes if r["id"] in presence]
         token_pending = await state.has_pending_enrollment(group_id)
         if online:
             state.mark_runtime_enrolled(workspace_id)
@@ -533,12 +572,18 @@ def create_app(
         if user is None:
             return error_response(401, "unauthorized", "Unauthorized")
         workspace_id = str(user["id"])
-        conductors = state.list_conductors_for_user(workspace_id)
+        conductors = await state.list_conductors_for_user(workspace_id)
+        runtime_ids = [
+            str(runtime["id"])
+            for runtime in state.runtimes.values()
+            if runtime_belongs_to_workspace(runtime, workspace_id, state.runtime_groups)
+        ]
+        presence = await state.presence_snapshot(runtime_ids)
         return JSONResponse(
             {
                 "conductors": conductors,
                 "runtimes": [
-                    runtime_public(runtime, state.presence)
+                    runtime_public(runtime, presence)
                     for runtime in state.runtimes.values()
                     if runtime_belongs_to_workspace(runtime, workspace_id, state.runtime_groups)
                 ]
@@ -554,7 +599,8 @@ def create_app(
         runtime = state.runtimes.get(runtime_id)
         if runtime is None or not runtime_belongs_to_workspace(runtime, workspace_id, state.runtime_groups):
             return error_response(404, "not_found", "Runtime not found")
-        return JSONResponse(runtime_public(runtime, state.presence))
+        presence = await state.presence_snapshot([runtime_id])
+        return JSONResponse(runtime_public(runtime, presence))
 
     @app.get("/api/v1/runs/recent")
     async def recent_runs(request: Request) -> JSONResponse:
@@ -725,7 +771,7 @@ def create_app(
                         }
                     }
                 )
-        command = state.enqueue_runtime_command(
+        command = await state.enqueue_runtime_command(
             conductor_id,
             {
                 "type": "log.fetch",
@@ -786,6 +832,11 @@ def create_app(
         runtime_id = str(runtime["id"])
         queue = await state.attach_runtime_ws(runtime_id)
         forward_task = asyncio.create_task(_forward_runtime_commands(websocket, queue))
+        redis_forward_task = (
+            asyncio.create_task(_relay_redis_runtime_commands(state, runtime_id, queue))
+            if state.redis_store is not None
+            else None
+        )
         try:
             while True:
                 message = await websocket.receive_json()
@@ -809,8 +860,13 @@ def create_app(
             pass
         finally:
             forward_task.cancel()
+            if redis_forward_task is not None:
+                redis_forward_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await forward_task
+            if redis_forward_task is not None:
+                with contextlib.suppress(asyncio.CancelledError):
+                    await redis_forward_task
             await state.detach_runtime_ws(runtime_id)
 
     @app.post("/api/v1/linear/graphql")
@@ -826,7 +882,11 @@ def create_app(
         group_id = str(runtime.get("runtime_group_id") or "")
         group = state.runtime_groups.get(group_id) or {}
         workspace_id = str(group.get("linear_workspace_id") or "")
-        installation = await state.get_linear_installation(workspace_id)
+        try:
+            installation = await state.get_linear_installation(workspace_id)
+        except SecretDecryptionError:
+            await state.record_proxy_audit({"runtime_id": runtime["id"], "allowed": False, "reason": "secret_decryption_failed", "timestamp": utc_now_iso()})
+            return error_response(400, "secret_decryption_failed", "Stored Linear installation token could not be decrypted")
         upstream_token = str((installation or {}).get("access_token") or "").strip()
         if not upstream_token:
             upstream_token = os.environ.get("PODIUM_LINEAR_ACCESS_TOKEN", "").strip()
@@ -1152,7 +1212,10 @@ class ManagedPodiumState:
         return self._fernet().encrypt(plaintext.encode()).decode()
 
     def decrypt_secret(self, ciphertext: str) -> str:
-        return self._fernet().decrypt(ciphertext.encode()).decode()
+        try:
+            return self._fernet().decrypt(ciphertext.encode()).decode()
+        except (InvalidToken, ValueError) as exc:
+            raise SecretDecryptionError("secret_decryption_failed") from exc
 
     def _installation_to_disk(self, installation: dict[str, Any]) -> dict[str, Any]:
         access_token = str(installation.get("access_token") or "")
@@ -1299,7 +1362,38 @@ class ManagedPodiumState:
         self.persist()
         return {"status": "ok", "bindings_upserted": upserted}
 
-    def list_conductors_for_user(self, user_id: str) -> list[dict[str, Any]]:
+    async def is_runtime_online(self, runtime_id: str) -> bool:
+        if self.redis_store is not None:
+            return bool(await self.redis_store.get_conductor_owner(runtime_id))
+        return runtime_id in self.presence
+
+    async def presence_snapshot(self, runtime_ids: list[str]) -> dict[str, str]:
+        snapshot: dict[str, str] = {}
+        for runtime_id in runtime_ids:
+            if await self.is_runtime_online(runtime_id):
+                snapshot[runtime_id] = self.presence.get(runtime_id) or utc_now_iso()
+        return snapshot
+
+    async def list_conductors_for_user(self, user_id: str) -> list[dict[str, Any]]:
+        if self.pg_store is not None:
+            for conductor in await self.pg_store.list_conductors_for_user(user_id):
+                conductor_id = str(conductor["id"])
+                self.conductors[conductor_id] = conductor
+                self.runtimes[conductor_id] = {
+                    "id": conductor_id,
+                    "runtime_group_id": f"group_{user_id}",
+                    "user_id": user_id,
+                    "runtime_token_hash": str(conductor.get("runtime_token_hash") or ""),
+                    "proxy_token_hash": str(conductor.get("proxy_token_hash") or ""),
+                    "disabled": bool(conductor.get("disabled")),
+                    "revoked": bool(conductor.get("revoked")),
+                    "created_at": str(conductor.get("created_at") or ""),
+                }
+                for binding in await self.pg_store.list_project_bindings_for_conductor(conductor_id):
+                    binding_id = str(binding.get("id") or "")
+                    if binding_id:
+                        self.project_bindings[binding_id] = binding
+                        self.runtime_groups[binding_id] = self._runtime_group_from_project_binding(binding)
         rows = [self.ensure_conductor_record(runtime_id) for runtime_id in self.runtimes]
         conductors = [row for row in rows if str(row.get("user_id") or "") == user_id]
         result: list[dict[str, Any]] = []
@@ -1319,7 +1413,7 @@ class ManagedPodiumState:
                     "hostname": conductor.get("hostname") or "",
                     "label": conductor.get("label") or "",
                     "version": conductor.get("version") or "",
-                    "online": conductor_id in self.presence,
+                    "online": await self.is_runtime_online(conductor_id),
                     "last_report_at": conductor.get("last_report_at"),
                     "bindings": bindings,
                 }
@@ -1346,10 +1440,12 @@ class ManagedPodiumState:
         self.ws_queues.pop(runtime_id, None)
         await self.clear_presence(runtime_id)
 
-    def enqueue_runtime_command(self, runtime_id: str, command: dict[str, Any]) -> dict[str, Any]:
+    async def enqueue_runtime_command(self, runtime_id: str, command: dict[str, Any]) -> dict[str, Any]:
         queue = self.ws_queues.get(runtime_id)
         if queue is not None:
             queue.put_nowait(command)
+        if self.redis_store is not None:
+            await self.redis_store.publish_runtime_command(runtime_id, command)
         return command
 
     async def apply_log_chunk(self, runtime_id: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -1399,6 +1495,8 @@ class ManagedPodiumState:
 
     @property
     def turnstile_enabled(self) -> bool:
+        if self.config.turnstile_disabled or self.debug_auth:
+            return False
         return bool(self.config.turnstile_site_key.strip() and self.config.turnstile_secret_key.strip())
 
     def public_config(self) -> dict[str, Any]:
@@ -1407,13 +1505,7 @@ class ManagedPodiumState:
 
     async def next_user_id(self) -> str:
         if self.pg_store is not None:
-            # V1 uses readable workspace ids. Pg-backed deployments check for
-            # gaps so a restarted Podium does not reuse user_1.
-            for index in range(1, 1_000_000):
-                candidate = f"user_{index}"
-                if await self.user_by_id(candidate) is None:
-                    return candidate
-            raise RuntimeError("user_id_space_exhausted")
+            return str(await self.pg_store.next_user_id())
         return f"user_{len(self.users) + 1}"
 
     async def create_user(
@@ -1537,13 +1629,16 @@ class ManagedPodiumState:
         if not token:
             return None
         token_hash = hash_secret(token)
-        for runtime in self.runtimes.values():
-            if hmac.compare_digest(str(runtime["runtime_token_hash"]), token_hash):
-                return runtime
         if self.pg_store is not None:
             runtime = await self.pg_store.get_runtime_by_token_hash(token_hash)
-            if runtime is not None:
-                self.runtimes[str(runtime["id"])] = runtime
+            if runtime is None or runtime.get("disabled") or runtime.get("revoked"):
+                return None
+            self.runtimes[str(runtime["id"])] = runtime
+            return runtime
+        for runtime in self.runtimes.values():
+            if hmac.compare_digest(str(runtime["runtime_token_hash"]), token_hash):
+                if runtime.get("disabled") or runtime.get("revoked"):
+                    return None
                 return runtime
         return None
 
@@ -1552,13 +1647,16 @@ class ManagedPodiumState:
         if not token:
             return None
         token_hash = hash_secret(token)
-        for runtime in self.runtimes.values():
-            if hmac.compare_digest(str(runtime["proxy_token_hash"]), token_hash):
-                return runtime
         if self.pg_store is not None:
             runtime = await self.pg_store.get_runtime_by_token_hash(token_hash, proxy=True)
-            if runtime is not None:
-                self.runtimes[str(runtime["id"])] = runtime
+            if runtime is None or runtime.get("disabled") or runtime.get("revoked"):
+                return None
+            self.runtimes[str(runtime["id"])] = runtime
+            return runtime
+        for runtime in self.runtimes.values():
+            if hmac.compare_digest(str(runtime["proxy_token_hash"]), token_hash):
+                if runtime.get("disabled") or runtime.get("revoked"):
+                    return None
                 return runtime
         return None
 
@@ -1579,13 +1677,16 @@ class ManagedPodiumState:
             }:
                 continue
             project_binding_id = str(group.get("project_binding_id") or group["id"])
-            if any(
-                str(dispatch.get("project_binding_id") or "") == project_binding_id
-                and str(dispatch.get("agent_session_id") or "") == str(event.get("agent_session_id") or "")
-                for dispatch in self.dispatches.values()
-            ):
-                continue
-            dispatch_id = f"dispatch_{len(self.dispatches) + 1}"
+            if self.pg_store is None:
+                if any(
+                    str(dispatch.get("project_binding_id") or "") == project_binding_id
+                    and str(dispatch.get("agent_session_id") or "") == str(event.get("agent_session_id") or "")
+                    for dispatch in self.dispatches.values()
+                ):
+                    continue
+            dispatch_id = f"dispatch_{secrets.token_urlsafe(18)}"
+            agent_session_id = str(event.get("agent_session_id") or "")
+            stored_agent_session_id = agent_session_id or f"empty-session:{event['issue_id']}"
             dispatch = {
                 "dispatch_id": dispatch_id,
                 "runtime_group_id": group["id"],
@@ -1595,7 +1696,7 @@ class ManagedPodiumState:
                 "issue_identifier": event["issue_identifier"],
                 "linear_workspace_id": event["workspace_id"],
                 "project_slug": event["project_slug"],
-                "agent_session_id": event.get("agent_session_id") or "",
+                "agent_session_id": stored_agent_session_id,
                 "agent_app_user_id": event.get("agent_app_user_id") or "",
                 "routing_rule_id": group["id"],
                 "workflow_profile": group.get("workflow_profile") or "task",
@@ -1622,7 +1723,7 @@ class ManagedPodiumState:
                 binding = self.project_bindings.get(binding_id) or {}
                 conductor_id = str(binding.get("conductor_id") or "")
                 if conductor_id:
-                    self.enqueue_runtime_command(
+                    await self.enqueue_runtime_command(
                         conductor_id,
                         {
                             "type": "dispatch.available",
@@ -1673,7 +1774,8 @@ class ManagedPodiumState:
             for binding_id, binding in self.project_bindings.items()
             if str(binding.get("conductor_id") or "") == runtime_id
         }
-        if self.pg_store is not None and not binding_ids:
+        if self.pg_store is not None:
+            binding_ids = set()
             for binding in await self.pg_store.list_project_bindings_for_conductor(runtime_id):
                 binding_id = str(binding.get("id") or "")
                 if not binding_id:
@@ -1722,6 +1824,25 @@ class ManagedPodiumState:
             return dispatch
         return None
 
+    async def reap_expired_dispatch_leases(self) -> int:
+        if self.pg_store is not None:
+            return int(await self.pg_store.reap_expired_dispatch_leases())
+        now = datetime.now(timezone.utc)
+        reaped = 0
+        for dispatch in self.dispatches.values():
+            leased_until = dispatch.get("leased_until")
+            if isinstance(leased_until, str):
+                leased_until = _datetime_from_json(leased_until)
+            if dispatch.get("status") == "leased" and isinstance(leased_until, datetime) and leased_until < now:
+                dispatch["status"] = "queued"
+                dispatch["leased_runtime_id"] = None
+                dispatch["leased_until"] = None
+                dispatch["updated_at"] = utc_now_iso()
+                reaped += 1
+        if reaped:
+            self.persist()
+        return reaped
+
     async def ack_dispatch(
         self,
         runtime_id: str,
@@ -1732,6 +1853,30 @@ class ManagedPodiumState:
         reason: str | None = None,
         runtime_phase: str | None = None,
     ) -> dict[str, Any] | None:
+        if self.pg_store is not None:
+            if fencing_token is None:
+                return {"dispatch_id": dispatch_id, "_ack_error": "stale_dispatch_lease"}
+            ack_status = status
+            ack_reason = reason or ""
+            ack_runtime_phase = runtime_phase or ""
+            if status in {"completed", "failed"} and runtime_phase not in {"done", "failed"}:
+                ack_status = "ack_drift"
+                ack_reason = "dispatch ack missing conductor terminal run event"
+            completed_at = utc_now_iso() if ack_status in {"completed", "failed", "cancelled", "canceled"} else None
+            saved = await self.pg_store.ack_dispatch(
+                runtime_id,
+                dispatch_id,
+                ack_status,
+                fencing_token=fencing_token,
+                reason=ack_reason,
+                runtime_phase=ack_runtime_phase,
+                completed_at=completed_at,
+            )
+            if saved is None:
+                return {"dispatch_id": dispatch_id, "_ack_error": "stale_dispatch_lease"}
+            self.dispatches[str(saved.get("dispatch_id") or dispatch_id)] = saved
+            return saved
+
         dispatch = self.dispatches.get(dispatch_id)
         if dispatch is None or dispatch.get("leased_runtime_id") != runtime_id:
             return None
@@ -1795,6 +1940,38 @@ async def _forward_runtime_commands(websocket: WebSocket, queue: asyncio.Queue[d
         await websocket.send_json(command)
 
 
+async def _relay_redis_runtime_commands(
+    state: ManagedPodiumState,
+    runtime_id: str,
+    queue: asyncio.Queue[dict[str, Any]],
+) -> None:
+    if state.redis_store is None:
+        return
+    pubsub = await state.redis_store.subscribe_runtime_commands(runtime_id)
+    try:
+        while True:
+            message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
+            if not message:
+                await asyncio.sleep(0.05)
+                continue
+            raw = message.get("data")
+            try:
+                command = json.loads(str(raw))
+            except json.JSONDecodeError:
+                continue
+            if isinstance(command, dict):
+                queue.put_nowait(command)
+    finally:
+        close = getattr(pubsub, "close", None)
+        aclose = getattr(pubsub, "aclose", None)
+        if callable(aclose):
+            await aclose()
+        elif callable(close):
+            result = close()
+            if inspect.isawaitable(result):
+                await result
+
+
 async def verify_turnstile_with_cloudflare(token: str, ip: str | None) -> bool:
     secret = os.environ.get("CLOUDFLARE_TURNSTILE_SECRET_KEY", "").strip()
     if not secret:
@@ -1825,6 +2002,16 @@ def public_user(user: dict[str, Any]) -> dict[str, Any]:
     return {"id": user_id, "email": str(user["email"]), "linear_app": public_app}
 
 
+async def _dispatch_lease_reaper_loop(app: FastAPI) -> None:
+    while True:
+        state = app.state.podium
+        try:
+            await state.reap_expired_dispatch_leases()
+        except Exception:
+            pass
+        await asyncio.sleep(30)
+
+
 def _clean_user(user: dict[str, Any]) -> dict[str, Any]:
     cleaned = dict(user)
     if cleaned.get("linear_app") is None:
@@ -1834,6 +2021,9 @@ def _clean_user(user: dict[str, Any]) -> dict[str, Any]:
 
 def dispatch_public(dispatch: dict[str, Any]) -> dict[str, Any]:
     project_binding_id = str(dispatch.get("project_binding_id") or dispatch.get("runtime_group_id") or "")
+    agent_session_id = str(dispatch.get("agent_session_id") or "")
+    if agent_session_id.startswith("empty-session:"):
+        agent_session_id = ""
     return {
         "dispatch_id": dispatch["dispatch_id"],
         "project_binding_id": project_binding_id,
@@ -1842,7 +2032,7 @@ def dispatch_public(dispatch: dict[str, Any]) -> dict[str, Any]:
         "issue_identifier": dispatch["issue_identifier"],
         "linear_workspace_id": dispatch["linear_workspace_id"],
         "project_slug": dispatch["project_slug"],
-        "agent_session_id": dispatch.get("agent_session_id") or "",
+        "agent_session_id": agent_session_id,
         "agent_app_user_id": dispatch.get("agent_app_user_id") or "",
         "routing_rule_id": dispatch["routing_rule_id"],
         "workflow_profile": dispatch["workflow_profile"],
@@ -1956,7 +2146,7 @@ def render_install_script() -> str:
     return r'''#!/usr/bin/env bash
 set -euo pipefail
 
-ENROLLMENT_TOKEN=""
+ENROLLMENT_TOKEN="${PODIUM_ENROLLMENT_TOKEN:-}"
 PODIUM_URL="${PODIUM_URL:-}"
 DATA_ROOT="${PODIUM_CONDUCTOR_DATA_ROOT:-${HOME}/.podium-conductor}"
 CONDUCTOR_COMMAND="${PODIUM_CONDUCTOR_COMMAND:-conductor}"
@@ -2023,13 +2213,14 @@ fi
 
 mkdir -p "$DATA_ROOT"
 
-ENROLLED_JSON="$(python3 - "$PODIUM_URL" "$ENROLLMENT_TOKEN" <<'PY'
+ENROLLED_JSON="$(PODIUM_ENROLLMENT_TOKEN="$ENROLLMENT_TOKEN" python3 - "$PODIUM_URL" <<'PY'
 import json
+import os
 import sys
 import urllib.request
 
 podium_url = sys.argv[1].rstrip("/")
-token = sys.argv[2]
+token = os.environ.get("PODIUM_ENROLLMENT_TOKEN", "")
 body = json.dumps({"enrollment_token": token}).encode()
 request = urllib.request.Request(
     f"{podium_url}/api/v1/runtime/enroll",
@@ -2046,6 +2237,7 @@ RUNTIME_ID="$(python3 -c 'import json,sys; print(json.loads(sys.stdin.read())["r
 RUNTIME_TOKEN="$(python3 -c 'import json,sys; print(json.loads(sys.stdin.read())["runtime_token"])' <<<"$ENROLLED_JSON")"
 PROXY_TOKEN="$(python3 -c 'import json,sys; print(json.loads(sys.stdin.read())["proxy_token"])' <<<"$ENROLLED_JSON")"
 WS_URL="$(python3 -c 'import json,sys; print(json.loads(sys.stdin.read())["websocket_url"])' <<<"$ENROLLED_JSON")"
+RUNTIME_GROUP_ID="$(python3 -c 'import json,sys; print(json.loads(sys.stdin.read()).get("runtime_group_id", ""))' <<<"$ENROLLED_JSON")"
 
 if [ "$START_CONDUCTOR" = "1" ]; then
   CONDUCTOR_LOG="/tmp/podium-conductor-${RUNTIME_ID}.log"
@@ -2086,18 +2278,19 @@ PY
   done
 fi
 
-python3 - "$CONDUCTOR_PORT" "$PODIUM_URL" "$RUNTIME_ID" "$RUNTIME_TOKEN" "$PROXY_TOKEN" "$WS_URL" <<'PY'
+python3 - "$CONDUCTOR_PORT" "$PODIUM_URL" "$RUNTIME_ID" "$RUNTIME_TOKEN" "$PROXY_TOKEN" "$WS_URL" "$RUNTIME_GROUP_ID" <<'PY'
 import json
 import sys
 import urllib.request
 
-port, podium_url, runtime_id, runtime_token, proxy_token, ws_url = sys.argv[1:]
+port, podium_url, runtime_id, runtime_token, proxy_token, ws_url, runtime_group_id = sys.argv[1:]
 body = json.dumps({
     "podium_url": podium_url.rstrip("/"),
     "podium_runtime_id": runtime_id,
     "podium_runtime_token": runtime_token,
     "podium_proxy_token": proxy_token,
     "podium_ws_url": ws_url,
+    "runtime_group_id": runtime_group_id,
     "managed_mode": True,
 }).encode()
 request = urllib.request.Request(

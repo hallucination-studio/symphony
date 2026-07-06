@@ -22,6 +22,7 @@ class PgMigrator:
                 linear_app_json JSONB
             )
             """,
+            "CREATE SEQUENCE IF NOT EXISTS podium_user_id_seq",
             """
             CREATE TABLE IF NOT EXISTS linear_installations (
                 workspace_id TEXT PRIMARY KEY,
@@ -192,6 +193,16 @@ class PgStore:
         )
         return _record_to_user(row)
 
+    async def next_user_id(self) -> str:
+        if self.pool is None:
+            for index in range(1, 1_000_000):
+                candidate = f"user_{index}"
+                if candidate not in self._memory_users:
+                    return candidate
+            raise RuntimeError("user_id_space_exhausted")
+        value = await self.pool.fetchval("SELECT nextval('podium_user_id_seq')")
+        return f"user_{int(value)}"
+
     async def get_user(self, user_id: str) -> dict[str, Any] | None:
         if self.pool is None:
             user = self._memory_users.get(user_id)
@@ -289,6 +300,22 @@ class PgStore:
             "revoked": bool(row["revoked"]),
             "created_at": row["created_at"].isoformat() if row["created_at"] is not None else "",
         }
+
+    async def list_conductors_for_user(self, user_id: str) -> list[dict[str, Any]]:
+        if self.pool is None:
+            raise RuntimeError("postgres_pool_unavailable")
+        rows = await self.pool.fetch(
+            """
+            SELECT id, user_id, hostname, label, version, conductor_id,
+                   runtime_token_hash, proxy_token_hash, disabled, revoked,
+                   created_at, last_report_at
+            FROM conductors
+            WHERE user_id = $1
+            ORDER BY created_at, id
+            """,
+            user_id,
+        )
+        return [_record_to_conductor(row) for row in rows]
 
     async def list_project_bindings_for_conductor(self, conductor_id: str) -> list[dict[str, Any]]:
         if self.pool is None:
@@ -504,7 +531,7 @@ class PgStore:
                 updated_at = now()
             WHERE id = $2
               AND leased_conductor_id = $1
-              AND ($7::bigint IS NULL OR fencing_token = $7::bigint)
+              AND fencing_token = $7::bigint
             RETURNING *
             """,
             conductor_id,
@@ -516,6 +543,25 @@ class PgStore:
             fencing_token,
         )
         return _record_to_dispatch(row) if row is not None else None
+
+    async def reap_expired_dispatch_leases(self) -> int:
+        if self.pool is None:
+            raise RuntimeError("postgres_pool_unavailable")
+        result = await self.pool.execute(
+            """
+            UPDATE dispatches
+            SET status = 'queued',
+                leased_conductor_id = NULL,
+                leased_until = NULL,
+                updated_at = now()
+            WHERE status = 'leased'
+              AND leased_until < now()
+            """
+        )
+        try:
+            return int(str(result).rsplit(" ", 1)[-1])
+        except (ValueError, IndexError):
+            return 0
 
     async def save_onboarding_state(self, user_id: str, completed_steps: list[str], metadata: dict[str, Any]) -> None:
         if self.pool is None:
@@ -603,6 +649,23 @@ def _record_to_dispatch(row: Any) -> dict[str, Any]:
         "created_at": row["created_at"].isoformat() if row["created_at"] is not None else "",
         "updated_at": row["updated_at"].isoformat() if row["updated_at"] is not None else "",
         "completed_at": row["completed_at"].isoformat() if row["completed_at"] is not None else None,
+    }
+
+
+def _record_to_conductor(row: Any) -> dict[str, Any]:
+    return {
+        "id": str(row["id"]),
+        "user_id": str(row["user_id"]),
+        "hostname": str(row["hostname"]),
+        "label": str(row["label"]),
+        "version": str(row["version"]),
+        "conductor_id": str(row["conductor_id"]),
+        "runtime_token_hash": str(row["runtime_token_hash"]),
+        "proxy_token_hash": str(row["proxy_token_hash"]),
+        "disabled": bool(row["disabled"]),
+        "revoked": bool(row["revoked"]),
+        "created_at": row["created_at"].isoformat() if row["created_at"] is not None else "",
+        "last_report_at": row["last_report_at"].isoformat() if row["last_report_at"] is not None else None,
     }
 
 

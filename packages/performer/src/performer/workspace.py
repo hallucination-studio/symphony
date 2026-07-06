@@ -52,6 +52,7 @@ class WorkspaceManager:
 
     async def run_before_run(self, path: Path) -> None:
         self.validate_workspace_path(path)
+        await self._record_workspace_baseline(path)
         if self.hooks.before_run:
             await self._run_hook("before_run", self.hooks.before_run, path, fatal=True)
 
@@ -87,6 +88,30 @@ class WorkspaceManager:
         if path != root and root not in path.parents:
             raise WorkspaceError("workspace_path_outside_root", f"Workspace path escapes root: {path}")
         return path
+
+    async def _record_workspace_baseline(self, path: Path) -> None:
+        if not (path / ".git").exists():
+            return
+        try:
+            process = await asyncio.create_subprocess_exec(
+                "git",
+                "rev-parse",
+                "HEAD",
+                cwd=str(path),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _stderr = await asyncio.wait_for(process.communicate(), timeout=10)
+        except (OSError, TimeoutError):
+            return
+        if process.returncode != 0:
+            return
+        baseline = stdout.decode(errors="replace").strip()
+        if not baseline:
+            return
+        metadata_dir = path / ".symphony"
+        metadata_dir.mkdir(parents=True, exist_ok=True)
+        (metadata_dir / "workspace-baseline").write_text(baseline + "\n", encoding="utf-8")
 
     async def _run_hook(self, name: str, script: str, cwd: Path, *, fatal: bool) -> None:
         logger.info("performer_hook outcome=started hook=%s cwd=%s", name, cwd)

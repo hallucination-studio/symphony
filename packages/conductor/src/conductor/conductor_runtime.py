@@ -66,6 +66,22 @@ class RecoveredProcess:
             self.returncode = 0
 
 
+class _StartingProcess:
+    pid: int | None = None
+    returncode: int | None = None
+
+    def terminate(self) -> None:
+        self.returncode = 0
+
+    def kill(self) -> None:
+        self.returncode = -9
+
+    async def wait(self) -> int:
+        if self.returncode is None:
+            self.returncode = 0
+        return self.returncode
+
+
 @dataclass(frozen=True)
 class LogQuery:
     tail: int | None = 200
@@ -96,6 +112,7 @@ class LogQueryResult:
 class ConductorRuntimeManager:
     def __init__(self, *, process_factory: ProcessFactory | None = None, command: str | None = None):
         self._handles: dict[str, RuntimeHandle] = {}
+        self._start_locks: dict[str, asyncio.Lock] = {}
         self.process_factory = process_factory or asyncio.create_subprocess_exec
         self.command = command or self._default_performer_command()
 
@@ -107,32 +124,46 @@ class ConductorRuntimeManager:
         advance_request_path: str | None = None,
         phase_result_path: str | None = None,
     ) -> InstanceRecord:
-        existing = self._handles.get(instance.id)
-        if existing is not None and getattr(existing.process, "returncode", None) is None:
-            return instance.with_updates(process_status="running", pid=getattr(existing.process, "pid", None))
+        lock = self._start_locks.setdefault(instance.id, asyncio.Lock())
+        async with lock:
+            existing = self._handles.get(instance.id)
+            if existing is not None and getattr(existing.process, "returncode", None) is None:
+                pid = getattr(existing.process, "pid", None)
+                status = existing.process_status if existing.process_status in {"starting", "running"} else "running"
+                return instance.with_updates(process_status=status, pid=pid)
 
-        legacy_log_path = Path(instance.log_path)
-        legacy_log_path.parent.mkdir(parents=True, exist_ok=True)
-        legacy_log_path.touch(exist_ok=True)
-        log_path, _generation = self._allocate_generation_log(instance)
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        log_path.touch(exist_ok=False)
-        self._write_current_pointer(log_path)
-        Path(instance.resolved_repo_path).mkdir(parents=True, exist_ok=True)
-        process = await self.process_factory(
-            *self._command_args(
-                instance.workflow_path,
-                advance_request_path=advance_request_path,
-                phase_result_path=phase_result_path,
-            ),
-            cwd=instance.resolved_repo_path,
-            env=self._process_env(env),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        log_task = asyncio.create_task(self._capture_logs(process, log_path))
-        self._handles[instance.id] = RuntimeHandle(process=process, log_task=log_task, process_status="running")
-        return instance.with_updates(process_status="running", pid=getattr(process, "pid", None), log_path=str(log_path))
+            legacy_log_path = Path(instance.log_path)
+            legacy_log_path.parent.mkdir(parents=True, exist_ok=True)
+            legacy_log_path.touch(exist_ok=True)
+            log_path, _generation = self._allocate_generation_log(instance)
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_path.touch(exist_ok=False)
+            self._write_current_pointer(log_path)
+            Path(instance.resolved_repo_path).mkdir(parents=True, exist_ok=True)
+            placeholder = _StartingProcess()
+            self._handles[instance.id] = RuntimeHandle(
+                process=placeholder,
+                log_task=asyncio.create_task(_noop_log_task()),
+                process_status="starting",
+            )
+            try:
+                process = await self.process_factory(
+                    *self._command_args(
+                        instance.workflow_path,
+                        advance_request_path=advance_request_path,
+                        phase_result_path=phase_result_path,
+                    ),
+                    cwd=instance.resolved_repo_path,
+                    env=self._process_env(env),
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+            except Exception:
+                self._handles.pop(instance.id, None)
+                raise
+            log_task = asyncio.create_task(self._capture_logs(process, log_path))
+            self._handles[instance.id] = RuntimeHandle(process=process, log_task=log_task, process_status="running")
+            return instance.with_updates(process_status="running", pid=getattr(process, "pid", None), log_path=str(log_path))
 
     async def stop(self, instance: InstanceRecord) -> InstanceRecord:
         handle = self._handles.pop(instance.id, None)
@@ -154,8 +185,12 @@ class ConductorRuntimeManager:
     def refresh(self, instance: InstanceRecord) -> InstanceRecord:
         handle = self._handles.get(instance.id)
         if handle is None:
-            if instance.process_status in {"running", "starting"} and instance.pid is not None and not _pid_alive(instance.pid):
-                return instance.with_updates(process_status="exited", pid=None, last_exit_code=0)
+            if (
+                instance.process_status in {"running", "starting"}
+                and instance.pid is not None
+                and not _pid_matches_command(instance.pid, self.command)
+            ):
+                return instance.with_updates(process_status="exited", pid=None, last_exit_code=-1)
             return instance
         returncode = _process_returncode(handle.process)
         if returncode is None:
@@ -181,7 +216,7 @@ class ConductorRuntimeManager:
         }
 
     def recover(self, instance: InstanceRecord) -> InstanceRecord | None:
-        if instance.pid is None or not _pid_alive(instance.pid):
+        if instance.pid is None or not _pid_matches_command(instance.pid, self.command):
             return None
         if instance.id not in self._handles:
             log_task = asyncio.create_task(self._follow_recovered_process(instance.pid))
@@ -385,11 +420,13 @@ class ConductorRuntimeManager:
         chunks: list[bytes] = []
         newlines = 0
         block_size = 8192
+        offset = file_size
         with path.open("rb") as handle:
             while remaining > 0 and newlines <= tail:
                 read_size = min(block_size, remaining)
                 remaining -= read_size
-                handle.seek(file_size - (sum(len(chunk) for chunk in chunks) + read_size))
+                offset -= read_size
+                handle.seek(offset)
                 chunk = handle.read(read_size)
                 chunks.insert(0, chunk)
                 newlines += chunk.count(b"\n")
@@ -426,6 +463,45 @@ def _pid_alive(pid: int) -> bool:
     except PermissionError:
         return True
     return True
+
+
+def _pid_matches_command(pid: int, command: str) -> bool:
+    if not _pid_alive(pid):
+        return False
+    argv = _pid_argv(pid)
+    if not argv:
+        return True
+    command_name = Path(command).name
+    basenames = {Path(arg).name for arg in argv if arg}
+    if command_name in basenames:
+        return True
+    return any(arg == "-m" and index + 1 < len(argv) and argv[index + 1] == "performer.cli" for index, arg in enumerate(argv))
+
+
+def _pid_argv(pid: int) -> list[str]:
+    proc_path = Path("/proc") / str(pid) / "cmdline"
+    try:
+        raw = proc_path.read_bytes()
+    except OSError:
+        raw = b""
+    if raw:
+        return [part.decode("utf-8", errors="replace") for part in raw.split(b"\0") if part]
+    try:
+        result = subprocess_run_ps(pid)
+    except Exception:
+        return []
+    return result
+
+
+def subprocess_run_ps(pid: int) -> list[str]:
+    import subprocess
+
+    output = subprocess.check_output(["ps", "-p", str(pid), "-o", "command="], text=True).strip()
+    if not output:
+        return []
+    import shlex
+
+    return shlex.split(output)
 
 
 def _process_returncode(process: Any) -> int | None:
