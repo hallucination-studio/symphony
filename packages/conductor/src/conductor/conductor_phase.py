@@ -28,6 +28,8 @@ class OrchestrationRun:
     issue_identifier: str | None
     phase: RunPhase
     status: str
+    blocked_by: list[str] = field(default_factory=list)
+    parent_issue_id: str | None = None
     epoch: int = 1
     attempt: int = 1
     workflow_profile: str | None = None
@@ -54,6 +56,7 @@ class OrchestrationRun:
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
         payload["phase"] = self.phase.value
+        payload["blocked_by"] = list(self.blocked_by or [])
         payload["human_action"] = dict(self.human_action or {})
         return payload
 
@@ -66,6 +69,8 @@ class OrchestrationRun:
             issue_identifier=_optional_str(payload.get("issue_identifier")),
             phase=RunPhase(str(payload.get("phase") or RunPhase.QUEUED.value)),
             status=str(payload.get("status") or RunStatus.QUEUED.value),
+            blocked_by=_str_list(payload.get("blocked_by")),
+            parent_issue_id=_optional_str(payload.get("parent_issue_id")),
             epoch=_int(payload.get("epoch"), default=1),
             attempt=_int(payload.get("attempt"), default=1),
             workflow_profile=_optional_str(payload.get("workflow_profile")),
@@ -146,6 +151,8 @@ class PhaseReducer:
         issue_identifier: str | None,
         workflow_profile: str | None,
         dispatch_id: str | None,
+        blocked_by: list[str] | None = None,
+        parent_issue_id: str | None = None,
     ) -> OrchestrationRun:
         return self.store.upsert_orchestration_run(
             instance_id=instance_id,
@@ -153,6 +160,8 @@ class PhaseReducer:
             issue_identifier=issue_identifier,
             workflow_profile=workflow_profile,
             dispatch_id=dispatch_id,
+            blocked_by=blocked_by or [],
+            parent_issue_id=parent_issue_id,
         )
 
     def performer_started(
@@ -403,6 +412,8 @@ def new_run(
     issue_identifier: str | None,
     workflow_profile: str | None,
     dispatch_id: str | None,
+    blocked_by: list[str] | None = None,
+    parent_issue_id: str | None = None,
     epoch: int = 1,
     now: str,
 ) -> OrchestrationRun:
@@ -413,6 +424,8 @@ def new_run(
         issue_identifier=issue_identifier,
         phase=RunPhase.QUEUED,
         status=RunStatus.QUEUED.value,
+        blocked_by=list(blocked_by or []),
+        parent_issue_id=parent_issue_id,
         epoch=epoch,
         workflow_profile=workflow_profile,
         dispatch_id=dispatch_id,
@@ -442,6 +455,12 @@ def _optional_str(value: Any) -> str | None:
         return None
     text = str(value)
     return text if text else None
+
+
+def _str_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [text for item in value if (text := str(item or "").strip())]
 
 
 def _optional_int(value: Any) -> int | None:

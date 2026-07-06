@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import inspect
 from pathlib import Path
 
 
@@ -44,3 +45,15 @@ def test_performer_does_not_write_authoritative_phase_labels() -> None:
             offenders.append(str(path))
 
     assert offenders == []
+
+
+def test_phase_executor_host_protocol_exposes_public_methods_only() -> None:
+    import performer.phase_executor as phase_executor
+
+    private_methods = [
+        name
+        for name, member in inspect.getmembers(phase_executor.PhaseExecutorHost)
+        if callable(member) and name.startswith("_") and not name.startswith("__")
+    ]
+
+    assert private_methods == []

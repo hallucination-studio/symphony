@@ -112,6 +112,7 @@ def create_app(
         linear_client_id=linear_client_id,
         linear_client_secret=linear_client_secret,
         linear_redirect_uri=linear_redirect_uri,
+        data_dir=data_dir,
         pg_store=pg_store,
         redis_store=redis_store,
         config=config or PodiumConfig.from_env(),
@@ -126,13 +127,13 @@ def create_app(
         podium_session = request.cookies.get(state.session_cookie_name)
         return await state.user_for_session(podium_session or "")
 
-    def resolve_linear_creds(workspace_id: str) -> tuple[str, str, str]:
+    async def resolve_linear_creds(workspace_id: str) -> tuple[str, str, str]:
         """Return (client_id, client_secret, redirect_uri) for the workspace.
 
         Prefers the user's custom app (decrypting the stored secret); otherwise
         falls back to the official shared app. Decryption failures surface.
         """
-        user = state.users.get(workspace_id)
+        user = await state.user_by_id(workspace_id)
         custom = user.get("linear_app") if isinstance(user, dict) else None
         if custom:
             client_secret = state.decrypt_secret(str(custom.get("client_secret_encrypted") or ""))
@@ -174,19 +175,17 @@ def create_app(
             return error_response(400, "invalid_turnstile", "Turnstile verification failed")
         if "@" not in email or len(password) < 8:
             return error_response(400, "invalid_credentials", "A valid email and password are required")
-        if email in state.user_ids_by_email:
+        if await state.user_by_email(email) is not None:
             return error_response(400, "email_already_registered", "Email is already registered")
-        user_id = f"user_{len(state.users) + 1}"
-        state.users[user_id] = {
-            "id": user_id,
-            "email": email,
-            "password_hash": state.password_hasher.hash(password),
-            "created_at": utc_now_iso(),
-        }
-        state.user_ids_by_email[email] = user_id
-        state.persist_users()
+        user_id = await state.next_user_id()
+        user = await state.create_user(
+            user_id,
+            email=email,
+            password_hash=state.password_hasher.hash(password),
+            created_at=utc_now_iso(),
+        )
         session_token = await state.create_session(user_id)
-        json_response = JSONResponse({"user": public_user(state.users[user_id])})
+        json_response = JSONResponse({"user": public_user(user)})
         state.set_session_cookie(json_response, session_token)
         return json_response
 
@@ -198,7 +197,7 @@ def create_app(
         turnstile_token = str(payload.get("turnstile_token") or "")
         if not await state.verify_turnstile(turnstile_token, request.client.host if request.client else None):
             return error_response(400, "invalid_turnstile", "Turnstile verification failed")
-        user = state.user_by_email(email)
+        user = await state.user_by_email(email)
         if user is None:
             return error_response(401, "invalid_login", "Invalid email or password")
         try:
@@ -240,8 +239,10 @@ def create_app(
         if user is None:
             return error_response(401, "unauthorized", "Unauthorized")
         user_id = str(user["id"])
-        if user_id in state.linear_installations:
+        await state.load_onboarding_state(user_id)
+        if await state.get_linear_installation(user_id) is not None:
             state.mark_linear_connected(user_id)
+            await state.persist_onboarding_state(user_id)
         return JSONResponse(state.onboarding_progress(user_id))
 
     @app.post("/api/v1/onboarding/scope")
@@ -250,9 +251,12 @@ def create_app(
         if user is None:
             return error_response(401, "unauthorized", "Unauthorized")
         payload = await request.json()
+        user_id = str(user["id"])
+        await state.load_onboarding_state(user_id)
         teams = payload.get("teams")
         projects = payload.get("projects")
-        progress = state.save_onboarding_scope(str(user["id"]), teams, projects)
+        progress = state.save_onboarding_scope(user_id, teams, projects)
+        await state.persist_onboarding_state(user_id)
         return JSONResponse({"onboarding": progress})
 
     @app.post("/api/v1/onboarding/repository")
@@ -261,6 +265,8 @@ def create_app(
         if user is None:
             return error_response(401, "unauthorized", "Unauthorized")
         payload = await request.json()
+        user_id = str(user["id"])
+        await state.load_onboarding_state(user_id)
         mode = str(payload.get("mode") or "")
         value = str(payload.get("value") or "")
         if mode not in {"local_path", "git_url"}:
@@ -268,7 +274,8 @@ def create_app(
         validation_state = "valid"
         if mode == "git_url" and not value.startswith(("https://", "git@")):
             validation_state = "invalid"
-        progress = state.save_onboarding_repository(str(user["id"]), mode, value)
+        progress = state.save_onboarding_repository(user_id, mode, value)
+        await state.persist_onboarding_state(user_id)
         return JSONResponse(
             {
                 "onboarding": progress,
@@ -287,7 +294,10 @@ def create_app(
             "recommendations": [],
             "timestamp": utc_now_iso(),
         }
-        state.set_smoke_result(str(user["id"]), result)
+        user_id = str(user["id"])
+        await state.load_onboarding_state(user_id)
+        state.set_smoke_result(user_id, result)
+        await state.persist_onboarding_state(user_id)
         return JSONResponse(result)
 
     @app.get("/api/v1/onboarding/smoke-check/result")
@@ -295,7 +305,9 @@ def create_app(
         user = await _require_user(request)
         if user is None:
             return error_response(401, "unauthorized", "Unauthorized")
-        result = state.get_smoke_result(str(user["id"]))
+        user_id = str(user["id"])
+        await state.load_onboarding_state(user_id)
+        result = state.get_smoke_result(user_id)
         if result is None:
             return error_response(404, "smoke_result_not_found", "No smoke result recorded")
         return JSONResponse(result)
@@ -306,8 +318,10 @@ def create_app(
         if user is None:
             return error_response(401, "unauthorized", "Unauthorized")
         user_id = str(user["id"])
-        if user_id in state.linear_installations:
+        await state.load_onboarding_state(user_id)
+        if await state.get_linear_installation(user_id) is not None:
             state.mark_linear_connected(user_id)
+            await state.persist_onboarding_state(user_id)
         return JSONResponse(
             {
                 "session": {
@@ -316,7 +330,7 @@ def create_app(
                     "email": str(user["email"]),
                 },
                 "onboarding": state.onboarding_progress(user_id),
-                "linear": state.linear_status(user_id),
+                "linear": await state.linear_status(user_id),
             }
         )
 
@@ -338,7 +352,7 @@ def create_app(
             "client_secret_encrypted": state.encrypt_secret(client_secret),
             "redirect_uri": redirect_uri,
         }
-        user["linear_app"] = linear_app
+        await state.set_user_linear_app(str(user["id"]), linear_app)
         return JSONResponse(
             {"linear_app": {"client_id": client_id, "redirect_uri": redirect_uri, "configured": True}}
         )
@@ -348,7 +362,7 @@ def create_app(
         user = await _require_user(request)
         if user is None:
             return error_response(401, "unauthorized", "Unauthorized")
-        user.pop("linear_app", None)
+        await state.set_user_linear_app(str(user["id"]), None)
         return JSONResponse({"ok": True, "linear_app": None})
 
     @app.post("/api/v1/onboarding/linear/start")
@@ -357,7 +371,7 @@ def create_app(
         if user is None:
             return error_response(401, "unauthorized", "Unauthorized")
         workspace_id = str(user["id"])
-        client_id, _client_secret, redirect_uri = resolve_linear_creds(workspace_id)
+        client_id, _client_secret, redirect_uri = await resolve_linear_creds(workspace_id)
         if not client_id:
             return error_response(400, "linear_app_not_configured", "No Linear app is configured")
         query = urllib.parse.urlencode(
@@ -385,7 +399,7 @@ def create_app(
         if linear_token_exchange is not None:
             token = linear_token_exchange(code, workspace_id)
         else:
-            client_id, client_secret, redirect_uri = resolve_linear_creds(workspace_id)
+            client_id, client_secret, redirect_uri = await resolve_linear_creds(workspace_id)
             async with httpx.AsyncClient(timeout=30, trust_env=False) as http_client:
                 resp = await http_client.post(
                     LINEAR_TOKEN_URL,
@@ -404,7 +418,7 @@ def create_app(
         expires_at: str | None = None
         if isinstance(expires_in, (int, float)):
             expires_at = (datetime.now(timezone.utc) + timedelta(seconds=int(expires_in))).isoformat().replace("+00:00", "Z")
-        state.save_linear_installation(
+        await state.save_linear_installation(
             workspace_id,
             {
                 "workspace_id": workspace_id,
@@ -414,6 +428,7 @@ def create_app(
             },
         )
         state.mark_linear_connected(workspace_id)
+        await state.persist_onboarding_state(workspace_id)
         return HTMLResponse(LINEAR_SUCCESS_HTML)
 
     @app.get("/api/v1/onboarding/linear/scope")
@@ -422,7 +437,7 @@ def create_app(
         if user is None:
             return error_response(401, "unauthorized", "Unauthorized")
         workspace_id = str(user["id"])
-        installation = state.get_linear_installation(workspace_id)
+        installation = await state.get_linear_installation(workspace_id)
         if not installation:
             return error_response(400, "linear_installation_not_found", "No Linear installation for workspace")
         access_token = str(installation.get("access_token") or "")
@@ -458,6 +473,7 @@ def create_app(
                 "codex_profile": {},
             },
         )
+        state.persist()
         return group_id
 
     @app.post("/api/v1/onboarding/runtime/enrollment-token")
@@ -585,6 +601,7 @@ def create_app(
                 "codex_profile": sanitize_codex_profile(payload.get("codex_profile")),
             },
         )
+        state.persist()
         await state.save_enrollment_token(
             token_hash,
             runtime_group_id=runtime_group_id,
@@ -618,6 +635,7 @@ def create_app(
             "created_at": utc_now_iso(),
         }
         state.ensure_conductor_record(runtime_id)
+        state.persist()
         websocket_url = str(request.base_url).rstrip("/").replace("http://", "ws://").replace("https://", "wss://")
         return JSONResponse(
             {
@@ -789,7 +807,7 @@ def create_app(
         group_id = str(runtime.get("runtime_group_id") or "")
         group = state.runtime_groups.get(group_id) or {}
         workspace_id = str(group.get("linear_workspace_id") or "")
-        installation = state.get_linear_installation(workspace_id)
+        installation = await state.get_linear_installation(workspace_id)
         upstream_token = str((installation or {}).get("access_token") or "").strip()
         if not upstream_token:
             upstream_token = os.environ.get("PODIUM_LINEAR_ACCESS_TOKEN", "").strip()
@@ -838,6 +856,7 @@ class ManagedPodiumState:
     secure_cookies: bool
     linear_webhook_secret: str = ""
     secret_key: str = ""
+    data_dir: str | Path | None = None
     linear_client_id: str = ""
     linear_client_secret: str = ""
     linear_redirect_uri: str = ""
@@ -849,13 +868,7 @@ class ManagedPodiumState:
     durable: Any = field(default_factory=lambda: InMemoryPodiumBusinessState())
 
     def __post_init__(self) -> None:
-        if self.pg_store is not None:
-            durable = getattr(self.pg_store, "_podium_business_state", None)
-            if durable is None:
-                durable = InMemoryPodiumBusinessState()
-                with contextlib.suppress(Exception):
-                    setattr(self.pg_store, "_podium_business_state", durable)
-            self.durable = durable
+        self.durable = InMemoryPodiumBusinessState()
 
     @property
     def users(self) -> Any:
@@ -922,15 +935,41 @@ class ManagedPodiumState:
         return self.durable.ws_queues
 
     def persist_users(self) -> None:
-        return None
+        self.persist()
 
     def persist_linear_installations(self) -> None:
-        return None
+        self.persist()
+
+    def persist(self) -> None:
+        persist = getattr(self.durable, "persist", None)
+        if callable(persist):
+            persist()
 
     def _onboarding_row(self, workspace_id: str) -> dict[str, Any]:
         return self.durable.onboarding_state.setdefault(
             workspace_id,
             {"completed_steps": [], "metadata": {}},
+        )
+
+    async def load_onboarding_state(self, workspace_id: str) -> None:
+        if self.pg_store is None:
+            return
+        row = await self.pg_store.get_onboarding_state(workspace_id)
+        if row is not None:
+            self.durable.onboarding_state[workspace_id] = {
+                "completed_steps": list(row.get("completed_steps") or []),
+                "metadata": dict(row.get("metadata") or {}),
+            }
+
+    async def persist_onboarding_state(self, workspace_id: str) -> None:
+        if self.pg_store is None:
+            self.persist()
+            return
+        row = self._onboarding_row(workspace_id)
+        await self.pg_store.save_onboarding_state(
+            workspace_id,
+            list(row.get("completed_steps") or []),
+            dict(row.get("metadata") or {}),
         )
 
     def _mark_onboarding(self, workspace_id: str, step: str) -> None:
@@ -940,12 +979,11 @@ class ManagedPodiumState:
         completed = row.setdefault("completed_steps", [])
         if step not in completed:
             completed.append(step)
+            self.persist()
 
     def onboarding_progress(self, workspace_id: str) -> dict[str, Any]:
         row = self._onboarding_row(workspace_id)
         completed = list(row.get("completed_steps") or [])
-        if workspace_id in self.linear_installations and "linear_connect" not in completed:
-            completed.append("linear_connect")
         group_id = f"group_{workspace_id}"
         has_runtime = any(
             str(runtime.get("runtime_group_id") or "") == group_id
@@ -976,12 +1014,14 @@ class ManagedPodiumState:
         row = self._onboarding_row(workspace_id)
         row.setdefault("metadata", {})["scope"] = {"teams": teams, "projects": projects}
         self._mark_onboarding(workspace_id, "scope_selection")
+        self.persist()
         return self.onboarding_progress(workspace_id)
 
     def save_onboarding_repository(self, workspace_id: str, mode: str, value: str) -> dict[str, Any]:
         row = self._onboarding_row(workspace_id)
         row.setdefault("metadata", {})["repository"] = {"mode": mode, "value": value}
         self._mark_onboarding(workspace_id, "repository_mapping")
+        self.persist()
         return self.onboarding_progress(workspace_id)
 
     def mark_linear_connected(self, workspace_id: str) -> dict[str, Any]:
@@ -995,6 +1035,7 @@ class ManagedPodiumState:
     def set_smoke_result(self, workspace_id: str, result: dict[str, Any]) -> dict[str, Any]:
         self.durable.smoke_results[workspace_id] = result
         self._mark_onboarding(workspace_id, "smoke_check")
+        self.persist()
         return self.onboarding_progress(workspace_id)
 
     def get_smoke_result(self, workspace_id: str) -> dict[str, Any] | None:
@@ -1010,6 +1051,7 @@ class ManagedPodiumState:
             "used": False,
             "expires_at": expires_at,
         }
+        self.persist()
 
     async def consume_enrollment_token(self, token: str) -> tuple[dict[str, Any] | None, str | None]:
         token_hash = hash_secret(token)
@@ -1024,6 +1066,7 @@ class ManagedPodiumState:
         if row["expires_at"] < datetime.now(timezone.utc):
             return None, "enrollment_token_expired"
         row["used"] = True
+        self.persist()
         return row, None
 
     async def has_pending_enrollment(self, runtime_group_id: str) -> bool:
@@ -1052,6 +1095,7 @@ class ManagedPodiumState:
             await self.redis_store.save_log_fetch_result(request_id, result, ttl_seconds=300)
         else:
             self.log_fetch_results[request_id] = result
+            self.persist()
 
     async def get_log_fetch_result(self, request_id: str) -> dict[str, Any] | None:
         if self.redis_store is not None:
@@ -1080,17 +1124,27 @@ class ManagedPodiumState:
         }
 
     def _installation_from_disk(self, installation: dict[str, Any]) -> dict[str, Any]:
+        encrypted = str(installation.get("access_token_encrypted") or installation.get("access_token") or "")
         return {
             "workspace_id": str(installation.get("workspace_id") or ""),
-            "access_token": self.decrypt_secret(str(installation.get("access_token_encrypted") or "")),
+            "access_token": self.decrypt_secret(encrypted) if encrypted else "",
             "scope": installation.get("scope"),
             "expires_at": installation.get("expires_at"),
         }
 
-    def get_linear_installation(self, workspace_id: str) -> dict[str, Any] | None:
+    async def get_linear_installation(self, workspace_id: str) -> dict[str, Any] | None:
+        if self.pg_store is not None:
+            installation = await self.pg_store.get_linear_installation(workspace_id)
+            return self._installation_from_disk(dict(installation)) if installation is not None else None
         return self.linear_installations.get(workspace_id)
 
-    def save_linear_installation(self, workspace_id: str, installation: dict[str, Any]) -> None:
+    async def save_linear_installation(self, workspace_id: str, installation: dict[str, Any]) -> None:
+        if self.pg_store is not None:
+            await self.pg_store.save_linear_installation(
+                workspace_id,
+                self._installation_to_disk(installation),
+            )
+            return
         self.linear_installations[workspace_id] = installation
         self.persist_linear_installations()
 
@@ -1113,8 +1167,10 @@ class ManagedPodiumState:
                 "last_report_at": None,
             }
             self.conductors[runtime_id] = conductor
+            self.persist()
         elif user_id and not conductor.get("user_id"):
             conductor["user_id"] = user_id
+            self.persist()
         return conductor
 
     def apply_runtime_report(self, runtime_id: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -1189,6 +1245,7 @@ class ManagedPodiumState:
                     "lines": list(tail.get("lines") or []),
                 }
             upserted += 1
+        self.persist()
         return {"status": "ok", "bindings_upserted": upserted}
 
     def list_conductors_for_user(self, user_id: str) -> list[dict[str, Any]]:
@@ -1265,10 +1322,11 @@ class ManagedPodiumState:
             "updated_at": utc_now_iso(),
             "lines": result["lines"],
         }
+        self.persist()
         return result
 
-    def linear_status(self, workspace_id: str) -> dict[str, Any]:
-        installation = self.get_linear_installation(workspace_id)
+    async def linear_status(self, workspace_id: str) -> dict[str, Any]:
+        installation = await self.get_linear_installation(workspace_id)
         if not installation:
             return {"workspace_id": workspace_id, "state": "not_connected"}
         return {
@@ -1296,9 +1354,69 @@ class ManagedPodiumState:
         site_key = self.config.turnstile_site_key.strip()
         return {"turnstile": {"enabled": self.turnstile_enabled, "site_key": site_key if self.turnstile_enabled else ""}}
 
-    def user_by_email(self, email: str) -> dict[str, Any] | None:
+    async def next_user_id(self) -> str:
+        if self.pg_store is not None:
+            # V1 uses readable workspace ids. Pg-backed deployments check for
+            # gaps so a restarted Podium does not reuse user_1.
+            for index in range(1, 1_000_000):
+                candidate = f"user_{index}"
+                if await self.user_by_id(candidate) is None:
+                    return candidate
+            raise RuntimeError("user_id_space_exhausted")
+        return f"user_{len(self.users) + 1}"
+
+    async def create_user(
+        self,
+        user_id: str,
+        *,
+        email: str,
+        password_hash: str,
+        created_at: str,
+    ) -> dict[str, Any]:
+        if self.pg_store is not None:
+            user = await self.pg_store.create_user(
+                user_id,
+                email=email,
+                password_hash=password_hash,
+                created_at=created_at,
+            )
+            return _clean_user(user)
+        user = {
+            "id": user_id,
+            "email": email,
+            "password_hash": password_hash,
+            "created_at": created_at,
+        }
+        self.users[user_id] = user
+        self.user_ids_by_email[email] = user_id
+        self.persist_users()
+        return user
+
+    async def user_by_id(self, user_id: str) -> dict[str, Any] | None:
+        if self.pg_store is not None:
+            user = await self.pg_store.get_user(user_id)
+            return _clean_user(user) if user is not None else None
+        return self.users.get(user_id or "")
+
+    async def user_by_email(self, email: str) -> dict[str, Any] | None:
+        if self.pg_store is not None:
+            user = await self.pg_store.get_user_by_email(email)
+            return _clean_user(user) if user is not None else None
         user_id = self.user_ids_by_email.get(email)
         return self.users.get(user_id or "")
+
+    async def set_user_linear_app(self, user_id: str, linear_app: dict[str, Any] | None) -> None:
+        if self.pg_store is not None:
+            await self.pg_store.set_user_linear_app(user_id, linear_app)
+            return
+        user = self.users.get(user_id)
+        if user is None:
+            return
+        if linear_app is None:
+            user.pop("linear_app", None)
+        else:
+            user["linear_app"] = linear_app
+        self.persist_users()
 
     def ensure_debug_user(self) -> dict[str, Any]:
         user_id = "debug"
@@ -1328,6 +1446,7 @@ class ManagedPodiumState:
                 "expires_at": datetime.now(timezone.utc) + ttl,
                 "revoked": False,
             }
+            self.persist()
         return token
 
     async def revoke_session(self, token: str) -> None:
@@ -1338,6 +1457,7 @@ class ManagedPodiumState:
         row = self.sessions.get(token_hash)
         if row is not None:
             row["revoked"] = True
+            self.persist()
 
     async def user_for_session(self, token: str) -> dict[str, Any] | None:
         token_hash = hash_secret(token)
@@ -1345,11 +1465,11 @@ class ManagedPodiumState:
             row = await self.redis_store.get_session(token_hash)
             if row is None or row.get("revoked"):
                 return None
-            return self.users.get(str(row["user_id"]))
+            return await self.user_by_id(str(row["user_id"]))
         row = self.sessions.get(token_hash)
         if row is None or row.get("revoked") or row["expires_at"] < datetime.now(timezone.utc):
             return None
-        return self.users.get(str(row["user_id"]))
+        return await self.user_by_id(str(row["user_id"]))
 
     def set_session_cookie(self, response: Response, token: str) -> None:
         response.set_cookie(
@@ -1409,6 +1529,8 @@ class ManagedPodiumState:
                 "routing_rule_id": group["id"],
                 "workflow_profile": group.get("workflow_profile") or "task",
                 "codex_profile": sanitize_codex_profile(group.get("codex_profile")),
+                "blocked_by": list(event.get("blocked_by") or []),
+                "parent_issue_id": event.get("parent_issue_id") or "",
                 "status": "queued",
                 "reason": "",
                 "runtime_phase": "",
@@ -1416,6 +1538,7 @@ class ManagedPodiumState:
                 "leased_until": None,
                 "created_at": utc_now_iso(),
             }
+            self.persist()
             binding_id = str(group.get("project_binding_id") or "")
             if binding_id:
                 binding = self.project_bindings.get(binding_id) or {}
@@ -1455,6 +1578,7 @@ class ManagedPodiumState:
             dispatch["status"] = "leased"
             dispatch["leased_runtime_id"] = runtime_id
             dispatch["leased_until"] = now + timedelta(minutes=5)
+            self.persist()
             return dispatch
         return None
 
@@ -1475,12 +1599,14 @@ class ManagedPodiumState:
             dispatch["reason"] = "dispatch ack missing conductor terminal run event"
             if runtime_phase is not None:
                 dispatch["runtime_phase"] = runtime_phase
+            self.persist()
             return dispatch
         dispatch["status"] = status
         if reason is not None:
             dispatch["reason"] = reason
         if runtime_phase is not None:
             dispatch["runtime_phase"] = runtime_phase
+        self.persist()
         return dispatch
 
     def reconcile_dispatch_acks(self) -> list[dict[str, Any]]:
@@ -1540,6 +1666,13 @@ def public_user(user: dict[str, Any]) -> dict[str, Any]:
     return {"id": user_id, "email": str(user["email"]), "linear_app": public_app}
 
 
+def _clean_user(user: dict[str, Any]) -> dict[str, Any]:
+    cleaned = dict(user)
+    if cleaned.get("linear_app") is None:
+        cleaned.pop("linear_app", None)
+    return cleaned
+
+
 def dispatch_public(dispatch: dict[str, Any]) -> dict[str, Any]:
     project_binding_id = str(dispatch.get("project_binding_id") or dispatch.get("runtime_group_id") or "")
     return {
@@ -1555,6 +1688,8 @@ def dispatch_public(dispatch: dict[str, Any]) -> dict[str, Any]:
         "routing_rule_id": dispatch["routing_rule_id"],
         "workflow_profile": dispatch["workflow_profile"],
         "codex_profile": sanitize_codex_profile(dispatch.get("codex_profile")),
+        "blocked_by": list(dispatch.get("blocked_by") or []),
+        "parent_issue_id": dispatch.get("parent_issue_id") or "",
         "status": dispatch["status"],
         "reason": dispatch.get("reason") or "",
         "runtime_phase": dispatch.get("runtime_phase") or "",
@@ -1817,7 +1952,107 @@ PY
 
 echo "Podium conductor enrolled as ${RUNTIME_ID}."
 echo "Conductor API: http://127.0.0.1:${CONDUCTOR_PORT}"
-'''
+    '''
+
+
+def _dict_payload(value: Any) -> dict[str, Any]:
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _list_payload(value: Any) -> list[dict[str, Any]]:
+    return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
+
+def _json_dumps(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
+def _json_loads(value: Any, *, default: Any = None) -> Any:
+    if not isinstance(value, str):
+        return default
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        return default
+
+
+def _datetime_to_json(value: Any) -> Any:
+    if isinstance(value, datetime):
+        return value.isoformat().replace("+00:00", "Z")
+    return value
+
+
+def _datetime_from_json(value: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return value
+
+
+def _session_to_json(value: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(value)
+    payload["expires_at"] = _datetime_to_json(payload.get("expires_at"))
+    return payload
+
+
+def _session_from_json(value: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(value)
+    payload["expires_at"] = _datetime_from_json(payload.get("expires_at"))
+    return payload
+
+
+def _enrollment_token_to_json(value: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(value)
+    payload["expires_at"] = _datetime_to_json(payload.get("expires_at"))
+    return payload
+
+
+def _enrollment_token_from_json(value: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(value)
+    payload["expires_at"] = _datetime_from_json(payload.get("expires_at"))
+    return payload
+
+
+def _dispatch_to_json(value: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(value)
+    payload["leased_until"] = _datetime_to_json(payload.get("leased_until"))
+    return payload
+
+
+def _dispatch_from_json(value: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(value)
+    payload["leased_until"] = _datetime_from_json(payload.get("leased_until"))
+    return payload
+
+
+def _tuple_keyed_dict_to_json(value: dict[tuple[str, str], dict[str, Any]]) -> dict[str, Any]:
+    return {f"{first}\u001f{second}": payload for (first, second), payload in value.items()}
+
+
+def _tuple_keyed_dict_from_json(value: Any) -> dict[tuple[str, str], dict[str, Any]]:
+    result: dict[tuple[str, str], dict[str, Any]] = {}
+    for key, payload in _dict_payload(value).items():
+        first, sep, second = str(key).partition("\u001f")
+        if sep and isinstance(payload, dict):
+            result[(first, second)] = payload
+    return result
+
+
+def _fernet_for_secret(secret_key: str) -> Fernet:
+    if not secret_key:
+        raise RuntimeError("encryption_unavailable")
+    key = base64.urlsafe_b64encode(hashlib.sha256(secret_key.encode()).digest())
+    return Fernet(key)
+
+
+def _encrypt_with_secret(plaintext: str, secret_key: str) -> str:
+    return _fernet_for_secret(secret_key).encrypt(plaintext.encode()).decode()
+
+
+def _decrypt_with_secret(ciphertext: str, secret_key: str) -> str:
+    return _fernet_for_secret(secret_key).decrypt(ciphertext.encode()).decode()
 
 
 def hash_secret(secret: str) -> str:
@@ -1851,12 +2086,13 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def normalize_agent_session_event(payload: dict[str, Any]) -> dict[str, str]:
+def normalize_agent_session_event(payload: dict[str, Any]) -> dict[str, Any]:
     session = payload.get("agentSession") if isinstance(payload.get("agentSession"), dict) else {}
     issue = session.get("issue") if isinstance(session.get("issue"), dict) else {}
     project = issue.get("project") if isinstance(issue.get("project"), dict) else {}
     agent = session.get("agent") if isinstance(session.get("agent"), dict) else {}
     workspace = payload.get("workspace") if isinstance(payload.get("workspace"), dict) else {}
+    parent = issue.get("parent") if isinstance(issue.get("parent"), dict) else payload.get("parent")
     return {
         "workspace_id": str(workspace.get("id") or payload.get("workspace_id") or ""),
         "project_slug": str(project.get("slugId") or payload.get("project_slug") or ""),
@@ -1874,4 +2110,24 @@ def normalize_agent_session_event(payload: dict[str, Any]) -> dict[str, str]:
             or ""
         ),
         "issue_delegate_id": str(((issue.get("delegate") or {}) if isinstance(issue.get("delegate"), dict) else {}).get("id") or ""),
+        "blocked_by": _webhook_blocked_by_ids(issue.get("blocked_by") or payload.get("blocked_by")),
+        "parent_issue_id": _webhook_ref_id(issue.get("parent_issue_id") or parent or payload.get("parent_issue_id")),
     }
+
+
+def _webhook_blocked_by_ids(value: Any) -> list[str]:
+    if value is None:
+        return []
+    raw_items = value if isinstance(value, list) else [value]
+    result: list[str] = []
+    for item in raw_items:
+        ref = _webhook_ref_id(item)
+        if ref:
+            result.append(ref)
+    return result
+
+
+def _webhook_ref_id(value: Any) -> str:
+    if isinstance(value, dict):
+        return str(value.get("id") or value.get("issue_id") or value.get("identifier") or "").strip()
+    return str(value or "").strip()

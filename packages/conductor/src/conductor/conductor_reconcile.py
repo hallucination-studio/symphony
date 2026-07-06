@@ -36,6 +36,7 @@ def reconcile_orchestration_health(*, store: Any, log_lines: list[str] | None = 
     findings.extend(_reconcile_repeated_claim_without_worker(log_lines or []))
     for run in store.list_orchestration_runs():
         findings.extend(_reconcile_run_events(store, run))
+        findings.extend(_reconcile_dependency_readiness(store, run))
     return findings
 
 
@@ -160,6 +161,28 @@ def _reconcile_run_events(store: Any, run: Any) -> list[ReconcileFinding]:
             )
         )
     return findings
+
+
+def _reconcile_dependency_readiness(store: Any, run: Any) -> list[ReconcileFinding]:
+    if run.phase is not RunPhase.QUEUED or run.status != "queued":
+        return []
+    blocker_issue_ids = list(getattr(run, "blocked_by", []) or [])
+    if not blocker_issue_ids:
+        return []
+    for blocker_issue_id in blocker_issue_ids:
+        blocker = store.get_latest_orchestration_run_for_issue(blocker_issue_id)
+        if blocker is None or blocker.phase not in {RunPhase.DONE, RunPhase.FAILED}:
+            return []
+    return [
+        ReconcileFinding(
+            code="dependency_readiness_drift",
+            severity="warning",
+            message="run is still queued behind dependencies even though all recorded blockers are terminal",
+            run_id=run.run_id,
+            issue_id=run.issue_id,
+            action="requeue_dependency_ready_run",
+        )
+    ]
 
 
 def _event_seen(events: list[Any], event_type: str) -> bool:

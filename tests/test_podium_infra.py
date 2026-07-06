@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import ast
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
+import httpx
 import fakeredis.aioredis
 from fastapi.testclient import TestClient
 
@@ -126,6 +129,105 @@ def test_create_app_exposes_injected_infra() -> None:
     assert app.state.podium.pg_store is pg_store
     assert app.state.podium.redis_store is redis_store
     assert app.state.podium.config is config
+
+
+class FakePgStore:
+    def __init__(self) -> None:
+        self.users: dict[str, dict[str, Any]] = {}
+        self.linear_installations: dict[str, dict[str, Any]] = {}
+        self.created_users: list[str] = []
+        self.email_lookups: list[str] = []
+        self.id_lookups: list[str] = []
+        self.linear_app_updates: list[tuple[str, dict[str, Any] | None]] = []
+        self.onboarding_state: dict[str, dict[str, Any]] = {}
+
+    async def create_user(self, user_id: str, *, email: str, password_hash: str, created_at: str) -> dict[str, Any]:
+        self.created_users.append(user_id)
+        user = {
+            "id": user_id,
+            "email": email,
+            "password_hash": password_hash,
+            "created_at": created_at,
+            "linear_app": None,
+        }
+        self.users[user_id] = user
+        return dict(user)
+
+    async def get_user(self, user_id: str) -> dict[str, Any] | None:
+        self.id_lookups.append(user_id)
+        user = self.users.get(user_id)
+        return dict(user) if user is not None else None
+
+    async def get_user_by_email(self, email: str) -> dict[str, Any] | None:
+        self.email_lookups.append(email)
+        for user in self.users.values():
+            if user["email"] == email:
+                return dict(user)
+        return None
+
+    async def set_user_linear_app(self, user_id: str, linear_app: dict[str, Any] | None) -> None:
+        self.linear_app_updates.append((user_id, linear_app))
+        self.users[user_id]["linear_app"] = linear_app
+
+    async def save_linear_installation(self, workspace_id: str, installation: dict[str, Any]) -> None:
+        self.linear_installations[workspace_id] = dict(installation)
+
+    async def get_linear_installation(self, workspace_id: str) -> dict[str, Any] | None:
+        installation = self.linear_installations.get(workspace_id)
+        return dict(installation) if installation is not None else None
+
+    async def save_onboarding_state(self, user_id: str, completed_steps: list[str], metadata: dict[str, Any]) -> None:
+        self.onboarding_state[user_id] = {
+            "completed_steps": list(completed_steps),
+            "metadata": dict(metadata),
+        }
+
+    async def get_onboarding_state(self, user_id: str) -> dict[str, Any] | None:
+        state = self.onboarding_state.get(user_id)
+        return dict(state) if state is not None else None
+
+
+class FakeRedisStore:
+    def __init__(self) -> None:
+        self.sessions: dict[str, dict[str, Any]] = {}
+        self.saved_sessions: list[str] = []
+
+    async def save_session(self, token_hash: str, *, user_id: str, ttl_seconds: int) -> None:
+        self.saved_sessions.append(token_hash)
+        self.sessions[token_hash] = {"user_id": user_id, "revoked": False}
+
+    async def get_session(self, token_hash: str) -> dict[str, Any] | None:
+        return self.sessions.get(token_hash)
+
+    async def revoke_session(self, token_hash: str) -> None:
+        if token_hash in self.sessions:
+            self.sessions[token_hash]["revoked"] = True
+
+
+async def test_auth_uses_postgres_for_users_and_redis_for_sessions() -> None:
+    pg_store = FakePgStore()
+    redis_store = FakeRedisStore()
+    app = create_app(
+        pg_store=pg_store,
+        redis_store=redis_store,
+        secret_key="test-secret",
+        secure_cookies=False,
+        turnstile_verifier=lambda token, _ip: token == "turnstile-ok",
+    )
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
+        register = await client.post(
+            "/api/v1/auth/register",
+            json={"email": "sql-user@example.com", "password": "correct-horse", "turnstile_token": "turnstile-ok"},
+        )
+        me = await client.get("/api/v1/auth/me")
+
+    assert register.status_code == 200
+    assert me.status_code == 200
+    assert pg_store.created_users == ["user_1"]
+    assert "user_1" in pg_store.id_lookups
+    assert redis_store.saved_sessions
+    assert app.state.podium.users == {}
 
 
 def test_managed_podium_state_does_not_declare_business_collections() -> None:

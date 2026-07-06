@@ -108,6 +108,8 @@ class CoordinationResult(dict[str, Any]):
         phase_human_actions_missing_response: int,
         phase_human_actions_failed: int,
         linear_phase_projections: int,
+        dispatchable: int = 0,
+        blocked_waiting: int = 0,
         reconcile_findings: list[dict[str, Any]] | None = None,
         remediations: dict[str, Any] | None = None,
         crash_restarts: int = 0,
@@ -128,6 +130,8 @@ class CoordinationResult(dict[str, Any]):
             phase_human_actions_missing_response=phase_human_actions_missing_response,
             phase_human_actions_failed=phase_human_actions_failed,
             linear_phase_projections=linear_phase_projections,
+            dispatchable=dispatchable,
+            blocked_waiting=blocked_waiting,
             reconcile_findings=list(reconcile_findings or []),
             remediations=dict(remediations or {}),
             crash_restarts=crash_restarts,
@@ -275,10 +279,16 @@ class ConductorService:
             issue_identifier=issue_identifier or None,
             workflow_profile=instance.workflow_profile,
             dispatch_id=dispatch_id or None,
+            blocked_by=_blocked_by_issue_ids(event.get("blocked_by")),
+            parent_issue_id=_optional_dispatch_ref(event.get("parent_issue_id") or event.get("parent")),
         )
         if run.phase is RunPhase.QUEUED:
             refreshed = self.get_instance(instance.id) or instance
-            if refreshed.process_status not in {"running", "starting"} and _run_due(run):
+            if (
+                refreshed.process_status not in {"running", "starting"}
+                and _run_due(run)
+                and self.scheduler.is_dispatchable(run)
+            ):
                 started = await self._start_orchestration_run(run, refreshed)
                 self.store.update_instance(started)
         return {
@@ -483,6 +493,7 @@ class ConductorService:
         phase_timeouts = await self._record_phase_timeouts()
         phase_crash_retries, phase_crash_failures = await self._record_phase_crashes()
         reconcile_findings = reconcile_orchestration_health(store=self.store)
+        scheduler_readiness = self.scheduler.readiness_counts()
         remediations = self.orchestration_remediator.remediate(reconcile_findings)
         phase_failure_human_actions_created = await self._create_phase_failure_human_actions()
         phase_human_actions = await self._coordinate_phase_human_actions()
@@ -520,6 +531,8 @@ class ConductorService:
             phase_human_actions_missing_response=phase_human_actions["missing_response"],
             phase_human_actions_failed=phase_human_actions["failed"],
             linear_phase_projections=linear_phase_projections,
+            dispatchable=scheduler_readiness["dispatchable"],
+            blocked_waiting=scheduler_readiness["blocked_waiting"],
             reconcile_findings=[finding.to_dict() for finding in reconcile_findings],
             remediations=remediations,
             crash_restarts=crash_restarts,
@@ -538,9 +551,6 @@ class ConductorService:
             "managed_podium_proxy_token_required",
             "Managed mode requires a Podium Linear proxy token before projecting orchestration phase state.",
         )
-
-    def _phase_projection_recorded(self, run_id: str, event_type: str, desired: dict[str, str | None]) -> bool:
-        return self.linear_projector._projection_recorded(run_id, event_type, desired)
 
     async def _create_phase_failure_human_actions(self) -> int:
         created = 0
@@ -715,6 +725,8 @@ class ConductorService:
             issue_identifier=issue_identifier,
             workflow_profile=instance.workflow_profile,
             dispatch_id=None,
+            blocked_by=[],
+            parent_issue_id=None,
         )
         if attempt is not None and attempt > run.attempt:
             run = self.store.apply_event(
@@ -2279,6 +2291,28 @@ def _safe_multiline_linear_value(value: Any) -> str:
         if marker in text:
             text = text.split(marker, 1)[0] + marker + "[redacted]"
     return text[:1000]
+
+
+def _optional_dispatch_ref(value: Any) -> str | None:
+    if isinstance(value, dict):
+        value = value.get("id")
+    text = str(value or "").strip()
+    return text or None
+
+
+def _blocked_by_issue_ids(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    blocked_by: list[str] = []
+    seen: set[str] = set()
+    for blocker in value:
+        candidate = blocker.get("id") if isinstance(blocker, dict) else getattr(blocker, "id", blocker)
+        text = str(candidate or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        blocked_by.append(text)
+    return blocked_by
 
 
 def _sanitize_codex_profile(value: Any) -> dict[str, Any]:

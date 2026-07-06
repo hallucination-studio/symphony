@@ -45,6 +45,55 @@ def test_store_upserts_duplicate_dispatch_by_instance_and_issue(tmp_path: Path) 
     assert [event.event_type for event in events] == ["dispatch.created", "dispatch.duplicate"]
 
 
+def test_dispatch_dependency_metadata_rebuilds_from_event_log(tmp_path: Path) -> None:
+    store = ConductorStore(tmp_path / "conductor-data")
+    reducer = PhaseReducer(store)
+
+    run = reducer.dispatch_received(
+        instance_id="inst-1",
+        issue_id="issue-2",
+        issue_identifier="ENG-2",
+        workflow_profile="default",
+        dispatch_id="dispatch-2",
+        blocked_by=["issue-1", "issue-1", ""],
+        parent_issue_id="parent-1",
+    )
+
+    assert run.blocked_by == ["issue-1"]
+    assert run.parent_issue_id == "parent-1"
+    assert store.rebuild_run(run.run_id) == run
+    assert store.list_orchestration_events(run.run_id)[0].payload["blocked_by"] == ["issue-1"]
+
+
+def test_duplicate_dispatch_updates_dependency_metadata_through_event_log(tmp_path: Path) -> None:
+    store = ConductorStore(tmp_path / "conductor-data")
+    reducer = PhaseReducer(store)
+    first = reducer.dispatch_received(
+        instance_id="inst-1",
+        issue_id="issue-2",
+        issue_identifier="ENG-2",
+        workflow_profile="default",
+        dispatch_id="dispatch-1",
+        blocked_by=["issue-1"],
+        parent_issue_id="parent-1",
+    )
+
+    second = reducer.dispatch_received(
+        instance_id="inst-1",
+        issue_id="issue-2",
+        issue_identifier="ENG-2",
+        workflow_profile="default",
+        dispatch_id="dispatch-2",
+        blocked_by=[],
+        parent_issue_id="parent-2",
+    )
+
+    assert second.run_id == first.run_id
+    assert second.blocked_by == []
+    assert second.parent_issue_id == "parent-2"
+    assert store.rebuild_run(first.run_id) == second
+
+
 def test_store_reopens_terminal_issue_dispatch_as_new_epoch(tmp_path: Path) -> None:
     store = ConductorStore(tmp_path / "conductor-data")
     reducer = PhaseReducer(store)

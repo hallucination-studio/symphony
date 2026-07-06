@@ -51,6 +51,8 @@ class DirectIngress:
                     issue_identifier=issue_identifier or None,
                     workflow_profile=instance.workflow_profile,
                     dispatch_id=None,
+                    blocked_by=_blocked_by_issue_ids(issue.get("blocked_by")),
+                    parent_issue_id=_optional_issue_ref(issue.get("parent_issue_id") or issue.get("parent")),
                 )
                 received += 1
         return received
@@ -59,6 +61,28 @@ class DirectIngress:
 def _issue_field(issue: dict[str, Any], key: str) -> str:
     value = issue.get(key)
     return str(value).strip() if value is not None else ""
+
+
+def _optional_issue_ref(value: Any) -> str | None:
+    if isinstance(value, dict):
+        value = value.get("id")
+    text = str(value or "").strip()
+    return text or None
+
+
+def _blocked_by_issue_ids(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    blocked_by: list[str] = []
+    seen: set[str] = set()
+    for blocker in value:
+        candidate = blocker.get("id") if isinstance(blocker, dict) else getattr(blocker, "id", blocker)
+        text = str(candidate or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        blocked_by.append(text)
+    return blocked_by
 
 
 def _is_system_child_issue(issue: dict[str, Any]) -> bool:

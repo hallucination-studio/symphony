@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
+import contextlib
 import os
 from pathlib import Path
 
 import uvicorn
 
 from .app import create_app
+from .config import PodiumConfig
+from .store import PgStore, RedisStore
 
 
 def env_flag(name: str) -> bool:
@@ -29,7 +33,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def main(argv: list[str] | None = None) -> int:
+    return asyncio.run(async_main(argv))
+
+
+async def async_main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    config = PodiumConfig.from_env()
+    pg_store = None
+    redis_store = None
+    if config.database_url:
+        pg_store = await PgStore.connect(config.database_url)
+        await pg_store.migrate()
+    if config.redis_url:
+        redis_store = RedisStore(redis_url=config.redis_url)
     default_static = Path(__file__).resolve().parent / "static"
     app = create_app(
         session_cookie_name=os.environ.get("PODIUM_SESSION_COOKIE_NAME", "podium_session"),
@@ -41,9 +57,22 @@ def main(argv: list[str] | None = None) -> int:
         linear_client_secret=os.environ.get("LINEAR_CLIENT_SECRET", ""),
         linear_redirect_uri=os.environ.get("LINEAR_REDIRECT_URI", ""),
         podium_base_url=os.environ.get("PODIUM_BASE_URL", "https://podium.example"),
+        pg_store=pg_store,
+        redis_store=redis_store,
+        config=config,
         debug_auth=env_flag("PODIUM_DEBUG_AUTH"),
     )
-    uvicorn.run(app, host=args.host, port=args.port)
+    try:
+        config = uvicorn.Config(app, host=args.host, port=args.port)
+        server = uvicorn.Server(config)
+        await server.serve()
+    finally:
+        if redis_store is not None:
+            with contextlib.suppress(asyncio.CancelledError):
+                await redis_store.close()
+        if pg_store is not None:
+            with contextlib.suppress(asyncio.CancelledError):
+                await pg_store.close()
     return 0
 
 

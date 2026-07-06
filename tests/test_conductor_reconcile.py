@@ -31,6 +31,42 @@ def test_reconcile_detects_materialized_projection_drift(tmp_path: Path) -> None
     assert "orchestration_projection_drift" in _codes(findings)
 
 
+def test_reconcile_reports_dependency_readiness_drift_when_all_blockers_terminal(tmp_path: Path) -> None:
+    store = ConductorStore(tmp_path / "conductor-data")
+    reducer = PhaseReducer(store)
+    blocker = reducer.dispatch_received(
+        instance_id="inst-1",
+        issue_id="issue-1",
+        issue_identifier="ENG-1",
+        workflow_profile="default",
+        dispatch_id="dispatch-1",
+    )
+    blocked = reducer.dispatch_received(
+        instance_id="inst-1",
+        issue_id="issue-2",
+        issue_identifier="ENG-2",
+        workflow_profile="default",
+        dispatch_id="dispatch-2",
+        blocked_by=[blocker.issue_id],
+    )
+    reducer.performer_started(blocker.run_id, request_path="/tmp/request.json", result_path="/tmp/result.json")
+    reducer.performer_result(
+        PhaseAdvanceResult(
+            run_id=blocker.run_id,
+            issue_id=blocker.issue_id,
+            next_phase=RunPhase.DONE,
+            status="completed",
+            reason="completed_by_runtime",
+        )
+    )
+
+    findings = reconcile_orchestration_health(store=store)
+
+    drift = next(finding for finding in findings if finding.code == "dependency_readiness_drift")
+    assert drift.run_id == blocked.run_id
+    assert drift.issue_id == blocked.issue_id
+
+
 def test_remediator_rewrites_materialized_projection_drift_from_event_log(tmp_path: Path) -> None:
     store = ConductorStore(tmp_path / "conductor-data")
     reducer = PhaseReducer(store)

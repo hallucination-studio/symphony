@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from datetime import datetime
+import json
 from typing import Any
 
 import asyncpg
@@ -136,6 +138,9 @@ class PgStore:
         self.pool = pool
         self.database_url = database_url
         self._owns_pool = False
+        self._memory_users: dict[str, dict[str, Any]] = {}
+        self._memory_linear_installations: dict[str, dict[str, Any]] = {}
+        self._memory_onboarding_state: dict[str, dict[str, Any]] = {}
 
     @classmethod
     async def connect(cls, database_url: str) -> PgStore:
@@ -157,7 +162,15 @@ class PgStore:
 
     async def create_user(self, user_id: str, *, email: str, password_hash: str, created_at: str) -> dict[str, Any]:
         if self.pool is None:
-            raise RuntimeError("postgres_pool_unavailable")
+            user = {
+                "id": user_id,
+                "email": email,
+                "password_hash": password_hash,
+                "created_at": created_at,
+                "linear_app": None,
+            }
+            self._memory_users[user_id] = user
+            return dict(user)
         row = await self.pool.fetchrow(
             """
             INSERT INTO users (id, email, password_hash, created_at)
@@ -167,13 +180,14 @@ class PgStore:
             user_id,
             email,
             password_hash,
-            created_at,
+            _pg_datetime(created_at),
         )
         return _record_to_user(row)
 
     async def get_user(self, user_id: str) -> dict[str, Any] | None:
         if self.pool is None:
-            raise RuntimeError("postgres_pool_unavailable")
+            user = self._memory_users.get(user_id)
+            return dict(user) if user is not None else None
         row = await self.pool.fetchrow(
             "SELECT id, email, password_hash, created_at, linear_app_json FROM users WHERE id = $1",
             user_id,
@@ -182,7 +196,10 @@ class PgStore:
 
     async def get_user_by_email(self, email: str) -> dict[str, Any] | None:
         if self.pool is None:
-            raise RuntimeError("postgres_pool_unavailable")
+            for user in self._memory_users.values():
+                if str(user.get("email") or "") == email:
+                    return dict(user)
+            return None
         row = await self.pool.fetchrow(
             "SELECT id, email, password_hash, created_at, linear_app_json FROM users WHERE email = $1",
             email,
@@ -191,12 +208,16 @@ class PgStore:
 
     async def set_user_linear_app(self, user_id: str, linear_app: dict[str, Any] | None) -> None:
         if self.pool is None:
-            raise RuntimeError("postgres_pool_unavailable")
+            user = self._memory_users.get(user_id)
+            if user is not None:
+                user["linear_app"] = linear_app
+            return
         await self.pool.execute("UPDATE users SET linear_app_json = $2 WHERE id = $1", user_id, linear_app)
 
     async def save_linear_installation(self, workspace_id: str, installation: dict[str, Any]) -> None:
         if self.pool is None:
-            raise RuntimeError("postgres_pool_unavailable")
+            self._memory_linear_installations[workspace_id] = dict(installation)
+            return
         await self.pool.execute(
             """
             INSERT INTO linear_installations (workspace_id, access_token_enc, scope, expires_at)
@@ -208,13 +229,21 @@ class PgStore:
             """,
             workspace_id,
             str(installation.get("access_token") or installation.get("access_token_enc") or ""),
-            installation.get("scope"),
-            installation.get("expires_at"),
+            _pg_json(installation.get("scope")),
+            _pg_datetime(installation.get("expires_at")),
         )
 
     async def get_linear_installation(self, workspace_id: str) -> dict[str, Any] | None:
         if self.pool is None:
-            raise RuntimeError("postgres_pool_unavailable")
+            installation = self._memory_linear_installations.get(workspace_id)
+            if installation is None:
+                return None
+            return {
+                "workspace_id": str(installation.get("workspace_id") or workspace_id),
+                "access_token": str(installation.get("access_token") or installation.get("access_token_enc") or ""),
+                "scope": installation.get("scope"),
+                "expires_at": installation.get("expires_at"),
+            }
         row = await self.pool.fetchrow(
             "SELECT workspace_id, access_token_enc, scope, expires_at FROM linear_installations WHERE workspace_id = $1",
             workspace_id,
@@ -257,8 +286,8 @@ class PgStore:
             str(conductor.get("proxy_token_hash") or ""),
             bool(conductor.get("disabled")),
             bool(conductor.get("revoked")),
-            str(conductor.get("created_at")),
-            conductor.get("last_report_at"),
+            _pg_datetime(conductor.get("created_at")),
+            _pg_datetime(conductor.get("last_report_at")),
         )
 
     async def upsert_project_binding(self, binding: dict[str, Any]) -> None:
@@ -292,13 +321,17 @@ class PgStore:
             str(binding.get("agent_app_user_id") or ""),
             str(binding.get("workflow_profile") or "task"),
             str(binding.get("process_status") or ""),
-            binding.get("repo_source") or {},
-            str(binding.get("updated_at")),
+            _pg_json(binding.get("repo_source") or {}),
+            _pg_datetime(binding.get("updated_at")),
         )
 
     async def save_onboarding_state(self, user_id: str, completed_steps: list[str], metadata: dict[str, Any]) -> None:
         if self.pool is None:
-            raise RuntimeError("postgres_pool_unavailable")
+            self._memory_onboarding_state[user_id] = {
+                "completed_steps": list(completed_steps),
+                "metadata": dict(metadata),
+            }
+            return
         await self.pool.execute(
             """
             INSERT INTO onboarding_state (user_id, completed_steps_json, metadata_json, updated_at)
@@ -309,13 +342,14 @@ class PgStore:
               updated_at = EXCLUDED.updated_at
             """,
             user_id,
-            completed_steps,
-            metadata,
+            _pg_json(completed_steps),
+            _pg_json(metadata),
         )
 
     async def get_onboarding_state(self, user_id: str) -> dict[str, Any] | None:
         if self.pool is None:
-            raise RuntimeError("postgres_pool_unavailable")
+            row = self._memory_onboarding_state.get(user_id)
+            return dict(row) if row is not None else None
         row = await self.pool.fetchrow(
             "SELECT completed_steps_json, metadata_json, updated_at FROM onboarding_state WHERE user_id = $1",
             user_id,
@@ -330,7 +364,7 @@ class PgStore:
 
     async def insert_proxy_audit_event(self, event: dict[str, Any]) -> None:
         if self.pool is None:
-            raise RuntimeError("postgres_pool_unavailable")
+            return
         await self.pool.execute(
             """
             INSERT INTO proxy_audit_events (
@@ -343,8 +377,8 @@ class PgStore:
             event.get("operation_name"),
             bool(event.get("allowed")),
             str(event.get("reason") or ""),
-            event.get("metadata") or {},
-            str(event.get("timestamp") or event.get("created_at") or ""),
+            _pg_json(event.get("metadata") or {}),
+            _pg_datetime(event.get("timestamp") or event.get("created_at") or ""),
         )
 
 
@@ -356,3 +390,17 @@ def _record_to_user(row: Any) -> dict[str, Any]:
         "created_at": row["created_at"].isoformat() if row["created_at"] is not None else "",
         "linear_app": row["linear_app_json"],
     }
+
+
+def _pg_datetime(value: Any) -> datetime | None:
+    if value in {None, ""}:
+        return None
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str):
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    raise TypeError(f"expected datetime-compatible value, got {type(value).__name__}")
+
+
+def _pg_json(value: Any) -> str:
+    return json.dumps(value, sort_keys=True)

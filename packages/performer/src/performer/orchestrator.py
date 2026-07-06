@@ -1856,6 +1856,9 @@ class Orchestrator:
             self._sync_lifecycle_label(issue_id, label_name, only_if_current=True)
         )
 
+    def sync_label_group_background(self, issue_id: str, label_name: str, *, prefix: str) -> None:
+        self._sync_label_group_background(issue_id, label_name, prefix=prefix)
+
     def _sync_label_group_background(self, issue_id: str, label_name: str, *, prefix: str) -> None:
         if not self.config.tracker.lifecycle_labels_enabled:
             return

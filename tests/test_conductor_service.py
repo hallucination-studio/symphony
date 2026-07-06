@@ -57,6 +57,60 @@ def test_conductor_service_constructs_long_lived_collaborators(tmp_path: Path) -
     assert service.orchestration_remediator is service.orchestration_remediator
 
 
+@pytest.mark.asyncio
+async def test_repository_handoff_proxy_returns_dependency_metadata_from_linear_candidates() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    "issues": {
+                        "nodes": [
+                            {
+                                "id": "issue-2",
+                                "identifier": "ENG-2",
+                                "title": "Blocked child",
+                                "description": "",
+                                "url": "https://linear.test/ENG-2",
+                                "state": {"name": "Todo", "type": "unstarted"},
+                                "parent": {"id": "parent-1", "identifier": "ENG-0"},
+                                "delegate": {"id": "app-user-1"},
+                                "labels": {"nodes": [{"name": "codex"}]},
+                                "inverseRelations": {
+                                    "nodes": [
+                                        {
+                                            "type": "blocks",
+                                            "issue": {
+                                                "id": "issue-1",
+                                                "identifier": "ENG-1",
+                                                "state": {"name": "In Progress"},
+                                            },
+                                        }
+                                    ]
+                                },
+                            }
+                        ],
+                        "pageInfo": {"hasNextPage": False, "endCursor": None},
+                    }
+                }
+            },
+        )
+
+    proxy = RepositoryHandoffLinearProxy(
+        endpoint="https://linear.test/graphql",
+        api_key="linear-token",
+        project_slug="ENG",
+        transport=httpx.MockTransport(handler),
+    )
+
+    issues = await proxy.fetch_candidate_issues()
+
+    assert issues[0]["parent_issue_id"] == "parent-1"
+    assert issues[0]["blocked_by"] == [
+        {"id": "issue-1", "identifier": "ENG-1", "state": "In Progress"}
+    ]
+
+
 def make_repo(tmp_path: Path, name: str = "repo") -> Path:
     repo = tmp_path / name
     repo.mkdir(parents=True)
@@ -514,9 +568,39 @@ async def test_coordinate_background_returns_structured_result_without_legacy_re
 
     assert isinstance(result, CoordinationResult)
     assert result["phase_runs_started"] == result.phase_runs_started
+    assert result["dispatchable"] == 0
+    assert result["blocked_waiting"] == 0
     assert "resumed" not in result.to_dict()
     with pytest.raises(KeyError):
         _ = result["resumed"]
+
+
+@pytest.mark.asyncio
+async def test_coordinate_background_reports_dependency_readiness_breakdown(tmp_path: Path) -> None:
+    service = make_service(tmp_path)
+    repo = make_repo(tmp_path)
+    instance = service.create_instance(make_request(repo))
+    service.phase_reducer.dispatch_received(
+        instance_id=instance.id,
+        issue_id="issue-ready",
+        issue_identifier="ENG-1",
+        workflow_profile="default",
+        dispatch_id=None,
+    )
+    service.phase_reducer.dispatch_received(
+        instance_id=instance.id,
+        issue_id="issue-blocked",
+        issue_identifier="ENG-2",
+        workflow_profile="default",
+        dispatch_id=None,
+        blocked_by=["missing-blocker"],
+    )
+
+    result = await service.coordinate_background_once()
+
+    assert result["dispatchable"] == 0
+    assert result["blocked_waiting"] == 1
+    assert result["phase_runs_started"] == 1
 
 
 @pytest.mark.asyncio
@@ -1585,6 +1669,39 @@ async def test_dispatch_podium_event_starts_one_shot_performer_for_matching_line
 
 
 @pytest.mark.asyncio
+async def test_dispatch_podium_event_keeps_blocked_run_queued_at_scheduler_gate(tmp_path: Path) -> None:
+    runtime = CapturingRuntime()
+    service = ConductorService(
+        store=ConductorStore(tmp_path / "conductor-data"),
+        data_root=tmp_path / "conductor-data",
+        runtime_manager=runtime,
+    )
+    repo = make_repo(tmp_path)
+    instance = service.create_instance(
+        make_request(repo).with_overrides(linear_project="ENG", linear_filters={"linear_agent_app_user_id": "app-user-1"})
+    )
+
+    result = await service.dispatch_podium_event(
+        {
+            "issue_id": "issue-2",
+            "issue_identifier": "ENG-2",
+            "project_slug": "ENG",
+            "agent_app_user_id": "app-user-1",
+            "blocked_by": [{"id": "issue-1", "identifier": "ENG-1", "state": "In Progress"}],
+            "parent_issue_id": "parent-1",
+        }
+    )
+
+    run = service.store.get_orchestration_run_by_issue(instance.id, "issue-2")
+    assert result["status"] == "accepted"
+    assert run is not None
+    assert run.phase is RunPhase.QUEUED
+    assert run.blocked_by == ["issue-1"]
+    assert run.parent_issue_id == "parent-1"
+    assert runtime.started_phase_issue_ids == []
+
+
+@pytest.mark.asyncio
 async def test_dispatch_podium_event_accepts_project_bound_instance_without_agent_filter(tmp_path: Path) -> None:
     runtime = CapturingRuntime()
     service = ConductorService(
@@ -2498,6 +2615,9 @@ async def test_direct_default_tracker_fetches_candidate_issues_from_linear_proxy
             "state": "Todo",
             "state_type": "started",
             "delegate_id": "app-user-1",
+            "parent_issue_id": None,
+            "parent_identifier": None,
+            "blocked_by": [],
             "labels": ["performer:phase/queued"],
         }
     ]

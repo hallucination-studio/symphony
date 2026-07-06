@@ -260,7 +260,11 @@ class ConductorStore:
         issue_identifier: str | None,
         workflow_profile: str | None,
         dispatch_id: str | None,
+        blocked_by: list[str] | None = None,
+        parent_issue_id: str | None = None,
     ) -> OrchestrationRun:
+        blocked_by = _clean_string_list(blocked_by)
+        parent_issue_id = _optional_text(parent_issue_id)
         with self.connect() as connection:
             row = connection.execute(
                 """
@@ -285,6 +289,8 @@ class ConductorStore:
                         "dispatch_id": dispatch_id,
                         "issue_identifier": issue_identifier,
                         "workflow_profile": workflow_profile,
+                        "blocked_by": blocked_by,
+                        "parent_issue_id": parent_issue_id,
                     },
                 },
             )
@@ -303,6 +309,8 @@ class ConductorStore:
                         "issue_identifier": issue_identifier,
                         "workflow_profile": workflow_profile,
                         "epoch": run.epoch + 1,
+                        "blocked_by": blocked_by,
+                        "parent_issue_id": parent_issue_id,
                     },
                 },
             )
@@ -315,6 +323,8 @@ class ConductorStore:
                     "dispatch_id": dispatch_id,
                     "issue_identifier": issue_identifier,
                     "workflow_profile": workflow_profile,
+                    "blocked_by": blocked_by,
+                    "parent_issue_id": parent_issue_id,
                 },
             },
         )
@@ -337,6 +347,33 @@ class ConductorStore:
                 (instance_id, issue_id),
             ).fetchone()
         return _orchestration_run_from_row(row) if row is not None else None
+
+    def get_latest_orchestration_run_for_issue(self, issue_id: str) -> OrchestrationRun | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT *
+                FROM orchestration_runs
+                WHERE issue_id = ?
+                ORDER BY epoch DESC, created_at DESC, run_id DESC
+                LIMIT 1
+                """,
+                (issue_id,),
+            ).fetchone()
+        return _orchestration_run_from_row(row) if row is not None else None
+
+    def has_terminal_orchestration_run_for_issue(self, issue_id: str) -> bool:
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT 1
+                FROM orchestration_runs
+                WHERE issue_id = ? AND phase IN ('done', 'failed')
+                LIMIT 1
+                """,
+                (issue_id,),
+            ).fetchone()
+        return row is not None
 
     def list_orchestration_runs(
         self,
@@ -608,6 +645,8 @@ class ConductorStore:
                   instance_id TEXT NOT NULL,
                   issue_id TEXT NOT NULL,
                   issue_identifier TEXT,
+                  blocked_by_json TEXT NOT NULL DEFAULT '[]',
+                  parent_issue_id TEXT,
                   phase TEXT NOT NULL,
                   status TEXT NOT NULL,
                   epoch INTEGER NOT NULL DEFAULT 1,
@@ -667,6 +706,8 @@ class ConductorStore:
             _ensure_column(connection, "orchestration_runs", "init_failure_count", "INTEGER NOT NULL DEFAULT 0")
             _ensure_column(connection, "orchestration_runs", "overload_count", "INTEGER NOT NULL DEFAULT 0")
             _ensure_column(connection, "orchestration_runs", "epoch", "INTEGER NOT NULL DEFAULT 1")
+            _ensure_column(connection, "orchestration_runs", "blocked_by_json", "TEXT NOT NULL DEFAULT '[]'")
+            _ensure_column(connection, "orchestration_runs", "parent_issue_id", "TEXT")
             _ensure_column(connection, "instances", "restart_next_at", "TEXT")
 
     def _set_runtime_action_status(self, action_id: str, *, status: str, error: str | None = None) -> None:
@@ -766,6 +807,8 @@ def _orchestration_run_values(run: OrchestrationRun) -> tuple[Any, ...]:
         run.instance_id,
         run.issue_id,
         run.issue_identifier,
+        _json_dumps(run.blocked_by),
+        run.parent_issue_id,
         run.phase.value,
         run.status,
         run.epoch,
@@ -799,6 +842,8 @@ def _orchestration_run_from_row(row: sqlite3.Row) -> OrchestrationRun:
         instance_id=str(row["instance_id"]),
         issue_id=str(row["issue_id"]),
         issue_identifier=row["issue_identifier"],
+        blocked_by=_json_loads_list(row["blocked_by_json"]),
+        parent_issue_id=row["parent_issue_id"],
         phase=RunPhase(str(row["phase"])),
         status=str(row["status"]),
         epoch=int(row["epoch"] or 1),
@@ -834,6 +879,8 @@ def _write_orchestration_run_projection(connection: sqlite3.Connection, run: Orc
           instance_id,
           issue_id,
           issue_identifier,
+          blocked_by_json,
+          parent_issue_id,
           phase,
           status,
           epoch,
@@ -859,11 +906,13 @@ def _write_orchestration_run_projection(connection: sqlite3.Connection, run: Orc
           created_at,
           updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(run_id) DO UPDATE SET
           instance_id = excluded.instance_id,
           issue_id = excluded.issue_id,
           issue_identifier = excluded.issue_identifier,
+          blocked_by_json = excluded.blocked_by_json,
+          parent_issue_id = excluded.parent_issue_id,
           phase = excluded.phase,
           status = excluded.status,
           epoch = excluded.epoch,
@@ -903,6 +952,8 @@ def _project_orchestration_event(current: OrchestrationRun | None, event: Orches
             instance_id=event.instance_id,
             issue_id=event.issue_id,
             issue_identifier=_optional_text(payload.get("issue_identifier")),
+            blocked_by=_clean_string_list(payload.get("blocked_by")),
+            parent_issue_id=_optional_text(payload.get("parent_issue_id")),
             workflow_profile=_optional_text(payload.get("workflow_profile")),
             dispatch_id=_optional_text(payload.get("dispatch_id")),
             epoch=_optional_int(payload.get("epoch"), default=1),
@@ -916,6 +967,10 @@ def _project_orchestration_event(current: OrchestrationRun | None, event: Orches
         for key in ("issue_identifier", "workflow_profile", "dispatch_id"):
             if payload.get(key):
                 changes[key] = payload[key]
+        if "blocked_by" in payload:
+            changes["blocked_by"] = _clean_string_list(payload.get("blocked_by"))
+        if "parent_issue_id" in payload:
+            changes["parent_issue_id"] = _optional_text(payload.get("parent_issue_id"))
     elif event.event_type == "projection.patch":
         changes.update(_normalize_projection_payload(payload))
     elif event.event_type in {
@@ -1004,6 +1059,10 @@ def _normalize_run_change(key: str, value: Any) -> Any:
         return RunPhase(str(value))
     if key == "status" and hasattr(value, "value"):
         return value.value
+    if key == "blocked_by":
+        return _clean_string_list(value)
+    if key == "parent_issue_id":
+        return _optional_text(value)
     return value
 
 
@@ -1033,6 +1092,8 @@ def _normalize_projection_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "ack_status",
         "acked_at",
         "issue_identifier",
+        "blocked_by",
+        "parent_issue_id",
     }
     for key, value in payload.items():
         if key not in allowed:
@@ -1114,3 +1175,24 @@ def _json_loads_dict(value: Any) -> dict[str, Any]:
         return {}
     payload = json.loads(str(value))
     return payload if isinstance(payload, dict) else {}
+
+
+def _json_loads_list(value: Any) -> list[str]:
+    if not value:
+        return []
+    payload = json.loads(str(value))
+    return _clean_string_list(payload)
+
+
+def _clean_string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        text = str(item or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        cleaned.append(text)
+    return cleaned

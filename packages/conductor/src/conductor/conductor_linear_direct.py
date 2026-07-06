@@ -64,8 +64,16 @@ query ConductorDirectCandidateIssues($projectSlug: String!, $stateNames: [String
       description
       url
       state {{ name type }}
+      parent {{ id identifier }}
       delegate {{ id }}
       labels {{ nodes {{ name }} }}
+      inverseRelations(first: 20) {{
+        nodes {{
+          type
+          issue {{ id identifier state {{ name }} }}
+          relatedIssue {{ id identifier state {{ name }} }}
+        }}
+      }}
     }}
     pageInfo {{ hasNextPage endCursor }}
   }}
@@ -499,7 +507,24 @@ def _normalize_linear_issue_dict(node: dict[str, Any]) -> dict[str, Any]:
     labels = node.get("labels") if isinstance(node.get("labels"), dict) else {}
     label_nodes = labels.get("nodes") if isinstance(labels, dict) else []
     delegate = node.get("delegate") if isinstance(node.get("delegate"), dict) else None
+    parent = node.get("parent") if isinstance(node.get("parent"), dict) else None
     state = node.get("state") if isinstance(node.get("state"), dict) else {}
+    blocked_by: list[dict[str, str | None]] = []
+    inverse_relations = node.get("inverseRelations") if isinstance(node.get("inverseRelations"), dict) else {}
+    for relation in inverse_relations.get("nodes") or []:
+        if not isinstance(relation, dict) or relation.get("type") != "blocks":
+            continue
+        issue = relation.get("issue") or relation.get("relatedIssue") or {}
+        if not isinstance(issue, dict):
+            continue
+        blocker_state = issue.get("state") if isinstance(issue.get("state"), dict) else {}
+        blocked_by.append(
+            {
+                "id": issue.get("id"),
+                "identifier": issue.get("identifier"),
+                "state": blocker_state.get("name") if isinstance(blocker_state, dict) else issue.get("state"),
+            }
+        )
     return {
         "id": node.get("id"),
         "identifier": node.get("identifier"),
@@ -509,6 +534,9 @@ def _normalize_linear_issue_dict(node: dict[str, Any]) -> dict[str, Any]:
         "state": state.get("name") if isinstance(state, dict) else node.get("state"),
         "state_type": state.get("type") if isinstance(state, dict) else None,
         "delegate_id": delegate.get("id") if delegate else None,
+        "parent_issue_id": parent.get("id") if parent else None,
+        "parent_identifier": parent.get("identifier") if parent else None,
+        "blocked_by": blocked_by,
         "labels": [
             str(label.get("name") or "")
             for label in (label_nodes or [])

@@ -38,6 +38,7 @@ class OrchestrationScheduler:
         self.runtime_env = runtime_env
         self.get_instance = get_instance
         self.policy = policy or SchedulerPolicy()
+        self._last_readiness_counts = {"dispatchable": 0, "blocked_waiting": 0}
 
     async def start_due_runs(self) -> int:
         started_count = 0
@@ -45,7 +46,13 @@ class OrchestrationScheduler:
         remaining_capacity = self.policy.remaining_capacity(active_count)
         if remaining_capacity == 0:
             return 0
-        for run in self._fair_due_runs(self.store.list_due_orchestration_runs()):
+        due_runs = self.store.list_due_orchestration_runs()
+        dispatchable_runs = self._dispatchable_due_runs(due_runs)
+        self._last_readiness_counts = {
+            "dispatchable": len(dispatchable_runs),
+            "blocked_waiting": len(due_runs) - len(dispatchable_runs),
+        }
+        for run in self._fair_due_runs(dispatchable_runs):
             if remaining_capacity is not None and started_count >= remaining_capacity:
                 break
             instance = self.store.get_instance(run.instance_id)
@@ -61,6 +68,14 @@ class OrchestrationScheduler:
             self.store.update_instance(started)
             started_count += 1
         return started_count
+
+    def readiness_counts(self) -> dict[str, int]:
+        due_runs = self.store.list_due_orchestration_runs()
+        dispatchable_runs = self._dispatchable_due_runs(due_runs)
+        return {
+            "dispatchable": len(dispatchable_runs),
+            "blocked_waiting": len(due_runs) - len(dispatchable_runs),
+        }
 
     async def start_run(self, run: Any, instance: InstanceRecord) -> InstanceRecord:
         paths = phase_file_paths(instance, run.run_id)
@@ -113,6 +128,24 @@ class OrchestrationScheduler:
                 if queue:
                     fair.append(queue.pop(0))
         return fair
+
+    def _dispatchable_due_runs(self, runs: list[Any]) -> list[Any]:
+        return [run for run in runs if self._is_dispatchable(run)]
+
+    def is_dispatchable(self, run: Any) -> bool:
+        for blocker_issue_id in getattr(run, "blocked_by", []) or []:
+            has_terminal = getattr(self.store, "has_terminal_orchestration_run_for_issue", None)
+            if callable(has_terminal) and has_terminal(blocker_issue_id):
+                continue
+            blocker = self.store.get_latest_orchestration_run_for_issue(blocker_issue_id)
+            if blocker is None:
+                return False
+            if blocker.phase not in {RunPhase.DONE, RunPhase.FAILED}:
+                return False
+        return True
+
+    def _is_dispatchable(self, run: Any) -> bool:
+        return self.is_dispatchable(run)
 
     def _active_phases(self) -> set[RunPhase]:
         return {
