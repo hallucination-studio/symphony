@@ -105,7 +105,11 @@ def test_pg_migrator_exposes_phase_0_schema() -> None:
     assert "CREATE TABLE IF NOT EXISTS onboarding_state" in sql
     assert "CREATE TABLE IF NOT EXISTS proxy_audit_events" in sql
     assert "fencing_token BIGINT NOT NULL DEFAULT 0" in sql
-    assert "UNIQUE(project_binding_id, agent_session_id)" in sql
+    assert "UNIQUE(project_binding_id, agent_session_id)" not in sql
+    assert "dispatches_binding_session_unique" in sql
+    assert "WHERE agent_session_id <> ''" in sql
+    assert "dispatches_binding_issue_empty_session_unique" in sql
+    assert "WHERE agent_session_id = ''" in sql
     assert "sessions" not in sql.lower()
 
 
@@ -123,6 +127,18 @@ async def test_redis_store_persists_session_with_ttl() -> None:
     await store.save_session("token-hash", user_id="user_1", ttl_seconds=60)
 
     assert await store.get_session("token-hash") == {"user_id": "user_1", "revoked": False}
+    assert await client.ttl("session:token-hash") > 0
+
+
+async def test_redis_store_save_session_does_not_revive_revoked_token() -> None:
+    client = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    store = RedisStore(client)
+
+    await store.save_session("token-hash", user_id="user_1", ttl_seconds=60)
+    await store.revoke_session("token-hash")
+    await store.save_session("token-hash", user_id="user_1", ttl_seconds=60)
+
+    assert await store.get_session("token-hash") == {"user_id": "user_1", "revoked": True}
     assert await client.ttl("session:token-hash") > 0
 
 
@@ -177,6 +193,7 @@ class FakePgStore:
         self.email_lookups: list[str] = []
         self.id_lookups: list[str] = []
         self.linear_app_updates: list[tuple[str, dict[str, Any] | None]] = []
+        self.oauth_states: dict[str, dict[str, Any]] = {}
         self.onboarding_state: dict[str, dict[str, Any]] = {}
         self.conductors: dict[str, dict[str, Any]] = {}
         self.project_bindings: dict[str, dict[str, Any]] = {}
@@ -222,6 +239,13 @@ class FakePgStore:
         installation = self.linear_installations.get(workspace_id)
         return dict(installation) if installation is not None else None
 
+    async def save_oauth_state(self, state: str, *, workspace_id: str, expires_at: str) -> None:
+        self.oauth_states[state] = {"workspace_id": workspace_id, "expires_at": expires_at}
+
+    async def consume_oauth_state(self, state: str) -> str | None:
+        row = self.oauth_states.pop(state, None)
+        return str(row.get("workspace_id") or "") if row is not None else None
+
     async def save_onboarding_state(self, user_id: str, completed_steps: list[str], metadata: dict[str, Any]) -> None:
         self.onboarding_state[user_id] = {
             "completed_steps": list(completed_steps),
@@ -254,6 +278,21 @@ class FakePgStore:
                 }
         return None
 
+    async def get_runtime(self, runtime_id: str) -> dict[str, Any] | None:
+        conductor = self.conductors.get(runtime_id)
+        if conductor is None:
+            return None
+        return {
+            "id": str(conductor["id"]),
+            "runtime_group_id": f"group_{conductor.get('user_id') or ''}",
+            "user_id": str(conductor.get("user_id") or ""),
+            "runtime_token_hash": str(conductor.get("runtime_token_hash") or ""),
+            "proxy_token_hash": str(conductor.get("proxy_token_hash") or ""),
+            "disabled": bool(conductor.get("disabled")),
+            "revoked": bool(conductor.get("revoked")),
+            "created_at": str(conductor.get("created_at") or ""),
+        }
+
     async def list_conductors_for_user(self, user_id: str) -> list[dict[str, Any]]:
         return [
             dict(conductor)
@@ -263,6 +302,14 @@ class FakePgStore:
 
     async def upsert_dispatch(self, dispatch: dict[str, Any]) -> bool:
         for existing in self.dispatches.values():
+            if not str(dispatch.get("agent_session_id") or ""):
+                if (
+                    existing.get("project_binding_id") == dispatch.get("project_binding_id")
+                    and existing.get("issue_id") == dispatch.get("issue_id")
+                    and not str(existing.get("agent_session_id") or "")
+                ):
+                    return False
+                continue
             if (
                 existing.get("project_binding_id") == dispatch.get("project_binding_id")
                 and existing.get("agent_session_id") == dispatch.get("agent_session_id")
@@ -361,6 +408,7 @@ class FakeRedisStore:
     def __init__(self) -> None:
         self.sessions: dict[str, dict[str, Any]] = {}
         self.enrollment_tokens: dict[str, dict[str, Any]] = {}
+        self.oauth_states: dict[str, dict[str, Any]] = {}
         self.saved_sessions: list[str] = []
         self.owners: dict[str, str] = {}
         self.command_queues: dict[str, list[dict[str, Any]]] = {}
@@ -384,6 +432,13 @@ class FakeRedisStore:
 
     async def has_enrollment_token_for_group(self, runtime_group_id: str) -> bool:
         return any(row.get("runtime_group_id") == runtime_group_id for row in self.enrollment_tokens.values())
+
+    async def save_oauth_state(self, state: str, *, workspace_id: str, ttl_seconds: int) -> None:
+        self.oauth_states[state] = {"workspace_id": workspace_id, "ttl_seconds": ttl_seconds}
+
+    async def consume_oauth_state(self, state: str) -> str | None:
+        row = self.oauth_states.pop(state, None)
+        return str(row.get("workspace_id") or "") if row is not None else None
 
     async def set_conductor_owner(self, conductor_id: str, podium_instance_id: str, *, ttl_seconds: int) -> None:
         self.owners[conductor_id] = podium_instance_id

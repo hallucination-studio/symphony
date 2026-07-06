@@ -142,6 +142,7 @@ def test_remediator_escalates_timeout_finding_to_failed_run_for_human_action(tmp
             "to_phase": RunPhase.IMPLEMENTING,
             "payload": {"last_reason": "scenario_timeout"},
         },
+        expected_current_phases={RunPhase.IMPLEMENTING},
     )
     finding = next(finding for finding in reconcile_orchestration_health(store=store) if finding.code == "scenario_timeout_unresolved")
 
@@ -193,8 +194,16 @@ def test_reconcile_codes_when_to_stop_waiting_event_rules(tmp_path: Path) -> Non
             reason="implementation_ready_for_review",
         )
     )
-    store.apply_event(run.run_id, {"event_type": "gate.parent_mismatch", "to_phase": RunPhase.REVIEWING})
-    store.apply_event(run.run_id, {"event_type": "evidence.missing", "to_phase": RunPhase.REVIEWING})
+    store.apply_event(
+        run.run_id,
+        {"event_type": "gate.parent_mismatch", "to_phase": RunPhase.REVIEWING},
+        expected_current_phases={RunPhase.REVIEWING},
+    )
+    store.apply_event(
+        run.run_id,
+        {"event_type": "evidence.missing", "to_phase": RunPhase.REVIEWING},
+        expected_current_phases={RunPhase.REVIEWING},
+    )
     store.apply_event(
         run.run_id,
         {
@@ -202,6 +211,7 @@ def test_reconcile_codes_when_to_stop_waiting_event_rules(tmp_path: Path) -> Non
             "to_phase": RunPhase.REVIEWING,
             "payload": {"last_reason": "continuation", "retry_count": 1},
         },
+        expected_current_phases={RunPhase.REVIEWING},
     )
 
     findings = reconcile_orchestration_health(store=store)
@@ -240,6 +250,7 @@ def test_reconcile_accepts_review_after_linear_projection_event(tmp_path: Path) 
             "to_phase": RunPhase.REVIEWING,
             "payload": {"status": RunStatus.QUEUED},
         },
+        expected_current_phases={RunPhase.REVIEWING},
     )
 
     assert "review_phase_projection_missing" not in _codes(reconcile_orchestration_health(store=store))

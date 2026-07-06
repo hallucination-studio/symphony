@@ -31,6 +31,7 @@ class OrchestrationScheduler:
         runtime_manager: Any,
         runtime_env: Callable[[], dict[str, str]],
         get_instance: Callable[[str], InstanceRecord | None],
+        codex_profile_for_run: Callable[[str], dict[str, Any]] | None = None,
         policy: SchedulerPolicy | None = None,
         start_lock_for_instance: Callable[[str], asyncio.Lock] | None = None,
     ):
@@ -39,6 +40,7 @@ class OrchestrationScheduler:
         self.runtime_manager = runtime_manager
         self.runtime_env = runtime_env
         self.get_instance = get_instance
+        self.codex_profile_for_run = codex_profile_for_run or (lambda run_id: {})
         self.policy = policy or SchedulerPolicy()
         self.start_lock_for_instance = start_lock_for_instance
         self._last_readiness_counts = {"dispatchable": 0, "blocked_waiting": 0}
@@ -103,6 +105,7 @@ class OrchestrationScheduler:
             attempt=run.attempt,
             human_response=run.human_response,
             workflow_profile=run.workflow_profile or instance.workflow_profile,
+            codex_profile=self.codex_profile_for_run(run.run_id),
             workspace_context={
                 "instance_dir": instance.instance_dir,
                 "workspace_root": instance.workspace_root,

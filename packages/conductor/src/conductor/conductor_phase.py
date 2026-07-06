@@ -156,6 +156,7 @@ class PhaseReducer:
         fencing_token: int | None = None,
         blocked_by: list[str] | None = None,
         parent_issue_id: str | None = None,
+        codex_profile: dict[str, Any] | None = None,
     ) -> OrchestrationRun:
         return self.store.upsert_orchestration_run(
             instance_id=instance_id,
@@ -166,6 +167,7 @@ class PhaseReducer:
             fencing_token=fencing_token,
             blocked_by=blocked_by or [],
             parent_issue_id=parent_issue_id,
+            codex_profile=codex_profile or {},
         )
 
     def performer_started(

@@ -142,6 +142,46 @@ async def test_verify_completion_reuses_recorded_successful_pytest_command_for_s
 
 
 @pytest.mark.asyncio
+async def test_verify_completion_rejects_recorded_pytest_command_with_unsafe_options(tmp_path: Path) -> None:
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=workspace, check=True)
+    (workspace / "pyproject.toml").write_text("[project]\nname='demo'\nversion='0.1.0'\n", encoding="utf-8")
+    tests_dir = workspace / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "test_demo.py").write_text("def test_value():\n    assert True\n", encoding="utf-8")
+    verifier = CompletionVerifier(
+        CompletionVerificationConfig(
+            required_checks=["test_results"],
+            optional_checks=[],
+            expected_test_patterns=["tests/test_demo.py"],
+        ),
+        FakeTracker(),
+    )
+    snapshot = OpsSnapshot(
+        events=[
+            TraceEvent(
+                event_id="evt-1",
+                event_type="tool_call_completed",
+                timestamp="2026-07-01T00:00:00Z",
+                issue_id="mt-1",
+                payload={
+                    "command": "python -m pytest -p malicious_plugin tests/test_demo.py -q",
+                    "exit_code": 0,
+                },
+            )
+        ]
+    )
+
+    verdict = await verifier.verify_completion(issue(), workspace, snapshot)
+
+    check = next(check for check in verdict.checks if check.check_name == "test_results")
+    assert verdict.status == "NEEDS_RETRY"
+    assert check.passed is False
+    assert "unsafe" in check.message.lower() or "missing" in check.message.lower()
+
+
+@pytest.mark.asyncio
 async def test_verify_completion_accepts_matching_test_command_evidence(tmp_path: Path) -> None:
     workspace = tmp_path / "repo"
     workspace.mkdir()
@@ -547,6 +587,52 @@ async def test_verify_completion_rejects_pytest_command_from_summary_without_exe
 
     assert verdict.status == "NEEDS_RETRY"
     assert any(check.check_name == "test_results" and not check.passed for check in verdict.checks)
+
+
+@pytest.mark.asyncio
+async def test_verify_completion_accepts_verifier_run_as_test_command_evidence(tmp_path: Path) -> None:
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=workspace, check=True)
+    (workspace / "pyproject.toml").write_text("[project]\nname='demo'\nversion='0.1.0'\n", encoding="utf-8")
+    tests_dir = workspace / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "test_smoke.py").write_text("def test_smoke():\n    assert True\n", encoding="utf-8")
+    snapshot = OpsSnapshot(
+        runs={
+            "run-1": RunRecord(
+                run_id="run-1",
+                issue_id="mt-1",
+                instance_id="inst-1",
+                status="completed",
+            )
+        },
+        events=[
+            TraceEvent(
+                event_id="evt-1",
+                event_type="turn_completed",
+                timestamp="2026-07-03T00:00:00Z",
+                issue_id="mt-1",
+                run_id="run-1",
+                summary='{"test_commands":["pytest tests/test_smoke.py -q"]}',
+            )
+        ],
+    )
+    verifier = CompletionVerifier(
+        CompletionVerificationConfig(
+            required_checks=["test_results", "test_command_evidence"],
+            optional_checks=[],
+            expected_test_patterns=["tests/test_smoke.py"],
+        ),
+        FakeTracker(),
+    )
+
+    verdict = await verifier.verify_completion(issue(), workspace, snapshot)
+
+    assert verdict.status == "VERIFIED"
+    command_check = next(check for check in verdict.checks if check.check_name == "test_command_evidence")
+    assert command_check.passed is True
+    assert command_check.evidence["source"] == "verifier"
 
 
 @pytest.mark.asyncio

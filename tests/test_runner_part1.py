@@ -1,201 +1,4 @@
-from __future__ import annotations
-
-import json
-from pathlib import Path
-import subprocess
-from typing import Any
-
-import pytest
-
-from performer_api.config import (
-    AcceptanceConfig,
-    AgentConfig,
-    CodexConfig,
-    HooksConfig,
-    PersistenceConfig,
-    PollingConfig,
-    RepositoryHandoffConfig,
-    ServiceConfig,
-    TrackerConfig,
-    WorkspaceConfig,
-)
-from performer_api.models import Issue
-from performer_api.ops_store import OpsStore
-from performer_api.persistence import ops_snapshot_path_from_persistence_path
-from performer_api.persistence import CodexThreadEntry, PersistenceStore, PersistedState
-from performer.runner import AgentRunner
-from performer.workspace import Workspace, WorkspaceError, WorkspaceManager
-
-
-class FakeCodex:
-    def __init__(self):
-        self.workspace_path: Path | None = None
-        self.prompt: str | None = None
-        self.title: str | None = None
-        self.kwargs: dict[str, Any] | None = None
-
-    async def run_session(self, workspace_path: Path, prompt: str, title: str, **kwargs: Any) -> None:
-        self.workspace_path = workspace_path
-        self.prompt = prompt
-        self.title = title
-        self.kwargs = kwargs
-
-
-class FakeCodexWithThread(FakeCodex):
-    async def run_session(self, workspace_path: Path, prompt: str, title: str, **kwargs: Any) -> Any:
-        await super().run_session(workspace_path, prompt, title, **kwargs)
-
-        class Result:
-            thread_id = "thread-new"
-            turn_id = "turn-new"
-            final_response = "done"
-            structured_result = None
-
-        return Result()
-
-
-class FailingCodexWithThread(FakeCodex):
-    async def run_session(self, workspace_path: Path, prompt: str, title: str, **kwargs: Any) -> Any:
-        await super().run_session(workspace_path, prompt, title, **kwargs)
-        on_event = kwargs["on_event"]
-        on_event(
-            {
-                "event": "session_started",
-                "thread_id": "thread-failed",
-                "turn_id": "turn-failed",
-                "session_id": "thread-failed-turn-failed",
-                "cwd": str(workspace_path),
-            }
-        )
-        raise RuntimeError("codex failed")
-
-
-class FakeCodexWithoutTurnStarted(FakeCodex):
-    async def run_session(self, workspace_path: Path, prompt: str, title: str, **kwargs: Any) -> None:
-        await super().run_session(workspace_path, prompt, title, **kwargs)
-        on_event = kwargs["on_event"]
-        on_event(
-            {
-                "event": "thread_token_usage_updated",
-                "turn_id": "turn_1",
-                "usage": {
-                    "input_tokens": 12,
-                    "output_tokens": 4,
-                    "cached_tokens": 2,
-                    "total_tokens": 18,
-                },
-            }
-        )
-        on_event({"event": "turn_completed", "turn_id": "turn_1", "message": "completed"})
-
-
-class FakeTracker:
-    def __init__(self, issue: Issue | None = None, *, missing: bool = False):
-        self.issue = None if missing else issue or Issue(
-            id="mt-1",
-            identifier="MT-1",
-            title="Build",
-            state="Todo",
-            labels=["codex"],
-            project_slug="MT",
-        )
-
-    async def fetch_issue_states_by_ids(self, issue_ids: list[str]) -> list[Issue]:
-        if self.issue is None:
-            return []
-        return [self.issue]
-
-
-class BadWorkspaceManager:
-    def __init__(self, root: Path, bad_path: Path):
-        self.config = WorkspaceConfig(root=root)
-        self.bad_path = bad_path
-
-    async def create_for_issue(self, identifier: str) -> Workspace:
-        return Workspace(path=self.bad_path, workspace_key=identifier, created_now=False)
-
-    async def run_before_run(self, path: Path) -> None:
-        return None
-
-    async def run_after_run(self, path: Path) -> None:
-        return None
-
-    def validate_workspace_path(self, path: Path) -> None:
-        root = self.config.root.resolve()
-        candidate = path.resolve()
-        if candidate != root and root not in candidate.parents:
-            raise WorkspaceError("workspace_path_outside_root", f"Workspace path escapes root: {candidate}")
-
-
-def make_config(tmp_path: Path) -> ServiceConfig:
-    return ServiceConfig(
-        tracker=TrackerConfig(
-            kind="linear",
-            endpoint="https://api.linear.app/graphql",
-            project_slug="MT",
-            api_key="linear-token",
-        ),
-        polling=PollingConfig(),
-        workspace=WorkspaceConfig(root=tmp_path),
-        hooks=HooksConfig(),
-        agent=AgentConfig(max_turns=2),
-        codex=CodexConfig(),
-        prompt_template="Do {{ issue.identifier }}",
-        workflow_path=tmp_path / "WORKFLOW.md",
-    )
-
-
-def make_config_with_persistence(tmp_path: Path) -> ServiceConfig:
-    config = make_config(tmp_path)
-    return ServiceConfig(
-        tracker=config.tracker,
-        polling=config.polling,
-        workspace=config.workspace,
-        hooks=config.hooks,
-        agent=config.agent,
-        codex=config.codex,
-        prompt_template=config.prompt_template,
-        workflow_path=config.workflow_path,
-        persistence=PersistenceConfig(path=tmp_path / "state" / "performer.json"),
-    )
-
-
-def make_config_with_acceptance(tmp_path: Path) -> ServiceConfig:
-    config = make_config(tmp_path)
-    return ServiceConfig(
-        tracker=config.tracker,
-        polling=config.polling,
-        workspace=config.workspace,
-        hooks=config.hooks,
-        agent=config.agent,
-        codex=config.codex,
-        prompt_template=config.prompt_template,
-        workflow_path=config.workflow_path,
-        acceptance=AcceptanceConfig(enabled=True),
-    )
-
-
-def make_config_with_required_delegate(tmp_path: Path, delegate_id: str) -> ServiceConfig:
-    config = make_config(tmp_path)
-    return ServiceConfig(
-        tracker=TrackerConfig(
-            kind=config.tracker.kind,
-            endpoint=config.tracker.endpoint,
-            project_slug=config.tracker.project_slug,
-            api_key=config.tracker.api_key,
-            required_delegate_id=delegate_id,
-            active_states=config.tracker.active_states,
-            terminal_states=config.tracker.terminal_states,
-        ),
-        polling=config.polling,
-        workspace=config.workspace,
-        hooks=config.hooks,
-        agent=config.agent,
-        codex=config.codex,
-        prompt_template=config.prompt_template,
-        workflow_path=config.workflow_path,
-    )
-
+from test_runner_support import *  # noqa: F401,F403
 
 def test_runner_does_not_expose_linear_graphql_tool(tmp_path: Path) -> None:
     config = make_config(tmp_path)
@@ -216,7 +19,6 @@ def test_runner_does_not_expose_linear_graphql_tool(tmp_path: Path) -> None:
     )
 
     assert not hasattr(runner.codex_client, "tools")
-
 
 def test_default_sdk_runner_does_not_expose_linear_tool_for_custom_tracker(tmp_path: Path) -> None:
     config = ServiceConfig(
@@ -242,8 +44,6 @@ def test_default_sdk_runner_does_not_expose_linear_tool_for_custom_tracker(tmp_p
 
     assert not hasattr(runner.codex_client, "tools")
 
-
-@pytest.mark.asyncio
 async def test_runner_uses_workspace_root_when_per_issue_workspace_is_disabled(tmp_path: Path) -> None:
     codex = FakeCodex()
     workspace_root = tmp_path / "workspace" / "repo"
@@ -275,8 +75,6 @@ async def test_runner_uses_workspace_root_when_per_issue_workspace_is_disabled(t
     assert codex.workspace_path == workspace_root
     assert not (workspace_root / "MT-1").exists()
 
-
-@pytest.mark.asyncio
 async def test_runner_ignores_instance_persistence_sdk_thread_id(tmp_path: Path) -> None:
     codex = FakeCodex()
     config = make_config_with_persistence(tmp_path)
@@ -320,8 +118,6 @@ async def test_runner_ignores_instance_persistence_sdk_thread_id(tmp_path: Path)
     assert codex.kwargs is not None
     assert codex.kwargs["existing_thread_id"] is None
 
-
-@pytest.mark.asyncio
 async def test_runner_prefers_workspace_owned_sdk_thread_id(tmp_path: Path) -> None:
     codex = FakeCodex()
     workspace_root = tmp_path / "workspace"
@@ -382,8 +178,6 @@ async def test_runner_prefers_workspace_owned_sdk_thread_id(tmp_path: Path) -> N
     assert codex.kwargs is not None
     assert codex.kwargs["existing_thread_id"] == "thread-workspace"
 
-
-@pytest.mark.asyncio
 async def test_runner_writes_sdk_thread_id_to_issue_workspace(tmp_path: Path) -> None:
     codex = FakeCodexWithThread()
     workspace_root = tmp_path / "workspace"
@@ -416,8 +210,6 @@ async def test_runner_writes_sdk_thread_id_to_issue_workspace(tmp_path: Path) ->
     assert payload["thread_id"] == "thread-new"
     assert payload["status"] == "resume_pending"
 
-
-@pytest.mark.asyncio
 async def test_runner_marks_workspace_sdk_thread_failed_on_error(tmp_path: Path) -> None:
     codex = FailingCodexWithThread()
     workspace_root = tmp_path / "workspace"
@@ -454,8 +246,6 @@ async def test_runner_marks_workspace_sdk_thread_failed_on_error(tmp_path: Path)
     assert payload["status"] == "failed"
     assert "codex failed" in payload["failure_summary"]
 
-
-@pytest.mark.asyncio
 async def test_runner_records_turns_even_when_codex_skips_turn_started_event(tmp_path: Path) -> None:
     config = make_config_with_persistence(tmp_path)
     runner = AgentRunner(
@@ -476,8 +266,6 @@ async def test_runner_records_turns_even_when_codex_skips_turn_started_event(tmp
     turn = next(iter(snapshot.turns.values()))
     assert turn.total_tokens == 18
 
-
-@pytest.mark.asyncio
 async def test_runner_validates_workspace_path_before_codex_launch(tmp_path: Path) -> None:
     codex = FakeCodex()
     runner = AgentRunner(
@@ -497,8 +285,6 @@ async def test_runner_validates_workspace_path_before_codex_launch(tmp_path: Pat
     assert exc.value.code == "workspace_path_outside_root"
     assert codex.kwargs is None
 
-
-@pytest.mark.asyncio
 async def test_runner_passes_max_turns_and_tracker_based_continuation(tmp_path: Path) -> None:
     codex = FakeCodex()
     runner = AgentRunner(
@@ -524,8 +310,6 @@ async def test_runner_passes_max_turns_and_tracker_based_continuation(tmp_path: 
         "Configured terminal states: Closed, Cancelled, Canceled, Duplicate, Done."
     )
 
-
-@pytest.mark.asyncio
 async def test_runner_acceptance_prompt_forbids_state_changes_and_requires_evidence(tmp_path: Path) -> None:
     codex = FakeCodex()
     runner = AgentRunner(
@@ -549,8 +333,6 @@ async def test_runner_acceptance_prompt_forbids_state_changes_and_requires_evide
     continuation = codex.kwargs["continuation_provider"]
     assert "Do not move the Linear issue to In Review or Done" in await continuation(1)
 
-
-@pytest.mark.asyncio
 async def test_runner_passes_worker_host_to_codex_session(tmp_path: Path) -> None:
     codex = FakeCodex()
     runner = AgentRunner(
@@ -570,8 +352,6 @@ async def test_runner_passes_worker_host_to_codex_session(tmp_path: Path) -> Non
     assert codex.kwargs is not None
     assert codex.kwargs["worker_host"] == "builder-1"
 
-
-@pytest.mark.asyncio
 async def test_runner_writes_run_attempt_turn_ops_snapshot(tmp_path: Path) -> None:
     codex = FakeCodex()
     config = make_config_with_persistence(tmp_path)
@@ -630,8 +410,6 @@ async def test_runner_writes_run_attempt_turn_ops_snapshot(tmp_path: Path) -> No
         "turn_completed",
     ]
 
-
-@pytest.mark.asyncio
 async def test_runner_emits_repository_handoff_report_ops_event_without_linear_child_issue(tmp_path: Path) -> None:
     codex = FakeCodex()
     workspace_root = tmp_path / "repo"
@@ -677,8 +455,6 @@ async def test_runner_emits_repository_handoff_report_ops_event_without_linear_c
     assert Path(events[0].payload["bundle"]["changes_patch_path"]).exists()
     assert not hasattr(tracker, "create_child_issue_for")
 
-
-@pytest.mark.asyncio
 async def test_runner_defers_repository_handoff_when_acceptance_is_enabled(tmp_path: Path) -> None:
     codex = FakeCodex()
     workspace_root = tmp_path / "repo"
@@ -713,8 +489,6 @@ async def test_runner_defers_repository_handoff_when_acceptance_is_enabled(tmp_p
     snapshot = OpsStore(ops_snapshot_path_from_persistence_path(config.persistence.path)).load()
     assert [event for event in snapshot.events if event.event_type == "repository_handoff_report.v1"] == []
 
-
-@pytest.mark.asyncio
 async def test_continuation_ignores_label_changes(tmp_path: Path) -> None:
     codex = FakeCodex()
     runner = AgentRunner(
@@ -734,8 +508,6 @@ async def test_continuation_ignores_label_changes(tmp_path: Path) -> None:
     continuation = codex.kwargs["continuation_provider"]
     assert await continuation(1) is not None
 
-
-@pytest.mark.asyncio
 async def test_continuation_stops_when_delegate_changes(tmp_path: Path) -> None:
     codex = FakeCodex()
     runner = AgentRunner(
@@ -773,8 +545,6 @@ async def test_continuation_stops_when_delegate_changes(tmp_path: Path) -> None:
     continuation = codex.kwargs["continuation_provider"]
     assert await continuation(1) is None
 
-
-@pytest.mark.asyncio
 async def test_continuation_stops_when_project_changes(tmp_path: Path) -> None:
     codex = FakeCodex()
     runner = AgentRunner(
@@ -796,8 +566,6 @@ async def test_continuation_stops_when_project_changes(tmp_path: Path) -> None:
     continuation = codex.kwargs["continuation_provider"]
     assert await continuation(1) is None
 
-
-@pytest.mark.asyncio
 async def test_continuation_stops_when_refresh_returns_no_issue(tmp_path: Path) -> None:
     codex = FakeCodex()
     runner = AgentRunner(

@@ -69,6 +69,7 @@ class PhaseHumanActionCoordinator:
                                 "child_identifier": child.get("identifier") or run.human_action.get("child_identifier"),
                             },
                         },
+                        expected_current_phases={run.phase},
                     )
                 continue
             human_response = response or "Human action completed."

@@ -189,6 +189,34 @@ async def test_callback_persists_installation_across_app_restart_without_public_
 
 
 @pytest.mark.asyncio
+async def test_oauth_callback_consumes_state_created_by_distinct_worker() -> None:
+    def fake_exchange(code: str, state: str) -> dict[str, object]:
+        assert code == "the-code"
+        assert state == oauth_state
+        return {"access_token": "SECRET-token", "scope": "read,write", "expires_in": 3600}
+
+    store = PgStore()
+    start_client, _start_app = app_client(pg_store=store)
+    async with start_client:
+        await _register(start_client)
+        start = await start_client.post("/api/v1/onboarding/linear/start")
+        oauth_state = _auth_url_params(start.json()["authorization_url"])["state"]
+
+    callback_client, callback_app = app_client(pg_store=store, linear_token_exchange=fake_exchange)
+    async with callback_client:
+        callback = await callback_client.get(
+            "/api/v1/linear/oauth/callback",
+            params={"code": "the-code", "state": oauth_state},
+        )
+
+    assert callback.status_code == 200
+    assert (await store.consume_oauth_state(oauth_state)) is None
+    installation = await callback_app.state.podium.get_linear_installation("user_1")
+    assert installation is not None
+    assert installation["access_token"] == "SECRET-token"
+
+
+@pytest.mark.asyncio
 async def test_callback_missing_state_returns_400() -> None:
     client, _app = app_client()
     async with client:

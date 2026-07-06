@@ -36,6 +36,24 @@ def test_phase_advance_request_round_trips_json_ready_payload() -> None:
     assert loaded == request
 
 
+def test_phase_advance_request_includes_non_empty_codex_profile() -> None:
+    request = PhaseAdvanceRequest(
+        run_id="run-1",
+        instance_id="inst-1",
+        issue_id="issue-1",
+        issue_identifier="ENG-1",
+        current_phase=RunPhase.QUEUED,
+        attempt=1,
+        codex_profile={"model": "gpt-5-codex", "sandbox": "workspace_write"},
+    )
+
+    payload = request.to_dict()
+    loaded = PhaseAdvanceRequest.from_dict(payload)
+
+    assert payload["codex_profile"] == {"model": "gpt-5-codex", "sandbox": "workspace_write"}
+    assert loaded == request
+
+
 def test_phase_advance_result_round_trips_human_action_metadata() -> None:
     result = PhaseAdvanceResult(
         run_id="run-1",

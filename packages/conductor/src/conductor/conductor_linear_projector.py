@@ -29,6 +29,8 @@ class LinearProjector:
         now_iso = _iso(now_dt)
         projected = 0
         for run in self.store.list_orchestration_runs():
+            if run.phase in {RunPhase.DONE, RunPhase.FAILED} and run.ack_status == "acked":
+                continue
             desired = desired_linear_phase_projection(run.phase)
             if desired is None:
                 continue
@@ -91,6 +93,7 @@ class LinearProjector:
                         "result": result if isinstance(result, dict) else {},
                     },
                 },
+                expected_current_phases={run.phase},
             )
             projected += 1
         return projected

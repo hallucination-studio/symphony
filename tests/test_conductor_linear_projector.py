@@ -19,6 +19,52 @@ class FailingProjectionTracker:
         raise RuntimeError("Linear 502")
 
 
+class CapturingProjectionTracker:
+    def __init__(self) -> None:
+        self.project_attempts = 0
+
+    async def project_issue_phase(self, issue_id: str, *, phase_label: str, state_name: str | None) -> dict[str, object]:
+        self.project_attempts += 1
+        return {"success": True, "issue_id": issue_id, "phase_label": phase_label, "state_name": state_name}
+
+
+@pytest.mark.asyncio
+async def test_linear_projector_skips_acked_terminal_runs(tmp_path: Path) -> None:
+    store = ConductorStore(tmp_path / "conductor-data")
+    tracker = CapturingProjectionTracker()
+    reducer = PhaseReducer(store)
+    run = reducer.dispatch_received(
+        instance_id="inst-1",
+        issue_id="issue-1",
+        issue_identifier="ENG-1",
+        workflow_profile="default",
+        dispatch_id="dispatch-1",
+    )
+    reducer.performer_started(run.run_id, request_path="/tmp/request.json", result_path="/tmp/result.json")
+    reducer.performer_result(
+        PhaseAdvanceResult(
+            run_id=run.run_id,
+            issue_id="issue-1",
+            next_phase=RunPhase.DONE,
+            status="completed",
+            reason="completed_by_runtime",
+        )
+    )
+    reducer.acked(run.run_id)
+    projector = LinearProjector(
+        store=store,
+        get_instance=lambda instance_id: object(),
+        tracker_factory=lambda instance: tracker,
+    )
+
+    projected = await projector.reconcile_once(now="2026-07-05T00:00:00Z")
+
+    events = store.list_orchestration_events(run.run_id)
+    assert projected == 0
+    assert tracker.project_attempts == 0
+    assert "linear.projected_phase" not in [event.event_type for event in events]
+
+
 @pytest.mark.asyncio
 async def test_linear_projector_backs_off_and_escalates_failures(tmp_path: Path) -> None:
     store = ConductorStore(tmp_path / "conductor-data")

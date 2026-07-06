@@ -60,6 +60,7 @@ class PersistedState:
     human_interventions: list[HumanInterventionEntry] = field(default_factory=list)
     sessions: list[PersistedSession] = field(default_factory=list)
     codex_threads: list[CodexThreadEntry] = field(default_factory=list)
+    completed: list[str] = field(default_factory=list)
 
     @classmethod
     def from_runtime(
@@ -71,6 +72,7 @@ class PersistedState:
         human_interventions: list[HumanInterventionEntry] | None = None,
         running: list[RunningEntry],
         codex_threads: list[CodexThreadEntry] | None = None,
+        completed: list[str] | None = None,
     ) -> PersistedState:
         return cls(
             retry_attempts=list(retry_attempts),
@@ -101,6 +103,7 @@ class PersistedState:
                 for entry in running
             ],
             codex_threads=list(codex_threads or []),
+            completed=list(completed or []),
         )
 
 
@@ -140,12 +143,13 @@ def _state_to_json(state: PersistedState) -> dict[str, Any]:
         "human_interventions": [_human_intervention_to_json(entry) for entry in state.human_interventions],
         "sessions": [_session_to_json(session) for session in state.sessions],
         "codex_threads": [_codex_thread_to_json(entry) for entry in state.codex_threads],
+        "completed": [issue_id for issue_id in state.completed if isinstance(issue_id, str) and issue_id],
     }
 
 
 def _state_from_json(payload: dict[str, Any]) -> PersistedState:
     parsed_retry_entries = [
-        entry
+        (item, entry)
         for item in payload.get("retry_attempts", [])
         if isinstance(item, dict)
         for entry in [_retry_from_json(item)]
@@ -153,13 +157,13 @@ def _state_from_json(payload: dict[str, Any]) -> PersistedState:
     ]
     retry_attempts = [
         entry
-        for entry in parsed_retry_entries
-        if not _is_legacy_continuation_retry(entry)
+        for item, entry in parsed_retry_entries
+        if not _is_legacy_continuation_retry(item, entry) and entry.error is not None
     ]
     continuations = [
         _continuation_from_retry(entry)
-        for entry in parsed_retry_entries
-        if _is_legacy_continuation_retry(entry)
+        for item, entry in parsed_retry_entries
+        if _is_legacy_continuation_retry(item, entry)
     ] + [
         entry
         for item in payload.get("continuations", [])
@@ -195,6 +199,7 @@ def _state_from_json(payload: dict[str, Any]) -> PersistedState:
         for entry in [_codex_thread_from_json(item)]
         if entry is not None
     ]
+    completed = [item for item in payload.get("completed", []) if isinstance(item, str) and item]
     return PersistedState(
         retry_attempts=retry_attempts,
         continuations=continuations,
@@ -202,6 +207,7 @@ def _state_from_json(payload: dict[str, Any]) -> PersistedState:
         human_interventions=human_interventions,
         sessions=sessions,
         codex_threads=codex_threads,
+        completed=completed,
     )
 
 
@@ -281,8 +287,10 @@ def _continuation_from_json(payload: dict[str, Any]) -> ContinuationEntry | None
         due_at=due_at,
         due_at_ms=monotonic_ms() + delay_ms,
         issue_url=payload.get("issue_url") if isinstance(payload.get("issue_url"), str) else None,
-        phase="continuing",
-        status_label=PHASE_LABELS["implementation_running"],
+        phase=payload.get("phase") if isinstance(payload.get("phase"), str) else "continuing",
+        status_label=payload.get("status_label")
+        if isinstance(payload.get("status_label"), str)
+        else PHASE_LABELS["implementation_running"],
         runtime_phase=payload.get("runtime_phase")
         if isinstance(payload.get("runtime_phase"), str)
         else "implementation_done",
@@ -399,8 +407,8 @@ def _human_intervention_from_json(payload: dict[str, Any]) -> HumanInterventionE
     )
 
 
-def _is_legacy_continuation_retry(entry: RetryEntry) -> bool:
-    return entry.error is None or entry.phase in {"done", "continuing"}
+def _is_legacy_continuation_retry(payload: dict[str, Any], entry: RetryEntry) -> bool:
+    return payload.get("error") is None and entry.phase in {"done", "continuing"}
 
 
 def _continuation_from_retry(entry: RetryEntry) -> ContinuationEntry:

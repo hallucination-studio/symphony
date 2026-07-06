@@ -192,6 +192,7 @@ def test_duplicate_active_run_projection_is_idempotent(tmp_path: Path) -> None:
                 "dispatch_id": "dispatch-1",
             },
         },
+        expected_current_phases=set(),
     )
 
     assert duplicate.run_id == first.run_id

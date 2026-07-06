@@ -1,4 +1,5 @@
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 
 from performer_api.ops_store import OpsStore
 from performer.ops_telemetry import ExecutionTelemetryRecorder
@@ -44,6 +45,31 @@ def test_recorder_appends_explicit_trace_events(tmp_path: Path) -> None:
     recorder.record_event(event)
 
     loaded = store.load()
-    assert loaded.events[0].event_id == "evt-1"
+    assert loaded.events[0].event_id.startswith("evt-")
+    assert loaded.events[0].event_id == event.event_id
     assert loaded.events[0].event_type == "issue_dispatched"
     assert loaded.events[0].retention_tier == "summary"
+
+
+def test_recorder_concurrent_event_writes_are_lossless_and_use_unique_ids(tmp_path: Path) -> None:
+    store = OpsStore(tmp_path / "ops.json")
+
+    def write_event(index: int) -> None:
+        recorder = ExecutionTelemetryRecorder(OpsStore(tmp_path / "ops.json"))
+        recorder.record_event(
+            recorder.make_event(
+                "concurrent_event",
+                issue_id="issue-1",
+                payload={"index": index},
+            )
+        )
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        list(executor.map(write_event, range(40)))
+
+    loaded = store.load()
+    events = [event for event in loaded.events if event.event_type == "concurrent_event"]
+
+    assert len(events) == 40
+    assert len({event.event_id for event in events}) == 40
+    assert sorted(event.payload["index"] for event in events) == list(range(40))

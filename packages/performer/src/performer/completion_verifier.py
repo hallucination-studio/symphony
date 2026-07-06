@@ -71,19 +71,31 @@ def _parse_recorded_command(command: str) -> tuple[list[str], dict[str, str]] | 
     env = os.environ.copy()
     while parts and "=" in parts[0] and not parts[0].startswith("-"):
         key, value = parts[0].split("=", 1)
-        if not key.replace("_", "").isalnum():
+        if not key.replace("_", "").isalnum() or key not in {"PYTHONPATH"}:
             return None
         env[key] = value
         parts = parts[1:]
     if not parts:
         return None
     if parts[0] in {"pytest", "py.test"}:
-        return parts, env
+        return (parts, env) if _pytest_args_safe(parts[1:]) else None
     if len(parts) >= 3 and parts[1:3] == ["-m", "pytest"]:
         if parts[0] in {"python", "python3"}:
             parts[0] = sys.executable
-        return parts, env
+        return (parts, env) if _pytest_args_safe(parts[3:]) else None
     return None
+
+
+def _pytest_args_safe(args: list[str]) -> bool:
+    blocked_options = {"-p", "-c", "-o"}
+    for arg in args:
+        if arg in blocked_options:
+            return False
+        if any(arg.startswith(f"{option}") and arg != option for option in blocked_options):
+            return False
+        if arg.startswith("--override-ini") or arg.startswith("--confcutdir"):
+            return False
+    return True
 
 
 def _env_evidence(env: dict[str, str] | None) -> dict[str, str]:
@@ -154,7 +166,8 @@ class CompletionVerifier:
             checks.append(await self._check_test_results(issue, workspace_path, ops_snapshot))
 
         if "test_command_evidence" in all_check_names:
-            checks.append(self._check_test_command_evidence(issue, ops_snapshot))
+            test_result_check = next((check for check in checks if check.check_name == "test_results"), None)
+            checks.append(self._check_test_command_evidence(issue, ops_snapshot, test_result_check))
 
         if "metrics_reasonable" in all_check_names:
             checks.append(self._check_metrics_reasonable(issue, ops_snapshot))
@@ -352,6 +365,13 @@ class CompletionVerifier:
             if recorded is not None:
                 cmd, env = recorded
                 test_framework = "pytest"
+            elif self._has_unsafe_recorded_pytest_command(issue, ops_snapshot):
+                return CheckResult(
+                    check_name="test_results",
+                    passed=False,
+                    message="Unsafe recorded pytest command was rejected",
+                    evidence={"status": "unsafe_recorded_pytest_command"},
+                )
             elif (workspace_path / "package.json").exists():
                 cmd = ["npm", "test"]
                 test_framework = "npm"
@@ -470,6 +490,21 @@ class CompletionVerifier:
                     return parsed
         return None
 
+    def _has_unsafe_recorded_pytest_command(self, issue: Issue, ops_snapshot: OpsSnapshot) -> bool:
+        patterns = [pattern for pattern in self.config.expected_test_patterns if pattern]
+        issue_run_ids = {run.run_id for run in _runs_for_issue(issue, ops_snapshot)}
+        for event in ops_snapshot.events:
+            if event.issue_id != issue.id and event.run_id not in issue_run_ids:
+                continue
+            command, exit_code = _command_evidence_from_payload(event.payload)
+            if exit_code != 0 or not isinstance(command, str) or "pytest" not in command:
+                continue
+            if patterns and not any(pattern in command for pattern in patterns):
+                continue
+            if _parse_recorded_command(command) is None:
+                return True
+        return False
+
     def _python_test_env(self, workspace_path: Path) -> dict[str, str] | None:
         if not (workspace_path / "src").is_dir():
             return None
@@ -478,7 +513,12 @@ class CompletionVerifier:
         env["PYTHONPATH"] = "src" if not existing else f"src{os.pathsep}{existing}"
         return env
 
-    def _check_test_command_evidence(self, issue: Issue, ops_snapshot: OpsSnapshot) -> CheckResult:
+    def _check_test_command_evidence(
+        self,
+        issue: Issue,
+        ops_snapshot: OpsSnapshot,
+        test_result_check: CheckResult | None = None,
+    ) -> CheckResult:
         patterns = [pattern for pattern in self.config.expected_test_patterns if pattern]
         if not patterns:
             return CheckResult(
@@ -488,6 +528,14 @@ class CompletionVerifier:
                 evidence={"expected_test_patterns": []},
             )
         issue_run_ids = {run.run_id for run in _runs_for_issue(issue, ops_snapshot)}
+        verified_command = self._verified_test_command_evidence(patterns, test_result_check)
+        if verified_command is not None:
+            return CheckResult(
+                check_name="test_command_evidence",
+                passed=True,
+                message=f"Verifier ran matching test command for pattern: {verified_command['pattern']}",
+                evidence=verified_command,
+            )
         commands: list[tuple[str, int | None]] = []
         self_reported_commands: list[str] = []
         for event in ops_snapshot.events:
@@ -528,6 +576,28 @@ class CompletionVerifier:
                 "self_reported_commands": self_reported_commands,
             },
         )
+
+    def _verified_test_command_evidence(
+        self,
+        patterns: list[str],
+        test_result_check: CheckResult | None,
+    ) -> dict[str, Any] | None:
+        if test_result_check is None or not test_result_check.passed:
+            return None
+        evidence = test_result_check.evidence if isinstance(test_result_check.evidence, dict) else {}
+        if evidence.get("exit_code") != 0 or evidence.get("framework") != "pytest":
+            return None
+        command_raw = evidence.get("command")
+        command = " ".join(str(part) for part in command_raw) if isinstance(command_raw, list) else str(command_raw or "")
+        for pattern in patterns:
+            if pattern in command:
+                return {
+                    "source": "verifier",
+                    "pattern": pattern,
+                    "command": command_raw,
+                    "exit_code": evidence.get("exit_code"),
+                }
+        return None
 
     def _check_metrics_reasonable(self, issue: Issue, ops_snapshot: OpsSnapshot) -> CheckResult:
         """检查 metrics 是否合理"""

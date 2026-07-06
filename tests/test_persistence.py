@@ -113,6 +113,7 @@ def test_persistence_store_round_trips_retry_entries_and_sessions(tmp_path: Path
                 updated_at=started_at,
             )
         ],
+        completed=["issue-done"],
     )
 
     store.save(state)
@@ -168,6 +169,7 @@ def test_persistence_store_round_trips_retry_entries_and_sessions(tmp_path: Path
     assert loaded.codex_threads[0].backend == "sdk"
     assert loaded.codex_threads[0].status == "resume_pending"
     assert loaded.codex_threads[0].last_turn_id == "sdk-turn"
+    assert loaded.completed == ["issue-done"]
 
 
 def test_persistence_store_builds_state_from_running_entries(tmp_path: Path) -> None:
@@ -254,3 +256,57 @@ def test_persistence_migrates_legacy_errorless_retry_to_continuation(tmp_path: P
     assert loaded.continuations[0].attempt == 2
     assert loaded.continuations[0].phase == "continuing"
     assert loaded.continuations[0].status_label == "performer:phase/implementation"
+
+
+def test_persistence_continuation_preserves_phase_and_status_label(tmp_path: Path) -> None:
+    path = tmp_path / "state.json"
+    due_at = utc_now() - timedelta(seconds=30)
+    store = PersistenceStore(path)
+    store.save(
+        PersistedState(
+            continuations=[
+                ContinuationEntry(
+                    issue_id="issue-1",
+                    identifier="MT-1",
+                    attempt=2,
+                    due_at=due_at,
+                    due_at_ms=123,
+                    phase="review_continuing",
+                    status_label="performer:phase/review",
+                    runtime_phase="review_waiting",
+                    last_message="continue review",
+                )
+            ]
+        )
+    )
+
+    loaded = store.load()
+
+    assert loaded.continuations[0].phase == "review_continuing"
+    assert loaded.continuations[0].status_label == "performer:phase/review"
+    assert loaded.continuations[0].runtime_phase == "review_waiting"
+    assert loaded.continuations[0].due_at_ms > 0
+
+
+def test_persistence_discards_corrupt_retry_without_error_instead_of_continuing(tmp_path: Path) -> None:
+    path = tmp_path / "state.json"
+    due_at = utc_now() + timedelta(seconds=30)
+    path.write_text(
+        (
+            '{"retry_attempts":[{'
+            '"issue_id":"issue-1",'
+            '"identifier":"MT-1",'
+            '"attempt":2,'
+            f'"due_at":"{due_at.isoformat().replace("+00:00", "Z")}",'
+            '"issue_url":"https://linear.app/x/issue/MT-1",'
+            '"phase":"retrying",'
+            '"status_label":"performer:phase/implementation"'
+            '}],"sessions":[]}'
+        ),
+        encoding="utf-8",
+    )
+
+    loaded = PersistenceStore(path).load()
+
+    assert loaded.retry_attempts == []
+    assert loaded.continuations == []

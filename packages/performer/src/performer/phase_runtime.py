@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from performer_api.models import PHASE_LABELS, Issue, RunningEntry, utc_now
+from performer_api.models import Issue, RunningEntry, utc_now
 from performer_api.phase import RunPhase
 
 
@@ -82,15 +82,16 @@ class PhaseRuntime:
         worker_host: str | None = None,
     ) -> PhaseExecutionOutcome:
         host = self.host
-        host.state.claimed.add(issue.id)
-        host.state.blocked.pop(issue.id, None)
         self._outcomes.pop(issue.id, None)
-        host.state.running[issue.id] = RunningEntry(
-            issue=issue,
-            task=None,
-            started_at=utc_now(),
-            retry_attempt=attempt or 0,
-            worker_host=worker_host,
+        host.state.release_completed(issue.id)
+        host.state.mark_running(
+            RunningEntry(
+                issue=issue,
+                task=None,
+                started_at=utc_now(),
+                retry_attempt=attempt or 0,
+                worker_host=worker_host,
+            )
         )
         host._set_running_phase(issue.id, "starting", runtime_phase="dispatch_received")
         host._persist_state()

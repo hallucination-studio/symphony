@@ -7,362 +7,15 @@ import httpx
 
 from performer_api.config import TrackerConfig
 from performer_api.labels import LABEL_SCHEME
-from performer_api.models import BlockerRef, Issue
+from performer_api.models import Issue
+from .linear_queries import *  # noqa: F403
+from .linear_models import *  # noqa: F403
 
 
 class LinearError(Exception):
     def __init__(self, code: str, message: str):
         super().__init__(message)
         self.code = code
-
-
-ISSUE_FIELDS = """
-nodes {
-  id
-  identifier
-  title
-  description
-  priority
-  branchName
-  url
-  createdAt
-  updatedAt
-  state { name }
-  project { slugId name }
-  assignee { id }
-  delegate { id }
-  labels { nodes { name } }
-  inverseRelations { nodes { type issue { id identifier state { name } } } }
-}
-pageInfo { hasNextPage endCursor }
-"""
-
-
-def _issues_query(operation_name: str, *, include_delegate_filter: bool) -> str:
-    delegate_variable = ", $delegateId: ID" if include_delegate_filter else ""
-    delegate_filter = "\n      delegate: { id: { eq: $delegateId } }" if include_delegate_filter else ""
-    return f"""
-query {operation_name}($projectSlug: String!, $stateNames: [String!], $first: Int!, $after: String{delegate_variable}) {{
-  issues(
-    first: $first
-    after: $after
-    filter: {{
-      project: {{ slugId: {{ eq: $projectSlug }} }}
-      state: {{ name: {{ in: $stateNames }} }}{delegate_filter}
-    }}
-  ) {{
-    {ISSUE_FIELDS}
-  }}
-}}
-"""
-
-
-CANDIDATE_QUERY = _issues_query("PerformerCandidateIssues", include_delegate_filter=False)
-ISSUES_BY_STATES_QUERY = _issues_query("PerformerIssuesByStates", include_delegate_filter=False)
-
-
-def _issues_query_and_variables(
-    operation_name: str,
-    config: TrackerConfig,
-    state_names: list[str],
-    *,
-    page_size: int,
-) -> tuple[str, dict[str, Any]]:
-    include_delegate_filter = config.required_delegate_id is not None
-    variables: dict[str, Any] = {
-        "projectSlug": config.project_slug,
-        "stateNames": state_names,
-        "first": page_size,
-        "after": None,
-    }
-    if config.required_delegate_id is not None:
-        variables["delegateId"] = config.required_delegate_id
-    return _issues_query(
-        operation_name,
-        include_delegate_filter=include_delegate_filter,
-    ), variables
-
-
-ISSUE_STATES_QUERY = """
-query PerformerIssueStates($ids: [ID!], $projectSlug: String!) {
-  issues(filter: { id: { in: $ids }, project: { slugId: { eq: $projectSlug } } }) {
-    nodes {
-      id
-      identifier
-      title
-      description
-      state { name }
-      project { slugId name }
-      assignee { id }
-      delegate { id }
-      labels { nodes { name } }
-      url
-      inverseRelations { nodes { type issue { id identifier state { name } } } }
-    }
-  }
-}
-"""
-
-
-COMMENT_CREATE_MUTATION = """
-mutation PerformerCommentIssue($issueId: String!, $body: String!) {
-  commentCreate(input: { issueId: $issueId, body: $body }) {
-    success
-    comment { id }
-  }
-}
-"""
-
-
-ISSUE_COMMENTS_QUERY = """
-query PerformerIssueComments($issueId: String!, $first: Int!) {
-  issue(id: $issueId) {
-    comments(first: $first) {
-      nodes {
-        id
-        body
-        createdAt
-        user { id name }
-      }
-    }
-  }
-}
-"""
-
-
-ISSUE_UPDATE_STATE_MUTATION = """
-mutation PerformerTransitionIssue($issueId: String!, $stateId: String!) {
-  issueUpdate(id: $issueId, input: { stateId: $stateId }) {
-    success
-    issue { id identifier state { name } }
-  }
-}
-"""
-
-
-ISSUE_TEAM_STATES_QUERY = """
-query PerformerIssueTeamStates($issueId: String!) {
-  issue(id: $issueId) {
-    id
-    identifier
-    team {
-      id
-      states(first: 100) {
-        nodes { id name }
-      }
-    }
-  }
-}
-"""
-
-
-ISSUE_DESCRIPTION_QUERY = """
-query PerformerIssueDescription($issueId: String!) {
-  issue(id: $issueId) {
-    id
-    identifier
-    description
-  }
-}
-"""
-
-
-ISSUE_UPDATE_DESCRIPTION_MUTATION = """
-mutation PerformerUpdateIssueDescription($issueId: String!, $description: String!) {
-  issueUpdate(id: $issueId, input: { description: $description }) {
-    success
-    issue { id identifier description }
-  }
-}
-"""
-
-
-ISSUE_ACCEPTANCE_RELATIONS_QUERY = """
-query PerformerAcceptanceRelations($issueId: String!) {
-  issue(id: $issueId) {
-    id
-    identifier
-    inverseRelations {
-      nodes {
-        id
-        type
-        issue {
-          id
-          identifier
-          title
-          url
-          state { name }
-          labels { nodes { name } }
-        }
-        relatedIssue {
-          id
-          identifier
-          title
-          url
-          state { name }
-          labels { nodes { name } }
-        }
-      }
-    }
-  }
-}
-"""
-
-
-ISSUE_CREATE_MUTATION = """
-mutation PerformerCreateIssue(
-  $teamId: String!,
-  $projectId: String!,
-  $stateId: String!,
-  $labelIds: [String!],
-  $title: String!,
-  $description: String!,
-  $parentId: String,
-  $assigneeId: String,
-  $delegateId: String
-) {
-  issueCreate(input: {
-    teamId: $teamId,
-    projectId: $projectId,
-    stateId: $stateId,
-    labelIds: $labelIds,
-    title: $title,
-    description: $description,
-    parentId: $parentId,
-    assigneeId: $assigneeId,
-    delegateId: $delegateId
-  }) {
-    success
-    issue {
-      id
-      identifier
-      title
-      url
-      state { name }
-      assignee { id }
-      delegate { id }
-      labels { nodes { name } }
-    }
-  }
-}
-"""
-
-
-ISSUE_CHILDREN_QUERY = """
-query PerformerIssueChildren($issueId: String!) {
-  issue(id: $issueId) {
-    id
-    children(first: 100) {
-      nodes {
-        id
-        identifier
-        title
-        description
-        url
-        state { name }
-        assignee { id }
-        delegate { id }
-        labels { nodes { name } }
-        comments(first: 20) {
-          nodes {
-            id
-            body
-            createdAt
-            user { id name }
-          }
-        }
-      }
-    }
-  }
-}
-"""
-
-
-ISSUE_RELATION_CREATE_MUTATION = """
-mutation PerformerCreateIssueRelation($input: IssueRelationCreateInput!) {
-  issueRelationCreate(input: $input) {
-    success
-    issueRelation {
-      id
-      type
-      issue { id identifier }
-      relatedIssue { id identifier }
-    }
-  }
-}
-"""
-
-
-ISSUE_LABEL_CONTEXT_QUERY = """
-query PerformerIssueLabelContext($issueId: String!) {
-  issue(id: $issueId) {
-    id
-    identifier
-    team { id }
-    labels { nodes { id name } }
-  }
-}
-"""
-
-
-ISSUE_CREATION_CONTEXT_QUERY = """
-query PerformerIssueCreationContext($issueId: String!) {
-  issue(id: $issueId) {
-    id
-    identifier
-    team { id }
-    project { id }
-    state { id name }
-  }
-}
-"""
-
-
-ISSUE_LABEL_BY_NAME_QUERY = """
-query PerformerIssueLabelByName($name: String!, $teamId: ID!) {
-  issueLabels(first: 20, filter: { name: { eq: $name }, team: { id: { eq: $teamId } } }) {
-    nodes { id name }
-  }
-}
-"""
-
-
-ISSUE_LABEL_CREATE_MUTATION = """
-mutation PerformerIssueLabelCreate($name: String!, $teamId: String!) {
-  issueLabelCreate(input: { name: $name, teamId: $teamId }) {
-    success
-    issueLabel { id name }
-  }
-}
-"""
-
-
-ISSUE_UPDATE_LABELS_MUTATION = """
-mutation PerformerUpdateIssueLabels($issueId: String!, $labelIds: [String!]) {
-  issueUpdate(id: $issueId, input: { labelIds: $labelIds }) {
-    success
-    issue {
-      id
-      identifier
-      labels { nodes { id name } }
-    }
-  }
-}
-"""
-
-
-ISSUE_UPDATE_DELEGATE_MUTATION = """
-mutation PerformerUpdateIssueDelegate($issueId: String!, $delegateId: String!) {
-  issueUpdate(id: $issueId, input: { delegateId: $delegateId }) {
-    success
-    issue {
-      id
-      identifier
-      delegate { id }
-    }
-  }
-}
-"""
 
 
 class LinearClient:
@@ -399,7 +52,7 @@ class LinearClient:
             raise LinearError("linear_unknown_payload", "Linear response was not valid JSON") from exc
         if not isinstance(payload, dict):
             raise LinearError("linear_unknown_payload", "Linear response was not an object")
-        if payload.get("errors"):
+        if payload.get("errors") and payload.get("data") is None:
             raise LinearError("linear_graphql_errors", str(payload["errors"]))
         return payload
 
@@ -581,10 +234,56 @@ class LinearClient:
         return issue
 
     async def fetch_child_issues(self, parent_issue_id: str, *, label_name: str | None = None) -> list[dict[str, Any]]:
-        payload = await self.graphql(ISSUE_CHILDREN_QUERY, {"issueId": parent_issue_id})
-        issue = ((payload.get("data") or {}).get("issue") or {})
-        nodes = (((issue.get("children") or {}).get("nodes")) or []) if isinstance(issue, dict) else []
-        children = [_normalize_issue_dict(node) for node in nodes if isinstance(node, dict)]
+        children_by_id: dict[str, dict[str, Any]] = {}
+        children_after: str | None = None
+        while True:
+            payload = await self.graphql(
+                ISSUE_CHILDREN_QUERY,
+                {"issueId": parent_issue_id, "childrenAfter": children_after, "commentsAfter": None},
+            )
+            issue = ((payload.get("data") or {}).get("issue") or {})
+            connection = (issue.get("children") or {}) if isinstance(issue, dict) else {}
+            nodes = (connection.get("nodes") or []) if isinstance(connection, dict) else []
+            for node in nodes:
+                if not isinstance(node, dict):
+                    continue
+                child = _normalize_issue_dict(node)
+                comments_connection = node.get("comments") if isinstance(node.get("comments"), dict) else {}
+                comments = list(child.get("comments") or [])
+                comments_page = comments_connection.get("pageInfo") if isinstance(comments_connection, dict) else {}
+                comments_after = comments_page.get("endCursor") if isinstance(comments_page, dict) else None
+                while isinstance(comments_page, dict) and comments_page.get("hasNextPage") and comments_after:
+                    page_payload = await self.graphql(
+                        ISSUE_CHILDREN_QUERY,
+                        {"issueId": parent_issue_id, "childrenAfter": children_after, "commentsAfter": comments_after},
+                    )
+                    page_issue = ((page_payload.get("data") or {}).get("issue") or {})
+                    page_children = ((page_issue.get("children") or {}).get("nodes") or []) if isinstance(page_issue, dict) else []
+                    page_node = next(
+                        (
+                            item
+                            for item in page_children
+                            if isinstance(item, dict) and str(item.get("id") or "") == child.get("id")
+                        ),
+                        None,
+                    )
+                    if page_node is None:
+                        break
+                    page_comments_connection = page_node.get("comments") if isinstance(page_node.get("comments"), dict) else {}
+                    comments.extend(_normalize_comments((page_comments_connection.get("nodes") or []) if isinstance(page_comments_connection, dict) else []))
+                    comments_page = page_comments_connection.get("pageInfo") if isinstance(page_comments_connection, dict) else {}
+                    comments_after = comments_page.get("endCursor") if isinstance(comments_page, dict) else None
+                child["comments"] = comments
+                child_id = str(child.get("id") or "")
+                if child_id:
+                    children_by_id[child_id] = child
+            page_info = connection.get("pageInfo") if isinstance(connection, dict) else {}
+            if not isinstance(page_info, dict) or not page_info.get("hasNextPage"):
+                break
+            children_after = page_info.get("endCursor") if isinstance(page_info.get("endCursor"), str) else None
+            if not children_after:
+                break
+        children = list(children_by_id.values())
         if label_name is None:
             return children
         wanted = label_name.strip().lower()
@@ -631,7 +330,26 @@ class LinearClient:
             if not isinstance(relation, dict) or relation.get("type") != relation_type:
                 continue
             blocker = relation.get("issue") if isinstance(relation.get("issue"), dict) else {}
-            if blocker.get("id") == issue_id:
+            if blocker.get("id") == issue_id or _relation_matches(
+                relation,
+                relation_type=relation_type,
+                issue_id=issue_id,
+                related_issue_id=related_issue_id,
+            ):
+                return relation
+        payload = await self.graphql(ISSUE_ACCEPTANCE_RELATIONS_QUERY, {"issueId": issue_id})
+        issue = ((payload.get("data") or {}).get("issue") or {})
+        direct_relations = (((issue.get("relations") or {}).get("nodes")) or []) if isinstance(issue, dict) else []
+        for relation in direct_relations:
+            if not isinstance(relation, dict) or relation.get("type") != relation_type:
+                continue
+            related_issue = relation.get("relatedIssue") if isinstance(relation.get("relatedIssue"), dict) else {}
+            if related_issue.get("id") == related_issue_id or _relation_matches(
+                relation,
+                relation_type=relation_type,
+                issue_id=issue_id,
+                related_issue_id=related_issue_id,
+            ):
                 return relation
         return await self.create_issue_relation(
             issue_id=issue_id,
@@ -947,163 +665,3 @@ class LinearTracker:
         return await self.client.set_issue_label_group(issue_id, label_name, prefix=prefix)
 
 
-def format_linear_milestone_comment(
-    issue_detail: dict[str, object], *, event_type: str, debug_url: str, verdict=None
-) -> str:
-    """
-    格式化 Linear milestone comment
-
-    Args:
-        verdict: 可选的 CompletionVerdict，用于展示验证结果
-    """
-    latest_run = issue_detail.get("latest_run")
-    if not isinstance(latest_run, dict):
-        latest_run = {}
-    turns = int(latest_run.get("turn_count") or 0)
-    tokens = int(latest_run.get("total_tokens") or 0)
-    cost = float(latest_run.get("estimated_cost_usd") or 0.0)
-    reason = str(issue_detail.get("state_explanation") or "")
-
-    # 基础信息
-    lines = [
-        f"Performer milestone: {event_type}",
-        f"Turns: {turns}",
-    ]
-
-    # Token 信息（仅当非 0 时显示）
-    if tokens > 0:
-        lines.append(f"Tokens: {tokens}")
-
-    # Cost 信息
-    if cost > 0:
-        lines.append(f"Cost: ${cost:.2f}")
-    else:
-        lines.append("Cost: N/A")
-
-    lines.append(f"Reason: {reason}")
-    lines.append(f"Debug: {debug_url}")
-
-    # 🆕 添加验证结果
-    if verdict:
-        lines.append("")
-        lines.append(f"✅ Completion Verification (verified at {verdict.verified_at}):")
-
-        for check in verdict.checks:
-            icon = "✅" if check.passed else "❌"
-            lines.append(f"  {icon} {check.check_name}: {check.message}")
-
-        # 添加关键证据
-        if "diff_stat" in verdict.evidence:
-            stat_lines = verdict.evidence["diff_stat"].split("\n")
-            if stat_lines:
-                lines.append(f"  - Changes: {stat_lines[0]}")
-        if "test_output" in verdict.evidence:
-            lines.append(f"  - Tests: {verdict.evidence['test_output']}")
-        if "duration_sec" in verdict.evidence:
-            lines.append(f"  - Duration: {verdict.evidence['duration_sec']}s")
-
-        lines.append("")
-        lines.append("Verified by: Performer Completion Verifier v1.0")
-
-    return "\n".join(lines)
-
-
-def _normalize_issue(node: dict[str, Any]) -> Issue:
-    labels = [label.get("name", "") for label in (((node.get("labels") or {}).get("nodes")) or [])]
-    blockers: list[BlockerRef] = []
-    for relation in (((node.get("inverseRelations") or {}).get("nodes")) or []):
-        blocker = BlockerRef.from_linear_relation(relation)
-        if blocker:
-            blockers.append(blocker)
-    state = node.get("state")
-    state_name = state.get("name") if isinstance(state, dict) else state
-    project = node.get("project")
-    assignee = node.get("assignee")
-    delegate = node.get("delegate")
-    return Issue(
-        id=node.get("id") or "",
-        identifier=node.get("identifier") or "",
-        title=node.get("title") or "",
-        description=node.get("description"),
-        priority=node.get("priority"),
-        state=state_name or "",
-        branch_name=node.get("branchName"),
-        url=node.get("url"),
-        labels=labels,
-        blocked_by=blockers,
-        created_at=node.get("createdAt"),
-        updated_at=node.get("updatedAt"),
-        assignee_id=assignee.get("id") if isinstance(assignee, dict) else None,
-        delegate_id=delegate.get("id") if isinstance(delegate, dict) else None,
-        project_slug=project.get("slugId") if isinstance(project, dict) else None,
-        project_name=project.get("name") if isinstance(project, dict) else None,
-    )
-
-
-def _normalize_issue_dict(node: dict[str, Any]) -> dict[str, Any]:
-    state = node.get("state")
-    state_name = state.get("name") if isinstance(state, dict) else state
-    labels = [
-        label.get("name", "")
-        for label in (((node.get("labels") or {}).get("nodes")) or [])
-        if isinstance(label, dict)
-    ]
-    assignee = node.get("assignee") if isinstance(node.get("assignee"), dict) else None
-    delegate = node.get("delegate") if isinstance(node.get("delegate"), dict) else None
-    comments = []
-    for comment in ((((node.get("comments") or {}).get("nodes")) or []) if isinstance(node.get("comments"), dict) else []):
-        if not isinstance(comment, dict):
-            continue
-        user = comment.get("user") if isinstance(comment.get("user"), dict) else None
-        comments.append(
-            {
-                "id": comment.get("id"),
-                "body": comment.get("body") or "",
-                "created_at": comment.get("createdAt"),
-                "user": {"id": user.get("id"), "name": user.get("name")} if user else None,
-            }
-        )
-    return {
-        "id": node.get("id") or "",
-        "identifier": node.get("identifier") or "",
-        "title": node.get("title") or "",
-        "url": node.get("url"),
-        "state": state_name or "",
-        "labels": labels,
-        "description": node.get("description") if isinstance(node.get("description"), str) else None,
-        "assignee_id": assignee.get("id") if assignee else None,
-        "delegate_id": delegate.get("id") if delegate else None,
-        "comments": comments,
-    }
-
-
-def _preserve_non_phase_performer_label(name: str) -> bool:
-    lowered = name.lower()
-    if not lowered.startswith("performer:"):
-        return True
-    keep_prefixes = (
-        LABEL_SCHEME.type_prefix.lower(),
-        LABEL_SCHEME.gate_prefix.lower(),
-        LABEL_SCHEME.score_prefix.lower(),
-    )
-    if not lowered.startswith(keep_prefixes):
-        return False
-    removed_type_labels = {
-        "task": LABEL_SCHEME.type_prefix.lower() + "task",
-        "acceptance": LABEL_SCHEME.type_prefix.lower() + "acceptance",
-    }
-    return lowered not in set(removed_type_labels.values())
-
-
-def replace_marker_block(description: str, marker_name: str, block: str) -> str:
-    begin = f"<!-- BEGIN {marker_name} -->"
-    end = f"<!-- END {marker_name} -->"
-    replacement = f"{begin}\n{block.strip()}\n{end}"
-    start = description.find(begin)
-    stop = description.find(end)
-    if start >= 0 and stop >= start:
-        stop += len(end)
-        return f"{description[:start]}{replacement}{description[stop:]}"
-    if description.strip():
-        return f"{description.rstrip()}\n\n{replacement}"
-    return replacement

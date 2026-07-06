@@ -37,7 +37,7 @@ class RepositoryHandoffLinearProxy:
         payload = response.json()
         if not isinstance(payload, dict):
             raise LinearDirectProxyError("linear_unknown_payload", "Linear response was not an object")
-        if payload.get("errors"):
+        if payload.get("errors") and payload.get("data") is None:
             raise LinearDirectProxyError("linear_graphql_errors", str(payload["errors"]))
         return payload
 

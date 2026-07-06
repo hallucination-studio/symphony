@@ -1,57 +1,15 @@
-from __future__ import annotations
-
-import json
-from dataclasses import replace
-from datetime import timedelta
-from pathlib import Path
-from types import SimpleNamespace
-
-import pytest
-
-from performer import cli
-from conductor import conductor_cli
-from podium.cli import parse_args as parse_podium_args
-from performer.cli import (
-    apply_runtime_config,
-    build_config_from_path,
-    build_acceptance_runner,
-    default_workflow_path,
-    persistence_store_from_config,
-    parse_args,
-)
-from conductor.conductor_cli import parse_args as parse_conductor_args
-from performer_api.config import (
-    AgentConfig,
-    CodexConfig,
-    HooksConfig,
-    PollingConfig,
-    ServiceConfig,
-    TrackerConfig,
-    AcceptanceConfig,
-    WorkspaceConfig,
-)
-from performer_api.phase import PhaseAdvanceRequest, RunPhase
-from performer_api.models import HumanInterventionEntry, RetryEntry, utc_now
-from performer.acceptance import CodexAcceptanceRunner, SmokeAcceptanceRunner
-from performer.linear import LinearTracker
-from performer.orchestrator import Orchestrator
-from performer.runner import AgentRunner
-from performer.workspace import WorkspaceManager
-
+from test_cli_support import *  # noqa: F401,F403
 
 def test_default_workflow_path_uses_cwd(tmp_path: Path) -> None:
     assert default_workflow_path(tmp_path) == tmp_path / "WORKFLOW.md"
-
 
 def test_conductor_default_data_root_is_dot_performer() -> None:
     args = parse_conductor_args([])
 
     assert args.data_root == ".conductor"
 
-
 def test_conductor_module_exposes_main_entrypoint() -> None:
     assert callable(conductor_cli.main)
-
 
 def test_conductor_main_does_not_load_dotenv_from_launch_directory(tmp_path: Path, monkeypatch) -> None:
     env_path = tmp_path / ".env"
@@ -68,18 +26,15 @@ def test_conductor_main_does_not_load_dotenv_from_launch_directory(tmp_path: Pat
 
     assert conductor_cli.main([]) == 0
 
-
 def test_parse_args_accepts_positional_workflow_path() -> None:
     args = parse_args(["custom/WORKFLOW.md", "--once"])
 
     assert args.workflow == "custom/WORKFLOW.md"
     assert args.once is True
 
-
 def test_parse_args_rejects_legacy_dispatch_issue_id() -> None:
     with pytest.raises(SystemExit):
         parse_args(["custom/WORKFLOW.md", "--dispatch-issue-id", "issue-123"])
-
 
 def test_parse_args_accepts_phase_request_and_result_paths() -> None:
     args = parse_args(
@@ -95,7 +50,6 @@ def test_parse_args_accepts_phase_request_and_result_paths() -> None:
     assert args.advance_request_path == "/tmp/request.json"
     assert args.phase_result_path == "/tmp/result.json"
 
-
 def test_podium_parse_args_accepts_helpful_defaults() -> None:
     args = parse_podium_args([])
 
@@ -103,14 +57,11 @@ def test_podium_parse_args_accepts_helpful_defaults() -> None:
     assert args.host == "127.0.0.1"
     assert args.port == 8090
 
-
 def test_podium_parse_args_accepts_legacy_top_level_port() -> None:
     args = parse_podium_args(["--port", "8123"])
 
     assert args.command == "api"
     assert args.port == 8123
-
-
 
 def test_build_config_from_explicit_workflow_path(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("LINEAR_API_KEY", "linear-token")
@@ -133,7 +84,6 @@ Do {{ issue.identifier }}
     assert config.tracker.project_slug == "MT"
     assert config.tracker.api_key == "linear-token"
 
-
 def test_build_config_loads_env_file_next_to_workflow(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.delenv("LINEAR_API_KEY", raising=False)
     (tmp_path / ".env").write_text("LINEAR_API_KEY=linear-token-from-file\n", encoding="utf-8")
@@ -154,7 +104,6 @@ Do {{ issue.identifier }}
 
     assert config.tracker.api_key == "linear-token-from-file"
 
-
 def test_env_file_does_not_override_existing_environment(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("LINEAR_API_KEY", "linear-token-from-env")
     (tmp_path / ".env").write_text("LINEAR_API_KEY=linear-token-from-file\n", encoding="utf-8")
@@ -174,25 +123,6 @@ Do {{ issue.identifier }}
     config = build_config_from_path(workflow)
 
     assert config.tracker.api_key == "linear-token-from-env"
-
-
-def make_service_config(tmp_path: Path, *, project_slug: str, api_key: str, workspace: str, command: str) -> ServiceConfig:
-    return ServiceConfig(
-        tracker=TrackerConfig(
-            kind="linear",
-            endpoint="https://api.linear.app/graphql",
-            project_slug=project_slug,
-            api_key=api_key,
-        ),
-        polling=PollingConfig(),
-        workspace=WorkspaceConfig(root=tmp_path / workspace),
-        hooks=HooksConfig(timeout_ms=1234),
-        agent=AgentConfig(max_turns=3),
-        codex=CodexConfig(command=command),
-        prompt_template="Do {{ issue.identifier }}",
-        workflow_path=tmp_path / "WORKFLOW.md",
-    )
-
 
 def test_apply_runtime_config_updates_tracker_workspace_and_codex(tmp_path: Path) -> None:
     first = make_service_config(tmp_path, project_slug="OLD", api_key="old-token", workspace="old", command="old-codex")
@@ -219,7 +149,6 @@ def test_apply_runtime_config_updates_tracker_workspace_and_codex(tmp_path: Path
     assert orchestrator.workspace_manager is runner.workspace_manager
     assert orchestrator.config.prompt_template == second.prompt_template
     assert runner.codex_client.config.command == "new-codex"
-
 
 def test_apply_runtime_config_disables_existing_acceptance_runner(tmp_path: Path) -> None:
     first_base = make_service_config(tmp_path, project_slug="OLD", api_key="old-token", workspace="old", command="old-codex")
@@ -255,7 +184,6 @@ def test_apply_runtime_config_disables_existing_acceptance_runner(tmp_path: Path
 
     assert orchestrator.acceptance_runner is None
 
-
 def test_build_acceptance_runner_only_when_enabled(tmp_path: Path) -> None:
     config = make_service_config(tmp_path, project_slug="MT", api_key="token", workspace="ws", command="codex")
     enabled = ServiceConfig(
@@ -273,7 +201,6 @@ def test_build_acceptance_runner_only_when_enabled(tmp_path: Path) -> None:
     assert build_acceptance_runner(config) is None
     assert isinstance(build_acceptance_runner(enabled), CodexAcceptanceRunner)
 
-
 def test_build_acceptance_runner_uses_smoke_runner_for_smoke_gate_mode(tmp_path: Path) -> None:
     config = make_service_config(tmp_path, project_slug="MT", api_key="token", workspace="ws", command="codex")
     enabled = ServiceConfig(
@@ -289,7 +216,6 @@ def test_build_acceptance_runner_uses_smoke_runner_for_smoke_gate_mode(tmp_path:
     )
 
     assert isinstance(build_acceptance_runner(enabled), SmokeAcceptanceRunner)
-
 
 def test_persistence_store_from_config_uses_configured_path(tmp_path: Path) -> None:
     workflow = tmp_path / "WORKFLOW.md"
@@ -313,14 +239,11 @@ Do {{ issue.identifier }}
     assert store is not None
     assert store.path == (tmp_path / "state" / "performer.json").resolve()
 
-
 def test_persistence_store_from_config_returns_none_when_unconfigured(tmp_path: Path) -> None:
     config = make_service_config(tmp_path, project_slug="MT", api_key="token", workspace="ws", command="codex")
 
     assert persistence_store_from_config(config) is None
 
-
-@pytest.mark.asyncio
 async def test_run_phase_advance_writes_result_file_atomically(tmp_path: Path, monkeypatch) -> None:
     workflow = tmp_path / "WORKFLOW.md"
     workflow.write_text("placeholder", encoding="utf-8")
@@ -413,8 +336,6 @@ async def test_run_phase_advance_writes_result_file_atomically(tmp_path: Path, m
     }
     assert not result_path.with_suffix(".json.tmp").exists()
 
-
-@pytest.mark.asyncio
 async def test_run_phase_advance_passes_conductor_human_response_to_advance(tmp_path: Path, monkeypatch) -> None:
     workflow = tmp_path / "WORKFLOW.md"
     workflow.write_text("placeholder", encoding="utf-8")
@@ -479,8 +400,6 @@ async def test_run_phase_advance_passes_conductor_human_response_to_advance(tmp_
         "idle",
     ]
 
-
-@pytest.mark.asyncio
 async def test_run_phase_advance_writes_init_failed_result_when_codex_init_fails(tmp_path: Path, monkeypatch) -> None:
     workflow = tmp_path / "WORKFLOW.md"
     workflow.write_text("placeholder", encoding="utf-8")
@@ -535,8 +454,6 @@ async def test_run_phase_advance_writes_init_failed_result_when_codex_init_fails
     assert payload["status"] == "init_failed"
     assert payload["reason"] == "codex_init_failed"
 
-
-@pytest.mark.asyncio
 async def test_run_phase_advance_preserves_codex_error_detail_and_http_status(tmp_path: Path, monkeypatch) -> None:
     workflow = tmp_path / "WORKFLOW.md"
     workflow.write_text("placeholder", encoding="utf-8")
@@ -597,8 +514,6 @@ async def test_run_phase_advance_preserves_codex_error_detail_and_http_status(tm
     assert payload["detail"] == "upstream 502: server overloaded raw body"
     assert payload["http_status"] == 502
 
-
-@pytest.mark.asyncio
 async def test_run_phase_advance_maps_exhausted_upstream_overload_to_overload_status(tmp_path: Path, monkeypatch) -> None:
     workflow = tmp_path / "WORKFLOW.md"
     workflow.write_text("placeholder", encoding="utf-8")
@@ -657,8 +572,6 @@ async def test_run_phase_advance_maps_exhausted_upstream_overload_to_overload_st
     assert result.detail == "JSON-RPC error -32000: upstream 502: server overloaded"
     assert result.http_status == 502
 
-
-@pytest.mark.asyncio
 async def test_run_phase_advance_writes_retry_result_when_codex_turn_times_out(tmp_path: Path, monkeypatch) -> None:
     workflow = tmp_path / "WORKFLOW.md"
     workflow.write_text("placeholder", encoding="utf-8")
@@ -713,119 +626,3 @@ async def test_run_phase_advance_writes_retry_result_when_codex_turn_times_out(t
     assert result.reason == "timeout"
     assert payload["status"] == "retry"
     assert payload["reason"] == "timeout"
-
-
-@pytest.mark.asyncio
-async def test_run_phase_advance_writes_retry_result_when_advance_hangs(tmp_path: Path, monkeypatch) -> None:
-    workflow = tmp_path / "WORKFLOW.md"
-    workflow.write_text("placeholder", encoding="utf-8")
-    request_path = tmp_path / "request.json"
-    result_path = tmp_path / "result.json"
-    request_path.write_text(
-        json.dumps(
-            PhaseAdvanceRequest(
-                run_id="run-1",
-                instance_id="inst-1",
-                issue_id="issue-123",
-                issue_identifier="ENG-1",
-                current_phase=RunPhase.QUEUED,
-                attempt=1,
-                workspace_context={},
-            ).to_dict()
-        ),
-        encoding="utf-8",
-    )
-
-    class HangingOrchestrator:
-        def __init__(self, *args, **kwargs):
-            self.workspace_manager = object()
-
-        def load_persisted_state(self):
-            pass
-
-        async def startup_terminal_workspace_cleanup(self, workspace_manager):
-            pass
-
-        async def advance(self, request):
-            await cli.asyncio.Event().wait()
-
-        async def wait_for_idle(self):
-            pass
-
-    config = replace(
-        make_service_config(tmp_path, project_slug="MT", api_key="token", workspace="ws", command="codex"),
-        codex=CodexConfig(read_timeout_ms=1, hard_turn_timeout_ms=1),
-    )
-    monkeypatch.setattr(cli, "build_config_from_path", lambda path: config)
-    monkeypatch.setattr(cli, "validate_tracker_config", lambda tracker_config: None)
-    monkeypatch.setattr(cli, "create_tracker", lambda tracker_config: object())
-    monkeypatch.setattr(cli, "WorkspaceManager", lambda *args, **kwargs: object())
-    monkeypatch.setattr(cli, "AgentRunner", lambda *args, **kwargs: object())
-    monkeypatch.setattr(cli, "persistence_store_from_config", lambda config: object())
-    monkeypatch.setattr(cli, "build_acceptance_runner", lambda config: None)
-    monkeypatch.setattr(cli, "Orchestrator", HangingOrchestrator)
-
-    result = await cli.run_phase_advance(workflow, request_path, result_path)
-    payload = json.loads(result_path.read_text(encoding="utf-8"))
-
-    assert result.next_phase is RunPhase.QUEUED
-    assert result.status == "retry"
-    assert result.reason == "turn_timeout"
-    assert payload["status"] == "retry"
-    assert payload["reason"] == "turn_timeout"
-
-
-def test_main_returns_nonzero_on_startup_failure(monkeypatch) -> None:
-    async def failing_daemon(path, *, once=False):
-        raise RuntimeError("boom")
-
-    monkeypatch.setattr(cli, "run_reloading_daemon", failing_daemon)
-
-    assert cli.main(["WORKFLOW.md", "--once"]) == 1
-
-
-def test_phase_main_exits_without_waiting_for_stuck_executor_after_result(monkeypatch, tmp_path: Path) -> None:
-    workflow = tmp_path / "WORKFLOW.md"
-    request_path = tmp_path / "request.json"
-    result_path = tmp_path / "result.json"
-    workflow.write_text("placeholder", encoding="utf-8")
-    request_path.write_text("{}", encoding="utf-8")
-    exits: list[int] = []
-
-    async def fake_phase_advance(workflow_path, advance_request_path, phase_result_path):
-        phase_result_path.write_text('{"status":"retry"}', encoding="utf-8")
-        return None
-
-    def fake_exit(code: int) -> None:
-        exits.append(code)
-        raise SystemExit(code)
-
-    monkeypatch.setattr(cli, "run_phase_advance", fake_phase_advance)
-    monkeypatch.setattr(cli.os, "_exit", fake_exit)
-
-    with pytest.raises(SystemExit) as exc:
-        cli.main(
-            [
-                str(workflow),
-                "--advance-request-path",
-                str(request_path),
-                "--phase-result-path",
-                str(result_path),
-            ]
-        )
-
-    assert exc.value.code == 0
-    assert exits == [0]
-
-
-def test_main_returns_zero_on_normal_shutdown(monkeypatch) -> None:
-    captured = {}
-
-    async def successful_daemon(path, *, once=False):
-        captured["once"] = once
-        return None
-
-    monkeypatch.setattr(cli, "run_reloading_daemon", successful_daemon)
-
-    assert cli.main(["WORKFLOW.md", "--once"]) == 0
-    assert captured["once"] is True

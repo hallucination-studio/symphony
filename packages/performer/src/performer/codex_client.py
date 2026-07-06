@@ -1,54 +1,33 @@
 from __future__ import annotations
 
 import asyncio
-import itertools
-import inspect
-import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
-import logging
 
 from performer_api.config import CodexConfig
-
-logger = logging.getLogger(__name__)
-
-try:
-    from openai_codex.errors import (  # type: ignore
-        InvalidParamsError as SdkInvalidParamsError,
-        InvalidRequestError as SdkInvalidRequestError,
-        JsonRpcError as SdkJsonRpcError,
-        MethodNotFoundError as SdkMethodNotFoundError,
-        ParseError as SdkParseError,
-        RetryLimitExceededError as SdkRetryLimitExceededError,
-        ServerBusyError as SdkServerBusyError,
-        TransportClosedError as SdkTransportClosedError,
-        is_retryable_error as sdk_is_retryable_error,
-    )
-except ImportError:
-    SdkInvalidParamsError = None
-    SdkInvalidRequestError = None
-    SdkJsonRpcError = None
-    SdkMethodNotFoundError = None
-    SdkParseError = None
-    SdkRetryLimitExceededError = None
-    SdkServerBusyError = None
-    SdkTransportClosedError = None
-    sdk_is_retryable_error = None
-
-
-class CodexError(Exception):
-    def __init__(self, code: str, message: str, *, http_status: int | None = None):
-        super().__init__(message)
-        self.code = code
-        self.http_status = http_status
-
-
-@dataclass(frozen=True)
-class _SdkErrorClassification:
-    code: str
-    http_status: int | None = None
+from .codex_client_helpers import (
+    CodexError,
+    _ThreadRunAdapter,
+    _aiter,
+    _callable_accepts_keyword,
+    _classify_sdk_exception,
+    _close_sdk_client,
+    _codex_sdk_env,
+    _first_dict,
+    _first_string,
+    _init_backoff_ms,
+    _is_terminal_init_error,
+    _is_transient_codex_error,
+    _latest_turn_identity,
+    _maybe_await,
+    _parse_structured_result,
+    _sdk_event_to_dict,
+    _string_attr,
+    _timeout_seconds,
+    _usage_from_any,
+)
 
 
 @dataclass(frozen=True)
@@ -583,298 +562,3 @@ class CodexSdkClient:
             _first_string(result, "final_response", "response", "text"),
             _first_dict(result, "structured_result", "output", "parsed", validate=validate_structured),
         )
-
-
-def _parse_structured_result(value: str | None) -> dict[str, Any] | None:
-    if not value:
-        return None
-    try:
-        parsed = json.loads(value)
-    except json.JSONDecodeError:
-        return None
-    return parsed if _valid_structured_result(parsed) else None
-
-
-def _valid_structured_result(value: Any) -> bool:
-    if not isinstance(value, dict):
-        return False
-    if value.get("next_action") not in {"ready_for_review", "needs_human", "blocked"}:
-        return False
-    if not isinstance(value.get("summary"), str):
-        return False
-    for key in ("test_commands", "changed_files", "remaining_risks"):
-        raw = value.get(key)
-        if not isinstance(raw, list) or not all(isinstance(item, str) for item in raw):
-            return False
-    return True
-
-
-def _is_transient_codex_error(code: str) -> bool:
-    return code in {
-        "invalid_structured_output",
-        "sdk_transport_error",
-        "response_error",
-        "rate_limit",
-        "timeout",
-        "connection_error",
-        "upstream_overloaded",
-        "upstream_overloaded_exhausted",
-    }
-
-
-def _is_terminal_init_error(code: str) -> bool:
-    return code in {
-        "codex_sdk_not_installed",
-        "invalid_sdk_codex_bin",
-        "invalid_workspace_cwd",
-        "sdk_missing_thread_start",
-        "sdk_missing_thread_resume",
-        "unsupported_sdk_worker_host",
-    }
-
-
-def _classify_sdk_exception(exc: BaseException) -> _SdkErrorClassification:
-    if isinstance(exc, CodexError):
-        return _SdkErrorClassification(exc.code, exc.http_status)
-    http_status = _sdk_http_status(exc)
-    if _is_instance(exc, SdkRetryLimitExceededError):
-        return _SdkErrorClassification("upstream_overloaded", http_status)
-    if _is_instance(exc, SdkServerBusyError):
-        return _SdkErrorClassification("upstream_overloaded", http_status)
-    if _is_instance(exc, SdkInvalidParamsError) or _is_instance(exc, SdkInvalidRequestError) or _is_instance(exc, SdkMethodNotFoundError) or _is_instance(exc, SdkParseError):
-        return _SdkErrorClassification("codex_bad_request", http_status)
-    if _is_instance(exc, SdkTransportClosedError):
-        return _SdkErrorClassification("sdk_transport_error", http_status)
-    if sdk_is_retryable_error is not None:
-        try:
-            if sdk_is_retryable_error(exc):
-                return _SdkErrorClassification("upstream_overloaded", http_status)
-        except Exception:
-            pass
-    return _SdkErrorClassification("sdk_transport_error", http_status)
-
-
-def _is_instance(value: BaseException, class_obj: Any) -> bool:
-    return class_obj is not None and isinstance(value, class_obj)
-
-
-def _sdk_http_status(exc: BaseException) -> int | None:
-    data = getattr(exc, "data", None)
-    return _http_status_from_any(data)
-
-
-def _http_status_from_any(value: Any) -> int | None:
-    if isinstance(value, dict):
-        for key in ("httpStatusCode", "http_status", "status", "statusCode"):
-            parsed = _optional_int(value.get(key))
-            if parsed is not None:
-                return parsed
-        for nested in value.values():
-            parsed = _http_status_from_any(nested)
-            if parsed is not None:
-                return parsed
-    if isinstance(value, list):
-        for nested in value:
-            parsed = _http_status_from_any(nested)
-            if parsed is not None:
-                return parsed
-    return None
-
-
-def _optional_int(value: Any) -> int | None:
-    if value is None or isinstance(value, bool):
-        return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _init_backoff_ms(config: CodexConfig, completed_failures: int) -> int:
-    base = max(1, config.init_backoff_ms)
-    cap = max(1, config.init_backoff_max_ms)
-    return min(base * (2 ** (completed_failures - 1)), cap)
-
-
-def _codex_sdk_env() -> dict[str, str]:
-    env: dict[str, str] = {}
-    home = os.environ.get("HOME")
-    codex_home = os.environ.get("CODEX_HOME")
-    if home:
-        env["HOME"] = home
-    if codex_home:
-        env["CODEX_HOME"] = codex_home
-    elif home:
-        env["CODEX_HOME"] = str(Path(home) / ".codex")
-    return env
-
-
-def _callable_accepts_keyword(value: Any, keyword: str) -> bool:
-    try:
-        signature = inspect.signature(value)
-    except (TypeError, ValueError):
-        return False
-    for parameter in signature.parameters.values():
-        if parameter.kind is inspect.Parameter.VAR_KEYWORD:
-            return True
-        if parameter.kind in {inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY}:
-            if parameter.name == keyword:
-                return True
-    return False
-
-
-def _timeout_seconds(timeout_ms: int) -> float | None:
-    if timeout_ms <= 0:
-        return None
-    return timeout_ms / 1000
-
-
-def _latest_turn_identity(
-    events: list[dict[str, Any]],
-    *,
-    thread_id: str,
-    default_turn_id: str,
-    default_session_id: str,
-) -> tuple[str, str]:
-    for event in reversed(events):
-        if event.get("event") != "turn_started":
-            continue
-        if event.get("thread_id") != thread_id:
-            continue
-        turn_id = event.get("turn_id")
-        session_id = event.get("session_id")
-        if isinstance(turn_id, str) and isinstance(session_id, str):
-            return turn_id, session_id
-    return default_turn_id, default_session_id
-
-
-async def _maybe_await(value: Any) -> Any:
-    if hasattr(value, "__await__"):
-        return await value
-    return value
-
-
-async def _close_sdk_client(client: Any) -> None:
-    close = getattr(client, "close", None)
-    if not callable(close):
-        return
-    try:
-        await _maybe_await(close())
-    except Exception as exc:
-        logger.debug("codex_sdk_close_failed reason=%s", exc)
-
-
-async def _aiter(value: Any) -> Any:
-    iterator = await _maybe_await(value)
-    async for item in iterator:
-        yield item
-
-
-def _string_attr(value: Any, name: str) -> str | None:
-    if isinstance(value, dict):
-        raw = value.get(name)
-    else:
-        raw = getattr(value, name, None)
-    return raw if isinstance(raw, str) and raw else None
-
-
-def _first_string(value: Any, *names: str, default: str | None = None) -> str | None:
-    for name in names:
-        raw = value.get(name) if isinstance(value, dict) else getattr(value, name, None)
-        if isinstance(raw, str) and raw:
-            return raw
-    return default
-
-
-def _first_dict(
-    value: Any,
-    *names: str,
-    default: dict[str, Any] | None = None,
-    validate: bool = True,
-) -> dict[str, Any] | None:
-    for name in names:
-        raw = value.get(name) if isinstance(value, dict) else getattr(value, name, None)
-        if isinstance(raw, dict) and (not validate or _valid_structured_result(raw)):
-            return raw
-    return default
-
-
-def _sdk_event_to_dict(event: Any) -> dict[str, Any] | None:
-    if isinstance(event, dict):
-        raw = dict(event)
-    else:
-        raw = {
-            key: getattr(event, key)
-            for key in ("type", "event", "message", "command", "exit_code", "usage", "turn_id", "thread_id")
-            if hasattr(event, key)
-        }
-    name = raw.get("event") or raw.get("type")
-    if not isinstance(name, str):
-        return None
-    mapped = {"event": f"sdk_{name.replace('.', '_').replace('/', '_')}", "backend": "sdk", "payload": raw}
-    for key in ("message", "command", "exit_code", "usage", "turn_id", "thread_id"):
-        if key in raw:
-            mapped[key] = raw[key]
-    return mapped
-
-
-def _usage_from_any(value: Any) -> dict[str, int] | None:
-    raw: Any = None
-    if isinstance(value, dict):
-        for key in ("usage", "token_usage", "tokenUsage", "total_token_usage", "totalTokenUsage"):
-            candidate = value.get(key)
-            if isinstance(candidate, dict):
-                raw = candidate
-                break
-    else:
-        for key in ("usage", "token_usage", "tokenUsage", "total_token_usage", "totalTokenUsage"):
-            candidate = getattr(value, key, None)
-            if isinstance(candidate, dict):
-                raw = candidate
-                break
-    if not isinstance(raw, dict):
-        return None
-    usage = {
-        "input_tokens": _int_from_keys(raw, "input_tokens", "inputTokens", "input"),
-        "output_tokens": _int_from_keys(raw, "output_tokens", "outputTokens", "output"),
-        "cached_tokens": _int_from_keys(raw, "cached_tokens", "cachedTokens", "cached"),
-        "total_tokens": _int_from_keys(raw, "total_tokens", "totalTokens", "total"),
-    }
-    if usage["total_tokens"] == 0:
-        usage["total_tokens"] = usage["input_tokens"] + usage["output_tokens"]
-    return usage if any(usage.values()) else None
-
-
-def _int_from_keys(values: dict[str, Any], *keys: str) -> int:
-    for key in keys:
-        value = values.get(key)
-        if isinstance(value, bool):
-            continue
-        if isinstance(value, int):
-            return value
-        if isinstance(value, str) and value.strip().isdigit():
-            return int(value.strip())
-    return 0
-
-
-_ADAPTER_TURN_IDS = itertools.count(1)
-
-
-class _ThreadRunAdapter:
-
-    def __init__(self, thread: Any, output_schema: dict[str, Any], prompt: str):
-        self.id = f"turn-{next(_ADAPTER_TURN_IDS)}"
-        self.thread = thread
-        self.output_schema = output_schema
-        self.prompt = prompt
-
-    async def run(self) -> Any:
-        run = getattr(self.thread, "run")
-        try:
-            result = await _maybe_await(run(self.prompt, output_schema=self.output_schema))
-        except TypeError:
-            result = await _maybe_await(run(self.prompt))
-        nested_run = getattr(result, "run", None)
-        if callable(nested_run):
-            return await _maybe_await(nested_run())
-        return result

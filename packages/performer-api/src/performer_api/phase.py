@@ -39,11 +39,14 @@ class PhaseAdvanceRequest:
     attempt: int
     human_response: str | None = None
     workflow_profile: str | None = None
+    codex_profile: dict[str, Any] = field(default_factory=dict)
     workspace_context: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
         payload["current_phase"] = self.current_phase.value
+        if not self.codex_profile:
+            payload.pop("codex_profile", None)
         return payload
 
     @classmethod
@@ -57,6 +60,7 @@ class PhaseAdvanceRequest:
             attempt=_int(payload.get("attempt"), default=1),
             human_response=_optional_str(payload.get("human_response")),
             workflow_profile=_optional_str(payload.get("workflow_profile")),
+            codex_profile=_dict(payload.get("codex_profile")),
             workspace_context=_dict(payload.get("workspace_context")),
         )
 

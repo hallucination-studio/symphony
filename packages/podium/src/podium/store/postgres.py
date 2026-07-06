@@ -82,8 +82,7 @@ class PgMigrator:
                 fencing_token BIGINT NOT NULL DEFAULT 0,
                 created_at TIMESTAMPTZ NOT NULL,
                 updated_at TIMESTAMPTZ NOT NULL,
-                completed_at TIMESTAMPTZ,
-                UNIQUE(project_binding_id, agent_session_id)
+                completed_at TIMESTAMPTZ
             )
             """,
             "ALTER TABLE dispatches ADD COLUMN IF NOT EXISTS fencing_token BIGINT NOT NULL DEFAULT 0",
@@ -91,6 +90,11 @@ class PgMigrator:
             CREATE UNIQUE INDEX IF NOT EXISTS dispatches_binding_session_unique
             ON dispatches (project_binding_id, agent_session_id)
             WHERE agent_session_id <> ''
+            """,
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS dispatches_binding_issue_empty_session_unique
+            ON dispatches (project_binding_id, issue_id)
+            WHERE agent_session_id = ''
             """,
             """
             CREATE TABLE IF NOT EXISTS metrics_snapshots (
@@ -139,6 +143,14 @@ class PgMigrator:
                 created_at TIMESTAMPTZ NOT NULL
             )
             """,
+            """
+            CREATE TABLE IF NOT EXISTS oauth_states (
+                state TEXT PRIMARY KEY,
+                workspace_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                expires_at TIMESTAMPTZ NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+            """,
         )
 
 
@@ -150,6 +162,7 @@ class PgStore:
         self._memory_users: dict[str, dict[str, Any]] = {}
         self._memory_linear_installations: dict[str, dict[str, Any]] = {}
         self._memory_onboarding_state: dict[str, dict[str, Any]] = {}
+        self._memory_oauth_states: dict[str, dict[str, Any]] = {}
 
     @classmethod
     async def connect(cls, database_url: str) -> PgStore:
@@ -259,7 +272,12 @@ class PgStore:
                 return None
             return {
                 "workspace_id": str(installation.get("workspace_id") or workspace_id),
-                "access_token": str(installation.get("access_token") or installation.get("access_token_enc") or ""),
+                "access_token": str(
+                    installation.get("access_token")
+                    or installation.get("access_token_enc")
+                    or installation.get("access_token_encrypted")
+                    or ""
+                ),
                 "scope": installation.get("scope"),
                 "expires_at": installation.get("expires_at"),
             }
@@ -276,6 +294,38 @@ class PgStore:
             "expires_at": row["expires_at"].isoformat() if row["expires_at"] is not None else None,
         }
 
+    async def save_oauth_state(self, state: str, *, workspace_id: str, expires_at: str) -> None:
+        if self.pool is None:
+            self._memory_oauth_states[state] = {"workspace_id": workspace_id, "expires_at": expires_at}
+            return
+        await self.pool.execute(
+            """
+            INSERT INTO oauth_states (state, workspace_id, expires_at, created_at)
+            VALUES ($1, $2, $3::timestamptz, now())
+            ON CONFLICT (state) DO UPDATE SET
+              workspace_id = EXCLUDED.workspace_id,
+              expires_at = EXCLUDED.expires_at,
+              created_at = now()
+            """,
+            state,
+            workspace_id,
+            _pg_datetime(expires_at),
+        )
+
+    async def consume_oauth_state(self, state: str) -> str | None:
+        if self.pool is None:
+            row = self._memory_oauth_states.pop(state, None)
+            return str(row.get("workspace_id") or "") if row is not None else None
+        row = await self.pool.fetchrow(
+            """
+            DELETE FROM oauth_states
+            WHERE state = $1 AND expires_at >= now()
+            RETURNING workspace_id
+            """,
+            state,
+        )
+        return str(row["workspace_id"]) if row is not None else None
+
     async def get_runtime_by_token_hash(self, token_hash: str, *, proxy: bool = False) -> dict[str, Any] | None:
         if self.pool is None:
             raise RuntimeError("postgres_pool_unavailable")
@@ -287,6 +337,30 @@ class PgStore:
             WHERE {column} = $1
             """,
             token_hash,
+        )
+        if row is None:
+            return None
+        return {
+            "id": str(row["id"]),
+            "runtime_group_id": f"group_{row['user_id']}",
+            "user_id": str(row["user_id"]),
+            "runtime_token_hash": str(row["runtime_token_hash"]),
+            "proxy_token_hash": str(row["proxy_token_hash"]),
+            "disabled": bool(row["disabled"]),
+            "revoked": bool(row["revoked"]),
+            "created_at": row["created_at"].isoformat() if row["created_at"] is not None else "",
+        }
+
+    async def get_runtime(self, runtime_id: str) -> dict[str, Any] | None:
+        if self.pool is None:
+            raise RuntimeError("postgres_pool_unavailable")
+        row = await self.pool.fetchrow(
+            """
+            SELECT id, user_id, runtime_token_hash, proxy_token_hash, disabled, revoked, created_at
+            FROM conductors
+            WHERE id = $1
+            """,
+            runtime_id,
         )
         if row is None:
             return None
@@ -445,7 +519,7 @@ class PgStore:
               $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::timestamptz,$14,
               $15::timestamptz,$16::timestamptz,$17::timestamptz
             )
-            ON CONFLICT (project_binding_id, agent_session_id) DO NOTHING
+            ON CONFLICT DO NOTHING
             RETURNING id
             """,
             str(dispatch["dispatch_id"]),

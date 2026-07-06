@@ -160,6 +160,47 @@ async def test_ack_completed_podium_dispatch_posts_runtime_completion(tmp_path: 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("status_code", [404, 409])
+async def test_ack_completed_podium_dispatch_treats_missing_or_conflict_as_terminal(
+    tmp_path: Path,
+    status_code: int,
+) -> None:
+    service = make_channel_service(tmp_path)
+    service.store.save_settings(
+        ConductorSettings(
+            podium_url="https://podium.test",
+            podium_runtime_id="runtime-1",
+            podium_runtime_token="runtime-token",
+        )
+    )
+    repo = make_repo(tmp_path)
+    instance = service.create_instance(make_request(repo))
+    run = service.store.upsert_orchestration_run(
+        instance_id=instance.id,
+        issue_id="issue-1",
+        issue_identifier="ENG-1",
+        workflow_profile="default",
+        dispatch_id="dispatch-1",
+    )
+    service.store.update_orchestration_run(
+        run.run_id,
+        phase=RunPhase.DONE,
+        status="completed",
+        ack_status="pending",
+    )
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status_code, json={"error": "already terminal"})
+
+    result = await service.ack_completed_podium_dispatches(transport=httpx.MockTransport(handler))
+
+    updated = service.store.get_orchestration_run(run.run_id)
+    assert result == {"acked": 1, "failed": 0, "skipped": 0}
+    assert updated is not None
+    assert updated.ack_status == "acked"
+
+
+@pytest.mark.asyncio
 async def test_handle_podium_ws_dispatch_and_log_fetch_commands(tmp_path: Path) -> None:
     service = make_channel_service(tmp_path)
     repo = make_repo(tmp_path)
@@ -194,7 +235,9 @@ async def test_handle_podium_ws_dispatch_and_log_fetch_commands(tmp_path: Path) 
         post_log_chunk=post_chunk,
     )
 
-    assert dispatch["status"] == "accepted"
+    assert dispatch["status"] == "queued"
+    assert service.runtime_manager.started_phase_issue_ids == []  # type: ignore[attr-defined]
+    assert await service._drain_podium_dispatch_queue() == 1
     assert service.runtime_manager.started_phase_issue_ids == ["issue-1"]  # type: ignore[attr-defined]
     assert fetch["status"] == "posted"
     assert posted_chunks[0]["request_id"] == "req-1"
