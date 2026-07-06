@@ -75,7 +75,16 @@ def test_pg_migrator_exposes_phase_0_schema() -> None:
     assert "CREATE TABLE IF NOT EXISTS instance_log_tails" in sql
     assert "CREATE TABLE IF NOT EXISTS onboarding_state" in sql
     assert "CREATE TABLE IF NOT EXISTS proxy_audit_events" in sql
+    assert "fencing_token BIGINT NOT NULL DEFAULT 0" in sql
+    assert "UNIQUE(project_binding_id, agent_session_id)" in sql
     assert "sessions" not in sql.lower()
+
+
+def test_pg_store_dispatch_lease_uses_atomic_skip_locked_query() -> None:
+    source = Path("packages/podium/src/podium/store/postgres.py").read_text(encoding="utf-8")
+
+    assert "FOR UPDATE SKIP LOCKED" in source
+    assert "fencing_token = dispatches.fencing_token + 1" in source
 
 
 async def test_redis_store_persists_session_with_ttl() -> None:
@@ -140,6 +149,10 @@ class FakePgStore:
         self.id_lookups: list[str] = []
         self.linear_app_updates: list[tuple[str, dict[str, Any] | None]] = []
         self.onboarding_state: dict[str, dict[str, Any]] = {}
+        self.conductors: dict[str, dict[str, Any]] = {}
+        self.project_bindings: dict[str, dict[str, Any]] = {}
+        self.dispatches: dict[str, dict[str, Any]] = {}
+        self.proxy_audit_events: list[dict[str, Any]] = []
 
     async def create_user(self, user_id: str, *, email: str, password_hash: str, created_at: str) -> dict[str, Any]:
         self.created_users.append(user_id)
@@ -186,10 +199,85 @@ class FakePgStore:
         state = self.onboarding_state.get(user_id)
         return dict(state) if state is not None else None
 
+    async def upsert_conductor(self, conductor: dict[str, Any]) -> None:
+        self.conductors[str(conductor["id"])] = dict(conductor)
+
+    async def upsert_project_binding(self, binding: dict[str, Any]) -> None:
+        self.project_bindings[str(binding["id"])] = dict(binding)
+
+    async def get_runtime_by_token_hash(self, token_hash: str, *, proxy: bool = False) -> dict[str, Any] | None:
+        field = "proxy_token_hash" if proxy else "runtime_token_hash"
+        for conductor in self.conductors.values():
+            if str(conductor.get(field) or "") == token_hash:
+                return {
+                    "id": str(conductor["id"]),
+                    "runtime_group_id": f"group_{conductor.get('user_id') or ''}",
+                    "user_id": str(conductor.get("user_id") or ""),
+                    "runtime_token_hash": str(conductor.get("runtime_token_hash") or ""),
+                    "proxy_token_hash": str(conductor.get("proxy_token_hash") or ""),
+                    "disabled": bool(conductor.get("disabled")),
+                    "revoked": bool(conductor.get("revoked")),
+                    "created_at": str(conductor.get("created_at") or ""),
+                }
+        return None
+
+    async def upsert_dispatch(self, dispatch: dict[str, Any]) -> bool:
+        for existing in self.dispatches.values():
+            if (
+                existing.get("project_binding_id") == dispatch.get("project_binding_id")
+                and existing.get("agent_session_id") == dispatch.get("agent_session_id")
+            ):
+                return False
+        self.dispatches[str(dispatch["dispatch_id"])] = dict(dispatch)
+        return True
+
+    async def list_project_bindings_for_conductor(self, conductor_id: str) -> list[dict[str, Any]]:
+        return [
+            dict(binding)
+            for binding in self.project_bindings.values()
+            if str(binding.get("conductor_id") or "") == conductor_id
+        ]
+
+    async def list_project_bindings_for_route(
+        self,
+        *,
+        user_id: str,
+        project_slug: str,
+        agent_app_user_ids: list[str],
+    ) -> list[dict[str, Any]]:
+        expected_agents = {str(agent_id) for agent_id in agent_app_user_ids if str(agent_id)}
+        return [
+            dict(binding)
+            for binding in self.project_bindings.values()
+            if str(binding.get("user_id") or "") == user_id
+            and str(binding.get("project_slug") or "") == project_slug
+            and (
+                not str(binding.get("agent_app_user_id") or "")
+                or str(binding.get("agent_app_user_id") or "") in expected_agents
+            )
+        ]
+
+    async def lease_dispatch(self, conductor_id: str, *, binding_ids: list[str], lease_until: str) -> dict[str, Any] | None:
+        for dispatch in self.dispatches.values():
+            if dispatch.get("project_binding_id") not in binding_ids:
+                continue
+            if dispatch.get("status") not in {"queued", "leased"}:
+                continue
+            dispatch["status"] = "leased"
+            dispatch["leased_runtime_id"] = conductor_id
+            dispatch["leased_until"] = lease_until
+            dispatch["fencing_token"] = int(dispatch.get("fencing_token") or 0) + 1
+            return dict(dispatch)
+        return None
+
+    async def insert_proxy_audit_event(self, event: dict[str, Any]) -> None:
+        self.proxy_audit_events.append(dict(event))
+
 
 class FakeRedisStore:
     def __init__(self) -> None:
         self.sessions: dict[str, dict[str, Any]] = {}
+        self.enrollment_tokens: dict[str, dict[str, Any]] = {}
         self.saved_sessions: list[str] = []
 
     async def save_session(self, token_hash: str, *, user_id: str, ttl_seconds: int) -> None:
@@ -202,6 +290,15 @@ class FakeRedisStore:
     async def revoke_session(self, token_hash: str) -> None:
         if token_hash in self.sessions:
             self.sessions[token_hash]["revoked"] = True
+
+    async def save_enrollment_token(self, token_hash: str, *, runtime_group_id: str, ttl_seconds: int) -> None:
+        self.enrollment_tokens[token_hash] = {"runtime_group_id": runtime_group_id}
+
+    async def consume_enrollment_token(self, token_hash: str) -> dict[str, Any] | None:
+        return self.enrollment_tokens.pop(token_hash, None)
+
+    async def has_enrollment_token_for_group(self, runtime_group_id: str) -> bool:
+        return any(row.get("runtime_group_id") == runtime_group_id for row in self.enrollment_tokens.values())
 
 
 async def test_auth_uses_postgres_for_users_and_redis_for_sessions() -> None:

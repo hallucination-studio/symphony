@@ -1127,9 +1127,12 @@ class Orchestrator:
                             questions=[str(verdict.reason)],
                             resume_strategy="retry",
                         )
-                    self.state.claimed.discard(issue_id)
                     self.state.retry_attempts.pop(issue_id, None)
-                    if not self.config.acceptance.enabled:
+                    self.state.continuations.pop(issue_id, None)
+                    if self.config.acceptance.enabled:
+                        self.state.claimed.discard(issue_id)
+                    else:
+                        self.state.claimed.add(issue_id)
                         self.phase_runtime.record_outcome(
                             issue_id,
                             next_phase=RunPhase.AWAITING_HUMAN,
@@ -1712,7 +1715,7 @@ class Orchestrator:
             if stall_timeout_ms > 0:
                 since = entry.last_codex_timestamp or entry.started_at
                 if (now - since).total_seconds() * 1000 > stall_timeout_ms:
-                    await self._terminate_running(issue_id, retry=True, failure_reason="stalled")
+                    await self._terminate_running(issue_id, retry=True, failure_reason="stalled", human_on_retry=False)
 
     async def _terminate_running(
         self,
@@ -1722,6 +1725,7 @@ class Orchestrator:
         cleanup_workspace: bool = False,
         ops_status: str | None = None,
         failure_reason: str = "stalled",
+        human_on_retry: bool = True,
     ) -> None:
         entry = self.state.running.pop(issue_id, None)
         if not entry:
@@ -1741,13 +1745,16 @@ class Orchestrator:
         if retry:
             self._finish_open_ops_for_issue(issue_id, status="failed", failure_summary=failure_reason)
             next_attempt = max(entry.retry_attempt + 1, 1)
-            await self._create_human_intervention_for_entry(
-                entry,
-                kind="runtime_error",
-                attempt=next_attempt,
-                error=failure_reason,
-                resume_strategy="retry",
-            )
+            if human_on_retry:
+                await self._create_human_intervention_for_entry(
+                    entry,
+                    kind="runtime_error",
+                    attempt=next_attempt,
+                    error=failure_reason,
+                    resume_strategy="retry",
+                )
+            else:
+                self._schedule_retry(entry.issue, next_attempt, error=failure_reason, delay_ms=5_000)
             self.phase_runtime.record_outcome(
                 issue_id,
                 next_phase=RunPhase.QUEUED,

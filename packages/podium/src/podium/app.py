@@ -80,6 +80,7 @@ class InMemoryPodiumBusinessState:
     ws_queues: dict[str, asyncio.Queue[dict[str, Any]]] = field(default_factory=dict)
     onboarding_state: dict[str, dict[str, Any]] = field(default_factory=dict)
     smoke_results: dict[str, dict[str, Any]] = field(default_factory=dict)
+    oauth_states: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 def create_app(
@@ -374,13 +375,14 @@ def create_app(
         client_id, _client_secret, redirect_uri = await resolve_linear_creds(workspace_id)
         if not client_id:
             return error_response(400, "linear_app_not_configured", "No Linear app is configured")
+        oauth_state = state.create_oauth_state(workspace_id)
         query = urllib.parse.urlencode(
             {
                 "client_id": client_id,
                 "redirect_uri": redirect_uri,
                 "response_type": "code",
                 "scope": LINEAR_DEFAULT_SCOPE,
-                "state": workspace_id,
+                "state": oauth_state,
                 "prompt": "consent",
             }
         )
@@ -388,16 +390,19 @@ def create_app(
 
     @app.get("/api/v1/linear/oauth/callback")
     async def linear_callback(request: Request) -> Response:
-        workspace_id = request.query_params.get("state") or ""
+        callback_state = request.query_params.get("state") or ""
         code = request.query_params.get("code") or ""
-        if not workspace_id:
+        if not callback_state:
             return error_response(400, "missing_state", "Missing state parameter")
         if not code:
             return error_response(400, "missing_code", "Missing code parameter")
+        workspace_id = state.consume_oauth_state(callback_state)
+        if not workspace_id:
+            return error_response(400, "invalid_state", "Invalid or expired state parameter")
         if not state.secret_key:
             return error_response(500, "encryption_unavailable", "Encryption is not configured")
         if linear_token_exchange is not None:
-            token = linear_token_exchange(code, workspace_id)
+            token = linear_token_exchange(code, callback_state)
         else:
             client_id, client_secret, redirect_uri = await resolve_linear_creds(workspace_id)
             async with httpx.AsyncClient(timeout=30, trust_env=False) as http_client:
@@ -620,7 +625,7 @@ def create_app(
             return error_response(400, "enrollment_token_used", "Enrollment token has already been used")
         if token_error == "enrollment_token_expired":
             return error_response(400, "enrollment_token_expired", "Enrollment token has expired")
-        runtime_id = f"runtime_{len(state.runtimes) + 1}"
+        runtime_id = f"runtime_{secrets.token_urlsafe(12)}"
         runtime_token = secrets.token_urlsafe(32)
         proxy_token = secrets.token_urlsafe(32)
         runtime_group_id = str(token_row["runtime_group_id"])
@@ -634,7 +639,15 @@ def create_app(
             "revoked": False,
             "created_at": utc_now_iso(),
         }
-        state.ensure_conductor_record(runtime_id)
+        conductor = state.ensure_conductor_record(runtime_id)
+        if state.pg_store is not None:
+            await state.pg_store.upsert_conductor(
+                {
+                    **conductor,
+                    "runtime_token_hash": state.runtimes[runtime_id]["runtime_token_hash"],
+                    "proxy_token_hash": state.runtimes[runtime_id]["proxy_token_hash"],
+                }
+            )
         state.persist()
         websocket_url = str(request.base_url).rstrip("/").replace("http://", "ws://").replace("https://", "wss://")
         return JSONResponse(
@@ -661,26 +674,26 @@ def create_app(
         if payload.get("type") != "AgentSessionEvent":
             return JSONResponse({"status": "ignored", "queued": 0})
         event = normalize_agent_session_event(payload)
-        queued = state.queue_dispatches(event)
+        queued = await state.queue_dispatches(event)
         return JSONResponse({"status": "accepted", "queued": queued})
 
     @app.post("/api/v1/runtime/dispatches/lease")
     async def lease_dispatch(authorization: str | None = Header(default=None)) -> JSONResponse:
-        runtime = state.runtime_for_bearer(authorization or "")
+        runtime = await state.runtime_for_bearer(authorization or "")
         if runtime is None:
             return error_response(401, "unauthorized", "Unauthorized")
-        dispatch = state.lease_dispatch(str(runtime["id"]))
+        dispatch = await state.lease_dispatch(str(runtime["id"]))
         if dispatch is None:
             return JSONResponse({"dispatch": None})
         return JSONResponse({"dispatch": dispatch_public(dispatch)})
 
     @app.post("/api/v1/runtime/report")
     async def runtime_report(request: Request, authorization: str | None = Header(default=None)) -> JSONResponse:
-        runtime = state.runtime_for_bearer(authorization or "")
+        runtime = await state.runtime_for_bearer(authorization or "")
         if runtime is None:
             return error_response(401, "unauthorized", "Unauthorized")
         payload = await request.json()
-        result = state.apply_runtime_report(str(runtime["id"]), payload if isinstance(payload, dict) else {})
+        result = await state.apply_runtime_report(str(runtime["id"]), payload if isinstance(payload, dict) else {})
         return JSONResponse(result)
 
     @app.get("/api/v1/runtimes/{conductor_id}/instances/{instance_id}/logs")
@@ -727,7 +740,7 @@ def create_app(
 
     @app.post("/api/v1/runtime/log-chunks")
     async def runtime_log_chunks(request: Request, authorization: str | None = Header(default=None)) -> JSONResponse:
-        runtime = state.runtime_for_bearer(authorization or "")
+        runtime = await state.runtime_for_bearer(authorization or "")
         if runtime is None:
             return error_response(401, "unauthorized", "Unauthorized")
         payload = await request.json()
@@ -743,24 +756,29 @@ def create_app(
 
     @app.post("/api/v1/runtime/dispatches/ack")
     async def ack_dispatch(request: Request, authorization: str | None = Header(default=None)) -> JSONResponse:
-        runtime = state.runtime_for_bearer(authorization or "")
+        runtime = await state.runtime_for_bearer(authorization or "")
         if runtime is None:
             return error_response(401, "unauthorized", "Unauthorized")
         payload = await request.json()
-        dispatch = state.ack_dispatch(
+        raw_fencing_token = payload.get("fencing_token")
+        fencing_token = int(raw_fencing_token) if raw_fencing_token not in {None, ""} else None
+        dispatch = await state.ack_dispatch(
             str(runtime["id"]),
             str(payload.get("dispatch_id") or ""),
             str(payload.get("status") or "accepted"),
+            fencing_token=fencing_token,
             reason=payload.get("reason") if isinstance(payload.get("reason"), str) else None,
             runtime_phase=payload.get("runtime_phase") if isinstance(payload.get("runtime_phase"), str) else None,
         )
         if dispatch is None:
             return error_response(404, "dispatch_not_found", "Dispatch not found")
+        if dispatch.get("_ack_error") == "stale_dispatch_lease":
+            return error_response(409, "stale_dispatch_lease", "Dispatch lease fencing token is stale")
         return JSONResponse({"dispatch": dispatch_public(dispatch)})
 
     @app.websocket("/api/v1/runtime/ws")
     async def runtime_ws(websocket: WebSocket) -> None:
-        runtime = state.runtime_for_bearer(websocket.headers.get("authorization") or "")
+        runtime = await state.runtime_for_bearer(websocket.headers.get("authorization") or "")
         if runtime is None:
             await websocket.close(code=4401)
             return
@@ -776,10 +794,11 @@ def create_app(
                     await state.set_presence(runtime_id)
                     await websocket.send_json({"type": "ping"})
                 elif kind == "dispatch.ack":
-                    dispatch = state.ack_dispatch(
+                    dispatch = await state.ack_dispatch(
                         runtime_id,
                         str(message.get("dispatch_id") or ""),
                         str(message.get("status") or "accepted"),
+                        fencing_token=int(message["fencing_token"]) if message.get("fencing_token") not in {None, ""} else None,
                         reason=message.get("reason") if isinstance(message.get("reason"), str) else None,
                         runtime_phase=message.get("runtime_phase") if isinstance(message.get("runtime_phase"), str) else None,
                     )
@@ -796,12 +815,12 @@ def create_app(
 
     @app.post("/api/v1/linear/graphql")
     async def linear_graphql(request: Request, authorization: str | None = Header(default=None)) -> JSONResponse:
-        runtime = state.runtime_for_proxy_bearer(authorization or "")
+        runtime = await state.runtime_for_proxy_bearer(authorization or "")
         if runtime is None:
-            state.proxy_audit.append({"allowed": False, "reason": "unauthorized", "timestamp": utc_now_iso()})
+            await state.record_proxy_audit({"allowed": False, "reason": "unauthorized", "timestamp": utc_now_iso()})
             return error_response(401, "unauthorized", "Unauthorized")
         if runtime.get("disabled") or runtime.get("revoked"):
-            state.proxy_audit.append({"runtime_id": runtime["id"], "allowed": False, "reason": "runtime_disabled", "timestamp": utc_now_iso()})
+            await state.record_proxy_audit({"runtime_id": runtime["id"], "allowed": False, "reason": "runtime_disabled", "timestamp": utc_now_iso()})
             return error_response(401, "runtime_disabled", "Runtime is disabled")
         payload = await request.json()
         group_id = str(runtime.get("runtime_group_id") or "")
@@ -812,7 +831,7 @@ def create_app(
         if not upstream_token:
             upstream_token = os.environ.get("PODIUM_LINEAR_ACCESS_TOKEN", "").strip()
         upstream_endpoint = os.environ.get("PODIUM_LINEAR_ENDPOINT", "https://api.linear.app/graphql").strip()
-        state.proxy_audit.append(
+        await state.record_proxy_audit(
             {
                 "runtime_id": runtime["id"],
                 "allowed": True,
@@ -944,6 +963,22 @@ class ManagedPodiumState:
         persist = getattr(self.durable, "persist", None)
         if callable(persist):
             persist()
+
+    def create_oauth_state(self, workspace_id: str) -> str:
+        token = secrets.token_urlsafe(32)
+        self.durable.oauth_states[token] = {
+            "workspace_id": workspace_id,
+            "created_at": utc_now_iso(),
+        }
+        self.persist()
+        return token
+
+    def consume_oauth_state(self, state: str) -> str | None:
+        row = self.durable.oauth_states.pop(state, None)
+        self.persist()
+        if not isinstance(row, dict):
+            return None
+        return str(row.get("workspace_id") or "") or None
 
     def _onboarding_row(self, workspace_id: str) -> dict[str, Any]:
         return self.durable.onboarding_state.setdefault(
@@ -1102,6 +1137,11 @@ class ManagedPodiumState:
             return await self.redis_store.get_log_fetch_result(request_id)
         return self.log_fetch_results.get(request_id)
 
+    async def record_proxy_audit(self, event: dict[str, Any]) -> None:
+        self.proxy_audit.append(dict(event))
+        if self.pg_store is not None:
+            await self.pg_store.insert_proxy_audit_event(event)
+
     def _fernet(self) -> Fernet:
         if not self.secret_key:
             raise RuntimeError("encryption_unavailable")
@@ -1173,12 +1213,21 @@ class ManagedPodiumState:
             self.persist()
         return conductor
 
-    def apply_runtime_report(self, runtime_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    async def apply_runtime_report(self, runtime_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         conductor = self.ensure_conductor_record(runtime_id)
         for key in ("hostname", "label", "version"):
             if key in payload:
                 conductor[key] = str(payload.get(key) or "")
         conductor["last_report_at"] = utc_now_iso()
+        if self.pg_store is not None:
+            runtime = self.runtimes.get(runtime_id, {})
+            await self.pg_store.upsert_conductor(
+                {
+                    **conductor,
+                    "runtime_token_hash": runtime.get("runtime_token_hash") or "",
+                    "proxy_token_hash": runtime.get("proxy_token_hash") or "",
+                }
+            )
         bindings = payload.get("bindings") if isinstance(payload.get("bindings"), list) else []
         metrics = payload.get("metrics") if isinstance(payload.get("metrics"), dict) else {}
         queue = payload.get("queue") if isinstance(payload.get("queue"), dict) else {}
@@ -1212,6 +1261,8 @@ class ManagedPodiumState:
                 "updated_at": utc_now_iso(),
             }
             self.project_bindings[binding_id] = binding
+            if self.pg_store is not None:
+                await self.pg_store.upsert_project_binding(binding)
             self.runtime_groups[binding_id] = {
                 "id": binding_id,
                 "linear_workspace_id": binding["user_id"],
@@ -1481,7 +1532,7 @@ class ManagedPodiumState:
             max_age=30 * 24 * 3600,
         )
 
-    def runtime_for_bearer(self, authorization: str) -> dict[str, Any] | None:
+    async def runtime_for_bearer(self, authorization: str) -> dict[str, Any] | None:
         token = bearer_token(authorization)
         if not token:
             return None
@@ -1489,9 +1540,14 @@ class ManagedPodiumState:
         for runtime in self.runtimes.values():
             if hmac.compare_digest(str(runtime["runtime_token_hash"]), token_hash):
                 return runtime
+        if self.pg_store is not None:
+            runtime = await self.pg_store.get_runtime_by_token_hash(token_hash)
+            if runtime is not None:
+                self.runtimes[str(runtime["id"])] = runtime
+                return runtime
         return None
 
-    def runtime_for_proxy_bearer(self, authorization: str) -> dict[str, Any] | None:
+    async def runtime_for_proxy_bearer(self, authorization: str) -> dict[str, Any] | None:
         token = bearer_token(authorization)
         if not token:
             return None
@@ -1499,11 +1555,16 @@ class ManagedPodiumState:
         for runtime in self.runtimes.values():
             if hmac.compare_digest(str(runtime["proxy_token_hash"]), token_hash):
                 return runtime
+        if self.pg_store is not None:
+            runtime = await self.pg_store.get_runtime_by_token_hash(token_hash, proxy=True)
+            if runtime is not None:
+                self.runtimes[str(runtime["id"])] = runtime
+                return runtime
         return None
 
-    def queue_dispatches(self, event: dict[str, Any]) -> int:
+    async def queue_dispatches(self, event: dict[str, Any]) -> int:
         queued = 0
-        groups = list(self.runtime_groups.values())
+        groups = await self._runtime_groups_for_dispatch_event(event)
         for group in groups:
             if not group.get("project_binding_id") and self.project_bindings:
                 continue
@@ -1511,15 +1572,25 @@ class ManagedPodiumState:
                 continue
             if group.get("project_slug") and group.get("project_slug") != event.get("project_slug"):
                 continue
-            if group.get("linear_agent_app_user_id") and group.get("linear_agent_app_user_id") != event.get("agent_app_user_id"):
+            expected_agent = str(group.get("linear_agent_app_user_id") or "")
+            if expected_agent and expected_agent not in {
+                str(event.get("agent_app_user_id") or ""),
+                str(event.get("issue_delegate_id") or ""),
+            }:
                 continue
-            if group.get("linear_agent_app_user_id") and group.get("linear_agent_app_user_id") != event.get("issue_delegate_id"):
+            project_binding_id = str(group.get("project_binding_id") or group["id"])
+            if any(
+                str(dispatch.get("project_binding_id") or "") == project_binding_id
+                and str(dispatch.get("agent_session_id") or "") == str(event.get("agent_session_id") or "")
+                for dispatch in self.dispatches.values()
+            ):
                 continue
             dispatch_id = f"dispatch_{len(self.dispatches) + 1}"
-            self.dispatches[dispatch_id] = {
+            dispatch = {
                 "dispatch_id": dispatch_id,
                 "runtime_group_id": group["id"],
-                "project_binding_id": group.get("project_binding_id") or group["id"],
+                "project_binding_id": project_binding_id,
+                "user_id": str(group.get("linear_workspace_id") or event["workspace_id"]),
                 "issue_id": event["issue_id"],
                 "issue_identifier": event["issue_identifier"],
                 "linear_workspace_id": event["workspace_id"],
@@ -1536,8 +1607,15 @@ class ManagedPodiumState:
                 "runtime_phase": "",
                 "leased_runtime_id": None,
                 "leased_until": None,
+                "fencing_token": 0,
                 "created_at": utc_now_iso(),
+                "updated_at": utc_now_iso(),
             }
+            if self.pg_store is not None:
+                inserted = await self.pg_store.upsert_dispatch(dispatch)
+                if not inserted:
+                    continue
+            self.dispatches[dispatch_id] = dispatch
             self.persist()
             binding_id = str(group.get("project_binding_id") or "")
             if binding_id:
@@ -1555,14 +1633,74 @@ class ManagedPodiumState:
             queued += 1
         return queued
 
-    def lease_dispatch(self, runtime_id: str) -> dict[str, Any] | None:
+    async def _runtime_groups_for_dispatch_event(self, event: dict[str, Any]) -> list[dict[str, Any]]:
+        groups = list(self.runtime_groups.values())
+        if self.pg_store is None:
+            return groups
+        agent_ids = [
+            str(event.get("agent_app_user_id") or ""),
+            str(event.get("issue_delegate_id") or ""),
+        ]
+        loaded = await self.pg_store.list_project_bindings_for_route(
+            user_id=str(event.get("workspace_id") or ""),
+            project_slug=str(event.get("project_slug") or ""),
+            agent_app_user_ids=[agent_id for agent_id in agent_ids if agent_id],
+        )
+        for binding in loaded:
+            binding_id = str(binding.get("id") or "")
+            if not binding_id:
+                continue
+            self.project_bindings[binding_id] = binding
+            self.runtime_groups[binding_id] = self._runtime_group_from_project_binding(binding)
+        return list(self.runtime_groups.values())
+
+    def _runtime_group_from_project_binding(self, binding: dict[str, Any]) -> dict[str, Any]:
+        binding_id = str(binding.get("id") or "")
+        return {
+            "id": binding_id,
+            "linear_workspace_id": str(binding.get("user_id") or ""),
+            "project_slug": str(binding.get("project_slug") or ""),
+            "linear_agent_app_user_id": str(binding.get("agent_app_user_id") or ""),
+            "workflow_profile": str(binding.get("workflow_profile") or "task"),
+            "codex_profile": sanitize_codex_profile(binding.get("codex_profile")),
+            "project_binding_id": binding_id,
+        }
+
+    async def lease_dispatch(self, runtime_id: str) -> dict[str, Any] | None:
         runtime = self.runtimes[runtime_id]
         binding_ids = {
             binding_id
             for binding_id, binding in self.project_bindings.items()
             if str(binding.get("conductor_id") or "") == runtime_id
         }
+        if self.pg_store is not None and not binding_ids:
+            for binding in await self.pg_store.list_project_bindings_for_conductor(runtime_id):
+                binding_id = str(binding.get("id") or "")
+                if not binding_id:
+                    continue
+                self.project_bindings[binding_id] = binding
+                self.runtime_groups[binding_id] = self._runtime_group_from_project_binding(binding)
+                binding_ids.add(binding_id)
         now = datetime.now(timezone.utc)
+        if self.pg_store is not None:
+            leased = await self.pg_store.lease_dispatch(
+                runtime_id,
+                binding_ids=sorted(binding_ids),
+                lease_until=(now + timedelta(minutes=5)).isoformat().replace("+00:00", "Z"),
+            )
+            if leased is not None:
+                group = self.runtime_groups.get(str(leased.get("project_binding_id") or "")) or {}
+                leased.update(
+                    {
+                        "runtime_group_id": str(group.get("id") or leased.get("project_binding_id") or ""),
+                        "routing_rule_id": str(group.get("id") or leased.get("project_binding_id") or ""),
+                        "workflow_profile": str(group.get("workflow_profile") or "task"),
+                        "codex_profile": sanitize_codex_profile(group.get("codex_profile")),
+                        "blocked_by": [],
+                        "parent_issue_id": "",
+                    }
+                )
+            return leased
         for dispatch in self.dispatches.values():
             if binding_ids:
                 if dispatch.get("project_binding_id") not in binding_ids:
@@ -1578,27 +1716,33 @@ class ManagedPodiumState:
             dispatch["status"] = "leased"
             dispatch["leased_runtime_id"] = runtime_id
             dispatch["leased_until"] = now + timedelta(minutes=5)
+            dispatch["fencing_token"] = int(dispatch.get("fencing_token") or 0) + 1
+            dispatch["updated_at"] = utc_now_iso()
             self.persist()
             return dispatch
         return None
 
-    def ack_dispatch(
+    async def ack_dispatch(
         self,
         runtime_id: str,
         dispatch_id: str,
         status: str,
         *,
+        fencing_token: int | None = None,
         reason: str | None = None,
         runtime_phase: str | None = None,
     ) -> dict[str, Any] | None:
         dispatch = self.dispatches.get(dispatch_id)
         if dispatch is None or dispatch.get("leased_runtime_id") != runtime_id:
             return None
+        if fencing_token is not None and fencing_token != int(dispatch.get("fencing_token") or 0):
+            return {**dispatch, "_ack_error": "stale_dispatch_lease"}
         if status in {"completed", "failed"} and runtime_phase not in {"done", "failed"}:
             dispatch["status"] = "ack_drift"
             dispatch["reason"] = "dispatch ack missing conductor terminal run event"
             if runtime_phase is not None:
                 dispatch["runtime_phase"] = runtime_phase
+            dispatch["updated_at"] = utc_now_iso()
             self.persist()
             return dispatch
         dispatch["status"] = status
@@ -1606,6 +1750,21 @@ class ManagedPodiumState:
             dispatch["reason"] = reason
         if runtime_phase is not None:
             dispatch["runtime_phase"] = runtime_phase
+        dispatch["updated_at"] = utc_now_iso()
+        if status in {"completed", "failed", "cancelled", "canceled"}:
+            dispatch["completed_at"] = dispatch["updated_at"]
+        if self.pg_store is not None:
+            saved = await self.pg_store.ack_dispatch(
+                runtime_id,
+                dispatch_id,
+                dispatch["status"],
+                fencing_token=fencing_token,
+                reason=str(dispatch.get("reason") or ""),
+                runtime_phase=str(dispatch.get("runtime_phase") or ""),
+                completed_at=dispatch.get("completed_at"),
+            )
+            if saved is None:
+                return {**dispatch, "_ack_error": "stale_dispatch_lease"} if fencing_token is not None else None
         self.persist()
         return dispatch
 
@@ -1691,6 +1850,7 @@ def dispatch_public(dispatch: dict[str, Any]) -> dict[str, Any]:
         "blocked_by": list(dispatch.get("blocked_by") or []),
         "parent_issue_id": dispatch.get("parent_issue_id") or "",
         "status": dispatch["status"],
+        "fencing_token": int(dispatch.get("fencing_token") or 0),
         "reason": dispatch.get("reason") or "",
         "runtime_phase": dispatch.get("runtime_phase") or "",
     }

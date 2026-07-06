@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -608,6 +610,94 @@ def test_real_codex_thread_resume_probe_uses_structured_prompt() -> None:
     assert "changed_files" in prompt
     assert "remaining_risks" in prompt
     assert "ready_for_review" in prompt
+
+
+def test_real_codex_continuation_probe_requires_two_turns_on_one_thread() -> None:
+    tool = load_tool("real_codex_continuation_probe")
+
+    summary = tool.summarize_probe(
+        SimpleNamespace(
+            success=True,
+            thread_id="thread-1",
+            turn_count=2,
+            structured_result={"next_action": "ready_for_review"},
+        ),
+        [
+            {"event": "turn_started", "thread_id": "thread-1", "turn_id": "turn-1"},
+            {"event": "turn_completed", "thread_id": "thread-1", "turn_id": "turn-1"},
+            {"event": "turn_started", "thread_id": "thread-1", "turn_id": "turn-2"},
+            {"event": "turn_completed", "thread_id": "thread-1", "turn_id": "turn-2"},
+        ],
+        [1],
+    )
+
+    assert summary["pass"] is True
+    assert summary["turn_count"] == 2
+    assert summary["same_thread"] is True
+    assert summary["continuation_calls"] == [1]
+
+
+def test_real_codex_continuation_probe_rejects_resume_only_single_turn() -> None:
+    tool = load_tool("real_codex_continuation_probe")
+
+    summary = tool.summarize_probe(
+        SimpleNamespace(
+            success=True,
+            thread_id="thread-1",
+            turn_count=1,
+            structured_result={"next_action": "ready_for_review"},
+        ),
+        [
+            {"event": "turn_started", "thread_id": "thread-1", "turn_id": "turn-1"},
+            {"event": "turn_completed", "thread_id": "thread-1", "turn_id": "turn-1"},
+        ],
+        [],
+    )
+
+    assert summary["pass"] is False
+
+
+def test_real_performer_continuation_probe_requires_refresh_and_persisted_continuation(tmp_path: Path) -> None:
+    tool = load_tool("real_performer_continuation_probe")
+    persistence_path = tmp_path / "state" / "performer.json"
+    persistence_path.parent.mkdir(parents=True)
+    persistence_path.write_text(
+        json.dumps(
+            {
+                "continuations": [
+                    {
+                        "issue_id": "mt-1",
+                        "identifier": "MT-1",
+                        "attempt": 1,
+                        "due_at": "2026-07-06T00:00:00Z",
+                        "due_at_ms": 1,
+                        "issue_url": None,
+                        "last_message": "still active",
+                        "phase": "continuing",
+                        "status_label": "performer:phase/implementation",
+                    }
+                ],
+                "retry_attempts": [],
+                "sessions": [],
+                "blocked": [],
+                "human_interventions": [],
+                "codex_threads": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    codex = tool.ProbeCodexClient()
+    codex.prompts = ["initial", "continued"]
+    tracker = tool.ProbeTracker(tool.make_issue())
+    tracker.refresh_calls = [["mt-1"]]
+
+    summary = tool.summarize_probe(codex=codex, tracker=tracker, persistence_path=persistence_path)
+
+    assert summary["pass"] is True
+    assert summary["turn_count"] == 2
+    assert summary["prompt_types"] == ["str", "str"]
+    assert summary["tracker_refresh_calls"] == [["mt-1"]]
+    assert summary["persisted_continuations"][0]["phase"] == "continuing"
 
 
 def test_real_codex_init_probe_summarizes_transient_recovery() -> None:

@@ -78,10 +78,18 @@ class PgMigrator:
                 runtime_phase TEXT NOT NULL DEFAULT '',
                 leased_conductor_id TEXT REFERENCES conductors(id) ON DELETE SET NULL,
                 leased_until TIMESTAMPTZ,
+                fencing_token BIGINT NOT NULL DEFAULT 0,
                 created_at TIMESTAMPTZ NOT NULL,
                 updated_at TIMESTAMPTZ NOT NULL,
-                completed_at TIMESTAMPTZ
+                completed_at TIMESTAMPTZ,
+                UNIQUE(project_binding_id, agent_session_id)
             )
+            """,
+            "ALTER TABLE dispatches ADD COLUMN IF NOT EXISTS fencing_token BIGINT NOT NULL DEFAULT 0",
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS dispatches_binding_session_unique
+            ON dispatches (project_binding_id, agent_session_id)
+            WHERE agent_session_id <> ''
             """,
             """
             CREATE TABLE IF NOT EXISTS metrics_snapshots (
@@ -257,6 +265,76 @@ class PgStore:
             "expires_at": row["expires_at"].isoformat() if row["expires_at"] is not None else None,
         }
 
+    async def get_runtime_by_token_hash(self, token_hash: str, *, proxy: bool = False) -> dict[str, Any] | None:
+        if self.pool is None:
+            raise RuntimeError("postgres_pool_unavailable")
+        column = "proxy_token_hash" if proxy else "runtime_token_hash"
+        row = await self.pool.fetchrow(
+            f"""
+            SELECT id, user_id, runtime_token_hash, proxy_token_hash, disabled, revoked, created_at
+            FROM conductors
+            WHERE {column} = $1
+            """,
+            token_hash,
+        )
+        if row is None:
+            return None
+        return {
+            "id": str(row["id"]),
+            "runtime_group_id": f"group_{row['user_id']}",
+            "user_id": str(row["user_id"]),
+            "runtime_token_hash": str(row["runtime_token_hash"]),
+            "proxy_token_hash": str(row["proxy_token_hash"]),
+            "disabled": bool(row["disabled"]),
+            "revoked": bool(row["revoked"]),
+            "created_at": row["created_at"].isoformat() if row["created_at"] is not None else "",
+        }
+
+    async def list_project_bindings_for_conductor(self, conductor_id: str) -> list[dict[str, Any]]:
+        if self.pool is None:
+            raise RuntimeError("postgres_pool_unavailable")
+        rows = await self.pool.fetch(
+            """
+            SELECT id, conductor_id, user_id, instance_id, name, linear_project,
+                   project_slug, agent_app_user_id, workflow_profile, process_status,
+                   repo_source, updated_at
+            FROM project_bindings
+            WHERE conductor_id = $1
+            ORDER BY id
+            """,
+            conductor_id,
+        )
+        return [_record_to_project_binding(row) for row in rows]
+
+    async def list_project_bindings_for_route(
+        self,
+        *,
+        user_id: str,
+        project_slug: str,
+        agent_app_user_ids: list[str],
+    ) -> list[dict[str, Any]]:
+        if self.pool is None:
+            raise RuntimeError("postgres_pool_unavailable")
+        rows = await self.pool.fetch(
+            """
+            SELECT id, conductor_id, user_id, instance_id, name, linear_project,
+                   project_slug, agent_app_user_id, workflow_profile, process_status,
+                   repo_source, updated_at
+            FROM project_bindings
+            WHERE user_id = $1
+              AND project_slug = $2
+              AND (
+                agent_app_user_id = ''
+                OR agent_app_user_id = ANY($3::text[])
+              )
+            ORDER BY id
+            """,
+            user_id,
+            project_slug,
+            list(agent_app_user_ids),
+        )
+        return [_record_to_project_binding(row) for row in rows]
+
     async def upsert_conductor(self, conductor: dict[str, Any]) -> None:
         if self.pool is None:
             raise RuntimeError("postgres_pool_unavailable")
@@ -325,6 +403,120 @@ class PgStore:
             _pg_datetime(binding.get("updated_at")),
         )
 
+    async def upsert_dispatch(self, dispatch: dict[str, Any]) -> bool:
+        if self.pool is None:
+            raise RuntimeError("postgres_pool_unavailable")
+        row = await self.pool.fetchrow(
+            """
+            INSERT INTO dispatches (
+              id, project_binding_id, user_id, issue_id, issue_identifier,
+              workspace_id, project_slug, agent_session_id, status, reason,
+              runtime_phase, leased_conductor_id, leased_until, fencing_token,
+              created_at, updated_at, completed_at
+            )
+            VALUES (
+              $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::timestamptz,$14,
+              $15::timestamptz,$16::timestamptz,$17::timestamptz
+            )
+            ON CONFLICT (project_binding_id, agent_session_id) DO NOTHING
+            RETURNING id
+            """,
+            str(dispatch["dispatch_id"]),
+            str(dispatch["project_binding_id"]),
+            str(dispatch["user_id"]),
+            str(dispatch["issue_id"]),
+            str(dispatch.get("issue_identifier") or ""),
+            str(dispatch.get("linear_workspace_id") or dispatch.get("workspace_id") or ""),
+            str(dispatch.get("project_slug") or ""),
+            str(dispatch.get("agent_session_id") or ""),
+            str(dispatch.get("status") or "queued"),
+            str(dispatch.get("reason") or ""),
+            str(dispatch.get("runtime_phase") or ""),
+            dispatch.get("leased_runtime_id") or dispatch.get("leased_conductor_id"),
+            _pg_datetime(dispatch.get("leased_until")),
+            int(dispatch.get("fencing_token") or 0),
+            _pg_datetime(dispatch.get("created_at")),
+            _pg_datetime(dispatch.get("updated_at") or dispatch.get("created_at")),
+            _pg_datetime(dispatch.get("completed_at")),
+        )
+        return row is not None
+
+    async def lease_dispatch(
+        self,
+        conductor_id: str,
+        *,
+        binding_ids: list[str],
+        lease_until: str,
+    ) -> dict[str, Any] | None:
+        if self.pool is None:
+            raise RuntimeError("postgres_pool_unavailable")
+        async with self.pool.acquire() as connection:
+            row = await connection.fetchrow(
+                """
+                WITH candidate AS (
+                  SELECT id
+                  FROM dispatches
+                  WHERE project_binding_id = ANY($2::text[])
+                    AND (
+                      status = 'queued'
+                      OR (status = 'leased' AND leased_until < now())
+                    )
+                  ORDER BY created_at ASC
+                  FOR UPDATE SKIP LOCKED
+                  LIMIT 1
+                )
+                UPDATE dispatches
+                SET status = 'leased',
+                    leased_conductor_id = $1,
+                    leased_until = $3::timestamptz,
+                    fencing_token = dispatches.fencing_token + 1,
+                    updated_at = now()
+                FROM candidate
+                WHERE dispatches.id = candidate.id
+                RETURNING dispatches.*
+                """,
+                conductor_id,
+                list(binding_ids),
+                _pg_datetime(lease_until),
+            )
+        return _record_to_dispatch(row) if row is not None else None
+
+    async def ack_dispatch(
+        self,
+        conductor_id: str,
+        dispatch_id: str,
+        status: str,
+        *,
+        fencing_token: int | None,
+        reason: str = "",
+        runtime_phase: str = "",
+        completed_at: str | None = None,
+    ) -> dict[str, Any] | None:
+        if self.pool is None:
+            raise RuntimeError("postgres_pool_unavailable")
+        row = await self.pool.fetchrow(
+            """
+            UPDATE dispatches
+            SET status = $3,
+                reason = $4,
+                runtime_phase = $5,
+                completed_at = $6::timestamptz,
+                updated_at = now()
+            WHERE id = $2
+              AND leased_conductor_id = $1
+              AND ($7::bigint IS NULL OR fencing_token = $7::bigint)
+            RETURNING *
+            """,
+            conductor_id,
+            dispatch_id,
+            status,
+            reason,
+            runtime_phase,
+            _pg_datetime(completed_at),
+            fencing_token,
+        )
+        return _record_to_dispatch(row) if row is not None else None
+
     async def save_onboarding_state(self, user_id: str, completed_steps: list[str], metadata: dict[str, Any]) -> None:
         if self.pool is None:
             self._memory_onboarding_state[user_id] = {
@@ -389,6 +581,45 @@ def _record_to_user(row: Any) -> dict[str, Any]:
         "password_hash": str(row["password_hash"]),
         "created_at": row["created_at"].isoformat() if row["created_at"] is not None else "",
         "linear_app": row["linear_app_json"],
+    }
+
+
+def _record_to_dispatch(row: Any) -> dict[str, Any]:
+    return {
+        "dispatch_id": str(row["id"]),
+        "project_binding_id": str(row["project_binding_id"]),
+        "user_id": str(row["user_id"]),
+        "issue_id": str(row["issue_id"]),
+        "issue_identifier": str(row["issue_identifier"]),
+        "linear_workspace_id": str(row["workspace_id"]),
+        "project_slug": str(row["project_slug"]),
+        "agent_session_id": str(row["agent_session_id"]),
+        "status": str(row["status"]),
+        "reason": str(row["reason"]),
+        "runtime_phase": str(row["runtime_phase"]),
+        "leased_runtime_id": row["leased_conductor_id"],
+        "leased_until": row["leased_until"].isoformat() if row["leased_until"] is not None else None,
+        "fencing_token": int(row["fencing_token"] or 0),
+        "created_at": row["created_at"].isoformat() if row["created_at"] is not None else "",
+        "updated_at": row["updated_at"].isoformat() if row["updated_at"] is not None else "",
+        "completed_at": row["completed_at"].isoformat() if row["completed_at"] is not None else None,
+    }
+
+
+def _record_to_project_binding(row: Any) -> dict[str, Any]:
+    return {
+        "id": str(row["id"]),
+        "conductor_id": str(row["conductor_id"]),
+        "user_id": str(row["user_id"]),
+        "instance_id": str(row["instance_id"]),
+        "name": str(row["name"]),
+        "linear_project": str(row["linear_project"]),
+        "project_slug": str(row["project_slug"]),
+        "agent_app_user_id": str(row["agent_app_user_id"]),
+        "workflow_profile": str(row["workflow_profile"]),
+        "process_status": str(row["process_status"]),
+        "repo_source": row["repo_source"] or {},
+        "updated_at": row["updated_at"].isoformat() if row["updated_at"] is not None else "",
     }
 
 

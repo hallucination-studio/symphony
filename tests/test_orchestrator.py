@@ -2219,7 +2219,10 @@ async def test_completion_verification_needs_human_does_not_mark_done(tmp_path: 
 
     assert "mt-1" not in orchestrator.state.completed
     assert "mt-1" not in orchestrator.state.retry_attempts
-    assert "mt-1" not in orchestrator.state.claimed
+    assert "mt-1" in orchestrator.state.claimed
+    assert "mt-1" in orchestrator.state.human_interventions
+    assert orchestrator.state.human_interventions["mt-1"].kind == "verification_needs_human"
+    assert orchestrator.state.continuations == {}
     assert ("mt-1", "performer:phase/done") not in tracker.lifecycle_labels
     assert tracker.comments[-1][0] == "mt-1"
     assert "human review is required" in tracker.comments[-1][1].lower()
@@ -3035,8 +3038,8 @@ async def test_stall_detection_cancels_and_retries(tmp_path: Path) -> None:
 
     await orchestrator.reconcile_running()
 
-    assert orchestrator.state.human_interventions["mt-1"].kind == "runtime_error"
-    assert orchestrator.state.human_interventions["mt-1"].error == "stalled"
+    assert orchestrator.state.human_interventions == {}
+    assert orchestrator.state.retry_attempts["mt-1"].error == "stalled"
     outcome = orchestrator.phase_runtime.pop_recorded_outcome("mt-1")
     assert outcome is not None
     assert outcome.next_phase is RunPhase.QUEUED
@@ -3045,7 +3048,7 @@ async def test_stall_detection_cancels_and_retries(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_stall_detection_comments_on_linear_issue(tmp_path: Path) -> None:
+async def test_stall_detection_does_not_create_human_action(tmp_path: Path) -> None:
     tracker = FakeTracker(candidates=[issue("MT-1")])
     runner = FakeRunner()
     config = make_config(tmp_path)
@@ -3067,9 +3070,8 @@ async def test_stall_detection_comments_on_linear_issue(tmp_path: Path) -> None:
     await orchestrator.reconcile_running()
 
     assert tracker.comments == []
-    child = tracker.created_issues[-1]
-    assert child["parent_id"] == "mt-1"
-    assert "stalled" in child["description"]
+    assert tracker.created_issues == []
+    assert orchestrator.state.retry_attempts["mt-1"].runtime_phase == "failed"
 
 
 @pytest.mark.asyncio

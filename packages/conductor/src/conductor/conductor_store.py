@@ -975,6 +975,7 @@ def _project_orchestration_event(current: OrchestrationRun | None, event: Orches
         changes.update(_normalize_projection_payload(payload))
     elif event.event_type in {
         "performer.started",
+        "performer.start_failed",
         "performer.result",
         "performer.init_failed",
         "performer.upstream_overloaded",

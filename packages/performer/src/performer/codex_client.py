@@ -106,7 +106,7 @@ class CodexSdkClient:
         existing_thread_id: str | None = None,
         output_schema: dict[str, Any] | None = None,
     ) -> CodexRunResult:
-        _ = title, max_turns, continuation_provider
+        _ = title
         if worker_host:
             raise CodexError("unsupported_sdk_worker_host", "Codex SDK backend does not support worker_host")
         if not workspace_path.exists() or not workspace_path.is_dir():
@@ -140,6 +140,74 @@ class CodexSdkClient:
         requires_handoff = output_schema is None
         final_response: str | None = None
         structured: dict[str, Any] | None = None
+        turn_count = 0
+        turn_id = "turn"
+        session_id = f"{thread_id}-{turn_id}"
+        turn_prompt: str | None = prompt
+        max_turn_count = max(1, int(max_turns or 1))
+        while turn_prompt is not None and turn_count < max_turn_count:
+            turn, turn_id, session_id, final_response, structured = await self._run_structured_turn(
+                thread,
+                turn_prompt,
+                schema,
+                thread_id=thread_id,
+                emit=emit,
+                events=events,
+                validate_structured=requires_handoff,
+            )
+            turn_count += 1
+            emit(
+                {
+                    "event": "turn_completed",
+                    "backend": "sdk",
+                    "thread_id": thread_id,
+                    "turn_id": turn_id,
+                    "session_id": session_id,
+                    "message": final_response,
+                }
+            )
+            if turn_count >= max_turn_count or continuation_provider is None:
+                break
+            turn_prompt = await _maybe_await(continuation_provider(turn_count))
+            if turn_prompt is not None and not isinstance(turn_prompt, str):
+                raise CodexError(
+                    "invalid_continuation_prompt",
+                    f"Continuation provider returned unsupported prompt type: {type(turn_prompt).__name__}",
+                )
+            if turn_prompt:
+                emit(
+                    {
+                        "event": "turn_continuing",
+                        "backend": "sdk",
+                        "thread_id": thread_id,
+                        "turn_count": turn_count,
+                        "next_turn": turn_count + 1,
+                    }
+                )
+        await _close_sdk_client(client)
+        return CodexRunResult(
+            True,
+            thread_id,
+            turn_id,
+            session_id,
+            turn_count,
+            backend="sdk",
+            final_response=final_response,
+            structured_result=structured,
+            events=events,
+        )
+
+    async def _run_structured_turn(
+        self,
+        thread: Any,
+        prompt: str,
+        output_schema: dict[str, Any],
+        *,
+        thread_id: str,
+        emit: EventCallback,
+        events: list[dict[str, Any]],
+        validate_structured: bool,
+    ) -> tuple[Any, str, str, str | None, dict[str, Any] | None]:
         turn_id = "turn"
         session_id = f"{thread_id}-{turn_id}"
         turn_prompt = prompt
@@ -148,16 +216,16 @@ class CodexSdkClient:
                 turn, turn_id, session_id, final_response, structured = await self._run_turn_with_timeout(
                     thread,
                     turn_prompt,
-                    schema,
+                    output_schema,
                     thread_id=thread_id,
                     emit=emit,
-                    validate_structured=requires_handoff,
+                    validate_structured=validate_structured,
                 )
-                if requires_handoff and structured is None:
+                if validate_structured and structured is None:
                     structured = _parse_structured_result(final_response)
-                if requires_handoff and structured is None:
+                if validate_structured and structured is None:
                     raise CodexError("invalid_structured_output", "Codex SDK turn did not produce the required structured JSON result")
-                break
+                return turn, turn_id, session_id, final_response, structured
             except (asyncio.TimeoutError, TimeoutError) as exc:
                 timeout_turn_id, timeout_session_id = _latest_turn_identity(
                     events,
@@ -200,19 +268,7 @@ class CodexSdkClient:
                     f"{prompt}\n\nYour previous response did not match the required JSON schema. "
                     "Reply again with only valid JSON for the required structured result."
                 )
-        emit({"event": "turn_completed", "backend": "sdk", "thread_id": thread_id, "turn_id": turn_id, "session_id": session_id, "message": final_response})
-        await _close_sdk_client(client)
-        return CodexRunResult(
-            True,
-            thread_id,
-            turn_id,
-            session_id,
-            1,
-            backend="sdk",
-            final_response=final_response,
-            structured_result=structured,
-            events=events,
-        )
+        raise CodexError("invalid_structured_output", "Codex SDK turn did not produce the required structured JSON result")
 
     async def _run_turn_with_timeout(
         self,

@@ -224,6 +224,139 @@ async def test_sdk_backend_starts_new_thread_with_structured_result(tmp_path: Pa
 
 
 @pytest.mark.asyncio
+async def test_sdk_backend_runs_continuation_turns_on_same_thread(tmp_path: Path) -> None:
+    class NumberedTurn:
+        def __init__(self, turn_id: str) -> None:
+            self.id = turn_id
+
+        async def run(self) -> dict[str, Any]:
+            return {
+                "final_response": json.dumps(
+                    {
+                        "summary": self.id,
+                        "test_commands": ["pytest -q"],
+                        "changed_files": ["a.py"],
+                        "remaining_risks": [],
+                        "next_action": "ready_for_review",
+                    }
+                )
+            }
+
+    class MultiTurnThread(FakeSdkThread):
+        def turn(self, *args: Any, **kwargs: Any) -> NumberedTurn:
+            self.prompts.append((args, kwargs))
+            return NumberedTurn(f"turn-{len(self.prompts)}")
+
+    class MultiTurnSdk(FakeSdk):
+        def __init__(self) -> None:
+            super().__init__()
+            self.thread = MultiTurnThread("thread-continuation")
+
+        async def thread_start(self, **kwargs: Any) -> MultiTurnThread:
+            self.started.append(kwargs)
+            return self.thread
+
+    fake_sdk = MultiTurnSdk()
+    continuation_calls: list[int] = []
+
+    def continuation_provider(turn_count: int) -> str | None:
+        continuation_calls.append(turn_count)
+        return f"Continue after turn {turn_count}"
+
+    events: list[dict[str, Any]] = []
+    client = CodexSdkClient(CodexConfig(), sdk_factory=lambda config: fake_sdk)
+
+    result = await client.run_session(
+        tmp_path,
+        "Do work",
+        "MT-1: Build",
+        on_event=events.append,
+        max_turns=3,
+        continuation_provider=continuation_provider,
+    )
+
+    assert result.thread_id == "thread-continuation"
+    assert result.turn_count == 3
+    assert result.turn_id == "turn-3"
+    assert result.session_id == "thread-continuation-turn-3"
+    assert result.structured_result is not None
+    assert result.structured_result["summary"] == "turn-3"
+    assert continuation_calls == [1, 2]
+    assert [call[0][0] for call in fake_sdk.thread.prompts] == [
+        "Do work",
+        "Continue after turn 1",
+        "Continue after turn 2",
+    ]
+    assert {event["thread_id"] for event in events if event["event"] == "turn_started"} == {"thread-continuation"}
+    assert [event["turn_id"] for event in events if event["event"] == "turn_completed"] == [
+        "turn-1",
+        "turn-2",
+        "turn-3",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_sdk_backend_awaits_async_continuation_provider(tmp_path: Path) -> None:
+    class NumberedTurn:
+        def __init__(self, turn_id: str) -> None:
+            self.id = turn_id
+
+        async def run(self) -> dict[str, Any]:
+            return {
+                "final_response": json.dumps(
+                    {
+                        "summary": self.id,
+                        "test_commands": [],
+                        "changed_files": [],
+                        "remaining_risks": [],
+                        "next_action": "ready_for_review",
+                    }
+                )
+            }
+
+    class AsyncContinuationThread(FakeSdkThread):
+        def turn(self, *args: Any, **kwargs: Any) -> NumberedTurn:
+            self.prompts.append((args, kwargs))
+            assert isinstance(args[0], str)
+            return NumberedTurn(f"turn-{len(self.prompts)}")
+
+    class AsyncContinuationSdk(FakeSdk):
+        def __init__(self) -> None:
+            super().__init__()
+            self.thread = AsyncContinuationThread("thread-async-continuation")
+
+        async def thread_start(self, **kwargs: Any) -> AsyncContinuationThread:
+            self.started.append(kwargs)
+            return self.thread
+
+    fake_sdk = AsyncContinuationSdk()
+    continuation_calls: list[int] = []
+
+    async def continuation_provider(turn_count: int) -> str | None:
+        continuation_calls.append(turn_count)
+        if turn_count == 1:
+            return "Continue from async provider"
+        return None
+
+    client = CodexSdkClient(CodexConfig(), sdk_factory=lambda config: fake_sdk)
+
+    result = await client.run_session(
+        tmp_path,
+        "Do work",
+        "MT-1: Build",
+        max_turns=3,
+        continuation_provider=continuation_provider,
+    )
+
+    assert result.turn_count == 2
+    assert continuation_calls == [1, 2]
+    assert [call[0][0] for call in fake_sdk.thread.prompts] == [
+        "Do work",
+        "Continue from async provider",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_sdk_backend_resumes_existing_thread(tmp_path: Path) -> None:
     fake_sdk = FakeSdk()
     client = CodexSdkClient(CodexConfig(), sdk_factory=lambda config: fake_sdk)

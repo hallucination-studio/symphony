@@ -65,6 +65,8 @@ class OrchestrationScheduler:
                 started = await self.start_run(run, refreshed)
             except PhaseTransitionError:
                 continue
+            except Exception:
+                continue
             self.store.update_instance(started)
             started_count += 1
         return started_count
@@ -99,12 +101,25 @@ class OrchestrationScheduler:
             },
         )
         _write_json_atomic(paths["request_path"], request.to_dict())
-        started = await self.runtime_manager.start(
-            instance.with_updates(process_status="starting"),
-            env=self.runtime_env(),
-            advance_request_path=str(paths["request_path"]),
-            phase_result_path=str(result_path),
+        starting_instance = instance.with_updates(process_status="starting", pid=None, last_error=None)
+        self.store.update_instance(starting_instance)
+        self.phase_reducer.performer_started(
+            run.run_id,
+            request_path=str(paths["request_path"]),
+            result_path=str(result_path),
+            pid=None,
         )
+        try:
+            started = await self.runtime_manager.start(
+                starting_instance,
+                env=self.runtime_env(),
+                advance_request_path=str(paths["request_path"]),
+                phase_result_path=str(result_path),
+            )
+        except Exception as exc:
+            self.phase_reducer.performer_start_failed(run.run_id, error=str(exc))
+            self.store.update_instance(instance.with_updates(process_status="idle", pid=None, last_error=str(exc)))
+            raise
         self.phase_reducer.performer_started(
             run.run_id,
             request_path=str(paths["request_path"]),

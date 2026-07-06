@@ -173,21 +173,45 @@ class PhaseReducer:
         pid: int | None = None,
     ) -> OrchestrationRun:
         run = self._require_run(run_id)
-        if run.phase not in {RunPhase.QUEUED, RunPhase.REWORKING, RunPhase.REVIEWING}:
+        if run.phase not in {RunPhase.QUEUED, RunPhase.IMPLEMENTING, RunPhase.REWORKING, RunPhase.REVIEWING}:
             raise PhaseTransitionError(f"Cannot start Performer from phase {run.phase.value}")
-        started_phase = RunPhase.REVIEWING if run.phase is RunPhase.REVIEWING else RunPhase.IMPLEMENTING
+        if run.phase in {RunPhase.IMPLEMENTING, RunPhase.REVIEWING}:
+            started_phase = run.phase
+        else:
+            started_phase = RunPhase.IMPLEMENTING
         return self.store.apply_event(
             run.run_id,
             {
                 "event_type": "performer.started",
                 "to_phase": started_phase,
                 "payload": {
-                    "status": RunStatus.RUNNING,
+                    "run_status": RunStatus.RUNNING,
                     "request_path": request_path,
                     "result_path": result_path,
                     "process_pid": pid,
                     "next_run_at": None,
                     "last_error": None,
+                },
+            },
+            expected_current_phases={run.phase},
+        )
+
+    def performer_start_failed(self, run_id: str, *, error: str) -> OrchestrationRun:
+        run = self._require_run(run_id)
+        if run.phase not in {RunPhase.QUEUED, RunPhase.IMPLEMENTING, RunPhase.REWORKING, RunPhase.REVIEWING}:
+            raise PhaseTransitionError(f"Cannot fail Performer start from phase {run.phase.value}")
+        return self.store.apply_event(
+            run.run_id,
+            {
+                "event_type": "performer.start_failed",
+                "to_phase": RunPhase.QUEUED,
+                "reason": error,
+                "payload": {
+                    "phase": RunPhase.QUEUED,
+                    "run_status": RunStatus.QUEUED,
+                    "process_pid": None,
+                    "last_error": error,
+                    "next_run_at": None,
                 },
             },
             expected_current_phases={run.phase},

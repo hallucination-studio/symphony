@@ -42,7 +42,9 @@ class PodiumStore:
     def _write_json(self, name: str, payload: dict[str, Any]) -> None:
         path = self._path(name)
         if path is not None:
-            path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+            tmp = path.with_name(f"{path.name}.tmp")
+            tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+            tmp.replace(path)
 
     def _load(self) -> None:
         self.runtime_records = {

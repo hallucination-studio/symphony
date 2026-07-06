@@ -18,6 +18,8 @@ def make_app(
     linear_graphql_transport: Any = None,
     data_dir: Any = None,
     secret_key: str = "test-secret",
+    pg_store: Any = None,
+    redis_store: Any = None,
 ):
     return create_app(
         turnstile_verifier=lambda token, _ip: token == "turnstile-ok",
@@ -26,6 +28,8 @@ def make_app(
         linear_graphql_transport=linear_graphql_transport,
         data_dir=data_dir,
         secret_key=secret_key,
+        pg_store=pg_store,
+        redis_store=redis_store,
     )
 
 
@@ -69,6 +73,19 @@ def agent_session_payload(*, workspace_id: str, project_slug: str, delegate_id: 
             },
         },
     }
+
+
+def agent_session_payload_with_distinct_session_app_user(
+    *,
+    workspace_id: str,
+    project_slug: str,
+    session_app_user_id: str,
+    issue_delegate_id: str,
+) -> dict[str, Any]:
+    payload = agent_session_payload(workspace_id=workspace_id, project_slug=project_slug, delegate_id=session_app_user_id)
+    payload["agentSession"]["appUserId"] = session_app_user_id
+    payload["agentSession"]["issue"]["delegate"] = {"id": issue_delegate_id}
+    return payload
 
 
 def dependent_agent_session_payload(*, workspace_id: str, project_slug: str, delegate_id: str) -> dict[str, Any]:
@@ -207,6 +224,133 @@ async def test_injected_postgres_and_redis_persist_auth_across_app_restart() -> 
 
 
 @pytest.mark.asyncio
+async def test_injected_postgres_persists_runtime_credentials_across_app_restart() -> None:
+    from tests.test_podium_infra import FakePgStore, FakeRedisStore
+
+    pg_store = FakePgStore()
+    redis_store = FakeRedisStore()
+    app = create_app(
+        turnstile_verifier=lambda token, _ip: token == "turnstile-ok",
+        secure_cookies=False,
+        secret_key="test-secret",
+        pg_store=pg_store,
+        redis_store=redis_store,
+    )
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
+        await register(client, "durable-runtime@example.com")
+        enrolled = await enroll_conductor(client)
+
+    restarted = create_app(
+        turnstile_verifier=lambda token, _ip: token == "turnstile-ok",
+        secure_cookies=False,
+        secret_key="test-secret",
+        pg_store=pg_store,
+        redis_store=redis_store,
+    )
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=restarted), base_url="http://podium.test") as client:
+        report = await client.post(
+            "/api/v1/runtime/report",
+            headers={"Authorization": f"Bearer {enrolled['runtime_token']}"},
+            json={"bindings": [{"instance_id": "inst-a", "project_slug": "ALPHA", "agent_app_user_id": "agent-alpha"}]},
+        )
+
+    assert report.status_code == 200
+    assert report.json()["bindings_upserted"] == 1
+    assert f"{enrolled['runtime_id']}:inst-a" in pg_store.project_bindings
+
+
+@pytest.mark.asyncio
+async def test_injected_postgres_persists_queued_dispatch_across_app_restart() -> None:
+    from tests.test_podium_infra import FakePgStore, FakeRedisStore
+
+    pg_store = FakePgStore()
+    redis_store = FakeRedisStore()
+    app = create_app(
+        turnstile_verifier=lambda token, _ip: token == "turnstile-ok",
+        secure_cookies=False,
+        secret_key="test-secret",
+        pg_store=pg_store,
+        redis_store=redis_store,
+    )
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
+        user_id = await register(client, "durable-dispatch@example.com")
+        enrolled = await enroll_conductor(client)
+        await client.post(
+            "/api/v1/runtime/report",
+            headers={"Authorization": f"Bearer {enrolled['runtime_token']}"},
+            json={"bindings": [{"instance_id": "inst-a", "project_slug": "ALPHA", "agent_app_user_id": "agent-alpha"}]},
+        )
+        queued = await client.post(
+            "/api/v1/linear/webhooks/agent-session",
+            json=agent_session_payload(workspace_id=user_id, project_slug="ALPHA", delegate_id="agent-alpha"),
+        )
+
+    restarted = create_app(
+        turnstile_verifier=lambda token, _ip: token == "turnstile-ok",
+        secure_cookies=False,
+        secret_key="test-secret",
+        pg_store=pg_store,
+        redis_store=redis_store,
+    )
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=restarted), base_url="http://podium.test") as client:
+        lease = await client.post(
+            "/api/v1/runtime/dispatches/lease",
+            headers={"Authorization": f"Bearer {enrolled['runtime_token']}"},
+        )
+
+    assert queued.status_code == 200
+    assert queued.json()["queued"] == 1
+    assert lease.status_code == 200
+    assert lease.json()["dispatch"]["issue_identifier"] == "ALPHA-1"
+    assert lease.json()["dispatch"]["fencing_token"] == 1
+
+
+@pytest.mark.asyncio
+async def test_injected_postgres_routes_webhook_and_lease_across_distinct_workers() -> None:
+    from tests.test_podium_infra import FakePgStore, FakeRedisStore
+
+    pg_store = FakePgStore()
+    redis_store = FakeRedisStore()
+
+    enrollment_app = make_app(pg_store=pg_store, redis_store=redis_store)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=enrollment_app), base_url="http://podium.test") as client:
+        user_id = await register(client, "multiworker@example.com")
+        enrolled = await enroll_conductor(client)
+        report = await client.post(
+            "/api/v1/runtime/report",
+            headers={"Authorization": f"Bearer {enrolled['runtime_token']}"},
+            json={"bindings": [{"instance_id": "inst-a", "project_slug": "ALPHA", "agent_app_user_id": "agent-alpha"}]},
+        )
+
+    webhook_app = make_app(pg_store=pg_store, redis_store=redis_store)
+    assert webhook_app.state.podium.runtime_groups == {}
+    assert webhook_app.state.podium.project_bindings == {}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=webhook_app), base_url="http://podium.test") as client:
+        queued = await client.post(
+            "/api/v1/linear/webhooks/agent-session",
+            json=agent_session_payload(workspace_id=user_id, project_slug="ALPHA", delegate_id="agent-alpha"),
+        )
+
+    lease_app = make_app(pg_store=pg_store, redis_store=redis_store)
+    assert lease_app.state.podium.runtimes == {}
+    assert lease_app.state.podium.runtime_groups == {}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=lease_app), base_url="http://podium.test") as client:
+        lease = await client.post(
+            "/api/v1/runtime/dispatches/lease",
+            headers={"Authorization": f"Bearer {enrolled['runtime_token']}"},
+        )
+
+    assert report.status_code == 200
+    assert queued.status_code == 200
+    assert queued.json()["queued"] == 1
+    assert lease.status_code == 200
+    dispatch = lease.json()["dispatch"]
+    assert dispatch["issue_identifier"] == "ALPHA-1"
+    assert dispatch["project_binding_id"] == f"{enrolled['runtime_id']}:inst-a"
+    assert dispatch["fencing_token"] == 1
+
+
+@pytest.mark.asyncio
 async def test_dispatch_routes_by_project_binding_not_single_workspace_group() -> None:
     app = make_app()
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
@@ -260,6 +404,48 @@ async def test_dispatch_routes_by_project_binding_not_single_workspace_group() -
         ],
     }
     assert "sk-" not in json.dumps(dispatch)
+
+
+@pytest.mark.asyncio
+async def test_webhook_routes_when_either_agent_session_or_issue_delegate_matches() -> None:
+    app = make_app()
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
+        user_id = await register(client, "routing-or@example.com")
+        enrolled = await enroll_conductor(client)
+        await client.post(
+            "/api/v1/runtime/report",
+            headers={"Authorization": f"Bearer {enrolled['runtime_token']}"},
+            json={
+                "bindings": [
+                    {"instance_id": "inst-a", "project_slug": "ALPHA", "agent_app_user_id": "agent-alpha"},
+                    {"instance_id": "inst-b", "project_slug": "BETA", "agent_app_user_id": "agent-beta"},
+                ]
+            },
+        )
+
+        issue_delegate_match = await client.post(
+            "/api/v1/linear/webhooks/agent-session",
+            json=agent_session_payload_with_distinct_session_app_user(
+                workspace_id=user_id,
+                project_slug="ALPHA",
+                session_app_user_id="other-agent",
+                issue_delegate_id="agent-alpha",
+            ),
+        )
+        session_app_match = await client.post(
+            "/api/v1/linear/webhooks/agent-session",
+            json=agent_session_payload_with_distinct_session_app_user(
+                workspace_id=user_id,
+                project_slug="BETA",
+                session_app_user_id="agent-beta",
+                issue_delegate_id="other-agent",
+            ),
+        )
+
+    assert issue_delegate_match.status_code == 200
+    assert issue_delegate_match.json()["queued"] == 1
+    assert session_app_match.status_code == 200
+    assert session_app_match.json()["queued"] == 1
 
 
 @pytest.mark.asyncio
@@ -392,6 +578,81 @@ async def test_signed_webhook_queues_dispatch_and_runtime_ack_completes_it() -> 
 
 
 @pytest.mark.asyncio
+async def test_agent_session_webhook_is_idempotent_by_binding_and_agent_session() -> None:
+    app = make_app()
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
+        user_id = await register(client, "idempotent-webhook@example.com")
+        enrolled = await enroll_conductor(client)
+        await client.post(
+            "/api/v1/runtime/report",
+            headers={"Authorization": f"Bearer {enrolled['runtime_token']}"},
+            json={"bindings": [{"instance_id": "inst-a", "project_slug": "ALPHA", "agent_app_user_id": "agent-alpha"}]},
+        )
+        payload = agent_session_payload(workspace_id=user_id, project_slug="ALPHA", delegate_id="agent-alpha")
+
+        first = await client.post("/api/v1/linear/webhooks/agent-session", json=payload)
+        second = await client.post("/api/v1/linear/webhooks/agent-session", json=payload)
+        runs = await client.get("/api/v1/runs/recent")
+
+    assert first.status_code == 200
+    assert first.json()["queued"] == 1
+    assert second.status_code == 200
+    assert second.json()["queued"] == 0
+    assert [run["issue_identifier"] for run in runs.json()["runs"]] == ["ALPHA-1"]
+
+
+@pytest.mark.asyncio
+async def test_dispatch_lease_returns_fencing_token_and_ack_requires_current_token() -> None:
+    app = make_app()
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
+        user_id = await register(client, "fencing@example.com")
+        enrolled = await enroll_conductor(client)
+        await client.post(
+            "/api/v1/runtime/report",
+            headers={"Authorization": f"Bearer {enrolled['runtime_token']}"},
+            json={"bindings": [{"instance_id": "inst-a", "project_slug": "ALPHA", "agent_app_user_id": "agent-alpha"}]},
+        )
+        await client.post(
+            "/api/v1/linear/webhooks/agent-session",
+            json=agent_session_payload(workspace_id=user_id, project_slug="ALPHA", delegate_id="agent-alpha"),
+        )
+
+        lease = await client.post(
+            "/api/v1/runtime/dispatches/lease",
+            headers={"Authorization": f"Bearer {enrolled['runtime_token']}"},
+        )
+        dispatch = lease.json()["dispatch"]
+        stale_ack = await client.post(
+            "/api/v1/runtime/dispatches/ack",
+            headers={"Authorization": f"Bearer {enrolled['runtime_token']}"},
+            json={
+                "dispatch_id": dispatch["dispatch_id"],
+                "fencing_token": dispatch["fencing_token"] - 1,
+                "status": "completed",
+                "runtime_phase": "done",
+            },
+        )
+        current_ack = await client.post(
+            "/api/v1/runtime/dispatches/ack",
+            headers={"Authorization": f"Bearer {enrolled['runtime_token']}"},
+            json={
+                "dispatch_id": dispatch["dispatch_id"],
+                "fencing_token": dispatch["fencing_token"],
+                "status": "completed",
+                "runtime_phase": "done",
+            },
+        )
+
+    assert lease.status_code == 200
+    assert dispatch["status"] == "leased"
+    assert dispatch["fencing_token"] == 1
+    assert stale_ack.status_code == 409
+    assert stale_ack.json()["error"]["code"] == "stale_dispatch_lease"
+    assert current_ack.status_code == 200
+    assert current_ack.json()["dispatch"]["status"] == "completed"
+
+
+@pytest.mark.asyncio
 async def test_dispatch_ack_reconcile_flags_missing_terminal_runtime_phase() -> None:
     app = make_app()
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
@@ -457,12 +718,12 @@ async def test_linear_proxy_requires_proxy_token_and_audits_requests() -> None:
             headers={"Authorization": f"Bearer {enrolled['proxy_token']}"},
         )
 
-        app.state.podium.linear_installations[user_id] = {
+        await app.state.podium.save_linear_installation(user_id, {
             "workspace_id": user_id,
             "access_token": "oauth-installation-token",
             "scope": "read write",
             "expires_at": None,
-        }
+        })
         allowed = await client.post(
             "/api/v1/linear/graphql",
             json={"operationName": "Viewer", "query": "{ viewer { id } }"},
@@ -475,6 +736,50 @@ async def test_linear_proxy_requires_proxy_token_and_audits_requests() -> None:
     assert allowed.status_code == 200
     assert allowed.json() == {"data": {"viewer": {"id": "viewer-1"}}}
     assert seen_authorization == ["oauth-installation-token"]
+
+
+@pytest.mark.asyncio
+async def test_linear_proxy_persists_audit_event_when_postgres_is_injected() -> None:
+    from tests.test_podium_infra import FakePgStore
+
+    pg_store = FakePgStore()
+
+    def linear_transport(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": {"viewer": {"id": "viewer-1"}}})
+
+    app = create_app(
+        turnstile_verifier=lambda token, _ip: token == "turnstile-ok",
+        secure_cookies=False,
+        secret_key="test-secret",
+        pg_store=pg_store,
+        linear_graphql_transport=linear_transport,
+    )
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
+        user_id = await register(client, "pg-audit@example.com")
+        enrolled = await enroll_conductor(client)
+        await app.state.podium.save_linear_installation(user_id, {
+            "workspace_id": user_id,
+            "access_token": "oauth-installation-token",
+            "scope": "read write",
+            "expires_at": None,
+        })
+        proxied = await client.post(
+            "/api/v1/linear/graphql",
+            json={"operationName": "Viewer", "query": "query Viewer { viewer { id } }"},
+            headers={"Authorization": f"Bearer {enrolled['proxy_token']}"},
+        )
+
+    assert proxied.status_code == 200
+    assert pg_store.proxy_audit_events == [
+        {
+            "runtime_id": enrolled["runtime_id"],
+            "allowed": True,
+            "operation_name": "Viewer",
+            "workspace_id": user_id,
+            "timestamp": pg_store.proxy_audit_events[0]["timestamp"],
+        }
+    ]
+    assert "oauth-installation-token" not in json.dumps(pg_store.proxy_audit_events)
 
 
 @pytest.mark.asyncio

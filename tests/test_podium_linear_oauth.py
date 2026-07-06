@@ -51,7 +51,8 @@ async def test_official_app_used_when_no_custom_app() -> None:
         url = resp.json()["authorization_url"]
         params = _auth_url_params(url)
         assert params["client_id"] == "official-client-id"
-        assert params["state"] == "user_1"
+        assert params["state"] != "user_1"
+        assert len(params["state"]) >= 24
 
 
 @pytest.mark.asyncio
@@ -126,16 +127,19 @@ async def test_put_linear_app_requires_secret_key() -> None:
 async def test_callback_stores_installation_and_marks_onboarding() -> None:
     def fake_exchange(code: str, state: str) -> dict[str, object]:
         assert code == "the-code"
-        assert state == "user_1"
+        assert state == oauth_state
         return {"access_token": "SECRET-token", "scope": "read,write", "expires_in": 3600}
 
+    oauth_state = ""
     client, app = app_client(linear_token_exchange=fake_exchange)
     async with client:
         await _register(client)
+        start = await client.post("/api/v1/onboarding/linear/start")
+        oauth_state = _auth_url_params(start.json()["authorization_url"])["state"]
 
         callback = await client.get(
             "/api/v1/linear/oauth/callback",
-            params={"code": "the-code", "state": "user_1"},
+            params={"code": "the-code", "state": oauth_state},
         )
         assert callback.status_code == 200
         assert "text/html" in callback.headers["content-type"]
@@ -163,9 +167,11 @@ async def test_callback_persists_installation_across_app_restart_without_public_
     client, _app = app_client(pg_store=store, linear_token_exchange=fake_exchange)
     async with client:
         await _register(client)
+        start = await client.post("/api/v1/onboarding/linear/start")
+        oauth_state = _auth_url_params(start.json()["authorization_url"])["state"]
         callback = await client.get(
             "/api/v1/linear/oauth/callback",
-            params={"code": "the-code", "state": "user_1"},
+            params={"code": "the-code", "state": oauth_state},
         )
         assert callback.status_code == 200
 
@@ -201,6 +207,16 @@ async def test_callback_missing_code_returns_400() -> None:
 
 
 @pytest.mark.asyncio
+async def test_callback_rejects_unknown_oauth_state() -> None:
+    client, _app = app_client()
+    async with client:
+        await _register(client)
+        resp = await client.get("/api/v1/linear/oauth/callback", params={"code": "the-code", "state": "user_1"})
+        assert resp.status_code == 400
+        assert resp.json()["error"]["code"] == "invalid_state"
+
+
+@pytest.mark.asyncio
 async def test_scope_returns_teams_projects_using_stored_token() -> None:
     seen: dict[str, str] = {}
 
@@ -221,9 +237,11 @@ async def test_scope_returns_teams_projects_using_stored_token() -> None:
     )
     async with client:
         await _register(client)
+        start = await client.post("/api/v1/onboarding/linear/start")
+        oauth_state = _auth_url_params(start.json()["authorization_url"])["state"]
         await client.get(
             "/api/v1/linear/oauth/callback",
-            params={"code": "c", "state": "user_1"},
+            params={"code": "c", "state": oauth_state},
         )
         resp = await client.get("/api/v1/onboarding/linear/scope")
         assert resp.status_code == 200

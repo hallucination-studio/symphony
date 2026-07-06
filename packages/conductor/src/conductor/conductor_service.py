@@ -1620,6 +1620,18 @@ class ConductorService:
                     self.store.update_instance(recovered)
                 else:
                     self.store.update_instance(instance.with_updates(process_status="stopped", pid=None))
+                    self._clear_orphaned_active_runs(instance.id, "orphaned performer process was not recoverable")
+
+    def _clear_orphaned_active_runs(self, instance_id: str, reason: str) -> None:
+        runs = self.store.list_orchestration_runs(
+            instance_id=instance_id,
+            phases={RunPhase.IMPLEMENTING, RunPhase.REVIEWING, RunPhase.REWORKING},
+        )
+        for run in runs:
+            try:
+                self.phase_reducer.performer_start_failed(run.run_id, error=reason)
+            except PhaseTransitionError:
+                continue
 
     def _phase_run_row(self, run) -> dict[str, Any]:
         telemetry = self._telemetry_for_phase_run(run)

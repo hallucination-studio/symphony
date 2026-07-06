@@ -242,6 +242,11 @@ class CapturingRuntime:
         )
 
 
+class NonRecoveringRuntime(CapturingRuntime):
+    def recover(self, instance):
+        return None
+
+
 def _phase_issue_id_from_request(path: str | None) -> str | None:
     if not path:
         return None
@@ -731,6 +736,49 @@ def test_get_instance_refreshes_exited_runtime_state(tmp_path: Path) -> None:
     assert refreshed.pid is None
     assert refreshed.last_exit_code == 0
     assert service.store.get_instance(instance.id).process_status == "exited"
+
+
+def test_service_startup_clears_orphaned_running_instance_and_run(tmp_path: Path) -> None:
+    data_root = tmp_path / "conductor-data"
+    store = ConductorStore(data_root)
+    service = ConductorService(
+        store=store,
+        data_root=data_root,
+        runtime_manager=CapturingRuntime(),
+    )
+    repo = make_repo(tmp_path)
+    instance = service.create_instance(make_request(repo))
+    run = service.phase_reducer.dispatch_received(
+        instance_id=instance.id,
+        issue_id="issue-1",
+        issue_identifier="ENG-1",
+        workflow_profile=instance.workflow_profile,
+        dispatch_id="dispatch-1",
+    )
+    service.phase_reducer.performer_started(
+        run.run_id,
+        request_path="/tmp/request.json",
+        result_path="/tmp/result.json",
+        pid=999999,
+    )
+    store.update_instance(instance.with_updates(process_status="running", pid=999999))
+
+    restarted = ConductorService(
+        store=store,
+        data_root=data_root,
+        runtime_manager=NonRecoveringRuntime(),
+    )
+
+    refreshed_instance = restarted.store.get_instance(instance.id)
+    refreshed_run = restarted.store.get_orchestration_run(run.run_id)
+    assert refreshed_instance is not None
+    assert refreshed_instance.process_status == "stopped"
+    assert refreshed_instance.pid is None
+    assert refreshed_run is not None
+    assert refreshed_run.phase is RunPhase.QUEUED
+    assert refreshed_run.status == "queued"
+    assert refreshed_run.process_pid is None
+    assert refreshed_run.last_error == "orphaned performer process was not recoverable"
 
 
 def test_conductor_service_pins_issue_and_collects_retention(tmp_path: Path) -> None:

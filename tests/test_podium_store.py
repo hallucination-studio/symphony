@@ -69,3 +69,11 @@ def test_store_persists_repository_mapping(tmp_path) -> None:
 
     reloaded = PodiumStore(data_dir=tmp_path)
     assert reloaded.get_repository_mapping("ws-1") == mapping
+
+
+def test_store_writes_json_atomically_without_leaving_temp_file(tmp_path) -> None:
+    store = PodiumStore(data_dir=tmp_path)
+    store.save_runtime_record(RuntimeRecord(runtime_id="rt-1", online=True, last_heartbeat=None))
+
+    assert (tmp_path / "runtimes.json").exists()
+    assert list(tmp_path.glob("runtimes.json.tmp*")) == []

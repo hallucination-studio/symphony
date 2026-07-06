@@ -21,6 +21,12 @@ class Runtime:
         return instance.with_updates(process_status="running", pid=123)
 
 
+class FailingRuntime(Runtime):
+    async def start(self, instance, *, env, advance_request_path, phase_result_path):
+        self.started.append(advance_request_path)
+        raise RuntimeError("fork failed")
+
+
 def make_instance(tmp_path: Path, *, instance_id: str = "inst-1") -> InstanceRecord:
     instance_dir = tmp_path / "conductor-data" / "instances" / instance_id
     return InstanceRecord.create(
@@ -77,6 +83,43 @@ async def test_scheduler_starts_due_run_through_runtime_boundary(tmp_path: Path)
     assert updated.request_path is not None
     assert Path(updated.request_path).exists()
     assert runtime.started == [updated.request_path]
+
+
+@pytest.mark.asyncio
+async def test_scheduler_recovers_run_and_instance_when_process_start_fails(tmp_path: Path) -> None:
+    store = ConductorStore(tmp_path / "conductor-data")
+    reducer = PhaseReducer(store)
+    runtime = FailingRuntime()
+    instance = make_instance(tmp_path)
+    store.create_instance(instance)
+    run = reducer.dispatch_received(
+        instance_id=instance.id,
+        issue_id="issue-1",
+        issue_identifier="ENG-1",
+        workflow_profile="default",
+        dispatch_id=None,
+    )
+    scheduler = OrchestrationScheduler(
+        store=store,
+        phase_reducer=reducer,
+        runtime_manager=runtime,
+        runtime_env=lambda: {},
+        get_instance=store.get_instance,
+    )
+
+    started = await scheduler.start_due_runs()
+
+    updated = store.get_orchestration_run(run.run_id)
+    refreshed = store.get_instance(instance.id)
+    assert started == 0
+    assert updated is not None
+    assert updated.phase is RunPhase.QUEUED
+    assert updated.status == "queued"
+    assert updated.process_pid is None
+    assert updated.last_error == "fork failed"
+    assert refreshed is not None
+    assert refreshed.process_status == "idle"
+    assert refreshed.pid is None
 
 
 @pytest.mark.asyncio

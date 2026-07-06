@@ -694,7 +694,7 @@ async def test_flow_004_optional_linear_state_failure_routes_to_human_review_wit
     assert "[FAIL] linear_state" in comment
     assert "Active blockers remain" in comment
     assert "human review is required" in comment.lower()
-    assert bundle["final_state"] == {"claimed": False, "retrying": False}
+    assert bundle["final_state"] == {"claimed": True, "retrying": False}
 
 
 @pytest.mark.asyncio
@@ -1146,31 +1146,34 @@ async def test_flow_014_stall_detection_kills_silent_session_and_retries(tmp_pat
 
     await orchestrator.reconcile_running()
 
-    intervention = orchestrator.state.human_interventions["eng-14"]
-    child = tracker.created_issues[-1]
     bundle = flow_bundle(
         test_id="FLOW-014",
-        title="stall detection terminates silent session and creates human action",
+        title="stall detection terminates silent session and schedules pure retry",
         source_sections=["5.3.6", "8.5", "10.6", "14.1", "14.2"],
         profile="core",
         initial_state={"issue": "ENG-14", "stall_timeout_ms": 1, "last_codex_event": "notification"},
         trigger="Run reconciliation after last Codex timestamp is older than stall timeout",
-        observed_transitions=["stall_elapsed_from_last_codex_timestamp", "worker_cancelled", "human_action_created"],
+        observed_transitions=["stall_elapsed_from_last_codex_timestamp", "worker_cancelled", "retry_scheduled"],
         workspace_evidence={"not_required": True},
-        tracker_evidence={"child": child},
+        tracker_evidence={"created_issues": tracker.created_issues},
         codex_evidence={"last_codex_timestamp": entry.last_codex_timestamp.isoformat()},
-        observability_evidence={"human_intervention": intervention.__dict__, "claimed": "eng-14" in orchestrator.state.claimed},
+        observability_evidence={
+            "retry": orchestrator.state.retry_attempts["eng-14"].__dict__,
+            "claimed": "eng-14" in orchestrator.state.claimed,
+        },
         final_state={
+            "retrying": "eng-14" in orchestrator.state.retry_attempts,
             "pending_human": "eng-14" in orchestrator.state.human_interventions,
             "running": "eng-14" in orchestrator.state.running,
         },
-        score_reason="Human-action child shows stalled reason; timestamp evidence shows stall clock source.",
+        score_reason="Retry entry shows stalled reason; timestamp evidence shows stall clock source without requiring human action.",
     )
 
-    assert intervention.error == "stalled"
+    assert orchestrator.state.retry_attempts["eng-14"].error == "stalled"
     assert "eng-14" in orchestrator.state.claimed
-    assert "stalled" in child["description"].lower()
-    assert bundle["final_state"]["pending_human"] is True
+    assert tracker.created_issues == []
+    assert bundle["final_state"]["retrying"] is True
+    assert bundle["final_state"]["pending_human"] is False
 
 
 def test_flow_015_dynamic_workflow_reload_changes_future_dispatch_not_inflight(
