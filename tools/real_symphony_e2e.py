@@ -106,7 +106,7 @@ def parser() -> argparse.ArgumentParser:
     arg_parser.add_argument("--pipeline-gates", action=argparse.BooleanOptionalAction, default=True)
     arg_parser.add_argument(
         "--pipeline-scenario",
-        choices=["basic", "parallel", "replan", "integration-conflict", "runtime-wait"],
+        choices=["basic", "parallel", "replan", "integration-conflict", "runtime-wait", "overall-dod"],
         default="basic",
     )
     arg_parser.add_argument("--e2e-gate-mode", choices=["smoke", "strict"], default="smoke")

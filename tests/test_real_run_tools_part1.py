@@ -281,6 +281,13 @@ def test_real_symphony_e2e_pushes_runtime_config_before_agent_webhook() -> None:
     assert "runtime-config:podium-pushed" in source
 
 
+def test_real_symphony_e2e_has_appendix_policy_and_read_only_probes() -> None:
+    source = (ROOT / "tools" / "real_symphony_e2e_run.py").read_text(encoding="utf-8")
+
+    assert "appendix:s0a-stale-policy-rejected" in source
+    assert "appendix:s0b-view-read-only" in source
+
+
 def test_real_symphony_e2e_runtime_config_uses_explicit_codex_home_source() -> None:
     tool = load_tool("real_symphony_e2e")
 
@@ -331,7 +338,7 @@ def test_real_symphony_e2e_runtime_config_carries_codex_execution_settings() -> 
 def test_real_symphony_e2e_cli_accepts_pipeline_scenarios() -> None:
     tool = load_tool("real_symphony_e2e")
 
-    for scenario in ["basic", "parallel", "replan", "integration-conflict", "runtime-wait"]:
+    for scenario in ["basic", "parallel", "replan", "integration-conflict", "runtime-wait", "overall-dod"]:
         args = tool.parser().parse_args(["--pipeline-scenario", scenario])
 
         assert args.pipeline_scenario == scenario
@@ -396,16 +403,40 @@ def test_real_symphony_e2e_replan_scenario_forces_first_verify_failure() -> None
     assert payload["profiles"]["verify"]["settings"] == {"force_first_verify_failure_for_replan": True}
 
 
+def test_real_symphony_e2e_overall_dod_combines_required_probes() -> None:
+    tool = load_tool("real_symphony_e2e_run")
+    source = (ROOT / "tools" / "real_symphony_e2e_run.py").read_text(encoding="utf-8")
+
+    payload = tool.build_runtime_config_payload(
+        runtime_group_id="group-1",
+        version=1,
+        pipeline_scenario="overall-dod",
+    )
+    description = tool._pipeline_scenario_issue_description("overall-dod", "run-1")
+
+    assert payload["scheduler_policy"]["capacity"]["by_mode"]["execute"] == 2
+    assert payload["profiles"]["execute"]["settings"]["emit_runtime_wait_probe"] is True
+    assert payload["profiles"]["verify"]["settings"] == {"force_first_verify_failure_for_replan": True}
+    assert "two independent parallel subtasks" in description
+    assert "SYMPHONY_CONFLICT_SHARED.md" in description
+    assert "Runtime Wait" in description
+    assert "replan" in description.lower()
+    assert 'pipeline_scenario == "overall-dod"' in source
+    assert "appendix:s0a-crashed-worker-lease-reclaimed" in source
+
+
 def test_real_symphony_e2e_runtime_wait_scenario_enables_permission_probe() -> None:
     tool = load_tool("real_symphony_e2e_run")
 
     basic = type("Args", (), {"pipeline_scenario": "basic", "permission_approval_probe": False})()
     explicit = type("Args", (), {"pipeline_scenario": "basic", "permission_approval_probe": True})()
     runtime_wait = type("Args", (), {"pipeline_scenario": "runtime-wait", "permission_approval_probe": False})()
+    overall = type("Args", (), {"pipeline_scenario": "overall-dod", "permission_approval_probe": False})()
 
     assert tool._effective_permission_approval_probe(basic) is False
     assert tool._effective_permission_approval_probe(explicit) is True
     assert tool._effective_permission_approval_probe(runtime_wait) is True
+    assert tool._effective_permission_approval_probe(overall) is True
 
     payload = tool.build_runtime_config_payload(
         runtime_group_id="group-1",
@@ -414,6 +445,26 @@ def test_real_symphony_e2e_runtime_wait_scenario_enables_permission_probe() -> N
     )
 
     assert payload["profiles"]["execute"]["settings"]["emit_runtime_wait_probe"] is True
+
+
+def test_real_symphony_e2e_overall_dod_scenario_is_not_downgraded() -> None:
+    tool = load_tool("real_symphony_e2e_run")
+    args = type("Args", (), {"pipeline_scenario": "overall-dod"})()
+
+    assert tool._pipeline_scenario(args) == "overall-dod"
+
+
+def test_real_symphony_e2e_overall_dod_runs_final_stage_checks_with_runtime_wait_probe() -> None:
+    tool = load_tool("real_symphony_e2e_run")
+
+    assert tool._should_run_final_pipeline_stage_checks(
+        permission_approval_probe=True,
+        pipeline_scenario="overall-dod",
+    )
+    assert not tool._should_run_final_pipeline_stage_checks(
+        permission_approval_probe=True,
+        pipeline_scenario="runtime-wait",
+    )
 
 
 def test_real_symphony_e2e_pipeline_projection_match_requires_current_revision() -> None:

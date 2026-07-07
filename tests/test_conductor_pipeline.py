@@ -478,9 +478,9 @@ def test_start_due_attempts_fail_closed_when_mode_environment_cannot_materialize
         )
     )
     store.commit_plan(_proposal())
-    blocked_home = tmp_path / "inst-1" / "runtime-homes" / "execute" / "codex"
-    blocked_home.parent.mkdir(parents=True)
-    blocked_home.write_text("not a directory", encoding="utf-8")
+    blocked_home_parent = tmp_path / "inst-1" / "runtime-homes" / "execute"
+    blocked_home_parent.parent.mkdir(parents=True)
+    blocked_home_parent.write_text("not a directory", encoding="utf-8")
 
     class Runtime:
         async def start(self, *_args, **_kwargs):
@@ -509,6 +509,107 @@ def test_start_due_attempts_fail_closed_when_mode_environment_cannot_materialize
     assert "pipeline_attempt_start_failed" in log_text
     assert "isolated CODEX_HOME" in log_text
     assert "attempt_id=" in log_text
+
+
+def test_start_due_attempts_refuses_ineligible_backend_before_dispatch(tmp_path: Path) -> None:
+    store = ConductorPipelineStore(tmp_path)
+    store.apply_runtime_config(
+        RuntimeConfigEnvelope(
+            "group-1",
+            1,
+            _policy(1),
+            profiles={
+                RuntimeMode.EXECUTE: RuntimeProfile(
+                    name="bad-executor",
+                    backend="local-verifier",
+                    mode=RuntimeMode.EXECUTE,
+                )
+            },
+        )
+    )
+    store.commit_plan(_proposal())
+
+    class Runtime:
+        async def start(self, *_args, **_kwargs):
+            raise AssertionError("ineligible backend must be refused before runtime dispatch")
+
+    class Instance:
+        id = "inst-1"
+        instance_dir = str(tmp_path / "inst-1")
+        resolved_repo_path = str(tmp_path)
+        log_path = str(tmp_path / "inst-1" / "logs" / "performer.log")
+
+        def with_updates(self, **changes):
+            return self
+
+    coordinator = PipelineCoordinator(store=store, runtime_manager=Runtime())
+
+    assert asyncio.run(coordinator.start_due_attempts(Instance())) == 0
+    assert store.list_attempts() == []
+    assert store.active_lease("a", RuntimeMode.EXECUTE) is None
+    assert store.get_node("a").state is GraphNodeState.AWAITING_HUMAN
+    assert store.get_node("a").human_reason is HumanEscalationReason.BACKEND_UNAVAILABLE
+
+
+def test_parallel_same_issue_execute_attempts_use_distinct_codex_homes(tmp_path: Path) -> None:
+    store = ConductorPipelineStore(tmp_path)
+    gate_a = _gate("a")
+    gate_b = _gate("b")
+    store.apply_runtime_config(
+        RuntimeConfigEnvelope(
+            "group-1",
+            1,
+            SchedulerPolicy(
+                policy_id="policy-1",
+                version=1,
+                effective_at="2026-07-06T00:00:00Z",
+                capacity=SchedulerCapacity(global_limit=3, by_mode={RuntimeMode.EXECUTE: 2}),
+            ),
+            profiles={
+                RuntimeMode.EXECUTE: RuntimeProfile(
+                    name="executor",
+                    backend="codex",
+                    mode=RuntimeMode.EXECUTE,
+                )
+            },
+        )
+    )
+    store.commit_plan(
+        PlanProposal(
+            graph_id="graph-1",
+            plan_attempt_id="plan-1",
+            root_node_id="a",
+            nodes=[
+                GraphNode(node_id="a", title="A", state=GraphNodeState.READY, gate_snapshot_hash=gate_a.hash),
+                GraphNode(node_id="b", title="B", state=GraphNodeState.READY, gate_snapshot_hash=gate_b.hash),
+            ],
+            blocks=[],
+            gates=[gate_a, gate_b],
+            entry_node_ids=["a", "b"],
+            exit_node_ids=["a", "b"],
+        )
+    )
+    captured_homes: list[str] = []
+
+    class Runtime:
+        async def start(self, _instance, *, env, **_kwargs):
+            captured_homes.append(env["CODEX_HOME"])
+
+    class Instance:
+        id = "inst-1"
+        instance_dir = str(tmp_path / "inst-1")
+        resolved_repo_path = str(tmp_path)
+        log_path = str(tmp_path / "inst-1" / "logs" / "performer.log")
+
+        def with_updates(self, **changes):
+            return self
+
+    coordinator = PipelineCoordinator(store=store, runtime_manager=Runtime())
+
+    assert asyncio.run(coordinator.start_due_attempts(Instance())) == 2
+    assert len(captured_homes) == 2
+    assert len(set(captured_homes)) == 2
+    assert all("/runtime-homes/execute/" in home for home in captured_homes)
 
 
 def test_prepare_mode_environment_copies_injected_codex_home_source(tmp_path: Path, monkeypatch) -> None:
@@ -1007,6 +1108,74 @@ def test_leases_expire_and_fence_stale_attempt_results(tmp_path: Path) -> None:
     assert store.active_lease("a", RuntimeMode.EXECUTE) is None
 
 
+def test_lowered_policy_limit_stops_new_dispatch_without_preempting_active_lease(tmp_path: Path) -> None:
+    store = ConductorPipelineStore(tmp_path)
+    gate_a = _gate("a")
+    gate_b = _gate("b")
+    store.apply_runtime_config(
+        RuntimeConfigEnvelope(
+            "group-1",
+            1,
+            SchedulerPolicy(
+                policy_id="policy-1",
+                version=1,
+                effective_at="2026-07-06T00:00:00Z",
+                capacity=SchedulerCapacity(global_limit=3, by_mode={RuntimeMode.EXECUTE: 2}),
+            ),
+        )
+    )
+    store.commit_plan(
+        PlanProposal(
+            graph_id="graph-1",
+            plan_attempt_id="plan-1",
+            root_node_id="a",
+            nodes=[
+                GraphNode(node_id="a", title="A", state=GraphNodeState.READY, gate_snapshot_hash=gate_a.hash),
+                GraphNode(node_id="b", title="B", state=GraphNodeState.READY, gate_snapshot_hash=gate_b.hash),
+            ],
+            blocks=[],
+            gates=[gate_a, gate_b],
+            entry_node_ids=["a", "b"],
+            exit_node_ids=["a", "b"],
+        )
+    )
+    now = datetime(2026, 7, 6, tzinfo=timezone.utc)
+    active = store.start_attempt(RuntimeMode.EXECUTE, node_id="a", attempt_id="exec-a", now=now)
+    assert store.apply_runtime_config(
+        RuntimeConfigEnvelope(
+            "group-1",
+            2,
+            SchedulerPolicy(
+                policy_id="policy-2",
+                version=2,
+                effective_at="2026-07-06T00:00:01Z",
+                capacity=SchedulerCapacity(global_limit=3, by_mode={RuntimeMode.EXECUTE: 1}),
+            ),
+        )
+    )
+
+    class Runtime:
+        async def start(self, *_args, **_kwargs):
+            raise AssertionError("new execute dispatch must be stopped while lowered limit is saturated")
+
+    class Instance:
+        id = "inst-1"
+        instance_dir = str(tmp_path / "inst-1")
+        resolved_repo_path = str(tmp_path)
+        log_path = str(tmp_path / "inst-1" / "logs" / "performer.log")
+
+        def with_updates(self, **changes):
+            return self
+
+    coordinator = PipelineCoordinator(store=store, runtime_manager=Runtime())
+
+    assert asyncio.run(coordinator.start_due_attempts(Instance(), now=now + timedelta(seconds=1))) == 0
+    assert store.active_lease("a", RuntimeMode.EXECUTE) == active
+    assert store.active_lease("b", RuntimeMode.EXECUTE) is None
+    assert store.get_node("a").state is GraphNodeState.EXECUTING
+    assert store.get_node("b").state is GraphNodeState.READY
+
+
 def test_reclaiming_expired_attempt_lease_times_out_attempt_and_escalates(tmp_path: Path) -> None:
     store = ConductorPipelineStore(tmp_path)
     store.apply_runtime_config(RuntimeConfigEnvelope("group-1", 1, _policy(1)))
@@ -1029,6 +1198,23 @@ def test_reclaiming_expired_attempt_lease_times_out_attempt_and_escalates(tmp_pa
     assert waits[0]["details"]["attempt_id"] == "exec-1"
     assert waits[0]["details"]["lease_id"] == lease.lease_id
     assert waits[0]["details"]["mode"] == RuntimeMode.EXECUTE.value
+
+
+def test_reclaiming_expired_lease_is_idempotent_without_double_count_or_leak(tmp_path: Path) -> None:
+    store = ConductorPipelineStore(tmp_path)
+    store.apply_runtime_config(RuntimeConfigEnvelope("group-1", 1, _policy(1)))
+    store.commit_plan(_proposal())
+    now = datetime(2026, 7, 6, tzinfo=timezone.utc)
+    store.start_attempt(RuntimeMode.EXECUTE, node_id="a", attempt_id="exec-1", now=now, ttl_seconds=5)
+
+    first = store.reclaim_expired_leases(now + timedelta(seconds=6))
+    second = store.reclaim_expired_leases(now + timedelta(seconds=7))
+
+    assert first == 1
+    assert second == 0
+    assert store.active_lease("a", RuntimeMode.EXECUTE) is None
+    assert len(store.list_human_waits()) == 1
+    assert store.get_attempt("exec-1").state is AttemptState.TIMED_OUT
 
 
 def test_lease_heartbeat_extends_active_lease_and_rejects_stale_token(tmp_path: Path) -> None:

@@ -16,6 +16,7 @@ class BackendEnvironmentContext:
     instance_state_root: Path
     profile: RuntimeProfile
     workspace_path: Path | None = None
+    home_scope: str | None = None
 
 
 class RuntimeBackendProvider(Protocol):
@@ -35,6 +36,7 @@ class RuntimeBackendRegistry:
         profile: RuntimeProfile | None,
         *,
         workspace_path: Path | str | None = None,
+        home_scope: str | None = None,
     ) -> dict[str, str]:
         if profile is None:
             raise ValueError("runtime profile is required for managed mode attempts")
@@ -47,6 +49,7 @@ class RuntimeBackendRegistry:
                 instance_state_root=instance_state_root,
                 profile=profile,
                 workspace_path=workspace,
+                home_scope=home_scope,
             )
         )
 
@@ -56,7 +59,7 @@ class CodexRuntimeBackendProvider:
 
     def prepare_environment(self, context: BackendEnvironmentContext) -> dict[str, str]:
         profile = context.profile
-        codex_home = context.instance_state_root / "runtime-homes" / profile.mode.value / "codex"
+        codex_home = _runtime_home_root(context, "codex")
         try:
             codex_home.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
@@ -102,7 +105,7 @@ class LocalVerifierRuntimeBackendProvider:
         profile = context.profile
         if profile.mode is not RuntimeMode.VERIFY:
             raise ValueError(f"unsupported runtime backend for {profile.mode.value}: {profile.backend}")
-        verifier_home = context.instance_state_root / "runtime-homes" / profile.mode.value / "local-verifier"
+        verifier_home = _runtime_home_root(context, "local-verifier")
         try:
             verifier_home.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
@@ -124,12 +127,25 @@ def prepare_backend_environment(
     profile: RuntimeProfile | None,
     *,
     workspace_path: Path | str | None = None,
+    home_scope: str | None = None,
 ) -> dict[str, str]:
     return default_runtime_backend_registry().prepare_environment(
         instance_state_root,
         profile,
         workspace_path=workspace_path,
+        home_scope=home_scope,
     )
+
+
+def _runtime_home_root(context: BackendEnvironmentContext, backend_name: str) -> Path:
+    base = context.instance_state_root / "runtime-homes" / context.profile.mode.value
+    if context.home_scope:
+        return base / _safe_home_scope(context.home_scope) / backend_name
+    return base / backend_name
+
+
+def _safe_home_scope(value: str) -> str:
+    return "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in value)[:160] or "attempt"
 
 
 def _resolve_codex_home_source(value: Any) -> Path | None:

@@ -32,6 +32,7 @@ from performer_api.pipeline import (
     PlanValidator,
     PlanValidatorError,
     PredictedCall,
+    RUNTIME_BACKENDS_BY_MODE,
     RuntimeConfigEnvelope,
     RuntimeMode,
     RuntimeProfile,
@@ -2526,6 +2527,27 @@ class PipelineCoordinator:
                 if self.store.active_lease(node_id, mode) is not None:
                     continue
                 profile = envelope.profiles.get(mode)
+                preflight_error = _runtime_profile_preflight_error(mode, profile)
+                if preflight_error is not None:
+                    _append_instance_log(
+                        instance,
+                        (
+                            "pipeline_backend_ineligible "
+                            f"mode={mode.value} node_id={node_id} error={preflight_error} "
+                            f"graph_revision={self.store.current_graph_revision()} "
+                            f"policy_revision={envelope.scheduler_policy.version}"
+                        ),
+                    )
+                    self.store.create_human_wait(
+                        node_id,
+                        reason=HumanEscalationReason.BACKEND_UNAVAILABLE.value,
+                        details={
+                            "mode": mode.value,
+                            "error": preflight_error,
+                            "action_required": "update_runtime_profile",
+                        },
+                    )
+                    continue
                 attempt_id = f"{mode.value}-{uuid4().hex}"
                 lease = self.store.start_attempt(mode, node_id=node_id, attempt_id=attempt_id, now=now)
                 try:
@@ -2542,6 +2564,7 @@ class PipelineCoordinator:
                         Path(instance.instance_dir),
                         profile,
                         workspace_path=_attempt_workspace_for_mode(mode, request),
+                        home_scope=attempt_id,
                     )
                     _write_json_atomic(paths["request_path"], request)
                     result_path = paths["result_path"]
@@ -3044,8 +3067,19 @@ def prepare_mode_environment(
     profile: RuntimeProfile | None,
     *,
     workspace_path: Path | str | None = None,
+    home_scope: str | None = None,
 ) -> dict[str, str]:
-    return prepare_backend_environment(instance_state_root, profile, workspace_path=workspace_path)
+    return prepare_backend_environment(instance_state_root, profile, workspace_path=workspace_path, home_scope=home_scope)
+
+
+def _runtime_profile_preflight_error(mode: RuntimeMode, profile: RuntimeProfile | None) -> str | None:
+    if profile is None:
+        return None
+    if profile.mode is not mode:
+        return f"runtime profile mode mismatch for {mode.value}: {profile.mode.value}"
+    if profile.backend not in RUNTIME_BACKENDS_BY_MODE.get(mode, set()):
+        return f"unsupported runtime backend for {mode.value}: {profile.backend}"
+    return None
 
 
 def materialize_planner_workspace(attempt_dir: Path, resolved_repo_path: str | Path | None) -> Path:

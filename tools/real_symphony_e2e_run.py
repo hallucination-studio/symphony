@@ -13,6 +13,8 @@ from pathlib import Path
 from typing import Any
 
 from real_symphony_e2e_analysis import (
+    appendix_exit_bar_audit,
+    appendix_feature_score_audit,
     audit_expected_failure_run,
     build_agent_session_webhook_payload,
     build_instance_payload,
@@ -67,14 +69,14 @@ def build_runtime_config_payload(
     if codex_home_source:
         settings["codex_home_source"] = codex_home_source
     by_mode = {"plan": 1, "execute": 1, "verify": 1}
-    if pipeline_scenario in {"parallel", "integration-conflict"}:
+    if pipeline_scenario in {"parallel", "integration-conflict", "overall-dod"}:
         by_mode["execute"] = 2
     execute_settings = dict(settings)
-    if pipeline_scenario == "runtime-wait":
+    if pipeline_scenario in {"runtime-wait", "overall-dod"}:
         execute_settings["emit_runtime_wait_probe"] = True
         execute_settings["runtime_wait_probe_seconds"] = 90
     verify_settings: dict[str, Any] = {}
-    if pipeline_scenario == "replan":
+    if pipeline_scenario in {"replan", "overall-dod"}:
         verify_settings["force_first_verify_failure_for_replan"] = True
     return {
         "runtime_group_id": runtime_group_id,
@@ -149,10 +151,12 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
     evidence.write()
     evidence.check(
         "pipeline-scenario:selected",
-        pipeline_scenario in {"basic", "parallel", "replan", "integration-conflict", "runtime-wait"},
+        pipeline_scenario in {"basic", "parallel", "replan", "integration-conflict", "runtime-wait", "overall-dod"},
         scenario=pipeline_scenario,
         permission_approval_probe=permission_approval_probe,
     )
+    if pipeline_scenario == "overall-dod":
+        _run_appendix_pytest_hardening_probes(evidence, env=env)
 
     for name, command in {
         "podium-help": [str(bin_dir / "podium"), "--help"],
@@ -284,6 +288,13 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
                 (root / "non-empty-clone" / "keep.txt").write_text("keep\n", encoding="utf-8")
             status, body = http_json(method, api_url(conductor_port, path), payload)
             evidence.check(f"conductor-api:{method} {path}", status in {200, 201}, status=status, body=body)
+        status, body = http_json("POST", api_url(conductor_port, "/api/pipeline"), {"nodes": []})
+        evidence.check(
+            "appendix:s0b-view-read-only",
+            status in {404, 405},
+            status=status,
+            body=body,
+        )
 
         linear = await create_linear_issue(
             token,
@@ -381,6 +392,48 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
             status=status,
             body=body,
         )
+        status, body = http_json(
+            "POST",
+            api_url(podium_port, "/api/v1/runtime/config"),
+            runtime_config,
+            headers={"Authorization": f"Bearer {enrolled_runtime['runtime_token']}"},
+        )
+        evidence.check(
+            "appendix:s0a-stale-policy-rejected",
+            status == 409 and ((body or {}).get("error") or {}).get("code") == "stale_runtime_config",
+            status=status,
+            body=body,
+        )
+        invalid_backend_config = json.loads(json.dumps(runtime_config))
+        invalid_backend_config["version"] = int(runtime_config.get("version") or 1) + 1
+        invalid_backend_config["scheduler_policy"]["version"] = invalid_backend_config["version"]
+        invalid_backend_config["profiles"]["execute"]["backend"] = "local-verifier"
+        invalid_backend_config["profiles"]["execute"]["name"] = "ineligible-execute"
+        status, body = http_json(
+            "POST",
+            api_url(podium_port, "/api/v1/runtime/config"),
+            invalid_backend_config,
+            headers={"Authorization": f"Bearer {enrolled_runtime['runtime_token']}"},
+        )
+        evidence.check(
+            "appendix:s0c-ineligible-backend-refused-before-dispatch",
+            status == 400
+            and "runtime_profile_backend_unsupported:execute:local-verifier" in str(((body or {}).get("error") or {}).get("details")),
+            status=status,
+            body=body,
+        )
+
+        lowered_policy_task: asyncio.Task[dict[str, Any]] | None = None
+        if pipeline_scenario == "overall-dod":
+            lowered_policy_task = asyncio.create_task(
+                _lower_policy_during_parallel_execute_probe(
+                    podium_port=podium_port,
+                    conductor_port=conductor_port,
+                    runtime_token=enrolled_runtime["runtime_token"],
+                    runtime_config=runtime_config,
+                    timeout_seconds=min(max(args.stage_timeout, 30), 180),
+                )
+            )
 
         webhook_payload = build_agent_session_webhook_payload(
             linear=linear,
@@ -432,7 +485,7 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
             timeout_seconds=args.timeout,
             stage_timeout_seconds=args.stage_timeout,
             permission_approval_probe=permission_approval_probe,
-            crash_recovery_probe=args.crash_recovery_probe,
+            crash_recovery_probe=args.crash_recovery_probe or pipeline_scenario == "overall-dod",
             expected_failure=args.expected_failure,
         )
         if permission_approval_probe:
@@ -450,6 +503,21 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
                 covered=sorted(name for name in check_names if str(name).startswith("human-action:")),
                 human_resume_covered=human_resume_covered,
             )
+        if pipeline_scenario == "overall-dod" or args.crash_recovery_probe:
+            check_names = {check.get("name") for check in evidence.data.get("checks", []) if check.get("passed")}
+            evidence.check(
+                "appendix:s0a-crashed-worker-lease-reclaimed",
+                "crash-recovery:covered" in check_names,
+                covered=sorted(name for name in check_names if str(name).startswith("crash-recovery:")),
+            )
+        if lowered_policy_task is not None:
+            lowered_policy = await lowered_policy_task
+            lowered_policy_details = {key: value for key, value in lowered_policy.items() if key != "passed"}
+            evidence.check(
+                "appendix:s0a-lowered-limit-no-preempt",
+                bool(lowered_policy.get("passed")),
+                **lowered_policy_details,
+            )
         issue = run_result["issue"]
         result_path = Path(run_result["result_path"])
         last_sample = (run_result.get("samples") or [{}])[-1]
@@ -461,6 +529,9 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
             if isinstance(last_sample, dict)
             else []
         )
+        if pipeline_scenario == "overall-dod":
+            live_refresh = _pipeline_live_refresh_evidence(run_result.get("samples") or [])
+            evidence.check("appendix:s0b-pipeline-live-refresh", bool(live_refresh["passed"]), **live_refresh)
         pipeline_terminal = pipeline_nodes_terminal(
             pipeline_nodes,
             terminal_states={"verify_passed", "failed", "superseded"},
@@ -560,7 +631,10 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
                     ],
                 )
                 _check_pipeline_scenario_acceptance(evidence, pipeline_scenario, pipeline_view)
-            if not permission_approval_probe:
+            if _should_run_final_pipeline_stage_checks(
+                permission_approval_probe=permission_approval_probe,
+                pipeline_scenario=pipeline_scenario,
+            ):
                 nodes = [node for node in pipeline_view.get("nodes", []) if isinstance(node, dict)]
                 manifests = [manifest for manifest in pipeline_view.get("manifests", []) if isinstance(manifest, dict)]
                 integrations = [
@@ -627,6 +701,13 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
                         for node in nodes
                     ],
                 )
+                if pipeline_scenario == "overall-dod":
+                    _check_appendix_overall_acceptance(
+                        evidence,
+                        pipeline_view,
+                        data_root=data_root,
+                        instance_id=instance_id,
+                    )
 
         for method, path, payload in [
             ("GET", "/api/pipeline", None),
@@ -652,6 +733,21 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
             tree_path.write_text(json.dumps(tree, indent=2, sort_keys=True), encoding="utf-8")
             evidence.artifact("final_issue_tree", tree_path)
         _archive_pipeline_artifacts(evidence=evidence, root=root, data_root=data_root, instance_id=instance_id)
+
+        if pipeline_scenario == "overall-dod":
+            podium.stop()
+            if podium in processes:
+                processes.remove(podium)
+            status, body = http_json("GET", api_url(conductor_port, "/api/pipeline"))
+            offline_pipeline = body.get("pipeline") if status == 200 and isinstance(body, dict) else {}
+            evidence.check(
+                "appendix:s0a-podium-unreachable-local-defaults",
+                status == 200
+                and isinstance(offline_pipeline, dict)
+                and int(offline_pipeline.get("policy_revision") or 0) >= 1,
+                status=status,
+                policy_revision=offline_pipeline.get("policy_revision") if isinstance(offline_pipeline, dict) else None,
+            )
 
         if not permission_approval_probe:
             conductor.stop()
@@ -758,14 +854,176 @@ def _codex_settings_from_args(args: argparse.Namespace) -> dict[str, Any]:
     return settings
 
 
+APPENDIX_PYTEST_HARDENING_PROBES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    (
+        "appendix:s1-terminal-attempt-immutable",
+        ("tests/test_conductor_pipeline.py::test_attempt_lifecycle_rejects_stale_fenced_results_and_publishes_verified_manifest",),
+    ),
+    (
+        "appendix:s1-superseded-revision-refused",
+        ("tests/test_conductor_pipeline.py::test_replan_rejects_replacement_subgraph_that_reuses_superseded_node_id",),
+    ),
+    (
+        "appendix:s2-malformed-proposal-refused",
+        (
+            "tests/test_pipeline_contracts.py::test_plan_validator_rejects_cycles_missing_gates_and_incomplete_rubrics",
+            "tests/test_pipeline_contracts.py::test_plan_validator_rejects_bad_or_unfrozen_gate_hashes",
+        ),
+    ),
+    (
+        "appendix:s2-gate-post-freeze-immutable",
+        (
+            "tests/test_conductor_pipeline.py::test_execute_attempt_cannot_start_without_frozen_gate_snapshot",
+            "tests/test_conductor_pipeline.py::test_verify_attempt_cannot_start_without_frozen_gate_snapshot",
+        ),
+    ),
+    (
+        "appendix:s2-linear-idempotent-rerun",
+        ("tests/test_conductor_pipeline.py::test_pipeline_coordinator_resumes_existing_root_planning_node_for_duplicate_dispatch",),
+    ),
+    (
+        "appendix:s3-verifier-mutation-detection",
+        (
+            "tests/test_performer_modes.py::test_verify_mode_rejects_gate_commands_that_mutate_verification_worktree",
+            "tests/test_performer_modes.py::test_verify_mode_rejects_gate_commands_that_mutate_tracked_state",
+        ),
+    ),
+    (
+        "appendix:s3-applied-tree-mismatch-rejected",
+        ("tests/test_performer_modes.py::test_verify_mode_rejects_expected_result_tree_mismatch",),
+    ),
+    (
+        "appendix:s3-expired-fencing-refused",
+        ("tests/test_conductor_pipeline.py::test_attempt_lifecycle_rejects_stale_fenced_results_and_publishes_verified_manifest",),
+    ),
+    (
+        "appendix:s4-superseded-revision-fenced",
+        ("tests/test_conductor_pipeline.py::test_replan_rejects_replacement_subgraph_that_reuses_superseded_node_id",),
+    ),
+    (
+        "appendix:s4-invalid-replan-escalates",
+        ("tests/test_conductor_pipeline.py::test_replanning_validation_failure_escalates_to_human_without_failed_node",),
+    ),
+    (
+        "appendix:linear-legitimate-blocks-edits-ingested",
+        ("tests/test_conductor_pipeline.py::test_pipeline_linear_projector_ingests_human_added_blocks_as_new_graph_revision",),
+    ),
+)
+
+
+def _run_appendix_pytest_hardening_probes(evidence: Evidence, *, env: dict[str, str]) -> None:
+    python = str(Path.cwd() / ".venv" / "bin" / "python")
+    for check_name, nodeids in APPENDIX_PYTEST_HARDENING_PROBES:
+        command = [python, "-m", "pytest", *nodeids, "-q"]
+        completed = subprocess.run(
+            command,
+            cwd=Path.cwd(),
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=120,
+        )
+        evidence.check(
+            check_name,
+            completed.returncode == 0,
+            command=command,
+            returncode=completed.returncode,
+            output_tail=(completed.stdout or "")[-4000:],
+        )
+
+
+def _pipeline_live_refresh_evidence(samples: list[dict[str, Any]]) -> dict[str, Any]:
+    node_state_signatures: list[tuple[tuple[str, str], ...]] = []
+    active_lease_counts: list[int] = []
+    for sample in samples:
+        if not isinstance(sample, dict):
+            continue
+        nodes = [node for node in sample.get("pipeline_nodes", []) if isinstance(node, dict)]
+        leases = [lease for lease in sample.get("pipeline_leases", []) if isinstance(lease, dict)]
+        if nodes:
+            node_state_signatures.append(
+                tuple(sorted((str(node.get("node_id") or ""), str(node.get("state") or "")) for node in nodes))
+            )
+        active_lease_counts.append(len(leases))
+    distinct_node_states = len(set(node_state_signatures))
+    distinct_lease_counts = len(set(active_lease_counts))
+    return {
+        "passed": len(samples) >= 2 and (distinct_node_states >= 2 or distinct_lease_counts >= 2),
+        "sample_count": len(samples),
+        "distinct_node_state_snapshots": distinct_node_states,
+        "distinct_active_lease_counts": distinct_lease_counts,
+    }
+
+
+async def _lower_policy_during_parallel_execute_probe(
+    *,
+    podium_port: int,
+    conductor_port: int,
+    runtime_token: str,
+    runtime_config: dict[str, Any],
+    timeout_seconds: int,
+) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout_seconds
+    observed_leases: list[dict[str, Any]] = []
+    while time.monotonic() < deadline:
+        status, body = http_json("GET", api_url(conductor_port, "/api/pipeline"), timeout=5)
+        pipeline = body.get("pipeline") if status == 200 and isinstance(body, dict) else {}
+        leases = [lease for lease in pipeline.get("leases", []) if isinstance(lease, dict)]
+        execute_leases = [lease for lease in leases if lease.get("mode") == "execute"]
+        if len(execute_leases) >= 2:
+            observed_leases = execute_leases
+            break
+        await asyncio.sleep(1)
+    if len(observed_leases) < 2:
+        return {"passed": False, "reason": "parallel_execute_leases_not_observed", "observed_leases": observed_leases}
+    lowered = json.loads(json.dumps(runtime_config))
+    lowered["version"] = int(runtime_config.get("version") or 1) + 1
+    lowered["scheduler_policy"]["version"] = lowered["version"]
+    lowered["scheduler_policy"]["capacity"]["by_mode"]["execute"] = 1
+    status, body = http_json(
+        "POST",
+        api_url(podium_port, "/api/v1/runtime/config"),
+        lowered,
+        headers={"Authorization": f"Bearer {runtime_token}"},
+        timeout=5,
+    )
+    if status != 200:
+        return {"passed": False, "reason": "lowered_policy_push_failed", "status": status, "body": body}
+    observed_ids = {str(lease.get("lease_id") or "") for lease in observed_leases}
+    latest_policy_revision = 0
+    latest_execute_ids: set[str] = set()
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        pipeline_status, pipeline_body = http_json("GET", api_url(conductor_port, "/api/pipeline"), timeout=5)
+        pipeline = pipeline_body.get("pipeline") if pipeline_status == 200 and isinstance(pipeline_body, dict) else {}
+        latest_policy_revision = int(pipeline.get("policy_revision") or 0) if isinstance(pipeline, dict) else 0
+        leases = [lease for lease in pipeline.get("leases", []) if isinstance(lease, dict)]
+        latest_execute_ids = {str(lease.get("lease_id") or "") for lease in leases if lease.get("mode") == "execute"}
+        if latest_policy_revision >= lowered["version"]:
+            break
+        await asyncio.sleep(1)
+    return {
+        "passed": latest_policy_revision >= lowered["version"] and observed_ids.issubset(latest_execute_ids),
+        "lowered_version": lowered["version"],
+        "latest_policy_revision": latest_policy_revision,
+        "observed_execute_lease_ids": sorted(observed_ids),
+        "latest_execute_lease_ids": sorted(latest_execute_ids),
+    }
+
+
 def _pipeline_scenario(args: argparse.Namespace) -> str:
     scenario = str(getattr(args, "pipeline_scenario", "basic") or "basic")
-    allowed = {"basic", "parallel", "replan", "integration-conflict", "runtime-wait"}
+    allowed = {"basic", "parallel", "replan", "integration-conflict", "runtime-wait", "overall-dod"}
     return scenario if scenario in allowed else "basic"
 
 
 def _effective_permission_approval_probe(args: argparse.Namespace) -> bool:
-    return bool(getattr(args, "permission_approval_probe", False) or _pipeline_scenario(args) == "runtime-wait")
+    return bool(getattr(args, "permission_approval_probe", False) or _pipeline_scenario(args) in {"runtime-wait", "overall-dod"})
+
+
+def _should_run_final_pipeline_stage_checks(*, permission_approval_probe: bool, pipeline_scenario: str) -> bool:
+    return not permission_approval_probe or pipeline_scenario == "overall-dod"
 
 
 def _pipeline_scenario_issue_description(scenario: str, run_id: str) -> str:
@@ -804,11 +1062,23 @@ def _pipeline_scenario_issue_description(scenario: str, run_id: str) -> str:
             "If the runtime asks for tool approval or operator input, Symphony must project that Runtime Wait "
             "to a [Human Action] child issue before resuming. Run pytest tests/test_smoke.py -q."
         )
+    if scenario == "overall-dod":
+        return (
+            f"Real Symphony Appendix overall DoD e2e task for run {run_id}. "
+            "Planner must create two independent parallel subtasks and must not add a blocks dependency between them. "
+            "Each parallel subtask must modify the already tracked file SYMPHONY_CONFLICT_SHARED.md with different "
+            "content so their verified patches overlap and Symphony must surface the integration result without a "
+            "silent last-writer-wins merge. At least one downstream subtask must depend on verified upstream output. "
+            "Create SYMPHONY_REAL_E2E_RESULT.md with the Linear issue identifier and the words overall dod. "
+            "If verification fails, replan with a replacement subgraph that preserves the requested files and smoke "
+            "test. If the runtime asks for tool approval or operator input, Symphony must project that Runtime Wait "
+            "to a [Human Action] child issue before resuming. Run pytest tests/test_smoke.py -q."
+        )
     return base
 
 
 def _prepare_pipeline_scenario_fixture(fixture: Path, scenario: str) -> None:
-    if scenario != "integration-conflict":
+    if scenario not in {"integration-conflict", "overall-dod"}:
         return
     conflict_path = fixture / "SYMPHONY_CONFLICT_SHARED.md"
     conflict_path.write_text("base integration conflict fixture\n", encoding="utf-8")
@@ -858,6 +1128,38 @@ def _permission_probe_block_cleared(sample: dict[str, Any]) -> bool:
         for action in actions
         if isinstance(action, dict) and str(action.get("status") or "").lower() in {"waiting", "open"}
     ]
+
+
+def _pipeline_prediction_is_conditional(pipeline_view: dict[str, Any]) -> bool:
+    basis = pipeline_view.get("prediction_basis") if isinstance(pipeline_view.get("prediction_basis"), dict) else {}
+    if not basis.get("graph_revision") or not basis.get("policy_revision") or not basis.get("generated_at"):
+        return False
+    if str(basis.get("assumption") or "") != "unknown verifies pass":
+        return False
+    order = pipeline_view.get("predicted_call_order")
+    if not isinstance(order, list):
+        return False
+    return all(
+        isinstance(item, dict) and str(item.get("confidence") or "") == "conditional"
+        for item in order
+    )
+
+
+def _managed_run_avoids_global_codex_home(pipeline_view: dict[str, Any]) -> bool:
+    home_codex = str(Path.home().resolve() / ".codex")
+    text = json.dumps(pipeline_view, sort_keys=True, default=str)
+    if home_codex in text or str(Path("~/.codex").expanduser()) in text:
+        return False
+    runtime_config = pipeline_view.get("runtime_config") if isinstance(pipeline_view.get("runtime_config"), dict) else {}
+    profiles = runtime_config.get("profiles") if isinstance(runtime_config.get("profiles"), dict) else {}
+    for profile in profiles.values():
+        if not isinstance(profile, dict):
+            continue
+        settings = profile.get("settings") if isinstance(profile.get("settings"), dict) else {}
+        source = str(settings.get("codex_home_source") or "")
+        if source and not source.startswith("$"):
+            return False
+    return True
 
 
 def _pipeline_projection_matches_current_revision(pipeline_view: dict[str, Any]) -> bool:
@@ -946,6 +1248,200 @@ def _check_pipeline_scenario_acceptance(evidence: Evidence, scenario: str, pipel
             runtime_waits=waits,
             projections=projections,
         )
+    elif scenario == "overall-dod":
+        _check_pipeline_scenario_acceptance(evidence, "parallel", pipeline_view)
+        _check_pipeline_scenario_acceptance(evidence, "replan", pipeline_view)
+        _check_pipeline_scenario_acceptance(evidence, "integration-conflict", pipeline_view)
+        _check_pipeline_scenario_acceptance(evidence, "runtime-wait", pipeline_view)
+
+
+def _check_appendix_overall_acceptance(
+    evidence: Evidence,
+    pipeline_view: dict[str, Any],
+    *,
+    data_root: Path | None = None,
+    instance_id: str | None = None,
+) -> None:
+    home_evidence = _runtime_home_evidence(data_root=data_root, instance_id=instance_id, pipeline_view=pipeline_view)
+    evidence.check(
+        "appendix:s0c-distinct-mode-codex-homes",
+        home_evidence["distinct_mode_homes"],
+        runtime_homes=home_evidence,
+    )
+    evidence.check(
+        "appendix:s0c-concurrent-runs-do-not-share-mode-homes",
+        home_evidence["concurrent_execute_homes_distinct"],
+        runtime_homes=home_evidence,
+    )
+    profiles = (pipeline_view.get("runtime_config") or {}).get("profiles") if isinstance(pipeline_view.get("runtime_config"), dict) else {}
+    evidence.check(
+        "appendix:s0c-non-codex-backend-selected",
+        any(
+            isinstance(profile, dict) and profile.get("backend") and profile.get("backend") != "codex"
+            for profile in (profiles or {}).values()
+        ),
+        profiles=profiles,
+    )
+    evidence.check(
+        "appendix:pipeline-prediction-conditional",
+        _pipeline_prediction_is_conditional(pipeline_view),
+        prediction_basis=pipeline_view.get("prediction_basis"),
+        predicted_call_order=pipeline_view.get("predicted_call_order"),
+    )
+    basis = pipeline_view.get("prediction_basis") if isinstance(pipeline_view.get("prediction_basis"), dict) else {}
+    evidence.check(
+        "appendix:s0b-view-refreshes-after-rewrite",
+        int(pipeline_view.get("graph_revision") or 0) > 1
+        and int(basis.get("graph_revision") or 0) == int(pipeline_view.get("graph_revision") or 0),
+        graph_revision=pipeline_view.get("graph_revision"),
+        prediction_basis=basis,
+    )
+    parent_evidence = _parent_aggregate_evidence(pipeline_view)
+    evidence.check("appendix:s1-parent-aggregate-real", parent_evidence["has_verified_parent"], **parent_evidence)
+    evidence.check(
+        "appendix:s1-parent-failed-child-not-passing",
+        parent_evidence["failed_or_waiting_child_not_passing"],
+        **parent_evidence,
+    )
+    downstream_evidence = _downstream_verify_gate_evidence(pipeline_view)
+    evidence.check(
+        "appendix:s3-downstream-gated-on-verify-passed",
+        downstream_evidence["gate_observed"],
+        **downstream_evidence,
+    )
+    s4_evidence = _superseded_node_evidence(pipeline_view)
+    evidence.check("appendix:s4-no-old-node-dependent-dispatch", s4_evidence["no_superseded_dispatch"], **s4_evidence)
+    evidence.check(
+        "appendix:no-global-codex-home",
+        _managed_run_avoids_global_codex_home(pipeline_view),
+        runtime_config=pipeline_view.get("runtime_config"),
+    )
+    evidence.check(
+        "appendix:patch-conflict-reproducible-under-real-concurrency",
+        pipeline_has_conflict_escalation_evidence(pipeline_view)
+        and any(check.get("name") == "scenario:parallel-execute-overlap" and check.get("passed") for check in evidence.data.get("checks", [])),
+        integration_queue=pipeline_view.get("integration_queue"),
+    )
+    evidence.check(
+        "appendix:patch-downstream-never-consumes-unintegrated-output",
+        pipeline_integrations_terminal(pipeline_view),
+        integration_queue=pipeline_view.get("integration_queue"),
+    )
+    evidence.check("appendix:reconcile-findings-clean", not evidence.data.get("failures"))
+    score_audit = appendix_feature_score_audit([evidence.data])
+    evidence.check(
+        "appendix:evidence-scores-within-hard-caps",
+        bool(score_audit["within_hard_caps"]),
+        audit=score_audit,
+    )
+    audit = appendix_exit_bar_audit([evidence.data])
+    evidence.check("appendix:feature-scores-r-plus-h", audit["pass"], audit=audit)
+
+
+def _runtime_home_evidence(
+    *,
+    data_root: Path | None,
+    instance_id: str | None,
+    pipeline_view: dict[str, Any],
+) -> dict[str, Any]:
+    attempts = [attempt for attempt in pipeline_view.get("attempts", []) if isinstance(attempt, dict)]
+    homes_root = data_root / "instances" / instance_id / "runtime-homes" if data_root is not None and instance_id else None
+    homes: dict[str, list[str]] = {mode: [] for mode in ("plan", "execute", "verify")}
+    if homes_root is not None and homes_root.is_dir():
+        for mode in homes:
+            mode_root = homes_root / mode
+            if not mode_root.is_dir():
+                continue
+            for path in sorted(mode_root.glob("*/*")):
+                if path.is_dir():
+                    homes[mode].append(str(path))
+            for path in sorted(mode_root.iterdir()):
+                if path.is_dir() and not any(Path(existing).parent == path for existing in homes[mode]):
+                    if path.name in {"codex", "local-verifier"}:
+                        homes[mode].append(str(path))
+    execute_attempt_count = sum(1 for attempt in attempts if attempt.get("mode") == "execute")
+    execute_homes = homes.get("execute", [])
+    mode_home_sets = [set(paths) for paths in homes.values() if paths]
+    flattened = [path for paths in homes.values() for path in paths]
+    return {
+        "homes_root": str(homes_root) if homes_root is not None else None,
+        "homes": homes,
+        "execute_attempt_count": execute_attempt_count,
+        "distinct_mode_homes": bool(flattened)
+        and len(flattened) == len(set(flattened))
+        and not any(left & right for index, left in enumerate(mode_home_sets) for right in mode_home_sets[index + 1 :]),
+        "concurrent_execute_homes_distinct": execute_attempt_count < 2
+        or (len(execute_homes) >= execute_attempt_count and len(execute_homes) == len(set(execute_homes))),
+    }
+
+
+def _parent_aggregate_evidence(pipeline_view: dict[str, Any]) -> dict[str, Any]:
+    nodes = [node for node in pipeline_view.get("nodes", []) if isinstance(node, dict)]
+    children_by_parent: dict[str, list[dict[str, Any]]] = {}
+    for node in nodes:
+        parent = str(node.get("parent_node_id") or "")
+        if parent:
+            children_by_parent.setdefault(parent, []).append(node)
+    verified_parent_ids: list[str] = []
+    bad_parent_ids: list[str] = []
+    for parent_id, children in children_by_parent.items():
+        parent = next((node for node in nodes if node.get("node_id") == parent_id), None)
+        if parent is None:
+            continue
+        parent_state = str(parent.get("aggregate_state") or parent.get("state") or "")
+        child_states = {str(child.get("aggregate_state") or child.get("state") or "") for child in children}
+        if parent_state == "verify_passed" and child_states and all(state == "verify_passed" for state in child_states):
+            verified_parent_ids.append(parent_id)
+        if parent_state == "verify_passed" and any(state in {"failed", "awaiting_human", "verify_failed"} for state in child_states):
+            bad_parent_ids.append(parent_id)
+    return {
+        "has_verified_parent": bool(verified_parent_ids),
+        "failed_or_waiting_child_not_passing": not bad_parent_ids,
+        "verified_parent_ids": verified_parent_ids,
+        "bad_parent_ids": bad_parent_ids,
+        "parent_count": len(children_by_parent),
+    }
+
+
+def _downstream_verify_gate_evidence(pipeline_view: dict[str, Any]) -> dict[str, Any]:
+    attempts = [attempt for attempt in pipeline_view.get("attempts", []) if isinstance(attempt, dict)]
+    execute_attempts = [attempt for attempt in attempts if attempt.get("mode") == "execute"]
+    verify_attempts = [attempt for attempt in attempts if attempt.get("mode") == "verify" and int(attempt.get("score") or 0) >= 3]
+    latest_verify_complete = max(
+        (_parse_e2e_time(attempt.get("completed_at")) for attempt in verify_attempts),
+        default=None,
+    )
+    downstream_execute_ids: list[str] = []
+    if latest_verify_complete is not None:
+        for attempt in execute_attempts:
+            started = _parse_e2e_time(attempt.get("started_at"))
+            if started is not None and started > latest_verify_complete:
+                downstream_execute_ids.append(str(attempt.get("attempt_id") or ""))
+    return {
+        "gate_observed": bool(verify_attempts) and bool(downstream_execute_ids),
+        "verify_passed_attempts": [attempt.get("attempt_id") for attempt in verify_attempts],
+        "downstream_execute_attempts": downstream_execute_ids,
+    }
+
+
+def _superseded_node_evidence(pipeline_view: dict[str, Any]) -> dict[str, Any]:
+    nodes = [node for node in pipeline_view.get("nodes", []) if isinstance(node, dict)]
+    attempts = [attempt for attempt in pipeline_view.get("attempts", []) if isinstance(attempt, dict)]
+    superseded_ids = {
+        str(node.get("node_id") or "")
+        for node in nodes
+        if node.get("state") == "superseded" or node.get("superseded_by")
+    }
+    live_superseded_attempts = [
+        attempt.get("attempt_id")
+        for attempt in attempts
+        if str(attempt.get("node_id") or "") in superseded_ids and attempt.get("state") in {"pending", "running"}
+    ]
+    return {
+        "no_superseded_dispatch": bool(superseded_ids) and not live_superseded_attempts,
+        "superseded_node_ids": sorted(superseded_ids),
+        "live_superseded_attempts": live_superseded_attempts,
+    }
 
 
 def _attempt_intervals_overlap(attempts: list[dict[str, Any]]) -> bool:

@@ -389,6 +389,212 @@ def test_real_symphony_e2e_permission_probe_allows_active_lease_after_wait_clear
     )
 
 
+def test_appendix_exit_bar_audit_requires_all_overall_items() -> None:
+    tool = load_tool("real_symphony_e2e")
+    reports = [
+        {
+            "failures": [],
+            "checks": [
+                {"name": "stage:pipeline-gates-frozen", "passed": True},
+                {"name": "stage:pipeline-linear-projected", "passed": True},
+                {"name": "scenario:parallel-execute-overlap", "passed": True},
+                {"name": "runtime-config:podium-pushed", "passed": True},
+                {"name": "stage:pipeline-manifest-published", "passed": True},
+                {"name": "stage:final-pipeline-verified", "passed": True},
+                {"name": "appendix:s3-verifier-mutation-detection", "passed": True},
+                {"name": "appendix:s3-expired-fencing-refused", "passed": True},
+                {"name": "scenario:replan-replacement-subgraph", "passed": True},
+                {"name": "scenario:integration-conflict-human-action", "passed": True},
+                {"name": "conductor-api:GET /api/pipeline", "passed": True},
+                {"name": "appendix:pipeline-prediction-conditional", "passed": True},
+                {"name": "runtime-config:codex-home-source-staged", "passed": True},
+                {"name": "appendix:no-global-codex-home", "passed": True},
+                {"name": "appendix:reconcile-findings-clean", "passed": True},
+                {"name": "appendix:evidence-scores-within-hard-caps", "passed": True},
+            ],
+        }
+    ]
+
+    passed = tool.appendix_exit_bar_audit(reports)
+    missing = tool.appendix_exit_bar_audit([{**reports[0], "checks": reports[0]["checks"][:-1]}])
+
+    assert passed["pass"] is True
+    assert {item["item"] for item in passed["items"]} == set(range(1, 9))
+    assert missing["pass"] is False
+    assert missing["items"][-1]["item"] == 8
+    assert missing["items"][-1]["pass"] is False
+
+
+def test_appendix_overall_acceptance_scores_after_required_checks(tmp_path: Path) -> None:
+    tool = load_tool("real_symphony_e2e_run")
+    analysis = load_tool("real_symphony_e2e_analysis")
+    evidence = tool.Evidence(tmp_path / "report.json")
+    required_names = {
+        name
+        for requirement in analysis.APPENDIX_FEATURE_SCORE_REQUIREMENTS
+        for key in ("r_checks", "h_checks")
+        for name in requirement[key]
+    }
+    required_names.update(
+        {
+            "stage:pipeline-gates-frozen",
+            "stage:pipeline-linear-projected",
+            "scenario:parallel-execute-overlap",
+            "runtime-config:podium-pushed",
+            "stage:pipeline-manifest-published",
+            "stage:final-pipeline-verified",
+            "appendix:s3-verifier-mutation-detection",
+            "appendix:s3-expired-fencing-refused",
+            "scenario:replan-replacement-subgraph",
+            "scenario:integration-conflict-human-action",
+            "conductor-api:GET /api/pipeline",
+            "runtime-config:codex-home-source-staged",
+        }
+    )
+    for name in sorted(required_names):
+        evidence.check(name, True)
+    pipeline_view = {
+        "prediction_basis": {
+            "graph_revision": 2,
+            "policy_revision": 1,
+            "assumption": "unknown verifies pass",
+            "generated_at": "2026-07-08T00:00:00Z",
+        },
+        "graph_revision": 2,
+        "predicted_call_order": [{"node_id": "a", "confidence": "conditional"}],
+        "runtime_config": {
+            "profiles": {
+                "execute": {"settings": {"codex_home_source": "$SYMPHONY_E2E_CODEX_HOME_SOURCE"}},
+                "verify": {"backend": "local-verifier", "settings": {}},
+            }
+        },
+        "nodes": [
+            {"node_id": "parent", "state": "verify_passed"},
+            {"node_id": "child-a", "parent_node_id": "parent", "state": "verify_passed"},
+            {"node_id": "child-b", "parent_node_id": "parent", "state": "verify_passed"},
+            {"node_id": "old", "state": "superseded", "superseded_by": ["replacement"]},
+            {"node_id": "replacement", "state": "verify_passed"},
+        ],
+        "attempts": [
+            {
+                "attempt_id": "verify-child-a",
+                "node_id": "child-a",
+                "mode": "verify",
+                "score": 3,
+                "completed_at": "2026-07-08T00:00:10Z",
+                "state": "succeeded",
+            },
+            {
+                "attempt_id": "execute-child-b",
+                "node_id": "child-b",
+                "mode": "execute",
+                "started_at": "2026-07-08T00:00:11Z",
+                "state": "succeeded",
+            },
+        ],
+        "integration_queue": [
+            {"status": "resolved", "error": "patch conflict", "human_resolution": "completed"}
+        ],
+    }
+    homes_root = tmp_path / "data" / "instances" / "inst-1" / "runtime-homes"
+    for relative in [
+        "plan/plan-1/codex",
+        "execute/exec-1/codex",
+        "execute/exec-2/codex",
+        "verify/verify-1/local-verifier",
+    ]:
+        (homes_root / relative).mkdir(parents=True)
+
+    tool._check_appendix_overall_acceptance(
+        evidence,
+        pipeline_view,
+        data_root=tmp_path / "data",
+        instance_id="inst-1",
+    )
+
+    checks = {check["name"]: check for check in evidence.data["checks"]}
+    assert checks["appendix:evidence-scores-within-hard-caps"]["passed"] is True
+    assert checks["appendix:feature-scores-r-plus-h"]["passed"] is True
+
+
+def test_real_symphony_e2e_runtime_home_evidence_requires_distinct_parallel_execute_homes(tmp_path: Path) -> None:
+    tool = load_tool("real_symphony_e2e_run")
+    homes_root = tmp_path / "data" / "instances" / "inst-1" / "runtime-homes"
+    for relative in [
+        "plan/plan-1/codex",
+        "execute/exec-1/codex",
+        "execute/exec-2/codex",
+        "verify/verify-1/local-verifier",
+    ]:
+        (homes_root / relative).mkdir(parents=True)
+
+    evidence = tool._runtime_home_evidence(
+        data_root=tmp_path / "data",
+        instance_id="inst-1",
+        pipeline_view={
+            "attempts": [
+                {"attempt_id": "exec-1", "mode": "execute"},
+                {"attempt_id": "exec-2", "mode": "execute"},
+            ]
+        },
+    )
+
+    assert evidence["distinct_mode_homes"] is True
+    assert evidence["concurrent_execute_homes_distinct"] is True
+
+
+def test_real_symphony_e2e_pipeline_prediction_requires_conditional_basis() -> None:
+    tool = load_tool("real_symphony_e2e_run")
+
+    assert tool._pipeline_prediction_is_conditional(
+        {
+            "prediction_basis": {
+                "graph_revision": 2,
+                "policy_revision": 1,
+                "assumption": "unknown verifies pass",
+                "generated_at": "2026-07-08T00:00:00Z",
+            },
+            "predicted_call_order": [{"node_id": "a", "confidence": "conditional"}],
+        }
+    )
+    assert not tool._pipeline_prediction_is_conditional(
+        {
+            "prediction_basis": {
+                "graph_revision": 2,
+                "policy_revision": 1,
+                "generated_at": "2026-07-08T00:00:00Z",
+            },
+            "predicted_call_order": [{"node_id": "a", "confidence": "certain"}],
+        }
+    )
+
+
+def test_real_symphony_e2e_no_global_codex_home_rejects_home_path() -> None:
+    tool = load_tool("real_symphony_e2e_run")
+    home_codex = Path.home() / ".codex"
+
+    assert tool._managed_run_avoids_global_codex_home(
+        {
+            "runtime_config": {
+                "profiles": {
+                    "plan": {"settings": {"codex_home_source": "$SYMPHONY_E2E_CODEX_HOME_SOURCE"}},
+                }
+            },
+            "runtime_waits": [{"log_path": "/tmp/symphony/performer.log"}],
+        }
+    )
+    assert not tool._managed_run_avoids_global_codex_home(
+        {
+            "runtime_config": {
+                "profiles": {
+                    "plan": {"settings": {"codex_home_source": str(home_codex)}},
+                }
+            },
+            "runtime_waits": [],
+        }
+    )
+
+
 def test_real_symphony_e2e_integration_conflict_acceptance_uses_resolved_queue_item(tmp_path: Path) -> None:
     tool = load_tool("real_symphony_e2e_run")
     evidence = tool.Evidence(tmp_path / "report.json")
