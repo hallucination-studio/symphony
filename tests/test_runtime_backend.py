@@ -30,6 +30,28 @@ def test_prepare_mode_environment_materializes_isolated_codex_home(tmp_path: Pat
     assert Path(env["CODEX_HOME"]).is_dir()
 
 
+def test_prepare_mode_environment_supports_local_verifier_without_codex_settings(tmp_path: Path) -> None:
+    profile = RuntimeProfile(
+        name="deterministic-verifier",
+        backend="local-verifier",
+        mode=RuntimeMode.VERIFY,
+        settings={"model": "ignored-for-local-verifier", "sdk_codex_bin": "/bin/codex"},
+    )
+
+    env = prepare_mode_environment(tmp_path, profile)
+
+    assert env == {"SYMPHONY_LOCAL_VERIFIER_HOME": str(tmp_path / "runtime-homes" / "verify" / "local-verifier")}
+    assert Path(env["SYMPHONY_LOCAL_VERIFIER_HOME"]).is_dir()
+
+
+def test_prepare_mode_environment_rejects_local_verifier_for_plan_and_execute(tmp_path: Path) -> None:
+    for mode in (RuntimeMode.PLAN, RuntimeMode.EXECUTE):
+        profile = RuntimeProfile(name=f"{mode.value}-local", backend="local-verifier", mode=mode)
+
+        with pytest.raises(ValueError, match=f"unsupported runtime backend for {mode.value}: local-verifier"):
+            prepare_mode_environment(tmp_path, profile)
+
+
 def test_managed_mode_fails_closed_without_mode_profile(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="runtime profile"):
         prepare_mode_environment(tmp_path, None)

@@ -627,7 +627,8 @@ async def test_verify_mode_runs_frozen_gate_commands_and_fails_on_command_failur
     assert payload["reason"].startswith("gate_command_failed")
     assert "python -c" in payload["reason"]
     assert "exit_code=" in payload["reason"]
-    assert "stderr=" in payload["reason"]
+    assert "stdout=''" in payload["reason"]
+    assert "stderr=''" in payload["reason"]
     assert payload["error"] == payload["reason"]
 
 

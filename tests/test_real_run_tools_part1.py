@@ -290,10 +290,12 @@ def test_real_symphony_e2e_runtime_config_uses_explicit_codex_home_source() -> N
     )
 
     assert payload["version"] == 7
-    for profile in payload["profiles"].values():
+    for profile in [payload["profiles"]["plan"], payload["profiles"]["execute"]]:
         assert profile["settings"]["codex_home_source"] == "$SYMPHONY_E2E_CODEX_HOME_SOURCE"
         assert "model" not in profile["settings"]
         assert "auth.json" not in str(profile)
+    assert payload["profiles"]["verify"]["backend"] == "local-verifier"
+    assert payload["profiles"]["verify"]["settings"] == {}
 
 
 def test_real_symphony_e2e_runtime_config_model_is_explicit_override_only(monkeypatch) -> None:
@@ -304,7 +306,9 @@ def test_real_symphony_e2e_runtime_config_model_is_explicit_override_only(monkey
     explicit = tool.build_runtime_config_payload(runtime_group_id="group-1", version=1, model="gpt-5.5")
 
     assert all("model" not in profile["settings"] for profile in inherited["profiles"].values())
-    assert all(profile["settings"]["model"] == "gpt-5.5" for profile in explicit["profiles"].values())
+    assert explicit["profiles"]["plan"]["settings"]["model"] == "gpt-5.5"
+    assert explicit["profiles"]["execute"]["settings"]["model"] == "gpt-5.5"
+    assert "model" not in explicit["profiles"]["verify"]["settings"]
 
 
 def test_real_symphony_e2e_runtime_config_carries_codex_execution_settings() -> None:
@@ -317,9 +321,81 @@ def test_real_symphony_e2e_runtime_config_carries_codex_execution_settings() -> 
         codex_settings={"hard_turn_timeout_ms": 120000, "config_overrides": ["model_provider=custom"]},
     )
 
-    for profile in payload["profiles"].values():
+    for profile in [payload["profiles"]["plan"], payload["profiles"]["execute"]]:
         assert profile["settings"]["hard_turn_timeout_ms"] == 120000
         assert profile["settings"]["config_overrides"] == ["model_provider=custom"]
+    assert payload["profiles"]["verify"]["settings"] == {}
+
+
+def test_real_symphony_e2e_cli_accepts_pipeline_scenarios() -> None:
+    tool = load_tool("real_symphony_e2e")
+
+    for scenario in ["basic", "parallel", "replan", "integration-conflict", "runtime-wait"]:
+        args = tool.parser().parse_args(["--pipeline-scenario", scenario])
+
+        assert args.pipeline_scenario == scenario
+
+
+def test_real_symphony_e2e_parallel_scenario_raises_execute_capacity() -> None:
+    tool = load_tool("real_symphony_e2e")
+
+    payload = tool.build_runtime_config_payload(
+        runtime_group_id="group-1",
+        version=1,
+        pipeline_scenario="parallel",
+    )
+
+    assert payload["scheduler_policy"]["capacity"]["by_mode"]["execute"] == 2
+
+
+def test_real_symphony_e2e_runtime_wait_scenario_enables_permission_probe() -> None:
+    tool = load_tool("real_symphony_e2e_run")
+
+    basic = type("Args", (), {"pipeline_scenario": "basic", "permission_approval_probe": False})()
+    explicit = type("Args", (), {"pipeline_scenario": "basic", "permission_approval_probe": True})()
+    runtime_wait = type("Args", (), {"pipeline_scenario": "runtime-wait", "permission_approval_probe": False})()
+
+    assert tool._effective_permission_approval_probe(basic) is False
+    assert tool._effective_permission_approval_probe(explicit) is True
+    assert tool._effective_permission_approval_probe(runtime_wait) is True
+
+
+def test_real_symphony_e2e_pipeline_projection_match_requires_current_revision() -> None:
+    tool = load_tool("real_symphony_e2e_run")
+    current = {
+        "graph_revision": 2,
+        "nodes": [{"node_id": "root", "state": "verify_passed", "gate_snapshot_hash": "sha256:gate"}],
+        "linear_projections": [
+            {
+                "node_id": "root",
+                "metadata": {
+                    "graph_id": "graph-1",
+                    "node_id": "root",
+                    "gate_snapshot_hash": "sha256:gate",
+                    "conductor_revision": 2,
+                    "operator_status": "verify_passed",
+                },
+            }
+        ],
+    }
+    stale = {
+        **current,
+        "linear_projections": [
+            {
+                "node_id": "old-root",
+                "metadata": {
+                    "graph_id": "graph-old",
+                    "node_id": "old-root",
+                    "gate_snapshot_hash": "sha256:old",
+                    "conductor_revision": 1,
+                    "operator_status": "verify_passed",
+                },
+            }
+        ],
+    }
+
+    assert tool._pipeline_projection_matches_current_revision(current) is True
+    assert tool._pipeline_projection_matches_current_revision(stale) is False
 
 
 def test_real_symphony_e2e_defaults_to_bounded_codex_turn_timeout() -> None:

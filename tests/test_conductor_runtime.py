@@ -100,6 +100,17 @@ def expected_pipeline_log() -> str:
     )
 
 
+def pipeline_start_kwargs_for(attempt_id: str, tmp_path: Path, *, mode: str = "execute") -> dict[str, str]:
+    attempt_dir = tmp_path / "state" / "pipeline" / attempt_id
+    return {
+        "mode": mode,
+        "attempt_id": attempt_id,
+        "lease_id": f"lease-{attempt_id}",
+        "attempt_request_path": str(attempt_dir / "attempt-request.json"),
+        "attempt_result_path": str(attempt_dir / "attempt-result.json"),
+    }
+
+
 async def wait_for_log(path: Path, expected: str) -> str:
     for _ in range(20):
         content = path.read_text(encoding="utf-8")
@@ -159,6 +170,66 @@ async def test_start_launches_performer_process_and_captures_logs(tmp_path: Path
     assert process.terminated is True
     assert stopped.process_status == "stopped"
     assert stopped.pid is None
+
+
+@pytest.mark.asyncio
+async def test_parallel_attempts_for_same_instance_start_distinct_performer_processes(tmp_path: Path) -> None:
+    processes = [PendingProcess(5001), PendingProcess(5002)]
+    started_processes: list[PendingProcess] = []
+    captured_args: list[tuple[str, ...]] = []
+
+    async def process_factory(*args: str, **kwargs: Any) -> PendingProcess:
+        captured_args.append(args)
+        process = processes.pop(0)
+        started_processes.append(process)
+        return process
+
+    manager = ConductorRuntimeManager(process_factory=process_factory, command="performer")
+    instance = make_instance(tmp_path)
+
+    first = await manager.start(instance, env={}, **pipeline_start_kwargs_for("exec-1", tmp_path))
+    second = await manager.start(first, env={}, **pipeline_start_kwargs_for("exec-2", tmp_path))
+
+    assert len(captured_args) == 2
+    assert first.pid == 5001
+    assert second.pid == 5002
+    assert set(manager._handles) == {("inst-1", "exec-1"), ("inst-1", "exec-2")}
+
+    stopped = await manager.stop(second)
+
+    assert stopped.process_status == "stopped"
+    assert all(process.returncode == 0 for process in started_processes)
+    assert manager._handles == {}
+
+
+@pytest.mark.asyncio
+async def test_performer_streams_are_written_to_attempt_log(tmp_path: Path) -> None:
+    process = FakeProcess()
+
+    async def process_factory(*args: str, **kwargs: Any) -> FakeProcess:
+        return process
+
+    manager = ConductorRuntimeManager(process_factory=process_factory, command="performer")
+    instance = make_instance(tmp_path)
+    start_kwargs = pipeline_start_kwargs_for("exec-1", tmp_path)
+
+    started = await manager.start(instance, env={}, **start_kwargs)
+    attempt_log = tmp_path / "state" / "pipeline" / "exec-1" / "attempt.log"
+
+    for _ in range(20):
+        if attempt_log.exists() and "event=performer_stream" in attempt_log.read_text(encoding="utf-8"):
+            break
+        await asyncio.sleep(0.01)
+    log_text = attempt_log.read_text(encoding="utf-8")
+
+    assert "event=performer_stream stream=stdout mode=execute attempt_id=exec-1 lease_id=lease-exec-1" in log_text
+    assert "event=performer_stream stream=stderr mode=execute attempt_id=exec-1 lease_id=lease-exec-1" in log_text
+    assert f"attempt_request_path={start_kwargs['attempt_request_path']}" in log_text
+    assert f"attempt_result_path={start_kwargs['attempt_result_path']}" in log_text
+    assert "message=daemon started" in log_text
+    assert "message=warning line" in log_text
+
+    await manager.stop(started)
 
 
 @pytest.mark.asyncio
@@ -408,6 +479,15 @@ def test_command_args_include_runtime_mode_attempt_paths() -> None:
     )
 
 
+def test_process_env_allows_local_verifier_runtime_home(tmp_path: Path) -> None:
+    manager = ConductorRuntimeManager(command="performer")
+    verifier_home = tmp_path / "runtime-homes" / "verify" / "local-verifier"
+
+    env = manager._process_env({"SYMPHONY_LOCAL_VERIFIER_HOME": str(verifier_home)})
+
+    assert env["SYMPHONY_LOCAL_VERIFIER_HOME"] == str(verifier_home)
+
+
 def test_refresh_polls_process_before_reporting_running(tmp_path: Path) -> None:
     class PollingProcess:
         pid = 4242
@@ -419,10 +499,11 @@ def test_refresh_polls_process_before_reporting_running(tmp_path: Path) -> None:
 
     manager = ConductorRuntimeManager(command="performer")
     instance = make_instance(tmp_path).with_updates(process_status="running", pid=4242)
-    manager._handles[instance.id] = RuntimeHandle(
+    manager._handles[(instance.id, "exec-1")] = RuntimeHandle(
         process=PollingProcess(),
         log_task=None,  # type: ignore[arg-type]
         process_status="running",
+        attempt_id="exec-1",
     )
 
     refreshed = manager.refresh(instance)

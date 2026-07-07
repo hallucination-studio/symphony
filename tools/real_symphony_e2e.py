@@ -104,6 +104,11 @@ def parser() -> argparse.ArgumentParser:
     arg_parser.add_argument("--out", type=Path, default=Path(".test-real-flow/e2e-matrix"))
     arg_parser.add_argument("--project-slug", default=DEFAULT_PROJECT_SLUG)
     arg_parser.add_argument("--pipeline-gates", action=argparse.BooleanOptionalAction, default=True)
+    arg_parser.add_argument(
+        "--pipeline-scenario",
+        choices=["basic", "parallel", "replan", "integration-conflict", "runtime-wait"],
+        default="basic",
+    )
     arg_parser.add_argument("--e2e-gate-mode", choices=["smoke", "strict"], default="smoke")
     arg_parser.add_argument("--stage-timeout", type=int, default=120)
     arg_parser.add_argument("--permission-approval-probe", action="store_true")

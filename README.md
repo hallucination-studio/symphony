@@ -149,9 +149,33 @@ Conductor managed settings are populated from Podium runtime enrollment: `podium
 Runtime-group policy/config is versioned. Podium accepts higher-version runtime
 config envelopes containing scheduler policy and per-mode runtime profiles,
 rejects stale versions, and returns only sanitized profile settings to browser
-APIs. Conductor materializes per-mode Codex homes under managed instance state
-(`runtime-homes/<mode>/codex`) and managed mode fails closed if a mode attempt has
-no runtime profile.
+APIs. Conductor materializes isolated runtime homes under managed instance state
+(`runtime-homes/<mode>/<backend>`). Codex-backed `plan` and `execute` profiles
+use isolated `CODEX_HOME` directories; the first-version `verify` profile may use
+`local-verifier`, which runs deterministic frozen gate commands without a model
+backend. Managed mode fails closed if a mode attempt has no runtime profile.
+
+Example runtime config envelope:
+
+```json
+{
+  "runtime_group_id": "group-example",
+  "version": 1,
+  "scheduler_policy": {
+    "policy_id": "policy-group-example",
+    "version": 1,
+    "effective_at": "2026-07-07T00:00:00Z",
+    "capacity": {"global": 3, "by_mode": {"plan": 1, "execute": 2, "verify": 1}},
+    "dependency_policy": "verify_passed",
+    "max_rework_attempts": 1
+  },
+  "profiles": {
+    "plan": {"name": "codex-plan", "backend": "codex", "mode": "plan", "settings": {"codex_home_source": "$SYMPHONY_E2E_CODEX_HOME_SOURCE"}},
+    "execute": {"name": "codex-execute", "backend": "codex", "mode": "execute", "settings": {"codex_home_source": "$SYMPHONY_E2E_CODEX_HOME_SOURCE"}},
+    "verify": {"name": "local-verifier", "backend": "local-verifier", "mode": "verify", "settings": {}}
+  }
+}
+```
 
 The offline importer in `conductor.offline_plan_importer` is intentionally
 non-scheduling: it imports hand-written plans through the same gate snapshot,
@@ -164,7 +188,10 @@ Verified task output manifests enqueue deterministic local patch integration. In
 
 ## Codex Permissions
 
-Per-mode runtime profiles carry Codex settings. Conductor materializes an isolated `CODEX_HOME` per mode and fails closed if a mode profile cannot be resolved.
+Per-mode runtime profiles carry backend settings. Conductor materializes an
+isolated runtime home per mode/backend and fails closed if a mode profile cannot
+be resolved. Codex profiles receive an isolated `CODEX_HOME`; `local-verifier`
+profiles do not receive Codex SDK settings.
 
 Runtime confirmation policy:
 

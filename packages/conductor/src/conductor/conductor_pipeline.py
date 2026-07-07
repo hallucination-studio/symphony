@@ -835,7 +835,7 @@ class ConductorPipelineStore:
             ).fetchall()
         return [_json_loads(row["payload_json"]) for row in rows]
 
-    def process_queued_integrations(self, repository_path: Path) -> int:
+    def process_queued_integrations(self, repository_path: Path, *, instance: Any | None = None) -> int:
         processed = 0
         for item in self.list_integration_queue():
             if item.get("status") != "queued":
@@ -843,12 +843,39 @@ class ConductorPipelineStore:
             try:
                 integrated_revision = self._integrate_manifest_patch(repository_path, str(item["verify_attempt_id"]))
             except Exception as exc:
-                self.complete_integration(str(item["integration_id"]), status="conflict", error=_sanitize_error(exc))
+                error = _sanitize_error(exc)
+                completed = self.complete_integration(str(item["integration_id"]), status="conflict", error=error)
+                _append_pipeline_log_event(
+                    instance,
+                    "pipeline_integration_conflicted",
+                    graph_revision=self.current_graph_revision(),
+                    policy_revision=self.active_runtime_config().scheduler_policy.version,
+                    node_id=str(completed.get("node_id") or ""),
+                    attempt_id=str(completed.get("verify_attempt_id") or ""),
+                    mode=RuntimeMode.VERIFY.value,
+                    lease_id="",
+                    integration_id=str(completed.get("integration_id") or ""),
+                    error_type=exc.__class__.__name__,
+                    sanitized_reason=error,
+                    action_required=HumanEscalationReason.LINEAR_SYNC_CONFLICT.value,
+                )
                 processed += 1
                 continue
-            self.complete_integration(
+            completed = self.complete_integration(
                 str(item["integration_id"]),
                 status="integrated",
+                integrated_revision=integrated_revision,
+            )
+            _append_pipeline_log_event(
+                instance,
+                "pipeline_integration_completed",
+                graph_revision=self.current_graph_revision(),
+                policy_revision=self.active_runtime_config().scheduler_policy.version,
+                node_id=str(completed.get("node_id") or ""),
+                attempt_id=str(completed.get("verify_attempt_id") or ""),
+                mode=RuntimeMode.VERIFY.value,
+                lease_id="",
+                integration_id=str(completed.get("integration_id") or ""),
                 integrated_revision=integrated_revision,
             )
             processed += 1
@@ -1279,6 +1306,22 @@ class ConductorPipelineStore:
             ).fetchall()
         return [_json_loads(row["payload_json"]) for row in rows]
 
+    def prune_linear_projections_except(self, node_ids: set[str]) -> int:
+        with self.connect() as connection:
+            rows = connection.execute("SELECT projection_id, node_id FROM linear_projections").fetchall()
+            stale_projection_ids = [
+                str(row["projection_id"])
+                for row in rows
+                if str(row["node_id"] or "") not in node_ids
+            ]
+            if not stale_projection_ids:
+                return 0
+            connection.executemany(
+                "DELETE FROM linear_projections WHERE projection_id = ?",
+                [(projection_id,) for projection_id in stale_projection_ids],
+            )
+        return len(stale_projection_ids)
+
     def linear_projection_metadata(self, node: GraphNode, revision: GraphRevision) -> dict[str, Any]:
         runtime_wait = self.active_runtime_wait_for_node(node.node_id)
         metadata = {
@@ -1313,6 +1356,7 @@ class ConductorPipelineStore:
         if revision is None:
             return []
         nodes_by_id = {node.node_id: node for node in nodes}
+        self.prune_linear_projections_except(set(nodes_by_id))
         projections: list[dict[str, Any]] = []
         for projection in self.list_linear_projections():
             node_id = str(projection.get("node_id") or "")
@@ -1688,7 +1732,11 @@ class ConductorPipelineStore:
         modes: list[PipelineModeView] = []
         for mode in RuntimeMode:
             active_node_ids = sorted(lease.node_id for lease in active_leases if lease.mode is mode)
-            queued = [node.node_id for node in nodes if _mode_for_state(node.state) is mode and node.node_id not in active_node_ids]
+            queued = [
+                node.node_id
+                for node in nodes
+                if _queued_mode_for_state(node.state) is mode and node.node_id not in active_node_ids
+            ]
             modes.append(
                 PipelineModeView(
                     mode=mode,
@@ -2174,6 +2222,8 @@ class PipelineCoordinator:
                         instance,
                         env=env,
                         mode=mode.value,
+                        attempt_id=attempt_id,
+                        lease_id=lease.lease_id,
                         attempt_request_path=str(paths["request_path"]),
                         attempt_result_path=str(result_path),
                     )
@@ -2370,7 +2420,43 @@ class PipelineCoordinator:
                 continue
             if self.store.complete_attempt_with_fencing(result, at=now):
                 applied += 1
-                result_path.rename(result_path.with_suffix(".json.applied"))
+                applied_path = result_path.with_suffix(".json.applied")
+                result_path.rename(applied_path)
+                _append_pipeline_log_event(
+                    instance,
+                    "pipeline_result_applied",
+                    graph_revision=result.graph_revision,
+                    policy_revision=result.policy_revision,
+                    node_id=result.node_id,
+                    attempt_id=result.attempt_id,
+                    mode=result.mode.value,
+                    lease_id=result.lease_id,
+                    result_path=str(applied_path),
+                )
+                if isinstance(result, VerifyAttemptResult) and result.passed and result.score >= PASS_THRESHOLD:
+                    integration_id = f"integration-{result.node_id}-{result.attempt_id}"
+                    _append_pipeline_log_event(
+                        instance,
+                        "pipeline_manifest_published",
+                        graph_revision=result.graph_revision,
+                        policy_revision=result.policy_revision,
+                        node_id=result.node_id,
+                        attempt_id=result.attempt_id,
+                        mode=result.mode.value,
+                        lease_id=result.lease_id,
+                        result_path=str(applied_path),
+                    )
+                    _append_pipeline_log_event(
+                        instance,
+                        "pipeline_integration_queued",
+                        graph_revision=result.graph_revision,
+                        policy_revision=result.policy_revision,
+                        node_id=result.node_id,
+                        attempt_id=result.attempt_id,
+                        mode=result.mode.value,
+                        lease_id=result.lease_id,
+                        integration_id=integration_id,
+                    )
         return applied
 
     def _attempt_request(
@@ -2490,6 +2576,16 @@ def _mode_for_state(state: GraphNodeState) -> RuntimeMode:
     return RuntimeMode.EXECUTE
 
 
+def _queued_mode_for_state(state: GraphNodeState) -> RuntimeMode | None:
+    if state is GraphNodeState.REPLANNING:
+        return RuntimeMode.PLAN
+    if state in {GraphNodeState.READY, GraphNodeState.REWORKING}:
+        return RuntimeMode.EXECUTE
+    if state is GraphNodeState.VERIFYING:
+        return RuntimeMode.VERIFY
+    return None
+
+
 def _projected_node_id_from_description(description: str) -> str | None:
     for line in description.splitlines():
         stripped = line.strip()
@@ -2517,8 +2613,19 @@ def prepare_mode_environment(
 ) -> dict[str, str]:
     if profile is None:
         raise ValueError("runtime profile is required for managed mode attempts")
+    if profile.backend == "local-verifier":
+        if profile.mode is not RuntimeMode.VERIFY:
+            raise ValueError(f"unsupported runtime backend for {profile.mode.value}: {profile.backend}")
+        verifier_home = instance_state_root / "runtime-homes" / profile.mode.value / "local-verifier"
+        try:
+            verifier_home.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise ValueError(f"isolated local verifier home could not be materialized: {verifier_home}") from exc
+        if not verifier_home.is_dir():
+            raise ValueError(f"isolated local verifier home could not be materialized: {verifier_home}")
+        return {"SYMPHONY_LOCAL_VERIFIER_HOME": str(verifier_home)}
     if profile.backend != "codex":
-        raise ValueError(f"unsupported runtime backend: {profile.backend}")
+        raise ValueError(f"unsupported runtime backend for {profile.mode.value}: {profile.backend}")
     codex_home = instance_state_root / "runtime-homes" / profile.mode.value / "codex"
     try:
         codex_home.mkdir(parents=True, exist_ok=True)
@@ -2723,6 +2830,26 @@ def _append_instance_log(instance: Any, message: str) -> None:
             handle.write(f"{_now()} {message}\n")
     except OSError:
         return
+
+
+def _append_pipeline_log_event(instance: Any | None, event: str, **fields: Any) -> None:
+    if instance is None:
+        return
+    parts = [f"event={event}"]
+    for key, value in fields.items():
+        if value is None:
+            continue
+        parts.append(f"{key}={_sanitize_log_field(value)}")
+    _append_instance_log(instance, " ".join(parts))
+
+
+def _sanitize_log_field(value: Any) -> str:
+    text = str(value).replace("\x00", "")
+    text = text.replace("\r", "\\r").replace("\n", "\\n")
+    text = re.sub(r"(?i)(authorization:\s*)(bearer|basic)\s+[^\s,;]+", r"\1[REDACTED]", text)
+    text = re.sub(r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]+", r"\1 [REDACTED]", text)
+    text = re.sub(r"(?i)\b(token|password|client_secret|cookie)=([^ \t,;]+)", r"\1=[REDACTED]", text)
+    return text.replace(" ", "_")
 
 
 def _process_exit_error(instance: Any) -> str:

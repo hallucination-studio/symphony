@@ -26,11 +26,17 @@ SECRET_SETTING_KEYS = {
     "token",
 }
 
-
 class RuntimeMode(StrEnum):
     PLAN = "plan"
     EXECUTE = "execute"
     VERIFY = "verify"
+
+
+RUNTIME_BACKENDS_BY_MODE = {
+    RuntimeMode.PLAN: {"codex"},
+    RuntimeMode.EXECUTE: {"codex"},
+    RuntimeMode.VERIFY: {"codex", "local-verifier"},
+}
 
 
 class GraphNodeState(StrEnum):
@@ -269,6 +275,8 @@ class RuntimeConfigEnvelope:
                 errors.append(f"runtime_profile_name_required:{mode.value}")
             if not profile.backend.strip():
                 errors.append(f"runtime_profile_backend_required:{mode.value}")
+            elif profile.backend not in RUNTIME_BACKENDS_BY_MODE.get(mode, set()):
+                errors.append(f"runtime_profile_backend_unsupported:{mode.value}:{profile.backend}")
         return errors
 
     def validate(self) -> None:

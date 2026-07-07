@@ -195,6 +195,40 @@ def test_runtime_config_validation_requires_complete_three_mode_profiles() -> No
     complete.validate()
 
 
+def test_runtime_config_validation_enforces_mode_backend_eligibility() -> None:
+    policy = SchedulerPolicy(
+        policy_id="policy-1",
+        version=1,
+        effective_at="2026-07-06T00:00:00Z",
+        capacity=SchedulerCapacity(global_limit=3, by_mode={mode: 1 for mode in RuntimeMode}),
+        dependency_policy=DependencySatisfactionPolicy.VERIFY_PASSED,
+        max_rework_attempts=1,
+    )
+    local_verify = RuntimeConfigEnvelope(
+        runtime_group_id="group-1",
+        version=1,
+        scheduler_policy=policy,
+        profiles={
+            RuntimeMode.PLAN: RuntimeProfile(name="planner", backend="codex", mode=RuntimeMode.PLAN),
+            RuntimeMode.EXECUTE: RuntimeProfile(name="executor", backend="codex", mode=RuntimeMode.EXECUTE),
+            RuntimeMode.VERIFY: RuntimeProfile(name="verifier", backend="local-verifier", mode=RuntimeMode.VERIFY),
+        },
+    )
+    invalid_plan_backend = RuntimeConfigEnvelope(
+        runtime_group_id="group-1",
+        version=1,
+        scheduler_policy=policy,
+        profiles={
+            RuntimeMode.PLAN: RuntimeProfile(name="planner", backend="local-verifier", mode=RuntimeMode.PLAN),
+            RuntimeMode.EXECUTE: RuntimeProfile(name="executor", backend="codex", mode=RuntimeMode.EXECUTE),
+            RuntimeMode.VERIFY: RuntimeProfile(name="verifier", backend="local-verifier", mode=RuntimeMode.VERIFY),
+        },
+    )
+
+    local_verify.validate()
+    assert invalid_plan_backend.validation_errors() == ["runtime_profile_backend_unsupported:plan:local-verifier"]
+
+
 def test_plan_validator_rejects_bad_or_unfrozen_gate_hashes() -> None:
     content = GateSpecContent(
         acceptance_criteria=["criterion"],

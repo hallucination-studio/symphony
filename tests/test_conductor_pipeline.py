@@ -2482,6 +2482,7 @@ def test_pipeline_view_filters_stale_linear_projections_and_refreshes_operator_s
     assert stale["projection_id"] not in {projection["projection_id"] for projection in projections}
     assert projections[0]["metadata"]["operator_status"] == "verify_passed"
     assert projections[0]["metadata"]["gate_snapshot_hash"] == store.get_node("a").gate_snapshot_hash
+    assert [projection["projection_id"] for projection in store.list_linear_projections()] == [current["projection_id"]]
 
 
 async def test_pipeline_linear_projector_creates_node_issue_with_gate_and_metadata(tmp_path: Path) -> None:
@@ -3173,6 +3174,23 @@ def test_pipeline_view_includes_mode_counts_and_conditional_prediction(tmp_path:
     assert "secret" not in str(payload)
 
 
+def test_pipeline_view_excludes_terminal_and_human_wait_nodes_from_mode_queues(tmp_path: Path) -> None:
+    store = ConductorPipelineStore(tmp_path)
+    store.apply_runtime_config(RuntimeConfigEnvelope("group-1", 1, _policy(1)))
+    store.commit_plan(_proposal())
+    store.update_node_state("a", GraphNodeState.AWAITING_HUMAN, human_reason=HumanEscalationReason.BACKEND_UNAVAILABLE)
+    store.update_node_state("b", GraphNodeState.VERIFY_PASSED, verify_score=3)
+
+    payload = store.pipeline_view().to_dict()
+
+    assert all("a" not in mode["node_ids"] for mode in payload["modes"])
+    assert all("b" not in mode["node_ids"] for mode in payload["modes"])
+    assert all(mode["queued"] == 0 for mode in payload["modes"])
+    predictions = {call["node"]: call for call in payload["predicted_call_order"]}
+    assert predictions["a"]["earliest_mode"] is None
+    assert predictions["b"]["earliest_mode"] is None
+
+
 def test_pipeline_prediction_blocks_on_unintegrated_verified_manifest(tmp_path: Path) -> None:
     store = ConductorPipelineStore(tmp_path)
     store.apply_runtime_config(RuntimeConfigEnvelope("group-1", 1, _policy(1)))
@@ -3401,6 +3419,7 @@ def test_pipeline_planner_request_preserves_dispatch_graph_metadata(tmp_path: Pa
         id = "inst-1"
         instance_dir = str(tmp_path / "inst-1")
         resolved_repo_path = str(tmp_path)
+        log_path = str(tmp_path / "inst-1" / "logs" / "performer.log")
 
         def with_updates(self, **changes):
             return self
@@ -4130,6 +4149,7 @@ def test_pipeline_coordinator_collects_result_files_with_fencing(tmp_path: Path)
         id = "inst-1"
         instance_dir = str(tmp_path / "inst-1")
         resolved_repo_path = str(tmp_path)
+        log_path = str(tmp_path / "inst-1" / "logs" / "performer.log")
 
         def with_updates(self, **changes):
             return self
@@ -4173,6 +4193,62 @@ def test_pipeline_coordinator_collects_result_files_with_fencing(tmp_path: Path)
 
     assert coordinator.collect_result_files(Instance(), now=now) == 1
     assert store.get_node("a").state is GraphNodeState.VERIFYING
+    log_text = Path(Instance.log_path).read_text(encoding="utf-8")
+    assert "event=pipeline_result_applied" in log_text
+    assert f"attempt_id={attempt.attempt_id}" in log_text
+    assert "node_id=a" in log_text
+    assert "mode=execute" in log_text
+    assert f"lease_id={attempt.lease_id}" in log_text
+    assert f"result_path={result_path.with_suffix('.json.applied')}" in log_text
+
+
+def test_pipeline_coordinator_logs_verify_manifest_and_integration_events(tmp_path: Path) -> None:
+    store = ConductorPipelineStore(tmp_path / "store")
+    store.apply_runtime_config(RuntimeConfigEnvelope("group-1", 1, _policy(1)))
+    store.commit_plan(_proposal())
+    now = datetime(2026, 7, 6, tzinfo=timezone.utc)
+    snapshot = _publish_verification_input(store, "a", execute_attempt_id="exec-1")
+    store.update_node_state("a", GraphNodeState.VERIFYING)
+    lease = store.start_attempt(RuntimeMode.VERIFY, node_id="a", attempt_id="verify-1", now=now, ttl_seconds=30)
+
+    class Instance:
+        id = "inst-1"
+        instance_dir = str(tmp_path / "inst-1")
+        log_path = str(tmp_path / "inst-1" / "logs" / "performer.log")
+
+    coordinator = PipelineCoordinator(store=store, runtime_manager=object())
+    result_path = Path(Instance.instance_dir) / "state" / "pipeline" / "verify-1" / "attempt-result.json"
+    result_path.parent.mkdir(parents=True, exist_ok=True)
+    result_path.write_text(
+        json.dumps(
+            VerifyAttemptResult(
+                attempt_id="verify-1",
+                node_id="a",
+                status=AttemptState.SUCCEEDED,
+                graph_revision=1,
+                policy_revision=1,
+                gate_snapshot_hash=snapshot.gate_snapshot_hash,
+                lease_id=lease.lease_id,
+                fencing_token=lease.fencing_token,
+                score=3,
+                passed=True,
+                execute_attempt_id="exec-1",
+            ).to_dict()
+        ),
+        encoding="utf-8",
+    )
+
+    assert coordinator.collect_result_files(Instance(), now=now) == 1
+
+    log_text = Path(Instance.log_path).read_text(encoding="utf-8")
+    assert "event=pipeline_result_applied" in log_text
+    assert "event=pipeline_manifest_published" in log_text
+    assert "event=pipeline_integration_queued" in log_text
+    assert "attempt_id=verify-1" in log_text
+    assert "node_id=a" in log_text
+    assert "mode=verify" in log_text
+    assert f"lease_id={lease.lease_id}" in log_text
+    assert "integration_id=integration-a-verify-1" in log_text
 
 
 def test_pipeline_coordinator_logs_invalid_result_file(tmp_path: Path) -> None:

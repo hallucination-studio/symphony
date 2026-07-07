@@ -386,7 +386,7 @@ class ConductorPodiumSyncMixin:
             repo_path = str(getattr(instance, "resolved_repo_path", "") or "").strip()
             if not repo_path:
                 continue
-            processed += self.pipeline_store.process_queued_integrations(Path(repo_path))
+            processed += self.pipeline_store.process_queued_integrations(Path(repo_path), instance=instance)
         return processed
 
     async def reconcile_linear_pipeline_projections_once(self) -> int:

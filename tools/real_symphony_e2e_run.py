@@ -54,6 +54,7 @@ def build_runtime_config_payload(
     model: str | None = None,
     codex_home_source: str | None = None,
     codex_settings: dict[str, Any] | None = None,
+    pipeline_scenario: str = "basic",
 ) -> dict[str, Any]:
     settings = dict(codex_settings or {})
     model_name = (model or os.environ.get("SYMPHONY_E2E_CODEX_MODEL") or "").strip()
@@ -61,6 +62,9 @@ def build_runtime_config_payload(
         settings["model"] = model_name
     if codex_home_source:
         settings["codex_home_source"] = codex_home_source
+    by_mode = {"plan": 1, "execute": 1, "verify": 1}
+    if pipeline_scenario == "parallel":
+        by_mode["execute"] = 2
     return {
         "runtime_group_id": runtime_group_id,
         "version": version,
@@ -68,18 +72,29 @@ def build_runtime_config_payload(
             "policy_id": f"policy-{runtime_group_id}",
             "version": version,
             "effective_at": utc_now(),
-            "capacity": {"global": 3, "by_mode": {"plan": 1, "execute": 1, "verify": 1}},
+            "capacity": {"global": 3, "by_mode": by_mode},
             "dependency_policy": "verify_passed",
             "max_rework_attempts": 1,
         },
         "profiles": {
-            mode: {
-                "name": f"codex-{mode}",
+            "plan": {
+                "name": "codex-plan",
                 "backend": "codex",
-                "mode": mode,
+                "mode": "plan",
                 "settings": dict(settings),
-            }
-            for mode in ["plan", "execute", "verify"]
+            },
+            "execute": {
+                "name": "codex-execute",
+                "backend": "codex",
+                "mode": "execute",
+                "settings": dict(settings),
+            },
+            "verify": {
+                "name": "local-verifier",
+                "backend": "local-verifier",
+                "mode": "verify",
+                "settings": {},
+            },
         },
     }
 
@@ -114,10 +129,19 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
     bin_dir = Path.cwd() / ".venv" / "bin"
     run_id = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S") + "-" + uuid.uuid4().hex[:6]
     run_id = f"symphony-e2e-matrix-{run_id}"
+    pipeline_scenario = _pipeline_scenario(args)
+    permission_approval_probe = _effective_permission_approval_probe(args)
     workspace_id = f"real-workspace-{run_id}"
     webhook_secret = f"webhook-{uuid.uuid4().hex}"
     evidence.data["run_id"] = run_id
+    evidence.data["pipeline_scenario"] = pipeline_scenario
     evidence.write()
+    evidence.check(
+        "pipeline-scenario:selected",
+        pipeline_scenario in {"basic", "parallel", "replan", "integration-conflict", "runtime-wait"},
+        scenario=pipeline_scenario,
+        permission_approval_probe=permission_approval_probe,
+    )
 
     for name, command in {
         "podium-help": [str(bin_dir / "podium"), "--help"],
@@ -254,6 +278,7 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
             args.project_slug,
             run_id,
             delegate_id=agent_app_user_id if not args.simulate_agent_webhook else None,
+            description=_pipeline_scenario_issue_description(pipeline_scenario, run_id),
         )
         if not args.simulate_agent_webhook:
             linear["issue"] = await delegate_linear_issue(token, linear["issue"]["id"], agent_app_user_id)
@@ -327,6 +352,7 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
             version=1,
             codex_home_source="$SYMPHONY_E2E_CODEX_HOME_SOURCE",
             codex_settings=_codex_settings_from_args(args),
+            pipeline_scenario=getattr(args, "pipeline_scenario", "basic"),
         )
         status, body = http_json(
             "POST",
@@ -393,11 +419,11 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
             evidence=evidence,
             timeout_seconds=args.timeout,
             stage_timeout_seconds=args.stage_timeout,
-            permission_approval_probe=args.permission_approval_probe,
+            permission_approval_probe=permission_approval_probe,
             crash_recovery_probe=args.crash_recovery_probe,
             expected_failure=args.expected_failure,
         )
-        if args.permission_approval_probe:
+        if permission_approval_probe:
             check_names = {check.get("name") for check in evidence.data.get("checks", []) if check.get("passed")}
             human_resume_covered = {
                 "human-action:conductor-pipeline-awaiting-human",
@@ -428,7 +454,7 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
             and all(str(node.get("state") or "") in {"verify_passed", "failed", "superseded"} for node in pipeline_nodes)
         )
         expected_failure = args.expected_failure != "none"
-        if args.permission_approval_probe:
+        if permission_approval_probe:
             evidence.check(
                 "runtime-error:blocked-cleared-after-approval",
                 not pipeline_leases,
@@ -483,16 +509,15 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
                 pipeline_nodes=pipeline_nodes[-5:],
             )
         if args.pipeline_gates and not expected_failure:
-            status, pipeline_body = http_json("GET", api_url(conductor_port, "/api/pipeline"))
-            pipeline_view = (
-                pipeline_body.get("pipeline")
-                if status == 200 and isinstance(pipeline_body, dict) and isinstance(pipeline_body.get("pipeline"), dict)
-                else {}
+            pipeline_view = await _wait_for_final_pipeline_view(
+                conductor_port,
+                timeout_seconds=min(max(args.stage_timeout, 5), 120),
+                allow_human_wait=pipeline_scenario == "integration-conflict",
             )
             pipeline_path = root / "final-pipeline-view.json"
             pipeline_path.write_text(json.dumps(pipeline_view, indent=2, sort_keys=True), encoding="utf-8")
             evidence.artifact("final_pipeline_view", pipeline_path)
-            if args.permission_approval_probe:
+            if permission_approval_probe:
                 tree = await fetch_linear_issue_tree(token, linear["issue"]["id"])
                 tree_path = root / "final-issue-tree.json"
                 tree_path.write_text(json.dumps(tree, indent=2, sort_keys=True), encoding="utf-8")
@@ -521,7 +546,8 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
                         for child in human_actions
                     ],
                 )
-            if not args.permission_approval_probe:
+                _check_pipeline_scenario_acceptance(evidence, pipeline_scenario, pipeline_view)
+            if not permission_approval_probe:
                 nodes = [node for node in pipeline_view.get("nodes", []) if isinstance(node, dict)]
                 manifests = [manifest for manifest in pipeline_view.get("manifests", []) if isinstance(manifest, dict)]
                 integrations = [
@@ -555,6 +581,7 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
                 evidence.check(
                     "stage:pipeline-linear-projected",
                     bool(projections)
+                    and _pipeline_projection_matches_current_revision(pipeline_view)
                     and all(
                         isinstance(projection.get("metadata"), dict)
                         and projection["metadata"].get("graph_id")
@@ -565,10 +592,17 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
                         for projection in projections
                     ),
                     projections=projections,
+                    graph_revision=pipeline_view.get("graph_revision"),
                 )
+                _check_pipeline_scenario_acceptance(evidence, pipeline_scenario, pipeline_view)
                 evidence.check(
                     "stage:final-pipeline-verified",
-                    bool(nodes) and all(node.get("state") in {"verify_passed", "superseded"} for node in nodes),
+                    bool(nodes)
+                    and all(
+                        node.get("state") in {"verify_passed", "superseded"}
+                        or (pipeline_scenario == "integration-conflict" and node.get("state") == "awaiting_human")
+                        for node in nodes
+                    ),
                     nodes=[{"node_id": node.get("node_id"), "state": node.get("state")} for node in nodes],
                 )
 
@@ -590,7 +624,14 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
             status, body = http_json(method, api_url(conductor_port, path), payload)
             evidence.check(f"conductor-api-removed:{method} {path}", status == 404, status=status, body=body)
 
-        if not args.permission_approval_probe:
+        if not (root / "final-issue-tree.json").exists():
+            tree = await fetch_linear_issue_tree(token, linear["issue"]["id"])
+            tree_path = root / "final-issue-tree.json"
+            tree_path.write_text(json.dumps(tree, indent=2, sort_keys=True), encoding="utf-8")
+            evidence.artifact("final_issue_tree", tree_path)
+        _archive_pipeline_artifacts(evidence=evidence, root=root, data_root=data_root, instance_id=instance_id)
+
+        if not permission_approval_probe:
             conductor.stop()
             processes.remove(conductor)
             conductor = start_process(
@@ -693,3 +734,222 @@ def _codex_settings_from_args(args: argparse.Namespace) -> dict[str, Any]:
     if config_overrides:
         settings["config_overrides"] = list(config_overrides)
     return settings
+
+
+def _pipeline_scenario(args: argparse.Namespace) -> str:
+    scenario = str(getattr(args, "pipeline_scenario", "basic") or "basic")
+    allowed = {"basic", "parallel", "replan", "integration-conflict", "runtime-wait"}
+    return scenario if scenario in allowed else "basic"
+
+
+def _effective_permission_approval_probe(args: argparse.Namespace) -> bool:
+    return bool(getattr(args, "permission_approval_probe", False) or _pipeline_scenario(args) == "runtime-wait")
+
+
+def _pipeline_scenario_issue_description(scenario: str, run_id: str) -> str:
+    base = (
+        f"Real Symphony e2e task for run {run_id}. "
+        "Create SYMPHONY_REAL_E2E_RESULT.md at the workspace root, include this Linear issue identifier, "
+        "say Podium, Conductor, and Performer reached Codex, and run pytest tests/test_smoke.py -q."
+    )
+    if scenario == "parallel":
+        return (
+            f"Real Symphony parallel pipeline e2e task for run {run_id}. "
+            "Create two independent deliverables with no dependency between them: SYMPHONY_PARALLEL_A.md and "
+            "SYMPHONY_PARALLEL_B.md. Each file must include this Linear issue identifier and the words "
+            "parallel execute. Also create SYMPHONY_REAL_E2E_RESULT.md and run pytest tests/test_smoke.py -q."
+        )
+    if scenario == "replan":
+        return (
+            f"Real Symphony replan pipeline e2e task for run {run_id}. "
+            "Create SYMPHONY_REAL_E2E_RESULT.md with the Linear issue identifier and the words replan recovery. "
+            "If verification reports a missing or incorrect result, decompose the replacement work into a fresh "
+            "subtask graph and run pytest tests/test_smoke.py -q."
+        )
+    if scenario == "integration-conflict":
+        return (
+            f"Real Symphony integration conflict e2e task for run {run_id}. "
+            "Create SYMPHONY_REAL_E2E_RESULT.md with the Linear issue identifier and the words integration conflict. "
+            "The pipeline must surface any patch integration conflict through a [Human Action] child issue. "
+            "Run pytest tests/test_smoke.py -q."
+        )
+    if scenario == "runtime-wait":
+        return (
+            f"Real Symphony runtime wait e2e task for run {run_id}. "
+            "Create SYMPHONY_REAL_E2E_RESULT.md with the Linear issue identifier and the words runtime wait. "
+            "If the runtime asks for tool approval or operator input, Symphony must project that Runtime Wait "
+            "to a [Human Action] child issue before resuming. Run pytest tests/test_smoke.py -q."
+        )
+    return base
+
+
+async def _wait_for_final_pipeline_view(
+    conductor_port: int,
+    *,
+    timeout_seconds: int,
+    allow_human_wait: bool = False,
+) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout_seconds
+    last_view: dict[str, Any] = {}
+    while time.monotonic() < deadline:
+        status, pipeline_body = http_json("GET", api_url(conductor_port, "/api/pipeline"))
+        pipeline_view = (
+            pipeline_body.get("pipeline")
+            if status == 200 and isinstance(pipeline_body, dict) and isinstance(pipeline_body.get("pipeline"), dict)
+            else {}
+        )
+        if isinstance(pipeline_view, dict):
+            last_view = pipeline_view
+            if _pipeline_final_view_converged(pipeline_view, allow_human_wait=allow_human_wait):
+                return pipeline_view
+        await asyncio.sleep(2)
+    return last_view
+
+
+def _pipeline_final_view_converged(pipeline_view: dict[str, Any], *, allow_human_wait: bool = False) -> bool:
+    nodes = [node for node in pipeline_view.get("nodes", []) if isinstance(node, dict)]
+    if not nodes:
+        return False
+    terminal_states = {"verify_passed", "superseded"}
+    if allow_human_wait:
+        terminal_states.add("awaiting_human")
+    return all(str(node.get("state") or "") in terminal_states for node in nodes) and _pipeline_projection_matches_current_revision(
+        pipeline_view
+    )
+
+
+def _pipeline_projection_matches_current_revision(pipeline_view: dict[str, Any]) -> bool:
+    try:
+        graph_revision = int(pipeline_view.get("graph_revision") or 0)
+    except (TypeError, ValueError):
+        return False
+    nodes = {
+        str(node.get("node_id") or ""): node
+        for node in pipeline_view.get("nodes", [])
+        if isinstance(node, dict) and str(node.get("node_id") or "")
+    }
+    projections = [projection for projection in pipeline_view.get("linear_projections", []) if isinstance(projection, dict)]
+    if graph_revision <= 0 or not nodes or not projections:
+        return False
+    for projection in projections:
+        metadata = projection.get("metadata") if isinstance(projection.get("metadata"), dict) else {}
+        node_id = str(projection.get("node_id") or metadata.get("node_id") or "")
+        if node_id not in nodes:
+            return False
+        if str(metadata.get("node_id") or "") != node_id:
+            return False
+        try:
+            projection_revision = int(metadata.get("conductor_revision") or 0)
+        except (TypeError, ValueError):
+            return False
+        if projection_revision != graph_revision:
+            return False
+        if not metadata.get("graph_id") or not metadata.get("operator_status"):
+            return False
+        gate_hash = str(nodes[node_id].get("gate_snapshot_hash") or "")
+        if gate_hash and metadata.get("gate_snapshot_hash") != gate_hash:
+            return False
+    return True
+
+
+def _check_pipeline_scenario_acceptance(evidence: Evidence, scenario: str, pipeline_view: dict[str, Any]) -> None:
+    if scenario == "basic":
+        return
+    if scenario == "parallel":
+        attempts = [attempt for attempt in pipeline_view.get("attempts", []) if isinstance(attempt, dict)]
+        execute_attempts = [attempt for attempt in attempts if attempt.get("mode") == "execute"]
+        execute_limit = ((pipeline_view.get("capacity") or {}).get("by_mode") or {}).get("execute")
+        evidence.check(
+            "scenario:parallel-execute-overlap",
+            len(execute_attempts) >= 2 and int(execute_limit or 0) > 1 and _attempt_intervals_overlap(execute_attempts),
+            execute_attempts=[
+                {
+                    "attempt_id": attempt.get("attempt_id"),
+                    "started_at": attempt.get("started_at"),
+                    "completed_at": attempt.get("completed_at"),
+                }
+                for attempt in execute_attempts
+            ],
+            execute_limit=execute_limit,
+        )
+    elif scenario == "replan":
+        nodes = [node for node in pipeline_view.get("nodes", []) if isinstance(node, dict)]
+        evidence.check(
+            "scenario:replan-replacement-subgraph",
+            int(pipeline_view.get("graph_revision") or 0) > 1
+            and any(node.get("state") == "superseded" or node.get("superseded_by") for node in nodes),
+            graph_revision=pipeline_view.get("graph_revision"),
+            nodes=[{"node_id": node.get("node_id"), "state": node.get("state"), "superseded_by": node.get("superseded_by")} for node in nodes],
+        )
+    elif scenario == "integration-conflict":
+        waits = [wait for wait in pipeline_view.get("human_waits", []) if isinstance(wait, dict)]
+        evidence.check(
+            "scenario:integration-conflict-human-action",
+            any(wait.get("reason") == "LINEAR_SYNC_CONFLICT" for wait in waits),
+            human_waits=waits,
+        )
+    elif scenario == "runtime-wait":
+        waits = [wait for wait in pipeline_view.get("runtime_waits", []) if isinstance(wait, dict)]
+        projections = [projection for projection in pipeline_view.get("linear_projections", []) if isinstance(projection, dict)]
+        resolved_wait_visible = any(wait.get("wait_kind") and wait.get("child_issue_id") for wait in waits)
+        evidence.check(
+            "scenario:runtime-wait-projected",
+            bool(waits)
+            and (
+                any((projection.get("metadata") or {}).get("operator_wait_kind") for projection in projections)
+                or resolved_wait_visible
+            ),
+            runtime_waits=waits,
+            projections=projections,
+        )
+
+
+def _attempt_intervals_overlap(attempts: list[dict[str, Any]]) -> bool:
+    intervals: list[tuple[datetime, datetime]] = []
+    for attempt in attempts:
+        started_at = _parse_e2e_time(attempt.get("started_at"))
+        completed_at = _parse_e2e_time(attempt.get("completed_at"))
+        if started_at is not None and completed_at is not None:
+            intervals.append((started_at, completed_at))
+    for index, first in enumerate(intervals):
+        for second in intervals[index + 1 :]:
+            if first[0] <= second[1] and second[0] <= first[1]:
+                return True
+    return False
+
+
+def _parse_e2e_time(value: Any) -> datetime | None:
+    if not value:
+        return None
+    text = str(value)
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
+        return None
+
+
+def _archive_pipeline_artifacts(*, evidence: Evidence, root: Path, data_root: Path, instance_id: str) -> None:
+    for name, path in {
+        "podium_log": root / "podium.log",
+        "conductor_log": root / "conductor.log",
+        "conductor_restarted_log": root / "conductor-restarted.log",
+        "pipeline_db": data_root / "pipeline.db",
+    }.items():
+        if path.exists():
+            evidence.artifact(name, path)
+    attempt_root = data_root / "instances" / instance_id / "state" / "pipeline"
+    if not attempt_root.exists():
+        return
+    for attempt_dir in sorted(path for path in attempt_root.iterdir() if path.is_dir()):
+        safe_attempt = attempt_dir.name.replace("/", "_")
+        for filename, suffix in [
+            ("attempt-request.json", "request"),
+            ("attempt-result.json", "result"),
+            ("attempt-result.json.applied", "result_applied"),
+            ("attempt.log", "log"),
+        ]:
+            path = attempt_dir / filename
+            if path.exists():
+                evidence.artifact(f"attempt_{safe_attempt}_{suffix}", path)

@@ -905,11 +905,9 @@ def _gate_command_failure_reason(command: str, exc: BaseException) -> str:
         parts.append(f"exit_code={returncode}")
     stdout = getattr(exc, "stdout", None)
     stderr = getattr(exc, "stderr", None)
-    if stdout:
-        parts.append(f"stdout={_single_line_tail(str(stdout))!r}")
-    if stderr:
-        parts.append(f"stderr={_single_line_tail(str(stderr))!r}")
-    if len(parts) == 1:
+    parts.append(f"stdout={_single_line_tail(str(stdout or ''))!r}")
+    parts.append(f"stderr={_single_line_tail(str(stderr or ''))!r}")
+    if returncode is None:
         parts.append(f"error={_single_line_tail(str(exc))!r}")
     return _sanitize_error(" ".join(parts))
 

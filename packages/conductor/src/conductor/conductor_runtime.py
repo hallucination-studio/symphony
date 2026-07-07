@@ -35,6 +35,7 @@ MANAGED_RUNTIME_ENV_KEYS = {
     "CODEX_OVERLOAD_MAX_ATTEMPTS",
     "CODEX_OVERLOAD_INITIAL_DELAY_MS",
     "CODEX_OVERLOAD_MAX_DELAY_MS",
+    "SYMPHONY_LOCAL_VERIFIER_HOME",
 }
 ALLOWED_RUNTIME_OVERRIDE_KEYS = ALLOWED_RUNTIME_OVERRIDE_KEYS | MANAGED_RUNTIME_ENV_KEYS
 
@@ -44,6 +45,11 @@ class RuntimeHandle:
     process: Any
     log_task: asyncio.Task[None]
     process_status: str
+    attempt_id: str = ""
+    mode: str = ""
+    request_path: str = ""
+    result_path: str = ""
+    lease_id: str = ""
     recovered: bool = False
 
 
@@ -141,7 +147,7 @@ class LogQueryResult:
 
 class ConductorRuntimeManager:
     def __init__(self, *, process_factory: ProcessFactory | None = None, command: str | None = None):
-        self._handles: dict[str, RuntimeHandle] = {}
+        self._handles: dict[tuple[str, str], RuntimeHandle] = {}
         self._start_locks: dict[str, asyncio.Lock] = {}
         self.process_factory = process_factory or asyncio.create_subprocess_exec
         self.command = command or self._default_performer_command()
@@ -152,12 +158,16 @@ class ConductorRuntimeManager:
         *,
         env: dict[str, str] | None = None,
         mode: str | None = None,
+        attempt_id: str | None = None,
         attempt_request_path: str | None = None,
         attempt_result_path: str | None = None,
+        lease_id: str | None = None,
     ) -> InstanceRecord:
+        resolved_attempt_id = attempt_id or _derive_attempt_id(attempt_request_path, attempt_result_path)
+        handle_key = (instance.id, resolved_attempt_id)
         lock = self._start_locks.setdefault(instance.id, asyncio.Lock())
         async with lock:
-            existing = self._handles.get(instance.id)
+            existing = self._handles.get(handle_key)
             if existing is not None and getattr(existing.process, "returncode", None) is None:
                 pid = getattr(existing.process, "pid", None)
                 status = existing.process_status if existing.process_status in {"starting", "running"} else "running"
@@ -172,10 +182,15 @@ class ConductorRuntimeManager:
             self._write_current_pointer(log_path)
             Path(instance.resolved_repo_path).mkdir(parents=True, exist_ok=True)
             placeholder = _StartingProcess()
-            self._handles[instance.id] = RuntimeHandle(
+            self._handles[handle_key] = RuntimeHandle(
                 process=placeholder,
                 log_task=asyncio.create_task(_noop_log_task()),
                 process_status="starting",
+                attempt_id=resolved_attempt_id,
+                mode=mode or "",
+                request_path=attempt_request_path or "",
+                result_path=attempt_result_path or "",
+                lease_id=lease_id or "",
             )
             try:
                 process = await self.process_factory(
@@ -190,23 +205,39 @@ class ConductorRuntimeManager:
                     stderr=asyncio.subprocess.PIPE,
                 )
             except Exception:
-                self._handles.pop(instance.id, None)
+                self._handles.pop(handle_key, None)
                 raise
+            attempt_log_path = _attempt_log_path(attempt_result_path)
             log_task = asyncio.create_task(
                 self._capture_logs(
                     process,
                     log_path,
+                    attempt_log_path=attempt_log_path,
                     mode=mode,
+                    attempt_id=attempt_id,
+                    lease_id=lease_id,
                     attempt_request_path=attempt_request_path,
                     attempt_result_path=attempt_result_path,
                 )
             )
-            self._handles[instance.id] = RuntimeHandle(process=process, log_task=log_task, process_status="running")
+            self._handles[handle_key] = RuntimeHandle(
+                process=process,
+                log_task=log_task,
+                process_status="running",
+                attempt_id=resolved_attempt_id,
+                mode=mode or "",
+                request_path=attempt_request_path or "",
+                result_path=attempt_result_path or "",
+                lease_id=lease_id or "",
+            )
             return instance.with_updates(process_status="running", pid=getattr(process, "pid", None), log_path=str(log_path))
 
     async def stop(self, instance: InstanceRecord) -> InstanceRecord:
-        handle = self._handles.pop(instance.id, None)
-        if handle is not None:
+        keys = self._handle_keys_for_instance(instance.id)
+        for key in keys:
+            handle = self._handles.pop(key, None)
+            if handle is None:
+                continue
             if getattr(handle.process, "returncode", None) is None:
                 handle.process.terminate()
             try:
@@ -222,8 +253,8 @@ class ConductorRuntimeManager:
         return await self.start(stopped, env=env)
 
     def refresh(self, instance: InstanceRecord) -> InstanceRecord:
-        handle = self._handles.get(instance.id)
-        if handle is None:
+        keys = self._handle_keys_for_instance(instance.id)
+        if not keys:
             if (
                 instance.process_status in {"running", "starting"}
                 and instance.pid is not None
@@ -231,20 +262,40 @@ class ConductorRuntimeManager:
             ):
                 return instance.with_updates(process_status="exited", pid=None, last_exit_code=-1)
             return instance
-        returncode = _process_returncode(handle.process)
-        if returncode is None:
+        active_handles: list[RuntimeHandle] = []
+        last_exit_code: int | None = None
+        for key in keys:
+            handle = self._handles.get(key)
+            if handle is None:
+                continue
+            returncode = _process_returncode(handle.process)
+            if returncode is None:
+                active_handles.append(handle)
+            else:
+                last_exit_code = returncode
+                self._handles.pop(key, None)
+        if active_handles:
+            handle = active_handles[-1]
             return instance.with_updates(process_status="running", pid=getattr(handle.process, "pid", None))
-        self._handles.pop(instance.id, None)
-        return instance.with_updates(process_status="exited", pid=None, last_exit_code=returncode)
+        if last_exit_code is not None:
+            return instance.with_updates(process_status="exited", pid=None, last_exit_code=last_exit_code)
+        return instance
 
     def runtime_snapshot(self, instance: InstanceRecord) -> dict[str, object]:
-        handle = self._handles.get(instance.id)
         process_status = instance.process_status
         pid = instance.pid
-        if handle is not None:
+        handles = [self._handles[key] for key in self._handle_keys_for_instance(instance.id)]
+        active = []
+        for handle in handles:
             returncode = _process_returncode(handle.process)
-            process_status = "running" if returncode is None else "exited"
-            pid = getattr(handle.process, "pid", None) if returncode is None else None
+            if returncode is None:
+                active.append(handle)
+        if active:
+            process_status = "running"
+            pid = getattr(active[-1].process, "pid", None)
+        elif handles:
+            process_status = "exited"
+            pid = None
         return {
             "instance_id": instance.id,
             "process_status": process_status,
@@ -259,16 +310,17 @@ class ConductorRuntimeManager:
         matches = _pid_matches_command(instance.pid, self.command)
         if not matches and not _can_recover_uninspectable_pid(instance):
             return None
-        if instance.id not in self._handles:
+        if not self._handle_keys_for_instance(instance.id):
             try:
                 loop = asyncio.get_running_loop()
                 log_task = loop.create_task(self._follow_recovered_process(instance.pid))
             except RuntimeError:
                 log_task = _CompletedLogTask()
-            self._handles[instance.id] = RuntimeHandle(
+            self._handles[(instance.id, f"recovered-{instance.pid}")] = RuntimeHandle(
                 process=RecoveredProcess(instance.pid),
                 log_task=log_task,  # type: ignore[arg-type]
                 process_status="running",
+                attempt_id=f"recovered-{instance.pid}",
                 recovered=True,
             )
         return instance.with_updates(process_status="running", pid=instance.pid)
@@ -297,8 +349,8 @@ class ConductorRuntimeManager:
         if order == "desc":
             lines = list(reversed(lines))
         warnings = []
-        handle = self._handles.get(instance.id)
-        if handle is not None and handle.recovered:
+        handles = [self._handles[key] for key in self._handle_keys_for_instance(instance.id)]
+        if any(handle.recovered for handle in handles):
             warnings.append("stdout/stderr pipes could not be reattached after Conductor restart; showing persisted log file only")
         return LogQueryResult(
             instance_id=instance.id,
@@ -320,7 +372,10 @@ class ConductorRuntimeManager:
         process: Any,
         log_path: Path,
         *,
+        attempt_log_path: Path | None = None,
         mode: str | None = None,
+        attempt_id: str | None = None,
+        lease_id: str | None = None,
         attempt_request_path: str | None = None,
         attempt_result_path: str | None = None,
     ) -> None:
@@ -328,16 +383,22 @@ class ConductorRuntimeManager:
             self._pipe_stream(
                 process.stdout,
                 log_path,
+                attempt_log_path=attempt_log_path,
                 stream_name="stdout",
                 mode=mode,
+                attempt_id=attempt_id,
+                lease_id=lease_id,
                 attempt_request_path=attempt_request_path,
                 attempt_result_path=attempt_result_path,
             ),
             self._pipe_stream(
                 process.stderr,
                 log_path,
+                attempt_log_path=attempt_log_path,
                 stream_name="stderr",
                 mode=mode,
+                attempt_id=attempt_id,
+                lease_id=lease_id,
                 attempt_request_path=attempt_request_path,
                 attempt_result_path=attempt_result_path,
             ),
@@ -348,8 +409,11 @@ class ConductorRuntimeManager:
         stream: Any,
         log_path: Path,
         *,
+        attempt_log_path: Path | None,
         stream_name: str,
         mode: str | None,
+        attempt_id: str | None,
+        lease_id: str | None,
         attempt_request_path: str | None,
         attempt_result_path: str | None,
     ) -> None:
@@ -362,13 +426,28 @@ class ConductorRuntimeManager:
             with log_path.open("ab") as handle:
                 for line in chunk.decode("utf-8", errors="replace").splitlines():
                     event = (
-                        "event=performer_stream "
-                        f"stream={stream_name} mode={mode or ''} "
-                        f"attempt_request_path={attempt_request_path or ''} "
-                        f"attempt_result_path={attempt_result_path or ''} "
-                        f"message={_sanitize_log_value(line)}\n"
+                        " ".join(
+                            [
+                                "event=performer_stream",
+                                f"stream={stream_name}",
+                                f"mode={mode or ''}",
+                                *([f"attempt_id={attempt_id}"] if attempt_id else []),
+                                *([f"lease_id={lease_id}"] if lease_id else []),
+                                f"attempt_request_path={attempt_request_path or ''}",
+                                f"attempt_result_path={attempt_result_path or ''}",
+                                f"message={_sanitize_log_value(line)}",
+                            ]
+                        )
+                        + "\n"
                     )
                     handle.write(event.encode("utf-8"))
+                    if attempt_log_path is not None:
+                        attempt_log_path.parent.mkdir(parents=True, exist_ok=True)
+                        with attempt_log_path.open("ab") as attempt_handle:
+                            attempt_handle.write(event.encode("utf-8"))
+
+    def _handle_keys_for_instance(self, instance_id: str) -> list[tuple[str, str]]:
+        return [key for key in self._handles if key[0] == instance_id]
 
     async def _finish_log_task(self, log_task: asyncio.Task[None]) -> None:
         if log_task.done():
@@ -542,6 +621,21 @@ class ConductorRuntimeManager:
 
 async def _noop_log_task() -> None:
     return None
+
+
+def _derive_attempt_id(attempt_request_path: str | None, attempt_result_path: str | None) -> str:
+    for value in (attempt_result_path, attempt_request_path):
+        if value:
+            parent_name = Path(value).parent.name
+            if parent_name:
+                return parent_name
+    return "unknown-attempt"
+
+
+def _attempt_log_path(attempt_result_path: str | None) -> Path | None:
+    if not attempt_result_path:
+        return None
+    return Path(attempt_result_path).parent / "attempt.log"
 
 
 def _sanitize_log_value(value: str) -> str:

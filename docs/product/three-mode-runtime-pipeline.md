@@ -146,8 +146,11 @@ Mode and backend are independent axes:
 - **backend**: Codex | Claude | other — which model runs it.
 
 Each mode can be assigned a different backend, carried by the runtime profile
-(S0-c). The first implementation may use Codex for all three, but backend is a
-pluggable, per-mode choice.
+(S0-c). The first accepted implementation uses Codex for `plan` and `execute`
+and `local-verifier` for `verify`. `local-verifier` is a deterministic verifier
+that runs the frozen gate commands against the immutable verification input; it
+does not ask the model backend to self-report success. Codex remains eligible for
+`verify`, but the first-version default is intentionally non-model verification.
 
 ## State Model
 
