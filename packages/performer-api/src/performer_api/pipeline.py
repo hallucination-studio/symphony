@@ -1090,6 +1090,10 @@ class PlanValidator:
         for source, target in proposal.blocks:
             if source not in node_ids or target not in node_ids or source == target:
                 errors.add(PlanValidatorError.ILLEGAL_EDGE)
+        parent_by_child = {node.node_id: node.parent_node_id for node in proposal.nodes if node.parent_node_id}
+        for source, target in proposal.blocks:
+            if parent_by_child.get(target) == source:
+                errors.add(PlanValidatorError.ILLEGAL_EDGE)
         if _has_cycle(node_ids, proposal.blocks):
             errors.add(PlanValidatorError.CYCLE_DETECTED)
         return errors

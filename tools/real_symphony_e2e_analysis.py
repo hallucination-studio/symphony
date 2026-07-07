@@ -123,6 +123,37 @@ def conductor_pipeline_nodes(pipeline_payload: dict[str, Any]) -> list[dict[str,
     return [node for node in nodes if isinstance(node, dict) and node.get("node_id")]
 
 
+def pipeline_node_effective_state(node: dict[str, Any]) -> str:
+    aggregate_state = str(node.get("aggregate_state") or "").strip().lower()
+    if aggregate_state:
+        return aggregate_state
+    return str(node.get("state") or "").strip().lower()
+
+
+def pipeline_nodes_terminal(
+    nodes: list[dict[str, Any]],
+    *,
+    terminal_states: set[str],
+) -> bool:
+    if not nodes:
+        return False
+    normalized = {state.lower() for state in terminal_states}
+    return all(pipeline_node_effective_state(node) in normalized for node in nodes)
+
+
+def pipeline_integrations_terminal(pipeline_payload: dict[str, Any]) -> bool:
+    integrations = [item for item in pipeline_payload.get("integration_queue", []) if isinstance(item, dict)]
+    return bool(integrations) and all(item.get("status") in {"integrated", "resolved"} for item in integrations)
+
+
+def pipeline_has_conflict_escalation_evidence(pipeline_payload: dict[str, Any]) -> bool:
+    waits = [wait for wait in pipeline_payload.get("human_waits", []) if isinstance(wait, dict)]
+    if any(wait.get("reason") == "LINEAR_SYNC_CONFLICT" for wait in waits):
+        return True
+    integrations = [item for item in pipeline_payload.get("integration_queue", []) if isinstance(item, dict)]
+    return any(item.get("status") == "resolved" and (item.get("human_resolution") or item.get("error")) for item in integrations)
+
+
 def audit_expected_failure_run(run_result: dict[str, Any], tree: dict[str, Any], *, expected: str) -> dict[str, Any]:
     pipeline_nodes = [
         node
@@ -273,9 +304,6 @@ def e2e_human_action_resume_response(action: dict[str, Any]) -> str:
 def should_complete_conductor_human_action(action: dict[str, Any], completed_wait_ids: set[str]) -> bool:
     wait_id = str(action.get("wait_id") or "")
     child_issue_id = str(action.get("child_issue_id") or "")
-    details = action.get("details") if isinstance(action.get("details"), dict) else {}
-    if details.get("wait_kind"):
-        return False
     return bool(wait_id and child_issue_id and wait_id not in completed_wait_ids)
 
 

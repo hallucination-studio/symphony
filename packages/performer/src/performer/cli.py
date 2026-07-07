@@ -303,6 +303,17 @@ def _planner_prompt(payload: dict[str, object]) -> str:
     title = str(payload.get("title") or issue_identifier or payload.get("node_id") or "")
     issue_description = str(payload.get("issue_description") or "").strip()
     prompt_payload = _planner_prompt_payload(payload)
+    replan_instruction = ""
+    if isinstance(payload.get("failure_context"), dict) and payload.get("failure_context"):
+        failed_node_id = str(payload.get("node_id") or "").strip()
+        replan_instruction = (
+            "This is a replan after a failed verify attempt. Return a replacement subgraph with "
+            "new node_ids. The replacement proposal must not reuse the failed node_id"
+            f"{f' `{failed_node_id}`' if failed_node_id else ''}; Conductor will preserve that failed node as superseded. "
+            "The replacement proposal must preserve the original issue description's concrete file paths, commands, and success conditions. "
+            "It must not replace `SYMPHONY_REAL_E2E_RESULT.md` with a different result file when that file was requested, "
+            "and it must not drop `pytest tests/test_smoke.py -q` if it was part of the original task. "
+        )
     return (
         "Produce a Symphony PlanProposal JSON object in a top-level `proposal` field. "
         "Every node must have a frozen gate snapshot, valid 0-4 rubric, pass_threshold=3, "
@@ -310,6 +321,8 @@ def _planner_prompt(payload: dict[str, object]) -> str:
         "executable node, at least one frozen gate whose task_id matches a node_id, and non-empty "
         "entry_node_ids and exit_node_ids. Do not return an empty plan. Entry nodes must exactly "
         "be nodes with no incoming blocks; exit nodes must exactly be nodes with no outgoing blocks. "
+        "If using parent_node_id for aggregate display, do not also make the parent directly block one of its children; "
+        "parent-child aggregation is not a dependency edge. "
         "Use the Linear issue description as the source of task truth; the frozen gate acceptance "
         "criteria and verification procedure must preserve concrete requested files, commands, and "
         "success conditions from that description. Each verification_procedure entry must be an "
@@ -318,7 +331,8 @@ def _planner_prompt(payload: dict[str, object]) -> str:
         "do not write steps like `Read the file`, `From the workspace root`, or `Run ... and confirm`. "
         "Do not freeze absolute local filesystem paths "
         "from this planner process into gates; refer to repository files by relative path or by "
-        "`workspace root` so the executor and verifier can run in isolated workspaces.\n\n"
+        "`workspace root` so the executor and verifier can run in isolated workspaces. "
+        f"{replan_instruction}\n\n"
         f"Task context:\nIssue: {issue_identifier}\nTitle: {title}\nDescription:\n{issue_description or '(none)'}\n\n"
         f"Attempt request:\n{json.dumps(prompt_payload, sort_keys=True)}"
     )
@@ -470,11 +484,13 @@ async def _run_execute_mode(payload: dict[str, object], *, agent_backend: Any | 
                 "error": str(exc),
             }
         try:
+            on_event = _attempt_event_printer(RuntimeMode.EXECUTE, attempt_id=attempt_id, node_id=node_id)
+            await _emit_runtime_wait_probe_if_requested(on_event)
             await backend.run_session(
                 workspace,
                 _executor_prompt(payload),
                 f"Execute {node_id}",
-                on_event=_attempt_event_printer(RuntimeMode.EXECUTE, attempt_id=attempt_id, node_id=node_id),
+                on_event=on_event,
                 max_turns=1,
             )
         except Exception as exc:
@@ -581,6 +597,23 @@ def _managed_codex_backend() -> CodexSdkClient:
     )
 
 
+async def _emit_runtime_wait_probe_if_requested(on_event: Any) -> None:
+    if not _env_bool("SYMPHONY_EMIT_RUNTIME_WAIT_PROBE") and not _env_bool("CODEX_EMIT_RUNTIME_WAIT_PROBE"):
+        return
+    if not callable(on_event):
+        return
+    on_event(
+        {
+            "event": "sdk_approval_requested",
+            "message": "waiting for command approval from runtime wait probe",
+            "command": "symphony-runtime-wait-probe",
+        }
+    )
+    delay_seconds = _env_float("SYMPHONY_RUNTIME_WAIT_PROBE_SECONDS", _env_float("CODEX_RUNTIME_WAIT_PROBE_SECONDS", 0.0))
+    if delay_seconds > 0:
+        await asyncio.sleep(delay_seconds)
+
+
 def _attempt_event_printer(mode: RuntimeMode, *, attempt_id: str, node_id: str):
     def emit(event: dict[str, Any]) -> None:
         event_name = str(event.get("event") or event.get("type") or "codex_event")
@@ -605,6 +638,21 @@ def _env_str(key: str) -> str | None:
         return None
     value = value.strip()
     return value or None
+
+
+def _env_bool(key: str) -> bool:
+    return str(os.environ.get(key) or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_float(key: str, default: float) -> float:
+    value = os.environ.get(key)
+    if value is None or not value.strip():
+        return default
+    try:
+        parsed = float(value)
+    except ValueError:
+        return default
+    return parsed if parsed >= 0 else default
 
 
 def _env_sandbox(key: str) -> str | None:
@@ -689,6 +737,9 @@ def _run_verify_mode(payload: dict[str, object]) -> dict[str, object]:
         return _failed_verify_result(payload, verification_input, gate_hash, "gate_snapshot_hash_mismatch")
     if str(verification_input.get("gate_snapshot_hash") or "") != gate_hash:
         return _failed_verify_result(payload, verification_input, gate_hash, "gate_snapshot_hash_mismatch")
+    forced_failure = _forced_first_verify_failure_reason()
+    if forced_failure is not None:
+        return _failed_gate_verify_result(payload, verification_input, gate_hash, forced_failure)
     patch_verification = _verify_patch_hash(verification_input)
     if patch_verification.reason is not None:
         return _failed_verify_result(payload, verification_input, gate_hash, patch_verification.reason)
@@ -732,6 +783,42 @@ def _failed_verify_result(
         "reason": sanitized_reason,
         "error": sanitized_reason,
     }
+
+
+def _failed_gate_verify_result(
+    payload: dict[str, object],
+    verification_input: dict[str, object],
+    gate_hash: str,
+    reason: str,
+) -> dict[str, object]:
+    sanitized_reason = reason.replace("\x00", "").strip()[:500] or "verify_failed"
+    return {
+        "attempt_id": str(payload.get("attempt_id") or "verify-attempt"),
+        "node_id": str(payload.get("node_id") or verification_input.get("task_id") or ""),
+        "execute_attempt_id": str(payload.get("execute_attempt_id") or verification_input.get("execute_attempt_id") or ""),
+        "mode": RuntimeMode.VERIFY.value,
+        "status": "succeeded",
+        **_fencing_fields(payload),
+        "gate_snapshot_hash": gate_hash,
+        "score": 0,
+        "passed": False,
+        "error": sanitized_reason,
+        "verification_input": dict(verification_input),
+    }
+
+
+def _forced_first_verify_failure_reason() -> str | None:
+    if os.environ.get("SYMPHONY_FORCE_FIRST_VERIFY_FAILURE_FOR_REPLAN") != "1":
+        return None
+    verifier_home = os.environ.get("SYMPHONY_LOCAL_VERIFIER_HOME", "").strip()
+    if not verifier_home:
+        return None
+    marker = Path(verifier_home) / "forced-first-verify-failure-for-replan.done"
+    if marker.exists():
+        return None
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text("forced_first_verify_failure_for_replan\n", encoding="utf-8")
+    return "forced_first_verify_failure_for_replan"
 
 
 def _collect_git_verification_input(
@@ -805,10 +892,11 @@ def _verify_patch_hash(verification_input: dict[str, object]) -> _PatchVerificat
         _git(["checkout", "--quiet", base_revision], cwd=verify_workspace)
     except (subprocess.SubprocessError, OSError):
         return _PatchVerificationResult(reason="verification_workspace_unavailable")
-    try:
-        _run(["git", "apply", "--index", str(patch_path)], cwd=verify_workspace)
-    except (subprocess.SubprocessError, OSError):
-        return _PatchVerificationResult(reason="patch_apply_failed")
+    if data:
+        try:
+            _run(["git", "apply", "--index", str(patch_path)], cwd=verify_workspace)
+        except (subprocess.SubprocessError, OSError):
+            return _PatchVerificationResult(reason="patch_apply_failed")
     try:
         actual_tree = _git(["write-tree"], cwd=verify_workspace).strip()
     except (subprocess.SubprocessError, OSError):

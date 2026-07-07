@@ -83,6 +83,8 @@ class CodexRuntimeBackendProvider:
             "overload_max_attempts",
             "overload_initial_delay_ms",
             "overload_max_delay_ms",
+            "emit_runtime_wait_probe",
+            "runtime_wait_probe_seconds",
         ):
             value = profile.settings.get(key)
             if value is not None:
@@ -107,7 +109,10 @@ class LocalVerifierRuntimeBackendProvider:
             raise ValueError(f"isolated local verifier home could not be materialized: {verifier_home}") from exc
         if not verifier_home.is_dir():
             raise ValueError(f"isolated local verifier home could not be materialized: {verifier_home}")
-        return {"SYMPHONY_LOCAL_VERIFIER_HOME": str(verifier_home)}
+        env = {"SYMPHONY_LOCAL_VERIFIER_HOME": str(verifier_home)}
+        if profile.settings.get("force_first_verify_failure_for_replan") is True:
+            env["SYMPHONY_FORCE_FIRST_VERIFY_FAILURE_FOR_REPLAN"] = "1"
+        return env
 
 
 def default_runtime_backend_registry() -> RuntimeBackendRegistry:

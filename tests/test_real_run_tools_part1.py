@@ -1,4 +1,5 @@
 from test_real_run_tools_support import *  # noqa: F401,F403
+import subprocess
 
 def test_runtime_claims_audit_flags_errorless_retry_and_claim_stall() -> None:
     tool = load_tool("runtime_claims_audit")
@@ -336,6 +337,13 @@ def test_real_symphony_e2e_cli_accepts_pipeline_scenarios() -> None:
         assert args.pipeline_scenario == scenario
 
 
+def test_real_symphony_e2e_defaults_to_hell_project() -> None:
+    tool = load_tool("real_symphony_e2e")
+    args = tool.parser().parse_args([])
+
+    assert args.project_slug == "8ab43179fb54"
+
+
 def test_real_symphony_e2e_parallel_scenario_raises_execute_capacity() -> None:
     tool = load_tool("real_symphony_e2e")
 
@@ -348,6 +356,46 @@ def test_real_symphony_e2e_parallel_scenario_raises_execute_capacity() -> None:
     assert payload["scheduler_policy"]["capacity"]["by_mode"]["execute"] == 2
 
 
+def test_real_symphony_e2e_integration_conflict_scenario_forces_parallel_conflict_shape() -> None:
+    tool = load_tool("real_symphony_e2e_run")
+
+    payload = tool.build_runtime_config_payload(
+        runtime_group_id="group-1",
+        version=1,
+        pipeline_scenario="integration-conflict",
+    )
+    description = tool._pipeline_scenario_issue_description("integration-conflict", "run-1")
+
+    assert payload["scheduler_policy"]["capacity"]["by_mode"]["execute"] == 2
+    assert "two independent parallel subtasks" in description
+    assert "must not add a blocks dependency" in description
+    assert "SYMPHONY_CONFLICT_SHARED.md" in description
+    assert "different content" in description
+
+
+def test_real_symphony_e2e_integration_conflict_fixture_tracks_shared_file(tmp_path) -> None:
+    tool = load_tool("real_symphony_e2e_run")
+    repo = tool.make_fixture_repo(tmp_path / "repo")
+
+    tool._prepare_pipeline_scenario_fixture(repo, "integration-conflict")
+
+    assert (repo / "SYMPHONY_CONFLICT_SHARED.md").read_text(encoding="utf-8")
+    tracked_files = subprocess.check_output(["git", "ls-files"], cwd=repo, text=True).splitlines()
+    assert "SYMPHONY_CONFLICT_SHARED.md" in tracked_files
+
+
+def test_real_symphony_e2e_replan_scenario_forces_first_verify_failure() -> None:
+    tool = load_tool("real_symphony_e2e")
+
+    payload = tool.build_runtime_config_payload(
+        runtime_group_id="group-1",
+        version=1,
+        pipeline_scenario="replan",
+    )
+
+    assert payload["profiles"]["verify"]["settings"] == {"force_first_verify_failure_for_replan": True}
+
+
 def test_real_symphony_e2e_runtime_wait_scenario_enables_permission_probe() -> None:
     tool = load_tool("real_symphony_e2e_run")
 
@@ -358,6 +406,14 @@ def test_real_symphony_e2e_runtime_wait_scenario_enables_permission_probe() -> N
     assert tool._effective_permission_approval_probe(basic) is False
     assert tool._effective_permission_approval_probe(explicit) is True
     assert tool._effective_permission_approval_probe(runtime_wait) is True
+
+    payload = tool.build_runtime_config_payload(
+        runtime_group_id="group-1",
+        version=1,
+        pipeline_scenario="runtime-wait",
+    )
+
+    assert payload["profiles"]["execute"]["settings"]["emit_runtime_wait_probe"] is True
 
 
 def test_real_symphony_e2e_pipeline_projection_match_requires_current_revision() -> None:
@@ -405,7 +461,7 @@ def test_real_symphony_e2e_defaults_to_bounded_codex_turn_timeout() -> None:
 
     settings = tool._codex_settings_from_args(args)
 
-    assert settings["hard_turn_timeout_ms"] == 180000
+    assert settings["hard_turn_timeout_ms"] == 300000
 
 
 def test_real_symphony_e2e_cli_rejects_codex_home_source_override() -> None:

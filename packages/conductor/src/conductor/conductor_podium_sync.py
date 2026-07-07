@@ -285,6 +285,14 @@ class ConductorPodiumSyncMixin:
                 wait = candidate
                 break
         if wait is None:
+            for candidate in self.pipeline_store.list_runtime_waits(status="waiting"):
+                if wait_id and candidate.get("wait_id") == wait_id:
+                    wait = candidate
+                    break
+                if child_issue_id and candidate.get("child_issue_id") == child_issue_id:
+                    wait = candidate
+                    break
+        if wait is None:
             return {"status": "ignored", "reason": "human_wait_not_found"}
         return {"status": "ignored", "reason": "completed_child_required", "wait_id": str(wait["wait_id"])}
 
@@ -531,17 +539,22 @@ class ConductorPodiumSyncMixin:
         return created
 
     async def reconcile_completed_pipeline_human_actions_once(self) -> int:
-        waits = [
-            wait
+        waits: list[tuple[str, dict[str, Any]]] = [
+            ("human", wait)
             for wait in self.pipeline_store.list_human_waits()
             if wait.get("status") == "waiting" and str(wait.get("child_issue_id") or "").strip()
         ]
+        waits.extend(
+            ("runtime", wait)
+            for wait in self.pipeline_store.list_runtime_waits(status="waiting")
+            if str(wait.get("child_issue_id") or "").strip()
+        )
         if not waits:
             return 0
         root_issue_id = self._pipeline_root_issue_id()
         if not root_issue_id:
             return 0
-        waits_by_child = {str(wait.get("child_issue_id") or ""): wait for wait in waits}
+        waits_by_child = {str(wait.get("child_issue_id") or ""): (kind, wait) for kind, wait in waits}
         completed = 0
         for instance in self.store.list_instances():
             try:
@@ -552,9 +565,10 @@ class ConductorPodiumSyncMixin:
                     child_id = str(child.get("id") or "").strip()
                     if child_id:
                         returned_child_ids.add(child_id)
-                    wait = waits_by_child.get(child_id)
-                    if wait is None:
+                    wait_entry = waits_by_child.get(child_id)
+                    if wait_entry is None:
                         continue
+                    wait_kind, wait = wait_entry
                     if not _linear_issue_completed(child):
                         self._record_pipeline_sync_failure(
                             "pipeline_human_wait_unresolved",
@@ -569,12 +583,13 @@ class ConductorPodiumSyncMixin:
                             },
                         )
                         continue
-                    self.pipeline_store.resume_human_wait(
-                        str(wait["wait_id"]),
-                        resolution=f"Linear human action {child_id} completed.",
-                    )
+                    resolution = f"Linear human action {child_id} completed."
+                    if wait_kind == "runtime":
+                        self.pipeline_store.resolve_runtime_wait(str(wait["wait_id"]), resolution=resolution)
+                    else:
+                        self.pipeline_store.resume_human_wait(str(wait["wait_id"]), resolution=resolution)
                     completed += 1
-                for child_id, wait in waits_by_child.items():
+                for child_id, (_, wait) in waits_by_child.items():
                     if child_id in returned_child_ids:
                         continue
                     self._record_pipeline_sync_failure(

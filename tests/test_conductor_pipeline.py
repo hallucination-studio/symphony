@@ -1689,7 +1689,7 @@ def test_integration_conflict_creates_human_wait_and_pauses_node(tmp_path: Path)
     assert waits[0]["details"]["error"] == "patch conflict"
 
 
-def test_resolving_integration_conflict_wait_requeues_integration_and_unpauses_node(tmp_path: Path) -> None:
+def test_resolving_integration_conflict_wait_marks_integration_resolved_and_unpauses_node(tmp_path: Path) -> None:
     store = ConductorPipelineStore(tmp_path)
     store.apply_runtime_config(RuntimeConfigEnvelope("group-1", 1, _policy(1)))
     store.commit_plan(_proposal())
@@ -1713,9 +1713,10 @@ def test_resolving_integration_conflict_wait_requeues_integration_and_unpauses_n
     assert resumed["status"] == "resolved"
     assert node.state is GraphNodeState.VERIFY_PASSED
     assert node.human_reason is None
-    assert integration["status"] == "queued"
-    assert integration["completed_at"] is None
-    assert integration["error"] is None
+    assert integration["status"] == "resolved"
+    assert integration["completed_at"]
+    assert integration["error"] == "patch conflict"
+    assert integration["human_resolution"] == "conflict resolved"
 
 
 def test_process_queued_integration_applies_patch_and_records_integrated_revision(tmp_path: Path) -> None:
@@ -2442,6 +2443,12 @@ async def test_background_coordination_projects_runtime_wait_signal_to_linear_no
     assert "exec-wait" in node_description
     assert "secret-token" not in node_description
     assert service.pipeline_store.pipeline_view().to_dict()["runtime_waits"][0]["node_id"] == "a"
+
+    human_actions[0]["state_type"] = "completed"
+    completion = await service.coordinate_background_once()
+
+    assert completion["pipeline_human_actions_completed"] == 1
+    assert service.pipeline_store.list_runtime_waits()[0]["status"] == "resolved"
 
 
 async def test_background_coordination_projects_tool_input_wait_as_operator_visible_state(tmp_path: Path) -> None:
@@ -3489,6 +3496,150 @@ async def test_pipeline_linear_projector_ingests_human_added_blocks_as_new_graph
     assert store.blockers_for("b") == ["a"]
     assert store.get_node("a").state is GraphNodeState.READY
     assert store.get_node("b").state is GraphNodeState.READY
+
+
+async def test_pipeline_linear_projector_does_not_clear_local_blocks_when_remote_relations_are_absent(tmp_path: Path) -> None:
+    store = ConductorPipelineStore(tmp_path)
+    store.commit_plan(_proposal())
+
+    class Tracker:
+        async def fetch_child_issues(self, parent_issue_id: str, *, label_name: str | None = None) -> list[dict[str, object]]:
+            return [
+                {
+                    "id": "issue-a",
+                    "description": "node_id: a",
+                    "labels": ["performer:type/pipeline-node"],
+                    "relations": [],
+                },
+                {
+                    "id": "issue-b",
+                    "description": "node_id: b",
+                    "labels": ["performer:type/pipeline-node"],
+                    "relations": [],
+                },
+            ]
+
+    projector = PipelineLinearProjector(store=store, tracker=Tracker(), root_issue_id="root-linear")
+
+    ingested = await projector.ingest_human_linear_changes_once()
+
+    assert ingested == 0
+    assert store.current_graph_revision() == 1
+    assert store.blockers_for("b") == ["a"]
+
+
+async def test_pipeline_linear_projector_ignores_stale_blocks_from_superseded_nodes(tmp_path: Path) -> None:
+    store = ConductorPipelineStore(tmp_path)
+    gate_a = _gate("a")
+    gate_b = _gate("b")
+    store.commit_plan(
+        PlanProposal(
+            graph_id="graph-1",
+            plan_attempt_id="plan-1",
+            root_node_id="a",
+            nodes=[
+                GraphNode(node_id="a", title="A", state=GraphNodeState.REPLANNING, gate_snapshot_hash=gate_a.hash),
+                GraphNode(node_id="b", title="B", state=GraphNodeState.PLANNED, gate_snapshot_hash=gate_b.hash),
+            ],
+            blocks=[("a", "b")],
+            gates=[gate_a, gate_b],
+            entry_node_ids=["a"],
+            exit_node_ids=["b"],
+        )
+    )
+    gate_a2 = _gate("a2")
+    store.replace_node_with_subgraph(
+        "a",
+        PlanProposal(
+            graph_id="graph-1",
+            plan_attempt_id="plan-2",
+            root_node_id="a2",
+            nodes=[GraphNode(node_id="a2", title="A2", state=GraphNodeState.PLANNED, gate_snapshot_hash=gate_a2.hash)],
+            blocks=[],
+            gates=[gate_a2],
+            entry_node_ids=["a2"],
+            exit_node_ids=["a2"],
+        ),
+    )
+
+    class Tracker:
+        async def fetch_child_issues(self, parent_issue_id: str, *, label_name: str | None = None) -> list[dict[str, object]]:
+            return [
+                {
+                    "id": "issue-a",
+                    "description": "node_id: a",
+                    "labels": ["performer:type/pipeline-node"],
+                    "relations": [{"type": "blocks", "relatedIssue": {"id": "issue-b"}}],
+                },
+                {
+                    "id": "issue-b",
+                    "description": "node_id: b",
+                    "labels": ["performer:type/pipeline-node"],
+                    "relations": [],
+                },
+            ]
+
+    projector = PipelineLinearProjector(store=store, tracker=Tracker(), root_issue_id="root-linear")
+
+    ingested = await projector.ingest_human_linear_changes_once()
+
+    assert ingested == 0
+    assert store.current_graph_revision() == 2
+    assert store.get_node("a").state is GraphNodeState.SUPERSEDED
+    assert store.blockers_for("b") == ["a2"]
+
+
+async def test_pipeline_linear_projector_does_not_clear_blocks_when_root_issue_endpoint_is_not_a_child(
+    tmp_path: Path,
+) -> None:
+    store = ConductorPipelineStore(tmp_path)
+    gate_root = _gate("root-linear")
+    gate_child = _gate("child-node")
+    store.commit_plan(
+        PlanProposal(
+            graph_id="graph-1",
+            plan_attempt_id="plan-1",
+            root_node_id="root-linear",
+            nodes=[
+                GraphNode(
+                    node_id="root-linear",
+                    title="Root",
+                    state=GraphNodeState.READY,
+                    issue_id="root-linear",
+                    gate_snapshot_hash=gate_root.hash,
+                ),
+                GraphNode(
+                    node_id="child-node",
+                    title="Child",
+                    state=GraphNodeState.PLANNED,
+                    gate_snapshot_hash=gate_child.hash,
+                ),
+            ],
+            blocks=[("root-linear", "child-node")],
+            gates=[gate_root, gate_child],
+            entry_node_ids=["root-linear"],
+            exit_node_ids=["child-node"],
+        )
+    )
+
+    class Tracker:
+        async def fetch_child_issues(self, parent_issue_id: str, *, label_name: str | None = None) -> list[dict[str, object]]:
+            return [
+                {
+                    "id": "child-issue",
+                    "description": "node_id: child-node",
+                    "labels": ["performer:type/pipeline-node"],
+                    "relations": [],
+                }
+            ]
+
+    projector = PipelineLinearProjector(store=store, tracker=Tracker(), root_issue_id="root-linear")
+
+    ingested = await projector.ingest_human_linear_changes_once()
+
+    assert ingested == 0
+    assert store.current_graph_revision() == 1
+    assert store.blockers_for("child-node") == ["root-linear"]
 
 
 def test_replan_replaces_node_with_subgraph_and_rewires_edges_atomically(tmp_path: Path) -> None:

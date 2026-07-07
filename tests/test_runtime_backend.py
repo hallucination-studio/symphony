@@ -44,6 +44,20 @@ def test_prepare_mode_environment_supports_local_verifier_without_codex_settings
     assert Path(env["SYMPHONY_LOCAL_VERIFIER_HOME"]).is_dir()
 
 
+def test_prepare_mode_environment_passes_local_verifier_replan_failure_probe(tmp_path: Path) -> None:
+    profile = RuntimeProfile(
+        name="deterministic-verifier",
+        backend="local-verifier",
+        mode=RuntimeMode.VERIFY,
+        settings={"force_first_verify_failure_for_replan": True},
+    )
+
+    env = prepare_mode_environment(tmp_path, profile)
+
+    assert env["SYMPHONY_LOCAL_VERIFIER_HOME"] == str(tmp_path / "runtime-homes" / "verify" / "local-verifier")
+    assert env["SYMPHONY_FORCE_FIRST_VERIFY_FAILURE_FOR_REPLAN"] == "1"
+
+
 def test_prepare_mode_environment_rejects_local_verifier_for_plan_and_execute(tmp_path: Path) -> None:
     for mode in (RuntimeMode.PLAN, RuntimeMode.EXECUTE):
         profile = RuntimeProfile(name=f"{mode.value}-local", backend="local-verifier", mode=mode)

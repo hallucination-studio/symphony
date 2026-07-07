@@ -43,6 +43,47 @@ def test_cli_rejects_legacy_managed_phase_flags() -> None:
         )
 
 
+def test_planner_prompt_for_replan_forbids_reusing_failed_node_id() -> None:
+    prompt = performer_cli._planner_prompt(
+        {
+            "attempt_id": "plan-retry",
+            "graph_id": "graph-1",
+            "root_node_id": "root",
+            "node_id": "failed-node",
+            "issue_id": "issue-1",
+            "issue_identifier": "ENG-1",
+            "title": "Recover failed work",
+            "failure_context": {"reason": "verify_failed", "failed_attempt_id": "verify-1"},
+        }
+    )
+
+    assert "failed-node" in prompt
+    assert "must not reuse the failed node_id" in prompt
+
+
+def test_planner_prompt_for_replan_preserves_original_concrete_requirements() -> None:
+    prompt = performer_cli._planner_prompt(
+        {
+            "attempt_id": "plan-retry",
+            "graph_id": "graph-1",
+            "root_node_id": "root",
+            "node_id": "failed-node",
+            "issue_id": "issue-1",
+            "issue_identifier": "ENG-1",
+            "title": "Recover failed work",
+            "issue_description": (
+                "Create SYMPHONY_REAL_E2E_RESULT.md with ENG-1 and replan recovery. "
+                "Run pytest tests/test_smoke.py -q."
+            ),
+            "failure_context": {"reason": "verify_failed", "failed_attempt_id": "verify-1"},
+        }
+    )
+
+    assert "must preserve the original issue description's concrete file paths, commands, and success conditions" in prompt
+    assert "must not replace `SYMPHONY_REAL_E2E_RESULT.md` with a different result file" in prompt
+    assert "must not drop `pytest tests/test_smoke.py -q` if it was part of the original task" in prompt
+
+
 @pytest.mark.asyncio
 async def test_plan_mode_writes_structured_result_file(tmp_path: Path) -> None:
     request_path = tmp_path / "plan-request.json"
@@ -552,6 +593,61 @@ async def test_verify_mode_scores_snapshot_against_gate_threshold(tmp_path: Path
 
 
 @pytest.mark.asyncio
+async def test_verify_mode_can_force_only_first_verify_failure_for_replan_probe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    verifier_home = tmp_path / "verifier-home"
+    monkeypatch.setenv("SYMPHONY_LOCAL_VERIFIER_HOME", str(verifier_home))
+    monkeypatch.setenv("SYMPHONY_FORCE_FIRST_VERIFY_FAILURE_FOR_REPLAN", "1")
+    gate = GateSpecSnapshot.create(
+        gate_id="gate-1",
+        task_id="node-1",
+        created_by="plan-1",
+        created_at="2026-07-06T00:00:00Z",
+        content=GateSpecContent(
+            acceptance_criteria=["command must pass"],
+            verification_procedure=["test -f README.md"],
+            rubric={str(score): f"score {score}" for score in range(5)},
+            pass_threshold=3,
+        ),
+    )
+    verification_input = _verification_input_with_patch(tmp_path, gate_hash=gate.hash)
+
+    async def run_verify(attempt_id: str, result_name: str) -> dict[str, object]:
+        request_path = tmp_path / f"{attempt_id}.json"
+        result_path = tmp_path / result_name
+        request_path.write_text(
+            json.dumps(
+                {
+                    "attempt_id": attempt_id,
+                    "node_id": "node-1",
+                    "graph_revision": 5,
+                    "policy_revision": 2,
+                    "lease_id": f"lease-{attempt_id}",
+                    "fencing_token": f"token-{attempt_id}",
+                    "gate_snapshot_hash": gate.hash,
+                    "gate_snapshot": gate.to_dict(),
+                    "verification_input": verification_input,
+                }
+            ),
+            encoding="utf-8",
+        )
+        await run_mode_attempt(RuntimeMode.VERIFY, request_path, result_path)
+        return json.loads(result_path.read_text(encoding="utf-8"))
+
+    first = await run_verify("verify-1", "verify-result-1.json")
+    second = await run_verify("verify-2", "verify-result-2.json")
+
+    assert first["status"] == "succeeded"
+    assert first["passed"] is False
+    assert first["score"] == 0
+    assert first["error"] == "forced_first_verify_failure_for_replan"
+    assert second["status"] == "succeeded"
+    assert second["passed"] is True
+
+
+@pytest.mark.asyncio
 async def test_verify_mode_fails_closed_without_frozen_gate_snapshot(tmp_path: Path) -> None:
     verification_input = _verification_input_with_patch(tmp_path, gate_hash="sha256:gate")
     request_path = tmp_path / "verify-request.json"
@@ -699,6 +795,70 @@ async def test_verify_mode_runs_gate_commands_against_patched_verification_workt
     assert payload["status"] == "succeeded"
     assert payload["passed"] is True
     assert not (repo / "created.txt").exists()
+
+
+@pytest.mark.asyncio
+async def test_verify_mode_accepts_empty_patch_when_base_tree_already_matches_expected(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True)
+    (repo / "README.md").write_text("before\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=repo, check=True, capture_output=True, text=True)
+    base_revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+    expected_tree = subprocess.check_output(["git", "rev-parse", "HEAD^{tree}"], cwd=repo, text=True).strip()
+    patch_path = tmp_path / "empty.patch"
+    patch_path.write_text("", encoding="utf-8")
+    gate = GateSpecSnapshot.create(
+        gate_id="gate-empty",
+        task_id="node-1",
+        created_by="plan-1",
+        created_at="2026-07-06T00:00:00Z",
+        content=GateSpecContent(
+            acceptance_criteria=["base content is already valid"],
+            verification_procedure=["test \"$(cat README.md)\" = \"before\""],
+            rubric={str(score): f"score {score}" for score in range(5)},
+            pass_threshold=3,
+        ),
+    )
+    request_path = tmp_path / "verify-request.json"
+    result_path = tmp_path / "verify-result.json"
+    request_path.write_text(
+        json.dumps(
+            {
+                "attempt_id": "verify-empty-patch",
+                "node_id": "node-1",
+                "graph_revision": 5,
+                "policy_revision": 2,
+                "lease_id": "lease-verify",
+                "fencing_token": "token-verify",
+                "gate_snapshot_hash": gate.hash,
+                "gate_snapshot": gate.to_dict(),
+                "verification_input": {
+                    "task_id": "node-1",
+                    "execute_attempt_id": "exec-1",
+                    "base_revision": base_revision,
+                    "repository_path": str(repo),
+                    "patch_uri": f"file://{patch_path}",
+                    "patch_hash": "sha256:" + hashlib.sha256(b"").hexdigest(),
+                    "expected_result_tree": expected_tree,
+                    "artifact_uris": [],
+                    "declared_commands": [],
+                    "evidence_uri": "artifact://evidence",
+                    "gate_snapshot_hash": gate.hash,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    await run_mode_attempt(RuntimeMode.VERIFY, request_path, result_path)
+
+    payload = json.loads(result_path.read_text(encoding="utf-8"))
+    assert payload["status"] == "succeeded"
+    assert payload["passed"] is True
 
 
 @pytest.mark.asyncio
@@ -1054,6 +1214,47 @@ async def test_execute_mode_streams_backend_events_to_stdout(tmp_path: Path, cap
     assert '"event": "performer_attempt_event"' in output
     assert '"codex_event": "sdk_session_starting"' in output
     assert "secret-token" not in output
+
+
+@pytest.mark.asyncio
+async def test_execute_mode_can_emit_runtime_wait_probe_event(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True)
+    (repo / "README.md").write_text("before\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=repo, check=True, capture_output=True, text=True)
+    request_path = tmp_path / "execute-request.json"
+    result_path = tmp_path / "execute-result.json"
+    request_path.write_text(
+        json.dumps(
+            {
+                "attempt_id": "exec-wait-probe",
+                "node_id": "node-1",
+                "graph_revision": 4,
+                "policy_revision": 2,
+                "lease_id": "lease-exec",
+                "fencing_token": "token-exec",
+                "gate_snapshot_hash": "sha256:gate",
+                "workspace_path": str(repo),
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("SYMPHONY_EMIT_RUNTIME_WAIT_PROBE", "1")
+    monkeypatch.setenv("SYMPHONY_RUNTIME_WAIT_PROBE_SECONDS", "0")
+
+    await run_mode_attempt(RuntimeMode.EXECUTE, request_path, result_path, agent_backend=_NoopBackend())
+
+    output = capsys.readouterr().out
+    assert '"codex_event": "sdk_approval_requested"' in output
+    assert '"message": "waiting for command approval from runtime wait probe"' in output
 
 
 @pytest.mark.asyncio

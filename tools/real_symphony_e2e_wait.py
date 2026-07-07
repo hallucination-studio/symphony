@@ -14,6 +14,8 @@ from real_symphony_e2e_analysis import (
     e2e_human_action_resume_response,
     kill_performer_for_crash_probe,
     parent_comment_negative_control_body,
+    pipeline_integrations_terminal,
+    pipeline_nodes_terminal,
     should_complete_conductor_human_action,
     write_wait_artifacts,
 )
@@ -21,7 +23,12 @@ from real_symphony_e2e_common import Evidence, api_url, http_json, utc_now
 from real_symphony_e2e_linear import comment_linear_issue, fetch_linear_issue
 
 
-def immediate_pipeline_failure(sample: dict[str, Any], *, expected_failure: str = "none") -> dict[str, Any] | None:
+def immediate_pipeline_failure(
+    sample: dict[str, Any],
+    *,
+    expected_failure: str = "none",
+    permission_approval_probe: bool = False,
+) -> dict[str, Any] | None:
     if expected_failure != "none":
         return None
     attempts = [attempt for attempt in sample.get("pipeline_attempts", []) if isinstance(attempt, dict)]
@@ -49,6 +56,8 @@ def immediate_pipeline_failure(sample: dict[str, Any], *, expected_failure: str 
         for action in waits
         if isinstance(action.get("details"), dict) and str(action["details"].get("wait_kind") or "")
     ]
+    if runtime_waits and permission_approval_probe:
+        return None
     if runtime_waits:
         return {"kind": "runtime_human_wait", "actions": runtime_waits}
     return None
@@ -130,9 +139,9 @@ async def wait_for_run(
         result_path = _pipeline_integrated_result_path(pipeline_payload) or fallback_result_path
         conductor_pipeline_event_types: list[str] = []
         pipeline_integrated = _pipeline_integrated(pipeline_payload)
-        pipeline_terminal = bool(
-            pipeline_nodes
-            and all(str(node.get("state") or "") in {"verify_passed", "failed", "superseded"} for node in pipeline_nodes)
+        pipeline_terminal = pipeline_nodes_terminal(
+            pipeline_nodes,
+            terminal_states={"verify_passed", "failed", "superseded"},
         )
         sample = {
             "at": utc_now(),
@@ -181,7 +190,11 @@ async def wait_for_run(
             ),
             flush=True,
         )
-        immediate_failure = immediate_pipeline_failure(sample, expected_failure=expected_failure)
+        immediate_failure = immediate_pipeline_failure(
+            sample,
+            expected_failure=expected_failure,
+            permission_approval_probe=permission_approval_probe,
+        )
         if immediate_failure is not None:
             evidence.check(
                 "pipeline-runtime-error:visible",
@@ -284,11 +297,7 @@ async def wait_for_run(
         )
         check_names = {check.get("name") for check in evidence.data.get("checks", []) if check.get("passed")}
         if permission_approval_probe and "human-action:managed-push-resume" in check_names:
-            resumed_wait_ids = {
-                str(wait.get("wait_id") or "")
-                for wait in pipeline_payload.get("human_waits", [])
-                if isinstance(wait, dict) and wait.get("status") == "resolved"
-            }
+            resumed_wait_ids = _resolved_pipeline_wait_ids(pipeline_payload)
             if completed_pipeline_human_waits & resumed_wait_ids:
                 evidence.check("human-action:resume-observed-after-push", True, wait_ids=sorted(resumed_wait_ids))
                 break
@@ -339,14 +348,7 @@ async def wait_for_run(
                         if probe_status == 200 and isinstance(probe_body, dict) and isinstance(probe_body.get("pipeline"), dict)
                         else {}
                     )
-                    probe_wait = next(
-                        (
-                            wait
-                            for wait in probe_pipeline.get("human_waits", [])
-                            if isinstance(wait, dict) and wait.get("wait_id") == wait_id
-                        ),
-                        {},
-                    )
+                    probe_wait = _pipeline_wait_by_id(probe_pipeline, wait_id)
                     evidence.check(
                         "human-action:parent-comment-does-not-resume",
                         bool(comment.get("success"))
@@ -383,7 +385,7 @@ async def wait_for_run(
                 )
                 evidence.check(
                     "human-action:managed-push-resume",
-                    status == 200 and isinstance(pushed, dict) and pushed.get("status") == "accepted",
+                    _human_answered_push_satisfies_resume_probe(status, pushed),
                     status=status,
                     body=pushed,
                 )
@@ -451,8 +453,41 @@ async def wait_for_run(
 
 
 def _pipeline_integrated(pipeline_payload: dict[str, Any]) -> bool:
-    integrations = [item for item in pipeline_payload.get("integration_queue", []) if isinstance(item, dict)]
-    return bool(integrations) and all(item.get("status") == "integrated" for item in integrations)
+    return pipeline_integrations_terminal(pipeline_payload)
+
+
+def _human_answered_push_satisfies_resume_probe(status: int, body: Any) -> bool:
+    if status != 200 or not isinstance(body, dict):
+        return False
+    if body.get("status") == "accepted":
+        return True
+    return body.get("status") == "ignored" and body.get("reason") == "completed_child_required"
+
+
+def _resolved_pipeline_wait_ids(pipeline_payload: dict[str, Any]) -> set[str]:
+    wait_ids: set[str] = set()
+    for key in ("human_waits", "runtime_waits"):
+        waits = pipeline_payload.get(key)
+        if not isinstance(waits, list):
+            continue
+        for wait in waits:
+            if not isinstance(wait, dict) or wait.get("status") != "resolved":
+                continue
+            wait_id = str(wait.get("wait_id") or "")
+            if wait_id:
+                wait_ids.add(wait_id)
+    return wait_ids
+
+
+def _pipeline_wait_by_id(pipeline_payload: dict[str, Any], wait_id: str) -> dict[str, Any]:
+    for key in ("human_waits", "runtime_waits"):
+        waits = pipeline_payload.get(key)
+        if not isinstance(waits, list):
+            continue
+        for wait in waits:
+            if isinstance(wait, dict) and wait.get("wait_id") == wait_id:
+                return wait
+    return {}
 
 
 def _pipeline_integrated_result_path(pipeline_payload: dict[str, Any]) -> Path | None:

@@ -422,6 +422,56 @@ def test_plan_validator_rejects_empty_and_duplicate_graphs() -> None:
     assert PlanValidatorError.MISSING_ENTRY_EXIT in empty_errors
 
 
+def test_plan_validator_rejects_parent_blocking_its_own_child() -> None:
+    gate_parent = GateSpecSnapshot.create(
+        gate_id="gate-parent",
+        task_id="parent",
+        created_by="plan-1",
+        created_at="2026-07-06T00:00:00Z",
+        content=GateSpecContent(
+            acceptance_criteria=["parent aggregate"],
+            verification_procedure=["test -f result.txt"],
+            rubric={str(score): f"score {score}" for score in range(5)},
+            pass_threshold=3,
+        ),
+    )
+    gate_child = GateSpecSnapshot.create(
+        gate_id="gate-child",
+        task_id="child",
+        created_by="plan-1",
+        created_at="2026-07-06T00:00:00Z",
+        content=GateSpecContent(
+            acceptance_criteria=["child work"],
+            verification_procedure=["test -f child.txt"],
+            rubric={str(score): f"score {score}" for score in range(5)},
+            pass_threshold=3,
+        ),
+    )
+    proposal = PlanProposal(
+        graph_id="graph-1",
+        plan_attempt_id="plan-1",
+        root_node_id="parent",
+        nodes=[
+            GraphNode(node_id="parent", title="Parent", state=GraphNodeState.PLANNED, gate_snapshot_hash=gate_parent.hash),
+            GraphNode(
+                node_id="child",
+                title="Child",
+                state=GraphNodeState.PLANNED,
+                parent_node_id="parent",
+                gate_snapshot_hash=gate_child.hash,
+            ),
+        ],
+        blocks=[("parent", "child")],
+        gates=[gate_parent, gate_child],
+        entry_node_ids=["parent"],
+        exit_node_ids=["child"],
+    )
+
+    errors = PlanValidator().validate(proposal)
+
+    assert PlanValidatorError.ILLEGAL_EDGE in errors
+
+
 def test_scheduler_policy_capacity_and_lease_fencing() -> None:
     capacity = SchedulerCapacity(global_limit=3, by_mode={RuntimeMode.PLAN: 1, RuntimeMode.EXECUTE: None})
     policy = SchedulerPolicy(

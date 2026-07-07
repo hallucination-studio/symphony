@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 LINEAR_ENDPOINT = "https://api.linear.app/graphql"
-DEFAULT_PROJECT_SLUG = "d17d2f7a038d"
+DEFAULT_PROJECT_SLUG = "8ab43179fb54"
 SENSITIVE_EVIDENCE_KEY_PARTS = ("secret", "password", "cookie", "authorization")
 
 

@@ -5,6 +5,7 @@ import asyncio
 import json
 import os
 import shutil
+import subprocess
 import time
 import uuid
 from datetime import datetime, timezone
@@ -16,6 +17,9 @@ from real_symphony_e2e_analysis import (
     build_agent_session_webhook_payload,
     build_instance_payload,
     linear_webhook_signature,
+    pipeline_has_conflict_escalation_evidence,
+    pipeline_integrations_terminal,
+    pipeline_nodes_terminal,
 )
 from real_symphony_e2e_common import (
     DEFAULT_PROJECT_SLUG,
@@ -44,7 +48,7 @@ from performer_api.config import sanitize_codex_config_template
 
 CODEX_HOME_SEED_FILES = ("config.toml", "auth.json", "version.json", "models_cache.json")
 CODEX_HOME_SEED_ENV = "SYMPHONY_E2E_CODEX_HOME_SEED"
-DEFAULT_E2E_HARD_TURN_TIMEOUT_MS = 180_000
+DEFAULT_E2E_HARD_TURN_TIMEOUT_MS = 300_000
 
 
 def build_runtime_config_payload(
@@ -63,8 +67,15 @@ def build_runtime_config_payload(
     if codex_home_source:
         settings["codex_home_source"] = codex_home_source
     by_mode = {"plan": 1, "execute": 1, "verify": 1}
-    if pipeline_scenario == "parallel":
+    if pipeline_scenario in {"parallel", "integration-conflict"}:
         by_mode["execute"] = 2
+    execute_settings = dict(settings)
+    if pipeline_scenario == "runtime-wait":
+        execute_settings["emit_runtime_wait_probe"] = True
+        execute_settings["runtime_wait_probe_seconds"] = 90
+    verify_settings: dict[str, Any] = {}
+    if pipeline_scenario == "replan":
+        verify_settings["force_first_verify_failure_for_replan"] = True
     return {
         "runtime_group_id": runtime_group_id,
         "version": version,
@@ -87,13 +98,13 @@ def build_runtime_config_payload(
                 "name": "codex-execute",
                 "backend": "codex",
                 "mode": "execute",
-                "settings": dict(settings),
+                "settings": execute_settings,
             },
             "verify": {
                 "name": "local-verifier",
                 "backend": "local-verifier",
                 "mode": "verify",
-                "settings": {},
+                "settings": verify_settings,
             },
         },
     }
@@ -151,6 +162,7 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
         run_cmd(name, command, evidence, env=env)
 
     fixture = make_fixture_repo(root / "fixture-repo")
+    _prepare_pipeline_scenario_fixture(fixture, pipeline_scenario)
 
     podium_port = allocate_port()
     conductor_port = allocate_port()
@@ -449,15 +461,16 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
             if isinstance(last_sample, dict)
             else []
         )
-        pipeline_terminal = bool(
-            pipeline_nodes
-            and all(str(node.get("state") or "") in {"verify_passed", "failed", "superseded"} for node in pipeline_nodes)
+        pipeline_terminal = pipeline_nodes_terminal(
+            pipeline_nodes,
+            terminal_states={"verify_passed", "failed", "superseded"},
         )
         expected_failure = args.expected_failure != "none"
         if permission_approval_probe:
             evidence.check(
                 "runtime-error:blocked-cleared-after-approval",
-                not pipeline_leases,
+                _permission_probe_block_cleared(last_sample),
+                pipeline_human_actions=last_sample.get("pipeline_human_actions") if isinstance(last_sample, dict) else [],
                 pipeline_leases=pipeline_leases,
             )
         elif expected_failure:
@@ -575,7 +588,7 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
                 )
                 evidence.check(
                     "stage:pipeline-integration-completed",
-                    bool(integrations) and all(item.get("status") == "integrated" for item in integrations),
+                    pipeline_integrations_terminal(pipeline_view),
                     integrations=integrations,
                 )
                 evidence.check(
@@ -597,13 +610,22 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
                 _check_pipeline_scenario_acceptance(evidence, pipeline_scenario, pipeline_view)
                 evidence.check(
                     "stage:final-pipeline-verified",
-                    bool(nodes)
-                    and all(
-                        node.get("state") in {"verify_passed", "superseded"}
-                        or (pipeline_scenario == "integration-conflict" and node.get("state") == "awaiting_human")
-                        for node in nodes
+                    pipeline_nodes_terminal(
+                        nodes,
+                        terminal_states=(
+                            {"verify_passed", "superseded", "awaiting_human"}
+                            if pipeline_scenario == "integration-conflict"
+                            else {"verify_passed", "superseded"}
+                        ),
                     ),
-                    nodes=[{"node_id": node.get("node_id"), "state": node.get("state")} for node in nodes],
+                    nodes=[
+                        {
+                            "node_id": node.get("node_id"),
+                            "state": node.get("state"),
+                            "aggregate_state": node.get("aggregate_state"),
+                        }
+                        for node in nodes
+                    ],
                 )
 
         for method, path, payload in [
@@ -769,9 +791,11 @@ def _pipeline_scenario_issue_description(scenario: str, run_id: str) -> str:
     if scenario == "integration-conflict":
         return (
             f"Real Symphony integration conflict e2e task for run {run_id}. "
-            "Create SYMPHONY_REAL_E2E_RESULT.md with the Linear issue identifier and the words integration conflict. "
-            "The pipeline must surface any patch integration conflict through a [Human Action] child issue. "
-            "Run pytest tests/test_smoke.py -q."
+            "Planner must create two independent parallel subtasks and must not add a blocks dependency between them. "
+            "Each subtask must modify the already tracked file SYMPHONY_CONFLICT_SHARED.md with different content, "
+            "so their verified patches overlap and the integration queue must surface the conflict through a "
+            "[Human Action] child issue. At least one subtask must create SYMPHONY_REAL_E2E_RESULT.md with the Linear "
+            "issue identifier and the words integration conflict. Run pytest tests/test_smoke.py -q."
         )
     if scenario == "runtime-wait":
         return (
@@ -781,6 +805,15 @@ def _pipeline_scenario_issue_description(scenario: str, run_id: str) -> str:
             "to a [Human Action] child issue before resuming. Run pytest tests/test_smoke.py -q."
         )
     return base
+
+
+def _prepare_pipeline_scenario_fixture(fixture: Path, scenario: str) -> None:
+    if scenario != "integration-conflict":
+        return
+    conflict_path = fixture / "SYMPHONY_CONFLICT_SHARED.md"
+    conflict_path.write_text("base integration conflict fixture\n", encoding="utf-8")
+    subprocess.run(["git", "add", conflict_path.name], cwd=fixture, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "add integration conflict fixture"], cwd=fixture, check=True)
 
 
 async def _wait_for_final_pipeline_view(
@@ -808,14 +841,23 @@ async def _wait_for_final_pipeline_view(
 
 def _pipeline_final_view_converged(pipeline_view: dict[str, Any], *, allow_human_wait: bool = False) -> bool:
     nodes = [node for node in pipeline_view.get("nodes", []) if isinstance(node, dict)]
-    if not nodes:
-        return False
     terminal_states = {"verify_passed", "superseded"}
     if allow_human_wait:
         terminal_states.add("awaiting_human")
-    return all(str(node.get("state") or "") in terminal_states for node in nodes) and _pipeline_projection_matches_current_revision(
+    return pipeline_nodes_terminal(nodes, terminal_states=terminal_states) and _pipeline_projection_matches_current_revision(
         pipeline_view
     )
+
+
+def _permission_probe_block_cleared(sample: dict[str, Any]) -> bool:
+    actions = sample.get("pipeline_human_actions") if isinstance(sample, dict) else []
+    if not isinstance(actions, list):
+        return False
+    return not [
+        action
+        for action in actions
+        if isinstance(action, dict) and str(action.get("status") or "").lower() in {"waiting", "open"}
+    ]
 
 
 def _pipeline_projection_matches_current_revision(pipeline_view: dict[str, Any]) -> bool:
@@ -883,10 +925,12 @@ def _check_pipeline_scenario_acceptance(evidence: Evidence, scenario: str, pipel
         )
     elif scenario == "integration-conflict":
         waits = [wait for wait in pipeline_view.get("human_waits", []) if isinstance(wait, dict)]
+        integrations = [item for item in pipeline_view.get("integration_queue", []) if isinstance(item, dict)]
         evidence.check(
             "scenario:integration-conflict-human-action",
-            any(wait.get("reason") == "LINEAR_SYNC_CONFLICT" for wait in waits),
+            pipeline_has_conflict_escalation_evidence(pipeline_view),
             human_waits=waits,
+            integrations=integrations,
         )
     elif scenario == "runtime-wait":
         waits = [wait for wait in pipeline_view.get("runtime_waits", []) if isinstance(wait, dict)]

@@ -303,6 +303,158 @@ def test_real_symphony_e2e_wait_uses_integrated_manifest_repository_result_path(
     assert result_path == repository / "SYMPHONY_REAL_E2E_RESULT.md"
 
 
+def test_real_symphony_e2e_pipeline_integrated_accepts_human_resolved_conflict() -> None:
+    tool = load_tool("real_symphony_e2e_wait")
+
+    assert tool._pipeline_integrated(
+        {
+            "integration_queue": [
+                {"status": "integrated", "node_id": "a"},
+                {"status": "resolved", "node_id": "b", "error": "patch conflict"},
+            ]
+        }
+    )
+
+
+def test_real_symphony_e2e_final_view_uses_parent_aggregate_state() -> None:
+    tool = load_tool("real_symphony_e2e_run")
+
+    pipeline_view = {
+        "graph_revision": 2,
+        "nodes": [
+            {
+                "node_id": "parent",
+                "state": "planned",
+                "aggregate_state": "verify_passed",
+                "gate_snapshot_hash": "gate-parent",
+            },
+            {"node_id": "child-a", "state": "verify_passed", "aggregate_state": "verify_passed"},
+            {"node_id": "child-b", "state": "verify_passed", "aggregate_state": "verify_passed"},
+        ],
+        "linear_projections": [
+            {
+                "node_id": "parent",
+                "metadata": {
+                    "node_id": "parent",
+                    "conductor_revision": 2,
+                    "graph_id": "graph-1",
+                    "operator_status": "verify_passed",
+                    "gate_snapshot_hash": "gate-parent",
+                },
+            },
+            {
+                "node_id": "child-a",
+                "metadata": {
+                    "node_id": "child-a",
+                    "conductor_revision": 2,
+                    "graph_id": "graph-1",
+                    "operator_status": "verify_passed",
+                },
+            },
+            {
+                "node_id": "child-b",
+                "metadata": {
+                    "node_id": "child-b",
+                    "conductor_revision": 2,
+                    "graph_id": "graph-1",
+                    "operator_status": "verify_passed",
+                },
+            },
+        ],
+    }
+
+    assert tool._pipeline_final_view_converged(pipeline_view)
+
+
+def test_real_symphony_e2e_permission_probe_allows_active_lease_after_wait_clears() -> None:
+    tool = load_tool("real_symphony_e2e_run")
+
+    assert tool._permission_probe_block_cleared(
+        {
+            "pipeline_human_actions": [],
+            "pipeline_leases": [{"lease_id": "execute-lease-1", "mode": "execute"}],
+        }
+    )
+    assert not tool._permission_probe_block_cleared(
+        {
+            "pipeline_human_actions": [
+                {
+                    "wait_id": "runtime-wait-exec-1-approval_requested",
+                    "status": "waiting",
+                    "details": {"wait_kind": "approval_requested"},
+                }
+            ],
+            "pipeline_leases": [{"lease_id": "execute-lease-1", "mode": "execute"}],
+        }
+    )
+
+
+def test_real_symphony_e2e_integration_conflict_acceptance_uses_resolved_queue_item(tmp_path: Path) -> None:
+    tool = load_tool("real_symphony_e2e_run")
+    evidence = tool.Evidence(tmp_path / "report.json")
+
+    tool._check_pipeline_scenario_acceptance(
+        evidence,
+        "integration-conflict",
+        {
+            "human_waits": [],
+            "integration_queue": [
+                {
+                    "status": "resolved",
+                    "error": "patch conflict",
+                    "human_resolution": "Linear human action child-1 completed.",
+                }
+            ],
+        },
+    )
+
+    check = evidence.data["checks"][-1]
+    assert check["name"] == "scenario:integration-conflict-human-action"
+    assert check["passed"] is True
+    assert evidence.data["failures"] == []
+
+
+def test_real_symphony_e2e_human_answered_push_accepts_completed_child_required_guard() -> None:
+    tool = load_tool("real_symphony_e2e_wait")
+
+    assert tool._human_answered_push_satisfies_resume_probe(200, {"status": "accepted"})
+    assert tool._human_answered_push_satisfies_resume_probe(
+        200,
+        {"status": "ignored", "reason": "completed_child_required"},
+    )
+    assert not tool._human_answered_push_satisfies_resume_probe(200, {"status": "ignored", "reason": "human_wait_not_found"})
+
+
+def test_real_symphony_e2e_resume_observed_reads_resolved_runtime_waits() -> None:
+    tool = load_tool("real_symphony_e2e_wait")
+
+    wait_ids = tool._resolved_pipeline_wait_ids(
+        {
+            "human_waits": [],
+            "runtime_waits": [
+                {"wait_id": "runtime-wait-exec-1-approval_requested", "status": "resolved"},
+            ],
+        }
+    )
+
+    assert wait_ids == {"runtime-wait-exec-1-approval_requested"}
+
+def test_real_symphony_e2e_finds_runtime_wait_for_parent_comment_probe() -> None:
+    tool = load_tool("real_symphony_e2e_wait")
+
+    wait = tool._pipeline_wait_by_id(
+        {
+            "human_waits": [],
+            "runtime_waits": [
+                {"wait_id": "runtime-wait-exec-1-approval_requested", "status": "waiting"},
+            ],
+        },
+        "runtime-wait-exec-1-approval_requested",
+    )
+
+    assert wait == {"wait_id": "runtime-wait-exec-1-approval_requested", "status": "waiting"}
+
+
 def test_real_symphony_e2e_tools_do_not_read_legacy_phase_runs() -> None:
     forbidden = [
         'run.get("phase")',
@@ -413,6 +565,17 @@ def test_real_symphony_e2e_tracks_one_automatic_human_action_per_wait() -> None:
     assert tool.should_complete_conductor_human_action(first, completed) is True
     completed.add("wait-1")
     assert tool.should_complete_conductor_human_action(second, completed) is False
+
+def test_real_symphony_e2e_completes_runtime_wait_child_actions() -> None:
+    tool = load_tool("real_symphony_e2e")
+
+    action = {
+        "wait_id": "runtime-wait-execute-1-approval_requested",
+        "child_issue_id": "child-runtime-1",
+        "details": {"wait_kind": "approval_requested"},
+    }
+
+    assert tool.should_complete_conductor_human_action(action, set()) is True
 
 def test_real_symphony_e2e_writes_human_response_into_child_description() -> None:
     tool = load_tool("real_symphony_e2e")
@@ -538,6 +701,26 @@ def test_real_symphony_e2e_expected_failure_mode_keeps_waiting_for_failure_audit
         tool.immediate_pipeline_failure(
             {"pipeline_attempts": [{"attempt_id": "plan-1", "state": "failed"}]},
             expected_failure="overload",
+        )
+        is None
+    )
+
+
+def test_real_symphony_e2e_permission_probe_keeps_waiting_on_runtime_wait() -> None:
+    tool = load_tool("real_symphony_e2e")
+
+    assert (
+        tool.immediate_pipeline_failure(
+            {
+                "pipeline_human_actions": [
+                    {
+                        "wait_id": "runtime-wait-exec-1-approval_requested",
+                        "reason": "approval_requested",
+                        "details": {"wait_kind": "approval_requested"},
+                    }
+                ]
+            },
+            permission_approval_probe=True,
         )
         is None
     )

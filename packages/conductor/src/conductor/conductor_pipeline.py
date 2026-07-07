@@ -1225,9 +1225,9 @@ class ConductorPipelineStore:
                         integration_payload = _json_loads(integration_row["payload_json"])
                         integration_payload.update(
                             {
-                                "status": "queued",
-                                "error": None,
-                                "completed_at": None,
+                                "status": "resolved",
+                                "human_resolution": resolution,
+                                "completed_at": payload["resolved_at"],
                             }
                         )
                         connection.execute(
@@ -1236,7 +1236,7 @@ class ConductorPipelineStore:
                             SET status = ?, payload_json = ?, completed_at = ?
                             WHERE integration_id = ?
                             """,
-                            ("queued", _json_dumps(integration_payload), None, integration_id),
+                            ("resolved", _json_dumps(integration_payload), payload["resolved_at"], integration_id),
                         )
             self._update_node_state_on_connection(
                 connection,
@@ -1362,6 +1362,25 @@ class ConductorPipelineStore:
                 )
                 resolved += 1
         return resolved
+
+    def resolve_runtime_wait(self, wait_id: str, *, resolution: str) -> dict[str, Any]:
+        now = _now()
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute("SELECT payload_json FROM runtime_waits WHERE wait_id = ?", (wait_id,)).fetchone()
+            if row is None:
+                raise KeyError(wait_id)
+            payload = _json_loads(row["payload_json"])
+            payload.update({"status": "resolved", "resolution": resolution, "resolved_at": now, "updated_at": now})
+            connection.execute(
+                """
+                UPDATE runtime_waits
+                SET status = ?, payload_json = ?, updated_at = ?, resolved_at = ?
+                WHERE wait_id = ?
+                """,
+                ("resolved", _json_dumps(payload), now, now, wait_id),
+            )
+        return payload
 
     def list_runtime_waits(self, *, status: str | None = None) -> list[dict[str, Any]]:
         with self.connect() as connection:
@@ -2266,6 +2285,21 @@ class PipelineLinearProjector:
         if not issue_id_by_node:
             return 0
         edges = self._linear_block_edges(children, node_by_issue_id)
+        node_by_id = {node.node_id: node for node in self.store.list_nodes()}
+        superseded_node_ids = {node_id for node_id, node in node_by_id.items() if node.state is GraphNodeState.SUPERSEDED}
+        if superseded_node_ids:
+            edges = [
+                (source_node_id, target_node_id)
+                for source_node_id, target_node_id in edges
+                if source_node_id not in superseded_node_ids and target_node_id not in superseded_node_ids
+            ]
+        current_edges = [
+            (source_node_id, target_node_id)
+            for source_node_id in node_by_id
+            for target_node_id in self.store.dependents_for(source_node_id)
+        ]
+        if not edges and current_edges:
+            return 0
         graph_revision = self.store.replace_current_edges_from_linear(edges, reason="human_linear_blocks_ingested")
         return 1 if graph_revision is not None else 0
 

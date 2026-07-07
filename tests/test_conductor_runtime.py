@@ -488,6 +488,28 @@ def test_process_env_allows_local_verifier_runtime_home(tmp_path: Path) -> None:
     assert env["SYMPHONY_LOCAL_VERIFIER_HOME"] == str(verifier_home)
 
 
+def test_process_env_allows_local_verifier_replan_failure_probe() -> None:
+    manager = ConductorRuntimeManager(command="performer")
+
+    env = manager._process_env({"SYMPHONY_FORCE_FIRST_VERIFY_FAILURE_FOR_REPLAN": "1"})
+
+    assert env["SYMPHONY_FORCE_FIRST_VERIFY_FAILURE_FOR_REPLAN"] == "1"
+
+
+def test_process_env_allows_codex_runtime_wait_probe() -> None:
+    manager = ConductorRuntimeManager(command="performer")
+
+    env = manager._process_env(
+        {
+            "CODEX_EMIT_RUNTIME_WAIT_PROBE": "True",
+            "CODEX_RUNTIME_WAIT_PROBE_SECONDS": "25",
+        }
+    )
+
+    assert env["CODEX_EMIT_RUNTIME_WAIT_PROBE"] == "True"
+    assert env["CODEX_RUNTIME_WAIT_PROBE_SECONDS"] == "25"
+
+
 def test_refresh_polls_process_before_reporting_running(tmp_path: Path) -> None:
     class PollingProcess:
         pid = 4242
