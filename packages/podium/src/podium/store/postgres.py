@@ -57,7 +57,7 @@ class PgMigrator:
                 linear_project TEXT NOT NULL DEFAULT '',
                 project_slug TEXT NOT NULL DEFAULT '',
                 agent_app_user_id TEXT NOT NULL DEFAULT '',
-                workflow_profile TEXT NOT NULL DEFAULT 'task',
+                pipeline_profile TEXT NOT NULL DEFAULT 'default',
                 process_status TEXT NOT NULL DEFAULT '',
                 repo_source JSONB,
                 updated_at TIMESTAMPTZ NOT NULL,
@@ -71,12 +71,13 @@ class PgMigrator:
                 user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
                 issue_id TEXT NOT NULL,
                 issue_identifier TEXT NOT NULL DEFAULT '',
+                issue_title TEXT NOT NULL DEFAULT '',
+                issue_description TEXT NOT NULL DEFAULT '',
                 workspace_id TEXT NOT NULL DEFAULT '',
                 project_slug TEXT NOT NULL DEFAULT '',
                 agent_session_id TEXT NOT NULL DEFAULT '',
                 status TEXT NOT NULL,
                 reason TEXT NOT NULL DEFAULT '',
-                runtime_phase TEXT NOT NULL DEFAULT '',
                 leased_conductor_id TEXT REFERENCES conductors(id) ON DELETE SET NULL,
                 leased_until TIMESTAMPTZ,
                 fencing_token BIGINT NOT NULL DEFAULT 0,
@@ -86,6 +87,8 @@ class PgMigrator:
             )
             """,
             "ALTER TABLE dispatches ADD COLUMN IF NOT EXISTS fencing_token BIGINT NOT NULL DEFAULT 0",
+            "ALTER TABLE dispatches ADD COLUMN IF NOT EXISTS issue_title TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE dispatches ADD COLUMN IF NOT EXISTS issue_description TEXT NOT NULL DEFAULT ''",
             """
             CREATE UNIQUE INDEX IF NOT EXISTS dispatches_binding_session_unique
             ON dispatches (project_binding_id, agent_session_id)
@@ -397,7 +400,7 @@ class PgStore:
         rows = await self.pool.fetch(
             """
             SELECT id, conductor_id, user_id, instance_id, name, linear_project,
-                   project_slug, agent_app_user_id, workflow_profile, process_status,
+                   project_slug, agent_app_user_id, pipeline_profile, process_status,
                    repo_source, updated_at
             FROM project_bindings
             WHERE conductor_id = $1
@@ -419,7 +422,7 @@ class PgStore:
         rows = await self.pool.fetch(
             """
             SELECT id, conductor_id, user_id, instance_id, name, linear_project,
-                   project_slug, agent_app_user_id, workflow_profile, process_status,
+                   project_slug, agent_app_user_id, pipeline_profile, process_status,
                    repo_source, updated_at
             FROM project_bindings
             WHERE user_id = $1
@@ -476,7 +479,7 @@ class PgStore:
             """
             INSERT INTO project_bindings (
               id, conductor_id, user_id, instance_id, name, linear_project,
-              project_slug, agent_app_user_id, workflow_profile, process_status,
+              project_slug, agent_app_user_id, pipeline_profile, process_status,
               repo_source, updated_at
             )
             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::timestamptz)
@@ -485,7 +488,7 @@ class PgStore:
               linear_project = EXCLUDED.linear_project,
               project_slug = EXCLUDED.project_slug,
               agent_app_user_id = EXCLUDED.agent_app_user_id,
-              workflow_profile = EXCLUDED.workflow_profile,
+              pipeline_profile = EXCLUDED.pipeline_profile,
               process_status = EXCLUDED.process_status,
               repo_source = EXCLUDED.repo_source,
               updated_at = EXCLUDED.updated_at
@@ -498,7 +501,7 @@ class PgStore:
             str(binding.get("linear_project") or ""),
             str(binding.get("project_slug") or ""),
             str(binding.get("agent_app_user_id") or ""),
-            str(binding.get("workflow_profile") or "task"),
+            str(binding.get("pipeline_profile") or "default"),
             str(binding.get("process_status") or ""),
             _pg_json(binding.get("repo_source") or {}),
             _pg_datetime(binding.get("updated_at")),
@@ -510,14 +513,14 @@ class PgStore:
         row = await self.pool.fetchrow(
             """
             INSERT INTO dispatches (
-              id, project_binding_id, user_id, issue_id, issue_identifier,
+              id, project_binding_id, user_id, issue_id, issue_identifier, issue_title, issue_description,
               workspace_id, project_slug, agent_session_id, status, reason,
-              runtime_phase, leased_conductor_id, leased_until, fencing_token,
+              leased_conductor_id, leased_until, fencing_token,
               created_at, updated_at, completed_at
             )
             VALUES (
-              $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::timestamptz,$14,
-              $15::timestamptz,$16::timestamptz,$17::timestamptz
+              $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14::timestamptz,$15,
+              $16::timestamptz,$17::timestamptz,$18::timestamptz
             )
             ON CONFLICT DO NOTHING
             RETURNING id
@@ -527,12 +530,13 @@ class PgStore:
             str(dispatch["user_id"]),
             str(dispatch["issue_id"]),
             str(dispatch.get("issue_identifier") or ""),
+            str(dispatch.get("issue_title") or ""),
+            str(dispatch.get("issue_description") or ""),
             str(dispatch.get("linear_workspace_id") or dispatch.get("workspace_id") or ""),
             str(dispatch.get("project_slug") or ""),
             str(dispatch.get("agent_session_id") or ""),
             str(dispatch.get("status") or "queued"),
             str(dispatch.get("reason") or ""),
-            str(dispatch.get("runtime_phase") or ""),
             dispatch.get("leased_runtime_id") or dispatch.get("leased_conductor_id"),
             _pg_datetime(dispatch.get("leased_until")),
             int(dispatch.get("fencing_token") or 0),
@@ -590,7 +594,7 @@ class PgStore:
         *,
         fencing_token: int | None,
         reason: str = "",
-        runtime_phase: str = "",
+        pipeline: dict[str, Any] | None = None,
         completed_at: str | None = None,
     ) -> dict[str, Any] | None:
         if self.pool is None:
@@ -600,23 +604,26 @@ class PgStore:
             UPDATE dispatches
             SET status = $3,
                 reason = $4,
-                runtime_phase = $5,
-                completed_at = $6::timestamptz,
+                completed_at = $5::timestamptz,
                 updated_at = now()
             WHERE id = $2
               AND leased_conductor_id = $1
-              AND fencing_token = $7::bigint
+              AND fencing_token = $6::bigint
             RETURNING *
             """,
             conductor_id,
             dispatch_id,
             status,
             reason,
-            runtime_phase,
             _pg_datetime(completed_at),
             fencing_token,
         )
-        return _record_to_dispatch(row) if row is not None else None
+        if row is None:
+            return None
+        dispatch = _record_to_dispatch(row)
+        if pipeline:
+            dispatch.update(pipeline)
+        return dispatch
 
     async def reap_expired_dispatch_leases(self) -> int:
         if self.pool is None:
@@ -711,12 +718,13 @@ def _record_to_dispatch(row: Any) -> dict[str, Any]:
         "user_id": str(row["user_id"]),
         "issue_id": str(row["issue_id"]),
         "issue_identifier": str(row["issue_identifier"]),
+        "issue_title": str(row["issue_title"]),
+        "issue_description": str(row["issue_description"]),
         "linear_workspace_id": str(row["workspace_id"]),
         "project_slug": str(row["project_slug"]),
         "agent_session_id": str(row["agent_session_id"]),
         "status": str(row["status"]),
         "reason": str(row["reason"]),
-        "runtime_phase": str(row["runtime_phase"]),
         "leased_runtime_id": row["leased_conductor_id"],
         "leased_until": row["leased_until"].isoformat() if row["leased_until"] is not None else None,
         "fencing_token": int(row["fencing_token"] or 0),
@@ -753,7 +761,7 @@ def _record_to_project_binding(row: Any) -> dict[str, Any]:
         "linear_project": str(row["linear_project"]),
         "project_slug": str(row["project_slug"]),
         "agent_app_user_id": str(row["agent_app_user_id"]),
-        "workflow_profile": str(row["workflow_profile"]),
+        "pipeline_profile": str(row["pipeline_profile"]),
         "process_status": str(row["process_status"]),
         "repo_source": row["repo_source"] or {},
         "updated_at": row["updated_at"].isoformat() if row["updated_at"] is not None else "",

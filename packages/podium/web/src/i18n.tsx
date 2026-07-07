@@ -12,7 +12,7 @@ export type Locale = "en" | "zh";
 
 const STORAGE_KEY = "podium.locale";
 
-const ZH: Record<string, string> = {
+const ZH_TRANSLATIONS: Record<string, string> = {
   "Account": "账号",
   "Account identity": "账号身份",
   "Active": "运行中",
@@ -71,7 +71,6 @@ const ZH: Record<string, string> = {
   "Default scopes": "默认范围",
   "Delegate": "代理",
   "Detail": "详情",
-  "Duration": "持续时间",
   "Email": "邮箱",
   "Ended {time}": "{time}结束",
   "Enrollment token": "注册令牌",
@@ -103,7 +102,6 @@ const ZH: Record<string, string> = {
   "Install your first Conductor to start operating Performers.": "安装第一个 Conductor 以开始运行 Performer。",
   "Integrations": "集成",
   "Invalid email or password": "邮箱或密码错误",
-  "Issue": "问题",
   "Issue source for routing work to runtimes.": "用于将工作路由到运行时的问题来源。",
   "Issues route to runtimes": "问题会路由到运行时",
   "Language": "语言",
@@ -131,10 +129,8 @@ const ZH: Record<string, string> = {
   "No log output reported yet.": "还没有上报日志输出。",
   "No Performers configured on this Conductor yet.": "此 Conductor 还没有配置 Performer。",
   "No report yet": "尚未报告",
-  "No runs yet": "暂无运行记录",
   "No runtime online": "没有在线运行时",
   "No runtimes yet": "暂无运行时",
-  "Once a runtime picks up an issue, runs will show up here.": "运行时接取问题后，运行记录会显示在这里。",
   "Not connected": "未连接",
   "Not run yet": "尚未运行",
   "Not started": "未开始",
@@ -155,8 +151,6 @@ const ZH: Record<string, string> = {
   "Project": "项目",
   "Queued": "排队",
   "Reconnect": "重新连接",
-  "Recent runs": "最近运行",
-  "Recent agent runs across your runtimes.": "你的运行时最近执行的 agent 运行记录。",
   "Reconnect Linear": "重新连接 Linear",
   "Reconnect this runtime": "重新连接此运行时",
   "Reconnect to restore access to your workspace.": "重新连接以恢复工作区访问。",
@@ -173,15 +167,14 @@ const ZH: Record<string, string> = {
   "Review setup": "查看设置",
   "Retries": "重试",
   "Routing": "路由",
-  "Run ID": "运行 ID",
   "Run one install command on the machine that will execute agent work.": "在执行 agent 工作的机器上运行一次安装命令。",
   "Run the command above on your runtime machine.": "在运行时机器上执行上面的命令。",
   "Running": "运行中",
   "Runtime": "运行时",
+  "Runtime waits": "运行时等待",
   "Runtime ID": "运行时 ID",
   "Runtime connected. You're ready for the next step.": "运行时已连接，可以进入下一步。",
   "Runtimes": "运行时",
-  "Runs": "运行",
   "Save custom app": "保存自定义应用",
   "Save and continue": "保存并继续",
   "Scope": "范围",
@@ -199,7 +192,6 @@ const ZH: Record<string, string> = {
   "Something went wrong. Please try again.": "发生错误，请重试。",
   "Something went wrong.": "发生错误。",
   "Started {time}": "{time}开始",
-  "Started": "开始时间",
   "Starts with http(s)://, git@, or ssh://.": "以 http(s)://、git@ 或 ssh:// 开头。",
   "State": "状态",
   "Status": "状态",
@@ -222,11 +214,9 @@ const ZH: Record<string, string> = {
   "Version": "版本",
   "version unknown": "版本未知",
   "View all": "查看全部",
-  "View runs": "查看运行",
   "Waiting for the runtime to check in…": "等待运行时上线…",
   "Welcome back — sign in to your workspace.": "欢迎回来，请登录你的工作区。",
   "Where your workspace stands and what to do next.": "查看工作区当前状态和下一步操作。",
-  "When a runtime picks up an issue from Linear, the run shows up here.": "运行时从 Linear 接取问题后，运行记录会显示在这里。",
   "Workspace": "工作区",
   "Write-only — never displayed after saving.": "只写字段，保存后不会再显示。",
   "You will be redirected to Linear to approve access, then brought back here.": "你将跳转到 Linear 批准访问，然后回到这里。",
@@ -236,6 +226,8 @@ const ZH: Record<string, string> = {
   "You're all set": "全部就绪",
   "Access token expired. Reconnect to restore routing.": "访问令牌已过期。请重新连接以恢复路由。",
   "heartbeat {time}": "{time}心跳",
+  "approval_requested": "等待审批",
+  "input_requested": "等待输入",
   "no heartbeat": "无心跳",
   "no report yet": "尚未报告",
   "reported {time}": "{time}报告",
@@ -265,6 +257,7 @@ const ZH: Record<string, string> = {
   "Smoke check found issues": "冒烟检查发现问题",
   "Smoke check passed": "冒烟检查通过",
   "Teams": "团队",
+  "tool_input_requested": "等待工具输入",
   "This runs a quick set of checks against your configuration.": "这会对你的配置运行一组快速检查。",
   "This usually means Linear isn't connected yet. Reconnect on the previous step.": "这通常表示 Linear 尚未连接。请回到上一步重新连接。",
   "Verify Linear, repository, and runtime are wired together end to end.": "验证 Linear、仓库和运行时已经端到端连通。",
@@ -300,7 +293,7 @@ export function I18nProvider({ children }: { children: ReactNode }) {
 
   const t = useCallback(
     (key: string, values: Record<string, string | number> = {}) => {
-      const template = locale === "zh" ? ZH[key] ?? key : key;
+      const template = locale === "zh" ? ZH_TRANSLATIONS[key] ?? key : key;
       return template.replace(/\{(\w+)\}/g, (_, name: string) =>
         String(values[name] ?? `{${name}}`),
       );
@@ -313,14 +306,16 @@ export function I18nProvider({ children }: { children: ReactNode }) {
   return <I18nContext.Provider value={value}>{children}</I18nContext.Provider>;
 }
 
+// eslint-disable-next-line react-refresh/only-export-components
 export function useI18n(): I18nContextValue {
   const value = useContext(I18nContext);
   if (!value) throw new Error("useI18n must be used inside I18nProvider");
   return value;
 }
 
+// eslint-disable-next-line react-refresh/only-export-components
 export function translate(locale: Locale, key: string): string {
-  return locale === "zh" ? ZH[key] ?? key : key;
+  return locale === "zh" ? ZH_TRANSLATIONS[key] ?? key : key;
 }
 
 function initialLocale(): Locale {

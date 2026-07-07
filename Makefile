@@ -4,7 +4,6 @@ PIP := $(PYTHON) -m pip
 PERFORMER := $(VENV)/bin/performer
 CONDUCTOR := $(VENV)/bin/conductor
 PODIUM := $(VENV)/bin/podium
-WORKFLOW := WORKFLOW.md
 
 .PHONY: dev stop once test install
 
@@ -13,10 +12,11 @@ dev: install
 
 stop:
 	-pkill -f '$(CONDUCTOR) --port 8081 --data-root ./.conductor'
-	-pkill -f '$(PERFORMER) .*/.conductor/instances/.*/WORKFLOW.md'
+	-pkill -f '$(PERFORMER) --mode '
 
 once: install
-	$(PERFORMER) $(WORKFLOW) --once
+	@echo "make once has been removed; pipeline attempts are leased and started by Conductor."
+	@false
 
 test: install
 	PYTHONPATH=$(PWD)/packages/performer-api/src:$(PWD)/packages/performer/src:$(PWD)/packages/conductor/src:$(PWD)/packages/podium/src $(PYTHON) -m pytest -q

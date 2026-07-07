@@ -6,15 +6,67 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .labels import GATE_LABELS, PHASE_LABELS, SCORE_LABEL_PREFIX, TYPE_LABELS
-from .models import normalize_state_key
-from .workflow import WorkflowDefinition
+from .labels import PIPELINE_LABELS
+
+
+CODEX_CONFIG_ALLOWED_TOP_LEVEL_KEYS = {
+    "model_provider",
+    "model",
+    "disable_response_storage",
+    "model_reasoning_effort",
+    "approval_policy",
+    "approvals_reviewer",
+    "sandbox_mode",
+    "service_tier",
+    "plan_mode_reasoning_effort",
+}
+CODEX_CONFIG_ALLOWED_SECTION_PREFIXES = (
+    "model_providers",
+    "sandbox_workspace_write",
+)
 
 
 class ConfigError(Exception):
     def __init__(self, code: str, message: str):
         super().__init__(message)
         self.code = code
+
+
+def sanitize_codex_config_template(text: str) -> str:
+    lines = text.splitlines()
+    output: list[str] = []
+    keep_section = True
+    current_section: str | None = None
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            current_section = stripped.strip("[]")
+            keep_section = any(
+                current_section == prefix or current_section.startswith(f"{prefix}.")
+                for prefix in CODEX_CONFIG_ALLOWED_SECTION_PREFIXES
+            )
+            if keep_section:
+                _append_line(output, line)
+            continue
+        if current_section is None:
+            if not stripped or stripped.startswith("#"):
+                _append_line(output, line)
+                continue
+            key = stripped.split("=", 1)[0].strip() if "=" in stripped else ""
+            if key in CODEX_CONFIG_ALLOWED_TOP_LEVEL_KEYS:
+                _append_line(output, line)
+            continue
+        if keep_section:
+            _append_line(output, line)
+    while output and not output[-1].strip():
+        output.pop()
+    return "\n".join(output) + ("\n" if output else "")
+
+
+def _append_line(output: list[str], line: str) -> None:
+    if not line.strip() and (not output or not output[-1].strip()):
+        return
+    output.append(line)
 
 
 @dataclass(frozen=True)
@@ -24,16 +76,10 @@ class TrackerConfig:
     project_slug: str
     api_key: str
     required_delegate_id: str | None = None
-    lifecycle_labels_enabled: bool = True
-    active_states: list[str] = field(default_factory=lambda: ["Todo", "In Progress"])
+    pipeline_labels_enabled: bool = True
     terminal_states: list[str] = field(
         default_factory=lambda: ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]
     )
-
-
-@dataclass(frozen=True)
-class PollingConfig:
-    interval_ms: int = 30_000
 
 
 @dataclass(frozen=True)
@@ -108,57 +154,6 @@ class WorkerConfig:
 
 
 @dataclass(frozen=True)
-class CompletionVerificationConfig:
-    """完成验证配置"""
-
-    enabled: bool = True
-    required_checks: list[str] = field(
-        default_factory=lambda: ["workspace_changes", "test_command_evidence", "metrics_reasonable"]
-    )
-    optional_checks: list[str] = field(default_factory=lambda: ["test_results", "linear_state"])
-    expected_repo_root: str | None = None
-    expected_test_patterns: list[str] = field(default_factory=list)
-    auto_retry_on_fail: bool = True
-    max_verification_retries: int = 1
-    test_timeout_seconds: int = 60
-    min_duration_seconds: int = 5
-    min_workspace_changes_chars: int = 50
-
-
-@dataclass(frozen=True)
-class AcceptanceConfig:
-    """验收 gate 配置"""
-
-    enabled: bool = False
-    mode: str = "block_done"
-    minimum_score: int = 3
-    require_findings_for_score_3: bool = True
-    auto_retry_on_fail: bool = True
-    task_type_label: str = ""
-    acceptance_type_label: str = ""
-    gate_type_label: str = TYPE_LABELS["gate"]
-    evidence_type_label: str = TYPE_LABELS["evidence"]
-    needs_more_info_label: str = PHASE_LABELS["blocked"]
-    todo_state: str = "Todo"
-    implementation_state: str = "In Progress"
-    review_state: str = "In Review"
-    done_state: str = "Done"
-    planned_phase_label: str = PHASE_LABELS["queued"]
-    implementation_phase_label: str = PHASE_LABELS["implementation_running"]
-    review_phase_label: str = PHASE_LABELS["review_running"]
-    rework_phase_label: str = PHASE_LABELS["rework"]
-    marker_name: str = "PERFORMER ACCEPTANCE"
-    plan_revision: int = 1
-    gate_planner_mode: str = "strict"
-    direct_done_bypass_policy: str = "review_with_evidence"
-    gate_pending_label: str = GATE_LABELS["pending"]
-    gate_passed_label: str = GATE_LABELS["passed"]
-    gate_pass_with_findings_label: str = GATE_LABELS["pass_with_findings"]
-    gate_failed_label: str = GATE_LABELS["failed"]
-    score_label_prefix: str = SCORE_LABEL_PREFIX
-
-
-@dataclass(frozen=True)
 class RepositoryHandoffConfig:
     enabled: bool = False
     bundle_root: Path | None = None
@@ -167,53 +162,15 @@ class RepositoryHandoffConfig:
 @dataclass(frozen=True)
 class ServiceConfig:
     tracker: TrackerConfig
-    polling: PollingConfig
     workspace: WorkspaceConfig
     hooks: HooksConfig
     agent: AgentConfig
     codex: CodexConfig
-    prompt_template: str
-    workflow_path: Path
     server: ServerConfig = field(default_factory=ServerConfig)
     persistence: PersistenceConfig = field(default_factory=PersistenceConfig)
     observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
     worker: WorkerConfig = field(default_factory=WorkerConfig)
-    completion_verification: CompletionVerificationConfig = field(
-        default_factory=CompletionVerificationConfig
-    )
-    acceptance: AcceptanceConfig = field(default_factory=AcceptanceConfig)
     repository_handoff: RepositoryHandoffConfig = field(default_factory=RepositoryHandoffConfig)
-
-    @classmethod
-    def from_workflow(cls, workflow: WorkflowDefinition, workflow_path: Path) -> ServiceConfig:
-        raw = workflow.config
-        tracker = _tracker_config(_map(raw.get("tracker")), workflow_path)
-        acceptance = _acceptance_config(_map(raw.get("acceptance")))
-        if acceptance.enabled:
-            tracker = _tracker_with_acceptance_scan_states(tracker, acceptance)
-        return cls(
-            tracker=tracker,
-            polling=_polling_config(_map(raw.get("polling"))),
-            workspace=_workspace_config(_map(raw.get("workspace")), workflow_path),
-            hooks=_hooks_config(_map(raw.get("hooks"))),
-            agent=_agent_config(_map(raw.get("agent"))),
-            codex=_codex_config(_map(raw.get("codex"))),
-            server=_server_config(_map(raw.get("server"))),
-            persistence=_persistence_config(_map(raw.get("persistence")), workflow_path),
-            observability=_observability_config(_map(raw.get("observability"))),
-            worker=_worker_config(_map(raw.get("worker"))),
-            completion_verification=_completion_verification_config(
-                _map(raw.get("completion_verification")),
-                workflow_path,
-            ),
-            acceptance=acceptance,
-            repository_handoff=_repository_handoff_config(
-                _map(raw.get("repository_handoff")),
-                workflow_path,
-            ),
-            prompt_template=workflow.prompt_template,
-            workflow_path=workflow_path,
-        )
 
     def validate_static(self) -> None:
         if self.tracker.kind == "linear" and not self.tracker.api_key:
@@ -288,17 +245,17 @@ def _resolve_env(value: str | None) -> str | None:
     return value
 
 
-def _resolve_path(value: str | None, workflow_path: Path) -> Path:
+def _resolve_path(value: str | None, base_path: Path) -> Path:
     raw = _resolve_env(value) if value is not None else None
     if not raw:
         raw = str(Path(tempfile.gettempdir()) / "performer_workspaces")
     expanded = Path(os.path.expanduser(raw))
     if not expanded.is_absolute():
-        expanded = workflow_path.parent / expanded
+        expanded = base_path.parent / expanded
     return expanded.resolve()
 
 
-def _tracker_config(raw: dict[str, Any], workflow_path: Path) -> TrackerConfig:
+def _tracker_config(raw: dict[str, Any], base_path: Path) -> TrackerConfig:
     kind = _string(raw.get("kind"), "linear") or "linear"
     endpoint = _string(raw.get("endpoint"), "https://api.linear.app/graphql") or ""
     config = TrackerConfig(
@@ -307,13 +264,12 @@ def _tracker_config(raw: dict[str, Any], workflow_path: Path) -> TrackerConfig:
         project_slug=_string(raw.get("project_slug"), "") or "",
         api_key=_resolve_env(_string(raw.get("api_key"))) or "",
         required_delegate_id=_resolve_env(_string(raw.get("required_delegate_id"))),
-        lifecycle_labels_enabled=_bool(raw.get("lifecycle_labels_enabled"), True),
-        active_states=list(raw.get("active_states") or ["Todo", "In Progress"]),
+        pipeline_labels_enabled=_bool(raw.get("pipeline_labels_enabled"), True),
         terminal_states=list(
             raw.get("terminal_states") or ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]
         ),
     )
-    _ = workflow_path
+    _ = base_path
     _validate_tracker(config)
     return config
 
@@ -325,41 +281,9 @@ def _validate_tracker(config: TrackerConfig) -> None:
         raise ConfigError("missing_tracker_project_slug", "tracker.project_slug is required")
 
 
-def _tracker_with_acceptance_scan_states(
-    tracker: TrackerConfig,
-    acceptance: AcceptanceConfig,
-) -> TrackerConfig:
-    active_states = list(tracker.active_states)
-    seen = {normalize_state_key(state) for state in active_states}
-    for state in (
-        acceptance.todo_state,
-        acceptance.implementation_state,
-        acceptance.review_state,
-        acceptance.done_state,
-    ):
-        key = normalize_state_key(state)
-        if key and key not in seen:
-            active_states.append(state)
-            seen.add(key)
-    return TrackerConfig(
-        kind=tracker.kind,
-        endpoint=tracker.endpoint,
-        project_slug=tracker.project_slug,
-        api_key=tracker.api_key,
-        required_delegate_id=tracker.required_delegate_id,
-        lifecycle_labels_enabled=tracker.lifecycle_labels_enabled,
-        active_states=active_states,
-        terminal_states=tracker.terminal_states,
-    )
-
-
-def _polling_config(raw: dict[str, Any]) -> PollingConfig:
-    return PollingConfig(interval_ms=_int(raw.get("interval_ms"), 30_000, positive=True))
-
-
-def _workspace_config(raw: dict[str, Any], workflow_path: Path) -> WorkspaceConfig:
+def _workspace_config(raw: dict[str, Any], base_path: Path) -> WorkspaceConfig:
     return WorkspaceConfig(
-        root=_resolve_path(_string(raw.get("root")), workflow_path),
+        root=_resolve_path(_string(raw.get("root")), base_path),
         per_issue=_bool(raw.get("per_issue"), True),
     )
 
@@ -459,11 +383,11 @@ def _server_config(raw: dict[str, Any]) -> ServerConfig:
     )
 
 
-def _persistence_config(raw: dict[str, Any], workflow_path: Path) -> PersistenceConfig:
+def _persistence_config(raw: dict[str, Any], base_path: Path) -> PersistenceConfig:
     raw_path = _string(raw.get("path"))
     if raw_path is None or not raw_path.strip():
         return PersistenceConfig()
-    return PersistenceConfig(path=_resolve_path(raw_path, workflow_path))
+    return PersistenceConfig(path=_resolve_path(raw_path, base_path))
 
 
 def _observability_config(raw: dict[str, Any]) -> ObservabilityConfig:
@@ -487,125 +411,11 @@ def _worker_config(raw: dict[str, Any]) -> WorkerConfig:
     )
 
 
-def _string_list(value: Any, default: list[str]) -> list[str]:
-    if value is None:
-        return list(default)
-    if not isinstance(value, list):
-        return list(default)
-    return [str(item).strip() for item in value if str(item).strip()]
-
-
-def _completion_verification_config(raw: dict[str, Any], workflow_path: Path) -> CompletionVerificationConfig:
-    defaults = CompletionVerificationConfig()
-    expected_repo_root = _string(raw.get("expected_repo_root"), defaults.expected_repo_root)
-    if expected_repo_root:
-        expected_repo_root = str(_resolve_path(expected_repo_root, workflow_path))
-    return CompletionVerificationConfig(
-        enabled=_bool(raw.get("enabled"), defaults.enabled),
-        required_checks=_string_list(raw.get("required_checks"), defaults.required_checks),
-        optional_checks=_string_list(raw.get("optional_checks"), defaults.optional_checks),
-        expected_repo_root=expected_repo_root,
-        expected_test_patterns=_string_list(raw.get("expected_test_patterns"), defaults.expected_test_patterns),
-        auto_retry_on_fail=_bool(raw.get("auto_retry_on_fail"), defaults.auto_retry_on_fail),
-        max_verification_retries=_int(
-            raw.get("max_verification_retries"),
-            defaults.max_verification_retries,
-            positive=True,
-        ),
-        test_timeout_seconds=_required_positive_int(
-            raw.get("test_timeout_seconds"),
-            defaults.test_timeout_seconds,
-            "invalid_completion_verification_test_timeout_seconds",
-        ),
-        min_duration_seconds=_int(raw.get("min_duration_seconds"), defaults.min_duration_seconds),
-        min_workspace_changes_chars=_int(
-            raw.get("min_workspace_changes_chars"),
-            defaults.min_workspace_changes_chars,
-            positive=True,
-        ),
-    )
-
-
-def _acceptance_config(raw: dict[str, Any]) -> AcceptanceConfig:
-    defaults = AcceptanceConfig()
-    return AcceptanceConfig(
-        enabled=_bool(raw.get("enabled"), defaults.enabled),
-        mode=_string(raw.get("mode"), defaults.mode) or defaults.mode,
-        minimum_score=_int(raw.get("minimum_score"), defaults.minimum_score),
-        require_findings_for_score_3=_bool(
-            raw.get("require_findings_for_score_3"),
-            defaults.require_findings_for_score_3,
-        ),
-        auto_retry_on_fail=_bool(raw.get("auto_retry_on_fail"), defaults.auto_retry_on_fail),
-        task_type_label=_string(raw.get("task_type_label"), defaults.task_type_label) or defaults.task_type_label,
-        acceptance_type_label=(
-            _string(raw.get("acceptance_type_label"), defaults.acceptance_type_label)
-            or defaults.acceptance_type_label
-        ),
-        gate_type_label=_string(raw.get("gate_type_label"), defaults.gate_type_label) or defaults.gate_type_label,
-        evidence_type_label=(
-            _string(raw.get("evidence_type_label"), defaults.evidence_type_label)
-            or defaults.evidence_type_label
-        ),
-        needs_more_info_label=(
-            _string(raw.get("needs_more_info_label"), defaults.needs_more_info_label)
-            or defaults.needs_more_info_label
-        ),
-        todo_state=_string(raw.get("todo_state"), defaults.todo_state) or defaults.todo_state,
-        implementation_state=(
-            _string(raw.get("implementation_state"), defaults.implementation_state)
-            or defaults.implementation_state
-        ),
-        review_state=_string(raw.get("review_state"), defaults.review_state) or defaults.review_state,
-        done_state=_string(raw.get("done_state"), defaults.done_state) or defaults.done_state,
-        planned_phase_label=(
-            _string(raw.get("planned_phase_label"), defaults.planned_phase_label)
-            or defaults.planned_phase_label
-        ),
-        implementation_phase_label=(
-            _string(raw.get("implementation_phase_label"), defaults.implementation_phase_label)
-            or defaults.implementation_phase_label
-        ),
-        review_phase_label=(
-            _string(raw.get("review_phase_label"), defaults.review_phase_label)
-            or defaults.review_phase_label
-        ),
-        rework_phase_label=(
-            _string(raw.get("rework_phase_label"), defaults.rework_phase_label)
-            or defaults.rework_phase_label
-        ),
-        marker_name=_string(raw.get("marker_name"), defaults.marker_name) or defaults.marker_name,
-        plan_revision=_int(raw.get("plan_revision"), defaults.plan_revision, positive=True),
-        gate_planner_mode=(
-            _string(raw.get("gate_planner_mode"), defaults.gate_planner_mode)
-            or defaults.gate_planner_mode
-        ),
-        direct_done_bypass_policy=(
-            _string(raw.get("direct_done_bypass_policy"), defaults.direct_done_bypass_policy)
-            or defaults.direct_done_bypass_policy
-        ),
-        gate_pending_label=(
-            _string(raw.get("gate_pending_label"), defaults.gate_pending_label)
-            or defaults.gate_pending_label
-        ),
-        gate_passed_label=(
-            _string(raw.get("gate_passed_label"), defaults.gate_passed_label)
-            or defaults.gate_passed_label
-        ),
-        gate_pass_with_findings_label=(
-            _string(raw.get("gate_pass_with_findings_label"), defaults.gate_pass_with_findings_label)
-            or defaults.gate_pass_with_findings_label
-        ),
-        gate_failed_label=_string(raw.get("gate_failed_label"), defaults.gate_failed_label) or defaults.gate_failed_label,
-        score_label_prefix=_string(raw.get("score_label_prefix"), defaults.score_label_prefix) or defaults.score_label_prefix,
-    )
-
-
-def _repository_handoff_config(raw: dict[str, Any], workflow_path: Path) -> RepositoryHandoffConfig:
+def _repository_handoff_config(raw: dict[str, Any], base_path: Path) -> RepositoryHandoffConfig:
     return RepositoryHandoffConfig(
         enabled=_bool(raw.get("enabled"), False),
         bundle_root=(
-            _resolve_path(_string(raw.get("bundle_root")), workflow_path)
+            _resolve_path(_string(raw.get("bundle_root")), base_path)
             if _string(raw.get("bundle_root"))
             else None
         ),

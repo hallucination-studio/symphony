@@ -57,10 +57,11 @@ export function useInstanceLogs(
   });
 }
 
-export function useRecentRuns(limit = 10) {
+export function usePipeline() {
   return useQuery({
-    queryKey: ["runs", "recent", limit],
-    queryFn: () => api.recentRuns(limit),
+    queryKey: ["pipeline"],
+    queryFn: () => api.pipeline(),
+    refetchInterval: 5000,
   });
 }
 

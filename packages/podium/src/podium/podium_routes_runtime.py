@@ -14,6 +14,7 @@ from typing import Any, Awaitable, Callable
 import httpx
 from fastapi import FastAPI, Header, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
+from performer_api.pipeline import RuntimeConfigEnvelope
 
 from .podium_install import shlex_quote
 from .podium_shared import (
@@ -25,7 +26,7 @@ from .podium_shared import (
     run_public,
     runtime_belongs_to_workspace,
     runtime_public,
-    sanitize_codex_profile,
+    sanitize_runtime_config,
     utc_now_iso,
 )
 from .podium_state import SecretDecryptionError
@@ -53,8 +54,7 @@ def register_runtime_routes(
                 "linear_workspace_id": workspace_id,
                 "project_slug": "",
                 "linear_agent_app_user_id": "",
-                "workflow_profile": "task",
-                "codex_profile": {},
+                "pipeline_profile": "default",
             },
         )
         state.persist()
@@ -145,37 +145,6 @@ def register_runtime_routes(
         presence = await state.presence_snapshot([runtime_id])
         return JSONResponse(runtime_public(runtime, presence))
 
-    @app.get("/api/v1/runs/recent")
-    async def recent_runs(request: Request) -> JSONResponse:
-        user = await require_user(request)
-        if user is None:
-            return error_response(401, "unauthorized", "Unauthorized")
-        workspace_id = str(user["id"])
-        raw_limit = request.query_params.get("limit") or "10"
-        try:
-            limit = int(raw_limit)
-        except ValueError:
-            limit = 10
-        limit = max(1, min(limit, 100))
-        runs = [
-            run
-            for run in state.dispatches.values()
-            if dispatch_belongs_to_workspace(run, workspace_id, state.runtime_groups)
-        ]
-        runs.sort(key=lambda run: str(run.get("created_at") or ""), reverse=True)
-        return JSONResponse({"runs": [run_public(run) for run in runs[:limit]]})
-
-    @app.get("/api/v1/runs/{run_id}")
-    async def run_detail(run_id: str, request: Request) -> JSONResponse:
-        user = await require_user(request)
-        if user is None:
-            return error_response(401, "unauthorized", "Unauthorized")
-        workspace_id = str(user["id"])
-        run = state.dispatches.get(run_id)
-        if run is None or not dispatch_belongs_to_workspace(run, workspace_id, state.runtime_groups):
-            return error_response(404, "not_found", "Run not found")
-        return JSONResponse(run_public(run))
-
     @app.post("/api/v1/runtime/enrollment-tokens")
     async def create_enrollment_token(request: Request) -> dict[str, str]:
         payload = await request.json()
@@ -191,8 +160,7 @@ def register_runtime_routes(
                 "linear_workspace_id": linear_workspace_id,
                 "project_slug": project_slug,
                 "linear_agent_app_user_id": str(payload.get("linear_agent_app_user_id") or payload.get("agent_app_user_id") or ""),
-                "workflow_profile": str(payload.get("workflow_profile") or "task"),
-                "codex_profile": sanitize_codex_profile(payload.get("codex_profile")),
+                "pipeline_profile": str(payload.get("pipeline_profile") or "default"),
             },
         )
         state.persist()
@@ -283,7 +251,70 @@ def register_runtime_routes(
             return error_response(401, "unauthorized", "Unauthorized")
         payload = await request.json()
         result = await state.apply_runtime_report(str(runtime["id"]), payload if isinstance(payload, dict) else {})
+        pipeline = payload.get("pipeline") if isinstance(payload, dict) else None
+        if isinstance(pipeline, dict):
+            state.pipeline_views[str(runtime.get("runtime_group_id") or "")] = sanitize_runtime_config(pipeline)
+            state.persist()
+        group_id = str(runtime.get("runtime_group_id") or "")
+        config = state.runtime_configs.get(group_id) or {}
+        if isinstance(result, dict):
+            result = {**result, "config": config}
         return JSONResponse(result)
+
+    @app.post("/api/v1/runtime/config")
+    async def runtime_config_push(request: Request, authorization: str | None = Header(default=None)) -> JSONResponse:
+        runtime = await state.runtime_for_bearer(authorization or "")
+        if runtime is None:
+            return error_response(401, "unauthorized", "Unauthorized")
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            return error_response(400, "invalid_config", "Runtime config must be a JSON object")
+        group_id = str(runtime.get("runtime_group_id") or "")
+        config = {"runtime_group_id": group_id, **payload}
+        try:
+            RuntimeConfigEnvelope.from_dict(config).validate()
+        except Exception as exc:
+            response = error_response(400, "invalid_runtime_config", "Runtime config failed pipeline validation")
+            body = json.loads(response.body.decode("utf-8"))
+            body["error"]["details"] = str(exc)
+            return JSONResponse(body, status_code=400)
+        sanitized = sanitize_runtime_config(config)
+        version = optional_int(sanitized.get("version"), 0) or 0
+        current = state.runtime_configs.get(group_id)
+        current_version = optional_int((current or {}).get("version"), 0) or 0
+        if version <= current_version:
+            return error_response(409, "stale_runtime_config", "Runtime config version must increase")
+        state.runtime_configs[group_id] = sanitized
+        state.persist()
+        return JSONResponse({"accepted": True, "config": sanitized})
+
+    @app.get("/api/v1/runtime/config")
+    async def runtime_config_read(authorization: str | None = Header(default=None)) -> JSONResponse:
+        runtime = await state.runtime_for_bearer(authorization or "")
+        if runtime is None:
+            return error_response(401, "unauthorized", "Unauthorized")
+        group_id = str(runtime.get("runtime_group_id") or "")
+        return JSONResponse({"config": state.runtime_configs.get(group_id) or {}})
+
+    @app.get("/api/v1/pipeline")
+    async def pipeline_view(request: Request) -> JSONResponse:
+        user = await require_user(request)
+        if user is None:
+            return error_response(401, "unauthorized", "Unauthorized")
+        workspace_id = str(user["id"])
+        group_id = f"group_{workspace_id}"
+        config = state.runtime_configs.get(group_id) or {}
+        view = state.pipeline_views.get(group_id) or {}
+        browser_config = sanitize_runtime_config(config, hide_runtime_sources=True)
+        scheduler_policy = browser_config.get("scheduler_policy") if isinstance(browser_config.get("scheduler_policy"), dict) else {}
+        return JSONResponse(
+            {
+                "runtime_group_id": group_id,
+                "policy_revision": optional_int(scheduler_policy.get("version"), optional_int(browser_config.get("version"), 0)) or 0,
+                "profiles": browser_config.get("profiles") if isinstance(browser_config.get("profiles"), dict) else {},
+                "pipeline": view,
+            }
+        )
 
     @app.get("/api/v1/runtimes/{conductor_id}/instances/{instance_id}/logs")
     async def runtime_instance_logs(conductor_id: str, instance_id: str, request: Request) -> JSONResponse:
@@ -360,7 +391,7 @@ def register_runtime_routes(
             str(payload.get("status") or "accepted"),
             fencing_token=fencing_token,
             reason=payload.get("reason") if isinstance(payload.get("reason"), str) else None,
-            runtime_phase=payload.get("runtime_phase") if isinstance(payload.get("runtime_phase"), str) else None,
+            pipeline=_pipeline_ack_payload(payload),
         )
         if dispatch is None:
             return error_response(404, "dispatch_not_found", "Dispatch not found")
@@ -409,7 +440,7 @@ def register_runtime_routes(
                         str(message.get("status") or "accepted"),
                         fencing_token=fencing_token,
                         reason=message.get("reason") if isinstance(message.get("reason"), str) else None,
-                        runtime_phase=message.get("runtime_phase") if isinstance(message.get("runtime_phase"), str) else None,
+                        pipeline=_pipeline_ack_payload(message),
                     )
                     await websocket.send_json({"type": "dispatch.ack.ok", "dispatch": dispatch_public(dispatch) if dispatch else None})
                 else:
@@ -512,6 +543,22 @@ async def _relay_redis_runtime_commands(
                 await result
 
 
+def _pipeline_ack_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: payload.get(key)
+        for key in (
+            "graph_id",
+            "node_id",
+            "attempt_id",
+            "mode",
+            "attempt_status",
+            "graph_revision",
+            "policy_revision",
+            "lease_id",
+        )
+    }
+
+
 def normalize_agent_session_event(payload: dict[str, Any]) -> dict[str, Any]:
     session = payload.get("agentSession") if isinstance(payload.get("agentSession"), dict) else {}
     issue = session.get("issue") if isinstance(session.get("issue"), dict) else {}
@@ -524,6 +571,10 @@ def normalize_agent_session_event(payload: dict[str, Any]) -> dict[str, Any]:
         "project_slug": str(project.get("slugId") or payload.get("project_slug") or ""),
         "issue_id": str(issue.get("id") or payload.get("issue_id") or ""),
         "issue_identifier": str(issue.get("identifier") or payload.get("issue_identifier") or ""),
+        "issue_title": str(issue.get("title") or payload.get("issue_title") or payload.get("title") or ""),
+        "issue_description": str(
+            issue.get("description") or payload.get("issue_description") or payload.get("description") or ""
+        ),
         "agent_session_id": str(session.get("id") or payload.get("agent_session_id") or ""),
         "agent_app_user_id": str(
             session.get("appUserId")

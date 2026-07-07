@@ -1,11 +1,10 @@
 import { useNavigate } from "react-router-dom";
-import { useBootstrap, useRecentRuns, useSmokeCheckResult } from "../api/hooks";
+import { useBootstrap, usePipeline, useSmokeCheckResult } from "../api/hooks";
 import { Card } from "../components/Card";
 import { LinkButton } from "../components/Button";
 import { ActionPanel } from "../components/ActionPanel";
 import { EmptyState } from "../components/EmptyState";
 import { OnboardingProgress as OnboardingProgressView } from "../components/OnboardingProgress";
-import { RunSummaryList } from "../components/RunSummaryList";
 import { StatusBadge } from "../components/StatusBadge";
 import { PageHeader, QueryState } from "../components/PageState";
 import {
@@ -16,7 +15,7 @@ import { linearHealth } from "../lib/linear";
 import type {
   Bootstrap,
   OnboardingProgress,
-  RunSummary,
+  PipelineStatus,
   SmokeCheckResult,
 } from "../api/types";
 import type { GlobalStatus } from "../lib/format";
@@ -24,7 +23,7 @@ import { useI18n } from "../i18n";
 
 export default function HomePage() {
   const bootstrap = useBootstrap();
-  const runs = useRecentRuns(5);
+  const pipeline = usePipeline();
   const smoke = useSmokeCheckResult();
   const { t } = useI18n();
 
@@ -38,8 +37,8 @@ export default function HomePage() {
         {bootstrap.data ? (
           <Home
             data={bootstrap.data}
-            runs={runs.data?.runs ?? []}
-            runsLoading={runs.isLoading}
+            pipeline={pipeline.data ?? null}
+            pipelineLoading={pipeline.isLoading}
             smoke={smoke.data ?? null}
           />
         ) : null}
@@ -50,13 +49,13 @@ export default function HomePage() {
 
 function Home({
   data,
-  runs,
-  runsLoading,
+  pipeline,
+  pipelineLoading,
   smoke,
 }: {
   data: Bootstrap;
-  runs: RunSummary[];
-  runsLoading: boolean;
+  pipeline: PipelineStatus | null;
+  pipelineLoading: boolean;
   smoke: SmokeCheckResult | null;
 }) {
   const navigate = useNavigate();
@@ -75,8 +74,8 @@ function Home({
             tone="success"
             title={t("You're all set")}
             description={t("Onboarding is complete. Podium is routing issues to your runtime.")}
-            actionLabel={t("View runs")}
-            onAction={() => navigate("/runs")}
+            actionLabel={t("View pipeline")}
+            onAction={() => navigate("/pipeline")}
           />
         ) : next ? (
           <ActionPanel
@@ -138,26 +137,34 @@ function Home({
 
       <Card
         className="span-2"
-        title={t("Recent runs")}
-        actions={
-          runs.length > 0 ? (
-            <LinkButton to="/runs" variant="ghost">
-              {t("View all")}
-            </LinkButton>
-          ) : undefined
-        }
+        title={t("Pipeline")}
+        actions={<LinkButton to="/pipeline" variant="ghost">{t("View pipeline")}</LinkButton>}
       >
-        <QueryState isLoading={runsLoading} error={null}>
-          {runs.length === 0 ? (
+        <QueryState isLoading={pipelineLoading} error={null}>
+          {!pipeline?.pipeline ? (
             <EmptyState
-              title={t("No runs yet")}
-              description={t("Once a runtime picks up an issue, runs will show up here.")}
+              title={t("No pipeline report yet")}
+              description={t("Pipeline state appears after a Conductor posts its next runtime report.")}
             />
           ) : (
-            <RunSummaryList runs={runs} />
+            <div className="pipeline-revisions">
+              <Metric label={t("Graph revision")} value={pipeline.pipeline.graph_revision ?? 0} />
+              <Metric label={t("Policy revision")} value={pipeline.policy_revision} />
+              <Metric label={t("Human waits")} value={pipeline.pipeline.human_waits?.length ?? 0} />
+              <Metric label={t("Runtime waits")} value={pipeline.pipeline.runtime_waits?.length ?? 0} />
+            </div>
           )}
         </QueryState>
       </Card>
+    </div>
+  );
+}
+
+function Metric({ label, value }: { label: string; value: string | number }) {
+  return (
+    <div className="pipeline-revision">
+      <span className="pipeline-label">{label}</span>
+      <span className="pipeline-value">{value}</span>
     </div>
   );
 }

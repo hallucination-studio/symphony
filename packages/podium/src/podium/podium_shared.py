@@ -13,52 +13,69 @@ def dispatch_public(dispatch: dict[str, Any]) -> dict[str, Any]:
     agent_session_id = str(dispatch.get("agent_session_id") or "")
     if agent_session_id.startswith("empty-session:"):
         agent_session_id = ""
-    return {
+    payload = {
         "dispatch_id": dispatch["dispatch_id"],
         "project_binding_id": project_binding_id,
         "instance_id": project_binding_id.split(":", 1)[1] if ":" in project_binding_id else "",
         "issue_id": dispatch["issue_id"],
         "issue_identifier": dispatch["issue_identifier"],
+        "issue_title": dispatch.get("issue_title") or "",
+        "issue_description": dispatch.get("issue_description") or "",
         "linear_workspace_id": dispatch["linear_workspace_id"],
         "project_slug": dispatch["project_slug"],
         "agent_session_id": agent_session_id,
         "agent_app_user_id": dispatch.get("agent_app_user_id") or "",
         "routing_rule_id": dispatch["routing_rule_id"],
-        "workflow_profile": dispatch["workflow_profile"],
-        "codex_profile": sanitize_codex_profile(dispatch.get("codex_profile")),
+        "pipeline_profile": dispatch["pipeline_profile"],
         "blocked_by": list(dispatch.get("blocked_by") or []),
         "parent_issue_id": dispatch.get("parent_issue_id") or "",
         "status": dispatch["status"],
         "fencing_token": int(dispatch.get("fencing_token") or 0),
         "reason": dispatch.get("reason") or "",
-        "runtime_phase": dispatch.get("runtime_phase") or "",
     }
+    for key in (
+        "graph_id",
+        "node_id",
+        "attempt_id",
+        "mode",
+        "attempt_status",
+        "graph_revision",
+        "policy_revision",
+        "lease_id",
+    ):
+        if dispatch.get(key) not in {None, ""}:
+            payload[key] = dispatch[key]
+    return payload
 
-def sanitize_codex_profile(value: Any) -> dict[str, Any]:
+def sanitize_runtime_config(value: Any, *, hide_runtime_sources: bool = False) -> dict[str, Any]:
     if not isinstance(value, dict):
         return {}
-    profile: dict[str, Any] = {}
-    model = str(value.get("model") or "").strip()
-    sandbox = str(value.get("sandbox") or "").strip()
-    if model:
-        profile["model"] = model
-    if sandbox:
-        profile["sandbox"] = sandbox
-    overrides = value.get("config_overrides")
-    if isinstance(overrides, list):
-        safe_overrides: list[str] = []
-        for item in overrides:
-            text = str(item).strip()
-            if not text or "=" not in text:
-                continue
-            key, raw_value = text.split("=", 1)
-            lowered_key = key.lower()
-            if any(marker in lowered_key for marker in ("api_key", "apikey", "token", "secret", "password")) and not raw_value.strip().startswith("$"):
-                continue
-            safe_overrides.append(text)
-        if safe_overrides:
-            profile["config_overrides"] = safe_overrides
-    return profile
+    payload = dict(value)
+    profiles = payload.get("profiles")
+    if isinstance(profiles, dict):
+        payload["profiles"] = {
+            str(mode): {
+                **(profile if isinstance(profile, dict) else {}),
+                "mode": str((profile or {}).get("mode") or mode) if isinstance(profile, dict) else str(mode),
+                "settings": _sanitize_profile_settings(
+                    profile.get("settings") if isinstance(profile, dict) and isinstance(profile.get("settings"), dict) else {},
+                    hide_runtime_sources=hide_runtime_sources,
+                ),
+            }
+            for mode, profile in profiles.items()
+        }
+    return payload
+
+def _sanitize_profile_settings(settings: dict[str, Any], *, hide_runtime_sources: bool = False) -> dict[str, Any]:
+    sanitized: dict[str, Any] = {}
+    for key, value in settings.items():
+        lowered = str(key).lower()
+        if hide_runtime_sources and lowered in {"codex_home_source"}:
+            continue
+        if any(marker in lowered for marker in ("token", "secret", "password", "cookie", "api_key", "apikey")):
+            continue
+        sanitized[str(key)] = value
+    return sanitized
 
 def runtime_belongs_to_workspace(
     runtime: dict[str, Any],

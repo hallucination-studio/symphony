@@ -34,7 +34,7 @@ function conductorWithPerformer() {
         linear_project: "Web Backend",
         project_slug: "web-backend",
         agent_app_user_id: "agent-42",
-        workflow_profile: "task",
+        pipeline_profile: "default",
         process_status: "running",
         constraint_labels: ["symphony:performer/checkout-flow", "symphony:profile/task"],
         metrics: { retries: 2, blocked: 1, pending_human: 1, failures: 0, tokens: 1500, queue_depth: 3 },

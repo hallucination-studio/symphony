@@ -2,73 +2,6 @@ from __future__ import annotations
 
 from typing import Any
 
-ISSUE_FIELDS = """
-nodes {
-  id
-  identifier
-  title
-  description
-  priority
-  branchName
-  url
-  createdAt
-  updatedAt
-  state { name }
-  project { slugId name }
-  assignee { id }
-  delegate { id }
-  labels { nodes { name } }
-  inverseRelations { nodes { type issue { id identifier state { name } } } }
-}
-pageInfo { hasNextPage endCursor }
-"""
-
-
-def _issues_query(operation_name: str, *, include_delegate_filter: bool) -> str:
-    delegate_variable = ", $delegateId: ID" if include_delegate_filter else ""
-    delegate_filter = "\n      delegate: { id: { eq: $delegateId } }" if include_delegate_filter else ""
-    return f"""
-query {operation_name}($projectSlug: String!, $stateNames: [String!], $first: Int!, $after: String{delegate_variable}) {{
-  issues(
-    first: $first
-    after: $after
-    filter: {{
-      project: {{ slugId: {{ eq: $projectSlug }} }}
-      state: {{ name: {{ in: $stateNames }} }}{delegate_filter}
-    }}
-  ) {{
-    {ISSUE_FIELDS}
-  }}
-}}
-"""
-
-
-CANDIDATE_QUERY = _issues_query("PerformerCandidateIssues", include_delegate_filter=False)
-ISSUES_BY_STATES_QUERY = _issues_query("PerformerIssuesByStates", include_delegate_filter=False)
-
-
-def _issues_query_and_variables(
-    operation_name: str,
-    config: TrackerConfig,
-    state_names: list[str],
-    *,
-    page_size: int,
-) -> tuple[str, dict[str, Any]]:
-    include_delegate_filter = config.required_delegate_id is not None
-    variables: dict[str, Any] = {
-        "projectSlug": config.project_slug,
-        "stateNames": state_names,
-        "first": page_size,
-        "after": None,
-    }
-    if config.required_delegate_id is not None:
-        variables["delegateId"] = config.required_delegate_id
-    return _issues_query(
-        operation_name,
-        include_delegate_filter=include_delegate_filter,
-    ), variables
-
-
 ISSUE_STATES_QUERY = """
 query PerformerIssueStates($ids: [ID!], $projectSlug: String!) {
   issues(filter: { id: { in: $ids }, project: { slugId: { eq: $projectSlug } } }) {
@@ -163,8 +96,8 @@ mutation PerformerUpdateIssueDescription($issueId: String!, $description: String
 """
 
 
-ISSUE_ACCEPTANCE_RELATIONS_QUERY = """
-query PerformerAcceptanceRelations($issueId: String!) {
+ISSUE_PIPELINE_RELATIONS_QUERY = """
+query PerformerPipelineRelations($issueId: String!) {
   issue(id: $issueId) {
     id
     identifier

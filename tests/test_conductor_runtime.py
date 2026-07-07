@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import subprocess
 import sys
 from pathlib import Path
@@ -73,15 +74,29 @@ def make_instance(tmp_path: Path) -> InstanceRecord:
         repo_source_value=str(tmp_path / "repo"),
         resolved_repo_path=str(tmp_path / "repo"),
         instance_dir=str(instance_dir),
-        workflow_path=str(instance_dir / "WORKFLOW.md"),
         workspace_root=str(instance_dir / "workspace"),
         persistence_path=str(instance_dir / "state" / "performer.json"),
         log_path=str(instance_dir / "logs" / "performer.log"),
         http_port=8801,
         linear_project="ENG",
         linear_filters={"labels": ["codex"]},
-        workflow_profile="default",
-        workflow_inputs={},
+    )
+
+
+def pipeline_start_kwargs() -> dict[str, str]:
+    return {
+        "mode": "plan",
+        "attempt_request_path": "/tmp/request.json",
+        "attempt_result_path": "/tmp/result.json",
+    }
+
+
+def expected_pipeline_log() -> str:
+    return (
+        "event=performer_stream stream=stdout mode=plan "
+        "attempt_request_path=/tmp/request.json attempt_result_path=/tmp/result.json message=daemon started\n"
+        "event=performer_stream stream=stderr mode=plan "
+        "attempt_request_path=/tmp/request.json attempt_result_path=/tmp/result.json message=warning line\n"
     )
 
 
@@ -107,23 +122,76 @@ async def test_start_launches_performer_process_and_captures_logs(tmp_path: Path
     manager = ConductorRuntimeManager(process_factory=process_factory, command="performer")
     instance = make_instance(tmp_path)
 
-    started = await manager.start(instance, env={"LINEAR_API_KEY": "conductor-token"})
+    started = await manager.start(
+        instance,
+        env={
+            "LINEAR_API_KEY": "conductor-token",
+            "PODIUM_PROXY_TOKEN": "proxy-token",
+            "CODEX_HOME": str(tmp_path / "managed-codex-home"),
+            "CODEX_MODEL": "gpt-5.3-codex",
+        },
+        **pipeline_start_kwargs(),
+    )
 
-    assert captured["args"] == ("performer", instance.workflow_path)
+    assert captured["args"] == (
+        "performer",
+        "--mode",
+        "plan",
+        "--attempt-request-path",
+        "/tmp/request.json",
+        "--attempt-result-path",
+        "/tmp/result.json",
+    )
     assert captured["kwargs"]["cwd"] == instance.resolved_repo_path
-    assert captured["kwargs"]["env"]["LINEAR_API_KEY"] == "conductor-token"
+    assert "LINEAR_API_KEY" not in captured["kwargs"]["env"]
+    assert captured["kwargs"]["env"]["PODIUM_PROXY_TOKEN"] == "proxy-token"
+    assert captured["kwargs"]["env"]["CODEX_HOME"] == str(tmp_path / "managed-codex-home")
+    assert captured["kwargs"]["env"]["CODEX_MODEL"] == "gpt-5.3-codex"
     assert started.process_status == "running"
     assert started.pid == 4242
     current_log = Path(instance.instance_dir) / "logs" / "performer-000001.log"
     assert started.log_path == str(current_log)
     assert Path(instance.log_path).read_text(encoding="utf-8") == ""
-    assert await wait_for_log(current_log, "daemon started\nwarning line\n") == "daemon started\nwarning line\n"
+    assert await wait_for_log(current_log, expected_pipeline_log()) == expected_pipeline_log()
 
     stopped = await manager.stop(started)
 
     assert process.terminated is True
     assert stopped.process_status == "stopped"
     assert stopped.pid is None
+
+
+@pytest.mark.asyncio
+async def test_performer_stream_logs_redact_secret_values(tmp_path: Path) -> None:
+    process = FakeProcess()
+    process.stdout = FakeStream([b"Authorization: Bearer stdout-secret token=abc123\n"])
+    process.stderr = FakeStream([b"password=hunter2 client_secret=secret cookie=session\n"])
+
+    async def process_factory(*args: str, **kwargs: Any) -> FakeProcess:
+        return process
+
+    manager = ConductorRuntimeManager(process_factory=process_factory, command="performer")
+    instance = make_instance(tmp_path)
+
+    started = await manager.start(instance, env={}, **pipeline_start_kwargs())
+    current_log = Path(started.log_path)
+    for _ in range(20):
+        log_text = current_log.read_text(encoding="utf-8")
+        if "event=performer_stream" in log_text and "cookie=" in log_text:
+            break
+        await asyncio.sleep(0.01)
+    log_text = current_log.read_text(encoding="utf-8")
+
+    assert "stdout-secret" not in log_text
+    assert "abc123" not in log_text
+    assert "hunter2" not in log_text
+    assert "client_secret=secret" not in log_text
+    assert "cookie=session" not in log_text
+    assert "Authorization: [REDACTED]" in log_text
+    assert "token=[REDACTED]" in log_text
+    assert "password=[REDACTED]" in log_text
+    assert "client_secret=[REDACTED]" in log_text
+    assert "cookie=[REDACTED]" in log_text
 
 
 @pytest.mark.asyncio
@@ -145,12 +213,46 @@ async def test_start_does_not_inherit_sensitive_runtime_credentials(
     manager = ConductorRuntimeManager(process_factory=process_factory, command="performer")
     instance = make_instance(tmp_path)
 
-    await manager.start(instance, env={})
+    await manager.start(instance, env={}, **pipeline_start_kwargs())
 
     env = captured["kwargs"]["env"]
     assert "LINEAR_API_KEY" not in env
     assert "PODIUM_PROXY_TOKEN" not in env
     assert "PODIUM_RUNTIME_TOKEN" not in env
+
+
+@pytest.mark.asyncio
+async def test_start_does_not_inherit_parent_codex_runtime_controls(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    process = FakeProcess()
+    captured: dict[str, Any] = {}
+
+    async def process_factory(*args: str, **kwargs: Any) -> FakeProcess:
+        captured["kwargs"] = kwargs
+        return process
+
+    monkeypatch.setenv("CODEX_SANDBOX", "seatbelt")
+    monkeypatch.setenv("CODEX_THREAD_ID", "thread-parent")
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "parent-codex"))
+    manager = ConductorRuntimeManager(process_factory=process_factory, command="performer")
+    instance = make_instance(tmp_path)
+
+    await manager.start(
+        instance,
+        env={
+            "CODEX_HOME": str(tmp_path / "managed-codex-home"),
+            "CODEX_MODEL": "gpt-5.3-codex",
+        },
+        **pipeline_start_kwargs(),
+    )
+
+    env = captured["kwargs"]["env"]
+    assert env["CODEX_HOME"] == str(tmp_path / "managed-codex-home")
+    assert env["CODEX_MODEL"] == "gpt-5.3-codex"
+    assert "CODEX_SANDBOX" not in env
+    assert "CODEX_THREAD_ID" not in env
 
 
 @pytest.mark.asyncio
@@ -169,9 +271,9 @@ async def test_concurrent_start_reserves_handle_before_process_factory_returns(t
     manager = ConductorRuntimeManager(process_factory=process_factory, command="performer")
     instance = make_instance(tmp_path)
 
-    first_task = asyncio.create_task(manager.start(instance, env={}))
+    first_task = asyncio.create_task(manager.start(instance, env={}, **pipeline_start_kwargs()))
     await entered.wait()
-    second_task = asyncio.create_task(manager.start(instance, env={}))
+    second_task = asyncio.create_task(manager.start(instance, env={}, **pipeline_start_kwargs()))
     await asyncio.sleep(0)
     release.set()
     first = await first_task
@@ -193,14 +295,14 @@ async def test_restart_creates_new_generation_without_truncating_previous_log(tm
     manager = ConductorRuntimeManager(process_factory=process_factory, command="performer")
     instance = make_instance(tmp_path)
 
-    first = await manager.start(instance, env={})
+    first = await manager.start(instance, env={}, **pipeline_start_kwargs())
     first_log = Path(first.log_path)
-    assert await wait_for_log(first_log, "daemon started\nwarning line\n") == "daemon started\nwarning line\n"
+    assert await wait_for_log(first_log, expected_pipeline_log()) == expected_pipeline_log()
     await manager.stop(first)
 
-    second = await manager.start(first, env={})
+    second = await manager.start(first, env={}, **pipeline_start_kwargs())
 
-    assert first_log.read_text(encoding="utf-8") == "daemon started\nwarning line\n"
+    assert first_log.read_text(encoding="utf-8") == expected_pipeline_log()
     assert Path(second.log_path).name == "performer-000002.log"
     assert Path(second.instance_dir, "logs", "current.log").read_text(encoding="utf-8") == str(Path(second.log_path))
 
@@ -231,34 +333,78 @@ def test_default_command_falls_back_to_python_module_in_editable_repo() -> None:
     manager = ConductorRuntimeManager(process_factory=None)
 
     if manager.command.endswith("/performer"):
-        assert manager._command_args("WORKFLOW.md") == (manager.command, "WORKFLOW.md")
+        assert manager._command_args(
+            mode="plan",
+            attempt_request_path="/tmp/request.json",
+            attempt_result_path="/tmp/result.json",
+        ) == (
+            manager.command,
+            "--mode",
+            "plan",
+            "--attempt-request-path",
+            "/tmp/request.json",
+            "--attempt-result-path",
+            "/tmp/result.json",
+        )
     else:
-        assert manager._command_args("WORKFLOW.md") == (manager.command, "-m", "performer.cli", "WORKFLOW.md")
+        assert manager._command_args(
+            mode="plan",
+            attempt_request_path="/tmp/request.json",
+            attempt_result_path="/tmp/result.json",
+        ) == (
+            manager.command,
+            "-m",
+            "performer.cli",
+            "--mode",
+            "plan",
+            "--attempt-request-path",
+            "/tmp/request.json",
+            "--attempt-result-path",
+            "/tmp/result.json",
+        )
 
 
 def test_command_args_do_not_include_legacy_dispatch_issue() -> None:
     manager = ConductorRuntimeManager(command="performer")
 
-    assert manager._command_args("WORKFLOW.md") == (
+    assert manager._command_args(
+        mode="execute",
+        attempt_request_path="/tmp/request.json",
+        attempt_result_path="/tmp/result.json",
+    ) == (
         "performer",
-        "WORKFLOW.md",
+        "--mode",
+        "execute",
+        "--attempt-request-path",
+        "/tmp/request.json",
+        "--attempt-result-path",
+        "/tmp/result.json",
     )
 
 
-def test_command_args_include_phase_request_and_result_paths() -> None:
+def test_command_args_signature_has_no_legacy_phase_paths() -> None:
+    manager = ConductorRuntimeManager(command="performer")
+    parameters = inspect.signature(manager._command_args).parameters
+
+    assert "advance_request_path" not in parameters
+    assert "phase_result_path" not in parameters
+
+
+def test_command_args_include_runtime_mode_attempt_paths() -> None:
     manager = ConductorRuntimeManager(command="performer")
 
     assert manager._command_args(
-        "WORKFLOW.md",
-        advance_request_path="/tmp/request.json",
-        phase_result_path="/tmp/result.json",
+        mode="verify",
+        attempt_request_path="/tmp/attempt-request.json",
+        attempt_result_path="/tmp/attempt-result.json",
     ) == (
         "performer",
-        "WORKFLOW.md",
-        "--advance-request-path",
-        "/tmp/request.json",
-        "--phase-result-path",
-        "/tmp/result.json",
+        "--mode",
+        "verify",
+        "--attempt-request-path",
+        "/tmp/attempt-request.json",
+        "--attempt-result-path",
+        "/tmp/attempt-result.json",
     )
 
 

@@ -28,23 +28,17 @@ def audit_runtime_state(state: dict[str, Any], log_text: str = "") -> dict[str, 
     for retry in retries:
         if retry.get("error") is None:
             failures.append(f"retry_without_error:{retry.get('identifier') or retry.get('issue_identifier')}")
-        if retry.get("phase") not in {None, "retrying"}:
-            warnings.append(f"retry_unexpected_phase:{retry.get('identifier')}:{retry.get('phase')}")
 
     for continuation in continuations:
-        if continuation.get("phase") not in {None, "continuing"}:
-            failures.append(f"continuation_unexpected_phase:{continuation.get('identifier')}:{continuation.get('phase')}")
         status_label = continuation.get("status_label")
-        if status_label not in {None, "performer:phase/implementation"}:
+        if status_label not in {None, "performer:pipeline/executing"}:
             failures.append(f"continuation_unexpected_label:{continuation.get('identifier')}:{status_label}")
 
     for blocked_entry in blocked:
         if blocked_entry.get("error") is None:
             failures.append(f"blocked_without_error:{blocked_entry.get('identifier') or blocked_entry.get('issue_identifier')}")
-        if blocked_entry.get("phase") not in {None, "error"}:
-            failures.append(f"blocked_unexpected_phase:{blocked_entry.get('identifier')}:{blocked_entry.get('phase')}")
         status_label = blocked_entry.get("status_label")
-        if status_label not in {None, "performer:phase/blocked"}:
+        if status_label not in {None, "performer:pipeline/awaiting-human"}:
             failures.append(f"blocked_unexpected_label:{blocked_entry.get('identifier')}:{status_label}")
 
     repeated_claim_stalls = _claim_stalls(log_text)
@@ -91,7 +85,6 @@ def _session_row(session: dict[str, Any]) -> dict[str, Any]:
     return {
         "issue_id": session.get("issue_id"),
         "issue_identifier": session.get("issue_identifier"),
-        "phase": session.get("phase"),
         "status_label": session.get("status_label"),
         "turn_count": session.get("turn_count"),
         "last_event": session.get("last_event"),
@@ -105,7 +98,6 @@ def _scheduled_row(entry: dict[str, Any]) -> dict[str, Any]:
         "identifier": entry.get("identifier") or entry.get("issue_identifier"),
         "attempt": entry.get("attempt"),
         "error": entry.get("error"),
-        "phase": entry.get("phase"),
         "status_label": entry.get("status_label"),
         "last_message": entry.get("last_message"),
     }

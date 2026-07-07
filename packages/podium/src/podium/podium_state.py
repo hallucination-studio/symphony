@@ -60,6 +60,8 @@ class InMemoryPodiumBusinessState:
     onboarding_state: dict[str, dict[str, Any]] = field(default_factory=dict)
     smoke_results: dict[str, dict[str, Any]] = field(default_factory=dict)
     oauth_states: dict[str, dict[str, Any]] = field(default_factory=dict)
+    runtime_configs: dict[str, dict[str, Any]] = field(default_factory=dict)
+    pipeline_views: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 class PodiumStateBaseMixin:
@@ -129,6 +131,14 @@ class PodiumStateBaseMixin:
     @property
     def ws_queues(self) -> Any:
         return self.durable.ws_queues
+
+    @property
+    def runtime_configs(self) -> Any:
+        return self.durable.runtime_configs
+
+    @property
+    def pipeline_views(self) -> Any:
+        return self.durable.pipeline_views
 
     def persist_users(self) -> None:
         self.persist()

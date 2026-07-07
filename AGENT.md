@@ -7,9 +7,9 @@ This file captures repo-specific commands, product boundaries, coding standards,
 Symphony is one product, not four unrelated projects. The repository remains `symphony` because the system is the full orchestra:
 
 - `podium` is the SaaS-facing web boundary. In this refactor it is a small HTTP service for Conductor registration and health checks.
-- `conductor` is the local daemon, reporting hub, and operator API. It starts, stops, configures, and observes Performer instances, then reports state/events upward to Podium.
-- `performer` is the execution worker. A Conductor may operate multiple Performer instances, and each Performer polls assigned work, prepares workspaces, and runs Codex.
-- `performer_api` is the shared contract package: workflow/config parsing, persisted state schemas, ops projections, runtime labels, and registration DTOs.
+- `conductor` is the local daemon, reporting hub, and operator API. It owns durable pipeline graph state, starts/stops per-mode Performer attempts, and reports state/events upward to Podium.
+- `performer` is the execution worker. A Conductor may operate multiple Performer instances, and each Performer runs exactly one fenced `plan`, `execute`, or `verify` attempt from request/result JSON paths.
+- `performer_api` is the shared contract package: pipeline DTOs, frozen gates, graph/attempt state, ops projections, runtime config, and registration DTOs.
 
 Package boundaries are runtime boundaries, not product boundaries. Keep user-facing language anchored in Symphony as the whole system, with Podium, Conductor, and Performer as roles inside that system.
 
@@ -33,7 +33,7 @@ Current hard renames:
 - Do not reintroduce Performer HTTP status/web UI or Conductor static web UI unless the product direction explicitly changes. Runtime status should flow through persisted state/ops and Conductor APIs.
 - Avoid compatibility shims for old `symphony` imports, commands, labels, files, or logs unless explicitly requested. This refactor is a hard break.
 - Do not print secrets. Settings such as `linear_api_key`, `podium_token`, and environment-resolved tokens may be validated or passed through, but final responses, logs, and API responses must not echo secret values.
-- Keep workflow behavior repo-owned through `WORKFLOW.md`. Conductor may generate and validate managed workflow files, but it should not hide policy in unrelated code paths.
+- Keep runtime behavior aligned with `docs/product/three-mode-runtime-pipeline.md`. Do not add direct polling, legacy phase scheduling, or `WORKFLOW.md` execution paths.
 - Prefer small focused modules over large cross-role files. When adding behavior, put lifecycle, repo materialization, ops/retention reads, registration/reporting, tracker integration, and Codex process handling in clearly owned modules.
 - Use structured models and parsers already in the codebase instead of ad hoc string manipulation for workflow config, persisted state, ops snapshots, registration payloads, and Linear data.
 - Tests should cover both the role-local behavior and the cross-role contract. Add or update import-boundary tests when package relationships change.
@@ -71,11 +71,11 @@ Run the full local suite:
 make test
 ```
 
-Run focused orchestration checks:
+Run focused pipeline checks:
 
 ```bash
 PYTHONPATH=$(pwd)/packages/performer-api/src:$(pwd)/packages/performer/src:$(pwd)/packages/conductor/src:$(pwd)/packages/podium/src \
-  .venv/bin/python -m pytest tests/test_orchestrator.py tests/test_linear.py tests/test_acceptance.py -q
+  .venv/bin/python -m pytest tests/test_pipeline_contracts.py tests/test_conductor_pipeline.py tests/test_performer_modes.py tests/test_podium_pipeline.py -q
 ```
 
 Install all editable packages:
@@ -84,34 +84,28 @@ Install all editable packages:
 make install
 ```
 
-Run a Performer directly from `WORKFLOW.md`:
+Run Conductor locally:
 
 ```bash
 make dev
 ```
 
-Run Conductor locally:
-
-```bash
-.venv/bin/conductor --port 8081 --data-root ./.conductor
-```
-
 Run Podium locally:
 
 ```bash
-.venv/bin/podium --port 8090
+.venv/bin/podium api --host 127.0.0.1 --port 8090
+```
+
+Run a single Performer attempt only through request/result files:
+
+```bash
+.venv/bin/performer --mode plan --attempt-request-path /tmp/request.json --attempt-result-path /tmp/result.json
 ```
 
 Stop local Performer/Conductor processes launched by the Makefile:
 
 ```bash
 make stop
-```
-
-Run one Performer tick from `WORKFLOW.md`:
-
-```bash
-make once
 ```
 
 ## Mandatory Completion Verification
@@ -127,11 +121,22 @@ The final response must be evidence-backed and specific:
 - list residual risks or explicitly say what could not be verified and why;
 - never treat "cannot verify" as a pass.
 
-For orchestration, acceptance, Linear, Conductor, Codex, retry, or continuation behavior, local tests are necessary but not sufficient when the behavior spans the running product. Use the real-run tools in this file and `docs/real-run-testing-guide.md`.
+For pipeline, Linear, Conductor, Codex, retry, rework, replan, or integration
+behavior, local tests are necessary but not sufficient when the behavior spans
+the running product. Use the real-run tools in this file and
+`docs/real-run-testing-guide.md`.
 
 For Podium onboarding, Podium Web, runtime enrollment, installed Conductor behavior, Podium dispatch routing, or Linear delegated work, use the `Podium Web To Linear Acceptance` scenario in `docs/real-run-testing-guide.md`. That file is the canonical test procedure for the browser -> Podium -> install command -> local Conductor -> Linear issue -> Performer -> Podium run-completion path; keep new lessons and required checks there rather than duplicating the full flow in this file.
 
-Human intervention must use Linear child issues. When Performer needs input, runtime approval, failure review, or verifier judgment, it must create a `[Human Action]` child issue with `performer:type/human-action` and mark the parent `performer:phase/blocked`. The specific reason belongs in the child issue title/description and runtime ops evidence, not in additional Linear reason labels. A real acceptance run is only valid if the human completes that child issue and moves it to `Done`; parent issue comments or command-like comments are informational only and must not resume Performer.
+Human intervention must use Linear child issues. When the pipeline needs input,
+runtime approval, tool input, integration-conflict review, or verifier judgment,
+Conductor must create a `[Human Action]` child issue. Pipeline human waits record
+their reason code; runtime approval/tool-input waits record a durable
+`runtime_wait` with `wait_kind`, `attempt_id`, `lease_id`, sanitized message, and
+the projected child issue id. Updating only local stdout, local logs, or a hidden
+runtime table is not enough. A real acceptance run is only valid if the human
+completes the child issue and moves it to `Done`; parent issue comments or
+command-like comments are informational only and must not resume Performer.
 
 This follows the Superpowers verification rule: evidence before claims, always.
 
@@ -211,7 +216,7 @@ PYTHONPATH=$(pwd)/packages/performer-api/src:$(pwd)/packages/performer/src:$(pwd
   --out .test-real-flow/evidence/linear-tree-audit.json
 ```
 
-Audit persisted retry/continuation state:
+Audit persisted runtime state:
 
 ```bash
 PYTHONPATH=$(pwd)/packages/performer-api/src:$(pwd)/packages/performer/src:$(pwd)/packages/conductor/src:$(pwd)/packages/podium/src:tools \
@@ -251,7 +256,8 @@ PYTHONPATH=$(pwd)/packages/performer-api/src:$(pwd)/packages/performer/src:$(pwd
 
 ## Real Full-Flow Testing Rules
 
-For orchestration, acceptance, Linear, Conductor, Codex, retry, or continuation changes, mock-only tests are not enough.
+For pipeline, Linear, Conductor, Codex, retry, rework, replan, or integration
+changes, mock-only tests are not enough.
 
 A real run must:
 
@@ -266,12 +272,12 @@ A real run must:
 For Podium-managed flows, the real run must additionally follow `docs/real-run-testing-guide.md#podium-web-to-linear-acceptance`:
 
 1. Start Podium with `PODIUM_LINEAR_ACCESS_TOKEN="$LINEAR_API_KEY"`.
-2. Start Podium Web and verify onboarding/runtime/runs with Chrome MCP or an equivalent real browser.
+2. Start Podium Web and verify onboarding/runtime/pipeline with Chrome MCP or an equivalent real browser.
 3. Create the Conductor enrollment token from Podium and run the generated install command locally.
 4. Verify the installed Conductor reports managed mode, Podium runtime/proxy tokens, and the Podium WebSocket URL.
 5. Create a real git fixture repo and a real Linear issue delegated to `$LINEAR_AGENT_APP_USER_ID`.
 6. Send the webhook for the actual registered Podium workspace/user id, then let Conductor and Performer complete the work.
-7. Verify Podium `/api/v1/runs/recent`, Linear issue state/comments/labels, Performer logs, fixture repo contents, and smoke tests.
+7. Verify Podium `/api/v1/pipeline`, Linear pipeline graph projection, Performer attempt logs, fixture repo contents, and smoke tests.
 
 Focused regression files for this path include:
 
@@ -279,30 +285,33 @@ Focused regression files for this path include:
 - `tests/test_conductor_podium_channels.py`
 - `tests/test_podium_conductor_channels.py`
 - `tests/test_podium.py::test_agent_session_webhook_queues_only_delegated_custom_agent_dispatch_and_runtime_acks`
-- `tests/test_completion_verifier.py`
 - `tests/test_no_podium_memory_state.py`
 
 The harness may create the initial issue and observe state. It must not manually:
 
 - move the business issue to `In Review` or `Done`;
-- create gate or evidence issues;
-- add pass/fail gate labels;
-- create acceptance blocks relations for the new flow;
-- call private orchestrator methods to advance phases;
+- mutate frozen gate snapshots, verifier scores, manifests, integration queue
+  rows, or Linear projection metadata outside Conductor's fenced attempt/result
+  paths;
+- mutate pipeline graph state outside Conductor's fenced attempt/result paths;
 - claim success from fake Codex when real Codex was requested.
 
-## Gate Tree Acceptance Requirements
+## Pipeline Gate Acceptance Requirements
 
-For the new business issue gate tree:
+For the three-mode pipeline:
 
-- business issue is the root;
-- gate issues are direct children with `performer:type/gate`;
-- evidence issues are children of their gate with `performer:type/evidence`;
-- no default `[Acceptance]` sibling issue is created;
-- no new default `blocks` relation is the primary acceptance mechanism;
-- business issue only reaches `Done` after all gates pass;
-- direct `Done` bypass before gate pass is pulled back;
-- missing implementation evidence must not enter review.
+- Conductor's durable graph is the scheduling source of truth.
+- Every executable node has a frozen `GateSpecSnapshot` before execute starts.
+- Execute and verify attempts carry graph revision, policy revision, lease id,
+  fencing token, and gate snapshot hash.
+- Verifier results score the fixed `0-4` rubric and only pass at `>= 3`.
+- Verify pass publishes a `TaskOutputManifest` and queues deterministic local
+  integration.
+- Linear projection includes `graph_id`, `node_id`, `plan_attempt_id`,
+  `gate_snapshot_hash`, `conductor_revision`, and an operator-readable
+  `operator_status`. Runtime approval/permission/tool-input waits must also
+  include `operator_wait_kind` and a Runtime Wait block in the Linear projection.
+- Human input resumes only through `[Human Action]` child issues.
 
 Always verify parent relationships using explicit Linear fields:
 
@@ -312,35 +321,36 @@ parent { id identifier }
 
 Do not rely only on nested query shape.
 
-## Retry Versus Continuation
+## Retry Versus Rework
 
 Use these meanings:
 
-- `retry`: exception, timeout, stall, verification failure, or other failure recovery.
-- `continuation`: normal follow-up after max turns or other resource boundary while work remains active.
+- `retry`: failed or timed-out fenced attempt that can be retried under a fresh lease.
+- `rework`: verifier failure that returns the graph node to `REWORKING`.
+- `replan`: bounded rework exhaustion that replaces the failed node with a validated subgraph revision.
 
-Expected continuation evidence:
+Expected evidence:
 
-- persisted `continuations`;
-- snapshot `continuing`;
-- ops/runtime trace showing continuation scheduling;
-- Linear parent phase remains an active phase such as `performer:phase/implementation`;
-- no `retry_attempts` row with `error: null`;
-- not counted as a retry/failure.
+- attempt records with lease id, fencing token, graph revision, and policy revision;
+- node state transitions through `READY` / `EXECUTING` / `VERIFYING` / `VERIFY_PASSED` or `REWORKING`;
+- verification scores use the fixed `0-4` rubric and pass only at `>= 3`;
+- failed stale or mismatched fenced results are rejected without mutating current graph state;
+- replan creates a new immutable graph revision and supersedes the replaced node.
 
 ## When To Stop Waiting
 
-Conductor reconcile now checks the former manual stop-waiting cases on each
-background coordination pass and reports structured findings instead of relying
-on a human to keep waiting and inspect logs:
+Conductor coordination should surface pipeline stalls as structured state rather
+than requiring a human to keep waiting and inspect logs:
 
-- `orphan_claim_detected` / `already_claimed_without_worker`;
-- `review_phase_projection_missing`;
+- expired or missing worker lease;
+- stale result rejected by graph/policy revision, gate hash, or fencing token;
 - `gate_parent_relationship_drift`;
-- `review_without_evidence`;
-- `continuation_recorded_as_retry`;
+- verified manifest without integration completion;
+- Codex approval or tool-input wait visible only in stdout and not in durable
+  runtime wait state plus Linear pipeline projection;
+- integration conflict awaiting a human child issue;
 - `scenario_timeout_unresolved`;
-- `orchestration_projection_drift`.
+- Linear projection drift for pipeline graph metadata.
 
 When a reconcile finding appears, treat it as product evidence: fix the bug,
 archive the project if a real run was involved, and rerun from a clean state.
@@ -350,7 +360,7 @@ archive the project if a real run was involved, and rerun from a clean state.
 Past real runs exposed bugs that mock tests missed:
 
 - gate fail returned the business issue to `In Progress` but left it claimed, blocking re-dispatch;
-- completion verifier `NEEDS_HUMAN` with acceptance enabled entered review behavior without moving Linear to `In Review`;
+- verifier/human-wait handoffs must not move Linear state without durable graph evidence;
 - issue tree checks must inspect explicit `parent` fields;
 - real Codex runs can take long enough that hard turn timeouts should be separate from stall timeouts.
 

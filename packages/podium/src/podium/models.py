@@ -45,14 +45,6 @@ class SmokeCheckStatus(_ValueEnum):
     FAILED = "failed"
 
 
-class RunStatus(_ValueEnum):
-    PENDING = "pending"
-    RUNNING = "running"
-    SUCCESS = "success"
-    FAILED = "failed"
-    CANCELLED = "cancelled"
-
-
 def _enum_value(value: Any) -> Any:
     return value.value if isinstance(value, Enum) else value
 
@@ -235,39 +227,3 @@ class SmokeCheckResult:
             timestamp=str(payload.get("timestamp") or ""),
         )
 
-
-@dataclass(frozen=True)
-class RunSummary:
-    run_id: str
-    issue_identifier: str | None
-    runtime_id: str | None
-    status: RunStatus
-    started_at: str | None = None
-    completed_at: str | None = None
-    duration_seconds: float | None = None
-    failure_reason: str | None = None
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "run_id": self.run_id,
-            "issue_identifier": self.issue_identifier,
-            "runtime_id": self.runtime_id,
-            "status": self.status.value,
-            "started_at": self.started_at,
-            "completed_at": self.completed_at,
-            "duration_seconds": self.duration_seconds,
-            "failure_reason": self.failure_reason,
-        }
-
-    @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> RunSummary:
-        return cls(
-            run_id=str(payload.get("run_id") or ""),
-            issue_identifier=payload.get("issue_identifier"),
-            runtime_id=payload.get("runtime_id"),
-            status=_parse_enum(RunStatus, payload.get("status") or RunStatus.PENDING),
-            started_at=payload.get("started_at"),
-            completed_at=payload.get("completed_at"),
-            duration_seconds=payload.get("duration_seconds"),
-            failure_reason=payload.get("failure_reason"),
-        )

@@ -11,8 +11,6 @@ from podium.models import (
     OnboardingStep,
     RepositoryMapping,
     RepositoryMappingMode,
-    RunStatus,
-    RunSummary,
     RuntimeRecord,
     SessionIdentity,
     SmokeCheckResult,
@@ -98,15 +96,8 @@ def test_smoke_check_result_roundtrips_through_dict() -> None:
     assert restored == result
 
 
-def test_run_summary_roundtrips_through_dict() -> None:
-    summary = RunSummary(
-        run_id="run-1",
-        issue_identifier="ENG-1",
-        runtime_id="rt-1",
-        status=RunStatus.SUCCESS,
-        started_at="2026-01-01T00:00:00Z",
-        completed_at="2026-01-01T00:01:00Z",
-        duration_seconds=60.0,
-    )
-    restored = RunSummary.from_dict(summary.to_dict())
-    assert restored == summary
+def test_legacy_run_summary_is_not_a_podium_contract() -> None:
+    import podium.models as models
+
+    assert not hasattr(models, "RunStatus")
+    assert not hasattr(models, "RunSummary")

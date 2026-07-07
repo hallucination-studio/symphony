@@ -80,7 +80,7 @@ Podium should provide a smoke check that verifies:
 - runtime can reach Podium
 - Podium can reach Linear
 - runtime can call Podium Linear proxy
-- generated workflow validates
+- pipeline runtime config validates
 - optional test Linear issue can be created and read
 
 The smoke check should not require Codex to make source changes. The first smoke
@@ -116,15 +116,16 @@ can stop at Linear proxy read/write and runtime dispatch readiness.
 - concurrency limits
 - enabled/disabled state
 
-### Runs
+### Pipeline
 
 - issue
 - runtime
-- status
-- start/end time
-- logs
-- trace events
-- Linear links
+- graph nodes
+- capacity and leases
+- attempts
+- manifests and integration
+- human waits
+- Linear projection links
 
 ## Error Handling
 

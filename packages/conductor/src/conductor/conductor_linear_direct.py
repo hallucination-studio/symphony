@@ -18,14 +18,12 @@ class RepositoryHandoffLinearProxy:
         endpoint: str,
         api_key: str,
         project_slug: str = "",
-        active_states: list[str] | None = None,
         required_delegate_id: str | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
     ):
         self.endpoint = endpoint
         self.api_key = api_key
         self.project_slug = project_slug
-        self.active_states = list(active_states or ["Todo", "In Progress"])
         self.required_delegate_id = required_delegate_id
         self._transport = transport
 
@@ -40,69 +38,6 @@ class RepositoryHandoffLinearProxy:
         if payload.get("errors") and payload.get("data") is None:
             raise LinearDirectProxyError("linear_graphql_errors", str(payload["errors"]))
         return payload
-
-    async def fetch_candidate_issues(self) -> list[dict[str, Any]]:
-        if not self.project_slug or not self.api_key:
-            return []
-        include_delegate_filter = bool(self.required_delegate_id)
-        delegate_variable = ", $delegateId: ID" if include_delegate_filter else ""
-        delegate_filter = "\n      delegate: { id: { eq: $delegateId } }" if include_delegate_filter else ""
-        query = f"""
-query ConductorDirectCandidateIssues($projectSlug: String!, $stateNames: [String!], $first: Int!, $after: String{delegate_variable}) {{
-  issues(
-    first: $first
-    after: $after
-    filter: {{
-      project: {{ slugId: {{ eq: $projectSlug }} }}
-      state: {{ name: {{ in: $stateNames }} }}{delegate_filter}
-    }}
-  ) {{
-    nodes {{
-      id
-      identifier
-      title
-      description
-      url
-      state {{ name type }}
-      parent {{ id identifier }}
-      delegate {{ id }}
-      labels {{ nodes {{ name }} }}
-      inverseRelations(first: 20) {{
-        nodes {{
-          type
-          issue {{ id identifier state {{ name }} }}
-          relatedIssue {{ id identifier state {{ name }} }}
-        }}
-      }}
-    }}
-    pageInfo {{ hasNextPage endCursor }}
-  }}
-}}
-"""
-        variables: dict[str, Any] = {
-            "projectSlug": self.project_slug,
-            "stateNames": self.active_states,
-            "first": 50,
-            "after": None,
-        }
-        if include_delegate_filter:
-            variables["delegateId"] = self.required_delegate_id
-        issues: list[dict[str, Any]] = []
-        while True:
-            payload = await self.graphql(query, variables)
-            connection = ((payload.get("data") or {}).get("issues") or {})
-            nodes = connection.get("nodes")
-            page_info = connection.get("pageInfo") or {}
-            if not isinstance(nodes, list):
-                raise LinearDirectProxyError("linear_unknown_payload", "Linear issues.nodes missing")
-            issues.extend(_normalize_linear_issue_dict(node) for node in nodes if isinstance(node, dict))
-            if not page_info.get("hasNextPage"):
-                return issues
-            end_cursor = page_info.get("endCursor")
-            if not end_cursor:
-                raise LinearDirectProxyError("linear_missing_end_cursor", "Linear pageInfo.endCursor missing")
-            variables = dict(variables)
-            variables["after"] = end_cursor
 
     async def fetch_child_issues(self, parent_issue_id: str, *, label_name: str | None = None) -> list[dict[str, Any]]:
         payload = await self.graphql(
@@ -119,6 +54,14 @@ query RepositoryHandoffChildren($issueId: String!) {
         state { name type }
         delegate { id }
         labels { nodes { name } }
+        relations(first: 100) {
+          nodes {
+            id
+            type
+            issue { id identifier }
+            relatedIssue { id identifier }
+          }
+        }
       }
     }
   }
@@ -245,77 +188,97 @@ mutation RepositoryHandoffComment($issueId: String!, $body: String!) {
         comment = result.get("comment") if isinstance(result, dict) else {}
         return {"success": bool(result.get("success")), "comment_id": comment.get("id") if isinstance(comment, dict) else None}
 
-    async def project_issue_phase(
+    async def create_issue_relation(
         self,
-        issue_id: str,
         *,
-        phase_label: str,
-        state_name: str | None,
+        issue_id: str,
+        related_issue_id: str,
+        relation_type: str,
     ) -> dict[str, Any]:
-        issue = await self._issue_label_context(issue_id)
-        team_id = str(issue.get("team_id") or "")
-        if not team_id:
-            raise LinearDirectProxyError("linear_missing_team", "Linear issue team is required for phase projection")
-        desired_label_id = await self._ensure_label_id(team_id, phase_label)
-        kept_label_ids = [
-            str(label["id"])
-            for label in issue.get("labels", [])
-            if isinstance(label, dict)
-            and label.get("id")
-            and not str(label.get("name") or "").startswith("performer:phase/")
-        ]
-        label_ids = [*kept_label_ids, desired_label_id]
-        updated = await self.graphql(
+        payload = await self.graphql(
             """
-mutation ProjectIssuePhaseLabels($issueId: String!, $labelIds: [String!]) {
-  issueUpdate(id: $issueId, input: { labelIds: $labelIds }) {
+mutation ConductorCreateIssueRelation($input: IssueRelationCreateInput!) {
+  issueRelationCreate(input: $input) {
     success
-    issue { id identifier }
+    issueRelation {
+      id
+      type
+      issue { id identifier }
+      relatedIssue { id identifier }
+    }
   }
 }
 """,
-            {"issueId": issue_id, "labelIds": label_ids},
+            {
+                "input": {
+                    "type": relation_type,
+                    "issueId": issue_id,
+                    "relatedIssueId": related_issue_id,
+                }
+            },
         )
-        label_success = bool(((updated.get("data") or {}).get("issueUpdate") or {}).get("success"))
-        state_projected = False
-        if state_name and str(issue.get("state_name") or "") != state_name:
-            state_id = await self._state_id_by_name(team_id, state_name)
-            if state_id:
-                state_payload = await self.graphql(
-                    """
-mutation ProjectIssuePhaseState($issueId: String!, $stateId: String!) {
-  issueUpdate(id: $issueId, input: { stateId: $stateId }) {
-    success
-    issue { id identifier }
+        result = ((payload.get("data") or {}).get("issueRelationCreate") or {})
+        relation = result.get("issueRelation") if isinstance(result, dict) else {}
+        if not result.get("success") or not isinstance(relation, dict) or not relation.get("id"):
+            raise LinearDirectProxyError("linear_issue_relation_create_failed", "Linear issueRelationCreate returned success=false")
+        return relation
+
+    async def ensure_issue_relation(
+        self,
+        *,
+        issue_id: str,
+        related_issue_id: str,
+        relation_type: str,
+    ) -> dict[str, Any]:
+        payload = await self.graphql(
+            """
+query ConductorInverseIssueRelations($issueId: String!) {
+  issue(id: $issueId) {
+    inverseRelations(first: 100) {
+      nodes {
+        id
+        type
+        issue { id identifier }
+        relatedIssue { id identifier }
+      }
+    }
   }
 }
 """,
-                    {"issueId": issue_id, "stateId": state_id},
-                )
-                state_projected = bool(((state_payload.get("data") or {}).get("issueUpdate") or {}).get("success"))
-        return {
-            "success": label_success and (state_name is None or state_projected or issue.get("state_name") == state_name),
-            "issue_id": issue_id,
-            "phase_label": phase_label,
-            "state_name": state_name,
-        }
-
-    async def issue_phase_projection_matches(
-        self,
-        issue_id: str,
-        *,
-        phase_label: str,
-        state_name: str | None,
-    ) -> bool:
-        issue = await self._issue_label_context(issue_id)
-        phase_labels = [
-            str(label.get("name") or "")
-            for label in issue.get("labels", [])
-            if isinstance(label, dict) and str(label.get("name") or "").startswith("performer:phase/")
-        ]
-        if phase_labels != [phase_label]:
-            return False
-        return state_name is None or str(issue.get("state_name") or "") == state_name
+            {"issueId": related_issue_id},
+        )
+        issue = ((payload.get("data") or {}).get("issue") or {})
+        inverse_relations = (((issue.get("inverseRelations") or {}).get("nodes")) or []) if isinstance(issue, dict) else []
+        for relation in inverse_relations:
+            if _relation_matches(relation, relation_type=relation_type, issue_id=issue_id, related_issue_id=related_issue_id):
+                return relation
+        payload = await self.graphql(
+            """
+query ConductorDirectIssueRelations($issueId: String!) {
+  issue(id: $issueId) {
+    relations(first: 100) {
+      nodes {
+        id
+        type
+        issue { id identifier }
+        relatedIssue { id identifier }
+      }
+    }
+  }
+}
+""",
+            {"issueId": issue_id},
+        )
+        issue = ((payload.get("data") or {}).get("issue") or {})
+        direct_relations = (((issue.get("relations") or {}).get("nodes")) or []) if isinstance(issue, dict) else []
+        for relation in direct_relations:
+            if _relation_matches(relation, relation_type=relation_type, issue_id=issue_id, related_issue_id=related_issue_id):
+                return relation
+        return await self.create_issue_relation(
+            issue_id=issue_id,
+            related_issue_id=related_issue_id,
+            relation_type=relation_type,
+        )
 
     async def _issue_label_context(self, issue_id: str) -> dict[str, Any]:
         payload = await self.graphql(
@@ -510,6 +473,7 @@ def _normalize_linear_issue_dict(node: dict[str, Any]) -> dict[str, Any]:
     parent = node.get("parent") if isinstance(node.get("parent"), dict) else None
     state = node.get("state") if isinstance(node.get("state"), dict) else {}
     blocked_by: list[dict[str, str | None]] = []
+    direct_relations: list[dict[str, Any]] = []
     inverse_relations = node.get("inverseRelations") if isinstance(node.get("inverseRelations"), dict) else {}
     for relation in inverse_relations.get("nodes") or []:
         if not isinstance(relation, dict) or relation.get("type") != "blocks":
@@ -525,6 +489,10 @@ def _normalize_linear_issue_dict(node: dict[str, Any]) -> dict[str, Any]:
                 "state": blocker_state.get("name") if isinstance(blocker_state, dict) else issue.get("state"),
             }
         )
+    relations = node.get("relations") if isinstance(node.get("relations"), dict) else {}
+    for relation in relations.get("nodes") or []:
+        if isinstance(relation, dict):
+            direct_relations.append(relation)
     return {
         "id": node.get("id"),
         "identifier": node.get("identifier"),
@@ -537,12 +505,27 @@ def _normalize_linear_issue_dict(node: dict[str, Any]) -> dict[str, Any]:
         "parent_issue_id": parent.get("id") if parent else None,
         "parent_identifier": parent.get("identifier") if parent else None,
         "blocked_by": blocked_by,
+        "relations": direct_relations,
         "labels": [
             str(label.get("name") or "")
             for label in (label_nodes or [])
             if isinstance(label, dict) and label.get("name")
         ],
     }
+
+
+def _relation_matches(
+    relation: Any,
+    *,
+    relation_type: str,
+    issue_id: str,
+    related_issue_id: str,
+) -> bool:
+    if not isinstance(relation, dict) or relation.get("type") != relation_type:
+        return False
+    issue = relation.get("issue") if isinstance(relation.get("issue"), dict) else {}
+    related_issue = relation.get("relatedIssue") if isinstance(relation.get("relatedIssue"), dict) else {}
+    return issue.get("id") == issue_id and related_issue.get("id") == related_issue_id
 
 
 def _replace_marker_block(current: str, marker_name: str, block: str) -> str:

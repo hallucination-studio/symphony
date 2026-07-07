@@ -45,6 +45,6 @@ The built assets are committed so Podium serves the UI out of the box. Re-run
 - `src/api/client.ts` — typed client covering every Podium BFF endpoint
 - `src/api/hooks.ts` — TanStack Query hooks
 - `src/api/types.ts` — response contracts
-- `src/pages/` — one placeholder page per route (Home, Setup, Integrations, Runtimes, Runs)
+- `src/pages/` — one page per route (Home, Setup, Integrations, Runtimes, Pipeline)
 - `src/components/` — shared UI (onboarding step list, status badges)
 - `src/styles/` — design tokens and app styles

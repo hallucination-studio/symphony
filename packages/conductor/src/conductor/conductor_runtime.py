@@ -20,6 +20,23 @@ SENSITIVE_RUNTIME_ENV_KEYS = {
     "PODIUM_RUNTIME_ID",
     "PODIUM_RUNTIME_TOKEN",
 }
+ALLOWED_RUNTIME_OVERRIDE_KEYS = SENSITIVE_RUNTIME_ENV_KEYS - {"LINEAR_API_KEY"}
+MANAGED_RUNTIME_ENV_KEYS = {
+    "CODEX_HOME",
+    "CODEX_MODEL",
+    "CODEX_SDK_CODEX_BIN",
+    "CODEX_SANDBOX",
+    "CODEX_CONFIG_OVERRIDES",
+    "CODEX_HARD_TURN_TIMEOUT_MS",
+    "CODEX_READ_TIMEOUT_MS",
+    "CODEX_INIT_MAX_ATTEMPTS",
+    "CODEX_INIT_BACKOFF_MS",
+    "CODEX_INIT_BACKOFF_MAX_MS",
+    "CODEX_OVERLOAD_MAX_ATTEMPTS",
+    "CODEX_OVERLOAD_INITIAL_DELAY_MS",
+    "CODEX_OVERLOAD_MAX_DELAY_MS",
+}
+ALLOWED_RUNTIME_OVERRIDE_KEYS = ALLOWED_RUNTIME_OVERRIDE_KEYS | MANAGED_RUNTIME_ENV_KEYS
 
 
 @dataclass
@@ -82,6 +99,19 @@ class _StartingProcess:
         return self.returncode
 
 
+class _CompletedLogTask:
+    def done(self) -> bool:
+        return True
+
+    def cancel(self) -> None:
+        return None
+
+    def __await__(self):
+        if False:
+            yield None
+        return None
+
+
 @dataclass(frozen=True)
 class LogQuery:
     tail: int | None = 200
@@ -121,8 +151,9 @@ class ConductorRuntimeManager:
         instance: InstanceRecord,
         *,
         env: dict[str, str] | None = None,
-        advance_request_path: str | None = None,
-        phase_result_path: str | None = None,
+        mode: str | None = None,
+        attempt_request_path: str | None = None,
+        attempt_result_path: str | None = None,
     ) -> InstanceRecord:
         lock = self._start_locks.setdefault(instance.id, asyncio.Lock())
         async with lock:
@@ -149,9 +180,9 @@ class ConductorRuntimeManager:
             try:
                 process = await self.process_factory(
                     *self._command_args(
-                        instance.workflow_path,
-                        advance_request_path=advance_request_path,
-                        phase_result_path=phase_result_path,
+                        mode=mode,
+                        attempt_request_path=attempt_request_path,
+                        attempt_result_path=attempt_result_path,
                     ),
                     cwd=instance.resolved_repo_path,
                     env=self._process_env(env),
@@ -161,7 +192,15 @@ class ConductorRuntimeManager:
             except Exception:
                 self._handles.pop(instance.id, None)
                 raise
-            log_task = asyncio.create_task(self._capture_logs(process, log_path))
+            log_task = asyncio.create_task(
+                self._capture_logs(
+                    process,
+                    log_path,
+                    mode=mode,
+                    attempt_request_path=attempt_request_path,
+                    attempt_result_path=attempt_result_path,
+                )
+            )
             self._handles[instance.id] = RuntimeHandle(process=process, log_task=log_task, process_status="running")
             return instance.with_updates(process_status="running", pid=getattr(process, "pid", None), log_path=str(log_path))
 
@@ -211,18 +250,24 @@ class ConductorRuntimeManager:
             "process_status": process_status,
             "pid": pid,
             "http_port": instance.http_port,
-            "workflow_path": instance.workflow_path,
             "log_path": instance.log_path,
         }
 
     def recover(self, instance: InstanceRecord) -> InstanceRecord | None:
-        if instance.pid is None or not _pid_matches_command(instance.pid, self.command):
+        if instance.pid is None:
+            return None
+        matches = _pid_matches_command(instance.pid, self.command)
+        if not matches and not _can_recover_uninspectable_pid(instance):
             return None
         if instance.id not in self._handles:
-            log_task = asyncio.create_task(self._follow_recovered_process(instance.pid))
+            try:
+                loop = asyncio.get_running_loop()
+                log_task = loop.create_task(self._follow_recovered_process(instance.pid))
+            except RuntimeError:
+                log_task = _CompletedLogTask()
             self._handles[instance.id] = RuntimeHandle(
                 process=RecoveredProcess(instance.pid),
-                log_task=log_task,
+                log_task=log_task,  # type: ignore[arg-type]
                 process_status="running",
                 recovered=True,
             )
@@ -270,13 +315,44 @@ class ConductorRuntimeManager:
         process = RecoveredProcess(pid)
         await process.wait()
 
-    async def _capture_logs(self, process: Any, log_path: Path) -> None:
+    async def _capture_logs(
+        self,
+        process: Any,
+        log_path: Path,
+        *,
+        mode: str | None = None,
+        attempt_request_path: str | None = None,
+        attempt_result_path: str | None = None,
+    ) -> None:
         await asyncio.gather(
-            self._pipe_stream(process.stdout, log_path),
-            self._pipe_stream(process.stderr, log_path),
+            self._pipe_stream(
+                process.stdout,
+                log_path,
+                stream_name="stdout",
+                mode=mode,
+                attempt_request_path=attempt_request_path,
+                attempt_result_path=attempt_result_path,
+            ),
+            self._pipe_stream(
+                process.stderr,
+                log_path,
+                stream_name="stderr",
+                mode=mode,
+                attempt_request_path=attempt_request_path,
+                attempt_result_path=attempt_result_path,
+            ),
         )
 
-    async def _pipe_stream(self, stream: Any, log_path: Path) -> None:
+    async def _pipe_stream(
+        self,
+        stream: Any,
+        log_path: Path,
+        *,
+        stream_name: str,
+        mode: str | None,
+        attempt_request_path: str | None,
+        attempt_result_path: str | None,
+    ) -> None:
         if stream is None:
             return
         while True:
@@ -284,7 +360,15 @@ class ConductorRuntimeManager:
             if not chunk:
                 return
             with log_path.open("ab") as handle:
-                handle.write(chunk)
+                for line in chunk.decode("utf-8", errors="replace").splitlines():
+                    event = (
+                        "event=performer_stream "
+                        f"stream={stream_name} mode={mode or ''} "
+                        f"attempt_request_path={attempt_request_path or ''} "
+                        f"attempt_result_path={attempt_result_path or ''} "
+                        f"message={_sanitize_log_value(line)}\n"
+                    )
+                    handle.write(event.encode("utf-8"))
 
     async def _finish_log_task(self, log_task: asyncio.Task[None]) -> None:
         if log_task.done():
@@ -310,12 +394,13 @@ class ConductorRuntimeManager:
 
     def _process_env(self, overrides: dict[str, str] | None) -> dict[str, str]:
         env = dict(os.environ)
-        override_keys = set(overrides or {})
         for key in SENSITIVE_RUNTIME_ENV_KEYS:
-            if key not in override_keys:
+            env.pop(key, None)
+        for key in list(env):
+            if key.startswith("CODEX_"):
                 env.pop(key, None)
         if overrides:
-            env.update(overrides)
+            env.update({key: value for key, value in overrides.items() if key in ALLOWED_RUNTIME_OVERRIDE_KEYS})
         package_root = Path(__file__).resolve().parents[3]
         local_srcs = [
             str(package_root / "performer-api" / "src"),
@@ -333,20 +418,26 @@ class ConductorRuntimeManager:
 
     def _command_args(
         self,
-        workflow_path: str,
         *,
-        advance_request_path: str | None = None,
-        phase_result_path: str | None = None,
+        mode: str | None = None,
+        attempt_request_path: str | None = None,
+        attempt_result_path: str | None = None,
     ) -> tuple[str, ...]:
+        if not mode or not attempt_request_path or not attempt_result_path:
+            raise ValueError("--mode, --attempt-request-path, and --attempt-result-path are required for Performer launches")
         if self.command == sys.executable:
-            args = (self.command, "-m", "performer.cli", workflow_path)
+            args = (self.command, "-m", "performer.cli")
         else:
-            args = (self.command, workflow_path)
-        if advance_request_path:
-            args = (*args, "--advance-request-path", advance_request_path)
-        if phase_result_path:
-            args = (*args, "--phase-result-path", phase_result_path)
-        return args
+            args = (self.command,)
+        return (
+            *args,
+            "--mode",
+            mode,
+            "--attempt-request-path",
+            attempt_request_path,
+            "--attempt-result-path",
+            attempt_result_path,
+        )
 
     def _allocate_generation_log(self, instance: InstanceRecord) -> tuple[Path, int]:
         logs_dir = Path(instance.instance_dir) / "logs"
@@ -453,6 +544,14 @@ async def _noop_log_task() -> None:
     return None
 
 
+def _sanitize_log_value(value: str) -> str:
+    text = value.replace("\x00", "")
+    text = re.sub(r"(?i)(authorization:\s*)(bearer|basic)\s+[^\s,;]+", r"\1[REDACTED]", text)
+    text = re.sub(r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]+", r"\1 [REDACTED]", text)
+    text = re.sub(r"(?i)\b(token|password|client_secret|cookie)=([^ \t,;]+)", r"\1=[REDACTED]", text)
+    return text.replace("\r", "\\r").replace("\n", "\\n")
+
+
 def _pid_alive(pid: int) -> bool:
     if pid <= 0:
         return False
@@ -470,12 +569,36 @@ def _pid_matches_command(pid: int, command: str) -> bool:
         return False
     argv = _pid_argv(pid)
     if not argv:
-        return True
+        return False
     command_name = Path(command).name
-    basenames = {Path(arg).name for arg in argv if arg}
+    executable_name = Path(argv[0]).name if argv else ""
+    if executable_name == command_name:
+        return True
+    basenames = {Path(arg).name for arg in argv[1:] if arg}
     if command_name in basenames:
         return True
-    return any(arg == "-m" and index + 1 < len(argv) and argv[index + 1] == "performer.cli" for index, arg in enumerate(argv))
+    return any(
+        executable_name == Path(sys.executable).name
+        and arg == "-m"
+        and index + 1 < len(argv)
+        and argv[index + 1] == "performer.cli"
+        for index, arg in enumerate(argv)
+    )
+
+
+def _has_recoverable_performer_log(instance: InstanceRecord) -> bool:
+    path = Path(instance.log_path)
+    return path.name.startswith("performer-") and path.name.endswith(".log") and path.exists()
+
+
+def _can_recover_uninspectable_pid(instance: InstanceRecord) -> bool:
+    if _has_recoverable_performer_log(instance):
+        return True
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+    return True
 
 
 def _pid_argv(pid: int) -> list[str]:

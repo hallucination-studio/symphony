@@ -20,7 +20,7 @@ async def test_runtime_report_upserts_conductor_bindings_metrics_and_log_tail() 
                         "linear_project": "Project Alpha",
                         "project_slug": "ALPHA",
                         "agent_app_user_id": "agent-alpha",
-                        "workflow_profile": "gated-task",
+                        "pipeline_profile": "gated-task",
                         "process_status": "running",
                         "constraint_labels": ["symphony:performer/Alpha", "symphony:profile/gated-task"],
                         "repo_source": {"type": "local_path", "value": "/repo/a"},
@@ -31,7 +31,7 @@ async def test_runtime_report_upserts_conductor_bindings_metrics_and_log_tail() 
                         "linear_project": "Project Beta",
                         "project_slug": "BETA",
                         "agent_app_user_id": "agent-beta",
-                        "workflow_profile": "task",
+                        "pipeline_profile": "default",
                         "process_status": "stopped",
                     },
                 ],
@@ -78,6 +78,48 @@ async def test_runtime_report_upserts_conductor_bindings_metrics_and_log_tail() 
     assert logs.status_code == 200
     assert logs.json()["logs"]["lines"] == ["newest", "older"]
     assert logs.json()["logs"]["cursor"] == 123
+
+async def test_runtime_report_returns_stored_runtime_config_for_conductor() -> None:
+    app = make_app()
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
+        await register(client, "runtime-config-report@example.com")
+        enrolled = await enroll_conductor(client)
+        config = {
+            "version": 7,
+            "scheduler_policy": {
+                "policy_id": "policy-e2e",
+                "version": 7,
+                "effective_at": "2026-07-07T00:00:00Z",
+                "capacity": {"global": 3, "by_mode": {"plan": 1, "execute": 1, "verify": 1}},
+                "dependency_policy": "verify_passed",
+                "max_rework_attempts": 1,
+            },
+            "profiles": {
+                "plan": {"name": "codex-plan", "backend": "codex", "mode": "plan", "settings": {"model": "gpt-5.3-codex"}},
+                "execute": {"name": "codex-execute", "backend": "codex", "mode": "execute", "settings": {"model": "gpt-5.3-codex"}},
+                "verify": {"name": "codex-verify", "backend": "codex", "mode": "verify", "settings": {"model": "gpt-5.3-codex"}},
+            },
+        }
+
+        pushed = await client.post(
+            "/api/v1/runtime/config",
+            headers={"Authorization": f"Bearer {enrolled['runtime_token']}"},
+            json=config,
+        )
+        report = await client.post(
+            "/api/v1/runtime/report",
+            headers={"Authorization": f"Bearer {enrolled['runtime_token']}"},
+            json={"bindings": []},
+        )
+
+    assert pushed.status_code == 200
+    assert report.status_code == 200
+    body = report.json()
+    assert body["status"] == "ok"
+    assert body["config"]["runtime_group_id"] == enrolled["runtime_group_id"]
+    assert body["config"]["version"] == 7
+    assert sorted(body["config"]["profiles"]) == ["execute", "plan", "verify"]
+    assert body["config"]["profiles"]["plan"]["settings"]["model"] == "gpt-5.3-codex"
 
 async def test_injected_postgres_and_redis_persist_auth_across_app_restart() -> None:
     from tests.test_podium_infra import FakePgStore, FakeRedisStore
@@ -307,7 +349,7 @@ async def test_injected_postgres_acks_leased_dispatch_across_distinct_workers_an
         missing_fence = await client.post(
             "/api/v1/runtime/dispatches/ack",
             headers={"Authorization": f"Bearer {enrolled['runtime_token']}"},
-            json={"dispatch_id": dispatch["dispatch_id"], "status": "completed", "runtime_phase": "done"},
+            json={"dispatch_id": dispatch["dispatch_id"], "status": "completed"},
         )
         ack = await client.post(
             "/api/v1/runtime/dispatches/ack",
@@ -317,7 +359,14 @@ async def test_injected_postgres_acks_leased_dispatch_across_distinct_workers_an
                 "fencing_token": dispatch["fencing_token"],
                 "status": "completed",
                 "reason": "completed_by_runtime",
-                "runtime_phase": "done",
+                "graph_id": "graph-1",
+                "node_id": "node-1",
+                "attempt_id": "attempt-1",
+                "mode": "verify",
+                "attempt_status": "succeeded",
+                "graph_revision": 1,
+                "policy_revision": 1,
+                "lease_id": "lease-1",
             },
         )
 
@@ -386,14 +435,6 @@ async def test_dispatch_routes_by_project_binding_not_single_workspace_group() -
                         "instance_id": "inst-b",
                         "project_slug": "BETA",
                         "agent_app_user_id": "agent-beta",
-                        "codex_profile": {
-                            "model": "gpt-5-codex",
-                            "sandbox": "workspace_write",
-                            "config_overrides": [
-                                "model_provider=openai",
-                                "model_providers.openai.api_key=$OPENAI_API_KEY",
-                            ],
-                        },
                     },
                 ]
             },
@@ -415,14 +456,7 @@ async def test_dispatch_routes_by_project_binding_not_single_workspace_group() -
     assert dispatch["project_binding_id"].endswith(":inst-b")
     assert dispatch["project_slug"] == "BETA"
     assert dispatch["instance_id"] == "inst-b"
-    assert dispatch["codex_profile"] == {
-        "model": "gpt-5-codex",
-        "sandbox": "workspace_write",
-        "config_overrides": [
-            "model_provider=openai",
-            "model_providers.openai.api_key=$OPENAI_API_KEY",
-        ],
-    }
+    assert "codex_profile" not in dispatch
     assert "sk-" not in json.dumps(dispatch)
 
 async def test_webhook_routes_when_either_agent_session_or_issue_delegate_matches() -> None:
@@ -531,7 +565,7 @@ async def test_signed_webhook_queues_dispatch_and_runtime_ack_completes_it() -> 
                         "instance_id": "inst-a",
                         "project_slug": "ALPHA",
                         "agent_app_user_id": "agent-alpha",
-                        "workflow_profile": "gated-task",
+                        "pipeline_profile": "gated-task",
                     }
                 ]
             },
@@ -572,7 +606,14 @@ async def test_signed_webhook_queues_dispatch_and_runtime_ack_completes_it() -> 
                 "dispatch_id": dispatch["dispatch_id"],
                 "status": "completed",
                 "reason": "completed_by_runtime",
-                "runtime_phase": "done",
+                "graph_id": "graph-1",
+                "node_id": "node-1",
+                "attempt_id": "attempt-1",
+                "mode": "verify",
+                "attempt_status": "succeeded",
+                "graph_revision": 1,
+                "policy_revision": 1,
+                "lease_id": "lease-1",
             },
         )
 
@@ -582,11 +623,13 @@ async def test_signed_webhook_queues_dispatch_and_runtime_ack_completes_it() -> 
     assert queued.json()["queued"] == 1
     assert dispatch["issue_id"] == "issue-1"
     assert dispatch["issue_identifier"] == "ALPHA-1"
-    assert dispatch["workflow_profile"] == "gated-task"
+    assert dispatch["pipeline_profile"] == "gated-task"
+    assert "workflow_profile" not in dispatch
     assert ack.status_code == 200
     assert ack.json()["dispatch"]["status"] == "completed"
     assert ack.json()["dispatch"]["reason"] == "completed_by_runtime"
-    assert ack.json()["dispatch"]["runtime_phase"] == "done"
+    assert "runtime_phase" not in ack.json()["dispatch"]
+    assert ack.json()["dispatch"]["graph_id"] == "graph-1"
 
 async def test_agent_session_webhook_is_idempotent_by_binding_and_agent_session() -> None:
     app = make_app()
@@ -602,13 +645,14 @@ async def test_agent_session_webhook_is_idempotent_by_binding_and_agent_session(
 
         first = await client.post("/api/v1/linear/webhooks/agent-session", json=payload)
         second = await client.post("/api/v1/linear/webhooks/agent-session", json=payload)
-        runs = await client.get("/api/v1/runs/recent")
+        pipeline = await client.get("/api/v1/pipeline")
 
     assert first.status_code == 200
     assert first.json()["queued"] == 1
     assert second.status_code == 200
     assert second.json()["queued"] == 0
-    assert [run["issue_identifier"] for run in runs.json()["runs"]] == ["ALPHA-1"]
+    assert pipeline.status_code == 200
+    assert "pipeline" in pipeline.json()
 
 async def test_injected_postgres_empty_agent_session_id_dedupes_by_issue_not_binding_only() -> None:
     from tests.test_podium_infra import FakePgStore, FakeRedisStore

@@ -15,7 +15,6 @@ from .podium_shared import (
     bearer_token,
     dispatch_public,
     hash_secret,
-    sanitize_codex_profile,
     utc_now_iso,
     _datetime_from_json,
 )
@@ -57,4 +56,3 @@ class PodiumOAuthMixin:
         if isinstance(expires_at, datetime) and expires_at < datetime.now(timezone.utc):
             return None
         return str(row.get("workspace_id") or "") or None
-

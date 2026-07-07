@@ -45,6 +45,51 @@ async def test_sdk_backend_retries_turn_overload_until_success(tmp_path: Path, m
     assert all(event["http_status"] == 502 for event in retry_events)
     assert "upstream 502: server overloaded" in retry_events[0]["message"]
 
+
+async def test_sdk_backend_retries_plain_502_bad_gateway_errors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    sleeps: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr(codex_client.asyncio, "sleep", fake_sleep)
+
+    class PlainBadGatewayThread(FakeSdkThread):
+        def __init__(self, thread_id: str) -> None:
+            super().__init__(thread_id)
+            self.calls = 0
+
+        def turn(self, *args: Any, **kwargs: Any) -> FakeSdkTurn:
+            self.calls += 1
+            if self.calls < 2:
+                raise RuntimeError("unexpected status 502 Bad Gateway: Upstream request failed")
+            return super().turn(*args, **kwargs)
+
+    class PlainBadGatewaySdk(FakeSdk):
+        def __init__(self) -> None:
+            super().__init__()
+            self.thread = PlainBadGatewayThread("thread-plain-502")
+
+        async def thread_start(self, **kwargs: Any) -> PlainBadGatewayThread:
+            return self.thread
+
+    fake_sdk = PlainBadGatewaySdk()
+    events: list[dict[str, Any]] = []
+    client = CodexSdkClient(
+        CodexConfig(overload_max_attempts=2, overload_initial_delay_ms=100, overload_max_delay_ms=250),
+        sdk_factory=lambda config: fake_sdk,
+    )
+
+    result = await client.run_session(tmp_path, "Do work", "MT-1: Build", on_event=events.append)
+
+    assert result.thread_id == "thread-plain-502"
+    assert fake_sdk.thread.calls == 2
+    assert sleeps == [0.1]
+    retry_events = [event for event in events if event["event"] == "codex_overload_retrying"]
+    assert retry_events[0]["http_status"] == 502
+    assert "Upstream request failed" in retry_events[0]["message"]
+
+
 async def test_sdk_backend_does_not_retry_terminal_bad_request(tmp_path: Path) -> None:
     class BadRequestThread(FakeSdkThread):
         def __init__(self, thread_id: str) -> None:

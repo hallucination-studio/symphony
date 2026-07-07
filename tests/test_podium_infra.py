@@ -110,6 +110,8 @@ def test_pg_migrator_exposes_phase_0_schema() -> None:
     assert "WHERE agent_session_id <> ''" in sql
     assert "dispatches_binding_issue_empty_session_unique" in sql
     assert "WHERE agent_session_id = ''" in sql
+    assert "pipeline_profile TEXT NOT NULL DEFAULT 'default'" in sql
+    assert "workflow_profile" not in sql
     assert "sessions" not in sql.lower()
 
 
@@ -365,7 +367,7 @@ class FakePgStore:
         *,
         fencing_token: int | None,
         reason: str = "",
-        runtime_phase: str = "",
+        pipeline: dict[str, Any] | None = None,
         completed_at: str | None = None,
     ) -> dict[str, Any] | None:
         if fencing_token is None:
@@ -379,7 +381,8 @@ class FakePgStore:
             return None
         dispatch["status"] = status
         dispatch["reason"] = reason
-        dispatch["runtime_phase"] = runtime_phase
+        if pipeline:
+            dispatch.update(pipeline)
         dispatch["updated_at"] = "2026-07-06T00:00:00Z"
         if completed_at is not None:
             dispatch["completed_at"] = completed_at

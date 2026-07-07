@@ -192,45 +192,130 @@ def test_codex_jsonrpc_fault_wrapper_parses_sdk_passthrough_args() -> None:
     assert args.mode == "overload"
     assert args.codex_args == ["--config", "model_provider=openai", "app-server", "--listen", "stdio://"]
 
-def test_real_symphony_e2e_detects_conductor_phase_human_action() -> None:
+def test_real_symphony_e2e_detects_conductor_pipeline_human_action() -> None:
     tool = load_tool("real_symphony_e2e")
 
     actions = tool.conductor_human_actions(
         {
-            "runs": [
+            "human_waits": [
                 {
-                    "run_id": "run-1",
+                    "wait_id": "wait-1",
+                    "node_id": "node-1",
+                    "reason": "LINEAR_SYNC_CONFLICT",
+                    "status": "open",
+                    "child_issue_id": "child-1",
+                    "child_identifier": "HELL-2",
+                    "child_url": "https://linear.test/HELL-2",
+                    "details": {"integration_id": "integration-node-1-verify-1"},
+                }
+            ],
+            "nodes": [
+                {
+                    "node_id": "node-1",
                     "issue_id": "issue-1",
                     "issue_identifier": "HELL-1",
-                    "phase": "awaiting_human",
-                    "status": "waiting",
-                    "last_reason": "codex needs local state repair",
-                    "human_action": {
-                        "child_issue_id": "child-1",
-                        "child_identifier": "HELL-2",
-                        "child_url": "https://linear.test/HELL-2",
-                        "kind": "runtime_error",
-                    },
-                },
-                {"run_id": "run-2", "phase": "done"},
-            ]
+                    "state": "awaiting_human",
+                }
+            ],
         }
     )
 
     assert actions == [
         {
-            "run_id": "run-1",
+            "wait_id": "wait-1",
+            "node_id": "node-1",
             "issue_id": "issue-1",
             "issue_identifier": "HELL-1",
-            "phase": "awaiting_human",
-            "status": "waiting",
-            "last_reason": "codex needs local state repair",
+            "state": "awaiting_human",
+            "status": "open",
+            "reason": "LINEAR_SYNC_CONFLICT",
             "child_issue_id": "child-1",
             "child_identifier": "HELL-2",
             "child_url": "https://linear.test/HELL-2",
-            "kind": "runtime_error",
+            "details": {"integration_id": "integration-node-1-verify-1"},
         }
     ]
+
+
+def test_real_symphony_e2e_detects_runtime_wait_human_action() -> None:
+    tool = load_tool("real_symphony_e2e")
+
+    actions = tool.conductor_human_actions(
+        {
+            "runtime_waits": [
+                {
+                    "wait_id": "runtime-wait-exec-1-approval_requested",
+                    "node_id": "node-1",
+                    "wait_kind": "approval_requested",
+                    "status": "waiting",
+                    "attempt_id": "exec-1",
+                    "lease_id": "lease-1",
+                    "child_issue_id": "child-1",
+                }
+            ],
+            "nodes": [
+                {
+                    "node_id": "node-1",
+                    "issue_id": "issue-1",
+                    "issue_identifier": "HELL-1",
+                    "state": "ready",
+                }
+            ],
+        }
+    )
+
+    assert actions == [
+        {
+            "wait_id": "runtime-wait-exec-1-approval_requested",
+            "node_id": "node-1",
+            "issue_id": "issue-1",
+            "issue_identifier": "HELL-1",
+            "state": "ready",
+            "status": "waiting",
+            "reason": "approval_requested",
+            "child_issue_id": "child-1",
+            "child_identifier": None,
+            "child_url": None,
+            "details": {"attempt_id": "exec-1", "lease_id": "lease-1", "wait_kind": "approval_requested"},
+        }
+    ]
+
+
+def test_real_symphony_e2e_wait_uses_integrated_manifest_repository_result_path(tmp_path) -> None:
+    tool = load_tool("real_symphony_e2e_wait")
+    repository = tmp_path / "repo"
+    repository.mkdir()
+
+    result_path = tool._pipeline_integrated_result_path(
+        {
+            "integration_queue": [
+                {"verify_attempt_id": "verify-1", "status": "integrated"},
+            ],
+            "manifests": [
+                {
+                    "verify_attempt_id": "verify-1",
+                    "code": {"repository_path": str(repository)},
+                }
+            ],
+        }
+    )
+
+    assert result_path == repository / "SYMPHONY_REAL_E2E_RESULT.md"
+
+
+def test_real_symphony_e2e_tools_do_not_read_legacy_phase_runs() -> None:
+    forbidden = [
+        'run.get("phase")',
+        "run.get('phase')",
+        'run["phase"]',
+        "run['phase']",
+        '"/api/runs"',
+        '"/api/runs/',
+    ]
+    for name in ["real_symphony_e2e_wait.py", "real_symphony_e2e_analysis.py", "real_concurrent_schedule_probe.py"]:
+        text = (ROOT / "tools" / name).read_text(encoding="utf-8")
+        for marker in forbidden:
+            assert marker not in text, f"{name} still depends on legacy phase runs via {marker}"
 
 def test_real_symphony_e2e_overload_failure_acceptance_detects_raw_status() -> None:
     tool = load_tool("real_symphony_e2e")
@@ -238,20 +323,18 @@ def test_real_symphony_e2e_overload_failure_acceptance_detects_raw_status() -> N
         "state": {"sessions": [], "retry_attempts": [], "continuations": [], "blocked": []},
         "samples": [
             {
-                "phase_runs": [
+                "pipeline_nodes": [
                     {
-                        "run_id": "run-1",
-                        "phase": "queued",
-                        "status": "queued",
+                        "node_id": "node-1",
+                        "state": "reworking",
                         "retry_count": 0,
                         "crash_count": 0,
                         "overload_count": 1,
                         "last_reason": "upstream_overloaded_exhausted",
                     },
                     {
-                        "run_id": "run-1",
-                        "phase": "failed",
-                        "status": "failed",
+                        "node_id": "node-1",
+                        "state": "failed",
                         "retry_count": 0,
                         "crash_count": 0,
                         "overload_count": 2,
@@ -291,10 +374,9 @@ def test_real_symphony_e2e_overload_failure_audit_reads_counters_from_child_desc
         {
             "samples": [
                 {
-                    "phase_runs": [
+                    "pipeline_nodes": [
                         {
-                            "phase": "failed",
-                            "status": "failed",
+                            "state": "failed",
                             "last_reason": "upstream_overloaded_exhausted",
                         }
                     ]
@@ -322,14 +404,14 @@ def test_real_symphony_e2e_overload_failure_audit_reads_counters_from_child_desc
     assert summary["pass"] is True
     assert summary["max_overload_count"] == 6
 
-def test_real_symphony_e2e_tracks_one_automatic_human_action_per_run() -> None:
+def test_real_symphony_e2e_tracks_one_automatic_human_action_per_wait() -> None:
     tool = load_tool("real_symphony_e2e")
     completed: set[str] = set()
-    first = {"run_id": "run-1", "child_issue_id": "child-1"}
-    second = {"run_id": "run-1", "child_issue_id": "child-2"}
+    first = {"wait_id": "wait-1", "child_issue_id": "child-1"}
+    second = {"wait_id": "wait-1", "child_issue_id": "child-2"}
 
     assert tool.should_complete_conductor_human_action(first, completed) is True
-    completed.add("run-1")
+    completed.add("wait-1")
     assert tool.should_complete_conductor_human_action(second, completed) is False
 
 def test_real_symphony_e2e_writes_human_response_into_child_description() -> None:
@@ -337,10 +419,12 @@ def test_real_symphony_e2e_writes_human_response_into_child_description() -> Non
 
     updated = tool.human_action_description_with_response(
         "Runtime error.\n\nHuman response:\n\n(Add the answer or decision here when information is required.)\n\nWhen finished, move this child issue to Done.",
-        "Reviewed by the E2E harness; retry the managed run.",
+        "Symphony E2E resume approval for human wait wait-1 on child HELL-2.\n"
+        "This is the explicit human-action resume signal; retry the managed run.",
     )
 
-    assert "Human response:\nReviewed by the E2E harness; retry the managed run.\n\nWhen finished" in updated
+    assert "Human response:\nSymphony E2E resume approval for human wait wait-1 on child HELL-2." in updated
+    assert "This is the explicit human-action resume signal; retry the managed run.\n\nWhen finished" in updated
     assert "(Add the answer or decision here when information is required.)" not in updated
 
 async def test_real_symphony_e2e_completes_conductor_human_action_child(monkeypatch) -> None:
@@ -387,14 +471,106 @@ async def test_real_symphony_e2e_completes_conductor_human_action_child(monkeypa
             "issue_identifier": "HELL-1",
             "child_issue_id": "child-1",
             "child_identifier": "HELL-2",
+            "wait_id": "wait-1",
             "kind": "runtime_error",
         },
-        response="Reviewed by the E2E harness; retry the managed run.",
+        response=tool.e2e_human_action_resume_response(
+            {
+                "wait_id": "wait-1",
+                "child_issue_id": "child-1",
+                "child_identifier": "HELL-2",
+                "reason": "LINEAR_SYNC_CONFLICT",
+            }
+        ),
     )
 
     assert result["status"] == "completed"
-    assert calls[1][1]["description"].startswith("Human response:\nReviewed by the E2E harness")
+    assert calls[1][1]["description"].startswith(
+        "Human response:\nSymphony E2E resume approval for human wait wait-1 on child HELL-2."
+    )
+    assert "reason=LINEAR_SYNC_CONFLICT" in calls[1][1]["description"]
     assert calls[2][1] == {"issueId": "child-1", "stateId": "state-done"}
+
+def test_real_symphony_e2e_parent_comment_probe_is_explicit_negative_control() -> None:
+    tool = load_tool("real_symphony_e2e")
+
+    body = tool.parent_comment_negative_control_body("wait-1")
+
+    assert "negative control" in body
+    assert "wait_id=wait-1" in body
+    assert "No action is required" in body
+    assert "not a Symphony human-action resume command" in body
+
+def test_real_symphony_e2e_surfaces_immediate_pipeline_failures() -> None:
+    tool = load_tool("real_symphony_e2e")
+
+    failure = tool.immediate_pipeline_failure(
+        {
+            "pipeline_attempts": [
+                {
+                    "attempt_id": "plan-1",
+                    "mode": "plan",
+                    "state": "failed",
+                    "error": "managed_codex_home_required",
+                }
+            ],
+            "pipeline_nodes": [{"node_id": "issue-1", "state": "awaiting_human"}],
+        }
+    )
+
+    assert failure == {
+        "kind": "attempt_failed",
+        "attempts": [
+            {
+                "attempt_id": "plan-1",
+                "mode": "plan",
+                "state": "failed",
+                "error": "managed_codex_home_required",
+            }
+        ],
+    }
+
+
+def test_real_symphony_e2e_expected_failure_mode_keeps_waiting_for_failure_audit() -> None:
+    tool = load_tool("real_symphony_e2e")
+
+    assert (
+        tool.immediate_pipeline_failure(
+            {"pipeline_attempts": [{"attempt_id": "plan-1", "state": "failed"}]},
+            expected_failure="overload",
+        )
+        is None
+    )
+
+
+def test_real_symphony_e2e_summary_includes_failure_details() -> None:
+    tool = load_tool("real_symphony_e2e")
+
+    summary = tool.e2e_report_summary(
+        {
+            "failures": [
+                {
+                    "name": "pipeline-runtime-error:visible",
+                    "failure": {
+                        "kind": "attempt_failed",
+                        "attempts": [{"attempt_id": "plan-1", "error": "managed_codex_home_required"}],
+                    },
+                }
+            ]
+        },
+        report_path=ROOT / ".test-real-flow" / "report.json",
+    )
+
+    assert summary["failures"] == 1
+    assert summary["failure_summaries"] == [
+        {
+            "name": "pipeline-runtime-error:visible",
+            "failure": {
+                "kind": "attempt_failed",
+                "attempts": [{"attempt_id": "plan-1", "error": "managed_codex_home_required"}],
+            },
+        }
+    ]
 
 def test_real_symphony_e2e_wait_artifacts_are_written_on_early_exit(tmp_path: Path) -> None:
     tool = load_tool("real_symphony_e2e")
@@ -422,5 +598,5 @@ def test_real_symphony_e2e_wait_artifacts_are_written_on_early_exit(tmp_path: Pa
     assert Path(evidence.data["artifacts"]["runtime_samples"]).exists()
     assert Path(evidence.data["artifacts"]["stage_snapshot"]).exists()
     assert Path(evidence.data["artifacts"]["final_issue"]).exists()
-    assert result["state"] == {"sessions": []}
-    assert result["ops"] == {"runs": {}}
+    assert "state" not in result
+    assert "ops" not in result

@@ -80,7 +80,7 @@ async def run_probe(args: argparse.Namespace) -> dict[str, Any]:
                             "instance_id": "inst-a",
                             "project_slug": "ALPHA",
                             "agent_app_user_id": "agent-alpha",
-                            "workflow_profile": "gated-task",
+                            "pipeline_profile": "gated-task",
                         }
                     ]
                 },

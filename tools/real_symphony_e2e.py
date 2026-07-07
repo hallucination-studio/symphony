@@ -11,7 +11,7 @@ from real_symphony_e2e_common import *  # noqa: F401,F403
 from real_symphony_e2e_linear import *  # noqa: F401,F403
 from real_symphony_e2e_analysis import *  # noqa: F401,F403
 from real_symphony_e2e_wait import *  # noqa: F401,F403
-from real_symphony_e2e_run import run
+from real_symphony_e2e_run import build_runtime_config_payload, run, stage_codex_home_seed
 from real_symphony_e2e_common import DEFAULT_PROJECT_SLUG
 import real_symphony_e2e_analysis as _analysis
 import real_symphony_e2e_linear as _linear
@@ -103,7 +103,7 @@ def parser() -> argparse.ArgumentParser:
     arg_parser = argparse.ArgumentParser(description="Run a real Symphony Podium/Conductor/Performer e2e matrix.")
     arg_parser.add_argument("--out", type=Path, default=Path(".test-real-flow/e2e-matrix"))
     arg_parser.add_argument("--project-slug", default=DEFAULT_PROJECT_SLUG)
-    arg_parser.add_argument("--acceptance-gates", action=argparse.BooleanOptionalAction, default=True)
+    arg_parser.add_argument("--pipeline-gates", action=argparse.BooleanOptionalAction, default=True)
     arg_parser.add_argument("--e2e-gate-mode", choices=["smoke", "strict"], default="smoke")
     arg_parser.add_argument("--stage-timeout", type=int, default=120)
     arg_parser.add_argument("--permission-approval-probe", action="store_true")
@@ -135,8 +135,25 @@ def main() -> int:
     except Exception as exc:
         print(f"real_symphony_e2e failed: {exc!r}", file=sys.stderr)
         return 1
-    print(json.dumps({"report": str(args.out / "real-symphony-e2e-report.json"), "failures": len(report["failures"])}, indent=2))
+    print(json.dumps(e2e_report_summary(report, report_path=args.out / "real-symphony-e2e-report.json"), indent=2))
     return 0 if not report["failures"] else 2
+
+
+def e2e_report_summary(report: dict[str, Any], *, report_path: Path) -> dict[str, Any]:
+    failures = [failure for failure in report.get("failures", []) if isinstance(failure, dict)]
+    return {
+        "report": str(report_path),
+        "failures": len(failures),
+        "failure_summaries": [_failure_summary(failure) for failure in failures[:5]],
+    }
+
+
+def _failure_summary(failure: dict[str, Any]) -> dict[str, Any]:
+    summary: dict[str, Any] = {"name": failure.get("name")}
+    for key in ["failure", "error", "reason", "status", "body", "process_status"]:
+        if key in failure:
+            summary[key] = failure[key]
+    return summary
 
 
 if __name__ == "__main__":

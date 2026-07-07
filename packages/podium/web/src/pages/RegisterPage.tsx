@@ -4,7 +4,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "../api/client";
 import { Button } from "../components/Button";
 import { BrandMark } from "../components/BrandMark";
-import { useTurnstile } from "../components/TurnstileWidget";
+import { useTurnstile } from "../components/useTurnstile";
 import { useI18n } from "../i18n";
 
 export default function RegisterPage() {

@@ -14,7 +14,6 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 make install        # create .venv and install all four packages editable
 make test           # full pytest suite (sets PYTHONPATH across all package srcs)
 make dev            # run Conductor on :8081 with data-root ./.conductor
-make once           # run one Performer poll cycle from WORKFLOW.md
 make stop           # kill Makefile-launched Conductor/Performer processes
 ```
 
@@ -22,7 +21,7 @@ make stop           # kill Makefile-launched Conductor/Performer processes
 
 ```bash
 PYTHONPATH=$(pwd)/packages/performer-api/src:$(pwd)/packages/performer/src:$(pwd)/packages/conductor/src:$(pwd)/packages/podium/src \
-  .venv/bin/python -m pytest tests/test_orchestrator.py -q
+  .venv/bin/python -m pytest tests/test_conductor_pipeline.py -q
 # single case:
 PYTHONPATH=... .venv/bin/python -m pytest tests/test_podium_auth.py::test_login -q
 ```
@@ -30,7 +29,7 @@ PYTHONPATH=... .venv/bin/python -m pytest tests/test_podium_auth.py::test_login 
 Run the services directly:
 
 ```bash
-.venv/bin/performer WORKFLOW.md            # Performer (direct/legacy polling mode)
+.venv/bin/performer --mode plan|execute|verify --attempt-request-path /tmp/request.json --attempt-result-path /tmp/result.json
 .venv/bin/conductor --port 8081 --data-root ./.conductor
 .venv/bin/podium api --host 127.0.0.1 --port 8090
 ```
@@ -41,9 +40,9 @@ Real Linear E2E is skipped by default; it needs a sourced `.env` — see the "Re
 
 Symphony is **one product** split into four Python packages under `packages/`, each a role in the "orchestra". Package boundaries are runtime boundaries, not product boundaries — keep user-facing language anchored on Symphony as the whole system.
 
-- **`performer-api`** — shared contracts: workflow/config parsing, persisted-state schemas, ops projections/models, registration DTOs. The other three depend on it; it depends on none of them.
-- **`performer`** — the execution worker. Fetches a Linear issue, materializes one workspace per issue, renders a prompt from `WORKFLOW.md`, runs Codex app-server, and tracks sessions/retries/stalls (`orchestrator.py`, `runner.py`, `codex_client.py`, `workspace.py`, `tracker.py`).
-- **`conductor`** — customer-side local daemon. Manages multiple Performer instances (`.conductor/instances/<id>/`), generates/validates managed `WORKFLOW.md`, starts/stops Performers, and connects outbound to Podium as an enrolled runtime (`conductor_service.py`, `conductor_runtime.py`, `conductor_api.py`).
+- **`performer-api`** — shared contracts: pipeline DTOs, frozen gate snapshots, graph/attempt state, runtime config, ops projections/models, and registration DTOs. The other three depend on it; it depends on none of them.
+- **`performer`** — the execution worker. It only runs fenced `plan`, `execute`, or `verify` attempts from JSON request/result paths under isolated per-mode runtime profiles.
+- **`conductor`** — customer-side local daemon. Manages multiple Performer instances (`.conductor/instances/<id>/`), owns durable pipeline graph state, leases Podium dispatches, starts/stops per-mode Performers, and connects outbound to Podium as an enrolled runtime (`conductor_service.py`, `conductor_runtime.py`, `conductor_api.py`, `conductor_pipeline.py`).
 - **`podium`** — SaaS control plane + BFF/static host. Owns auth, Linear OAuth/app state, runtime enrollment, dispatch queueing, webhooks, and the Linear proxy. `server.py` is a thin asyncio orchestrator over `auth_service.py`, `linear_service.py`, `runtime_service.py`, `onboarding_service.py`, and `store.py`.
 
 ### Import-boundary invariant (enforced by tests)
@@ -58,7 +57,7 @@ Conductor is the only local process manager for Performer, and it launches it vi
 
 ### Managed dispatch flow
 
-The primary (managed) path is event-driven, not polling: a Linear issue is delegated to the Symphony custom agent → Linear sends an AgentSession webhook to Podium → Podium matches agent/project/runtime-group and queues a dispatch → Conductor leases it over outbound runtime auth → Performer runs `--dispatch-issue-id` and talks to Linear only through Podium's GraphQL proxy. The direct Performer polling loop (`make once`) is dev-only. Dispatch routing is by custom-agent delegate, project scope, active state, blockers, and runtime capacity — never labels or human assignee.
+The runtime path is event-driven, not polling: a Linear issue is delegated to the Symphony custom agent → Linear sends an AgentSession webhook to Podium → Podium matches agent/project/runtime-group and queues a dispatch → Conductor leases it over outbound runtime auth → Conductor commits or resumes a durable `plan -> execute -> verify` graph → Performer runs one fenced `--mode plan|execute|verify` attempt. Dispatch routing is by custom-agent delegate, project scope, active state, blockers, verified graph dependencies, and runtime capacity — never labels or human assignee.
 
 ### Podium web frontend
 
@@ -78,6 +77,6 @@ npm run design:lint  # lint DESIGN.md against the @google/design.md spec
 ## Conventions
 
 - This is a hard break from the old `symphony` package/CLI — do not add compatibility shims for old `symphony` imports, commands, labels, or state/log files unless explicitly asked.
-- Keep repo-owned workflow behavior in `WORKFLOW.md`; Conductor generates/validates managed workflow files but should not hide policy elsewhere. `WORKFLOW.smoke.md` is the isolated local smoke profile.
+- `docs/product/three-mode-runtime-pipeline.md` is the runtime architecture source of truth. Do not add direct polling, legacy phase scheduling, or legacy workflow execution instructions.
 - Secrets flow through `$VAR` indirection (e.g. `$PODIUM_PROXY_TOKEN`); values are validated but never printed in responses, logs, or API output.
 - Prefer small role-owned modules over large cross-role files, and use the existing structured models/parsers instead of ad hoc string manipulation for workflow config, persisted state, ops snapshots, and Linear data.

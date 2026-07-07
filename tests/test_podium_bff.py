@@ -589,74 +589,23 @@ async def test_runtime_detail_404_for_unknown() -> None:
     assert json.loads(body)["error"]["code"] == "not_found"
 
 
-# ===== Runs =====
+# ===== Pipeline-only Runtime Surface =====
 
 
 @pytest.mark.asyncio
-async def test_runs_recent_returns_summaries() -> None:
+async def test_legacy_runs_api_is_not_exposed() -> None:
     server = _server()
     await server.start(port=0)
     try:
         ws, cookie = await _auth(server)
-        server.app.state.podium.dispatches["run-1"] = {
-            "dispatch_id": "run-1",
-            "runtime_group_id": f"group_{ws}",
-            "issue_identifier": "ENG-1",
-            "leased_runtime_id": "rt-1",
-            "status": "completed",
-            "reason": "",
-            "created_at": "2026-01-01T00:00:00Z",
-            "updated_at": "2026-01-01T00:01:00Z",
-            "duration_seconds": 60.0,
-        }
-        status, _, body = await request(
+        recent_status, _, _recent_body = await request(
             server.port, "GET", "/api/v1/runs/recent", headers={"Cookie": cookie}
         )
-    finally:
-        await server.stop()
-
-    assert status == 200
-    payload = json.loads(body)
-    assert payload["runs"][0]["run_id"] == "run-1"
-
-
-@pytest.mark.asyncio
-async def test_run_detail_returns_failure_reason() -> None:
-    server = _server()
-    await server.start(port=0)
-    try:
-        ws, cookie = await _auth(server)
-        server.app.state.podium.dispatches["run-1"] = {
-            "dispatch_id": "run-1",
-            "runtime_group_id": f"group_{ws}",
-            "issue_identifier": "ENG-1",
-            "leased_runtime_id": "rt-1",
-            "status": "failed",
-            "reason": "boom",
-            "created_at": "2026-01-01T00:00:00Z",
-        }
-        status, _, body = await request(
+        detail_status, _, _detail_body = await request(
             server.port, "GET", "/api/v1/runs/run-1", headers={"Cookie": cookie}
         )
     finally:
         await server.stop()
 
-    assert status == 200
-    payload = json.loads(body)
-    assert payload["failure_reason"] == "boom"
-
-
-@pytest.mark.asyncio
-async def test_run_detail_404_for_unknown() -> None:
-    server = _server()
-    await server.start(port=0)
-    try:
-        ws, cookie = await _auth(server)
-        status, _, body = await request(
-            server.port, "GET", "/api/v1/runs/nope", headers={"Cookie": cookie}
-        )
-    finally:
-        await server.stop()
-
-    assert status == 404
-    assert json.loads(body)["error"]["code"] == "not_found"
+    assert recent_status == 404
+    assert detail_status == 404

@@ -165,22 +165,15 @@ def _normalize_comments(nodes: list[Any]) -> list[dict[str, Any]]:
     return comments
 
 
-def _preserve_non_phase_performer_label(name: str) -> bool:
+def _preserve_pipeline_projection_label(name: str) -> bool:
     lowered = name.lower()
     if not lowered.startswith("performer:"):
         return True
-    keep_prefixes = (
-        LABEL_SCHEME.type_prefix.lower(),
-        LABEL_SCHEME.gate_prefix.lower(),
-        LABEL_SCHEME.score_prefix.lower(),
-    )
-    if not lowered.startswith(keep_prefixes):
-        return False
-    removed_type_labels = {
-        "task": LABEL_SCHEME.type_prefix.lower() + "task",
-        "acceptance": LABEL_SCHEME.type_prefix.lower() + "acceptance",
-    }
-    return lowered not in set(removed_type_labels.values())
+    return lowered in {label.lower() for label in LABEL_SCHEME.types.values()}
+
+
+def _preserve_non_phase_performer_label(name: str) -> bool:
+    return _preserve_pipeline_projection_label(name)
 
 
 def replace_marker_block(description: str, marker_name: str, block: str) -> str:

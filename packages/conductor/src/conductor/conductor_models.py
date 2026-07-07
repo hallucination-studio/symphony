@@ -7,22 +7,11 @@ from uuid import uuid4
 
 
 RepoSourceType = Literal["git", "local_path"]
-WorkflowGenerationStatus = Literal["draft", "valid", "invalid", "generation_failed"]
 ProcessStatus = Literal["stopped", "starting", "running", "unhealthy", "exited", "crash_loop"]
 
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-
-
-@dataclass(frozen=True)
-class WorkflowValidationResult:
-    ok: bool
-    error_code: str | None
-    diagnostics: list[str]
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
 
 
 @dataclass(frozen=True)
@@ -75,17 +64,12 @@ class InstanceRecord:
     repo_source_value: str
     resolved_repo_path: str
     instance_dir: str
-    workflow_path: str
     workspace_root: str
     persistence_path: str
     log_path: str
     http_port: int
     linear_project: str
     linear_filters: dict[str, Any]
-    workflow_profile: str
-    workflow_inputs: dict[str, Any]
-    workflow_content: str = ""
-    workflow_generation_status: WorkflowGenerationStatus = "draft"
     process_status: ProcessStatus = "stopped"
     pid: int | None = None
     last_exit_code: int | None = None
@@ -105,15 +89,12 @@ class InstanceRecord:
         repo_source_value: str,
         resolved_repo_path: str,
         instance_dir: str,
-        workflow_path: str,
         workspace_root: str,
         persistence_path: str,
         log_path: str,
         http_port: int,
         linear_project: str,
         linear_filters: dict[str, Any],
-        workflow_profile: str,
-        workflow_inputs: dict[str, Any],
         id: str | None = None,
     ) -> InstanceRecord:
         now = utc_now_iso()
@@ -124,15 +105,12 @@ class InstanceRecord:
             repo_source_value=repo_source_value,
             resolved_repo_path=resolved_repo_path,
             instance_dir=instance_dir,
-            workflow_path=workflow_path,
             workspace_root=workspace_root,
             persistence_path=persistence_path,
             log_path=log_path,
             http_port=http_port,
             linear_project=linear_project,
             linear_filters=linear_filters,
-            workflow_profile=workflow_profile,
-            workflow_inputs=workflow_inputs,
             created_at=now,
             updated_at=now,
         )
@@ -142,11 +120,11 @@ class InstanceRecord:
             changes["updated_at"] = utc_now_iso()
         return replace(self, **changes)
 
-    def to_dict(self, *, include_workflow_content: bool = True) -> dict[str, Any]:
-        data = asdict(self)
-        if not include_workflow_content:
-            data.pop("workflow_content", None)
-        return data
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    def to_public_dict(self) -> dict[str, Any]:
+        return asdict(self)
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> InstanceRecord:
@@ -164,8 +142,7 @@ class InstanceCreateRequest:
     repo_source_value: str
     linear_project: str
     linear_filters: dict[str, Any]
-    workflow_profile: str
-    workflow_inputs: dict[str, Any]
+    pipeline_profile: str = "default"
     http_port: int | None = None
     instance_dir: str | None = None
     workspace_root: str | None = None
@@ -181,6 +158,4 @@ class InstancePatchRequest:
     name: str | None = None
     linear_project: str | None = None
     linear_filters: dict[str, Any] | None = None
-    workflow_profile: str | None = None
-    workflow_inputs: dict[str, Any] | None = None
-    workflow_content: str | None = None
+    pipeline_profile: str | None = None

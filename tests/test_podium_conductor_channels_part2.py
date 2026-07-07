@@ -76,7 +76,14 @@ async def test_dispatch_lease_returns_fencing_token_and_ack_requires_current_tok
                 "dispatch_id": dispatch["dispatch_id"],
                 "fencing_token": dispatch["fencing_token"] - 1,
                 "status": "completed",
-                "runtime_phase": "done",
+                "graph_id": "graph-1",
+                "node_id": "node-1",
+                "attempt_id": "attempt-1",
+                "mode": "verify",
+                "attempt_status": "succeeded",
+                "graph_revision": 1,
+                "policy_revision": 1,
+                "lease_id": "lease-1",
             },
         )
         current_ack = await client.post(
@@ -86,7 +93,14 @@ async def test_dispatch_lease_returns_fencing_token_and_ack_requires_current_tok
                 "dispatch_id": dispatch["dispatch_id"],
                 "fencing_token": dispatch["fencing_token"],
                 "status": "completed",
-                "runtime_phase": "done",
+                "graph_id": "graph-1",
+                "node_id": "node-1",
+                "attempt_id": "attempt-1",
+                "mode": "verify",
+                "attempt_status": "succeeded",
+                "graph_revision": 1,
+                "policy_revision": 1,
+                "lease_id": "lease-1",
             },
         )
 
@@ -97,6 +111,8 @@ async def test_dispatch_lease_returns_fencing_token_and_ack_requires_current_tok
     assert stale_ack.json()["error"]["code"] == "stale_dispatch_lease"
     assert current_ack.status_code == 200
     assert current_ack.json()["dispatch"]["status"] == "completed"
+    assert "runtime_phase" not in current_ack.json()["dispatch"]
+    assert current_ack.json()["dispatch"]["graph_id"] == "graph-1"
 
 def test_runtime_ws_rejects_invalid_fencing_token_without_closing_loop() -> None:
     app = make_app()
@@ -124,7 +140,7 @@ def test_runtime_ws_rejects_invalid_fencing_token_without_closing_loop() -> None
     assert invalid["code"] == "invalid_fencing_token"
     assert heartbeat == {"type": "ping"}
 
-async def test_dispatch_ack_reconcile_flags_missing_terminal_runtime_phase() -> None:
+async def test_dispatch_ack_reconcile_has_no_phase_drift_findings() -> None:
     app = make_app()
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
         await register(client, "dispatch-reconcile@example.com")
@@ -146,11 +162,17 @@ async def test_dispatch_ack_reconcile_flags_missing_terminal_runtime_phase() -> 
             "agent_session_id": "session-1",
             "agent_app_user_id": "agent-alpha",
             "routing_rule_id": enrolled["runtime_group_id"],
-            "workflow_profile": "task",
-            "codex_profile": {},
+            "pipeline_profile": "default",
             "status": "completed",
             "reason": "completed_by_runtime",
-            "runtime_phase": "reviewing",
+            "graph_id": "graph-1",
+            "node_id": "node-1",
+            "attempt_id": "attempt-1",
+            "mode": "verify",
+            "attempt_status": "succeeded",
+            "graph_revision": 1,
+            "policy_revision": 1,
+            "lease_id": "lease-1",
             "leased_runtime_id": enrolled["runtime_id"],
             "leased_until": None,
             "created_at": "2026-07-04T00:00:00Z",
@@ -158,15 +180,7 @@ async def test_dispatch_ack_reconcile_flags_missing_terminal_runtime_phase() -> 
 
         findings = state.reconcile_dispatch_acks()
 
-    assert findings == [
-        {
-            "code": "dispatch_ack_without_terminal_run_event",
-            "dispatch_id": "dispatch-1",
-            "issue_id": "issue-1",
-            "runtime_phase": "reviewing",
-            "status": "completed",
-        }
-    ]
+    assert findings == []
 
 async def test_linear_proxy_requires_proxy_token_and_audits_requests() -> None:
     seen_authorization: list[str] = []

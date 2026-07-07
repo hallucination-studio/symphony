@@ -2,8 +2,8 @@ import type { ReactNode } from "react";
 import { LinkButton } from "./Button";
 
 /**
- * Empty state: what's missing + one obvious way forward. Used by Runtimes,
- * Runs, and anywhere a list has nothing to show yet.
+ * Empty state: what's missing + one obvious way forward. Used by Runtimes
+ * and anywhere a list has nothing to show yet.
  */
 export function EmptyState({
   icon,

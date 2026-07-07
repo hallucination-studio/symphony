@@ -9,8 +9,7 @@ from typing import Any
 from linear_project_issues import graphql
 
 
-GATE_LABEL = "performer:type/gate"
-EVIDENCE_LABEL = "performer:type/evidence"
+PIPELINE_NODE_LABEL = "performer:type/pipeline-node"
 
 
 async def fetch_issue_tree(issue_id: str) -> dict[str, Any]:
@@ -81,49 +80,55 @@ def labels(node: dict[str, Any]) -> list[str]:
     return [label["name"] for label in node.get("labels", {}).get("nodes", [])]
 
 
-def has_label(node: dict[str, Any], label: str) -> bool:
-    return label in labels(node)
-
-
 def audit_tree(tree: dict[str, Any]) -> dict[str, Any]:
     children = tree.get("children", {}).get("nodes", [])
-    gates = [child for child in children if has_label(child, GATE_LABEL)]
-    evidence = [
-        grandchild
-        for gate in gates
-        for grandchild in gate.get("children", {}).get("nodes", [])
-        if has_label(grandchild, EVIDENCE_LABEL)
-    ]
-    gate_ids = {gate["id"] for gate in gates}
-    acceptance_siblings = [child for child in children if str(child.get("title", "")).startswith("[Acceptance]")]
+    pipeline_nodes = [child for child in children if PIPELINE_NODE_LABEL in labels(child)]
     blocks_relations = [
-        relation for relation in tree.get("inverseRelations", {}).get("nodes", []) if relation.get("type") == "blocks"
+        relation
+        for child in pipeline_nodes
+        for relation in child.get("inverseRelations", {}).get("nodes", [])
+        if relation.get("type") == "blocks"
     ]
     failures: list[str] = []
-    for gate in gates:
-        if (gate.get("parent") or {}).get("id") != tree.get("id"):
-            failures.append(f"gate_parent_mismatch:{gate.get('identifier')}")
-    for item in evidence:
-        if (item.get("parent") or {}).get("id") not in gate_ids:
-            failures.append(f"evidence_parent_mismatch:{item.get('identifier')}")
-    if acceptance_siblings:
-        failures.append("acceptance_sibling_present")
-    if blocks_relations:
-        failures.append("blocks_relation_present")
+    for node in pipeline_nodes:
+        if (node.get("parent") or {}).get("id") != tree.get("id"):
+            failures.append(f"pipeline_node_parent_mismatch:{node.get('identifier')}")
+        metadata = _pipeline_metadata(node)
+        missing = [
+            key
+            for key in [
+                "graph_id",
+                "node_id",
+                "plan_attempt_id",
+                "gate_snapshot_hash",
+                "conductor_revision",
+                "operator_status",
+            ]
+            if not metadata.get(key)
+        ]
+        if missing:
+            failures.append(f"pipeline_metadata_missing:{node.get('identifier')}:{','.join(missing)}")
+        if metadata.get("operator_status") == "waiting_for_runtime_input":
+            description = str(node.get("description") or "")
+            if not metadata.get("operator_wait_kind"):
+                failures.append(f"pipeline_runtime_wait_kind_missing:{node.get('identifier')}")
+            if "Runtime Wait" not in description or "runtime_wait:" not in description:
+                failures.append(f"pipeline_runtime_wait_block_missing:{node.get('identifier')}")
+        if "Frozen Gate" not in str(node.get("description") or ""):
+            failures.append(f"frozen_gate_missing:{node.get('identifier')}")
     return {
         "business_issue": _issue_row(tree),
-        "gate_count": len(gates),
-        "evidence_count": len(evidence),
-        "acceptance_sibling_count": len(acceptance_siblings),
+        "pipeline_node_count": len(pipeline_nodes),
         "blocks_relation_count": len(blocks_relations),
-        "gates": [
+        "pipeline_nodes": [
             {
-                **_issue_row(gate),
-                "children": [_issue_row(child) for child in gate.get("children", {}).get("nodes", [])],
+                **_issue_row(node),
+                "metadata": _pipeline_metadata(node),
+                "children": [_issue_row(child) for child in node.get("children", {}).get("nodes", [])],
             }
-            for gate in gates
+            for node in pipeline_nodes
         ],
-        "evidence": [_issue_row(item) for item in evidence],
+        "blocks_relations": blocks_relations,
         "failures": failures,
         "pass": not failures,
     }
@@ -166,6 +171,24 @@ def _blocks_relations(issue: dict[str, Any], *, scope: str) -> list[dict[str, An
     ]
 
 
+def _pipeline_metadata(issue: dict[str, Any]) -> dict[str, str]:
+    description = str(issue.get("description") or "")
+    result: dict[str, str] = {}
+    in_symphony = False
+    for line in description.splitlines():
+        stripped = line.strip()
+        if stripped == "symphony:":
+            in_symphony = True
+            continue
+        if in_symphony and stripped.startswith("```"):
+            break
+        if not in_symphony or ":" not in stripped:
+            continue
+        key, value = stripped.split(":", 1)
+        result[key.strip()] = value.strip()
+    return result
+
+
 def _issue_row(issue: dict[str, Any]) -> dict[str, Any]:
     state = issue.get("state") or {}
     return {
@@ -190,13 +213,13 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def parser() -> argparse.ArgumentParser:
-    arg_parser = argparse.ArgumentParser(description="Audit a Linear business issue gate/evidence tree.")
+    arg_parser = argparse.ArgumentParser(description="Audit a Linear projection of a Symphony pipeline graph.")
     arg_parser.add_argument("issue", help="Linear issue id or identifier accepted by Linear's issue(id:) field.")
     arg_parser.add_argument(
         "--mode",
         choices=["audit", "summary"],
         default="audit",
-        help="Use audit for gate/evidence checks or summary to export parent/child/blocks relationships.",
+        help="Use audit for pipeline projection checks or summary to export parent/child/blocks relationships.",
     )
     arg_parser.add_argument("--out", type=Path, help="Write JSON evidence to this path.")
     return arg_parser

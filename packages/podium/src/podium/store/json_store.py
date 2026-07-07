@@ -8,7 +8,6 @@ from ..models import (
     OnboardingProgress,
     OnboardingStep,
     RepositoryMapping,
-    RunSummary,
     RuntimeRecord,
 )
 
@@ -21,7 +20,6 @@ class PodiumStore:
         self.runtime_records: dict[str, RuntimeRecord] = {}
         self.onboarding_progress: dict[str, OnboardingProgress] = {}
         self.repository_mappings: dict[str, RepositoryMapping] = {}
-        self.runs: dict[str, RunSummary] = {}
         self.users: dict[str, dict[str, Any]] = {}
         if self.data_dir is not None:
             self.data_dir.mkdir(parents=True, exist_ok=True)
@@ -58,10 +56,6 @@ class PodiumStore:
         self.repository_mappings = {
             key: RepositoryMapping.from_dict(value)
             for key, value in self._load_json("repositories.json").items()
-        }
-        self.runs = {
-            key: RunSummary.from_dict(value)
-            for key, value in self._load_json("runs.json").items()
         }
         self.users = self._load_json("users.json")
 
@@ -120,16 +114,6 @@ class PodiumStore:
 
     def get_repository_mapping(self, workspace_id: str) -> RepositoryMapping | None:
         return self.repository_mappings.get(workspace_id)
-
-    def save_run(self, run: RunSummary) -> None:
-        self.runs[run.run_id] = run
-        self._write_json("runs.json", {k: v.to_dict() for k, v in self.runs.items()})
-
-    def list_runs(self) -> list[RunSummary]:
-        return list(self.runs.values())
-
-    def get_run(self, run_id: str) -> RunSummary | None:
-        return self.runs.get(run_id)
 
     def save_user(self, user_id: str, user: dict[str, Any]) -> None:
         self.users[user_id] = user

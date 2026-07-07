@@ -64,20 +64,11 @@ async def create_linear_issue(
     title: str | None = None,
     description: str | None = None,
 ) -> dict[str, Any]:
-    project = (
-        await linear_graphql(
-            token,
-            """
-            query Project($slug: String!) {
-              projects(first: 5, filter: { slugId: { eq: $slug } }) {
-                nodes { id name slugId teams { nodes { id key name } } }
-              }
-            }
-            """,
-            {"slug": project_slug},
-        )
-    )["projects"]["nodes"][0]
-    team = project["teams"]["nodes"][0]
+    project = await resolve_project(token, project_slug)
+    teams = project.get("teams", {}).get("nodes") or []
+    if not teams:
+        raise RuntimeError(f"Linear project has no teams: {project_slug}")
+    team = teams[0]
     states = (
         await linear_graphql(
             token,
@@ -105,6 +96,7 @@ async def create_linear_issue(
                   id
                   identifier
                   title
+                  description
                   url
                   state { name type }
                   assignee { id name }
@@ -134,6 +126,40 @@ async def create_linear_issue(
         )
     )["issueCreate"]["issue"]
     return {"project": project, "team": team, "todo_state": todo, "issue": issue}
+
+
+async def resolve_project(token: str, project: str) -> dict[str, Any]:
+    by_slug = (
+        await linear_graphql(
+            token,
+            """
+            query ProjectBySlug($project: String!) {
+              projects(first: 5, filter: { slugId: { eq: $project } }) {
+                nodes { id name slugId teams { nodes { id key name } } }
+              }
+            }
+            """,
+            {"project": project},
+        )
+    )["projects"]["nodes"]
+    if by_slug:
+        return by_slug[0]
+    by_name = (
+        await linear_graphql(
+            token,
+            """
+            query ProjectByName($project: String!) {
+              projects(first: 5, filter: { name: { eq: $project } }) {
+                nodes { id name slugId teams { nodes { id key name } } }
+              }
+            }
+            """,
+            {"project": project},
+        )
+    )["projects"]["nodes"]
+    if by_name:
+        return by_name[0]
+    raise RuntimeError(f"Linear project not found by slugId or name: {project}")
 
 
 async def create_linear_blocks_relation(token: str, blocker_id: str, blocked_id: str) -> dict[str, Any]:
@@ -177,6 +203,7 @@ async def fetch_linear_issue(token: str, issue_id: str) -> dict[str, Any]:
                 id
                 identifier
                 title
+                description
                 url
                 state { name type }
                 assignee { id name }
@@ -204,6 +231,8 @@ async def delegate_linear_issue(token: str, issue_id: str, delegate_id: str) -> 
                 issue {
                   id
                   identifier
+                  title
+                  description
                   delegate { id name }
                   agentSessions(first: 5) { nodes { id status appUser { id name } } }
                 }
@@ -319,6 +348,7 @@ async def fetch_linear_issue_tree(token: str, issue_id: str) -> dict[str, Any]:
                 id
                 identifier
                 title
+                description
                 url
                 state { name type }
                 assignee { id name }

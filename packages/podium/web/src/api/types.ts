@@ -107,7 +107,7 @@ export interface ConductorBinding {
   linear_project: string;
   project_slug: string;
   agent_app_user_id: string;
-  workflow_profile: string;
+  pipeline_profile: string;
   process_status: string;
   // `symphony:` labels Conductor mirrors onto the Linear project for this
   // Performer. Present once the Conductor has reported.
@@ -158,22 +158,46 @@ export interface InstanceLogs {
   offset_end?: number;
 }
 
-export type RunStatus =
-  | "pending"
-  | "running"
-  | "success"
-  | "failed"
-  | "cancelled";
+export interface PipelineModeView {
+  mode: "plan" | "execute" | "verify";
+  active: number;
+  limit?: number | null;
+  queued: number;
+  node_ids: string[];
+}
 
-export interface RunSummary {
-  run_id: string;
-  issue_identifier?: string | null;
-  runtime_id?: string | null;
-  status: RunStatus;
-  started_at?: string | null;
-  completed_at?: string | null;
-  duration_seconds?: number | null;
-  failure_reason?: string | null;
+export interface PipelinePredictedCall {
+  node: string;
+  predicted_position?: number | null;
+  blocked_by: string[];
+  earliest_mode?: "plan" | "execute" | "verify" | null;
+  confidence: string;
+}
+
+export interface PipelineRuntimeWait {
+  node_id: string;
+  attempt_id: string;
+  mode: "plan" | "execute" | "verify";
+  wait_kind: string;
+  status: string;
+  message?: string | null;
+  command?: string | null;
+}
+
+export interface PipelineView {
+  graph_revision: number;
+  policy_revision: number;
+  modes: PipelineModeView[];
+  predicted_call_order: PipelinePredictedCall[];
+  human_waits: Array<{ node_id: string; reason?: string | null }>;
+  runtime_waits: PipelineRuntimeWait[];
+}
+
+export interface PipelineStatus {
+  runtime_group_id: string;
+  policy_revision: number;
+  profiles: Record<string, unknown>;
+  pipeline: Partial<PipelineView>;
 }
 
 export interface EnrollmentStatus {

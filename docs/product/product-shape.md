@@ -48,12 +48,15 @@ treated as an optional development mode, not the default SaaS posture.
 
 ### Performer
 
-Performer executes the actual coding-agent workflow. It reads and writes Linear
-through Podium's Linear proxy. It may access local repositories, workspaces,
-Codex, shell tools, and customer-approved secrets needed for code execution.
+Performer runs exactly one fenced pipeline attempt in `plan`, `execute`, or
+`verify` mode. It receives attempt JSON from Conductor, uses the isolated
+runtime environment prepared for that mode, and writes one fenced result JSON
+back to Conductor. It may access local repositories, workspaces, Codex, shell
+tools, and customer-approved secrets needed for the attempt.
 
-Performer should not require `LINEAR_API_KEY` in the managed product path.
-Legacy direct Linear tokens can remain as a local development fallback.
+Performer must not require `LINEAR_API_KEY` in the managed product path and must
+not poll Linear directly. Linear collaboration flows through Podium and
+Conductor's pipeline projection.
 
 ## Core User Journey
 
@@ -66,8 +69,10 @@ Legacy direct Linear tokens can remain as a local development fallback.
 7. The installed Conductor enrolls with Podium.
 8. Linear sends `AgentSessionEvent` webhooks to Podium.
 9. Podium routes each event to an eligible Conductor.
-10. Performer executes the work and accesses Linear through Podium proxy.
-11. Podium shows status, logs, runs, and runtime health.
+10. Conductor schedules fenced `plan -> execute -> verify` attempts and starts
+    short-lived Performers for each mode.
+11. Podium shows pipeline graph state, capacity, leases, attempts, manifests,
+    integration, human waits, and runtime health.
 
 ## Default Architecture Decision
 

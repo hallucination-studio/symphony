@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import httpx
 import pytest
 
 from conductor.conductor_models import InstanceRecord
+from conductor.conductor_linear_direct import RepositoryHandoffLinearProxy
 from conductor.conductor_repository_handoff import RepositoryHandoffCoordinator
 from performer_api.ops_models import OpsSnapshot, TraceEvent
 from performer_api.ops_store import OpsStore
@@ -60,6 +62,18 @@ class FakeTracker:
         return {"success": True}
 
 
+class RecordingTransport(httpx.AsyncBaseTransport):
+    def __init__(self, responses: list[dict[str, object]]) -> None:
+        self.responses = responses
+        self.requests: list[dict[str, object]] = []
+
+    async def handle_async_request(self, request):
+        import json
+
+        self.requests.append({"json": json.loads(request.content.decode()), "headers": request.headers})
+        return httpx.Response(200, json=self.responses.pop(0), request=request)
+
+
 def make_instance(tmp_path: Path) -> InstanceRecord:
     return InstanceRecord.create(
         name="Alpha",
@@ -67,15 +81,12 @@ def make_instance(tmp_path: Path) -> InstanceRecord:
         repo_source_value=str(tmp_path / "repo"),
         resolved_repo_path=str(tmp_path / "repo"),
         instance_dir=str(tmp_path / "instances" / "inst-1"),
-        workflow_path=str(tmp_path / "instances" / "inst-1" / "WORKFLOW.md"),
         workspace_root=str(tmp_path / "instances" / "inst-1" / "workspace" / "repo"),
         persistence_path=str(tmp_path / "instances" / "inst-1" / "state" / "performer.json"),
         log_path=str(tmp_path / "instances" / "inst-1" / "logs" / "performer.log"),
         http_port=8801,
         linear_project="ENG",
         linear_filters={"linear_agent_app_user_id": "app-user-1", "integration_agent_mention": "@integrator"},
-        workflow_profile="default",
-        workflow_inputs={},
         id="inst-1",
     )
 
@@ -117,3 +128,37 @@ async def test_repository_handoff_coordinator_creates_child_and_records_closeout
     assert "@integrator Repository handoff is ready for ENG-1." in tracker.comments[0][1]
     assert len(closeouts) == 1
     assert closeouts[0].payload["source_event_id"] == "evt-1"
+
+
+@pytest.mark.asyncio
+async def test_conductor_linear_proxy_ensures_blocks_relation() -> None:
+    transport = RecordingTransport(
+        [
+            {"data": {"issue": {"inverseRelations": {"nodes": []}}}},
+            {"data": {"issue": {"relations": {"nodes": []}}}},
+            {
+                "data": {
+                    "issueRelationCreate": {
+                        "success": True,
+                        "issueRelation": {
+                            "id": "relation-1",
+                            "type": "blocks",
+                            "issue": {"id": "node-a"},
+                            "relatedIssue": {"id": "node-b"},
+                        },
+                    }
+                }
+            },
+        ]
+    )
+    proxy = RepositoryHandoffLinearProxy(endpoint="https://linear.test/graphql", api_key="token", transport=transport)  # type: ignore[arg-type]
+
+    relation = await proxy.ensure_issue_relation(issue_id="node-a", related_issue_id="node-b", relation_type="blocks")
+
+    assert relation["id"] == "relation-1"
+    assert "inverseRelations" in transport.requests[0]["json"]["query"]
+    assert "relations" in transport.requests[1]["json"]["query"]
+    assert "issueRelationCreate" in transport.requests[2]["json"]["query"]
+    assert transport.requests[2]["json"]["variables"] == {
+        "input": {"type": "blocks", "issueId": "node-a", "relatedIssueId": "node-b"}
+    }

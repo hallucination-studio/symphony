@@ -7,7 +7,6 @@ import pytest
 
 from conductor.conductor_models import ConductorSettings, InstanceRecord
 from conductor.conductor_store import ConductorStore
-from performer_api.phase import RunPhase
 
 
 def make_instance(tmp_path: Path, *, instance_id: str, name: str, port: int) -> InstanceRecord:
@@ -21,12 +20,9 @@ def make_instance(tmp_path: Path, *, instance_id: str, name: str, port: int) -> 
         instance_dir=str(instance_dir),
         linear_project="ENG",
         linear_filters={"labels": ["codex"]},
-        workflow_profile="default",
-        workflow_inputs={"goal": "Ship"},
         workspace_root=str(instance_dir / "workspace"),
         persistence_path=str(instance_dir / "state" / "performer.json"),
         log_path=str(instance_dir / "logs" / "performer.log"),
-        workflow_path=str(instance_dir / "WORKFLOW.md"),
         http_port=port,
     )
 
@@ -167,34 +163,15 @@ def test_managed_runtime_settings_round_trip_without_public_tokens(tmp_path: Pat
     assert "proxy-secret" not in str(public)
 
 
-def test_duplicate_active_run_projection_is_idempotent(tmp_path: Path) -> None:
+def test_store_schema_excludes_legacy_orchestration_tables(tmp_path: Path) -> None:
     store = ConductorStore(tmp_path / "conductor-data")
-    instance = make_instance(tmp_path, instance_id="inst-1", name="Main", port=8801)
-    store.create_instance(instance)
-    first = store.upsert_orchestration_run(
-        instance_id=instance.id,
-        issue_id="issue-1",
-        issue_identifier="ENG-1",
-        workflow_profile="default",
-        dispatch_id="dispatch-1",
-    )
 
-    duplicate = store.apply_event(
-        "run-duplicate",
-        {
-            "instance_id": instance.id,
-            "issue_id": "issue-1",
-            "event_type": "dispatch.created",
-            "to_phase": RunPhase.QUEUED,
-            "payload": {
-                "issue_identifier": "ENG-1",
-                "workflow_profile": "default",
-                "dispatch_id": "dispatch-1",
-            },
-        },
-        expected_current_phases=set(),
-    )
+    with store.connect() as connection:
+        tables = {
+            str(row["name"])
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
+        }
 
-    assert duplicate.run_id == first.run_id
-    active = store.list_orchestration_runs(instance_id=instance.id, phases={RunPhase.QUEUED})
-    assert [run.run_id for run in active] == [first.run_id]
+    assert {"settings", "instances", "runtime_actions"}.issubset(tables)
+    assert "orchestration_runs" not in tables
+    assert "orchestration_events" not in tables

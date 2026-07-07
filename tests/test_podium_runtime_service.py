@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from podium.models import RunStatus, RunSummary, RuntimeRecord
+from podium.models import RuntimeRecord
 from podium.runtime_service import RuntimeService
 from podium.store import PodiumStore
 
@@ -50,38 +50,9 @@ def test_record_heartbeat_marks_runtime_online() -> None:
     assert record.online is True
 
 
-def test_recent_runs_returns_newest_first_limited() -> None:
+def test_runtime_service_does_not_expose_legacy_runs() -> None:
     service, _ = _service()
-    for i in range(5):
-        service.record_run(
-            RunSummary(
-                run_id=f"run-{i}",
-                issue_identifier=f"ENG-{i}",
-                runtime_id="rt-1",
-                status=RunStatus.SUCCESS,
-                started_at=f"2026-01-0{i+1}T00:00:00Z",
-                completed_at=None,
-                duration_seconds=None,
-            )
-        )
-    recent = service.recent_runs(limit=3)
-    assert [r.run_id for r in recent] == ["run-4", "run-3", "run-2"]
 
-
-def test_get_run_returns_detail() -> None:
-    service, _ = _service()
-    service.record_run(
-        RunSummary(
-            run_id="run-1",
-            issue_identifier="ENG-1",
-            runtime_id="rt-1",
-            status=RunStatus.FAILED,
-            started_at="2026-01-01T00:00:00Z",
-            completed_at="2026-01-01T00:01:00Z",
-            duration_seconds=60.0,
-            failure_reason="boom",
-        )
-    )
-    run = service.get_run("run-1")
-    assert run is not None
-    assert run.failure_reason == "boom"
+    assert not hasattr(service, "record_run")
+    assert not hasattr(service, "recent_runs")
+    assert not hasattr(service, "get_run")

@@ -1,6 +1,6 @@
 from test_codex_client_support import *  # noqa: F401,F403
 
-async def test_sdk_backend_passes_codex_state_env_to_sdk_config(tmp_path: Path, monkeypatch) -> None:
+async def test_sdk_backend_does_not_fall_back_to_global_codex_home(tmp_path: Path, monkeypatch) -> None:
     home = tmp_path / "home"
     (home / ".codex").mkdir(parents=True)
     monkeypatch.setenv("HOME", str(home))
@@ -27,7 +27,7 @@ async def test_sdk_backend_passes_codex_state_env_to_sdk_config(tmp_path: Path, 
     kwargs = captured["config_kwargs"]
     assert kwargs["codex_bin"] == "/bin/sh"
     assert kwargs["env"]["HOME"] == str(home)
-    assert kwargs["env"]["CODEX_HOME"] == str(home / ".codex")
+    assert "CODEX_HOME" not in kwargs["env"]
 
 async def test_sdk_backend_passes_config_overrides_to_sdk_config(tmp_path: Path, monkeypatch) -> None:
     captured: dict[str, Any] = {}

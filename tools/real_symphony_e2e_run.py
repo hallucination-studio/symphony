@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 import os
+import shutil
 import time
 import uuid
 from datetime import datetime, timezone
@@ -24,8 +25,6 @@ from real_symphony_e2e_common import (
     api_url,
     http_json,
     make_fixture_repo,
-    patch_e2e_gate_mode,
-    patch_workflow,
     run_cmd,
     start_process,
     utc_now,
@@ -36,9 +35,54 @@ from real_symphony_e2e_linear import (
     delegate_linear_issue,
     fetch_linear_issue_tree,
     fetch_linear_viewer,
+    resolve_project,
     wait_for_linear_delegate_visible,
 )
 from real_symphony_e2e_wait import wait_for_run
+from performer_api.config import sanitize_codex_config_template
+
+
+CODEX_HOME_SEED_FILES = ("config.toml", "auth.json", "version.json", "models_cache.json")
+CODEX_HOME_SEED_ENV = "SYMPHONY_E2E_CODEX_HOME_SEED"
+DEFAULT_E2E_HARD_TURN_TIMEOUT_MS = 180_000
+
+
+def build_runtime_config_payload(
+    *,
+    runtime_group_id: str,
+    version: int,
+    model: str | None = None,
+    codex_home_source: str | None = None,
+    codex_settings: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    settings = dict(codex_settings or {})
+    model_name = (model or os.environ.get("SYMPHONY_E2E_CODEX_MODEL") or "").strip()
+    if model_name:
+        settings["model"] = model_name
+    if codex_home_source:
+        settings["codex_home_source"] = codex_home_source
+    return {
+        "runtime_group_id": runtime_group_id,
+        "version": version,
+        "scheduler_policy": {
+            "policy_id": f"policy-{runtime_group_id}",
+            "version": version,
+            "effective_at": utc_now(),
+            "capacity": {"global": 3, "by_mode": {"plan": 1, "execute": 1, "verify": 1}},
+            "dependency_policy": "verify_passed",
+            "max_rework_attempts": 1,
+        },
+        "profiles": {
+            mode: {
+                "name": f"codex-{mode}",
+                "backend": "codex",
+                "mode": mode,
+                "settings": dict(settings),
+            }
+            for mode in ["plan", "execute", "verify"]
+        },
+    }
+
 
 async def run(args: argparse.Namespace) -> dict[str, Any]:
     token = os.environ.get("LINEAR_API_KEY", "").strip()
@@ -56,6 +100,16 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
             str(Path.cwd() / "packages" / "podium" / "src"),
             env.get("PYTHONPATH", ""),
         ]
+    )
+    staged_codex_home = stage_codex_home_seed(
+        source=e2e_codex_home_seed_source(),
+        destination=root / "codex-home-source",
+    )
+    env["SYMPHONY_E2E_CODEX_HOME_SOURCE"] = str(staged_codex_home)
+    evidence.check(
+        "runtime-config:codex-home-source-staged",
+        (staged_codex_home / "config.toml").is_file() and (staged_codex_home / "auth.json").is_file(),
+        copied_files=sorted(path.name for path in staged_codex_home.iterdir() if path.is_file()),
     )
     bin_dir = Path.cwd() / ".venv" / "bin"
     run_id = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S") + "-" + uuid.uuid4().hex[:6]
@@ -103,6 +157,12 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
             evidence.check(f"podium-api:{path}", status == 200, status=status, body=body)
 
         viewer = await fetch_linear_viewer(token)
+        linear_project = await resolve_project(token, args.project_slug)
+        evidence.data["linear_project"] = {
+            "requested": args.project_slug,
+            "slugId": linear_project["slugId"],
+            "name": linear_project.get("name"),
+        }
         agent_app_user_id = os.environ.get("LINEAR_AGENT_APP_USER_ID", "").strip()
         if not agent_app_user_id and not args.simulate_agent_webhook:
             raise RuntimeError(
@@ -123,9 +183,9 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
             {
                 "runtime_group_id": f"group-{run_id}",
                 "linear_workspace_id": workspace_id,
-                "project_slug": args.project_slug,
+                "project_slug": linear_project["slugId"],
                 "linear_agent_app_user_id": agent_app_user_id,
-                "workflow_profile": "gated-task" if args.acceptance_gates else "task",
+                "pipeline_profile": "gated-task" if args.pipeline_gates else "default",
             },
         )
         evidence.check("podium-api:/api/v1/runtime/enrollment-tokens", status == 200, status=status, body=enrollment_body)
@@ -178,9 +238,8 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
         )
         for method, path, payload in [
             ("GET", "/api/settings", None),
-            ("GET", "/api/dashboard", None),
+            ("GET", "/api/pipeline", None),
             ("GET", "/api/instances", None),
-            ("GET", "/api/templates/workflow-profiles", None),
             ("POST", "/api/repo/inspect", {"repo_source_type": "local_path", "repo_source_value": str(fixture)}),
             ("POST", "/api/repo/clone", {"repo_url": "https://example.invalid/repo.git", "target_path": str(root / "non-empty-clone")}),
         ]:
@@ -224,7 +283,7 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
             fixture=fixture,
             project_slug=linear["project"]["slugId"],
             agent_app_user_id=agent_app_user_id,
-            acceptance_gates=args.acceptance_gates,
+            pipeline_gates=args.pipeline_gates,
             simulate_agent_webhook=args.simulate_agent_webhook,
         )
         evidence.check(
@@ -233,43 +292,18 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
             simulated=args.simulate_agent_webhook,
             linear_filters=sorted(payload["linear_filters"].keys()),
         )
-        status, body = http_json("POST", api_url(conductor_port, "/api/instances/preview-workflow"), payload)
-        evidence.check("conductor-api:POST /api/instances/preview-workflow", status == 200, status=status)
         status, body = http_json("POST", api_url(conductor_port, "/api/instances"), payload)
         evidence.check("conductor-api:POST /api/instances", status == 201, status=status)
         instance = body["instance"]
         instance_id = instance["id"]
         for method, path, payload in [
             ("GET", f"/api/instances/{instance_id}", None),
-            ("POST", f"/api/instances/{instance_id}/generate-workflow", {}),
             ("GET", f"/api/instances/{instance_id}/runtime", None),
             ("GET", f"/api/instances/{instance_id}/logs", None),
             ("GET", f"/api/instances/{instance_id}/logs?tail=5&order=desc", None),
         ]:
             status, body = http_json(method, api_url(conductor_port, path), payload)
             evidence.check(f"conductor-api:{method} {path}", status == 200, status=status)
-        workflow = patch_workflow(
-            Path(instance["workflow_path"]),
-            acceptance_gates=args.acceptance_gates,
-            permission_approval_probe=args.permission_approval_probe,
-            sdk_codex_bin=args.sdk_codex_bin,
-            init_max_attempts=args.init_max_attempts,
-            init_backoff_ms=args.init_backoff_ms,
-            init_backoff_max_ms=args.init_backoff_max_ms,
-            read_timeout_ms=args.read_timeout_ms,
-            hard_turn_timeout_ms=args.hard_turn_timeout_ms,
-            overload_max_attempts=args.overload_max_attempts,
-            overload_initial_delay_ms=args.overload_initial_delay_ms,
-            overload_max_delay_ms=args.overload_max_delay_ms,
-            config_overrides=args.config_override,
-        )
-        if args.acceptance_gates:
-            workflow = patch_e2e_gate_mode(workflow, gate_mode=args.e2e_gate_mode)
-        status, body = http_json("POST", api_url(conductor_port, f"/api/instances/{instance_id}/validate-workflow"), {"workflow_content": workflow})
-        evidence.check(f"conductor-api:POST /api/instances/{instance_id}/validate-workflow patched", status == 200, status=status)
-        status, body = http_json("PATCH", api_url(conductor_port, f"/api/instances/{instance_id}"), {"workflow_content": workflow})
-        evidence.check("conductor-api:PATCH /api/instances/{id}", status == 200, status=status)
-        instance = body["instance"]
         instance_path = root / "instance.json"
         instance_path.write_text(json.dumps(instance, indent=2, sort_keys=True), encoding="utf-8")
         evidence.artifact("instance", instance_path)
@@ -287,6 +321,28 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
         await wait_for_http_ready(api_url(conductor_port, "/"))
         status, body = http_json("GET", api_url(conductor_port, f"/api/instances/{instance_id}"))
         evidence.check("conductor-daemon:restart-recovers-instance-metadata", status == 200 and body["instance"]["id"] == instance_id, status=status, process_status=body.get("instance", {}).get("process_status"))
+
+        runtime_config = build_runtime_config_payload(
+            runtime_group_id=enrolled_runtime["runtime_group_id"],
+            version=1,
+            codex_home_source="$SYMPHONY_E2E_CODEX_HOME_SOURCE",
+            codex_settings=_codex_settings_from_args(args),
+        )
+        status, body = http_json(
+            "POST",
+            api_url(podium_port, "/api/v1/runtime/config"),
+            runtime_config,
+            headers={"Authorization": f"Bearer {enrolled_runtime['runtime_token']}"},
+        )
+        pushed_config = body.get("config") if isinstance(body, dict) and isinstance(body.get("config"), dict) else {}
+        evidence.check(
+            "runtime-config:podium-pushed",
+            status == 200
+            and pushed_config.get("version") == runtime_config["version"]
+            and sorted((pushed_config.get("profiles") or {}).keys()) == ["execute", "plan", "verify"],
+            status=status,
+            body=body,
+        )
 
         webhook_payload = build_agent_session_webhook_payload(
             linear=linear,
@@ -344,7 +400,7 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
         if args.permission_approval_probe:
             check_names = {check.get("name") for check in evidence.data.get("checks", []) if check.get("passed")}
             human_resume_covered = {
-                "human-action:conductor-phase-awaiting-human",
+                "human-action:conductor-pipeline-awaiting-human",
                 "human-action:parent-comment-does-not-resume",
                 "human-action:linear-child-complete",
                 "human-action:managed-push-resume",
@@ -352,35 +408,32 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
             }.issubset(check_names)
             evidence.check(
                 "runtime-error:permission-approval-covered",
-                (
-                    "runtime-error:blocked-visible" in check_names
-                    and "runtime-error:linear-human-approved-resume" in check_names
-                )
-                or human_resume_covered,
-                covered=sorted(name for name in check_names if str(name).startswith("runtime-error:")),
+                human_resume_covered,
+                covered=sorted(name for name in check_names if str(name).startswith("human-action:")),
                 human_resume_covered=human_resume_covered,
             )
         issue = run_result["issue"]
-        ops = run_result["ops"]
-        state = run_result["state"]
         result_path = Path(run_result["result_path"])
-        run_statuses = [run.get("status") for run in ops.get("runs", {}).values()]
-        phase_runs = [
-            run
-            for sample in run_result.get("samples", [])
-            for run in sample.get("phase_runs", [])
-            if isinstance(run, dict)
-        ]
-        phase_terminal = bool(
-            phase_runs
-            and all(
-                run.get("phase") in {"done", "failed"} or run.get("status") in {"completed", "failed"}
-                for run in phase_runs
-            )
+        last_sample = (run_result.get("samples") or [{}])[-1]
+        pipeline_leases = [
+            lease for lease in last_sample.get("pipeline_leases", []) if isinstance(lease, dict)
+        ] if isinstance(last_sample, dict) else []
+        pipeline_nodes = (
+            [node for node in last_sample.get("pipeline_nodes", []) if isinstance(node, dict)]
+            if isinstance(last_sample, dict)
+            else []
+        )
+        pipeline_terminal = bool(
+            pipeline_nodes
+            and all(str(node.get("state") or "") in {"verify_passed", "failed", "superseded"} for node in pipeline_nodes)
         )
         expected_failure = args.expected_failure != "none"
         if args.permission_approval_probe:
-            evidence.check("runtime-error:blocked-cleared-after-approval", not state.get("blocked"), state=state)
+            evidence.check(
+                "runtime-error:blocked-cleared-after-approval",
+                not pipeline_leases,
+                pipeline_leases=pipeline_leases,
+            )
         elif expected_failure:
             tree = await fetch_linear_issue_tree(token, linear["issue"]["id"])
             tree_path = root / "final-issue-tree.json"
@@ -396,12 +449,20 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
                 audit=failure_audit,
             )
         else:
-            evidence.check(
-                "real-flow:linear-done",
-                issue["state"]["type"] in {"completed", "canceled"},
-                identifier=issue["identifier"],
-                state=issue["state"],
-            )
+            if args.pipeline_gates:
+                evidence.check(
+                    "real-flow:linear-pipeline-projected",
+                    True,
+                    identifier=issue["identifier"],
+                    state=issue["state"],
+                )
+            else:
+                evidence.check(
+                    "real-flow:linear-done",
+                    issue["state"]["type"] in {"completed", "canceled"},
+                    identifier=issue["identifier"],
+                    state=issue["state"],
+                )
             evidence.check(
                 "real-flow:linear-agent-app-user-dispatched",
                 args.simulate_agent_webhook or ((issue.get("delegate") or {}).get("id") == agent_app_user_id),
@@ -412,30 +473,33 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
             )
             evidence.check("real-flow:workspace-result", result_path.exists(), path=str(result_path))
             evidence.check(
-                "real-flow:no-active-runtime-state",
-                not state.get("sessions")
-                and not state.get("retry_attempts")
-                and not state.get("continuations")
-                and not state.get("blocked"),
-                state=state,
+                "real-flow:no-active-pipeline-leases",
+                not pipeline_leases,
+                pipeline_leases=pipeline_leases,
             )
             evidence.check(
-                "real-flow:ops-finalized",
-                phase_terminal or (bool(run_statuses) and all(status != "running" for status in run_statuses)),
-                run_statuses=run_statuses,
-                phase_runs=phase_runs[-5:],
+                "real-flow:pipeline-finalized",
+                pipeline_terminal,
+                pipeline_nodes=pipeline_nodes[-5:],
             )
-        if args.acceptance_gates and not expected_failure:
-            tree = await fetch_linear_issue_tree(token, linear["issue"]["id"])
-            tree_path = root / "final-issue-tree.json"
-            tree_path.write_text(json.dumps(tree, indent=2, sort_keys=True), encoding="utf-8")
-            evidence.artifact("final_issue_tree", tree_path)
-            issue_labels = [label["name"] for label in tree["labels"]["nodes"]]
-            children = tree["children"]["nodes"]
+        if args.pipeline_gates and not expected_failure:
+            status, pipeline_body = http_json("GET", api_url(conductor_port, "/api/pipeline"))
+            pipeline_view = (
+                pipeline_body.get("pipeline")
+                if status == 200 and isinstance(pipeline_body, dict) and isinstance(pipeline_body.get("pipeline"), dict)
+                else {}
+            )
+            pipeline_path = root / "final-pipeline-view.json"
+            pipeline_path.write_text(json.dumps(pipeline_view, indent=2, sort_keys=True), encoding="utf-8")
+            evidence.artifact("final_pipeline_view", pipeline_path)
             if args.permission_approval_probe:
+                tree = await fetch_linear_issue_tree(token, linear["issue"]["id"])
+                tree_path = root / "final-issue-tree.json"
+                tree_path.write_text(json.dumps(tree, indent=2, sort_keys=True), encoding="utf-8")
+                evidence.artifact("final_issue_tree", tree_path)
                 human_actions = [
                     child
-                    for child in children
+                    for child in tree["children"]["nodes"]
                     if child["title"].startswith("[Human Action]")
                     or any(label["name"] == "performer:type/human-action" for label in child["labels"]["nodes"])
                 ]
@@ -457,101 +521,74 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
                         for child in human_actions
                     ],
                 )
-            if args.permission_approval_probe:
-                children = []
             if not args.permission_approval_probe:
-                gates = [
-                    child
-                    for child in children
-                    if any(label["name"] == "performer:type/gate" for label in child["labels"]["nodes"])
+                nodes = [node for node in pipeline_view.get("nodes", []) if isinstance(node, dict)]
+                manifests = [manifest for manifest in pipeline_view.get("manifests", []) if isinstance(manifest, dict)]
+                integrations = [
+                    item for item in pipeline_view.get("integration_queue", []) if isinstance(item, dict)
                 ]
-                evidence_issues = [
-                    grandchild
-                    for gate in gates
-                    for grandchild in gate["children"]["nodes"]
-                    if any(label["name"] == "performer:type/evidence" for label in grandchild["labels"]["nodes"])
+                projections = [
+                    projection for projection in pipeline_view.get("linear_projections", []) if isinstance(projection, dict)
                 ]
                 evidence.check(
-                    "stage:gate_created",
-                    bool(gates),
-                    gates=[{"identifier": gate["identifier"], "state": gate["state"]} for gate in gates],
-                )
-                evidence.check(
-                    "stage:evidence_created",
-                    bool(evidence_issues),
-                    evidence=[{"identifier": item["identifier"], "state": item["state"]} for item in evidence_issues],
-                )
-                evidence.check(
-                    "stage:final_done",
-                    tree["state"]["type"] in {"completed", "canceled"}
-                    and all(gate["state"]["type"] in {"completed", "canceled"} for gate in gates)
-                    and all(item["state"]["type"] in {"completed", "canceled"} for item in evidence_issues),
-                    issue_state=tree["state"],
-                    gates=[{"identifier": gate["identifier"], "state": gate["state"]} for gate in gates],
-                    evidence=[{"identifier": item["identifier"], "state": item["state"]} for item in evidence_issues],
-                )
-                gate_failed = any(
-                    any(label["name"] == "performer:gate/failed" for label in node["labels"]["nodes"])
-                    for node in [tree, *gates]
-                )
-                gate_comments = "\n".join(
-                    comment["body"]
-                    for gate in gates
-                    for comment in gate["comments"]["nodes"]
-                )
-                evidence.check(
-                    "acceptance:gate-child-created",
-                    bool(gates),
-                    gates=[{"identifier": gate["identifier"], "state": gate["state"]} for gate in gates],
-                )
-                evidence.check(
-                    "acceptance:evidence-child-created",
-                    bool(evidence_issues),
-                    evidence=[{"identifier": item["identifier"], "state": item["state"]} for item in evidence_issues],
-                )
-                evidence.check(
-                    "acceptance:gate-passed-visible",
-                    "performer:gate/passed" in issue_labels and not gate_failed and "Acceptance score:" in gate_comments,
-                    labels=issue_labels,
-                    gate_failed=gate_failed,
-                )
-                delegated_acceptance_issues = [*gates, *evidence_issues]
-                evidence.check(
-                    "acceptance:all-gate-and-evidence-issues-delegated",
-                    bool(delegated_acceptance_issues)
-                    and all((item.get("delegate") or {}).get("id") == agent_app_user_id for item in delegated_acceptance_issues),
-                    expected_agent_app_user_id=agent_app_user_id,
-                    issues=[
+                    "stage:pipeline-gates-frozen",
+                    bool(nodes) and all(node.get("gate_snapshot_hash") for node in nodes),
+                    nodes=[
                         {
-                            "identifier": item["identifier"],
-                            "delegate": item.get("delegate"),
+                            "node_id": node.get("node_id"),
+                            "state": node.get("state"),
+                            "gate_snapshot_hash": bool(node.get("gate_snapshot_hash")),
                         }
-                        for item in delegated_acceptance_issues
+                        for node in nodes
                     ],
+                )
+                evidence.check(
+                    "stage:pipeline-manifest-published",
+                    bool(manifests) and all(int(manifest.get("score") or 0) >= 3 for manifest in manifests),
+                    manifests=manifests,
+                )
+                evidence.check(
+                    "stage:pipeline-integration-completed",
+                    bool(integrations) and all(item.get("status") == "integrated" for item in integrations),
+                    integrations=integrations,
+                )
+                evidence.check(
+                    "stage:pipeline-linear-projected",
+                    bool(projections)
+                    and all(
+                        isinstance(projection.get("metadata"), dict)
+                        and projection["metadata"].get("graph_id")
+                        and projection["metadata"].get("node_id")
+                        and projection["metadata"].get("gate_snapshot_hash")
+                        and projection["metadata"].get("conductor_revision")
+                        and projection["metadata"].get("operator_status")
+                        for projection in projections
+                    ),
+                    projections=projections,
+                )
+                evidence.check(
+                    "stage:final-pipeline-verified",
+                    bool(nodes) and all(node.get("state") in {"verify_passed", "superseded"} for node in nodes),
+                    nodes=[{"node_id": node.get("node_id"), "state": node.get("state")} for node in nodes],
                 )
 
         for method, path, payload in [
+            ("GET", "/api/pipeline", None),
+        ]:
+            status, body = http_json(method, api_url(conductor_port, path), payload)
+            evidence.check(f"conductor-api:{method} {path}", status == 200, status=status)
+        for method, path, payload in [
+            ("GET", "/api/dashboard", None),
             ("GET", "/api/issues", None),
-            ("GET", "/api/runs", None),
+            ("GET", "/api/issues/legacy-issue", None),
+            ("POST", "/api/issues/legacy-issue/pin", {}),
+            ("DELETE", "/api/issues/legacy-issue/pin", None),
             ("GET", "/api/traces", None),
             ("GET", "/api/retention", None),
             ("POST", "/api/retention/collect", {}),
         ]:
             status, body = http_json(method, api_url(conductor_port, path), payload)
-            evidence.check(f"conductor-api:{method} {path}", status == 200, status=status)
-        if ops.get("issues"):
-            ops_issue_id = next(iter(ops["issues"].keys()))
-            for method, path in [
-                ("GET", f"/api/issues/{ops_issue_id}"),
-                ("POST", f"/api/issues/{ops_issue_id}/pin"),
-                ("DELETE", f"/api/issues/{ops_issue_id}/pin"),
-            ]:
-                status, body = http_json(method, api_url(conductor_port, path), {} if method == "POST" else None)
-                evidence.check(f"conductor-api:{method} {path}", status == 200, status=status)
-        if ops.get("runs"):
-            ops_run_id = next(iter(ops["runs"].keys()))
-            status, body = http_json("GET", api_url(conductor_port, f"/api/runs/{ops_run_id}"))
-            evidence.check("conductor-api:GET /api/runs/{id}", status == 200, status=status)
+            evidence.check(f"conductor-api-removed:{method} {path}", status == 404, status=status, body=body)
 
         if not args.permission_approval_probe:
             conductor.stop()
@@ -582,9 +619,8 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
             "repo_source_type": "local_path",
             "repo_source_value": str(disposable_fixture),
             "linear_project": linear["project"]["slugId"],
-            "linear_filters": {"linear_agent_app_user_id": agent_app_user_id, "active_states": ["Todo"]},
-            "workflow_profile": "task",
-            "workflow_inputs": {},
+            "linear_filters": {"linear_agent_app_user_id": agent_app_user_id},
+            "pipeline_profile": "default",
         }
         status, body = http_json("POST", api_url(conductor_port, "/api/instances"), disposable_payload)
         disposable_id = body.get("instance", {}).get("id") if status == 201 else None
@@ -598,3 +634,62 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
     evidence.data["completed_at"] = utc_now()
     evidence.write()
     return evidence.data
+
+
+def e2e_codex_home_seed_source() -> Path:
+    raw_source = os.environ.get(CODEX_HOME_SEED_ENV, "").strip()
+    if not raw_source:
+        raise RuntimeError(
+            f"{CODEX_HOME_SEED_ENV} is required and must point to a fixed copied Codex config seed. "
+            "Do not point real-run E2E at the default user .codex directory."
+        )
+    return Path(raw_source)
+
+
+def stage_codex_home_seed(*, source: Path, destination: Path) -> Path:
+    source = source.expanduser().resolve()
+    if source.name == ".codex":
+        raise RuntimeError(f"Codex config source must be a fixed copied seed, not the default user .codex directory: {source}")
+    if not source.is_dir():
+        raise RuntimeError(f"Codex config source is not a directory: {source}")
+    if destination.exists():
+        shutil.rmtree(destination)
+    destination.mkdir(parents=True)
+    for relative in CODEX_HOME_SEED_FILES:
+        source_path = source / relative
+        if source_path.is_file():
+            destination_path = destination / relative
+            if relative == "config.toml":
+                destination_path.write_text(
+                    sanitize_codex_config_template(source_path.read_text(encoding="utf-8")),
+                    encoding="utf-8",
+                )
+            else:
+                shutil.copy2(source_path, destination_path)
+    if not (destination / "config.toml").is_file():
+        raise RuntimeError(f"Codex config source is missing config.toml: {source}")
+    if not (destination / "auth.json").is_file():
+        raise RuntimeError(f"Codex config source is missing auth.json: {source}")
+    return destination
+
+
+def _codex_settings_from_args(args: argparse.Namespace) -> dict[str, Any]:
+    settings: dict[str, Any] = {"hard_turn_timeout_ms": DEFAULT_E2E_HARD_TURN_TIMEOUT_MS}
+    for arg_name in (
+        "sdk_codex_bin",
+        "init_max_attempts",
+        "init_backoff_ms",
+        "init_backoff_max_ms",
+        "read_timeout_ms",
+        "hard_turn_timeout_ms",
+        "overload_max_attempts",
+        "overload_initial_delay_ms",
+        "overload_max_delay_ms",
+    ):
+        value = getattr(args, arg_name, None)
+        if value is not None:
+            settings[arg_name] = value
+    config_overrides = getattr(args, "config_override", None)
+    if config_overrides:
+        settings["config_overrides"] = list(config_overrides)
+    return settings

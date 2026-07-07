@@ -8,10 +8,10 @@ import type {
   LinearAppConfig,
   LinearScope,
   OnboardingProgress,
+  PipelineStatus,
   PodiumConfig,
   RepositoryMapping,
   RepositoryMode,
-  RunSummary,
   RuntimeRecord,
   SmokeCheckResult,
 } from "./types";
@@ -192,11 +192,7 @@ export const api = {
     );
   },
 
-  recentRuns(limit = 10): Promise<{ runs: RunSummary[] }> {
-    return request(`/api/v1/runs/recent?limit=${encodeURIComponent(limit)}`);
-  },
-
-  run(id: string): Promise<RunSummary> {
-    return request<RunSummary>(`/api/v1/runs/${encodeURIComponent(id)}`);
+  pipeline(): Promise<PipelineStatus> {
+    return request<PipelineStatus>("/api/v1/pipeline");
   },
 };

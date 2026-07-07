@@ -3,7 +3,7 @@ import HomePage from "./pages/HomePage";
 import SetupPage from "./pages/SetupPage";
 import IntegrationsPage from "./pages/IntegrationsPage";
 import RuntimesPage from "./pages/RuntimesPage";
-import RunsPage from "./pages/RunsPage";
+import PipelinePage from "./pages/PipelinePage";
 import AccountPage from "./pages/AccountPage";
 import LoginPage from "./pages/LoginPage";
 import RegisterPage from "./pages/RegisterPage";
@@ -17,7 +17,7 @@ const NAV = [
   { to: "/setup", label: "Setup", end: false },
   { to: "/integrations", label: "Integrations", end: false },
   { to: "/runtimes", label: "Runtimes", end: false },
-  { to: "/runs", label: "Runs", end: false },
+  { to: "/pipeline", label: "Pipeline", end: false },
   { to: "/account", label: "Account", end: false },
 ];
 
@@ -86,7 +86,7 @@ function AppShell({ user }: { user: AuthUser }) {
           <Route path="/setup/:step" element={<SetupPage />} />
           <Route path="/integrations" element={<IntegrationsPage />} />
           <Route path="/runtimes" element={<RuntimesPage />} />
-          <Route path="/runs" element={<RunsPage />} />
+          <Route path="/pipeline" element={<PipelinePage />} />
           <Route path="/account" element={<AccountPage />} />
           {/* Signed-in users hitting auth routes go home. */}
           <Route path="/login" element={<Navigate to="/" replace />} />

@@ -124,19 +124,6 @@ export function TurnstileWidget({
   );
 }
 
-export function useTurnstile() {
-  const [token, setToken] = useState("");
-  const [ready, setReady] = useState(false);
-
-  return {
-    token,
-    ready,
-    widget: (
-      <TurnstileWidget onToken={setToken} onReadyChange={setReady} />
-    ),
-  };
-}
-
 function loadTurnstileScript(): Promise<void> {
   if (window.turnstile) return Promise.resolve();
   if (scriptPromise) return scriptPromise;

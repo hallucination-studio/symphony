@@ -56,26 +56,6 @@ class LinearClient:
             raise LinearError("linear_graphql_errors", str(payload["errors"]))
         return payload
 
-    async def fetch_candidate_issues(self, config: TrackerConfig, *, page_size: int = 50) -> list[Issue]:
-        query, variables = _issues_query_and_variables(
-            "PerformerCandidateIssues",
-            config,
-            config.active_states,
-            page_size=page_size,
-        )
-        return await self._fetch_paginated(query, variables)
-
-    async def fetch_issues_by_states(self, config: TrackerConfig, state_names: list[str]) -> list[Issue]:
-        if not state_names:
-            return []
-        query, variables = _issues_query_and_variables(
-            "PerformerIssuesByStates",
-            config,
-            state_names,
-            page_size=50,
-        )
-        return await self._fetch_paginated(query, variables)
-
     async def fetch_issue_states_by_ids(self, config: TrackerConfig, issue_ids: list[str]) -> list[Issue]:
         if not issue_ids:
             return []
@@ -161,30 +141,6 @@ class LinearClient:
             "identifier": updated_issue.get("identifier") if isinstance(updated_issue, dict) else None,
             "description": updated,
         }
-
-    async def find_acceptance_issue_for(
-        self,
-        *,
-        original_issue: Issue,
-        acceptance_label_name: str,
-    ) -> dict[str, Any] | None:
-        payload = await self.graphql(ISSUE_ACCEPTANCE_RELATIONS_QUERY, {"issueId": original_issue.id})
-        issue = ((payload.get("data") or {}).get("issue") or {})
-        relations = (((issue.get("inverseRelations") or {}).get("nodes")) or []) if isinstance(issue, dict) else []
-        for relation in relations:
-            if not isinstance(relation, dict) or relation.get("type") != "blocks":
-                continue
-            candidate = relation.get("issue")
-            if not isinstance(candidate, dict):
-                continue
-            labels = [
-                str(label.get("name") or "").strip().lower()
-                for label in (((candidate.get("labels") or {}).get("nodes")) or [])
-                if isinstance(label, dict)
-            ]
-            if acceptance_label_name.strip().lower() in labels:
-                return _normalize_issue_dict(candidate)
-        return None
 
     async def create_issue(
         self,
@@ -323,7 +279,7 @@ class LinearClient:
         related_issue_id: str,
         relation_type: str,
     ) -> dict[str, Any]:
-        payload = await self.graphql(ISSUE_ACCEPTANCE_RELATIONS_QUERY, {"issueId": related_issue_id})
+        payload = await self.graphql(ISSUE_PIPELINE_RELATIONS_QUERY, {"issueId": related_issue_id})
         issue = ((payload.get("data") or {}).get("issue") or {})
         relations = (((issue.get("inverseRelations") or {}).get("nodes")) or []) if isinstance(issue, dict) else []
         for relation in relations:
@@ -337,7 +293,7 @@ class LinearClient:
                 related_issue_id=related_issue_id,
             ):
                 return relation
-        payload = await self.graphql(ISSUE_ACCEPTANCE_RELATIONS_QUERY, {"issueId": issue_id})
+        payload = await self.graphql(ISSUE_PIPELINE_RELATIONS_QUERY, {"issueId": issue_id})
         issue = ((payload.get("data") or {}).get("issue") or {})
         direct_relations = (((issue.get("relations") or {}).get("nodes")) or []) if isinstance(issue, dict) else []
         for relation in direct_relations:
@@ -355,25 +311,6 @@ class LinearClient:
             issue_id=issue_id,
             related_issue_id=related_issue_id,
             relation_type=relation_type,
-        )
-
-    async def create_acceptance_issue_for(
-        self,
-        *,
-        original_issue_id: str,
-        title: str,
-        description: str,
-        acceptance_label_name: str,
-    ) -> dict[str, Any]:
-        context = await self._fetch_issue_creation_context(original_issue_id)
-        label = await self._ensure_issue_label(context["team_id"], acceptance_label_name)
-        return await self.create_issue(
-            team_id=context["team_id"],
-            project_id=context["project_id"],
-            state_id=context["state_id"],
-            label_ids=[label["id"]],
-            title=title,
-            description=description,
         )
 
     async def create_child_issue_for(
@@ -400,36 +337,20 @@ class LinearClient:
             delegate_id=delegate_id,
         )
 
-    async def set_issue_lifecycle_label(self, issue_id: str, label_name: str) -> dict[str, Any]:
-        context = await self._fetch_issue_label_context(issue_id)
-        target = await self._ensure_issue_label(context["team_id"], label_name)
-        preserved = [
-            label
-            for label in context["labels"]
-            if _preserve_non_phase_performer_label(str(label.get("name") or ""))
-        ]
-        label_ids = [label["id"] for label in preserved if label.get("id")]
-        if target["id"] not in label_ids:
-            label_ids.append(target["id"])
-        payload = await self.graphql(ISSUE_UPDATE_LABELS_MUTATION, {"issueId": issue_id, "labelIds": label_ids})
-        result = ((payload.get("data") or {}).get("issueUpdate") or {})
-        issue = result.get("issue") if isinstance(result, dict) else {}
-        return {
-            "success": bool(result.get("success")),
-            "issue_id": issue.get("id") if isinstance(issue, dict) else None,
-            "identifier": issue.get("identifier") if isinstance(issue, dict) else None,
-            "label": label_name,
-            "label_ids": label_ids,
-        }
+    async def set_issue_pipeline_label(self, issue_id: str, label_name: str) -> dict[str, Any]:
+        if not label_name.startswith("performer:pipeline/"):
+            raise ValueError("pipeline labels must start with performer:pipeline/")
+        return await self._set_issue_pipeline_label(issue_id, label_name)
 
-    async def set_issue_label_group(self, issue_id: str, label_name: str, *, prefix: str) -> dict[str, Any]:
+    async def _set_issue_pipeline_label(self, issue_id: str, label_name: str) -> dict[str, Any]:
         context = await self._fetch_issue_label_context(issue_id)
         target = await self._ensure_issue_label(context["team_id"], label_name)
-        lowered_prefix = prefix.lower()
+        lowered_prefix = "performer:pipeline/"
         preserved = [
             label
             for label in context["labels"]
             if not str(label.get("name") or "").lower().startswith(lowered_prefix)
+            and _preserve_pipeline_projection_label(str(label.get("name") or ""))
         ]
         label_ids = [label["id"] for label in preserved if label.get("id")]
         if target["id"] not in label_ids:
@@ -530,12 +451,6 @@ class LinearTracker:
             self.client = LinearClient(config.endpoint, config.api_key)
         self.config = config
 
-    async def fetch_candidate_issues(self) -> list[Issue]:
-        return await self.client.fetch_candidate_issues(self.config)
-
-    async def fetch_issues_by_states(self, state_names: list[str]) -> list[Issue]:
-        return await self.client.fetch_issues_by_states(self.config, state_names)
-
     async def fetch_issue_states_by_ids(self, issue_ids: list[str]) -> list[Issue]:
         return await self.client.fetch_issue_states_by_ids(self.config, issue_ids)
 
@@ -558,17 +473,6 @@ class LinearTracker:
         block: str,
     ) -> dict[str, Any]:
         return await self.client.update_issue_description_marker_block(issue_id, marker_name, block)
-
-    async def find_acceptance_issue_for(
-        self,
-        *,
-        original_issue: Issue,
-        acceptance_label_name: str,
-    ) -> dict[str, Any] | None:
-        return await self.client.find_acceptance_issue_for(
-            original_issue=original_issue,
-            acceptance_label_name=acceptance_label_name,
-        )
 
     async def create_issue(
         self,
@@ -643,25 +547,5 @@ class LinearTracker:
             relation_type=relation_type,
         )
 
-    async def create_acceptance_issue_for(
-        self,
-        *,
-        original_issue_id: str,
-        title: str,
-        description: str,
-        acceptance_label_name: str,
-    ) -> dict[str, Any]:
-        return await self.client.create_acceptance_issue_for(
-            original_issue_id=original_issue_id,
-            title=title,
-            description=description,
-            acceptance_label_name=acceptance_label_name,
-        )
-
-    async def set_issue_lifecycle_label(self, issue_id: str, label_name: str) -> dict[str, Any]:
-        return await self.client.set_issue_lifecycle_label(issue_id, label_name)
-
-    async def set_issue_label_group(self, issue_id: str, label_name: str, *, prefix: str) -> dict[str, Any]:
-        return await self.client.set_issue_label_group(issue_id, label_name, prefix=prefix)
-
-
+    async def set_issue_pipeline_label(self, issue_id: str, label_name: str) -> dict[str, Any]:
+        return await self.client.set_issue_pipeline_label(issue_id, label_name)

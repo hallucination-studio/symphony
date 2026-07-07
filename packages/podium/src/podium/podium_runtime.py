@@ -15,7 +15,6 @@ from .podium_shared import (
     bearer_token,
     dispatch_public,
     hash_secret,
-    sanitize_codex_profile,
     utc_now_iso,
     _datetime_from_json,
 )
@@ -82,8 +81,7 @@ class PodiumRuntimeMixin:
                 "linear_project": str(raw_binding.get("linear_project") or ""),
                 "project_slug": str(raw_binding.get("project_slug") or raw_binding.get("linear_project") or ""),
                 "agent_app_user_id": str(raw_binding.get("agent_app_user_id") or raw_binding.get("linear_agent_app_user_id") or ""),
-                "workflow_profile": str(raw_binding.get("workflow_profile") or "task"),
-                "codex_profile": sanitize_codex_profile(raw_binding.get("codex_profile")),
+                "pipeline_profile": str(raw_binding.get("pipeline_profile") or "default"),
                 "process_status": str(raw_binding.get("process_status") or ""),
                 "constraint_labels": [
                     str(label)
@@ -101,8 +99,7 @@ class PodiumRuntimeMixin:
                 "linear_workspace_id": binding["user_id"],
                 "project_slug": binding["project_slug"],
                 "linear_agent_app_user_id": binding["agent_app_user_id"],
-                "workflow_profile": binding["workflow_profile"],
-                "codex_profile": binding["codex_profile"],
+                "pipeline_profile": binding["pipeline_profile"],
                 "project_binding_id": binding_id,
             }
             instance_metrics = metrics.get(instance_id) if isinstance(metrics.get(instance_id), dict) else {}
@@ -277,4 +274,3 @@ class PodiumRuntimeMixin:
                     return None
                 return runtime
         return None
-

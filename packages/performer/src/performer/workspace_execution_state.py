@@ -39,7 +39,7 @@ class WorkspaceExecutionState:
             thread_id=thread_id,
             turn_id=getattr(result, "turn_id", None),
             status="resume_pending",
-            prior_phase_summary=getattr(result, "final_response", None),
+            prior_attempt_summary=getattr(result, "final_response", None),
         )
         self._write_payload(payload)
 
@@ -69,7 +69,7 @@ class WorkspaceExecutionState:
         thread_id: str,
         turn_id: str | None,
         status: str,
-        prior_phase_summary: str | None = None,
+        prior_attempt_summary: str | None = None,
         failure_summary: str | None = None,
     ) -> dict[str, Any]:
         payload = {
@@ -81,8 +81,8 @@ class WorkspaceExecutionState:
             "status": status,
             "notes": [],
         }
-        if prior_phase_summary is not None:
-            payload["prior_phase_summary"] = prior_phase_summary
+        if prior_attempt_summary is not None:
+            payload["prior_attempt_summary"] = prior_attempt_summary
         if failure_summary is not None:
             payload["failure_summary"] = failure_summary
         return payload

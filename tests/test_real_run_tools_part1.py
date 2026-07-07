@@ -12,8 +12,7 @@ def test_runtime_claims_audit_flags_errorless_retry_and_claim_stall() -> None:
                     "identifier": "HELL-1",
                     "attempt": 2,
                     "error": None,
-                    "phase": "done",
-                    "status_label": "performer:phase/done",
+                    "status_label": "performer:pipeline/verify-passed",
                 }
             ],
             "continuations": [],
@@ -39,8 +38,7 @@ def test_runtime_claims_audit_allows_blocked_human_approval_state() -> None:
                     "identifier": "HELL-1",
                     "attempt": 2,
                     "error": "runtime_permission_blocked: writing outside of the project",
-                    "phase": "error",
-                    "status_label": "performer:phase/blocked",
+                    "status_label": "performer:pipeline/awaiting-human",
                 }
             ],
         },
@@ -51,7 +49,7 @@ def test_runtime_claims_audit_allows_blocked_human_approval_state() -> None:
     assert result["counts"]["blocked"] == 1
     assert result["blocked"][0]["identifier"] == "HELL-1"
 
-def test_linear_tree_audit_requires_gate_and_evidence_parent_links() -> None:
+def test_linear_tree_audit_requires_pipeline_projection_metadata() -> None:
     tool = load_tool("linear_tree_audit")
 
     result = tool.audit_tree(
@@ -64,31 +62,13 @@ def test_linear_tree_audit_requires_gate_and_evidence_parent_links() -> None:
             "children": {
                 "nodes": [
                     {
-                        "id": "gate-1",
+                        "id": "node-1",
                         "identifier": "HELL-2",
-                        "title": "[Gate] HELL-1: Behavior",
+                        "title": "Pipeline node",
+                        "description": "```yaml\nsymphony:\n  graph_id: graph-1\n  node_id: node-1\n```\n",
                         "parent": {"id": "other", "identifier": "HELL-X"},
                         "state": {"name": "Todo", "type": "unstarted"},
-                        "labels": {"nodes": [{"name": "performer:type/gate"}]},
-                        "children": {
-                            "nodes": [
-                                {
-                                    "id": "evidence-1",
-                                    "identifier": "HELL-3",
-                                    "title": "[Evidence] HELL-1",
-                                    "parent": {"id": "business-1", "identifier": "HELL-1"},
-                                    "state": {"name": "Todo", "type": "unstarted"},
-                                    "labels": {"nodes": [{"name": "performer:type/evidence"}]},
-                                }
-                            ]
-                        },
-                    },
-                    {
-                        "id": "acceptance-1",
-                        "identifier": "HELL-4",
-                        "title": "[Acceptance] HELL-1",
-                        "state": {"name": "Todo", "type": "unstarted"},
-                        "labels": {"nodes": []},
+                        "labels": {"nodes": [{"name": "performer:type/pipeline-node"}]},
                         "children": {"nodes": []},
                     },
                 ]
@@ -98,10 +78,60 @@ def test_linear_tree_audit_requires_gate_and_evidence_parent_links() -> None:
     )
 
     assert result["pass"] is False
-    assert "gate_parent_mismatch:HELL-2" in result["failures"]
-    assert "evidence_parent_mismatch:HELL-3" in result["failures"]
-    assert "acceptance_sibling_present" in result["failures"]
-    assert "blocks_relation_present" in result["failures"]
+    assert "pipeline_node_parent_mismatch:HELL-2" in result["failures"]
+    assert (
+        "pipeline_metadata_missing:HELL-2:plan_attempt_id,gate_snapshot_hash,conductor_revision,operator_status"
+        in result["failures"]
+    )
+    assert "frozen_gate_missing:HELL-2" in result["failures"]
+
+
+def test_linear_tree_audit_requires_runtime_wait_projection_details() -> None:
+    tool = load_tool("linear_tree_audit")
+
+    result = tool.audit_tree(
+        {
+            "id": "business-1",
+            "identifier": "HELL-1",
+            "title": "Business",
+            "state": {"name": "In Progress", "type": "started"},
+            "labels": {"nodes": []},
+            "children": {
+                "nodes": [
+                    {
+                        "id": "node-1",
+                        "identifier": "HELL-2",
+                        "title": "Pipeline node",
+                        "description": "\n".join(
+                            [
+                                "```yaml",
+                                "symphony:",
+                                "  graph_id: graph-1",
+                                "  node_id: node-1",
+                                "  plan_attempt_id: plan-1",
+                                "  gate_snapshot_hash: sha256:gate",
+                                "  conductor_revision: 1",
+                                "  operator_status: waiting_for_runtime_input",
+                                "```",
+                                "",
+                                "### Frozen Gate",
+                            ]
+                        ),
+                        "parent": {"id": "business-1", "identifier": "HELL-1"},
+                        "state": {"name": "In Progress", "type": "started"},
+                        "labels": {"nodes": [{"name": "performer:type/pipeline-node"}]},
+                        "children": {"nodes": []},
+                        "inverseRelations": {"nodes": []},
+                    },
+                ]
+            },
+            "inverseRelations": {"nodes": []},
+        }
+    )
+
+    assert result["pass"] is False
+    assert "pipeline_runtime_wait_kind_missing:HELL-2" in result["failures"]
+    assert "pipeline_runtime_wait_block_missing:HELL-2" in result["failures"]
 
 def test_linear_tree_audit_summarizes_children_and_blocks_relations() -> None:
     tool = load_tool("linear_tree_audit")
@@ -161,6 +191,36 @@ def test_linear_tree_audit_summarizes_children_and_blocks_relations() -> None:
         }
     ]
 
+
+@pytest.mark.asyncio
+async def test_real_e2e_linear_project_lookup_falls_back_from_slug_to_name(monkeypatch) -> None:
+    tool = load_tool("real_symphony_e2e_linear")
+    calls: list[dict[str, object]] = []
+
+    async def fake_graphql(token: str, query: str, variables: dict[str, object]) -> dict[str, object]:
+        calls.append({"query": query, "variables": variables})
+        if "filter: { slugId" in query:
+            return {"projects": {"nodes": []}}
+        return {
+            "projects": {
+                "nodes": [
+                    {
+                        "id": "project-1",
+                        "name": "HELL",
+                        "slugId": "8ab43179fb54",
+                        "teams": {"nodes": [{"id": "team-1", "key": "HELL", "name": "Hallucination"}]},
+                    }
+                ]
+            }
+        }
+
+    monkeypatch.setattr(tool, "linear_graphql", fake_graphql)
+
+    project = await tool.resolve_project("token", "HELL")
+
+    assert project["id"] == "project-1"
+    assert [call["variables"] for call in calls] == [{"project": "HELL"}, {"project": "HELL"}]
+
 async def test_real_symphony_e2e_create_issue_accepts_parent_id(monkeypatch) -> None:
     tool = load_tool("real_symphony_e2e")
     calls: list[dict[str, object]] = []
@@ -209,6 +269,170 @@ async def test_real_symphony_e2e_create_issue_accepts_parent_id(monkeypatch) -> 
     assert create_call["variables"]["input"]["parentId"] == "parent-1"
     assert result["issue"]["parent"]["id"] == "parent-1"
 
+def test_real_symphony_e2e_pushes_runtime_config_before_agent_webhook() -> None:
+    source = (ROOT / "tools" / "real_symphony_e2e_run.py").read_text(encoding="utf-8")
+
+    config_index = source.index('"/api/v1/runtime/config"')
+    webhook_index = source.index('"/api/v1/linear/webhooks/agent-session"')
+
+    assert config_index < webhook_index
+    assert "build_runtime_config_payload" in source
+    assert "runtime-config:podium-pushed" in source
+
+
+def test_real_symphony_e2e_runtime_config_uses_explicit_codex_home_source() -> None:
+    tool = load_tool("real_symphony_e2e")
+
+    payload = tool.build_runtime_config_payload(
+        runtime_group_id="group-1",
+        version=7,
+        codex_home_source="$SYMPHONY_E2E_CODEX_HOME_SOURCE",
+    )
+
+    assert payload["version"] == 7
+    for profile in payload["profiles"].values():
+        assert profile["settings"]["codex_home_source"] == "$SYMPHONY_E2E_CODEX_HOME_SOURCE"
+        assert "model" not in profile["settings"]
+        assert "auth.json" not in str(profile)
+
+
+def test_real_symphony_e2e_runtime_config_model_is_explicit_override_only(monkeypatch) -> None:
+    tool = load_tool("real_symphony_e2e")
+    monkeypatch.delenv("SYMPHONY_E2E_CODEX_MODEL", raising=False)
+
+    inherited = tool.build_runtime_config_payload(runtime_group_id="group-1", version=1)
+    explicit = tool.build_runtime_config_payload(runtime_group_id="group-1", version=1, model="gpt-5.5")
+
+    assert all("model" not in profile["settings"] for profile in inherited["profiles"].values())
+    assert all(profile["settings"]["model"] == "gpt-5.5" for profile in explicit["profiles"].values())
+
+
+def test_real_symphony_e2e_runtime_config_carries_codex_execution_settings() -> None:
+    tool = load_tool("real_symphony_e2e")
+
+    payload = tool.build_runtime_config_payload(
+        runtime_group_id="group-1",
+        version=7,
+        codex_home_source="$SYMPHONY_E2E_CODEX_HOME_SOURCE",
+        codex_settings={"hard_turn_timeout_ms": 120000, "config_overrides": ["model_provider=custom"]},
+    )
+
+    for profile in payload["profiles"].values():
+        assert profile["settings"]["hard_turn_timeout_ms"] == 120000
+        assert profile["settings"]["config_overrides"] == ["model_provider=custom"]
+
+
+def test_real_symphony_e2e_defaults_to_bounded_codex_turn_timeout() -> None:
+    tool = load_tool("real_symphony_e2e_run")
+    entry = load_tool("real_symphony_e2e")
+    args = entry.parser().parse_args([])
+
+    settings = tool._codex_settings_from_args(args)
+
+    assert settings["hard_turn_timeout_ms"] == 180000
+
+
+def test_real_symphony_e2e_cli_rejects_codex_home_source_override() -> None:
+    tool = load_tool("real_symphony_e2e")
+
+    with pytest.raises(SystemExit):
+        tool.parser().parse_args(["--codex-home-source", "~/.codex"])
+
+
+def test_real_symphony_e2e_run_does_not_default_to_user_codex_home() -> None:
+    source = (ROOT / "tools" / "real_symphony_e2e_run.py").read_text(encoding="utf-8")
+
+    assert 'Path.home() / ".codex"' not in source
+    assert "args.codex_home_source" not in source
+
+
+def test_real_symphony_e2e_rejects_direct_user_codex_home_seed(tmp_path: Path) -> None:
+    tool = load_tool("real_symphony_e2e")
+    home = tmp_path / "home"
+    source = home / ".codex"
+    source.mkdir(parents=True)
+    (source / "config.toml").write_text("model = 'gpt-5.3-codex'\n", encoding="utf-8")
+    (source / "auth.json").write_text('{"token":"secret-token"}\n', encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="default user .codex"):
+        tool.stage_codex_home_seed(source=source, destination=tmp_path / "run" / "codex-home-source")
+
+
+def test_real_symphony_e2e_stages_codex_home_source_before_injection(tmp_path: Path) -> None:
+    tool = load_tool("real_symphony_e2e")
+    source = tmp_path / "user-codex"
+    source.mkdir()
+    (source / "config.toml").write_text("model = 'gpt-5.3-codex'\n", encoding="utf-8")
+    (source / "auth.json").write_text('{"token":"secret-token"}\n', encoding="utf-8")
+    (source / "history.jsonl").write_text("do not copy\n", encoding="utf-8")
+    (source / "sessions").mkdir()
+    (source / "sessions" / "session.jsonl").write_text("do not copy\n", encoding="utf-8")
+
+    staged = tool.stage_codex_home_seed(source=source, destination=tmp_path / "run" / "codex-home-source")
+
+    assert staged == tmp_path / "run" / "codex-home-source"
+    assert (staged / "config.toml").is_file()
+    assert (staged / "auth.json").is_file()
+    assert not (staged / "history.jsonl").exists()
+    assert not (staged / "sessions").exists()
+
+
+def test_real_symphony_e2e_sanitizes_codex_config_template(tmp_path: Path) -> None:
+    tool = load_tool("real_symphony_e2e")
+    source = tmp_path / "user-codex"
+    source.mkdir()
+    (source / "config.toml").write_text(
+        '\n'.join(
+            [
+                'model_provider = "custom"',
+                'model = "gpt-5.5"',
+                'notify = ["/Applications/Codex.app"]',
+                '',
+                '[model_providers.custom]',
+                'name = "custom"',
+                'base_url = "http://127.0.0.1:8080"',
+                '',
+                '[sandbox_workspace_write]',
+                'network_access = true',
+                '',
+                '[projects."/Users/murphy/code/github/symphony"]',
+                'trust_level = "trusted"',
+                '',
+                '[mcp_servers.node_repl.env]',
+                'CODEX_HOME = "/Users/murphy/.codex"',
+                'BROWSER_USE_AVAILABLE_BACKENDS = "chrome,iab"',
+                '',
+                '[plugins."browser@openai-bundled"]',
+                'enabled = true',
+                '',
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (source / "auth.json").write_text('{"token":"secret-token"}\n', encoding="utf-8")
+
+    staged = tool.stage_codex_home_seed(source=source, destination=tmp_path / "run" / "codex-home-source")
+
+    config = (staged / "config.toml").read_text(encoding="utf-8")
+    assert 'model_provider = "custom"' in config
+    assert "[model_providers.custom]" in config
+    assert "[sandbox_workspace_write]" in config
+    assert "CODEX_HOME" not in config
+    assert "BROWSER_USE" not in config
+    assert "mcp_servers" not in config
+    assert "plugins." not in config
+    assert "projects." not in config
+    assert "notify" not in config
+
+
+def test_real_symphony_e2e_does_not_artifact_codex_home_source() -> None:
+    source = (ROOT / "tools" / "real_symphony_e2e_run.py").read_text(encoding="utf-8")
+
+    assert 'artifact("codex_home_source"' not in source
+    assert "staged_path=" not in source
+    assert "runtime-config:codex-home-source-staged" in source
+
+
 async def test_real_symphony_e2e_create_blocks_relation_uses_blocker_as_issue(monkeypatch) -> None:
     tool = load_tool("real_symphony_e2e")
     calls: list[dict[str, object]] = []
@@ -249,30 +473,30 @@ def test_real_concurrent_schedule_probe_assertions_pass_for_expected_timeline() 
             "tick": 1,
             "background": {"blocked_waiting": 1},
             "started_this_tick": [{"issue_id": "A"}, {"issue_id": "B"}],
-            "runs": [
-                {"issue_id": "A", "phase": "implementing", "is_dispatchable": True},
-                {"issue_id": "B", "phase": "implementing", "is_dispatchable": True},
-                {"issue_id": "C", "phase": "queued", "is_dispatchable": False},
+            "nodes": [
+                {"issue_id": "A", "state": "executing", "is_dispatchable": True},
+                {"issue_id": "B", "state": "executing", "is_dispatchable": True},
+                {"issue_id": "C", "state": "planned", "is_dispatchable": False},
             ],
         },
         {
             "tick": 2,
             "background": {"blocked_waiting": 1},
             "started_this_tick": [],
-            "runs": [
-                {"issue_id": "A", "phase": "done", "is_dispatchable": True},
-                {"issue_id": "B", "phase": "done", "is_dispatchable": True},
-                {"issue_id": "C", "phase": "queued", "is_dispatchable": True},
+            "nodes": [
+                {"issue_id": "A", "state": "verify_passed", "is_dispatchable": True},
+                {"issue_id": "B", "state": "verify_passed", "is_dispatchable": True},
+                {"issue_id": "C", "state": "ready", "is_dispatchable": True},
             ],
         },
         {
             "tick": 3,
             "background": {"blocked_waiting": 0},
             "started_this_tick": [{"issue_id": "C"}],
-            "runs": [
-                {"issue_id": "A", "phase": "done", "is_dispatchable": True},
-                {"issue_id": "B", "phase": "done", "is_dispatchable": True},
-                {"issue_id": "C", "phase": "implementing", "is_dispatchable": True},
+            "nodes": [
+                {"issue_id": "A", "state": "verify_passed", "is_dispatchable": True},
+                {"issue_id": "B", "state": "verify_passed", "is_dispatchable": True},
+                {"issue_id": "C", "state": "executing", "is_dispatchable": True},
             ],
         },
     ]
@@ -301,20 +525,20 @@ def test_real_concurrent_schedule_probe_assertions_fail_when_blocked_child_start
                 "tick": 1,
                 "background": {"blocked_waiting": 0},
                 "started_this_tick": [{"issue_id": "A"}, {"issue_id": "B"}, {"issue_id": "C"}],
-                "runs": [
-                    {"issue_id": "A", "phase": "implementing", "is_dispatchable": True},
-                    {"issue_id": "B", "phase": "implementing", "is_dispatchable": True},
-                    {"issue_id": "C", "phase": "implementing", "is_dispatchable": True},
+                "nodes": [
+                    {"issue_id": "A", "state": "executing", "is_dispatchable": True},
+                    {"issue_id": "B", "state": "executing", "is_dispatchable": True},
+                    {"issue_id": "C", "state": "executing", "is_dispatchable": True},
                 ],
             },
             {
                 "tick": 2,
                 "background": {"blocked_waiting": 0},
                 "started_this_tick": [],
-                "runs": [
-                    {"issue_id": "A", "phase": "done", "is_dispatchable": True},
-                    {"issue_id": "B", "phase": "done", "is_dispatchable": True},
-                    {"issue_id": "C", "phase": "done", "is_dispatchable": True},
+                "nodes": [
+                    {"issue_id": "A", "state": "verify_passed", "is_dispatchable": True},
+                    {"issue_id": "B", "state": "verify_passed", "is_dispatchable": True},
+                    {"issue_id": "C", "state": "verify_passed", "is_dispatchable": True},
                 ],
             },
         ],
@@ -329,12 +553,12 @@ def test_real_concurrent_schedule_probe_assertions_fail_when_blocked_child_start
     assert "dependency-gate:C-waits-before-A-terminal" in failed
     assert "capacity-non-cause:C-waits-with-capacity-available" in failed
 
-async def test_real_concurrent_schedule_probe_noop_direct_ingress_returns_zero() -> None:
+async def test_real_concurrent_schedule_probe_noop_pipeline_ingress_returns_zero() -> None:
     tool = load_tool("real_concurrent_schedule_probe")
 
-    assert await tool.NoopDirectIngress().poll() == 0
+    assert await tool.NoopPipelineIngress().poll() == 0
 
-def test_real_run_observer_diagnoses_review_phase_state_mismatch() -> None:
+def test_real_run_observer_diagnoses_missing_pipeline_metadata() -> None:
     observer = load_tool("real_run_observer")
 
     findings = observer.diagnose(
@@ -342,68 +566,30 @@ def test_real_run_observer_diagnoses_review_phase_state_mismatch() -> None:
             "business_issue": {
                 "identifier": "HELL-1",
                 "state": "In Progress",
-                "labels": ["performer:phase/review"],
+                "labels": ["performer:type/task"],
             },
             "failures": [],
         },
         {"failures": []},
     )
 
-    assert findings == ["linear_state_phase_mismatch:review_phase_without_in_review_state"]
+    assert findings == ["linear_tree:missing_pipeline_metadata"]
 
-def test_real_symphony_e2e_patches_smoke_gate_mode() -> None:
+def test_real_run_observer_cli_uses_pipeline_sample_flag() -> None:
+    observer = load_tool("real_run_observer")
+    parser = observer.parser()
+
+    args = parser.parse_args(["--issue", "HELL-1", "--instance-root", "/tmp/inst", "--single-sample"])
+
+    assert args.single_sample is True
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--issue", "HELL-1", "--instance-root", "/tmp/inst", "--once"])
+
+def test_real_symphony_e2e_common_has_no_workflow_patch_helpers() -> None:
     tool = load_tool("real_symphony_e2e")
-    workflow = "acceptance:\n  enabled: true\n  mode: block_done\n\ncodex:\n  command: codex app-server\n"
 
-    patched = tool.patch_e2e_gate_mode(workflow, gate_mode="smoke")
-
-    assert "acceptance:\n  enabled: true\n  mode: block_done\n  gate_planner_mode: smoke\n\ncodex:" in patched
-
-def test_real_symphony_e2e_replaces_existing_gate_mode() -> None:
-    tool = load_tool("real_symphony_e2e")
-    workflow = "acceptance:\n  enabled: true\n  gate_planner_mode: strict\ncodex:\n  command: codex app-server\n"
-
-    patched = tool.patch_e2e_gate_mode(workflow, gate_mode="smoke")
-
-    assert "gate_planner_mode: smoke" in patched
-    assert "gate_planner_mode: strict" not in patched
-
-def test_real_symphony_e2e_patch_workflow_injects_codex_init_options(tmp_path: Path) -> None:
-    tool = load_tool("real_symphony_e2e")
-    workflow_path = tmp_path / "WORKFLOW.md"
-    workflow_path.write_text(
-        "agent:\n  max_concurrent_agents: 10\n  max_turns: 20\n\n"
-        "persistence:\n  path: state/performer.json\n\n"
-        "codex:\n  backend: sdk\n  sdk_codex_bin: /old/codex\n",
-        encoding="utf-8",
-    )
-
-    patched = tool.patch_workflow(
-        workflow_path,
-        acceptance_gates=False,
-        sdk_codex_bin="/tmp/codex-wrapper",
-        init_max_attempts=3,
-        init_backoff_ms=100,
-        init_backoff_max_ms=150,
-        read_timeout_ms=2500,
-        hard_turn_timeout_ms=30000,
-        overload_max_attempts=4,
-        overload_initial_delay_ms=125,
-        overload_max_delay_ms=1000,
-        config_overrides=["model_provider=openai"],
-    )
-
-    assert "  sdk_codex_bin: /tmp/codex-wrapper\n" in patched
-    assert "  init_max_attempts: 3\n" in patched
-    assert "  init_backoff_ms: 100\n" in patched
-    assert "  init_backoff_max_ms: 150\n" in patched
-    assert "  read_timeout_ms: 2500\n" in patched
-    assert "  hard_turn_timeout_ms: 30000\n" in patched
-    assert "  overload_max_attempts: 4\n" in patched
-    assert "  overload_initial_delay_ms: 125\n" in patched
-    assert "  overload_max_delay_ms: 1000\n" in patched
-    assert "  config_overrides:\n    - model_provider=openai\n" in patched
-    assert "/old/codex" not in patched
+    assert not hasattr(tool, "patch_workflow")
+    assert not hasattr(tool, "patch_e2e_gate_mode")
 
 def test_real_symphony_e2e_simulated_webhook_sets_issue_delegate() -> None:
     tool = load_tool("real_symphony_e2e")
@@ -437,11 +623,14 @@ def test_real_symphony_e2e_simulated_instance_payload_does_not_require_real_dele
         fixture=Path("/tmp/fixture"),
         project_slug="AI",
         agent_app_user_id="agent-1",
-        acceptance_gates=False,
+        pipeline_gates=False,
         simulate_agent_webhook=True,
     )
 
-    assert payload["linear_filters"] == {"active_states": ["Todo", "In Progress"]}
+    assert payload["linear_filters"] == {}
+    assert payload["pipeline_profile"] == "default"
+    assert "workflow_profile" not in payload
+    assert "workflow_inputs" not in payload
 
 def test_real_symphony_e2e_real_instance_payload_requires_delegate() -> None:
     tool = load_tool("real_symphony_e2e")
@@ -451,14 +640,54 @@ def test_real_symphony_e2e_real_instance_payload_requires_delegate() -> None:
         fixture=Path("/tmp/fixture"),
         project_slug="AI",
         agent_app_user_id="agent-1",
-        acceptance_gates=True,
+        pipeline_gates=True,
         simulate_agent_webhook=False,
     )
 
     assert payload["linear_filters"] == {
         "linear_agent_app_user_id": "agent-1",
-        "active_states": ["Todo", "In Progress"],
     }
+    assert payload["pipeline_profile"] == "gated-task"
+    assert "workflow_profile" not in payload
+    assert "workflow_inputs" not in payload
+
+def test_real_symphony_e2e_run_no_longer_patches_workflow_content() -> None:
+    source = (ROOT / "tools" / "real_symphony_e2e_run.py").read_text(encoding="utf-8")
+    common_source = (ROOT / "tools" / "real_symphony_e2e_common.py").read_text(encoding="utf-8")
+
+    assert "patch_workflow" not in source
+    assert "patch_workflow" not in common_source
+    assert "patch_e2e_gate_mode" not in common_source
+    assert "workflow_content" not in source
+    assert '["workflow_path"]' not in source
+    assert "workflow_path" not in source
+
+
+def test_real_symphony_e2e_run_uses_pipeline_view_not_legacy_runs_or_gate_children() -> None:
+    source = (ROOT / "tools" / "real_symphony_e2e_run.py").read_text(encoding="utf-8")
+
+    assert '"/api/pipeline"' in source
+    assert '"/api/runs"' not in source
+    assert '"/api/runs/' not in source
+    assert "pipeline_runs" not in source
+    assert "phase_terminal" not in source
+    assert "performer:type/gate" not in source
+    assert "performer:type/evidence" not in source
+
+
+def test_real_symphony_e2e_enrolls_runtime_with_resolved_project_slug() -> None:
+    source = (ROOT / "tools" / "real_symphony_e2e_run.py").read_text(encoding="utf-8")
+
+    resolve_index = source.index("linear_project = await resolve_project")
+    enrollment_index = source.index('"/api/v1/runtime/enrollment-tokens"')
+    enrollment_payload_start = source.index('"runtime_group_id": f"group-{run_id}"')
+    enrollment_payload_end = source.index('"pipeline_profile": "gated-task"')
+    enrollment_payload = source[enrollment_payload_start:enrollment_payload_end]
+
+    assert resolve_index < enrollment_index
+    assert '"project_slug": linear_project["slugId"]' in enrollment_payload
+    assert '"project_slug": args.project_slug' not in enrollment_payload
+    assert "performer:gate/passed" not in source
 
 async def test_real_symphony_e2e_waits_for_delegate_visibility_before_webhook(monkeypatch) -> None:
     tool = load_tool("real_symphony_e2e")
@@ -535,6 +764,16 @@ def test_real_run_evidence_bundle_copies_codex_overload_probe(tmp_path: Path) ->
     assert manifest["copied"]["codex_overload_probe"] is True
     assert "codex-overload-probe.json" in manifest["files"]
 
+
+def test_real_symphony_e2e_run_does_not_call_removed_workflow_api_routes() -> None:
+    source = (ROOT / "tools" / "real_symphony_e2e_run.py").read_text(encoding="utf-8")
+
+    assert "preview-workflow" not in source
+    assert "generate-workflow" not in source
+    assert "validate-workflow" not in source
+    assert "workflow-profiles" not in source
+
+
 def test_real_codex_thread_resume_probe_summarizes_resume_and_fallback() -> None:
     tool = load_tool("real_codex_thread_resume_probe")
 
@@ -605,45 +844,3 @@ def test_real_codex_continuation_probe_rejects_resume_only_single_turn() -> None
     )
 
     assert summary["pass"] is False
-
-def test_real_performer_continuation_probe_requires_refresh_and_persisted_continuation(tmp_path: Path) -> None:
-    tool = load_tool("real_performer_continuation_probe")
-    persistence_path = tmp_path / "state" / "performer.json"
-    persistence_path.parent.mkdir(parents=True)
-    persistence_path.write_text(
-        json.dumps(
-            {
-                "continuations": [
-                    {
-                        "issue_id": "mt-1",
-                        "identifier": "MT-1",
-                        "attempt": 1,
-                        "due_at": "2026-07-06T00:00:00Z",
-                        "due_at_ms": 1,
-                        "issue_url": None,
-                        "last_message": "still active",
-                        "phase": "continuing",
-                        "status_label": "performer:phase/implementation",
-                    }
-                ],
-                "retry_attempts": [],
-                "sessions": [],
-                "blocked": [],
-                "human_interventions": [],
-                "codex_threads": [],
-            }
-        ),
-        encoding="utf-8",
-    )
-    codex = tool.ProbeCodexClient()
-    codex.prompts = ["initial", "continued"]
-    tracker = tool.ProbeTracker(tool.make_issue())
-    tracker.refresh_calls = [["mt-1"]]
-
-    summary = tool.summarize_probe(codex=codex, tracker=tracker, persistence_path=persistence_path)
-
-    assert summary["pass"] is True
-    assert summary["turn_count"] == 2
-    assert summary["prompt_types"] == ["str", "str"]
-    assert summary["tracker_refresh_calls"] == [["mt-1"]]
-    assert summary["persisted_continuations"][0]["phase"] == "continuing"

@@ -5,9 +5,6 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-from .labels import HUMAN_INTERVENTION_KIND_LABELS, HUMAN_INTERVENTION_LABELS, PHASE_LABELS
-
-
 def normalize_state_key(value: str) -> str:
     return value.strip().lower()
 
@@ -131,100 +128,6 @@ class RuntimeTokens:
         else:
             self.cached_tokens = cached_tokens
             self.total_tokens = total_tokens
-
-
-@dataclass
-class RunningEntry:
-    issue: Issue
-    task: Any
-    started_at: datetime
-    retry_attempt: int
-    session_id: str | None = None
-    thread_id: str | None = None
-    turn_id: str | None = None
-    worker_host: str | None = None
-    last_codex_event: str | None = None
-    last_codex_timestamp: datetime | None = None
-    turn_started_at: datetime | None = None
-    last_codex_message: str | None = None
-    last_raw_codex_message: str | None = None
-    phase: str = "starting"
-    status_label: str = PHASE_LABELS["implementation_running"]
-    runtime_phase: str = "dispatch_received"
-    workspace_path: str | None = None
-    recent_events: list[dict[str, Any]] = field(default_factory=list)
-    tokens: RuntimeTokens = field(default_factory=RuntimeTokens)
-    last_reported_tokens: RuntimeTokens = field(default_factory=RuntimeTokens)
-    turn_count: int = 0
-    human_blocked_reason: str | None = None
-    structured_result: dict[str, Any] | None = None
-
-
-@dataclass
-class RetryEntry:
-    issue_id: str
-    identifier: str
-    attempt: int
-    due_at: datetime
-    due_at_ms: int
-    error: str | None = None
-    issue_url: str | None = None
-    phase: str = "retrying"
-    status_label: str = PHASE_LABELS["implementation_running"]
-    runtime_phase: str = "failed"
-    last_message: str | None = None
-    recent_events: list[dict[str, Any]] = field(default_factory=list)
-
-
-@dataclass
-class ContinuationEntry:
-    issue_id: str
-    identifier: str
-    attempt: int
-    due_at: datetime
-    due_at_ms: int
-    issue_url: str | None = None
-    phase: str = "continuing"
-    status_label: str = PHASE_LABELS["implementation_running"]
-    runtime_phase: str = "implementation_done"
-    last_message: str | None = None
-    recent_events: list[dict[str, Any]] = field(default_factory=list)
-
-
-@dataclass
-class BlockedEntry:
-    issue_id: str
-    identifier: str
-    attempt: int
-    blocked_at: datetime
-    error: str
-    issue_url: str | None = None
-    phase: str = "error"
-    status_label: str = PHASE_LABELS["blocked"]
-    runtime_phase: str = "failed"
-    last_message: str | None = None
-    recent_events: list[dict[str, Any]] = field(default_factory=list)
-
-
-@dataclass
-class HumanInterventionEntry:
-    issue_id: str
-    identifier: str
-    child_issue_id: str
-    child_identifier: str | None
-    child_url: str | None
-    kind: str
-    attempt: int
-    created_at: datetime
-    error: str | None = None
-    questions: list[str] = field(default_factory=list)
-    resume_strategy: str = "retry"
-    issue_url: str | None = None
-    phase: str = "human_pending"
-    status_label: str = PHASE_LABELS["blocked"]
-    runtime_phase: str = "human_pending"
-    last_message: str | None = None
-    recent_events: list[dict[str, Any]] = field(default_factory=list)
 
 
 def sort_for_dispatch(issues: list[Issue]) -> list[Issue]:

@@ -15,7 +15,6 @@ from .podium_shared import (
     bearer_token,
     dispatch_public,
     hash_secret,
-    sanitize_codex_profile,
     utc_now_iso,
     _datetime_from_json,
 )
@@ -54,18 +53,26 @@ class PodiumDispatchMixin:
                 "user_id": str(group.get("linear_workspace_id") or event["workspace_id"]),
                 "issue_id": event["issue_id"],
                 "issue_identifier": event["issue_identifier"],
+                "issue_title": event.get("issue_title") or "",
+                "issue_description": event.get("issue_description") or "",
                 "linear_workspace_id": event["workspace_id"],
                 "project_slug": event["project_slug"],
                 "agent_session_id": agent_session_id,
                 "agent_app_user_id": event.get("agent_app_user_id") or "",
                 "routing_rule_id": group["id"],
-                "workflow_profile": group.get("workflow_profile") or "task",
-                "codex_profile": sanitize_codex_profile(group.get("codex_profile")),
+                "pipeline_profile": group.get("pipeline_profile") or "default",
                 "blocked_by": list(event.get("blocked_by") or []),
                 "parent_issue_id": event.get("parent_issue_id") or "",
                 "status": "queued",
                 "reason": "",
-                "runtime_phase": "",
+                "graph_id": "",
+                "node_id": "",
+                "attempt_id": "",
+                "mode": "",
+                "attempt_status": "",
+                "graph_revision": 0,
+                "policy_revision": 0,
+                "lease_id": "",
                 "leased_runtime_id": None,
                 "leased_until": None,
                 "fencing_token": 0,
@@ -121,8 +128,7 @@ class PodiumDispatchMixin:
             "linear_workspace_id": str(binding.get("user_id") or ""),
             "project_slug": str(binding.get("project_slug") or ""),
             "linear_agent_app_user_id": str(binding.get("agent_app_user_id") or ""),
-            "workflow_profile": str(binding.get("workflow_profile") or "task"),
-            "codex_profile": sanitize_codex_profile(binding.get("codex_profile")),
+            "pipeline_profile": str(binding.get("pipeline_profile") or "default"),
             "project_binding_id": binding_id,
         }
 
@@ -161,8 +167,7 @@ class PodiumDispatchMixin:
                     {
                         "runtime_group_id": str(group.get("id") or leased.get("project_binding_id") or ""),
                         "routing_rule_id": str(group.get("id") or leased.get("project_binding_id") or ""),
-                        "workflow_profile": str(group.get("workflow_profile") or "task"),
-                        "codex_profile": sanitize_codex_profile(group.get("codex_profile")),
+                        "pipeline_profile": str(group.get("pipeline_profile") or "default"),
                         "blocked_by": [],
                         "parent_issue_id": "",
                     }
@@ -216,17 +221,14 @@ class PodiumDispatchMixin:
         *,
         fencing_token: int | None = None,
         reason: str | None = None,
-        runtime_phase: str | None = None,
+        pipeline: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
+        pipeline = _sanitize_pipeline_ack(pipeline or {})
         if self.pg_store is not None:
             if fencing_token is None:
                 return {"dispatch_id": dispatch_id, "_ack_error": "stale_dispatch_lease"}
             ack_status = status
             ack_reason = reason or ""
-            ack_runtime_phase = runtime_phase or ""
-            if status in {"completed", "failed"} and runtime_phase not in {"done", "failed"}:
-                ack_status = "ack_drift"
-                ack_reason = "dispatch ack missing conductor terminal run event"
             completed_at = utc_now_iso() if ack_status in {"completed", "failed", "cancelled", "canceled"} else None
             saved = await self.pg_store.ack_dispatch(
                 runtime_id,
@@ -234,7 +236,7 @@ class PodiumDispatchMixin:
                 ack_status,
                 fencing_token=fencing_token,
                 reason=ack_reason,
-                runtime_phase=ack_runtime_phase,
+                pipeline=pipeline,
                 completed_at=completed_at,
             )
             if saved is None:
@@ -247,19 +249,10 @@ class PodiumDispatchMixin:
             return None
         if fencing_token is not None and fencing_token != int(dispatch.get("fencing_token") or 0):
             return {**dispatch, "_ack_error": "stale_dispatch_lease"}
-        if status in {"completed", "failed"} and runtime_phase not in {"done", "failed"}:
-            dispatch["status"] = "ack_drift"
-            dispatch["reason"] = "dispatch ack missing conductor terminal run event"
-            if runtime_phase is not None:
-                dispatch["runtime_phase"] = runtime_phase
-            dispatch["updated_at"] = utc_now_iso()
-            self.persist()
-            return dispatch
         dispatch["status"] = status
         if reason is not None:
             dispatch["reason"] = reason
-        if runtime_phase is not None:
-            dispatch["runtime_phase"] = runtime_phase
+        dispatch.update(pipeline)
         dispatch["updated_at"] = utc_now_iso()
         if status in {"completed", "failed", "cancelled", "canceled"}:
             dispatch["completed_at"] = dispatch["updated_at"]
@@ -270,7 +263,7 @@ class PodiumDispatchMixin:
                 dispatch["status"],
                 fencing_token=fencing_token,
                 reason=str(dispatch.get("reason") or ""),
-                runtime_phase=str(dispatch.get("runtime_phase") or ""),
+                pipeline=pipeline,
                 completed_at=dispatch.get("completed_at"),
             )
             if saved is None:
@@ -279,22 +272,18 @@ class PodiumDispatchMixin:
         return dispatch
 
     def reconcile_dispatch_acks(self) -> list[dict[str, Any]]:
-        findings: list[dict[str, Any]] = []
-        for dispatch in self.dispatches.values():
-            status = str(dispatch.get("status") or "")
-            runtime_phase = str(dispatch.get("runtime_phase") or "")
-            if status not in {"completed", "failed"}:
-                continue
-            if runtime_phase in {"done", "failed"}:
-                continue
-            findings.append(
-                {
-                    "code": "dispatch_ack_without_terminal_run_event",
-                    "dispatch_id": str(dispatch.get("dispatch_id") or ""),
-                    "issue_id": str(dispatch.get("issue_id") or ""),
-                    "runtime_phase": runtime_phase,
-                    "status": status,
-                }
-            )
-        return findings
+        return []
 
+
+def _sanitize_pipeline_ack(payload: dict[str, Any]) -> dict[str, Any]:
+    sanitized: dict[str, Any] = {}
+    for key in ("graph_id", "node_id", "attempt_id", "mode", "attempt_status", "lease_id"):
+        value = payload.get(key)
+        if isinstance(value, str) and value:
+            sanitized[key] = value[:256]
+    for key in ("graph_revision", "policy_revision"):
+        try:
+            sanitized[key] = int(payload.get(key) or 0)
+        except (TypeError, ValueError):
+            sanitized[key] = 0
+    return sanitized

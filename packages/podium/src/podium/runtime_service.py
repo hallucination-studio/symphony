@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
-from .models import RunSummary, RuntimeRecord
+from .models import RuntimeRecord
 from .store import PodiumStore
 
 
@@ -41,17 +41,3 @@ class RuntimeService:
             metadata=metadata,
             timestamp=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         )
-
-    def record_run(self, run: RunSummary) -> None:
-        self.store.save_run(run)
-
-    def recent_runs(self, limit: int = 10) -> list[RunSummary]:
-        runs = sorted(
-            self.store.list_runs(),
-            key=lambda run: run.started_at or "",
-            reverse=True,
-        )
-        return runs[:limit]
-
-    def get_run(self, run_id: str) -> RunSummary | None:
-        return self.store.get_run(run_id)

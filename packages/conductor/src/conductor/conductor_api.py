@@ -7,7 +7,7 @@ import random
 from typing import Any
 from urllib.parse import parse_qs
 
-from .conductor_models import InstanceCreateRequest, InstancePatchRequest
+from .conductor_models import InstanceCreateRequest, InstancePatchRequest, InstanceRecord
 from .conductor_service import ConductorService, ConductorServiceError
 from .podium_client import PodiumRuntimeClient
 
@@ -63,6 +63,7 @@ class ConductorApiServer:
         delay = 1.0
         while True:
             try:
+                await self.service.post_podium_report()
                 result = await self.service.poll_podium_dispatch_once()
                 if result.get("reason") == "runtime_unauthorized":
                     self.service.update_podium_connection("poll", status="unauthorized", error="runtime_unauthorized")
@@ -144,73 +145,35 @@ class ConductorApiServer:
         try:
             if method == "GET" and path == "/":
                 return 200, {"service": "conductor", "status": "ok"}
-            if method == "GET" and path == "/api/dashboard":
-                return 200, {"dashboard": self.service.dashboard()}
-            if method == "GET" and path == "/api/issues":
-                return 200, {"issues": self.service.list_issues()}
-            if method == "GET" and path.startswith("/api/issues/"):
-                suffix = path.removeprefix("/api/issues/")
-                if suffix.endswith("/pin"):
-                    return 404, {"error": {"code": "not_found", "message": f"Route not found: {path}"}}
-                return 200, {"issue": self.service.get_issue(suffix)}
-            if method == "POST" and path.startswith("/api/issues/") and path.endswith("/pin"):
-                issue_id = path.removeprefix("/api/issues/").removesuffix("/pin")
-                return 200, {"retention": self.service.pin_issue(issue_id)}
-            if method == "DELETE" and path.startswith("/api/issues/") and path.endswith("/pin"):
-                issue_id = path.removeprefix("/api/issues/").removesuffix("/pin")
-                return 200, {"retention": self.service.unpin_issue(issue_id)}
-            if method == "GET" and path == "/api/runs":
-                return 200, {"runs": self.service.list_runs()}
-            if method == "POST" and path.startswith("/api/runs/") and path.endswith("/human-answered"):
-                run_id = path.removeprefix("/api/runs/").removesuffix("/human-answered")
+            if method == "GET" and path == "/api/pipeline":
+                return 200, {"pipeline": self.service.pipeline_store.pipeline_view().to_dict()}
+            if method == "POST" and path.startswith("/api/pipeline/human-waits/") and path.endswith("/human-answered"):
+                wait_id = path.removeprefix("/api/pipeline/human-waits/").removesuffix("/human-answered")
                 command = {
                     "type": "human.answered",
-                    "run_id": run_id,
+                    "wait_id": wait_id,
                     "child_issue_id": body.get("child_issue_id"),
                     "human_response": body.get("human_response") or body.get("response"),
                 }
                 return 200, await self.service.handle_podium_ws_command(command)
-            if method == "GET" and path.startswith("/api/runs/"):
-                return 200, {"run": self.service.get_run(path.removeprefix("/api/runs/"))}
-            if method == "GET" and path == "/api/traces":
-                return 200, {
-                    "events": self.service.list_trace_events(
-                        issue_id=query.get("issue_id"),
-                        run_id=query.get("run_id"),
-                        limit=_int(query.get("limit"), 200),
-                    )
-                }
-            if method == "GET" and path == "/api/retention":
-                return 200, {"retention": self.service.retention_status()}
-            if method == "POST" and path == "/api/retention/collect":
-                return 200, {"retention": self.service.collect_retention()}
             if method == "GET" and path == "/api/instances":
                 return 200, {
-                    "instances": [instance.to_dict(include_workflow_content=False) for instance in self.service.list_instances()]
+                    "instances": [_public_instance(instance) for instance in self.service.list_instances()]
                 }
             if method == "GET" and path == "/api/settings":
                 return 200, {"settings": self.service.settings().to_public_dict()}
             if method == "PATCH" and path == "/api/settings":
                 settings = self.service.update_settings_json(body)
                 return 200, {"settings": settings.to_public_dict()}
-            if method == "POST" and path == "/api/instances/preview-workflow":
-                instance, validation = self.service.preview_instance(InstanceCreateRequest(**body))
-                return 200, {
-                    "instance": instance.to_dict(),
-                    "validation": validation.to_dict(),
-                    "workflow_content": instance.workflow_content,
-                }
             if method == "POST" and path == "/api/instances":
                 instance = self.service.create_instance(InstanceCreateRequest(**body))
-                return 201, {"instance": instance.to_dict()}
+                return 201, {"instance": _public_instance(instance)}
             if method == "POST" and path == "/api/repo/inspect":
                 repo = self.service.inspect_repo(body["repo_source_type"], body["repo_source_value"])
                 return 200, {"repo": repo}
             if method == "POST" and path == "/api/repo/clone":
                 repo = self.service.clone_repo(body["repo_url"], body["target_path"])
                 return 200, {"repo": repo}
-            if method == "GET" and path == "/api/templates/workflow-profiles":
-                return 200, {"profiles": self.service.available_workflow_profiles()}
             if path.startswith("/api/instances/"):
                 return await self._route_instance(method, path, body, query)
         except ConductorServiceError as exc:
@@ -232,28 +195,27 @@ class ConductorApiServer:
             instance = await self.service.get_instance_coordinated(instance_id)
             if instance is None:
                 return 404, {"error": {"code": "instance_not_found", "message": f"Instance not found: {instance_id}"}}
-            return 200, {"instance": instance.to_dict()}
+            return 200, {"instance": _public_instance(instance)}
         if method == "PATCH" and not action:
+            if any(key in body for key in {"workflow_content", "workflow_path", "workflow_profile", "workflow_inputs"}):
+                raise ConductorServiceError(
+                    "workflow_runtime_surface_removed",
+                    "Runtime workflow fields are not part of the pipeline instance API.",
+                )
             instance = self.service.update_instance(instance_id, InstancePatchRequest(**body))
-            return 200, {"instance": instance.to_dict()}
+            return 200, {"instance": _public_instance(instance)}
         if method == "DELETE" and not action:
             self.service.delete_instance(instance_id)
             return 200, {"deleted": True}
-        if method == "POST" and action == "generate-workflow":
-            instance = self.service.generate_workflow(instance_id)
-            return 200, {"instance": instance.to_dict()}
-        if method == "POST" and action == "validate-workflow":
-            validation = self.service.validate_workflow(instance_id, body.get("workflow_content", ""))
-            return 200, {"validation": validation.to_dict()}
         if method == "POST" and action == "start":
             instance = await self.service.start_instance(instance_id)
-            return 200, {"instance": instance.to_dict(include_workflow_content=False)}
+            return 200, {"instance": _public_instance(instance)}
         if method == "POST" and action == "stop":
             instance = await self.service.stop_instance(instance_id)
-            return 200, {"instance": instance.to_dict(include_workflow_content=False)}
+            return 200, {"instance": _public_instance(instance)}
         if method == "POST" and action == "restart":
             instance = await self.service.restart_instance(instance_id)
-            return 200, {"instance": instance.to_dict(include_workflow_content=False)}
+            return 200, {"instance": _public_instance(instance)}
         if method == "GET" and action == "logs":
             if not query:
                 return 200, {"logs": self.service.instance_logs(instance_id)}
@@ -318,6 +280,10 @@ def _optional_int(value: Any, default: int | None) -> int | None:
     if isinstance(value, str) and value.strip().lower() in {"", "none", "null", "all"}:
         return None
     return _int(value, default or 0)
+
+
+def _public_instance(instance: InstanceRecord) -> dict[str, Any]:
+    return instance.to_public_dict()
 
 
 def _bool(value: Any) -> bool:

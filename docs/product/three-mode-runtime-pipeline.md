@@ -2,9 +2,11 @@
 
 ## Status
 
-Product architecture RFC. This document defines a target direction. It does not
-claim the described behavior has already shipped. Implementation is sequenced as
-subprojects (S0–S5) at the end of this document.
+Product architecture source of truth. Symphony runtime uses the durable
+`plan -> execute -> verify` pipeline as scheduling truth. Legacy phase runners,
+direct Linear polling, orchestration-run materialized views, and
+`performer:phase/*` label projection are removed from product runtime paths and
+must not be reintroduced as compatibility surfaces.
 
 This RFC evolves and absorbs:
 
@@ -344,7 +346,7 @@ Isolation includes capability limits, not just separate homes.
 
 ## Backend Abstraction
 
-Backends differ in capability, so the scheduler and phase logic must depend only
+Backends differ in capability, so the scheduler and mode lifecycle must depend only
 on a minimal interface, with per-mode capability requirements.
 
 ```text
@@ -365,7 +367,7 @@ mode_requirements:
 ```
 
 A backend that cannot meet a mode's requirements is ineligible for that mode.
-Scheduler and phase logic must not embed backend-specific behavior.
+Scheduler and mode lifecycle logic must not embed backend-specific behavior.
 
 ## Conductor Graph vs Linear
 
@@ -557,24 +559,15 @@ Absorbs and extends
   backends). Note this is necessary but not sufficient for verifier isolation —
   workspace/artifact-snapshot isolation (see Verification Handoff) is also
   required.
-- The runtime profile carries the **backend selection** per mode, making
-  `codex_profile` one case of a general per-mode runtime profile.
+- The runtime profile carries the **backend selection** and sanitized
+  backend-specific settings per mode.
 - Runtime-profile push and scheduler-policy push share the same Podium →
   Conductor configuration channel.
 
-**Preserved discipline:** documentation-first posture; docs must not claim the
-managed `~/.codex` fallback removal shipped unless it lands in the same change.
-The absorbed plan's code anchors remain the S0-c implementation checklist:
-
-- `packages/podium/src/podium/podium_shared.py` → `sanitize_codex_profile`
-- `packages/conductor/src/conductor/conductor_workflow.py` →
-  `generate_workflow_content`, `_codex_profile`, `_managed_resource_mismatches`
-- `packages/conductor/src/conductor/conductor_service.py` →
-  `_build_instance_candidate`, `_materialize_instance`, `_runtime_env`
-- `packages/conductor/src/conductor/conductor_runtime.py` → `_process_env`
-- `packages/conductor/src/conductor/conductor_models.py` → `InstanceRecord`
-- `packages/performer-api/src/performer_api/config.py` → `CodexConfig`
-- `packages/performer/src/performer/codex_client.py` → `_codex_sdk_env`
+**Preserved discipline:** documentation-first posture; docs must not claim mode
+isolation shipped unless the runtime-profile materialization, managed
+environment filtering, per-mode `CODEX_HOME`, and fail-closed setup all land in
+the same change.
 
 ## Failure-Driven Re-Decomposition (S4, ADaPT)
 
@@ -720,17 +713,14 @@ by the scheduler, so scheduling and runtime-profile ownership are settled first.
 - **Evolves:** `docs/product/runtime-orchestration-architecture.md` (three
   Performer modes; per-mode runtime environment boundary; graph store as
   scheduling authority).
-- **Evolves:** existing gate-tree acceptance semantics in `packages/performer`
-  (`acceptance.py`, `REVIEWING`) toward pre-frozen gate snapshots and an isolated
-  verifier runtime.
+- **Replaces:** legacy Linear acceptance semantics with pre-frozen gate
+  snapshots, isolated verifier attempts, verified manifests, and deterministic
+  integration.
 - **Demotes:** `docs/product/symphony-linear-tree-skill.md` to the optional S5
   importer role.
 
-When S0-c is implemented, the supporting docs listed in the absorbed plan
-(`security-model.md`, `runtime-installer-and-updates.md`, `product-shape.md`,
-`README.md`, `CLAUDE.md`, `AGENT.md`, `docs.md`, `WORKFLOW.md`,
-`WORKFLOW.smoke.md`) must be aligned to the per-mode isolated `CODEX_HOME`
-invariant.
+Supporting docs must stay aligned to the per-mode isolated `CODEX_HOME`
+invariant and the request/result based Performer CLI.
 
 ## Success Criteria
 
@@ -757,22 +747,25 @@ invariant.
 9. Managed mode never falls back to the operator's global `~/.codex`; each mode
    uses a Conductor-provisioned isolated runtime environment.
 10. Model backend is selectable per mode via the runtime profile without changing
-   scheduler or phase logic.
+   scheduler or mode lifecycle logic.
 11. Abnormal conditions escalate to `AWAITING_HUMAN` with a structured reason
     rather than collapsing into `FAILED`.
+12. Linear projection exposes operator-visible pipeline status, including
+    `operator_status` on every projected node and `operator_wait_kind` whenever
+    Codex/runtime is waiting for approval, permission, or tool input.
 
 ## Verification
 
-Documentation-consistency and symbol-existence checks during the doc phase:
+Documentation-consistency and symbol-existence checks:
 
 ```bash
-grep -Rni "CODEX_HOME\|~/.codex\|codex_profile\|managed mode\|runtime profile" \
-  docs README.md CLAUDE.md AGENT.md docs.md WORKFLOW.md WORKFLOW.smoke.md
+grep -Rni "CODEX_HOME\|~/.codex\|managed mode\|runtime profile" \
+  docs README.md AGENT.md
 
 grep -Rni "SchedulerPolicy\|global_capacity\|is_dispatchable\|readiness_counts\|by_mode" \
   packages/conductor/src/conductor
 
-grep -Rni "sanitize_codex_profile\|generate_workflow_content\|_codex_profile\|_managed_resource_mismatches\|_build_instance_candidate\|_materialize_instance\|_runtime_env\|_process_env\|InstanceRecord\|CodexConfig\|_codex_sdk_env" \
+grep -Rni "RuntimeConfigEnvelope\|RuntimeProfile\|CODEX_HOME\|attempt_request_path\|attempt_result_path\|PipelineView" \
   packages
 ```
 

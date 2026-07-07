@@ -64,11 +64,13 @@ def diagnose(tree: dict[str, Any] | None, runtime: dict[str, Any]) -> list[str]:
         return findings
     business = tree.get("business_issue") or {}
     labels = set(business.get("labels") or [])
-    state = business.get("state")
-    if "performer:phase/review" in labels and state != "In Review":
-        findings.append("linear_state_phase_mismatch:review_phase_without_in_review_state")
-    if "performer:gate/passed" in labels and state != "Done":
-        findings.append("linear_state_phase_mismatch:passed_gate_without_done_state")
+    description = str(business.get("description") or "")
+    has_pipeline_metadata = all(
+        marker in description
+        for marker in ("graph_id:", "node_id:", "gate_snapshot_hash:", "conductor_revision:")
+    )
+    if "performer:type/task" in labels and not has_pipeline_metadata:
+        findings.append("linear_tree:missing_pipeline_metadata")
     findings.extend(f"linear_tree:{failure}" for failure in tree.get("failures", []))
     return findings
 
@@ -83,7 +85,7 @@ async def observe(args: argparse.Namespace) -> dict[str, Any]:
             args.jsonl.parent.mkdir(parents=True, exist_ok=True)
             with args.jsonl.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(row, sort_keys=True) + "\n")
-        if args.once or time.time() >= deadline:
+        if args.single_sample or time.time() >= deadline:
             break
         if row["diagnosis"] and args.stop_on_diagnosis:
             break
@@ -107,7 +109,7 @@ def parser() -> argparse.ArgumentParser:
     arg_parser.add_argument("--instance-root", type=Path, required=True, help="Conductor instance root containing state/ and logs/.")
     arg_parser.add_argument("--interval", type=float, default=10.0)
     arg_parser.add_argument("--timeout", type=float, default=300.0)
-    arg_parser.add_argument("--once", action="store_true")
+    arg_parser.add_argument("--single-sample", action="store_true")
     arg_parser.add_argument("--stop-on-diagnosis", action="store_true")
     arg_parser.add_argument("--jsonl", type=Path, help="Append every sample as JSONL.")
     arg_parser.add_argument("--out", type=Path, help="Write final observer summary JSON.")

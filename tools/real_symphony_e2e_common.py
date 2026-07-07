@@ -4,7 +4,6 @@ import json
 import os
 import signal
 import asyncio
-import shutil
 import socket
 import subprocess
 import time
@@ -55,6 +54,10 @@ class Evidence:
         self.data["checks"].append(row)
         if not passed:
             self.data["failures"].append(row)
+        status = "passed" if passed else "failed"
+        print(f"event=e2e_check status={status} name={name}", flush=True)
+        if not passed:
+            print(json.dumps({"event": "e2e_failure", **row}, sort_keys=True), flush=True)
         self.write()
 
     def artifact(self, name: str, path: Path) -> None:
@@ -184,213 +187,6 @@ def make_fixture_repo(path: Path) -> Path:
     subprocess.run(["git", "add", "."], cwd=path, check=True)
     subprocess.run(["git", "commit", "-q", "-m", "base"], cwd=path, check=True)
     return path
-
-
-def patch_workflow(
-    workflow_path: Path,
-    *,
-    acceptance_gates: bool,
-    permission_approval_probe: bool = False,
-    sdk_codex_bin: str | None = None,
-    init_max_attempts: int | None = None,
-    init_backoff_ms: int | None = None,
-    init_backoff_max_ms: int | None = None,
-    read_timeout_ms: int | None = None,
-    hard_turn_timeout_ms: int | None = None,
-    overload_max_attempts: int | None = None,
-    overload_initial_delay_ms: int | None = None,
-    overload_max_delay_ms: int | None = None,
-    config_overrides: list[str] | None = None,
-) -> str:
-    workflow = workflow_path.read_text(encoding="utf-8")
-    codex_bin = sdk_codex_bin or shutil.which("codex")
-    if codex_bin and "  sdk_codex_bin:" not in workflow:
-        workflow = workflow.replace("codex:\n", f"codex:\n  sdk_codex_bin: {codex_bin}\n", 1)
-    elif codex_bin:
-        workflow = _replace_or_insert_codex_key(workflow, "sdk_codex_bin", codex_bin)
-    if init_max_attempts is not None:
-        workflow = _replace_or_insert_codex_key(workflow, "init_max_attempts", str(init_max_attempts))
-    if init_backoff_ms is not None:
-        workflow = _replace_or_insert_codex_key(workflow, "init_backoff_ms", str(init_backoff_ms))
-    if init_backoff_max_ms is not None:
-        workflow = _replace_or_insert_codex_key(workflow, "init_backoff_max_ms", str(init_backoff_max_ms))
-    if read_timeout_ms is not None:
-        workflow = _replace_or_insert_codex_key(workflow, "read_timeout_ms", str(read_timeout_ms))
-    if hard_turn_timeout_ms is not None:
-        workflow = _replace_or_insert_codex_key(workflow, "hard_turn_timeout_ms", str(hard_turn_timeout_ms))
-    if overload_max_attempts is not None:
-        workflow = _replace_or_insert_codex_key(workflow, "overload_max_attempts", str(overload_max_attempts))
-    if overload_initial_delay_ms is not None:
-        workflow = _replace_or_insert_codex_key(workflow, "overload_initial_delay_ms", str(overload_initial_delay_ms))
-    if overload_max_delay_ms is not None:
-        workflow = _replace_or_insert_codex_key(workflow, "overload_max_delay_ms", str(overload_max_delay_ms))
-    if config_overrides:
-        workflow = _replace_or_insert_codex_list(workflow, "config_overrides", config_overrides)
-    workflow = workflow.replace(
-        "  max_concurrent_agents: 10\n  max_turns: 20\n",
-        "  max_concurrent_agents: 1\n  max_turns: 2\n" if acceptance_gates else "  max_concurrent_agents: 1\n  max_turns: 1\n",
-    )
-    if "polling:\n" not in workflow:
-        workflow = workflow.replace("persistence:\n", "polling:\n  interval_ms: 5000\n\npersistence:\n")
-    if "completion_verification:\n" not in workflow:
-        workflow = workflow.replace(
-            "codex:\n",
-            "completion_verification:\n"
-            "  expected_test_patterns:\n"
-            "    - tests/test_smoke.py\n"
-            "  min_workspace_changes_chars: 10\n\n"
-            "codex:\n",
-        )
-    if acceptance_gates and "acceptance:\n" not in workflow:
-        workflow = workflow.replace(
-            "codex:\n",
-            "acceptance:\n"
-            "  enabled: true\n"
-            "  mode: block_done\n"
-            "  minimum_score: 3\n"
-            "  require_findings_for_score_3: true\n"
-            "  auto_retry_on_fail: true\n"
-            "  todo_state: Todo\n"
-            "  implementation_state: In Progress\n"
-            "  review_state: In Review\n"
-            "  done_state: Done\n\n"
-            "codex:\n",
-        )
-    if not acceptance_gates and "acceptance:\n" in workflow:
-        workflow = workflow.replace("  enabled: true\n", "  enabled: false\n", 1)
-    if permission_approval_probe:
-        task_instruction = (
-            "E2E permission approval probe: First check whether `.symphony_permission_probe_started` exists in the current working directory returned by `pwd`. "
-            "If it does not exist, create `.symphony_permission_probe_started` in `pwd`, then intentionally try to create `SYMPHONY_PERMISSION_DENIED_PROBE.md` "
-            "under the Source repository path shown above, outside `pwd`. Stop after that attempted outside-workspace write; do not create the result file yet. "
-            "If `.symphony_permission_probe_started` already exists, do not write outside `pwd`; create SYMPHONY_REAL_E2E_RESULT.md in `pwd`. "
-            "The result file must include the Linear issue identifier and one sentence saying Podium, Conductor, Performer, and Linear approval resumed successfully. "
-            "Run `pytest tests/test_smoke.py -q`. "
-        )
-    else:
-        task_instruction = (
-            "E2E task: Create SYMPHONY_REAL_E2E_RESULT.md in the current working directory returned by `pwd`; do not write to any source repository path outside `pwd`. The file must include the Linear issue identifier "
-            "and one sentence saying Podium, Conductor, and Performer reached Codex successfully. Run `pytest tests/test_smoke.py -q`. "
-            "Do not inspect git status, do not clean pytest caches, and do not remove generated `__pycache__`; those are outside this task's acceptance criteria. "
-        )
-    if acceptance_gates:
-        task_instruction += (
-            "Update the Linear issue description with concrete evidence fields named exactly `Implementation summary:`, "
-            "`Test commands and exact output:`, and `Remaining risks:`. Do not move the issue to Done yourself; leave it active "
-            "so Performer can run acceptance gates.\n"
-        )
-    else:
-        task_instruction += "Let Performer handle completion policy.\n"
-    legacy_instruction = (
-        "When the requested work is implemented and verified, create a Linear comment summarizing the result and verification, "
-        "then move the issue out of the active states using the linear_graphql tool.\n"
-    )
-    if legacy_instruction in workflow:
-        workflow = workflow.replace(legacy_instruction, task_instruction)
-    elif "Current Linear issue:\n" in workflow and task_instruction not in workflow:
-        workflow += "\n" + task_instruction
-    if acceptance_gates and "Configured terminal states:" in workflow:
-        workflow = workflow.split("Configured terminal states:", 1)[0]
-        workflow += (
-            "Acceptance gates are enabled. After implementation, leave the business issue in an active state with the required evidence fields in its description. "
-            "Performer will move it to review, run the gate child issue, create evidence, and close the tree if the gate passes.\n"
-        )
-    return workflow
-
-
-def _replace_or_insert_codex_key(workflow: str, key: str, value: str) -> str:
-    lines = workflow.splitlines()
-    output: list[str] = []
-    in_codex = False
-    inserted = False
-    key_prefix = f"  {key}:"
-    for line in lines:
-        if line.startswith("codex:"):
-            in_codex = True
-            output.append(line)
-            continue
-        if in_codex and line and not line.startswith(" "):
-            if not inserted:
-                output.append(f"  {key}: {value}")
-                inserted = True
-            in_codex = False
-        if in_codex and line.startswith(key_prefix):
-            if not inserted:
-                output.append(f"  {key}: {value}")
-                inserted = True
-            continue
-        output.append(line)
-    if in_codex and not inserted:
-        output.append(f"  {key}: {value}")
-    return "\n".join(output) + ("\n" if workflow.endswith("\n") else "")
-
-
-def _replace_or_insert_codex_list(workflow: str, key: str, values: list[str]) -> str:
-    lines = workflow.splitlines()
-    output: list[str] = []
-    in_codex = False
-    skipping_existing = False
-    inserted = False
-    key_prefix = f"  {key}:"
-    rendered = [f"  {key}:", *[f"    - {value}" for value in values]]
-    for line in lines:
-        if line.startswith("codex:"):
-            in_codex = True
-            output.append(line)
-            continue
-        if skipping_existing:
-            if line.startswith("    - "):
-                continue
-            skipping_existing = False
-        if in_codex and line and not line.startswith(" "):
-            if not inserted:
-                output.extend(rendered)
-                inserted = True
-            in_codex = False
-        if in_codex and line.startswith(key_prefix):
-            if not inserted:
-                output.extend(rendered)
-                inserted = True
-            skipping_existing = True
-            continue
-        output.append(line)
-    if in_codex and not inserted:
-        output.extend(rendered)
-    return "\n".join(output) + ("\n" if workflow.endswith("\n") else "")
-
-
-def patch_e2e_gate_mode(workflow: str, *, gate_mode: str) -> str:
-    if gate_mode not in {"smoke", "strict"}:
-        raise ValueError(f"unsupported e2e gate mode: {gate_mode}")
-    if "acceptance:\n" not in workflow:
-        return workflow
-    lines = workflow.splitlines()
-    output: list[str] = []
-    in_acceptance = False
-    inserted = False
-    for line in lines:
-        if line.startswith("acceptance:"):
-            in_acceptance = True
-            inserted = False
-            output.append(line)
-            continue
-        if in_acceptance and line == "" and not inserted:
-            output.append(f"  gate_planner_mode: {gate_mode}")
-            inserted = True
-        if in_acceptance and line and not line.startswith(" "):
-            if not inserted:
-                output.append(f"  gate_planner_mode: {gate_mode}")
-                inserted = True
-            in_acceptance = False
-        if in_acceptance and line.strip().startswith("gate_planner_mode:"):
-            if not inserted:
-                output.append(f"  gate_planner_mode: {gate_mode}")
-                inserted = True
-            continue
-        output.append(line)
-    if in_acceptance and not inserted:
-        output.append(f"  gate_planner_mode: {gate_mode}")
-    return "\n".join(output) + ("\n" if workflow.endswith("\n") else "")
 
 
 def api_url(port: int, path: str) -> str:

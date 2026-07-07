@@ -52,6 +52,24 @@ describe("api client", () => {
     expect(result.turnstile.enabled).toBe(false);
   });
 
+  it("pipeline requests the runtime group pipeline view", async () => {
+    const fetchMock = mockFetch(200, {
+      runtime_group_id: "group-1",
+      policy_revision: 2,
+      profiles: {},
+      pipeline: { graph_revision: 3, modes: [], predicted_call_order: [], human_waits: [] },
+    });
+    global.fetch = fetchMock;
+
+    const result = await api.pipeline();
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/pipeline",
+      expect.objectContaining({ credentials: "include" }),
+    );
+    expect(result.pipeline.graph_revision).toBe(3);
+  });
+
   it("saveRepository POSTs a JSON body without workspace_id", async () => {
     const fetchMock = mockFetch(200, {
       repository: { mode: "git_url", value: "https://example.com/repo.git" },

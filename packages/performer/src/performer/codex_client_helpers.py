@@ -5,6 +5,7 @@ import itertools
 import json
 import logging
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -100,26 +101,29 @@ def _classify_sdk_exception(exc: BaseException) -> _SdkErrorClassification:
     if isinstance(exc, CodexError):
         return _SdkErrorClassification(exc.code, exc.http_status)
     http_status = _sdk_http_status(exc)
+    inferred_http_status = http_status or _http_status_from_error_text(str(exc))
+    if inferred_http_status in {429, 500, 502, 503, 504} or _looks_like_upstream_overload(str(exc)):
+        return _SdkErrorClassification("upstream_overloaded", inferred_http_status)
     if _is_instance(exc, SdkRetryLimitExceededError):
-        return _SdkErrorClassification("upstream_overloaded", http_status)
+        return _SdkErrorClassification("upstream_overloaded", inferred_http_status)
     if _is_instance(exc, SdkServerBusyError):
-        return _SdkErrorClassification("upstream_overloaded", http_status)
+        return _SdkErrorClassification("upstream_overloaded", inferred_http_status)
     if (
         _is_instance(exc, SdkInvalidParamsError)
         or _is_instance(exc, SdkInvalidRequestError)
         or _is_instance(exc, SdkMethodNotFoundError)
         or _is_instance(exc, SdkParseError)
     ):
-        return _SdkErrorClassification("codex_bad_request", http_status)
+        return _SdkErrorClassification("codex_bad_request", inferred_http_status)
     if _is_instance(exc, SdkTransportClosedError):
-        return _SdkErrorClassification("sdk_transport_error", http_status)
+        return _SdkErrorClassification("sdk_transport_error", inferred_http_status)
     if sdk_is_retryable_error is not None:
         try:
             if sdk_is_retryable_error(exc):
-                return _SdkErrorClassification("upstream_overloaded", http_status)
+                return _SdkErrorClassification("upstream_overloaded", inferred_http_status)
         except Exception:
             pass
-    return _SdkErrorClassification("sdk_transport_error", http_status)
+    return _SdkErrorClassification("sdk_transport_error", inferred_http_status)
 
 
 def _is_instance(value: BaseException, class_obj: Any) -> bool:
@@ -149,6 +153,26 @@ def _http_status_from_any(value: Any) -> int | None:
     return None
 
 
+def _http_status_from_error_text(value: str) -> int | None:
+    match = re.search(r"\b(429|500|502|503|504)\b", value)
+    return int(match.group(1)) if match else None
+
+
+def _looks_like_upstream_overload(value: str) -> bool:
+    lowered = value.lower()
+    return any(
+        marker in lowered
+        for marker in (
+            "bad gateway",
+            "upstream request failed",
+            "server overloaded",
+            "upstream overloaded",
+            "temporarily unavailable",
+            "gateway timeout",
+        )
+    )
+
+
 def _optional_int(value: Any) -> int | None:
     if value is None or isinstance(value, bool):
         return None
@@ -172,8 +196,6 @@ def _codex_sdk_env() -> dict[str, str]:
         env["HOME"] = home
     if codex_home:
         env["CODEX_HOME"] = codex_home
-    elif home:
-        env["CODEX_HOME"] = str(Path(home) / ".codex")
     return env
 
 

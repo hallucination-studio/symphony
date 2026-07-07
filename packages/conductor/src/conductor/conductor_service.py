@@ -1,14 +1,12 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 from pathlib import Path
 from typing import Any
 import shutil
 import subprocess
 import socket
-from datetime import datetime, timedelta, timezone
 import httpx
 
 from .conductor_models import (
@@ -16,62 +14,25 @@ from .conductor_models import (
     InstanceCreateRequest,
     InstancePatchRequest,
     InstanceRecord,
-    WorkflowValidationResult,
 )
 from .conductor_runtime import ConductorRuntimeManager
 from .conductor_runtime import LogQuery
-from .conductor_scheduler import OrchestrationScheduler, phase_file_paths
+from .conductor_pipeline import ConductorPipelineStore, PipelineCoordinator
 from .conductor_store import ConductorStore
-from .conductor_crash_recovery import normalize_stale_runtime_state
 from .conductor_podium_sync import ConductorPodiumSyncMixin
-from .conductor_phase_ops import ConductorPhaseOpsMixin
 from .conductor_service_views import ConductorServiceViewsMixin
+from .conductor_service_helpers import (
+    _desired_project_labels,
+    _linear_agent_app_user_id,
+    _merge_project_labels,
+)
 from .conductor_service_types import ConductorServiceError, CoordinationCadence, CoordinationResult
-from .conductor_ingress import DirectIngress
 from .conductor_linear_direct import ProjectLabelLinearProxy, RepositoryHandoffLinearProxy
-from .conductor_phase import PhaseReducer, PhaseTransitionError
-from .conductor_linear_projector import LinearProjector
-from .conductor_performer_supervisor import PerformerSupervisor
-from .conductor_phase_human_actions import (
-    PhaseHumanActionCoordinator,
-    comment_missing_phase_human_response,
-    find_phase_human_child,
-    human_response_from_child,
-    linear_issue_is_done,
-    phase_human_action_requires_response,
-    write_phase_human_response_to_parent,
-)
-from .conductor_reconcile import reconcile_orchestration_health
-from .conductor_remediation import OrchestrationRemediator
 from .conductor_repository_handoff import (
-    REPOSITORY_HANDOFF_MARKER_NAME,
-    REPOSITORY_INTEGRATION_LABEL,
     RepositoryHandoffCoordinator,
-    comment_repository_handoff,
-    find_repository_integration_child,
-    repository_handoff_closeout_event,
-    repository_handoff_comment,
-    repository_handoff_marker,
-    repository_integration_description,
 )
-from .conductor_workflow import (
-    ConductorValidationError,
-    generate_workflow_content,
-    validate_instance_workflow,
-    workflow_profiles,
-)
-from performer_api.ops_models import OpsSnapshot, TraceEvent
-from performer_api.ops_projection import build_issue_detail, build_issue_list, build_run_detail, build_trace_stream
-from performer_api.ops_retention import RetentionPolicy
-from performer_api.ops_store import OpsStore
-from performer_api.phase import PhaseAdvanceResult, RunPhase
-from performer_api.persistence import PersistenceStore, PersistedSession, PersistedState
-from performer_api.models import normalize_state_key, utc_now
-from performer_api.workflow import load_workflow
 
-
-
-class ConductorService(ConductorPodiumSyncMixin, ConductorPhaseOpsMixin, ConductorServiceViewsMixin):
+class ConductorService(ConductorPodiumSyncMixin, ConductorServiceViewsMixin):
     def __init__(
         self,
         *,
@@ -82,43 +43,11 @@ class ConductorService(ConductorPodiumSyncMixin, ConductorPhaseOpsMixin, Conduct
         self.store = store
         self.data_root = data_root
         self.runtime_manager = runtime_manager or ConductorRuntimeManager()
+        self.pipeline_store = ConductorPipelineStore(data_root / "pipeline")
+        self.pipeline_coordinator = PipelineCoordinator(store=self.pipeline_store, runtime_manager=self.runtime_manager)
         self._startup_locks: dict[str, asyncio.Lock] = {}
-        self.phase_reducer = PhaseReducer(store)
         self.repository_handoff_tracker_factory = self._repository_handoff_tracker
         self.project_label_proxy_factory = self._project_label_proxy
-        self.linear_projector = LinearProjector(
-            store=self.store,
-            get_instance=self.store.get_instance,
-            tracker_factory=lambda instance: self.repository_handoff_tracker_factory(instance),
-        )
-        self.direct_ingress = DirectIngress(
-            store=self.store,
-            phase_reducer=self.phase_reducer,
-            list_instances=self.store.list_instances,
-            get_instance=self.get_instance,
-            tracker_factory=lambda instance: self.repository_handoff_tracker_factory(instance),
-        )
-        self.scheduler = OrchestrationScheduler(
-            store=self.store,
-            phase_reducer=self.phase_reducer,
-            runtime_manager=self.runtime_manager,
-            runtime_env=self._runtime_env,
-            get_instance=self.get_instance,
-            codex_profile_for_run=self._codex_profile_for_run,
-            start_lock_for_instance=self._startup_lock_for_instance,
-        )
-        self.performer_supervisor = PerformerSupervisor(
-            store=self.store,
-            phase_reducer=self.phase_reducer,
-            comment_result_diagnostic=self._comment_phase_result_diagnostic,
-        )
-        self.phase_human_actions = PhaseHumanActionCoordinator(
-            store=self.store,
-            phase_reducer=self.phase_reducer,
-            managed_mode_enabled=self._managed_mode_enabled,
-            tracker_factory=lambda instance: self.repository_handoff_tracker_factory(instance),
-        )
-        self.orchestration_remediator = OrchestrationRemediator(self.store)
         self.coordination_cadence = CoordinationCadence()
         self._podium_connection: dict[str, Any] = {
             "poll": {"status": "idle", "last_error": None, "updated_at": None},
@@ -129,11 +58,6 @@ class ConductorService(ConductorPodiumSyncMixin, ConductorPhaseOpsMixin, Conduct
         # loop only calls Linear when an instance's scope actually changes.
         self._project_label_signatures: dict[str, str] = {}
         self.data_root.mkdir(parents=True, exist_ok=True)
-        normalize_stale_runtime_state(
-            store=self.store,
-            runtime_manager=self.runtime_manager,
-            phase_reducer=self.phase_reducer,
-        )
 
     def list_instances(self) -> list[InstanceRecord]:
         return self.store.list_instances()
@@ -150,3 +74,57 @@ class ConductorService(ConductorPodiumSyncMixin, ConductorPhaseOpsMixin, Conduct
         merged.update(payload)
         return self.update_settings(ConductorSettings.from_dict(merged))
 
+    async def get_instance_coordinated(self, instance_id: str) -> InstanceRecord | None:
+        return self.get_instance(instance_id)
+
+    async def coordinate_repository_handoff_closeouts(self, *, instance_id: str | None = None) -> dict[str, Any]:
+        return await RepositoryHandoffCoordinator(
+            ops_rows=self._ops_stores,
+            tracker_factory=self.repository_handoff_tracker_factory,
+        ).coordinate(instance_id=instance_id)
+
+    def _repository_handoff_tracker(
+        self,
+        instance: InstanceRecord,
+        *,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> Any:
+        settings = self.store.get_settings()
+        endpoint_base = settings.podium_url.strip().rstrip("/")
+        endpoint = f"{endpoint_base}/api/v1/linear/graphql" if endpoint_base else "https://api.linear.app/graphql"
+        api_key = settings.podium_proxy_token.strip()
+        return RepositoryHandoffLinearProxy(
+            endpoint=endpoint,
+            api_key=api_key,
+            project_slug=instance.linear_project,
+            required_delegate_id=_linear_agent_app_user_id(instance.linear_filters) or None,
+            transport=transport,
+        )
+
+    def _project_label_proxy(self, instance: InstanceRecord) -> Any:
+        settings = self.store.get_settings()
+        endpoint_base = settings.podium_url.strip().rstrip("/") or "https://podium.example"
+        return ProjectLabelLinearProxy(
+            endpoint=f"{endpoint_base}/api/v1/linear/graphql",
+            api_key=settings.podium_proxy_token.strip(),
+        )
+
+    async def sync_instance_project_labels(self, instance: InstanceRecord) -> dict[str, Any]:
+        settings = self.store.get_settings()
+        if not settings.podium_proxy_token.strip():
+            return {"status": "skipped", "reason": "proxy_not_configured"}
+        project_slug = str(instance.linear_project or "").strip()
+        if not project_slug:
+            return {"status": "skipped", "reason": "missing_project_slug"}
+        proxy = self.project_label_proxy_factory(instance)
+        project_id = await proxy.find_project_id(project_slug)
+        if not project_id:
+            return {"status": "skipped", "reason": "project_not_found", "project_slug": project_slug}
+        existing = await proxy.fetch_project_labels(project_id)
+        existing_names = [row["name"] for row in existing]
+        desired = _merge_project_labels(existing_names, _desired_project_labels(instance))
+        if set(desired) == set(existing_names):
+            return {"status": "unchanged", "project_id": project_id, "labels": desired}
+        label_ids = [await proxy.ensure_project_label_id(name) for name in desired]
+        await proxy.set_project_labels(project_id, label_ids)
+        return {"status": "synced", "project_id": project_id, "labels": desired}

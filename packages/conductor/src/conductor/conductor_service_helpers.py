@@ -7,12 +7,6 @@ from pathlib import Path
 from typing import Any
 
 from .conductor_models import InstanceRecord
-from .conductor_phase_human_actions import (
-    find_phase_human_child,
-    human_response_from_child,
-    linear_issue_is_done,
-    phase_human_action_requires_response,
-)
 from .conductor_repository_handoff import (
     repository_handoff_closeout_event,
     repository_handoff_comment,
@@ -21,7 +15,6 @@ from .conductor_repository_handoff import (
 )
 from .conductor_service_types import PROJECT_LABEL_PREFIX
 from performer_api.ops_models import OpsSnapshot, TraceEvent
-from performer_api.persistence import PersistedSession, PersistedState
 
 def json_stable(payload: dict[str, Any]) -> str:
     import json
@@ -61,143 +54,6 @@ def _replace_marker_block(current: str, marker_name: str, block: str) -> str:
         return f"{prefix.rstrip()}\n\n{replacement}\n\n{suffix.lstrip()}".strip()
     base = current.strip()
     return f"{base}\n\n{replacement}".strip() if base else replacement
-
-
-def _find_phase_human_child(human_action: dict[str, Any], children: list[dict[str, Any]]) -> dict[str, Any] | None:
-    return find_phase_human_child(human_action, children)
-
-
-def _linear_issue_is_done(issue: dict[str, Any]) -> bool:
-    return linear_issue_is_done(issue)
-
-
-def _human_response_from_child(child: dict[str, Any]) -> str | None:
-    return human_response_from_child(child)
-
-
-def _phase_human_action_requires_response(human_action: dict[str, Any]) -> bool:
-    return phase_human_action_requires_response(human_action)
-
-
-def _persisted_session_row(session: PersistedSession) -> dict[str, Any]:
-    return {
-        "issue_id": session.issue_id,
-        "issue_identifier": session.issue_identifier,
-        "issue_url": session.issue_url,
-        "session_id": session.session_id,
-        "turn_id": session.turn_id,
-        "worker_host": session.worker_host,
-        "phase": session.phase,
-        "status_label": session.status_label,
-        "workspace_path": session.workspace_path,
-        "started_at": session.started_at.isoformat().replace("+00:00", "Z"),
-        "last_event": session.last_event,
-        "last_message": session.last_message,
-        "last_raw_message": session.last_raw_message,
-        "recent_events": session.recent_events,
-        "turn_count": session.turn_count,
-        "tokens": {
-            "input_tokens": session.tokens.input_tokens,
-            "output_tokens": session.tokens.output_tokens,
-            "cached_tokens": session.tokens.cached_tokens,
-            "total_tokens": session.tokens.total_tokens,
-        },
-    }
-
-
-def _persisted_retry_row(entry) -> dict[str, Any]:
-    return {
-        "issue_id": entry.issue_id,
-        "issue_identifier": entry.identifier,
-        "issue_url": entry.issue_url,
-        "attempt": entry.attempt,
-        "due_at": entry.due_at.isoformat().replace("+00:00", "Z"),
-        "due_at_ms": entry.due_at_ms,
-        "error": entry.error,
-        "last_message": entry.last_message,
-        "phase": entry.phase,
-        "status_label": entry.status_label,
-        "recent_events": entry.recent_events,
-    }
-
-
-def _persisted_continuation_row(entry) -> dict[str, Any]:
-    return {
-        "issue_id": entry.issue_id,
-        "issue_identifier": entry.identifier,
-        "issue_url": entry.issue_url,
-        "attempt": entry.attempt,
-        "due_at": entry.due_at.isoformat().replace("+00:00", "Z"),
-        "due_at_ms": entry.due_at_ms,
-        "error": None,
-        "last_message": entry.last_message,
-        "phase": entry.phase,
-        "status_label": entry.status_label,
-        "recent_events": entry.recent_events,
-    }
-
-
-def _persisted_blocked_row(entry) -> dict[str, Any]:
-    return {
-        "issue_id": entry.issue_id,
-        "issue_identifier": entry.identifier,
-        "issue_url": entry.issue_url,
-        "attempt": entry.attempt,
-        "blocked_at": entry.blocked_at.isoformat().replace("+00:00", "Z"),
-        "error": entry.error,
-        "last_message": entry.last_message,
-        "phase": entry.phase,
-        "status_label": entry.status_label,
-        "recent_events": entry.recent_events,
-    }
-
-
-def _persisted_human_intervention_row(entry) -> dict[str, Any]:
-    return {
-        "issue_id": entry.issue_id,
-        "issue_identifier": entry.identifier,
-        "issue_url": entry.issue_url,
-        "attempt": entry.attempt,
-        "created_at": entry.created_at.isoformat().replace("+00:00", "Z"),
-        "kind": entry.kind,
-        "error": entry.error,
-        "last_message": entry.last_message,
-        "phase": entry.phase,
-        "status_label": entry.status_label,
-        "child_issue_id": entry.child_issue_id,
-        "child_identifier": entry.child_identifier,
-        "child_url": entry.child_url,
-        "questions": entry.questions,
-        "resume_strategy": entry.resume_strategy,
-        "recent_events": entry.recent_events,
-    }
-
-
-def _phase_runtime_row(run) -> dict[str, Any]:
-    return {
-        "run_id": run.run_id,
-        "issue_id": run.issue_id,
-        "issue_identifier": run.issue_identifier,
-        "phase": run.phase.value,
-        "status": run.status,
-        "attempt": run.attempt,
-        "workflow_profile": run.workflow_profile,
-        "dispatch_id": run.dispatch_id,
-        "workspace_path": run.workspace_path,
-        "ops_snapshot_path": run.ops_snapshot_path,
-        "human_action": dict(run.human_action),
-        "human_response": run.human_response,
-        "last_reason": run.last_reason,
-        "last_error": run.last_error,
-        "retry_count": run.retry_count,
-        "crash_count": run.crash_count,
-        "init_failure_count": run.init_failure_count,
-        "overload_count": run.overload_count,
-        "next_run_at": run.next_run_at,
-        "ack_status": run.ack_status,
-        "created_at": run.created_at,
-        "updated_at": run.updated_at,
-    }
 
 
 def _run_due(run) -> bool:
@@ -244,17 +100,11 @@ def _runtime_metrics(performer: dict[str, Any]) -> dict[str, Any]:
 
 
 def _performer_retry_metric(performer: dict[str, Any]) -> int:
-    if performer.get("source") == "conductor_phase":
-        rows = performer.get("issues") if isinstance(performer.get("issues"), list) else []
-        return sum(_int(row.get("retry_count")) for row in rows if isinstance(row, dict))
     counts = performer.get("counts") if isinstance(performer.get("counts"), dict) else {}
     return _int(counts.get("retrying"))
 
 
 def _performer_failure_metric(performer: dict[str, Any]) -> int:
-    if performer.get("source") == "conductor_phase":
-        rows = performer.get("failed") if isinstance(performer.get("failed"), list) else []
-        return len(rows)
     return 0
 
 
@@ -307,11 +157,7 @@ def _desired_project_labels(instance: InstanceRecord) -> list[str]:
     Human-readable and keyed on the instance name (unique per Conductor) so the
     Linear project shows exactly which Performers and profiles target it.
     """
-    labels = [f"{PROJECT_LABEL_PREFIX}performer/{instance.name}"]
-    profile = str(instance.workflow_profile or "").strip()
-    if profile:
-        labels.append(f"{PROJECT_LABEL_PREFIX}profile/{profile}")
-    return labels
+    return [f"{PROJECT_LABEL_PREFIX}performer/{instance.name}"]
 
 
 def _merge_project_labels(existing: list[str], desired: list[str]) -> list[str]:
@@ -327,38 +173,6 @@ def _merge_project_labels(existing: list[str], desired: list[str]) -> list[str]:
         if label not in merged:
             merged.append(label)
     return merged
-
-
-def _first_pending_performer_issue(persisted: PersistedState) -> dict[str, Any] | None:
-    for collection in (persisted.retry_attempts, persisted.continuations, persisted.blocked, persisted.human_interventions):
-        for entry in collection:
-            issue_id = str(getattr(entry, "issue_id", "") or "").strip()
-            if issue_id:
-                return {
-                    "issue_id": issue_id,
-                    "issue_identifier": str(getattr(entry, "identifier", "") or "").strip() or None,
-                    "attempt": _optional_positive_int(getattr(entry, "attempt", None)),
-                }
-    return None
-
-
-def _first_pending_performer_issue_id(persisted: PersistedState) -> str | None:
-    pending = _first_pending_performer_issue(persisted)
-    return str(pending["issue_id"]) if pending is not None else None
-
-
-def _has_pending_performer_work(persisted: PersistedState) -> bool:
-    return _first_pending_performer_issue_id(persisted) is not None
-
-
-def _optional_positive_int(value: Any) -> int | None:
-    if isinstance(value, bool):
-        return None
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        return None
-    return parsed if parsed > 0 else None
 
 
 def _parse_iso(value: str | None) -> datetime | None:
@@ -413,7 +227,7 @@ def _repository_handoff_comment(report: dict[str, Any], *, child: dict[str, Any]
     return repository_handoff_comment(report, child=child, mention=mention)
 
 
-def _phase_diagnostic_comment(
+def _pipeline_diagnostic_comment(
     title: str,
     run,
     *,
@@ -426,7 +240,6 @@ def _phase_diagnostic_comment(
         f"{title} for {issue_ref}.",
         "",
         f"run_id: `{run.run_id}`",
-        f"phase: `{run.phase.value}`",
         f"status: `{run.status}`",
         f"reason: {_safe_linear_value(reason or run.last_reason or 'unknown')}",
         f"attempt: {run.attempt}",
@@ -449,7 +262,7 @@ def _phase_diagnostic_comment(
     return "\n".join(lines)
 
 
-def _phase_failure_needs_human_action(run, detail: dict[str, Any]) -> bool:
+def _pipeline_failure_needs_human_action(run, detail: dict[str, Any]) -> bool:
     text = " ".join(
         str(value or "")
         for value in (
@@ -470,19 +283,19 @@ def _phase_failure_needs_human_action(run, detail: dict[str, Any]) -> bool:
             "invalid params",
             "json-rpc error",
             "scenario_timeout_unresolved",
-            "linear_phase_projection_failed",
+            "linear_projection_failed",
             "gate_parent_relationship_drift",
             "orchestration_event_rebuild_failed",
         )
     )
 
 
-def _phase_failure_human_action_description(run, detail: dict[str, Any]) -> str:
+def _pipeline_failure_human_action_description(run, detail: dict[str, Any]) -> str:
     issue_ref = run.issue_identifier or run.issue_id
     reason = detail.get("reason") or run.last_reason or "runtime_error"
     error = detail.get("error") or run.last_error or reason
     lines = [
-        "The managed Performer phase hit an execution failure that needs human review.",
+        "The managed Performer pipeline hit an execution failure that needs human review.",
         "",
         f"Parent issue: {issue_ref}",
     ]
@@ -512,7 +325,7 @@ def _phase_failure_human_action_description(run, detail: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _phase_failure_error_is_summary(value: str) -> bool:
+def _pipeline_failure_error_is_summary(value: str) -> bool:
     return value in {"upstream overload exhausted repeatedly", "codex init failed repeatedly"} or not value
 
 
@@ -553,31 +366,5 @@ def _blocked_by_issue_ids(value: Any) -> list[str]:
         blocked_by.append(text)
     return blocked_by
 
-
-def _sanitize_codex_profile(value: Any) -> dict[str, Any]:
-    if not isinstance(value, dict):
-        return {}
-    profile: dict[str, Any] = {}
-    model = str(value.get("model") or "").strip()
-    sandbox = str(value.get("sandbox") or "").strip()
-    if model:
-        profile["model"] = model
-    if sandbox:
-        profile["sandbox"] = sandbox
-    overrides = value.get("config_overrides")
-    if isinstance(overrides, list):
-        safe_overrides: list[str] = []
-        for item in overrides:
-            text = str(item).strip()
-            if not text or "=" not in text:
-                continue
-            key, raw_value = text.split("=", 1)
-            lowered_key = key.lower()
-            if any(marker in lowered_key for marker in ("api_key", "apikey", "token", "secret", "password")) and not raw_value.strip().startswith("$"):
-                continue
-            safe_overrides.append(text)
-        if safe_overrides:
-            profile["config_overrides"] = safe_overrides
-    return profile
 
 __all__ = [name for name in globals() if name.startswith("_") or name == "json_stable"]

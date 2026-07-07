@@ -8,7 +8,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from real_symphony_e2e_common import Evidence, read_json_object_if_ready
+from real_symphony_e2e_common import Evidence
 from real_symphony_e2e_linear import (
     comment_linear_issue,
     fetch_linear_human_action_issue,
@@ -49,8 +49,6 @@ def write_wait_artifacts(
     stage_snapshot_path.write_text(json.dumps(stage_snapshot, indent=2, sort_keys=True), encoding="utf-8")
     evidence.artifact("stage_snapshot", stage_snapshot_path)
     return {
-        "state": read_json_object_if_ready(state_path, last_state),
-        "ops": read_json_object_if_ready(ops_path, last_ops),
         "issue": final_issue,
         "result_path": str(result_path),
         "log_path": str(log_path),
@@ -58,54 +56,86 @@ def write_wait_artifacts(
     }
 
 
-def conductor_human_actions(runs_payload: dict[str, Any]) -> list[dict[str, Any]]:
-    runs = runs_payload.get("runs")
-    if not isinstance(runs, list):
-        return []
+def conductor_human_actions(pipeline_payload: dict[str, Any]) -> list[dict[str, Any]]:
+    nodes = {
+        str(node.get("node_id") or ""): node
+        for node in pipeline_payload.get("nodes", [])
+        if isinstance(node, dict) and node.get("node_id")
+    }
     actions: list[dict[str, Any]] = []
-    for run in runs:
-        if not isinstance(run, dict) or run.get("phase") != "awaiting_human":
+    waits = pipeline_payload.get("human_waits")
+    if isinstance(waits, list):
+        for wait in waits:
+            if not isinstance(wait, dict) or str(wait.get("status") or "") not in {"waiting", "open"}:
+                continue
+            node_id = str(wait.get("node_id") or "")
+            node = nodes.get(node_id, {})
+            actions.append(
+                {
+                    "wait_id": str(wait.get("wait_id") or ""),
+                    "node_id": node_id,
+                    "issue_id": str(node.get("issue_id") or "") or None,
+                    "issue_identifier": str(node.get("issue_identifier") or "") or None,
+                    "state": str(node.get("state") or ""),
+                    "status": str(wait.get("status") or ""),
+                    "reason": str(wait.get("reason") or "") or None,
+                    "child_issue_id": str(wait.get("child_issue_id") or "") or None,
+                    "child_identifier": str(wait.get("child_identifier") or "") or None,
+                    "child_url": str(wait.get("child_url") or "") or None,
+                    "details": wait.get("details") if isinstance(wait.get("details"), dict) else {},
+                }
+            )
+    runtime_waits = pipeline_payload.get("runtime_waits")
+    if not isinstance(runtime_waits, list):
+        return actions
+    for wait in runtime_waits:
+        if not isinstance(wait, dict) or str(wait.get("status") or "") not in {"waiting", "open"}:
             continue
-        human_action = run.get("human_action")
-        if not isinstance(human_action, dict):
-            human_action = {}
+        node_id = str(wait.get("node_id") or "")
+        node = nodes.get(node_id, {})
+        wait_kind = str(wait.get("wait_kind") or "") or None
         actions.append(
             {
-                "run_id": str(run.get("run_id") or ""),
-                "issue_id": str(run.get("issue_id") or ""),
-                "issue_identifier": str(run.get("issue_identifier") or "") or None,
-                "phase": str(run.get("phase") or ""),
-                "status": str(run.get("status") or ""),
-                "last_reason": str(run.get("last_reason") or "") or None,
-                "child_issue_id": str(human_action.get("child_issue_id") or "") or None,
-                "child_identifier": str(human_action.get("child_identifier") or "") or None,
-                "child_url": str(human_action.get("child_url") or "") or None,
-                "kind": str(human_action.get("kind") or "") or None,
+                "wait_id": str(wait.get("wait_id") or ""),
+                "node_id": node_id,
+                "issue_id": str(node.get("issue_id") or "") or None,
+                "issue_identifier": str(node.get("issue_identifier") or "") or None,
+                "state": str(node.get("state") or ""),
+                "status": str(wait.get("status") or ""),
+                "reason": wait_kind,
+                "child_issue_id": str(wait.get("child_issue_id") or "") or None,
+                "child_identifier": str(wait.get("child_identifier") or "") or None,
+                "child_url": str(wait.get("child_url") or "") or None,
+                "details": {
+                    "attempt_id": str(wait.get("attempt_id") or ""),
+                    "lease_id": str(wait.get("lease_id") or ""),
+                    "wait_kind": wait_kind or "",
+                },
             }
         )
     return actions
 
 
-def conductor_phase_runs(runs_payload: dict[str, Any]) -> list[dict[str, Any]]:
-    runs = runs_payload.get("runs")
-    if not isinstance(runs, list):
+def conductor_pipeline_nodes(pipeline_payload: dict[str, Any]) -> list[dict[str, Any]]:
+    nodes = pipeline_payload.get("nodes")
+    if not isinstance(nodes, list):
         return []
-    return [run for run in runs if isinstance(run, dict) and run.get("run_id") and run.get("phase")]
+    return [node for node in nodes if isinstance(node, dict) and node.get("node_id")]
 
 
 def audit_expected_failure_run(run_result: dict[str, Any], tree: dict[str, Any], *, expected: str) -> dict[str, Any]:
-    phase_runs = [
-        run
+    pipeline_nodes = [
+        node
         for sample in run_result.get("samples", [])
         if isinstance(sample, dict)
-        for run in sample.get("phase_runs", [])
-        if isinstance(run, dict)
+        for node in sample.get("pipeline_nodes", [])
+        if isinstance(node, dict)
     ]
-    max_overload_count = max([_int_value(run.get("overload_count")) for run in phase_runs] or [0])
-    max_retry_count = max([_int_value(run.get("retry_count")) for run in phase_runs] or [0])
-    max_crash_count = max([_int_value(run.get("crash_count")) for run in phase_runs] or [0])
-    reasons = [str(run.get("last_reason") or "") for run in phase_runs]
-    failed_terminal = any(run.get("phase") == "failed" or run.get("status") == "failed" for run in phase_runs)
+    max_overload_count = max([_int_value(node.get("overload_count")) for node in pipeline_nodes] or [0])
+    max_retry_count = max([_int_value(node.get("retry_count")) for node in pipeline_nodes] or [0])
+    max_crash_count = max([_int_value(node.get("crash_count")) for node in pipeline_nodes] or [0])
+    reasons = [str(node.get("last_reason") or "") for node in pipeline_nodes]
+    failed_terminal = any(node.get("state") == "failed" for node in pipeline_nodes)
     human_actions = _human_action_children(tree)
     descriptions = "\n\n".join(str(child.get("description") or "") for child in human_actions)
     if max_overload_count == 0:
@@ -176,13 +206,16 @@ def _max_counter_from_text(text: str, key: str) -> int:
     return max(values or [0])
 
 
-def crash_probe_candidate(phase_runs: list[dict[str, Any]]) -> dict[str, Any] | None:
-    for run in phase_runs:
-        if run.get("phase") != "implementing" or run.get("status") != "running":
+def crash_probe_candidate(pipeline_attempts: list[dict[str, Any]], leases: list[dict[str, Any]]) -> dict[str, Any] | None:
+    active_attempt_ids = {str(lease.get("attempt_id") or "") for lease in leases if isinstance(lease, dict)}
+    for attempt in pipeline_attempts:
+        if str(attempt.get("attempt_id") or "") not in active_attempt_ids:
             continue
-        pid = run.get("process_pid")
+        if attempt.get("state") != "running":
+            continue
+        pid = attempt.get("process_pid")
         if isinstance(pid, int) and pid > 0:
-            return run
+            return attempt
     return None
 
 
@@ -217,10 +250,33 @@ def human_action_description_with_response(description: str, response: str) -> s
     return f"{prefix}\n{response}\n"
 
 
-def should_complete_conductor_human_action(action: dict[str, Any], completed_run_ids: set[str]) -> bool:
-    run_id = str(action.get("run_id") or "")
+def parent_comment_negative_control_body(wait_id: str) -> str:
+    normalized_wait_id = str(wait_id or "unknown").strip() or "unknown"
+    return (
+        "Symphony E2E negative control for human-action routing.\n\n"
+        f"wait_id={normalized_wait_id}\n"
+        "No action is required. This is not a Symphony human-action resume command; "
+        "the waiting pipeline task must remain blocked until its [Human Action] child issue is completed."
+    )
+
+
+def e2e_human_action_resume_response(action: dict[str, Any]) -> str:
+    wait_id = str(action.get("wait_id") or "unknown").strip() or "unknown"
+    child_identifier = str(action.get("child_identifier") or action.get("child_issue_id") or "unknown").strip() or "unknown"
+    reason = str(action.get("reason") or "unknown").strip() or "unknown"
+    return (
+        f"Symphony E2E resume approval for human wait {wait_id} on child {child_identifier}.\n"
+        f"This is the explicit human-action resume signal; reason={reason}; retry the managed run."
+    )
+
+
+def should_complete_conductor_human_action(action: dict[str, Any], completed_wait_ids: set[str]) -> bool:
+    wait_id = str(action.get("wait_id") or "")
     child_issue_id = str(action.get("child_issue_id") or "")
-    return bool(run_id and child_issue_id and run_id not in completed_run_ids)
+    details = action.get("details") if isinstance(action.get("details"), dict) else {}
+    if details.get("wait_kind"):
+        return False
+    return bool(wait_id and child_issue_id and wait_id not in completed_wait_ids)
 
 
 def done_state_id_for_human_action(issue: dict[str, Any]) -> str | None:
@@ -286,10 +342,10 @@ def build_instance_payload(
     fixture: Path,
     project_slug: str,
     agent_app_user_id: str,
-    acceptance_gates: bool,
+    pipeline_gates: bool,
     simulate_agent_webhook: bool,
 ) -> dict[str, Any]:
-    linear_filters: dict[str, Any] = {"active_states": ["Todo", "In Progress"]}
+    linear_filters: dict[str, Any] = {}
     if not simulate_agent_webhook:
         linear_filters["linear_agent_app_user_id"] = agent_app_user_id
     return {
@@ -298,8 +354,7 @@ def build_instance_payload(
         "repo_source_value": str(fixture),
         "linear_project": project_slug,
         "linear_filters": linear_filters,
-        "workflow_profile": "gated-task" if acceptance_gates else "task",
-        "workflow_inputs": {"goal": "Run the real Symphony e2e matrix task."},
+        "pipeline_profile": "gated-task" if pipeline_gates else "default",
     }
 
 
@@ -327,6 +382,8 @@ def build_agent_session_webhook_payload(
             "issue": {
                 "id": issue["id"],
                 "identifier": issue["identifier"],
+                "title": issue.get("title") or issue["identifier"],
+                "description": issue.get("description") or "",
                 "project": {"slugId": linear["project"]["slugId"]},
                 "assignee": issue.get("assignee"),
                 "delegate": delegate,
