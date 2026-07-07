@@ -803,3 +803,296 @@ Each implementation subproject (S0–S4) carries its own real-run verification p
 AGENT.md rules: mock-only evidence caps at 2/4, and behavior depending on
 Conductor scheduling, Codex/Claude execution, or Linear routing requires a real
 run for a passing score.
+
+---
+
+# Appendix: Definition of Done per Feature
+
+> **Purpose.** The body of this RFC defines *what* to build. This appendix defines
+> *how far* each feature must go before it is considered finished, so a feature is
+> not re-opened round after round. It is additive: it does not change any decision
+> above.
+>
+> **How to read it.** Each feature has a **Final shape** (the end state, no further
+> evolution expected) and three completeness bars that must be cleared *in order*:
+>
+> - **L (Local):** in-process / unit / sqlite-level behavior is correct and tested
+>   with `make test`. Per AGENT.md this caps at **2/4** on its own.
+> - **R (Real):** exercised through a real managed run
+>   (Podium → Conductor → Performer → Linear), or real Codex/Claude where the mode
+>   runs a model, with evidence per AGENT.md. This is the bar for **3–4/4**.
+> - **H (Hardened):** the failure/adversarial/concurrent edge cases that make the
+>   feature safe to depend on are closed, not just the happy path.
+>
+> A feature is **Done** only at **R + H**. `L` alone is explicitly *not* done.
+> "Current" notes reflect the code state observed when this appendix was written
+> and may advance; treat the bars, not the notes, as the contract.
+
+## Legend for current state
+
+- **present-local** — implemented and unit-covered locally; R/H still open.
+- **present-partial** — some of the final shape exists; specific gaps listed.
+- **scaffolded** — types/hooks exist but behavior is not the final shape.
+
+---
+
+## S0-a — Typed capacity + versioned Podium-pushed policy
+
+**Final shape.** `SchedulerPolicy` carries `global` plus `by_mode` limits
+(`plan`, `execute`, `verify`), where `execute: null` means no mode-local cap but
+still bounded by `global`. Podium owns the policy per runtime group, pushes it
+over `POST /api/v1/runtime/config`, and Conductor accepts only strictly
+increasing `version`, persists the active policy, and keeps a local default when
+Podium is unreachable. Capacity is accounted by live **leases**, not by process
+guesses.
+
+- **L done when:** `remaining_capacity` respects `global` + each `by_mode`; the
+  `null`-means-no-local-cap arithmetic is unit-tested; a lower/equal `version` is
+  rejected (`409 stale_runtime_config`); lease acquire/heartbeat/expiry/reclaim
+  and `validate_fencing_token` are unit-tested.
+- **R done when:** a real managed run with ≥2 modes active shows Conductor pulling
+  a Podium-pushed policy, enforcing per-mode limits under real dispatch, and
+  surviving a Podium-unreachable window on local defaults.
+- **H done when:** stale/out-of-order policy pushes never lower the active
+  version; a policy that lowers a limit below current active count stops *new*
+  dispatch without preempting in-flight work; a crashed worker's lease expires and
+  capacity is reclaimed with no double-count and no leak.
+- **Current:** present-partial. Config channel + version rejection + lease/fencing
+  present-local; `by_mode` enforcement and the Podium-unreachable fallback need R
+  evidence.
+
+## S0-b — Dependency-satisfaction predicate + pipeline observability
+
+**Final shape.** Dispatchability consults a pluggable
+`DependencySatisfactionPolicy`. Pre-S3 default: a blocker is satisfied at terminal
+success. From S3: a blocker is satisfied only at `VERIFY_PASSED` with
+`score >= 3`. Linear `blocks` remains a hard precondition. Podium exposes a
+**read-only** pipeline view: per-mode active/limit/queued, which nodes are in
+plan/execute/verify, and a **conditional** predicted call order that always
+carries its `prediction_basis` (`graph_revision`, `policy_revision`,
+`assumption: unknown verifies pass`, `generated_at`) and per-node
+`confidence: conditional`.
+
+- **L done when:** the predicate is swappable and unit-tested for both variants;
+  `blocks` precondition holds; predicted-order simulation is deterministic for a
+  fixed graph+policy and always emits `prediction_basis`.
+- **R done when:** the Podium `/api/v1/pipeline` view reflects a real run's live
+  per-mode detail, and the predicted order visibly re-computes as nodes complete.
+- **H done when:** the predicted order is never presented as a commitment (basis +
+  conditional confidence always attached); a mid-flight graph rewrite (S4) or new
+  `blocks` edge refreshes the view without stale ordering; the view is strictly
+  read-only (no scheduling side effects).
+- **Current:** present-partial. Predicate hook + `/api/v1/pipeline` route
+  present-local; R evidence of live refresh and conditional framing pending.
+
+## S0-c — Runtime profile + per-mode CODEX_HOME isolation + pluggable backend
+
+**Final shape.** Podium owns the managed runtime profile; Conductor materializes a
+**per-mode** isolated `CODEX_HOME` (and equivalent home for other backends) under
+instance state, never the operator's global `~/.codex`. The runtime profile
+selects the backend per mode via a `RuntimeBackendRegistry`; scheduler and mode
+lifecycle logic contain no backend-specific branches. A backend that cannot meet a
+mode's `ModeRequirement` is ineligible for that mode.
+
+- **L done when:** each mode resolves to its own `runtime-homes/<mode>/…` home;
+  materialization fails loudly if the home cannot be created; a seed source that
+  points at the default user `.codex` is rejected; backend eligibility per mode is
+  unit-tested; registry selection is unit-tested.
+- **R done when:** a real managed run shows plan/execute/verify each running under
+  distinct `CODEX_HOME` paths with no cross-mode leakage, and a non-Codex backend
+  (e.g. Claude) can be selected for at least one mode without touching scheduler
+  or phase code.
+- **H done when:** managed mode provably never falls back to `~/.codex` (negative
+  test); a mode assigned an ineligible backend is refused before dispatch, not
+  mid-run; per-mode homes are not shared even under concurrent same-issue runs.
+- **Current:** present-partial. Per-mode home materialization + registry +
+  eligibility present-local; second real backend (Claude) and the negative
+  no-fallback R/H evidence pending.
+
+## S1 — Three-layer state model + graph store + artifact model
+
+**Final shape.** Three distinct, separately stored layers: **GraphNode** state,
+**Attempt** state (execute and verify attempts stored separately and immutable
+once terminal), and **derived Aggregate parent** state (`IN_PROGRESS` is derived,
+never authored; a parent reaches `VERIFY_PASSED` only via child aggregation).
+`ConductorPipelineStore` is the durable graph with `graph_revision` stamping.
+`VerificationInputSnapshot` and `TaskOutputManifest` schemas exist and are bound
+to attempts/gates by id and hash.
+
+- **L done when:** node/attempt/aggregate transitions are enforced (illegal
+  transitions rejected); parent state is computed only by aggregation and cannot
+  be written directly; every dispatch is stamped with `graph_revision` +
+  `policy_revision`; snapshot/manifest round-trip is unit-tested.
+- **R done when:** a real decomposed issue shows the parent reaching
+  `VERIFY_PASSED` strictly from child aggregation, with attempts recorded per node
+  across a real run.
+- **H done when:** results stamped with a superseded `graph_revision` cannot commit
+  (routed to reconciliation); terminal attempts are immutable; a parent with a
+  failed/awaiting child never shows a passing aggregate.
+- **Current:** present-local. Store, three layers, revision stamping, snapshots
+  present; R aggregation evidence and stale-revision-commit rejection (H) pending.
+
+## S2 — Planner mode + PlanValidator + Linear projection
+
+**Final shape.** `performer --mode plan` proposes a `blocks` DAG where **every**
+subtask carries a pre-frozen `GateSpecSnapshot` (rubric 0–4, `pass_threshold = 3`
+recorded for audit, not overridable). The proposal is committed **only** after a
+deterministic, non-LLM `PlanValidator` passes all its checks. The committed graph
+is projected to Linear as parent/child issues with `blocks`, each stamped with
+`symphony` metadata (`graph_id`, `node_id`, `plan_attempt_id`,
+`gate_snapshot_hash`, `conductor_revision`). Planner cannot run implementation or
+write verdicts.
+
+- **L done when:** PlanValidator rejects: missing gate, non-executable gate,
+  incomplete 0–4 rubric, lowered/absent threshold, dependency cycle, illegal
+  `blocks` direction, uncomputable entry/exit, subtask count over policy limit,
+  gate needing executor-only state, gate needing verifier-inaccessible creds;
+  gate hashing/freezing is unit-tested.
+- **R done when:** a real business issue is decomposed by a real model, passes
+  PlanValidator, commits a graph revision, and projects a correct
+  parent/child+`blocks` tree to real Linear with explicit `parent` fields.
+- **H done when:** a malformed model proposal never reaches the scheduler; a
+  re-run over the same issue is idempotent in Linear (no duplicate issues/edges);
+  gate content cannot be mutated post-freeze via any path.
+- **Current:** present-partial. Plan mode + validator + gate snapshots
+  present-local; real-model decomposition and Linear-tree R evidence + idempotency
+  H pending.
+
+## S3 — Verifier mode (isolated) + verify-passed dependency gating
+
+**Final shape.** `performer --mode verify` runs in an **isolated** runtime against
+an immutable `VerificationInputSnapshot`. Canonical path: fresh disposable
+workspace → checkout `base_revision` → fetch `patch_uri` and verify `patch_hash` →
+apply patch → assert resulting tree == `expected_result_tree` → pull hash-checked
+read-only artifacts → load frozen gate by hash → run the gate procedure → emit a
+0–4 verdict via Conductor API. Direct checkout of `result_revision` as the primary
+path is forbidden. Verifier cannot push commits, mutate gates, change the graph,
+or produce rework patches. On pass (`>= 3`), Conductor publishes the
+`TaskOutputManifest`; downstream gating switches to verify-passed.
+
+- **L done when:** verify attempt requires a frozen gate + verification input
+  (rejects otherwise); apply-patch path + tree-hash assertion + artifact-hash
+  checks are unit-tested; verdict scoring maps to the calibrated rubric;
+  `score == 2` does not satisfy dependents.
+- **R done when:** a real run verifies a real executor patch in an isolated
+  worktree/home distinct from the executor's, scores against the frozen gate, and
+  a real downstream node dispatches only after upstream `VERIFY_PASSED >= 3`.
+- **H done when:** the `local-verifier` mutation-detection reliably **fails** a run
+  where the verifier environment alters tracked state (self-report / tampering is
+  caught, not trusted); a patch whose applied tree ≠ `expected_result_tree` is
+  rejected; a verdict written under an expired lease/fencing token is refused.
+- **Current:** present-partial. Verify mode + frozen-gate/input requirement +
+  local-verifier home present-local; R isolation evidence and mutation-detection
+  failure H are the critical remaining bars.
+
+## S4 — Failure-driven re-decomposition (REPLANNING + atomic graph rewrite)
+
+**Final shape.** On verify failure a node enters `REWORKING`; when rework is
+exhausted it enters `REPLANNING`, which produces a PlanValidator-passed subgraph
+that **replaces** the failing node atomically as a new `graph_revision`: the old
+node → `SUPERSEDED`; upstream blockers reconnect to subgraph entry nodes;
+downstream dependents reconnect to subgraph exit nodes; a dependent dispatches only
+when all exit nodes are `VERIFY_PASSED`. The scheduler only ever schedules the
+current active revision.
+
+- **L done when:** the rewrite is atomic (single new revision, no intermediate
+  detached state); edge reconnection follows the `A blocks T1 … T2 blocks B`
+  invariant; superseded nodes are never re-dispatched; unit-tested.
+- **R done when:** a real failing node is replanned into a working subgraph within
+  a real run, and the previously-blocked downstream eventually dispatches only
+  after the subgraph's exits pass.
+- **H done when:** a worker still running against the superseded revision cannot
+  commit (revision fencing); no dependent is ever dispatchable against the old
+  node after rewrite; a replan that itself fails validation escalates to
+  `AWAITING_HUMAN(REPLAN_LIMIT_EXCEEDED)` rather than looping or `FAILED`.
+- **Current:** present-partial. Replan rewrite present-local; real replan loop and
+  revision-fencing H pending.
+
+## Patch Integration and Conflict Model
+
+**Final shape.** Each execute attempt runs against a computed input baseline:
+entry nodes use the graph base revision; dependent nodes use the integrated result
+of verified blockers (or explicitly named verified output manifests).
+Independently verified patches are **not** treated as globally integrated;
+Conductor owns a deterministic integration step/queue. Conflicting verified patches
+escalate to `AWAITING_HUMAN` or `REPLANNING` rather than silently merging. A full
+merge engine is *not* required in the first implementation, but the boundary
+("`VERIFY_PASSED` on parallel nodes ≠ globally integrated state") must hold.
+
+- **L done when:** baseline computation is deterministic and unit-tested; a
+  synthetic conflict between two verified patches is detected and escalated, not
+  merged.
+- **R done when:** a real run with two parallel executors touching overlapping
+  files reaches a defined outcome (integrated or escalated), never a silent
+  last-writer-wins.
+- **H done when:** conflict escalation is reproducible under real concurrency; a
+  downstream node never consumes an un-integrated upstream output; if a future
+  integration queue is added it uses its own attempt/state records without
+  changing the plan/execute/verify contract.
+- **Current:** present-partial. Integration/conflict handling present-local;
+  real-concurrency R evidence pending.
+
+## Human Escalation
+
+**Final shape.** Abnormal conditions escalate to `AWAITING_HUMAN` with a structured
+reason (`PLAN_INVALID`, `GATE_UNEXECUTABLE`, `LINEAR_SYNC_CONFLICT`,
+`CREDENTIAL_REQUIRED`, `REPLAN_LIMIT_EXCEEDED`, `BACKEND_UNAVAILABLE`,
+`CAPACITY_STARVED`), never a silent collapse into `FAILED`. Per AGENT.md, human
+intervention uses a Linear `[Human Action]` child issue; the human completing that
+issue is what resumes the affected node.
+
+- **L done when:** each reason is reachable and unit-tested; escalation does not
+  mark the node `FAILED`.
+- **R done when:** a real escalation creates the `[Human Action]` child, the parent
+  goes `blocked`, and completing the child resumes exactly that node.
+- **H done when:** parent comments / command-like comments never resume work (only
+  the completed child issue does); an unresolved escalation is surfaced by
+  reconcile findings rather than silently stalling.
+- **Current:** present-partial. Reasons + AWAITING_HUMAN present-local; the real
+  child-issue resume loop is the key R bar.
+
+## Linear projection (operator visibility)
+
+**Final shape.** Every projected node carries `operator_status`, and
+`operator_wait_kind` is set whenever Codex/runtime is waiting on approval,
+permission, or tool input. Linear is a projection/collaboration surface only;
+Conductor's graph remains scheduling truth. Human edits that would mutate frozen
+gates, historical attempts, or past graph revisions are rejected or converted into
+a new graph-revision proposal.
+
+- **L done when:** projection payloads always include `operator_status`, and
+  `operator_wait_kind` is populated for wait states; idempotent write keys are
+  unit-tested.
+- **R done when:** a real run shows operators the live wait/pipeline status on the
+  Linear issues, matching Conductor state.
+- **H done when:** a human editing a gate/description in Linear cannot alter the
+  authoritative snapshot; reconciliation ingests legitimate `blocks` edits without
+  letting Linear become a second source of scheduling truth.
+- **Current:** present-partial. `operator_status`/`operator_wait_kind` fields exist
+  (low footprint); R operator-visibility evidence and edit-rejection H pending.
+
+---
+
+## Overall exit bar
+
+The pipeline is **product-complete** only when every feature above is at **R + H**,
+demonstrated by a single real managed acceptance run
+(Podium → Conductor → Performer → Linear) in which:
+
+1. a real business issue is decomposed, PlanValidated, committed as a graph
+   revision, and projected as a correct `blocks` tree in Linear;
+2. executors run in parallel under per-mode Podium-pushed capacity, with leases and
+   fencing observed;
+3. verification runs isolated, apply-patch canonical, mutation detection proven to
+   fail tampering, and downstream gates only on `VERIFY_PASSED >= 3`;
+4. at least one induced failure is replanned into a working subgraph, or escalates
+   to a structured `AWAITING_HUMAN` that a human resumes via the child issue;
+5. parallel-conflict is either integrated or escalated, never silently merged;
+6. the Podium pipeline view shows live per-mode detail and a conditional predicted
+   order with its basis;
+7. no managed run touches the operator's global `~/.codex`;
+8. the AGENT.md reconcile findings are all clean and the evidence bundle scores
+   each requirement per the 0–4 rubric with no item above its hard cap.
+
+Until that run exists, local/unit coverage for any feature is at most **2/4** and
+the feature is **not** Done regardless of how complete it looks locally.
