@@ -90,3 +90,23 @@ def test_docs_do_not_publish_legacy_workflow_or_phase_instructions() -> None:
         text = path.read_text(encoding="utf-8")
         for phrase in forbidden:
             assert phrase not in text, f"{path} still publishes {phrase!r}"
+
+
+def test_pipeline_docs_are_honest_about_first_verify_isolation() -> None:
+    pipeline = Path("docs/product/three-mode-runtime-pipeline.md").read_text(encoding="utf-8")
+    readme = Path("README.md").read_text(encoding="utf-8")
+    combined = pipeline + "\n" + readme
+
+    assert "disposable worktree" in combined
+    assert "mutation detection" in combined
+    assert "not OS-level read-only enforcement" in combined
+    assert "read-only checkout + disposable workspace" not in pipeline
+    assert "OS-level read-only" not in combined.replace("not OS-level read-only enforcement", "")
+
+
+def test_pipeline_docs_keep_s4_local_implementation_distinct_from_real_acceptance() -> None:
+    text = Path("docs/product/three-mode-runtime-pipeline.md").read_text(encoding="utf-8")
+
+    assert "S4 local/unit implementation is present" in text
+    assert "real acceptance matrix" in text
+    assert "not final acceptance evidence" in text

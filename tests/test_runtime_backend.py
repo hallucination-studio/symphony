@@ -52,6 +52,13 @@ def test_prepare_mode_environment_rejects_local_verifier_for_plan_and_execute(tm
             prepare_mode_environment(tmp_path, profile)
 
 
+def test_prepare_mode_environment_rejects_unknown_backend_with_actionable_category(tmp_path: Path) -> None:
+    profile = RuntimeProfile(name="planner", backend="mystery", mode=RuntimeMode.PLAN)
+
+    with pytest.raises(ValueError, match="unsupported runtime backend for plan: mystery"):
+        prepare_mode_environment(tmp_path, profile)
+
+
 def test_managed_mode_fails_closed_without_mode_profile(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="runtime profile"):
         prepare_mode_environment(tmp_path, None)

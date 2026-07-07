@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import json
 import hashlib
-import os
 import re
 import shutil
 import sqlite3
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -42,7 +42,8 @@ from performer_api.pipeline import (
     VerifyAttemptRequest,
     WorkerLease,
 )
-from performer_api.config import sanitize_codex_config_template
+
+from .runtime_backends import prepare_backend_environment
 
 
 @dataclass(frozen=True)
@@ -144,6 +145,13 @@ class ConductorPipelineStore:
                   payload_json TEXT NOT NULL,
                   created_at TEXT NOT NULL,
                   completed_at TEXT
+                );
+                CREATE TABLE IF NOT EXISTS repository_integrations (
+                  graph_id TEXT NOT NULL,
+                  repository_path TEXT NOT NULL,
+                  integrated_revision TEXT NOT NULL,
+                  updated_at TEXT NOT NULL,
+                  PRIMARY KEY (graph_id, repository_path)
                 );
                 CREATE TABLE IF NOT EXISTS human_waits (
                   wait_id TEXT PRIMARY KEY,
@@ -418,13 +426,26 @@ class ConductorPipelineStore:
 
     def refresh_aggregate_parent_state(self, parent_node_id: str) -> GraphNode:
         children = self.children_for(parent_node_id)
+        parent = self.get_node(parent_node_id)
         state = self.derive_parent_state(parent_node_id)
         verify_score = (
             min(int(child.verify_score or 0) for child in children if child.state is GraphNodeState.VERIFY_PASSED)
             if state is GraphNodeState.VERIFY_PASSED and children
             else None
         )
-        return self.update_node_state(parent_node_id, state, verify_score=verify_score)
+        return GraphNode(
+            node_id=parent.node_id,
+            title=parent.title,
+            state=state,
+            issue_id=parent.issue_id,
+            issue_identifier=parent.issue_identifier,
+            parent_node_id=parent.parent_node_id,
+            gate_snapshot_hash=parent.gate_snapshot_hash,
+            verify_score=verify_score,
+            rework_count=parent.rework_count,
+            superseded_by=list(parent.superseded_by),
+            human_reason=parent.human_reason,
+        )
 
     def gate_for_node(self, node_id: str) -> GateSpecSnapshot | None:
         try:
@@ -835,6 +856,43 @@ class ConductorPipelineStore:
             ).fetchall()
         return [_json_loads(row["payload_json"]) for row in rows]
 
+    def current_integrated_revision(self, repository_path: Path | str) -> str | None:
+        graph_id = self._current_graph_id()
+        if not graph_id:
+            return None
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT integrated_revision FROM repository_integrations
+                WHERE graph_id = ? AND repository_path = ?
+                """,
+                (graph_id, _repository_integration_path(repository_path)),
+            ).fetchone()
+        if row is None:
+            return None
+        revision = str(row["integrated_revision"] or "").strip()
+        return revision or None
+
+    def _record_integrated_revision(self, repository_path: Path | str, integrated_revision: str) -> None:
+        graph_id = self._current_graph_id()
+        if not graph_id:
+            return
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO repository_integrations (graph_id, repository_path, integrated_revision, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(graph_id, repository_path) DO UPDATE SET
+                  integrated_revision = excluded.integrated_revision,
+                  updated_at = excluded.updated_at
+                """,
+                (graph_id, _repository_integration_path(repository_path), integrated_revision, _now()),
+            )
+
+    def _current_graph_id(self) -> str:
+        revision = self.current_graph_revision_record()
+        return revision.graph_id if revision is not None else ""
+
     def process_queued_integrations(self, repository_path: Path, *, instance: Any | None = None) -> int:
         processed = 0
         for item in self.list_integration_queue():
@@ -900,17 +958,73 @@ class ConductorPipelineStore:
             if actual_patch_hash != patch_hash:
                 raise ValueError("patch_hash_mismatch")
         original_revision = _git(["rev-parse", "HEAD"], cwd=repository_path).strip()
+        integration_base = self.current_integrated_revision(repository_path) or original_revision
         try:
-            _git(["checkout", "--quiet", base_revision], cwd=repository_path)
+            self._verify_manifest_patch_against_base(
+                repository_path,
+                base_revision=base_revision,
+                patch_path=patch_path,
+                expected_tree=expected_tree,
+                verify_attempt_id=verify_attempt_id,
+            )
+            _git(["checkout", "--quiet", integration_base], cwd=repository_path)
+            try:
+                _git(["apply", "--check", str(patch_path)], cwd=repository_path)
+            except Exception as apply_exc:
+                try:
+                    _git(["apply", "--reverse", "--check", str(patch_path)], cwd=repository_path)
+                except Exception:
+                    raise apply_exc
+                integrated_revision = _git(["rev-parse", "HEAD"], cwd=repository_path).strip()
+                self._record_integrated_revision(repository_path, integrated_revision)
+                return integrated_revision
             _git(["apply", "--index", str(patch_path)], cwd=repository_path)
-            actual_tree = _git(["write-tree"], cwd=repository_path).strip()
-            if actual_tree != expected_tree:
-                raise ValueError("integrated tree mismatch")
+            _git(["write-tree"], cwd=repository_path).strip()
             _git(["commit", "--quiet", "-m", f"Integrate pipeline node {manifest.node_id}"], cwd=repository_path)
-            return _git(["rev-parse", "HEAD"], cwd=repository_path).strip()
+            integrated_revision = _git(["rev-parse", "HEAD"], cwd=repository_path).strip()
+            self._record_integrated_revision(repository_path, integrated_revision)
+            return integrated_revision
         except Exception:
             _rollback_repository(repository_path, original_revision)
             raise
+
+    def _verify_manifest_patch_against_base(
+        self,
+        repository_path: Path,
+        *,
+        base_revision: str,
+        patch_path: Path,
+        expected_tree: str,
+        verify_attempt_id: str,
+    ) -> None:
+        worktree_parent = self.artifact_root / "integration-worktrees"
+        worktree_parent.mkdir(parents=True, exist_ok=True)
+        worktree_path = Path(
+            tempfile.mkdtemp(prefix=f"{_safe_path_part(verify_attempt_id)}-", dir=str(worktree_parent))
+        )
+        try:
+            shutil.rmtree(worktree_path)
+            _git(["worktree", "add", "--detach", "--quiet", str(worktree_path), base_revision], cwd=repository_path)
+            _git(["apply", "--index", str(patch_path)], cwd=worktree_path)
+            actual_tree = _git(["write-tree"], cwd=worktree_path).strip()
+            if actual_tree != expected_tree:
+                raise ValueError("integrated tree mismatch")
+        finally:
+            subprocess.run(
+                ["git", "worktree", "remove", "--force", str(worktree_path)],
+                cwd=repository_path,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            shutil.rmtree(worktree_path, ignore_errors=True)
+            subprocess.run(
+                ["git", "worktree", "prune"],
+                cwd=repository_path,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
 
     def _task_output_manifest_for_verify_attempt(self, verify_attempt_id: str) -> TaskOutputManifest | None:
         with self.connect() as connection:
@@ -1785,9 +1899,17 @@ class ConductorPipelineStore:
         return [WorkerLease.from_dict(_json_loads(row["payload_json"])) for row in rows]
 
     def _predicted_call_order(self, nodes: list[GraphNode]) -> list[PredictedCall]:
+        envelope = self.active_runtime_config()
+        capacity = envelope.scheduler_policy.capacity
+        node_by_id = {node.node_id: node for node in nodes}
+        predicted_by_node: dict[str, int] = {}
+        active_leases = self._active_leases()
+        wave_usage: dict[int, dict[RuntimeMode, int]] = {1: {}}
+        wave_global_usage: dict[int, int] = {1: len(active_leases)}
+        for lease in active_leases:
+            wave_usage[1][lease.mode] = wave_usage[1].get(lease.mode, 0) + 1
         order: list[PredictedCall] = []
-        predicted_position = 0
-        for node in sorted(nodes, key=lambda item: item.node_id):
+        for node in self._topological_nodes(nodes):
             blocked_by: list[str] = []
             earliest_mode = _mode_for_state(node.state) if node.state in _DISPATCHABLE_STATES or node.state is GraphNodeState.PLANNED else None
             if node.state is GraphNodeState.AWAITING_HUMAN:
@@ -1797,23 +1919,115 @@ class ConductorPipelineStore:
                 blocked_by.append(f"{node.node_id}: {node.state.value} is not dispatchable")
             if node.state in _PREDICTABLE_DISPATCH_STATES:
                 for blocker_id in self.blockers_for(node.node_id):
-                    blocker = self.get_node(blocker_id)
-                    if not _node_verify_passed(blocker):
-                        blocked_by.append(f"{blocker_id}: verify not passed")
-                    elif self.integrated_manifest_for_node(blocker_id) is None:
-                        blocked_by.append(f"{blocker_id}: integration not completed")
-            if not blocked_by:
-                predicted_position += 1
+                    blocker = node_by_id.get(blocker_id)
+                    if blocker is None:
+                        continue
+                    blocked_by.extend(self._dependency_block_reasons(blocker))
+            predicted_position = None
+            if not blocked_by and earliest_mode is not None:
+                earliest_position = 1 + max(
+                    (predicted_by_node[blocker_id] for blocker_id in self.blockers_for(node.node_id) if blocker_id in predicted_by_node),
+                    default=0,
+                )
+                predicted_position = self._reserve_prediction_wave(
+                    earliest_position,
+                    earliest_mode,
+                    capacity,
+                    wave_usage,
+                    wave_global_usage,
+                )
+                predicted_by_node[node.node_id] = predicted_position
             order.append(
                 PredictedCall(
                     node_id=node.node_id,
-                    predicted_position=None if blocked_by else predicted_position,
+                    predicted_position=predicted_position,
                     blocked_by=blocked_by,
                     earliest_mode=earliest_mode,
                     aggregate_state=self._aggregate_display_state(node),
                 )
             )
         return order
+
+    def _topological_nodes(self, nodes: list[GraphNode]) -> list[GraphNode]:
+        node_by_id = {node.node_id: node for node in nodes}
+        indegree = {node.node_id: 0 for node in nodes}
+        outgoing = {node.node_id: [] for node in nodes}
+        for node in nodes:
+            for blocker_id in self.blockers_for(node.node_id):
+                if blocker_id not in node_by_id:
+                    continue
+                outgoing[blocker_id].append(node.node_id)
+                indegree[node.node_id] += 1
+        ready = sorted(node_id for node_id, count in indegree.items() if count == 0)
+        ordered: list[GraphNode] = []
+        while ready:
+            node_id = ready.pop(0)
+            ordered.append(node_by_id[node_id])
+            for dependent_id in sorted(outgoing[node_id]):
+                indegree[dependent_id] -= 1
+                if indegree[dependent_id] == 0:
+                    ready.append(dependent_id)
+                    ready.sort()
+        if len(ordered) != len(nodes):
+            return sorted(nodes, key=lambda item: item.node_id)
+        return ordered
+
+    def _dependency_block_reasons(self, blocker: GraphNode) -> list[str]:
+        children = self.children_for(blocker.node_id)
+        if children:
+            derived_state = self.derive_parent_state(blocker.node_id)
+            if derived_state is GraphNodeState.AWAITING_HUMAN:
+                return [f"{blocker.node_id}: awaiting human"]
+            if derived_state is not GraphNodeState.VERIFY_PASSED:
+                return [f"{blocker.node_id}: verify not passed"]
+            if not all(self._child_ready_for_aggregate_downstream(child) for child in children):
+                return [f"{blocker.node_id}: integration not completed"]
+            return []
+        if blocker.state is GraphNodeState.AWAITING_HUMAN:
+            reason = f" ({blocker.human_reason.value})" if blocker.human_reason is not None else ""
+            return [f"{blocker.node_id}: awaiting human{reason}"]
+        if not _node_verify_passed(blocker):
+            return [f"{blocker.node_id}: verify not passed"]
+        if self.integrated_manifest_for_node(blocker.node_id) is None:
+            return [f"{blocker.node_id}: integration not completed"]
+        return []
+
+    def _child_ready_for_aggregate_downstream(self, child: GraphNode) -> bool:
+        if child.state is GraphNodeState.SUPERSEDED:
+            return True
+        return _node_verify_passed(child) and self.integrated_manifest_for_node(child.node_id) is not None
+
+    def _reserve_prediction_wave(
+        self,
+        earliest_position: int,
+        mode: RuntimeMode,
+        capacity: SchedulerCapacity,
+        wave_usage: dict[int, dict[RuntimeMode, int]],
+        wave_global_usage: dict[int, int],
+    ) -> int:
+        position = earliest_position
+        while not self._prediction_wave_has_capacity(position, mode, capacity, wave_usage, wave_global_usage):
+            position += 1
+        wave_usage.setdefault(position, {})
+        wave_usage[position][mode] = wave_usage[position].get(mode, 0) + 1
+        wave_global_usage[position] = wave_global_usage.get(position, 0) + 1
+        return position
+
+    def _prediction_wave_has_capacity(
+        self,
+        position: int,
+        mode: RuntimeMode,
+        capacity: SchedulerCapacity,
+        wave_usage: dict[int, dict[RuntimeMode, int]],
+        wave_global_usage: dict[int, int],
+    ) -> bool:
+        global_limit = capacity.global_limit
+        if global_limit is not None and wave_global_usage.get(position, 0) >= global_limit:
+            return False
+        mode_limit = capacity.by_mode.get(mode)
+        if mode_limit is not None and wave_usage.get(position, {}).get(mode, 0) >= mode_limit:
+            return False
+        return True
 
     def _aggregate_display_state(self, node: GraphNode) -> str | None:
         if not self.children_for(node.node_id):
@@ -2388,6 +2602,51 @@ class PipelineCoordinator:
             failed += 1
         return failed
 
+    def fail_exited_attempt_snapshot(
+        self,
+        instance: Any,
+        snapshot: dict[str, object],
+        *,
+        at: datetime | None = None,
+    ) -> int:
+        attempt_id = str(snapshot.get("attempt_id") or "").strip()
+        if not attempt_id:
+            return 0
+        try:
+            attempt = self.store.get_attempt(attempt_id)
+        except KeyError:
+            return 0
+        if attempt.state is not AttemptState.RUNNING:
+            return 0
+        snapshot_mode = str(snapshot.get("mode") or "").strip()
+        if snapshot_mode and snapshot_mode != attempt.mode.value:
+            return 0
+        lease = self.store.active_lease(attempt.node_id, attempt.mode)
+        if lease is None or lease.attempt_id != attempt.attempt_id:
+            return 0
+        snapshot_lease_id = str(snapshot.get("lease_id") or "").strip()
+        if snapshot_lease_id and snapshot_lease_id != lease.lease_id:
+            return 0
+        error = _attempt_snapshot_exit_error(snapshot, instance)
+        self._fail_started_attempt_for_backend_error(
+            mode=attempt.mode,
+            node_id=attempt.node_id,
+            attempt_id=attempt.attempt_id,
+            lease_id=lease.lease_id,
+            error=error,
+            at=at or datetime.now(timezone.utc),
+        )
+        _append_instance_log(
+            instance,
+            (
+                "pipeline_attempt_process_exited "
+                f"mode={attempt.mode.value} node_id={attempt.node_id} "
+                f"attempt_id={attempt.attempt_id} lease_id={lease.lease_id} "
+                f"pid={snapshot.get('pid')} exit_code={snapshot.get('exit_code')} error={error}"
+            ),
+        )
+        return 1
+
     def collect_result_files(self, instance: Any, *, now: datetime | None = None) -> int:
         now = now or datetime.now(timezone.utc)
         root = Path(instance.instance_dir) / "state" / "pipeline"
@@ -2496,7 +2755,12 @@ class PipelineCoordinator:
                 policy_revision=self.store.active_runtime_config().scheduler_policy.version,
                 lease_id=lease.lease_id,
                 fencing_token=lease.fencing_token,
-                workspace_path=str(getattr(instance, "resolved_repo_path", "") or ""),
+                workspace_path=str(
+                    materialize_planner_workspace(
+                        attempt_dir,
+                        getattr(instance, "resolved_repo_path", None),
+                    )
+                ),
                 issue_description=str(dispatch_context.get("description") or ""),
                 failure_context=failure_context,
             )
@@ -2514,6 +2778,7 @@ class PipelineCoordinator:
             "fencing_token": lease.fencing_token,
         }
         if mode is RuntimeMode.EXECUTE:
+            blocker_ids = self.store.blockers_for(node_id)
             upstream_manifests = self.store.integrated_manifests_for_blockers(node_id)
             integrated_revisions = [
                 str(manifest.code.get("integrated_revision") or "").strip()
@@ -2521,12 +2786,20 @@ class PipelineCoordinator:
                 if str(manifest.code.get("integrated_revision") or "").strip()
             ]
             repository_path = str(getattr(instance, "resolved_repo_path", "") or "")
+            current_integrated_revision = (
+                self.store.current_integrated_revision(repository_path)
+                if blocker_ids and len(upstream_manifests) == len(blocker_ids)
+                else None
+            )
             request = ExecuteAttemptRequest(
                 **common,
                 task_title=str(dispatch_context.get("title") or node.title),
                 issue_identifier=str(dispatch_context.get("issue_identifier") or node.issue_identifier or ""),
                 issue_description=str(dispatch_context.get("description") or ""),
-                base_revision=integrated_revisions[-1] if integrated_revisions else _repository_head_revision(repository_path),
+                base_revision=(
+                    current_integrated_revision
+                    or (integrated_revisions[-1] if integrated_revisions else _repository_head_revision(repository_path))
+                ),
                 repository={"resolved_repo_path": repository_path},
                 artifact_paths={"attempt_dir": str(attempt_dir)},
                 upstream_manifests=[manifest.to_dict() for manifest in upstream_manifests],
@@ -2611,105 +2884,23 @@ def prepare_mode_environment(
     *,
     workspace_path: Path | str | None = None,
 ) -> dict[str, str]:
-    if profile is None:
-        raise ValueError("runtime profile is required for managed mode attempts")
-    if profile.backend == "local-verifier":
-        if profile.mode is not RuntimeMode.VERIFY:
-            raise ValueError(f"unsupported runtime backend for {profile.mode.value}: {profile.backend}")
-        verifier_home = instance_state_root / "runtime-homes" / profile.mode.value / "local-verifier"
-        try:
-            verifier_home.mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
-            raise ValueError(f"isolated local verifier home could not be materialized: {verifier_home}") from exc
-        if not verifier_home.is_dir():
-            raise ValueError(f"isolated local verifier home could not be materialized: {verifier_home}")
-        return {"SYMPHONY_LOCAL_VERIFIER_HOME": str(verifier_home)}
-    if profile.backend != "codex":
-        raise ValueError(f"unsupported runtime backend for {profile.mode.value}: {profile.backend}")
-    codex_home = instance_state_root / "runtime-homes" / profile.mode.value / "codex"
-    try:
-        codex_home.mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
-        raise ValueError(f"isolated CODEX_HOME could not be materialized: {codex_home}") from exc
-    if not codex_home.is_dir():
-        raise ValueError(f"isolated CODEX_HOME could not be materialized: {codex_home}")
-    source = _resolve_codex_home_source(profile.settings.get("codex_home_source"))
-    if source is not None:
-        _copy_codex_home_seed(source, codex_home)
-    if workspace_path is not None:
-        _trust_codex_project(codex_home / "config.toml", Path(workspace_path))
-    env = {"CODEX_HOME": str(codex_home)}
-    model = profile.settings.get("model")
-    if model is not None:
-        env["CODEX_MODEL"] = str(model)
-    for key in (
-        "sdk_codex_bin",
-        "sandbox",
-        "hard_turn_timeout_ms",
-        "read_timeout_ms",
-        "init_max_attempts",
-        "init_backoff_ms",
-        "init_backoff_max_ms",
-        "overload_max_attempts",
-        "overload_initial_delay_ms",
-        "overload_max_delay_ms",
-    ):
-        value = profile.settings.get(key)
-        if value is not None:
-            env[f"CODEX_{key.upper()}"] = str(value)
-    config_overrides = profile.settings.get("config_overrides")
-    if isinstance(config_overrides, list):
-        env["CODEX_CONFIG_OVERRIDES"] = json.dumps([str(item) for item in config_overrides])
-    return env
+    return prepare_backend_environment(instance_state_root, profile, workspace_path=workspace_path)
 
 
-def _resolve_codex_home_source(value: Any) -> Path | None:
-    if value is None:
-        return None
-    raw = str(value).strip()
-    if not raw:
-        return None
-    if not raw.startswith("$"):
-        raise ValueError("codex_home_source must be injected through an environment variable")
-    env_name = raw[1:]
-    if not env_name:
-        raise ValueError("codex_home_source environment variable name is empty")
-    raw = os.environ.get(env_name, "").strip()
-    if not raw:
-        raise ValueError(f"codex_home_source environment variable is not set: {env_name}")
-    source = Path(raw).expanduser().resolve()
-    if source.name == ".codex":
-        raise ValueError("codex_home_source must point to a fixed copied seed, not the default user .codex directory")
-    if not source.is_dir():
-        raise ValueError(f"codex_home_source is not a directory: {source}")
-    return source
-
-
-def _copy_codex_home_seed(source: Path, destination: Path) -> None:
-    for relative in ("config.toml", "auth.json", "version.json", "models_cache.json"):
-        source_path = source / relative
-        if not source_path.is_file():
-            continue
-        destination_path = destination / relative
-        destination_path.parent.mkdir(parents=True, exist_ok=True)
-        if relative == "config.toml":
-            destination_path.write_text(
-                sanitize_codex_config_template(source_path.read_text(encoding="utf-8")),
-                encoding="utf-8",
-            )
+def materialize_planner_workspace(attempt_dir: Path, resolved_repo_path: str | Path | None) -> Path:
+    workspace = attempt_dir / "planner-workspace"
+    if workspace.exists():
+        if workspace.is_dir():
+            shutil.rmtree(workspace)
         else:
-            shutil.copy2(source_path, destination_path)
-
-
-def _trust_codex_project(config_path: Path, workspace_path: Path) -> None:
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    workspace = str(workspace_path.expanduser().resolve())
-    header = f"[projects.{json.dumps(workspace)}]"
-    existing = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
-    if header in existing:
-        return
-    suffix = "" if not existing or existing.endswith("\n") else "\n"
-    config_path.write_text(f"{existing}{suffix}\n{header}\ntrust_level = \"trusted\"\n", encoding="utf-8")
+            workspace.unlink()
+    attempt_dir.mkdir(parents=True, exist_ok=True)
+    source = Path(resolved_repo_path).expanduser() if resolved_repo_path else None
+    if source is not None and source.is_dir() and source.resolve(strict=False) not in workspace.resolve(strict=False).parents:
+        shutil.copytree(source, workspace)
+    else:
+        workspace.mkdir(parents=True, exist_ok=True)
+    return workspace
 
 
 def _attempt_workspace_for_mode(mode: RuntimeMode, request: dict[str, Any]) -> Path | None:
@@ -2861,6 +3052,18 @@ def _process_exit_error(instance: Any) -> str:
     return _sanitize_error(" ".join(parts))
 
 
+def _attempt_snapshot_exit_error(snapshot: dict[str, object], instance: Any) -> str:
+    exit_code = snapshot.get("exit_code")
+    if exit_code is None:
+        parts = ["process exited before publishing attempt result"]
+    else:
+        parts = [f"process exited with code {exit_code} before publishing attempt result"]
+    tail = _instance_log_error_tail(instance)
+    if tail:
+        parts.append(f"log_tail={tail}")
+    return _sanitize_error(" ".join(parts))
+
+
 def _instance_log_error_tail(instance: Any) -> str:
     paths: list[Path] = []
     current = Path(str(getattr(instance, "instance_dir", ""))) / "logs" / "current.log"
@@ -2914,6 +3117,15 @@ def _attempt_result_from_payload(payload: dict[str, Any]) -> PlanAttemptResult |
     if mode is RuntimeMode.VERIFY:
         return VerifyAttemptResult.from_dict(payload)
     return None
+
+
+def _repository_integration_path(repository_path: Path | str) -> str:
+    return str(Path(repository_path).resolve(strict=False))
+
+
+def _safe_path_part(value: str) -> str:
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "-", value).strip(".-")
+    return safe or "integration"
 
 
 def _git(args: list[str], *, cwd: Path) -> str:

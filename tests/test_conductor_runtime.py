@@ -513,6 +513,80 @@ def test_refresh_polls_process_before_reporting_running(tmp_path: Path) -> None:
     assert refreshed.last_exit_code == 0
 
 
+def test_refresh_keeps_exited_attempt_metadata_while_other_attempt_runs(tmp_path: Path) -> None:
+    manager = ConductorRuntimeManager(command="performer")
+    instance = make_instance(tmp_path).with_updates(process_status="running", pid=5002)
+    first_kwargs = pipeline_start_kwargs_for("exec-1", tmp_path, mode="execute")
+    second_kwargs = pipeline_start_kwargs_for("verify-1", tmp_path, mode="verify")
+    exited = PendingProcess(5001)
+    exited.returncode = 7
+    running = PendingProcess(5002)
+    manager._handles[(instance.id, "exec-1")] = RuntimeHandle(
+        process=exited,
+        log_task=None,  # type: ignore[arg-type]
+        process_status="running",
+        attempt_id="exec-1",
+        mode=first_kwargs["mode"],
+        lease_id=first_kwargs["lease_id"],
+        request_path=first_kwargs["attempt_request_path"],
+        result_path=first_kwargs["attempt_result_path"],
+    )
+    manager._handles[(instance.id, "verify-1")] = RuntimeHandle(
+        process=running,
+        log_task=None,  # type: ignore[arg-type]
+        process_status="running",
+        attempt_id="verify-1",
+        mode=second_kwargs["mode"],
+        lease_id=second_kwargs["lease_id"],
+        request_path=second_kwargs["attempt_request_path"],
+        result_path=second_kwargs["attempt_result_path"],
+    )
+
+    refreshed = manager.refresh(instance)
+    drained = manager.drain_exited_attempts(instance)
+
+    assert refreshed.process_status == "running"
+    assert refreshed.pid == 5002
+    assert drained == [
+        {
+            "instance_id": "inst-1",
+            "attempt_id": "exec-1",
+            "mode": "execute",
+            "lease_id": "lease-exec-1",
+            "request_path": first_kwargs["attempt_request_path"],
+            "result_path": first_kwargs["attempt_result_path"],
+            "pid": 5001,
+            "exit_code": 7,
+        }
+    ]
+    assert set(manager._handles) == {("inst-1", "verify-1")}
+
+
+def test_drain_exited_attempts_returns_each_exit_once(tmp_path: Path) -> None:
+    manager = ConductorRuntimeManager(command="performer")
+    instance = make_instance(tmp_path).with_updates(process_status="running", pid=5001)
+    start_kwargs = pipeline_start_kwargs_for("exec-1", tmp_path)
+    exited = PendingProcess(5001)
+    exited.returncode = 3
+    manager._handles[(instance.id, "exec-1")] = RuntimeHandle(
+        process=exited,
+        log_task=None,  # type: ignore[arg-type]
+        process_status="running",
+        attempt_id="exec-1",
+        mode=start_kwargs["mode"],
+        lease_id=start_kwargs["lease_id"],
+        request_path=start_kwargs["attempt_request_path"],
+        result_path=start_kwargs["attempt_result_path"],
+    )
+
+    manager.refresh(instance)
+    first_drain = manager.drain_exited_attempts(instance)
+    second_drain = manager.drain_exited_attempts(instance)
+
+    assert [snapshot["attempt_id"] for snapshot in first_drain] == ["exec-1"]
+    assert second_drain == []
+
+
 def test_refresh_marks_missing_pid_exited_without_runtime_handle(tmp_path: Path) -> None:
     manager = ConductorRuntimeManager(command="performer")
     instance = make_instance(tmp_path).with_updates(process_status="running", pid=999999)

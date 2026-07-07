@@ -153,7 +153,9 @@ APIs. Conductor materializes isolated runtime homes under managed instance state
 (`runtime-homes/<mode>/<backend>`). Codex-backed `plan` and `execute` profiles
 use isolated `CODEX_HOME` directories; the first-version `verify` profile may use
 `local-verifier`, which runs deterministic frozen gate commands without a model
-backend. Managed mode fails closed if a mode attempt has no runtime profile.
+backend. The first local-verifier implementation uses a disposable worktree with
+mutation detection after gate execution, not OS-level read-only enforcement.
+Managed mode fails closed if a mode attempt has no runtime profile.
 
 Example runtime config envelope:
 
@@ -203,7 +205,7 @@ Runtime confirmation policy:
 
 ## Workspace and Safety Posture
 
-This implementation targets a trusted local automation environment. Managed Conductor instances use one prepared repository workspace per instance and rely on Codex/worktree behavior for per-task working state. Performer still validates that the configured workspace stays inside its managed root and honors the configured Codex approval/sandbox posture.
+This implementation targets a trusted local automation environment. Managed Conductor instances use one prepared repository workspace per instance and rely on Codex/worktree behavior for per-task working state. Verify attempts that use `local-verifier` run frozen gate commands in a disposable worktree and fail if mutation detection finds implementation changes after the gate. Performer still validates that the configured workspace stays inside its managed root and honors the configured Codex approval/sandbox posture.
 
 Secrets should be provided through `$VAR` indirection such as `$PODIUM_PROXY_TOKEN`. Performer validates that required secrets are present but does not print token values. Hook scripts and agent prompts are trusted inputs and can still leak data if they are written unsafely.
 

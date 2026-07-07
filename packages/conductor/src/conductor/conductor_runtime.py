@@ -148,6 +148,7 @@ class LogQueryResult:
 class ConductorRuntimeManager:
     def __init__(self, *, process_factory: ProcessFactory | None = None, command: str | None = None):
         self._handles: dict[tuple[str, str], RuntimeHandle] = {}
+        self._exited_attempts: dict[tuple[str, str], dict[str, object]] = {}
         self._start_locks: dict[str, asyncio.Lock] = {}
         self.process_factory = process_factory or asyncio.create_subprocess_exec
         self.command = command or self._default_performer_command()
@@ -246,6 +247,7 @@ class ConductorRuntimeManager:
                 handle.process.kill()
                 await handle.process.wait()
             await self._finish_log_task(handle.log_task)
+        self._clear_exited_attempts(instance.id)
         return instance.with_updates(process_status="stopped", pid=None)
 
     async def restart(self, instance: InstanceRecord, *, env: dict[str, str] | None = None) -> InstanceRecord:
@@ -273,6 +275,7 @@ class ConductorRuntimeManager:
                 active_handles.append(handle)
             else:
                 last_exit_code = returncode
+                self._record_exited_attempt(key, handle, returncode)
                 self._handles.pop(key, None)
         if active_handles:
             handle = active_handles[-1]
@@ -280,6 +283,14 @@ class ConductorRuntimeManager:
         if last_exit_code is not None:
             return instance.with_updates(process_status="exited", pid=None, last_exit_code=last_exit_code)
         return instance
+
+    def drain_exited_attempts(self, instance: InstanceRecord) -> list[dict[str, object]]:
+        snapshots: list[dict[str, object]] = []
+        for key in list(self._exited_attempts):
+            if key[0] != instance.id:
+                continue
+            snapshots.append(dict(self._exited_attempts.pop(key)))
+        return snapshots
 
     def runtime_snapshot(self, instance: InstanceRecord) -> dict[str, object]:
         process_status = instance.process_status
@@ -448,6 +459,23 @@ class ConductorRuntimeManager:
 
     def _handle_keys_for_instance(self, instance_id: str) -> list[tuple[str, str]]:
         return [key for key in self._handles if key[0] == instance_id]
+
+    def _record_exited_attempt(self, key: tuple[str, str], handle: RuntimeHandle, exit_code: int) -> None:
+        self._exited_attempts[key] = {
+            "instance_id": key[0],
+            "attempt_id": handle.attempt_id or key[1],
+            "mode": handle.mode,
+            "lease_id": handle.lease_id,
+            "request_path": handle.request_path,
+            "result_path": handle.result_path,
+            "pid": getattr(handle.process, "pid", None),
+            "exit_code": exit_code,
+        }
+
+    def _clear_exited_attempts(self, instance_id: str) -> None:
+        for key in list(self._exited_attempts):
+            if key[0] == instance_id:
+                self._exited_attempts.pop(key, None)
 
     async def _finish_log_task(self, log_task: asyncio.Task[None]) -> None:
         if log_task.done():

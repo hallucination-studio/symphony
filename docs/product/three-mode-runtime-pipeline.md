@@ -8,6 +8,12 @@ direct Linear polling, orchestration-run materialized views, and
 `performer:phase/*` label projection are removed from product runtime paths and
 must not be reintroduced as compatibility surfaces.
 
+Implementation status: the first local/unit implementation includes the
+three-mode graph, local verifier, integration queue/conflict handling, runtime
+waits, and S4 replan graph rewrite. That local coverage is not final acceptance
+evidence. Final acceptance still requires the real acceptance matrix for managed
+Podium -> Conductor -> Performer -> Linear runs.
+
 This RFC evolves and absorbs:
 
 - `docs/product/runtime-orchestration-architecture.md` (Conductor owns state,
@@ -149,8 +155,11 @@ Each mode can be assigned a different backend, carried by the runtime profile
 (S0-c). The first accepted implementation uses Codex for `plan` and `execute`
 and `local-verifier` for `verify`. `local-verifier` is a deterministic verifier
 that runs the frozen gate commands against the immutable verification input; it
-does not ask the model backend to self-report success. Codex remains eligible for
-`verify`, but the first-version default is intentionally non-model verification.
+does not ask the model backend to self-report success. In this first
+implementation, local verifier workspace isolation is a disposable worktree plus
+mutation detection after gate execution, not OS-level read-only enforcement.
+Codex remains eligible for `verify`, but the first-version default is
+intentionally non-model verification.
 
 ## State Model
 
@@ -315,7 +324,7 @@ Verifier canonical workflow (apply-patch is the normative path; `result_revision
 is used only for provenance or as an optimization after verifying it resolves to
 the same tree):
 
-1. create a fresh, disposable workspace;
+1. create a fresh, disposable worktree/workspace;
 2. checkout `base_revision`;
 3. fetch `patch_uri` and verify `patch_hash`;
 4. apply the patch;
@@ -334,6 +343,12 @@ which would weaken the "executor output is an immutable bundle" boundary.
 verifier actually running the gate procedure, never from the executor's
 self-attested commands.
 
+First implementation note: `local-verifier` creates a disposable worktree and
+uses mutation detection after running gate commands. This catches gate procedures
+that write implementation artifacts, while preserving common test cache behavior
+that the verifier explicitly ignores. It should not be described as OS-level
+read-only enforcement unless a later implementation adds that capability.
+
 ## Runtime Permission Boundaries
 
 Isolation includes capability limits, not just separate homes.
@@ -342,10 +357,10 @@ Isolation includes capability limits, not just separate homes.
   implementation; cannot write verify verdicts.
 - **Executor**: may modify code, produce patches, upload evidence; cannot mutate
   frozen gates; cannot write verify verdicts.
-- **Verifier**: read-only checkout + disposable workspace; may run tests and read
-  artifacts; cannot push commits, cannot modify task content except writing the
-  verdict via Conductor API, cannot change gates or the dependency graph, cannot
-  produce rework patches.
+- **Verifier**: disposable worktree/workspace with mutation detection; may run
+  tests and read artifacts; cannot push commits, cannot modify task content
+  except writing the verdict via Conductor API, cannot change gates or the
+  dependency graph, cannot produce rework patches.
 
 ## Backend Abstraction
 
@@ -437,8 +452,9 @@ PLANNED → (validate) → READY → EXECUTING → VERIFYING → VERIFY_PASSED
 - Whether a business issue is decomposed, and how deeply, is decided by the
   planner model, not a hardcoded size threshold.
 - The planner may decide no decomposition is needed and emit a single node.
-- First implementation is one-directional (`plan → execute → verify`). The
-  `REPLANNING` back-edge is S4.
+- The current local/unit implementation includes the `REPLANNING` back-edge from
+  S4. It still needs real acceptance matrix coverage before being treated as
+  fully accepted product behavior.
 - `AWAITING_HUMAN` is reachable from any state on escalation (see Human
   Escalation).
 
@@ -574,6 +590,13 @@ the same change.
 
 ## Failure-Driven Re-Decomposition (S4, ADaPT)
 
+S4 local/unit implementation is present: verify failure at the rework limit moves
+a node to `REPLANNING`, a replanning attempt receives failure context, and a
+validated replacement subgraph atomically supersedes and rewires the failed node.
+This is not final acceptance evidence; the real acceptance matrix must still
+cover the managed replan scenario with real runtime, Linear projection, logs, and
+evidence artifacts.
+
 When a node's verify fails, it enters `REWORKING`. If rework reaches its limit,
 the node does not go straight to `FAILED`; it enters `REPLANNING`, which produces
 a validated subgraph that replaces the failing node.
@@ -698,7 +721,8 @@ S3 Verifier mode — isolated runtime executing gates against Verification Input
    Snapshots, scoring 0–4; enable verify-passed as the dependency predicate
    (depends on S0-c per-mode isolation and S0-b predicate hook)
         │
-S4 ADaPT failure-driven re-decomposition (REPLANNING + atomic graph rewrite)
+S4 ADaPT failure-driven re-decomposition (REPLANNING + atomic graph rewrite;
+   local/unit implementation present, real acceptance matrix still required)
         │
 S5 (optional) offline import skill — batch-create a hand-written plan into a
    Linear tree; the earlier standalone skill is demoted to here, or dropped
@@ -736,7 +760,10 @@ invariant and the request/result based Performer CLI.
    bounded by `blocks` and verify gating; a downstream node never dispatches
    before its blocker's verify passes at score >= 3.
 4. The verifier runs as an isolated runtime, verifying an immutable Verification
-   Input Snapshot, and cannot mutate gates or write implementation artifacts.
+   Input Snapshot. The first `local-verifier` implementation uses a disposable
+   worktree and mutation detection rather than filesystem write prevention;
+   it cannot mutate gates or write implementation artifacts without being
+   detected and failed.
 5. Verified task outputs are published only by Conductor after a verifier passes a
    node, as a TaskOutputManifest bound to `verify_attempt_id` and
    `gate_snapshot_hash`.

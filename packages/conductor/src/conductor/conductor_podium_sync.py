@@ -45,7 +45,7 @@ class ConductorPodiumSyncMixin:
         runtime_mode = None
         if not self._pipeline_configured():
             await self.post_podium_report()
-        if self._pipeline_configured() and refreshed.process_status not in {"running", "starting"}:
+        if self._pipeline_configured():
             started_count = await self.pipeline_coordinator.start_due_attempts(refreshed)
             runtime_mode = "plan" if started_count else None
         attempt_ack = self._pipeline_dispatch_attempt_ack(accepted.node_id)
@@ -348,6 +348,10 @@ class ConductorPodiumSyncMixin:
         failed = 0
         for instance in self.store.list_instances():
             refreshed = self.get_instance(instance.id) or instance
+            drain_exited_attempts = getattr(self.runtime_manager, "drain_exited_attempts", None)
+            if callable(drain_exited_attempts):
+                for snapshot in drain_exited_attempts(refreshed):
+                    failed += self.pipeline_coordinator.fail_exited_attempt_snapshot(refreshed, snapshot)
             failed += self.pipeline_coordinator.fail_running_attempts_for_exited_process(refreshed)
         return failed
 
@@ -355,8 +359,6 @@ class ConductorPodiumSyncMixin:
         started = 0
         for instance in self.store.list_instances():
             refreshed = self.get_instance(instance.id) or instance
-            if refreshed.process_status in {"running", "starting"}:
-                continue
             started += await self.pipeline_coordinator.start_due_attempts(refreshed)
         return started
 
