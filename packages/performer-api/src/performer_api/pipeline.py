@@ -74,6 +74,7 @@ class HumanEscalationReason(StrEnum):
 
 
 class DependencySatisfactionPolicy(StrEnum):
+    TERMINAL_SUCCESS = "terminal_success"
     VERIFY_PASSED = "verify_passed"
 
 
@@ -434,6 +435,10 @@ class AttemptRecord:
     node_id: str
     mode: RuntimeMode
     state: AttemptState
+    graph_revision: int = 0
+    policy_revision: int = 0
+    lease_id: str = ""
+    fencing_token: str = ""
     gate_snapshot_hash: str | None = None
     score: int | None = None
     started_at: str | None = None
@@ -447,6 +452,10 @@ class AttemptRecord:
             "node_id": self.node_id,
             "mode": self.mode.value,
             "state": self.state.value,
+            "graph_revision": self.graph_revision,
+            "policy_revision": self.policy_revision,
+            "lease_id": self.lease_id,
+            "fencing_token": self.fencing_token,
             "gate_snapshot_hash": self.gate_snapshot_hash,
             "score": self.score,
             "started_at": self.started_at,
@@ -462,6 +471,10 @@ class AttemptRecord:
             node_id=str(payload.get("node_id") or ""),
             mode=_mode(payload.get("mode")),
             state=AttemptState(str(payload.get("state") or AttemptState.PENDING.value)),
+            graph_revision=_int(payload.get("graph_revision"), default=0),
+            policy_revision=_int(payload.get("policy_revision"), default=0),
+            lease_id=str(payload.get("lease_id") or ""),
+            fencing_token=str(payload.get("fencing_token") or ""),
             gate_snapshot_hash=_optional_str(payload.get("gate_snapshot_hash")),
             score=_optional_int(payload.get("score")),
             started_at=_optional_str(payload.get("started_at")),

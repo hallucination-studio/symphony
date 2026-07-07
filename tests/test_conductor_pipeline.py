@@ -830,6 +830,28 @@ def test_dependency_policy_requires_verify_passed_score_by_default(tmp_path: Pat
     assert scheduler.dispatchable_nodes(RuntimeMode.EXECUTE) == ["b"]
 
 
+def test_dependency_policy_terminal_success_variant_does_not_require_integration_manifest(tmp_path: Path) -> None:
+    store = ConductorPipelineStore(tmp_path)
+    store.apply_runtime_config(
+        RuntimeConfigEnvelope(
+            "group-1",
+            1,
+            _policy(1, dependency_policy=DependencySatisfactionPolicy.TERMINAL_SUCCESS),
+        )
+    )
+    store.commit_plan(_proposal())
+    scheduler = PipelineScheduler(store)
+
+    store.update_node_state("a", GraphNodeState.FAILED)
+    assert scheduler.is_dependency_satisfied("a") is False
+    assert scheduler.dispatchable_nodes(RuntimeMode.EXECUTE) == []
+
+    store.update_node_state("a", GraphNodeState.VERIFY_PASSED, verify_score=0)
+    assert scheduler.is_dependency_satisfied("a") is True
+    assert scheduler.promote_ready_nodes() == ["b"]
+    assert scheduler.dispatchable_nodes(RuntimeMode.EXECUTE) == ["b"]
+
+
 def test_planned_nodes_do_not_execute_until_promoted_to_ready(tmp_path: Path) -> None:
     store = ConductorPipelineStore(tmp_path)
     store.apply_runtime_config(RuntimeConfigEnvelope("group-1", 1, _policy(1)))
@@ -1174,6 +1196,39 @@ def test_verify_pass_requires_matching_execute_attempt_id_before_manifest(tmp_pa
     assert store.list_integration_queue() == []
 
 
+def test_expired_verify_lease_refuses_passed_verdict_and_publishes_no_manifest(tmp_path: Path) -> None:
+    store = ConductorPipelineStore(tmp_path)
+    store.apply_runtime_config(RuntimeConfigEnvelope("group-1", 1, _policy(1)))
+    store.commit_plan(_proposal())
+    now = datetime(2026, 7, 6, tzinfo=timezone.utc)
+    gate_hash = store.get_node("a").gate_snapshot_hash or ""
+    _publish_verification_input(store, "a", execute_attempt_id="exec-1")
+    verify_lease = store.start_attempt(RuntimeMode.VERIFY, node_id="a", attempt_id="verify-expired", now=now, ttl_seconds=1)
+
+    accepted = store.complete_attempt_with_fencing(
+        VerifyAttemptResult(
+            attempt_id="verify-expired",
+            node_id="a",
+            status=AttemptState.SUCCEEDED,
+            graph_revision=1,
+            policy_revision=1,
+            gate_snapshot_hash=gate_hash,
+            lease_id=verify_lease.lease_id,
+            fencing_token=verify_lease.fencing_token,
+            score=3,
+            passed=True,
+            execute_attempt_id="exec-1",
+        ),
+        at=now + timedelta(seconds=2),
+    )
+
+    assert accepted is False
+    assert store.get_attempt("verify-expired").state is AttemptState.RUNNING
+    assert store.get_node("a").state is GraphNodeState.VERIFYING
+    assert store.list_task_output_manifests() == []
+    assert store.list_integration_queue() == []
+
+
 def test_failed_plan_attempt_result_creates_structured_human_wait(tmp_path: Path) -> None:
     store = ConductorPipelineStore(tmp_path)
     store.apply_runtime_config(RuntimeConfigEnvelope("group-1", 1, _policy(1)))
@@ -1213,6 +1268,224 @@ def test_failed_plan_attempt_result_creates_structured_human_wait(tmp_path: Path
     assert waits[0]["details"]["attempt_id"] == "plan-1"
     assert waits[0]["details"]["lease_id"] == lease.lease_id
     assert waits[0]["details"]["error"] == "unexpected status 401 Unauthorized"
+
+
+def test_invalid_initial_plan_result_escalates_plan_invalid_without_failed_node(tmp_path: Path) -> None:
+    store = ConductorPipelineStore(tmp_path)
+    store.apply_runtime_config(RuntimeConfigEnvelope("group-1", 1, _policy(1)))
+    coordinator = PipelineCoordinator(store=store, runtime_manager=object())
+    accepted = coordinator.accept_dispatch(
+        {
+            "issue_id": "issue-1",
+            "issue_identifier": "ENG-1",
+            "title": "Plan feature",
+        },
+        instance_id="inst-1",
+    )
+    now = datetime(2026, 7, 6, tzinfo=timezone.utc)
+    lease = store.start_attempt(RuntimeMode.PLAN, node_id=accepted.node_id, attempt_id="plan-invalid", now=now, ttl_seconds=30)
+    gate = _gate("a")
+    invalid = PlanProposal(
+        graph_id=accepted.graph_id,
+        plan_attempt_id="plan-invalid",
+        root_node_id=accepted.node_id,
+        nodes=[GraphNode(node_id="a", title="A", state=GraphNodeState.PLANNED, gate_snapshot_hash=gate.hash)],
+        blocks=[("missing", "a")],
+        gates=[gate],
+        entry_node_ids=["a"],
+        exit_node_ids=["a"],
+    )
+
+    assert store.complete_attempt_with_fencing(
+        PlanAttemptResult(
+            attempt_id="plan-invalid",
+            node_id=accepted.node_id,
+            status=AttemptState.SUCCEEDED,
+            graph_revision=1,
+            policy_revision=1,
+            gate_snapshot_hash="",
+            lease_id=lease.lease_id,
+            fencing_token=lease.fencing_token,
+            proposal=invalid,
+        ),
+        at=now,
+    )
+
+    node = store.get_node(accepted.node_id)
+    waits = store.list_human_waits()
+    assert store.current_graph_revision() == 1
+    assert node.state is GraphNodeState.AWAITING_HUMAN
+    assert node.human_reason is HumanEscalationReason.PLAN_INVALID
+    assert waits[-1]["reason"] == HumanEscalationReason.PLAN_INVALID.value
+    assert store.get_attempt("plan-invalid").state is AttemptState.FAILED
+
+
+def test_failed_invalid_initial_plan_result_escalates_plan_invalid_without_backend_collapse(tmp_path: Path) -> None:
+    store = ConductorPipelineStore(tmp_path)
+    store.apply_runtime_config(RuntimeConfigEnvelope("group-1", 1, _policy(1)))
+    coordinator = PipelineCoordinator(store=store, runtime_manager=object())
+    accepted = coordinator.accept_dispatch(
+        {
+            "issue_id": "issue-1",
+            "issue_identifier": "ENG-1",
+            "title": "Plan feature",
+        },
+        instance_id="inst-1",
+    )
+    now = datetime(2026, 7, 6, tzinfo=timezone.utc)
+    lease = store.start_attempt(RuntimeMode.PLAN, node_id=accepted.node_id, attempt_id="plan-invalid", now=now, ttl_seconds=30)
+
+    assert store.complete_attempt_with_fencing(
+        PlanAttemptResult(
+            attempt_id="plan-invalid",
+            node_id=accepted.node_id,
+            status=AttemptState.FAILED,
+            graph_revision=1,
+            policy_revision=1,
+            gate_snapshot_hash="",
+            lease_id=lease.lease_id,
+            fencing_token=lease.fencing_token,
+            error="invalid_plan_proposal:missing_gate",
+        ),
+        at=now,
+    )
+
+    node = store.get_node(accepted.node_id)
+    waits = store.list_human_waits()
+    assert node.state is GraphNodeState.AWAITING_HUMAN
+    assert node.human_reason is HumanEscalationReason.PLAN_INVALID
+    assert waits[-1]["reason"] == HumanEscalationReason.PLAN_INVALID.value
+    assert waits[-1]["details"]["error"] == "invalid_plan_proposal:missing_gate"
+    assert store.get_attempt("plan-invalid").state is AttemptState.FAILED
+
+
+def test_invalid_plan_gate_and_credentials_map_to_specific_human_reasons(tmp_path: Path) -> None:
+    store = ConductorPipelineStore(tmp_path)
+    store.apply_runtime_config(RuntimeConfigEnvelope("group-1", 1, _policy(1)))
+    coordinator = PipelineCoordinator(store=store, runtime_manager=object())
+    accepted = coordinator.accept_dispatch({"issue_id": "issue-1", "title": "Plan feature"}, instance_id="inst-1")
+    now = datetime(2026, 7, 6, tzinfo=timezone.utc)
+
+    prose_gate = GateSpecSnapshot.create(
+        gate_id="gate-a",
+        task_id="a",
+        created_by="plan-gate",
+        created_at="2026-07-06T00:00:00Z",
+        content=GateSpecContent(
+            acceptance_criteria=["a works"],
+            verification_procedure=["verify the feature manually"],
+            rubric={str(score): f"score {score}" for score in range(5)},
+            pass_threshold=3,
+        ),
+    )
+    lease = store.start_attempt(RuntimeMode.PLAN, node_id=accepted.node_id, attempt_id="plan-gate", now=now, ttl_seconds=30)
+    assert store.complete_attempt_with_fencing(
+        PlanAttemptResult(
+            attempt_id="plan-gate",
+            node_id=accepted.node_id,
+            status=AttemptState.SUCCEEDED,
+            graph_revision=1,
+            policy_revision=1,
+            gate_snapshot_hash="",
+            lease_id=lease.lease_id,
+            fencing_token=lease.fencing_token,
+            proposal=PlanProposal(
+                graph_id=accepted.graph_id,
+                plan_attempt_id="plan-gate",
+                root_node_id=accepted.node_id,
+                nodes=[GraphNode(node_id="a", title="A", state=GraphNodeState.PLANNED, gate_snapshot_hash=prose_gate.hash)],
+                blocks=[],
+                gates=[prose_gate],
+                entry_node_ids=["a"],
+                exit_node_ids=["a"],
+            ),
+        ),
+        at=now,
+    )
+    assert store.get_node(accepted.node_id).human_reason is HumanEscalationReason.GATE_UNEXECUTABLE
+
+    store.update_node_state(accepted.node_id, GraphNodeState.REPLANNING, human_reason=None)
+    credential_gate = GateSpecSnapshot.create(
+        gate_id="gate-b",
+        task_id="b",
+        created_by="plan-credential",
+        created_at="2026-07-06T00:00:00Z",
+        content=GateSpecContent(
+            acceptance_criteria=["b works"],
+            verification_procedure=["pytest -q"],
+            rubric={str(score): f"score {score}" for score in range(5)},
+            pass_threshold=3,
+            verifier_credentials=["LINEAR_TOKEN"],
+        ),
+    )
+    lease = store.start_attempt(RuntimeMode.PLAN, node_id=accepted.node_id, attempt_id="plan-credential", now=now, ttl_seconds=30)
+    assert store.complete_attempt_with_fencing(
+        PlanAttemptResult(
+            attempt_id="plan-credential",
+            node_id=accepted.node_id,
+            status=AttemptState.SUCCEEDED,
+            graph_revision=1,
+            policy_revision=1,
+            gate_snapshot_hash="",
+            lease_id=lease.lease_id,
+            fencing_token=lease.fencing_token,
+            proposal=PlanProposal(
+                graph_id=accepted.graph_id,
+                plan_attempt_id="plan-credential",
+                root_node_id=accepted.node_id,
+                nodes=[GraphNode(node_id="b", title="B", state=GraphNodeState.PLANNED, gate_snapshot_hash=credential_gate.hash)],
+                blocks=[],
+                gates=[credential_gate],
+                entry_node_ids=["b"],
+                exit_node_ids=["b"],
+            ),
+        ),
+        at=now,
+    )
+    assert store.get_node(accepted.node_id).human_reason is HumanEscalationReason.CREDENTIAL_REQUIRED
+
+
+def test_failed_invalid_plan_gate_and_credentials_map_to_specific_human_reasons(tmp_path: Path) -> None:
+    store = ConductorPipelineStore(tmp_path)
+    store.apply_runtime_config(RuntimeConfigEnvelope("group-1", 1, _policy(1)))
+    coordinator = PipelineCoordinator(store=store, runtime_manager=object())
+    accepted = coordinator.accept_dispatch({"issue_id": "issue-1", "title": "Plan feature"}, instance_id="inst-1")
+    now = datetime(2026, 7, 6, tzinfo=timezone.utc)
+
+    lease = store.start_attempt(RuntimeMode.PLAN, node_id=accepted.node_id, attempt_id="plan-gate", now=now, ttl_seconds=30)
+    assert store.complete_attempt_with_fencing(
+        PlanAttemptResult(
+            attempt_id="plan-gate",
+            node_id=accepted.node_id,
+            status=AttemptState.FAILED,
+            graph_revision=1,
+            policy_revision=1,
+            gate_snapshot_hash="",
+            lease_id=lease.lease_id,
+            fencing_token=lease.fencing_token,
+            error="invalid_plan_proposal:gate_unexecutable",
+        ),
+        at=now,
+    )
+    assert store.get_node(accepted.node_id).human_reason is HumanEscalationReason.GATE_UNEXECUTABLE
+
+    store.update_node_state(accepted.node_id, GraphNodeState.REPLANNING, human_reason=None)
+    lease = store.start_attempt(RuntimeMode.PLAN, node_id=accepted.node_id, attempt_id="plan-credential", now=now, ttl_seconds=30)
+    assert store.complete_attempt_with_fencing(
+        PlanAttemptResult(
+            attempt_id="plan-credential",
+            node_id=accepted.node_id,
+            status=AttemptState.FAILED,
+            graph_revision=1,
+            policy_revision=1,
+            gate_snapshot_hash="",
+            lease_id=lease.lease_id,
+            fencing_token=lease.fencing_token,
+            error="invalid_plan_proposal:verifier_credential_unavailable",
+        ),
+        at=now,
+    )
+    assert store.get_node(accepted.node_id).human_reason is HumanEscalationReason.CREDENTIAL_REQUIRED
 
 
 def test_verify_failure_moves_node_to_reworking_without_manifest(tmp_path: Path) -> None:
@@ -1562,6 +1835,87 @@ def test_process_queued_integrations_preserves_prior_integrated_patches(tmp_path
     assert (repo / "alpha.txt").read_text(encoding="utf-8") == "alpha after\n"
     assert (repo / "beta.txt").read_text(encoding="utf-8") == "beta after\n"
     assert subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip() == queue[1]["integrated_revision"]
+
+
+def test_process_queued_integrations_detects_overlapping_verified_patch_conflict(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True)
+    (repo / "README.md").write_text("before\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=repo, check=True, capture_output=True, text=True)
+    base_revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+
+    patches: dict[str, tuple[str, str, str]] = {}
+    for node_id, content in (("a", "after from a\n"), ("b", "after from b\n")):
+        (repo / "README.md").write_text(content, encoding="utf-8")
+        subprocess.run(["git", "add", "README.md"], cwd=repo, check=True)
+        patch = subprocess.check_output(["git", "diff", "--binary", "--cached"], cwd=repo, text=True)
+        expected_tree = subprocess.check_output(["git", "write-tree"], cwd=repo, text=True).strip()
+        subprocess.run(["git", "reset", "--hard", base_revision], cwd=repo, check=True, capture_output=True, text=True)
+        patch_path = tmp_path / f"{node_id}.diff"
+        patch_path.write_text(patch, encoding="utf-8")
+        patches[node_id] = (
+            f"file://{patch_path}",
+            "sha256:" + hashlib.sha256(patch.encode("utf-8")).hexdigest(),
+            expected_tree,
+        )
+
+    gate_a = _gate("a")
+    gate_b = _gate("b")
+    store = ConductorPipelineStore(tmp_path / "store")
+    store.apply_runtime_config(RuntimeConfigEnvelope("group-1", 1, _policy(1)))
+    store.commit_plan(
+        PlanProposal(
+            graph_id="graph-1",
+            plan_attempt_id="plan-1",
+            root_node_id="a",
+            nodes=[
+                GraphNode(node_id="a", title="A", state=GraphNodeState.VERIFY_PASSED, gate_snapshot_hash=gate_a.hash),
+                GraphNode(node_id="b", title="B", state=GraphNodeState.VERIFY_PASSED, gate_snapshot_hash=gate_b.hash),
+            ],
+            blocks=[],
+            gates=[gate_a, gate_b],
+            entry_node_ids=["a", "b"],
+            exit_node_ids=["a", "b"],
+        )
+    )
+    for node_id in ("a", "b"):
+        patch_uri, patch_hash, expected_tree = patches[node_id]
+        manifest = TaskOutputManifest(
+            node_id=node_id,
+            verify_attempt_id=f"verify-{node_id}",
+            gate_snapshot_hash=store.get_node(node_id).gate_snapshot_hash or "",
+            score=3,
+            code={
+                "base_revision": base_revision,
+                "patch_uri": patch_uri,
+                "patch_hash": patch_hash,
+                "expected_result_tree": expected_tree,
+            },
+        )
+        store.publish_task_output_manifest(manifest)
+        store.enqueue_integration(manifest)
+
+    processed = store.process_queued_integrations(repo)
+
+    queue = store.list_integration_queue()
+    waits = store.list_human_waits()
+    assert processed == 2
+    assert queue[0]["node_id"] == "a"
+    assert queue[0]["status"] == "integrated"
+    assert queue[0]["integrated_revision"]
+    assert queue[1]["node_id"] == "b"
+    assert queue[1]["status"] == "conflict"
+    assert queue[1]["error"]
+    assert (repo / "README.md").read_text(encoding="utf-8") == "after from a\n"
+    assert store.get_node("b").state is GraphNodeState.AWAITING_HUMAN
+    assert store.get_node("b").human_reason is HumanEscalationReason.LINEAR_SYNC_CONFLICT
+    assert waits[0]["node_id"] == "b"
+    assert waits[0]["reason"] == "LINEAR_SYNC_CONFLICT"
+    assert waits[0]["details"]["integration_id"] == queue[1]["integration_id"]
 
 
 def test_process_queued_integration_recovers_after_commit_before_queue_update(tmp_path: Path) -> None:
@@ -2575,6 +2929,233 @@ async def test_background_coordination_resumes_completed_linear_human_action(tmp
     assert waits[0]["resolution"] == "Linear human action human-child-1 completed."
 
 
+async def test_background_coordination_resumes_completed_non_conflict_human_action(tmp_path: Path) -> None:
+    data_root = tmp_path / "conductor-data"
+    store = ConductorStore(data_root)
+    instance_dir = data_root / "instances" / "inst-1"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    store.save_instance(
+        InstanceRecord.create(
+            id="inst-1",
+            name="Alpha",
+            repo_source_type="local_path",
+            repo_source_value=str(repo),
+            resolved_repo_path=str(repo),
+            instance_dir=str(instance_dir),
+            workspace_root=str(instance_dir / "workspace" / "repo"),
+            persistence_path=str(instance_dir / "state" / "performer.json"),
+            log_path=str(instance_dir / "logs" / "performer.log"),
+            http_port=8801,
+            linear_project="ENG",
+            linear_filters={"labels": ["codex"]},
+        )
+    )
+    service = ConductorService(
+        store=store,
+        data_root=data_root,
+        runtime_manager=ConductorRuntimeManager(command="performer"),
+    )
+    service.pipeline_store.apply_runtime_config(RuntimeConfigEnvelope("group-1", 1, _policy(1)))
+    service.pipeline_store.commit_plan(_proposal())
+    wait = service.pipeline_store.create_human_wait(
+        "a",
+        reason="PLAN_INVALID",
+        child_issue_id="human-child-1",
+        details={"attempt_id": "plan-invalid"},
+    )
+
+    class Tracker:
+        async def fetch_child_issues(self, parent_issue_id: str, *, label_name: str | None = None) -> list[dict[str, object]]:
+            return [
+                {
+                    "id": "human-child-1",
+                    "labels": ["performer:type/human-action"],
+                    "state": "Done",
+                    "state_type": "completed",
+                    "description": "plan fixed",
+                }
+            ]
+
+    service.repository_handoff_tracker_factory = lambda instance: Tracker()
+
+    completed = await service.reconcile_completed_pipeline_human_actions_once()
+
+    node = service.pipeline_store.get_node("a")
+    waits = service.pipeline_store.list_human_waits()
+    assert completed == 1
+    assert waits[0]["wait_id"] == wait["wait_id"]
+    assert waits[0]["status"] == "resolved"
+    assert node.state is GraphNodeState.REPLANNING
+    assert node.human_reason is None
+
+
+async def test_podium_human_answered_command_without_completed_child_does_not_resume_wait(tmp_path: Path) -> None:
+    service = ConductorService(
+        store=ConductorStore(tmp_path / "conductor-data"),
+        data_root=tmp_path / "conductor-data",
+        runtime_manager=ConductorRuntimeManager(command="performer"),
+    )
+    service.pipeline_store.apply_runtime_config(RuntimeConfigEnvelope("group-1", 1, _policy(1)))
+    service.pipeline_store.commit_plan(_proposal())
+    wait = service.pipeline_store.create_human_wait(
+        "a",
+        reason="LINEAR_SYNC_CONFLICT",
+        child_issue_id="human-child-1",
+        details={"integration_id": "integration-a-verify-1"},
+    )
+
+    result = await service.handle_podium_ws_command(
+        {
+            "type": "human.answered",
+            "wait_id": wait["wait_id"],
+            "child_issue_id": "human-child-1",
+            "human_response": "resume from parent command",
+        }
+    )
+
+    waits = service.pipeline_store.list_human_waits()
+    assert result == {"status": "ignored", "reason": "completed_child_required", "wait_id": wait["wait_id"]}
+    assert waits[0]["status"] == "waiting"
+    assert service.pipeline_store.get_node("a").state is GraphNodeState.AWAITING_HUMAN
+
+
+async def test_unresolved_human_action_child_emits_reconcile_finding(tmp_path: Path) -> None:
+    data_root = tmp_path / "conductor-data"
+    store = ConductorStore(data_root)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    store.save_instance(
+        InstanceRecord.create(
+            id="inst-1",
+            name="Alpha",
+            repo_source_type="local_path",
+            repo_source_value=str(repo),
+            resolved_repo_path=str(repo),
+            instance_dir=str(data_root / "instances" / "inst-1"),
+            workspace_root=str(data_root / "instances" / "inst-1" / "workspace" / "repo"),
+            persistence_path=str(data_root / "instances" / "inst-1" / "state" / "performer.json"),
+            log_path=str(data_root / "instances" / "inst-1" / "logs" / "performer.log"),
+            http_port=8801,
+            linear_project="ENG",
+            linear_filters={"labels": ["codex"]},
+        )
+    )
+    service = ConductorService(
+        store=store,
+        data_root=data_root,
+        runtime_manager=ConductorRuntimeManager(command="performer"),
+    )
+    service.pipeline_store.apply_runtime_config(RuntimeConfigEnvelope("group-1", 1, _policy(1)))
+    service.pipeline_store.commit_plan(_proposal())
+    wait = service.pipeline_store.create_human_wait(
+        "a",
+        reason="LINEAR_SYNC_CONFLICT",
+        child_issue_id="human-child-1",
+        details={"integration_id": "integration-a-verify-1"},
+    )
+
+    class Tracker:
+        async def fetch_child_issues(self, parent_issue_id: str, *, label_name: str | None = None) -> list[dict[str, object]]:
+            return [
+                {
+                    "id": "human-child-1",
+                    "labels": ["performer:type/human-action"],
+                    "state": "Todo",
+                    "state_type": "unstarted",
+                    "description": "still open",
+                }
+            ]
+
+    service.repository_handoff_tracker_factory = lambda instance: Tracker()
+    service._pipeline_reconcile_findings = []
+
+    completed = await service.reconcile_completed_pipeline_human_actions_once()
+
+    assert completed == 0
+    assert service.pipeline_store.list_human_waits()[0]["status"] == "waiting"
+    assert service._pipeline_reconcile_findings == [
+        {
+            "event": "pipeline_human_wait_unresolved",
+            "severity": "warning",
+            "error_type": "RuntimeError",
+            "sanitized_reason": "human action child is not completed",
+            "action_required": "complete_human_action_child",
+            "retryable": True,
+            "instance_id": "inst-1",
+            "issue_project": "ENG",
+            "wait_id": wait["wait_id"],
+            "node_id": "a",
+            "child_issue_id": "human-child-1",
+            "reason": "LINEAR_SYNC_CONFLICT",
+        }
+    ]
+
+
+async def test_missing_human_action_child_emits_reconcile_finding(tmp_path: Path) -> None:
+    data_root = tmp_path / "conductor-data"
+    store = ConductorStore(data_root)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    store.save_instance(
+        InstanceRecord.create(
+            id="inst-1",
+            name="Alpha",
+            repo_source_type="local_path",
+            repo_source_value=str(repo),
+            resolved_repo_path=str(repo),
+            instance_dir=str(data_root / "instances" / "inst-1"),
+            workspace_root=str(data_root / "instances" / "inst-1" / "workspace" / "repo"),
+            persistence_path=str(data_root / "instances" / "inst-1" / "state" / "performer.json"),
+            log_path=str(data_root / "instances" / "inst-1" / "logs" / "performer.log"),
+            http_port=8801,
+            linear_project="ENG",
+            linear_filters={"labels": ["codex"]},
+        )
+    )
+    service = ConductorService(
+        store=store,
+        data_root=data_root,
+        runtime_manager=ConductorRuntimeManager(command="performer"),
+    )
+    service.pipeline_store.apply_runtime_config(RuntimeConfigEnvelope("group-1", 1, _policy(1)))
+    service.pipeline_store.commit_plan(_proposal())
+    wait = service.pipeline_store.create_human_wait(
+        "a",
+        reason="PLAN_INVALID",
+        child_issue_id="human-child-missing",
+        details={"attempt_id": "plan-invalid"},
+    )
+
+    class Tracker:
+        async def fetch_child_issues(self, parent_issue_id: str, *, label_name: str | None = None) -> list[dict[str, object]]:
+            return []
+
+    service.repository_handoff_tracker_factory = lambda instance: Tracker()
+    service._pipeline_reconcile_findings = []
+
+    completed = await service.reconcile_completed_pipeline_human_actions_once()
+
+    assert completed == 0
+    assert service.pipeline_store.list_human_waits()[0]["status"] == "waiting"
+    assert service._pipeline_reconcile_findings == [
+        {
+            "event": "pipeline_human_wait_unresolved",
+            "severity": "warning",
+            "error_type": "RuntimeError",
+            "sanitized_reason": "human action child was not returned by Linear",
+            "action_required": "recreate_or_complete_human_action_child",
+            "retryable": True,
+            "instance_id": "inst-1",
+            "issue_project": "ENG",
+            "wait_id": wait["wait_id"],
+            "node_id": "a",
+            "child_issue_id": "human-child-missing",
+            "reason": "PLAN_INVALID",
+        }
+    ]
+
+
 def test_human_wait_and_linear_projection_records_are_durable(tmp_path: Path) -> None:
     store = ConductorPipelineStore(tmp_path)
     store.apply_runtime_config(RuntimeConfigEnvelope("group-1", 1, _policy(1)))
@@ -3117,6 +3698,156 @@ def test_replanning_plan_attempt_completion_replaces_node_with_subgraph(tmp_path
     assert store.get_attempt("plan-rewrite").state is AttemptState.SUCCEEDED
 
 
+def test_replanning_validation_failure_escalates_to_human_without_failed_node(tmp_path: Path) -> None:
+    store = ConductorPipelineStore(tmp_path)
+    store.apply_runtime_config(RuntimeConfigEnvelope("group-1", 1, _policy(1, max_rework_attempts=1)))
+    gate_a = _gate("a")
+    gate_t = _gate("t")
+    gate_b = _gate("b")
+    store.commit_plan(
+        PlanProposal(
+            graph_id="graph-1",
+            plan_attempt_id="plan-1",
+            root_node_id="root",
+            nodes=[
+                GraphNode(node_id="a", title="A", state=GraphNodeState.VERIFY_PASSED, gate_snapshot_hash=gate_a.hash, verify_score=3),
+                GraphNode(node_id="t", title="T", state=GraphNodeState.VERIFYING, gate_snapshot_hash=gate_t.hash),
+                GraphNode(node_id="b", title="B", state=GraphNodeState.PLANNED, gate_snapshot_hash=gate_b.hash),
+            ],
+            blocks=[("a", "t"), ("t", "b")],
+            gates=[gate_a, gate_t, gate_b],
+            entry_node_ids=["a"],
+            exit_node_ids=["b"],
+        )
+    )
+    now = datetime(2026, 7, 6, tzinfo=timezone.utc)
+    _publish_verification_input(store, "t", execute_attempt_id="exec-t")
+    failed_verify_lease = store.start_attempt(RuntimeMode.VERIFY, node_id="t", attempt_id="verify-t", now=now, ttl_seconds=30)
+    assert store.complete_attempt_with_fencing(
+        VerifyAttemptResult(
+            attempt_id="verify-t",
+            node_id="t",
+            status=AttemptState.SUCCEEDED,
+            graph_revision=1,
+            policy_revision=1,
+            gate_snapshot_hash=gate_t.hash,
+            lease_id=failed_verify_lease.lease_id,
+            fencing_token=failed_verify_lease.fencing_token,
+            passed=False,
+            score=2,
+            execute_attempt_id="exec-t",
+            error="gate failed",
+        ),
+        at=now,
+    )
+    assert store.get_node("t").state is GraphNodeState.REPLANNING
+    lease = store.start_attempt(RuntimeMode.PLAN, node_id="t", attempt_id="plan-invalid-rewrite", now=now, ttl_seconds=30)
+    invalid_subgraph = PlanProposal(
+        graph_id="graph-1",
+        plan_attempt_id="plan-invalid-rewrite",
+        root_node_id="root",
+        nodes=[GraphNode(node_id="t1", title="T1", state=GraphNodeState.PLANNED)],
+        blocks=[],
+        gates=[],
+        entry_node_ids=["t1"],
+        exit_node_ids=["t1"],
+    )
+
+    assert store.complete_attempt_with_fencing(
+        PlanAttemptResult(
+            attempt_id="plan-invalid-rewrite",
+            node_id="t",
+            status=AttemptState.SUCCEEDED,
+            graph_revision=1,
+            policy_revision=1,
+            gate_snapshot_hash="",
+            lease_id=lease.lease_id,
+            fencing_token=lease.fencing_token,
+            proposal=invalid_subgraph,
+        ),
+        at=now,
+    )
+
+    node = store.get_node("t")
+    waits = store.list_human_waits()
+    assert store.current_graph_revision() == 1
+    assert node.state is GraphNodeState.AWAITING_HUMAN
+    assert node.human_reason is HumanEscalationReason.REPLAN_LIMIT_EXCEEDED
+    assert waits[-1]["reason"] == HumanEscalationReason.REPLAN_LIMIT_EXCEEDED.value
+    assert store.get_attempt("plan-invalid-rewrite").state is AttemptState.FAILED
+    assert store.active_lease("t", RuntimeMode.PLAN) is None
+
+
+def test_failed_invalid_replanning_attempt_escalates_replan_limit_without_backend_collapse(tmp_path: Path) -> None:
+    store = ConductorPipelineStore(tmp_path)
+    store.apply_runtime_config(RuntimeConfigEnvelope("group-1", 1, _policy(1, max_rework_attempts=1)))
+    gate_a = _gate("a")
+    gate_t = _gate("t")
+    gate_b = _gate("b")
+    store.commit_plan(
+        PlanProposal(
+            graph_id="graph-1",
+            plan_attempt_id="plan-1",
+            root_node_id="root",
+            nodes=[
+                GraphNode(node_id="a", title="A", state=GraphNodeState.VERIFY_PASSED, gate_snapshot_hash=gate_a.hash, verify_score=3),
+                GraphNode(node_id="t", title="T", state=GraphNodeState.VERIFYING, gate_snapshot_hash=gate_t.hash),
+                GraphNode(node_id="b", title="B", state=GraphNodeState.PLANNED, gate_snapshot_hash=gate_b.hash),
+            ],
+            blocks=[("a", "t"), ("t", "b")],
+            gates=[gate_a, gate_t, gate_b],
+            entry_node_ids=["a"],
+            exit_node_ids=["b"],
+        )
+    )
+    now = datetime(2026, 7, 6, tzinfo=timezone.utc)
+    _publish_verification_input(store, "t", execute_attempt_id="exec-t")
+    failed_verify_lease = store.start_attempt(RuntimeMode.VERIFY, node_id="t", attempt_id="verify-t", now=now, ttl_seconds=30)
+    assert store.complete_attempt_with_fencing(
+        VerifyAttemptResult(
+            attempt_id="verify-t",
+            node_id="t",
+            status=AttemptState.SUCCEEDED,
+            graph_revision=1,
+            policy_revision=1,
+            gate_snapshot_hash=gate_t.hash,
+            lease_id=failed_verify_lease.lease_id,
+            fencing_token=failed_verify_lease.fencing_token,
+            passed=False,
+            score=2,
+            execute_attempt_id="exec-t",
+            error="gate failed",
+        ),
+        at=now,
+    )
+    lease = store.start_attempt(RuntimeMode.PLAN, node_id="t", attempt_id="plan-invalid-rewrite", now=now, ttl_seconds=30)
+
+    assert store.complete_attempt_with_fencing(
+        PlanAttemptResult(
+            attempt_id="plan-invalid-rewrite",
+            node_id="t",
+            status=AttemptState.FAILED,
+            graph_revision=1,
+            policy_revision=1,
+            gate_snapshot_hash="",
+            lease_id=lease.lease_id,
+            fencing_token=lease.fencing_token,
+            error="invalid_plan_proposal:missing_gate",
+        ),
+        at=now,
+    )
+
+    node = store.get_node("t")
+    waits = store.list_human_waits()
+    assert store.current_graph_revision() == 1
+    assert node.state is GraphNodeState.AWAITING_HUMAN
+    assert node.human_reason is HumanEscalationReason.REPLAN_LIMIT_EXCEEDED
+    assert waits[-1]["reason"] == HumanEscalationReason.REPLAN_LIMIT_EXCEEDED.value
+    assert waits[-1]["details"]["error"] == "invalid_plan_proposal:missing_gate"
+    assert store.get_attempt("plan-invalid-rewrite").state is AttemptState.FAILED
+    assert store.active_lease("t", RuntimeMode.PLAN) is None
+
+
 def test_initial_dispatch_plan_attempt_completion_commits_planner_graph(tmp_path: Path) -> None:
     store = ConductorPipelineStore(tmp_path)
     store.apply_runtime_config(RuntimeConfigEnvelope("group-1", 1, _policy(1)))
@@ -3482,6 +4213,16 @@ def test_attempt_lifecycle_rejects_stale_fenced_results_and_publishes_verified_m
     store.commit_plan(_proposal())
     now = datetime(2026, 7, 6, tzinfo=timezone.utc)
     lease = store.start_attempt(RuntimeMode.EXECUTE, node_id="a", attempt_id="exec-1", now=now, ttl_seconds=30)
+    attempt = store.get_attempt("exec-1")
+    assert attempt.graph_revision == 1
+    assert attempt.policy_revision == 1
+    assert attempt.lease_id == lease.lease_id
+    assert attempt.fencing_token == lease.fencing_token
+    view_attempt = store.pipeline_view().to_dict()["attempts"][0]
+    assert view_attempt["graph_revision"] == 1
+    assert view_attempt["policy_revision"] == 1
+    assert view_attempt["lease_id"] == lease.lease_id
+    assert view_attempt["fencing_token"] == lease.fencing_token
 
     stale = ExecuteAttemptResult(
         attempt_id="exec-1",
@@ -3515,6 +4256,8 @@ def test_attempt_lifecycle_rejects_stale_fenced_results_and_publishes_verified_m
     assert store.complete_attempt_with_fencing(accepted, at=now) is True
     assert store.get_attempt("exec-1").state is AttemptState.SUCCEEDED
     assert store.get_node("a").state is GraphNodeState.VERIFYING
+    with pytest.raises(ValueError, match="terminal_attempt_immutable"):
+        store.start_attempt(RuntimeMode.EXECUTE, node_id="a", attempt_id="exec-1", now=now, ttl_seconds=30)
 
     verify_lease = store.start_attempt(RuntimeMode.VERIFY, node_id="a", attempt_id="verify-1", now=now, ttl_seconds=30)
     verdict = VerifyAttemptResult(

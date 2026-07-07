@@ -30,6 +30,7 @@ from performer_api.pipeline import (
     PipelineView,
     PlanProposal,
     PlanValidator,
+    PlanValidatorError,
     PredictedCall,
     RuntimeConfigEnvelope,
     RuntimeMode,
@@ -559,6 +560,14 @@ class ConductorPipelineStore:
         now: datetime,
         ttl_seconds: int = 300,
     ) -> WorkerLease:
+        try:
+            existing_attempt = self.get_attempt(attempt_id)
+        except KeyError:
+            existing_attempt = None
+        if existing_attempt is not None:
+            if existing_attempt.state is not AttemptState.RUNNING:
+                raise ValueError("terminal_attempt_immutable")
+            raise ValueError("attempt_already_exists")
         node = self.get_node(node_id)
         if mode is RuntimeMode.PLAN:
             next_state = GraphNodeState.REPLANNING
@@ -571,11 +580,16 @@ class ConductorPipelineStore:
             next_state = GraphNodeState.VERIFYING
         lease = self.acquire_lease(mode, node_id=node_id, attempt_id=attempt_id, now=now, ttl_seconds=ttl_seconds)
         graph_revision = self.current_graph_revision()
+        policy_revision = self.active_runtime_config().scheduler_policy.version
         attempt = AttemptRecord(
             attempt_id=attempt_id,
             node_id=node_id,
             mode=mode,
             state=AttemptState.RUNNING,
+            graph_revision=graph_revision,
+            policy_revision=policy_revision,
+            lease_id=lease.lease_id,
+            fencing_token=lease.fencing_token,
             gate_snapshot_hash=node.gate_snapshot_hash,
             started_at=_format_time(_utc(now)),
         )
@@ -714,6 +728,10 @@ class ConductorPipelineStore:
             node_id=attempt.node_id,
             mode=attempt.mode,
             state=AttemptState.TIMED_OUT,
+            graph_revision=attempt.graph_revision,
+            policy_revision=attempt.policy_revision,
+            lease_id=attempt.lease_id,
+            fencing_token=attempt.fencing_token,
             gate_snapshot_hash=attempt.gate_snapshot_hash,
             score=attempt.score,
             started_at=attempt.started_at,
@@ -1220,12 +1238,12 @@ class ConductorPipelineStore:
                             """,
                             ("queued", _json_dumps(integration_payload), None, integration_id),
                         )
-                self._update_node_state_on_connection(
-                    connection,
-                    str(payload["node_id"]),
-                    GraphNodeState.VERIFY_PASSED,
-                    human_reason=None,
-                )
+            self._update_node_state_on_connection(
+                connection,
+                str(payload["node_id"]),
+                _resume_state_for_human_wait(payload),
+                human_reason=None,
+            )
         return payload
 
     def attach_human_wait_child_issue(self, wait_id: str, *, child_issue_id: str) -> dict[str, Any]:
@@ -1683,10 +1701,41 @@ class ConductorPipelineStore:
         if isinstance(result, PlanAttemptResult):
             if result.proposal is None:
                 return False
+            validation_errors = PlanValidator().validate(result.proposal)
             if node.state is GraphNodeState.REPLANNING and self.latest_failed_verify_attempt_for_node(result.node_id) is not None:
-                self.replace_node_with_subgraph(result.node_id, result.proposal)
+                if validation_errors:
+                    return self._fail_plan_attempt_with_human_wait(
+                        result,
+                        at=at,
+                        reason=HumanEscalationReason.REPLAN_LIMIT_EXCEEDED,
+                        error=_plan_validation_error_summary(validation_errors),
+                    )
+                try:
+                    self.replace_node_with_subgraph(result.node_id, result.proposal)
+                except ValueError as exc:
+                    return self._fail_plan_attempt_with_human_wait(
+                        result,
+                        at=at,
+                        reason=HumanEscalationReason.REPLAN_LIMIT_EXCEEDED,
+                        error=_sanitize_error(exc),
+                    )
             else:
-                self.commit_plan(result.proposal)
+                if validation_errors:
+                    return self._fail_plan_attempt_with_human_wait(
+                        result,
+                        at=at,
+                        reason=_plan_validation_human_reason(validation_errors),
+                        error=_plan_validation_error_summary(validation_errors),
+                    )
+                try:
+                    self.commit_plan(result.proposal)
+                except ValueError as exc:
+                    return self._fail_plan_attempt_with_human_wait(
+                        result,
+                        at=at,
+                        reason=HumanEscalationReason.PLAN_INVALID,
+                        error=_sanitize_error(exc),
+                    )
         elif isinstance(result, ExecuteAttemptResult):
             snapshot = VerificationInputSnapshot.from_dict(result.verification_input or {})
             if not self._verification_input_matches_execute_result(snapshot, result):
@@ -1735,6 +1784,28 @@ class ConductorPipelineStore:
             error=result.error,
         )
         self._deactivate_lease(result.lease_id)
+        return True
+
+    def _fail_plan_attempt_with_human_wait(
+        self,
+        result: PlanAttemptResult,
+        *,
+        at: datetime,
+        reason: HumanEscalationReason,
+        error: str,
+    ) -> bool:
+        self._finish_attempt(result, state=AttemptState.FAILED, at=at, error=error)
+        self._deactivate_lease(result.lease_id)
+        self.create_human_wait(
+            result.node_id,
+            reason=reason.value,
+            details={
+                "mode": result.mode.value,
+                "attempt_id": result.attempt_id,
+                "lease_id": result.lease_id,
+                "error": error,
+            },
+        )
         return True
 
     def _verification_input_matches_execute_result(
@@ -1796,6 +1867,10 @@ class ConductorPipelineStore:
             node_id=attempt.node_id,
             mode=attempt.mode,
             state=state,
+            graph_revision=attempt.graph_revision,
+            policy_revision=attempt.policy_revision,
+            lease_id=attempt.lease_id,
+            fencing_token=attempt.fencing_token,
             gate_snapshot_hash=result.gate_snapshot_hash or attempt.gate_snapshot_hash,
             score=score,
             started_at=attempt.started_at,
@@ -1824,7 +1899,14 @@ class ConductorPipelineStore:
         *,
         error: str | None = None,
     ) -> None:
-        if result.mode is RuntimeMode.VERIFY:
+        visible_error = error if error is not None else _visible_attempt_error(result)
+        if isinstance(result, PlanAttemptResult):
+            node = self.get_node(result.node_id)
+            if node.state is GraphNodeState.REPLANNING and self.latest_failed_verify_attempt_for_node(result.node_id) is not None:
+                reason = HumanEscalationReason.REPLAN_LIMIT_EXCEEDED
+            else:
+                reason = _plan_failure_human_reason(visible_error)
+        elif result.mode is RuntimeMode.VERIFY:
             reason = HumanEscalationReason.GATE_UNEXECUTABLE
         else:
             reason = HumanEscalationReason.BACKEND_UNAVAILABLE
@@ -1835,7 +1917,7 @@ class ConductorPipelineStore:
                 "mode": result.mode.value,
                 "attempt_id": result.attempt_id,
                 "lease_id": result.lease_id,
-                "error": error if error is not None else _visible_attempt_error(result),
+                "error": visible_error,
             },
         )
 
@@ -2049,13 +2131,12 @@ class PipelineScheduler:
             derived_state = self.store.derive_parent_state(node_id)
             if self.store.active_runtime_config().scheduler_policy.dependency_policy is DependencySatisfactionPolicy.VERIFY_PASSED:
                 return derived_state is GraphNodeState.VERIFY_PASSED and all(self._node_ready_for_downstream(child) for child in children)
-            return derived_state in {GraphNodeState.VERIFY_PASSED, GraphNodeState.FAILED, GraphNodeState.SUPERSEDED}
+            return derived_state in {GraphNodeState.VERIFY_PASSED, GraphNodeState.SUPERSEDED}
         policy = self.store.active_runtime_config().scheduler_policy.dependency_policy
         if policy is DependencySatisfactionPolicy.VERIFY_PASSED:
             return self._node_ready_for_downstream(node)
         return node.state in {
             GraphNodeState.VERIFY_PASSED,
-            GraphNodeState.FAILED,
             GraphNodeState.SUPERSEDED,
         }
 
@@ -2839,6 +2920,52 @@ _PREDICTABLE_DISPATCH_STATES = {
 
 def _node_verify_passed(node: GraphNode) -> bool:
     return node.state is GraphNodeState.VERIFY_PASSED and int(node.verify_score or 0) >= PASS_THRESHOLD
+
+
+def _plan_validation_human_reason(errors: set[PlanValidatorError]) -> HumanEscalationReason:
+    if PlanValidatorError.VERIFIER_CREDENTIAL_UNAVAILABLE in errors:
+        return HumanEscalationReason.CREDENTIAL_REQUIRED
+    if PlanValidatorError.GATE_UNEXECUTABLE in errors:
+        return HumanEscalationReason.GATE_UNEXECUTABLE
+    return HumanEscalationReason.PLAN_INVALID
+
+
+def _plan_failure_human_reason(error: str) -> HumanEscalationReason:
+    if not error.startswith("invalid_plan_proposal"):
+        return HumanEscalationReason.BACKEND_UNAVAILABLE
+    return _plan_validation_human_reason(_plan_validator_errors_from_error(error))
+
+
+def _plan_validator_errors_from_error(error: str) -> set[PlanValidatorError]:
+    if ":" not in error:
+        return set()
+    errors: set[PlanValidatorError] = set()
+    for token in error.split(":", 1)[1].replace(",", " ").split():
+        try:
+            errors.add(PlanValidatorError(token.strip()))
+        except ValueError:
+            continue
+    return errors
+
+
+def _plan_validation_error_summary(errors: set[PlanValidatorError]) -> str:
+    names = ", ".join(sorted(error.value for error in errors))
+    return f"invalid plan proposal: {names}"
+
+
+def _resume_state_for_human_wait(payload: dict[str, Any]) -> GraphNodeState:
+    if payload.get("reason") == HumanEscalationReason.LINEAR_SYNC_CONFLICT.value:
+        return GraphNodeState.VERIFY_PASSED
+    details = payload.get("details") if isinstance(payload.get("details"), dict) else {}
+    try:
+        mode = RuntimeMode(str(details.get("mode") or RuntimeMode.PLAN.value))
+    except ValueError:
+        mode = RuntimeMode.PLAN
+    if mode is RuntimeMode.EXECUTE:
+        return GraphNodeState.READY
+    if mode is RuntimeMode.VERIFY:
+        return GraphNodeState.VERIFYING
+    return GraphNodeState.REPLANNING
 
 
 def _mode_for_state(state: GraphNodeState) -> RuntimeMode:

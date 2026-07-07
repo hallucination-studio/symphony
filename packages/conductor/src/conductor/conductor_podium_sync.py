@@ -286,8 +286,7 @@ class ConductorPodiumSyncMixin:
                 break
         if wait is None:
             return {"status": "ignored", "reason": "human_wait_not_found"}
-        resumed = self.pipeline_store.resume_human_wait(str(wait["wait_id"]), resolution=human_response)
-        return {"status": "accepted", "wait_id": resumed["wait_id"], "node_id": resumed["node_id"]}
+        return {"status": "ignored", "reason": "completed_child_required", "wait_id": str(wait["wait_id"])}
 
     async def coordinate_background_once(self) -> CoordinationResult:
         self._pipeline_reconcile_findings: list[dict[str, Any]] = []
@@ -548,16 +547,48 @@ class ConductorPodiumSyncMixin:
             try:
                 tracker = self.repository_handoff_tracker_factory(instance)
                 children = await tracker.fetch_child_issues(root_issue_id, label_name="performer:type/human-action")
+                returned_child_ids: set[str] = set()
                 for child in children:
                     child_id = str(child.get("id") or "").strip()
+                    if child_id:
+                        returned_child_ids.add(child_id)
                     wait = waits_by_child.get(child_id)
-                    if wait is None or not _linear_issue_completed(child):
+                    if wait is None:
+                        continue
+                    if not _linear_issue_completed(child):
+                        self._record_pipeline_sync_failure(
+                            "pipeline_human_wait_unresolved",
+                            instance,
+                            RuntimeError("human action child is not completed"),
+                            action_required="complete_human_action_child",
+                            extra={
+                                "wait_id": wait.get("wait_id"),
+                                "node_id": wait.get("node_id"),
+                                "child_issue_id": child_id,
+                                "reason": wait.get("reason"),
+                            },
+                        )
                         continue
                     self.pipeline_store.resume_human_wait(
                         str(wait["wait_id"]),
                         resolution=f"Linear human action {child_id} completed.",
                     )
                     completed += 1
+                for child_id, wait in waits_by_child.items():
+                    if child_id in returned_child_ids:
+                        continue
+                    self._record_pipeline_sync_failure(
+                        "pipeline_human_wait_unresolved",
+                        instance,
+                        RuntimeError("human action child was not returned by Linear"),
+                        action_required="recreate_or_complete_human_action_child",
+                        extra={
+                            "wait_id": wait.get("wait_id"),
+                            "node_id": wait.get("node_id"),
+                            "child_issue_id": child_id,
+                            "reason": wait.get("reason"),
+                        },
+                    )
                 break
             except Exception as exc:
                 self._record_pipeline_sync_failure(

@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from performer_api.pipeline import (
+    AttemptRecord,
     AttemptState,
     canonical_gate_hash,
     DependencySatisfactionPolicy,
@@ -110,6 +111,32 @@ def test_attempt_requests_round_trip_issue_and_task_context() -> None:
     assert execute_payload["issue_identifier"] == "HELL-1"
     assert execute_payload["issue_description"] == "Create SYMPHONY_REAL_E2E_RESULT.md and run pytest."
     assert ExecuteAttemptRequest.from_dict(execute_payload).issue_description == execute.issue_description
+
+
+def test_attempt_record_persists_fencing_and_revision_context() -> None:
+    attempt = AttemptRecord(
+        attempt_id="exec-1",
+        node_id="node-1",
+        mode=RuntimeMode.EXECUTE,
+        state=AttemptState.RUNNING,
+        graph_revision=7,
+        policy_revision=3,
+        lease_id="lease-exec",
+        fencing_token="fence-exec",
+        gate_snapshot_hash="sha256:gate",
+    )
+
+    payload = attempt.to_dict()
+    restored = AttemptRecord.from_dict(payload)
+
+    assert payload["graph_revision"] == 7
+    assert payload["policy_revision"] == 3
+    assert payload["lease_id"] == "lease-exec"
+    assert payload["fencing_token"] == "fence-exec"
+    assert restored.graph_revision == 7
+    assert restored.policy_revision == 3
+    assert restored.lease_id == "lease-exec"
+    assert restored.fencing_token == "fence-exec"
 
 
 def test_plan_validator_rejects_cycles_missing_gates_and_incomplete_rubrics() -> None:

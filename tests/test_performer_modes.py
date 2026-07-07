@@ -745,6 +745,49 @@ async def test_verify_mode_rejects_gate_commands_that_mutate_verification_worktr
 
 
 @pytest.mark.asyncio
+async def test_verify_mode_rejects_gate_commands_that_mutate_tracked_state(tmp_path: Path) -> None:
+    verification_input = _verification_input_with_patch(tmp_path, gate_hash="")
+    gate = GateSpecSnapshot.create(
+        gate_id="gate-1",
+        task_id="node-1",
+        created_by="plan-1",
+        created_at="2026-07-06T00:00:00Z",
+        content=GateSpecContent(
+            acceptance_criteria=["verifier gate must leave tracked files unchanged"],
+            verification_procedure=["printf tampered > README.md"],
+            rubric={str(score): f"score {score}" for score in range(5)},
+            pass_threshold=3,
+        ),
+    )
+    verification_input["gate_snapshot_hash"] = gate.hash
+    request_path = tmp_path / "verify-request.json"
+    result_path = tmp_path / "verify-result.json"
+    request_path.write_text(
+        json.dumps(
+            {
+                "attempt_id": "verify-tracked-readonly",
+                "node_id": "node-1",
+                "graph_revision": 5,
+                "policy_revision": 2,
+                "lease_id": "lease-verify",
+                "fencing_token": "token-verify",
+                "gate_snapshot_hash": gate.hash,
+                "gate_snapshot": gate.to_dict(),
+                "verification_input": verification_input,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    await run_mode_attempt(RuntimeMode.VERIFY, request_path, result_path)
+
+    payload = json.loads(result_path.read_text(encoding="utf-8"))
+    assert payload["status"] == "failed"
+    assert payload["passed"] is False
+    assert payload["reason"] == "verifier_workspace_mutated"
+
+
+@pytest.mark.asyncio
 async def test_verify_mode_runs_pytest_without_generated_cache_mutation(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -1421,6 +1464,64 @@ async def test_verify_mode_applies_patch_and_accepts_matching_result_tree(tmp_pa
     payload = json.loads(result_path.read_text(encoding="utf-8"))
     assert payload["status"] == "succeeded"
     assert payload["passed"] is True
+
+
+@pytest.mark.asyncio
+async def test_verify_mode_rejects_expected_result_tree_mismatch(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True)
+    (repo / "README.md").write_text("before\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=repo, check=True, capture_output=True, text=True)
+    base_revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+    (repo / "README.md").write_text("after\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=repo, check=True)
+    patch = subprocess.check_output(["git", "diff", "--binary", "--cached"], cwd=repo, text=True)
+    subprocess.run(["git", "reset", "--hard", "HEAD"], cwd=repo, check=True, capture_output=True, text=True)
+    patch_path = tmp_path / "patch.diff"
+    patch_path.write_text(patch, encoding="utf-8")
+    gate = _passing_gate()
+    request_path = tmp_path / "verify-request.json"
+    result_path = tmp_path / "verify-result.json"
+    request_path.write_text(
+        json.dumps(
+            {
+                "attempt_id": "verify-result-tree",
+                "node_id": "node-1",
+                "graph_revision": 4,
+                "policy_revision": 2,
+                "lease_id": "lease-verify",
+                "fencing_token": "token-verify",
+                "gate_snapshot_hash": gate.hash,
+                "gate_snapshot": gate.to_dict(),
+                "verification_input": {
+                    "task_id": "node-1",
+                    "execute_attempt_id": "exec-1",
+                    "base_revision": base_revision,
+                    "repository_path": str(repo),
+                    "patch_uri": f"file://{patch_path}",
+                    "patch_hash": "sha256:" + hashlib.sha256(patch.encode("utf-8")).hexdigest(),
+                    "expected_result_tree": "not-the-applied-tree",
+                    "artifact_uris": [],
+                    "declared_commands": [],
+                    "evidence_uri": f"file://{tmp_path}",
+                    "gate_snapshot_hash": gate.hash,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    await run_mode_attempt(RuntimeMode.VERIFY, request_path, result_path)
+
+    payload = json.loads(result_path.read_text(encoding="utf-8"))
+    assert payload["status"] == "failed"
+    assert payload["score"] == 0
+    assert payload["passed"] is False
+    assert payload["reason"] == "result_tree_mismatch"
 
 
 @pytest.mark.asyncio
