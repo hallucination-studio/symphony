@@ -60,7 +60,7 @@ class GraphRevision:
 
 
 _UNCHANGED = object()
-_PROCESS_EXIT_RESULT_GRACE_SECONDS = 5.0
+_PROCESS_EXIT_RESULT_GRACE_SECONDS = 15.0
 
 
 class ConductorPipelineStore:
