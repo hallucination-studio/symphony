@@ -476,9 +476,48 @@ def register_runtime_routes(
         except SecretDecryptionError:
             await state.record_proxy_audit({"runtime_id": runtime["id"], "allowed": False, "reason": "secret_decryption_failed", "timestamp": utc_now_iso()})
             return error_response(400, "secret_decryption_failed", "Stored Linear installation token could not be decrypted")
+        is_mutation = _linear_payload_is_mutation(payload)
         upstream_token = str((installation or {}).get("access_token") or "").strip()
+        token_source = "installation" if upstream_token else ""
+        if is_mutation and upstream_token and not _linear_installation_actor_is_app(installation):
+            await state.record_proxy_audit(
+                {
+                    "runtime_id": runtime["id"],
+                    "allowed": False,
+                    "reason": "agent_actor_token_required",
+                    "operation_name": payload.get("operationName"),
+                    "workspace_id": workspace_id,
+                    "timestamp": utc_now_iso(),
+                }
+            )
+            return error_response(
+                400,
+                "agent_actor_token_required",
+                "Linear mutations authored by Symphony require an app actor installation token.",
+            )
         if not upstream_token:
-            upstream_token = os.environ.get("PODIUM_LINEAR_ACCESS_TOKEN", "").strip()
+            if is_mutation:
+                upstream_token = os.environ.get("PODIUM_LINEAR_APP_ACCESS_TOKEN", "").strip()
+                token_source = "app_environment" if upstream_token else ""
+            else:
+                upstream_token = os.environ.get("PODIUM_LINEAR_ACCESS_TOKEN", "").strip()
+                token_source = "operator_environment" if upstream_token else ""
+        if is_mutation and not upstream_token:
+            await state.record_proxy_audit(
+                {
+                    "runtime_id": runtime["id"],
+                    "allowed": False,
+                    "reason": "agent_actor_token_required",
+                    "operation_name": payload.get("operationName"),
+                    "workspace_id": workspace_id,
+                    "timestamp": utc_now_iso(),
+                }
+            )
+            return error_response(
+                400,
+                "agent_actor_token_required",
+                "Linear mutations authored by Symphony require an app actor installation token.",
+            )
         upstream_endpoint = os.environ.get("PODIUM_LINEAR_ENDPOINT", "https://api.linear.app/graphql").strip()
         await state.record_proxy_audit(
             {
@@ -486,6 +525,7 @@ def register_runtime_routes(
                 "allowed": True,
                 "operation_name": payload.get("operationName"),
                 "workspace_id": workspace_id,
+                "token_source": token_source,
                 "timestamp": utc_now_iso(),
             }
         )
@@ -557,6 +597,18 @@ def _pipeline_ack_payload(payload: dict[str, Any]) -> dict[str, Any]:
             "lease_id",
         )
     }
+
+
+def _linear_payload_is_mutation(payload: dict[str, Any]) -> bool:
+    query = str(payload.get("query") or "").lstrip().lower()
+    return query.startswith("mutation") or "\nmutation" in query
+
+
+def _linear_installation_actor_is_app(installation: dict[str, Any] | None) -> bool:
+    if not isinstance(installation, dict):
+        return False
+    actor = str(installation.get("actor") or installation.get("token_actor") or "").strip().lower()
+    return actor in {"app", "application"}
 
 
 def normalize_agent_session_event(payload: dict[str, Any]) -> dict[str, Any]:

@@ -4277,6 +4277,47 @@ async def test_pipeline_linear_projector_refreshes_operator_status_after_state_c
     assert "operator_status: verify_passed" in tracker.description_blocks["child-a"]
 
 
+async def test_pipeline_linear_projector_surfaces_workflow_transition_failure(tmp_path: Path) -> None:
+    store = ConductorPipelineStore(tmp_path)
+    store.apply_runtime_config(RuntimeConfigEnvelope("group-1", 1, _policy(1)))
+    store.commit_plan(_proposal())
+
+    class Tracker:
+        async def fetch_child_issues(self, parent_issue_id: str, *, label_name: str | None = None) -> list[dict[str, object]]:
+            return [
+                {
+                    "id": "child-a",
+                    "description": "```yaml\nsymphony:\n  node_id: a\n```",
+                    "labels": ["performer:type/pipeline-node"],
+                    "parent_issue_id": "root-linear",
+                }
+            ]
+
+        async def update_issue_description_marker_block(self, issue_id: str, marker_name: str, block: str) -> dict[str, object]:
+            return {"success": True}
+
+        async def create_child_issue_for(
+            self,
+            *,
+            parent_issue_id: str,
+            title: str,
+            description: str,
+            label_names: list[str],
+            delegate_id: str | None = None,
+        ) -> dict[str, object]:
+            return {"id": "child-b", "description": description}
+
+        async def transition_issue_by_state_target(
+            self, issue_id: str, *, names: list[str], state_type: str
+        ) -> dict[str, object]:
+            return {"success": False, "issue_id": issue_id, "state": "Backlog", "reason": "state_not_found"}
+
+    projector = PipelineLinearProjector(store=store, tracker=Tracker(), root_issue_id="root-linear")
+
+    with pytest.raises(Exception, match="linear_workflow_transition_failed"):
+        await projector.reconcile_once()
+
+
 async def test_pipeline_linear_projector_posts_agent_status_comment_activity_and_workflow(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("SYMPHONY_DEBUG_PROJECTION", "1")
     store = ConductorPipelineStore(tmp_path)

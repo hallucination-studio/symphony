@@ -28,9 +28,11 @@ class PgMigrator:
                 workspace_id TEXT PRIMARY KEY,
                 access_token_enc TEXT NOT NULL,
                 scope JSONB,
+                actor TEXT NOT NULL DEFAULT '',
                 expires_at TIMESTAMPTZ
             )
             """,
+            "ALTER TABLE linear_installations ADD COLUMN IF NOT EXISTS actor TEXT NOT NULL DEFAULT ''",
             """
             CREATE TABLE IF NOT EXISTS conductors (
                 id TEXT PRIMARY KEY,
@@ -257,16 +259,18 @@ class PgStore:
             return
         await self.pool.execute(
             """
-            INSERT INTO linear_installations (workspace_id, access_token_enc, scope, expires_at)
-            VALUES ($1, $2, $3, $4::timestamptz)
+            INSERT INTO linear_installations (workspace_id, access_token_enc, scope, actor, expires_at)
+            VALUES ($1, $2, $3, $4, $5::timestamptz)
             ON CONFLICT (workspace_id) DO UPDATE SET
               access_token_enc = EXCLUDED.access_token_enc,
               scope = EXCLUDED.scope,
+              actor = EXCLUDED.actor,
               expires_at = EXCLUDED.expires_at
             """,
             workspace_id,
             str(installation.get("access_token") or installation.get("access_token_enc") or ""),
             _pg_json(installation.get("scope")),
+            str(installation.get("actor") or ""),
             _pg_datetime(installation.get("expires_at")),
         )
 
@@ -284,10 +288,11 @@ class PgStore:
                     or ""
                 ),
                 "scope": installation.get("scope"),
+                "actor": installation.get("actor"),
                 "expires_at": installation.get("expires_at"),
             }
         row = await self.pool.fetchrow(
-            "SELECT workspace_id, access_token_enc, scope, expires_at FROM linear_installations WHERE workspace_id = $1",
+            "SELECT workspace_id, access_token_enc, scope, actor, expires_at FROM linear_installations WHERE workspace_id = $1",
             workspace_id,
         )
         if row is None:
@@ -296,6 +301,7 @@ class PgStore:
             "workspace_id": str(row["workspace_id"]),
             "access_token": str(row["access_token_enc"]),
             "scope": row["scope"],
+            "actor": str(row["actor"] or ""),
             "expires_at": row["expires_at"].isoformat() if row["expires_at"] is not None else None,
         }
 

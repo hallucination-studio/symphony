@@ -97,6 +97,8 @@ def test_pg_migrator_exposes_phase_0_schema() -> None:
 
     assert "CREATE TABLE IF NOT EXISTS users" in sql
     assert "CREATE TABLE IF NOT EXISTS linear_installations" in sql
+    assert "actor TEXT NOT NULL DEFAULT ''" in sql
+    assert "ALTER TABLE linear_installations ADD COLUMN IF NOT EXISTS actor TEXT NOT NULL DEFAULT ''" in sql
     assert "CREATE TABLE IF NOT EXISTS conductors" in sql
     assert "CREATE TABLE IF NOT EXISTS project_bindings" in sql
     assert "CREATE TABLE IF NOT EXISTS dispatches" in sql

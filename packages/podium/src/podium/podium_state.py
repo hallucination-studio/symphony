@@ -334,6 +334,7 @@ class PodiumStateBaseMixin:
             "workspace_id": str(installation.get("workspace_id") or ""),
             "access_token_encrypted": self.encrypt_secret(access_token),
             "scope": installation.get("scope"),
+            "actor": installation.get("actor"),
             "expires_at": installation.get("expires_at"),
         }
 
@@ -343,6 +344,7 @@ class PodiumStateBaseMixin:
             "workspace_id": str(installation.get("workspace_id") or ""),
             "access_token": self.decrypt_secret(encrypted) if encrypted else "",
             "scope": installation.get("scope"),
+            "actor": installation.get("actor"),
             "expires_at": installation.get("expires_at"),
         }
 

@@ -257,6 +257,7 @@ async def test_linear_proxy_persists_audit_event_when_postgres_is_injected() -> 
             "allowed": True,
             "operation_name": "Viewer",
             "workspace_id": user_id,
+            "token_source": "installation",
             "timestamp": pg_store.proxy_audit_events[0]["timestamp"],
         }
     ]
@@ -314,6 +315,35 @@ async def test_linear_proxy_can_use_environment_access_token_without_workspace_i
     assert proxied.status_code == 200
     assert proxied.json() == {"data": {"viewer": {"id": "viewer-1"}}}
     assert captured["authorization"] == "operator-linear-token"
+
+
+async def test_linear_proxy_rejects_mutation_when_only_operator_environment_token_exists(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    called = False
+
+    def linear_transport(request: httpx.Request) -> httpx.Response:
+        nonlocal called
+        called = True
+        return httpx.Response(200, json={"data": {"commentCreate": {"success": True}}})
+
+    monkeypatch.setenv("PODIUM_LINEAR_ACCESS_TOKEN", "operator-linear-token")
+    app = make_app(linear_graphql_transport=linear_transport)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
+        await register(client, "env-proxy-mutation@example.com")
+        enrolled = await enroll_conductor(client)
+        proxied = await client.post(
+            "/api/v1/linear/graphql",
+            json={
+                "operationName": "CommentIssue",
+                "query": "mutation CommentIssue { commentCreate(input: {issueId: \"issue-1\", body: \"x\"}) { success } }",
+            },
+            headers={"Authorization": f"Bearer {enrolled['proxy_token']}"},
+        )
+
+    assert proxied.status_code == 400
+    assert proxied.json()["error"]["code"] == "agent_actor_token_required"
+    assert called is False
 
 def test_runtime_ws_presence_dispatch_wakeup_and_log_fetch_roundtrip() -> None:
     with TestClient(make_app()) as client:

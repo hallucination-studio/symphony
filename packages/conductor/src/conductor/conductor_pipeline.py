@@ -2899,17 +2899,17 @@ class PipelineLinearProjector:
             if update_description is not None:
                 await update_description(issue_id, "SYMPHONY PIPELINE NODE", self._description_block(node, revision))
             metadata = self._metadata(node, revision)
-            self.store.record_linear_projection(
-                node_id=node.node_id,
-                linear_issue_id=issue_id,
-                metadata=metadata,
-            )
             projected += await self._project_workflow_state(issue_id, node)
             projected += await self._project_agent_activity(
                 issue_id=issue_id,
                 node=node,
                 metadata=metadata,
                 prior_metadata=prior_metadata_by_node.get(node.node_id),
+            )
+            self.store.record_linear_projection(
+                node_id=node.node_id,
+                linear_issue_id=issue_id,
+                metadata=metadata,
             )
             issue_ids_by_node[node.node_id] = issue_id
             projected += 1
@@ -2955,10 +2955,16 @@ class PipelineLinearProjector:
         names, state_type = _linear_workflow_state_target_for_node(node, graph_complete=self._graph_complete())
         if not names:
             return 0
-        try:
-            await transition(issue_id, names=names, state_type=state_type)
-        except Exception:
-            return 0
+        result = await transition(issue_id, names=names, state_type=state_type)
+        if isinstance(result, dict) and result.get("success") is False:
+            reason = str(result.get("reason") or "transition_rejected")
+            current = str(result.get("state") or result.get("current_state") or "")
+            target = ",".join(names)
+            raise RuntimeError(
+                "linear_workflow_transition_failed "
+                f"issue_id={issue_id} node_id={node.node_id} target={target} "
+                f"state_type={state_type} current_state={current} reason={reason}"
+            )
         return 1
 
     def _graph_complete(self) -> bool:

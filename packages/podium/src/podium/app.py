@@ -349,6 +349,7 @@ def create_app(
                 "redirect_uri": redirect_uri,
                 "response_type": "code",
                 "scope": LINEAR_DEFAULT_SCOPE,
+                "actor": "app",
                 "state": oauth_state,
                 "prompt": "consent",
             }
@@ -399,6 +400,7 @@ def create_app(
                 "workspace_id": workspace_id,
                 "access_token": access_token,
                 "scope": token.get("scope"),
+                "actor": token.get("actor") or "app",
                 "expires_at": expires_at,
             },
         )

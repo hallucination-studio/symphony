@@ -51,6 +51,7 @@ async def test_official_app_used_when_no_custom_app() -> None:
         url = resp.json()["authorization_url"]
         params = _auth_url_params(url)
         assert params["client_id"] == "official-client-id"
+        assert params["actor"] == "app"
         assert params["state"] != "user_1"
         assert len(params["state"]) >= 24
 
@@ -214,6 +215,7 @@ async def test_oauth_callback_consumes_state_created_by_distinct_worker() -> Non
     installation = await callback_app.state.podium.get_linear_installation("user_1")
     assert installation is not None
     assert installation["access_token"] == "SECRET-token"
+    assert installation["actor"] == "app"
 
 
 @pytest.mark.asyncio
