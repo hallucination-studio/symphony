@@ -10,7 +10,17 @@ import pytest
 import performer.cli as performer_cli
 
 from performer.cli import parse_args, run_mode_attempt
-from performer_api.pipeline import GateSpecContent, GateSpecSnapshot, GraphNode, GraphNodeState, PASS_THRESHOLD, PlanProposal, RuntimeMode
+from performer_api.pipeline import (
+    GateSpecContent,
+    GateSpecSnapshot,
+    GateStep,
+    GateStepSource,
+    GraphNode,
+    GraphNodeState,
+    PASS_THRESHOLD,
+    PlanProposal,
+    RuntimeMode,
+)
 
 
 def test_cli_accepts_three_runtime_modes_and_attempt_paths() -> None:
@@ -273,12 +283,12 @@ async def test_plan_mode_writes_structured_result_file(tmp_path: Path) -> None:
         task_id="issue-1",
         created_by="plan-1",
         created_at="2026-07-06T00:00:00Z",
-        content=GateSpecContent(
-            acceptance_criteria=["feature works"],
-            verification_procedure=["pytest -q"],
-            rubric={str(score): f"score {score}" for score in range(5)},
-            pass_threshold=3,
-        ),
+            content=GateSpecContent(
+                acceptance_criteria=["feature works"],
+                verification_procedure=[GateStep("pytest -q", GateStepSource.ISSUE_REQUIREMENT)],
+                rubric={str(score): f"score {score}" for score in range(5)},
+                pass_threshold=3,
+            ),
     )
     proposal = PlanProposal(
         graph_id="graph-1",
@@ -345,12 +355,12 @@ async def test_plan_mode_uses_request_workspace_path_for_codex(tmp_path: Path) -
         task_id="issue-1",
         created_by="plan-1",
         created_at="2026-07-06T00:00:00Z",
-        content=GateSpecContent(
-            acceptance_criteria=["feature works"],
-            verification_procedure=["pytest -q"],
-            rubric={str(score): f"score {score}" for score in range(5)},
-            pass_threshold=3,
-        ),
+            content=GateSpecContent(
+                acceptance_criteria=["feature works"],
+                verification_procedure=[GateStep("pytest -q", GateStepSource.ISSUE_REQUIREMENT)],
+                rubric={str(score): f"score {score}" for score in range(5)},
+                pass_threshold=3,
+            ),
     )
     proposal = PlanProposal(
         graph_id="graph-1",
@@ -378,7 +388,8 @@ async def test_plan_mode_uses_request_workspace_path_for_codex(tmp_path: Path) -
     assert str(workspace) not in backend.prompts[0]
     assert '"workspace_path": "<planner-workspace>"' in backend.prompts[0]
     assert "Do not freeze absolute local filesystem paths" in backend.prompts[0]
-    assert "verification_procedure entry must be an executable POSIX shell command" in backend.prompts[0]
+    assert "verification_procedure entry must carry a step and source provenance" in backend.prompts[0]
+    assert "Every gate needs at least one authoritative source" in backend.prompts[0]
 
 
 @pytest.mark.asyncio
@@ -902,12 +913,12 @@ async def test_verify_mode_runs_frozen_gate_commands_and_fails_on_command_failur
         task_id="node-1",
         created_by="plan-1",
         created_at="2026-07-06T00:00:00Z",
-        content=GateSpecContent(
-            acceptance_criteria=["command must pass"],
-            verification_procedure=["python -c 'raise SystemExit(7)'"],
-            rubric={str(score): f"score {score}" for score in range(5)},
-            pass_threshold=3,
-        ),
+            content=GateSpecContent(
+                acceptance_criteria=["command must pass"],
+                verification_procedure=[GateStep("python -c 'raise SystemExit(7)'", GateStepSource.ISSUE_REQUIREMENT)],
+                rubric={str(score): f"score {score}" for score in range(5)},
+                pass_threshold=3,
+            ),
     )
     verification_input["gate_snapshot_hash"] = gate.hash
     request_path.write_text(
@@ -939,6 +950,52 @@ async def test_verify_mode_runs_frozen_gate_commands_and_fails_on_command_failur
     assert "stdout=''" in payload["reason"]
     assert "stderr=''" in payload["reason"]
     assert payload["error"] == payload["reason"]
+
+
+@pytest.mark.asyncio
+async def test_verify_mode_treats_planner_inferred_gate_failures_as_advisory(tmp_path: Path) -> None:
+    verification_input = _verification_input_with_patch(tmp_path, gate_hash="")
+    request_path = tmp_path / "verify-request.json"
+    result_path = tmp_path / "verify-result.json"
+    gate = GateSpecSnapshot.create(
+        gate_id="gate-1",
+        task_id="node-1",
+        created_by="plan-1",
+        created_at="2026-07-06T00:00:00Z",
+        content=GateSpecContent(
+            acceptance_criteria=["authoritative requirement passes"],
+            verification_procedure=[
+                GateStep("true", GateStepSource.ISSUE_REQUIREMENT),
+                GateStep("python -c 'raise SystemExit(7)'", GateStepSource.PLANNER_INFERRED),
+            ],
+            rubric={str(score): f"score {score}" for score in range(5)},
+            pass_threshold=3,
+        ),
+    )
+    verification_input["gate_snapshot_hash"] = gate.hash
+    request_path.write_text(
+        json.dumps(
+            {
+                "attempt_id": "verify-1",
+                "node_id": "node-1",
+                "graph_revision": 5,
+                "policy_revision": 2,
+                "lease_id": "lease-verify",
+                "fencing_token": "token-verify",
+                "gate_snapshot_hash": gate.hash,
+                "gate_snapshot": gate.to_dict(),
+                "verification_input": verification_input,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    await run_mode_attempt(RuntimeMode.VERIFY, request_path, result_path)
+
+    payload = json.loads(result_path.read_text(encoding="utf-8"))
+    assert payload["status"] == "succeeded"
+    assert payload["score"] == PASS_THRESHOLD
+    assert payload["passed"] is True
 
 
 @pytest.mark.asyncio
@@ -2092,7 +2149,7 @@ def _passing_gate() -> GateSpecSnapshot:
         created_at="2026-07-06T00:00:00Z",
         content=GateSpecContent(
             acceptance_criteria=["patch applies"],
-            verification_procedure=["test -f README.md"],
+            verification_procedure=[GateStep("test -f README.md", GateStepSource.ISSUE_REQUIREMENT)],
             rubric={str(score): f"score {score}" for score in range(5)},
             pass_threshold=3,
         ),

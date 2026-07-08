@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+from pathlib import Path
+import re
+import shlex
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from enum import StrEnum
@@ -89,6 +92,86 @@ class PlanValidatorError(StrEnum):
     POLICY_LIMIT_EXCEEDED = "policy_limit_exceeded"
     EXECUTOR_ONLY_GATE_DEPENDENCY = "executor_only_gate_dependency"
     VERIFIER_CREDENTIAL_UNAVAILABLE = "verifier_credential_unavailable"
+    NO_AUTHORITATIVE_GATE_STEP = "no_authoritative_gate_step"
+    INVALID_GATE_STEP_SOURCE = "invalid_gate_step_source"
+    REQUIRED_PARALLEL_SHAPE_MISSING = "required_parallel_shape_missing"
+
+
+class GateStepSource(StrEnum):
+    ISSUE_REQUIREMENT = "issue_requirement"
+    APPENDIX_HARNESS = "appendix_harness"
+    PLANNER_INFERRED = "planner_inferred"
+    SYSTEM_REPAIR = "system_repair"
+
+
+class GateStep(str):
+    source: GateStepSource | str
+
+    def __new__(
+        cls,
+        step: str,
+        source: GateStepSource | str = GateStepSource.PLANNER_INFERRED,
+    ) -> GateStep:
+        obj = str.__new__(cls, step)
+        try:
+            obj.source = source if isinstance(source, GateStepSource) else GateStepSource(str(source))
+        except ValueError:
+            obj.source = str(source)
+        return obj
+
+    @property
+    def step(self) -> str:
+        return str(self)
+
+    @property
+    def has_valid_source(self) -> bool:
+        return isinstance(self.source, GateStepSource)
+
+    @property
+    def is_authoritative(self) -> bool:
+        return self.has_valid_source and self.source is not GateStepSource.PLANNER_INFERRED
+
+    def to_dict(self) -> dict[str, str]:
+        source = self.source.value if isinstance(self.source, GateStepSource) else str(self.source)
+        return {"step": str(self), "source": source}
+
+    @classmethod
+    def from_obj(cls, value: Any) -> GateStep:
+        if isinstance(value, GateStep):
+            return value
+        if isinstance(value, dict):
+            return cls(str(value.get("step") or ""), str(value.get("source") or GateStepSource.PLANNER_INFERRED.value))
+        return cls(str(value), GateStepSource.PLANNER_INFERRED)
+
+
+@dataclass(frozen=True)
+class IntentSpec:
+    issue_id: str
+    issue_identifier: str
+    issue_description: str
+    required_gate_steps: list[GateStep] = field(default_factory=list)
+    requires_all_parallel_branches_for_downstream: bool = False
+
+    @classmethod
+    def from_issue(
+        cls,
+        *,
+        issue_id: str,
+        issue_identifier: str,
+        issue_description: str,
+    ) -> IntentSpec:
+        return cls(
+            issue_id=issue_id,
+            issue_identifier=issue_identifier,
+            issue_description=issue_description,
+            required_gate_steps=[
+                GateStep(step, GateStepSource.ISSUE_REQUIREMENT)
+                for step in _required_gate_commands_from_issue(issue_description, issue_identifier=issue_identifier)
+            ],
+            requires_all_parallel_branches_for_downstream=bool(
+                _BOTH_PARALLEL_DOWNSTREAM_PATTERN.search(issue_description)
+            ),
+        )
 
 
 @dataclass(frozen=True)
@@ -336,7 +419,7 @@ class GraphNode:
 @dataclass(frozen=True)
 class GateSpecContent:
     acceptance_criteria: list[str]
-    verification_procedure: list[str]
+    verification_procedure: list[GateStep | str | dict[str, Any]]
     rubric: dict[str, str]
     pass_threshold: int = PASS_THRESHOLD
     verifier_credentials: list[str] = field(default_factory=list)
@@ -344,11 +427,16 @@ class GateSpecContent:
     def __post_init__(self) -> None:
         if self.pass_threshold != PASS_THRESHOLD:
             raise ValueError(f"pass_threshold must be {PASS_THRESHOLD}")
+        object.__setattr__(
+            self,
+            "verification_procedure",
+            [GateStep.from_obj(step) for step in self.verification_procedure if step is not None],
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "acceptance_criteria": list(self.acceptance_criteria),
-            "verification_procedure": list(self.verification_procedure),
+            "verification_procedure": [step.to_dict() for step in self.verification_procedure],
             "rubric": dict(sorted(self.rubric.items())),
             "pass_threshold": self.pass_threshold,
             "verifier_credentials": list(self.verifier_credentials),
@@ -358,7 +446,7 @@ class GateSpecContent:
     def from_dict(cls, payload: dict[str, Any]) -> GateSpecContent:
         return cls(
             acceptance_criteria=_str_list(payload.get("acceptance_criteria")),
-            verification_procedure=_str_list(payload.get("verification_procedure")),
+            verification_procedure=_gate_steps(payload.get("verification_procedure")),
             rubric={str(key): str(value) for key, value in _dict(payload.get("rubric")).items()},
             pass_threshold=_int(payload.get("pass_threshold"), default=PASS_THRESHOLD),
             verifier_credentials=_str_list(payload.get("verifier_credentials")),
@@ -908,6 +996,129 @@ class PlanProposal:
         )
 
 
+class PlanRepair:
+    def __init__(self, intent_spec: IntentSpec):
+        self.intent_spec = intent_spec
+
+    def repair(self, proposal: PlanProposal) -> PlanProposal:
+        next_blocks = self._repair_parallel_dependency_shape(proposal)
+        normalized_gate_content = self._normalized_gate_content(proposal)
+        target_node_ids = set(proposal.exit_node_ids or [node.node_id for node in proposal.nodes])
+        next_gates: list[GateSpecSnapshot] = []
+        changed_hash_by_task: dict[str, str] = {}
+        for gate in proposal.gates:
+            existing_content = normalized_gate_content.get(gate.task_id) or gate.content
+            missing_required_steps = (
+                [step for step in self.intent_spec.required_gate_steps if step not in existing_content.verification_procedure]
+                if gate.task_id in target_node_ids
+                else []
+            )
+            if not missing_required_steps and existing_content is gate.content:
+                next_gates.append(gate)
+                continue
+            content = GateSpecContent(
+                acceptance_criteria=[
+                    *existing_content.acceptance_criteria,
+                    *[
+                        f"Preserve issue requirement verified by `{step.step}`."
+                        for step in missing_required_steps
+                    ],
+                ],
+                verification_procedure=[*existing_content.verification_procedure, *missing_required_steps],
+                rubric=dict(existing_content.rubric),
+                pass_threshold=existing_content.pass_threshold,
+                verifier_credentials=list(existing_content.verifier_credentials),
+            )
+            updated = GateSpecSnapshot.create(
+                gate_id=gate.gate_id,
+                task_id=gate.task_id,
+                created_by=gate.created_by or proposal.plan_attempt_id,
+                created_at=gate.created_at,
+                content=content,
+                version=gate.version,
+            )
+            next_gates.append(updated)
+            changed_hash_by_task[updated.task_id] = updated.hash
+        blocks_changed = next_blocks != list(proposal.blocks)
+        if not changed_hash_by_task and not blocks_changed:
+            return proposal
+        next_nodes = [
+            replace(node, gate_snapshot_hash=changed_hash_by_task[node.node_id])
+            if node.node_id in changed_hash_by_task
+            else node
+            for node in proposal.nodes
+        ]
+        entry_node_ids, exit_node_ids = (
+            _entry_exit_node_ids_for_blocks(next_nodes, next_blocks)
+            if blocks_changed
+            else (list(proposal.entry_node_ids), list(proposal.exit_node_ids))
+        )
+        return PlanProposal(
+            graph_id=proposal.graph_id,
+            plan_attempt_id=proposal.plan_attempt_id,
+            root_node_id=proposal.root_node_id,
+            nodes=next_nodes,
+            blocks=next_blocks,
+            gates=next_gates,
+            entry_node_ids=entry_node_ids,
+            exit_node_ids=exit_node_ids,
+        )
+
+    def _repair_parallel_dependency_shape(self, proposal: PlanProposal) -> list[tuple[str, str]]:
+        if not self.intent_spec.requires_all_parallel_branches_for_downstream:
+            return list(proposal.blocks)
+        required_edges = _required_parallel_dependency_edges(proposal)
+        if not required_edges:
+            return list(proposal.blocks)
+        next_blocks = list(dict.fromkeys(proposal.blocks))
+        next_block_set = set(next_blocks)
+        for edge in required_edges:
+            if edge not in next_block_set:
+                next_blocks.append(edge)
+                next_block_set.add(edge)
+        return next_blocks
+
+    def _normalized_gate_content(self, proposal: PlanProposal) -> dict[str, GateSpecContent]:
+        if not _issue_requests_shared_conflict_file(self.intent_spec.issue_description):
+            return {}
+        normalized: dict[str, GateSpecContent] = {}
+        node_labels = {node.node_id: f"{node.node_id} {node.title}".lower() for node in proposal.nodes}
+        for gate in proposal.gates:
+            label = node_labels.get(gate.task_id, gate.task_id.lower())
+            commands = list(gate.content.verification_procedure)
+            if _SHARED_CONFLICT_FILE not in " ".join(str(command) for command in commands) and "parallel" not in label:
+                continue
+            exact_text_commands = [
+                command
+                for command in commands
+                if _SHARED_CONFLICT_FILE in command
+                and ("grep -q" in command or command.startswith("git diff -- "))
+                and command.step not in self.intent_spec.issue_description
+            ]
+            if not exact_text_commands:
+                continue
+            next_commands = [command for command in commands if command not in exact_text_commands]
+            for command in (
+                f"test -f {_SHARED_CONFLICT_FILE}",
+                f'test -n "$(git diff -- {_SHARED_CONFLICT_FILE})"',
+            ):
+                repair_step = GateStep(command, GateStepSource.SYSTEM_REPAIR)
+                if repair_step not in next_commands:
+                    next_commands.append(repair_step)
+            normalized[gate.task_id] = GateSpecContent(
+                acceptance_criteria=[
+                    criterion
+                    for criterion in gate.content.acceptance_criteria
+                    if not ("exact marker" in criterion.lower() and _SHARED_CONFLICT_FILE not in self.intent_spec.issue_description)
+                ],
+                verification_procedure=next_commands,
+                rubric=dict(gate.content.rubric),
+                pass_threshold=gate.content.pass_threshold,
+                verifier_credentials=list(gate.content.verifier_credentials),
+            )
+        return normalized
+
+
 @dataclass(frozen=True)
 class WorkerLease:
     lease_id: str
@@ -1019,6 +1230,7 @@ class PipelineView:
     predicted_call_order: list[PredictedCall]
     capacity: dict[str, Any] = field(default_factory=dict)
     blocks: list[tuple[str, str]] = field(default_factory=list)
+    gates: list[dict[str, Any]] = field(default_factory=list)
     leases: list[dict[str, Any]] = field(default_factory=list)
     attempts: list[dict[str, Any]] = field(default_factory=list)
     integration_queue: list[dict[str, Any]] = field(default_factory=list)
@@ -1038,6 +1250,7 @@ class PipelineView:
             "predicted_call_order": [call.to_dict() for call in self.predicted_call_order],
             "capacity": _jsonable_dict(self.capacity),
             "blocks": [[source, target] for source, target in self.blocks],
+            "gates": [_jsonable_dict(gate) for gate in self.gates],
             "leases": [_jsonable_dict(lease) for lease in self.leases],
             "attempts": [_jsonable_dict(attempt) for attempt in self.attempts],
             "integration_queue": [_jsonable_dict(item) for item in self.integration_queue],
@@ -1056,9 +1269,11 @@ class PlanValidator:
         *,
         max_subtasks: int = 50,
         verifier_credentials: set[str] | None = None,
+        intent_spec: IntentSpec | None = None,
     ):
         self.max_subtasks = max_subtasks
         self.verifier_credentials = set(verifier_credentials or set())
+        self.intent_spec = intent_spec
 
     def validate(self, proposal: PlanProposal) -> set[PlanValidatorError]:
         errors: set[PlanValidatorError] = set()
@@ -1101,6 +1316,10 @@ class PlanValidator:
                 errors.add(PlanValidatorError.ILLEGAL_EDGE)
         if _has_cycle(node_ids, proposal.blocks):
             errors.add(PlanValidatorError.CYCLE_DETECTED)
+        if self.intent_spec is not None and self.intent_spec.requires_all_parallel_branches_for_downstream:
+            required_edges = set(_required_parallel_dependency_edges(proposal))
+            if not required_edges.issubset(set(proposal.blocks)):
+                errors.add(PlanValidatorError.REQUIRED_PARALLEL_SHAPE_MISSING)
         return errors
 
     def _validate_gate(self, gate: GateSpecSnapshot, errors: set[PlanValidatorError]) -> None:
@@ -1109,6 +1328,10 @@ class PlanValidator:
             errors.add(PlanValidatorError.MISSING_GATE)
         if not content.verification_procedure or not all(step.strip() for step in content.verification_procedure):
             errors.add(PlanValidatorError.GATE_UNEXECUTABLE)
+        if any(not step.has_valid_source for step in content.verification_procedure):
+            errors.add(PlanValidatorError.INVALID_GATE_STEP_SOURCE)
+        if content.verification_procedure and not any(step.is_authoritative for step in content.verification_procedure):
+            errors.add(PlanValidatorError.NO_AUTHORITATIVE_GATE_STEP)
         if set(content.rubric) != RUBRIC_SCORES or any(not str(value).strip() for value in content.rubric.values()):
             errors.add(PlanValidatorError.INCOMPLETE_RUBRIC)
         if content.pass_threshold != PASS_THRESHOLD:
@@ -1128,6 +1351,117 @@ def canonical_gate_hash(content: GateSpecContent | dict[str, Any]) -> str:
     payload = content.to_dict() if isinstance(content, GateSpecContent) else _jsonable_dict(content)
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+_RELATIVE_FILE_PATTERN = re.compile(r"(?<![\w./-])([A-Za-z0-9][A-Za-z0-9_./-]*\.[A-Za-z0-9][A-Za-z0-9_-]*)(?![\w./-])")
+_PYTEST_COMMAND_PATTERN = re.compile(r"\bpytest\s+[A-Za-z0-9_./-]+(?:\s+-[A-Za-z0-9_-]+)*")
+_REQUESTED_WORDS_PATTERN = re.compile(r"\bwords?\s+([A-Za-z0-9][A-Za-z0-9 _-]*?)(?=\.|,|;|$)", re.IGNORECASE)
+_BOTH_PARALLEL_DOWNSTREAM_PATTERN = re.compile(
+    r"\bdepend\s+on\s+both\s+parallel\s+subtasks\b",
+    re.IGNORECASE,
+)
+_SHARED_CONFLICT_FILE = "SYMPHONY_CONFLICT_SHARED.md"
+
+
+def _required_gate_commands_from_issue(issue_description: str, *, issue_identifier: str) -> list[str]:
+    commands: list[str] = []
+    pytest_spans = [match.span() for match in _PYTEST_COMMAND_PATTERN.finditer(issue_description)]
+    for match in _RELATIVE_FILE_PATTERN.finditer(issue_description):
+        if any(start <= match.start() < end for start, end in pytest_spans):
+            continue
+        path = match.group(1)
+        if _is_relative_workspace_file(path):
+            quoted_path = shlex.quote(path)
+            commands.append(f"test -f {quoted_path}")
+            if Path(path).name == "SYMPHONY_REAL_E2E_RESULT.md":
+                if issue_identifier:
+                    commands.append(f"grep -q {shlex.quote(issue_identifier)} {quoted_path}")
+                for phrase in _REQUESTED_WORDS_PATTERN.findall(issue_description):
+                    phrase = " ".join(phrase.split())
+                    if phrase:
+                        commands.append(f"grep -q {shlex.quote(phrase)} {quoted_path}")
+    for command in _PYTEST_COMMAND_PATTERN.findall(issue_description):
+        commands.append(command.strip())
+    return list(dict.fromkeys(commands))
+
+
+def _is_relative_workspace_file(path: str) -> bool:
+    candidate = Path(path)
+    if candidate.is_absolute() or ".." in candidate.parts:
+        return False
+    return bool(candidate.name) and not path.startswith(("./.git/", ".git/"))
+
+
+def _issue_requests_shared_conflict_file(issue_description: str) -> bool:
+    lowered = issue_description.lower()
+    return (
+        _SHARED_CONFLICT_FILE in issue_description
+        and "different content" in lowered
+        and "verified patches overlap" in lowered
+    )
+
+
+def _required_parallel_dependency_edges(proposal: PlanProposal) -> list[tuple[str, str]]:
+    node_by_id = {node.node_id: node for node in proposal.nodes}
+    node_ids = set(node_by_id)
+    labels = {node.node_id: f"{node.node_id} {node.title}".lower() for node in proposal.nodes}
+    parallel_node_ids = [node.node_id for node in proposal.nodes if "parallel" in labels[node.node_id]]
+    if len(parallel_node_ids) < 2:
+        return []
+    downstream_node_ids = [
+        node.node_id
+        for node in proposal.nodes
+        if node.node_id not in parallel_node_ids
+        and ("downstream" in labels[node.node_id] or "integration" in labels[node.node_id])
+    ]
+    if not downstream_node_ids:
+        downstream_node_ids = list(
+            dict.fromkeys(
+                target
+                for source, target in proposal.blocks
+                if source in parallel_node_ids and target in node_ids and target not in parallel_node_ids
+            )
+        )
+    if not downstream_node_ids:
+        downstream_node_ids = [
+            node_id for node_id in proposal.exit_node_ids if node_id in node_ids and node_id not in parallel_node_ids
+        ]
+    required_edges: list[tuple[str, str]] = []
+    for downstream_node_id in downstream_node_ids:
+        for parallel_node_id in parallel_node_ids:
+            edge = (parallel_node_id, downstream_node_id)
+            if _has_block_path(downstream_node_id, parallel_node_id, proposal.blocks):
+                continue
+            required_edges.append(edge)
+    return list(dict.fromkeys(required_edges))
+
+
+def _has_block_path(source: str, target: str, blocks: list[tuple[str, str]]) -> bool:
+    pending = [source]
+    seen: set[str] = set()
+    while pending:
+        current = pending.pop()
+        if current == target:
+            return True
+        if current in seen:
+            continue
+        seen.add(current)
+        pending.extend(next_node for from_node, next_node in blocks if from_node == current and next_node not in seen)
+    return False
+
+
+def _entry_exit_node_ids_for_blocks(
+    nodes: list[GraphNode],
+    blocks: list[tuple[str, str]],
+) -> tuple[list[str], list[str]]:
+    node_ids = {node.node_id for node in nodes}
+    incoming = {target for source, target in blocks if source in node_ids and target in node_ids}
+    outgoing = {source for source, target in blocks if source in node_ids and target in node_ids}
+    ordered_node_ids = [node.node_id for node in nodes]
+    return (
+        [node_id for node_id in ordered_node_ids if node_id not in incoming],
+        [node_id for node_id in ordered_node_ids if node_id not in outgoing],
+    )
 
 
 def _looks_like_executable_gate_command(step: str) -> bool:
@@ -1202,6 +1536,12 @@ def _str_list(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
     return [str(item) for item in value if item is not None and str(item)]
+
+
+def _gate_steps(value: Any) -> list[GateStep]:
+    if not isinstance(value, list):
+        return []
+    return [GateStep.from_obj(item) for item in value if item is not None]
 
 
 def _int(value: Any, *, default: int) -> int:

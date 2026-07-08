@@ -1023,7 +1023,7 @@ async def _lower_policy_during_parallel_execute_probe(
 
 def _pipeline_scenario(args: argparse.Namespace) -> str:
     scenario = str(getattr(args, "pipeline_scenario", "basic") or "basic")
-    allowed = {"basic", "parallel", "replan", "integration-conflict", "runtime-wait", "overall-dod"}
+    allowed = {"basic", "parallel", "replan", "integration-conflict", "runtime-wait", "gate-normalization", "overall-dod"}
     return scenario if scenario in allowed else "basic"
 
 
@@ -1258,11 +1258,20 @@ def _check_pipeline_scenario_acceptance(evidence: Evidence, scenario: str, pipel
             runtime_waits=waits,
             projections=projections,
         )
+    elif scenario == "gate-normalization":
+        gate_provenance_evidence = _gate_step_provenance_evidence(pipeline_view)
+        evidence.check(
+            "scenario:gate-normalization-provenance",
+            gate_provenance_evidence["all_steps_have_valid_source"]
+            and gate_provenance_evidence["all_gates_have_authoritative_step"],
+            **gate_provenance_evidence,
+        )
     elif scenario == "overall-dod":
         _check_pipeline_scenario_acceptance(evidence, "parallel", pipeline_view)
         _check_pipeline_scenario_acceptance(evidence, "replan", pipeline_view)
         _check_pipeline_scenario_acceptance(evidence, "integration-conflict", pipeline_view)
         _check_pipeline_scenario_acceptance(evidence, "runtime-wait", pipeline_view)
+        _check_pipeline_scenario_acceptance(evidence, "gate-normalization", pipeline_view)
 
 
 def _check_appendix_overall_acceptance(
@@ -1324,6 +1333,13 @@ def _check_appendix_overall_acceptance(
         "appendix:overall-downstream-depends-on-both-parallel-subtasks",
         overall_shape_evidence["has_downstream_with_both_parallel_blockers"],
         **overall_shape_evidence,
+    )
+    gate_provenance_evidence = _gate_step_provenance_evidence(pipeline_view)
+    evidence.check(
+        "appendix:gate-step-provenance-checkpoint",
+        gate_provenance_evidence["all_steps_have_valid_source"]
+        and gate_provenance_evidence["all_gates_have_authoritative_step"],
+        **gate_provenance_evidence,
     )
     s4_evidence = _superseded_node_evidence(pipeline_view)
     evidence.check("appendix:s4-no-old-node-dependent-dispatch", s4_evidence["no_superseded_dispatch"], **s4_evidence)
@@ -1472,6 +1488,43 @@ def _overall_downstream_depends_on_both_parallel_evidence(pipeline_view: dict[st
         "downstream_node_ids": downstream_node_ids,
         "matching_downstream_node_ids": matching_downstream,
         "blocks": [[source, target] for source, target in blocks],
+    }
+
+
+def _gate_step_provenance_evidence(pipeline_view: dict[str, Any]) -> dict[str, Any]:
+    valid_sources = {"issue_requirement", "appendix_harness", "planner_inferred", "system_repair"}
+    authoritative_sources = {"issue_requirement", "appendix_harness", "system_repair"}
+    gates = [gate for gate in pipeline_view.get("gates", []) if isinstance(gate, dict)]
+    missing_source_steps: list[dict[str, Any]] = []
+    invalid_source_steps: list[dict[str, Any]] = []
+    gates_without_authoritative_step: list[str] = []
+    for gate in gates:
+        gate_id = str(gate.get("gate_id") or gate.get("task_id") or "")
+        content = gate.get("content") if isinstance(gate.get("content"), dict) else {}
+        steps = content.get("verification_procedure") if isinstance(content, dict) else []
+        authoritative = False
+        for index, step in enumerate(steps if isinstance(steps, list) else []):
+            if not isinstance(step, dict):
+                missing_source_steps.append({"gate_id": gate_id, "index": index, "step": step})
+                continue
+            source = str(step.get("source") or "")
+            if not source:
+                missing_source_steps.append({"gate_id": gate_id, "index": index, "step": step.get("step")})
+                continue
+            if source not in valid_sources:
+                invalid_source_steps.append({"gate_id": gate_id, "index": index, "source": source})
+                continue
+            if source in authoritative_sources:
+                authoritative = True
+        if not authoritative:
+            gates_without_authoritative_step.append(gate_id)
+    return {
+        "gate_count": len(gates),
+        "all_steps_have_valid_source": bool(gates) and not missing_source_steps and not invalid_source_steps,
+        "all_gates_have_authoritative_step": bool(gates) and not gates_without_authoritative_step,
+        "missing_source_steps": missing_source_steps,
+        "invalid_source_steps": invalid_source_steps,
+        "gates_without_authoritative_step": gates_without_authoritative_step,
     }
 
 

@@ -28,6 +28,8 @@ from performer_api.pipeline import (
     DependencySatisfactionPolicy,
     GateSpecContent,
     GateSpecSnapshot,
+    GateStep,
+    GateStepSource,
     GraphNode,
     GraphNodeState,
     HumanEscalationReason,
@@ -69,7 +71,7 @@ def _gate(task_id: str) -> GateSpecSnapshot:
         created_at="2026-07-06T00:00:00Z",
         content=GateSpecContent(
             acceptance_criteria=[f"{task_id} works"],
-            verification_procedure=["pytest -q"],
+            verification_procedure=[GateStep("pytest -q", GateStepSource.ISSUE_REQUIREMENT)],
             rubric={str(score): f"score {score}" for score in range(5)},
             pass_threshold=3,
         ),
@@ -332,6 +334,48 @@ def test_graph_commit_persists_revision_nodes_edges_and_gates(tmp_path: Path) ->
     assert store.gate_for_node("a") is not None
 
 
+def test_graph_nodes_store_topology_and_node_runtime_state_is_node_keyed(tmp_path: Path) -> None:
+    store = ConductorPipelineStore(tmp_path)
+    store.commit_plan(_proposal())
+
+    with store.connect() as connection:
+        topology_payload = json.loads(
+            connection.execute(
+                "SELECT payload_json FROM graph_nodes WHERE revision = 1 AND node_id = 'a'",
+            ).fetchone()["payload_json"]
+        )
+        runtime_payload = json.loads(
+            connection.execute(
+                "SELECT payload_json FROM node_runtime_state WHERE node_id = 'a'",
+            ).fetchone()["payload_json"]
+        )
+
+    assert "state" not in topology_payload
+    assert "verify_score" not in topology_payload
+    assert "rework_count" not in topology_payload
+    assert "human_reason" not in topology_payload
+    assert runtime_payload["state"] == GraphNodeState.READY.value
+
+    before_topology = topology_payload
+    store.update_node_state("a", GraphNodeState.VERIFY_PASSED, verify_score=3)
+
+    with store.connect() as connection:
+        after_topology = json.loads(
+            connection.execute(
+                "SELECT payload_json FROM graph_nodes WHERE revision = 1 AND node_id = 'a'",
+            ).fetchone()["payload_json"]
+        )
+        after_runtime = json.loads(
+            connection.execute(
+                "SELECT payload_json FROM node_runtime_state WHERE node_id = 'a'",
+            ).fetchone()["payload_json"]
+        )
+
+    assert after_topology == before_topology
+    assert after_runtime["state"] == GraphNodeState.VERIFY_PASSED.value
+    assert after_runtime["verify_score"] == 3
+
+
 def test_graph_revisions_keep_nodes_immutable_when_node_id_is_reused(tmp_path: Path) -> None:
     store = ConductorPipelineStore(tmp_path)
     first = _proposal()
@@ -363,6 +407,7 @@ def test_graph_revisions_keep_nodes_immutable_when_node_id_is_reused(tmp_path: P
     assert store.get_node("a", revision=1).title == "A"
     assert store.get_node("a", revision=1).state is GraphNodeState.READY
     assert store.get_node("a", revision=2).title == "A revised"
+    assert store.get_node("a", revision=2).state is GraphNodeState.READY
     assert store.get_node("a").title == "A revised"
 
 
@@ -393,7 +438,7 @@ def test_start_attempt_updates_only_current_graph_revision(tmp_path: Path) -> No
 
     store.start_attempt(RuntimeMode.EXECUTE, node_id="a", attempt_id="exec-1", now=datetime(2026, 7, 6, tzinfo=timezone.utc))
 
-    assert store.get_node("a", revision=1).state is GraphNodeState.READY
+    assert store.get_node("a", revision=1).state is GraphNodeState.EXECUTING
     assert store.get_node("a", revision=2).state is GraphNodeState.EXECUTING
 
 
@@ -3925,6 +3970,39 @@ async def test_pipeline_linear_projector_ingests_human_added_blocks_as_new_graph
     assert store.get_node("b").state is GraphNodeState.READY
 
 
+def test_merge_human_added_blocks_is_union_only_and_idempotent(tmp_path: Path) -> None:
+    store = ConductorPipelineStore(tmp_path)
+    gate_a = _gate("a")
+    gate_b = _gate("b")
+    gate_c = _gate("c")
+    store.commit_plan(
+        PlanProposal(
+            graph_id="graph-1",
+            plan_attempt_id="plan-1",
+            root_node_id="root",
+            nodes=[
+                GraphNode(node_id="a", title="A", state=GraphNodeState.READY, gate_snapshot_hash=gate_a.hash),
+                GraphNode(node_id="b", title="B", state=GraphNodeState.READY, gate_snapshot_hash=gate_b.hash),
+                GraphNode(node_id="c", title="C", state=GraphNodeState.READY, gate_snapshot_hash=gate_c.hash),
+            ],
+            blocks=[("a", "b")],
+            gates=[gate_a, gate_b, gate_c],
+            entry_node_ids=["a", "c"],
+            exit_node_ids=["b", "c"],
+        )
+    )
+
+    revision = store.merge_human_added_blocks([("b", "c")], reason="human_linear_blocks_ingested")
+
+    assert revision is not None
+    assert revision.revision == 2
+    assert store.current_blocks() == [("a", "b"), ("b", "c")]
+
+    assert store.merge_human_added_blocks([("b", "c")], reason="human_linear_blocks_ingested") is None
+    assert store.current_graph_revision() == 2
+    assert store.current_blocks() == [("a", "b"), ("b", "c")]
+
+
 async def test_pipeline_linear_projector_does_not_clear_local_blocks_when_remote_relations_are_absent(tmp_path: Path) -> None:
     store = ConductorPipelineStore(tmp_path)
     store.commit_plan(_proposal())
@@ -4215,7 +4293,8 @@ def test_replan_replaces_node_with_subgraph_and_rewires_edges_atomically(tmp_pat
     assert store.blockers_for("t1") == ["a"]
     assert store.blockers_for("t2") == ["t1"]
     assert store.blockers_for("b") == ["t2"]
-    assert store.get_node("t", revision=1).state is GraphNodeState.REPLANNING
+    assert store.get_node("t", revision=1).title == "T"
+    assert store.get_node("t", revision=1).state is GraphNodeState.SUPERSEDED
 
 
 def test_replan_does_not_let_replacement_subgraph_turn_downstream_into_parent(tmp_path: Path) -> None:
@@ -4769,6 +4848,18 @@ def test_predicted_call_order_uses_topological_dependency_order_not_node_id_sort
 
     assert payload["blocks"] == [["z-a", "m-b"], ["m-b", "a-c"]]
     assert [call["node"] for call in payload["predicted_call_order"]] == ["z-a", "m-b", "a-c"]
+
+
+def test_pipeline_view_exposes_gate_step_provenance_for_shape_checkpoint(tmp_path: Path) -> None:
+    store = ConductorPipelineStore(tmp_path)
+    store.commit_plan(_proposal())
+
+    payload = store.pipeline_view().to_dict()
+
+    assert payload["blocks"] == [["a", "b"]]
+    assert payload["gates"]
+    steps = payload["gates"][0]["content"]["verification_procedure"]
+    assert steps == [{"step": "pytest -q", "source": "issue_requirement"}]
 
 
 def test_predicted_call_positions_share_capacity_wave_for_same_mode_ready_nodes(tmp_path: Path) -> None:

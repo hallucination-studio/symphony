@@ -16,9 +16,12 @@ from performer_api.config import CodexConfig
 from performer_api.pipeline import (
     GateSpecContent,
     GateSpecSnapshot,
+    GateStepSource,
     GraphNode,
     HumanEscalationReason,
+    IntentSpec,
     PASS_THRESHOLD,
+    PlanRepair,
     PlanProposal,
     PlanValidator,
     RuntimeMode,
@@ -115,7 +118,31 @@ PLAN_RESULT_SCHEMA: dict[str, object] = {
                                 "type": "object",
                                 "properties": {
                                     "acceptance_criteria": {"type": "array", "items": {"type": "string"}},
-                                    "verification_procedure": {"type": "array", "items": {"type": "string"}},
+                                    "verification_procedure": {
+                                        "type": "array",
+                                        "items": {
+                                            "oneOf": [
+                                                {"type": "string"},
+                                                {
+                                                    "type": "object",
+                                                    "properties": {
+                                                        "step": {"type": "string"},
+                                                        "source": {
+                                                            "type": "string",
+                                                            "enum": [
+                                                                "issue_requirement",
+                                                                "appendix_harness",
+                                                                "planner_inferred",
+                                                                "system_repair",
+                                                            ],
+                                                        },
+                                                    },
+                                                    "required": ["step", "source"],
+                                                    "additionalProperties": False,
+                                                },
+                                            ]
+                                        },
+                                    },
                                     "rubric": {
                                         "type": "object",
                                         "properties": {str(score): {"type": "string"} for score in range(5)},
@@ -253,13 +280,14 @@ async def _run_plan_mode(payload: dict[str, object], *, agent_backend: Any | Non
             prompt = _planner_retry_prompt(payload, last_error)
             continue
         try:
+            intent_spec = _intent_spec_from_plan_payload(payload)
             proposal = _proposal_from_model_payload(proposal_payload, attempt_id=attempt_id)
-            proposal = _proposal_preserving_issue_requirements(proposal, payload, attempt_id=attempt_id)
+            proposal = PlanRepair(intent_spec).repair(proposal)
         except (TypeError, ValueError) as exc:
             last_error = f"invalid_plan_proposal:{_sanitize_error(exc)}"
             prompt = _planner_retry_prompt(payload, last_error)
             continue
-        errors = PlanValidator().validate(proposal)
+        errors = PlanValidator(intent_spec=intent_spec).validate(proposal)
         if errors:
             last_error = "invalid_plan_proposal:" + ",".join(sorted(error.value for error in errors))
             prompt = _planner_retry_prompt(payload, last_error)
@@ -327,8 +355,11 @@ def _planner_prompt(payload: dict[str, object]) -> str:
         "parent-child aggregation is not a dependency edge. "
         "Use the Linear issue description as the source of task truth; the frozen gate acceptance "
         "criteria and verification procedure must preserve concrete requested files, commands, and "
-        "success conditions from that description. Each verification_procedure entry must be an "
-        "executable POSIX shell command run from the workspace root, not prose or markdown. Use "
+        "success conditions from that description. Each verification_procedure entry must carry "
+        "a step and source provenance. Use source=issue_requirement for checks traceable to the "
+        "issue, source=appendix_harness for acceptance harness checks, and source=planner_inferred "
+        "only for unmandated planner elaboration. Every gate needs at least one authoritative "
+        "source. Each step must be an executable POSIX shell command run from the workspace root, not prose or markdown. Use "
         "commands such as `test -f RELPATH`, `grep -q TEXT RELPATH`, and `pytest tests/test_smoke.py -q`; "
         "do not write steps like `Read the file`, `From the workspace root`, or `Run ... and confirm`. "
         "Do not freeze absolute local filesystem paths "
@@ -452,93 +483,14 @@ def _proposal_preserving_issue_requirements(
     *,
     attempt_id: str,
 ) -> PlanProposal:
-    issue_description = str(request_payload.get("issue_description") or "")
-    if not issue_description.strip():
-        return proposal
-    required_commands = _required_gate_commands_from_issue(
-        issue_description,
-        issue_identifier=str(request_payload.get("issue_identifier") or request_payload.get("issue_id") or ""),
-    )
-    next_blocks = _blocks_preserving_issue_dependency_requirements(proposal, issue_description)
-    blocks_changed = next_blocks != list(proposal.blocks)
-    if not required_commands and not blocks_changed:
-        return proposal
-    target_node_ids = set(proposal.exit_node_ids or [node.node_id for node in proposal.nodes])
-    normalized_gate_content = _gate_content_preserving_issue_gate_requirements(proposal, issue_description)
-    gates_by_task = {gate.task_id: gate for gate in proposal.gates}
-    next_gates: list[GateSpecSnapshot] = []
-    changed_hash_by_task: dict[str, str] = {}
-    for gate in proposal.gates:
-        normalized_content = normalized_gate_content.get(gate.task_id)
-        if gate.task_id not in target_node_ids and normalized_content is None:
-            next_gates.append(gate)
-            continue
-        existing_content = normalized_content or gate.content
-        existing_commands = list(existing_content.verification_procedure)
-        missing_commands = (
-            [command for command in required_commands if command not in existing_commands]
-            if gate.task_id in target_node_ids
-            else []
-        )
-        if not missing_commands and normalized_content is None:
-            next_gates.append(gate)
-            continue
-        content = GateSpecContent(
-            acceptance_criteria=[
-                *existing_content.acceptance_criteria,
-                *[f"Preserve issue requirement verified by `{command}`." for command in missing_commands],
-            ],
-            verification_procedure=[*existing_commands, *missing_commands],
-            rubric=dict(existing_content.rubric),
-            pass_threshold=existing_content.pass_threshold,
-            verifier_credentials=list(existing_content.verifier_credentials),
-        )
-        updated = GateSpecSnapshot.create(
-            gate_id=gate.gate_id,
-            task_id=gate.task_id,
-            created_by=gate.created_by or attempt_id,
-            created_at=gate.created_at,
-            content=content,
-            version=gate.version,
-        )
-        next_gates.append(updated)
-        changed_hash_by_task[updated.task_id] = updated.hash
-    if not changed_hash_by_task and not blocks_changed:
-        return proposal
-    next_nodes = [
-        (
-            GraphNode(
-                node_id=node.node_id,
-                title=node.title,
-                state=node.state,
-                issue_id=node.issue_id,
-                issue_identifier=node.issue_identifier,
-                parent_node_id=node.parent_node_id,
-                gate_snapshot_hash=changed_hash_by_task[node.node_id],
-                verify_score=node.verify_score,
-                rework_count=node.rework_count,
-                superseded_by=list(node.superseded_by),
-                human_reason=node.human_reason,
-            )
-            if node.node_id in changed_hash_by_task
-            else node
-        )
-        for node in proposal.nodes
-    ]
-    entry_node_ids, exit_node_ids = (
-        _entry_exit_node_ids_for_blocks(next_nodes, next_blocks)
-        if blocks_changed
-        else (list(proposal.entry_node_ids), list(proposal.exit_node_ids))
-    )
-    return PlanProposal(
-        graph_id=proposal.graph_id,
-        plan_attempt_id=proposal.plan_attempt_id,
-        root_node_id=proposal.root_node_id,
-        nodes=next_nodes,
-        blocks=next_blocks,
-        gates=next_gates,
-        entry_node_ids=entry_node_ids,
-        exit_node_ids=exit_node_ids,
+    return PlanRepair(_intent_spec_from_plan_payload(request_payload)).repair(proposal)
+
+
+def _intent_spec_from_plan_payload(payload: dict[str, object]) -> IntentSpec:
+    return IntentSpec.from_issue(
+        issue_id=str(payload.get("issue_id") or ""),
+        issue_identifier=str(payload.get("issue_identifier") or payload.get("issue_id") or ""),
+        issue_description=str(payload.get("issue_description") or ""),
     )
 
 
@@ -1229,10 +1181,16 @@ def _run_gate_commands(
                 env=_verification_command_env(),
             )
         except subprocess.CalledProcessError as exc:
+            if command.source is GateStepSource.PLANNER_INFERRED:
+                continue
             return _gate_command_failure_reason(command, exc)
         except subprocess.TimeoutExpired as exc:
+            if command.source is GateStepSource.PLANNER_INFERRED:
+                continue
             return _gate_command_failure_reason(command, exc)
         except (subprocess.SubprocessError, OSError) as exc:
+            if command.source is GateStepSource.PLANNER_INFERRED:
+                continue
             return _gate_command_failure_reason(command, exc)
     if verification_workspace is not None:
         try:

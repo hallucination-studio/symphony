@@ -477,6 +477,17 @@ def test_appendix_overall_acceptance_scores_after_required_checks(tmp_path: Path
             {"node_id": "integration-check", "title": "Integration check", "parent_node_id": "parent", "state": "verify_passed"},
         ],
         "blocks": [["parallel-alpha", "integration-check"], ["parallel-beta", "integration-check"]],
+        "gates": [
+            {
+                "gate_id": "gate-integration",
+                "task_id": "integration-check",
+                "content": {
+                    "verification_procedure": [
+                        {"step": "pytest tests/test_smoke.py -q", "source": "issue_requirement"}
+                    ]
+                },
+            }
+        ],
         "attempts": [
             {
                 "attempt_id": "verify-child-a",
@@ -516,6 +527,7 @@ def test_appendix_overall_acceptance_scores_after_required_checks(tmp_path: Path
 
     checks = {check["name"]: check for check in evidence.data["checks"]}
     assert checks["appendix:overall-downstream-depends-on-both-parallel-subtasks"]["passed"] is True
+    assert checks["appendix:gate-step-provenance-checkpoint"]["passed"] is True
     assert checks["appendix:evidence-scores-within-hard-caps"]["passed"] is True
     assert checks["appendix:feature-scores-r-plus-h"]["passed"] is True
 
@@ -673,6 +685,50 @@ def test_real_symphony_e2e_integration_conflict_acceptance_uses_resolved_queue_i
     assert check["name"] == "scenario:integration-conflict-human-action"
     assert check["passed"] is True
     assert evidence.data["failures"] == []
+
+
+def test_real_symphony_e2e_gate_normalization_acceptance_requires_gate_step_sources(tmp_path: Path) -> None:
+    tool = load_tool("real_symphony_e2e_run")
+    evidence = tool.Evidence(tmp_path / "report.json")
+
+    tool._check_pipeline_scenario_acceptance(
+        evidence,
+        "gate-normalization",
+        {
+            "gates": [
+                {
+                    "gate_id": "gate-a",
+                    "content": {
+                        "verification_procedure": [
+                            {"step": "test -f SYMPHONY_CONFLICT_SHARED.md", "source": "system_repair"},
+                            {"step": "grep -q invented SYMPHONY_CONFLICT_SHARED.md", "source": "planner_inferred"},
+                        ]
+                    },
+                }
+            ]
+        },
+    )
+
+    check = evidence.data["checks"][-1]
+    assert check["name"] == "scenario:gate-normalization-provenance"
+    assert check["passed"] is True
+
+    tool._check_pipeline_scenario_acceptance(
+        evidence,
+        "gate-normalization",
+        {
+            "gates": [
+                {
+                    "gate_id": "gate-b",
+                    "content": {"verification_procedure": [{"step": "grep -q invented file", "source": "planner_inferred"}]},
+                }
+            ]
+        },
+    )
+
+    failed = evidence.data["checks"][-1]
+    assert failed["passed"] is False
+    assert evidence.data["failures"][-1]["name"] == "scenario:gate-normalization-provenance"
 
 
 def test_real_symphony_e2e_human_answered_push_accepts_completed_child_required_guard() -> None:

@@ -31,5 +31,7 @@ def test_offline_importer_commits_valid_hand_written_plan_without_scheduling(tmp
 
     assert revision.revision == 1
     assert store.blockers_for("b") == ["a"]
-    assert store.gate_for_node("a") is not None
+    gate = store.gate_for_node("a")
+    assert gate is not None
+    assert gate.content.verification_procedure[0].source.value == "issue_requirement"
     assert store.active_lease("a", RuntimeMode.EXECUTE) is None

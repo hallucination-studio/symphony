@@ -5,6 +5,8 @@ from typing import Any
 from performer_api.pipeline import (
     GateSpecContent,
     GateSpecSnapshot,
+    GateStep,
+    GateStepSource,
     GraphNode,
     GraphNodeState,
     PASS_THRESHOLD,
@@ -41,7 +43,10 @@ def import_offline_plan(store: ConductorPipelineStore, payload: dict[str, Any]) 
             created_at=str(payload.get("created_at") or "1970-01-01T00:00:00Z"),
             content=GateSpecContent(
                 acceptance_criteria=_str_list(raw.get("acceptance_criteria")) or [f"{raw.get('title') or node_id} is complete"],
-                verification_procedure=_str_list(raw.get("verification_procedure")),
+                verification_procedure=[
+                    GateStep(step, GateStepSource.ISSUE_REQUIREMENT)
+                    for step in _str_list(raw.get("verification_procedure"))
+                ],
                 rubric={str(score): _rubric(score) for score in range(5)},
                 pass_threshold=PASS_THRESHOLD,
             ),

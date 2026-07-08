@@ -99,6 +99,10 @@ class ConductorPipelineStore:
                   payload_json TEXT NOT NULL,
                   PRIMARY KEY (revision, node_id)
                 );
+                CREATE TABLE IF NOT EXISTS node_runtime_state (
+                  node_id TEXT PRIMARY KEY,
+                  payload_json TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS graph_edges (
                   revision INTEGER NOT NULL,
                   blocker_node_id TEXT NOT NULL,
@@ -184,6 +188,7 @@ class ConductorPipelineStore:
                 """
             )
             self._migrate_graph_nodes_primary_key(connection)
+            self._migrate_node_runtime_state(connection)
 
     def _migrate_graph_nodes_primary_key(self, connection: sqlite3.Connection) -> None:
         columns = connection.execute("PRAGMA table_info(graph_nodes)").fetchall()
@@ -210,6 +215,29 @@ class ConductorPipelineStore:
             """
         )
         connection.execute("DROP TABLE graph_nodes_legacy")
+
+    def _migrate_node_runtime_state(self, connection: sqlite3.Connection) -> None:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS node_runtime_state (
+              node_id TEXT PRIMARY KEY,
+              payload_json TEXT NOT NULL
+            )
+            """
+        )
+        rows = connection.execute("SELECT node_id, payload_json FROM graph_nodes ORDER BY revision, node_id").fetchall()
+        for row in rows:
+            row_node_id = str(row["node_id"] if isinstance(row, sqlite3.Row) else row[0])
+            row_payload = str(row["payload_json"] if isinstance(row, sqlite3.Row) else row[1])
+            payload = _json_loads(row_payload)
+            node = GraphNode.from_dict(payload)
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO node_runtime_state (node_id, payload_json)
+                VALUES (?, ?)
+                """,
+                (row_node_id, _json_dumps(_node_runtime_payload(node))),
+            )
 
     def apply_runtime_config(self, envelope: RuntimeConfigEnvelope) -> bool:
         with self.connect() as connection:
@@ -273,7 +301,14 @@ class ConductorPipelineStore:
                     INSERT INTO graph_nodes (revision, node_id, payload_json)
                     VALUES (?, ?, ?)
                     """,
-                    (revision, node.node_id, _json_dumps(node.to_dict())),
+                    (revision, node.node_id, _json_dumps(_node_topology_payload(node))),
+                )
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO node_runtime_state (node_id, payload_json)
+                    VALUES (?, ?)
+                    """,
+                    (node.node_id, _json_dumps(_node_runtime_payload(node))),
                 )
             for source, target in proposal.blocks:
                 connection.execute(
@@ -359,9 +394,14 @@ class ConductorPipelineStore:
                 "SELECT payload_json FROM graph_nodes WHERE revision = ? AND node_id = ?",
                 (revision, node_id),
             ).fetchone()
+            runtime_row = connection.execute(
+                "SELECT payload_json FROM node_runtime_state WHERE node_id = ?",
+                (node_id,),
+            ).fetchone()
         if row is None:
             raise KeyError(node_id)
-        return GraphNode.from_dict(_json_loads(row["payload_json"]))
+        runtime_payload = _json_loads(runtime_row["payload_json"]) if runtime_row is not None else None
+        return _node_from_topology_and_runtime(_json_loads(row["payload_json"]), runtime_payload)
 
     def list_nodes(self) -> list[GraphNode]:
         revision = self.current_graph_revision()
@@ -369,10 +409,22 @@ class ConductorPipelineStore:
             return []
         with self.connect() as connection:
             rows = connection.execute(
-                "SELECT payload_json FROM graph_nodes WHERE revision = ? ORDER BY node_id",
+                """
+                SELECT graph_nodes.node_id, graph_nodes.payload_json AS topology_json, node_runtime_state.payload_json AS runtime_json
+                FROM graph_nodes
+                LEFT JOIN node_runtime_state ON node_runtime_state.node_id = graph_nodes.node_id
+                WHERE graph_nodes.revision = ?
+                ORDER BY graph_nodes.node_id
+                """,
                 (revision,),
             ).fetchall()
-        return [GraphNode.from_dict(_json_loads(row["payload_json"])) for row in rows]
+        return [
+            _node_from_topology_and_runtime(
+                _json_loads(row["topology_json"]),
+                _json_loads(row["runtime_json"]) if row["runtime_json"] is not None else None,
+            )
+            for row in rows
+        ]
 
     def blockers_for(self, node_id: str) -> list[str]:
         revision = self.current_graph_revision()
@@ -418,13 +470,24 @@ class ConductorPipelineStore:
         revision = self.current_graph_revision()
         with self.connect() as connection:
             rows = connection.execute(
-                "SELECT payload_json FROM graph_nodes WHERE revision = ? ORDER BY node_id",
+                """
+                SELECT graph_nodes.payload_json AS topology_json, node_runtime_state.payload_json AS runtime_json
+                FROM graph_nodes
+                LEFT JOIN node_runtime_state ON node_runtime_state.node_id = graph_nodes.node_id
+                WHERE graph_nodes.revision = ?
+                ORDER BY graph_nodes.node_id
+                """,
                 (revision,),
             ).fetchall()
         return [
             node
             for row in rows
-            for node in [GraphNode.from_dict(_json_loads(row["payload_json"]))]
+            for node in [
+                _node_from_topology_and_runtime(
+                    _json_loads(row["topology_json"]),
+                    _json_loads(row["runtime_json"]) if row["runtime_json"] is not None else None,
+                )
+            ]
             if node.parent_node_id == parent_node_id
         ]
 
@@ -508,13 +571,20 @@ class ConductorPipelineStore:
         rework_count: int | None = None,
     ) -> GraphNode:
         revision = self._current_graph_revision_on_connection(connection)
-        row = connection.execute(
+        topology_row = connection.execute(
             "SELECT payload_json FROM graph_nodes WHERE revision = ? AND node_id = ?",
             (revision, node_id),
         ).fetchone()
-        if row is None:
+        runtime_row = connection.execute(
+            "SELECT payload_json FROM node_runtime_state WHERE node_id = ?",
+            (node_id,),
+        ).fetchone()
+        if topology_row is None:
             raise KeyError(node_id)
-        node = GraphNode.from_dict(_json_loads(row["payload_json"]))
+        node = _node_from_topology_and_runtime(
+            _json_loads(topology_row["payload_json"]),
+            _json_loads(runtime_row["payload_json"]) if runtime_row is not None else None,
+        )
         updated = GraphNode(
             node_id=node.node_id,
             title=node.title,
@@ -529,8 +599,12 @@ class ConductorPipelineStore:
             human_reason=node.human_reason if human_reason is _UNCHANGED else human_reason,
         )
         connection.execute(
-            "UPDATE graph_nodes SET payload_json = ? WHERE revision = ? AND node_id = ?",
-            (_json_dumps(updated.to_dict()), revision, node_id),
+            """
+            INSERT INTO node_runtime_state (node_id, payload_json)
+            VALUES (?, ?)
+            ON CONFLICT(node_id) DO UPDATE SET payload_json = excluded.payload_json
+            """,
+            (node_id, _json_dumps(_node_runtime_payload(updated))),
         )
         return updated
 
@@ -631,8 +705,12 @@ class ConductorPipelineStore:
                 human_reason=node.human_reason,
             )
             connection.execute(
-                "UPDATE graph_nodes SET payload_json = ? WHERE revision = ? AND node_id = ?",
-                (_json_dumps(updated.to_dict()), graph_revision, node_id),
+                """
+                INSERT INTO node_runtime_state (node_id, payload_json)
+                VALUES (?, ?)
+                ON CONFLICT(node_id) DO UPDATE SET payload_json = excluded.payload_json
+                """,
+                (node_id, _json_dumps(_node_runtime_payload(updated))),
             )
         return lease
 
@@ -1588,11 +1666,31 @@ class ConductorPipelineStore:
             projections.append(refreshed)
         return projections
 
-    def replace_current_edges_from_linear(self, edges: list[tuple[str, str]], *, reason: str) -> GraphRevision | None:
+    def reject_superseded_edges(self, edges: list[tuple[str, str]]) -> list[tuple[str, str]]:
+        node_by_id = {node.node_id: node for node in self.list_nodes()}
+        superseded_node_ids = {node_id for node_id, node in node_by_id.items() if node.state is GraphNodeState.SUPERSEDED}
+        return [
+            (source, target)
+            for source, target in edges
+            if source not in superseded_node_ids and target not in superseded_node_ids
+        ]
+
+    def ignore_missing_remote_edges(self, remote_edges: list[tuple[str, str]]) -> list[tuple[str, str]]:
+        node_by_id = {node.node_id: node for node in self.list_nodes()}
+        live_node_ids = {node_id for node_id, node in node_by_id.items() if node.state is not GraphNodeState.SUPERSEDED}
+        current_edges = [
+            (source_node_id, target_node_id)
+            for source_node_id in live_node_ids
+            for target_node_id in self.dependents_for(source_node_id)
+            if target_node_id in live_node_ids
+        ]
+        return list(dict.fromkeys([*current_edges, *self.reject_superseded_edges(remote_edges)]))
+
+    def merge_human_added_blocks(self, edges: list[tuple[str, str]], *, reason: str) -> GraphRevision | None:
         current = self.current_graph_revision_record()
         if current is None:
             return None
-        normalized_edges = list(dict.fromkeys(edges))
+        normalized_edges = self.ignore_missing_remote_edges(edges)
         existing_all_edges = [
             (source, target)
             for node in self.list_nodes()
@@ -1646,7 +1744,7 @@ class ConductorPipelineStore:
                     INSERT INTO graph_nodes (revision, node_id, payload_json)
                     VALUES (?, ?, ?)
                     """,
-                    (revision, node.node_id, _json_dumps(node.to_dict())),
+                    (revision, node.node_id, _json_dumps(_node_topology_payload(node))),
                 )
             for source, target in normalized_edges:
                 connection.execute(
@@ -1662,6 +1760,9 @@ class ConductorPipelineStore:
             plan_attempt_id=current.plan_attempt_id,
             root_node_id=current.root_node_id,
         )
+
+    def replace_current_edges_from_linear(self, edges: list[tuple[str, str]], *, reason: str) -> GraphRevision | None:
+        return self.merge_human_added_blocks(edges, reason=reason)
 
     def replace_node_with_subgraph(self, node_id: str, subgraph: PlanProposal) -> GraphRevision:
         errors = PlanValidator().validate(subgraph)
@@ -1762,8 +1863,23 @@ class ConductorPipelineStore:
                     INSERT INTO graph_nodes (revision, node_id, payload_json)
                     VALUES (?, ?, ?)
                     """,
-                    (revision, node.node_id, _json_dumps(node.to_dict())),
+                    (revision, node.node_id, _json_dumps(_node_topology_payload(node))),
                 )
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO node_runtime_state (node_id, payload_json)
+                    VALUES (?, ?)
+                    """,
+                    (node.node_id, _json_dumps(_node_runtime_payload(node))),
+                )
+            connection.execute(
+                """
+                INSERT INTO node_runtime_state (node_id, payload_json)
+                VALUES (?, ?)
+                ON CONFLICT(node_id) DO UPDATE SET payload_json = excluded.payload_json
+                """,
+                (node_id, _json_dumps(_node_runtime_payload(next(node for node in retained_nodes if node.node_id == node_id)))),
+            )
             for source, target in new_edges:
                 connection.execute(
                     """
@@ -1969,8 +2085,6 @@ class ConductorPipelineStore:
             return False
         if attempt.node_id != result.node_id or attempt.mode is not result.mode:
             return False
-        if result.graph_revision != attempt.graph_revision:
-            return False
         if result.policy_revision != attempt.policy_revision:
             return False
         node = self.get_node(result.node_id)
@@ -2089,6 +2203,12 @@ class ConductorPipelineStore:
             predicted_call_order=self._predicted_call_order(nodes),
             capacity=envelope.scheduler_policy.capacity.to_dict(),
             blocks=self.current_blocks(),
+            gates=[
+                gate.to_dict()
+                for node in nodes
+                for gate in [self.gate_for_node(node.node_id)]
+                if gate is not None
+            ],
             leases=[lease.to_dict() for lease in active_leases],
             attempts=[attempt.to_dict() for attempt in self.list_attempts()],
             integration_queue=self.list_integration_queue(),
@@ -2399,24 +2519,7 @@ class PipelineLinearProjector:
         if not issue_id_by_node:
             return 0
         edges = self._linear_block_edges(children, node_by_issue_id)
-        node_by_id = {node.node_id: node for node in self.store.list_nodes()}
-        superseded_node_ids = {node_id for node_id, node in node_by_id.items() if node.state is GraphNodeState.SUPERSEDED}
-        if superseded_node_ids:
-            edges = [
-                (source_node_id, target_node_id)
-                for source_node_id, target_node_id in edges
-                if source_node_id not in superseded_node_ids and target_node_id not in superseded_node_ids
-            ]
-        current_edges = [
-            (source_node_id, target_node_id)
-            for source_node_id in node_by_id
-            for target_node_id in self.store.dependents_for(source_node_id)
-            if source_node_id not in superseded_node_ids and target_node_id not in superseded_node_ids
-        ]
-        if not edges and current_edges:
-            return 0
-        merged_edges = list(dict.fromkeys([*current_edges, *edges]))
-        graph_revision = self.store.replace_current_edges_from_linear(merged_edges, reason="human_linear_blocks_ingested")
+        graph_revision = self.store.merge_human_added_blocks(edges, reason="human_linear_blocks_ingested")
         return 1 if graph_revision is not None else 0
 
     def _linear_block_edges(
@@ -2586,7 +2689,14 @@ class PipelineCoordinator:
                 INSERT INTO graph_nodes (revision, node_id, payload_json)
                 VALUES (?, ?, ?)
                 """,
-                (revision, node_id, _json_dumps(node.to_dict())),
+                (revision, node_id, _json_dumps(_node_topology_payload(node))),
+            )
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO node_runtime_state (node_id, payload_json)
+                VALUES (?, ?)
+                """,
+                (node_id, _json_dumps(_node_runtime_payload(node))),
             )
         self.store.record_dispatch_context(
             node_id,
@@ -3476,6 +3586,37 @@ def _sanitize_error(exc: Exception | str) -> str:
     text = re.sub(r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]+", r"\1 [REDACTED]", text)
     text = re.sub(r"(?i)\b(token|password|client_secret|cookie)=([^ \t,;]+)", r"\1=[REDACTED]", text)
     return text[:500]
+
+
+def _node_topology_payload(node: GraphNode) -> dict[str, Any]:
+    return {
+        "node_id": node.node_id,
+        "title": node.title,
+        "issue_id": node.issue_id,
+        "issue_identifier": node.issue_identifier,
+        "parent_node_id": node.parent_node_id,
+        "gate_snapshot_hash": node.gate_snapshot_hash,
+        "superseded_by": list(node.superseded_by),
+    }
+
+
+def _node_runtime_payload(node: GraphNode) -> dict[str, Any]:
+    return {
+        "state": node.state.value,
+        "verify_score": node.verify_score,
+        "rework_count": node.rework_count,
+        "human_reason": node.human_reason.value if node.human_reason is not None else None,
+    }
+
+
+def _node_from_topology_and_runtime(topology_payload: dict[str, Any], runtime_payload: dict[str, Any] | None) -> GraphNode:
+    merged = dict(topology_payload)
+    runtime = runtime_payload or {}
+    merged["state"] = runtime.get("state") or topology_payload.get("state") or GraphNodeState.PLANNED.value
+    merged["verify_score"] = runtime.get("verify_score", topology_payload.get("verify_score"))
+    merged["rework_count"] = runtime.get("rework_count", topology_payload.get("rework_count", 0))
+    merged["human_reason"] = runtime.get("human_reason", topology_payload.get("human_reason"))
+    return GraphNode.from_dict(merged)
 
 
 def _json_dumps(payload: dict[str, Any]) -> str:
