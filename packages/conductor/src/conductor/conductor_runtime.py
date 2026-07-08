@@ -322,6 +322,8 @@ class ConductorRuntimeManager:
     def recover(self, instance: InstanceRecord) -> InstanceRecord | None:
         if instance.pid is None:
             return None
+        if not _pid_alive(instance.pid):
+            return None
         matches = _pid_matches_command(instance.pid, self.command)
         if not matches and not _can_recover_uninspectable_pid(instance):
             return None
@@ -347,6 +349,8 @@ class ConductorRuntimeManager:
         except (TypeError, ValueError):
             return None
         if pid <= 0:
+            return None
+        if not _pid_alive(pid):
             return None
         matches = _pid_matches_command(pid, self.command)
         probe_instance = instance.with_updates(pid=pid) if getattr(instance, "pid", None) != pid else instance

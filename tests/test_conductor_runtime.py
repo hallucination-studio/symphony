@@ -669,6 +669,20 @@ async def test_recovered_process_log_query_reports_pipe_warning(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
+async def test_recover_does_not_resurrect_dead_pid_from_log_file(tmp_path: Path) -> None:
+    manager = ConductorRuntimeManager(command="performer")
+    instance = make_instance(tmp_path).with_updates(process_status="running", pid=999999)
+    log_path = Path(instance.instance_dir) / "logs" / "performer-000001.log"
+    log_path.parent.mkdir(parents=True)
+    log_path.write_text("persisted log\n", encoding="utf-8")
+    instance = instance.with_updates(log_path=str(log_path))
+
+    recovered = manager.recover(instance)
+
+    assert recovered is None
+
+
+@pytest.mark.asyncio
 async def test_stop_recovers_running_pid_when_handle_cache_is_empty(tmp_path: Path) -> None:
     process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", "performer"])
     try:
