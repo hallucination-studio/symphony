@@ -184,6 +184,8 @@ def make_fixture_repo(path: Path) -> Path:
     subprocess.run(["git", "init", "-q"], cwd=path, check=True)
     subprocess.run(["git", "config", "user.email", "real-e2e@example.com"], cwd=path, check=True)
     subprocess.run(["git", "config", "user.name", "Symphony Real E2E"], cwd=path, check=True)
+    subprocess.run(["git", "config", "commit.gpgsign", "false"], cwd=path, check=True)
+    subprocess.run(["git", "config", "tag.gpgsign", "false"], cwd=path, check=True)
     subprocess.run(["git", "add", "."], cwd=path, check=True)
     subprocess.run(["git", "commit", "-q", "-m", "base"], cwd=path, check=True)
     return path

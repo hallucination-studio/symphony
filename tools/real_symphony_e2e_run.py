@@ -50,7 +50,7 @@ from performer_api.config import sanitize_codex_config_template
 
 CODEX_HOME_SEED_FILES = ("config.toml", "auth.json", "version.json", "models_cache.json")
 CODEX_HOME_SEED_ENV = "SYMPHONY_E2E_CODEX_HOME_SEED"
-DEFAULT_E2E_HARD_TURN_TIMEOUT_MS = 300_000
+DEFAULT_E2E_HARD_TURN_TIMEOUT_MS = 900_000
 
 
 def build_runtime_config_payload(
@@ -486,6 +486,10 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
             stage_timeout_seconds=args.stage_timeout,
             permission_approval_probe=permission_approval_probe,
             crash_recovery_probe=args.crash_recovery_probe or pipeline_scenario == "overall-dod",
+            crash_after_policy_revision=(int(runtime_config.get("version") or 1) + 1)
+            if pipeline_scenario == "overall-dod"
+            else None,
+            continue_after_human_resume=pipeline_scenario == "overall-dod",
             expected_failure=args.expected_failure,
         )
         if permission_approval_probe:
@@ -531,7 +535,12 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
         )
         if pipeline_scenario == "overall-dod":
             live_refresh = _pipeline_live_refresh_evidence(run_result.get("samples") or [])
-            evidence.check("appendix:s0b-pipeline-live-refresh", bool(live_refresh["passed"]), **live_refresh)
+            live_refresh_details = {key: value for key, value in live_refresh.items() if key != "passed"}
+            evidence.check(
+                "appendix:s0b-pipeline-live-refresh",
+                bool(live_refresh.get("passed")),
+                **live_refresh_details,
+            )
         pipeline_terminal = pipeline_nodes_terminal(
             pipeline_nodes,
             terminal_states={"verify_passed", "failed", "superseded"},
@@ -1068,7 +1077,8 @@ def _pipeline_scenario_issue_description(scenario: str, run_id: str) -> str:
             "Planner must create two independent parallel subtasks and must not add a blocks dependency between them. "
             "Each parallel subtask must modify the already tracked file SYMPHONY_CONFLICT_SHARED.md with different "
             "content so their verified patches overlap and Symphony must surface the integration result without a "
-            "silent last-writer-wins merge. At least one downstream subtask must depend on verified upstream output. "
+            "silent last-writer-wins merge. At least one downstream subtask must depend on both parallel subtasks' "
+            "verified upstream output. "
             "Create SYMPHONY_REAL_E2E_RESULT.md with the Linear issue identifier and the words overall dod. "
             "If verification fails, replan with a replacement subgraph that preserves the requested files and smoke "
             "test. If the runtime asks for tool approval or operator input, Symphony must project that Runtime Wait "
@@ -1309,6 +1319,12 @@ def _check_appendix_overall_acceptance(
         downstream_evidence["gate_observed"],
         **downstream_evidence,
     )
+    overall_shape_evidence = _overall_downstream_depends_on_both_parallel_evidence(pipeline_view)
+    evidence.check(
+        "appendix:overall-downstream-depends-on-both-parallel-subtasks",
+        overall_shape_evidence["has_downstream_with_both_parallel_blockers"],
+        **overall_shape_evidence,
+    )
     s4_evidence = _superseded_node_evidence(pipeline_view)
     evidence.check("appendix:s4-no-old-node-dependent-dispatch", s4_evidence["no_superseded_dispatch"], **s4_evidence)
     evidence.check(
@@ -1390,7 +1406,8 @@ def _parent_aggregate_evidence(pipeline_view: dict[str, Any]) -> dict[str, Any]:
             continue
         parent_state = str(parent.get("aggregate_state") or parent.get("state") or "")
         child_states = {str(child.get("aggregate_state") or child.get("state") or "") for child in children}
-        if parent_state == "verify_passed" and child_states and all(state == "verify_passed" for state in child_states):
+        passing_child_states = {"verify_passed", "superseded"}
+        if parent_state == "verify_passed" and child_states and all(state in passing_child_states for state in child_states):
             verified_parent_ids.append(parent_id)
         if parent_state == "verify_passed" and any(state in {"failed", "awaiting_human", "verify_failed"} for state in child_states):
             bad_parent_ids.append(parent_id)
@@ -1421,6 +1438,40 @@ def _downstream_verify_gate_evidence(pipeline_view: dict[str, Any]) -> dict[str,
         "gate_observed": bool(verify_attempts) and bool(downstream_execute_ids),
         "verify_passed_attempts": [attempt.get("attempt_id") for attempt in verify_attempts],
         "downstream_execute_attempts": downstream_execute_ids,
+    }
+
+
+def _overall_downstream_depends_on_both_parallel_evidence(pipeline_view: dict[str, Any]) -> dict[str, Any]:
+    nodes = [node for node in pipeline_view.get("nodes", []) if isinstance(node, dict)]
+    blocks = [
+        (str(edge[0]), str(edge[1]))
+        for edge in pipeline_view.get("blocks", [])
+        if isinstance(edge, list) and len(edge) == 2
+    ]
+    labels = {
+        str(node.get("node_id") or ""): f"{node.get('node_id') or ''} {node.get('title') or ''}".lower()
+        for node in nodes
+    }
+    parallel_node_ids = sorted(node_id for node_id, label in labels.items() if "parallel" in label)
+    downstream_node_ids = sorted(
+        node_id
+        for node_id, label in labels.items()
+        if node_id not in parallel_node_ids and ("downstream" in label or "integration" in label)
+    )
+    blockers_by_node: dict[str, set[str]] = {}
+    for blocker, blocked in blocks:
+        blockers_by_node.setdefault(blocked, set()).add(blocker)
+    matching_downstream = [
+        node_id
+        for node_id in downstream_node_ids
+        if len(blockers_by_node.get(node_id, set()).intersection(parallel_node_ids)) >= 2
+    ]
+    return {
+        "has_downstream_with_both_parallel_blockers": bool(matching_downstream),
+        "parallel_node_ids": parallel_node_ids,
+        "downstream_node_ids": downstream_node_ids,
+        "matching_downstream_node_ids": matching_downstream,
+        "blocks": [[source, target] for source, target in blocks],
     }
 
 

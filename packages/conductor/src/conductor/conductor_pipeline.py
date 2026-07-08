@@ -400,6 +400,20 @@ class ConductorPipelineStore:
             ).fetchall()
         return [str(row["blocked_node_id"]) for row in rows]
 
+    def current_blocks(self) -> list[tuple[str, str]]:
+        revision = self.current_graph_revision()
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT blocker_node_id, blocked_node_id
+                FROM graph_edges
+                WHERE revision = ?
+                ORDER BY rowid
+                """,
+                (revision,),
+            ).fetchall()
+        return [(str(row["blocker_node_id"]), str(row["blocked_node_id"])) for row in rows]
+
     def children_for(self, parent_node_id: str) -> list[GraphNode]:
         revision = self.current_graph_revision()
         with self.connect() as connection:
@@ -651,6 +665,37 @@ class ConductorPipelineStore:
             raise KeyError(attempt_id)
         return AttemptRecord.from_dict(_json_loads(row["payload_json"]))
 
+    def record_attempt_process_pid(self, attempt_id: str, process_pid: int | None) -> None:
+        if process_pid is None or process_pid <= 0:
+            return
+        attempt = self.get_attempt(attempt_id)
+        updated = AttemptRecord(
+            attempt_id=attempt.attempt_id,
+            node_id=attempt.node_id,
+            mode=attempt.mode,
+            state=attempt.state,
+            graph_revision=attempt.graph_revision,
+            policy_revision=attempt.policy_revision,
+            lease_id=attempt.lease_id,
+            fencing_token=attempt.fencing_token,
+            gate_snapshot_hash=attempt.gate_snapshot_hash,
+            score=attempt.score,
+            started_at=attempt.started_at,
+            completed_at=attempt.completed_at,
+            result_uri=attempt.result_uri,
+            error=attempt.error,
+            process_pid=process_pid,
+        )
+        with self.connect() as connection:
+            connection.execute(
+                """
+                UPDATE attempts
+                SET payload_json = ?
+                WHERE attempt_id = ?
+                """,
+                (_json_dumps(updated.to_dict()), updated.attempt_id),
+            )
+
     def list_attempts(self) -> list[AttemptRecord]:
         with self.connect() as connection:
             rows = connection.execute(
@@ -739,6 +784,7 @@ class ConductorPipelineStore:
             completed_at=_format_time(_utc(at)),
             result_uri=attempt.result_uri,
             error=error,
+            process_pid=attempt.process_pid,
         )
         connection.execute(
             """
@@ -1137,6 +1183,28 @@ class ConductorPipelineStore:
             if str(manifest.code.get("integrated_revision") or "").strip():
                 return manifest
         return None
+
+    def integration_terminal_for_node(self, node_id: str) -> bool:
+        if self.integrated_manifest_for_node(node_id) is not None:
+            return True
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT payload_json FROM integration_queue
+                WHERE node_id = ?
+                ORDER BY completed_at DESC, integration_id DESC
+                """,
+                (node_id,),
+            ).fetchall()
+        for row in rows:
+            payload = _json_loads(row["payload_json"])
+            if (
+                payload.get("status") == "resolved"
+                and str(payload.get("human_resolution") or "").strip()
+                and str(payload.get("completed_at") or "").strip()
+            ):
+                return True
+        return False
 
     def integrated_manifests_for_blockers(self, node_id: str) -> list[TaskOutputManifest]:
         manifests: list[TaskOutputManifest] = []
@@ -1635,6 +1703,26 @@ class ConductorPipelineStore:
             else node
             for node in retained_nodes
         ]
+        replacement_nodes = [
+            GraphNode(
+                node_id=node.node_id,
+                title=node.title,
+                state=node.state,
+                issue_id=node.issue_id,
+                issue_identifier=node.issue_identifier,
+                parent_node_id=self._replacement_parent_node_id(
+                    node.parent_node_id,
+                    inherited_parent_id=old.parent_node_id,
+                    subgraph_node_ids=subgraph_node_ids,
+                ),
+                gate_snapshot_hash=node.gate_snapshot_hash,
+                verify_score=node.verify_score,
+                rework_count=node.rework_count,
+                superseded_by=list(node.superseded_by),
+                human_reason=node.human_reason,
+            )
+            for node in subgraph.nodes
+        ]
         existing_edges = [
             (source, target)
             for source in nodes
@@ -1668,7 +1756,7 @@ class ConductorPipelineStore:
                     _now(),
                 ),
             )
-            for node in [*retained_nodes, *subgraph.nodes]:
+            for node in [*retained_nodes, *replacement_nodes]:
                 connection.execute(
                     """
                     INSERT INTO graph_nodes (revision, node_id, payload_json)
@@ -1698,6 +1786,19 @@ class ConductorPipelineStore:
             plan_attempt_id=subgraph.plan_attempt_id,
             root_node_id=subgraph.root_node_id,
         )
+
+    @staticmethod
+    def _replacement_parent_node_id(
+        candidate_parent_id: str | None,
+        *,
+        inherited_parent_id: str | None,
+        subgraph_node_ids: set[str],
+    ) -> str | None:
+        if candidate_parent_id in subgraph_node_ids or candidate_parent_id == inherited_parent_id:
+            return candidate_parent_id
+        if candidate_parent_id:
+            return inherited_parent_id
+        return inherited_parent_id
 
     def complete_attempt_with_fencing(
         self,
@@ -1860,11 +1961,21 @@ class ConductorPipelineStore:
         *,
         at: datetime,
     ) -> bool:
-        if result.graph_revision != self.current_graph_revision():
+        try:
+            attempt = self.get_attempt(result.attempt_id)
+        except KeyError:
             return False
-        if result.policy_revision != self.active_runtime_config().scheduler_policy.version:
+        if attempt.state is not AttemptState.RUNNING:
+            return False
+        if attempt.node_id != result.node_id or attempt.mode is not result.mode:
+            return False
+        if result.graph_revision != attempt.graph_revision:
+            return False
+        if result.policy_revision != attempt.policy_revision:
             return False
         node = self.get_node(result.node_id)
+        if node.state is GraphNodeState.SUPERSEDED:
+            return False
         if result.mode is not RuntimeMode.PLAN and (node.gate_snapshot_hash or "") != result.gate_snapshot_hash:
             return False
         lease = self.active_lease(result.node_id, result.mode)
@@ -1897,6 +2008,7 @@ class ConductorPipelineStore:
             completed_at=_format_time(_utc(at)),
             result_uri=attempt.result_uri,
             error=error,
+            process_pid=attempt.process_pid,
         )
         with self.connect() as connection:
             connection.execute(
@@ -1976,6 +2088,7 @@ class ConductorPipelineStore:
             modes=modes,
             predicted_call_order=self._predicted_call_order(nodes),
             capacity=envelope.scheduler_policy.capacity.to_dict(),
+            blocks=self.current_blocks(),
             leases=[lease.to_dict() for lease in active_leases],
             attempts=[attempt.to_dict() for attempt in self.list_attempts()],
             integration_queue=self.list_integration_queue(),
@@ -2090,14 +2203,14 @@ class ConductorPipelineStore:
             return [f"{blocker.node_id}: awaiting human{reason}"]
         if not _node_verify_passed(blocker):
             return [f"{blocker.node_id}: verify not passed"]
-        if self.integrated_manifest_for_node(blocker.node_id) is None:
+        if not self.integration_terminal_for_node(blocker.node_id):
             return [f"{blocker.node_id}: integration not completed"]
         return []
 
     def _child_ready_for_aggregate_downstream(self, child: GraphNode) -> bool:
         if child.state is GraphNodeState.SUPERSEDED:
             return True
-        return _node_verify_passed(child) and self.integrated_manifest_for_node(child.node_id) is not None
+        return _node_verify_passed(child) and self.integration_terminal_for_node(child.node_id)
 
     def _reserve_prediction_wave(
         self,
@@ -2163,7 +2276,7 @@ class PipelineScheduler:
     def _node_ready_for_downstream(self, node: GraphNode) -> bool:
         if node.state is GraphNodeState.SUPERSEDED:
             return True
-        return _node_verify_passed(node) and self.store.integrated_manifest_for_node(node.node_id) is not None
+        return _node_verify_passed(node) and self.store.integration_terminal_for_node(node.node_id)
 
     def dispatchable_nodes(self, mode: RuntimeMode) -> list[str]:
         nodes = self.store.list_nodes()
@@ -2298,10 +2411,12 @@ class PipelineLinearProjector:
             (source_node_id, target_node_id)
             for source_node_id in node_by_id
             for target_node_id in self.store.dependents_for(source_node_id)
+            if source_node_id not in superseded_node_ids and target_node_id not in superseded_node_ids
         ]
         if not edges and current_edges:
             return 0
-        graph_revision = self.store.replace_current_edges_from_linear(edges, reason="human_linear_blocks_ingested")
+        merged_edges = list(dict.fromkeys([*current_edges, *edges]))
+        graph_revision = self.store.replace_current_edges_from_linear(merged_edges, reason="human_linear_blocks_ingested")
         return 1 if graph_revision is not None else 0
 
     def _linear_block_edges(
@@ -2570,7 +2685,7 @@ class PipelineCoordinator:
                     result_path = paths["result_path"]
                     if result_path.exists():
                         result_path.unlink()
-                    await self.runtime_manager.start(
+                    started_instance = await self.runtime_manager.start(
                         instance,
                         env=env,
                         mode=mode.value,
@@ -2579,6 +2694,7 @@ class PipelineCoordinator:
                         attempt_request_path=str(paths["request_path"]),
                         attempt_result_path=str(result_path),
                     )
+                    self.store.record_attempt_process_pid(attempt_id, getattr(started_instance, "pid", None))
                     _append_instance_log(
                         instance,
                         (
@@ -2586,6 +2702,7 @@ class PipelineCoordinator:
                             f"mode={mode.value} node_id={node_id} attempt_id={attempt_id} "
                             f"lease_id={lease.lease_id} graph_revision={self.store.current_graph_revision()} "
                             f"policy_revision={envelope.scheduler_policy.version} "
+                            f"process_pid={getattr(started_instance, 'pid', None)} "
                             f"request_path={paths['request_path']} result_path={result_path}"
                         ),
                     )
@@ -2720,6 +2837,9 @@ class PipelineCoordinator:
             lease = self.store.active_lease(attempt.node_id, attempt.mode)
             if lease is None or lease.attempt_id != attempt.attempt_id:
                 continue
+            result_path = Path(instance.instance_dir) / "state" / "pipeline" / attempt.attempt_id / "attempt-result.json"
+            if result_path.exists():
+                continue
             self._fail_started_attempt_for_backend_error(
                 mode=attempt.mode,
                 node_id=attempt.node_id,
@@ -2764,6 +2884,9 @@ class PipelineCoordinator:
             return 0
         snapshot_lease_id = str(snapshot.get("lease_id") or "").strip()
         if snapshot_lease_id and snapshot_lease_id != lease.lease_id:
+            return 0
+        snapshot_result_path_value = str(snapshot.get("result_path") or "").strip()
+        if snapshot_result_path_value and Path(snapshot_result_path_value).exists():
             return 0
         error = _attempt_snapshot_exit_error(snapshot, instance)
         self._fail_started_attempt_for_backend_error(

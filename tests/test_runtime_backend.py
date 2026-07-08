@@ -56,6 +56,29 @@ def test_prepare_mode_environment_passes_local_verifier_replan_failure_probe(tmp
 
     assert env["SYMPHONY_LOCAL_VERIFIER_HOME"] == str(tmp_path / "runtime-homes" / "verify" / "local-verifier")
     assert env["SYMPHONY_FORCE_FIRST_VERIFY_FAILURE_FOR_REPLAN"] == "1"
+    assert env["SYMPHONY_LOCAL_VERIFIER_PROBE_HOME"] == str(tmp_path / "runtime-homes" / "verify" / "local-verifier")
+
+
+def test_local_verifier_replan_failure_probe_marker_survives_attempt_scoped_homes(tmp_path: Path) -> None:
+    profile = RuntimeProfile(
+        name="deterministic-verifier",
+        backend="local-verifier",
+        mode=RuntimeMode.VERIFY,
+        settings={"force_first_verify_failure_for_replan": True},
+    )
+
+    first = prepare_mode_environment(tmp_path, profile, home_scope="verify-attempt-1")
+    second = prepare_mode_environment(tmp_path, profile, home_scope="verify-attempt-2")
+
+    assert first["SYMPHONY_LOCAL_VERIFIER_HOME"] != second["SYMPHONY_LOCAL_VERIFIER_HOME"]
+    assert first["SYMPHONY_LOCAL_VERIFIER_HOME"].endswith(
+        "/runtime-homes/verify/verify-attempt-1/local-verifier"
+    )
+    assert second["SYMPHONY_LOCAL_VERIFIER_HOME"].endswith(
+        "/runtime-homes/verify/verify-attempt-2/local-verifier"
+    )
+    assert first["SYMPHONY_LOCAL_VERIFIER_PROBE_HOME"] == second["SYMPHONY_LOCAL_VERIFIER_PROBE_HOME"]
+    assert first["SYMPHONY_LOCAL_VERIFIER_PROBE_HOME"] == str(tmp_path / "runtime-homes" / "verify" / "local-verifier")
 
 
 def test_prepare_mode_environment_rejects_local_verifier_for_plan_and_execute(tmp_path: Path) -> None:

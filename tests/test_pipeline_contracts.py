@@ -124,6 +124,7 @@ def test_attempt_record_persists_fencing_and_revision_context() -> None:
         lease_id="lease-exec",
         fencing_token="fence-exec",
         gate_snapshot_hash="sha256:gate",
+        process_pid=4242,
     )
 
     payload = attempt.to_dict()
@@ -133,10 +134,12 @@ def test_attempt_record_persists_fencing_and_revision_context() -> None:
     assert payload["policy_revision"] == 3
     assert payload["lease_id"] == "lease-exec"
     assert payload["fencing_token"] == "fence-exec"
+    assert payload["process_pid"] == 4242
     assert restored.graph_revision == 7
     assert restored.policy_revision == 3
     assert restored.lease_id == "lease-exec"
     assert restored.fencing_token == "fence-exec"
+    assert restored.process_pid == 4242
 
 
 def test_plan_validator_rejects_cycles_missing_gates_and_incomplete_rubrics() -> None:

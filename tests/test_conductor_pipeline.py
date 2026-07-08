@@ -553,6 +553,7 @@ def test_start_due_attempts_refuses_ineligible_backend_before_dispatch(tmp_path:
 
 def test_parallel_same_issue_execute_attempts_use_distinct_codex_homes(tmp_path: Path) -> None:
     store = ConductorPipelineStore(tmp_path)
+    gate_root = _gate("root")
     gate_a = _gate("a")
     gate_b = _gate("b")
     store.apply_runtime_config(
@@ -1174,6 +1175,237 @@ def test_lowered_policy_limit_stops_new_dispatch_without_preempting_active_lease
     assert store.active_lease("b", RuntimeMode.EXECUTE) is None
     assert store.get_node("a").state is GraphNodeState.EXECUTING
     assert store.get_node("b").state is GraphNodeState.READY
+
+
+def test_result_fence_accepts_inflight_attempt_after_policy_revision_changes(tmp_path: Path) -> None:
+    store = ConductorPipelineStore(tmp_path / "store")
+    store.apply_runtime_config(RuntimeConfigEnvelope("group-1", 1, _policy(1)))
+    store.commit_plan(_proposal())
+    now = datetime(2026, 7, 6, tzinfo=timezone.utc)
+    lease = store.start_attempt(RuntimeMode.EXECUTE, node_id="a", attempt_id="exec-1", now=now, ttl_seconds=600)
+    gate_hash = store.get_node("a").gate_snapshot_hash or ""
+    assert store.apply_runtime_config(RuntimeConfigEnvelope("group-1", 2, _policy(2)))
+
+    result_path = tmp_path / "inst-1" / "state" / "pipeline" / "exec-1" / "attempt-result.json"
+    result_path.parent.mkdir(parents=True)
+    result_path.write_text(
+        json.dumps(
+            ExecuteAttemptResult(
+                attempt_id="exec-1",
+                node_id="a",
+                status=AttemptState.SUCCEEDED,
+                graph_revision=1,
+                policy_revision=1,
+                gate_snapshot_hash=gate_hash,
+                lease_id=lease.lease_id,
+                fencing_token=lease.fencing_token,
+                verification_input={
+                    "task_id": "a",
+                    "execute_attempt_id": "exec-1",
+                    "base_revision": "base",
+                    "patch_uri": "artifact://patch",
+                    "patch_hash": "sha256:patch",
+                    "expected_result_tree": "tree",
+                    "artifact_uris": [],
+                    "declared_commands": ["pytest -q"],
+                    "evidence_uri": "artifact://evidence",
+                    "gate_snapshot_hash": gate_hash,
+                    "repository_path": "/repo",
+                    "workspace_path": "/workspace",
+                },
+            ).to_dict()
+        ),
+        encoding="utf-8",
+    )
+
+    class Instance:
+        id = "inst-1"
+        instance_dir = str(tmp_path / "inst-1")
+        log_path = str(tmp_path / "inst-1" / "logs" / "performer.log")
+
+    coordinator = PipelineCoordinator(store=store, runtime_manager=object())
+
+    assert coordinator.collect_result_files(Instance(), now=now + timedelta(seconds=60)) == 1
+    assert store.get_attempt("exec-1").state is AttemptState.SUCCEEDED
+    assert store.get_node("a").state is GraphNodeState.VERIFYING
+    assert store.active_lease("a", RuntimeMode.EXECUTE) is None
+    assert result_path.with_suffix(".json.applied").exists()
+
+
+def test_result_fence_rejects_policy_revision_mismatched_to_attempt(tmp_path: Path) -> None:
+    store = ConductorPipelineStore(tmp_path)
+    store.apply_runtime_config(RuntimeConfigEnvelope("group-1", 1, _policy(1)))
+    store.commit_plan(_proposal())
+    now = datetime(2026, 7, 6, tzinfo=timezone.utc)
+    lease = store.start_attempt(RuntimeMode.EXECUTE, node_id="a", attempt_id="exec-1", now=now, ttl_seconds=600)
+    gate_hash = store.get_node("a").gate_snapshot_hash or ""
+    assert store.apply_runtime_config(RuntimeConfigEnvelope("group-1", 2, _policy(2)))
+
+    assert not store.complete_attempt_with_fencing(
+        ExecuteAttemptResult(
+            attempt_id="exec-1",
+            node_id="a",
+            status=AttemptState.SUCCEEDED,
+            graph_revision=1,
+            policy_revision=2,
+            gate_snapshot_hash=gate_hash,
+            lease_id=lease.lease_id,
+            fencing_token=lease.fencing_token,
+            verification_input={
+                "task_id": "a",
+                "execute_attempt_id": "exec-1",
+                "base_revision": "base",
+                "patch_uri": "artifact://patch",
+                "patch_hash": "sha256:patch",
+                "expected_result_tree": "tree",
+                "artifact_uris": [],
+                "declared_commands": ["pytest -q"],
+                "evidence_uri": "artifact://evidence",
+                "gate_snapshot_hash": gate_hash,
+                "repository_path": "/repo",
+                "workspace_path": "/workspace",
+            },
+        ),
+        at=now + timedelta(seconds=60),
+    )
+    assert store.get_attempt("exec-1").state is AttemptState.RUNNING
+    assert store.active_lease("a", RuntimeMode.EXECUTE) is not None
+
+
+def test_result_fence_accepts_inflight_attempt_after_unrelated_graph_revision_changes(tmp_path: Path) -> None:
+    store = ConductorPipelineStore(tmp_path)
+    gate_a = _gate("a")
+    gate_t = _gate("t")
+    gate_b = _gate("b")
+    store.apply_runtime_config(RuntimeConfigEnvelope("group-1", 1, _policy(1)))
+    store.commit_plan(
+        PlanProposal(
+            graph_id="graph-1",
+            plan_attempt_id="plan-1",
+            root_node_id="root",
+            nodes=[
+                GraphNode(node_id="a", title="A", state=GraphNodeState.READY, gate_snapshot_hash=gate_a.hash),
+                GraphNode(node_id="t", title="T", state=GraphNodeState.REPLANNING, gate_snapshot_hash=gate_t.hash),
+                GraphNode(node_id="b", title="B", state=GraphNodeState.PLANNED, gate_snapshot_hash=gate_b.hash),
+            ],
+            blocks=[("t", "b")],
+            gates=[gate_a, gate_t, gate_b],
+            entry_node_ids=["a", "t"],
+            exit_node_ids=["a", "b"],
+        )
+    )
+    now = datetime(2026, 7, 6, tzinfo=timezone.utc)
+    lease = store.start_attempt(RuntimeMode.EXECUTE, node_id="a", attempt_id="exec-a", now=now, ttl_seconds=600)
+    gate_t1 = _gate("t1")
+    store.replace_node_with_subgraph(
+        "t",
+        PlanProposal(
+            graph_id="graph-1",
+            plan_attempt_id="plan-rewrite",
+            root_node_id="root",
+            nodes=[GraphNode(node_id="t1", title="T1", state=GraphNodeState.READY, gate_snapshot_hash=gate_t1.hash)],
+            blocks=[],
+            gates=[gate_t1],
+            entry_node_ids=["t1"],
+            exit_node_ids=["t1"],
+        ),
+    )
+
+    assert store.current_graph_revision() == 2
+    assert store.get_node("a").state is GraphNodeState.EXECUTING
+    assert store.complete_attempt_with_fencing(
+        ExecuteAttemptResult(
+            attempt_id="exec-a",
+            node_id="a",
+            status=AttemptState.SUCCEEDED,
+            graph_revision=1,
+            policy_revision=1,
+            gate_snapshot_hash=gate_a.hash,
+            lease_id=lease.lease_id,
+            fencing_token=lease.fencing_token,
+            verification_input={
+                "task_id": "a",
+                "execute_attempt_id": "exec-a",
+                "base_revision": "base",
+                "patch_uri": "artifact://patch",
+                "patch_hash": "sha256:patch",
+                "expected_result_tree": "tree",
+                "artifact_uris": [],
+                "declared_commands": ["pytest -q"],
+                "evidence_uri": "artifact://evidence",
+                "gate_snapshot_hash": gate_a.hash,
+                "repository_path": "/repo",
+                "workspace_path": "/workspace",
+            },
+        ),
+        at=now + timedelta(seconds=60),
+    )
+    assert store.get_attempt("exec-a").state is AttemptState.SUCCEEDED
+    assert store.get_node("a").state is GraphNodeState.VERIFYING
+
+
+def test_result_fence_rejects_superseded_node_attempt_after_graph_revision_changes(tmp_path: Path) -> None:
+    store = ConductorPipelineStore(tmp_path)
+    gate_t = _gate("t")
+    store.apply_runtime_config(RuntimeConfigEnvelope("group-1", 1, _policy(1)))
+    store.commit_plan(
+        PlanProposal(
+            graph_id="graph-1",
+            plan_attempt_id="plan-1",
+            root_node_id="t",
+            nodes=[GraphNode(node_id="t", title="T", state=GraphNodeState.READY, gate_snapshot_hash=gate_t.hash)],
+            blocks=[],
+            gates=[gate_t],
+            entry_node_ids=["t"],
+            exit_node_ids=["t"],
+        )
+    )
+    now = datetime(2026, 7, 6, tzinfo=timezone.utc)
+    lease = store.start_attempt(RuntimeMode.EXECUTE, node_id="t", attempt_id="exec-t", now=now, ttl_seconds=600)
+    gate_t1 = _gate("t1")
+    store.replace_node_with_subgraph(
+        "t",
+        PlanProposal(
+            graph_id="graph-1",
+            plan_attempt_id="plan-rewrite",
+            root_node_id="t1",
+            nodes=[GraphNode(node_id="t1", title="T1", state=GraphNodeState.READY, gate_snapshot_hash=gate_t1.hash)],
+            blocks=[],
+            gates=[gate_t1],
+            entry_node_ids=["t1"],
+            exit_node_ids=["t1"],
+        ),
+    )
+
+    assert store.get_node("t").state is GraphNodeState.SUPERSEDED
+    assert not store.complete_attempt_with_fencing(
+        ExecuteAttemptResult(
+            attempt_id="exec-t",
+            node_id="t",
+            status=AttemptState.SUCCEEDED,
+            graph_revision=1,
+            policy_revision=1,
+            gate_snapshot_hash=gate_t.hash,
+            lease_id=lease.lease_id,
+            fencing_token=lease.fencing_token,
+            verification_input={
+                "task_id": "t",
+                "execute_attempt_id": "exec-t",
+                "base_revision": "base",
+                "patch_uri": "artifact://patch",
+                "patch_hash": "sha256:patch",
+                "expected_result_tree": "tree",
+                "artifact_uris": [],
+                "declared_commands": ["pytest -q"],
+                "evidence_uri": "artifact://evidence",
+                "gate_snapshot_hash": gate_t.hash,
+                "repository_path": "/repo",
+                "workspace_path": "/workspace",
+            },
+        ),
+        at=now + timedelta(seconds=60),
+    )
+    assert store.get_attempt("exec-t").state is AttemptState.RUNNING
 
 
 def test_reclaiming_expired_attempt_lease_times_out_attempt_and_escalates(tmp_path: Path) -> None:
@@ -1852,6 +2084,7 @@ def test_integration_conflict_creates_human_wait_and_pauses_node(tmp_path: Path)
         score=3,
         code={"patch_hash": "sha256:patch"},
     )
+    store.update_node_state("a", GraphNodeState.VERIFY_PASSED, verify_score=3)
     store.publish_task_output_manifest(manifest)
     queued = store.enqueue_integration(manifest)
 
@@ -1887,10 +2120,15 @@ def test_resolving_integration_conflict_wait_marks_integration_resolved_and_unpa
         score=3,
         code={"patch_hash": "sha256:patch"},
     )
+    store.update_node_state("a", GraphNodeState.VERIFY_PASSED, verify_score=3)
     store.publish_task_output_manifest(manifest)
     queued = store.enqueue_integration(manifest)
     store.complete_integration(queued["integration_id"], status="conflict", error="patch conflict")
     wait = store.list_human_waits()[0]
+    scheduler = PipelineScheduler(store)
+
+    assert scheduler.is_dependency_satisfied("a") is False
+    assert scheduler.promote_ready_nodes() == []
 
     resumed = store.resume_human_wait(wait["wait_id"], resolution="conflict resolved")
 
@@ -1903,6 +2141,9 @@ def test_resolving_integration_conflict_wait_marks_integration_resolved_and_unpa
     assert integration["completed_at"]
     assert integration["error"] == "patch conflict"
     assert integration["human_resolution"] == "conflict resolved"
+    assert scheduler.is_dependency_satisfied("a") is True
+    assert scheduler.promote_ready_nodes() == ["b"]
+    assert scheduler.dispatchable_nodes(RuntimeMode.EXECUTE) == ["b"]
 
 
 def test_process_queued_integration_applies_patch_and_records_integrated_revision(tmp_path: Path) -> None:
@@ -3775,6 +4016,90 @@ async def test_pipeline_linear_projector_ignores_stale_blocks_from_superseded_no
     assert store.blockers_for("b") == ["a2"]
 
 
+async def test_pipeline_linear_projector_preserves_replacement_blocks_not_yet_reflected_by_linear(
+    tmp_path: Path,
+) -> None:
+    store = ConductorPipelineStore(tmp_path)
+    gate_alpha = _gate("alpha")
+    gate_target = _gate("target")
+    gate_downstream = _gate("downstream")
+    store.commit_plan(
+        PlanProposal(
+            graph_id="graph-1",
+            plan_attempt_id="plan-1",
+            root_node_id="alpha",
+            nodes=[
+                GraphNode(node_id="alpha", title="Alpha", state=GraphNodeState.EXECUTING, gate_snapshot_hash=gate_alpha.hash),
+                GraphNode(node_id="target", title="Target", state=GraphNodeState.REPLANNING, gate_snapshot_hash=gate_target.hash),
+                GraphNode(node_id="downstream", title="Downstream", state=GraphNodeState.PLANNED, gate_snapshot_hash=gate_downstream.hash),
+            ],
+            blocks=[("alpha", "downstream"), ("target", "downstream")],
+            gates=[gate_alpha, gate_target, gate_downstream],
+            entry_node_ids=["alpha", "target"],
+            exit_node_ids=["downstream"],
+        )
+    )
+    gate_replacement = _gate("target-replacement")
+    store.replace_node_with_subgraph(
+        "target",
+        PlanProposal(
+            graph_id="graph-1",
+            plan_attempt_id="plan-2",
+            root_node_id="target-replacement",
+            nodes=[
+                GraphNode(
+                    node_id="target-replacement",
+                    title="Target replacement",
+                    state=GraphNodeState.READY,
+                    gate_snapshot_hash=gate_replacement.hash,
+                )
+            ],
+            blocks=[],
+            gates=[gate_replacement],
+            entry_node_ids=["target-replacement"],
+            exit_node_ids=["target-replacement"],
+        ),
+    )
+    assert store.blockers_for("downstream") == ["alpha", "target-replacement"]
+
+    class Tracker:
+        async def fetch_child_issues(self, parent_issue_id: str, *, label_name: str | None = None) -> list[dict[str, object]]:
+            return [
+                {
+                    "id": "issue-alpha",
+                    "description": "node_id: alpha",
+                    "labels": ["performer:type/pipeline-node"],
+                    "relations": [{"type": "blocks", "relatedIssue": {"id": "issue-downstream"}}],
+                },
+                {
+                    "id": "issue-target",
+                    "description": "node_id: target",
+                    "labels": ["performer:type/pipeline-node"],
+                    "relations": [],
+                },
+                {
+                    "id": "issue-target-replacement",
+                    "description": "node_id: target-replacement",
+                    "labels": ["performer:type/pipeline-node"],
+                    "relations": [],
+                },
+                {
+                    "id": "issue-downstream",
+                    "description": "node_id: downstream",
+                    "labels": ["performer:type/pipeline-node"],
+                    "relations": [],
+                },
+            ]
+
+    projector = PipelineLinearProjector(store=store, tracker=Tracker(), root_issue_id="root-linear")
+
+    ingested = await projector.ingest_human_linear_changes_once()
+
+    assert ingested == 0
+    assert store.current_graph_revision() == 2
+    assert store.blockers_for("downstream") == ["alpha", "target-replacement"]
+
+
 async def test_pipeline_linear_projector_does_not_clear_blocks_when_root_issue_endpoint_is_not_a_child(
     tmp_path: Path,
 ) -> None:
@@ -3830,6 +4155,7 @@ async def test_pipeline_linear_projector_does_not_clear_blocks_when_root_issue_e
 
 def test_replan_replaces_node_with_subgraph_and_rewires_edges_atomically(tmp_path: Path) -> None:
     store = ConductorPipelineStore(tmp_path)
+    gate_root = _gate("root")
     gate_a = _gate("a")
     gate_t = _gate("t")
     gate_b = _gate("b")
@@ -3839,14 +4165,28 @@ def test_replan_replaces_node_with_subgraph_and_rewires_edges_atomically(tmp_pat
             plan_attempt_id="plan-1",
             root_node_id="root",
             nodes=[
-                GraphNode(node_id="a", title="A", state=GraphNodeState.VERIFY_PASSED, gate_snapshot_hash=gate_a.hash, verify_score=3),
-                GraphNode(node_id="t", title="T", state=GraphNodeState.REPLANNING, gate_snapshot_hash=gate_t.hash),
+                GraphNode(node_id="root", title="Root", state=GraphNodeState.PLANNED, gate_snapshot_hash=gate_root.hash),
+                GraphNode(
+                    node_id="a",
+                    title="A",
+                    state=GraphNodeState.VERIFY_PASSED,
+                    parent_node_id="root",
+                    gate_snapshot_hash=gate_a.hash,
+                    verify_score=3,
+                ),
+                GraphNode(
+                    node_id="t",
+                    title="T",
+                    state=GraphNodeState.REPLANNING,
+                    parent_node_id="root",
+                    gate_snapshot_hash=gate_t.hash,
+                ),
                 GraphNode(node_id="b", title="B", state=GraphNodeState.PLANNED, gate_snapshot_hash=gate_b.hash),
             ],
             blocks=[("a", "t"), ("t", "b")],
-            gates=[gate_a, gate_t, gate_b],
-            entry_node_ids=["a"],
-            exit_node_ids=["b"],
+            gates=[gate_root, gate_a, gate_t, gate_b],
+            entry_node_ids=["a", "root"],
+            exit_node_ids=["b", "root"],
         )
     )
     gate_t1 = _gate("t1")
@@ -3870,10 +4210,60 @@ def test_replan_replaces_node_with_subgraph_and_rewires_edges_atomically(tmp_pat
     assert revision.revision == 2
     assert store.get_node("t").state is GraphNodeState.SUPERSEDED
     assert store.get_node("t").superseded_by == ["t1", "t2"]
+    assert store.get_node("t1").parent_node_id == "root"
+    assert store.get_node("t2").parent_node_id == "root"
     assert store.blockers_for("t1") == ["a"]
     assert store.blockers_for("t2") == ["t1"]
     assert store.blockers_for("b") == ["t2"]
     assert store.get_node("t", revision=1).state is GraphNodeState.REPLANNING
+
+
+def test_replan_does_not_let_replacement_subgraph_turn_downstream_into_parent(tmp_path: Path) -> None:
+    store = ConductorPipelineStore(tmp_path)
+    gate_a = _gate("a")
+    gate_t = _gate("t")
+    gate_b = _gate("b")
+    store.commit_plan(
+        PlanProposal(
+            graph_id="graph-1",
+            plan_attempt_id="plan-1",
+            root_node_id="root",
+            nodes=[
+                GraphNode(node_id="a", title="A", state=GraphNodeState.VERIFY_PASSED, gate_snapshot_hash=gate_a.hash, verify_score=3),
+                GraphNode(node_id="t", title="T", state=GraphNodeState.REPLANNING, gate_snapshot_hash=gate_t.hash),
+                GraphNode(node_id="b", title="B", state=GraphNodeState.PLANNED, gate_snapshot_hash=gate_b.hash),
+            ],
+            blocks=[("a", "t"), ("t", "b")],
+            gates=[gate_a, gate_t, gate_b],
+            entry_node_ids=["a"],
+            exit_node_ids=["b"],
+        )
+    )
+    gate_t1 = _gate("t1")
+    subgraph = PlanProposal(
+        graph_id="graph-1",
+        plan_attempt_id="plan-2",
+        root_node_id="root",
+        nodes=[
+            GraphNode(
+                node_id="t1",
+                title="T1",
+                state=GraphNodeState.PLANNED,
+                parent_node_id="b",
+                gate_snapshot_hash=gate_t1.hash,
+            ),
+        ],
+        blocks=[],
+        gates=[gate_t1],
+        entry_node_ids=["t1"],
+        exit_node_ids=["t1"],
+    )
+
+    store.replace_node_with_subgraph("t", subgraph)
+
+    assert store.get_node("t1").parent_node_id is None
+    assert store.children_for("b") == []
+    assert store.blockers_for("b") == ["t1"]
 
 
 def test_replan_rejects_replacement_subgraph_that_reuses_existing_node_ids(tmp_path: Path) -> None:
@@ -3954,6 +4344,7 @@ def test_replan_rejects_replacement_subgraph_that_reuses_superseded_node_id(tmp_
 def test_replanning_plan_attempt_completion_replaces_node_with_subgraph(tmp_path: Path) -> None:
     store = ConductorPipelineStore(tmp_path)
     store.apply_runtime_config(RuntimeConfigEnvelope("group-1", 1, _policy(1)))
+    gate_root = _gate("root")
     gate_a = _gate("a")
     gate_t = _gate("t")
     gate_b = _gate("b")
@@ -3963,14 +4354,29 @@ def test_replanning_plan_attempt_completion_replaces_node_with_subgraph(tmp_path
             plan_attempt_id="plan-1",
             root_node_id="root",
             nodes=[
-                GraphNode(node_id="a", title="A", state=GraphNodeState.VERIFY_PASSED, gate_snapshot_hash=gate_a.hash, verify_score=3),
-                GraphNode(node_id="t", title="T", state=GraphNodeState.VERIFYING, gate_snapshot_hash=gate_t.hash, rework_count=2),
+                GraphNode(node_id="root", title="Root", state=GraphNodeState.PLANNED, gate_snapshot_hash=gate_root.hash),
+                GraphNode(
+                    node_id="a",
+                    title="A",
+                    state=GraphNodeState.VERIFY_PASSED,
+                    parent_node_id="root",
+                    gate_snapshot_hash=gate_a.hash,
+                    verify_score=3,
+                ),
+                GraphNode(
+                    node_id="t",
+                    title="T",
+                    state=GraphNodeState.VERIFYING,
+                    parent_node_id="root",
+                    gate_snapshot_hash=gate_t.hash,
+                    rework_count=2,
+                ),
                 GraphNode(node_id="b", title="B", state=GraphNodeState.PLANNED, gate_snapshot_hash=gate_b.hash),
             ],
             blocks=[("a", "t"), ("t", "b")],
-            gates=[gate_a, gate_t, gate_b],
-            entry_node_ids=["a"],
-            exit_node_ids=["b"],
+            gates=[gate_root, gate_a, gate_t, gate_b],
+            entry_node_ids=["a", "root"],
+            exit_node_ids=["b", "root"],
         )
     )
     now = datetime(2026, 7, 6, tzinfo=timezone.utc)
@@ -4029,6 +4435,8 @@ def test_replanning_plan_attempt_completion_replaces_node_with_subgraph(tmp_path
     assert store.current_graph_revision() == 2
     assert store.get_node("t").state is GraphNodeState.SUPERSEDED
     assert store.get_node("t").superseded_by == ["t1", "t2"]
+    assert store.get_node("t1").parent_node_id == "root"
+    assert store.get_node("t2").parent_node_id == "root"
     assert store.blockers_for("t1") == ["a"]
     assert store.blockers_for("t2") == ["t1"]
     assert store.blockers_for("b") == ["t2"]
@@ -4359,6 +4767,7 @@ def test_predicted_call_order_uses_topological_dependency_order_not_node_id_sort
 
     payload = store.pipeline_view().to_dict()
 
+    assert payload["blocks"] == [["z-a", "m-b"], ["m-b", "a-c"]]
     assert [call["node"] for call in payload["predicted_call_order"]] == ["z-a", "m-b", "a-c"]
 
 
@@ -5530,6 +5939,14 @@ async def test_background_coordination_starts_due_attempts_while_instance_alread
     assert result.pipeline_attempts_started == 2
     assert [start["mode"] for start in runtime.starts] == ["execute", "execute"]
     assert sorted(lease.node_id for lease in service.pipeline_store.list_active_leases()) == ["a", "b"]
+    assert sorted(
+        attempt.process_pid for attempt in service.pipeline_store.list_attempts() if attempt.mode is RuntimeMode.EXECUTE
+    ) == [1234, 1234]
+    assert all(
+        attempt["process_pid"] == 1234
+        for attempt in service.pipeline_store.pipeline_view().to_dict()["attempts"]
+        if attempt["mode"] == "execute"
+    )
 
 
 async def test_background_coordination_fails_only_drained_exited_attempt(tmp_path: Path) -> None:
@@ -5623,6 +6040,78 @@ async def test_background_coordination_fails_only_drained_exited_attempt(tmp_pat
     assert "pipeline_attempt_process_exited" in log_text
     assert "attempt_id=exec-a" in log_text
     assert "attempt_id=exec-b" not in log_text
+
+
+def test_fail_exited_attempt_snapshot_defers_when_result_file_exists(tmp_path: Path) -> None:
+    store = ConductorPipelineStore(tmp_path)
+    store.apply_runtime_config(
+        RuntimeConfigEnvelope(
+            "group-1",
+            1,
+            _policy(1),
+            profiles={RuntimeMode.EXECUTE: RuntimeProfile(name="executor", backend="codex", mode=RuntimeMode.EXECUTE)},
+        )
+    )
+    gate = _gate("a")
+    store.commit_plan(
+        PlanProposal(
+            graph_id="graph-1",
+            plan_attempt_id="plan-1",
+            root_node_id="a",
+            nodes=[GraphNode(node_id="a", title="A", state=GraphNodeState.READY, gate_snapshot_hash=gate.hash)],
+            blocks=[],
+            gates=[gate],
+            entry_node_ids=["a"],
+            exit_node_ids=["a"],
+        )
+    )
+    lease = store.start_attempt(RuntimeMode.EXECUTE, node_id="a", attempt_id="exec-a", now=datetime.now(timezone.utc))
+    verification_input = _publish_verification_input(store, "a", execute_attempt_id="exec-a")
+    result_path = tmp_path / "inst-1" / "state" / "pipeline" / "exec-a" / "attempt-result.json"
+    result_path.parent.mkdir(parents=True)
+    graph_revision = store.current_graph_revision()
+    result_path.write_text(
+        json.dumps(
+            ExecuteAttemptResult(
+                attempt_id="exec-a",
+                node_id="a",
+                status=AttemptState.SUCCEEDED,
+                graph_revision=graph_revision,
+                policy_revision=1,
+                gate_snapshot_hash=gate.hash,
+                lease_id=lease.lease_id,
+                fencing_token=lease.fencing_token,
+                verification_input=verification_input.to_dict(),
+            ).to_dict()
+        ),
+        encoding="utf-8",
+    )
+
+    class Instance:
+        instance_dir = str(tmp_path / "inst-1")
+        log_path = str(tmp_path / "inst-1" / "logs" / "performer.log")
+        process_status = "exited"
+        last_exit_code = 0
+
+    coordinator = PipelineCoordinator(store=store, runtime_manager=None)
+
+    failed = coordinator.fail_exited_attempt_snapshot(
+        Instance,
+        {
+            "attempt_id": "exec-a",
+            "mode": "execute",
+            "lease_id": lease.lease_id,
+            "result_path": str(result_path),
+            "exit_code": 0,
+        },
+    )
+
+    assert failed == 0
+    assert coordinator.fail_running_attempts_for_exited_process(Instance) == 0
+    assert store.get_attempt("exec-a").state is AttemptState.RUNNING
+    assert store.active_lease("a", RuntimeMode.EXECUTE) is not None
+    assert coordinator.collect_result_files(Instance) == 1
+    assert store.get_attempt("exec-a").state is AttemptState.SUCCEEDED
 
 
 async def test_process_exit_error_uses_current_generation_log_tail(tmp_path: Path) -> None:

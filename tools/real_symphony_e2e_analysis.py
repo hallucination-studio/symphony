@@ -247,7 +247,10 @@ APPENDIX_FEATURE_SCORE_REQUIREMENTS: tuple[dict[str, Any], ...] = (
     {
         "feature": "S4",
         "summary": "failure-driven re-decomposition",
-        "r_checks": {"scenario:replan-replacement-subgraph"},
+        "r_checks": {
+            "scenario:replan-replacement-subgraph",
+            "appendix:overall-downstream-depends-on-both-parallel-subtasks",
+        },
         "h_checks": {
             "appendix:s4-superseded-revision-fenced",
             "appendix:s4-no-old-node-dependent-dispatch",
@@ -482,6 +485,8 @@ def crash_probe_candidate(pipeline_attempts: list[dict[str, Any]], leases: list[
     active_attempt_ids = {str(lease.get("attempt_id") or "") for lease in leases if isinstance(lease, dict)}
     for attempt in pipeline_attempts:
         if str(attempt.get("attempt_id") or "") not in active_attempt_ids:
+            continue
+        if attempt.get("mode") != "execute":
             continue
         if attempt.get("state") != "running":
             continue

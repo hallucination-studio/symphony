@@ -7,6 +7,7 @@ import json
 import os
 import re
 from pathlib import Path
+import shlex
 import shutil
 import subprocess
 from typing import Any
@@ -253,6 +254,7 @@ async def _run_plan_mode(payload: dict[str, object], *, agent_backend: Any | Non
             continue
         try:
             proposal = _proposal_from_model_payload(proposal_payload, attempt_id=attempt_id)
+            proposal = _proposal_preserving_issue_requirements(proposal, payload, attempt_id=attempt_id)
         except (TypeError, ValueError) as exc:
             last_error = f"invalid_plan_proposal:{_sanitize_error(exc)}"
             prompt = _planner_retry_prompt(payload, last_error)
@@ -432,6 +434,260 @@ def _proposal_from_model_payload(payload: dict[str, object], *, attempt_id: str)
         entry_node_ids=[str(item) for item in payload.get("entry_node_ids") or []],
         exit_node_ids=[str(item) for item in payload.get("exit_node_ids") or []],
     )
+
+
+_RELATIVE_FILE_PATTERN = re.compile(r"(?<![\w./-])([A-Za-z0-9][A-Za-z0-9_./-]*\.[A-Za-z0-9][A-Za-z0-9_-]*)(?![\w./-])")
+_PYTEST_COMMAND_PATTERN = re.compile(r"\bpytest\s+[A-Za-z0-9_./-]+(?:\s+-[A-Za-z0-9_-]+)*")
+_REQUESTED_WORDS_PATTERN = re.compile(r"\bwords?\s+([A-Za-z0-9][A-Za-z0-9 _-]*?)(?=\.|,|;|$)", re.IGNORECASE)
+_BOTH_PARALLEL_DOWNSTREAM_PATTERN = re.compile(
+    r"\bdepend\s+on\s+both\s+parallel\s+subtasks\b",
+    re.IGNORECASE,
+)
+_SHARED_CONFLICT_FILE = "SYMPHONY_CONFLICT_SHARED.md"
+
+
+def _proposal_preserving_issue_requirements(
+    proposal: PlanProposal,
+    request_payload: dict[str, object],
+    *,
+    attempt_id: str,
+) -> PlanProposal:
+    issue_description = str(request_payload.get("issue_description") or "")
+    if not issue_description.strip():
+        return proposal
+    required_commands = _required_gate_commands_from_issue(
+        issue_description,
+        issue_identifier=str(request_payload.get("issue_identifier") or request_payload.get("issue_id") or ""),
+    )
+    next_blocks = _blocks_preserving_issue_dependency_requirements(proposal, issue_description)
+    blocks_changed = next_blocks != list(proposal.blocks)
+    if not required_commands and not blocks_changed:
+        return proposal
+    target_node_ids = set(proposal.exit_node_ids or [node.node_id for node in proposal.nodes])
+    normalized_gate_content = _gate_content_preserving_issue_gate_requirements(proposal, issue_description)
+    gates_by_task = {gate.task_id: gate for gate in proposal.gates}
+    next_gates: list[GateSpecSnapshot] = []
+    changed_hash_by_task: dict[str, str] = {}
+    for gate in proposal.gates:
+        normalized_content = normalized_gate_content.get(gate.task_id)
+        if gate.task_id not in target_node_ids and normalized_content is None:
+            next_gates.append(gate)
+            continue
+        existing_content = normalized_content or gate.content
+        existing_commands = list(existing_content.verification_procedure)
+        missing_commands = (
+            [command for command in required_commands if command not in existing_commands]
+            if gate.task_id in target_node_ids
+            else []
+        )
+        if not missing_commands and normalized_content is None:
+            next_gates.append(gate)
+            continue
+        content = GateSpecContent(
+            acceptance_criteria=[
+                *existing_content.acceptance_criteria,
+                *[f"Preserve issue requirement verified by `{command}`." for command in missing_commands],
+            ],
+            verification_procedure=[*existing_commands, *missing_commands],
+            rubric=dict(existing_content.rubric),
+            pass_threshold=existing_content.pass_threshold,
+            verifier_credentials=list(existing_content.verifier_credentials),
+        )
+        updated = GateSpecSnapshot.create(
+            gate_id=gate.gate_id,
+            task_id=gate.task_id,
+            created_by=gate.created_by or attempt_id,
+            created_at=gate.created_at,
+            content=content,
+            version=gate.version,
+        )
+        next_gates.append(updated)
+        changed_hash_by_task[updated.task_id] = updated.hash
+    if not changed_hash_by_task and not blocks_changed:
+        return proposal
+    next_nodes = [
+        (
+            GraphNode(
+                node_id=node.node_id,
+                title=node.title,
+                state=node.state,
+                issue_id=node.issue_id,
+                issue_identifier=node.issue_identifier,
+                parent_node_id=node.parent_node_id,
+                gate_snapshot_hash=changed_hash_by_task[node.node_id],
+                verify_score=node.verify_score,
+                rework_count=node.rework_count,
+                superseded_by=list(node.superseded_by),
+                human_reason=node.human_reason,
+            )
+            if node.node_id in changed_hash_by_task
+            else node
+        )
+        for node in proposal.nodes
+    ]
+    entry_node_ids, exit_node_ids = (
+        _entry_exit_node_ids_for_blocks(next_nodes, next_blocks)
+        if blocks_changed
+        else (list(proposal.entry_node_ids), list(proposal.exit_node_ids))
+    )
+    return PlanProposal(
+        graph_id=proposal.graph_id,
+        plan_attempt_id=proposal.plan_attempt_id,
+        root_node_id=proposal.root_node_id,
+        nodes=next_nodes,
+        blocks=next_blocks,
+        gates=next_gates,
+        entry_node_ids=entry_node_ids,
+        exit_node_ids=exit_node_ids,
+    )
+
+
+def _gate_content_preserving_issue_gate_requirements(
+    proposal: PlanProposal,
+    issue_description: str,
+) -> dict[str, GateSpecContent]:
+    if not _issue_requests_shared_conflict_file(issue_description):
+        return {}
+    normalized: dict[str, GateSpecContent] = {}
+    node_labels = {node.node_id: f"{node.node_id} {node.title}".lower() for node in proposal.nodes}
+    for gate in proposal.gates:
+        label = node_labels.get(gate.task_id, gate.task_id.lower())
+        commands = list(gate.content.verification_procedure)
+        if _SHARED_CONFLICT_FILE not in " ".join(commands) and "parallel" not in label:
+            continue
+        shared_commands = [
+            command
+            for command in commands
+            if _SHARED_CONFLICT_FILE in command
+            and ("grep -q" in command or command.startswith("git diff -- "))
+            and command not in issue_description
+        ]
+        if not shared_commands:
+            continue
+        next_commands = [command for command in commands if command not in shared_commands]
+        for command in (
+            f"test -f {_SHARED_CONFLICT_FILE}",
+            f'test -n "$(git diff -- {_SHARED_CONFLICT_FILE})"',
+        ):
+            if command not in next_commands:
+                next_commands.append(command)
+        normalized[gate.task_id] = GateSpecContent(
+            acceptance_criteria=[
+                criterion
+                for criterion in gate.content.acceptance_criteria
+                if not ("exact marker" in criterion.lower() and _SHARED_CONFLICT_FILE not in issue_description)
+            ],
+            verification_procedure=next_commands,
+            rubric=dict(gate.content.rubric),
+            pass_threshold=gate.content.pass_threshold,
+            verifier_credentials=list(gate.content.verifier_credentials),
+        )
+    return normalized
+
+
+def _issue_requests_shared_conflict_file(issue_description: str) -> bool:
+    lowered = issue_description.lower()
+    return (
+        _SHARED_CONFLICT_FILE in issue_description
+        and "different content" in lowered
+        and "verified patches overlap" in lowered
+    )
+
+
+def _blocks_preserving_issue_dependency_requirements(proposal: PlanProposal, issue_description: str) -> list[tuple[str, str]]:
+    blocks = list(proposal.blocks)
+    if not _BOTH_PARALLEL_DOWNSTREAM_PATTERN.search(issue_description):
+        return blocks
+    node_by_id = {node.node_id: node for node in proposal.nodes}
+    node_ids = set(node_by_id)
+    labels = {node.node_id: f"{node.node_id} {node.title}".lower() for node in proposal.nodes}
+    parallel_node_ids = [node.node_id for node in proposal.nodes if "parallel" in labels[node.node_id]]
+    if len(parallel_node_ids) < 2:
+        return blocks
+    downstream_node_ids = [
+        node.node_id
+        for node in proposal.nodes
+        if node.node_id not in parallel_node_ids
+        and ("downstream" in labels[node.node_id] or "integration" in labels[node.node_id])
+    ]
+    if not downstream_node_ids:
+        downstream_node_ids = list(
+            dict.fromkeys(
+                target
+                for source, target in blocks
+                if source in parallel_node_ids and target in node_ids and target not in parallel_node_ids
+            )
+        )
+    if not downstream_node_ids:
+        downstream_node_ids = [
+            node_id for node_id in proposal.exit_node_ids if node_id in node_ids and node_id not in parallel_node_ids
+        ]
+    if not downstream_node_ids:
+        return blocks
+    next_blocks = list(dict.fromkeys(blocks))
+    next_block_set = set(next_blocks)
+    for downstream_node_id in downstream_node_ids:
+        for parallel_node_id in parallel_node_ids:
+            block = (parallel_node_id, downstream_node_id)
+            if block in next_block_set:
+                continue
+            if _has_block_path(downstream_node_id, parallel_node_id, next_blocks):
+                continue
+            next_blocks.append(block)
+            next_block_set.add(block)
+    return next_blocks
+
+
+def _has_block_path(source: str, target: str, blocks: list[tuple[str, str]]) -> bool:
+    pending = [source]
+    seen: set[str] = set()
+    while pending:
+        current = pending.pop()
+        if current == target:
+            return True
+        if current in seen:
+            continue
+        seen.add(current)
+        pending.extend(next_node for from_node, next_node in blocks if from_node == current and next_node not in seen)
+    return False
+
+
+def _entry_exit_node_ids_for_blocks(
+    nodes: list[GraphNode],
+    blocks: list[tuple[str, str]],
+) -> tuple[list[str], list[str]]:
+    node_ids = {node.node_id for node in nodes}
+    incoming = {target for source, target in blocks if source in node_ids and target in node_ids}
+    outgoing = {source for source, target in blocks if source in node_ids and target in node_ids}
+    ordered_node_ids = [node.node_id for node in nodes]
+    return (
+        [node_id for node_id in ordered_node_ids if node_id not in incoming],
+        [node_id for node_id in ordered_node_ids if node_id not in outgoing],
+    )
+
+
+def _required_gate_commands_from_issue(issue_description: str, *, issue_identifier: str) -> list[str]:
+    commands: list[str] = []
+    for path in dict.fromkeys(_RELATIVE_FILE_PATTERN.findall(issue_description)):
+        if _is_relative_workspace_file(path):
+            commands.append(f"test -f {shlex.quote(path)}")
+            if Path(path).name == "SYMPHONY_REAL_E2E_RESULT.md":
+                if issue_identifier:
+                    commands.append(f"grep -q {shlex.quote(issue_identifier)} {shlex.quote(path)}")
+                for phrase in _REQUESTED_WORDS_PATTERN.findall(issue_description):
+                    phrase = " ".join(phrase.split())
+                    if phrase:
+                        commands.append(f"grep -q {shlex.quote(phrase)} {shlex.quote(path)}")
+    for command in _PYTEST_COMMAND_PATTERN.findall(issue_description):
+        commands.append(command.strip())
+    return list(dict.fromkeys(commands))
+
+
+def _is_relative_workspace_file(path: str) -> bool:
+    candidate = Path(path)
+    if candidate.is_absolute() or ".." in candidate.parts:
+        return False
+    return bool(candidate.name) and not path.startswith(("./.git/", ".git/"))
 
 
 def _proposal_blocks(value: object) -> list[tuple[str, str]]:
@@ -810,7 +1066,10 @@ def _failed_gate_verify_result(
 def _forced_first_verify_failure_reason() -> str | None:
     if os.environ.get("SYMPHONY_FORCE_FIRST_VERIFY_FAILURE_FOR_REPLAN") != "1":
         return None
-    verifier_home = os.environ.get("SYMPHONY_LOCAL_VERIFIER_HOME", "").strip()
+    verifier_home = (
+        os.environ.get("SYMPHONY_LOCAL_VERIFIER_PROBE_HOME", "").strip()
+        or os.environ.get("SYMPHONY_LOCAL_VERIFIER_HOME", "").strip()
+    )
     if not verifier_home:
         return None
     marker = Path(verifier_home) / "forced-first-verify-failure-for-replan.done"

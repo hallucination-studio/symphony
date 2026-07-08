@@ -84,6 +84,165 @@ def test_planner_prompt_for_replan_preserves_original_concrete_requirements() ->
     assert "must not drop `pytest tests/test_smoke.py -q` if it was part of the original task" in prompt
 
 
+def test_planner_preserves_issue_file_and_command_requirements_in_exit_gate() -> None:
+    gate = _passing_gate().to_dict()
+    gate["task_id"] = "downstream"
+    gate["gate_id"] = "gate-downstream"
+    proposal = performer_cli._proposal_from_model_payload(
+        {
+            "graph_id": "graph-1",
+            "plan_attempt_id": "plan-1",
+            "root_node_id": "root",
+            "nodes": [
+                {
+                    "node_id": "downstream",
+                    "title": "Downstream",
+                    "state": "planned",
+                    "gate_snapshot_hash": "model-hash",
+                }
+            ],
+            "blocks": [],
+            "gates": [gate],
+            "entry_node_ids": ["downstream"],
+            "exit_node_ids": ["downstream"],
+        },
+        attempt_id="plan-1",
+    )
+
+    preserved = performer_cli._proposal_preserving_issue_requirements(
+        proposal,
+        {
+            "issue_id": "issue-1",
+            "issue_identifier": "ENG-1",
+            "issue_description": (
+                "Create SYMPHONY_REAL_E2E_RESULT.md with the Linear issue identifier and the words overall dod. "
+                "Run pytest tests/test_smoke.py -q."
+            ),
+        },
+        attempt_id="plan-1",
+    )
+
+    gate = preserved.gates[0]
+    assert "test -f SYMPHONY_REAL_E2E_RESULT.md" in gate.content.verification_procedure
+    assert "grep -q ENG-1 SYMPHONY_REAL_E2E_RESULT.md" in gate.content.verification_procedure
+    assert "grep -q 'overall dod' SYMPHONY_REAL_E2E_RESULT.md" in gate.content.verification_procedure
+    assert "pytest tests/test_smoke.py -q" in gate.content.verification_procedure
+    assert preserved.nodes[0].gate_snapshot_hash == gate.hash
+    assert gate.hash != "model-hash"
+
+
+def test_planner_preserves_issue_requirement_that_downstream_depends_on_both_parallel_subtasks() -> None:
+    gates = []
+    nodes = []
+    for node_id, title in [
+        ("parallel-alpha", "Parallel alpha"),
+        ("parallel-beta", "Parallel beta"),
+        ("integration-check", "Integration check"),
+    ]:
+        gate_payload = _passing_gate().to_dict()
+        gate_payload["task_id"] = node_id
+        gate_payload["gate_id"] = f"gate-{node_id}"
+        gates.append(gate_payload)
+        nodes.append(
+            {
+                "node_id": node_id,
+                "title": title,
+                "state": "planned",
+                "gate_snapshot_hash": "model-hash",
+            }
+        )
+    proposal = performer_cli._proposal_from_model_payload(
+        {
+            "graph_id": "graph-1",
+            "plan_attempt_id": "plan-1",
+            "root_node_id": "root",
+            "nodes": nodes,
+            "blocks": [{"from_node_id": "parallel-alpha", "to_node_id": "integration-check"}],
+            "gates": gates,
+            "entry_node_ids": ["parallel-alpha", "parallel-beta"],
+            "exit_node_ids": ["parallel-beta", "integration-check"],
+        },
+        attempt_id="plan-1",
+    )
+
+    preserved = performer_cli._proposal_preserving_issue_requirements(
+        proposal,
+        {
+            "issue_id": "issue-1",
+            "issue_identifier": "ENG-1",
+            "issue_description": (
+                "Planner must create two independent parallel subtasks and must not add a blocks dependency between them. "
+                "At least one downstream subtask must depend on both parallel subtasks' verified upstream output. "
+                "Create SYMPHONY_REAL_E2E_RESULT.md with the Linear issue identifier and the words overall dod. "
+                "Run pytest tests/test_smoke.py -q."
+            ),
+        },
+        attempt_id="plan-1",
+    )
+
+    assert ("parallel-alpha", "integration-check") in preserved.blocks
+    assert ("parallel-beta", "integration-check") in preserved.blocks
+    assert ("parallel-alpha", "parallel-beta") not in preserved.blocks
+    assert ("parallel-beta", "parallel-alpha") not in preserved.blocks
+    assert preserved.entry_node_ids == ["parallel-alpha", "parallel-beta"]
+    assert preserved.exit_node_ids == ["integration-check"]
+
+
+def test_planner_does_not_preserve_model_invented_exact_shared_conflict_marker_gate() -> None:
+    gate = _passing_gate().to_dict()
+    gate["task_id"] = "parallel-alpha"
+    gate["gate_id"] = "gate-parallel-alpha"
+    gate["content"]["acceptance_criteria"] = [
+        "The file contains the exact marker text: ENG-1 parallel branch A content for run-1.",
+    ]
+    gate["content"]["verification_procedure"] = [
+        "test -f SYMPHONY_CONFLICT_SHARED.md",
+        "grep -q 'ENG-1 parallel branch A content for run-1' SYMPHONY_CONFLICT_SHARED.md",
+        "git diff -- SYMPHONY_CONFLICT_SHARED.md | grep -q 'ENG-1 parallel branch A content for run-1'",
+    ]
+    proposal = performer_cli._proposal_from_model_payload(
+        {
+            "graph_id": "graph-1",
+            "plan_attempt_id": "plan-1",
+            "root_node_id": "root",
+            "nodes": [
+                {
+                    "node_id": "parallel-alpha",
+                    "title": "Parallel alpha",
+                    "state": "planned",
+                    "gate_snapshot_hash": "model-hash",
+                }
+            ],
+            "blocks": [],
+            "gates": [gate],
+            "entry_node_ids": ["parallel-alpha"],
+            "exit_node_ids": ["parallel-alpha"],
+        },
+        attempt_id="plan-1",
+    )
+
+    preserved = performer_cli._proposal_preserving_issue_requirements(
+        proposal,
+        {
+            "issue_id": "issue-1",
+            "issue_identifier": "ENG-1",
+            "issue_description": (
+                "Each parallel subtask must modify the already tracked file SYMPHONY_CONFLICT_SHARED.md "
+                "with different content so their verified patches overlap."
+            ),
+        },
+        attempt_id="plan-1",
+    )
+
+    commands = preserved.gates[0].content.verification_procedure
+    assert "grep -q 'ENG-1 parallel branch A content for run-1' SYMPHONY_CONFLICT_SHARED.md" not in commands
+    assert "git diff -- SYMPHONY_CONFLICT_SHARED.md | grep -q 'ENG-1 parallel branch A content for run-1'" not in commands
+    assert "test -f SYMPHONY_CONFLICT_SHARED.md" in commands
+    assert 'test -n "$(git diff -- SYMPHONY_CONFLICT_SHARED.md)"' in commands
+    assert preserved.nodes[0].gate_snapshot_hash == preserved.gates[0].hash
+    assert preserved.gates[0].hash != gate["hash"]
+
+
 @pytest.mark.asyncio
 async def test_plan_mode_writes_structured_result_file(tmp_path: Path) -> None:
     request_path = tmp_path / "plan-request.json"
@@ -645,6 +804,60 @@ async def test_verify_mode_can_force_only_first_verify_failure_for_replan_probe(
     assert first["error"] == "forced_first_verify_failure_for_replan"
     assert second["status"] == "succeeded"
     assert second["passed"] is True
+
+
+@pytest.mark.asyncio
+async def test_verify_replan_probe_uses_stable_probe_home_across_attempt_homes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    probe_home = tmp_path / "stable-probe-home"
+    monkeypatch.setenv("SYMPHONY_LOCAL_VERIFIER_PROBE_HOME", str(probe_home))
+    monkeypatch.setenv("SYMPHONY_FORCE_FIRST_VERIFY_FAILURE_FOR_REPLAN", "1")
+    gate = GateSpecSnapshot.create(
+        gate_id="gate-1",
+        task_id="node-1",
+        created_by="plan-1",
+        created_at="2026-07-06T00:00:00Z",
+        content=GateSpecContent(
+            acceptance_criteria=["command must pass"],
+            verification_procedure=["test -f README.md"],
+            rubric={str(score): f"score {score}" for score in range(5)},
+            pass_threshold=3,
+        ),
+    )
+    verification_input = _verification_input_with_patch(tmp_path, gate_hash=gate.hash)
+
+    async def run_verify(attempt_id: str) -> dict[str, object]:
+        monkeypatch.setenv("SYMPHONY_LOCAL_VERIFIER_HOME", str(tmp_path / f"{attempt_id}-home"))
+        request_path = tmp_path / f"{attempt_id}.json"
+        result_path = tmp_path / f"{attempt_id}-result.json"
+        request_path.write_text(
+            json.dumps(
+                {
+                    "attempt_id": attempt_id,
+                    "node_id": "node-1",
+                    "graph_revision": 5,
+                    "policy_revision": 2,
+                    "lease_id": f"lease-{attempt_id}",
+                    "fencing_token": f"token-{attempt_id}",
+                    "gate_snapshot_hash": gate.hash,
+                    "gate_snapshot": gate.to_dict(),
+                    "verification_input": verification_input,
+                }
+            ),
+            encoding="utf-8",
+        )
+        await run_mode_attempt(RuntimeMode.VERIFY, request_path, result_path)
+        return json.loads(result_path.read_text(encoding="utf-8"))
+
+    first = await run_verify("verify-1")
+    second = await run_verify("verify-2")
+
+    assert first["passed"] is False
+    assert first["error"] == "forced_first_verify_failure_for_replan"
+    assert second["passed"] is True
+    assert (probe_home / "forced-first-verify-failure-for-replan.done").is_file()
 
 
 @pytest.mark.asyncio

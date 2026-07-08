@@ -445,6 +445,7 @@ class AttemptRecord:
     completed_at: str | None = None
     result_uri: str | None = None
     error: str | None = None
+    process_pid: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -462,6 +463,7 @@ class AttemptRecord:
             "completed_at": self.completed_at,
             "result_uri": self.result_uri,
             "error": self.error,
+            "process_pid": self.process_pid,
         }
 
     @classmethod
@@ -481,6 +483,7 @@ class AttemptRecord:
             completed_at=_optional_str(payload.get("completed_at")),
             result_uri=_optional_str(payload.get("result_uri")),
             error=_optional_str(payload.get("error")),
+            process_pid=_optional_int(payload.get("process_pid")),
         )
 
 
@@ -1015,6 +1018,7 @@ class PipelineView:
     modes: list[PipelineModeView]
     predicted_call_order: list[PredictedCall]
     capacity: dict[str, Any] = field(default_factory=dict)
+    blocks: list[tuple[str, str]] = field(default_factory=list)
     leases: list[dict[str, Any]] = field(default_factory=list)
     attempts: list[dict[str, Any]] = field(default_factory=list)
     integration_queue: list[dict[str, Any]] = field(default_factory=list)
@@ -1033,6 +1037,7 @@ class PipelineView:
             "modes": [mode.to_dict() for mode in self.modes],
             "predicted_call_order": [call.to_dict() for call in self.predicted_call_order],
             "capacity": _jsonable_dict(self.capacity),
+            "blocks": [[source, target] for source, target in self.blocks],
             "leases": [_jsonable_dict(lease) for lease in self.leases],
             "attempts": [_jsonable_dict(attempt) for attempt in self.attempts],
             "integration_queue": [_jsonable_dict(item) for item in self.integration_queue],

@@ -491,9 +491,15 @@ def test_process_env_allows_local_verifier_runtime_home(tmp_path: Path) -> None:
 def test_process_env_allows_local_verifier_replan_failure_probe() -> None:
     manager = ConductorRuntimeManager(command="performer")
 
-    env = manager._process_env({"SYMPHONY_FORCE_FIRST_VERIFY_FAILURE_FOR_REPLAN": "1"})
+    env = manager._process_env(
+        {
+            "SYMPHONY_FORCE_FIRST_VERIFY_FAILURE_FOR_REPLAN": "1",
+            "SYMPHONY_LOCAL_VERIFIER_PROBE_HOME": "/tmp/probe-home",
+        }
+    )
 
     assert env["SYMPHONY_FORCE_FIRST_VERIFY_FAILURE_FOR_REPLAN"] == "1"
+    assert env["SYMPHONY_LOCAL_VERIFIER_PROBE_HOME"] == "/tmp/probe-home"
 
 
 def test_process_env_allows_codex_runtime_wait_probe() -> None:

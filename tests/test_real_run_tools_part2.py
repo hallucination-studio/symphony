@@ -446,6 +446,7 @@ def test_appendix_overall_acceptance_scores_after_required_checks(tmp_path: Path
             "appendix:s3-verifier-mutation-detection",
             "appendix:s3-expired-fencing-refused",
             "scenario:replan-replacement-subgraph",
+            "appendix:overall-downstream-depends-on-both-parallel-subtasks",
             "scenario:integration-conflict-human-action",
             "conductor-api:GET /api/pipeline",
             "runtime-config:codex-home-source-staged",
@@ -469,16 +470,17 @@ def test_appendix_overall_acceptance_scores_after_required_checks(tmp_path: Path
             }
         },
         "nodes": [
-            {"node_id": "parent", "state": "verify_passed"},
-            {"node_id": "child-a", "parent_node_id": "parent", "state": "verify_passed"},
-            {"node_id": "child-b", "parent_node_id": "parent", "state": "verify_passed"},
-            {"node_id": "old", "state": "superseded", "superseded_by": ["replacement"]},
-            {"node_id": "replacement", "state": "verify_passed"},
+            {"node_id": "parent", "title": "Parent", "state": "verify_passed"},
+            {"node_id": "parallel-alpha", "title": "Parallel alpha", "parent_node_id": "parent", "state": "verify_passed"},
+            {"node_id": "parallel-beta", "title": "Parallel beta", "parent_node_id": "parent", "state": "superseded", "superseded_by": ["replacement"]},
+            {"node_id": "replacement", "title": "Parallel beta replacement", "parent_node_id": "parent", "state": "verify_passed"},
+            {"node_id": "integration-check", "title": "Integration check", "parent_node_id": "parent", "state": "verify_passed"},
         ],
+        "blocks": [["parallel-alpha", "integration-check"], ["parallel-beta", "integration-check"]],
         "attempts": [
             {
                 "attempt_id": "verify-child-a",
-                "node_id": "child-a",
+                "node_id": "parallel-alpha",
                 "mode": "verify",
                 "score": 3,
                 "completed_at": "2026-07-08T00:00:10Z",
@@ -486,7 +488,7 @@ def test_appendix_overall_acceptance_scores_after_required_checks(tmp_path: Path
             },
             {
                 "attempt_id": "execute-child-b",
-                "node_id": "child-b",
+                "node_id": "integration-check",
                 "mode": "execute",
                 "started_at": "2026-07-08T00:00:11Z",
                 "state": "succeeded",
@@ -513,8 +515,61 @@ def test_appendix_overall_acceptance_scores_after_required_checks(tmp_path: Path
     )
 
     checks = {check["name"]: check for check in evidence.data["checks"]}
+    assert checks["appendix:overall-downstream-depends-on-both-parallel-subtasks"]["passed"] is True
     assert checks["appendix:evidence-scores-within-hard-caps"]["passed"] is True
     assert checks["appendix:feature-scores-r-plus-h"]["passed"] is True
+
+
+def test_appendix_overall_acceptance_fails_without_downstream_depending_on_both_parallel_subtasks(
+    tmp_path: Path,
+) -> None:
+    tool = load_tool("real_symphony_e2e_run")
+    evidence = tool.Evidence(tmp_path / "report.json")
+
+    tool._check_appendix_overall_acceptance(
+        evidence,
+        {
+            "prediction_basis": {"graph_revision": 2, "policy_revision": 1, "assumption": "unknown verifies pass"},
+            "graph_revision": 2,
+            "predicted_call_order": [{"node_id": "a", "confidence": "conditional"}],
+            "runtime_config": {
+                "profiles": {
+                    "execute": {"settings": {"codex_home_source": "$SYMPHONY_E2E_CODEX_HOME_SOURCE"}},
+                    "verify": {"backend": "local-verifier", "settings": {}},
+                }
+            },
+            "nodes": [
+                {"node_id": "parent", "title": "Parent", "state": "verify_passed"},
+                {"node_id": "parallel-alpha", "title": "Parallel alpha", "parent_node_id": "parent", "state": "verify_passed"},
+                {"node_id": "parallel-beta", "title": "Parallel beta", "parent_node_id": "parent", "state": "verify_passed"},
+                {"node_id": "integration-check", "title": "Integration check", "parent_node_id": "parent", "state": "verify_passed"},
+            ],
+            "blocks": [["parallel-alpha", "integration-check"]],
+            "attempts": [
+                {
+                    "attempt_id": "verify-alpha",
+                    "node_id": "parallel-alpha",
+                    "mode": "verify",
+                    "score": 3,
+                    "completed_at": "2026-07-08T00:00:10Z",
+                    "state": "succeeded",
+                },
+                {
+                    "attempt_id": "execute-integration",
+                    "node_id": "integration-check",
+                    "mode": "execute",
+                    "started_at": "2026-07-08T00:00:11Z",
+                    "state": "succeeded",
+                },
+            ],
+            "integration_queue": [{"status": "resolved", "error": "patch conflict", "human_resolution": "completed"}],
+        },
+        data_root=tmp_path / "missing-data",
+        instance_id="inst-1",
+    )
+
+    checks = {check["name"]: check for check in evidence.data["checks"]}
+    assert checks["appendix:overall-downstream-depends-on-both-parallel-subtasks"]["passed"] is False
 
 
 def test_real_symphony_e2e_runtime_home_evidence_requires_distinct_parallel_execute_homes(tmp_path: Path) -> None:
@@ -629,6 +684,14 @@ def test_real_symphony_e2e_human_answered_push_accepts_completed_child_required_
         {"status": "ignored", "reason": "completed_child_required"},
     )
     assert not tool._human_answered_push_satisfies_resume_probe(200, {"status": "ignored", "reason": "human_wait_not_found"})
+
+
+def test_real_symphony_e2e_wait_skips_stale_wait_resolved_by_attempt_success() -> None:
+    tool = load_tool("real_symphony_e2e_wait")
+
+    assert tool._wait_resolved_before_harness_resume({"status": "resolved", "resolution": "attempt succeeded"})
+    assert not tool._wait_resolved_before_harness_resume({"status": "waiting", "resolution": None})
+    assert not tool._wait_resolved_before_harness_resume({"status": "resolved", "resolution": "parent comment"})
 
 
 def test_real_symphony_e2e_resume_observed_reads_resolved_runtime_waits() -> None:

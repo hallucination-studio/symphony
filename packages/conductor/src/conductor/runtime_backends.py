@@ -114,7 +114,10 @@ class LocalVerifierRuntimeBackendProvider:
             raise ValueError(f"isolated local verifier home could not be materialized: {verifier_home}")
         env = {"SYMPHONY_LOCAL_VERIFIER_HOME": str(verifier_home)}
         if profile.settings.get("force_first_verify_failure_for_replan") is True:
+            probe_home = _runtime_mode_home_root(context) / "local-verifier"
+            probe_home.mkdir(parents=True, exist_ok=True)
             env["SYMPHONY_FORCE_FIRST_VERIFY_FAILURE_FOR_REPLAN"] = "1"
+            env["SYMPHONY_LOCAL_VERIFIER_PROBE_HOME"] = str(probe_home)
         return env
 
 
@@ -138,10 +141,14 @@ def prepare_backend_environment(
 
 
 def _runtime_home_root(context: BackendEnvironmentContext, backend_name: str) -> Path:
-    base = context.instance_state_root / "runtime-homes" / context.profile.mode.value
+    base = _runtime_mode_home_root(context)
     if context.home_scope:
         return base / _safe_home_scope(context.home_scope) / backend_name
     return base / backend_name
+
+
+def _runtime_mode_home_root(context: BackendEnvironmentContext) -> Path:
+    return context.instance_state_root / "runtime-homes" / context.profile.mode.value
 
 
 def _safe_home_scope(value: str) -> str:

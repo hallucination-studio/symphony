@@ -74,6 +74,8 @@ async def wait_for_run(
     stage_timeout_seconds: int,
     permission_approval_probe: bool = False,
     crash_recovery_probe: bool = False,
+    crash_after_policy_revision: int | None = None,
+    continue_after_human_resume: bool = False,
     expected_failure: str = "none",
 ) -> dict[str, Any]:
     instance_root = Path(instance["instance_dir"])
@@ -90,11 +92,11 @@ async def wait_for_run(
     completed_pipeline_human_waits: set[str] = set()
     parent_comment_probe_waits: set[str] = set()
     crash_probe_attempt_id: str | None = None
+    crash_probe_lease_id: str | None = None
     crash_probe_pid: int | None = None
     crash_probe_killed = False
-    crash_probe_requeued = False
-    crash_probe_restarted = False
-    crash_probe_terminal = False
+    crash_probe_failure_visible = False
+    crash_probe_lease_reclaimed = False
     stages: dict[str, str] = {}
 
     def mark_stage(name: str, passed: bool, **details: Any) -> None:
@@ -196,6 +198,21 @@ async def wait_for_run(
             permission_approval_probe=permission_approval_probe,
         )
         if immediate_failure is not None:
+            crash_probe_expected_failure = (
+                crash_recovery_probe
+                and crash_probe_killed
+                and _immediate_failure_matches_attempt(immediate_failure, crash_probe_attempt_id)
+            )
+            if crash_probe_expected_failure:
+                crash_probe_failure_visible = True
+                evidence.check(
+                    "crash-recovery:failure-visible",
+                    True,
+                    attempt_id=crash_probe_attempt_id,
+                    failure=immediate_failure,
+                )
+                immediate_failure = None
+        if immediate_failure is not None:
             evidence.check(
                 "pipeline-runtime-error:visible",
                 False,
@@ -215,12 +232,24 @@ async def wait_for_run(
                 stages=stages,
                 stage_timeout_seconds=stage_timeout_seconds,
             )
-        if crash_recovery_probe and not crash_probe_killed:
+        crash_probe_policy_ready = (
+            crash_after_policy_revision is None
+            or int(pipeline_payload.get("policy_revision") or 0) >= crash_after_policy_revision
+        )
+        if crash_recovery_probe and crash_probe_policy_ready and not crash_probe_killed:
             candidate = crash_probe_candidate(pipeline_attempts, pipeline_leases)
             if candidate is not None:
                 pid = int(candidate["process_pid"])
                 killed, error = kill_performer_for_crash_probe(pid)
                 crash_probe_attempt_id = str(candidate.get("attempt_id") or "")
+                crash_probe_lease_id = next(
+                    (
+                        str(lease.get("lease_id") or "")
+                        for lease in pipeline_leases
+                        if str(lease.get("attempt_id") or "") == crash_probe_attempt_id
+                    ),
+                    None,
+                )
                 crash_probe_pid = pid
                 crash_probe_killed = killed
                 evidence.check(
@@ -230,6 +259,7 @@ async def wait_for_run(
                     attempt_id=crash_probe_attempt_id,
                     mode=candidate.get("mode"),
                     status=candidate.get("status"),
+                    lease_id=crash_probe_lease_id,
                     error=error,
                 )
                 await asyncio.sleep(2)
@@ -238,43 +268,28 @@ async def wait_for_run(
             matching_attempts = [
                 attempt for attempt in pipeline_attempts if attempt.get("attempt_id") == crash_probe_attempt_id
             ]
-            crashed_events_seen = "performer.crashed" in conductor_pipeline_event_types
-            if crashed_events_seen and not crash_probe_requeued:
-                requeued_attempts = [attempt for attempt in matching_attempts if attempt.get("state") == "pending"]
-                if requeued_attempts:
-                    crash_probe_requeued = True
-                    evidence.check(
-                        "crash-recovery:performer-crashed-event",
-                        True,
-                        attempt_id=crash_probe_attempt_id,
-                        pipeline_attempts=requeued_attempts,
-                        event_types=conductor_pipeline_event_types[-20:],
-                    )
-            if crash_probe_requeued and not crash_probe_restarted:
-                restarted_attempts = [attempt for attempt in matching_attempts if attempt.get("state") == "running"]
-                if restarted_attempts:
-                    crash_probe_restarted = True
-                    evidence.check(
-                        "crash-recovery:restarted-after-crash",
-                        True,
-                        attempt_id=crash_probe_attempt_id,
-                        pipeline_attempts=restarted_attempts,
-                    )
-            if crash_probe_requeued and not crash_probe_terminal:
-                terminal_attempts = [
-                    attempt
-                    for attempt in matching_attempts
-                    if attempt.get("state") in {"succeeded", "failed", "cancelled", "timed_out"}
-                ]
-                if terminal_attempts:
-                    crash_probe_terminal = True
-                    evidence.check(
-                        "crash-recovery:terminal-after-crash",
-                        True,
-                        attempt_id=crash_probe_attempt_id,
-                        pid=crash_probe_pid,
-                        pipeline_attempts=terminal_attempts,
-                    )
+            terminal_attempts = [
+                attempt
+                for attempt in matching_attempts
+                if attempt.get("state") in {"failed", "cancelled", "timed_out"}
+            ]
+            active_crash_leases = [
+                lease
+                for lease in pipeline_leases
+                if str(lease.get("attempt_id") or "") == crash_probe_attempt_id
+                or (crash_probe_lease_id and str(lease.get("lease_id") or "") == crash_probe_lease_id)
+            ]
+            if terminal_attempts and not active_crash_leases and not crash_probe_lease_reclaimed:
+                crash_probe_lease_reclaimed = True
+                evidence.check(
+                    "crash-recovery:lease-reclaimed",
+                    True,
+                    attempt_id=crash_probe_attempt_id,
+                    lease_id=crash_probe_lease_id,
+                    pid=crash_probe_pid,
+                    pipeline_attempts=terminal_attempts,
+                    active_crash_leases=active_crash_leases,
+                )
         mark_stage("webhook_queued", True, issue_id=issue_id)
         mark_stage("process_running_or_exited", process_status in {"running", "exited", "stopped"}, process_status=process_status)
         mark_stage("implementation_result_exists", result_path.exists(), path=str(result_path))
@@ -300,7 +315,8 @@ async def wait_for_run(
             resumed_wait_ids = _resolved_pipeline_wait_ids(pipeline_payload)
             if completed_pipeline_human_waits & resumed_wait_ids:
                 evidence.check("human-action:resume-observed-after-push", True, wait_ids=sorted(resumed_wait_ids))
-                break
+                if not continue_after_human_resume:
+                    break
         if pipeline_human_actions:
             evidence.check(
                 "human-action:conductor-pipeline-awaiting-human",
@@ -349,6 +365,16 @@ async def wait_for_run(
                         else {}
                     )
                     probe_wait = _pipeline_wait_by_id(probe_pipeline, wait_id)
+                    if _wait_resolved_before_harness_resume(probe_wait):
+                        completed_pipeline_human_waits.add(wait_id)
+                        evidence.check(
+                            "human-action:stale-wait-already-resolved",
+                            True,
+                            status=probe_status,
+                            wait=probe_wait,
+                            comment_created=bool(comment.get("success")),
+                        )
+                        continue
                     evidence.check(
                         "human-action:parent-comment-does-not-resume",
                         bool(comment.get("success"))
@@ -410,7 +436,8 @@ async def wait_for_run(
                 and "human-action:managed-push-resume" in check_names
                 and "human-action:resume-observed-after-push" in check_names
             ):
-                break
+                if not continue_after_human_resume:
+                    break
         if (
             result_path.exists()
             and pipeline_terminal
@@ -419,7 +446,7 @@ async def wait_for_run(
             and process_status in {"exited", "stopped"}
         ):
             break
-        sleep_seconds = 2 if crash_recovery_probe and not crash_probe_terminal else 5
+        sleep_seconds = 2 if crash_recovery_probe and not crash_probe_lease_reclaimed else 5
         await asyncio.sleep(sleep_seconds)
     final_issue = final_issue or await fetch_linear_issue(token, issue_id)
     if crash_recovery_probe:
@@ -428,12 +455,12 @@ async def wait_for_run(
             "crash-recovery:covered",
             {
                 "crash-recovery:performer-killed",
-                "crash-recovery:performer-crashed-event",
-                "crash-recovery:restarted-after-crash",
-                "crash-recovery:terminal-after-crash",
+                "crash-recovery:failure-visible",
+                "crash-recovery:lease-reclaimed",
             }.issubset(check_names),
             killed=crash_probe_killed,
             attempt_id=crash_probe_attempt_id,
+            lease_id=crash_probe_lease_id,
             pid=crash_probe_pid,
             passed_checks=sorted(name for name in check_names if str(name).startswith("crash-recovery:")),
         )
@@ -462,6 +489,37 @@ def _human_answered_push_satisfies_resume_probe(status: int, body: Any) -> bool:
     if body.get("status") == "accepted":
         return True
     return body.get("status") == "ignored" and body.get("reason") == "completed_child_required"
+
+
+def _wait_resolved_before_harness_resume(wait: dict[str, Any]) -> bool:
+    if wait.get("status") != "resolved":
+        return False
+    resolution = str(wait.get("resolution") or "").strip().lower()
+    return resolution in {"attempt succeeded", "attempt cancelled", "attempt failed", "attempt timed_out"}
+
+
+def _immediate_failure_matches_attempt(failure: dict[str, Any], attempt_id: str | None) -> bool:
+    expected_attempt_id = str(attempt_id or "").strip()
+    if not expected_attempt_id:
+        return False
+    attempts = failure.get("attempts")
+    if isinstance(attempts, list):
+        attempt_ids = [
+            str(attempt.get("attempt_id") or "")
+            for attempt in attempts
+            if isinstance(attempt, dict) and str(attempt.get("attempt_id") or "")
+        ]
+        return bool(attempt_ids) and all(attempt_id == expected_attempt_id for attempt_id in attempt_ids)
+    actions = failure.get("actions")
+    if not isinstance(actions, list):
+        return False
+    for action in actions:
+        if not isinstance(action, dict):
+            continue
+        details = action.get("details")
+        if isinstance(details, dict) and str(details.get("attempt_id") or "") == expected_attempt_id:
+            return True
+    return False
 
 
 def _resolved_pipeline_wait_ids(pipeline_payload: dict[str, Any]) -> set[str]:

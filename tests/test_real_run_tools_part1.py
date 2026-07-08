@@ -288,6 +288,46 @@ def test_real_symphony_e2e_has_appendix_policy_and_read_only_probes() -> None:
     assert "appendix:s0b-view-read-only" in source
 
 
+def test_real_symphony_e2e_fixture_repo_disables_local_git_signing() -> None:
+    source = (ROOT / "tools" / "real_symphony_e2e_common.py").read_text(encoding="utf-8")
+
+    assert "commit.gpgsign" in source
+    assert "tag.gpgsign" in source
+
+
+def test_crash_probe_candidate_targets_execute_attempts_only() -> None:
+    tool = load_tool("real_symphony_e2e_analysis")
+    leases = [
+        {"attempt_id": "plan-1", "lease_id": "lease-plan"},
+        {"attempt_id": "exec-1", "lease_id": "lease-exec"},
+    ]
+
+    assert tool.crash_probe_candidate(
+        [
+            {"attempt_id": "plan-1", "mode": "plan", "state": "running", "process_pid": 111},
+            {"attempt_id": "exec-1", "mode": "execute", "state": "running", "process_pid": 222},
+        ],
+        leases,
+    )["attempt_id"] == "exec-1"
+    assert tool.crash_probe_candidate(
+        [{"attempt_id": "plan-1", "mode": "plan", "state": "running", "process_pid": 111}],
+        leases,
+    ) is None
+
+
+def test_crash_probe_failure_match_does_not_hide_other_failures() -> None:
+    tool = load_tool("real_symphony_e2e_wait")
+
+    assert tool._immediate_failure_matches_attempt(
+        {"attempts": [{"attempt_id": "crash-attempt"}]},
+        "crash-attempt",
+    )
+    assert not tool._immediate_failure_matches_attempt(
+        {"attempts": [{"attempt_id": "crash-attempt"}, {"attempt_id": "other-failed"}]},
+        "crash-attempt",
+    )
+
+
 def test_real_symphony_e2e_runtime_config_uses_explicit_codex_home_source() -> None:
     tool = load_tool("real_symphony_e2e")
 
@@ -418,6 +458,7 @@ def test_real_symphony_e2e_overall_dod_combines_required_probes() -> None:
     assert payload["profiles"]["execute"]["settings"]["emit_runtime_wait_probe"] is True
     assert payload["profiles"]["verify"]["settings"] == {"force_first_verify_failure_for_replan": True}
     assert "two independent parallel subtasks" in description
+    assert "depend on both parallel subtasks" in description
     assert "SYMPHONY_CONFLICT_SHARED.md" in description
     assert "Runtime Wait" in description
     assert "replan" in description.lower()
@@ -512,7 +553,7 @@ def test_real_symphony_e2e_defaults_to_bounded_codex_turn_timeout() -> None:
 
     settings = tool._codex_settings_from_args(args)
 
-    assert settings["hard_turn_timeout_ms"] == 300000
+    assert settings["hard_turn_timeout_ms"] == 900000
 
 
 def test_real_symphony_e2e_cli_rejects_codex_home_source_override() -> None:
