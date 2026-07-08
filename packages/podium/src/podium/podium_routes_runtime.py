@@ -566,6 +566,13 @@ def normalize_agent_session_event(payload: dict[str, Any]) -> dict[str, Any]:
     agent = session.get("agent") if isinstance(session.get("agent"), dict) else {}
     workspace = payload.get("workspace") if isinstance(payload.get("workspace"), dict) else {}
     parent = issue.get("parent") if isinstance(issue.get("parent"), dict) else payload.get("parent")
+    pipeline_intent = payload.get("pipeline_intent")
+    if not isinstance(pipeline_intent, dict):
+        pipeline_intent = payload.get("intent")
+    if not isinstance(pipeline_intent, dict):
+        pipeline_intent = issue.get("pipeline_intent")
+    if not isinstance(pipeline_intent, dict):
+        pipeline_intent = issue.get("intent")
     return {
         "workspace_id": str(workspace.get("id") or payload.get("workspace_id") or ""),
         "project_slug": str(project.get("slugId") or payload.get("project_slug") or ""),
@@ -589,6 +596,7 @@ def normalize_agent_session_event(payload: dict[str, Any]) -> dict[str, Any]:
         "issue_delegate_id": str(((issue.get("delegate") or {}) if isinstance(issue.get("delegate"), dict) else {}).get("id") or ""),
         "blocked_by": _webhook_blocked_by_ids(issue.get("blocked_by") or payload.get("blocked_by")),
         "parent_issue_id": _webhook_ref_id(issue.get("parent_issue_id") or parent or payload.get("parent_issue_id")),
+        "pipeline_intent": dict(pipeline_intent) if isinstance(pipeline_intent, dict) else {},
     }
 
 

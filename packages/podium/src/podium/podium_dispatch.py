@@ -63,6 +63,7 @@ class PodiumDispatchMixin:
                 "pipeline_profile": group.get("pipeline_profile") or "default",
                 "blocked_by": list(event.get("blocked_by") or []),
                 "parent_issue_id": event.get("parent_issue_id") or "",
+                "pipeline_intent": dict(event.get("pipeline_intent") or {}),
                 "status": "queued",
                 "reason": "",
                 "graph_id": "",
@@ -168,8 +169,8 @@ class PodiumDispatchMixin:
                         "runtime_group_id": str(group.get("id") or leased.get("project_binding_id") or ""),
                         "routing_rule_id": str(group.get("id") or leased.get("project_binding_id") or ""),
                         "pipeline_profile": str(group.get("pipeline_profile") or "default"),
-                        "blocked_by": [],
-                        "parent_issue_id": "",
+                        "blocked_by": list(leased.get("blocked_by") or []),
+                        "parent_issue_id": str(leased.get("parent_issue_id") or ""),
                     }
                 )
             return leased

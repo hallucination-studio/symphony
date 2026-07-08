@@ -28,7 +28,9 @@ from performer_api.pipeline import (
     PlanAttemptResult,
     PipelineModeView,
     PipelineView,
+    IntentSpec,
     PlanProposal,
+    PlanRepair,
     PlanValidator,
     PlanValidatorError,
     PredictedCall,
@@ -185,6 +187,20 @@ class ConductorPipelineStore:
                   payload_json TEXT NOT NULL,
                   updated_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS stuck_node_observations (
+                  graph_revision INTEGER NOT NULL,
+                  node_id TEXT NOT NULL,
+                  count INTEGER NOT NULL,
+                  payload_json TEXT NOT NULL,
+                  first_seen_at TEXT NOT NULL,
+                  last_seen_at TEXT NOT NULL,
+                  PRIMARY KEY (graph_revision, node_id)
+                );
+                CREATE TABLE IF NOT EXISTS scheduler_tick_policy (
+                  id INTEGER PRIMARY KEY CHECK (id = 1),
+                  payload_json TEXT NOT NULL,
+                  updated_at TEXT NOT NULL
+                );
                 """
             )
             self._migrate_graph_nodes_primary_key(connection)
@@ -272,8 +288,53 @@ class ConductorPipelineStore:
             return RuntimeConfigEnvelope(runtime_group_id="", version=1, scheduler_policy=policy, profiles={})
         return RuntimeConfigEnvelope.from_dict(_json_loads(row["payload_json"]))
 
-    def commit_plan(self, proposal: PlanProposal) -> GraphRevision:
-        errors = PlanValidator().validate(proposal)
+    def active_runtime_config_source(self) -> str:
+        with self.connect() as connection:
+            row = connection.execute("SELECT 1 FROM runtime_config WHERE id = 1").fetchone()
+        return "podium_pushed" if row is not None else "local_default"
+
+    def record_scheduler_tick_policy(
+        self,
+        envelope: RuntimeConfigEnvelope,
+        *,
+        policy_source: str,
+        at: datetime | None = None,
+    ) -> dict[str, Any]:
+        payload = {
+            "policy_id": envelope.scheduler_policy.policy_id,
+            "policy_version": envelope.scheduler_policy.version,
+            "policy_source": policy_source,
+            "runtime_config_version": envelope.version,
+            "recorded_at": _format_time(at or datetime.now(timezone.utc)),
+        }
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO scheduler_tick_policy (id, payload_json, updated_at)
+                VALUES (1, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                  payload_json = excluded.payload_json,
+                  updated_at = excluded.updated_at
+                """,
+                (_json_dumps(payload), payload["recorded_at"]),
+            )
+        return payload
+
+    def latest_scheduler_tick_policy(self) -> dict[str, Any]:
+        with self.connect() as connection:
+            row = connection.execute("SELECT payload_json FROM scheduler_tick_policy WHERE id = 1").fetchone()
+        if row is None:
+            return {
+                "policy_id": "",
+                "policy_version": 0,
+                "policy_source": "no_scheduler_tick",
+                "runtime_config_version": 0,
+                "recorded_at": "",
+            }
+        return _json_loads(row["payload_json"])
+
+    def commit_plan(self, proposal: PlanProposal, *, intent_spec: IntentSpec | None = None) -> GraphRevision:
+        errors = PlanValidator(intent_spec=intent_spec).validate(proposal)
         if errors:
             names = ", ".join(sorted(error.value for error in errors))
             raise ValueError(f"invalid plan proposal: {names}")
@@ -365,6 +426,10 @@ class ConductorPipelineStore:
             "title": str(context.get("title") or ""),
             "description": _sanitize_error(str(context.get("description") or "")) if context.get("description") else "",
         }
+        for key in ("intent", "pipeline_intent"):
+            value = context.get(key)
+            if isinstance(value, dict):
+                sanitized[key] = _jsonable(value)
         with self.connect() as connection:
             connection.execute(
                 """
@@ -466,6 +531,71 @@ class ConductorPipelineStore:
             ).fetchall()
         return [(str(row["blocker_node_id"]), str(row["blocked_node_id"])) for row in rows]
 
+    def record_stuck_node_observation(self, node_id: str, *, reason: str, at: datetime | None = None) -> dict[str, Any]:
+        graph_revision = self.current_graph_revision()
+        now = (at or datetime.now(timezone.utc)).isoformat()
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT count, payload_json, first_seen_at FROM stuck_node_observations
+                WHERE graph_revision = ? AND node_id = ?
+                """,
+                (graph_revision, node_id),
+            ).fetchone()
+            count = int(row["count"]) + 1 if row is not None else 1
+            first_seen_at = str(row["first_seen_at"]) if row is not None else now
+            payload = _json_loads(row["payload_json"]) if row is not None else {}
+            payload.update(
+                {
+                    "node_id": node_id,
+                    "graph_revision": graph_revision,
+                    "reason": reason,
+                    "count": count,
+                    "first_seen_at": first_seen_at,
+                    "last_seen_at": now,
+                }
+            )
+            connection.execute(
+                """
+                INSERT INTO stuck_node_observations (graph_revision, node_id, count, payload_json, first_seen_at, last_seen_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(graph_revision, node_id) DO UPDATE SET
+                  count = excluded.count,
+                  payload_json = excluded.payload_json,
+                  last_seen_at = excluded.last_seen_at
+                """,
+                (graph_revision, node_id, count, _json_dumps(payload), first_seen_at, now),
+            )
+        return payload
+
+    def clear_stuck_node_observations_except(self, node_ids: set[str]) -> None:
+        graph_revision = self.current_graph_revision()
+        with self.connect() as connection:
+            if not node_ids:
+                connection.execute("DELETE FROM stuck_node_observations WHERE graph_revision = ?", (graph_revision,))
+                return
+            placeholders = ",".join("?" for _ in node_ids)
+            connection.execute(
+                f"""
+                DELETE FROM stuck_node_observations
+                WHERE graph_revision = ? AND node_id NOT IN ({placeholders})
+                """,
+                (graph_revision, *sorted(node_ids)),
+            )
+
+    def list_stuck_node_observations(self) -> list[dict[str, Any]]:
+        graph_revision = self.current_graph_revision()
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT payload_json FROM stuck_node_observations
+                WHERE graph_revision = ?
+                ORDER BY node_id
+                """,
+                (graph_revision,),
+            ).fetchall()
+        return [_json_loads(row["payload_json"]) for row in rows]
+
     def children_for(self, parent_node_id: str) -> list[GraphNode]:
         revision = self.current_graph_revision()
         with self.connect() as connection:
@@ -522,6 +652,7 @@ class ConductorPipelineStore:
             gate_snapshot_hash=parent.gate_snapshot_hash,
             verify_score=verify_score,
             rework_count=parent.rework_count,
+            replan_depth=parent.replan_depth,
             superseded_by=list(parent.superseded_by),
             human_reason=parent.human_reason,
         )
@@ -548,6 +679,7 @@ class ConductorPipelineStore:
         verify_score: int | None = None,
         human_reason: Any = _UNCHANGED,
         rework_count: int | None = None,
+        replan_depth: int | None = None,
     ) -> GraphNode:
         with self.connect() as connection:
             updated = self._update_node_state_on_connection(
@@ -557,6 +689,7 @@ class ConductorPipelineStore:
                 verify_score=verify_score,
                 human_reason=human_reason,
                 rework_count=rework_count,
+                replan_depth=replan_depth,
             )
         return updated
 
@@ -569,6 +702,7 @@ class ConductorPipelineStore:
         verify_score: int | None = None,
         human_reason: Any = _UNCHANGED,
         rework_count: int | None = None,
+        replan_depth: int | None = None,
     ) -> GraphNode:
         revision = self._current_graph_revision_on_connection(connection)
         topology_row = connection.execute(
@@ -595,6 +729,7 @@ class ConductorPipelineStore:
             gate_snapshot_hash=node.gate_snapshot_hash,
             verify_score=verify_score if verify_score is not None else node.verify_score,
             rework_count=rework_count if rework_count is not None else node.rework_count,
+            replan_depth=replan_depth if replan_depth is not None else node.replan_depth,
             superseded_by=node.superseded_by,
             human_reason=node.human_reason if human_reason is _UNCHANGED else human_reason,
         )
@@ -701,6 +836,7 @@ class ConductorPipelineStore:
                 gate_snapshot_hash=node.gate_snapshot_hash,
                 verify_score=node.verify_score,
                 rework_count=node.rework_count,
+                replan_depth=node.replan_depth,
                 superseded_by=node.superseded_by,
                 human_reason=node.human_reason,
             )
@@ -1797,6 +1933,7 @@ class ConductorPipelineStore:
                 gate_snapshot_hash=old.gate_snapshot_hash,
                 verify_score=old.verify_score,
                 rework_count=old.rework_count,
+                replan_depth=old.replan_depth,
                 superseded_by=replacement_ids,
                 human_reason=old.human_reason,
             )
@@ -1819,6 +1956,7 @@ class ConductorPipelineStore:
                 gate_snapshot_hash=node.gate_snapshot_hash,
                 verify_score=node.verify_score,
                 rework_count=node.rework_count,
+                replan_depth=old.replan_depth + 1,
                 superseded_by=list(node.superseded_by),
                 human_reason=node.human_reason,
             )
@@ -1938,8 +2076,18 @@ class ConductorPipelineStore:
         if isinstance(result, PlanAttemptResult):
             if result.proposal is None:
                 return False
-            validation_errors = PlanValidator().validate(result.proposal)
+            intent_spec = self._intent_spec_for_plan_node(result.node_id)
+            proposal = PlanRepair(intent_spec).repair(result.proposal)
+            validation_errors = PlanValidator(intent_spec=intent_spec).validate(proposal)
             if node.state is GraphNodeState.REPLANNING and self.latest_failed_verify_attempt_for_node(result.node_id) is not None:
+                max_replan_depth = self.active_runtime_config().scheduler_policy.max_rework_attempts
+                if node.replan_depth >= max_replan_depth:
+                    return self._fail_plan_attempt_with_human_wait(
+                        result,
+                        at=at,
+                        reason=HumanEscalationReason.REPLAN_LIMIT_EXCEEDED,
+                        error=f"replan_depth_limit_exceeded depth={node.replan_depth} limit={max_replan_depth}",
+                    )
                 if validation_errors:
                     return self._fail_plan_attempt_with_human_wait(
                         result,
@@ -1948,7 +2096,7 @@ class ConductorPipelineStore:
                         error=_plan_validation_error_summary(validation_errors),
                     )
                 try:
-                    self.replace_node_with_subgraph(result.node_id, result.proposal)
+                    self.replace_node_with_subgraph(result.node_id, proposal)
                 except ValueError as exc:
                     return self._fail_plan_attempt_with_human_wait(
                         result,
@@ -1965,7 +2113,7 @@ class ConductorPipelineStore:
                         error=_plan_validation_error_summary(validation_errors),
                     )
                 try:
-                    self.commit_plan(result.proposal)
+                    self.commit_plan(proposal, intent_spec=intent_spec)
                 except ValueError as exc:
                     return self._fail_plan_attempt_with_human_wait(
                         result,
@@ -2013,6 +2161,7 @@ class ConductorPipelineStore:
                 )
         else:
             return False
+        self._drive_parent_aggregate_state(result.node_id)
         self._finish_attempt(
             result,
             state=AttemptState.SUCCEEDED,
@@ -2022,6 +2171,39 @@ class ConductorPipelineStore:
         )
         self._deactivate_lease(result.lease_id)
         return True
+
+    def _drive_parent_aggregate_state(self, node_id: str) -> None:
+        try:
+            node = self.get_node(node_id)
+        except KeyError:
+            return
+        parent_id = node.parent_node_id
+        while parent_id:
+            refreshed = self.refresh_aggregate_parent_state(parent_id)
+            if refreshed.state is GraphNodeState.PLANNED:
+                return
+            self.update_node_state(
+                parent_id,
+                refreshed.state,
+                verify_score=refreshed.verify_score,
+                human_reason=refreshed.human_reason,
+            )
+            parent_id = refreshed.parent_node_id
+
+    def _intent_spec_for_plan_node(self, node_id: str) -> IntentSpec:
+        context = self.dispatch_context_for_node(node_id)
+        if not context:
+            revision = self.current_graph_revision_record()
+            if revision is not None:
+                context = self.dispatch_context_for_node(revision.root_node_id)
+        if not context:
+            node = self.get_node(node_id)
+            context = {
+                "issue_id": node.issue_id or node.node_id,
+                "issue_identifier": node.issue_identifier or "",
+                "description": "",
+            }
+        return IntentSpec.from_dispatch_context(context)
 
     def _fail_plan_attempt_with_human_wait(
         self,
@@ -2169,6 +2351,8 @@ class ConductorPipelineStore:
 
     def pipeline_view(self) -> PipelineView:
         envelope = self.active_runtime_config()
+        policy_source = self.active_runtime_config_source()
+        scheduler_policy = self.latest_scheduler_tick_policy()
         nodes = self.list_nodes()
         active_leases = self._active_leases()
         modes: list[PipelineModeView] = []
@@ -2191,11 +2375,18 @@ class ConductorPipelineStore:
         return PipelineView(
             graph_revision=self.current_graph_revision(),
             policy_revision=envelope.scheduler_policy.version,
+            policy_id=envelope.scheduler_policy.policy_id,
+            policy_source=policy_source,
+            last_scheduler_policy_id=str(scheduler_policy.get("policy_id") or ""),
+            last_scheduler_policy_version=int(scheduler_policy.get("policy_version") or 0),
+            last_scheduler_policy_source=str(scheduler_policy.get("policy_source") or "no_scheduler_tick"),
+            last_scheduler_tick_at=str(scheduler_policy.get("recorded_at") or ""),
             nodes=[
                 {
                     **node.to_dict(),
                     "graph_revision": self.current_graph_revision(),
                     "aggregate_state": self._aggregate_display_state(node),
+                    "progress_measure": self._node_progress_measure(node, envelope),
                 }
                 for node in nodes
             ],
@@ -2215,6 +2406,7 @@ class ConductorPipelineStore:
             manifests=[manifest.to_dict() for manifest in self.list_task_output_manifests()],
             human_waits=self.list_human_waits(),
             runtime_waits=self.list_runtime_waits(),
+            stuck_observations=self.list_stuck_node_observations(),
             linear_projections=self._current_linear_projections(nodes),
             prediction_basis={
                 "graph_revision": self.current_graph_revision(),
@@ -2223,7 +2415,11 @@ class ConductorPipelineStore:
                 "generated_at": _now(),
                 "dependency_policy": envelope.scheduler_policy.dependency_policy.value,
                 "pass_threshold": PASS_THRESHOLD,
-                "basis": "current graph revision, active leases, and VERIFY_PASSED blockers",
+                "policy_id": str(scheduler_policy.get("policy_id") or envelope.scheduler_policy.policy_id),
+                "policy_version": int(scheduler_policy.get("policy_version") or envelope.scheduler_policy.version),
+                "policy_source": str(scheduler_policy.get("policy_source") or policy_source),
+                "last_scheduler_tick_at": str(scheduler_policy.get("recorded_at") or ""),
+                "basis": "current graph revision, active leases, last scheduler policy, and VERIFY_PASSED blockers",
             },
             runtime_config=envelope.sanitized().to_dict(),
         )
@@ -2372,6 +2568,21 @@ class ConductorPipelineStore:
             return "in_progress"
         return derived_state.value
 
+    def _node_progress_measure(self, node: GraphNode, envelope: RuntimeConfigEnvelope) -> dict[str, Any]:
+        return {
+            "replan_depth": node.replan_depth,
+            "rework_count": node.rework_count,
+            "max_rework_attempts": envelope.scheduler_policy.max_rework_attempts,
+            "terminal": node.state
+            in {
+                GraphNodeState.VERIFY_PASSED,
+                GraphNodeState.FAILED,
+                GraphNodeState.SUPERSEDED,
+                GraphNodeState.AWAITING_HUMAN,
+            },
+            "next_action": _node_next_action(node),
+        }
+
 
 class PipelineScheduler:
     def __init__(self, store: ConductorPipelineStore):
@@ -2427,6 +2638,50 @@ class PipelineScheduler:
                 self.store.update_node_state(node.node_id, GraphNodeState.READY)
                 promoted.append(node.node_id)
         return promoted
+
+    def find_stuck_nodes(self) -> list[str]:
+        terminal_states = {
+            GraphNodeState.VERIFY_PASSED,
+            GraphNodeState.FAILED,
+            GraphNodeState.SUPERSEDED,
+            GraphNodeState.AWAITING_HUMAN,
+        }
+        active_lease_node_ids = {lease.node_id for lease in self.store.list_active_leases()}
+        open_human_wait_node_ids = {
+            str(wait.get("node_id") or "")
+            for wait in self.store.list_human_waits()
+            if str(wait.get("status") or "waiting") == "waiting"
+        }
+        open_runtime_wait_node_ids = {
+            str(wait.get("node_id") or "")
+            for wait in self.store.list_runtime_waits(status="waiting")
+        }
+        dispatchable_node_ids = {
+            node_id
+            for mode in RuntimeMode
+            for node_id in self.dispatchable_nodes(mode)
+        }
+        stuck: list[str] = []
+        for node in self.store.list_nodes():
+            if node.state in terminal_states:
+                continue
+            if node.node_id in active_lease_node_ids:
+                continue
+            if node.node_id in open_human_wait_node_ids or node.node_id in open_runtime_wait_node_ids:
+                continue
+            if node.node_id in dispatchable_node_ids:
+                continue
+            blocker_ids = self.store.blockers_for(node.node_id)
+            if node.state is GraphNodeState.PLANNED:
+                if all(self.is_dependency_satisfied(blocker_id) for blocker_id in blocker_ids):
+                    continue
+                if any(self.store.get_node(blocker_id).state not in terminal_states for blocker_id in blocker_ids):
+                    continue
+            children = self.store.children_for(node.node_id)
+            if children and any(child.state not in terminal_states for child in children):
+                continue
+            stuck.append(node.node_id)
+        return stuck
 
 
 class PipelineLinearProjector:
@@ -2705,6 +2960,8 @@ class PipelineCoordinator:
                 "issue_identifier": issue_identifier,
                 "title": title,
                 "description": issue_description,
+                "intent": event.get("intent") if isinstance(event.get("intent"), dict) else {},
+                "pipeline_intent": event.get("pipeline_intent") if isinstance(event.get("pipeline_intent"), dict) else {},
             },
         )
         return PipelineDispatchAccepted(node_id=node_id, graph_id=graph_id, plan_attempt_id=plan_attempt_id)
@@ -2731,6 +2988,8 @@ class PipelineCoordinator:
         now = now or datetime.now(timezone.utc)
         started = 0
         envelope = self.store.active_runtime_config()
+        policy_source = self.store.active_runtime_config_source()
+        self.store.record_scheduler_tick_policy(envelope, policy_source=policy_source, at=now)
         self.scheduler.promote_ready_nodes()
         active_leases = self.store._active_leases()
         active_by_mode: dict[RuntimeMode, int] = {mode: 0 for mode in RuntimeMode}
@@ -3133,6 +3392,13 @@ class PipelineCoordinator:
                     )
                 ),
                 issue_description=str(dispatch_context.get("description") or ""),
+                pipeline_intent=_jsonable(
+                    dispatch_context.get("pipeline_intent")
+                    if isinstance(dispatch_context.get("pipeline_intent"), dict)
+                    else dispatch_context.get("intent")
+                    if isinstance(dispatch_context.get("intent"), dict)
+                    else {}
+                ),
                 failure_context=failure_context,
             )
             return request.to_dict()
@@ -3605,6 +3871,7 @@ def _node_runtime_payload(node: GraphNode) -> dict[str, Any]:
         "state": node.state.value,
         "verify_score": node.verify_score,
         "rework_count": node.rework_count,
+        "replan_depth": node.replan_depth,
         "human_reason": node.human_reason.value if node.human_reason is not None else None,
     }
 
@@ -3615,8 +3882,34 @@ def _node_from_topology_and_runtime(topology_payload: dict[str, Any], runtime_pa
     merged["state"] = runtime.get("state") or topology_payload.get("state") or GraphNodeState.PLANNED.value
     merged["verify_score"] = runtime.get("verify_score", topology_payload.get("verify_score"))
     merged["rework_count"] = runtime.get("rework_count", topology_payload.get("rework_count", 0))
+    merged["replan_depth"] = runtime.get("replan_depth", topology_payload.get("replan_depth", 0))
     merged["human_reason"] = runtime.get("human_reason", topology_payload.get("human_reason"))
     return GraphNode.from_dict(merged)
+
+
+def _node_next_action(node: GraphNode) -> str:
+    if node.state is GraphNodeState.PLANNED:
+        return "wait_for_dependencies_or_promote"
+    if node.state is GraphNodeState.READY:
+        return "dispatch_execute"
+    if node.state is GraphNodeState.EXECUTING:
+        return "wait_for_execute_result"
+    if node.state is GraphNodeState.VERIFYING:
+        return "dispatch_or_wait_for_verify"
+    if node.state is GraphNodeState.REWORKING:
+        return "dispatch_execute_rework"
+    if node.state is GraphNodeState.REPLANNING:
+        return "dispatch_plan_rewrite"
+    if node.state is GraphNodeState.AWAITING_HUMAN:
+        return "wait_for_human_action"
+    return "terminal"
+
+
+def _jsonable(value: Any) -> Any:
+    try:
+        return json.loads(json.dumps(value))
+    except TypeError:
+        return str(value)
 
 
 def _json_dumps(payload: dict[str, Any]) -> str:

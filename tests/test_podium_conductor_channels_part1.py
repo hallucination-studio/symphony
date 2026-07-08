@@ -240,6 +240,58 @@ async def test_injected_postgres_persists_queued_dispatch_across_app_restart() -
     assert lease.json()["dispatch"]["issue_identifier"] == "ALPHA-1"
     assert lease.json()["dispatch"]["fencing_token"] == 1
 
+
+async def test_injected_postgres_persists_structured_pipeline_intent_across_app_restart() -> None:
+    from tests.test_podium_infra import FakePgStore, FakeRedisStore
+
+    pg_store = FakePgStore()
+    redis_store = FakeRedisStore()
+    app = create_app(
+        turnstile_verifier=lambda token, _ip: token == "turnstile-ok",
+        secure_cookies=False,
+        secret_key="test-secret",
+        pg_store=pg_store,
+        redis_store=redis_store,
+    )
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
+        user_id = await register(client, "durable-intent-dispatch@example.com")
+        enrolled = await enroll_conductor(client)
+        await client.post(
+            "/api/v1/runtime/report",
+            headers={"Authorization": f"Bearer {enrolled['runtime_token']}"},
+            json={"bindings": [{"instance_id": "inst-a", "project_slug": "ALPHA", "agent_app_user_id": "agent-alpha"}]},
+        )
+        queued = await client.post(
+            "/api/v1/linear/webhooks/agent-session",
+            json=agent_session_payload_with_pipeline_intent(
+                workspace_id=user_id,
+                project_slug="ALPHA",
+                delegate_id="agent-alpha",
+            ),
+        )
+
+    restarted = create_app(
+        turnstile_verifier=lambda token, _ip: token == "turnstile-ok",
+        secure_cookies=False,
+        secret_key="test-secret",
+        pg_store=pg_store,
+        redis_store=redis_store,
+    )
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=restarted), base_url="http://podium.test") as client:
+        lease = await client.post(
+            "/api/v1/runtime/dispatches/lease",
+            headers={"Authorization": f"Bearer {enrolled['runtime_token']}"},
+        )
+
+    assert queued.status_code == 200
+    assert queued.json()["queued"] == 1
+    assert lease.status_code == 200
+    assert lease.json()["dispatch"]["pipeline_intent"]["parallel_dependency_shape"]["parallel_branch_node_ids"] == [
+        "parallel-a",
+        "parallel-b",
+    ]
+
+
 async def test_injected_postgres_routes_webhook_and_lease_across_distinct_workers() -> None:
     from tests.test_podium_infra import FakePgStore, FakeRedisStore
 
@@ -527,6 +579,46 @@ async def test_agent_session_webhook_preserves_dependency_metadata_for_runtime_d
     dispatch = lease.json()["dispatch"]
     assert dispatch["parent_issue_id"] == "parent-1"
     assert dispatch["blocked_by"] == ["blocker-1"]
+
+
+async def test_agent_session_webhook_preserves_structured_pipeline_intent_for_runtime_dispatch() -> None:
+    app = make_app()
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
+        user_id = await register(client, "intent-routing@example.com")
+        enrolled = await enroll_conductor(client)
+        await client.post(
+            "/api/v1/runtime/report",
+            headers={"Authorization": f"Bearer {enrolled['runtime_token']}"},
+            json={
+                "bindings": [
+                    {"instance_id": "inst-a", "project_slug": "ALPHA", "agent_app_user_id": "agent-alpha"}
+                ]
+            },
+        )
+        queued = await client.post(
+            "/api/v1/linear/webhooks/agent-session",
+            json=agent_session_payload_with_pipeline_intent(
+                workspace_id=user_id,
+                project_slug="ALPHA",
+                delegate_id="agent-alpha",
+            ),
+        )
+        lease = await client.post(
+            "/api/v1/runtime/dispatches/lease",
+            headers={"Authorization": f"Bearer {enrolled['runtime_token']}"},
+        )
+
+    assert queued.status_code == 200
+    assert queued.json()["queued"] == 1
+    dispatch = lease.json()["dispatch"]
+    assert dispatch["pipeline_intent"]["parallel_dependency_shape"] == {
+        "parallel_branch_node_ids": ["parallel-a", "parallel-b"],
+        "downstream_node_ids": ["downstream"],
+    }
+    assert dispatch["pipeline_intent"]["required_gate_steps"] == [
+        {"step": "pytest tests/test_smoke.py -q", "source": "appendix_harness"}
+    ]
+
 
 async def test_webhook_rejects_invalid_signature_and_invalid_json() -> None:
     secret = "webhook-secret"

@@ -120,45 +120,72 @@ def test_plan_validator_rejects_gate_without_authoritative_step() -> None:
     assert PlanValidatorError.NO_AUTHORITATIVE_GATE_STEP in errors
 
 
-def test_intent_spec_derives_issue_gate_steps_and_parallel_shape_deterministically() -> None:
-    issue_description = (
-        "Planner must create two independent parallel subtasks. "
-        "At least one downstream subtask must depend on both parallel subtasks' verified upstream output. "
-        "Create SYMPHONY_REAL_E2E_RESULT.md with the Linear issue identifier and the words overall dod. "
-        "Run pytest tests/test_smoke.py -q."
-    )
+def test_intent_spec_derives_only_from_structured_dispatch_context() -> None:
+    dispatch_context = {
+        "issue_id": "issue-1",
+        "issue_identifier": "ENG-1",
+        "description": (
+            "This prose mentions SYMPHONY_REAL_E2E_RESULT.md and says downstream should depend "
+            "on both parallel subtasks, but prose is not authoritative."
+        ),
+        "intent": {
+            "required_gate_steps": [
+                {"step": "test -f SYMPHONY_REAL_E2E_RESULT.md", "source": "appendix_harness"},
+                {"step": "pytest tests/test_smoke.py -q", "source": "appendix_harness"},
+            ],
+            "parallel_dependency_shape": {
+                "parallel_branch_node_ids": ["branch-a", "branch-b"],
+                "downstream_node_ids": ["integration"],
+            },
+        },
+    }
 
-    first = IntentSpec.from_issue(
-        issue_id="issue-1",
-        issue_identifier="ENG-1",
-        issue_description=issue_description,
-    )
-    second = IntentSpec.from_issue(
-        issue_id="issue-1",
-        issue_identifier="ENG-1",
-        issue_description=issue_description,
-    )
+    first = IntentSpec.from_dispatch_context(dispatch_context)
+    second = IntentSpec.from_dispatch_context(dict(dispatch_context))
 
     assert first == second
     assert first.requires_all_parallel_branches_for_downstream is True
+    assert first.parallel_branch_node_ids == ["branch-a", "branch-b"]
+    assert first.downstream_node_ids == ["integration"]
     assert first.required_gate_steps == [
-        GateStep("test -f SYMPHONY_REAL_E2E_RESULT.md", GateStepSource.ISSUE_REQUIREMENT),
-        GateStep("grep -q ENG-1 SYMPHONY_REAL_E2E_RESULT.md", GateStepSource.ISSUE_REQUIREMENT),
-        GateStep("grep -q 'overall dod' SYMPHONY_REAL_E2E_RESULT.md", GateStepSource.ISSUE_REQUIREMENT),
-        GateStep("pytest tests/test_smoke.py -q", GateStepSource.ISSUE_REQUIREMENT),
+        GateStep("test -f SYMPHONY_REAL_E2E_RESULT.md", GateStepSource.APPENDIX_HARNESS),
+        GateStep("pytest tests/test_smoke.py -q", GateStepSource.APPENDIX_HARNESS),
     ]
+
+    prose_only = IntentSpec.from_dispatch_context(
+        {
+            "issue_id": "issue-1",
+            "issue_identifier": "ENG-1",
+            "description": (
+                "Create SYMPHONY_REAL_E2E_RESULT.md and make downstream depend on both parallel subtasks. "
+                "Run pytest tests/test_smoke.py -q."
+            ),
+        }
+    )
+    assert prose_only.required_gate_steps == []
+    assert prose_only.requires_all_parallel_branches_for_downstream is False
 
 
 def test_plan_repair_is_idempotent_and_repairs_required_parallel_shape() -> None:
-    intent = IntentSpec.from_issue(
-        issue_id="issue-1",
-        issue_identifier="ENG-1",
-        issue_description=(
-            "At least one downstream subtask must depend on both parallel subtasks' verified upstream output. "
-            "Create SYMPHONY_REAL_E2E_RESULT.md with the Linear issue identifier and the words overall dod."
-        ),
+    intent = IntentSpec.from_dispatch_context(
+        {
+            "issue_id": "issue-1",
+            "issue_identifier": "ENG-1",
+            "intent": {
+                "required_gate_steps": [
+                    {"step": "test -f SYMPHONY_REAL_E2E_RESULT.md", "source": "appendix_harness"}
+                ],
+                "parallel_dependency_shape": {
+                    "parallel_branch_node_ids": ["parallel-a", "parallel-b"],
+                    "downstream_node_ids": ["integration"],
+                },
+            },
+        }
     )
-    proposal = _parallel_shape_proposal(blocks=[("parallel-a", "integration")])
+    proposal = _parallel_shape_proposal(
+        blocks=[("parallel-a", "integration")],
+        titles={"parallel-a": "First branch", "parallel-b": "Second branch", "integration": "Join work"},
+    )
 
     repaired = PlanRepair(intent).repair(proposal)
     repaired_again = PlanRepair(intent).repair(repaired)
@@ -169,20 +196,154 @@ def test_plan_repair_is_idempotent_and_repairs_required_parallel_shape() -> None
     assert repaired.exit_node_ids == ["integration"]
     assert repaired_again.to_dict() == repaired.to_dict()
     integration_gate = next(gate for gate in repaired.gates if gate.task_id == "integration")
-    assert GateStep("test -f SYMPHONY_REAL_E2E_RESULT.md", GateStepSource.ISSUE_REQUIREMENT) in integration_gate.content.verification_procedure
+    assert GateStep("test -f SYMPHONY_REAL_E2E_RESULT.md", GateStepSource.APPENDIX_HARNESS) in integration_gate.content.verification_procedure
+
+
+def test_plan_repair_promotes_business_issue_root_to_pure_parent_for_aggregate_intent() -> None:
+    intent = IntentSpec.from_dispatch_context(
+        {
+            "issue_id": "issue-1",
+            "issue_identifier": "ENG-1",
+            "intent": {
+                "requires_parent_aggregate": True,
+                "parallel_dependency_shape": {
+                    "parallel_branch_node_ids": ["parallel-a", "parallel-b"],
+                    "downstream_node_ids": ["integration"],
+                },
+            },
+        }
+    )
+    gates: list[GateSpecSnapshot] = []
+    nodes: list[GraphNode] = []
+    for node_id in ("root", "parallel-a", "parallel-b", "integration"):
+        gate = GateSpecSnapshot.create(
+            gate_id=f"gate-{node_id}",
+            task_id=node_id,
+            created_by="plan-1",
+            created_at="2026-07-06T00:00:00Z",
+            content=GateSpecContent(
+                acceptance_criteria=[f"{node_id} works"],
+                verification_procedure=[GateStep("true", GateStepSource.ISSUE_REQUIREMENT)],
+                rubric={str(score): f"score {score}" for score in range(5)},
+                pass_threshold=3,
+            ),
+        )
+        gates.append(gate)
+        nodes.append(GraphNode(node_id=node_id, title=node_id, state=GraphNodeState.PLANNED, gate_snapshot_hash=gate.hash))
+    proposal = PlanProposal(
+        graph_id="graph-1",
+        plan_attempt_id="plan-1",
+        root_node_id="root",
+        nodes=nodes,
+        blocks=[("root", "parallel-a"), ("parallel-a", "integration")],
+        gates=gates,
+        entry_node_ids=["root", "parallel-b"],
+        exit_node_ids=["parallel-b", "integration"],
+    )
+
+    repaired = PlanRepair(intent).repair(proposal)
+    repaired_again = PlanRepair(intent).repair(repaired)
+
+    root = next(node for node in repaired.nodes if node.node_id == "root")
+    subtasks = [node for node in repaired.nodes if node.node_id != "root"]
+    assert root.parent_node_id is None
+    assert root.gate_snapshot_hash is None
+    assert all(node.parent_node_id == "root" for node in subtasks)
+    assert {gate.task_id for gate in repaired.gates} == {"parallel-a", "parallel-b", "integration"}
+    assert not any("root" in edge for edge in repaired.blocks)
+    assert repaired.entry_node_ids == ["parallel-a", "parallel-b"]
+    assert repaired.exit_node_ids == ["integration"]
+    assert PlanValidator(intent_spec=intent).validate(repaired) == set()
+    assert repaired_again.to_dict() == repaired.to_dict()
+
+
+def test_plan_validator_rejects_missing_parent_aggregate_when_intent_requires_it() -> None:
+    intent = IntentSpec.from_dispatch_context(
+        {
+            "issue_id": "issue-1",
+            "issue_identifier": "ENG-1",
+            "intent": {"requires_parent_aggregate": True},
+        }
+    )
+    proposal = _parallel_shape_proposal(
+        blocks=[("parallel-a", "integration"), ("parallel-b", "integration")],
+        titles={"parallel-a": "First branch", "parallel-b": "Second branch", "integration": "Join work"},
+    )
+
+    errors = PlanValidator(intent_spec=intent).validate(proposal)
+
+    assert PlanValidatorError.PARENT_AGGREGATE_MISSING in errors
 
 
 def test_plan_validator_rejects_unrepaired_required_parallel_shape() -> None:
-    intent = IntentSpec.from_issue(
-        issue_id="issue-1",
-        issue_identifier="ENG-1",
-        issue_description="At least one downstream subtask must depend on both parallel subtasks' verified upstream output.",
+    intent = IntentSpec.from_dispatch_context(
+        {
+            "issue_id": "issue-1",
+            "issue_identifier": "ENG-1",
+            "intent": {
+                "parallel_dependency_shape": {
+                    "parallel_branch_node_ids": ["parallel-a", "parallel-b"],
+                    "downstream_node_ids": ["integration"],
+                }
+            },
+        }
     )
-    proposal = _parallel_shape_proposal(blocks=[("parallel-a", "integration")])
+    proposal = _parallel_shape_proposal(
+        blocks=[("parallel-a", "integration")],
+        titles={"parallel-a": "First branch", "parallel-b": "Second branch", "integration": "Join work"},
+    )
 
     errors = PlanValidator(intent_spec=intent).validate(proposal)
 
     assert PlanValidatorError.REQUIRED_PARALLEL_SHAPE_MISSING in errors
+
+
+def test_plan_repair_demotes_model_exact_text_gate_without_injecting_authoritative_steps() -> None:
+    intent = IntentSpec.from_dispatch_context(
+        {
+            "issue_id": "issue-1",
+            "issue_identifier": "ENG-1",
+            "description": (
+                "Structured intent intentionally carries no shared-file gate guard. "
+                "Even if prose mentions grep -q 'model invented marker' SYMPHONY_CONFLICT_SHARED.md, "
+                "prose is not authoritative."
+            ),
+        }
+    )
+    gate = GateSpecSnapshot.create(
+        gate_id="gate-branch-a",
+        task_id="branch-a",
+        created_by="plan-1",
+        created_at="2026-07-06T00:00:00Z",
+        content=GateSpecContent(
+            acceptance_criteria=["Contains exact marker text."],
+            verification_procedure=[
+                GateStep("test -f SYMPHONY_CONFLICT_SHARED.md", GateStepSource.ISSUE_REQUIREMENT),
+                GateStep("grep -q 'model invented marker' SYMPHONY_CONFLICT_SHARED.md", GateStepSource.ISSUE_REQUIREMENT),
+                GateStep("git diff -- SYMPHONY_CONFLICT_SHARED.md | grep -q 'model invented marker'", GateStepSource.ISSUE_REQUIREMENT),
+            ],
+            rubric={str(score): f"score {score}" for score in range(5)},
+            pass_threshold=3,
+        ),
+    )
+    proposal = PlanProposal(
+        graph_id="graph-1",
+        plan_attempt_id="plan-1",
+        root_node_id="root",
+        nodes=[GraphNode(node_id="branch-a", title="Branch A", state=GraphNodeState.PLANNED, gate_snapshot_hash=gate.hash)],
+        blocks=[],
+        gates=[gate],
+        entry_node_ids=["branch-a"],
+        exit_node_ids=["branch-a"],
+    )
+
+    repaired = PlanRepair(intent).repair(proposal)
+
+    commands = repaired.gates[0].content.verification_procedure
+    assert GateStep("test -f SYMPHONY_CONFLICT_SHARED.md", GateStepSource.ISSUE_REQUIREMENT) in commands
+    assert GateStep("grep -q 'model invented marker' SYMPHONY_CONFLICT_SHARED.md", GateStepSource.PLANNER_INFERRED) in commands
+    assert GateStep("git diff -- SYMPHONY_CONFLICT_SHARED.md | grep -q 'model invented marker'", GateStepSource.PLANNER_INFERRED) in commands
+    assert GateStep('test -n "$(git diff -- SYMPHONY_CONFLICT_SHARED.md)"', GateStepSource.SYSTEM_REPAIR) not in commands
 
 
 def test_attempt_requests_round_trip_issue_and_task_context() -> None:
@@ -778,7 +939,12 @@ def test_plan_request_carries_replan_failure_context() -> None:
     assert round_tripped.failure_context["failed_attempt_id"] == "verify-1"
 
 
-def _parallel_shape_proposal(*, blocks: list[tuple[str, str]]) -> PlanProposal:
+def _parallel_shape_proposal(
+    *,
+    blocks: list[tuple[str, str]],
+    titles: dict[str, str] | None = None,
+) -> PlanProposal:
+    titles = titles or {}
     gates: list[GateSpecSnapshot] = []
     nodes: list[GraphNode] = []
     for node_id, title in (
@@ -802,7 +968,7 @@ def _parallel_shape_proposal(*, blocks: list[tuple[str, str]]) -> PlanProposal:
         nodes.append(
             GraphNode(
                 node_id=node_id,
-                title=title,
+                title=titles.get(node_id, title),
                 state=GraphNodeState.PLANNED,
                 gate_snapshot_hash=gate.hash,
             )

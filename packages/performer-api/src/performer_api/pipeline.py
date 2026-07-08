@@ -2,9 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from pathlib import Path
 import re
-import shlex
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from enum import StrEnum
@@ -95,6 +93,7 @@ class PlanValidatorError(StrEnum):
     NO_AUTHORITATIVE_GATE_STEP = "no_authoritative_gate_step"
     INVALID_GATE_STEP_SOURCE = "invalid_gate_step_source"
     REQUIRED_PARALLEL_SHAPE_MISSING = "required_parallel_shape_missing"
+    PARENT_AGGREGATE_MISSING = "parent_aggregate_missing"
 
 
 class GateStepSource(StrEnum):
@@ -151,6 +150,9 @@ class IntentSpec:
     issue_description: str
     required_gate_steps: list[GateStep] = field(default_factory=list)
     requires_all_parallel_branches_for_downstream: bool = False
+    requires_parent_aggregate: bool = False
+    parallel_branch_node_ids: list[str] = field(default_factory=list)
+    downstream_node_ids: list[str] = field(default_factory=list)
 
     @classmethod
     def from_issue(
@@ -164,13 +166,38 @@ class IntentSpec:
             issue_id=issue_id,
             issue_identifier=issue_identifier,
             issue_description=issue_description,
-            required_gate_steps=[
-                GateStep(step, GateStepSource.ISSUE_REQUIREMENT)
-                for step in _required_gate_commands_from_issue(issue_description, issue_identifier=issue_identifier)
-            ],
-            requires_all_parallel_branches_for_downstream=bool(
-                _BOTH_PARALLEL_DOWNSTREAM_PATTERN.search(issue_description)
+        )
+
+    @classmethod
+    def from_dispatch_context(cls, payload: dict[str, Any]) -> IntentSpec:
+        intent_payload = payload.get("intent")
+        if not isinstance(intent_payload, dict):
+            intent_payload = payload.get("pipeline_intent")
+        intent = intent_payload if isinstance(intent_payload, dict) else {}
+        shape = intent.get("parallel_dependency_shape")
+        if not isinstance(shape, dict):
+            shape = intent
+        parallel_branch_node_ids = _str_list(shape.get("parallel_branch_node_ids"))
+        downstream_node_ids = _str_list(shape.get("downstream_node_ids"))
+        required_gate_steps = [
+            GateStep.from_obj(step)
+            for step in intent.get("required_gate_steps") or []
+            if isinstance(step, (dict, str, GateStep))
+        ]
+        requires_all_parallel_branches_for_downstream = bool(parallel_branch_node_ids and downstream_node_ids)
+        return cls(
+            issue_id=str(payload.get("issue_id") or ""),
+            issue_identifier=str(payload.get("issue_identifier") or payload.get("issue_id") or ""),
+            issue_description=str(payload.get("description") or payload.get("issue_description") or ""),
+            required_gate_steps=required_gate_steps,
+            requires_all_parallel_branches_for_downstream=requires_all_parallel_branches_for_downstream,
+            requires_parent_aggregate=bool(
+                intent.get("requires_parent_aggregate")
+                or parallel_branch_node_ids
+                or requires_all_parallel_branches_for_downstream
             ),
+            parallel_branch_node_ids=parallel_branch_node_ids,
+            downstream_node_ids=downstream_node_ids,
         )
 
 
@@ -380,6 +407,7 @@ class GraphNode:
     gate_snapshot_hash: str | None = None
     verify_score: int | None = None
     rework_count: int = 0
+    replan_depth: int = 0
     superseded_by: list[str] = field(default_factory=list)
     human_reason: HumanEscalationReason | None = None
 
@@ -394,6 +422,7 @@ class GraphNode:
             "gate_snapshot_hash": self.gate_snapshot_hash,
             "verify_score": self.verify_score,
             "rework_count": self.rework_count,
+            "replan_depth": self.replan_depth,
             "superseded_by": list(self.superseded_by),
             "human_reason": self.human_reason.value if self.human_reason is not None else None,
         }
@@ -411,6 +440,7 @@ class GraphNode:
             gate_snapshot_hash=_optional_str(payload.get("gate_snapshot_hash")),
             verify_score=_optional_int(payload.get("verify_score")),
             rework_count=_int(payload.get("rework_count"), default=0),
+            replan_depth=_int(payload.get("replan_depth"), default=0),
             superseded_by=_str_list(payload.get("superseded_by")),
             human_reason=HumanEscalationReason(str(reason)) if reason else None,
         )
@@ -662,6 +692,7 @@ class PlanAttemptRequest:
     fencing_token: str
     workspace_path: str
     issue_description: str = ""
+    pipeline_intent: dict[str, Any] = field(default_factory=dict)
     failure_context: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -683,6 +714,7 @@ class PlanAttemptRequest:
             lease_id=str(payload.get("lease_id") or ""),
             fencing_token=str(payload.get("fencing_token") or ""),
             workspace_path=str(payload.get("workspace_path") or ""),
+            pipeline_intent=_dict(payload.get("pipeline_intent")),
             failure_context=_dict(payload.get("failure_context")),
         )
 
@@ -1001,12 +1033,13 @@ class PlanRepair:
         self.intent_spec = intent_spec
 
     def repair(self, proposal: PlanProposal) -> PlanProposal:
-        next_blocks = self._repair_parallel_dependency_shape(proposal)
-        normalized_gate_content = self._normalized_gate_content(proposal)
-        target_node_ids = set(proposal.exit_node_ids or [node.node_id for node in proposal.nodes])
+        parent_repaired = self._repair_parent_aggregate_shape(proposal)
+        next_blocks = self._repair_parallel_dependency_shape(parent_repaired)
+        normalized_gate_content = self._normalized_gate_content(parent_repaired)
+        target_node_ids = set(parent_repaired.exit_node_ids or [node.node_id for node in parent_repaired.nodes])
         next_gates: list[GateSpecSnapshot] = []
         changed_hash_by_task: dict[str, str] = {}
-        for gate in proposal.gates:
+        for gate in parent_repaired.gates:
             existing_content = normalized_gate_content.get(gate.task_id) or gate.content
             missing_required_steps = (
                 [step for step in self.intent_spec.required_gate_steps if step not in existing_content.verification_procedure]
@@ -1039,21 +1072,74 @@ class PlanRepair:
             )
             next_gates.append(updated)
             changed_hash_by_task[updated.task_id] = updated.hash
-        blocks_changed = next_blocks != list(proposal.blocks)
-        if not changed_hash_by_task and not blocks_changed:
+        blocks_changed = next_blocks != list(parent_repaired.blocks)
+        structure_changed = parent_repaired.to_dict() != proposal.to_dict()
+        if not changed_hash_by_task and not blocks_changed and not structure_changed:
             return proposal
         next_nodes = [
             replace(node, gate_snapshot_hash=changed_hash_by_task[node.node_id])
             if node.node_id in changed_hash_by_task
             else node
-            for node in proposal.nodes
+            for node in parent_repaired.nodes
         ]
         entry_node_ids, exit_node_ids = (
-            _entry_exit_node_ids_for_blocks(next_nodes, next_blocks)
+            _entry_exit_node_ids_for_blocks(
+                _entry_exit_nodes_for_intent(next_nodes, parent_repaired.root_node_id, self.intent_spec),
+                next_blocks,
+            )
             if blocks_changed
-            else (list(proposal.entry_node_ids), list(proposal.exit_node_ids))
+            else (list(parent_repaired.entry_node_ids), list(parent_repaired.exit_node_ids))
         )
         return PlanProposal(
+            graph_id=parent_repaired.graph_id,
+            plan_attempt_id=parent_repaired.plan_attempt_id,
+            root_node_id=parent_repaired.root_node_id,
+            nodes=next_nodes,
+            blocks=next_blocks,
+            gates=next_gates,
+            entry_node_ids=entry_node_ids,
+            exit_node_ids=exit_node_ids,
+        )
+
+    def _repair_parent_aggregate_shape(self, proposal: PlanProposal) -> PlanProposal:
+        if not self.intent_spec.requires_parent_aggregate or len(proposal.nodes) <= 1:
+            return proposal
+        root_node_id = proposal.root_node_id
+        if not root_node_id:
+            return proposal
+        root_exists = any(node.node_id == root_node_id for node in proposal.nodes)
+        root_node = next((node for node in proposal.nodes if node.node_id == root_node_id), None)
+        if root_node is None:
+            root_node = GraphNode(
+                node_id=root_node_id,
+                title=self.intent_spec.issue_identifier or self.intent_spec.issue_id or "Business issue",
+                state=GraphNodeState.PLANNED,
+                issue_id=self.intent_spec.issue_id or None,
+                issue_identifier=self.intent_spec.issue_identifier or None,
+            )
+        has_root_parentage = any(node.node_id != root_node_id and node.parent_node_id == root_node_id for node in proposal.nodes)
+        needs_parent_rewrite = not has_root_parentage
+        next_nodes: list[GraphNode] = []
+        if not root_exists:
+            next_nodes.append(root_node)
+        for node in proposal.nodes:
+            if node.node_id == root_node_id:
+                next_nodes.append(replace(node, parent_node_id=None, gate_snapshot_hash=None))
+            elif needs_parent_rewrite:
+                next_nodes.append(replace(node, parent_node_id=root_node_id))
+            else:
+                next_nodes.append(node)
+        if not root_exists:
+            next_nodes[0] = replace(next_nodes[0], parent_node_id=None, gate_snapshot_hash=None)
+        next_blocks = [
+            (source, target)
+            for source, target in proposal.blocks
+            if source != root_node_id and target != root_node_id
+        ]
+        next_gates = [gate for gate in proposal.gates if gate.task_id != root_node_id]
+        executable_nodes = _entry_exit_nodes_for_intent(next_nodes, root_node_id, self.intent_spec)
+        entry_node_ids, exit_node_ids = _entry_exit_node_ids_for_blocks(executable_nodes, next_blocks)
+        next_proposal = PlanProposal(
             graph_id=proposal.graph_id,
             plan_attempt_id=proposal.plan_attempt_id,
             root_node_id=proposal.root_node_id,
@@ -1063,11 +1149,12 @@ class PlanRepair:
             entry_node_ids=entry_node_ids,
             exit_node_ids=exit_node_ids,
         )
+        return next_proposal
 
     def _repair_parallel_dependency_shape(self, proposal: PlanProposal) -> list[tuple[str, str]]:
         if not self.intent_spec.requires_all_parallel_branches_for_downstream:
             return list(proposal.blocks)
-        required_edges = _required_parallel_dependency_edges(proposal)
+        required_edges = _required_parallel_dependency_edges(proposal, self.intent_spec)
         if not required_edges:
             return list(proposal.blocks)
         next_blocks = list(dict.fromkeys(proposal.blocks))
@@ -1079,37 +1166,29 @@ class PlanRepair:
         return next_blocks
 
     def _normalized_gate_content(self, proposal: PlanProposal) -> dict[str, GateSpecContent]:
-        if not _issue_requests_shared_conflict_file(self.intent_spec.issue_description):
-            return {}
         normalized: dict[str, GateSpecContent] = {}
-        node_labels = {node.node_id: f"{node.node_id} {node.title}".lower() for node in proposal.nodes}
+        required_steps = {step.step for step in self.intent_spec.required_gate_steps}
         for gate in proposal.gates:
-            label = node_labels.get(gate.task_id, gate.task_id.lower())
             commands = list(gate.content.verification_procedure)
-            if _SHARED_CONFLICT_FILE not in " ".join(str(command) for command in commands) and "parallel" not in label:
+            next_commands: list[GateStep] = []
+            changed = False
+            for command in commands:
+                if (
+                    _looks_like_model_exact_text_gate_step(command)
+                    and command.step not in required_steps
+                    and command.source is not GateStepSource.PLANNER_INFERRED
+                ):
+                    next_commands.append(GateStep(command.step, GateStepSource.PLANNER_INFERRED))
+                    changed = True
+                else:
+                    next_commands.append(command)
+            if not changed:
                 continue
-            exact_text_commands = [
-                command
-                for command in commands
-                if _SHARED_CONFLICT_FILE in command
-                and ("grep -q" in command or command.startswith("git diff -- "))
-                and command.step not in self.intent_spec.issue_description
-            ]
-            if not exact_text_commands:
-                continue
-            next_commands = [command for command in commands if command not in exact_text_commands]
-            for command in (
-                f"test -f {_SHARED_CONFLICT_FILE}",
-                f'test -n "$(git diff -- {_SHARED_CONFLICT_FILE})"',
-            ):
-                repair_step = GateStep(command, GateStepSource.SYSTEM_REPAIR)
-                if repair_step not in next_commands:
-                    next_commands.append(repair_step)
             normalized[gate.task_id] = GateSpecContent(
                 acceptance_criteria=[
                     criterion
                     for criterion in gate.content.acceptance_criteria
-                    if not ("exact marker" in criterion.lower() and _SHARED_CONFLICT_FILE not in self.intent_spec.issue_description)
+                    if "exact marker" not in criterion.lower()
                 ],
                 verification_procedure=next_commands,
                 rubric=dict(gate.content.rubric),
@@ -1225,6 +1304,12 @@ class PredictedCall:
 class PipelineView:
     graph_revision: int
     policy_revision: int
+    policy_id: str
+    policy_source: str
+    last_scheduler_policy_id: str
+    last_scheduler_policy_version: int
+    last_scheduler_policy_source: str
+    last_scheduler_tick_at: str
     nodes: list[dict[str, Any]]
     modes: list[PipelineModeView]
     predicted_call_order: list[PredictedCall]
@@ -1237,6 +1322,7 @@ class PipelineView:
     manifests: list[dict[str, Any]] = field(default_factory=list)
     human_waits: list[dict[str, Any]] = field(default_factory=list)
     runtime_waits: list[dict[str, Any]] = field(default_factory=list)
+    stuck_observations: list[dict[str, Any]] = field(default_factory=list)
     linear_projections: list[dict[str, Any]] = field(default_factory=list)
     prediction_basis: dict[str, Any] = field(default_factory=dict)
     runtime_config: dict[str, Any] = field(default_factory=dict)
@@ -1245,6 +1331,12 @@ class PipelineView:
         return {
             "graph_revision": self.graph_revision,
             "policy_revision": self.policy_revision,
+            "policy_id": self.policy_id,
+            "policy_source": self.policy_source,
+            "last_scheduler_policy_id": self.last_scheduler_policy_id,
+            "last_scheduler_policy_version": self.last_scheduler_policy_version,
+            "last_scheduler_policy_source": self.last_scheduler_policy_source,
+            "last_scheduler_tick_at": self.last_scheduler_tick_at,
             "nodes": [_jsonable_dict(node) for node in self.nodes],
             "modes": [mode.to_dict() for mode in self.modes],
             "predicted_call_order": [call.to_dict() for call in self.predicted_call_order],
@@ -1257,6 +1349,7 @@ class PipelineView:
             "manifests": [_jsonable_dict(manifest) for manifest in self.manifests],
             "human_waits": [_jsonable_dict(wait) for wait in self.human_waits],
             "runtime_waits": [_jsonable_dict(wait) for wait in self.runtime_waits],
+            "stuck_observations": [_jsonable_dict(observation) for observation in self.stuck_observations],
             "linear_projections": [_jsonable_dict(projection) for projection in self.linear_projections],
             "prediction_basis": _jsonable_dict(self.prediction_basis),
             "runtime_config": _jsonable_dict(self.runtime_config),
@@ -1279,6 +1372,13 @@ class PlanValidator:
         errors: set[PlanValidatorError] = set()
         node_id_list = [node.node_id for node in proposal.nodes]
         node_ids = set(node_id_list)
+        aggregate_root_id = (
+            proposal.root_node_id
+            if self.intent_spec is not None and self.intent_spec.requires_parent_aggregate
+            else ""
+        )
+        executable_nodes = _entry_exit_nodes_for_intent(proposal.nodes, proposal.root_node_id, self.intent_spec)
+        executable_node_ids = {node.node_id for node in executable_nodes}
         gate_task_list = [gate.task_id for gate in proposal.gates]
         gate_id_list = [gate.gate_id for gate in proposal.gates]
         gate_by_task = {gate.task_id: gate for gate in proposal.gates}
@@ -1292,14 +1392,29 @@ class PlanValidator:
             errors.add(PlanValidatorError.POLICY_LIMIT_EXCEEDED)
         if not proposal.entry_node_ids or not proposal.exit_node_ids:
             errors.add(PlanValidatorError.MISSING_ENTRY_EXIT)
-        if not set(proposal.entry_node_ids).issubset(node_ids) or not set(proposal.exit_node_ids).issubset(node_ids):
+        if not set(proposal.entry_node_ids).issubset(executable_node_ids) or not set(proposal.exit_node_ids).issubset(executable_node_ids):
             errors.add(PlanValidatorError.MISSING_ENTRY_EXIT)
         legal_edges = [(source, target) for source, target in proposal.blocks if source in node_ids and target in node_ids and source != target]
-        computed_entries = node_ids - {target for _source, target in legal_edges}
-        computed_exits = node_ids - {source for source, _target in legal_edges}
+        executable_edges = [
+            (source, target)
+            for source, target in legal_edges
+            if source in executable_node_ids and target in executable_node_ids
+        ]
+        computed_entries = executable_node_ids - {target for _source, target in executable_edges}
+        computed_exits = executable_node_ids - {source for source, _target in executable_edges}
         if set(proposal.entry_node_ids) != computed_entries or set(proposal.exit_node_ids) != computed_exits:
             errors.add(PlanValidatorError.MISSING_ENTRY_EXIT)
+        if aggregate_root_id:
+            if aggregate_root_id not in node_ids or not any(
+                node.node_id != aggregate_root_id and node.parent_node_id == aggregate_root_id
+                for node in proposal.nodes
+            ):
+                errors.add(PlanValidatorError.PARENT_AGGREGATE_MISSING)
+            if aggregate_root_id in gate_by_task:
+                errors.add(PlanValidatorError.MISSING_GATE)
         for node in proposal.nodes:
+            if node.node_id == aggregate_root_id:
+                continue
             gate = gate_by_task.get(node.node_id)
             if gate is None or not node.gate_snapshot_hash:
                 errors.add(PlanValidatorError.MISSING_GATE)
@@ -1317,7 +1432,7 @@ class PlanValidator:
         if _has_cycle(node_ids, proposal.blocks):
             errors.add(PlanValidatorError.CYCLE_DETECTED)
         if self.intent_spec is not None and self.intent_spec.requires_all_parallel_branches_for_downstream:
-            required_edges = set(_required_parallel_dependency_edges(proposal))
+            required_edges = set(_required_parallel_dependency_edges(proposal, self.intent_spec))
             if not required_edges.issubset(set(proposal.blocks)):
                 errors.add(PlanValidatorError.REQUIRED_PARALLEL_SHAPE_MISSING)
         return errors
@@ -1353,79 +1468,24 @@ def canonical_gate_hash(content: GateSpecContent | dict[str, Any]) -> str:
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
-_RELATIVE_FILE_PATTERN = re.compile(r"(?<![\w./-])([A-Za-z0-9][A-Za-z0-9_./-]*\.[A-Za-z0-9][A-Za-z0-9_-]*)(?![\w./-])")
-_PYTEST_COMMAND_PATTERN = re.compile(r"\bpytest\s+[A-Za-z0-9_./-]+(?:\s+-[A-Za-z0-9_-]+)*")
-_REQUESTED_WORDS_PATTERN = re.compile(r"\bwords?\s+([A-Za-z0-9][A-Za-z0-9 _-]*?)(?=\.|,|;|$)", re.IGNORECASE)
-_BOTH_PARALLEL_DOWNSTREAM_PATTERN = re.compile(
-    r"\bdepend\s+on\s+both\s+parallel\s+subtasks\b",
-    re.IGNORECASE,
-)
-_SHARED_CONFLICT_FILE = "SYMPHONY_CONFLICT_SHARED.md"
+def _looks_like_model_exact_text_gate_step(command: GateStep) -> bool:
+    lowered = command.step.lower()
+    return "grep -q" in lowered or lowered.startswith("git diff --") or " git diff --" in lowered
 
 
-def _required_gate_commands_from_issue(issue_description: str, *, issue_identifier: str) -> list[str]:
-    commands: list[str] = []
-    pytest_spans = [match.span() for match in _PYTEST_COMMAND_PATTERN.finditer(issue_description)]
-    for match in _RELATIVE_FILE_PATTERN.finditer(issue_description):
-        if any(start <= match.start() < end for start, end in pytest_spans):
-            continue
-        path = match.group(1)
-        if _is_relative_workspace_file(path):
-            quoted_path = shlex.quote(path)
-            commands.append(f"test -f {quoted_path}")
-            if Path(path).name == "SYMPHONY_REAL_E2E_RESULT.md":
-                if issue_identifier:
-                    commands.append(f"grep -q {shlex.quote(issue_identifier)} {quoted_path}")
-                for phrase in _REQUESTED_WORDS_PATTERN.findall(issue_description):
-                    phrase = " ".join(phrase.split())
-                    if phrase:
-                        commands.append(f"grep -q {shlex.quote(phrase)} {quoted_path}")
-    for command in _PYTEST_COMMAND_PATTERN.findall(issue_description):
-        commands.append(command.strip())
-    return list(dict.fromkeys(commands))
-
-
-def _is_relative_workspace_file(path: str) -> bool:
-    candidate = Path(path)
-    if candidate.is_absolute() or ".." in candidate.parts:
-        return False
-    return bool(candidate.name) and not path.startswith(("./.git/", ".git/"))
-
-
-def _issue_requests_shared_conflict_file(issue_description: str) -> bool:
-    lowered = issue_description.lower()
-    return (
-        _SHARED_CONFLICT_FILE in issue_description
-        and "different content" in lowered
-        and "verified patches overlap" in lowered
-    )
-
-
-def _required_parallel_dependency_edges(proposal: PlanProposal) -> list[tuple[str, str]]:
+def _required_parallel_dependency_edges(proposal: PlanProposal, intent_spec: IntentSpec) -> list[tuple[str, str]]:
     node_by_id = {node.node_id: node for node in proposal.nodes}
     node_ids = set(node_by_id)
-    labels = {node.node_id: f"{node.node_id} {node.title}".lower() for node in proposal.nodes}
-    parallel_node_ids = [node.node_id for node in proposal.nodes if "parallel" in labels[node.node_id]]
+    parallel_node_ids = [node_id for node_id in intent_spec.parallel_branch_node_ids if node_id in node_ids]
     if len(parallel_node_ids) < 2:
         return []
     downstream_node_ids = [
-        node.node_id
-        for node in proposal.nodes
-        if node.node_id not in parallel_node_ids
-        and ("downstream" in labels[node.node_id] or "integration" in labels[node.node_id])
+        node_id
+        for node_id in intent_spec.downstream_node_ids
+        if node_id in node_ids and node_id not in parallel_node_ids
     ]
     if not downstream_node_ids:
-        downstream_node_ids = list(
-            dict.fromkeys(
-                target
-                for source, target in proposal.blocks
-                if source in parallel_node_ids and target in node_ids and target not in parallel_node_ids
-            )
-        )
-    if not downstream_node_ids:
-        downstream_node_ids = [
-            node_id for node_id in proposal.exit_node_ids if node_id in node_ids and node_id not in parallel_node_ids
-        ]
+        return []
     required_edges: list[tuple[str, str]] = []
     for downstream_node_id in downstream_node_ids:
         for parallel_node_id in parallel_node_ids:
@@ -1462,6 +1522,16 @@ def _entry_exit_node_ids_for_blocks(
         [node_id for node_id in ordered_node_ids if node_id not in incoming],
         [node_id for node_id in ordered_node_ids if node_id not in outgoing],
     )
+
+
+def _entry_exit_nodes_for_intent(
+    nodes: list[GraphNode],
+    root_node_id: str,
+    intent_spec: IntentSpec | None,
+) -> list[GraphNode]:
+    if intent_spec is None or not intent_spec.requires_parent_aggregate or not root_node_id:
+        return list(nodes)
+    return [node for node in nodes if node.node_id != root_node_id]
 
 
 def _looks_like_executable_gate_command(step: str) -> bool:

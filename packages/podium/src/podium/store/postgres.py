@@ -73,6 +73,7 @@ class PgMigrator:
                 issue_identifier TEXT NOT NULL DEFAULT '',
                 issue_title TEXT NOT NULL DEFAULT '',
                 issue_description TEXT NOT NULL DEFAULT '',
+                pipeline_intent JSONB NOT NULL DEFAULT '{}'::jsonb,
                 workspace_id TEXT NOT NULL DEFAULT '',
                 project_slug TEXT NOT NULL DEFAULT '',
                 agent_session_id TEXT NOT NULL DEFAULT '',
@@ -89,6 +90,7 @@ class PgMigrator:
             "ALTER TABLE dispatches ADD COLUMN IF NOT EXISTS fencing_token BIGINT NOT NULL DEFAULT 0",
             "ALTER TABLE dispatches ADD COLUMN IF NOT EXISTS issue_title TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE dispatches ADD COLUMN IF NOT EXISTS issue_description TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE dispatches ADD COLUMN IF NOT EXISTS pipeline_intent JSONB NOT NULL DEFAULT '{}'::jsonb",
             """
             CREATE UNIQUE INDEX IF NOT EXISTS dispatches_binding_session_unique
             ON dispatches (project_binding_id, agent_session_id)
@@ -514,13 +516,13 @@ class PgStore:
             """
             INSERT INTO dispatches (
               id, project_binding_id, user_id, issue_id, issue_identifier, issue_title, issue_description,
-              workspace_id, project_slug, agent_session_id, status, reason,
+              pipeline_intent, workspace_id, project_slug, agent_session_id, status, reason,
               leased_conductor_id, leased_until, fencing_token,
               created_at, updated_at, completed_at
             )
             VALUES (
-              $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14::timestamptz,$15,
-              $16::timestamptz,$17::timestamptz,$18::timestamptz
+              $1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12,$13,$14,$15::timestamptz,$16,
+              $17::timestamptz,$18::timestamptz,$19::timestamptz
             )
             ON CONFLICT DO NOTHING
             RETURNING id
@@ -532,6 +534,7 @@ class PgStore:
             str(dispatch.get("issue_identifier") or ""),
             str(dispatch.get("issue_title") or ""),
             str(dispatch.get("issue_description") or ""),
+            _pg_json(dispatch.get("pipeline_intent") or {}),
             str(dispatch.get("linear_workspace_id") or dispatch.get("workspace_id") or ""),
             str(dispatch.get("project_slug") or ""),
             str(dispatch.get("agent_session_id") or ""),
@@ -720,6 +723,7 @@ def _record_to_dispatch(row: Any) -> dict[str, Any]:
         "issue_identifier": str(row["issue_identifier"]),
         "issue_title": str(row["issue_title"]),
         "issue_description": str(row["issue_description"]),
+        "pipeline_intent": row["pipeline_intent"] if isinstance(row["pipeline_intent"], dict) else {},
         "linear_workspace_id": str(row["workspace_id"]),
         "project_slug": str(row["project_slug"]),
         "agent_session_id": str(row["agent_session_id"]),

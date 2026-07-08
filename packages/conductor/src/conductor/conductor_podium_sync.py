@@ -7,10 +7,10 @@ from typing import Any
 
 import httpx
 
-from .conductor_pipeline import PipelineLinearProjector, _append_instance_log, _sanitize_error
+from .conductor_pipeline import PipelineLinearProjector, PipelineScheduler, _append_instance_log, _sanitize_error
 from .conductor_service_helpers import *  # noqa: F403
 from .conductor_service_types import *  # noqa: F403
-from performer_api.pipeline import RuntimeConfigEnvelope
+from performer_api.pipeline import HumanEscalationReason, RuntimeConfigEnvelope
 
 
 class ConductorPodiumSyncMixin:
@@ -318,6 +318,7 @@ class ConductorPodiumSyncMixin:
         pipeline_human_actions_completed = await self.reconcile_completed_pipeline_human_actions_once()
         pipeline_lease_heartbeats = self._heartbeat_running_pipeline_leases()
         pipeline_leases_reclaimed = self.pipeline_store.reclaim_expired_leases(datetime.now(timezone.utc))
+        pipeline_stuck_nodes_surfaced = self._surface_stuck_nodes()
         linear_pipeline_ingestions = await self.ingest_linear_pipeline_changes_once()
         linear_pipeline_projections = await self.reconcile_linear_pipeline_projections_once()
         pipeline_attempts_started = await self._start_due_pipeline_attempts()
@@ -350,6 +351,58 @@ class ConductorPodiumSyncMixin:
             crash_restarts=crash_restarts,
             crash_loops=crash_loops,
         )
+
+    def _surface_stuck_nodes(self) -> int:
+        surfaced = 0
+        scheduler = PipelineScheduler(self.pipeline_store)
+        stuck_node_ids = set(scheduler.find_stuck_nodes())
+        self.pipeline_store.clear_stuck_node_observations_except(stuck_node_ids)
+        existing_wait_nodes = {
+            str(wait.get("node_id") or "")
+            for wait in self.pipeline_store.list_human_waits()
+            if str(wait.get("status") or "waiting") == "waiting"
+        }
+        findings = getattr(self, "_pipeline_reconcile_findings", None)
+        if findings is None:
+            findings = []
+            self._pipeline_reconcile_findings = findings
+        for node_id in sorted(stuck_node_ids):
+            observation = self.pipeline_store.record_stuck_node_observation(
+                node_id,
+                reason="pipeline node has no live driver",
+            )
+            if int(observation.get("count") or 0) < 2:
+                continue
+            node = self.pipeline_store.get_node(node_id)
+            finding = {
+                "event": "pipeline_node_stuck",
+                "severity": "warning",
+                "error_type": "RuntimeError",
+                "sanitized_reason": "pipeline node has no live driver",
+                "action_required": "inspect_pipeline_node",
+                "retryable": True,
+                "node_id": node_id,
+                "state": node.state.value,
+                "graph_revision": self.pipeline_store.current_graph_revision(),
+                "observation_count": int(observation.get("count") or 0),
+                "first_seen_at": observation.get("first_seen_at"),
+                "last_seen_at": observation.get("last_seen_at"),
+            }
+            findings.append(finding)
+            if node_id not in existing_wait_nodes:
+                self.pipeline_store.create_human_wait(
+                    node_id,
+                    reason=HumanEscalationReason.CAPACITY_STARVED.value,
+                    details={
+                        "error": "pipeline node has no live driver",
+                        "graph_revision": self.pipeline_store.current_graph_revision(),
+                        "state": node.state.value,
+                        "observation_count": int(observation.get("count") or 0),
+                    },
+                )
+                existing_wait_nodes.add(node_id)
+            surfaced += 1
+        return surfaced
 
     def _fail_exited_pipeline_attempts(self) -> int:
         failed = 0

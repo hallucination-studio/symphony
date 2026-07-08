@@ -94,7 +94,7 @@ def test_planner_prompt_for_replan_preserves_original_concrete_requirements() ->
     assert "must not drop `pytest tests/test_smoke.py -q` if it was part of the original task" in prompt
 
 
-def test_planner_preserves_issue_file_and_command_requirements_in_exit_gate() -> None:
+def test_performer_plan_payload_parser_preserves_raw_model_gate_without_intent_repair() -> None:
     gate = _passing_gate().to_dict()
     gate["task_id"] = "downstream"
     gate["gate_id"] = "gate-downstream"
@@ -119,29 +119,13 @@ def test_planner_preserves_issue_file_and_command_requirements_in_exit_gate() ->
         attempt_id="plan-1",
     )
 
-    preserved = performer_cli._proposal_preserving_issue_requirements(
-        proposal,
-        {
-            "issue_id": "issue-1",
-            "issue_identifier": "ENG-1",
-            "issue_description": (
-                "Create SYMPHONY_REAL_E2E_RESULT.md with the Linear issue identifier and the words overall dod. "
-                "Run pytest tests/test_smoke.py -q."
-            ),
-        },
-        attempt_id="plan-1",
-    )
-
-    gate = preserved.gates[0]
-    assert "test -f SYMPHONY_REAL_E2E_RESULT.md" in gate.content.verification_procedure
-    assert "grep -q ENG-1 SYMPHONY_REAL_E2E_RESULT.md" in gate.content.verification_procedure
-    assert "grep -q 'overall dod' SYMPHONY_REAL_E2E_RESULT.md" in gate.content.verification_procedure
-    assert "pytest tests/test_smoke.py -q" in gate.content.verification_procedure
-    assert preserved.nodes[0].gate_snapshot_hash == gate.hash
-    assert gate.hash != "model-hash"
+    assert proposal.gates[0].hash == gate["hash"]
+    assert proposal.nodes[0].gate_snapshot_hash == proposal.gates[0].hash
+    assert "test -f SYMPHONY_REAL_E2E_RESULT.md" not in proposal.gates[0].content.verification_procedure
+    assert "pytest tests/test_smoke.py -q" not in proposal.gates[0].content.verification_procedure
 
 
-def test_planner_preserves_issue_requirement_that_downstream_depends_on_both_parallel_subtasks() -> None:
+def test_performer_plan_payload_parser_does_not_repair_parallel_dependency_shape() -> None:
     gates = []
     nodes = []
     for node_id, title in [
@@ -175,30 +159,12 @@ def test_planner_preserves_issue_requirement_that_downstream_depends_on_both_par
         attempt_id="plan-1",
     )
 
-    preserved = performer_cli._proposal_preserving_issue_requirements(
-        proposal,
-        {
-            "issue_id": "issue-1",
-            "issue_identifier": "ENG-1",
-            "issue_description": (
-                "Planner must create two independent parallel subtasks and must not add a blocks dependency between them. "
-                "At least one downstream subtask must depend on both parallel subtasks' verified upstream output. "
-                "Create SYMPHONY_REAL_E2E_RESULT.md with the Linear issue identifier and the words overall dod. "
-                "Run pytest tests/test_smoke.py -q."
-            ),
-        },
-        attempt_id="plan-1",
-    )
-
-    assert ("parallel-alpha", "integration-check") in preserved.blocks
-    assert ("parallel-beta", "integration-check") in preserved.blocks
-    assert ("parallel-alpha", "parallel-beta") not in preserved.blocks
-    assert ("parallel-beta", "parallel-alpha") not in preserved.blocks
-    assert preserved.entry_node_ids == ["parallel-alpha", "parallel-beta"]
-    assert preserved.exit_node_ids == ["integration-check"]
+    assert proposal.blocks == [("parallel-alpha", "integration-check")]
+    assert proposal.entry_node_ids == ["parallel-alpha", "parallel-beta"]
+    assert proposal.exit_node_ids == ["parallel-beta", "integration-check"]
 
 
-def test_planner_does_not_preserve_model_invented_exact_shared_conflict_marker_gate() -> None:
+def test_performer_plan_payload_parser_does_not_normalize_model_invented_exact_shared_conflict_marker_gate() -> None:
     gate = _passing_gate().to_dict()
     gate["task_id"] = "parallel-alpha"
     gate["gate_id"] = "gate-parallel-alpha"
@@ -231,26 +197,12 @@ def test_planner_does_not_preserve_model_invented_exact_shared_conflict_marker_g
         attempt_id="plan-1",
     )
 
-    preserved = performer_cli._proposal_preserving_issue_requirements(
-        proposal,
-        {
-            "issue_id": "issue-1",
-            "issue_identifier": "ENG-1",
-            "issue_description": (
-                "Each parallel subtask must modify the already tracked file SYMPHONY_CONFLICT_SHARED.md "
-                "with different content so their verified patches overlap."
-            ),
-        },
-        attempt_id="plan-1",
-    )
-
-    commands = preserved.gates[0].content.verification_procedure
-    assert "grep -q 'ENG-1 parallel branch A content for run-1' SYMPHONY_CONFLICT_SHARED.md" not in commands
-    assert "git diff -- SYMPHONY_CONFLICT_SHARED.md | grep -q 'ENG-1 parallel branch A content for run-1'" not in commands
-    assert "test -f SYMPHONY_CONFLICT_SHARED.md" in commands
-    assert 'test -n "$(git diff -- SYMPHONY_CONFLICT_SHARED.md)"' in commands
-    assert preserved.nodes[0].gate_snapshot_hash == preserved.gates[0].hash
-    assert preserved.gates[0].hash != gate["hash"]
+    commands = proposal.gates[0].content.verification_procedure
+    assert GateStep("grep -q 'ENG-1 parallel branch A content for run-1' SYMPHONY_CONFLICT_SHARED.md", GateStepSource.PLANNER_INFERRED) in commands
+    assert GateStep("git diff -- SYMPHONY_CONFLICT_SHARED.md | grep -q 'ENG-1 parallel branch A content for run-1'", GateStepSource.PLANNER_INFERRED) in commands
+    assert GateStep("test -f SYMPHONY_CONFLICT_SHARED.md", GateStepSource.PLANNER_INFERRED) in commands
+    assert GateStep('test -n "$(git diff -- SYMPHONY_CONFLICT_SHARED.md)"', GateStepSource.SYSTEM_REPAIR) not in commands
+    assert proposal.nodes[0].gate_snapshot_hash == proposal.gates[0].hash
 
 
 @pytest.mark.asyncio
@@ -460,6 +412,12 @@ async def test_plan_mode_uses_strict_plan_result_schema(tmp_path: Path) -> None:
     assert proposal_schema["properties"]["entry_node_ids"]["minItems"] == 1
     assert proposal_schema["properties"]["exit_node_ids"]["minItems"] == 1
     assert _contains_open_additional_properties(schema) is False
+    assert _contains_json_schema_combinator(schema) is False
+    step_schema = proposal_schema["properties"]["gates"]["items"]["properties"]["content"]["properties"][
+        "verification_procedure"
+    ]["items"]
+    assert step_schema["type"] == "object"
+    assert step_schema["required"] == ["step", "source"]
 
 
 @pytest.mark.asyncio
@@ -639,7 +597,7 @@ async def test_plan_mode_without_injected_backend_fails_closed_without_codex_hom
 
 
 @pytest.mark.asyncio
-async def test_plan_mode_retries_invalid_structured_output_then_returns_fenced_failure(tmp_path: Path) -> None:
+async def test_plan_mode_retries_missing_proposal_then_preserves_raw_structured_proposal(tmp_path: Path) -> None:
     request_path = tmp_path / "plan-request.json"
     result_path = tmp_path / "plan-result.json"
     workspace = tmp_path / "planner-workspace"
@@ -671,13 +629,15 @@ async def test_plan_mode_retries_invalid_structured_output_then_returns_fenced_f
     assert backend.calls == 2
     assert "missing_proposal" in backend.prompts[1]
     assert result["mode"] == "plan"
-    assert payload["status"] == "failed"
-    assert payload["proposal"] is None
+    assert payload["status"] == "succeeded"
+    assert payload["proposal"]["nodes"] == []
+    assert payload["proposal"]["blocks"] == []
+    assert payload["proposal"]["gates"] == []
     assert payload["graph_revision"] == 7
     assert payload["policy_revision"] == 3
     assert payload["lease_id"] == "lease-plan"
     assert payload["fencing_token"] == "token-plan"
-    assert payload["error"].startswith("invalid_plan_proposal:")
+    assert "error" not in payload
 
 
 @pytest.mark.asyncio
@@ -2163,6 +2123,16 @@ def _contains_open_additional_properties(value: object) -> bool:
         return any(_contains_open_additional_properties(item) for item in value.values())
     if isinstance(value, list):
         return any(_contains_open_additional_properties(item) for item in value)
+    return False
+
+
+def _contains_json_schema_combinator(value: object) -> bool:
+    if isinstance(value, dict):
+        if any(key in value for key in ("oneOf", "anyOf", "allOf")):
+            return True
+        return any(_contains_json_schema_combinator(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_contains_json_schema_combinator(item) for item in value)
     return False
 
 

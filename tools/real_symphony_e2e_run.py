@@ -46,6 +46,7 @@ from real_symphony_e2e_linear import (
 )
 from real_symphony_e2e_wait import wait_for_run
 from performer_api.config import sanitize_codex_config_template
+from real_codex_connectivity_probe import run_probe as run_real_codex_connectivity_probe
 
 
 CODEX_HOME_SEED_FILES = ("config.toml", "auth.json", "version.json", "models_cache.json")
@@ -139,6 +140,28 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
         (staged_codex_home / "config.toml").is_file() and (staged_codex_home / "auth.json").is_file(),
         copied_files=sorted(path.name for path in staged_codex_home.iterdir() if path.is_file()),
     )
+    if getattr(args, "codex_connectivity_probe", False):
+        connected = await run_codex_connectivity_probe(
+            evidence=evidence,
+            root=root,
+            staged_codex_home=staged_codex_home,
+            args=args,
+        )
+        if not connected:
+            evidence.data["completed_at"] = utc_now()
+            evidence.write()
+            return evidence.data
+    if getattr(args, "codex_planner_shaped_probe", False):
+        connected = await run_codex_planner_shaped_probe(
+            evidence=evidence,
+            root=root,
+            staged_codex_home=staged_codex_home,
+            args=args,
+        )
+        if not connected:
+            evidence.data["completed_at"] = utc_now()
+            evidence.write()
+            return evidence.data
     bin_dir = Path.cwd() / ".venv" / "bin"
     run_id = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S") + "-" + uuid.uuid4().hex[:6]
     run_id = f"symphony-e2e-matrix-{run_id}"
@@ -441,6 +464,9 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
             agent_app_user_id=agent_app_user_id,
             simulate_agent_webhook=args.simulate_agent_webhook,
         )
+        pipeline_intent = _pipeline_scenario_intent(pipeline_scenario)
+        if pipeline_intent:
+            webhook_payload["pipeline_intent"] = pipeline_intent
         raw_webhook = json.dumps(webhook_payload).encode()
         status, body = http_json(
             "POST",
@@ -841,6 +867,90 @@ def stage_codex_home_seed(*, source: Path, destination: Path) -> Path:
     return destination
 
 
+async def run_codex_connectivity_probe(
+    *,
+    evidence: Evidence,
+    root: Path,
+    staged_codex_home: Path,
+    args: argparse.Namespace,
+) -> bool:
+    out = root / "codex-connectivity-probe.json"
+    probe_args = argparse.Namespace(
+        workspace=root / "codex-connectivity-workspace",
+        codex_home=staged_codex_home,
+        out=out,
+        probe_kind="minimal",
+        expected="connected",
+        model=os.environ.get("SYMPHONY_E2E_CODEX_MODEL") or None,
+        sdk_codex_bin=getattr(args, "sdk_codex_bin", None),
+        sandbox=None,
+        config_override=getattr(args, "config_override", None),
+        timeout_ms=getattr(args, "codex_connectivity_timeout_ms", 45_000),
+        init_max_attempts=getattr(args, "init_max_attempts", None) or 2,
+        init_backoff_ms=getattr(args, "init_backoff_ms", None) or 500,
+        init_backoff_max_ms=getattr(args, "init_backoff_max_ms", None) or 2_000,
+        overload_max_attempts=getattr(args, "overload_max_attempts", None) or 2,
+        overload_initial_delay_ms=getattr(args, "overload_initial_delay_ms", None) or 250,
+        overload_max_delay_ms=getattr(args, "overload_max_delay_ms", None) or 2_000,
+    )
+    summary = await run_real_codex_connectivity_probe(probe_args)
+    evidence.artifact("codex_connectivity_probe", out)
+    status = str(summary.get("connectivity_status") or "unknown")
+    evidence.check(
+        "codex-connectivity:connected",
+        status == "connected",
+        status=status,
+        outcome=summary.get("outcome"),
+        error_code=summary.get("error_code"),
+        http_status=summary.get("http_status"),
+        output=str(out),
+    )
+    return status == "connected"
+
+
+async def run_codex_planner_shaped_probe(
+    *,
+    evidence: Evidence,
+    root: Path,
+    staged_codex_home: Path,
+    args: argparse.Namespace,
+) -> bool:
+    out = root / "codex-planner-shaped-probe.json"
+    probe_args = argparse.Namespace(
+        workspace=root / "codex-planner-shaped-workspace",
+        codex_home=staged_codex_home,
+        out=out,
+        probe_kind="planner-shaped",
+        expected="connected",
+        model=os.environ.get("SYMPHONY_E2E_CODEX_MODEL") or None,
+        sdk_codex_bin=getattr(args, "sdk_codex_bin", None),
+        sandbox=None,
+        config_override=getattr(args, "config_override", None),
+        timeout_ms=getattr(args, "codex_planner_shaped_timeout_ms", 120_000),
+        init_max_attempts=getattr(args, "init_max_attempts", None) or 2,
+        init_backoff_ms=getattr(args, "init_backoff_ms", None) or 500,
+        init_backoff_max_ms=getattr(args, "init_backoff_max_ms", None) or 2_000,
+        overload_max_attempts=getattr(args, "overload_max_attempts", None) or 2,
+        overload_initial_delay_ms=getattr(args, "overload_initial_delay_ms", None) or 250,
+        overload_max_delay_ms=getattr(args, "overload_max_delay_ms", None) or 2_000,
+    )
+    summary = await run_real_codex_connectivity_probe(probe_args)
+    evidence.artifact("codex_planner_shaped_probe", out)
+    status = str(summary.get("connectivity_status") or "unknown")
+    evidence.check(
+        "codex-connectivity:planner-shaped",
+        status == "connected",
+        status=status,
+        outcome=summary.get("outcome"),
+        error_code=summary.get("error_code"),
+        http_status=summary.get("http_status"),
+        planner_shape_valid=summary.get("planner_shape_valid"),
+        structured_present=summary.get("structured_present"),
+        output=str(out),
+    )
+    return status == "connected"
+
+
 def _codex_settings_from_args(args: argparse.Namespace) -> dict[str, Any]:
     settings: dict[str, Any] = {"hard_turn_timeout_ms": DEFAULT_E2E_HARD_TURN_TIMEOUT_MS}
     for arg_name in (
@@ -1044,6 +1154,7 @@ def _pipeline_scenario_issue_description(scenario: str, run_id: str) -> str:
     if scenario == "parallel":
         return (
             f"Real Symphony parallel pipeline e2e task for run {run_id}. "
+            "Use node_ids hell-parallel-a, hell-parallel-b, and hell-downstream-integration. "
             "Create two independent deliverables with no dependency between them: SYMPHONY_PARALLEL_A.md and "
             "SYMPHONY_PARALLEL_B.md. Each file must include this Linear issue identifier and the words "
             "parallel execute. Also create SYMPHONY_REAL_E2E_RESULT.md and run pytest tests/test_smoke.py -q."
@@ -1058,6 +1169,7 @@ def _pipeline_scenario_issue_description(scenario: str, run_id: str) -> str:
     if scenario == "integration-conflict":
         return (
             f"Real Symphony integration conflict e2e task for run {run_id}. "
+            "Use node_ids hell-parallel-a, hell-parallel-b, and hell-downstream-integration. "
             "Planner must create two independent parallel subtasks and must not add a blocks dependency between them. "
             "Each subtask must modify the already tracked file SYMPHONY_CONFLICT_SHARED.md with different content, "
             "so their verified patches overlap and the integration queue must surface the conflict through a "
@@ -1074,6 +1186,7 @@ def _pipeline_scenario_issue_description(scenario: str, run_id: str) -> str:
     if scenario == "overall-dod":
         return (
             f"Real Symphony Appendix overall DoD e2e task for run {run_id}. "
+            "Use node_ids hell-parallel-a, hell-parallel-b, and hell-downstream-integration. "
             "Planner must create two independent parallel subtasks and must not add a blocks dependency between them. "
             "Each parallel subtask must modify the already tracked file SYMPHONY_CONFLICT_SHARED.md with different "
             "content so their verified patches overlap and Symphony must surface the integration result without a "
@@ -1085,6 +1198,27 @@ def _pipeline_scenario_issue_description(scenario: str, run_id: str) -> str:
             "to a [Human Action] child issue before resuming. Run pytest tests/test_smoke.py -q."
         )
     return base
+
+
+def _pipeline_scenario_intent(scenario: str) -> dict[str, Any]:
+    if scenario not in {"parallel", "integration-conflict", "overall-dod", "gate-normalization"}:
+        return {}
+    intent: dict[str, Any] = {
+        "required_gate_steps": [
+            {"step": "pytest tests/test_smoke.py -q", "source": "appendix_harness"}
+        ]
+    }
+    if scenario in {"parallel", "integration-conflict", "overall-dod"}:
+        intent["requires_parent_aggregate"] = True
+        intent["parallel_dependency_shape"] = {
+            "parallel_branch_node_ids": ["hell-parallel-a", "hell-parallel-b"],
+            "downstream_node_ids": ["hell-downstream-integration"],
+        }
+    if scenario in {"integration-conflict", "overall-dod", "gate-normalization"}:
+        intent["required_gate_steps"].append(
+            {"step": "test -f SYMPHONY_CONFLICT_SHARED.md", "source": "appendix_harness"}
+        )
+    return intent
 
 
 def _prepare_pipeline_scenario_fixture(fixture: Path, scenario: str) -> None:
@@ -1213,9 +1347,31 @@ def _check_pipeline_scenario_acceptance(evidence: Evidence, scenario: str, pipel
         attempts = [attempt for attempt in pipeline_view.get("attempts", []) if isinstance(attempt, dict)]
         execute_attempts = [attempt for attempt in attempts if attempt.get("mode") == "execute"]
         execute_limit = ((pipeline_view.get("capacity") or {}).get("by_mode") or {}).get("execute")
+        policy_id = str(pipeline_view.get("policy_id") or "")
+        policy_source = str(pipeline_view.get("policy_source") or "")
+        runtime_config = pipeline_view.get("runtime_config") if isinstance(pipeline_view.get("runtime_config"), dict) else {}
+        expected_policy = runtime_config.get("scheduler_policy") if isinstance(runtime_config.get("scheduler_policy"), dict) else {}
+        expected_scheduler_policy_id = str(expected_policy.get("policy_id") or "")
+        expected_scheduler_policy_version = _safe_int(expected_policy.get("version"))
+        last_scheduler_policy_id = str(pipeline_view.get("last_scheduler_policy_id") or "")
+        last_scheduler_policy_version = _safe_int(pipeline_view.get("last_scheduler_policy_version"))
+        last_scheduler_policy_source = str(pipeline_view.get("last_scheduler_policy_source") or "")
+        last_scheduler_tick_at = str(pipeline_view.get("last_scheduler_tick_at") or "")
+        scheduler_policy_matches = (
+            bool(expected_scheduler_policy_id)
+            and expected_scheduler_policy_version > 0
+            and last_scheduler_policy_source == "podium_pushed"
+            and last_scheduler_policy_id == expected_scheduler_policy_id
+            and last_scheduler_policy_version == expected_scheduler_policy_version
+            and bool(last_scheduler_tick_at)
+        )
         evidence.check(
             "scenario:parallel-execute-overlap",
-            len(execute_attempts) >= 2 and int(execute_limit or 0) > 1 and _attempt_intervals_overlap(execute_attempts),
+            policy_source == "podium_pushed"
+            and bool(policy_id)
+            and scheduler_policy_matches
+            and len(execute_attempts) >= 2
+            and _attempt_intervals_overlap(execute_attempts),
             execute_attempts=[
                 {
                     "attempt_id": attempt.get("attempt_id"),
@@ -1225,6 +1381,14 @@ def _check_pipeline_scenario_acceptance(evidence: Evidence, scenario: str, pipel
                 for attempt in execute_attempts
             ],
             execute_limit=execute_limit,
+            policy_id=policy_id,
+            policy_source=policy_source,
+            expected_scheduler_policy_id=expected_scheduler_policy_id,
+            expected_scheduler_policy_version=expected_scheduler_policy_version,
+            last_scheduler_policy_id=last_scheduler_policy_id,
+            last_scheduler_policy_version=last_scheduler_policy_version,
+            last_scheduler_policy_source=last_scheduler_policy_source,
+            last_scheduler_tick_at=last_scheduler_tick_at,
         )
     elif scenario == "replan":
         nodes = [node for node in pipeline_view.get("nodes", []) if isinstance(node, dict)]
@@ -1272,6 +1436,13 @@ def _check_pipeline_scenario_acceptance(evidence: Evidence, scenario: str, pipel
         _check_pipeline_scenario_acceptance(evidence, "integration-conflict", pipeline_view)
         _check_pipeline_scenario_acceptance(evidence, "runtime-wait", pipeline_view)
         _check_pipeline_scenario_acceptance(evidence, "gate-normalization", pipeline_view)
+
+
+def _safe_int(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _check_appendix_overall_acceptance(
@@ -1440,19 +1611,64 @@ def _downstream_verify_gate_evidence(pipeline_view: dict[str, Any]) -> dict[str,
     attempts = [attempt for attempt in pipeline_view.get("attempts", []) if isinstance(attempt, dict)]
     execute_attempts = [attempt for attempt in attempts if attempt.get("mode") == "execute"]
     verify_attempts = [attempt for attempt in attempts if attempt.get("mode") == "verify" and int(attempt.get("score") or 0) >= 3]
-    latest_verify_complete = max(
-        (_parse_e2e_time(attempt.get("completed_at")) for attempt in verify_attempts),
-        default=None,
-    )
+    blocks = [
+        (str(edge[0]), str(edge[1]))
+        for edge in pipeline_view.get("blocks", [])
+        if isinstance(edge, list) and len(edge) == 2
+    ]
+    blockers_by_node: dict[str, set[str]] = {}
+    for blocker, blocked in blocks:
+        blockers_by_node.setdefault(blocked, set()).add(blocker)
+    verifies_by_node: dict[str, list[dict[str, Any]]] = {}
+    for attempt in verify_attempts:
+        node_id = str(attempt.get("node_id") or "")
+        if node_id:
+            verifies_by_node.setdefault(node_id, []).append(attempt)
     downstream_execute_ids: list[str] = []
-    if latest_verify_complete is not None:
+    upstream_verify_ids: set[str] = set()
+    if blockers_by_node:
         for attempt in execute_attempts:
+            node_id = str(attempt.get("node_id") or "")
+            blockers = blockers_by_node.get(node_id, set())
+            if not blockers:
+                continue
             started = _parse_e2e_time(attempt.get("started_at"))
-            if started is not None and started > latest_verify_complete:
+            blocker_completions: list[datetime] = []
+            blocker_verify_ids: list[str] = []
+            for blocker in blockers:
+                blocker_verifies = verifies_by_node.get(blocker, [])
+                if not blocker_verifies:
+                    blocker_completions = []
+                    break
+                latest = max(
+                    (
+                        (_parse_e2e_time(verify.get("completed_at")), str(verify.get("attempt_id") or ""))
+                        for verify in blocker_verifies
+                        if _parse_e2e_time(verify.get("completed_at")) is not None
+                    ),
+                    default=None,
+                    key=lambda item: item[0],
+                )
+                if latest is None:
+                    blocker_completions = []
+                    break
+                blocker_completions.append(latest[0])
+                blocker_verify_ids.append(latest[1])
+            if started is not None and blocker_completions and started > max(blocker_completions):
                 downstream_execute_ids.append(str(attempt.get("attempt_id") or ""))
+                upstream_verify_ids.update(blocker_verify_ids)
+    else:
+        return {
+            "gate_observed": False,
+            "verify_passed_attempts": [attempt.get("attempt_id") for attempt in verify_attempts],
+            "downstream_execute_attempts": [],
+            "reason": "no_block_edges",
+        }
     return {
         "gate_observed": bool(verify_attempts) and bool(downstream_execute_ids),
-        "verify_passed_attempts": [attempt.get("attempt_id") for attempt in verify_attempts],
+        "verify_passed_attempts": sorted(upstream_verify_ids)
+        if upstream_verify_ids
+        else [attempt.get("attempt_id") for attempt in verify_attempts],
         "downstream_execute_attempts": downstream_execute_ids,
     }
 

@@ -33,6 +33,9 @@ def dispatch_public(dispatch: dict[str, Any]) -> dict[str, Any]:
         "fencing_token": int(dispatch.get("fencing_token") or 0),
         "reason": dispatch.get("reason") or "",
     }
+    pipeline_intent = dispatch.get("pipeline_intent")
+    if isinstance(pipeline_intent, dict):
+        payload["pipeline_intent"] = pipeline_intent
     for key in (
         "graph_id",
         "node_id",

@@ -1,5 +1,141 @@
 from test_real_run_tools_support import *  # noqa: F401,F403
 
+def test_real_codex_connectivity_probe_classifies_upstream_and_auth_failures() -> None:
+    tool = load_tool("real_codex_connectivity_probe")
+
+    upstream = tool.summarize_events(
+        [
+            {"event": "codex_init_succeeded", "thread_id": "thread-1"},
+            {"event": "codex_overload_retrying", "http_status": 502, "message": "upstream unavailable"},
+            {"event": "codex_overload_exhausted", "http_status": 502, "message": "upstream unavailable"},
+        ]
+    )
+    upstream.update({"outcome": "codex_error", "error_code": "upstream_overloaded_exhausted", "http_status": 502})
+    upstream["connectivity_status"] = tool.classify_connectivity(upstream)
+    auth = tool.summarize_events(
+        [
+            {"event": "codex_init_succeeded", "thread_id": "thread-1"},
+            {"event": "codex_request_failed_terminal", "code": "codex_bad_request", "http_status": 401},
+        ]
+    )
+    auth.update({"outcome": "codex_error", "error_code": "codex_bad_request", "http_status": 401})
+    auth["connectivity_status"] = tool.classify_connectivity(auth)
+
+    assert upstream["connectivity_status"] == "upstream_unavailable"
+    assert auth["connectivity_status"] == "auth_failed"
+    assert tool.scenario_passed(upstream, "connected") is False
+    assert tool.scenario_passed(upstream, "upstream_unavailable") is True
+    assert tool.scenario_passed(auth, "auth_failed") is True
+
+
+def test_real_codex_connectivity_probe_requires_turn_completion_and_blocks_secret_leaks() -> None:
+    tool = load_tool("real_codex_connectivity_probe")
+
+    connected = tool.summarize_events(
+        [
+            {"event": "codex_init_succeeded", "thread_id": "thread-1"},
+            {"event": "turn_started", "turn_id": "turn-1"},
+            {"event": "turn_completed", "turn_id": "turn-1"},
+        ]
+    )
+    connected.update({"outcome": "success"})
+    connected["connectivity_status"] = tool.classify_connectivity(connected)
+    leaked = tool.summarize_events(
+        [
+            {"event": "codex_init_succeeded", "thread_id": "thread-1"},
+            {"event": "turn_completed", "message": "Bearer sk-secret-value"},
+        ]
+    )
+    leaked.update({"outcome": "success"})
+    leaked["connectivity_status"] = tool.classify_connectivity(leaked)
+
+    assert connected["connectivity_status"] == "connected"
+    assert tool.scenario_passed(connected, "connected") is True
+    assert leaked["secret_leak_found"] is True
+    assert leaked["connectivity_status"] == "secret_leak"
+    assert tool.scenario_passed(leaked, "connected") is False
+
+
+def test_real_codex_connectivity_probe_planner_shape_requires_structured_plan() -> None:
+    tool = load_tool("real_codex_connectivity_probe")
+
+    summary = tool.summarize_events(
+        [
+            {"event": "codex_init_succeeded", "thread_id": "thread-1"},
+            {"event": "turn_started", "turn_id": "turn-1"},
+            {"event": "turn_completed", "turn_id": "turn-1"},
+        ]
+    )
+    summary.update({"outcome": "success", "probe_kind": "planner-shaped", "structured_present": False})
+
+    assert tool.classify_connectivity(summary) == "planner_shape_invalid"
+    assert tool.scenario_passed(summary, "connected") is False
+
+
+def test_real_codex_connectivity_probe_exposes_planner_shaped_schema_and_prompt() -> None:
+    tool = load_tool("real_codex_connectivity_probe")
+
+    args = tool.parser().parse_args(["--workspace", "/tmp/probe", "--probe-kind", "planner-shaped"])
+    spec = tool.probe_spec("planner-shaped")
+
+    assert args.probe_kind == "planner-shaped"
+    assert "proposal" in spec.schema["required"]
+    assert "nodes" in spec.prompt
+    assert "gates" in spec.prompt
+
+
+def test_real_codex_connectivity_probe_extracts_custom_schema_from_final_response() -> None:
+    tool = load_tool("real_codex_connectivity_probe")
+    payload = {
+        "probe_kind": "planner-shaped",
+        "summary": "Planner-shaped structured output is available.",
+        "proposal": {
+            "nodes": [
+                {"id": "plan", "mode": "plan", "objective": "Plan the work.", "depends_on": []},
+                {"id": "execute", "mode": "execute", "objective": "Execute the work.", "depends_on": ["plan"]},
+                {"id": "verify", "mode": "verify", "objective": "Verify the work.", "depends_on": ["execute"]},
+            ],
+            "gates": [
+                {"id": "gate-plan", "node_id": "plan", "kind": "command", "command": "test -f README.md"},
+                {"id": "gate-verify", "node_id": "verify", "kind": "command", "command": "pytest -q"},
+            ],
+            "entry_node_ids": ["plan"],
+            "exit_node_ids": ["verify"],
+            "risk_notes": [],
+        },
+    }
+    result = SimpleNamespace(structured_result=None, final_response=json.dumps(payload))
+
+    structured = tool.extract_probe_structured_result(result)
+
+    assert structured == payload
+    assert tool._planner_shape_valid(structured) is True
+
+
+def test_real_symphony_e2e_has_optional_codex_connectivity_probe() -> None:
+    tool = load_tool("real_symphony_e2e")
+    run_tool = load_tool("real_symphony_e2e_run")
+
+    args = tool.parser().parse_args(["--codex-connectivity-probe", "--codex-connectivity-timeout-ms", "1234"])
+
+    assert args.codex_connectivity_probe is True
+    assert args.codex_connectivity_timeout_ms == 1234
+    assert "codex-connectivity:connected" in (ROOT / "tools" / "real_symphony_e2e_run.py").read_text(encoding="utf-8")
+    assert hasattr(run_tool, "run_codex_connectivity_probe")
+
+
+def test_real_symphony_e2e_has_optional_planner_shaped_codex_probe() -> None:
+    tool = load_tool("real_symphony_e2e")
+    run_tool = load_tool("real_symphony_e2e_run")
+
+    args = tool.parser().parse_args(["--codex-planner-shaped-probe", "--codex-planner-shaped-timeout-ms", "1234"])
+
+    assert args.codex_planner_shaped_probe is True
+    assert args.codex_planner_shaped_timeout_ms == 1234
+    assert "codex-connectivity:planner-shaped" in (ROOT / "tools" / "real_symphony_e2e_run.py").read_text(encoding="utf-8")
+    assert hasattr(run_tool, "run_codex_planner_shaped_probe")
+
+
 def test_real_codex_init_probe_summarizes_transient_recovery() -> None:
     tool = load_tool("real_codex_init_probe")
 
@@ -476,7 +612,7 @@ def test_appendix_overall_acceptance_scores_after_required_checks(tmp_path: Path
             {"node_id": "replacement", "title": "Parallel beta replacement", "parent_node_id": "parent", "state": "verify_passed"},
             {"node_id": "integration-check", "title": "Integration check", "parent_node_id": "parent", "state": "verify_passed"},
         ],
-        "blocks": [["parallel-alpha", "integration-check"], ["parallel-beta", "integration-check"]],
+        "blocks": [["parallel-alpha", "integration-check"], ["replacement", "integration-check"]],
         "gates": [
             {
                 "gate_id": "gate-integration",
@@ -498,6 +634,14 @@ def test_appendix_overall_acceptance_scores_after_required_checks(tmp_path: Path
                 "state": "succeeded",
             },
             {
+                "attempt_id": "verify-child-b",
+                "node_id": "replacement",
+                "mode": "verify",
+                "score": 3,
+                "completed_at": "2026-07-08T00:00:10Z",
+                "state": "succeeded",
+            },
+            {
                 "attempt_id": "execute-child-b",
                 "node_id": "integration-check",
                 "mode": "execute",
@@ -505,10 +649,11 @@ def test_appendix_overall_acceptance_scores_after_required_checks(tmp_path: Path
                 "state": "succeeded",
             },
         ],
-        "integration_queue": [
-            {"status": "resolved", "error": "patch conflict", "human_resolution": "completed"}
-        ],
-    }
+            "integration_queue": [
+                {"status": "resolved", "error": "patch conflict", "human_resolution": "completed"}
+            ],
+            "human_waits": [{"reason": "LINEAR_SYNC_CONFLICT", "status": "resolved"}],
+        }
     homes_root = tmp_path / "data" / "instances" / "inst-1" / "runtime-homes"
     for relative in [
         "plan/plan-1/codex",
@@ -670,7 +815,7 @@ def test_real_symphony_e2e_integration_conflict_acceptance_uses_resolved_queue_i
         evidence,
         "integration-conflict",
         {
-            "human_waits": [],
+            "human_waits": [{"reason": "LINEAR_SYNC_CONFLICT", "status": "resolved"}],
             "integration_queue": [
                 {
                     "status": "resolved",
@@ -685,6 +830,207 @@ def test_real_symphony_e2e_integration_conflict_acceptance_uses_resolved_queue_i
     assert check["name"] == "scenario:integration-conflict-human-action"
     assert check["passed"] is True
     assert evidence.data["failures"] == []
+
+
+def test_real_symphony_e2e_integration_conflict_rejects_untraced_resolved_queue_item() -> None:
+    analysis = load_tool("real_symphony_e2e_analysis")
+
+    assert not analysis.pipeline_has_conflict_escalation_evidence(
+        {
+            "human_waits": [],
+            "integration_queue": [
+                {
+                    "status": "resolved",
+                    "error": "patch conflict",
+                    "human_resolution": "completed",
+                }
+            ],
+        }
+    )
+
+
+def test_real_symphony_e2e_parallel_acceptance_requires_podium_pushed_policy_source(tmp_path: Path) -> None:
+    tool = load_tool("real_symphony_e2e_run")
+    evidence = tool.Evidence(tmp_path / "report.json")
+
+    tool._check_pipeline_scenario_acceptance(
+        evidence,
+        "parallel",
+        {
+            "policy_id": "local-default",
+            "policy_source": "local_default",
+            "capacity": {"by_mode": {"execute": 2}},
+            "attempts": [
+                {"attempt_id": "exec-a", "mode": "execute", "started_at": "2026-07-08T00:00:00Z", "completed_at": "2026-07-08T00:01:00Z"},
+                {"attempt_id": "exec-b", "mode": "execute", "started_at": "2026-07-08T00:00:30Z", "completed_at": "2026-07-08T00:01:30Z"},
+            ],
+        },
+    )
+
+    check = evidence.data["checks"][-1]
+    assert check["name"] == "scenario:parallel-execute-overlap"
+    assert check["passed"] is False
+    assert check["policy_id"] == "local-default"
+    assert check["policy_source"] == "local_default"
+
+
+def test_real_symphony_e2e_parallel_acceptance_requires_scheduler_tick_policy_match(tmp_path: Path) -> None:
+    tool = load_tool("real_symphony_e2e_run")
+    evidence = tool.Evidence(tmp_path / "report.json")
+
+    tool._check_pipeline_scenario_acceptance(
+        evidence,
+        "parallel",
+        {
+            "policy_id": "policy-group-1",
+            "policy_source": "podium_pushed",
+            "last_scheduler_policy_id": "local-default",
+            "last_scheduler_policy_version": 1,
+            "last_scheduler_policy_source": "local_default",
+            "runtime_config": {"scheduler_policy": {"policy_id": "policy-group-1", "version": 4}},
+            "capacity": {"by_mode": {"execute": 2}},
+            "attempts": [
+                {"attempt_id": "exec-a", "mode": "execute", "started_at": "2026-07-08T00:00:00Z", "completed_at": "2026-07-08T00:01:00Z"},
+                {"attempt_id": "exec-b", "mode": "execute", "started_at": "2026-07-08T00:00:30Z", "completed_at": "2026-07-08T00:01:30Z"},
+            ],
+        },
+    )
+
+    check = evidence.data["checks"][-1]
+    assert check["name"] == "scenario:parallel-execute-overlap"
+    assert check["passed"] is False
+    assert check["expected_scheduler_policy_id"] == "policy-group-1"
+    assert check["last_scheduler_policy_id"] == "local-default"
+    assert check["last_scheduler_policy_source"] == "local_default"
+
+
+def test_real_symphony_e2e_parallel_acceptance_passes_with_matching_scheduler_tick_policy(tmp_path: Path) -> None:
+    tool = load_tool("real_symphony_e2e_run")
+    evidence = tool.Evidence(tmp_path / "report.json")
+
+    tool._check_pipeline_scenario_acceptance(
+        evidence,
+        "parallel",
+        {
+            "policy_id": "policy-group-1",
+            "policy_source": "podium_pushed",
+            "last_scheduler_policy_id": "policy-group-1",
+            "last_scheduler_policy_version": 4,
+            "last_scheduler_policy_source": "podium_pushed",
+            "last_scheduler_tick_at": "2026-07-08T00:00:00Z",
+            "runtime_config": {"scheduler_policy": {"policy_id": "policy-group-1", "version": 4}},
+            "capacity": {"by_mode": {"execute": 2}},
+            "attempts": [
+                {"attempt_id": "exec-a", "mode": "execute", "started_at": "2026-07-08T00:00:00Z", "completed_at": "2026-07-08T00:01:00Z"},
+                {"attempt_id": "exec-b", "mode": "execute", "started_at": "2026-07-08T00:00:30Z", "completed_at": "2026-07-08T00:01:30Z"},
+            ],
+        },
+    )
+
+    check = evidence.data["checks"][-1]
+    assert check["name"] == "scenario:parallel-execute-overlap"
+    assert check["passed"] is True
+    assert evidence.data["failures"] == []
+
+
+def test_real_symphony_e2e_parallel_acceptance_allows_final_lowered_capacity_after_overlap(tmp_path: Path) -> None:
+    tool = load_tool("real_symphony_e2e_run")
+    evidence = tool.Evidence(tmp_path / "report.json")
+
+    tool._check_pipeline_scenario_acceptance(
+        evidence,
+        "parallel",
+        {
+            "policy_id": "policy-group-1",
+            "policy_source": "podium_pushed",
+            "last_scheduler_policy_id": "policy-group-1",
+            "last_scheduler_policy_version": 5,
+            "last_scheduler_policy_source": "podium_pushed",
+            "last_scheduler_tick_at": "2026-07-08T00:02:00Z",
+            "runtime_config": {"scheduler_policy": {"policy_id": "policy-group-1", "version": 5}},
+            "capacity": {"by_mode": {"execute": 1}},
+            "attempts": [
+                {"attempt_id": "exec-a", "mode": "execute", "started_at": "2026-07-08T00:00:00Z", "completed_at": "2026-07-08T00:01:00Z"},
+                {"attempt_id": "exec-b", "mode": "execute", "started_at": "2026-07-08T00:00:00Z", "completed_at": "2026-07-08T00:01:30Z"},
+            ],
+        },
+    )
+
+    check = evidence.data["checks"][-1]
+    assert check["name"] == "scenario:parallel-execute-overlap"
+    assert check["passed"] is True
+    assert check["execute_limit"] == 1
+
+
+def test_real_symphony_e2e_downstream_gate_uses_blocker_verify_times_not_latest_verify() -> None:
+    tool = load_tool("real_symphony_e2e_run")
+
+    evidence = tool._downstream_verify_gate_evidence(
+        {
+            "blocks": [["parallel-a", "downstream"], ["parallel-b-replan", "downstream"]],
+            "attempts": [
+                {
+                    "attempt_id": "verify-a",
+                    "node_id": "parallel-a",
+                    "mode": "verify",
+                    "score": 3,
+                    "completed_at": "2026-07-08T00:01:00Z",
+                },
+                {
+                    "attempt_id": "verify-b",
+                    "node_id": "parallel-b-replan",
+                    "mode": "verify",
+                    "score": 3,
+                    "completed_at": "2026-07-08T00:02:00Z",
+                },
+                {
+                    "attempt_id": "execute-downstream",
+                    "node_id": "downstream",
+                    "mode": "execute",
+                    "started_at": "2026-07-08T00:03:00Z",
+                },
+                {
+                    "attempt_id": "verify-downstream",
+                    "node_id": "downstream",
+                    "mode": "verify",
+                    "score": 3,
+                    "completed_at": "2026-07-08T00:04:00Z",
+                },
+            ],
+        }
+    )
+
+    assert evidence["gate_observed"] is True
+    assert evidence["downstream_execute_attempts"] == ["execute-downstream"]
+    assert set(evidence["verify_passed_attempts"]) == {"verify-a", "verify-b"}
+
+
+def test_real_symphony_e2e_downstream_gate_requires_real_block_edges() -> None:
+    tool = load_tool("real_symphony_e2e_run")
+
+    evidence = tool._downstream_verify_gate_evidence(
+        {
+            "blocks": [],
+            "attempts": [
+                {
+                    "attempt_id": "verify-a",
+                    "node_id": "parallel-a",
+                    "mode": "verify",
+                    "score": 3,
+                    "completed_at": "2026-07-08T00:01:00Z",
+                },
+                {
+                    "attempt_id": "execute-downstream",
+                    "node_id": "downstream",
+                    "mode": "execute",
+                    "started_at": "2026-07-08T00:02:00Z",
+                },
+            ],
+        }
+    )
+
+    assert evidence["gate_observed"] is False
+    assert evidence["reason"] == "no_block_edges"
 
 
 def test_real_symphony_e2e_gate_normalization_acceptance_requires_gate_step_sources(tmp_path: Path) -> None:

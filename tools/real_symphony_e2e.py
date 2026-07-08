@@ -119,6 +119,18 @@ def parser() -> argparse.ArgumentParser:
     arg_parser.add_argument("--init-backoff-max-ms", type=int)
     arg_parser.add_argument("--read-timeout-ms", type=int)
     arg_parser.add_argument("--hard-turn-timeout-ms", type=int)
+    arg_parser.add_argument(
+        "--codex-connectivity-probe",
+        action="store_true",
+        help="Run a short real Codex SDK connectivity check before starting Podium/Linear orchestration.",
+    )
+    arg_parser.add_argument("--codex-connectivity-timeout-ms", type=int, default=45_000)
+    arg_parser.add_argument(
+        "--codex-planner-shaped-probe",
+        action="store_true",
+        help="Run a planner-shaped real Codex structured-output preflight before Podium/Linear orchestration.",
+    )
+    arg_parser.add_argument("--codex-planner-shaped-timeout-ms", type=int, default=120_000)
     arg_parser.add_argument("--overload-max-attempts", type=int)
     arg_parser.add_argument("--overload-initial-delay-ms", type=int)
     arg_parser.add_argument("--overload-max-delay-ms", type=int)

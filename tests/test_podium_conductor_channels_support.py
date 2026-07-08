@@ -75,6 +75,20 @@ def agent_session_payload(*, workspace_id: str, project_slug: str, delegate_id: 
     }
 
 
+def agent_session_payload_with_pipeline_intent(*, workspace_id: str, project_slug: str, delegate_id: str) -> dict[str, Any]:
+    payload = agent_session_payload(workspace_id=workspace_id, project_slug=project_slug, delegate_id=delegate_id)
+    payload["pipeline_intent"] = {
+        "required_gate_steps": [
+            {"step": "pytest tests/test_smoke.py -q", "source": "appendix_harness"}
+        ],
+        "parallel_dependency_shape": {
+            "parallel_branch_node_ids": ["parallel-a", "parallel-b"],
+            "downstream_node_ids": ["downstream"],
+        },
+    }
+    return payload
+
+
 def agent_session_payload_without_session_id(
     *,
     workspace_id: str,

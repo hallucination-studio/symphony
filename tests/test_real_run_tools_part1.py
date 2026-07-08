@@ -453,6 +453,7 @@ def test_real_symphony_e2e_overall_dod_combines_required_probes() -> None:
         pipeline_scenario="overall-dod",
     )
     description = tool._pipeline_scenario_issue_description("overall-dod", "run-1")
+    intent = tool._pipeline_scenario_intent("overall-dod")
 
     assert payload["scheduler_policy"]["capacity"]["by_mode"]["execute"] == 2
     assert payload["profiles"]["execute"]["settings"]["emit_runtime_wait_probe"] is True
@@ -462,6 +463,11 @@ def test_real_symphony_e2e_overall_dod_combines_required_probes() -> None:
     assert "SYMPHONY_CONFLICT_SHARED.md" in description
     assert "Runtime Wait" in description
     assert "replan" in description.lower()
+    assert intent["parallel_dependency_shape"] == {
+        "parallel_branch_node_ids": ["hell-parallel-a", "hell-parallel-b"],
+        "downstream_node_ids": ["hell-downstream-integration"],
+    }
+    assert {"step": "pytest tests/test_smoke.py -q", "source": "appendix_harness"} in intent["required_gate_steps"]
     assert 'pipeline_scenario == "overall-dod"' in source
     assert "appendix:s0a-crashed-worker-lease-reclaimed" in source
 

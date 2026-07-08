@@ -7,7 +7,6 @@ import json
 import os
 import re
 from pathlib import Path
-import shlex
 import shutil
 import subprocess
 from typing import Any
@@ -19,11 +18,8 @@ from performer_api.pipeline import (
     GateStepSource,
     GraphNode,
     HumanEscalationReason,
-    IntentSpec,
     PASS_THRESHOLD,
-    PlanRepair,
     PlanProposal,
-    PlanValidator,
     RuntimeMode,
 )
 
@@ -121,26 +117,21 @@ PLAN_RESULT_SCHEMA: dict[str, object] = {
                                     "verification_procedure": {
                                         "type": "array",
                                         "items": {
-                                            "oneOf": [
-                                                {"type": "string"},
-                                                {
-                                                    "type": "object",
-                                                    "properties": {
-                                                        "step": {"type": "string"},
-                                                        "source": {
-                                                            "type": "string",
-                                                            "enum": [
-                                                                "issue_requirement",
-                                                                "appendix_harness",
-                                                                "planner_inferred",
-                                                                "system_repair",
-                                                            ],
-                                                        },
-                                                    },
-                                                    "required": ["step", "source"],
-                                                    "additionalProperties": False,
+                                            "type": "object",
+                                            "properties": {
+                                                "step": {"type": "string"},
+                                                "source": {
+                                                    "type": "string",
+                                                    "enum": [
+                                                        "issue_requirement",
+                                                        "appendix_harness",
+                                                        "planner_inferred",
+                                                        "system_repair",
+                                                    ],
                                                 },
-                                            ]
+                                            },
+                                            "required": ["step", "source"],
+                                            "additionalProperties": False,
                                         },
                                     },
                                     "rubric": {
@@ -280,16 +271,9 @@ async def _run_plan_mode(payload: dict[str, object], *, agent_backend: Any | Non
             prompt = _planner_retry_prompt(payload, last_error)
             continue
         try:
-            intent_spec = _intent_spec_from_plan_payload(payload)
             proposal = _proposal_from_model_payload(proposal_payload, attempt_id=attempt_id)
-            proposal = PlanRepair(intent_spec).repair(proposal)
         except (TypeError, ValueError) as exc:
             last_error = f"invalid_plan_proposal:{_sanitize_error(exc)}"
-            prompt = _planner_retry_prompt(payload, last_error)
-            continue
-        errors = PlanValidator(intent_spec=intent_spec).validate(proposal)
-        if errors:
-            last_error = "invalid_plan_proposal:" + ",".join(sorted(error.value for error in errors))
             prompt = _planner_retry_prompt(payload, last_error)
             continue
         return {
@@ -333,6 +317,12 @@ def _planner_prompt(payload: dict[str, object]) -> str:
     title = str(payload.get("title") or issue_identifier or payload.get("node_id") or "")
     issue_description = str(payload.get("issue_description") or "").strip()
     prompt_payload = _planner_prompt_payload(payload)
+    pipeline_intent_instruction = ""
+    if isinstance(payload.get("pipeline_intent"), dict) and payload.get("pipeline_intent"):
+        pipeline_intent_instruction = (
+            "The attempt request includes `pipeline_intent`, a structured Conductor intent contract. "
+            "Use any node_ids named there exactly in the returned proposal so Conductor can validate the shape. "
+        )
     replan_instruction = ""
     if isinstance(payload.get("failure_context"), dict) and payload.get("failure_context"):
         failed_node_id = str(payload.get("node_id") or "").strip()
@@ -351,8 +341,9 @@ def _planner_prompt(payload: dict[str, object]) -> str:
         "executable node, at least one frozen gate whose task_id matches a node_id, and non-empty "
         "entry_node_ids and exit_node_ids. Do not return an empty plan. Entry nodes must exactly "
         "be nodes with no incoming blocks; exit nodes must exactly be nodes with no outgoing blocks. "
-        "If using parent_node_id for aggregate display, do not also make the parent directly block one of its children; "
-        "parent-child aggregation is not a dependency edge. "
+        "The root business-issue node must be the parent when a plan has multiple subtasks: every subtask node must set "
+        "parent_node_id to root_node_id, and the root node has no gate and no blocks edges. Parent-child aggregation is "
+        "not a dependency edge. "
         "Use the Linear issue description as the source of task truth; the frozen gate acceptance "
         "criteria and verification procedure must preserve concrete requested files, commands, and "
         "success conditions from that description. Each verification_procedure entry must carry "
@@ -365,6 +356,7 @@ def _planner_prompt(payload: dict[str, object]) -> str:
         "Do not freeze absolute local filesystem paths "
         "from this planner process into gates; refer to repository files by relative path or by "
         "`workspace root` so the executor and verifier can run in isolated workspaces. "
+        f"{pipeline_intent_instruction}"
         f"{replan_instruction}\n\n"
         f"Task context:\nIssue: {issue_identifier}\nTitle: {title}\nDescription:\n{issue_description or '(none)'}\n\n"
         f"Attempt request:\n{json.dumps(prompt_payload, sort_keys=True)}"
@@ -465,181 +457,6 @@ def _proposal_from_model_payload(payload: dict[str, object], *, attempt_id: str)
         entry_node_ids=[str(item) for item in payload.get("entry_node_ids") or []],
         exit_node_ids=[str(item) for item in payload.get("exit_node_ids") or []],
     )
-
-
-_RELATIVE_FILE_PATTERN = re.compile(r"(?<![\w./-])([A-Za-z0-9][A-Za-z0-9_./-]*\.[A-Za-z0-9][A-Za-z0-9_-]*)(?![\w./-])")
-_PYTEST_COMMAND_PATTERN = re.compile(r"\bpytest\s+[A-Za-z0-9_./-]+(?:\s+-[A-Za-z0-9_-]+)*")
-_REQUESTED_WORDS_PATTERN = re.compile(r"\bwords?\s+([A-Za-z0-9][A-Za-z0-9 _-]*?)(?=\.|,|;|$)", re.IGNORECASE)
-_BOTH_PARALLEL_DOWNSTREAM_PATTERN = re.compile(
-    r"\bdepend\s+on\s+both\s+parallel\s+subtasks\b",
-    re.IGNORECASE,
-)
-_SHARED_CONFLICT_FILE = "SYMPHONY_CONFLICT_SHARED.md"
-
-
-def _proposal_preserving_issue_requirements(
-    proposal: PlanProposal,
-    request_payload: dict[str, object],
-    *,
-    attempt_id: str,
-) -> PlanProposal:
-    return PlanRepair(_intent_spec_from_plan_payload(request_payload)).repair(proposal)
-
-
-def _intent_spec_from_plan_payload(payload: dict[str, object]) -> IntentSpec:
-    return IntentSpec.from_issue(
-        issue_id=str(payload.get("issue_id") or ""),
-        issue_identifier=str(payload.get("issue_identifier") or payload.get("issue_id") or ""),
-        issue_description=str(payload.get("issue_description") or ""),
-    )
-
-
-def _gate_content_preserving_issue_gate_requirements(
-    proposal: PlanProposal,
-    issue_description: str,
-) -> dict[str, GateSpecContent]:
-    if not _issue_requests_shared_conflict_file(issue_description):
-        return {}
-    normalized: dict[str, GateSpecContent] = {}
-    node_labels = {node.node_id: f"{node.node_id} {node.title}".lower() for node in proposal.nodes}
-    for gate in proposal.gates:
-        label = node_labels.get(gate.task_id, gate.task_id.lower())
-        commands = list(gate.content.verification_procedure)
-        if _SHARED_CONFLICT_FILE not in " ".join(commands) and "parallel" not in label:
-            continue
-        shared_commands = [
-            command
-            for command in commands
-            if _SHARED_CONFLICT_FILE in command
-            and ("grep -q" in command or command.startswith("git diff -- "))
-            and command not in issue_description
-        ]
-        if not shared_commands:
-            continue
-        next_commands = [command for command in commands if command not in shared_commands]
-        for command in (
-            f"test -f {_SHARED_CONFLICT_FILE}",
-            f'test -n "$(git diff -- {_SHARED_CONFLICT_FILE})"',
-        ):
-            if command not in next_commands:
-                next_commands.append(command)
-        normalized[gate.task_id] = GateSpecContent(
-            acceptance_criteria=[
-                criterion
-                for criterion in gate.content.acceptance_criteria
-                if not ("exact marker" in criterion.lower() and _SHARED_CONFLICT_FILE not in issue_description)
-            ],
-            verification_procedure=next_commands,
-            rubric=dict(gate.content.rubric),
-            pass_threshold=gate.content.pass_threshold,
-            verifier_credentials=list(gate.content.verifier_credentials),
-        )
-    return normalized
-
-
-def _issue_requests_shared_conflict_file(issue_description: str) -> bool:
-    lowered = issue_description.lower()
-    return (
-        _SHARED_CONFLICT_FILE in issue_description
-        and "different content" in lowered
-        and "verified patches overlap" in lowered
-    )
-
-
-def _blocks_preserving_issue_dependency_requirements(proposal: PlanProposal, issue_description: str) -> list[tuple[str, str]]:
-    blocks = list(proposal.blocks)
-    if not _BOTH_PARALLEL_DOWNSTREAM_PATTERN.search(issue_description):
-        return blocks
-    node_by_id = {node.node_id: node for node in proposal.nodes}
-    node_ids = set(node_by_id)
-    labels = {node.node_id: f"{node.node_id} {node.title}".lower() for node in proposal.nodes}
-    parallel_node_ids = [node.node_id for node in proposal.nodes if "parallel" in labels[node.node_id]]
-    if len(parallel_node_ids) < 2:
-        return blocks
-    downstream_node_ids = [
-        node.node_id
-        for node in proposal.nodes
-        if node.node_id not in parallel_node_ids
-        and ("downstream" in labels[node.node_id] or "integration" in labels[node.node_id])
-    ]
-    if not downstream_node_ids:
-        downstream_node_ids = list(
-            dict.fromkeys(
-                target
-                for source, target in blocks
-                if source in parallel_node_ids and target in node_ids and target not in parallel_node_ids
-            )
-        )
-    if not downstream_node_ids:
-        downstream_node_ids = [
-            node_id for node_id in proposal.exit_node_ids if node_id in node_ids and node_id not in parallel_node_ids
-        ]
-    if not downstream_node_ids:
-        return blocks
-    next_blocks = list(dict.fromkeys(blocks))
-    next_block_set = set(next_blocks)
-    for downstream_node_id in downstream_node_ids:
-        for parallel_node_id in parallel_node_ids:
-            block = (parallel_node_id, downstream_node_id)
-            if block in next_block_set:
-                continue
-            if _has_block_path(downstream_node_id, parallel_node_id, next_blocks):
-                continue
-            next_blocks.append(block)
-            next_block_set.add(block)
-    return next_blocks
-
-
-def _has_block_path(source: str, target: str, blocks: list[tuple[str, str]]) -> bool:
-    pending = [source]
-    seen: set[str] = set()
-    while pending:
-        current = pending.pop()
-        if current == target:
-            return True
-        if current in seen:
-            continue
-        seen.add(current)
-        pending.extend(next_node for from_node, next_node in blocks if from_node == current and next_node not in seen)
-    return False
-
-
-def _entry_exit_node_ids_for_blocks(
-    nodes: list[GraphNode],
-    blocks: list[tuple[str, str]],
-) -> tuple[list[str], list[str]]:
-    node_ids = {node.node_id for node in nodes}
-    incoming = {target for source, target in blocks if source in node_ids and target in node_ids}
-    outgoing = {source for source, target in blocks if source in node_ids and target in node_ids}
-    ordered_node_ids = [node.node_id for node in nodes]
-    return (
-        [node_id for node_id in ordered_node_ids if node_id not in incoming],
-        [node_id for node_id in ordered_node_ids if node_id not in outgoing],
-    )
-
-
-def _required_gate_commands_from_issue(issue_description: str, *, issue_identifier: str) -> list[str]:
-    commands: list[str] = []
-    for path in dict.fromkeys(_RELATIVE_FILE_PATTERN.findall(issue_description)):
-        if _is_relative_workspace_file(path):
-            commands.append(f"test -f {shlex.quote(path)}")
-            if Path(path).name == "SYMPHONY_REAL_E2E_RESULT.md":
-                if issue_identifier:
-                    commands.append(f"grep -q {shlex.quote(issue_identifier)} {shlex.quote(path)}")
-                for phrase in _REQUESTED_WORDS_PATTERN.findall(issue_description):
-                    phrase = " ".join(phrase.split())
-                    if phrase:
-                        commands.append(f"grep -q {shlex.quote(phrase)} {shlex.quote(path)}")
-    for command in _PYTEST_COMMAND_PATTERN.findall(issue_description):
-        commands.append(command.strip())
-    return list(dict.fromkeys(commands))
-
-
-def _is_relative_workspace_file(path: str) -> bool:
-    candidate = Path(path)
-    if candidate.is_absolute() or ".." in candidate.parts:
-        return False
-    return bool(candidate.name) and not path.startswith(("./.git/", ".git/"))
 
 
 def _proposal_blocks(value: object) -> list[tuple[str, str]]:

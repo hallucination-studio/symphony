@@ -392,10 +392,11 @@ def pipeline_integrations_terminal(pipeline_payload: dict[str, Any]) -> bool:
 
 def pipeline_has_conflict_escalation_evidence(pipeline_payload: dict[str, Any]) -> bool:
     waits = [wait for wait in pipeline_payload.get("human_waits", []) if isinstance(wait, dict)]
-    if any(wait.get("reason") == "LINEAR_SYNC_CONFLICT" for wait in waits):
+    has_conflict_wait = any(wait.get("reason") == "LINEAR_SYNC_CONFLICT" for wait in waits)
+    if has_conflict_wait:
         return True
     integrations = [item for item in pipeline_payload.get("integration_queue", []) if isinstance(item, dict)]
-    return any(item.get("status") == "resolved" and (item.get("human_resolution") or item.get("error")) for item in integrations)
+    return any(item.get("status") == "conflict" and item.get("error") for item in integrations)
 
 
 def audit_expected_failure_run(run_result: dict[str, Any], tree: dict[str, Any], *, expected: str) -> dict[str, Any]:
