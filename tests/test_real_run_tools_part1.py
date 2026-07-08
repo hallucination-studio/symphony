@@ -470,6 +470,8 @@ def test_real_symphony_e2e_overall_dod_combines_required_probes() -> None:
     assert {"step": "pytest tests/test_smoke.py -q", "source": "appendix_harness"} in intent["required_gate_steps"]
     assert 'pipeline_scenario == "overall-dod"' in source
     assert "appendix:s0a-crashed-worker-lease-reclaimed" in source
+    assert "PODIUM_LINEAR_APP_ACCESS_TOKEN" in source
+    assert "Linear app actor token is required" in source
 
 
 def test_real_symphony_e2e_runtime_wait_scenario_enables_permission_probe() -> None:

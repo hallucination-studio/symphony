@@ -271,7 +271,7 @@ A real run must:
 
 For Podium-managed flows, the real run must additionally follow `docs/real-run-testing-guide.md#podium-web-to-linear-acceptance`:
 
-1. Start Podium with `PODIUM_LINEAR_ACCESS_TOKEN="$LINEAR_API_KEY"`.
+1. Start Podium with `PODIUM_LINEAR_ACCESS_TOKEN="$LINEAR_API_KEY"` for read/query fallback and `PODIUM_LINEAR_APP_ACCESS_TOKEN` set to an `actor=app` Linear OAuth token for Symphony-authored mutations.
 2. Start Podium Web and verify onboarding/runtime/pipeline with Chrome MCP or an equivalent real browser.
 3. Create the Conductor enrollment token from Podium and run the generated install command locally.
 4. Verify the installed Conductor reports managed mode, Podium runtime/proxy tokens, and the Podium WebSocket URL.

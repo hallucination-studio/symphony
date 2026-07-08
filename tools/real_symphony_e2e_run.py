@@ -141,6 +141,12 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
     token = os.environ.get("LINEAR_API_KEY", "").strip()
     if not token:
         raise RuntimeError("LINEAR_API_KEY is required")
+    app_actor_token = os.environ.get("PODIUM_LINEAR_APP_ACCESS_TOKEN", "").strip()
+    if not app_actor_token:
+        raise RuntimeError(
+            "Linear app actor token is required: set PODIUM_LINEAR_APP_ACCESS_TOKEN "
+            "to an actor=app OAuth token for Symphony-authored Linear mutations"
+        )
     root = args.out.resolve()
     root.mkdir(parents=True, exist_ok=True)
     evidence = Evidence(root / "real-symphony-e2e-report.json")
@@ -252,6 +258,7 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
     podium_env = dict(env)
     podium_env["LINEAR_WEBHOOK_SECRET"] = webhook_secret
     podium_env["PODIUM_LINEAR_ACCESS_TOKEN"] = token
+    podium_env["PODIUM_LINEAR_APP_ACCESS_TOKEN"] = app_actor_token
     processes: list[ManagedProcess] = []
     try:
         podium = start_process(

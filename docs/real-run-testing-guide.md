@@ -226,6 +226,9 @@ This is the required full-flow acceptance path:
    ```bash
    set -a && source .env && set +a
    export PODIUM_LINEAR_ACCESS_TOKEN="$LINEAR_API_KEY"
+   # Required for Symphony-authored comments, child issues, activities, and workflow transitions.
+   # Must be a Linear OAuth token authorized with actor=app, not a human/operator API key.
+   export PODIUM_LINEAR_APP_ACCESS_TOKEN="$YOUR_LINEAR_APP_ACTOR_TOKEN"
    export PYTHONPATH="$PWD/packages/performer-api/src:$PWD/packages/performer/src:$PWD/packages/conductor/src:$PWD/packages/podium/src"
    .venv/bin/podium --host 127.0.0.1 --port 8090
    ```
@@ -305,7 +308,8 @@ Capture enough evidence for another agent to distinguish a true product run from
 
 Watch these known failures explicitly:
 
-- Missing `PODIUM_LINEAR_ACCESS_TOKEN` causes Podium Linear proxy requests to fail even when `LINEAR_API_KEY` is set.
+- Missing `PODIUM_LINEAR_APP_ACCESS_TOKEN` causes Symphony-authored Linear mutations to fail closed with `agent_actor_token_required`; do not substitute a human/operator API key.
+- Missing `PODIUM_LINEAR_ACCESS_TOKEN` causes Podium Linear proxy query fallback requests to fail even when `LINEAR_API_KEY` is set.
 - A webhook with the wrong Podium workspace/user id creates a valid dispatch for another user; the current user's run list remains empty.
 - A fixture that is not a git repository, or lacks the smoke test referenced by the frozen gate, can produce verifier failures that do not prove the product path is broken.
 - Event-driven one-shot work must continue the same `dispatch_issue_id` on retry or resume. It must not fall back to a daemon-wide project scan.
