@@ -10,7 +10,7 @@ import httpx
 from .conductor_pipeline import PipelineLinearProjector, PipelineScheduler, _append_instance_log, _sanitize_error
 from .conductor_service_helpers import *  # noqa: F403
 from .conductor_service_types import *  # noqa: F403
-from performer_api.pipeline import HumanEscalationReason, RuntimeConfigEnvelope
+from performer_api.pipeline import AttemptState, HumanEscalationReason, RuntimeConfigEnvelope
 
 
 class ConductorPodiumSyncMixin:
@@ -299,6 +299,7 @@ class ConductorPodiumSyncMixin:
     async def coordinate_background_once(self) -> CoordinationResult:
         self._pipeline_reconcile_findings: list[dict[str, Any]] = []
         closeout = {"closed_out": 0, "failed": 0, "skipped": 0}
+        startup_reconciled_attempts = self.reconcile_pipeline_attempts_on_startup()
         dispatches_drained = await self._drain_podium_dispatch_queue()
         remediations: dict[str, Any] = {}
         pipeline_results_applied = 0
@@ -310,7 +311,7 @@ class ConductorPodiumSyncMixin:
         linear_pipeline_projections = 0
         pipeline_attempts_started = 0
         pipeline_results_applied = self._collect_pipeline_result_files()
-        pipeline_crash_failures = self._fail_exited_pipeline_attempts()
+        pipeline_crash_failures = startup_reconciled_attempts + self._fail_exited_pipeline_attempts()
         pipeline_runtime_waits_observed = self._collect_pipeline_runtime_waits()
         pipeline_integrations_processed = self._process_pipeline_integrations()
         self._drive_pipeline_convergence()
@@ -404,6 +405,47 @@ class ConductorPodiumSyncMixin:
                 existing_wait_nodes.add(node_id)
             surfaced += 1
         return surfaced
+
+    def reconcile_pipeline_attempts_on_startup(self) -> int:
+        failed = 0
+        attempted: set[str] = set()
+        instances = [self.get_instance(instance.id) or instance for instance in self.store.list_instances()]
+        if not instances:
+            return 0
+        recover_attempt = getattr(self.runtime_manager, "recover_attempt", None)
+        now = datetime.now(timezone.utc)
+        for attempt in self.pipeline_store.list_attempts():
+            if attempt.state is not AttemptState.RUNNING or attempt.attempt_id in attempted:
+                continue
+            if attempt.process_pid is None:
+                continue
+            attempted.add(attempt.attempt_id)
+            recovered_instance = None
+            if attempt.process_pid is not None and callable(recover_attempt):
+                for instance in instances:
+                    recovered_instance = recover_attempt(instance, attempt)
+                    if recovered_instance is not None:
+                        self.store.update_instance(recovered_instance)
+                        break
+            if recovered_instance is not None:
+                continue
+            instance = instances[0]
+            error = f"running attempt process is not alive process_pid={attempt.process_pid or ''}".strip()
+            if self.pipeline_store.fail_running_attempt_for_recovery(attempt.attempt_id, error=error, at=now):
+                lease_id = attempt.lease_id
+                _append_instance_log(
+                    instance,
+                    (
+                        "pipeline_attempt_orphan_reconciled "
+                        f"mode={attempt.mode.value} node_id={attempt.node_id} "
+                        f"attempt_id={attempt.attempt_id} lease_id={lease_id} "
+                        f"process_pid={attempt.process_pid or ''} "
+                        f"error_type=ProcessExited sanitized_reason={error} "
+                        "action_required=none retryable=True"
+                    ),
+                )
+                failed += 1
+        return failed
 
     def _fail_exited_pipeline_attempts(self) -> int:
         failed = 0

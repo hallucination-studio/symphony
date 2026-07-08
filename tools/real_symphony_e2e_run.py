@@ -779,13 +779,16 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
                 projections = [
                     projection for projection in pipeline_view.get("linear_projections", []) if isinstance(projection, dict)
                 ]
+                executable_nodes = [node for node in nodes if _pipeline_node_requires_gate(node, nodes)]
+                executable_node_ids = {str(node.get("node_id") or "") for node in executable_nodes}
                 evidence.check(
                     "stage:pipeline-gates-frozen",
-                    bool(nodes) and all(node.get("gate_snapshot_hash") for node in nodes),
+                    bool(executable_nodes) and all(node.get("gate_snapshot_hash") for node in executable_nodes),
                     nodes=[
                         {
                             "node_id": node.get("node_id"),
                             "state": node.get("state"),
+                            "requires_gate": str(node.get("node_id") or "") in executable_node_ids,
                             "gate_snapshot_hash": bool(node.get("gate_snapshot_hash")),
                         }
                         for node in nodes
@@ -809,7 +812,11 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
                         isinstance(projection.get("metadata"), dict)
                         and projection["metadata"].get("graph_id")
                         and projection["metadata"].get("node_id")
-                        and projection["metadata"].get("gate_snapshot_hash")
+                        and (
+                            projection["metadata"].get("gate_snapshot_hash")
+                            or str(projection.get("node_id") or projection["metadata"].get("node_id") or "")
+                            not in executable_node_ids
+                        )
                         and projection["metadata"].get("conductor_revision")
                         and projection["metadata"].get("operator_status")
                         for projection in projections
@@ -1439,6 +1446,15 @@ def _pipeline_projection_matches_current_revision(pipeline_view: dict[str, Any])
         if gate_hash and metadata.get("gate_snapshot_hash") != gate_hash:
             return False
     return True
+
+
+def _pipeline_node_requires_gate(node: dict[str, Any], nodes: list[dict[str, Any]]) -> bool:
+    node_id = str(node.get("node_id") or "")
+    if not node_id:
+        return False
+    if node.get("gate_snapshot_hash"):
+        return True
+    return not any(str(candidate.get("parent_node_id") or "") == node_id for candidate in nodes)
 
 
 def _check_pipeline_scenario_acceptance(evidence: Evidence, scenario: str, pipeline_view: dict[str, Any]) -> None:

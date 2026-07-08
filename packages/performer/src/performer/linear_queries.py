@@ -27,7 +27,27 @@ COMMENT_CREATE_MUTATION = """
 mutation PerformerCommentIssue($issueId: String!, $body: String!) {
   commentCreate(input: { issueId: $issueId, body: $body }) {
     success
-    comment { id }
+    comment { id body }
+  }
+}
+"""
+
+
+COMMENT_UPDATE_MUTATION = """
+mutation PerformerUpdateComment($commentId: String!, $body: String!) {
+  commentUpdate(id: $commentId, input: { body: $body }) {
+    success
+    comment { id body }
+  }
+}
+"""
+
+
+AGENT_ACTIVITY_CREATE_MUTATION = """
+mutation PerformerAgentActivity($input: AgentActivityCreateInput!) {
+  agentActivityCreate(input: $input) {
+    success
+    agentActivity { id }
   }
 }
 """

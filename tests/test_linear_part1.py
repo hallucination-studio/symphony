@@ -120,6 +120,88 @@ async def test_comment_issue_uses_comment_create() -> None:
     assert "commentCreate" in request["json"]["query"]
     assert request["json"]["variables"] == {"issueId": "issue-1", "body": "done"}
 
+
+async def test_update_issue_comment_marker_block_creates_then_updates_comment() -> None:
+    transport = RecordingTransport(
+        [
+            {"data": {"issue": {"comments": {"nodes": []}}}},
+            {
+                "data": {
+                    "commentCreate": {
+                        "success": True,
+                        "comment": {"id": "comment-1", "body": "created"},
+                    }
+                }
+            },
+            {
+                "data": {
+                    "issue": {
+                        "comments": {
+                            "nodes": [
+                                {
+                                    "id": "comment-1",
+                                    "body": "<!-- BEGIN SYMPHONY STATUS -->\nold\n<!-- END SYMPHONY STATUS -->",
+                                }
+                            ]
+                        }
+                    }
+                }
+            },
+            {
+                "data": {
+                    "commentUpdate": {
+                        "success": True,
+                        "comment": {"id": "comment-1", "body": "updated"},
+                    }
+                }
+            },
+        ]
+    )
+    client = LinearClient("https://api.linear.app/graphql", "linear-token", transport=transport)
+    tracker = LinearTracker(make_config(), client=client)
+
+    created = await tracker.update_issue_comment_marker_block("issue-1", "SYMPHONY STATUS", "first body")
+    updated = await tracker.update_issue_comment_marker_block("issue-1", "SYMPHONY STATUS", "second body")
+
+    assert created["comment_id"] == "comment-1"
+    assert updated["comment_id"] == "comment-1"
+    assert "commentCreate" in transport.requests[1]["json"]["query"]
+    assert "commentUpdate" in transport.requests[3]["json"]["query"]
+    assert "second body" in transport.requests[3]["json"]["variables"]["body"]
+
+
+async def test_agent_activity_create_uses_agent_session_mutation() -> None:
+    transport = RecordingTransport(
+        [
+            {
+                "data": {
+                    "agentActivityCreate": {
+                        "success": True,
+                        "agentActivity": {"id": "activity-1"},
+                    }
+                }
+            }
+        ]
+    )
+    client = LinearClient("https://api.linear.app/graphql", "linear-token", transport=transport)
+    tracker = LinearTracker(make_config(), client=client)
+
+    result = await tracker.agent_activity_create(
+        agent_session_id="session-1",
+        content={"type": "thought", "body": "running execute"},
+    )
+
+    assert result == {"success": True, "activity_id": "activity-1"}
+    request = transport.requests[0]
+    assert "agentActivityCreate" in request["json"]["query"]
+    assert "AgentActivityCreateInput" in request["json"]["query"]
+    assert request["json"]["variables"] == {
+        "input": {
+            "agentSessionId": "session-1",
+            "content": {"type": "thought", "body": "running execute"},
+        }
+    }
+
 async def test_transition_issue_uses_issue_update() -> None:
     transport = RecordingTransport(
         [

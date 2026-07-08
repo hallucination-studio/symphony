@@ -72,6 +72,46 @@ class LinearClient:
             "comment_id": comment.get("id") if isinstance(comment, dict) else None,
         }
 
+    async def update_issue_comment_marker_block(
+        self,
+        issue_id: str,
+        marker_name: str,
+        block: str,
+    ) -> dict[str, Any]:
+        comments = await self.fetch_issue_comments(issue_id, first=50)
+        begin = f"<!-- BEGIN {marker_name} -->"
+        existing = next((comment for comment in comments if begin in str(comment.get("body") or "")), None)
+        body = replace_marker_block(str((existing or {}).get("body") or ""), marker_name, block)
+        if existing and existing.get("id"):
+            payload = await self.graphql(COMMENT_UPDATE_MUTATION, {"commentId": str(existing["id"]), "body": body})
+            result = ((payload.get("data") or {}).get("commentUpdate") or {})
+            comment = result.get("comment") if isinstance(result, dict) else {}
+            return {
+                "success": bool(result.get("success")),
+                "comment_id": comment.get("id") if isinstance(comment, dict) else existing["id"],
+                "body": body,
+            }
+        created = await self.comment_issue(issue_id, body)
+        created["body"] = body
+        return created
+
+    async def agent_activity_create(
+        self,
+        *,
+        agent_session_id: str,
+        content: dict[str, Any],
+    ) -> dict[str, Any]:
+        payload = await self.graphql(
+            AGENT_ACTIVITY_CREATE_MUTATION,
+            {"input": {"agentSessionId": agent_session_id, "content": content}},
+        )
+        result = ((payload.get("data") or {}).get("agentActivityCreate") or {})
+        activity = result.get("agentActivity") if isinstance(result, dict) else {}
+        return {
+            "success": bool(result.get("success")),
+            "activity_id": activity.get("id") if isinstance(activity, dict) else None,
+        }
+
     async def fetch_issue_comments(self, issue_id: str, *, first: int = 20) -> list[dict[str, Any]]:
         payload = await self.graphql(ISSUE_COMMENTS_QUERY, {"issueId": issue_id, "first": first})
         nodes = ((((payload.get("data") or {}).get("issue") or {}).get("comments") or {}).get("nodes") or [])
@@ -456,6 +496,25 @@ class LinearTracker:
 
     async def comment_issue(self, issue_id: str, body: str) -> dict[str, Any]:
         return await self.client.comment_issue(issue_id, body)
+
+    async def update_issue_comment_marker_block(
+        self,
+        issue_id: str,
+        marker_name: str,
+        block: str,
+    ) -> dict[str, Any]:
+        return await self.client.update_issue_comment_marker_block(issue_id, marker_name, block)
+
+    async def agent_activity_create(
+        self,
+        *,
+        agent_session_id: str,
+        content: dict[str, Any],
+    ) -> dict[str, Any]:
+        return await self.client.agent_activity_create(
+            agent_session_id=agent_session_id,
+            content=content,
+        )
 
     async def fetch_issue_comments(self, issue_id: str, *, first: int = 20) -> list[dict[str, Any]]:
         return await self.client.fetch_issue_comments(issue_id, first=first)

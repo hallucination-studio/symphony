@@ -7,6 +7,7 @@ import pytest
 from performer_api.pipeline import (
     AttemptRecord,
     AttemptState,
+    ExecuteAttemptResult,
     canonical_gate_hash,
     DependencySatisfactionPolicy,
     GateStep,
@@ -20,6 +21,7 @@ from performer_api.pipeline import (
     PlanRepair,
     PlanProposal,
     PlanAttemptRequest,
+    PlanAttemptResult,
     PlanValidator,
     PlanValidatorError,
     RuntimeMode,
@@ -395,6 +397,61 @@ def test_plan_repair_promotes_parent_aggregate_from_pipeline_intent_shadowed_by_
     assert PlanValidator(intent_spec=intent).validate(repaired) == set()
 
 
+def test_plan_repair_infers_gate_less_root_parent_as_aggregate() -> None:
+    intent = IntentSpec.from_dispatch_context(
+        {
+            "issue_id": "issue-1",
+            "issue_identifier": "ENG-1",
+            "intent": {},
+        }
+    )
+    gate = GateSpecSnapshot.create(
+        gate_id="gate-child",
+        task_id="task-create-result",
+        created_by="plan-1",
+        created_at="2026-07-06T00:00:00Z",
+        content=GateSpecContent(
+            acceptance_criteria=["child work is complete"],
+            verification_procedure=[GateStep("test -f SYMPHONY_REAL_E2E_RESULT.md", GateStepSource.ISSUE_REQUIREMENT)],
+            rubric={str(score): f"score {score}" for score in range(5)},
+            pass_threshold=3,
+        ),
+    )
+    proposal = PlanProposal(
+        graph_id="graph-1",
+        plan_attempt_id="plan-1",
+        root_node_id="issue-1",
+        nodes=[
+            GraphNode(
+                node_id="issue-1",
+                title="Business issue",
+                state=GraphNodeState.PLANNED,
+                issue_id="issue-1",
+                issue_identifier="ENG-1",
+            ),
+            GraphNode(
+                node_id="task-create-result",
+                title="Create result",
+                state=GraphNodeState.PLANNED,
+                parent_node_id="issue-1",
+                gate_snapshot_hash=gate.hash,
+            ),
+        ],
+        blocks=[],
+        gates=[gate],
+        entry_node_ids=["issue-1", "task-create-result"],
+        exit_node_ids=["issue-1", "task-create-result"],
+    )
+
+    repaired = PlanRepair(intent).repair(proposal)
+    repaired_again = PlanRepair(intent).repair(repaired)
+
+    assert repaired.entry_node_ids == ["task-create-result"]
+    assert repaired.exit_node_ids == ["task-create-result"]
+    assert PlanValidator(intent_spec=intent).validate(repaired) == set()
+    assert repaired_again.to_dict() == repaired.to_dict()
+
+
 def test_plan_validator_rejects_missing_parent_aggregate_when_intent_requires_it() -> None:
     intent = IntentSpec.from_dispatch_context(
         {
@@ -523,6 +580,7 @@ def test_attempt_requests_round_trip_issue_and_task_context() -> None:
         gate_snapshot=gate,
         lease_id="lease-exec",
         fencing_token="fence-exec",
+        expected_thread_id="thread-exec",
     )
 
     assert PlanAttemptRequest.from_dict(plan.to_dict()).issue_description == plan.issue_description
@@ -530,7 +588,9 @@ def test_attempt_requests_round_trip_issue_and_task_context() -> None:
     assert execute_payload["task_title"] == "Real E2E"
     assert execute_payload["issue_identifier"] == "HELL-1"
     assert execute_payload["issue_description"] == "Create SYMPHONY_REAL_E2E_RESULT.md and run pytest."
+    assert execute_payload["expected_thread_id"] == "thread-exec"
     assert ExecuteAttemptRequest.from_dict(execute_payload).issue_description == execute.issue_description
+    assert ExecuteAttemptRequest.from_dict(execute_payload).expected_thread_id == "thread-exec"
 
 
 def test_attempt_record_persists_fencing_and_revision_context() -> None:
@@ -545,6 +605,7 @@ def test_attempt_record_persists_fencing_and_revision_context() -> None:
         fencing_token="fence-exec",
         gate_snapshot_hash="sha256:gate",
         process_pid=4242,
+        thread_id="thread-1",
     )
 
     payload = attempt.to_dict()
@@ -555,11 +616,42 @@ def test_attempt_record_persists_fencing_and_revision_context() -> None:
     assert payload["lease_id"] == "lease-exec"
     assert payload["fencing_token"] == "fence-exec"
     assert payload["process_pid"] == 4242
+    assert payload["thread_id"] == "thread-1"
     assert restored.graph_revision == 7
     assert restored.policy_revision == 3
     assert restored.lease_id == "lease-exec"
     assert restored.fencing_token == "fence-exec"
     assert restored.process_pid == 4242
+    assert restored.thread_id == "thread-1"
+
+
+def test_attempt_results_persist_codex_thread_id_for_resume() -> None:
+    plan = PlanAttemptResult(
+        attempt_id="plan-1",
+        node_id="node-1",
+        status=AttemptState.FAILED,
+        graph_revision=1,
+        policy_revision=2,
+        gate_snapshot_hash="",
+        lease_id="lease-plan",
+        fencing_token="fence-plan",
+        thread_id="thread-plan",
+    )
+    execute = ExecuteAttemptResult(
+        attempt_id="exec-1",
+        node_id="node-1",
+        status=AttemptState.FAILED,
+        graph_revision=1,
+        policy_revision=2,
+        gate_snapshot_hash="sha256:gate",
+        lease_id="lease-exec",
+        fencing_token="fence-exec",
+        thread_id="thread-exec",
+        verification_input={},
+    )
+
+    assert PlanAttemptResult.from_dict(plan.to_dict()).thread_id == "thread-plan"
+    assert ExecuteAttemptResult.from_dict(execute.to_dict()).thread_id == "thread-exec"
 
 
 def test_plan_validator_rejects_cycles_missing_gates_and_incomplete_rubrics() -> None:
@@ -966,6 +1058,7 @@ def test_runtime_profile_and_artifact_manifests_round_trip_without_secrets() -> 
     assert TaskOutputManifest.from_dict(manifest.to_dict()) == manifest
     assert AttemptState.SUCCEEDED.value == "succeeded"
     assert HumanEscalationReason.PLAN_INVALID.value == "PLAN_INVALID"
+    assert HumanEscalationReason.THREAD_LOST.value == "THREAD_LOST"
 
 
 def test_verification_input_snapshot_preserves_repository_and_workspace_paths() -> None:

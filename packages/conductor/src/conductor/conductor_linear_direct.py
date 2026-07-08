@@ -188,6 +188,169 @@ mutation RepositoryHandoffComment($issueId: String!, $body: String!) {
         comment = result.get("comment") if isinstance(result, dict) else {}
         return {"success": bool(result.get("success")), "comment_id": comment.get("id") if isinstance(comment, dict) else None}
 
+    async def fetch_issue_comments(self, issue_id: str, *, first: int = 50) -> list[dict[str, Any]]:
+        payload = await self.graphql(
+            """
+query RepositoryHandoffComments($issueId: String!, $first: Int!) {
+  issue(id: $issueId) {
+    comments(first: $first) {
+      nodes { id body createdAt user { id name } }
+    }
+  }
+}
+""",
+            {"issueId": issue_id, "first": first},
+        )
+        nodes = ((((payload.get("data") or {}).get("issue") or {}).get("comments") or {}).get("nodes") or [])
+        comments: list[dict[str, Any]] = []
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            user = node.get("user") if isinstance(node.get("user"), dict) else None
+            comments.append(
+                {
+                    "id": node.get("id"),
+                    "body": node.get("body") or "",
+                    "created_at": node.get("createdAt"),
+                    "user": {"id": user.get("id"), "name": user.get("name")} if user else None,
+                }
+            )
+        return comments
+
+    async def update_issue_comment_marker_block(
+        self,
+        issue_id: str,
+        marker_name: str,
+        block: str,
+    ) -> dict[str, Any]:
+        comments = await self.fetch_issue_comments(issue_id, first=50)
+        start = f"<!-- {marker_name}:START -->"
+        existing = next((comment for comment in comments if start in str(comment.get("body") or "")), None)
+        body = _replace_marker_block(str((existing or {}).get("body") or ""), marker_name, block)
+        if existing and existing.get("id"):
+            payload = await self.graphql(
+                """
+mutation RepositoryHandoffCommentUpdate($commentId: String!, $body: String!) {
+  commentUpdate(id: $commentId, input: { body: $body }) {
+    success
+    comment { id body }
+  }
+}
+""",
+                {"commentId": str(existing["id"]), "body": body},
+            )
+            result = ((payload.get("data") or {}).get("commentUpdate") or {})
+            comment = result.get("comment") if isinstance(result, dict) else {}
+            return {
+                "success": bool(result.get("success")),
+                "comment_id": comment.get("id") if isinstance(comment, dict) else existing["id"],
+                "body": body,
+            }
+        created = await self.comment_issue(issue_id, body)
+        created["body"] = body
+        return created
+
+    async def agent_activity_create(
+        self,
+        *,
+        agent_session_id: str,
+        content: dict[str, Any],
+    ) -> dict[str, Any]:
+        payload = await self.graphql(
+            """
+mutation RepositoryHandoffAgentActivity($input: AgentActivityCreateInput!) {
+  agentActivityCreate(input: $input) {
+    success
+    agentActivity { id }
+  }
+}
+""",
+            {"input": {"agentSessionId": agent_session_id, "content": content}},
+        )
+        result = ((payload.get("data") or {}).get("agentActivityCreate") or {})
+        activity = result.get("agentActivity") if isinstance(result, dict) else {}
+        return {
+            "success": bool(result.get("success")),
+            "activity_id": activity.get("id") if isinstance(activity, dict) else None,
+        }
+
+    async def transition_issue(self, issue_id: str, state_id: str) -> dict[str, Any]:
+        payload = await self.graphql(
+            """
+mutation RepositoryHandoffTransitionIssue($issueId: String!, $stateId: String!) {
+  issueUpdate(id: $issueId, input: { stateId: $stateId }) {
+    success
+    issue { id identifier state { name } }
+  }
+}
+""",
+            {"issueId": issue_id, "stateId": state_id},
+        )
+        result = ((payload.get("data") or {}).get("issueUpdate") or {})
+        issue = result.get("issue") if isinstance(result, dict) else {}
+        state = issue.get("state") if isinstance(issue, dict) else {}
+        return {
+            "success": bool(result.get("success")),
+            "issue_id": issue.get("id") if isinstance(issue, dict) else issue_id,
+            "identifier": issue.get("identifier") if isinstance(issue, dict) else None,
+            "state": state.get("name") if isinstance(state, dict) else None,
+        }
+
+    async def transition_issue_by_state_name(self, issue_id: str, state_name: str) -> dict[str, Any]:
+        context = await self._issue_label_context(issue_id)
+        if str(context.get("state_name") or "").strip().lower() == state_name.strip().lower():
+            return {"success": True, "issue_id": issue_id, "state": context.get("state_name")}
+        team_id = str(context.get("team_id") or "")
+        if not team_id:
+            return {"success": False, "issue_id": issue_id, "state": context.get("state_name"), "reason": "missing_team_id"}
+        state_id = await self._state_id_by_name(team_id, state_name)
+        if not state_id:
+            return {"success": False, "issue_id": issue_id, "state": context.get("state_name"), "reason": "state_not_found"}
+        return await self.transition_issue(issue_id, state_id)
+
+    async def transition_issue_by_state_target(
+        self,
+        issue_id: str,
+        *,
+        names: list[str],
+        state_type: str,
+    ) -> dict[str, Any]:
+        context = await self._issue_label_context(issue_id)
+        current = str(context.get("state_name") or "").strip()
+        wanted = {name.strip().lower() for name in names if name and name.strip()}
+        if current.lower() in wanted:
+            return {"success": True, "issue_id": issue_id, "state": current}
+        team_id = str(context.get("team_id") or "")
+        if not team_id:
+            return {"success": False, "issue_id": issue_id, "state": current, "reason": "missing_team_id"}
+        states = await self._team_workflow_states(team_id)
+        target = next((state for state in states if str(state.get("name") or "").strip().lower() in wanted), None)
+        if target is None and state_type:
+            target = next((state for state in states if str(state.get("type") or "") == state_type), None)
+        if target is None or not target.get("id"):
+            return {"success": False, "issue_id": issue_id, "state": current, "reason": "state_not_found"}
+        if str(target.get("name") or "").strip().lower() == current.lower():
+            return {"success": True, "issue_id": issue_id, "state": current}
+        return await self.transition_issue(issue_id, str(target["id"]))
+
+    async def _team_workflow_states(self, team_id: str) -> list[dict[str, Any]]:
+        payload = await self.graphql(
+            """
+query ConductorTeamWorkflowStates($teamId: ID!) {
+  workflowStates(first: 100, filter: { team: { id: { eq: $teamId } } }) {
+    nodes { id name type }
+  }
+}
+""",
+            {"teamId": team_id},
+        )
+        nodes = (((payload.get("data") or {}).get("workflowStates") or {}).get("nodes") or [])
+        return [
+            {"id": str(node.get("id") or ""), "name": str(node.get("name") or ""), "type": str(node.get("type") or "")}
+            for node in nodes
+            if isinstance(node, dict) and node.get("id")
+        ]
+
     async def create_issue_relation(
         self,
         *,

@@ -108,6 +108,13 @@ class ConductorServiceViewsMixin:
 
     async def restart_instance(self, instance_id: str) -> InstanceRecord:
         current = self._require_instance(instance_id)
+        if self.pipeline_store.current_graph_revision_record() is not None:
+            stopped = await self.runtime_manager.stop(current)
+            self.store.update_instance(stopped)
+            self.reconcile_pipeline_attempts_on_startup()
+            self._drive_pipeline_convergence()
+            await self._start_due_pipeline_attempts()
+            return self.get_instance(instance_id) or stopped
         request_path = Path(current.instance_dir) / "state" / "pipeline" / "manual-restart-request.json"
         result_path = Path(current.instance_dir) / "state" / "pipeline" / "manual-restart-result.json"
         self._write_manual_plan_request(current, request_path)

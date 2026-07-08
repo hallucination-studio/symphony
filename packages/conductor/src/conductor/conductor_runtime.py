@@ -340,6 +340,41 @@ class ConductorRuntimeManager:
             )
         return instance.with_updates(process_status="running", pid=instance.pid)
 
+    def recover_attempt(self, instance: InstanceRecord, attempt: Any) -> InstanceRecord | None:
+        pid = getattr(attempt, "process_pid", None)
+        try:
+            pid = int(pid)
+        except (TypeError, ValueError):
+            return None
+        if pid <= 0:
+            return None
+        matches = _pid_matches_command(pid, self.command)
+        probe_instance = instance.with_updates(pid=pid) if getattr(instance, "pid", None) != pid else instance
+        if not matches and not _can_recover_uninspectable_pid(probe_instance):
+            return None
+        attempt_id = str(getattr(attempt, "attempt_id", "") or f"recovered-{pid}")
+        handle_key = (instance.id, attempt_id)
+        if handle_key not in self._handles:
+            try:
+                loop = asyncio.get_running_loop()
+                log_task = loop.create_task(self._follow_recovered_process(pid))
+            except RuntimeError:
+                log_task = _CompletedLogTask()
+            request_path = str(Path(instance.instance_dir) / "state" / "pipeline" / attempt_id / "attempt-request.json")
+            result_path = str(Path(instance.instance_dir) / "state" / "pipeline" / attempt_id / "attempt-result.json")
+            self._handles[handle_key] = RuntimeHandle(
+                process=RecoveredProcess(pid),
+                log_task=log_task,  # type: ignore[arg-type]
+                process_status="running",
+                attempt_id=attempt_id,
+                mode=str(getattr(getattr(attempt, "mode", ""), "value", getattr(attempt, "mode", ""))),
+                request_path=request_path,
+                result_path=result_path,
+                lease_id=str(getattr(attempt, "lease_id", "") or ""),
+                recovered=True,
+            )
+        return instance.with_updates(process_status="running", pid=pid)
+
     def read_logs(self, instance: InstanceRecord) -> str:
         return self.query_logs(instance, LogQuery(order="asc")).text()
 

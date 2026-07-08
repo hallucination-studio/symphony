@@ -24,6 +24,7 @@ from performer_api.pipeline import (
 )
 
 from .codex_client import CodexSdkClient
+from .workspace_execution_state import WorkspaceExecutionState
 
 
 PLAN_RESULT_SCHEMA: dict[str, object] = {
@@ -245,6 +246,17 @@ async def _run_plan_mode(payload: dict[str, object], *, agent_backend: Any | Non
     last_error = "invalid_plan_proposal"
     for _attempt in range(2):
         try:
+            execution_state = WorkspaceExecutionState(_thread_state_workspace_path(payload, fallback=workspace))
+            existing_thread_id = execution_state.sdk_thread_id(issue_id=node_id)
+            expected_thread_id = _optional_payload_str(payload.get("expected_thread_id"))
+            if expected_thread_id and existing_thread_id != expected_thread_id:
+                return _failed_plan_result(
+                    payload,
+                    attempt_id=attempt_id,
+                    node_id=node_id,
+                    error=HumanEscalationReason.THREAD_LOST.value,
+                    thread_id=expected_thread_id,
+                )
             result = await backend.run_session(
                 workspace,
                 prompt,
@@ -252,7 +264,9 @@ async def _run_plan_mode(payload: dict[str, object], *, agent_backend: Any | Non
                 on_event=_attempt_event_printer(RuntimeMode.PLAN, attempt_id=attempt_id, node_id=node_id),
                 output_schema=PLAN_RESULT_SCHEMA,
                 max_turns=1,
+                existing_thread_id=existing_thread_id,
             )
+            execution_state.write_sdk_thread(issue_id=node_id, result=result)
         except Exception as exc:
             return _failed_plan_result(
                 payload,
@@ -283,6 +297,7 @@ async def _run_plan_mode(payload: dict[str, object], *, agent_backend: Any | Non
             "status": "succeeded",
             **_fencing_fields(payload),
             "gate_snapshot_hash": "",
+            "thread_id": getattr(result, "thread_id", None),
             "proposal": proposal.to_dict(),
         }
     return _failed_plan_result(
@@ -299,6 +314,7 @@ def _failed_plan_result(
     attempt_id: str,
     node_id: str,
     error: str,
+    thread_id: str | None = None,
 ) -> dict[str, object]:
     return {
         "attempt_id": attempt_id,
@@ -309,6 +325,7 @@ def _failed_plan_result(
         "gate_snapshot_hash": "",
         "proposal": None,
         "error": error,
+        "thread_id": thread_id,
     }
 
 
@@ -511,13 +528,27 @@ async def _run_execute_mode(payload: dict[str, object], *, agent_backend: Any | 
         try:
             on_event = _attempt_event_printer(RuntimeMode.EXECUTE, attempt_id=attempt_id, node_id=node_id)
             await _emit_runtime_wait_probe_if_requested(on_event)
-            await backend.run_session(
+            execution_state = WorkspaceExecutionState(_thread_state_workspace_path(payload, fallback=workspace))
+            existing_thread_id = execution_state.sdk_thread_id(issue_id=node_id)
+            expected_thread_id = _optional_payload_str(payload.get("expected_thread_id"))
+            if expected_thread_id and existing_thread_id != expected_thread_id:
+                return _failed_execute_result(
+                    payload,
+                    attempt_id=attempt_id,
+                    node_id=node_id,
+                    gate_hash=gate_hash,
+                    error=HumanEscalationReason.THREAD_LOST.value,
+                    thread_id=expected_thread_id,
+                )
+            result = await backend.run_session(
                 workspace,
                 _executor_prompt(payload),
                 f"Execute {node_id}",
                 on_event=on_event,
                 max_turns=1,
+                existing_thread_id=existing_thread_id,
             )
+            execution_state.write_sdk_thread(issue_id=node_id, result=result)
         except Exception as exc:
             return _failed_execute_result(
                 payload,
@@ -555,6 +586,7 @@ async def _run_execute_mode(payload: dict[str, object], *, agent_backend: Any | 
         **_fencing_fields(payload),
         "node_id": node_id,
         "gate_snapshot_hash": gate_hash,
+        "thread_id": locals().get("result") and getattr(locals()["result"], "thread_id", None),
         "verification_input": verification_input,
     }
 
@@ -566,6 +598,7 @@ def _failed_execute_result(
     node_id: str,
     gate_hash: str,
     error: str,
+    thread_id: str | None = None,
 ) -> dict[str, object]:
     return {
         "attempt_id": attempt_id,
@@ -576,6 +609,7 @@ def _failed_execute_result(
         "gate_snapshot_hash": gate_hash,
         "verification_input": {},
         "error": error,
+        "thread_id": thread_id,
     }
 
 
@@ -724,6 +758,13 @@ def _execute_workspace_path(payload: dict[str, object]) -> str | None:
         if attempt_dir:
             return str(Path(attempt_dir) / "workspace")
     return _execute_repository_path(payload)
+
+
+def _thread_state_workspace_path(payload: dict[str, object], *, fallback: Path) -> Path:
+    thread_state_workspace = _optional_payload_str(payload.get("thread_state_workspace_path"))
+    if thread_state_workspace:
+        return Path(thread_state_workspace)
+    return fallback
 
 
 def _execute_repository_path(payload: dict[str, object]) -> str | None:

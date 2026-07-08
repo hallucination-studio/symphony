@@ -58,6 +58,7 @@ class ConductorService(ConductorPodiumSyncMixin, ConductorServiceViewsMixin):
         # loop only calls Linear when an instance's scope actually changes.
         self._project_label_signatures: dict[str, str] = {}
         self.data_root.mkdir(parents=True, exist_ok=True)
+        self.reconcile_pipeline_attempts_on_startup()
 
     def list_instances(self) -> list[InstanceRecord]:
         return self.store.list_instances()

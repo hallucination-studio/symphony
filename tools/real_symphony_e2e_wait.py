@@ -509,17 +509,19 @@ def _immediate_failure_matches_attempt(failure: dict[str, Any], attempt_id: str 
             for attempt in attempts
             if isinstance(attempt, dict) and str(attempt.get("attempt_id") or "")
         ]
-        return any(attempt_id == expected_attempt_id for attempt_id in attempt_ids)
+        return bool(attempt_ids) and all(attempt_id == expected_attempt_id for attempt_id in attempt_ids)
     actions = failure.get("actions")
     if not isinstance(actions, list):
         return False
+    matched = False
     for action in actions:
         if not isinstance(action, dict):
-            continue
+            return False
         details = action.get("details")
-        if isinstance(details, dict) and str(details.get("attempt_id") or "") == expected_attempt_id:
-            return True
-    return False
+        if not isinstance(details, dict) or str(details.get("attempt_id") or "") != expected_attempt_id:
+            return False
+        matched = True
+    return matched
 
 
 def _immediate_failure_without_attempt(failure: dict[str, Any], attempt_id: str | None) -> dict[str, Any] | None:

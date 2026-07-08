@@ -53,6 +53,122 @@ def test_cli_rejects_legacy_managed_phase_flags() -> None:
         )
 
 
+async def test_execute_mode_returns_thread_lost_when_expected_thread_missing(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True)
+    (repo / "README.md").write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=repo, check=True, capture_output=True, text=True)
+    gate = GateSpecSnapshot.create(
+        gate_id="gate-node-1",
+        task_id="node-1",
+        created_by="plan-1",
+        created_at="2026-07-06T00:00:00Z",
+        content=GateSpecContent(
+            acceptance_criteria=["works"],
+            verification_procedure=[GateStep("pytest -q", GateStepSource.ISSUE_REQUIREMENT)],
+            rubric={str(score): f"score {score}" for score in range(5)},
+            pass_threshold=3,
+        ),
+    )
+
+    class Backend:
+        async def run_session(self, *_args: object, **_kwargs: object) -> object:
+            raise AssertionError("execute must not start a new Codex thread when expected_thread_id is lost")
+
+    result = await performer_cli._run_execute_mode(
+        {
+            "attempt_id": "exec-1",
+            "node_id": "node-1",
+            "graph_revision": 1,
+            "policy_revision": 1,
+            "gate_snapshot": gate.to_dict(),
+            "gate_snapshot_hash": gate.hash,
+            "lease_id": "lease-1",
+            "fencing_token": "fence-1",
+            "repository": {"resolved_repo_path": str(repo)},
+            "artifact_paths": {"attempt_dir": str(tmp_path / "attempt")},
+            "base_revision": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip(),
+            "expected_thread_id": "thread-lost",
+        },
+        agent_backend=Backend(),
+    )
+
+    assert result["status"] == "failed"
+    assert result["error"] == "THREAD_LOST"
+    assert result["thread_id"] == "thread-lost"
+
+
+async def test_execute_mode_resumes_expected_thread_from_stable_thread_state_workspace(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True)
+    (repo / "README.md").write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=repo, check=True, capture_output=True, text=True)
+    gate = GateSpecSnapshot.create(
+        gate_id="gate-node-1",
+        task_id="node-1",
+        created_by="plan-1",
+        created_at="2026-07-06T00:00:00Z",
+        content=GateSpecContent(
+            acceptance_criteria=["works"],
+            verification_procedure=[GateStep("test -f RESULT.md", GateStepSource.ISSUE_REQUIREMENT)],
+            rubric={str(score): f"score {score}" for score in range(5)},
+            pass_threshold=3,
+        ),
+    )
+    stable = tmp_path / "stable"
+    (stable / ".symphony").mkdir(parents=True)
+    (stable / ".symphony" / "execution.json").write_text(
+        json.dumps(
+            {
+                "issue_id": "node-1",
+                "thread_id": "thread-1",
+                "backend": "sdk",
+                "status": "resume_pending",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class Backend:
+        async def run_session(self, workspace_path: Path, _prompt: str, _title: str, **kwargs: object) -> object:
+            assert kwargs["existing_thread_id"] == "thread-1"
+            (workspace_path / "RESULT.md").write_text("done\n", encoding="utf-8")
+            return SimpleNamespace(thread_id="thread-1", turn_id="turn-2", final_response="executed")
+
+    result = await performer_cli._run_execute_mode(
+        {
+            "attempt_id": "exec-1",
+            "node_id": "node-1",
+            "graph_revision": 1,
+            "policy_revision": 1,
+            "gate_snapshot": gate.to_dict(),
+            "gate_snapshot_hash": gate.hash,
+            "lease_id": "lease-1",
+            "fencing_token": "fence-1",
+            "repository": {"resolved_repo_path": str(repo)},
+            "artifact_paths": {"attempt_dir": str(tmp_path / "attempt")},
+            "base_revision": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip(),
+            "expected_thread_id": "thread-1",
+            "thread_state_workspace_path": str(stable),
+        },
+        agent_backend=Backend(),
+    )
+
+    assert result["status"] == "succeeded"
+    assert result["thread_id"] == "thread-1"
+    thread_state = json.loads((stable / ".symphony" / "execution.json").read_text(encoding="utf-8"))
+    assert thread_state["thread_id"] == "thread-1"
+    assert thread_state["last_turn_id"] == "turn-2"
+
+
 def test_planner_prompt_for_replan_forbids_reusing_failed_node_id() -> None:
     prompt = performer_cli._planner_prompt(
         {
@@ -342,6 +458,67 @@ async def test_plan_mode_uses_request_workspace_path_for_codex(tmp_path: Path) -
     assert "Do not freeze absolute local filesystem paths" in backend.prompts[0]
     assert "verification_procedure entry must carry a step and source provenance" in backend.prompts[0]
     assert "Every gate needs at least one authoritative source" in backend.prompts[0]
+
+
+@pytest.mark.asyncio
+async def test_plan_mode_writes_thread_state_to_stable_workspace(tmp_path: Path) -> None:
+    planner_workspace = tmp_path / "planner-workspace"
+    planner_workspace.mkdir()
+    stable_workspace = tmp_path / "stable-workspace"
+    request = {
+        "attempt_id": "plan-1",
+        "graph_id": "graph-1",
+        "root_node_id": "node-1",
+        "node_id": "node-1",
+        "issue_id": "node-1",
+        "issue_identifier": "ENG-1",
+        "title": "Implement feature",
+        "graph_revision": 1,
+        "policy_revision": 1,
+        "lease_id": "lease-plan",
+        "fencing_token": "token-plan",
+        "workspace_path": str(planner_workspace),
+        "thread_state_workspace_path": str(stable_workspace),
+    }
+    gate = GateSpecSnapshot.create(
+        gate_id="gate-node-1",
+        task_id="node-1",
+        created_by="plan-1",
+        created_at="2026-07-06T00:00:00Z",
+        content=GateSpecContent(
+            acceptance_criteria=["feature works"],
+            verification_procedure=[GateStep("pytest -q", GateStepSource.ISSUE_REQUIREMENT)],
+            rubric={str(score): f"score {score}" for score in range(5)},
+            pass_threshold=3,
+        ),
+    )
+    proposal = PlanProposal(
+        graph_id="graph-1",
+        plan_attempt_id="plan-1",
+        root_node_id="node-1",
+        nodes=[GraphNode(node_id="node-1", title="Implement", state=GraphNodeState.PLANNED, gate_snapshot_hash=gate.hash)],
+        blocks=[],
+        gates=[gate],
+        entry_node_ids=["node-1"],
+        exit_node_ids=["node-1"],
+    )
+
+    class Backend:
+        async def run_session(self, *_args: object, **_kwargs: object) -> object:
+            return SimpleNamespace(
+                structured_result={"proposal": proposal.to_dict()},
+                thread_id="thread-1",
+                turn_id="turn-1",
+                final_response="planned",
+            )
+
+    result = await performer_cli._run_plan_mode(request, agent_backend=Backend())
+
+    assert result["status"] == "succeeded"
+    thread_state = json.loads((stable_workspace / ".symphony" / "execution.json").read_text(encoding="utf-8"))
+    assert thread_state["issue_id"] == "node-1"
+    assert thread_state["thread_id"] == "thread-1"
+    assert not (planner_workspace / ".symphony" / "execution.json").exists()
 
 
 @pytest.mark.asyncio

@@ -72,6 +72,7 @@ class HumanEscalationReason(StrEnum):
     REPLAN_LIMIT_EXCEEDED = "REPLAN_LIMIT_EXCEEDED"
     BACKEND_UNAVAILABLE = "BACKEND_UNAVAILABLE"
     CAPACITY_STARVED = "CAPACITY_STARVED"
+    THREAD_LOST = "THREAD_LOST"
 
 
 class DependencySatisfactionPolicy(StrEnum):
@@ -561,6 +562,7 @@ class AttemptRecord:
     result_uri: str | None = None
     error: str | None = None
     process_pid: int | None = None
+    thread_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -579,6 +581,7 @@ class AttemptRecord:
             "result_uri": self.result_uri,
             "error": self.error,
             "process_pid": self.process_pid,
+            "thread_id": self.thread_id,
         }
 
     @classmethod
@@ -599,6 +602,7 @@ class AttemptRecord:
             result_uri=_optional_str(payload.get("result_uri")),
             error=_optional_str(payload.get("error")),
             process_pid=_optional_int(payload.get("process_pid")),
+            thread_id=_optional_str(payload.get("thread_id")),
         )
 
 
@@ -656,6 +660,7 @@ class FencedAttemptResult:
     lease_id: str
     fencing_token: str
     error: str | None = None
+    thread_id: str | None = None
 
     mode: RuntimeMode = RuntimeMode.EXECUTE
 
@@ -671,6 +676,7 @@ class FencedAttemptResult:
             "lease_id": self.lease_id,
             "fencing_token": self.fencing_token,
             "error": self.error,
+            "thread_id": self.thread_id,
         }
 
 
@@ -688,9 +694,11 @@ class PlanAttemptRequest:
     lease_id: str
     fencing_token: str
     workspace_path: str
+    thread_state_workspace_path: str | None = None
     issue_description: str = ""
     pipeline_intent: dict[str, Any] = field(default_factory=dict)
     failure_context: dict[str, Any] = field(default_factory=dict)
+    expected_thread_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -711,8 +719,10 @@ class PlanAttemptRequest:
             lease_id=str(payload.get("lease_id") or ""),
             fencing_token=str(payload.get("fencing_token") or ""),
             workspace_path=str(payload.get("workspace_path") or ""),
+            thread_state_workspace_path=_optional_str(payload.get("thread_state_workspace_path")),
             pipeline_intent=_dict(payload.get("pipeline_intent")),
             failure_context=_dict(payload.get("failure_context")),
+            expected_thread_id=_optional_str(payload.get("expected_thread_id")),
         )
 
 
@@ -739,6 +749,7 @@ class PlanAttemptResult(FencedAttemptResult):
             lease_id=str(payload.get("lease_id") or ""),
             fencing_token=str(payload.get("fencing_token") or ""),
             error=_optional_str(payload.get("error")),
+            thread_id=_optional_str(payload.get("thread_id")),
             proposal=PlanProposal.from_dict(proposal_payload) if isinstance(proposal_payload, dict) else None,
         )
 
@@ -760,6 +771,8 @@ class ExecuteAttemptRequest:
     artifact_paths: dict[str, Any] = field(default_factory=dict)
     upstream_manifests: list[dict[str, Any]] = field(default_factory=list)
     reason: str | None = None
+    expected_thread_id: str | None = None
+    thread_state_workspace_path: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -779,6 +792,8 @@ class ExecuteAttemptRequest:
             "artifact_paths": _jsonable_dict(self.artifact_paths),
             "upstream_manifests": [_jsonable_dict(manifest) for manifest in self.upstream_manifests],
             "reason": self.reason,
+            "expected_thread_id": self.expected_thread_id,
+            "thread_state_workspace_path": self.thread_state_workspace_path,
         }
 
     @classmethod
@@ -802,6 +817,8 @@ class ExecuteAttemptRequest:
             artifact_paths=_dict(payload.get("artifact_paths")),
             upstream_manifests=[_dict(item) for item in payload.get("upstream_manifests") or [] if isinstance(item, dict)],
             reason=_optional_str(payload.get("reason")),
+            expected_thread_id=_optional_str(payload.get("expected_thread_id")),
+            thread_state_workspace_path=_optional_str(payload.get("thread_state_workspace_path")),
         )
 
 
@@ -827,6 +844,7 @@ class ExecuteAttemptResult(FencedAttemptResult):
             lease_id=str(payload.get("lease_id") or ""),
             fencing_token=str(payload.get("fencing_token") or ""),
             error=_optional_str(payload.get("error")),
+            thread_id=_optional_str(payload.get("thread_id")),
             verification_input=_dict(payload.get("verification_input")),
         )
 
@@ -905,6 +923,7 @@ class VerifyAttemptResult(FencedAttemptResult):
             lease_id=str(payload.get("lease_id") or ""),
             fencing_token=str(payload.get("fencing_token") or ""),
             error=_optional_str(payload.get("error")),
+            thread_id=_optional_str(payload.get("thread_id")),
             score=_int(payload.get("score"), default=0),
             passed=bool(payload.get("passed")),
             execute_attempt_id=str(payload.get("execute_attempt_id") or ""),
@@ -1099,13 +1118,21 @@ class PlanRepair:
         )
 
     def _repair_parent_aggregate_shape(self, proposal: PlanProposal) -> PlanProposal:
-        if not self.intent_spec.requires_parent_aggregate or len(proposal.nodes) <= 1:
+        if len(proposal.nodes) <= 1:
             return proposal
         root_node_id = proposal.root_node_id
         if not root_node_id:
             return proposal
-        root_exists = any(node.node_id == root_node_id for node in proposal.nodes)
         root_node = next((node for node in proposal.nodes if node.node_id == root_node_id), None)
+        has_root_parentage = any(node.node_id != root_node_id and node.parent_node_id == root_node_id for node in proposal.nodes)
+        inferred_parent_aggregate = bool(
+            has_root_parentage
+            and root_node is not None
+            and not root_node.gate_snapshot_hash
+        )
+        if not self.intent_spec.requires_parent_aggregate and not inferred_parent_aggregate:
+            return proposal
+        root_exists = any(node.node_id == root_node_id for node in proposal.nodes)
         if root_node is None:
             root_node = GraphNode(
                 node_id=root_node_id,
@@ -1114,7 +1141,6 @@ class PlanRepair:
                 issue_id=self.intent_spec.issue_id or None,
                 issue_identifier=self.intent_spec.issue_identifier or None,
             )
-        has_root_parentage = any(node.node_id != root_node_id and node.parent_node_id == root_node_id for node in proposal.nodes)
         needs_parent_rewrite = not has_root_parentage
         next_nodes: list[GraphNode] = []
         if not root_exists:
@@ -1369,11 +1395,7 @@ class PlanValidator:
         errors: set[PlanValidatorError] = set()
         node_id_list = [node.node_id for node in proposal.nodes]
         node_ids = set(node_id_list)
-        aggregate_root_id = (
-            proposal.root_node_id
-            if self.intent_spec is not None and self.intent_spec.requires_parent_aggregate
-            else ""
-        )
+        aggregate_root_id = _aggregate_root_id_for_proposal(proposal, self.intent_spec)
         executable_nodes = _entry_exit_nodes_for_intent(proposal.nodes, proposal.root_node_id, self.intent_spec)
         executable_node_ids = {node.node_id for node in executable_nodes}
         gate_task_list = [gate.task_id for gate in proposal.gates]
@@ -1526,9 +1548,34 @@ def _entry_exit_nodes_for_intent(
     root_node_id: str,
     intent_spec: IntentSpec | None,
 ) -> list[GraphNode]:
-    if intent_spec is None or not intent_spec.requires_parent_aggregate or not root_node_id:
+    if not root_node_id:
+        return list(nodes)
+    root_node = next((node for node in nodes if node.node_id == root_node_id), None)
+    has_root_parentage = any(node.node_id != root_node_id and node.parent_node_id == root_node_id for node in nodes)
+    inferred_parent_aggregate = bool(
+        has_root_parentage
+        and root_node is not None
+        and not root_node.gate_snapshot_hash
+    )
+    if (intent_spec is None or not intent_spec.requires_parent_aggregate) and not inferred_parent_aggregate:
         return list(nodes)
     return [node for node in nodes if node.node_id != root_node_id]
+
+
+def _aggregate_root_id_for_proposal(
+    proposal: PlanProposal,
+    intent_spec: IntentSpec | None,
+) -> str:
+    root_node_id = proposal.root_node_id
+    if not root_node_id:
+        return ""
+    root_node = next((node for node in proposal.nodes if node.node_id == root_node_id), None)
+    has_root_parentage = any(node.node_id != root_node_id and node.parent_node_id == root_node_id for node in proposal.nodes)
+    if intent_spec is not None and intent_spec.requires_parent_aggregate:
+        return root_node_id
+    if has_root_parentage and root_node is not None and not root_node.gate_snapshot_hash:
+        return root_node_id
+    return ""
 
 
 def _looks_like_executable_gate_command(step: str) -> bool:

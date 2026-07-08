@@ -318,6 +318,52 @@ def test_runtime_config_accepts_only_higher_versions_and_sanitizes_profiles(tmp_
     assert "codex_home_source" not in str(sanitized)
 
 
+def test_dispatch_context_persists_agent_session_id(tmp_path: Path) -> None:
+    store = ConductorPipelineStore(tmp_path)
+
+    store.record_dispatch_context(
+        "node-1",
+        {
+            "issue_id": "issue-1",
+            "issue_identifier": "ENG-1",
+            "title": "Do work",
+            "description": "Details",
+            "agent_session_id": "session-1",
+        },
+    )
+
+    assert store.dispatch_context_for_node("node-1")["agent_session_id"] == "session-1"
+
+
+def test_thread_lost_execute_failure_creates_thread_lost_human_wait(tmp_path: Path) -> None:
+    store = ConductorPipelineStore(tmp_path)
+    store.apply_runtime_config(RuntimeConfigEnvelope("group-1", 1, _policy(1)))
+    store.commit_plan(_proposal())
+    now = datetime(2026, 7, 6, tzinfo=timezone.utc)
+    lease = store.start_attempt(RuntimeMode.EXECUTE, node_id="a", attempt_id="exec-thread-lost", now=now)
+
+    assert store.complete_attempt_with_fencing(
+        ExecuteAttemptResult(
+            attempt_id="exec-thread-lost",
+            node_id="a",
+            status=AttemptState.FAILED,
+            graph_revision=1,
+            policy_revision=1,
+            gate_snapshot_hash=store.get_node("a").gate_snapshot_hash or "",
+            lease_id=lease.lease_id,
+            fencing_token=lease.fencing_token,
+            error=HumanEscalationReason.THREAD_LOST.value,
+            thread_id="thread-1",
+            verification_input={},
+        ),
+        at=now,
+    )
+
+    waits = store.list_human_waits()
+    assert waits[0]["reason"] == HumanEscalationReason.THREAD_LOST.value
+    assert store.get_attempt("exec-thread-lost").thread_id == "thread-1"
+
+
 def test_parent_aggregate_waits_for_child_integration_terminal(tmp_path: Path) -> None:
     store = ConductorPipelineStore(tmp_path)
     store.apply_runtime_config(RuntimeConfigEnvelope("group-1", 1, _policy(1)))
@@ -4230,6 +4276,106 @@ async def test_pipeline_linear_projector_refreshes_operator_status_after_state_c
     assert "operator_status: verify_passed" in tracker.description_blocks["child-a"]
 
 
+async def test_pipeline_linear_projector_posts_agent_status_comment_activity_and_workflow(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("SYMPHONY_DEBUG_PROJECTION", "1")
+    store = ConductorPipelineStore(tmp_path)
+    store.apply_runtime_config(RuntimeConfigEnvelope("group-1", 1, _policy(1)))
+    store.commit_plan(_proposal())
+    store.record_dispatch_context("root", {"issue_id": "root-linear", "agent_session_id": "11111111-1111-4111-8111-111111111111"})
+    store.record_linear_projection(
+        node_id="a",
+        linear_issue_id="child-a",
+        metadata={"graph_id": "graph-1", "node_id": "a", "conductor_revision": 1},
+    )
+    lease = store.start_attempt(RuntimeMode.EXECUTE, node_id="a", attempt_id="exec-1", now=datetime.now(timezone.utc))
+    store.record_attempt_process_pid("exec-1", 4321)
+
+    class Tracker:
+        def __init__(self) -> None:
+            self.children: list[dict[str, object]] = [
+                {
+                    "id": "child-a",
+                    "description": "```yaml\nsymphony:\n  node_id: a\n```",
+                    "labels": ["performer:type/pipeline-node"],
+                    "parent_issue_id": "root-linear",
+                    "state": {"name": "Todo"},
+                }
+            ]
+            self.description_blocks: dict[str, str] = {}
+            self.root_comments: list[tuple[str, str]] = []
+            self.activities: list[dict[str, object]] = []
+            self.transitions: list[tuple[str, str]] = []
+
+        async def fetch_child_issues(self, parent_issue_id: str, *, label_name: str | None = None) -> list[dict[str, object]]:
+            return [
+                child
+                for child in self.children
+                if child.get("parent_issue_id") == parent_issue_id
+                and (label_name is None or label_name in child.get("labels", []))
+            ]
+
+        async def update_issue_description_marker_block(self, issue_id: str, marker_name: str, block: str) -> dict[str, object]:
+            self.description_blocks[issue_id] = block
+            return {"success": True}
+
+        async def update_issue_comment_marker_block(self, issue_id: str, marker_name: str, block: str) -> dict[str, object]:
+            self.root_comments.append((marker_name, block))
+            return {"success": True, "comment_id": "comment-1"}
+
+        async def agent_activity_create(
+            self,
+            *,
+            agent_session_id: str,
+            content: dict[str, object],
+        ) -> dict[str, object]:
+            self.activities.append(
+                {
+                    "agent_session_id": agent_session_id,
+                    "activity_type": content.get("type"),
+                    "body": content.get("body"),
+                    "content": content,
+                }
+            )
+            return {"success": True, "activity_id": f"activity-{len(self.activities)}"}
+
+        async def transition_issue_by_state_target(
+            self, issue_id: str, *, names: list[str], state_type: str
+        ) -> dict[str, object]:
+            target = names[0] if names else ""
+            self.transitions.append((issue_id, target))
+            return {"success": True, "issue_id": issue_id, "state": target}
+
+        async def ensure_issue_relation(self, *, issue_id: str, related_issue_id: str, relation_type: str) -> dict[str, object]:
+            return {"success": True}
+
+        async def create_child_issue_for(self, **kwargs: object) -> dict[str, object]:
+            child = {
+                "id": f"child-{len(self.children) + 1}",
+                "description": kwargs.get("description"),
+                "labels": list(kwargs.get("label_names") or []),
+                "parent_issue_id": kwargs.get("parent_issue_id"),
+                "title": kwargs.get("title"),
+            }
+            self.children.append(child)
+            return child
+
+    tracker = Tracker()
+    projector = PipelineLinearProjector(store=store, tracker=tracker, root_issue_id="root-linear", delegate_id="agent-1")
+
+    projected = await projector.reconcile_once()
+
+    assert projected >= 3
+    assert tracker.root_comments
+    assert "exec-1" in tracker.root_comments[-1][1]
+    assert lease.lease_id in tracker.root_comments[-1][1]
+    assert 'process_pid: "4321"' in tracker.description_blocks["child-a"]
+    assert "attempts:" in tracker.description_blocks["child-a"]
+    running_activity = next(activity for activity in tracker.activities if "running execute" in str(activity["body"]))
+    assert running_activity["agent_session_id"] == "11111111-1111-4111-8111-111111111111"
+    assert running_activity["activity_type"] == "thought"
+    assert ("child-a", "In Progress") in tracker.transitions
+
+
 async def test_pipeline_linear_projector_marks_root_issue_for_planning_node(tmp_path: Path) -> None:
     store = ConductorPipelineStore(tmp_path)
     store.apply_runtime_config(RuntimeConfigEnvelope("group-1", 1, _policy(1)))
@@ -6181,6 +6327,7 @@ def test_pipeline_planner_request_preserves_dispatch_graph_metadata(tmp_path: Pa
     assert request["root_node_id"] == "issue-1"
     assert request["node_id"] == "issue-1"
     assert workspace_path == attempt_dir / "planner-workspace"
+    assert request["thread_state_workspace_path"] == str(repo)
     assert workspace_path.is_dir()
     assert (workspace_path / "README.md").read_text(encoding="utf-8") == "source repo\n"
     assert request["issue_description"] == ""
@@ -7089,6 +7236,154 @@ async def test_background_coordination_fails_only_drained_exited_attempt(tmp_pat
     assert "pipeline_attempt_process_exited" in log_text
     assert "attempt_id=exec-a" in log_text
     assert "attempt_id=exec-b" not in log_text
+
+
+async def test_startup_reconcile_fails_dead_persisted_running_attempt(tmp_path: Path) -> None:
+    data_root = tmp_path / "conductor-data"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    store = ConductorStore(data_root)
+    instance_dir = data_root / "instances" / "inst-1"
+    instance = InstanceRecord.create(
+        id="inst-1",
+        name="Alpha",
+        repo_source_type="local_path",
+        repo_source_value=str(repo),
+        resolved_repo_path=str(repo),
+        instance_dir=str(instance_dir),
+        workspace_root=str(instance_dir / "workspace" / "repo"),
+        persistence_path=str(instance_dir / "state" / "performer.json"),
+        log_path=str(instance_dir / "logs" / "performer.log"),
+        http_port=8801,
+        linear_project="ENG",
+        linear_filters={"linear_agent_app_user_id": "agent-1"},
+    ).with_updates(process_status="running", pid=99999)
+    store.save_instance(instance)
+
+    class StartupRuntime:
+        def refresh(self, record):
+            return record
+
+        def recover_attempt(self, record, attempt):
+            return None
+
+    service = ConductorService(store=store, data_root=data_root, runtime_manager=StartupRuntime())  # type: ignore[arg-type]
+    service.pipeline_store.apply_runtime_config(
+        RuntimeConfigEnvelope(
+            "group-1",
+            1,
+            _policy(1),
+            profiles={RuntimeMode.EXECUTE: RuntimeProfile(name="executor", backend="codex", mode=RuntimeMode.EXECUTE)},
+        )
+    )
+    service.pipeline_store.commit_plan(_proposal())
+    lease = service.pipeline_store.start_attempt(
+        RuntimeMode.EXECUTE,
+        node_id="a",
+        attempt_id="exec-dead",
+        now=datetime.now(timezone.utc),
+    )
+    service.pipeline_store.record_attempt_process_pid("exec-dead", 99999)
+
+    reconciled = service.reconcile_pipeline_attempts_on_startup()
+
+    assert reconciled == 1
+    assert service.pipeline_store.get_attempt("exec-dead").state is AttemptState.FAILED
+    assert service.pipeline_store.active_lease("a", RuntimeMode.EXECUTE) is None
+    log_text = Path(instance.log_path).read_text(encoding="utf-8")
+    assert "pipeline_attempt_orphan_reconciled" in log_text
+    assert "attempt_id=exec-dead" in log_text
+    assert "process_pid=99999" in log_text
+    assert lease.lease_id in log_text
+
+
+async def test_startup_reconcile_keeps_alive_persisted_running_attempt(tmp_path: Path) -> None:
+    data_root = tmp_path / "conductor-data"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    store = ConductorStore(data_root)
+    instance_dir = data_root / "instances" / "inst-1"
+    instance = InstanceRecord.create(
+        id="inst-1",
+        name="Alpha",
+        repo_source_type="local_path",
+        repo_source_value=str(repo),
+        resolved_repo_path=str(repo),
+        instance_dir=str(instance_dir),
+        workspace_root=str(instance_dir / "workspace" / "repo"),
+        persistence_path=str(instance_dir / "state" / "performer.json"),
+        log_path=str(instance_dir / "logs" / "performer.log"),
+        http_port=8801,
+        linear_project="ENG",
+        linear_filters={"linear_agent_app_user_id": "agent-1"},
+    ).with_updates(process_status="running", pid=2222)
+    store.save_instance(instance)
+
+    class StartupRuntime:
+        def __init__(self) -> None:
+            self.recovered: list[str] = []
+
+        def refresh(self, record):
+            return record
+
+        def recover_attempt(self, record, attempt):
+            self.recovered.append(attempt.attempt_id)
+            return record.with_updates(process_status="running", pid=attempt.process_pid)
+
+    runtime = StartupRuntime()
+    service = ConductorService(store=store, data_root=data_root, runtime_manager=runtime)  # type: ignore[arg-type]
+    service.pipeline_store.apply_runtime_config(
+        RuntimeConfigEnvelope(
+            "group-1",
+            1,
+            _policy(1),
+            profiles={RuntimeMode.EXECUTE: RuntimeProfile(name="executor", backend="codex", mode=RuntimeMode.EXECUTE)},
+        )
+    )
+    service.pipeline_store.commit_plan(_proposal())
+    lease = service.pipeline_store.start_attempt(
+        RuntimeMode.EXECUTE,
+        node_id="a",
+        attempt_id="exec-live",
+        now=datetime.now(timezone.utc),
+    )
+    service.pipeline_store.record_attempt_process_pid("exec-live", 2222)
+
+    reconciled = service.reconcile_pipeline_attempts_on_startup()
+
+    assert reconciled == 0
+    assert runtime.recovered == ["exec-live"]
+    assert service.pipeline_store.get_attempt("exec-live").state is AttemptState.RUNNING
+    assert service.pipeline_store.active_lease("a", RuntimeMode.EXECUTE).lease_id == lease.lease_id  # type: ignore[union-attr]
+
+
+async def test_restart_instance_resumes_existing_graph_without_manual_replan(tmp_path: Path) -> None:
+    data_root = tmp_path / "conductor-data"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    store = ConductorStore(data_root)
+    runtime = _RecordingRuntime()
+    service = ConductorService(store=store, data_root=data_root, runtime_manager=runtime)  # type: ignore[arg-type]
+    instance = service.create_instance(_create_request(repo))
+    service.pipeline_store.apply_runtime_config(
+        RuntimeConfigEnvelope(
+            "group-1",
+            1,
+            _policy(1),
+            profiles={RuntimeMode.EXECUTE: RuntimeProfile(name="executor", backend="codex", mode=RuntimeMode.EXECUTE)},
+        )
+    )
+    service.pipeline_store.commit_plan(_proposal())
+
+    restarted = await service.restart_instance(instance.id)
+
+    assert restarted.id == instance.id
+    assert len(runtime.stops) == 1
+    assert len(runtime.starts) == 1
+    assert runtime.starts[0]["mode"] == "execute"
+    assert "manual-restart-request.json" not in str(runtime.starts[0].get("attempt_request_path"))
+    assert not (Path(instance.instance_dir) / "state" / "pipeline" / "manual-restart-request.json").exists()
+    assert service.pipeline_store.current_graph_revision() == 1
 
 
 def test_fail_exited_attempt_snapshot_defers_when_result_file_exists(tmp_path: Path) -> None:

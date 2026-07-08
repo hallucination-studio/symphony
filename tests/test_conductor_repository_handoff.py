@@ -162,3 +162,57 @@ async def test_conductor_linear_proxy_ensures_blocks_relation() -> None:
     assert transport.requests[2]["json"]["variables"] == {
         "input": {"type": "blocks", "issueId": "node-a", "relatedIssueId": "node-b"}
     }
+
+
+async def test_transition_issue_by_state_target_falls_back_to_state_type() -> None:
+    # Team has no "In Progress" state; resolver must fall back to the first
+    # started-type state ("Doing") since none of the candidate names match.
+    transport = RecordingTransport(
+        [
+            {"data": {"issue": {"team": {"id": "team-1"}, "state": {"name": "Todo"}, "labels": {"nodes": []}}}},
+            {
+                "data": {
+                    "workflowStates": {
+                        "nodes": [
+                            {"id": "state-todo", "name": "Todo", "type": "unstarted"},
+                            {"id": "state-doing", "name": "Doing", "type": "started"},
+                            {"id": "state-done", "name": "Done", "type": "completed"},
+                        ]
+                    }
+                }
+            },
+            {
+                "data": {
+                    "issueUpdate": {
+                        "success": True,
+                        "issue": {"id": "issue-1", "identifier": "ENG-1", "state": {"name": "Doing"}},
+                    }
+                }
+            },
+        ]
+    )
+    proxy = RepositoryHandoffLinearProxy(endpoint="https://linear.test/graphql", api_key="token", transport=transport)  # type: ignore[arg-type]
+
+    result = await proxy.transition_issue_by_state_target(
+        "issue-1", names=["In Progress", "Started"], state_type="started"
+    )
+
+    assert result["success"] is True
+    assert transport.requests[2]["json"]["variables"] == {"issueId": "issue-1", "stateId": "state-doing"}
+
+
+async def test_transition_issue_by_state_target_noops_when_already_in_state() -> None:
+    transport = RecordingTransport(
+        [
+            {"data": {"issue": {"team": {"id": "team-1"}, "state": {"name": "In Progress"}, "labels": {"nodes": []}}}},
+        ]
+    )
+    proxy = RepositoryHandoffLinearProxy(endpoint="https://linear.test/graphql", api_key="token", transport=transport)  # type: ignore[arg-type]
+
+    result = await proxy.transition_issue_by_state_target(
+        "issue-1", names=["In Progress", "Started"], state_type="started"
+    )
+
+    assert result == {"success": True, "issue_id": "issue-1", "state": "In Progress"}
+    # Only the context lookup happened; no workflowStates query, no issueUpdate.
+    assert len(transport.requests) == 1

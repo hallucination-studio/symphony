@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import os
 import re
 import shutil
 import sqlite3
@@ -11,7 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from performer_api.pipeline import (
     AttemptRecord,
@@ -437,6 +438,7 @@ class ConductorPipelineStore:
             "issue_identifier": str(context.get("issue_identifier") or ""),
             "title": str(context.get("title") or ""),
             "description": _sanitize_error(str(context.get("description") or "")) if context.get("description") else "",
+            "agent_session_id": str(context.get("agent_session_id") or ""),
         }
         for key in ("intent", "pipeline_intent"):
             value = context.get(key)
@@ -654,10 +656,13 @@ class ConductorPipelineStore:
             return GraphNodeState.FAILED
         if all(child.state is GraphNodeState.SUPERSEDED for child in children):
             return GraphNodeState.SUPERSEDED
-        if all(child.state in {GraphNodeState.VERIFY_PASSED, GraphNodeState.SUPERSEDED} for child in children) and all(
-            child.state is GraphNodeState.SUPERSEDED or self.integration_terminal_for_node(child.node_id)
-            for child in children
-        ):
+        if all(child.state in {GraphNodeState.VERIFY_PASSED, GraphNodeState.SUPERSEDED} for child in children):
+            parent = self.get_node(parent_node_id)
+            if parent.gate_snapshot_hash is None and not all(
+                child.state is GraphNodeState.SUPERSEDED or self.integration_terminal_for_node(child.node_id)
+                for child in children
+            ):
+                return GraphNodeState.PLANNED
             return GraphNodeState.VERIFY_PASSED
         return GraphNodeState.PLANNED
 
@@ -938,6 +943,7 @@ class ConductorPipelineStore:
             result_uri=attempt.result_uri,
             error=attempt.error,
             process_pid=process_pid,
+            thread_id=attempt.thread_id,
         )
         with self.connect() as connection:
             connection.execute(
@@ -970,6 +976,12 @@ class ConductorPipelineStore:
             attempt = AttemptRecord.from_dict(_json_loads(row["payload_json"]))
             if attempt.score is not None and attempt.score < PASS_THRESHOLD:
                 return attempt
+        return None
+
+    def latest_thread_id_for_node(self, node_id: str) -> str | None:
+        for attempt in reversed(self.list_attempts()):
+            if attempt.node_id == node_id and attempt.thread_id:
+                return attempt.thread_id
         return None
 
     def active_lease(self, node_id: str, mode: RuntimeMode) -> WorkerLease | None:
@@ -1038,6 +1050,7 @@ class ConductorPipelineStore:
             result_uri=attempt.result_uri,
             error=error,
             process_pid=attempt.process_pid,
+            thread_id=attempt.thread_id,
         )
         connection.execute(
             """
@@ -1808,6 +1821,18 @@ class ConductorPipelineStore:
 
     def linear_projection_metadata(self, node: GraphNode, revision: GraphRevision) -> dict[str, Any]:
         runtime_wait = self.active_runtime_wait_for_node(node.node_id)
+        attempts = [attempt for attempt in self.list_attempts() if attempt.node_id == node.node_id]
+        active_lease = None
+        for mode in RuntimeMode:
+            lease = self.active_lease(node.node_id, mode)
+            if lease is not None:
+                active_lease = lease
+                break
+        human_waits = [
+            wait
+            for wait in self.list_human_waits()
+            if str(wait.get("node_id") or "") == node.node_id and str(wait.get("status") or "waiting") == "waiting"
+        ]
         metadata = {
             "graph_id": revision.graph_id,
             "node_id": node.node_id,
@@ -1815,6 +1840,24 @@ class ConductorPipelineStore:
             "gate_snapshot_hash": node.gate_snapshot_hash,
             "conductor_revision": revision.revision,
             "operator_status": self._linear_operator_status(node, runtime_wait=runtime_wait),
+            "attempts": [
+                {
+                    "attempt_id": attempt.attempt_id,
+                    "mode": attempt.mode.value,
+                    "state": attempt.state.value,
+                    "score": attempt.score,
+                    "thread_id": attempt.thread_id,
+                    "process_pid": attempt.process_pid,
+                    "lease_id": attempt.lease_id,
+                }
+                for attempt in attempts
+            ],
+            "rework_count": node.rework_count,
+            "replan_depth": node.replan_depth,
+            "verify_score": node.verify_score,
+            "active_lease": active_lease.to_dict() if active_lease is not None else None,
+            "human_waits": human_waits,
+            "runtime_wait": runtime_wait,
         }
         if runtime_wait is not None:
             metadata["operator_wait_kind"] = runtime_wait.get("wait_kind")
@@ -2373,6 +2416,7 @@ class ConductorPipelineStore:
             result_uri=attempt.result_uri,
             error=error,
             process_pid=attempt.process_pid,
+            thread_id=result.thread_id or attempt.thread_id,
         )
         with self.connect() as connection:
             connection.execute(
@@ -2389,6 +2433,55 @@ class ConductorPipelineStore:
         with self.connect() as connection:
             connection.execute("UPDATE worker_leases SET active = 0 WHERE lease_id = ?", (lease_id,))
 
+    def fail_running_attempt_for_recovery(
+        self,
+        attempt_id: str,
+        *,
+        error: str,
+        at: datetime,
+    ) -> bool:
+        try:
+            attempt = self.get_attempt(attempt_id)
+        except KeyError:
+            return False
+        if attempt.state is not AttemptState.RUNNING:
+            return False
+        lease = self.active_lease(attempt.node_id, attempt.mode)
+        if lease is None or lease.attempt_id != attempt.attempt_id:
+            return False
+        updated = AttemptRecord(
+            attempt_id=attempt.attempt_id,
+            node_id=attempt.node_id,
+            mode=attempt.mode,
+            state=AttemptState.FAILED,
+            graph_revision=attempt.graph_revision,
+            policy_revision=attempt.policy_revision,
+            lease_id=attempt.lease_id,
+            fencing_token=attempt.fencing_token,
+            gate_snapshot_hash=attempt.gate_snapshot_hash,
+            score=attempt.score,
+            started_at=attempt.started_at,
+            completed_at=_format_time(_utc(at)),
+            result_uri=attempt.result_uri,
+            error=error,
+            process_pid=attempt.process_pid,
+            thread_id=attempt.thread_id,
+        )
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                """
+                UPDATE attempts
+                SET state = ?, payload_json = ?
+                WHERE attempt_id = ?
+                """,
+                (AttemptState.FAILED.value, _json_dumps(updated.to_dict()), updated.attempt_id),
+            )
+            connection.execute("UPDATE worker_leases SET active = 0 WHERE lease_id = ?", (lease.lease_id,))
+        self.update_node_state(attempt.node_id, _retry_state_for_attempt_mode(attempt.mode))
+        self.resolve_runtime_waits_for_attempt(updated.attempt_id, resolution="attempt failed during startup recovery")
+        return True
+
     def _create_attempt_failure_human_wait(
         self,
         result: PlanAttemptResult | ExecuteAttemptResult | VerifyAttemptResult,
@@ -2404,6 +2497,8 @@ class ConductorPipelineStore:
                 reason = _plan_failure_human_reason(visible_error)
         elif result.mode is RuntimeMode.VERIFY:
             reason = HumanEscalationReason.GATE_UNEXECUTABLE
+        elif visible_error == HumanEscalationReason.THREAD_LOST.value or "thread_lost" in visible_error.lower():
+            reason = HumanEscalationReason.THREAD_LOST
         else:
             reason = HumanEscalationReason.BACKEND_UNAVAILABLE
         self.create_human_wait(
@@ -2604,6 +2699,8 @@ class ConductorPipelineStore:
         wave_usage: dict[int, dict[RuntimeMode, int]],
         wave_global_usage: dict[int, int],
     ) -> int:
+        if capacity.global_limit == 0 or capacity.by_mode.get(mode) == 0:
+            return earliest_position
         position = earliest_position
         while not self._prediction_wave_has_capacity(position, mode, capacity, wave_usage, wave_global_usage):
             position += 1
@@ -2773,6 +2870,11 @@ class PipelineLinearProjector:
         projected = 0
         issue_ids_by_node: dict[str, str] = {}
         existing = await self._existing_node_issues()
+        prior_metadata_by_node = {
+            str(projection.get("node_id") or ""): projection.get("metadata")
+            for projection in self.store.list_linear_projections()
+            if str(projection.get("node_id") or "")
+        }
         for projection in self.store.list_linear_projections():
             node_id = str(projection.get("node_id") or "")
             issue_id = str(projection.get("linear_issue_id") or "")
@@ -2795,15 +2897,131 @@ class PipelineLinearProjector:
             update_description = getattr(self.tracker, "update_issue_description_marker_block", None)
             if update_description is not None:
                 await update_description(issue_id, "SYMPHONY PIPELINE NODE", self._description_block(node, revision))
+            metadata = self._metadata(node, revision)
             self.store.record_linear_projection(
                 node_id=node.node_id,
                 linear_issue_id=issue_id,
-                metadata=self._metadata(node, revision),
+                metadata=metadata,
+            )
+            projected += await self._project_workflow_state(issue_id, node)
+            projected += await self._project_agent_activity(
+                issue_id=issue_id,
+                node=node,
+                metadata=metadata,
+                prior_metadata=prior_metadata_by_node.get(node.node_id),
             )
             issue_ids_by_node[node.node_id] = issue_id
             projected += 1
         projected += await self._project_block_edges(issue_ids_by_node)
+        projected += await self._project_root_status_comment(revision)
         return projected
+
+    async def _project_root_status_comment(self, revision: GraphRevision) -> int:
+        update_comment = getattr(self.tracker, "update_issue_comment_marker_block", None)
+        if update_comment is None:
+            return 0
+        await update_comment(self.root_issue_id, "SYMPHONY PIPELINE STATUS", self._root_status_block(revision))
+        return 1
+
+    async def _project_agent_activity(
+        self,
+        *,
+        issue_id: str,
+        node: GraphNode,
+        metadata: dict[str, Any],
+        prior_metadata: Any,
+    ) -> int:
+        agent_session_id = self._agent_session_id_for_node(node.node_id)
+        if not agent_session_id or not _is_uuid(agent_session_id):
+            return 0
+        create_activity = getattr(self.tracker, "agent_activity_create", None)
+        if create_activity is None:
+            return 0
+        prior_status = ""
+        if isinstance(prior_metadata, dict):
+            prior_status = str(prior_metadata.get("operator_status") or "")
+        current_status = str(metadata.get("operator_status") or "")
+        if prior_status == current_status:
+            return 0
+        content = _linear_activity_content(node, metadata, graph_complete=self._graph_complete())
+        await create_activity(agent_session_id=agent_session_id, content=content)
+        return 1
+
+    async def _project_workflow_state(self, issue_id: str, node: GraphNode) -> int:
+        transition = getattr(self.tracker, "transition_issue_by_state_target", None)
+        if transition is None:
+            return 0
+        names, state_type = _linear_workflow_state_target_for_node(node, graph_complete=self._graph_complete())
+        if not names:
+            return 0
+        try:
+            await transition(issue_id, names=names, state_type=state_type)
+        except Exception:
+            return 0
+        return 1
+
+    def _graph_complete(self) -> bool:
+        nodes = self.store.list_nodes()
+        return bool(nodes) and all(node.state is GraphNodeState.VERIFY_PASSED for node in nodes)
+
+    def _agent_session_id_for_node(self, node_id: str) -> str:
+        context = self.store.resolved_dispatch_context_for_node(node_id)
+        session_id = str(context.get("agent_session_id") or "").strip()
+        if session_id:
+            return session_id
+        revision = self.store.current_graph_revision_record()
+        if revision is not None:
+            root_context = self.store.dispatch_context_for_node(revision.root_node_id)
+            return str(root_context.get("agent_session_id") or "").strip()
+        return ""
+
+    def _root_status_block(self, revision: GraphRevision) -> str:
+        debug_projection = _debug_projection_enabled()
+        lines = [
+            "```yaml",
+            "symphony_pipeline:",
+            f"  graph_id: {revision.graph_id}",
+            f"  conductor_revision: {revision.revision}",
+            f"  graph_complete: {str(self._graph_complete()).lower()}",
+            "  nodes:",
+        ]
+        for node in self.store.list_nodes():
+            metadata = self._metadata(node, revision)
+            active_lease = metadata.get("active_lease") if isinstance(metadata.get("active_lease"), dict) else None
+            lines.extend(
+                [
+                    f"    - node_id: {_yaml_scalar(node.node_id)}",
+                    f"      state: {_yaml_scalar(node.state.value)}",
+                    f"      operator_status: {_yaml_scalar(metadata.get('operator_status'))}",
+                    f"      verify_score: {_yaml_scalar(node.verify_score)}",
+                    f"      rework_count: {node.rework_count}",
+                    f"      replan_depth: {node.replan_depth}",
+                ]
+            )
+            if active_lease is not None:
+                lines.append(f"      active_lease_mode: {_yaml_scalar(active_lease.get('mode'))}")
+                lines.append(f"      heartbeat_at: {_yaml_scalar(active_lease.get('heartbeat_at'))}")
+                if debug_projection:
+                    lines.extend(
+                        [
+                            f"      lease_id: {_yaml_scalar(active_lease.get('lease_id'))}",
+                            f"      fencing_token: {_yaml_scalar(active_lease.get('fencing_token'))}",
+                            f"      attempt_id: {_yaml_scalar(active_lease.get('attempt_id'))}",
+                        ]
+                    )
+            attempts = metadata.get("attempts") if isinstance(metadata.get("attempts"), list) else []
+            if attempts:
+                latest = attempts[-1]
+                if isinstance(latest, dict):
+                    lines.append(f"      current_attempt_mode: {_yaml_scalar(latest.get('mode'))}")
+                    if debug_projection:
+                        lines.append(f"      current_attempt_id: {_yaml_scalar(latest.get('attempt_id'))}")
+                        lines.append(f"      process_pid: {_yaml_scalar(latest.get('process_pid'))}")
+            human_reason = node.human_reason.value if node.human_reason is not None else ""
+            if human_reason:
+                lines.append(f"      human_reason: {_yaml_scalar(human_reason)}")
+        lines.append("```")
+        return "\n".join(lines)
 
     async def _project_block_edges(self, issue_ids_by_node: dict[str, str]) -> int:
         ensure_relation = getattr(self.tracker, "ensure_issue_relation", None)
@@ -2901,6 +3119,57 @@ class PipelineLinearProjector:
         ]
         if metadata.get("operator_wait_kind"):
             lines.append(f"  operator_wait_kind: {_yaml_scalar(metadata.get('operator_wait_kind'))}")
+        lines.extend(
+            [
+                f"  rework_count: {int(metadata.get('rework_count') or 0)}",
+                f"  replan_depth: {int(metadata.get('replan_depth') or 0)}",
+                f"  verify_score: {_yaml_scalar(metadata.get('verify_score'))}",
+                "  attempts:",
+            ]
+        )
+        debug_projection = _debug_projection_enabled()
+        for attempt in metadata.get("attempts") or []:
+            if not isinstance(attempt, dict):
+                continue
+            lines.extend(
+                [
+                    f"    - mode: {_yaml_scalar(attempt.get('mode'))}",
+                    f"      state: {_yaml_scalar(attempt.get('state'))}",
+                    f"      score: {_yaml_scalar(attempt.get('score'))}",
+                ]
+            )
+            if attempt.get("thread_id"):
+                lines.append(f"      thread_id: {_yaml_scalar(attempt.get('thread_id'))}")
+            if debug_projection:
+                lines.extend(
+                    [
+                        f"      attempt_id: {_yaml_scalar(attempt.get('attempt_id'))}",
+                        f"      lease_id: {_yaml_scalar(attempt.get('lease_id'))}",
+                        f"      process_pid: {_yaml_scalar(attempt.get('process_pid'))}",
+                    ]
+                )
+        active_lease = metadata.get("active_lease") if isinstance(metadata.get("active_lease"), dict) else None
+        if active_lease is not None:
+            lines.extend(
+                [
+                    "  active_lease:",
+                    f"    mode: {_yaml_scalar(active_lease.get('mode'))}",
+                    f"    heartbeat_at: {_yaml_scalar(active_lease.get('heartbeat_at'))}",
+                ]
+            )
+            if debug_projection:
+                lines.extend(
+                    [
+                        f"    lease_id: {_yaml_scalar(active_lease.get('lease_id'))}",
+                        f"    fencing_token: {_yaml_scalar(active_lease.get('fencing_token'))}",
+                        f"    attempt_id: {_yaml_scalar(active_lease.get('attempt_id'))}",
+                    ]
+                )
+        if metadata.get("human_waits"):
+            lines.append("  human_waits:")
+            for wait in metadata.get("human_waits") or []:
+                if isinstance(wait, dict):
+                    lines.append(f"    - reason: {_yaml_scalar(wait.get('reason'))}")
         lines.append("```")
         if runtime_wait is not None:
             lines.extend(
@@ -3056,6 +3325,7 @@ class PipelineCoordinator:
                 "issue_identifier": issue_identifier,
                 "title": title,
                 "description": issue_description,
+                "agent_session_id": event.get("agent_session_id") or "",
                 "intent": event.get("intent") if isinstance(event.get("intent"), dict) else {},
                 "pipeline_intent": event.get("pipeline_intent") if isinstance(event.get("pipeline_intent"), dict) else {},
             },
@@ -3509,6 +3779,7 @@ class PipelineCoordinator:
                         getattr(instance, "resolved_repo_path", None),
                     )
                 ),
+                thread_state_workspace_path=str(getattr(instance, "resolved_repo_path", "") or ""),
                 issue_description=str(dispatch_context.get("description") or ""),
                 pipeline_intent=_jsonable(
                     dispatch_context.get("pipeline_intent")
@@ -3518,6 +3789,7 @@ class PipelineCoordinator:
                     else {}
                 ),
                 failure_context=failure_context,
+                expected_thread_id=self.store.latest_thread_id_for_node(node_id),
             )
             return request.to_dict()
         gate = self.store.gate_for_node(node_id)
@@ -3559,6 +3831,8 @@ class PipelineCoordinator:
                 artifact_paths={"attempt_dir": str(attempt_dir)},
                 upstream_manifests=[manifest.to_dict() for manifest in upstream_manifests],
                 reason="dependency_policy_satisfied",
+                expected_thread_id=self.store.latest_thread_id_for_node(node_id),
+                thread_state_workspace_path=repository_path,
             )
             return request.to_dict()
         snapshot = self.store.verification_input_for_node(node_id)
@@ -3605,6 +3879,8 @@ def _plan_validation_human_reason(errors: set[PlanValidatorError]) -> HumanEscal
 
 
 def _plan_failure_human_reason(error: str) -> HumanEscalationReason:
+    if error == HumanEscalationReason.THREAD_LOST.value or "thread_lost" in error.lower():
+        return HumanEscalationReason.THREAD_LOST
     if not error.startswith("invalid_plan_proposal"):
         return HumanEscalationReason.BACKEND_UNAVAILABLE
     return _plan_validation_human_reason(_plan_validator_errors_from_error(error))
@@ -3640,6 +3916,86 @@ def _resume_state_for_human_wait(payload: dict[str, Any]) -> GraphNodeState:
     if mode is RuntimeMode.VERIFY:
         return GraphNodeState.VERIFYING
     return GraphNodeState.REPLANNING
+
+
+def _retry_state_for_attempt_mode(mode: RuntimeMode) -> GraphNodeState:
+    if mode is RuntimeMode.EXECUTE:
+        return GraphNodeState.READY
+    if mode is RuntimeMode.VERIFY:
+        return GraphNodeState.VERIFYING
+    return GraphNodeState.REPLANNING
+
+
+def _debug_projection_enabled() -> bool:
+    return str(os.environ.get("SYMPHONY_DEBUG_PROJECTION") or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _is_uuid(value: str) -> bool:
+    try:
+        UUID(value)
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+def _linear_workflow_state_target_for_node(
+    node: GraphNode, *, graph_complete: bool = False
+) -> tuple[list[str], str]:
+    """Return (candidate state names, Linear workflow-state type) for a node.
+
+    Names are matched case-insensitively against the team's states first; if none
+    match, the state ``type`` is used as a team-agnostic fallback.
+    """
+    if graph_complete:
+        return (["Done", "Completed", "Merged", "Shipped"], "completed")
+    if node.state in {GraphNodeState.PLANNED, GraphNodeState.READY}:
+        return (["Todo", "Unstarted", "Backlog"], "unstarted")
+    if node.state in {
+        GraphNodeState.EXECUTING,
+        GraphNodeState.VERIFYING,
+        GraphNodeState.REWORKING,
+        GraphNodeState.REPLANNING,
+        GraphNodeState.AWAITING_HUMAN,
+    }:
+        return (["In Progress", "Started", "Doing"], "started")
+    if node.state is GraphNodeState.VERIFY_PASSED:
+        return (["In Review", "Review"], "started")
+    if node.state in {GraphNodeState.FAILED, GraphNodeState.SUPERSEDED, GraphNodeState.EXECUTE_FAILED, GraphNodeState.VERIFY_FAILED}:
+        return (["Canceled", "Cancelled"], "canceled")
+    return (["Todo", "Unstarted", "Backlog"], "unstarted")
+
+
+def _linear_activity_content(
+    node: GraphNode, metadata: dict[str, Any], *, graph_complete: bool = False
+) -> dict[str, str]:
+    """Build a Linear agent-activity ``content`` object.
+
+    Lifecycle-safe: only ``response`` completes the session and only ``error``
+    marks it errored, so intermediate progress is a ``thought`` and awaiting-human
+    is an ``elicitation``. See linear.app/developers/agent-interaction.
+    """
+    status = str(metadata.get("operator_status") or node.state.value)
+    if graph_complete:
+        return {"type": "response", "body": f"Symphony completed all pipeline nodes for node {node.node_id}."}
+    if status == "awaiting_human_action":
+        reason = node.human_reason.value if node.human_reason is not None else "human action required"
+        return {"type": "elicitation", "body": f"Symphony is awaiting human action on node {node.node_id}: {reason}."}
+    if node.state is GraphNodeState.FAILED:
+        reason = node.human_reason.value if node.human_reason is not None else "pipeline node failed"
+        return {"type": "error", "body": f"Symphony failed node {node.node_id}: {reason}."}
+    return {"type": "thought", "body": _linear_activity_body(node, metadata)}
+
+
+def _linear_activity_body(node: GraphNode, metadata: dict[str, Any]) -> str:
+    status = str(metadata.get("operator_status") or node.state.value)
+    if status.startswith("running_"):
+        mode = status.removeprefix("running_")
+        return f"Symphony is running {mode} for node {node.node_id}."
+    if status == "waiting_for_runtime_input":
+        return f"Symphony is waiting for runtime input on node {node.node_id}."
+    if node.state is GraphNodeState.VERIFY_PASSED:
+        return f"Symphony verified node {node.node_id} with score {node.verify_score}."
+    return f"Symphony projected node {node.node_id} as {status}."
 
 
 def _mode_for_state(state: GraphNodeState) -> RuntimeMode:
