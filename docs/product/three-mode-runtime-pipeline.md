@@ -83,6 +83,87 @@ Planner / Executor / Joiner.
   orchestrator-workers and evaluator-optimizer patterns; add agentic complexity
   only when it demonstrably helps.
 
+## Two Root Causes and the Authority Boundary
+
+Early real runs repeatedly stalled in ways that looked like unrelated bugs — a
+downstream node depending on only one of two parallel branches, a replan's new
+edges getting overwritten by Linear ingestion, a verifier failing a node on an
+exact-text marker the issue never required. These are not separate defects. They
+are surface projections of **two independent, deeper root causes**, and this
+document is organized so that every downstream rule traces back to one of them.
+
+### Root cause A — specification and proposal were never separated
+
+The system had no deterministic, authoritative representation of **intent** that
+exists independently of (a) what the model proposes and (b) what Linear projects.
+Because intent was never materialized as a first-class artifact, every component
+was forced to *re-derive* intent from an unreliable source: the planner
+re-invented the Definition of Done on each run, ingestion re-derived edges from
+Linear's lagging view, and the verifier re-derived acceptance criteria from
+gates the planning model authored. The model was simultaneously the author of a
+proposal and the authority on that proposal.
+
+Contrast with prior art, which all avoid this: Temporal's event history is the
+single source of truth and workflow code is deterministic, while LLM calls are
+non-deterministic Activities that never define truth; LangGraph fixes topology at
+compile time and lets the model only read/route over mutable state; Anthropic's
+evaluator-optimizer pattern keeps the loop scaffold and the pass criteria in code,
+with the model supplying only content. Symphony was operating as pure
+orchestrator-workers (the model dynamically owns everything) on a problem whose
+specification is in fact *known* in advance (the business issue, the acceptance
+harness, the required parallel shape). The acceptance harness demonstrably knows
+the correct graph shape — otherwise it could not assert it — yet that knowledge
+lived only in test assertions and was never owned at runtime. That mismatch, not
+any individual prompt, is the root cause.
+
+**The fix — IntentSpec as a first-class authority.** Intent is derived
+deterministically from the inputs (business issue + acceptance harness / Appendix)
+*before* the planner runs, and is authoritative over both the model and Linear:
+
+- The graph-shape constraints (which downstream nodes must depend on which
+  parallel branches), the DoD criteria, and the provenance of each acceptance
+  check are extracted deterministically and exist prior to any model output.
+- The planner's output is demoted to a **proposal**. A deterministic layer
+  (`PlanRepair` → `PlanValidator`, see Plan Validation) projects that proposal
+  onto the IntentSpec, repairing or rejecting deterministically — never by
+  re-invoking the model.
+- Gate steps carry a `source` provenance (`issue_requirement`,
+  `appendix_harness`, `planner_inferred`, `system_repair`, see Gate step
+  provenance); the verifier treats `planner_inferred` steps as
+  advisory-conservative so a model-invented check can never manufacture a hard
+  failure the issue never asked for.
+- Linear can only submit **typed human events** (add/edit `blocks`), never
+  replace durable truth (see Ingestion is union-only and idempotent). The durable
+  graph is the sole authority; Linear is a projection plus a human-event inbox.
+
+### Root cause B — versioned topology and mutable runtime state shared one table
+
+Node runtime state (lifecycle state, `verify_score`, `rework_count`, escalation
+reason, attempt pointers) was stored inside the `(graph_revision, node_id)`
+rows that version topology. Every new revision therefore had to copy-forward the
+live state of every node, and correctness depended on that copy never dropping a
+field. Under parallelism — where revisions are minted while executors and
+verifiers are mid-flight — this made revision churn the dominant source of lost
+or stale state and of scheduling instability. (Symptom 2 above hits *both* root
+causes at once: the overwrite is Root cause A, the revision churn it triggers is
+Root cause B.)
+
+**The fix — split topology from runtime state** (see State Model, Layer 0):
+`graph_revision` versions topology only; runtime state is keyed by `node_id` and
+mutated in place, never copied per revision. This mirrors LangGraph's separation
+of compiled topology from reduced state, and Temporal's separation of durable
+history from live execution.
+
+### Why these are orthogonal
+
+Root cause A is about **where truth comes from** (a correctness problem: authority
+confusion among model, Linear, and verifier). Root cause B is about **how truth is
+stored** (a stability problem: revision churn under concurrency). They are fixed
+by independent mechanisms and must not be conflated: making ingestion idempotent
+(A) does not remove the copy-forward hazard (B), and splitting the state store (B)
+does not stop the model from authoring its own acceptance authority (A). The
+invariants and subprojects below are tagged to whichever root cause they close.
+
 ## Architecture Invariants
 
 These invariants are normative. Every subproject must preserve them.
@@ -103,6 +184,15 @@ These invariants are normative. Every subproject must preserve them.
 11. Isolation is required per mode at both the model-home level (`CODEX_HOME` and
     equivalents) and the workspace/artifact-snapshot level.
 12. Capacity accounting is lease-based and crash-recoverable.
+13. `graph_revision` versions **topology only** (nodes, parentage, gate bindings,
+    `blocks` edges, supersession). Mutable node runtime state (lifecycle state,
+    `verify_score`, `rework_count`, escalation reason, attempt pointers) is keyed
+    by `node_id` and mutated in place, never copied per revision. No code path may
+    copy-forward runtime state on a revision change.
+14. A new `graph_revision` is minted only by a plan commit, a replan rewrite, or
+    an ingestion that changes topology. Steady-state reconciliation that observes
+    no topology change must not mint a revision (revision churn is a bug, not a
+    heartbeat).
 
 ## Core Architecture
 
@@ -163,8 +253,45 @@ intentionally non-model verification.
 
 ## State Model
 
-The pipeline uses three distinct state layers. They must not be collapsed into a
-single phase enum; doing so is the primary source of scheduling and replan bugs.
+The pipeline separates **versioned topology** from **mutable runtime state**, and
+tracks three distinct state layers within them. These must not be collapsed —
+neither into a single phase enum, nor into a single per-revision node row.
+Collapsing either is the primary source of scheduling and replan bugs, and is the
+root cause of parallel-execution instability.
+
+### Layer 0: versioned topology vs. mutable runtime state
+
+A `graph_revision` versions **topology only**: which nodes exist, their identity
+and parentage, their frozen `gate_snapshot_hash` binding, the `blocks` edges, and
+supersession (`superseded_by`). Topology is immutable once a revision is
+committed; a new revision is minted only by a plan commit, a replan rewrite, or an
+ingestion that genuinely changes topology.
+
+Node **runtime state** — the GraphNode lifecycle state (below), current attempt
+pointers, `verify_score`, `rework_count`, and any escalation reason — is keyed by
+`node_id` and mutated in place. It is **never** versioned or copied per revision.
+
+Rationale (the root-cause fix): storing runtime state inside
+`(graph_revision, node_id)` forces every new revision to copy-forward the live
+state of every node, and makes correctness depend on that copy never dropping a
+field. Under parallelism — where revisions can be minted while executors and
+verifiers are mid-flight — that copy-forward is the dominant source of lost or
+stale state and of "the scheduler is too complex to reason about." Keying runtime
+state by `node_id` removes the copy-forward contract entirely: a revision change
+re-points topology without touching any node's live state, and an attempt started
+under revision `N` commits against the same `node_id` regardless of the current
+revision.
+
+Fencing consequences:
+
+- A dispatch and its attempt are still stamped with the `graph_revision` and
+  `policy_revision` they were planned under.
+- An attempt result is fenced by: the attempt still `RUNNING`; its lease token
+  still active; its `node_id` not `SUPERSEDED`; and (for execute/verify) the
+  node's `gate_snapshot_hash` unchanged. Revision churn that neither supersedes
+  the node nor changes its gate does **not** invalidate an in-flight attempt.
+- A worker whose `node_id` was superseded by a replan is fenced out, because
+  supersession is topology and is visible by `node_id`.
 
 ### 1. GraphNode state
 
@@ -246,7 +373,9 @@ gate_spec:
   created_at: <ts>
   content:
     acceptance_criteria: [...]
-    verification_procedure: [...]     # executable commands or explicit steps
+    verification_procedure:            # each step carries a provenance tag
+      - step: <executable command or explicit step>
+        source: issue_requirement | appendix_harness | planner_inferred | system_repair
     rubric:
       "0": ...
       "1": ...
@@ -267,6 +396,36 @@ Rules:
   via replan; in-place mutation is forbidden.
 - Linear may render the gate for humans, but the Conductor snapshot is
   authoritative.
+
+### Gate step provenance
+
+Every verification step is tagged with where its authority comes from. Without
+this, a verifier cannot tell an issue-mandated check from a sentence the model
+invented, and a plausible-but-wrong `planner_inferred` check (e.g. grepping for an
+exact marker string the executor was never told to write) becomes a false-negative
+that blocks an otherwise-correct node.
+
+```text
+source ∈ {
+  issue_requirement,   # traceable to the business issue's own text / acceptance
+  appendix_harness,    # mandated by the acceptance harness / Appendix DoD
+  planner_inferred,    # the planner's own elaboration; plausible but unmandated
+  system_repair,       # inserted by deterministic repair/validation, not the model
+}
+```
+
+Verifier obligations by source:
+
+- `issue_requirement` / `appendix_harness` / `system_repair` steps are
+  **authoritative**: failing them fails the node.
+- `planner_inferred` steps are **advisory-conservative**: a `planner_inferred`
+  step must not, on its own, drive a node below `pass_threshold`. In particular,
+  an inferred exact-text/marker match that is not derivable from the issue text
+  cannot be the sole reason a node fails. It may lower confidence (contribute to a
+  2 vs 3 within already-satisfied authoritative checks) but cannot manufacture a
+  hard failure the issue never asked for.
+- A gate with **no** authoritative step is invalid (see PlanValidator); a node
+  cannot be gated entirely by inference.
 
 ## Rubric Calibration
 
@@ -413,13 +572,79 @@ symphony:
 All graph changes follow: `planner proposal → validate → commit graph revision →
 sync to Linear`. The planner never writes Linear as a primary database.
 
+### Ingestion is union-only and idempotent
+
+Linear is written *after* it is read within a coordination pass, so the remote
+`blocks` view a reconcile observes always lags Conductor's own graph. Treating
+that lagging remote view as authoritative — in particular, treating "an edge
+Conductor knows about but Linear has not echoed back yet" as a deletion — makes
+ingestion delete live edges and mint a fresh `graph_revision` on nearly every
+tick. Under parallelism that revision churn is the dominant cause of scheduling
+instability.
+
+Ingestion is therefore defined as a **union of remote-added edges with current
+non-superseded local edges**, minus edges touching `SUPERSEDED` nodes:
+
+- start from the current local `blocks` edges whose endpoints are both live
+  (not `SUPERSEDED`);
+- add any new edges the human created in Linear;
+- drop any edge whose endpoint is `SUPERSEDED` (those belong to replaced topology);
+- the result must pass `PlanValidator` (acyclic, legal directions, computable
+  entry/exit) before it can commit.
+
+Consequences that must hold:
+
+- **Idempotence:** if the merged edge set equals the current edge set, ingestion
+  commits nothing and mints no revision. Steady-state reconciliation is a no-op.
+- **No silent deletion via lag:** a local edge Linear has not yet echoed is never
+  removed by ingestion. Deleting an edge is a topology change and is expressed
+  only through a replan / new graph-revision proposal, never inferred from a
+  lagging remote read.
+- **Bounded growth:** because edges touching superseded nodes are filtered, and
+  because a valid DAG bounds the edge set, union-only ingestion cannot grow the
+  graph unboundedly across ticks.
+
+This is deliberately the simplest rule that is safe under lag: additive, filtered
+by supersession, validated before commit, and a no-op in steady state.
+
 ## Plan Validation
 
-The planner has broad authority (it authors the DAG, gates, and rubrics). Its
-output must pass a deterministic, non-LLM `PlanValidator` before it is committed
-to the graph: `planner output → PlanValidator → commit graph`.
+The planner has broad authority (it authors the DAG, gates, and rubrics), but its
+raw output is a **proposal, never product fact**. Real model output varies run to
+run: it may make a downstream node depend on only one of two parallel branches,
+may drop a replacement subgraph's inherited downstream edge, or may invent an
+exact-text gate the issue never required. The prompt is allowed to *suggest*
+shape; it is never allowed to *own* Definition-of-Done compliance.
 
-The validator rejects a plan unless:
+Compliance is therefore enforced by two deterministic, non-LLM stages before any
+commit: `planner output → PlanRepair → PlanValidator → commit graph`.
+
+### PlanRepair (deterministic normalization)
+
+`PlanRepair` runs first and deterministically rewrites the proposal to satisfy
+structural DoD constraints the model is unreliable at. Repairs it performs are
+stamped `system_repair` (edges) or as `system_repair`-sourced gate steps, so they
+are auditable and distinguishable from model output:
+
+- **Parallel-dependency shape.** If the issue's DoD requires a downstream node to
+  depend on *all* sibling parallel branches, and the proposal wires it to only a
+  subset, repair adds the missing `blocks` edges so the downstream depends on the
+  full parallel set. A downstream must not become `READY` while any required
+  sibling is still executing, failed, or replanning.
+- **Gate over-specification.** Repair strips or downgrades gate steps that assert
+  exact text / markers not derivable from the issue text. For a shared-file
+  conflict scenario, the repaired gate verifies *the shared file exists and the
+  patch diff is non-empty*, not that the executor wrote a planner-invented
+  sentence. Removed assertions, if kept at all, are demoted to `planner_inferred`
+  (advisory-conservative per Gate step provenance).
+
+`PlanRepair` is idempotent and total: repairing an already-compliant proposal is a
+no-op, and every repair either succeeds deterministically or the proposal is
+rejected — repair never depends on re-invoking the model.
+
+### PlanValidator (deterministic rejection)
+
+The validator runs after repair and rejects a plan unless:
 
 1. every subtask has a gate;
 2. every gate has an executable verification procedure;
@@ -431,7 +656,16 @@ The validator rejects a plan unless:
 7. entry and exit nodes are computable;
 8. subtask count is within the policy limit;
 9. no gate depends on executor-only workspace state;
-10. no gate requires credentials the verifier cannot access.
+10. no gate requires credentials the verifier cannot access;
+11. every gate has at least one **authoritative** step (`issue_requirement`,
+    `appendix_harness`, or `system_repair`); a gate composed only of
+    `planner_inferred` steps is rejected;
+12. required parallel-dependency shape holds after repair (a downstream that must
+    depend on all sibling parallel branches actually does);
+13. every gate step carries a valid `source` provenance tag.
+
+Validation failures are structural facts, not model opinions: the same proposal
+always fails the same way, and a failing proposal never reaches the scheduler.
 
 ## Phase / Pipeline Flow (S1)
 
@@ -710,12 +944,17 @@ S0 Scheduling + runtime-profile foundation
             (absorbs the CODEX_HOME isolation plan)
         │
 S1 State + graph + artifact-model foundation — three-layer state model
-   (GraphNode / Attempt / Aggregate), graph store, VerificationInputSnapshot,
-   TaskOutputManifest schema, and plan→execute→verify flow
+   (GraphNode / Attempt / Aggregate) over a **topology-vs-runtime-state split**
+   (revision-versioned topology; `node_id`-keyed mutable runtime state), graph
+   store, VerificationInputSnapshot, TaskOutputManifest schema, and
+   plan→execute→verify flow (closes Root cause B)
         │
 S2 Planner mode — gate planner becomes an execution decomposer: subtasks +
-   blocks + pre-frozen GateSpecSnapshot per subtask; output passes PlanValidator;
-   committed as a graph revision and projected to Linear
+   blocks + pre-frozen GateSpecSnapshot per subtask. A deterministic IntentSpec is
+   derived from the issue + acceptance harness *before* the model runs; the model
+   output is a proposal that passes PlanRepair (deterministic normalization onto
+   IntentSpec) then PlanValidator; committed as a graph revision and projected to
+   Linear (closes Root cause A)
         │
 S3 Verifier mode — isolated runtime executing gates against Verification Input
    Snapshots, scoring 0–4; enable verify-passed as the dependency predicate
@@ -911,7 +1150,12 @@ mode's `ModeRequirement` is ineligible for that mode.
 
 ## S1 — Three-layer state model + graph store + artifact model
 
-**Final shape.** Three distinct, separately stored layers: **GraphNode** state,
+**Final shape.** Topology and runtime state are stored separately.
+`graph_revision` versions **topology only** (node identity/parentage, gate
+bindings, `blocks` edges, supersession); a `node_id`-keyed runtime-state store
+holds the mutable GraphNode lifecycle state, `verify_score`, `rework_count`,
+escalation reason, and attempt pointers, mutated in place and never copied per
+revision. Over that split sit three distinct layers: **GraphNode** state,
 **Attempt** state (execute and verify attempts stored separately and immutable
 once terminal), and **derived Aggregate parent** state (`IN_PROGRESS` is derived,
 never authored; a parent reaches `VERIFY_PASSED` only via child aggregation).
@@ -921,42 +1165,63 @@ to attempts/gates by id and hash.
 
 - **L done when:** node/attempt/aggregate transitions are enforced (illegal
   transitions rejected); parent state is computed only by aggregation and cannot
-  be written directly; every dispatch is stamped with `graph_revision` +
-  `policy_revision`; snapshot/manifest round-trip is unit-tested.
+  be written directly; runtime state is keyed by `node_id` and a revision change
+  performs **no** copy-forward of runtime state (asserted by test); every dispatch
+  is stamped with `graph_revision` + `policy_revision`; snapshot/manifest
+  round-trip is unit-tested.
 - **R done when:** a real decomposed issue shows the parent reaching
   `VERIFY_PASSED` strictly from child aggregation, with attempts recorded per node
-  across a real run.
+  across a real run, and node runtime state surviving intervening revision changes
+  without loss.
 - **H done when:** results stamped with a superseded `graph_revision` cannot commit
-  (routed to reconciliation); terminal attempts are immutable; a parent with a
-  failed/awaiting child never shows a passing aggregate.
-- **Current:** present-local. Store, three layers, revision stamping, snapshots
-  present; R aggregation evidence and stale-revision-commit rejection (H) pending.
+  only when the node itself is superseded or its gate changed (a benign revision
+  bump that leaves the node and gate intact does not fence an in-flight attempt);
+  terminal attempts are immutable; a parent with a failed/awaiting child never
+  shows a passing aggregate.
+- **Current:** present-partial. Store, three layers, revision stamping, snapshots
+  present; the topology/runtime-state split, the no-copy-forward guarantee, R
+  aggregation evidence, and revision-churn survival (H) pending.
 
-## S2 — Planner mode + PlanValidator + Linear projection
+## S2 — Planner mode + IntentSpec + PlanRepair + PlanValidator + Linear projection
 
-**Final shape.** `performer --mode plan` proposes a `blocks` DAG where **every**
-subtask carries a pre-frozen `GateSpecSnapshot` (rubric 0–4, `pass_threshold = 3`
-recorded for audit, not overridable). The proposal is committed **only** after a
-deterministic, non-LLM `PlanValidator` passes all its checks. The committed graph
-is projected to Linear as parent/child issues with `blocks`, each stamped with
-`symphony` metadata (`graph_id`, `node_id`, `plan_attempt_id`,
+**Final shape.** A deterministic **IntentSpec** is derived from the business issue
+and the acceptance harness/Appendix *before* the model runs, capturing the
+required graph-shape constraints, DoD criteria, and the provenance of each
+acceptance check. `performer --mode plan` then proposes a `blocks` DAG where
+**every** subtask carries a pre-frozen `GateSpecSnapshot` (rubric 0–4,
+`pass_threshold = 3` recorded for audit, not overridable) and every gate step
+carries a `source` provenance. The proposal is treated as a proposal, not fact:
+it is committed **only** after `PlanRepair` (deterministic normalization onto the
+IntentSpec) and then a deterministic, non-LLM `PlanValidator` pass all checks. The
+committed graph is projected to Linear as parent/child issues with `blocks`, each
+stamped with `symphony` metadata (`graph_id`, `node_id`, `plan_attempt_id`,
 `gate_snapshot_hash`, `conductor_revision`). Planner cannot run implementation or
-write verdicts.
+write verdicts. (This subproject closes Root cause A.)
 
-- **L done when:** PlanValidator rejects: missing gate, non-executable gate,
-  incomplete 0–4 rubric, lowered/absent threshold, dependency cycle, illegal
-  `blocks` direction, uncomputable entry/exit, subtask count over policy limit,
-  gate needing executor-only state, gate needing verifier-inaccessible creds;
-  gate hashing/freezing is unit-tested.
-- **R done when:** a real business issue is decomposed by a real model, passes
-  PlanValidator, commits a graph revision, and projects a correct
-  parent/child+`blocks` tree to real Linear with explicit `parent` fields.
-- **H done when:** a malformed model proposal never reaches the scheduler; a
-  re-run over the same issue is idempotent in Linear (no duplicate issues/edges);
-  gate content cannot be mutated post-freeze via any path.
+- **L done when:** IntentSpec derivation is deterministic and unit-tested;
+  PlanRepair is idempotent and total (repairs parallel-dependency shape; strips /
+  demotes to `planner_inferred` any exact-text gate step not derivable from the
+  issue); PlanValidator rejects: missing gate, non-executable gate, incomplete
+  0–4 rubric, lowered/absent threshold, dependency cycle, illegal `blocks`
+  direction, uncomputable entry/exit, subtask count over policy limit, gate
+  needing executor-only state, gate needing verifier-inaccessible creds, a gate
+  with no authoritative step, and a required parallel-dependency shape not holding
+  after repair; gate hashing/freezing and step provenance are unit-tested.
+- **R done when:** a real business issue is decomposed by a real model, is
+  normalized by PlanRepair against the IntentSpec, passes PlanValidator, commits a
+  graph revision, and projects a correct parent/child+`blocks` tree to real Linear
+  with explicit `parent` fields — with the committed shape matching the IntentSpec
+  regardless of model variation.
+- **H done when:** a malformed model proposal never reaches the scheduler; a model
+  proposal that violates the required parallel-dependency shape is deterministically
+  repaired, not committed as-is; a model-invented exact-text check cannot on its
+  own fail an otherwise-correct node (verified end-to-end via provenance); a re-run
+  over the same issue is idempotent in Linear (no duplicate issues/edges); gate
+  content cannot be mutated post-freeze via any path.
 - **Current:** present-partial. Plan mode + validator + gate snapshots
-  present-local; real-model decomposition and Linear-tree R evidence + idempotency
-  H pending.
+  present-local; IntentSpec derivation, PlanRepair normalization, and step
+  provenance landing; real-model decomposition and Linear-tree R evidence +
+  shape-repair/provenance H pending.
 
 ## S3 — Verifier mode (isolated) + verify-passed dependency gating
 
@@ -1067,17 +1332,57 @@ a new graph-revision proposal.
   Linear issues, matching Conductor state.
 - **H done when:** a human editing a gate/description in Linear cannot alter the
   authoritative snapshot; reconciliation ingests legitimate `blocks` edits without
-  letting Linear become a second source of scheduling truth.
+  letting Linear become a second source of scheduling truth; ingestion is
+  union-only and idempotent — a lagging remote read never deletes a live local
+  edge, and a steady-state pass (no topology change) mints no `graph_revision`.
 - **Current:** present-partial. `operator_status`/`operator_wait_kind` fields exist
-  (low footprint); R operator-visibility evidence and edit-rejection H pending.
+  (low footprint); union-only idempotent ingestion landing; R operator-visibility
+  evidence and edit-rejection H pending.
 
 ---
+
+## Acceptance: composable sub-scenarios before the overall run
+
+A single scenario that exercises S0–S4 + Patch + Human + Linear projection at once
+means any one broken sub-behavior forces a full, expensive real-Codex re-run to
+re-observe. Worse, several early runs reported `failures=[]` while a manual look at
+the committed graph showed the shape was wrong — the run passed hundreds of checks
+before anyone noticed the topology never satisfied the DoD.
+
+Acceptance is therefore split into **focused sub-scenarios** that can be run and
+scored independently, plus one final overall smoke. Each sub-scenario targets one
+mechanism and traces to a root cause:
+
+- **parallel-dependency-shape** (Root cause A): a downstream node depends on *all*
+  required parallel branches after PlanRepair; it never becomes `READY` while any
+  required sibling is still active.
+- **replan-edge-inheritance** (Root cause A + B): after a replan, the replacement
+  subgraph's exits inherit the superseded node's downstream edges, and a later
+  ingestion pass does not overwrite them.
+- **linear-block-ingestion** (Root cause A): union-only, idempotent; a lagging
+  remote read never deletes a live local edge; a no-topology-change pass mints no
+  revision.
+- **gate-normalization** (Root cause A): a model-invented exact-text gate step is
+  stripped or demoted to `planner_inferred` and cannot alone fail a correct node.
+- **runtime-wait**: a Codex/runtime wait surfaces as `operator_wait_kind` and
+  resumes correctly.
+- **integration-conflict**: two overlapping verified patches reach a defined
+  outcome (integrated or escalated), never silent last-writer-wins.
+
+**Fail-fast checkpoints.** Every DoD-critical *shape* is asserted at the earliest
+possible checkpoint, not after the full pipeline drains. In particular, the
+committed graph's `blocks` shape and gate-step provenance are asserted immediately
+after plan commit (before any executor dispatch), and `/api/v1/pipeline` exposes
+the committed `blocks` edges so acceptance can inspect the graph directly. A shape
+that violates the IntentSpec aborts the scenario at the checkpoint rather than
+after hundreds of downstream checks. A reported `failures=[]` is only trusted when
+the shape checkpoints have themselves been asserted.
 
 ## Overall exit bar
 
 The pipeline is **product-complete** only when every feature above is at **R + H**,
-demonstrated by a single real managed acceptance run
-(Podium → Conductor → Performer → Linear) in which:
+and every sub-scenario above passes, demonstrated by a single real managed
+acceptance run (Podium → Conductor → Performer → Linear) in which:
 
 1. a real business issue is decomposed, PlanValidated, committed as a graph
    revision, and projected as a correct `blocks` tree in Linear;
