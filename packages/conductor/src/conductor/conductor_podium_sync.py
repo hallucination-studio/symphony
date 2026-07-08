@@ -420,6 +420,10 @@ class ConductorPodiumSyncMixin:
             if attempt.process_pid is None:
                 continue
             attempted.add(attempt.attempt_id)
+            instance = _instance_for_attempt_pid(instances, attempt.process_pid) or instances[0]
+            result_path = Path(instance.instance_dir) / "state" / "pipeline" / attempt.attempt_id / "attempt-result.json"
+            if result_path.exists() or getattr(instance, "process_status", None) == "exited":
+                continue
             recovered_instance = None
             if attempt.process_pid is not None and callable(recover_attempt):
                 for instance in instances:
@@ -429,7 +433,6 @@ class ConductorPodiumSyncMixin:
                         break
             if recovered_instance is not None:
                 continue
-            instance = instances[0]
             error = f"running attempt process is not alive process_pid={attempt.process_pid or ''}".strip()
             if self.pipeline_store.fail_running_attempt_for_recovery(attempt.attempt_id, error=error, at=now):
                 lease_id = attempt.lease_id
@@ -948,3 +951,12 @@ def _linear_issue_completed(issue: dict[str, Any]) -> bool:
         return True
     state_name = str(issue.get("state") or "").strip().lower()
     return state_name in {"done", "closed", "completed"}
+
+
+def _instance_for_attempt_pid(instances: list[Any], process_pid: int | None) -> Any | None:
+    if process_pid is None:
+        return None
+    for instance in instances:
+        if getattr(instance, "pid", None) == process_pid:
+            return instance
+    return None

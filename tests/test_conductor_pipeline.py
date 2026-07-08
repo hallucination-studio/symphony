@@ -7323,6 +7323,60 @@ async def test_startup_reconcile_fails_dead_persisted_running_attempt(tmp_path: 
     assert lease.lease_id in log_text
 
 
+async def test_startup_reconcile_defers_current_exited_instance_attempt_to_exit_path(tmp_path: Path) -> None:
+    data_root = tmp_path / "conductor-data"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    store = ConductorStore(data_root)
+    instance_dir = data_root / "instances" / "inst-1"
+    instance = InstanceRecord.create(
+        id="inst-1",
+        name="Alpha",
+        repo_source_type="local_path",
+        repo_source_value=str(repo),
+        resolved_repo_path=str(repo),
+        instance_dir=str(instance_dir),
+        workspace_root=str(instance_dir / "workspace" / "repo"),
+        persistence_path=str(instance_dir / "state" / "performer.json"),
+        log_path=str(instance_dir / "logs" / "performer.log"),
+        http_port=8801,
+        linear_project="ENG",
+        linear_filters={"linear_agent_app_user_id": "agent-1"},
+    ).with_updates(process_status="running", pid=99999)
+    store.save_instance(instance)
+
+    class StartupRuntime:
+        def refresh(self, record):
+            return record.with_updates(process_status="exited", pid=99999, last_exit_code=0)
+
+        def recover_attempt(self, record, attempt):
+            return None
+
+    service = ConductorService(store=store, data_root=data_root, runtime_manager=StartupRuntime())  # type: ignore[arg-type]
+    service.pipeline_store.apply_runtime_config(
+        RuntimeConfigEnvelope(
+            "group-1",
+            1,
+            _policy(1),
+            profiles={RuntimeMode.EXECUTE: RuntimeProfile(name="executor", backend="codex", mode=RuntimeMode.EXECUTE)},
+        )
+    )
+    service.pipeline_store.commit_plan(_proposal())
+    lease = service.pipeline_store.start_attempt(
+        RuntimeMode.EXECUTE,
+        node_id="a",
+        attempt_id="exec-current-exited",
+        now=datetime.now(timezone.utc),
+    )
+    service.pipeline_store.record_attempt_process_pid("exec-current-exited", 99999)
+
+    reconciled = service.reconcile_pipeline_attempts_on_startup()
+
+    assert reconciled == 0
+    assert service.pipeline_store.get_attempt("exec-current-exited").state is AttemptState.RUNNING
+    assert service.pipeline_store.active_lease("a", RuntimeMode.EXECUTE).lease_id == lease.lease_id  # type: ignore[union-attr]
+
+
 async def test_startup_reconcile_keeps_alive_persisted_running_attempt(tmp_path: Path) -> None:
     data_root = tmp_path / "conductor-data"
     repo = tmp_path / "repo"
