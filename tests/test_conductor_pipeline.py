@@ -425,6 +425,32 @@ def test_drive_convergence_refreshes_parent_and_promotes_downstream(tmp_path: Pa
     assert store.get_node("c").state is GraphNodeState.READY
 
 
+def test_drive_convergence_refreshes_awaiting_parent_after_child_wait_resolves(tmp_path: Path) -> None:
+    store = ConductorPipelineStore(tmp_path)
+    store.apply_runtime_config(RuntimeConfigEnvelope("group-1", 1, _policy(1)))
+    store.commit_plan(_parent_proposal(), intent_spec=_parent_intent())
+    coordinator = PipelineCoordinator(store=store, runtime_manager=object())
+    for node_id, verify_attempt_id, revision in [
+        ("a", "verify-a", "commit-a"),
+        ("b", "verify-b", "commit-b"),
+    ]:
+        store.update_node_state(node_id, GraphNodeState.VERIFY_PASSED, verify_score=3)
+        manifest = _publish_manifest(store, node_id, verify_attempt_id=verify_attempt_id)
+        store.enqueue_integration(manifest)
+        store.complete_integration(
+            f"integration-{manifest.node_id}-{manifest.verify_attempt_id}",
+            status="integrated",
+            integrated_revision=revision,
+        )
+    store.update_node_state("root", GraphNodeState.AWAITING_HUMAN, human_reason=HumanEscalationReason.LINEAR_SYNC_CONFLICT)
+
+    changed = coordinator.drive_convergence_once()
+
+    assert changed >= 1
+    assert store.get_node("root").state is GraphNodeState.VERIFY_PASSED
+    assert store.get_node("root").human_reason is None
+
+
 def test_conductor_instance_creation_does_not_generate_or_persist_workflow(
     tmp_path: Path, monkeypatch
 ) -> None:

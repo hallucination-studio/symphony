@@ -692,7 +692,7 @@ class ConductorPipelineStore:
             rework_count=parent.rework_count,
             replan_depth=parent.replan_depth,
             superseded_by=list(parent.superseded_by),
-            human_reason=parent.human_reason,
+            human_reason=parent.human_reason if state is GraphNodeState.AWAITING_HUMAN else None,
         )
 
     def gate_for_node(self, node_id: str) -> GateSpecSnapshot | None:
@@ -3225,7 +3225,6 @@ class PipelineCoordinator:
         terminal_parent_states = {
             GraphNodeState.FAILED,
             GraphNodeState.SUPERSEDED,
-            GraphNodeState.AWAITING_HUMAN,
         }
         for node in self.store.list_nodes():
             if node.state in terminal_parent_states:
