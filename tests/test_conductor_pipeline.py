@@ -399,36 +399,10 @@ def test_parent_aggregate_all_superseded_children_does_not_require_verify_score(
     assert refreshed.verify_score is None
 
 
-def test_drive_convergence_refreshes_parent_and_promotes_downstream(tmp_path: Path) -> None:
+def test_drive_convergence_refreshes_aggregate_parent_and_promotes_downstream(tmp_path: Path) -> None:
     store = ConductorPipelineStore(tmp_path)
     store.apply_runtime_config(RuntimeConfigEnvelope("group-1", 1, _policy(1)))
     store.commit_plan(_parent_blocks_downstream_proposal(), intent_spec=_parent_intent())
-    coordinator = PipelineCoordinator(store=store, runtime_manager=object())
-    for node_id, verify_attempt_id, revision in [
-        ("a", "verify-a", "commit-a"),
-        ("b", "verify-b", "commit-b"),
-    ]:
-        store.update_node_state(node_id, GraphNodeState.VERIFY_PASSED, verify_score=3)
-        manifest = _publish_manifest(store, node_id, verify_attempt_id=verify_attempt_id)
-        store.enqueue_integration(manifest)
-        store.complete_integration(
-            f"integration-{manifest.node_id}-{manifest.verify_attempt_id}",
-            status="integrated",
-            integrated_revision=revision,
-        )
-    store.update_node_state("root", GraphNodeState.PLANNED, verify_score=None)
-
-    changed = coordinator.drive_convergence_once()
-
-    assert changed >= 2
-    assert store.get_node("root").state is GraphNodeState.VERIFY_PASSED
-    assert store.get_node("c").state is GraphNodeState.READY
-
-
-def test_drive_convergence_refreshes_awaiting_parent_after_child_wait_resolves(tmp_path: Path) -> None:
-    store = ConductorPipelineStore(tmp_path)
-    store.apply_runtime_config(RuntimeConfigEnvelope("group-1", 1, _policy(1)))
-    store.commit_plan(_parent_proposal(), intent_spec=_parent_intent())
     coordinator = PipelineCoordinator(store=store, runtime_manager=object())
     for node_id, verify_attempt_id, revision in [
         ("a", "verify-a", "commit-a"),
@@ -446,9 +420,10 @@ def test_drive_convergence_refreshes_awaiting_parent_after_child_wait_resolves(t
 
     changed = coordinator.drive_convergence_once()
 
-    assert changed >= 1
+    assert changed >= 2
     assert store.get_node("root").state is GraphNodeState.VERIFY_PASSED
     assert store.get_node("root").human_reason is None
+    assert store.get_node("c").state is GraphNodeState.READY
 
 
 def test_conductor_instance_creation_does_not_generate_or_persist_workflow(
@@ -7265,45 +7240,67 @@ async def test_background_coordination_fails_only_drained_exited_attempt(tmp_pat
     assert "attempt_id=exec-b" not in log_text
 
 
-async def test_startup_reconcile_fails_dead_persisted_running_attempt(tmp_path: Path) -> None:
-    data_root = tmp_path / "conductor-data"
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    store = ConductorStore(data_root)
-    instance_dir = data_root / "instances" / "inst-1"
-    instance = InstanceRecord.create(
-        id="inst-1",
-        name="Alpha",
-        repo_source_type="local_path",
-        repo_source_value=str(repo),
-        resolved_repo_path=str(repo),
-        instance_dir=str(instance_dir),
-        workspace_root=str(instance_dir / "workspace" / "repo"),
-        persistence_path=str(instance_dir / "state" / "performer.json"),
-        log_path=str(instance_dir / "logs" / "performer.log"),
-        http_port=8801,
-        linear_project="ENG",
-        linear_filters={"linear_agent_app_user_id": "agent-1"},
-    ).with_updates(process_status="running", pid=99999)
-    store.save_instance(instance)
-
-    class StartupRuntime:
+def test_startup_reconcile_handles_dead_current_exited_and_live_attempts(tmp_path: Path) -> None:
+    class DeadRuntime:
         def refresh(self, record):
             return record
 
         def recover_attempt(self, record, attempt):
             return None
 
-    service = ConductorService(store=store, data_root=data_root, runtime_manager=StartupRuntime())  # type: ignore[arg-type]
-    service.pipeline_store.apply_runtime_config(
-        RuntimeConfigEnvelope(
-            "group-1",
-            1,
-            _policy(1),
-            profiles={RuntimeMode.EXECUTE: RuntimeProfile(name="executor", backend="codex", mode=RuntimeMode.EXECUTE)},
+    class CurrentExitedRuntime:
+        def refresh(self, record):
+            return record.with_updates(process_status="exited", pid=99999, last_exit_code=0)
+
+        def recover_attempt(self, record, attempt):
+            return None
+
+    class LiveRuntime:
+        def __init__(self) -> None:
+            self.recovered: list[str] = []
+
+        def refresh(self, record):
+            return record
+
+        def recover_attempt(self, record, attempt):
+            self.recovered.append(attempt.attempt_id)
+            return record.with_updates(process_status="running", pid=attempt.process_pid)
+
+    def make_service(case: str, runtime, *, process_pid: int) -> tuple[ConductorService, InstanceRecord]:
+        data_root = tmp_path / case / "conductor-data"
+        repo = tmp_path / case / "repo"
+        repo.mkdir(parents=True)
+        store = ConductorStore(data_root)
+        instance_dir = data_root / "instances" / "inst-1"
+        instance = InstanceRecord.create(
+            id="inst-1",
+            name="Alpha",
+            repo_source_type="local_path",
+            repo_source_value=str(repo),
+            resolved_repo_path=str(repo),
+            instance_dir=str(instance_dir),
+            workspace_root=str(instance_dir / "workspace" / "repo"),
+            persistence_path=str(instance_dir / "state" / "performer.json"),
+            log_path=str(instance_dir / "logs" / "performer.log"),
+            http_port=8801,
+            linear_project="ENG",
+            linear_filters={"linear_agent_app_user_id": "agent-1"},
+        ).with_updates(process_status="running", pid=process_pid)
+        store.save_instance(instance)
+
+        service = ConductorService(store=store, data_root=data_root, runtime_manager=runtime)  # type: ignore[arg-type]
+        service.pipeline_store.apply_runtime_config(
+            RuntimeConfigEnvelope(
+                "group-1",
+                1,
+                _policy(1),
+                profiles={RuntimeMode.EXECUTE: RuntimeProfile(name="executor", backend="codex", mode=RuntimeMode.EXECUTE)},
+            )
         )
-    )
-    service.pipeline_store.commit_plan(_proposal())
+        service.pipeline_store.commit_plan(_proposal())
+        return service, instance
+
+    service, instance = make_service("dead", DeadRuntime(), process_pid=99999)
     lease = service.pipeline_store.start_attempt(
         RuntimeMode.EXECUTE,
         node_id="a",
@@ -7323,46 +7320,7 @@ async def test_startup_reconcile_fails_dead_persisted_running_attempt(tmp_path: 
     assert "process_pid=99999" in log_text
     assert lease.lease_id in log_text
 
-
-async def test_startup_reconcile_defers_current_exited_instance_attempt_to_exit_path(tmp_path: Path) -> None:
-    data_root = tmp_path / "conductor-data"
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    store = ConductorStore(data_root)
-    instance_dir = data_root / "instances" / "inst-1"
-    instance = InstanceRecord.create(
-        id="inst-1",
-        name="Alpha",
-        repo_source_type="local_path",
-        repo_source_value=str(repo),
-        resolved_repo_path=str(repo),
-        instance_dir=str(instance_dir),
-        workspace_root=str(instance_dir / "workspace" / "repo"),
-        persistence_path=str(instance_dir / "state" / "performer.json"),
-        log_path=str(instance_dir / "logs" / "performer.log"),
-        http_port=8801,
-        linear_project="ENG",
-        linear_filters={"linear_agent_app_user_id": "agent-1"},
-    ).with_updates(process_status="running", pid=99999)
-    store.save_instance(instance)
-
-    class StartupRuntime:
-        def refresh(self, record):
-            return record.with_updates(process_status="exited", pid=99999, last_exit_code=0)
-
-        def recover_attempt(self, record, attempt):
-            return None
-
-    service = ConductorService(store=store, data_root=data_root, runtime_manager=StartupRuntime())  # type: ignore[arg-type]
-    service.pipeline_store.apply_runtime_config(
-        RuntimeConfigEnvelope(
-            "group-1",
-            1,
-            _policy(1),
-            profiles={RuntimeMode.EXECUTE: RuntimeProfile(name="executor", backend="codex", mode=RuntimeMode.EXECUTE)},
-        )
-    )
-    service.pipeline_store.commit_plan(_proposal())
+    service, _ = make_service("current-exited", CurrentExitedRuntime(), process_pid=99999)
     lease = service.pipeline_store.start_attempt(
         RuntimeMode.EXECUTE,
         node_id="a",
@@ -7377,51 +7335,8 @@ async def test_startup_reconcile_defers_current_exited_instance_attempt_to_exit_
     assert service.pipeline_store.get_attempt("exec-current-exited").state is AttemptState.RUNNING
     assert service.pipeline_store.active_lease("a", RuntimeMode.EXECUTE).lease_id == lease.lease_id  # type: ignore[union-attr]
 
-
-async def test_startup_reconcile_keeps_alive_persisted_running_attempt(tmp_path: Path) -> None:
-    data_root = tmp_path / "conductor-data"
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    store = ConductorStore(data_root)
-    instance_dir = data_root / "instances" / "inst-1"
-    instance = InstanceRecord.create(
-        id="inst-1",
-        name="Alpha",
-        repo_source_type="local_path",
-        repo_source_value=str(repo),
-        resolved_repo_path=str(repo),
-        instance_dir=str(instance_dir),
-        workspace_root=str(instance_dir / "workspace" / "repo"),
-        persistence_path=str(instance_dir / "state" / "performer.json"),
-        log_path=str(instance_dir / "logs" / "performer.log"),
-        http_port=8801,
-        linear_project="ENG",
-        linear_filters={"linear_agent_app_user_id": "agent-1"},
-    ).with_updates(process_status="running", pid=2222)
-    store.save_instance(instance)
-
-    class StartupRuntime:
-        def __init__(self) -> None:
-            self.recovered: list[str] = []
-
-        def refresh(self, record):
-            return record
-
-        def recover_attempt(self, record, attempt):
-            self.recovered.append(attempt.attempt_id)
-            return record.with_updates(process_status="running", pid=attempt.process_pid)
-
-    runtime = StartupRuntime()
-    service = ConductorService(store=store, data_root=data_root, runtime_manager=runtime)  # type: ignore[arg-type]
-    service.pipeline_store.apply_runtime_config(
-        RuntimeConfigEnvelope(
-            "group-1",
-            1,
-            _policy(1),
-            profiles={RuntimeMode.EXECUTE: RuntimeProfile(name="executor", backend="codex", mode=RuntimeMode.EXECUTE)},
-        )
-    )
-    service.pipeline_store.commit_plan(_proposal())
+    live_runtime = LiveRuntime()
+    service, _ = make_service("live", live_runtime, process_pid=2222)
     lease = service.pipeline_store.start_attempt(
         RuntimeMode.EXECUTE,
         node_id="a",
@@ -7433,7 +7348,7 @@ async def test_startup_reconcile_keeps_alive_persisted_running_attempt(tmp_path:
     reconciled = service.reconcile_pipeline_attempts_on_startup()
 
     assert reconciled == 0
-    assert runtime.recovered == ["exec-live"]
+    assert live_runtime.recovered == ["exec-live"]
     assert service.pipeline_store.get_attempt("exec-live").state is AttemptState.RUNNING
     assert service.pipeline_store.active_lease("a", RuntimeMode.EXECUTE).lease_id == lease.lease_id  # type: ignore[union-attr]
 
@@ -7467,8 +7382,8 @@ async def test_restart_instance_resumes_existing_graph_without_manual_replan(tmp
     assert service.pipeline_store.current_graph_revision() == 1
 
 
-def test_fail_exited_attempt_snapshot_defers_when_result_file_exists(tmp_path: Path) -> None:
-    store = ConductorPipelineStore(tmp_path)
+def test_process_exit_failure_defers_for_result_file_and_recent_exit(tmp_path: Path) -> None:
+    store = ConductorPipelineStore(tmp_path / "result-present")
     store.apply_runtime_config(
         RuntimeConfigEnvelope(
             "group-1",
@@ -7492,7 +7407,7 @@ def test_fail_exited_attempt_snapshot_defers_when_result_file_exists(tmp_path: P
     )
     lease = store.start_attempt(RuntimeMode.EXECUTE, node_id="a", attempt_id="exec-a", now=datetime.now(timezone.utc))
     verification_input = _publish_verification_input(store, "a", execute_attempt_id="exec-a")
-    result_path = tmp_path / "inst-1" / "state" / "pipeline" / "exec-a" / "attempt-result.json"
+    result_path = tmp_path / "result-present" / "inst-1" / "state" / "pipeline" / "exec-a" / "attempt-result.json"
     result_path.parent.mkdir(parents=True)
     graph_revision = store.current_graph_revision()
     result_path.write_text(
@@ -7513,8 +7428,8 @@ def test_fail_exited_attempt_snapshot_defers_when_result_file_exists(tmp_path: P
     )
 
     class Instance:
-        instance_dir = str(tmp_path / "inst-1")
-        log_path = str(tmp_path / "inst-1" / "logs" / "performer.log")
+        instance_dir = str(tmp_path / "result-present" / "inst-1")
+        log_path = str(tmp_path / "result-present" / "inst-1" / "logs" / "performer.log")
         process_status = "exited"
         last_exit_code = 0
 
@@ -7538,9 +7453,7 @@ def test_fail_exited_attempt_snapshot_defers_when_result_file_exists(tmp_path: P
     assert coordinator.collect_result_files(Instance) == 1
     assert store.get_attempt("exec-a").state is AttemptState.SUCCEEDED
 
-
-def test_fail_running_attempts_defers_immediately_after_process_exit(tmp_path: Path) -> None:
-    store = ConductorPipelineStore(tmp_path)
+    store = ConductorPipelineStore(tmp_path / "recent-exit")
     store.apply_runtime_config(
         RuntimeConfigEnvelope(
             "group-1",
@@ -7553,16 +7466,16 @@ def test_fail_running_attempts_defers_immediately_after_process_exit(tmp_path: P
     store.update_node_state("a", GraphNodeState.REPLANNING)
     lease = store.start_attempt(RuntimeMode.PLAN, node_id="a", attempt_id="plan-a", now=datetime.now(timezone.utc))
 
-    class Instance:
-        instance_dir = str(tmp_path / "inst-1")
-        log_path = str(tmp_path / "inst-1" / "logs" / "performer.log")
+    class RecentExitInstance:
+        instance_dir = str(tmp_path / "recent-exit" / "inst-1")
+        log_path = str(tmp_path / "recent-exit" / "inst-1" / "logs" / "performer.log")
         process_status = "exited"
         last_exit_code = 0
         updated_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
     coordinator = PipelineCoordinator(store=store, runtime_manager=None)
 
-    failed = coordinator.fail_running_attempts_for_exited_process(Instance)
+    failed = coordinator.fail_running_attempts_for_exited_process(RecentExitInstance)
 
     assert failed == 0
     assert store.get_attempt("plan-a").state is AttemptState.RUNNING
