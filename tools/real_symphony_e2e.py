@@ -153,15 +153,24 @@ def main() -> int:
         print(f"real_symphony_e2e failed: {exc!r}", file=sys.stderr)
         return 1
     print(json.dumps(e2e_report_summary(report, report_path=args.out / "real-symphony-e2e-report.json"), indent=2))
-    return 0 if not report["failures"] else 2
+    return 0 if not report.get("failures") and not report.get("blocked") else 2
 
 
 def e2e_report_summary(report: dict[str, Any], *, report_path: Path) -> dict[str, Any]:
     failures = [failure for failure in report.get("failures", []) if isinstance(failure, dict)]
+    blocked = [item for item in report.get("blocked", []) if isinstance(item, dict)]
+    actionable_root_causes = [
+        item for item in report.get("actionable_root_causes", []) if isinstance(item, dict)
+    ]
+    first_blocker = _failure_summary(failures[0]) if failures else (_blocked_summary(blocked[0]) if blocked else None)
     return {
         "report": str(report_path),
         "failures": len(failures),
+        "blocked": len(blocked),
         "failure_summaries": [_failure_summary(failure) for failure in failures[:5]],
+        "blocked_summaries": [_blocked_summary(item) for item in blocked[:5]],
+        "first_blocker": first_blocker,
+        "actionable_root_causes": actionable_root_causes[:5],
     }
 
 
@@ -170,6 +179,14 @@ def _failure_summary(failure: dict[str, Any]) -> dict[str, Any]:
     for key in ["failure", "error", "reason", "status", "body", "process_status"]:
         if key in failure:
             summary[key] = failure[key]
+    return summary
+
+
+def _blocked_summary(blocked: dict[str, Any]) -> dict[str, Any]:
+    summary: dict[str, Any] = {"name": blocked.get("name")}
+    for key in ["blocked_by", "reason", "details", "upstream_check"]:
+        if key in blocked:
+            summary[key] = blocked[key]
     return summary
 
 

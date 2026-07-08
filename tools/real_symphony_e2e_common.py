@@ -47,6 +47,8 @@ class Evidence:
             "checks": [],
             "artifacts": {},
             "failures": [],
+            "blocked": [],
+            "stages": [],
         }
 
     def check(self, name: str, passed: bool, **details: Any) -> None:
@@ -63,6 +65,44 @@ class Evidence:
     def artifact(self, name: str, path: Path) -> None:
         self.data["artifacts"][name] = str(path)
         self.write()
+
+    def blocked(self, name: str, *, blocked_by: str, reason: str, **details: Any) -> None:
+        row = redact_evidence_value(
+            {
+                "name": name,
+                "blocked_by": blocked_by,
+                "reason": reason,
+                "details": dict(details),
+                **details,
+            }
+        )
+        self.data.setdefault("blocked", []).append(row)
+        print(
+            f"event=e2e_blocked name={name} blocked_by={blocked_by} reason={reason}",
+            flush=True,
+        )
+        self.write()
+
+    def checkpoint(self, stage: str, payload: dict[str, Any]) -> Path:
+        checkpoint = redact_evidence_value({"stage": stage, **payload})
+        checkpoints_dir = self.out.parent / "checkpoints"
+        checkpoints_dir.mkdir(parents=True, exist_ok=True)
+        path = checkpoints_dir / f"{stage}.json"
+        path.write_text(json.dumps(checkpoint, indent=2, sort_keys=True), encoding="utf-8")
+        stage_row = {
+            "stage": stage,
+            "status": str(checkpoint.get("status") or "recorded"),
+            "completed_at": utc_now(),
+            "checks": checkpoint.get("checks", []),
+            "failures": checkpoint.get("failures", []),
+            "blocked": checkpoint.get("blocked", []),
+        }
+        if checkpoint.get("started_at"):
+            stage_row["started_at"] = checkpoint["started_at"]
+        self.data.setdefault("stages", []).append(stage_row)
+        self.data.setdefault("artifacts", {})[f"checkpoint:{stage}"] = str(path)
+        self.write()
+        return path
 
     def write(self) -> None:
         self.out.parent.mkdir(parents=True, exist_ok=True)

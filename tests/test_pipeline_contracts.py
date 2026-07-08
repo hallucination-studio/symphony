@@ -166,6 +166,87 @@ def test_intent_spec_derives_only_from_structured_dispatch_context() -> None:
     assert prose_only.requires_all_parallel_branches_for_downstream is False
 
 
+def test_intent_spec_uses_pipeline_intent_when_intent_is_empty() -> None:
+    intent = IntentSpec.from_dispatch_context(
+        {
+            "issue_id": "issue-1",
+            "issue_identifier": "ENG-1",
+            "intent": {},
+            "pipeline_intent": {
+                "requires_parent_aggregate": True,
+                "required_gate_steps": [
+                    {"step": "test -f SYMPHONY_REAL_E2E_RESULT.md", "source": "appendix_harness"}
+                ],
+                "parallel_dependency_shape": {
+                    "parallel_branch_node_ids": ["parallel-a", "parallel-b"],
+                    "downstream_node_ids": ["integration"],
+                },
+            },
+        }
+    )
+
+    assert intent.requires_parent_aggregate is True
+    assert intent.requires_all_parallel_branches_for_downstream is True
+    assert intent.parallel_branch_node_ids == ["parallel-a", "parallel-b"]
+    assert intent.downstream_node_ids == ["integration"]
+    assert intent.required_gate_steps == [
+        GateStep("test -f SYMPHONY_REAL_E2E_RESULT.md", GateStepSource.APPENDIX_HARNESS)
+    ]
+
+
+def test_intent_spec_uses_intent_when_pipeline_intent_is_empty() -> None:
+    intent = IntentSpec.from_dispatch_context(
+        {
+            "issue_id": "issue-1",
+            "issue_identifier": "ENG-1",
+            "intent": {
+                "requires_parent_aggregate": True,
+                "parallel_dependency_shape": {
+                    "parallel_branch_node_ids": ["parallel-a", "parallel-b"],
+                    "downstream_node_ids": ["integration"],
+                },
+            },
+            "pipeline_intent": {},
+        }
+    )
+
+    assert intent.requires_parent_aggregate is True
+    assert intent.requires_all_parallel_branches_for_downstream is True
+    assert intent.parallel_branch_node_ids == ["parallel-a", "parallel-b"]
+    assert intent.downstream_node_ids == ["integration"]
+
+
+def test_intent_spec_merges_pipeline_intent_base_with_non_empty_intent_overrides() -> None:
+    intent = IntentSpec.from_dispatch_context(
+        {
+            "issue_id": "issue-1",
+            "issue_identifier": "ENG-1",
+            "pipeline_intent": {
+                "required_gate_steps": [
+                    {"step": "test -f SYMPHONY_REAL_E2E_RESULT.md", "source": "appendix_harness"}
+                ],
+                "parallel_dependency_shape": {
+                    "parallel_branch_node_ids": ["stale-a", "stale-b"],
+                    "downstream_node_ids": ["stale-integration"],
+                },
+            },
+            "intent": {
+                "required_gate_steps": [],
+                "parallel_dependency_shape": {
+                    "parallel_branch_node_ids": ["parallel-a", "parallel-b"],
+                    "downstream_node_ids": ["integration"],
+                },
+            },
+        }
+    )
+
+    assert intent.parallel_branch_node_ids == ["parallel-a", "parallel-b"]
+    assert intent.downstream_node_ids == ["integration"]
+    assert intent.required_gate_steps == [
+        GateStep("test -f SYMPHONY_REAL_E2E_RESULT.md", GateStepSource.APPENDIX_HARNESS)
+    ]
+
+
 def test_plan_repair_is_idempotent_and_repairs_required_parallel_shape() -> None:
     intent = IntentSpec.from_dispatch_context(
         {
@@ -255,6 +336,63 @@ def test_plan_repair_promotes_business_issue_root_to_pure_parent_for_aggregate_i
     assert repaired.exit_node_ids == ["integration"]
     assert PlanValidator(intent_spec=intent).validate(repaired) == set()
     assert repaired_again.to_dict() == repaired.to_dict()
+
+
+def test_plan_repair_promotes_parent_aggregate_from_pipeline_intent_shadowed_by_empty_intent() -> None:
+    intent = IntentSpec.from_dispatch_context(
+        {
+            "issue_id": "issue-1",
+            "issue_identifier": "ENG-1",
+            "intent": {},
+            "pipeline_intent": {
+                "requires_parent_aggregate": True,
+                "parallel_dependency_shape": {
+                    "parallel_branch_node_ids": ["parallel-a", "parallel-b"],
+                    "downstream_node_ids": ["integration"],
+                },
+            },
+        }
+    )
+    gates: list[GateSpecSnapshot] = []
+    nodes: list[GraphNode] = []
+    for node_id in ("root", "parallel-a", "parallel-b", "integration"):
+        gate = GateSpecSnapshot.create(
+            gate_id=f"gate-{node_id}",
+            task_id=node_id,
+            created_by="plan-1",
+            created_at="2026-07-06T00:00:00Z",
+            content=GateSpecContent(
+                acceptance_criteria=[f"{node_id} works"],
+                verification_procedure=[GateStep("true", GateStepSource.ISSUE_REQUIREMENT)],
+                rubric={str(score): f"score {score}" for score in range(5)},
+                pass_threshold=3,
+            ),
+        )
+        gates.append(gate)
+        nodes.append(GraphNode(node_id=node_id, title=node_id, state=GraphNodeState.PLANNED, gate_snapshot_hash=gate.hash))
+    proposal = PlanProposal(
+        graph_id="graph-1",
+        plan_attempt_id="plan-1",
+        root_node_id="root",
+        nodes=nodes,
+        blocks=[("root", "parallel-a"), ("parallel-a", "integration")],
+        gates=gates,
+        entry_node_ids=["root", "parallel-b"],
+        exit_node_ids=["parallel-b", "integration"],
+    )
+
+    repaired = PlanRepair(intent).repair(proposal)
+
+    root = next(node for node in repaired.nodes if node.node_id == "root")
+    subtasks = [node for node in repaired.nodes if node.node_id != "root"]
+    assert root.parent_node_id is None
+    assert root.gate_snapshot_hash is None
+    assert all(node.parent_node_id == "root" for node in subtasks)
+    assert {gate.task_id for gate in repaired.gates} == {"parallel-a", "parallel-b", "integration"}
+    assert not any("root" in edge for edge in repaired.blocks)
+    assert repaired.entry_node_ids == ["parallel-a", "parallel-b"]
+    assert repaired.exit_node_ids == ["integration"]
+    assert PlanValidator(intent_spec=intent).validate(repaired) == set()
 
 
 def test_plan_validator_rejects_missing_parent_aggregate_when_intent_requires_it() -> None:

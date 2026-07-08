@@ -1397,6 +1397,35 @@ def test_real_symphony_e2e_permission_probe_keeps_waiting_on_runtime_wait() -> N
     )
 
 
+def test_real_symphony_e2e_crash_probe_filter_exempts_probe_and_keeps_real_failures() -> None:
+    tool = load_tool("real_symphony_e2e_wait")
+
+    assert tool._immediate_failure_without_attempt(
+        {
+            "kind": "attempt_failed",
+            "attempts": [
+                {"attempt_id": "execute-crash-probe", "mode": "execute", "state": "failed"},
+                {"attempt_id": "plan-real-failure", "mode": "plan", "state": "failed"},
+            ],
+        },
+        "execute-crash-probe",
+    ) == {
+        "kind": "attempt_failed",
+        "attempts": [{"attempt_id": "plan-real-failure", "mode": "plan", "state": "failed"}],
+    }
+
+    assert (
+        tool._immediate_failure_without_attempt(
+            {
+                "kind": "attempt_failed",
+                "attempts": [{"attempt_id": "execute-crash-probe", "mode": "execute", "state": "failed"}],
+            },
+            "execute-crash-probe",
+        )
+        is None
+    )
+
+
 def test_real_symphony_e2e_summary_includes_failure_details() -> None:
     tool = load_tool("real_symphony_e2e")
 
@@ -1425,6 +1454,316 @@ def test_real_symphony_e2e_summary_includes_failure_details() -> None:
             },
         }
     ]
+
+
+def test_real_symphony_e2e_evidence_records_blocked_stages_and_checkpoints(tmp_path: Path) -> None:
+    tool = load_tool("real_symphony_e2e")
+    evidence = tool.Evidence(tmp_path / "report.json")
+
+    evidence.blocked(
+        "06-graph-shape",
+        blocked_by="04-dispatch-and-plan",
+        reason="plan_commit_failed",
+        upstream_check="pipeline-runtime-error:visible",
+    )
+    checkpoint_path = evidence.checkpoint(
+        "04-dispatch-and-plan",
+        {"status": "failed", "failure": {"kind": "attempt_failed"}},
+    )
+
+    assert checkpoint_path == tmp_path / "checkpoints" / "04-dispatch-and-plan.json"
+    assert checkpoint_path.exists()
+    assert evidence.data["blocked"] == [
+        {
+            "name": "06-graph-shape",
+            "blocked_by": "04-dispatch-and-plan",
+            "reason": "plan_commit_failed",
+            "details": {"upstream_check": "pipeline-runtime-error:visible"},
+            "upstream_check": "pipeline-runtime-error:visible",
+        }
+    ]
+    assert evidence.data["stages"][-1]["stage"] == "04-dispatch-and-plan"
+    assert evidence.data["stages"][-1]["status"] == "failed"
+    assert evidence.data["artifacts"]["checkpoint:04-dispatch-and-plan"] == str(checkpoint_path)
+
+
+def test_real_symphony_e2e_summary_includes_blocked_and_first_blocker() -> None:
+    tool = load_tool("real_symphony_e2e")
+
+    summary = tool.e2e_report_summary(
+        {
+            "failures": [
+                {
+                    "name": "pipeline-runtime-error:visible",
+                    "reason": "plan_commit_failed",
+                }
+            ],
+            "blocked": [
+                {
+                    "name": "06-graph-shape",
+                    "blocked_by": "04-dispatch-and-plan",
+                    "reason": "plan_commit_failed",
+                }
+            ],
+            "actionable_root_causes": [
+                {
+                    "code": "intent_shadowed_by_empty_intent",
+                    "summary": "empty intent shadowed pipeline_intent",
+                }
+            ],
+        },
+        report_path=ROOT / ".test-real-flow" / "report.json",
+    )
+
+    assert summary["failures"] == 1
+    assert summary["blocked"] == 1
+    assert summary["first_blocker"] == {
+        "name": "pipeline-runtime-error:visible",
+        "reason": "plan_commit_failed",
+    }
+    assert summary["blocked_summaries"] == [
+        {
+            "name": "06-graph-shape",
+            "blocked_by": "04-dispatch-and-plan",
+            "reason": "plan_commit_failed",
+        }
+    ]
+    assert summary["actionable_root_causes"] == [
+        {
+            "code": "intent_shadowed_by_empty_intent",
+            "summary": "empty intent shadowed pipeline_intent",
+        }
+    ]
+
+
+def test_plan_offline_analysis_detects_empty_intent_shadowing_pipeline_intent() -> None:
+    analysis = load_tool("real_symphony_e2e_analysis")
+    from performer_api import pipeline
+
+    root = pipeline.GraphNode(node_id="root", title="HELL-773", state=pipeline.GraphNodeState.PLANNED)
+    branch_a = pipeline.GraphNode(
+        node_id="hell-parallel-a",
+        title="Parallel A",
+        state=pipeline.GraphNodeState.PLANNED,
+        parent_node_id="root",
+    )
+    branch_b = pipeline.GraphNode(
+        node_id="hell-parallel-b",
+        title="Parallel B",
+        state=pipeline.GraphNodeState.PLANNED,
+        parent_node_id="root",
+    )
+    downstream = pipeline.GraphNode(
+        node_id="hell-downstream-integration",
+        title="Downstream",
+        state=pipeline.GraphNodeState.PLANNED,
+        parent_node_id="root",
+    )
+    gates = []
+    gated_nodes = []
+    for node in [branch_a, branch_b, downstream]:
+        gate = pipeline.GateSpecSnapshot.create(
+            gate_id=f"gate-{node.node_id}",
+            task_id=node.node_id,
+            created_by="plan-1",
+            created_at="2026-07-08T00:00:00Z",
+            content=pipeline.GateSpecContent(
+                acceptance_criteria=["Work is complete."],
+                verification_procedure=[
+                    pipeline.GateStep("pytest tests/test_smoke.py -q", pipeline.GateStepSource.APPENDIX_HARNESS)
+                ],
+                rubric={"correctness": "3"},
+            ),
+        )
+        gates.append(gate)
+        gated_nodes.append(pipeline.replace(node, gate_snapshot_hash=gate.hash))
+    proposal = pipeline.PlanProposal(
+        graph_id="graph-1",
+        plan_attempt_id="plan-1",
+        root_node_id="root",
+        nodes=[root, *gated_nodes],
+        blocks=[("hell-parallel-a", "hell-downstream-integration"), ("hell-parallel-b", "hell-downstream-integration")],
+        gates=gates,
+        entry_node_ids=["hell-parallel-a", "hell-parallel-b"],
+        exit_node_ids=["hell-downstream-integration"],
+    )
+
+    report = analysis.analyze_plan_artifacts(
+        attempt_request={
+            "attempt_id": "plan-1",
+            "issue_id": "issue-1",
+            "issue_identifier": "HELL-773",
+            "pipeline_intent": {
+                "requires_parent_aggregate": True,
+                "parallel_dependency_shape": {
+                    "parallel_branch_node_ids": ["hell-parallel-a", "hell-parallel-b"],
+                    "downstream_node_ids": ["hell-downstream-integration"],
+                },
+            },
+        },
+        attempt_result={
+            "attempt_id": "plan-1",
+            "node_id": "root",
+            "status": "succeeded",
+            "proposal": proposal.to_dict(),
+        },
+        dispatch_context={
+            "issue_id": "issue-1",
+            "issue_identifier": "HELL-773",
+            "intent": {},
+            "pipeline_intent": {
+                "requires_parent_aggregate": True,
+                "parallel_dependency_shape": {
+                    "parallel_branch_node_ids": ["hell-parallel-a", "hell-parallel-b"],
+                    "downstream_node_ids": ["hell-downstream-integration"],
+                },
+            },
+        },
+    )
+
+    assert report["status"] == "analyzed"
+    assert "intent_shadowed_by_empty_intent" in report["root_cause_codes"]
+    assert report["current_intent"]["requires_parent_aggregate"] is True
+    assert report["preferred_intent"]["requires_parent_aggregate"] is True
+    assert "missing_gate" not in report["validator_errors_current"]
+    assert "missing_gate" not in report["validator_errors_preferred_after_repair"]
+
+
+def test_real_symphony_e2e_runtime_blocker_writes_plan_analysis_and_blocks_downstream(
+    tmp_path: Path,
+) -> None:
+    tool = load_tool("real_symphony_e2e_run")
+    from performer_api import pipeline
+
+    evidence = tool.Evidence(tmp_path / "report.json")
+    evidence.check(
+        "pipeline-runtime-error:visible",
+        False,
+        failure={
+            "kind": "attempt_failed",
+            "attempts": [{"attempt_id": "plan-1", "mode": "plan", "error": "invalid plan proposal: missing_gate"}],
+        },
+    )
+    data_root = tmp_path / "data"
+    attempt_dir = data_root / "instances" / "inst-1" / "state" / "pipeline" / "plan-1"
+    attempt_dir.mkdir(parents=True)
+    intent = {
+        "requires_parent_aggregate": True,
+        "parallel_dependency_shape": {
+            "parallel_branch_node_ids": ["hell-parallel-a", "hell-parallel-b"],
+            "downstream_node_ids": ["hell-downstream-integration"],
+        },
+    }
+    (attempt_dir / "attempt-request.json").write_text(
+        json.dumps(
+            {
+                "attempt_id": "plan-1",
+                "node_id": "root",
+                "root_node_id": "root",
+                "issue_id": "issue-1",
+                "issue_identifier": "HELL-773",
+                "pipeline_intent": intent,
+            }
+        ),
+        encoding="utf-8",
+    )
+    gate_content = pipeline.GateSpecContent(
+        acceptance_criteria=["Work is complete."],
+        verification_procedure=[pipeline.GateStep("pytest tests/test_smoke.py -q", pipeline.GateStepSource.APPENDIX_HARNESS)],
+        rubric={"correctness": "3"},
+    )
+    gates = [
+        pipeline.GateSpecSnapshot.create(
+            gate_id=f"gate-{node_id}",
+            task_id=node_id,
+            created_by="plan-1",
+            created_at="2026-07-08T00:00:00Z",
+            content=gate_content,
+        )
+        for node_id in ["hell-parallel-a", "hell-parallel-b", "hell-downstream-integration"]
+    ]
+    gate_by_node = {gate.task_id: gate for gate in gates}
+    proposal = pipeline.PlanProposal(
+        graph_id="graph-1",
+        plan_attempt_id="plan-1",
+        root_node_id="root",
+        nodes=[
+            pipeline.GraphNode(node_id="root", title="HELL-773", state=pipeline.GraphNodeState.PLANNED),
+            pipeline.GraphNode(
+                node_id="hell-parallel-a",
+                title="Parallel A",
+                state=pipeline.GraphNodeState.PLANNED,
+                parent_node_id="root",
+                gate_snapshot_hash=gate_by_node["hell-parallel-a"].hash,
+            ),
+            pipeline.GraphNode(
+                node_id="hell-parallel-b",
+                title="Parallel B",
+                state=pipeline.GraphNodeState.PLANNED,
+                parent_node_id="root",
+                gate_snapshot_hash=gate_by_node["hell-parallel-b"].hash,
+            ),
+            pipeline.GraphNode(
+                node_id="hell-downstream-integration",
+                title="Downstream",
+                state=pipeline.GraphNodeState.PLANNED,
+                parent_node_id="root",
+                gate_snapshot_hash=gate_by_node["hell-downstream-integration"].hash,
+            ),
+        ],
+        blocks=[("hell-parallel-a", "hell-downstream-integration"), ("hell-parallel-b", "hell-downstream-integration")],
+        gates=gates,
+        entry_node_ids=["hell-parallel-a", "hell-parallel-b"],
+        exit_node_ids=["hell-downstream-integration"],
+    )
+    (attempt_dir / "attempt-result.json.applied").write_text(
+        json.dumps(
+            {
+                "attempt_id": "plan-1",
+                "node_id": "root",
+                "status": "succeeded",
+                "proposal": proposal.to_dict(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    import sqlite3
+
+    (data_root / "pipeline").mkdir(parents=True)
+    with sqlite3.connect(data_root / "pipeline" / "pipeline.db") as connection:
+        connection.execute(
+            "CREATE TABLE dispatch_context (node_id TEXT PRIMARY KEY, payload_json TEXT NOT NULL, updated_at TEXT NOT NULL)"
+        )
+        connection.execute(
+            "INSERT INTO dispatch_context (node_id, payload_json, updated_at) VALUES (?, ?, ?)",
+            (
+                "root",
+                json.dumps({"issue_id": "issue-1", "issue_identifier": "HELL-773", "intent": {}, "pipeline_intent": intent}),
+                "2026-07-08T00:00:00Z",
+            ),
+        )
+
+    handled = tool._handle_pipeline_runtime_blocker(
+        evidence=evidence,
+        root=tmp_path,
+        data_root=data_root,
+        instance_id="inst-1",
+        run_result={"samples": [{"pipeline_attempts": [{"attempt_id": "plan-1"}]}]},
+    )
+
+    assert handled is True
+    assert Path(evidence.data["artifacts"]["plan_offline_analysis"]).exists()
+    assert "checkpoint:04-dispatch-and-plan" in evidence.data["artifacts"]
+    assert "checkpoint:05-plan-offline-analysis" in evidence.data["artifacts"]
+    assert {item["name"] for item in evidence.data["blocked"]} == {
+        "06-graph-shape",
+        "07-scheduler-capacity",
+        "08-execute-verify",
+        "09-replan-recovery",
+        "10-integration",
+        "11-final-acceptance",
+    }
+    assert evidence.data["actionable_root_causes"][0]["code"] == "intent_shadowed_by_empty_intent"
 
 def test_real_symphony_e2e_wait_artifacts_are_written_on_early_exit(tmp_path: Path) -> None:
     tool = load_tool("real_symphony_e2e")

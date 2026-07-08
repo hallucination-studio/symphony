@@ -313,6 +313,7 @@ class ConductorPodiumSyncMixin:
         pipeline_crash_failures = self._fail_exited_pipeline_attempts()
         pipeline_runtime_waits_observed = self._collect_pipeline_runtime_waits()
         pipeline_integrations_processed = self._process_pipeline_integrations()
+        self._drive_pipeline_convergence()
         pipeline_human_actions_created = await self.reconcile_pipeline_human_actions_once()
         pipeline_human_actions_created += await self.reconcile_pipeline_runtime_wait_actions_once()
         pipeline_human_actions_completed = await self.reconcile_completed_pipeline_human_actions_once()
@@ -450,6 +451,9 @@ class ConductorPodiumSyncMixin:
                 continue
             processed += self.pipeline_store.process_queued_integrations(Path(repo_path), instance=instance)
         return processed
+
+    def _drive_pipeline_convergence(self) -> int:
+        return self.pipeline_coordinator.drive_convergence_once()
 
     async def reconcile_linear_pipeline_projections_once(self) -> int:
         revision = self.pipeline_store.current_graph_revision_record()

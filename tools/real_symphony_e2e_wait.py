@@ -211,7 +211,7 @@ async def wait_for_run(
                     attempt_id=crash_probe_attempt_id,
                     failure=immediate_failure,
                 )
-                immediate_failure = None
+                immediate_failure = _immediate_failure_without_attempt(immediate_failure, crash_probe_attempt_id)
         if immediate_failure is not None:
             evidence.check(
                 "pipeline-runtime-error:visible",
@@ -509,7 +509,7 @@ def _immediate_failure_matches_attempt(failure: dict[str, Any], attempt_id: str 
             for attempt in attempts
             if isinstance(attempt, dict) and str(attempt.get("attempt_id") or "")
         ]
-        return bool(attempt_ids) and all(attempt_id == expected_attempt_id for attempt_id in attempt_ids)
+        return any(attempt_id == expected_attempt_id for attempt_id in attempt_ids)
     actions = failure.get("actions")
     if not isinstance(actions, list):
         return False
@@ -520,6 +520,27 @@ def _immediate_failure_matches_attempt(failure: dict[str, Any], attempt_id: str 
         if isinstance(details, dict) and str(details.get("attempt_id") or "") == expected_attempt_id:
             return True
     return False
+
+
+def _immediate_failure_without_attempt(failure: dict[str, Any], attempt_id: str | None) -> dict[str, Any] | None:
+    expected_attempt_id = str(attempt_id or "").strip()
+    if not expected_attempt_id:
+        return failure
+    attempts = failure.get("attempts")
+    if not isinstance(attempts, list):
+        return None if _immediate_failure_matches_attempt(failure, expected_attempt_id) else failure
+    remaining_attempts = [
+        attempt
+        for attempt in attempts
+        if not (isinstance(attempt, dict) and str(attempt.get("attempt_id") or "") == expected_attempt_id)
+    ]
+    if len(remaining_attempts) == len(attempts):
+        return failure
+    if not remaining_attempts:
+        return None
+    filtered = dict(failure)
+    filtered["attempts"] = remaining_attempts
+    return filtered
 
 
 def _resolved_pipeline_wait_ids(pipeline_payload: dict[str, Any]) -> set[str]:

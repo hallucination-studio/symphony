@@ -170,10 +170,7 @@ class IntentSpec:
 
     @classmethod
     def from_dispatch_context(cls, payload: dict[str, Any]) -> IntentSpec:
-        intent_payload = payload.get("intent")
-        if not isinstance(intent_payload, dict):
-            intent_payload = payload.get("pipeline_intent")
-        intent = intent_payload if isinstance(intent_payload, dict) else {}
+        intent = _merged_intent_payload(payload)
         shape = intent.get("parallel_dependency_shape")
         if not isinstance(shape, dict):
             shape = intent
@@ -1596,6 +1593,29 @@ def _mode(value: Any) -> RuntimeMode:
 
 def _dict(value: Any) -> dict[str, Any]:
     return dict(value) if isinstance(value, dict) else {}
+
+
+def _merged_intent_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    base = _dict(payload.get("pipeline_intent"))
+    override = _dict(payload.get("intent"))
+    return _merge_non_empty_values(base, override)
+
+
+def _merge_non_empty_values(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(base)
+    for key, value in override.items():
+        if _is_empty_intent_value(value):
+            continue
+        existing = merged.get(key)
+        if isinstance(existing, dict) and isinstance(value, dict):
+            merged[key] = _merge_non_empty_values(existing, value)
+            continue
+        merged[key] = value
+    return merged
+
+
+def _is_empty_intent_value(value: Any) -> bool:
+    return value is None or value == {} or value == [] or value == ""
 
 
 def _jsonable_dict(value: dict[str, Any]) -> dict[str, Any]:

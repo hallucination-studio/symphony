@@ -138,7 +138,8 @@ class ConductorPipelineStore:
                 CREATE TABLE IF NOT EXISTS verification_inputs (
                   execute_attempt_id TEXT PRIMARY KEY,
                   node_id TEXT NOT NULL,
-                  payload_json TEXT NOT NULL
+                  payload_json TEXT NOT NULL,
+                  created_at TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS task_output_manifests (
                   verify_attempt_id TEXT PRIMARY KEY,
@@ -205,6 +206,7 @@ class ConductorPipelineStore:
             )
             self._migrate_graph_nodes_primary_key(connection)
             self._migrate_node_runtime_state(connection)
+            self._migrate_verification_inputs_created_at(connection)
 
     def _migrate_graph_nodes_primary_key(self, connection: sqlite3.Connection) -> None:
         columns = connection.execute("PRAGMA table_info(graph_nodes)").fetchall()
@@ -253,6 +255,15 @@ class ConductorPipelineStore:
                 VALUES (?, ?)
                 """,
                 (row_node_id, _json_dumps(_node_runtime_payload(node))),
+            )
+
+    def _migrate_verification_inputs_created_at(self, connection: sqlite3.Connection) -> None:
+        columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(verification_inputs)").fetchall()}
+        if "created_at" not in columns:
+            connection.execute("ALTER TABLE verification_inputs ADD COLUMN created_at TEXT")
+            connection.execute(
+                "UPDATE verification_inputs SET created_at = ? WHERE created_at IS NULL OR created_at = ''",
+                (_now(),),
             )
 
     def apply_runtime_config(self, envelope: RuntimeConfigEnvelope) -> bool:
@@ -366,8 +377,9 @@ class ConductorPipelineStore:
                 )
                 connection.execute(
                     """
-                    INSERT OR IGNORE INTO node_runtime_state (node_id, payload_json)
+                    INSERT INTO node_runtime_state (node_id, payload_json)
                     VALUES (?, ?)
+                    ON CONFLICT(node_id) DO UPDATE SET payload_json = excluded.payload_json
                     """,
                     (node.node_id, _json_dumps(_node_runtime_payload(node))),
                 )
@@ -451,6 +463,17 @@ class ConductorPipelineStore:
         if row is None:
             return {}
         return _json_loads(row["payload_json"])
+
+    def resolved_dispatch_context_for_node(self, node_id: str) -> dict[str, Any]:
+        context = self.dispatch_context_for_node(node_id)
+        if context:
+            return context
+        revision = self.current_graph_revision_record()
+        if revision is not None and revision.root_node_id != node_id:
+            context = self.dispatch_context_for_node(revision.root_node_id)
+            if context:
+                return context
+        return {}
 
     def get_node(self, node_id: str, *, revision: int | None = None) -> GraphNode:
         revision = self.current_graph_revision() if revision is None else revision
@@ -629,7 +652,12 @@ class ConductorPipelineStore:
             return GraphNodeState.AWAITING_HUMAN
         if any(child.state is GraphNodeState.FAILED for child in children):
             return GraphNodeState.FAILED
-        if all(child.state in {GraphNodeState.VERIFY_PASSED, GraphNodeState.SUPERSEDED} for child in children):
+        if all(child.state is GraphNodeState.SUPERSEDED for child in children):
+            return GraphNodeState.SUPERSEDED
+        if all(child.state in {GraphNodeState.VERIFY_PASSED, GraphNodeState.SUPERSEDED} for child in children) and all(
+            child.state is GraphNodeState.SUPERSEDED or self.integration_terminal_for_node(child.node_id)
+            for child in children
+        ):
             return GraphNodeState.VERIFY_PASSED
         return GraphNodeState.PLANNED
 
@@ -637,9 +665,14 @@ class ConductorPipelineStore:
         children = self.children_for(parent_node_id)
         parent = self.get_node(parent_node_id)
         state = self.derive_parent_state(parent_node_id)
+        verified_scores = [
+            int(child.verify_score or 0)
+            for child in children
+            if child.state is GraphNodeState.VERIFY_PASSED
+        ]
         verify_score = (
-            min(int(child.verify_score or 0) for child in children if child.state is GraphNodeState.VERIFY_PASSED)
-            if state is GraphNodeState.VERIFY_PASSED and children
+            min(verified_scores)
+            if state is GraphNodeState.VERIFY_PASSED and verified_scores
             else None
         )
         return GraphNode(
@@ -783,6 +816,8 @@ class ConductorPipelineStore:
         attempt_id: str,
         now: datetime,
         ttl_seconds: int = 300,
+        graph_revision: int | None = None,
+        policy_revision: int | None = None,
     ) -> WorkerLease:
         try:
             existing_attempt = self.get_attempt(attempt_id)
@@ -803,8 +838,12 @@ class ConductorPipelineStore:
             self._require_verification_input_for_attempt(node)
             next_state = GraphNodeState.VERIFYING
         lease = self.acquire_lease(mode, node_id=node_id, attempt_id=attempt_id, now=now, ttl_seconds=ttl_seconds)
-        graph_revision = self.current_graph_revision()
-        policy_revision = self.active_runtime_config().scheduler_policy.version
+        graph_revision = self.current_graph_revision() if graph_revision is None else graph_revision
+        policy_revision = (
+            self.active_runtime_config().scheduler_policy.version
+            if policy_revision is None
+            else policy_revision
+        )
         attempt = AttemptRecord(
             attempt_id=attempt_id,
             node_id=node_id,
@@ -1008,16 +1047,25 @@ class ConductorPipelineStore:
             """,
             (AttemptState.TIMED_OUT.value, _json_dumps(updated.to_dict()), updated.attempt_id),
         )
-        self._create_human_wait_on_connection(
+        runtime_row = connection.execute(
+            "SELECT payload_json FROM node_runtime_state WHERE node_id = ?",
+            (attempt.node_id,),
+        ).fetchone()
+        runtime_payload = _json_loads(runtime_row["payload_json"]) if runtime_row is not None else {}
+        rework_count = int(runtime_payload.get("rework_count") or 0)
+        if attempt.mode is RuntimeMode.PLAN:
+            retry_state = GraphNodeState.REPLANNING
+        elif attempt.mode is RuntimeMode.VERIFY:
+            retry_state = GraphNodeState.VERIFYING
+        elif rework_count > 0:
+            retry_state = GraphNodeState.REWORKING
+        else:
+            retry_state = GraphNodeState.READY
+        self._update_node_state_on_connection(
             connection,
             attempt.node_id,
-            reason=HumanEscalationReason.CAPACITY_STARVED,
-            details={
-                "mode": attempt.mode.value,
-                "attempt_id": attempt.attempt_id,
-                "lease_id": lease.lease_id,
-                "error": error,
-            },
+            retry_state,
+            human_reason=None,
         )
 
     def heartbeat_lease(
@@ -1060,10 +1108,10 @@ class ConductorPipelineStore:
         with self.connect() as connection:
             connection.execute(
                 """
-                INSERT OR REPLACE INTO verification_inputs (execute_attempt_id, node_id, payload_json)
-                VALUES (?, ?, ?)
+                INSERT OR REPLACE INTO verification_inputs (execute_attempt_id, node_id, payload_json, created_at)
+                VALUES (?, ?, ?, ?)
                 """,
-                (snapshot.execute_attempt_id, snapshot.task_id, _json_dumps(snapshot.to_dict())),
+                (snapshot.execute_attempt_id, snapshot.task_id, _json_dumps(snapshot.to_dict()), _now()),
             )
 
     def has_verification_input_for_node(self, node_id: str) -> bool:
@@ -1080,7 +1128,7 @@ class ConductorPipelineStore:
                 """
                 SELECT payload_json FROM verification_inputs
                 WHERE node_id = ?
-                ORDER BY execute_attempt_id DESC
+                ORDER BY created_at DESC, execute_attempt_id DESC
                 LIMIT 1
                 """,
                 (node_id,),
@@ -1373,6 +1421,8 @@ class ConductorPipelineStore:
                         "error": error,
                     },
                 )
+        if status == "integrated":
+            self._drive_parent_aggregate_state(str(payload["node_id"]))
         return payload
 
     def list_task_output_manifests(self) -> list[TaskOutputManifest]:
@@ -1900,8 +1950,10 @@ class ConductorPipelineStore:
     def replace_current_edges_from_linear(self, edges: list[tuple[str, str]], *, reason: str) -> GraphRevision | None:
         return self.merge_human_added_blocks(edges, reason=reason)
 
-    def replace_node_with_subgraph(self, node_id: str, subgraph: PlanProposal) -> GraphRevision:
-        errors = PlanValidator().validate(subgraph)
+    def replace_node_with_subgraph(self, node_id: str, subgraph: PlanProposal, *, intent_spec: IntentSpec | None = None) -> GraphRevision:
+        if intent_spec is not None:
+            subgraph = PlanRepair(intent_spec).repair(subgraph)
+        errors = PlanValidator(intent_spec=intent_spec).validate(subgraph)
         if errors:
             names = ", ".join(sorted(error.value for error in errors))
             raise ValueError(f"invalid replacement subgraph: {names}")
@@ -1913,7 +1965,15 @@ class ConductorPipelineStore:
             raise KeyError(node_id)
         upstream = self.blockers_for(node_id)
         downstream = self.dependents_for(node_id)
-        replacement_ids = [node.node_id for node in subgraph.nodes]
+        retained_subgraph_node_ids = {
+            subgraph.root_node_id
+            for node in subgraph.nodes
+            if node.node_id == subgraph.root_node_id and node.node_id in nodes and node.node_id != node_id
+        }
+        replacement_source_nodes = [
+            node for node in subgraph.nodes if node.node_id not in retained_subgraph_node_ids
+        ]
+        replacement_ids = [node.node_id for node in replacement_source_nodes]
         subgraph_node_ids = set(replacement_ids)
         if node_id in subgraph_node_ids:
             raise ValueError("replacement subgraph reuses superseded node_id")
@@ -1960,7 +2020,7 @@ class ConductorPipelineStore:
                 superseded_by=list(node.superseded_by),
                 human_reason=node.human_reason,
             )
-            for node in subgraph.nodes
+            for node in replacement_source_nodes
         ]
         existing_edges = [
             (source, target)
@@ -2079,7 +2139,7 @@ class ConductorPipelineStore:
             intent_spec = self._intent_spec_for_plan_node(result.node_id)
             proposal = PlanRepair(intent_spec).repair(result.proposal)
             validation_errors = PlanValidator(intent_spec=intent_spec).validate(proposal)
-            if node.state is GraphNodeState.REPLANNING and self.latest_failed_verify_attempt_for_node(result.node_id) is not None:
+            if self._plan_result_should_replace_node(result.node_id, node):
                 max_replan_depth = self.active_runtime_config().scheduler_policy.max_rework_attempts
                 if node.replan_depth >= max_replan_depth:
                     return self._fail_plan_attempt_with_human_wait(
@@ -2096,7 +2156,7 @@ class ConductorPipelineStore:
                         error=_plan_validation_error_summary(validation_errors),
                     )
                 try:
-                    self.replace_node_with_subgraph(result.node_id, proposal)
+                    self.replace_node_with_subgraph(result.node_id, proposal, intent_spec=intent_spec)
                 except ValueError as exc:
                     return self._fail_plan_attempt_with_human_wait(
                         result,
@@ -2172,6 +2232,16 @@ class ConductorPipelineStore:
         self._deactivate_lease(result.lease_id)
         return True
 
+    def _plan_result_should_replace_node(self, node_id: str, node: GraphNode) -> bool:
+        if node.state is not GraphNodeState.REPLANNING:
+            return False
+        revision = self.current_graph_revision_record()
+        if revision is None:
+            return False
+        if revision.root_node_id == node_id and len(self.list_nodes()) == 1:
+            return False
+        return True
+
     def _drive_parent_aggregate_state(self, node_id: str) -> None:
         try:
             node = self.get_node(node_id)
@@ -2191,11 +2261,7 @@ class ConductorPipelineStore:
             parent_id = refreshed.parent_node_id
 
     def _intent_spec_for_plan_node(self, node_id: str) -> IntentSpec:
-        context = self.dispatch_context_for_node(node_id)
-        if not context:
-            revision = self.current_graph_revision_record()
-            if revision is not None:
-                context = self.dispatch_context_for_node(revision.root_node_id)
+        context = self.resolved_dispatch_context_for_node(node_id)
         if not context:
             node = self.get_node(node_id)
             context = {
@@ -2266,6 +2332,8 @@ class ConductorPipelineStore:
         if attempt.state is not AttemptState.RUNNING:
             return False
         if attempt.node_id != result.node_id or attempt.mode is not result.mode:
+            return False
+        if result.graph_revision != attempt.graph_revision:
             return False
         if result.policy_revision != attempt.policy_revision:
             return False
@@ -2883,6 +2951,34 @@ class PipelineCoordinator:
         self.runtime_manager = runtime_manager
         self.scheduler = PipelineScheduler(store)
 
+    def drive_convergence_once(self) -> int:
+        changed = 0
+        terminal_parent_states = {
+            GraphNodeState.FAILED,
+            GraphNodeState.SUPERSEDED,
+            GraphNodeState.AWAITING_HUMAN,
+        }
+        for node in self.store.list_nodes():
+            if node.state in terminal_parent_states:
+                continue
+            if not self.store.children_for(node.node_id):
+                continue
+            refreshed = self.store.refresh_aggregate_parent_state(node.node_id)
+            if (
+                refreshed.state is not node.state
+                or refreshed.verify_score != node.verify_score
+                or refreshed.human_reason != node.human_reason
+            ):
+                self.store.update_node_state(
+                    node.node_id,
+                    refreshed.state,
+                    verify_score=refreshed.verify_score,
+                    human_reason=refreshed.human_reason,
+                )
+                changed += 1
+        changed += len(self.scheduler.promote_ready_nodes())
+        return changed
+
     def heartbeat_active_leases(
         self,
         *,
@@ -2989,6 +3085,9 @@ class PipelineCoordinator:
         started = 0
         envelope = self.store.active_runtime_config()
         policy_source = self.store.active_runtime_config_source()
+        graph_revision_record = self.store.current_graph_revision_record()
+        graph_revision = graph_revision_record.revision if graph_revision_record is not None else self.store.current_graph_revision()
+        policy_revision = envelope.scheduler_policy.version
         self.store.record_scheduler_tick_policy(envelope, policy_source=policy_source, at=now)
         self.scheduler.promote_ready_nodes()
         active_leases = self.store._active_leases()
@@ -3018,8 +3117,8 @@ class PipelineCoordinator:
                         (
                             "pipeline_backend_ineligible "
                             f"mode={mode.value} node_id={node_id} error={preflight_error} "
-                            f"graph_revision={self.store.current_graph_revision()} "
-                            f"policy_revision={envelope.scheduler_policy.version}"
+                            f"graph_revision={graph_revision} "
+                            f"policy_revision={policy_revision}"
                         ),
                     )
                     self.store.create_human_wait(
@@ -3033,7 +3132,14 @@ class PipelineCoordinator:
                     )
                     continue
                 attempt_id = f"{mode.value}-{uuid4().hex}"
-                lease = self.store.start_attempt(mode, node_id=node_id, attempt_id=attempt_id, now=now)
+                lease = self.store.start_attempt(
+                    mode,
+                    node_id=node_id,
+                    attempt_id=attempt_id,
+                    now=now,
+                    graph_revision=graph_revision,
+                    policy_revision=policy_revision,
+                )
                 try:
                     paths = self._attempt_paths(Path(instance.instance_dir), attempt_id)
                     request = self._attempt_request(
@@ -3043,6 +3149,9 @@ class PipelineCoordinator:
                         lease=lease,
                         instance=instance,
                         attempt_dir=paths["request_path"].parent,
+                        graph_revision_record=graph_revision_record,
+                        graph_revision=graph_revision,
+                        policy_revision=policy_revision,
                     )
                     env = prepare_mode_environment(
                         Path(instance.instance_dir),
@@ -3069,8 +3178,8 @@ class PipelineCoordinator:
                         (
                             "pipeline_attempt_started "
                             f"mode={mode.value} node_id={node_id} attempt_id={attempt_id} "
-                            f"lease_id={lease.lease_id} graph_revision={self.store.current_graph_revision()} "
-                            f"policy_revision={envelope.scheduler_policy.version} "
+                            f"lease_id={lease.lease_id} graph_revision={graph_revision} "
+                            f"policy_revision={policy_revision} "
                             f"process_pid={getattr(started_instance, 'pid', None)} "
                             f"request_path={paths['request_path']} result_path={result_path}"
                         ),
@@ -3357,11 +3466,20 @@ class PipelineCoordinator:
         lease: WorkerLease,
         instance: Any,
         attempt_dir: Path,
+        graph_revision_record: GraphRevision | None = None,
+        graph_revision: int | None = None,
+        policy_revision: int | None = None,
     ) -> dict[str, Any]:
         node = self.store.get_node(node_id)
-        dispatch_context = self.store.dispatch_context_for_node(node_id)
+        dispatch_context = self.store.resolved_dispatch_context_for_node(node_id)
+        graph_revision = self.store.current_graph_revision() if graph_revision is None else graph_revision
+        policy_revision = (
+            self.store.active_runtime_config().scheduler_policy.version
+            if policy_revision is None
+            else policy_revision
+        )
         if mode is RuntimeMode.PLAN:
-            revision = self.store.current_graph_revision_record()
+            revision = graph_revision_record or self.store.current_graph_revision_record()
             failure_context: dict[str, Any] = {}
             if node.state is GraphNodeState.REPLANNING:
                 failed_verify = self.store.latest_failed_verify_attempt_for_node(node_id)
@@ -3381,8 +3499,8 @@ class PipelineCoordinator:
                 issue_id=str(dispatch_context.get("issue_id") or node.issue_id or node_id),
                 issue_identifier=str(dispatch_context.get("issue_identifier") or node.issue_identifier or node.title),
                 title=str(dispatch_context.get("title") or node.title),
-                graph_revision=self.store.current_graph_revision(),
-                policy_revision=self.store.active_runtime_config().scheduler_policy.version,
+                graph_revision=graph_revision,
+                policy_revision=policy_revision,
                 lease_id=lease.lease_id,
                 fencing_token=lease.fencing_token,
                 workspace_path=str(
@@ -3408,8 +3526,8 @@ class PipelineCoordinator:
         common = {
             "attempt_id": attempt_id,
             "node_id": node_id,
-            "graph_revision": self.store.current_graph_revision(),
-            "policy_revision": self.store.active_runtime_config().scheduler_policy.version,
+            "graph_revision": graph_revision,
+            "policy_revision": policy_revision,
             "gate_snapshot": gate,
             "lease_id": lease.lease_id,
             "fencing_token": lease.fencing_token,
