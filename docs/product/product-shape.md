@@ -4,8 +4,8 @@
 
 Symphony should be delivered as a hosted control plane plus a customer-installed
 runtime. Podium is the hosted product surface. It owns the Linear OAuth
-application, stores Linear workspace tokens, receives Linear webhooks, routes
-work, and exposes the web UI. Customers install a local runtime that contains
+application, stores Linear workspace tokens, polls delegated Linear issues,
+routes work, and exposes the web UI. Customers install a local runtime that contains
 Conductor and Performer. That runtime runs on the customer's machine or server
 and performs code work close to the customer's repositories and credentials.
 
@@ -21,7 +21,6 @@ Podium is the SaaS boundary. It is public internet-facing and must have stable
 HTTPS endpoints for:
 
 - Linear OAuth callback
-- Linear webhooks
 - Runtime registration
 - Runtime heartbeat and command channels
 - Linear GraphQL proxy
@@ -31,7 +30,6 @@ Podium owns the sensitive integration state:
 
 - Linear OAuth access tokens
 - Linear refresh tokens
-- Linear webhook signing secrets
 - Runtime enrollment tokens
 - Runtime dispatch/proxy tokens
 
@@ -67,8 +65,8 @@ Conductor's pipeline projection.
 5. Podium generates a runtime install command.
 6. The user runs the install command on a local machine or server.
 7. The installed Conductor enrolls with Podium.
-8. Linear sends `AgentSessionEvent` webhooks to Podium.
-9. Podium routes each event to an eligible Conductor.
+8. Podium polls Linear for issues delegated to the Symphony custom agent.
+9. Podium routes each delegated issue to an eligible Conductor.
 10. Conductor schedules fenced `plan -> execute -> verify` attempts and starts
     short-lived Performers for each mode.
 11. Podium shows pipeline graph state, capacity, leases, attempts, manifests,
@@ -78,8 +76,8 @@ Conductor's pipeline projection.
 
 The default should be:
 
-> Linear and public webhooks terminate at Podium. Customer runtimes connect
-> outbound to Podium. Linear tokens never leave Podium.
+> Linear integration terminates at Podium. Customer runtimes connect outbound to
+> Podium. Linear tokens never leave Podium.
 
 This keeps the customer installation simpler and avoids asking users to expose a
 local machine to the public internet.

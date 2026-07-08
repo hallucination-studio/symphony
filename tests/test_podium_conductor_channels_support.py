@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import hashlib
-import hmac
 import json
 from typing import Any
 
@@ -10,27 +8,42 @@ import pytest
 from fastapi.testclient import TestClient
 
 from podium.app import create_app
+from podium.podium_routes_runtime import normalize_agent_session_event
+from podium.store import PodiumStore
 
 
 def make_app(
     *,
-    linear_webhook_secret: str = "",
     linear_graphql_transport: Any = None,
     data_dir: Any = None,
     secret_key: str = "test-secret",
-    pg_store: Any = None,
-    redis_store: Any = None,
+    store: Any = None,
 ):
+    selected_store = store or PodiumStore(data_dir=data_dir)
     return create_app(
         turnstile_verifier=lambda token, _ip: token == "turnstile-ok",
         secure_cookies=False,
-        linear_webhook_secret=linear_webhook_secret,
         linear_graphql_transport=linear_graphql_transport,
         data_dir=data_dir,
         secret_key=secret_key,
-        pg_store=pg_store,
-        redis_store=redis_store,
+        store=selected_store,
     )
+
+
+class QueueResult:
+    def __init__(self, *, status_code: int, body: dict[str, Any]) -> None:
+        self.status_code = status_code
+        self._body = body
+
+    def json(self) -> dict[str, Any]:
+        return dict(self._body)
+
+
+async def queue_agent_session(app: Any, payload: dict[str, Any]) -> QueueResult:
+    if payload.get("type") != "AgentSessionEvent":
+        return QueueResult(status_code=200, body={"status": "ignored", "queued": 0})
+    queued = await app.state.podium.queue_dispatches(normalize_agent_session_event(payload))
+    return QueueResult(status_code=200, body={"status": "accepted", "queued": queued})
 
 
 async def register(client: httpx.AsyncClient, email: str = "phase@example.com") -> str:

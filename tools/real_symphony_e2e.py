@@ -136,11 +136,6 @@ def parser() -> argparse.ArgumentParser:
     arg_parser.add_argument("--overload-max-delay-ms", type=int)
     arg_parser.add_argument("--config-override", action="append")
     arg_parser.add_argument("--expected-failure", choices=["none", "overload", "terminal_bad_request"], default="none")
-    arg_parser.add_argument(
-        "--simulate-agent-webhook",
-        action="store_true",
-        help="Use a synthetic AgentSessionEvent instead of requiring the Linear issue to be delegated to the app user.",
-    )
     arg_parser.add_argument("--timeout", type=int, default=420)
     return arg_parser
 

@@ -7,7 +7,7 @@ import httpx
 import pytest
 
 from podium.app import create_app
-from podium.store.postgres import PgStore
+from podium.store import PodiumStore
 
 
 OFFICIAL_KWARGS = dict(
@@ -52,6 +52,8 @@ async def test_official_app_used_when_no_custom_app() -> None:
         params = _auth_url_params(url)
         assert params["client_id"] == "official-client-id"
         assert params["actor"] == "app"
+        assert "app:assignable" in params["scope"]
+        assert "app:mentionable" in params["scope"]
         assert params["state"] != "user_1"
         assert len(params["state"]) >= 24
 
@@ -92,6 +94,9 @@ async def test_custom_app_configured_and_never_echoes_secret() -> None:
         params = _auth_url_params(start.json()["authorization_url"])
         assert params["client_id"] == "custom-client-id"
         assert params["redirect_uri"] == "https://custom.example/callback"
+        assert params["actor"] == "app"
+        assert "app:assignable" in params["scope"]
+        assert "app:mentionable" in params["scope"]
 
 
 @pytest.mark.asyncio
@@ -146,7 +151,8 @@ async def test_callback_stores_installation_and_marks_onboarding() -> None:
         assert "text/html" in callback.headers["content-type"]
         assert "SECRET-token" not in callback.text
 
-        installation = app.state.podium.linear_installations["user_1"]
+        installation = await app.state.podium.get_linear_installation("user_1")
+        assert installation is not None
         assert installation["access_token"] == "SECRET-token"
 
         boot = await client.get("/api/v1/bootstrap")
@@ -164,8 +170,8 @@ async def test_callback_persists_installation_across_app_restart_without_public_
     def fake_exchange(code: str, state: str) -> dict[str, object]:
         return {"access_token": "SECRET-token", "scope": "read,write", "expires_in": 3600}
 
-    store = PgStore()
-    client, _app = app_client(pg_store=store, linear_token_exchange=fake_exchange)
+    store = PodiumStore()
+    client, _app = app_client(store=store, linear_token_exchange=fake_exchange)
     async with client:
         await _register(client)
         start = await client.post("/api/v1/onboarding/linear/start")
@@ -176,7 +182,7 @@ async def test_callback_persists_installation_across_app_restart_without_public_
         )
         assert callback.status_code == 200
 
-    restarted_client, _restarted_app = app_client(pg_store=store)
+    restarted_client, _restarted_app = app_client(store=store)
     async with restarted_client:
         login = await restarted_client.post(
             "/api/v1/auth/login",
@@ -196,14 +202,14 @@ async def test_oauth_callback_consumes_state_created_by_distinct_worker() -> Non
         assert state == oauth_state
         return {"access_token": "SECRET-token", "scope": "read,write", "expires_in": 3600}
 
-    store = PgStore()
-    start_client, _start_app = app_client(pg_store=store)
+    store = PodiumStore()
+    start_client, _start_app = app_client(store=store)
     async with start_client:
         await _register(start_client)
         start = await start_client.post("/api/v1/onboarding/linear/start")
         oauth_state = _auth_url_params(start.json()["authorization_url"])["state"]
 
-    callback_client, callback_app = app_client(pg_store=store, linear_token_exchange=fake_exchange)
+    callback_client, callback_app = app_client(store=store, linear_token_exchange=fake_exchange)
     async with callback_client:
         callback = await callback_client.get(
             "/api/v1/linear/oauth/callback",

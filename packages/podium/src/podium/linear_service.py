@@ -35,6 +35,7 @@ class LinearService:
                 "redirect_uri": creds.redirect_uri or self.redirect_uri,
                 "response_type": "code",
                 "scope": LINEAR_DEFAULT_SCOPE,
+                "actor": "app",
                 "state": state,
                 "prompt": "consent",
             }

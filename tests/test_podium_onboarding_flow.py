@@ -7,7 +7,7 @@ import httpx
 import pytest
 
 from podium.server import PodiumServer
-from podium.store.postgres import PgStore
+from podium.store import PodiumStore
 
 
 async def request(
@@ -90,11 +90,15 @@ async def test_full_onboarding_flow_reaches_complete(tmp_path) -> None:
         cookie = (reg_headers.get("set-cookie") or "").split(";", 1)[0]
         ws = json.loads(reg_body)["user"]["id"]
         # Seed a connected Linear installation for this user's workspace.
-        server.linear_service.installations[ws] = {
-            "workspace_id": ws,
-            "access_token": "secret-linear-token",
-            "scope": "read,write",
-        }
+        await server.app.state.podium.save_linear_installation(
+            ws,
+            {
+                "workspace_id": ws,
+                "access_token": "secret-linear-token",
+                "scope": "read,write",
+                "actor": "app",
+            },
+        )
         auth = {"Cookie": cookie}
 
         # 1. Bootstrap - Linear is already connected in this fixture, so the
@@ -158,7 +162,7 @@ async def test_full_onboarding_flow_reaches_complete(tmp_path) -> None:
         assert status == 200
         runtime_id = json.loads(body)["runtime_id"]
 
-        server.app.state.podium.presence[runtime_id] = "2026-01-01T00:00:00Z"
+        await server.app.state.podium.set_presence(runtime_id)
 
         status, headers, body = await request(port, "GET", "/api/v1/onboarding/runtime/status", headers=auth)
         assert status == 200
@@ -190,8 +194,8 @@ async def test_full_onboarding_flow_reaches_complete(tmp_path) -> None:
 @pytest.mark.asyncio
 async def test_onboarding_state_persists_across_server_restart() -> None:
     """Onboarding progress survives when server instances share the durable store."""
-    store = PgStore()
-    server1 = PodiumServer(secret_key="test-secret", pg_store=store)
+    store = PodiumStore()
+    server1 = PodiumServer(secret_key="test-secret", store=store)
     await server1.start(port=0)
     try:
         _, reg_headers, reg_body = await request(
@@ -207,7 +211,7 @@ async def test_onboarding_state_persists_across_server_restart() -> None:
     finally:
         await server1.stop()
 
-    server2 = PodiumServer(secret_key="test-secret", pg_store=store)
+    server2 = PodiumServer(secret_key="test-secret", store=store)
     await server2.start(port=0)
     try:
         # Log in again to obtain a fresh session for the same user.

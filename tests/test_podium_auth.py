@@ -289,7 +289,7 @@ async def test_debug_auth_me_reuses_internal_session() -> None:
     assert first.status_code == 200
     assert second.status_code == 200
     assert second.json()["user"]["id"] == "debug"
-    assert len(app.state.podium.users) == 1
+    assert await app.state.podium.user_by_id("debug") is not None
 
 
 @pytest.mark.asyncio

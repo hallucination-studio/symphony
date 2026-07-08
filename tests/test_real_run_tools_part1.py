@@ -270,15 +270,16 @@ async def test_real_symphony_e2e_create_issue_accepts_parent_id(monkeypatch) -> 
     assert create_call["variables"]["input"]["parentId"] == "parent-1"
     assert result["issue"]["parent"]["id"] == "parent-1"
 
-def test_real_symphony_e2e_pushes_runtime_config_before_agent_webhook() -> None:
+def test_real_symphony_e2e_pushes_runtime_config_before_waiting_for_poller_dispatch() -> None:
     source = (ROOT / "tools" / "real_symphony_e2e_run.py").read_text(encoding="utf-8")
 
     config_index = source.index('"/api/v1/runtime/config"')
-    webhook_index = source.index('"/api/v1/linear/webhooks/agent-session"')
+    poller_index = source.index('"conductor-dispatch:poller-starts-one-shot"')
 
-    assert config_index < webhook_index
+    assert config_index < poller_index
     assert "build_runtime_config_payload" in source
     assert "runtime-config:podium-pushed" in source
+    assert "/api/v1/linear/webhooks/agent-session" not in source
 
 
 def test_real_symphony_e2e_has_appendix_policy_and_read_only_probes() -> None:
@@ -472,6 +473,8 @@ def test_real_symphony_e2e_overall_dod_combines_required_probes() -> None:
     assert "appendix:s0a-crashed-worker-lease-reclaimed" in source
     assert "PODIUM_LINEAR_APP_ACCESS_TOKEN" in source
     assert "Linear app actor token is required" in source
+    assert "app:assignable" in source
+    assert "app:mentionable" in source
 
 
 def test_real_symphony_e2e_runtime_wait_scenario_enables_permission_probe() -> None:
@@ -823,31 +826,19 @@ def test_real_symphony_e2e_common_has_no_workflow_patch_helpers() -> None:
     assert not hasattr(tool, "patch_workflow")
     assert not hasattr(tool, "patch_e2e_gate_mode")
 
-def test_real_symphony_e2e_simulated_webhook_sets_issue_delegate() -> None:
-    tool = load_tool("real_symphony_e2e")
-    linear = {
-        "issue": {
-            "id": "issue-1",
-            "identifier": "AI-1",
-            "assignee": None,
-            "delegate": None,
-            "agentSessions": {"nodes": []},
-        },
-        "project": {"slugId": "AI"},
-    }
+def test_real_symphony_e2e_run_uses_app_token_and_poller_not_user_token_or_webhook() -> None:
+    source = (ROOT / "tools" / "real_symphony_e2e_run.py").read_text(encoding="utf-8")
 
-    payload = tool.build_agent_session_webhook_payload(
-        linear=linear,
-        workspace_id="workspace-1",
-        agent_app_user_id="agent-1",
-        simulate_agent_webhook=True,
-    )
+    assert 'os.environ.get("PODIUM_LINEAR_APP_ACCESS_TOKEN"' in source
+    assert "PODIUM_LINEAR_APPLICATION_ID" in source
+    assert "PODIUM_LINEAR_POLL_INTERVAL_SECONDS" in source
+    assert "PODIUM_LINEAR_ACCESS_TOKEN" not in source
+    assert "LINEAR_API_KEY" not in source
+    assert "LINEAR_WEBHOOK_SECRET" not in source
+    assert "/api/v1/linear/webhooks/agent-session" not in source
 
-    issue = payload["agentSession"]["issue"]
-    assert issue["delegate"] == {"id": "agent-1"}
-    assert payload["agentSession"]["appUserId"] == "agent-1"
 
-def test_real_symphony_e2e_simulated_instance_payload_does_not_require_real_delegate() -> None:
+def test_real_symphony_e2e_instance_payload_always_requires_delegate_filter() -> None:
     tool = load_tool("real_symphony_e2e")
 
     payload = tool.build_instance_payload(
@@ -856,10 +847,11 @@ def test_real_symphony_e2e_simulated_instance_payload_does_not_require_real_dele
         project_slug="AI",
         agent_app_user_id="agent-1",
         pipeline_gates=False,
-        simulate_agent_webhook=True,
     )
 
-    assert payload["linear_filters"] == {}
+    assert payload["linear_filters"] == {
+        "linear_agent_app_user_id": "agent-1",
+    }
     assert payload["pipeline_profile"] == "default"
     assert "workflow_profile" not in payload
     assert "workflow_inputs" not in payload
@@ -873,7 +865,6 @@ def test_real_symphony_e2e_real_instance_payload_requires_delegate() -> None:
         project_slug="AI",
         agent_app_user_id="agent-1",
         pipeline_gates=True,
-        simulate_agent_webhook=False,
     )
 
     assert payload["linear_filters"] == {
@@ -921,7 +912,7 @@ def test_real_symphony_e2e_enrolls_runtime_with_resolved_project_slug() -> None:
     assert '"project_slug": args.project_slug' not in enrollment_payload
     assert "performer:gate/passed" not in source
 
-async def test_real_symphony_e2e_waits_for_delegate_visibility_before_webhook(monkeypatch) -> None:
+async def test_real_symphony_e2e_waits_for_delegate_visibility_before_poller_dispatch(monkeypatch) -> None:
     tool = load_tool("real_symphony_e2e")
     seen = [
         {"id": "issue-1", "delegate": None, "agentSessions": {"nodes": []}},

@@ -18,9 +18,7 @@ from real_symphony_e2e_analysis import (
     appendix_exit_bar_audit,
     appendix_feature_score_audit,
     audit_expected_failure_run,
-    build_agent_session_webhook_payload,
     build_instance_payload,
-    linear_webhook_signature,
     pipeline_has_conflict_escalation_evidence,
     pipeline_integrations_terminal,
     pipeline_nodes_terminal,
@@ -53,7 +51,9 @@ from real_codex_connectivity_probe import run_probe as run_real_codex_connectivi
 
 CODEX_HOME_SEED_FILES = ("config.toml", "auth.json", "version.json", "models_cache.json")
 CODEX_HOME_SEED_ENV = "SYMPHONY_E2E_CODEX_HOME_SEED"
+LINEAR_AGENT_OAUTH_SCOPE = "read,write,app:assignable,app:mentionable"
 DEFAULT_E2E_HARD_TURN_TIMEOUT_MS = 900_000
+E2E_POSTGRES_IMAGE = "postgres:16-alpine"
 E2E_STAGE_ORDER = (
     "00-archive-old-issues",
     "01-preflight",
@@ -137,15 +137,105 @@ def build_runtime_config_payload(
     }
 
 
+def start_e2e_postgres_if_needed(root: Path, env: dict[str, str], evidence: Evidence) -> str | None:
+    if env.get("PODIUM_DATABASE_URL", "").strip():
+        evidence.check("podium-db:external-url-configured", True)
+        return None
+    port = allocate_port()
+    container_name = f"symphony-e2e-pg-{uuid.uuid4().hex[:12]}"
+    password = uuid.uuid4().hex
+    command = [
+        "docker",
+        "run",
+        "-d",
+        "--rm",
+        "--name",
+        container_name,
+        "-e",
+        "POSTGRES_USER=podium",
+        "-e",
+        f"POSTGRES_PASSWORD={password}",
+        "-e",
+        "POSTGRES_DB=podium",
+        "-p",
+        f"127.0.0.1:{port}:5432",
+        E2E_POSTGRES_IMAGE,
+    ]
+    result = subprocess.run(command, text=True, capture_output=True, timeout=60)
+    (root / "postgres-container.log").write_text(
+        json.dumps(
+            {
+                "container_name": container_name,
+                "port": port,
+                "returncode": result.returncode,
+                "stdout_tail": result.stdout[-500:],
+                "stderr_tail": result.stderr[-500:],
+            },
+            indent=2,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    evidence.artifact("postgres-container", root / "postgres-container.log")
+    evidence.check(
+        "podium-db:ephemeral-postgres-started",
+        result.returncode == 0,
+        container_name=container_name,
+        port=port,
+        image=E2E_POSTGRES_IMAGE,
+        stderr_tail=result.stderr[-500:],
+    )
+    if result.returncode != 0:
+        raise RuntimeError("ephemeral PostgreSQL container failed to start")
+    try:
+        deadline = time.monotonic() + 30
+        ready = False
+        last_stderr = ""
+        while time.monotonic() < deadline:
+            probe = subprocess.run(
+                ["docker", "exec", container_name, "pg_isready", "-U", "podium", "-d", "podium"],
+                text=True,
+                capture_output=True,
+                timeout=10,
+            )
+            if probe.returncode == 0:
+                ready = True
+                break
+            last_stderr = probe.stderr[-500:] or probe.stdout[-500:]
+            time.sleep(0.5)
+        evidence.check(
+            "podium-db:ephemeral-postgres-ready",
+            ready,
+            container_name=container_name,
+            port=port,
+            stderr_tail=last_stderr,
+        )
+        if not ready:
+            raise RuntimeError("ephemeral PostgreSQL container did not become ready")
+    except Exception:
+        stop_e2e_postgres(container_name)
+        raise
+    env["PODIUM_DATABASE_URL"] = f"postgresql://podium:{password}@127.0.0.1:{port}/podium"
+    return container_name
+
+
+def stop_e2e_postgres(container_name: str | None) -> None:
+    if not container_name:
+        return
+    subprocess.run(["docker", "rm", "-f", container_name], text=True, capture_output=True, timeout=30)
+
+
 async def run(args: argparse.Namespace) -> dict[str, Any]:
-    token = os.environ.get("LINEAR_API_KEY", "").strip()
+    token = os.environ.get("PODIUM_LINEAR_APP_ACCESS_TOKEN", "").strip()
     if not token:
-        raise RuntimeError("LINEAR_API_KEY is required")
-    app_actor_token = os.environ.get("PODIUM_LINEAR_APP_ACCESS_TOKEN", "").strip()
-    if not app_actor_token:
         raise RuntimeError(
             "Linear app actor token is required: set PODIUM_LINEAR_APP_ACCESS_TOKEN "
             "to an actor=app OAuth token for Symphony-authored Linear mutations"
+        )
+    agent_app_user_id = os.environ.get("PODIUM_LINEAR_APPLICATION_ID", "").strip()
+    if not agent_app_user_id:
+        raise RuntimeError(
+            "PODIUM_LINEAR_APPLICATION_ID is required and must be the Linear custom-agent app user's id."
         )
     root = args.out.resolve()
     root.mkdir(parents=True, exist_ok=True)
@@ -229,7 +319,6 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
     pipeline_scenario = _pipeline_scenario(args)
     permission_approval_probe = _effective_permission_approval_probe(args)
     workspace_id = f"real-workspace-{run_id}"
-    webhook_secret = f"webhook-{uuid.uuid4().hex}"
     evidence.data["run_id"] = run_id
     evidence.data["pipeline_scenario"] = pipeline_scenario
     evidence.write()
@@ -255,10 +344,12 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
     podium_port = allocate_port()
     conductor_port = allocate_port()
     data_root = root / "conductor-data"
+    postgres_container = start_e2e_postgres_if_needed(root, env, evidence)
     podium_env = dict(env)
-    podium_env["LINEAR_WEBHOOK_SECRET"] = webhook_secret
-    podium_env["PODIUM_LINEAR_ACCESS_TOKEN"] = token
-    podium_env["PODIUM_LINEAR_APP_ACCESS_TOKEN"] = app_actor_token
+    podium_env["PODIUM_LINEAR_APPLICATION_ID"] = agent_app_user_id
+    podium_env["PODIUM_LINEAR_APP_ACCESS_TOKEN"] = token
+    podium_env["PODIUM_LINEAR_POLL_INTERVAL_SECONDS"] = "1"
+    podium_env["PODIUM_LINEAR_POLL_INITIAL_LOOKBACK_SECONDS"] = "86400"
     processes: list[ManagedProcess] = []
     try:
         podium = start_process(
@@ -288,18 +379,11 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
             "slugId": linear_project["slugId"],
             "name": linear_project.get("name"),
         }
-        agent_app_user_id = os.environ.get("LINEAR_AGENT_APP_USER_ID", "").strip()
-        if not agent_app_user_id and not args.simulate_agent_webhook:
-            raise RuntimeError(
-                "LINEAR_AGENT_APP_USER_ID is required for real custom-agent delegation. "
-                "Set it to the Linear app user's id."
-            )
-        agent_app_user_id = agent_app_user_id or "real-e2e-agent-app-user"
         evidence.data["linear_agent_app_user_id"] = agent_app_user_id
         evidence.check(
             "linear-agent:app-user-selected",
             bool(agent_app_user_id),
-            source="LINEAR_AGENT_APP_USER_ID" if os.environ.get("LINEAR_AGENT_APP_USER_ID", "").strip() else "simulated-default",
+            source="PODIUM_LINEAR_APPLICATION_ID",
             viewer={key: viewer.get(key) for key in ["id", "name", "email"]},
         )
         status, enrollment_body = http_json(
@@ -385,16 +469,15 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
             token,
             args.project_slug,
             run_id,
-            delegate_id=agent_app_user_id if not args.simulate_agent_webhook else None,
+            delegate_id=agent_app_user_id,
             description=_pipeline_scenario_issue_description(pipeline_scenario, run_id),
         )
-        if not args.simulate_agent_webhook:
-            linear["issue"] = await delegate_linear_issue(token, linear["issue"]["id"], agent_app_user_id)
-            linear["issue"] = await wait_for_linear_delegate_visible(
-                token,
-                linear["issue"]["id"],
-                agent_app_user_id,
-            )
+        linear["issue"] = await delegate_linear_issue(token, linear["issue"]["id"], agent_app_user_id)
+        linear["issue"] = await wait_for_linear_delegate_visible(
+            token,
+            linear["issue"]["id"],
+            agent_app_user_id,
+        )
         issue_path = root / "business-issue.json"
         issue_path.write_text(json.dumps(linear, indent=2, sort_keys=True), encoding="utf-8")
         evidence.artifact("business_issue", issue_path)
@@ -406,10 +489,9 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
         )
         evidence.check(
             "linear-agent:issue-delegated-to-custom-agent",
-            args.simulate_agent_webhook or ((linear["issue"].get("delegate") or {}).get("id") == agent_app_user_id),
+            ((linear["issue"].get("delegate") or {}).get("id") == agent_app_user_id),
             expected_agent_app_user_id=agent_app_user_id,
             actual_delegate=linear["issue"].get("delegate"),
-            simulated=args.simulate_agent_webhook,
         )
         payload = build_instance_payload(
             run_id=run_id,
@@ -417,13 +499,6 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
             project_slug=linear["project"]["slugId"],
             agent_app_user_id=agent_app_user_id,
             pipeline_gates=args.pipeline_gates,
-            simulate_agent_webhook=args.simulate_agent_webhook,
-        )
-        evidence.check(
-            "linear-agent:simulated-webhook-mode-does-not-verify-real-delegate",
-            not args.simulate_agent_webhook or "linear_agent_app_user_id" not in payload["linear_filters"],
-            simulated=args.simulate_agent_webhook,
-            linear_filters=sorted(payload["linear_filters"].keys()),
         )
         status, body = http_json("POST", api_url(conductor_port, "/api/instances"), payload)
         evidence.check("conductor-api:POST /api/instances", status == 201, status=status)
@@ -538,31 +613,16 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
                 )
             )
 
-        webhook_payload = build_agent_session_webhook_payload(
-            linear=linear,
-            workspace_id=workspace_id,
-            agent_app_user_id=agent_app_user_id,
-            simulate_agent_webhook=args.simulate_agent_webhook,
-        )
-        pipeline_intent = _pipeline_scenario_intent(pipeline_scenario)
-        if pipeline_intent:
-            webhook_payload["pipeline_intent"] = pipeline_intent
-        raw_webhook = json.dumps(webhook_payload).encode()
-        status, body = http_json(
-            "POST",
-            api_url(podium_port, "/api/v1/linear/webhooks/agent-session"),
-            raw_webhook,
-            headers={"Linear-Signature": linear_webhook_signature(webhook_secret, raw_webhook)},
-        )
         evidence.check(
-            "podium-api:/api/v1/linear/webhooks/agent-session queues-dispatch",
-            status == 200 and body.get("queued") == 1,
-            status=status,
-            body=body,
+            "podium-poller:uses-delegated-linear-issue",
+            True,
+            scenario=pipeline_scenario,
+            poller_mode=True,
+            note="polling mode discovers delegated Linear issues through Linear GraphQL",
         )
         dispatch_instance_status = 0
         dispatch_instance_body: dict[str, Any] = {}
-        deadline = time.monotonic() + 20
+        deadline = time.monotonic() + 60
         while time.monotonic() < deadline:
             dispatch_instance_status, dispatch_instance_body = http_json(
                 "GET", api_url(conductor_port, f"/api/instances/{instance_id}")
@@ -572,7 +632,7 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
                 break
             await asyncio.sleep(0.5)
         evidence.check(
-            "conductor-dispatch:agent-session-starts-one-shot",
+            "conductor-dispatch:poller-starts-one-shot",
             dispatch_instance_status == 200
             and dispatch_instance_body.get("instance", {}).get("process_status") in {"running", "exited"},
             status=dispatch_instance_status,
@@ -718,11 +778,10 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
                 )
             evidence.check(
                 "real-flow:linear-agent-app-user-dispatched",
-                args.simulate_agent_webhook or ((issue.get("delegate") or {}).get("id") == agent_app_user_id),
+                ((issue.get("delegate") or {}).get("id") == agent_app_user_id),
                 expected_agent_app_user_id=agent_app_user_id,
                 actual_delegate=issue.get("delegate"),
                 actual_assignee=issue.get("assignee"),
-                simulated=args.simulate_agent_webhook,
             )
             evidence.check("real-flow:workspace-result", result_path.exists(), path=str(result_path))
             evidence.check(
@@ -940,6 +999,7 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
     finally:
         for process in reversed(processes):
             process.stop()
+        stop_e2e_postgres(postgres_container)
     evidence.data["completed_at"] = utc_now()
     evidence.write()
     return evidence.data

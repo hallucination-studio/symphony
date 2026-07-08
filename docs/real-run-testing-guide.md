@@ -217,7 +217,7 @@ Passing local tests is necessary but not sufficient. For orchestration changes, 
 
 ## Podium Web To Linear Acceptance
 
-Use this scenario when changing Podium onboarding, auth/session behavior, runtime enrollment, Conductor reporting, Redis/PG runtime state, dispatch routing, WebSocket wakeups, log streaming, or any code where a browser-created Conductor must receive real Linear work.
+Use this scenario when changing Podium onboarding, auth/session behavior, runtime enrollment, Conductor reporting, PostgreSQL-backed runtime state, dispatch routing, WebSocket wakeups, log streaming, or any code where a browser-created Conductor must receive real Linear work.
 
 This is the required full-flow acceptance path:
 
@@ -225,10 +225,13 @@ This is the required full-flow acceptance path:
 
    ```bash
    set -a && source .env && set +a
-   export PODIUM_LINEAR_ACCESS_TOKEN="$LINEAR_API_KEY"
-   # Required for Symphony-authored comments, child issues, activities, and workflow transitions.
-   # Must be a Linear OAuth token authorized with actor=app, not a human/operator API key.
+   # Required for delegate polling and Symphony-authored comments, child issues,
+   # activities, and workflow transitions.
+   # Must be a Linear OAuth token authorized with actor=app and scopes:
+   # read,write,app:assignable,app:mentionable. Do not use a human/operator API key.
+   export PODIUM_LINEAR_APPLICATION_ID="$YOUR_LINEAR_APP_USER_ID"
    export PODIUM_LINEAR_APP_ACCESS_TOKEN="$YOUR_LINEAR_APP_ACTOR_TOKEN"
+   export PODIUM_LINEAR_POLL_INTERVAL_SECONDS=1
    export PYTHONPATH="$PWD/packages/performer-api/src:$PWD/packages/performer/src:$PWD/packages/conductor/src:$PWD/packages/podium/src"
    .venv/bin/podium --host 127.0.0.1 --port 8090
    ```
@@ -271,12 +274,12 @@ This is the required full-flow acceptance path:
 7. Create a Conductor instance for that repo. Configure it with:
 
    - the target Linear project id or slug;
-   - `linear_agent_app_user_id=$LINEAR_AGENT_APP_USER_ID`;
+   - `linear_agent_app_user_id=$PODIUM_LINEAR_APPLICATION_ID`;
    - a small pipeline goal with a frozen gate that makes one verifiable file change and runs `pytest tests/test_smoke.py -q`.
 
 8. Force or wait for Conductor to report to Podium so the project binding, metrics, and log tail are visible from Podium. A direct local helper such as `ConductorService.post_podium_report()` is acceptable only for reporting local Conductor state upward; it must not fake dispatch, completion, or Linear state.
 
-9. Create one real Linear issue delegated to the same agent app user. Send the real Podium `AgentSessionEvent` webhook for the actual Podium workspace/user id returned by registration. Do not hardcode `user_1`; using the wrong workspace queues work for the wrong user and makes the current user's runs appear empty.
+9. Create one real Linear issue delegated to the same agent app user. Do not inject dispatches or send synthetic events; wait for Podium's delegate poller to observe the issue through Linear GraphQL and enqueue the dispatch for the registered workspace/runtime binding.
 
 10. Let the Conductor and Performer complete the issue. Do not manually move the issue, create comments, acknowledge dispatch rows, or write Podium run completion state.
 
@@ -284,7 +287,7 @@ This is the required full-flow acceptance path:
 
    - Podium Web shows the enrolled runtime and pipeline state after a real browser refresh.
    - `/api/v1/pipeline` for the logged-in user shows the graph revision, mode capacity, attempts, manifests, and terminal integration state.
-   - The Performer log shows the target issue was handled through event-driven dispatch, not a broad project scan.
+   - The Performer log shows the target issue was handled through Podium dispatch, not a broad project scan.
    - The expected file exists with exact content from the pipeline goal.
    - An independent `pytest tests/test_smoke.py -q` passes inside the fixture repo.
    - The Linear issue has the expected handoff/comment evidence and no false failed/verifier labels on a successful run.
@@ -294,9 +297,9 @@ This is the required full-flow acceptance path:
 
 Capture enough evidence for another agent to distinguish a true product run from a hand-wired script:
 
-- Podium backend command, port, env names used, and log excerpt around registration, report, dispatch, and completion.
+- Podium backend command, port, env names used, and log excerpt around registration, report, delegate polling, dispatch, and completion.
 - Podium Web URL plus Chrome MCP screenshot or snapshot of onboarding/runtime/pipeline when UI behavior is in scope.
-- Registered Podium user/workspace id used by the webhook.
+- Registered Podium user/workspace id and runtime binding used by the poller.
 - Enrollment token creation evidence without printing secret token values.
 - Installed Conductor config summary with secret values redacted.
 - Conductor instance id, data root, repo path, pipeline graph id/revision, and log path.
@@ -308,9 +311,9 @@ Capture enough evidence for another agent to distinguish a true product run from
 
 Watch these known failures explicitly:
 
-- Missing `PODIUM_LINEAR_APP_ACCESS_TOKEN` causes Symphony-authored Linear mutations to fail closed with `agent_actor_token_required`; do not substitute a human/operator API key.
-- Missing `PODIUM_LINEAR_ACCESS_TOKEN` causes Podium Linear proxy query fallback requests to fail even when `LINEAR_API_KEY` is set.
-- A webhook with the wrong Podium workspace/user id creates a valid dispatch for another user; the current user's run list remains empty.
+- Missing `PODIUM_LINEAR_APP_ACCESS_TOKEN`, or minting it without `app:assignable` and `app:mentionable`, causes Symphony-authored Linear mutations or custom-agent delegation to fail closed; do not substitute a human/operator API key.
+- Missing `PODIUM_LINEAR_APPLICATION_ID` prevents the delegate poller from starting.
+- Setting only `LINEAR_API_KEY` or `PODIUM_LINEAR_ACCESS_TOKEN` does not authorize the managed path.
 - A fixture that is not a git repository, or lacks the smoke test referenced by the frozen gate, can produce verifier failures that do not prove the product path is broken.
 - Event-driven one-shot work must continue the same `dispatch_issue_id` on retry or resume. It must not fall back to a daemon-wide project scan.
 - Small one-file changes are valid completion evidence when the pipeline gate asks for exactly that; the verifier must not reject them only for being small.
@@ -330,7 +333,7 @@ Important Podium and runtime tests:
 - `tests/test_podium_infra.py`
 - `tests/test_podium_auth.py`
 - `tests/test_podium_onboarding.py`
-- `tests/test_podium.py::test_agent_session_webhook_queues_only_delegated_custom_agent_dispatch_and_runtime_acks`
+- `tests/test_podium_linear_polling.py`
 
 Focused command:
 

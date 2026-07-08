@@ -771,13 +771,6 @@ async def complete_conductor_human_action(
     }
 
 
-def linear_webhook_signature(secret: str, payload: bytes) -> str:
-    import hashlib
-    import hmac
-
-    return hmac.new(secret.encode(), payload, hashlib.sha256).hexdigest()
-
-
 def build_instance_payload(
     *,
     run_id: str,
@@ -785,50 +778,12 @@ def build_instance_payload(
     project_slug: str,
     agent_app_user_id: str,
     pipeline_gates: bool,
-    simulate_agent_webhook: bool,
 ) -> dict[str, Any]:
-    linear_filters: dict[str, Any] = {}
-    if not simulate_agent_webhook:
-        linear_filters["linear_agent_app_user_id"] = agent_app_user_id
     return {
         "name": f"Matrix {run_id}",
         "repo_source_type": "local_path",
         "repo_source_value": str(fixture),
         "linear_project": project_slug,
-        "linear_filters": linear_filters,
+        "linear_filters": {"linear_agent_app_user_id": agent_app_user_id},
         "pipeline_profile": "gated-task" if pipeline_gates else "default",
-    }
-
-
-def build_agent_session_webhook_payload(
-    *,
-    linear: dict[str, Any],
-    workspace_id: str,
-    agent_app_user_id: str,
-    simulate_agent_webhook: bool,
-) -> dict[str, Any]:
-    issue = linear["issue"]
-    linear_agent_sessions = ((issue.get("agentSessions") or {}).get("nodes") or [])
-    linear_agent_session = linear_agent_sessions[0] if linear_agent_sessions else {}
-    delegate = issue.get("delegate")
-    if simulate_agent_webhook:
-        delegate = {"id": agent_app_user_id}
-    return {
-        "type": "AgentSessionEvent",
-        "action": "created",
-        "workspace": {"id": workspace_id},
-        "agentSession": {
-            "id": linear_agent_session.get("id") or f"session-{uuid.uuid4().hex}",
-            "appUserId": agent_app_user_id,
-            "appUser": {"id": agent_app_user_id},
-            "issue": {
-                "id": issue["id"],
-                "identifier": issue["identifier"],
-                "title": issue.get("title") or issue["identifier"],
-                "description": issue.get("description") or "",
-                "project": {"slugId": linear["project"]["slugId"]},
-                "assignee": issue.get("assignee"),
-                "delegate": delegate,
-            },
-        },
     }

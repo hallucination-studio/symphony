@@ -113,9 +113,9 @@ async def test_status_before_and_after_enrollment() -> None:
         assert after.json()["online_count"] == 0
         assert after.json()["token_pending"] is False
 
-        # Seed presence -> online_count reflects it and onboarding step completes.
+        # Seed persisted presence -> online_count reflects it and onboarding step completes.
         app = client._podium_app  # type: ignore[attr-defined]
-        app.state.podium.presence[runtime_id] = "2026-01-01T00:00:00Z"
+        await app.state.podium.set_presence(runtime_id)
 
         online = await client.get("/api/v1/onboarding/runtime/status")
         assert online.json()["online_count"] == 1

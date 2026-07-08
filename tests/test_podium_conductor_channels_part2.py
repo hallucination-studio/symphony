@@ -1,19 +1,23 @@
+import asyncio
+
 from test_podium_conductor_channels_support import *  # noqa: F401,F403
 
-async def test_runtime_presence_reads_redis_owner_across_distinct_workers() -> None:
-    from tests.test_podium_infra import FakePgStore, FakeRedisStore
+async def test_runtime_presence_reads_store_across_distinct_workers() -> None:
+    from podium.store import PodiumStore
 
-    pg_store = FakePgStore()
-    redis_store = FakeRedisStore()
-    enrollment_app = make_app(pg_store=pg_store, redis_store=redis_store)
+    store = PodiumStore()
+    enrollment_app = make_app(store=store)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=enrollment_app), base_url="http://podium.test") as client:
         user_id = await register(client, "presence-worker@example.com")
         enrolled = await enroll_conductor(client)
 
-    await redis_store.set_conductor_owner(enrolled["runtime_id"], "podium-a", ttl_seconds=90)
+    await store.set_presence(
+        enrolled["runtime_id"],
+        timestamp="2026-01-01T00:00:00Z",
+        expires_at="2099-01-01T00:00:00Z",
+    )
 
-    list_app = make_app(pg_store=pg_store, redis_store=redis_store)
-    assert list_app.state.podium.presence == {}
+    list_app = make_app(store=store)
     user = await list_app.state.podium.user_by_id(user_id)
     assert user is not None
     token = await list_app.state.podium.create_session(user_id)
@@ -31,19 +35,19 @@ async def test_runtime_presence_reads_redis_owner_across_distinct_workers() -> N
     assert runtimes.json()["runtimes"][0]["online"] is True
     assert runtimes.json()["conductors"][0]["online"] is True
 
-async def test_runtime_auth_rechecks_postgres_disabled_state_instead_of_memory_cache() -> None:
-    from tests.test_podium_infra import FakePgStore, FakeRedisStore
+async def test_runtime_auth_rechecks_persisted_disabled_state() -> None:
+    from podium.store import PodiumStore
 
-    pg_store = FakePgStore()
-    redis_store = FakeRedisStore()
-    app = make_app(pg_store=pg_store, redis_store=redis_store)
+    store = PodiumStore()
+    app = make_app(store=store)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
         await register(client, "runtime-disabled@example.com")
         enrolled = await enroll_conductor(client)
 
     runtime_id = enrolled["runtime_id"]
-    app.state.podium.runtimes[runtime_id]["disabled"] = False
-    pg_store.conductors[runtime_id]["disabled"] = True
+    conductors = store._load_map("conductors.json")
+    conductors[runtime_id]["disabled"] = True
+    store._write("conductors.json", conductors)
 
     runtime = await app.state.podium.runtime_for_bearer(f"Bearer {enrolled['runtime_token']}")
 
@@ -59,9 +63,9 @@ async def test_dispatch_lease_returns_fencing_token_and_ack_requires_current_tok
             headers={"Authorization": f"Bearer {enrolled['runtime_token']}"},
             json={"bindings": [{"instance_id": "inst-a", "project_slug": "ALPHA", "agent_app_user_id": "agent-alpha"}]},
         )
-        await client.post(
-            "/api/v1/linear/webhooks/agent-session",
-            json=agent_session_payload(workspace_id=user_id, project_slug="ALPHA", delegate_id="agent-alpha"),
+        await queue_agent_session(
+            app,
+            agent_session_payload(workspace_id=user_id, project_slug="ALPHA", delegate_id="agent-alpha"),
         )
 
         lease = await client.post(
@@ -150,35 +154,7 @@ async def test_dispatch_ack_reconcile_has_no_phase_drift_findings() -> None:
             headers={"Authorization": f"Bearer {enrolled['runtime_token']}"},
             json={"bindings": [{"instance_id": "inst-a", "project_slug": "ALPHA", "agent_app_user_id": "agent-alpha"}]},
         )
-        state = app.state.podium
-        state.dispatches["dispatch-1"] = {
-            "dispatch_id": "dispatch-1",
-            "runtime_group_id": enrolled["runtime_group_id"],
-            "project_binding_id": enrolled["runtime_group_id"],
-            "issue_id": "issue-1",
-            "issue_identifier": "ALPHA-1",
-            "linear_workspace_id": "workspace-1",
-            "project_slug": "ALPHA",
-            "agent_session_id": "session-1",
-            "agent_app_user_id": "agent-alpha",
-            "routing_rule_id": enrolled["runtime_group_id"],
-            "pipeline_profile": "default",
-            "status": "completed",
-            "reason": "completed_by_runtime",
-            "graph_id": "graph-1",
-            "node_id": "node-1",
-            "attempt_id": "attempt-1",
-            "mode": "verify",
-            "attempt_status": "succeeded",
-            "graph_revision": 1,
-            "policy_revision": 1,
-            "lease_id": "lease-1",
-            "leased_runtime_id": enrolled["runtime_id"],
-            "leased_until": None,
-            "created_at": "2026-07-04T00:00:00Z",
-        }
-
-        findings = state.reconcile_dispatch_acks()
+        findings = app.state.podium.reconcile_dispatch_acks()
 
     assert findings == []
 
@@ -215,15 +191,15 @@ async def test_linear_proxy_requires_proxy_token_and_audits_requests() -> None:
 
     assert unauthorized.status_code == 401
     assert missing_installation.status_code == 400
-    assert missing_installation.json()["error"]["code"] == "linear_installation_not_found"
+    assert missing_installation.json()["error"]["code"] == "linear_app_token_required"
     assert allowed.status_code == 200
     assert allowed.json() == {"data": {"viewer": {"id": "viewer-1"}}}
     assert seen_authorization == ["oauth-installation-token"]
 
 async def test_linear_proxy_persists_audit_event_when_postgres_is_injected() -> None:
-    from tests.test_podium_infra import FakePgStore
+    from podium.store import PodiumStore
 
-    pg_store = FakePgStore()
+    store = PodiumStore()
 
     def linear_transport(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"data": {"viewer": {"id": "viewer-1"}}})
@@ -232,7 +208,7 @@ async def test_linear_proxy_persists_audit_event_when_postgres_is_injected() -> 
         turnstile_verifier=lambda token, _ip: token == "turnstile-ok",
         secure_cookies=False,
         secret_key="test-secret",
-        pg_store=pg_store,
+        store=store,
         linear_graphql_transport=linear_transport,
     )
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
@@ -251,23 +227,23 @@ async def test_linear_proxy_persists_audit_event_when_postgres_is_injected() -> 
         )
 
     assert proxied.status_code == 200
-    assert pg_store.proxy_audit_events == [
+    assert store._load_list("proxy_audit_events.json") == [
         {
             "runtime_id": enrolled["runtime_id"],
             "allowed": True,
             "operation_name": "Viewer",
             "workspace_id": user_id,
             "token_source": "installation",
-            "timestamp": pg_store.proxy_audit_events[0]["timestamp"],
+            "timestamp": store._load_list("proxy_audit_events.json")[0]["timestamp"],
         }
     ]
-    assert "oauth-installation-token" not in json.dumps(pg_store.proxy_audit_events)
+    assert "oauth-installation-token" not in json.dumps(store._load_list("proxy_audit_events.json"))
 
 async def test_linear_proxy_returns_structured_error_for_corrupt_stored_token() -> None:
-    from tests.test_podium_infra import FakePgStore
+    from podium.store import PodiumStore
 
-    pg_store = FakePgStore()
-    app = make_app(pg_store=pg_store)
+    store = PodiumStore()
+    app = make_app(store=store)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
         user_id = await register(client, "proxy-secret-error@example.com")
         enrolled = await enroll_conductor(client)
@@ -280,7 +256,9 @@ async def test_linear_proxy_returns_structured_error_for_corrupt_stored_token() 
                 "expires_at": None,
             },
         )
-        pg_store.linear_installations[user_id]["access_token_encrypted"] = "not-a-fernet-token"
+        installations = store._load_map("linear_installations.json")
+        installations[user_id]["access_token_encrypted"] = "not-a-fernet-token"
+        store._write("linear_installations.json", installations)
 
         response = await client.post(
             "/api/v1/linear/graphql",
@@ -290,9 +268,9 @@ async def test_linear_proxy_returns_structured_error_for_corrupt_stored_token() 
 
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "secret_decryption_failed"
-    assert pg_store.proxy_audit_events[-1]["reason"] == "secret_decryption_failed"
+    assert store._load_list("proxy_audit_events.json")[-1]["reason"] == "secret_decryption_failed"
 
-async def test_linear_proxy_can_use_environment_access_token_without_workspace_installation(
+async def test_linear_proxy_can_use_environment_app_token_without_workspace_installation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured: dict[str, str | None] = {}
@@ -301,7 +279,7 @@ async def test_linear_proxy_can_use_environment_access_token_without_workspace_i
         captured["authorization"] = request.headers.get("Authorization")
         return httpx.Response(200, json={"data": {"viewer": {"id": "viewer-1"}}})
 
-    monkeypatch.setenv("PODIUM_LINEAR_ACCESS_TOKEN", "operator-linear-token")
+    monkeypatch.setenv("PODIUM_LINEAR_APP_ACCESS_TOKEN", "app-linear-token")
     app = make_app(linear_graphql_transport=linear_transport)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
         await register(client, "env-proxy@example.com")
@@ -314,10 +292,10 @@ async def test_linear_proxy_can_use_environment_access_token_without_workspace_i
 
     assert proxied.status_code == 200
     assert proxied.json() == {"data": {"viewer": {"id": "viewer-1"}}}
-    assert captured["authorization"] == "operator-linear-token"
+    assert captured["authorization"] == "app-linear-token"
 
 
-async def test_linear_proxy_rejects_mutation_when_only_operator_environment_token_exists(
+async def test_linear_proxy_rejects_query_when_only_operator_environment_token_exists(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     called = False
@@ -330,23 +308,21 @@ async def test_linear_proxy_rejects_mutation_when_only_operator_environment_toke
     monkeypatch.setenv("PODIUM_LINEAR_ACCESS_TOKEN", "operator-linear-token")
     app = make_app(linear_graphql_transport=linear_transport)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
-        await register(client, "env-proxy-mutation@example.com")
+        await register(client, "env-proxy-query-token@example.com")
         enrolled = await enroll_conductor(client)
         proxied = await client.post(
             "/api/v1/linear/graphql",
-            json={
-                "operationName": "CommentIssue",
-                "query": "mutation CommentIssue { commentCreate(input: {issueId: \"issue-1\", body: \"x\"}) { success } }",
-            },
+            json={"operationName": "Viewer", "query": "query Viewer { viewer { id } }"},
             headers={"Authorization": f"Bearer {enrolled['proxy_token']}"},
         )
 
     assert proxied.status_code == 400
-    assert proxied.json()["error"]["code"] == "agent_actor_token_required"
+    assert proxied.json()["error"]["code"] == "linear_app_token_required"
     assert called is False
 
 def test_runtime_ws_presence_dispatch_wakeup_and_log_fetch_roundtrip() -> None:
-    with TestClient(make_app()) as client:
+    app = make_app()
+    with TestClient(app) as client:
         register_response = client.post(
             "/api/v1/auth/register",
             json={"email": "ws@example.com", "password": "correct-horse", "turnstile_token": "turnstile-ok"},
@@ -368,10 +344,11 @@ def test_runtime_ws_presence_dispatch_wakeup_and_log_fetch_roundtrip() -> None:
             ws.send_json({"type": "hello"})
             assert ws.receive_json()["type"] == "ping"
 
-            queued = client.post(
-                "/api/v1/linear/webhooks/agent-session",
-                content=json.dumps(agent_session_payload(workspace_id=user_id, project_slug="ALPHA", delegate_id="agent-alpha")).encode(),
-                headers={"Content-Type": "application/json", "Linear-Signature": "ignored"},
+            queued = asyncio.run(
+                queue_agent_session(
+                    app,
+                    agent_session_payload(workspace_id=user_id, project_slug="ALPHA", delegate_id="agent-alpha"),
+                )
             )
             assert queued.status_code == 200
             wakeup = ws.receive_json()

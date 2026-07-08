@@ -26,11 +26,9 @@ class PodiumServer:
         linear_client_id: str = "",
         linear_client_secret: str = "",
         linear_redirect_uri: str = "",
-        linear_webhook_secret: str = "",
         linear_graphql_transport: Callable[..., Any] | None = None,
         podium_base_url: str = "https://podium.example",
-        pg_store: Any | None = None,
-        redis_store: Any | None = None,
+        store: Any | None = None,
         config: PodiumConfig | None = None,
         debug_auth: bool = False,
     ) -> None:
@@ -39,15 +37,13 @@ class PodiumServer:
         self.linear_client_id = linear_client_id
         self.linear_client_secret = linear_client_secret
         self.linear_redirect_uri = linear_redirect_uri
-        self.linear_webhook_secret = linear_webhook_secret
         self.linear_graphql_transport = linear_graphql_transport
         self.podium_base_url = podium_base_url
-        self.pg_store = pg_store
-        self.redis_store = redis_store
+        self.state_store = store or PodiumStore(data_dir=data_dir)
         self.config = config or PodiumConfig.from_env()
         self.debug_auth = debug_auth
         self.port: int | None = None
-        self.store = PodiumStore(data_dir=data_dir)
+        self.store = self.state_store
         self.auth_service = AuthService(self.store, secret_key) if secret_key.strip() else None
         self.runtime_service = RuntimeService(self.store)
         self.linear_service = LinearService(
@@ -64,7 +60,6 @@ class PodiumServer:
             self.app = create_app(
                 turnstile_verifier=lambda _token, _ip: True,
                 secure_cookies=False,
-                linear_webhook_secret=self.linear_webhook_secret,
                 static_dir=None,
                 data_dir=self.data_dir,
                 secret_key="",
@@ -74,8 +69,7 @@ class PodiumServer:
                 linear_scope_fetch=None,
                 linear_graphql_transport=self.linear_graphql_transport,
                 podium_base_url=self.podium_base_url,
-                pg_store=self.pg_store,
-                redis_store=self.redis_store,
+                store=self.state_store,
                 config=self.config,
                 debug_auth=self.debug_auth,
             )
@@ -83,7 +77,6 @@ class PodiumServer:
             self.app = create_app(
                 turnstile_verifier=lambda _token, _ip: True,
                 secure_cookies=False,
-                linear_webhook_secret=self.linear_webhook_secret,
                 static_dir=None,
                 data_dir=self.data_dir,
                 secret_key=self.secret_key,
@@ -93,12 +86,10 @@ class PodiumServer:
                 linear_scope_fetch=None,
                 linear_graphql_transport=self.linear_graphql_transport,
                 podium_base_url=self.podium_base_url,
-                pg_store=self.pg_store,
-                redis_store=self.redis_store,
+                store=self.state_store,
                 config=self.config,
                 debug_auth=self.debug_auth,
             )
-        self.linear_service.installations = self.app.state.podium.linear_installations
         self.app.state.podium.server_wrapper = self
         if self.auth_service is not None:
             self.app.state.podium.session_ttl = self.auth_service.session_ttl
@@ -129,8 +120,8 @@ class PodiumServer:
 
     def _resolve_linear_credentials(self, workspace_id: str) -> LinearCredentials:
         user = None
-        if self.app is not None:
-            user = self.app.state.podium.users.get(workspace_id)
+        if isinstance(self.state_store, PodiumStore):
+            user = self.state_store._load_map("users.json").get(workspace_id)
         custom = user.get("linear_app") if isinstance(user, dict) else None
         if custom:
             if self.auth_service is None:

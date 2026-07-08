@@ -1784,7 +1784,7 @@ def test_real_symphony_e2e_wait_artifacts_are_written_on_early_exit(tmp_path: Pa
         ops_path=ops_path,
         last_ops={},
         log_path=tmp_path / "performer.log",
-        stages={"webhook_queued": "2026-07-04T00:00:00Z"},
+        stages={"poller_queued": "2026-07-04T00:00:00Z"},
         stage_timeout_seconds=60,
     )
 

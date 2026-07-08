@@ -2,7 +2,7 @@
 
 Symphony is one orchestration system for running coding agents as an "orchestra":
 
-- **Podium** is the managed SaaS control plane. It owns auth, Linear app/OAuth state, runtime enrollment, dispatch queueing, webhooks, and the Linear proxy.
+- **Podium** is the managed SaaS control plane. It owns auth, Linear app/OAuth state, runtime enrollment, delegated-issue polling, dispatch queueing, and the Linear proxy.
 - **Conductor** is the customer-side local daemon. It owns local instance metadata, connects outbound to Podium as an enrolled runtime, leases dispatches, starts/stops Performers, and reports local state.
 - **Performer** is the execution worker. It runs short-lived `plan`, `execute`, or `verify` attempts from Conductor-owned attempt request files.
 - **performer-api** contains the shared contracts that let those roles speak the same language without cross-importing each other's runtime code.
@@ -15,7 +15,7 @@ surface, and Performer only runs fenced per-mode attempts. In managed mode the
 flow is:
 
 1. A Linear issue is delegated to the Symphony custom agent.
-2. Linear sends an AgentSession webhook to Podium.
+2. Podium polls Linear for issues delegated to the configured Symphony application id.
 3. Podium matches the delegated custom agent, project, and runtime group, then queues a dispatch.
 4. Conductor leases the dispatch over outbound runtime auth.
 5. Conductor commits or resumes a durable pipeline graph and starts short-lived Performer workers in `plan`, `execute`, or `verify` mode.
@@ -28,7 +28,7 @@ gate snapshots, verification input snapshots, task output manifests, pipeline
 view DTOs, and deterministic `PlanValidator` semantics. Conductor persists graph
 revisions, nodes, blocks edges, frozen gates, worker leases, verification input
 snapshots, and verified task output manifests in its pipeline store. Managed
-dispatch does not create orchestration phase runs, poll Linear directly, apply
+Conductor dispatch does not create orchestration phase runs, poll Linear directly, apply
 phase result files, or project `performer:phase/*` labels as scheduling truth.
 
 Performer accepts only managed one-shot mode attempts:
@@ -135,12 +135,12 @@ Current API surface includes:
 - `POST /api/v1/runtime/config`
 - `GET /api/v1/runtime/config`
 - `GET /api/v1/pipeline`
-- `POST /api/v1/linear/webhooks/agent-session`
 - `POST /api/v1/linear/graphql`
 
 Run it with:
 
 ```bash
+export PODIUM_DATABASE_URL=postgresql://podium@localhost/podium
 .venv/bin/podium api --host 127.0.0.1 --port 8090
 ```
 
@@ -239,7 +239,7 @@ When `worker.ssh_hosts` is omitted, work runs locally. When configured, Performe
 make test
 ```
 
-Real Linear integration checks are skipped by default. To run the managed custom-agent E2E, source a local `.env` that contains an operator Linear token for the harness and `LINEAR_AGENT_APP_USER_ID` for the installed custom agent:
+Real Linear integration checks are skipped by default. To run the managed custom-agent E2E, source a local `.env` that contains `PODIUM_LINEAR_APPLICATION_ID` and `PODIUM_LINEAR_APP_ACCESS_TOKEN` for the installed custom agent. Do not use a human/operator Linear token for this path:
 
 ```bash
 set -a && source .env && set +a

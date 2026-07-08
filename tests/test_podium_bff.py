@@ -66,12 +66,16 @@ async def _auth(server: PodiumServer, *, linear_token: str | None = "secret-line
     cookie = (headers.get("set-cookie") or "").split(";", 1)[0]
     workspace_id = json.loads(body)["user"]["id"]
     if linear_token is not None:
-        server.linear_service.installations[workspace_id] = {
-            "workspace_id": workspace_id,
-            "access_token": linear_token,
-            "scope": "read,write",
-            "app_user_id": "app-1",
-        }
+        await server.app.state.podium.save_linear_installation(
+            workspace_id,
+            {
+                "workspace_id": workspace_id,
+                "access_token": linear_token,
+                "scope": "read,write",
+                "actor": "app",
+                "app_user_id": "app-1",
+            },
+        )
     return workspace_id, cookie
 
 
@@ -370,8 +374,12 @@ async def test_runtime_enroll_over_http_brings_runtime_online() -> None:
         runtime_id = enrolled["runtime_id"]
         assert runtime_id
 
-        server.app.state.podium.runtimes[runtime_id]["version"] = "1.2.3"
-        server.app.state.podium.presence[runtime_id] = "2026-01-01T00:00:00Z"
+        runtime = await server.app.state.podium.store.get_runtime(runtime_id)
+        conductor_rows = server.app.state.podium.store._load_map("conductors.json")
+        conductor_rows[runtime_id]["version"] = "1.2.3"
+        server.app.state.podium.store._write("conductors.json", conductor_rows)
+        assert runtime is not None
+        await server.app.state.podium.set_presence(runtime_id)
         # The workspace now reports an online runtime once presence is observed.
         status, _, status_body = await request(
             server.port,
@@ -551,17 +559,21 @@ async def test_runtimes_list_returns_online_status() -> None:
     try:
         ws, cookie = await _auth(server)
         group_id = f"group_{ws}"
-        server.app.state.podium.runtime_groups[group_id] = {"id": group_id}
-        server.app.state.podium.runtimes["rt-1"] = {
+        await server.app.state.podium.store.upsert_runtime_group(
+            {"id": group_id, "linear_workspace_id": ws, "pipeline_profile": "default"}
+        )
+        await server.app.state.podium.store.upsert_conductor({
             "id": "rt-1",
+            "conductor_id": "rt-1",
+            "user_id": ws,
             "runtime_group_id": group_id,
             "runtime_token_hash": "",
             "proxy_token_hash": "",
             "disabled": False,
             "revoked": False,
             "created_at": "2026-01-01T00:00:00Z",
-        }
-        server.app.state.podium.presence["rt-1"] = "2026-01-01T00:00:00Z"
+        })
+        await server.app.state.podium.set_presence("rt-1")
         status, _, body = await request(
             server.port, "GET", "/api/v1/runtimes", headers={"Cookie": cookie}
         )

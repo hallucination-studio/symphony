@@ -10,7 +10,7 @@ import uvicorn
 
 from .app import create_app
 from .config import PodiumConfig
-from .store import PgStore, RedisStore
+from .store import PgStore
 
 
 def env_flag(name: str) -> bool:
@@ -39,17 +39,13 @@ def main(argv: list[str] | None = None) -> int:
 async def async_main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     config = PodiumConfig.from_env()
-    pg_store = None
-    redis_store = None
-    if config.database_url:
-        pg_store = await PgStore.connect(config.database_url)
-        await pg_store.migrate()
-    if config.redis_url:
-        redis_store = RedisStore(redis_url=config.redis_url)
+    if not config.database_url:
+        raise RuntimeError("podium_database_url_required")
+    store = await PgStore.connect(config.database_url)
+    await store.migrate()
     default_static = Path(__file__).resolve().parent / "static"
     app = create_app(
         session_cookie_name=os.environ.get("PODIUM_SESSION_COOKIE_NAME", "podium_session"),
-        linear_webhook_secret=os.environ.get("LINEAR_WEBHOOK_SECRET", ""),
         static_dir=str(default_static) if default_static.exists() else None,
         data_dir=os.environ.get("PODIUM_DATA_DIR"),
         secret_key=os.environ.get("PODIUM_SECRET_KEY", ""),
@@ -57,8 +53,7 @@ async def async_main(argv: list[str] | None = None) -> int:
         linear_client_secret=os.environ.get("LINEAR_CLIENT_SECRET", ""),
         linear_redirect_uri=os.environ.get("LINEAR_REDIRECT_URI", ""),
         podium_base_url=os.environ.get("PODIUM_BASE_URL", "https://podium.example"),
-        pg_store=pg_store,
-        redis_store=redis_store,
+        store=store,
         config=config,
         debug_auth=env_flag("PODIUM_DEBUG_AUTH"),
     )
@@ -67,12 +62,8 @@ async def async_main(argv: list[str] | None = None) -> int:
         server = uvicorn.Server(config)
         await server.serve()
     finally:
-        if redis_store is not None:
-            with contextlib.suppress(asyncio.CancelledError):
-                await redis_store.close()
-        if pg_store is not None:
-            with contextlib.suppress(asyncio.CancelledError):
-                await pg_store.close()
+        with contextlib.suppress(asyncio.CancelledError):
+            await store.close()
     return 0
 
 

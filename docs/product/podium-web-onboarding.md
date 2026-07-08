@@ -3,7 +3,7 @@
 ## Goal
 
 Podium Web should guide a user from an empty account to a working Linear-powered
-runtime without requiring them to understand OAuth, webhooks, or local daemon
+runtime without requiring them to understand OAuth, delegate polling, or local daemon
 configuration.
 
 ## Onboarding Steps
@@ -94,7 +94,7 @@ can stop at Linear proxy read/write and runtime dispatch readiness.
 - authorized workspace
 - OAuth scopes
 - token refresh health
-- webhook health
+- delegate poller health
 - reconnect/revoke actions
 
 ### Runtimes
@@ -132,7 +132,7 @@ can stop at Linear proxy read/write and runtime dispatch readiness.
 Podium should turn setup failures into direct operator actions:
 
 - Linear OAuth failed: reconnect Linear
-- webhook delivery failed: verify public Podium URL and Linear webhook secret
+- delegate polling failed: verify the Linear application id, app actor token, and project binding
 - runtime offline: restart service or reinstall runtime
 - version outdated: update runtime
 - proxy denied: rotate runtime token or re-enroll runtime
@@ -145,5 +145,5 @@ The user should experience Symphony as:
 > Connect Linear, install a local runtime, choose a project, and let Podium route
 > work.
 
-They should not need to understand where OAuth tokens are stored, how webhook
-signatures work, or which internal process runs Performer.
+They should not need to understand where OAuth tokens are stored, how delegate
+polling works, or which internal process runs Performer.

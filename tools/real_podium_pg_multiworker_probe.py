@@ -9,6 +9,7 @@ from typing import Any
 import httpx
 
 from podium.app import create_app
+from podium.linear_polling import LinearDelegatePoller
 from podium.store.postgres import PgStore
 
 
@@ -17,7 +18,7 @@ def _app(pg_store: PgStore) -> Any:
         turnstile_verifier=lambda token, _ip: token == "turnstile-ok",
         secure_cookies=False,
         secret_key="real-pg-multiworker-probe",
-        pg_store=pg_store,
+        store=pg_store,
     )
 
 
@@ -45,23 +46,6 @@ async def _enroll(client: httpx.AsyncClient) -> dict[str, Any]:
     return dict(enrolled.json())
 
 
-def _agent_session_payload(*, workspace_id: str) -> dict[str, Any]:
-    return {
-        "type": "AgentSessionEvent",
-        "workspace": {"id": workspace_id},
-        "agentSession": {
-            "id": "pg-multiworker-session-1",
-            "appUserId": "agent-alpha",
-            "issue": {
-                "id": "pg-multiworker-issue-1",
-                "identifier": "ALPHA-1",
-                "project": {"slugId": "ALPHA"},
-                "delegate": {"id": "agent-alpha"},
-            },
-        },
-    }
-
-
 async def run_probe(args: argparse.Namespace) -> dict[str, Any]:
     store = await PgStore.connect(args.database_url)
     try:
@@ -87,17 +71,48 @@ async def run_probe(args: argparse.Namespace) -> dict[str, Any]:
             )
             report.raise_for_status()
 
-        webhook_app = _app(store)
-        webhook_started_empty = (
-            webhook_app.state.podium.runtime_groups == {}
-            and webhook_app.state.podium.project_bindings == {}
+        poller_app = _app(store)
+        poller_started_empty = (
+            poller_app.state.podium.runtime_groups == {}
+            and poller_app.state.podium.project_bindings == {}
         )
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=webhook_app), base_url="http://podium.test") as client:
-            queued = await client.post(
-                "/api/v1/linear/webhooks/agent-session",
-                json=_agent_session_payload(workspace_id=user_id),
+
+        def linear_transport(request: httpx.Request) -> httpx.Response:
+            payload = json.loads(request.content.decode("utf-8"))
+            if payload.get("variables", {}).get("projectSlug") != "ALPHA":
+                return httpx.Response(400, json={"errors": [{"message": "wrong project"}]})
+            if payload.get("variables", {}).get("delegateId") != "agent-alpha":
+                return httpx.Response(400, json={"errors": [{"message": "wrong delegate"}]})
+            return httpx.Response(
+                200,
+                json={
+                    "data": {
+                        "issues": {
+                            "nodes": [
+                                {
+                                    "id": "pg-multiworker-issue-1",
+                                    "identifier": "ALPHA-1",
+                                    "title": "PG multiworker poll probe",
+                                    "description": "Prove poller dispatch is durable.",
+                                    "updatedAt": "2026-07-08T00:00:00Z",
+                                    "project": {"slugId": "ALPHA"},
+                                    "delegate": {"id": "agent-alpha"},
+                                    "parent": None,
+                                    "inverseRelations": {"nodes": []},
+                                }
+                            ]
+                        }
+                    }
+                },
             )
-            queued.raise_for_status()
+
+        queued = await LinearDelegatePoller(
+            store=poller_app.state.podium.store,
+            application_id="agent-alpha",
+            app_token="app-token",
+            transport=linear_transport,
+            initial_lookback_seconds=86_400,
+        ).poll_once()
 
         lease_app = _app(store)
         lease_started_empty = lease_app.state.podium.runtimes == {} and lease_app.state.podium.runtime_groups == {}
@@ -113,19 +128,19 @@ async def run_probe(args: argparse.Namespace) -> dict[str, Any]:
         summary = {
             "pass": bool(
                 report.json().get("bindings_upserted") == 1
-                and queued.json().get("queued") == 1
+                and queued.get("queued") == 1
                 and isinstance(dispatch, dict)
                 and dispatch.get("project_binding_id") == binding_id
                 and dispatch.get("fencing_token") == 1
-                and webhook_started_empty
+                and poller_started_empty
                 and lease_started_empty
             ),
             "runtime_id": enrolled["runtime_id"],
             "binding_id": binding_id,
             "report_bindings_upserted": report.json().get("bindings_upserted"),
-            "queued": queued.json().get("queued"),
+            "queued": queued.get("queued"),
             "leased_dispatch": dispatch,
-            "webhook_worker_started_without_memory": webhook_started_empty,
+            "poller_worker_started_without_memory": poller_started_empty,
             "lease_worker_started_without_memory": lease_started_empty,
         }
     finally:

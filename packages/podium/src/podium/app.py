@@ -17,13 +17,15 @@ from fastapi import FastAPI, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 from .config import PodiumConfig
+from .linear_polling import LinearDelegatePoller, run_linear_delegate_poll_loop
 from .podium_dispatch import PodiumDispatchMixin
 from .podium_install import render_install_script
 from .podium_oauth import PodiumOAuthMixin
 from .podium_routes_runtime import register_runtime_routes
 from .podium_runtime import PodiumRuntimeMixin
 from .podium_shared import utc_now_iso
-from .podium_state import InMemoryPodiumBusinessState, PodiumStateBaseMixin, SecretDecryptionError
+from .podium_state import PodiumStateBaseMixin, SecretDecryptionError
+from .store import PodiumStore
 
 
 TurnstileVerifier = Callable[[str, str | None], bool]
@@ -31,7 +33,7 @@ TurnstileVerifier = Callable[[str, str | None], bool]
 LINEAR_AUTHORIZE_URL = "https://linear.app/oauth/authorize"
 LINEAR_TOKEN_URL = "https://api.linear.app/oauth/token"
 LINEAR_GRAPHQL_URL = "https://api.linear.app/graphql"
-LINEAR_DEFAULT_SCOPE = "read,write"
+LINEAR_DEFAULT_SCOPE = "read,write,app:assignable,app:mentionable"
 LINEAR_SCOPE_QUERY = "query { teams { nodes { id name key } } projects { nodes { id name } } }"
 
 LINEAR_SUCCESS_HTML = (
@@ -50,7 +52,6 @@ def create_app(
     turnstile_verifier: TurnstileVerifier | None = None,
     secure_cookies: bool = True,
     session_cookie_name: str = "podium_session",
-    linear_webhook_secret: str = "",
     static_dir: str | Path | None = None,
     data_dir: str | Path | None = None,
     secret_key: str = "",
@@ -61,8 +62,7 @@ def create_app(
     linear_scope_fetch: Callable[[str, str], dict[str, Any]] | None = None,
     linear_graphql_transport: Callable[[httpx.Request], Any] | None = None,
     podium_base_url: str = "https://podium.example",
-    pg_store: Any | None = None,
-    redis_store: Any | None = None,
+    store: Any | None = None,
     config: PodiumConfig | None = None,
     debug_auth: bool = False,
 ) -> FastAPI:
@@ -70,14 +70,12 @@ def create_app(
         turnstile_verifier=turnstile_verifier or verify_turnstile_with_cloudflare,
         session_cookie_name=session_cookie_name,
         secure_cookies=secure_cookies,
-        linear_webhook_secret=linear_webhook_secret,
         secret_key=secret_key,
         linear_client_id=linear_client_id,
         linear_client_secret=linear_client_secret,
         linear_redirect_uri=linear_redirect_uri,
         data_dir=data_dir,
-        pg_store=pg_store,
-        redis_store=redis_store,
+        store=store or PodiumStore(data_dir=data_dir),
         config=config or PodiumConfig.from_env(),
         debug_auth=debug_auth,
     )
@@ -85,19 +83,27 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         app.state.dispatch_reaper_task = asyncio.create_task(_dispatch_lease_reaper_loop(app))
+        app.state.linear_delegate_poller_task = _start_linear_delegate_poller(
+            state,
+            linear_graphql_transport=linear_graphql_transport,
+        )
         try:
             yield
         finally:
-            task = getattr(app.state, "dispatch_reaper_task", None)
-            if task is not None:
+            for task_name in ("linear_delegate_poller_task", "dispatch_reaper_task"):
+                task = getattr(app.state, task_name, None)
+                if task is None:
+                    continue
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
+                setattr(app.state, task_name, None)
             app.state.dispatch_reaper_task = None
 
     app = FastAPI(title="Symphony Podium", lifespan=lifespan)
     app.state.podium = state
     app.state.dispatch_reaper_task = None
+    app.state.linear_delegate_poller_task = None
     static_root = Path(static_dir).resolve() if static_dir else None
     index_file = static_root / "index.html" if static_root else None
 
@@ -198,7 +204,7 @@ def create_app(
         user = await state.user_for_session(podium_session or "")
         if user is None:
             if state.debug_auth:
-                user = state.ensure_debug_user()
+                user = await state.ensure_debug_user()
                 session_token = await state.create_session(str(user["id"]))
                 json_response = JSONResponse({"user": public_user(user)})
                 state.set_session_cookie(json_response, session_token)
@@ -212,11 +218,9 @@ def create_app(
         if user is None:
             return error_response(401, "unauthorized", "Unauthorized")
         user_id = str(user["id"])
-        await state.load_onboarding_state(user_id)
         if await state.get_linear_installation(user_id) is not None:
-            state.mark_linear_connected(user_id)
-            await state.persist_onboarding_state(user_id)
-        return JSONResponse(state.onboarding_progress(user_id))
+            await state.mark_linear_connected(user_id)
+        return JSONResponse(await state.onboarding_progress(user_id))
 
     @app.post("/api/v1/onboarding/scope")
     async def onboarding_scope(request: Request) -> JSONResponse:
@@ -225,9 +229,7 @@ def create_app(
             return error_response(401, "unauthorized", "Unauthorized")
         payload = await request.json()
         user_id = str(user["id"])
-        await state.load_onboarding_state(user_id)
-        progress = state.save_onboarding_scope(user_id, payload.get("teams"), payload.get("projects"))
-        await state.persist_onboarding_state(user_id)
+        progress = await state.save_onboarding_scope(user_id, payload.get("teams"), payload.get("projects"))
         return JSONResponse({"onboarding": progress})
 
     @app.post("/api/v1/onboarding/repository")
@@ -237,7 +239,6 @@ def create_app(
             return error_response(401, "unauthorized", "Unauthorized")
         payload = await request.json()
         user_id = str(user["id"])
-        await state.load_onboarding_state(user_id)
         mode = str(payload.get("mode") or "")
         value = str(payload.get("value") or "")
         if mode not in {"local_path", "git_url"}:
@@ -245,8 +246,7 @@ def create_app(
         validation_state = "valid"
         if mode == "git_url" and not value.startswith(("https://", "git@")):
             validation_state = "invalid"
-        progress = state.save_onboarding_repository(user_id, mode, value)
-        await state.persist_onboarding_state(user_id)
+        progress = await state.save_onboarding_repository(user_id, mode, value)
         return JSONResponse(
             {
                 "onboarding": progress,
@@ -266,9 +266,7 @@ def create_app(
             "timestamp": utc_now_iso(),
         }
         user_id = str(user["id"])
-        await state.load_onboarding_state(user_id)
-        state.set_smoke_result(user_id, result)
-        await state.persist_onboarding_state(user_id)
+        await state.set_smoke_result(user_id, result)
         return JSONResponse(result)
 
     @app.get("/api/v1/onboarding/smoke-check/result")
@@ -277,8 +275,7 @@ def create_app(
         if user is None:
             return error_response(401, "unauthorized", "Unauthorized")
         user_id = str(user["id"])
-        await state.load_onboarding_state(user_id)
-        result = state.get_smoke_result(user_id)
+        result = await state.get_smoke_result(user_id)
         if result is None:
             return error_response(404, "smoke_result_not_found", "No smoke result recorded")
         return JSONResponse(result)
@@ -289,14 +286,12 @@ def create_app(
         if user is None:
             return error_response(401, "unauthorized", "Unauthorized")
         user_id = str(user["id"])
-        await state.load_onboarding_state(user_id)
         if await state.get_linear_installation(user_id) is not None:
-            state.mark_linear_connected(user_id)
-            await state.persist_onboarding_state(user_id)
+            await state.mark_linear_connected(user_id)
         return JSONResponse(
             {
                 "session": {"workspace_id": user_id, "user_id": user_id, "email": str(user["email"])},
-                "onboarding": state.onboarding_progress(user_id),
+                "onboarding": await state.onboarding_progress(user_id),
                 "linear": await state.linear_status(user_id),
             }
         )
@@ -404,8 +399,7 @@ def create_app(
                 "expires_at": expires_at,
             },
         )
-        state.mark_linear_connected(workspace_id)
-        await state.persist_onboarding_state(workspace_id)
+        await state.mark_linear_connected(workspace_id)
         return HTMLResponse(LINEAR_SUCCESS_HTML)
 
     @app.get("/api/v1/onboarding/linear/scope")
@@ -462,23 +456,46 @@ def create_app(
     return app
 
 
+def _start_linear_delegate_poller(
+    state: Any,
+    *,
+    linear_graphql_transport: Callable[[httpx.Request], Any] | None,
+) -> asyncio.Task[Any] | None:
+    config = state.config
+    application_id = str(getattr(config, "linear_application_id", "") or "").strip()
+    app_token = str(getattr(config, "linear_app_access_token", "") or "").strip()
+    if not application_id or not app_token:
+        return None
+    poller = LinearDelegatePoller(
+        store=state.store,
+        application_id=application_id,
+        app_token=app_token,
+        transport=linear_graphql_transport,
+        page_size=int(getattr(config, "linear_poll_page_size", 50) or 50),
+        initial_lookback_seconds=int(getattr(config, "linear_poll_initial_lookback_seconds", 86_400) or 86_400),
+    )
+    return asyncio.create_task(
+        run_linear_delegate_poll_loop(
+            poller,
+            interval_seconds=float(getattr(config, "linear_poll_interval_seconds", 15) or 15),
+        )
+    )
+
+
 @dataclass
 class ManagedPodiumState(PodiumStateBaseMixin, PodiumOAuthMixin, PodiumRuntimeMixin, PodiumDispatchMixin):
     turnstile_verifier: TurnstileVerifier
     session_cookie_name: str
     secure_cookies: bool
-    linear_webhook_secret: str = ""
     secret_key: str = ""
     data_dir: str | Path | None = None
     linear_client_id: str = ""
     linear_client_secret: str = ""
     linear_redirect_uri: str = ""
     password_hasher: PasswordHasher = field(default_factory=PasswordHasher)
-    pg_store: Any | None = None
-    redis_store: Any | None = None
+    store: Any | None = None
     config: PodiumConfig = field(default_factory=PodiumConfig.from_env)
     debug_auth: bool = False
-    durable: Any = field(default_factory=lambda: InMemoryPodiumBusinessState())
 
 
 async def verify_turnstile_with_cloudflare(token: str, ip: str | None) -> bool:

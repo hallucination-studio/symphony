@@ -14,7 +14,6 @@ they should not receive Linear OAuth access or refresh tokens.
 
 - Linear OAuth access token
 - Linear OAuth refresh token
-- Linear webhook signing secret
 - runtime enrollment token hashes
 - runtime credential material
 - Linear proxy token mapping
@@ -58,12 +57,11 @@ Runtime enrollment tokens should be:
 After enrollment, Podium issues runtime credentials and invalidates the
 enrollment token.
 
-## Webhook Verification
+## Delegate Polling
 
-Podium must verify every Linear webhook signature before parsing it as a trusted
-event.
-
-Invalid signatures and malformed JSON should be rejected before dispatch.
+Podium polls Linear for delegated issues with the configured application id and
+app actor token. Poll cursors, last success time, and sanitized poll errors are
+durable state so a worker restart cannot duplicate or hide failures.
 
 ## Update Security
 

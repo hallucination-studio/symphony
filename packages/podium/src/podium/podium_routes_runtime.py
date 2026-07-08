@@ -1,10 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
-import hashlib
-import hmac
-import inspect
 import json
 import os
 import secrets
@@ -17,18 +13,7 @@ from fastapi.responses import JSONResponse
 from performer_api.pipeline import RuntimeConfigEnvelope
 
 from .podium_install import shlex_quote
-from .podium_shared import (
-    dispatch_belongs_to_workspace,
-    dispatch_public,
-    hash_secret,
-    optional_int,
-    query_bool,
-    run_public,
-    runtime_belongs_to_workspace,
-    runtime_public,
-    sanitize_runtime_config,
-    utc_now_iso,
-)
+from .podium_shared import dispatch_public, hash_secret, optional_int, query_bool, runtime_public, sanitize_runtime_config, utc_now_iso
 from .podium_state import SecretDecryptionError
 
 
@@ -45,20 +30,67 @@ def register_runtime_routes(
     linear_graphql_transport: Callable[[httpx.Request], Any] | None,
     error_response: ErrorResponse,
 ) -> None:
-    def group_for_workspace(workspace_id: str) -> str:
+    async def group_for_workspace(workspace_id: str) -> str:
         group_id = f"group_{workspace_id}"
-        state.runtime_groups.setdefault(
-            group_id,
-            {
-                "id": group_id,
-                "linear_workspace_id": workspace_id,
-                "project_slug": "",
-                "linear_agent_app_user_id": "",
-                "pipeline_profile": "default",
-            },
-        )
-        state.persist()
+        await state.ensure_workspace_runtime_group(workspace_id)
         return group_id
+
+    async def runtime_records_for_user(workspace_id: str) -> list[dict[str, Any]]:
+        records: list[dict[str, Any]] = []
+        for conductor in await state.store.list_conductors_for_user(workspace_id):
+            runtime = await state.store.get_runtime(str(conductor["id"]))
+            if runtime is not None:
+                records.append(runtime)
+        return records
+
+    async def runtime_group_from_payload(payload: dict[str, Any]) -> str:
+        existing = await state.store.list_runtime_groups()
+        runtime_group_id = str(payload.get("runtime_group_id") or f"group_{len(existing) + 1}")
+        await state.store.upsert_runtime_group(
+            {
+                "id": runtime_group_id,
+                "linear_workspace_id": str(payload.get("linear_workspace_id") or ""),
+                "project_slug": str(payload.get("project_slug") or ""),
+                "linear_agent_app_user_id": str(payload.get("linear_agent_app_user_id") or payload.get("agent_app_user_id") or ""),
+                "pipeline_profile": str(payload.get("pipeline_profile") or "default"),
+                "project_binding_id": "",
+            }
+        )
+        return runtime_group_id
+
+    async def save_runtime_record(
+        runtime_id: str,
+        runtime_group_id: str,
+        runtime_token_hash: str,
+        proxy_token_hash: str,
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        payload = payload or {}
+        group = await state.store.get_runtime_group(runtime_group_id) or {
+            "id": runtime_group_id,
+            "linear_workspace_id": "",
+            "project_slug": "",
+            "linear_agent_app_user_id": "",
+            "pipeline_profile": "default",
+            "project_binding_id": "",
+        }
+        conductor = {
+            "id": runtime_id,
+            "conductor_id": runtime_id,
+            "user_id": str(group.get("linear_workspace_id") or ""),
+            "runtime_group_id": runtime_group_id,
+            "hostname": str(payload.get("hostname") or ""),
+            "label": str(payload.get("label") or ""),
+            "version": str(payload.get("version") or ""),
+            "runtime_token_hash": runtime_token_hash,
+            "proxy_token_hash": proxy_token_hash,
+            "disabled": False,
+            "revoked": False,
+            "created_at": utc_now_iso(),
+            "last_report_at": None,
+        }
+        await state.store.upsert_conductor(conductor)
+        return conductor
 
     @app.post("/api/v1/onboarding/runtime/enrollment-token")
     async def onboarding_enrollment_token(request: Request) -> JSONResponse:
@@ -66,7 +98,7 @@ def register_runtime_routes(
         if user is None:
             return error_response(401, "unauthorized", "Unauthorized")
         workspace_id = str(user["id"])
-        group_id = group_for_workspace(workspace_id)
+        group_id = await group_for_workspace(workspace_id)
         token = secrets.token_urlsafe(32)
         token_hash = hash_secret(token)
         expires_at = datetime.now(timezone.utc) + timedelta(hours=1)
@@ -93,12 +125,12 @@ def register_runtime_routes(
         workspace_id = str(user["id"])
         group_id = f"group_{workspace_id}"
         await state.list_conductors_for_user(workspace_id)
-        runtimes = [r for r in state.runtimes.values() if r["runtime_group_id"] == group_id]
-        presence = await state.presence_snapshot([str(r["id"]) for r in runtimes])
+        runtimes = [r for r in await runtime_records_for_user(workspace_id) if r["runtime_group_id"] == group_id]
+        presence = await state.runtime_presence_snapshot([str(r["id"]) for r in runtimes])
         online = [r for r in runtimes if r["id"] in presence]
         token_pending = await state.has_pending_enrollment(group_id)
         if online:
-            state.mark_runtime_enrolled(workspace_id)
+            await state.mark_runtime_enrolled(workspace_id)
         return JSONResponse(
             {
                 "workspace_id": workspace_id,
@@ -116,20 +148,13 @@ def register_runtime_routes(
             return error_response(401, "unauthorized", "Unauthorized")
         workspace_id = str(user["id"])
         conductors = await state.list_conductors_for_user(workspace_id)
-        runtime_ids = [
-            str(runtime["id"])
-            for runtime in state.runtimes.values()
-            if runtime_belongs_to_workspace(runtime, workspace_id, state.runtime_groups)
-        ]
-        presence = await state.presence_snapshot(runtime_ids)
+        runtime_rows = await runtime_records_for_user(workspace_id)
+        runtime_ids = [str(runtime["id"]) for runtime in runtime_rows]
+        presence = await state.runtime_presence_snapshot(runtime_ids)
         return JSONResponse(
             {
                 "conductors": conductors,
-                "runtimes": [
-                    runtime_public(runtime, presence)
-                    for runtime in state.runtimes.values()
-                    if runtime_belongs_to_workspace(runtime, workspace_id, state.runtime_groups)
-                ],
+                "runtimes": [runtime_public(runtime, presence) for runtime in runtime_rows],
             }
         )
 
@@ -139,10 +164,10 @@ def register_runtime_routes(
         if user is None:
             return error_response(401, "unauthorized", "Unauthorized")
         workspace_id = str(user["id"])
-        runtime = state.runtimes.get(runtime_id)
-        if runtime is None or not runtime_belongs_to_workspace(runtime, workspace_id, state.runtime_groups):
+        runtime = await state.store.get_runtime(runtime_id)
+        if runtime is None or str(runtime.get("user_id") or "") != workspace_id:
             return error_response(404, "not_found", "Runtime not found")
-        presence = await state.presence_snapshot([runtime_id])
+        presence = await state.runtime_presence_snapshot([runtime_id])
         return JSONResponse(runtime_public(runtime, presence))
 
     @app.post("/api/v1/runtime/enrollment-tokens")
@@ -150,20 +175,7 @@ def register_runtime_routes(
         payload = await request.json()
         token = secrets.token_urlsafe(32)
         token_hash = hash_secret(token)
-        runtime_group_id = str(payload.get("runtime_group_id") or f"group_{len(state.runtime_groups) + 1}")
-        linear_workspace_id = str(payload.get("linear_workspace_id") or "")
-        project_slug = str(payload.get("project_slug") or "")
-        state.runtime_groups.setdefault(
-            runtime_group_id,
-            {
-                "id": runtime_group_id,
-                "linear_workspace_id": linear_workspace_id,
-                "project_slug": project_slug,
-                "linear_agent_app_user_id": str(payload.get("linear_agent_app_user_id") or payload.get("agent_app_user_id") or ""),
-                "pipeline_profile": str(payload.get("pipeline_profile") or "default"),
-            },
-        )
-        state.persist()
+        runtime_group_id = await runtime_group_from_payload(payload)
         await state.save_enrollment_token(
             token_hash,
             runtime_group_id=runtime_group_id,
@@ -186,26 +198,7 @@ def register_runtime_routes(
         runtime_token = secrets.token_urlsafe(32)
         proxy_token = secrets.token_urlsafe(32)
         runtime_group_id = str(token_row["runtime_group_id"])
-        state.runtimes[runtime_id] = {
-            "id": runtime_id,
-            "runtime_group_id": runtime_group_id,
-            "user_id": str((state.runtime_groups.get(runtime_group_id) or {}).get("linear_workspace_id") or ""),
-            "runtime_token_hash": hash_secret(runtime_token),
-            "proxy_token_hash": hash_secret(proxy_token),
-            "disabled": False,
-            "revoked": False,
-            "created_at": utc_now_iso(),
-        }
-        conductor = state.ensure_conductor_record(runtime_id)
-        if state.pg_store is not None:
-            await state.pg_store.upsert_conductor(
-                {
-                    **conductor,
-                    "runtime_token_hash": state.runtimes[runtime_id]["runtime_token_hash"],
-                    "proxy_token_hash": state.runtimes[runtime_id]["proxy_token_hash"],
-                }
-            )
-        state.persist()
+        await save_runtime_record(runtime_id, runtime_group_id, hash_secret(runtime_token), hash_secret(proxy_token), payload)
         websocket_url = str(request.base_url).rstrip("/").replace("http://", "ws://").replace("https://", "wss://")
         return JSONResponse(
             {
@@ -216,23 +209,6 @@ def register_runtime_routes(
                 "websocket_url": f"{websocket_url}/api/v1/runtime/ws",
             }
         )
-
-    @app.post("/api/v1/linear/webhooks/agent-session")
-    async def linear_agent_session(request: Request, linear_signature: str | None = Header(default=None)) -> JSONResponse:
-        raw = await request.body()
-        if state.linear_webhook_secret:
-            expected = hmac.new(state.linear_webhook_secret.encode(), raw, hashlib.sha256).hexdigest()
-            if not hmac.compare_digest(linear_signature or "", expected):
-                return error_response(401, "invalid_signature", "Invalid Linear webhook signature")
-        try:
-            payload = json.loads(raw.decode() or "{}")
-        except json.JSONDecodeError:
-            return error_response(400, "invalid_json", "Request body must be valid JSON")
-        if payload.get("type") != "AgentSessionEvent":
-            return JSONResponse({"status": "ignored", "queued": 0})
-        event = normalize_agent_session_event(payload)
-        queued = await state.queue_dispatches(event)
-        return JSONResponse({"status": "accepted", "queued": queued})
 
     @app.post("/api/v1/runtime/dispatches/lease")
     async def lease_dispatch(authorization: str | None = Header(default=None)) -> JSONResponse:
@@ -252,11 +228,10 @@ def register_runtime_routes(
         payload = await request.json()
         result = await state.apply_runtime_report(str(runtime["id"]), payload if isinstance(payload, dict) else {})
         pipeline = payload.get("pipeline") if isinstance(payload, dict) else None
-        if isinstance(pipeline, dict):
-            state.pipeline_views[str(runtime.get("runtime_group_id") or "")] = sanitize_runtime_config(pipeline)
-            state.persist()
         group_id = str(runtime.get("runtime_group_id") or "")
-        config = state.runtime_configs.get(group_id) or {}
+        if isinstance(pipeline, dict):
+            await state.store.save_pipeline_view(group_id, sanitize_runtime_config(pipeline))
+        config = await state.store.get_runtime_config(group_id) or {}
         if isinstance(result, dict):
             result = {**result, "config": config}
         return JSONResponse(result)
@@ -280,12 +255,11 @@ def register_runtime_routes(
             return JSONResponse(body, status_code=400)
         sanitized = sanitize_runtime_config(config)
         version = optional_int(sanitized.get("version"), 0) or 0
-        current = state.runtime_configs.get(group_id)
+        current = await state.store.get_runtime_config(group_id)
         current_version = optional_int((current or {}).get("version"), 0) or 0
         if version <= current_version:
             return error_response(409, "stale_runtime_config", "Runtime config version must increase")
-        state.runtime_configs[group_id] = sanitized
-        state.persist()
+        await state.store.save_runtime_config(group_id, sanitized)
         return JSONResponse({"accepted": True, "config": sanitized})
 
     @app.get("/api/v1/runtime/config")
@@ -294,7 +268,7 @@ def register_runtime_routes(
         if runtime is None:
             return error_response(401, "unauthorized", "Unauthorized")
         group_id = str(runtime.get("runtime_group_id") or "")
-        return JSONResponse({"config": state.runtime_configs.get(group_id) or {}})
+        return JSONResponse({"config": await state.store.get_runtime_config(group_id) or {}})
 
     @app.get("/api/v1/pipeline")
     async def pipeline_view(request: Request) -> JSONResponse:
@@ -303,8 +277,8 @@ def register_runtime_routes(
             return error_response(401, "unauthorized", "Unauthorized")
         workspace_id = str(user["id"])
         group_id = f"group_{workspace_id}"
-        config = state.runtime_configs.get(group_id) or {}
-        view = state.pipeline_views.get(group_id) or {}
+        config = await state.store.get_runtime_config(group_id) or {}
+        view = await state.store.get_pipeline_view(group_id) or {}
         browser_config = sanitize_runtime_config(config, hide_runtime_sources=True)
         scheduler_policy = browser_config.get("scheduler_policy") if isinstance(browser_config.get("scheduler_policy"), dict) else {}
         return JSONResponse(
@@ -321,13 +295,13 @@ def register_runtime_routes(
         user = await require_user(request)
         if user is None:
             return error_response(401, "unauthorized", "Unauthorized")
-        if not state.conductor_belongs_to_user(conductor_id, str(user["id"])):
+        if not await state.conductor_belongs_to_user(conductor_id, str(user["id"])):
             return error_response(404, "not_found", "Conductor not found")
         tail = optional_int(request.query_params.get("tail"), 200)
         previous = query_bool(request.query_params.get("previous"))
         order = request.query_params.get("order") or "desc"
         if not previous:
-            tail_row = state.instance_log_tails.get((conductor_id, instance_id))
+            tail_row = await state.store.get_instance_log_tail(conductor_id, instance_id)
             if tail_row is not None:
                 lines = list(tail_row.get("lines") or [])
                 if tail is not None:
@@ -407,13 +381,8 @@ def register_runtime_routes(
             return
         await websocket.accept()
         runtime_id = str(runtime["id"])
-        queue = await state.attach_runtime_ws(runtime_id)
-        forward_task = asyncio.create_task(_forward_runtime_commands(websocket, queue))
-        redis_forward_task = (
-            asyncio.create_task(_relay_redis_runtime_commands(state, runtime_id, queue))
-            if state.redis_store is not None
-            else None
-        )
+        after_command_id = await state.attach_runtime_ws(runtime_id)
+        forward_task = asyncio.create_task(_forward_runtime_commands(state, websocket, runtime_id, after_command_id))
         try:
             while True:
                 message = await websocket.receive_json()
@@ -449,13 +418,10 @@ def register_runtime_routes(
             pass
         finally:
             forward_task.cancel()
-            if redis_forward_task is not None:
-                redis_forward_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
+            try:
                 await forward_task
-            if redis_forward_task is not None:
-                with contextlib.suppress(asyncio.CancelledError):
-                    await redis_forward_task
+            except asyncio.CancelledError:
+                pass
             await state.detach_runtime_ws(runtime_id)
 
     @app.post("/api/v1/linear/graphql")
@@ -469,7 +435,7 @@ def register_runtime_routes(
             return error_response(401, "runtime_disabled", "Runtime is disabled")
         payload = await request.json()
         group_id = str(runtime.get("runtime_group_id") or "")
-        group = state.runtime_groups.get(group_id) or {}
+        group = await state.store.get_runtime_group(group_id) or {}
         workspace_id = str(group.get("linear_workspace_id") or "")
         try:
             installation = await state.get_linear_installation(workspace_id)
@@ -496,18 +462,14 @@ def register_runtime_routes(
                 "Linear mutations authored by Symphony require an app actor installation token.",
             )
         if not upstream_token:
-            if is_mutation:
-                upstream_token = os.environ.get("PODIUM_LINEAR_APP_ACCESS_TOKEN", "").strip()
-                token_source = "app_environment" if upstream_token else ""
-            else:
-                upstream_token = os.environ.get("PODIUM_LINEAR_ACCESS_TOKEN", "").strip()
-                token_source = "operator_environment" if upstream_token else ""
-        if is_mutation and not upstream_token:
+            upstream_token = os.environ.get("PODIUM_LINEAR_APP_ACCESS_TOKEN", "").strip()
+            token_source = "app_environment" if upstream_token else ""
+        if not upstream_token:
             await state.record_proxy_audit(
                 {
                     "runtime_id": runtime["id"],
                     "allowed": False,
-                    "reason": "agent_actor_token_required",
+                    "reason": "linear_app_token_required",
                     "operation_name": payload.get("operationName"),
                     "workspace_id": workspace_id,
                     "timestamp": utc_now_iso(),
@@ -515,8 +477,8 @@ def register_runtime_routes(
             )
             return error_response(
                 400,
-                "agent_actor_token_required",
-                "Linear mutations authored by Symphony require an app actor installation token.",
+                "linear_app_token_required",
+                "Linear proxy requests require an app actor installation token.",
             )
         upstream_endpoint = os.environ.get("PODIUM_LINEAR_ENDPOINT", "https://api.linear.app/graphql").strip()
         await state.record_proxy_audit(
@@ -545,42 +507,16 @@ def register_runtime_routes(
         return error_response(400, "linear_installation_not_found", "No Linear installation for runtime workspace")
 
 
-async def _forward_runtime_commands(websocket: WebSocket, queue: asyncio.Queue[dict[str, Any]]) -> None:
+async def _forward_runtime_commands(state: Any, websocket: WebSocket, runtime_id: str, after_id: int) -> None:
     while True:
-        command = await queue.get()
-        await websocket.send_json(command)
-
-
-async def _relay_redis_runtime_commands(
-    state: Any,
-    runtime_id: str,
-    queue: asyncio.Queue[dict[str, Any]],
-) -> None:
-    if state.redis_store is None:
-        return
-    pubsub = await state.redis_store.subscribe_runtime_commands(runtime_id)
-    try:
-        while True:
-            message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
-            if not message:
-                await asyncio.sleep(0.05)
-                continue
-            raw = message.get("data")
-            try:
-                command = json.loads(str(raw))
-            except json.JSONDecodeError:
-                continue
-            if isinstance(command, dict):
-                queue.put_nowait(command)
-    finally:
-        close = getattr(pubsub, "close", None)
-        aclose = getattr(pubsub, "aclose", None)
-        if callable(aclose):
-            await aclose()
-        elif callable(close):
-            result = close()
-            if inspect.isawaitable(result):
-                await result
+        row = await state.store.next_runtime_command(runtime_id, after_id=after_id)
+        if row is None:
+            await asyncio.sleep(0.05)
+            continue
+        after_id = int(row.get("id") or after_id)
+        command = row.get("command") if isinstance(row.get("command"), dict) else None
+        if command is not None:
+            await websocket.send_json(command)
 
 
 def _pipeline_ack_payload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -646,25 +582,25 @@ def normalize_agent_session_event(payload: dict[str, Any]) -> dict[str, Any]:
             or ""
         ),
         "issue_delegate_id": str(((issue.get("delegate") or {}) if isinstance(issue.get("delegate"), dict) else {}).get("id") or ""),
-        "blocked_by": _webhook_blocked_by_ids(issue.get("blocked_by") or payload.get("blocked_by")),
-        "parent_issue_id": _webhook_ref_id(issue.get("parent_issue_id") or parent or payload.get("parent_issue_id")),
+        "blocked_by": _issue_ref_ids(issue.get("blocked_by") or payload.get("blocked_by")),
+        "parent_issue_id": _issue_ref_id(issue.get("parent_issue_id") or parent or payload.get("parent_issue_id")),
         "pipeline_intent": dict(pipeline_intent) if isinstance(pipeline_intent, dict) else {},
     }
 
 
-def _webhook_blocked_by_ids(value: Any) -> list[str]:
+def _issue_ref_ids(value: Any) -> list[str]:
     if value is None:
         return []
     raw_items = value if isinstance(value, list) else [value]
     result: list[str] = []
     for item in raw_items:
-        ref = _webhook_ref_id(item)
+        ref = _issue_ref_id(item)
         if ref:
             result.append(ref)
     return result
 
 
-def _webhook_ref_id(value: Any) -> str:
+def _issue_ref_id(value: Any) -> str:
     if isinstance(value, dict):
         return str(value.get("id") or value.get("issue_id") or value.get("identifier") or "").strip()
     return str(value or "").strip()

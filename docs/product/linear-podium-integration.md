@@ -12,8 +12,6 @@ Symphony should create and operate an official Linear OAuth application:
 
 - Name: Symphony or Symphony Podium
 - OAuth callback: `https://<podium-host>/api/v1/linear/oauth/callback`
-- Webhook URL: `https://<podium-host>/api/v1/linear/webhooks/agent-session`
-- Webhook resource types: `AgentSessionEvent` for the first version
 - OAuth scopes: minimum required read/write scopes for issue reads, comments,
   labels, state transitions, and agent session workflows
 
@@ -49,13 +47,15 @@ Stored installation fields:
 
 Access and refresh tokens must be encrypted at rest.
 
-## Webhook Flow
+## Delegate Polling Flow
 
-1. Linear sends `AgentSessionEvent` to Podium.
-2. Podium verifies the Linear webhook signature.
-3. Podium rejects invalid signatures and malformed JSON.
-4. Podium normalizes the event into a Symphony dispatch event.
-5. Podium finds matching routing rules by workspace, project, team, labels, and
+1. A Linear issue is delegated to the Symphony custom agent.
+2. Podium polls Linear with `PODIUM_LINEAR_APPLICATION_ID` and
+   `PODIUM_LINEAR_APP_ACCESS_TOKEN`.
+3. Podium normalizes matching delegated issues into Symphony dispatch events.
+4. Podium records the per-binding poll cursor and last sanitized error in the
+   durable store.
+5. Podium finds matching routing rules by workspace, project, delegate, and
    available runtimes.
 6. Podium enqueues the dispatch.
 7. An online Conductor receives or pulls the dispatch.
@@ -64,12 +64,12 @@ First-version normalized event:
 
 ```json
 {
-  "event_type": "linear.agent_session.created",
+  "event_type": "linear.delegated_issue.polled",
   "workspace_id": "linear-workspace-id",
   "project_slug": "project-slug",
   "issue_id": "linear-issue-id",
   "issue_identifier": "AI-149",
-  "agent_session_id": "linear-agent-session-id"
+  "agent_session_id": ""
 }
 ```
 
@@ -131,8 +131,7 @@ For local development, Podium can run on `127.0.0.1` and the OAuth callback can
 use a loopback HTTP redirect URI. Linear OAuth redirect URIs allow absolute HTTP
 or HTTPS URLs.
 
-Linear app webhooks require a public HTTPS URL and cannot use loopback or
-private-network hosts. Without a public HTTPS Podium URL, full webhook delivery
-cannot be tested directly from Linear. In that case, OAuth and proxy can still be
-tested with loopback, while webhook delivery requires a tunnel or deployed
-Podium.
+Delegate polling works from loopback development environments because Podium
+initiates outbound GraphQL requests to Linear. A public HTTPS URL is still
+required for OAuth redirect URIs in deployed environments, but local acceptance
+does not require an inbound Linear event tunnel.

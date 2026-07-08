@@ -93,6 +93,7 @@ make dev
 Run Podium locally:
 
 ```bash
+export PODIUM_DATABASE_URL=postgresql://podium@localhost/podium
 .venv/bin/podium api --host 127.0.0.1 --port 8090
 ```
 
@@ -261,7 +262,7 @@ changes, mock-only tests are not enough.
 
 A real run must:
 
-1. Use `.env` and the real `LINEAR_API_KEY`.
+1. Use `.env` with Podium's Linear application id and app actor token.
 2. Start a Conductor instance first.
 3. Create a real Linear business issue after Conductor is running.
 4. Let Conductor operate Performer so Performer creates gates, dispatches Codex, verifies completion, creates evidence, and transitions states.
@@ -271,12 +272,12 @@ A real run must:
 
 For Podium-managed flows, the real run must additionally follow `docs/real-run-testing-guide.md#podium-web-to-linear-acceptance`:
 
-1. Start Podium with `PODIUM_LINEAR_ACCESS_TOKEN="$LINEAR_API_KEY"` for read/query fallback and `PODIUM_LINEAR_APP_ACCESS_TOKEN` set to an `actor=app` Linear OAuth token for Symphony-authored mutations.
+1. Start Podium with `PODIUM_LINEAR_APPLICATION_ID` and `PODIUM_LINEAR_APP_ACCESS_TOKEN` set to an `actor=app` Linear OAuth token; that token must include the agent scopes `app:assignable` and `app:mentionable`. Do not set a human/operator `LINEAR_API_KEY` or `PODIUM_LINEAR_ACCESS_TOKEN` for the managed path.
 2. Start Podium Web and verify onboarding/runtime/pipeline with Chrome MCP or an equivalent real browser.
 3. Create the Conductor enrollment token from Podium and run the generated install command locally.
 4. Verify the installed Conductor reports managed mode, Podium runtime/proxy tokens, and the Podium WebSocket URL.
-5. Create a real git fixture repo and a real Linear issue delegated to `$LINEAR_AGENT_APP_USER_ID`.
-6. Send the webhook for the actual registered Podium workspace/user id, then let Conductor and Performer complete the work.
+5. Create a real git fixture repo and a real Linear issue delegated to `$PODIUM_LINEAR_APPLICATION_ID`.
+6. Let Podium's delegate poller discover the issue, then let Conductor and Performer complete the work.
 7. Verify Podium `/api/v1/pipeline`, Linear pipeline graph projection, Performer attempt logs, fixture repo contents, and smoke tests.
 
 Focused regression files for this path include:
@@ -284,7 +285,7 @@ Focused regression files for this path include:
 - `tests/test_podium_runtime_onboarding.py`
 - `tests/test_conductor_podium_channels.py`
 - `tests/test_podium_conductor_channels.py`
-- `tests/test_podium.py::test_agent_session_webhook_queues_only_delegated_custom_agent_dispatch_and_runtime_acks`
+- `tests/test_podium_linear_polling.py`
 - `tests/test_no_podium_memory_state.py`
 
 The harness may create the initial issue and observe state. It must not manually:
