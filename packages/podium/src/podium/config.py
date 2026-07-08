@@ -18,7 +18,7 @@ class PodiumConfig:
     linear_app_access_token: str = ""
     linear_poll_interval_seconds: int = 15
     linear_poll_page_size: int = 50
-    linear_poll_initial_lookback_seconds: int = 86_400
+    linear_poll_initial_lookback_seconds: int = 0
 
     @classmethod
     def from_env(cls) -> PodiumConfig:
@@ -35,7 +35,7 @@ class PodiumConfig:
             linear_app_access_token=os.environ.get("PODIUM_LINEAR_APP_ACCESS_TOKEN", "").strip(),
             linear_poll_interval_seconds=_env_int("PODIUM_LINEAR_POLL_INTERVAL_SECONDS", 15),
             linear_poll_page_size=_env_int("PODIUM_LINEAR_POLL_PAGE_SIZE", 50),
-            linear_poll_initial_lookback_seconds=_env_int("PODIUM_LINEAR_POLL_INITIAL_LOOKBACK_SECONDS", 86_400),
+            linear_poll_initial_lookback_seconds=_env_int("PODIUM_LINEAR_POLL_INITIAL_LOOKBACK_SECONDS", 0),
         )
 
 

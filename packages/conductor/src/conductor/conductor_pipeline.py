@@ -3733,6 +3733,18 @@ class PipelineCoordinator:
                         lease_id=result.lease_id,
                         integration_id=integration_id,
                     )
+            else:
+                _append_instance_log(
+                    instance,
+                    (
+                        "event=pipeline_result_rejected "
+                        f"attempt_id={result.attempt_id} node_id={result.node_id} mode={result.mode.value} "
+                        f"lease_id={result.lease_id} graph_revision={result.graph_revision} "
+                        f"policy_revision={result.policy_revision} result_path={result_path} "
+                        "error_type=FenceRejected sanitized_reason=result_fencing_or_state_mismatch "
+                        "action_required=inspect_pipeline_state retryable=True"
+                    ),
+                )
         return applied
 
     def _attempt_request(

@@ -13,6 +13,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import asyncpg
+
 from real_symphony_e2e_analysis import (
     analyze_plan_artifacts,
     appendix_exit_bar_audit,
@@ -137,7 +139,7 @@ def build_runtime_config_payload(
     }
 
 
-def start_e2e_postgres_if_needed(root: Path, env: dict[str, str], evidence: Evidence) -> str | None:
+async def start_e2e_postgres_if_needed(root: Path, env: dict[str, str], evidence: Evidence) -> str | None:
     if env.get("PODIUM_DATABASE_URL", "").strip():
         evidence.check("podium-db:external-url-configured", True)
         return None
@@ -187,6 +189,7 @@ def start_e2e_postgres_if_needed(root: Path, env: dict[str, str], evidence: Evid
     )
     if result.returncode != 0:
         raise RuntimeError("ephemeral PostgreSQL container failed to start")
+    database_url = f"postgresql://podium:{password}@127.0.0.1:{port}/podium"
     try:
         deadline = time.monotonic() + 30
         ready = False
@@ -199,10 +202,16 @@ def start_e2e_postgres_if_needed(root: Path, env: dict[str, str], evidence: Evid
                 timeout=10,
             )
             if probe.returncode == 0:
-                ready = True
-                break
-            last_stderr = probe.stderr[-500:] or probe.stdout[-500:]
-            time.sleep(0.5)
+                try:
+                    connection = await asyncpg.connect(database_url)
+                    await connection.close()
+                    ready = True
+                    break
+                except Exception as exc:
+                    last_stderr = f"{exc.__class__.__name__}: {exc}"
+            else:
+                last_stderr = probe.stderr[-500:] or probe.stdout[-500:]
+            await asyncio.sleep(0.5)
         evidence.check(
             "podium-db:ephemeral-postgres-ready",
             ready,
@@ -215,7 +224,7 @@ def start_e2e_postgres_if_needed(root: Path, env: dict[str, str], evidence: Evid
     except Exception:
         stop_e2e_postgres(container_name)
         raise
-    env["PODIUM_DATABASE_URL"] = f"postgresql://podium:{password}@127.0.0.1:{port}/podium"
+    env["PODIUM_DATABASE_URL"] = database_url
     return container_name
 
 
@@ -344,12 +353,12 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
     podium_port = allocate_port()
     conductor_port = allocate_port()
     data_root = root / "conductor-data"
-    postgres_container = start_e2e_postgres_if_needed(root, env, evidence)
+    postgres_container = await start_e2e_postgres_if_needed(root, env, evidence)
     podium_env = dict(env)
     podium_env["PODIUM_LINEAR_APPLICATION_ID"] = agent_app_user_id
     podium_env["PODIUM_LINEAR_APP_ACCESS_TOKEN"] = token
     podium_env["PODIUM_LINEAR_POLL_INTERVAL_SECONDS"] = "1"
-    podium_env["PODIUM_LINEAR_POLL_INITIAL_LOOKBACK_SECONDS"] = "86400"
+    podium_env["PODIUM_LINEAR_POLL_INITIAL_LOOKBACK_SECONDS"] = "0"
     processes: list[ManagedProcess] = []
     try:
         podium = start_process(

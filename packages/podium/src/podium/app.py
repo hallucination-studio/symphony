@@ -472,7 +472,7 @@ def _start_linear_delegate_poller(
         app_token=app_token,
         transport=linear_graphql_transport,
         page_size=int(getattr(config, "linear_poll_page_size", 50) or 50),
-        initial_lookback_seconds=int(getattr(config, "linear_poll_initial_lookback_seconds", 86_400) or 86_400),
+        initial_lookback_seconds=int(getattr(config, "linear_poll_initial_lookback_seconds", 0)),
     )
     return asyncio.create_task(
         run_linear_delegate_poll_loop(

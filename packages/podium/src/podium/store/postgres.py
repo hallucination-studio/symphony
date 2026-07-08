@@ -127,6 +127,8 @@ class PgMigrator:
                 workspace_id TEXT NOT NULL DEFAULT '',
                 project_slug TEXT NOT NULL DEFAULT '',
                 agent_session_id TEXT NOT NULL DEFAULT '',
+                agent_app_user_id TEXT NOT NULL DEFAULT '',
+                issue_delegate_id TEXT NOT NULL DEFAULT '',
                 status TEXT NOT NULL,
                 reason TEXT NOT NULL DEFAULT '',
                 leased_conductor_id TEXT REFERENCES conductors(id) ON DELETE SET NULL,
@@ -149,6 +151,8 @@ class PgMigrator:
             "ALTER TABLE dispatches ADD COLUMN IF NOT EXISTS issue_title TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE dispatches ADD COLUMN IF NOT EXISTS issue_description TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE dispatches ADD COLUMN IF NOT EXISTS pipeline_intent JSONB NOT NULL DEFAULT '{}'::jsonb",
+            "ALTER TABLE dispatches ADD COLUMN IF NOT EXISTS agent_app_user_id TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE dispatches ADD COLUMN IF NOT EXISTS issue_delegate_id TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE dispatches ADD COLUMN IF NOT EXISTS graph_id TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE dispatches ADD COLUMN IF NOT EXISTS node_id TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE dispatches ADD COLUMN IF NOT EXISTS attempt_id TEXT NOT NULL DEFAULT ''",
@@ -423,7 +427,7 @@ class PgStore:
         return {
             "workspace_id": str(row["workspace_id"]),
             "access_token": str(row["access_token_enc"]),
-            "scope": row["scope"],
+            "scope": _pg_json_value(row["scope"], None),
             "actor": str(row["actor"] or ""),
             "expires_at": row["expires_at"].isoformat() if row["expires_at"] is not None else None,
         }
@@ -603,13 +607,13 @@ class PgStore:
             INSERT INTO dispatches (
               id, project_binding_id, user_id, issue_id, issue_identifier, issue_title, issue_description,
               pipeline_intent, workspace_id, project_slug, agent_session_id, status, reason,
-              leased_conductor_id, leased_until, fencing_token,
+              agent_app_user_id, issue_delegate_id, leased_conductor_id, leased_until, fencing_token,
               graph_id, node_id, attempt_id, mode, attempt_status, graph_revision, policy_revision, lease_id,
               created_at, updated_at, completed_at
             )
             VALUES (
-              $1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12,$13,$14,$15::timestamptz,$16,
-              $17,$18,$19,$20,$21,$22,$23,$24,$25::timestamptz,$26::timestamptz,$27::timestamptz
+              $1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12,$13,$14,$15,$16,$17::timestamptz,$18,
+              $19,$20,$21,$22,$23,$24,$25,$26,$27::timestamptz,$28::timestamptz,$29::timestamptz
             )
             ON CONFLICT DO NOTHING
             RETURNING id
@@ -627,6 +631,8 @@ class PgStore:
             str(dispatch.get("agent_session_id") or ""),
             str(dispatch.get("status") or "queued"),
             str(dispatch.get("reason") or ""),
+            str(dispatch.get("agent_app_user_id") or ""),
+            str(dispatch.get("issue_delegate_id") or ""),
             dispatch.get("leased_runtime_id") or dispatch.get("leased_conductor_id"),
             _pg_datetime(dispatch.get("leased_until")),
             int(dispatch.get("fencing_token") or 0),
@@ -749,7 +755,11 @@ class PgStore:
         row = await self.pool.fetchrow("SELECT completed_steps_json, metadata_json, updated_at FROM onboarding_state WHERE user_id = $1", user_id)
         if row is None:
             return None
-        return {"completed_steps": list(row["completed_steps_json"] or []), "metadata": dict(row["metadata_json"] or {}), "updated_at": row["updated_at"].isoformat()}
+        return {
+            "completed_steps": list(_pg_json_value(row["completed_steps_json"], [])),
+            "metadata": dict(_pg_json_value(row["metadata_json"], {})),
+            "updated_at": row["updated_at"].isoformat(),
+        }
 
     async def save_smoke_result(self, user_id: str, result: dict[str, Any]) -> None:
         await self.pool.execute(
@@ -764,7 +774,7 @@ class PgStore:
 
     async def get_smoke_result(self, user_id: str) -> dict[str, Any] | None:
         row = await self.pool.fetchrow("SELECT result_json FROM smoke_results WHERE user_id = $1", user_id)
-        return dict(row["result_json"]) if row is not None else None
+        return dict(_pg_json_value(row["result_json"], {})) if row is not None else None
 
     async def set_presence(self, runtime_id: str, *, timestamp: str, expires_at: str) -> None:
         await self.pool.execute(
@@ -802,7 +812,7 @@ class PgStore:
 
     async def get_metrics_snapshot(self, conductor_id: str, instance_id: str) -> dict[str, Any] | None:
         row = await self.pool.fetchrow("SELECT metrics_json FROM metrics_snapshots WHERE conductor_id = $1 AND instance_id = $2", conductor_id, instance_id)
-        return dict(row["metrics_json"]) if row is not None else None
+        return dict(_pg_json_value(row["metrics_json"], {})) if row is not None else None
 
     async def upsert_instance_log_tail(self, conductor_id: str, instance_id: str, tail: dict[str, Any]) -> None:
         await self.pool.execute(
@@ -819,7 +829,7 @@ class PgStore:
 
     async def get_instance_log_tail(self, conductor_id: str, instance_id: str) -> dict[str, Any] | None:
         row = await self.pool.fetchrow("SELECT tail_json FROM instance_log_tails WHERE conductor_id = $1 AND instance_id = $2", conductor_id, instance_id)
-        return dict(row["tail_json"]) if row is not None else None
+        return dict(_pg_json_value(row["tail_json"], {})) if row is not None else None
 
     async def save_log_fetch_result(self, request_id: str, result: dict[str, Any]) -> None:
         await self.pool.execute(
@@ -834,7 +844,7 @@ class PgStore:
 
     async def get_log_fetch_result(self, request_id: str) -> dict[str, Any] | None:
         row = await self.pool.fetchrow("SELECT result_json FROM log_fetch_results WHERE request_id = $1", request_id)
-        return dict(row["result_json"]) if row is not None else None
+        return dict(_pg_json_value(row["result_json"], {})) if row is not None else None
 
     async def save_runtime_config(self, runtime_group_id: str, config: dict[str, Any]) -> None:
         await self.pool.execute(
@@ -849,7 +859,7 @@ class PgStore:
 
     async def get_runtime_config(self, runtime_group_id: str) -> dict[str, Any] | None:
         row = await self.pool.fetchrow("SELECT config_json FROM runtime_configs WHERE runtime_group_id = $1", runtime_group_id)
-        return dict(row["config_json"]) if row is not None else None
+        return dict(_pg_json_value(row["config_json"], {})) if row is not None else None
 
     async def save_pipeline_view(self, runtime_group_id: str, view: dict[str, Any]) -> None:
         await self.pool.execute(
@@ -864,7 +874,7 @@ class PgStore:
 
     async def get_pipeline_view(self, runtime_group_id: str) -> dict[str, Any] | None:
         row = await self.pool.fetchrow("SELECT view_json FROM pipeline_views WHERE runtime_group_id = $1", runtime_group_id)
-        return dict(row["view_json"]) if row is not None else None
+        return dict(_pg_json_value(row["view_json"], {})) if row is not None else None
 
     async def append_runtime_command(self, runtime_id: str, command: dict[str, Any]) -> dict[str, Any]:
         row = await self.pool.fetchrow(
@@ -909,7 +919,7 @@ def _record_to_user(row: Any) -> dict[str, Any]:
         "email": str(row["email"]),
         "password_hash": str(row["password_hash"]),
         "created_at": row["created_at"].isoformat() if row["created_at"] is not None else "",
-        "linear_app": row["linear_app_json"],
+        "linear_app": _pg_json_value(row["linear_app_json"], None),
     }
 
 
@@ -971,8 +981,8 @@ def _record_to_project_binding(row: Any) -> dict[str, Any]:
         "agent_app_user_id": str(row["agent_app_user_id"]),
         "pipeline_profile": str(row["pipeline_profile"]),
         "process_status": str(row["process_status"]),
-        "constraint_labels": list(row["constraint_labels"] or []),
-        "repo_source": row["repo_source"] or {},
+        "constraint_labels": list(_pg_json_value(row["constraint_labels"], [])),
+        "repo_source": _pg_json_value(row["repo_source"], {}),
         "updated_at": row["updated_at"].isoformat() if row["updated_at"] is not None else "",
     }
 
@@ -986,10 +996,12 @@ def _record_to_dispatch(row: Any) -> dict[str, Any]:
         "issue_identifier": str(row["issue_identifier"]),
         "issue_title": str(row["issue_title"]),
         "issue_description": str(row["issue_description"]),
-        "pipeline_intent": row["pipeline_intent"] if isinstance(row["pipeline_intent"], dict) else {},
+        "pipeline_intent": _pg_json_value(row["pipeline_intent"], {}),
         "linear_workspace_id": str(row["workspace_id"]),
         "project_slug": str(row["project_slug"]),
         "agent_session_id": str(row["agent_session_id"]),
+        "agent_app_user_id": str(row["agent_app_user_id"]),
+        "issue_delegate_id": str(row["issue_delegate_id"]),
         "status": str(row["status"]),
         "reason": str(row["reason"]),
         "leased_runtime_id": row["leased_conductor_id"],
@@ -1014,7 +1026,7 @@ def _record_to_runtime_command(row: Any) -> dict[str, Any]:
     return {
         "id": int(row["id"]),
         "runtime_id": str(row["runtime_id"]),
-        "command": dict(row["command_json"]),
+        "command": dict(_pg_json_value(row["command_json"], {})),
         "created_at": row["created_at"].isoformat() if row["created_at"] is not None else "",
     }
 
@@ -1031,6 +1043,17 @@ def _pg_datetime(value: Any) -> datetime | None:
 
 def _pg_json(value: Any) -> str:
     return json.dumps(value, sort_keys=True)
+
+
+def _pg_json_value(value: Any, default: Any) -> Any:
+    if value is None:
+        return default
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            return default
+    return value
 
 
 def _row_count(result: str) -> int:

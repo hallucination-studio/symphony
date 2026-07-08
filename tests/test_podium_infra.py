@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 
 from podium.app import create_app
 from podium.config import PodiumConfig
+from podium.podium_shared import dispatch_public
 from podium.store.postgres import PgMigrator
 from podium.store import PodiumStore
 
@@ -35,6 +36,14 @@ def test_config_requires_explicit_linear_application_id_env(monkeypatch) -> None
     config = PodiumConfig.from_env()
 
     assert config.linear_application_id == ""
+
+
+def test_config_defaults_linear_poll_initial_lookback_to_no_backfill(monkeypatch) -> None:
+    monkeypatch.delenv("PODIUM_LINEAR_POLL_INITIAL_LOOKBACK_SECONDS", raising=False)
+
+    config = PodiumConfig.from_env()
+
+    assert config.linear_poll_initial_lookback_seconds == 0
 
 
 def test_config_reads_turnstile_disable_flags(monkeypatch) -> None:
@@ -106,6 +115,8 @@ def test_pg_migrator_exposes_phase_0_schema() -> None:
     assert "CREATE TABLE IF NOT EXISTS conductors" in sql
     assert "CREATE TABLE IF NOT EXISTS project_bindings" in sql
     assert "CREATE TABLE IF NOT EXISTS dispatches" in sql
+    assert "agent_app_user_id TEXT NOT NULL DEFAULT ''" in sql
+    assert "issue_delegate_id TEXT NOT NULL DEFAULT ''" in sql
     assert "CREATE TABLE IF NOT EXISTS metrics_snapshots" in sql
     assert "CREATE TABLE IF NOT EXISTS instance_log_tails" in sql
     assert "CREATE TABLE IF NOT EXISTS onboarding_state" in sql
@@ -133,6 +144,24 @@ def test_pg_store_dispatch_lease_uses_atomic_skip_locked_query() -> None:
     assert "fencing_token = dispatches.fencing_token + 1" in source
 
 
+def test_dispatch_public_tolerates_pg_ack_record_without_route_fields() -> None:
+    payload = dispatch_public(
+        {
+            "dispatch_id": "dispatch-1",
+            "project_binding_id": "runtime-1:inst-1",
+            "issue_id": "issue-1",
+            "issue_identifier": "ALPHA-1",
+            "linear_workspace_id": "workspace-1",
+            "project_slug": "ALPHA",
+            "status": "completed",
+            "fencing_token": 1,
+        }
+    )
+
+    assert payload["routing_rule_id"] == "runtime-1:inst-1"
+    assert payload["pipeline_profile"] == "default"
+
+
 async def test_json_store_persists_session_and_does_not_revive_revoked_token(tmp_path) -> None:
     store = PodiumStore(tmp_path)
 
@@ -154,6 +183,25 @@ async def test_json_store_consumes_enrollment_token_once(tmp_path) -> None:
 
     assert (await store.consume_enrollment_token("token-hash"))[0]["runtime_group_id"] == "group_1"
     assert await store.consume_enrollment_token("token-hash") == (None, "enrollment_token_used")
+
+
+async def test_runtime_enrollment_token_creates_workspace_user_for_durable_fk(tmp_path) -> None:
+    store = PodiumStore(tmp_path)
+    app = create_app(store=store, secret_key="test-secret", secure_cookies=False)
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
+        created = await client.post(
+            "/api/v1/runtime/enrollment-tokens",
+            json={
+                "runtime_group_id": "group-real-workspace",
+                "linear_workspace_id": "real-workspace-1",
+                "project_slug": "ALPHA",
+                "linear_agent_app_user_id": "agent-app-1",
+            },
+        )
+
+    assert created.status_code == 200
+    assert await store.get_user("real-workspace-1") is not None
 
 
 async def test_json_store_persists_presence_and_log_fetch_result(tmp_path) -> None:

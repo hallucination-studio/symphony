@@ -475,6 +475,8 @@ def test_real_symphony_e2e_overall_dod_combines_required_probes() -> None:
     assert "Linear app actor token is required" in source
     assert "app:assignable" in source
     assert "app:mentionable" in source
+    assert "asyncpg.connect" in source
+    assert "await start_e2e_postgres_if_needed" in source
 
 
 def test_real_symphony_e2e_runtime_wait_scenario_enables_permission_probe() -> None:
@@ -836,6 +838,14 @@ def test_real_symphony_e2e_run_uses_app_token_and_poller_not_user_token_or_webho
     assert "LINEAR_API_KEY" not in source
     assert "LINEAR_WEBHOOK_SECRET" not in source
     assert "/api/v1/linear/webhooks/agent-session" not in source
+    assert 'PODIUM_LINEAR_POLL_INITIAL_LOOKBACK_SECONDS"] = "0"' in source
+
+
+def test_real_symphony_e2e_wait_uses_poller_stage_name_not_webhook() -> None:
+    source = (ROOT / "tools" / "real_symphony_e2e_wait.py").read_text(encoding="utf-8")
+
+    assert 'mark_stage("poller_queued"' in source
+    assert 'mark_stage("webhook_queued"' not in source
 
 
 def test_real_symphony_e2e_instance_payload_always_requires_delegate_filter() -> None:

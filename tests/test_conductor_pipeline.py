@@ -7748,6 +7748,65 @@ def test_pipeline_coordinator_collects_result_files_with_fencing(tmp_path: Path)
     assert f"result_path={result_path.with_suffix('.json.applied')}" in log_text
 
 
+def test_pipeline_coordinator_logs_rejected_result_files(tmp_path: Path) -> None:
+    store = ConductorPipelineStore(tmp_path)
+    store.apply_runtime_config(
+        RuntimeConfigEnvelope(
+            "group-1",
+            1,
+            _policy(1),
+            profiles={
+                RuntimeMode.EXECUTE: RuntimeProfile(name="executor", backend="codex", mode=RuntimeMode.EXECUTE),
+            },
+        )
+    )
+    store.commit_plan(_proposal())
+    now = datetime(2026, 7, 6, tzinfo=timezone.utc)
+
+    class Runtime:
+        async def start(self, instance, **kwargs):
+            return instance.with_updates(process_status="running", pid=1234)
+
+    class Instance:
+        id = "inst-1"
+        instance_dir = str(tmp_path / "inst-1")
+        resolved_repo_path = str(tmp_path)
+        log_path = str(tmp_path / "inst-1" / "logs" / "performer.log")
+
+        def with_updates(self, **changes):
+            return self
+
+    coordinator = PipelineCoordinator(store=store, runtime_manager=Runtime())
+    import asyncio
+
+    asyncio.run(coordinator.start_due_attempts(Instance(), now=now))
+    attempt = store.active_lease("a", RuntimeMode.EXECUTE)
+    assert attempt is not None
+    result_path = tmp_path / "inst-1" / "state" / "pipeline" / attempt.attempt_id / "attempt-result.json"
+    result_path.write_text(
+        json.dumps(
+            ExecuteAttemptResult(
+                attempt_id=attempt.attempt_id,
+                node_id="a",
+                status=AttemptState.SUCCEEDED,
+                graph_revision=1,
+                policy_revision=1,
+                gate_snapshot_hash=store.get_node("a").gate_snapshot_hash or "",
+                lease_id=attempt.lease_id,
+                fencing_token="stale-token",
+                verification_input={},
+            ).to_dict()
+        ),
+        encoding="utf-8",
+    )
+
+    assert coordinator.collect_result_files(Instance(), now=now) == 0
+    log_text = Path(Instance.log_path).read_text(encoding="utf-8")
+    assert "event=pipeline_result_rejected" in log_text
+    assert "sanitized_reason=result_fencing_or_state_mismatch" in log_text
+    assert result_path.exists()
+
+
 def test_pipeline_coordinator_logs_verify_manifest_and_integration_events(tmp_path: Path) -> None:
     store = ConductorPipelineStore(tmp_path / "store")
     store.apply_runtime_config(RuntimeConfigEnvelope("group-1", 1, _policy(1)))

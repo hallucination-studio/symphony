@@ -290,7 +290,7 @@ async def wait_for_run(
                     pipeline_attempts=terminal_attempts,
                     active_crash_leases=active_crash_leases,
                 )
-        mark_stage("webhook_queued", True, issue_id=issue_id)
+        mark_stage("poller_queued", True, issue_id=issue_id)
         mark_stage("process_running_or_exited", process_status in {"running", "exited", "stopped"}, process_status=process_status)
         mark_stage("implementation_result_exists", result_path.exists(), path=str(result_path))
         mark_stage(

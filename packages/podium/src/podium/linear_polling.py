@@ -13,9 +13,10 @@ from .podium_shared import utc_now_iso
 LINEAR_GRAPHQL_ENDPOINT = "https://api.linear.app/graphql"
 
 DELEGATED_ISSUES_QUERY = """
-query SymphonyDelegatedIssues($projectSlug: String!, $delegateId: String!, $updatedAfter: DateTime, $first: Int!) {
+query SymphonyDelegatedIssues($projectSlug: String!, $delegateId: ID!, $updatedAfter: DateTimeOrDuration, $first: Int!) {
   issues(
     first: $first,
+    orderBy: updatedAt,
     filter: {
       project: { slugId: { eq: $projectSlug } },
       delegate: { id: { eq: $delegateId } },
@@ -27,6 +28,7 @@ query SymphonyDelegatedIssues($projectSlug: String!, $delegateId: String!, $upda
       identifier
       title
       description
+      createdAt
       updatedAt
       project { slugId }
       delegate { id }
@@ -77,10 +79,15 @@ class LinearDelegatePoller:
             bindings += 1
             binding_id = str(binding.get("project_binding_id") or binding.get("id") or "")
             try:
-                issues = await self._fetch_delegated_issues(binding)
+                state = await self.store.get_linear_poll_state(binding_id) or {}
+                stored_cursor = str(state.get("cursor") or "")
+                updated_after = stored_cursor or self._initial_cursor()
+                issues = await self._fetch_delegated_issues(binding, updated_after=updated_after)
                 binding_queued = 0
-                cursor = str((await self.store.get_linear_poll_state(binding_id) or {}).get("cursor") or "")
-                for issue in issues:
+                cursor = updated_after
+                for issue in _newest_first(issues):
+                    if not stored_cursor and _issue_created_before(issue, updated_after):
+                        continue
                     event = self._event_from_issue(binding, issue)
                     if event is None:
                         continue
@@ -127,12 +134,10 @@ class LinearDelegatePoller:
                 result.append(group)
         return result
 
-    async def _fetch_delegated_issues(self, binding: dict[str, Any]) -> list[dict[str, Any]]:
-        binding_id = str(binding.get("project_binding_id") or binding.get("id") or "")
-        state = await self.store.get_linear_poll_state(binding_id) or {}
-        updated_after = str(state.get("cursor") or "")
-        if not updated_after:
-            updated_after = (datetime.now(timezone.utc) - timedelta(seconds=self.initial_lookback_seconds)).isoformat().replace("+00:00", "Z")
+    def _initial_cursor(self) -> str:
+        return (datetime.now(timezone.utc) - timedelta(seconds=self.initial_lookback_seconds)).isoformat().replace("+00:00", "Z")
+
+    async def _fetch_delegated_issues(self, binding: dict[str, Any], *, updated_after: str) -> list[dict[str, Any]]:
         transport = httpx.MockTransport(self.transport) if self.transport is not None else None
         async with httpx.AsyncClient(timeout=30, trust_env=False, transport=transport) as client:
             response = await client.post(
@@ -160,6 +165,8 @@ class LinearDelegatePoller:
         if str(delegate.get("id") or "") != self.application_id:
             return None
         if str(project.get("slugId") or "") != str(binding.get("project_slug") or ""):
+            return None
+        if _is_symphony_projection_issue(issue):
             return None
         issue_id = str(issue.get("id") or "")
         if not issue_id:
@@ -267,3 +274,24 @@ def _parent_issue_id(issue: dict[str, Any]) -> str:
 
 def _sanitize_poll_error(exc: Exception) -> str:
     return f"{type(exc).__name__}: {str(exc)[:300]}"
+
+
+def _newest_first(issues: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return sorted(issues, key=lambda issue: str(issue.get("updatedAt") or ""), reverse=True)
+
+
+def _issue_created_before(issue: dict[str, Any], cursor: str) -> bool:
+    created_at = str(issue.get("createdAt") or "")
+    return bool(created_at and created_at < cursor)
+
+
+def _is_symphony_projection_issue(issue: dict[str, Any]) -> bool:
+    title = str(issue.get("title") or "").strip()
+    description = str(issue.get("description") or "")
+    if title.startswith("[Human Action]"):
+        return True
+    if "symphony_runtime_wait:" in description or "symphony_human_wait:" in description:
+        return True
+    if "symphony:" not in description:
+        return False
+    return "graph_id:" in description and "node_id:" in description and "operator_status:" in description
