@@ -7044,10 +7044,11 @@ async def test_background_coordination_fails_running_attempt_when_process_exits_
         encoding="utf-8",
     )
     store.save_instance(instance)
+    exited_at = (datetime.now(timezone.utc) - timedelta(seconds=30)).isoformat().replace("+00:00", "Z")
 
     class ExitedRuntime:
         def refresh(self, record):
-            return record.with_updates(process_status="exited", pid=None, last_exit_code=1)
+            return record.with_updates(process_status="exited", pid=None, last_exit_code=1, updated_at=exited_at)
 
     service = ConductorService(store=store, data_root=data_root, runtime_manager=ExitedRuntime())  # type: ignore[arg-type]
     service.pipeline_store.apply_runtime_config(
@@ -7595,10 +7596,11 @@ async def test_process_exit_error_uses_current_generation_log_tail(tmp_path: Pat
     (logs_dir / "current.log").write_text(str(current_log), encoding="utf-8")
     Path(instance.log_path).write_text("stale start line only\n", encoding="utf-8")
     store.save_instance(instance)
+    exited_at = (datetime.now(timezone.utc) - timedelta(seconds=30)).isoformat().replace("+00:00", "Z")
 
     class ExitedRuntime:
         def refresh(self, record):
-            return record.with_updates(process_status="exited", pid=None, last_exit_code=1)
+            return record.with_updates(process_status="exited", pid=None, last_exit_code=1, updated_at=exited_at)
 
     service = ConductorService(store=store, data_root=data_root, runtime_manager=ExitedRuntime())  # type: ignore[arg-type]
     service.pipeline_store.apply_runtime_config(
