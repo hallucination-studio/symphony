@@ -89,8 +89,16 @@ Early real runs repeatedly stalled in ways that looked like unrelated bugs — a
 downstream node depending on only one of two parallel branches, a replan's new
 edges getting overwritten by Linear ingestion, a verifier failing a node on an
 exact-text marker the issue never required. These are not separate defects. They
-are surface projections of **two independent, deeper root causes**, and this
-document is organized so that every downstream rule traces back to one of them.
+are surface projections of **four independent, deeper root causes** (A–D), and
+this document is organized so that every downstream rule traces back to one of
+them.
+
+> **Root-cause index.** A — specification vs. proposal (correctness). B —
+> topology vs. runtime-state storage (stability). C — graph convergence /
+> liveness (the graph must always reach a terminal state). D — capacity single
+> source of truth (a pushed policy must be *provably in effect* before acceptance
+> asserts on it). A and B were identified first; C and D surfaced once A/B stopped
+> masking them.
 
 ### Root cause A — specification and proposal were never separated
 
@@ -136,6 +144,30 @@ deterministically from the inputs (business issue + acceptance harness / Appendi
   replace durable truth (see Ingestion is union-only and idempotent). The durable
   graph is the sole authority; Linear is a projection plus a human-event inbox.
 
+**Where the authority must live (anti-pattern warning).** IntentSpec derivation
+and `PlanRepair` are **Conductor-side, plan-commit-time** concerns. They run in
+the orchestrator, over structured inputs, *before* the proposal is committed to
+the graph. It is an anti-pattern — and the concrete cause of the exact-marker
+false-negatives — to derive intent inside the Performer worker *after* the model
+has produced output, by regex-scraping the issue prose and matching the model's
+own free-text node labels (e.g. keying off the substring `"parallel"` in a title).
+That approach is neither deterministic (it depends on model-authored labels) nor
+independent (it re-derives intent from prose the model also saw), and it tempts
+`PlanRepair` into *injecting* authoritative gate commands the issue never
+mandated. Two hard rules follow:
+
+- IntentSpec is derived from **structured issue/harness inputs**, not from
+  free-text prose scraping and not from model-authored labels. If a required
+  graph shape or gate step cannot be derived structurally, it is absent, not
+  guessed.
+- `PlanRepair` may **add or re-point `blocks` edges** and may **demote** an
+  over-specified model step to `planner_inferred`, but it must **never inject an
+  `issue_requirement`/`appendix_harness`/`system_repair` gate command that did not
+  come from the IntentSpec**. Repair aligns structure; it does not manufacture
+  acceptance authority. Any step repair itself inserts is `system_repair` only
+  when it is a structural guard the harness defines, never a content assertion the
+  model invented.
+
 ### Root cause B — versioned topology and mutable runtime state shared one table
 
 Node runtime state (lifecycle state, `verify_score`, `rework_count`, escalation
@@ -154,15 +186,68 @@ mutated in place, never copied per revision. This mirrors LangGraph's separation
 of compiled topology from reduced state, and Temporal's separation of durable
 history from live execution.
 
+### Root cause C — the graph had no convergence (liveness) guarantee
+
+Nothing in the scheduler guaranteed a committed graph would ever reach a terminal
+state. The state machine permitted a *stable deadlock*: a parent in `REPLANNING`,
+one child in `AWAITING_HUMAN`, and a replacement node in `EXECUTING`, with no
+force driving it to resolve. `derive_parent_state` computes a display aggregate
+but triggers no action; the replan → rework → awaiting-human transitions had no
+strictly-decreasing progress measure and no whole-graph terminal assertion. The
+acceptance stage `final-pipeline-verified` asserts convergence, but the scheduler
+never promised it — a specification requirement with no matching runtime
+invariant.
+
+**The fix — an explicit convergence contract** (see Graph Convergence Contract):
+
+- Every graph node has a defined terminal set; a node not in a terminal state
+  must have at least one *live driver* (a dispatchable mode, an active attempt, or
+  an open human/runtime wait keyed to it). A node with no live driver and no
+  terminal state is a **stuck-node** finding, surfaced immediately, never a silent
+  stall.
+- Every replan/rework strictly decreases a well-founded progress measure
+  (bounded `rework_count`/replan depth). Exhausting it escalates to
+  `AWAITING_HUMAN(REPLAN_LIMIT_EXCEEDED)` — a terminal-until-resolved state — not
+  another loop.
+- The parent aggregate is not merely displayed; when all children are terminal the
+  parent is *driven* to its aggregate terminal state (`VERIFY_PASSED`, `FAILED`,
+  or `AWAITING_HUMAN`), so a fully-terminal child set can never leave the parent
+  perpetually `IN_PROGRESS`/`REPLANNING`.
+
+### Root cause D — capacity had no single, verified source of truth
+
+Capacity existed in three representations — the Podium-pushed policy, Conductor's
+local default, and the pipeline-view snapshot — with no path that proves a pushed
+policy is *in effect*. The local default (`global: null, by_mode: {}`) silently
+masks a failed or rejected push: `by_mode: {}` means *no* per-mode cap, so an
+observed "2 concurrent executes" can happen because nothing limited it, not
+because `execute: 2` took effect. Meanwhile the view reports
+`by_mode.get(mode)`, which under the local default disagrees with what the
+scheduler actually enforced. Acceptance then asserts on a policy that was never
+active.
+
+**The fix — one verified capacity read** (see Scheduling Foundation S0-a):
+
+- The pipeline view reports the **effective policy actually used by the scheduler
+  this tick** (its `policy_id` + `version`), not a re-derived limit. View,
+  scheduler arithmetic, and enforcement read the same policy object.
+- A run whose acceptance depends on a specific pushed policy must observe that the
+  active `policy_id`/`version` **matches the pushed one** before asserting on
+  per-mode limits. Falling back to local default is a distinguishable, surfaced
+  state, not a silent substitute that looks like success.
+
 ### Why these are orthogonal
 
-Root cause A is about **where truth comes from** (a correctness problem: authority
-confusion among model, Linear, and verifier). Root cause B is about **how truth is
-stored** (a stability problem: revision churn under concurrency). They are fixed
-by independent mechanisms and must not be conflated: making ingestion idempotent
-(A) does not remove the copy-forward hazard (B), and splitting the state store (B)
-does not stop the model from authoring its own acceptance authority (A). The
-invariants and subprojects below are tagged to whichever root cause they close.
+Root cause A is about **where truth comes from** (correctness: authority confusion
+among model, Linear, and verifier). B is about **how truth is stored** (stability:
+revision churn under concurrency). C is about **whether the system is guaranteed to
+make progress** (liveness: no stable deadlock). D is about **trusting the control
+inputs** (a pushed policy must be provably in effect). They are fixed by
+independent mechanisms and must not be conflated: idempotent ingestion (A) does not
+remove the copy-forward hazard (B); splitting the state store (B) does not add a
+progress measure (C); a progress measure (C) does not make capacity observable
+(D). The invariants and subprojects below are tagged to whichever root cause they
+close.
 
 ## Architecture Invariants
 
@@ -193,6 +278,22 @@ These invariants are normative. Every subproject must preserve them.
     an ingestion that changes topology. Steady-state reconciliation that observes
     no topology change must not mint a revision (revision churn is a bug, not a
     heartbeat).
+15. Intent authority is derived Conductor-side at plan-commit time from structured
+    inputs, never inside the Performer worker from prose scraping or model-authored
+    labels. `PlanRepair` may add/re-point edges and demote steps to
+    `planner_inferred`, but must never inject an authoritative gate command absent
+    from the IntentSpec. (Root cause A.)
+16. Every non-terminal graph node has at least one live driver (a dispatchable
+    mode, an active attempt, or an open human/runtime wait keyed to it). A
+    non-terminal node with no live driver is a surfaced stuck-node finding, never a
+    silent stall. Every replan/rework strictly decreases a well-founded progress
+    measure; exhausting it escalates to `AWAITING_HUMAN`, not another loop. (Root
+    cause C.)
+17. Capacity has one verified source of truth: the pipeline view reports the
+    effective policy the scheduler used this tick (`policy_id` + `version`), and a
+    run asserting on a pushed policy first confirms the active `policy_id`/`version`
+    matches it. Local-default fallback is a distinguishable, surfaced state, not a
+    silent substitute. (Root cause D.)
 
 ## Core Architecture
 
@@ -692,6 +793,50 @@ PLANNED → (validate) → READY → EXECUTING → VERIFYING → VERIFY_PASSED
 - `AWAITING_HUMAN` is reachable from any state on escalation (see Human
   Escalation).
 
+## Graph Convergence Contract
+
+A committed graph must be *guaranteed* to reach a terminal state; the scheduler
+may not permit a stable deadlock (Root cause C). This contract makes convergence a
+runtime invariant, not merely an acceptance hope.
+
+### Terminal states and live drivers
+
+Terminal node states are `VERIFY_PASSED`, `FAILED`, `SUPERSEDED`, and
+`AWAITING_HUMAN` (terminal-until-resolved). Every node **not** in a terminal state
+must have at least one **live driver**:
+
+- a mode for which it is currently dispatchable (`READY`/`REWORKING` with
+  satisfied dependencies and capacity), or
+- an active attempt (an unexpired lease + `RUNNING` attempt), or
+- an open human wait or runtime wait keyed to that node.
+
+A non-terminal node with no live driver is a **stuck-node finding**. Conductor
+surfaces it in reconcile findings each tick and escalates it to
+`AWAITING_HUMAN(<structured reason>)` rather than leaving it silently parked. "The
+graph stopped moving but nothing is wrong" is not a permitted state.
+
+### Well-founded progress measure
+
+Every backward transition consumes a bounded budget so loops cannot run forever:
+
+- `rework_count` is bounded by `max_rework_attempts`; reaching it moves the node to
+  `REPLANNING`, not another `REWORKING` cycle.
+- replan depth is bounded; a replan whose subgraph itself exhausts the budget, or
+  fails validation, escalates to `AWAITING_HUMAN(REPLAN_LIMIT_EXCEEDED)`.
+- Because `SUPERSEDED` is terminal and replan strictly increases replan depth, the
+  `(replan_depth, rework_count)` pair is a well-founded measure that strictly
+  decreases the remaining budget on every backward edge.
+
+### Parent aggregate is driven, not just displayed
+
+`derive_parent_state` computes the aggregate, but the coordinator must also *act*
+on it: when every child of a parent is terminal, the parent is driven to its
+aggregate terminal state (`VERIFY_PASSED` if all exit children passed and all
+children are `VERIFY_PASSED`/`SUPERSEDED`; `AWAITING_HUMAN` if any child awaits a
+human; `FAILED` if any child is unrecoverably failed). A fully-terminal child set
+may never leave the parent perpetually `IN_PROGRESS` or `REPLANNING`. This is the
+transition that lets `final-pipeline-verified` actually converge.
+
 ## Scheduling Foundation (S0)
 
 ### S0-a: Typed capacity + versioned Podium-pushed policy
@@ -726,6 +871,23 @@ Semantics:
 - A policy update does not preempt running tasks unless explicitly configured; if
   active count exceeds a new lower limit, Conductor stops new dispatch but does
   not kill in-flight work. New dispatches use the latest policy.
+
+**Single verified source of truth (Root cause D).** Capacity must never be
+readable in a way that disagrees with what the scheduler enforced:
+
+- The scheduler arithmetic (`remaining_for_mode`), the enforcement in
+  `start_due_attempts`, and the `/api/v1/pipeline` view all read the **same**
+  active policy object. The view reports that policy's `policy_id` + `version` and
+  the per-mode limit *as the scheduler saw it this tick*, never a separately
+  re-derived number.
+- Local-default fallback (`global: null, by_mode: {}`) is a **distinguishable,
+  surfaced state**, not a silent substitute. The view exposes whether the active
+  policy is a Podium-pushed policy or the local default, so an acceptance run can
+  tell "policy in effect" from "push never landed."
+- A run whose acceptance asserts a specific per-mode limit (e.g.
+  `execute: 2`) must first confirm the active `policy_id`/`version` matches the
+  pushed policy. Observing N concurrent attempts under the local default (which
+  imposes no per-mode cap) is **not** evidence the pushed limit took effect.
 
 Capacity accounting is lease-based so a crashed worker does not leak capacity:
 
@@ -1022,6 +1184,12 @@ invariant and the request/result based Performer CLI.
 12. Linear projection exposes operator-visible pipeline status, including
     `operator_status` on every projected node and `operator_wait_kind` whenever
     Codex/runtime is waiting for approval, permission, or tool input.
+13. Every committed graph converges: no non-terminal node lacks a live driver, and
+    a parent whose children are all terminal is driven to its aggregate terminal
+    state rather than parked in `IN_PROGRESS`/`REPLANNING` (Root cause C).
+14. Capacity is reported from the single active policy the scheduler used, with
+    Podium-pushed vs. local-default distinguishable; acceptance confirms the pushed
+    `policy_id`/`version` is active before asserting per-mode limits (Root cause D).
 
 ## Verification
 
