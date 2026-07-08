@@ -60,6 +60,7 @@ class GraphRevision:
 
 
 _UNCHANGED = object()
+_PROCESS_EXIT_RESULT_GRACE_SECONDS = 5.0
 
 
 class ConductorPipelineStore:
@@ -3576,6 +3577,8 @@ class PipelineCoordinator:
         if getattr(instance, "process_status", None) != "exited":
             return 0
         at = at or datetime.now(timezone.utc)
+        if _recently_observed_process_exit(instance, at=at):
+            return 0
         failed = 0
         error = _process_exit_error(instance)
         for attempt in self.store.list_attempts():
@@ -4406,3 +4409,21 @@ def _utc(value: datetime) -> datetime:
 
 def _format_time(value: datetime) -> str:
     return _utc(value).isoformat().replace("+00:00", "Z")
+
+
+def _parse_time(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return _utc(parsed)
+
+
+def _recently_observed_process_exit(instance: Any, *, at: datetime) -> bool:
+    observed_at = _parse_time(getattr(instance, "updated_at", None))
+    if observed_at is None:
+        return False
+    return (_utc(at) - observed_at).total_seconds() < _PROCESS_EXIT_RESULT_GRACE_SECONDS

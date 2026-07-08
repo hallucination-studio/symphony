@@ -7484,6 +7484,36 @@ def test_fail_exited_attempt_snapshot_defers_when_result_file_exists(tmp_path: P
     assert store.get_attempt("exec-a").state is AttemptState.SUCCEEDED
 
 
+def test_fail_running_attempts_defers_immediately_after_process_exit(tmp_path: Path) -> None:
+    store = ConductorPipelineStore(tmp_path)
+    store.apply_runtime_config(
+        RuntimeConfigEnvelope(
+            "group-1",
+            1,
+            _policy(1),
+            profiles={RuntimeMode.PLAN: RuntimeProfile(name="planner", backend="codex", mode=RuntimeMode.PLAN)},
+        )
+    )
+    store.commit_plan(_proposal())
+    store.update_node_state("a", GraphNodeState.REPLANNING)
+    lease = store.start_attempt(RuntimeMode.PLAN, node_id="a", attempt_id="plan-a", now=datetime.now(timezone.utc))
+
+    class Instance:
+        instance_dir = str(tmp_path / "inst-1")
+        log_path = str(tmp_path / "inst-1" / "logs" / "performer.log")
+        process_status = "exited"
+        last_exit_code = 0
+        updated_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    coordinator = PipelineCoordinator(store=store, runtime_manager=None)
+
+    failed = coordinator.fail_running_attempts_for_exited_process(Instance)
+
+    assert failed == 0
+    assert store.get_attempt("plan-a").state is AttemptState.RUNNING
+    assert store.active_lease("a", RuntimeMode.PLAN).lease_id == lease.lease_id  # type: ignore[union-attr]
+
+
 async def test_process_exit_error_uses_current_generation_log_tail(tmp_path: Path) -> None:
     data_root = tmp_path / "conductor-data"
     repo = tmp_path / "repo"
