@@ -23,6 +23,15 @@ from performer_api.pipeline import (
 )
 
 
+def _commit_file(repo: Path, commit_sha: str, relative_path: str) -> str:
+    return subprocess.check_output(["git", "show", f"{commit_sha}:{relative_path}"], cwd=repo, text=True)
+
+
+def _commit_file_names(repo: Path, commit_sha: str) -> list[str]:
+    output = subprocess.check_output(["git", "show", "--name-only", "--format=", commit_sha], cwd=repo, text=True)
+    return [line.strip() for line in output.splitlines() if line.strip()]
+
+
 def test_cli_accepts_three_runtime_modes_and_attempt_paths() -> None:
     args = parse_args(
         [
@@ -1136,7 +1145,7 @@ async def test_verify_mode_treats_planner_inferred_gate_failures_as_advisory(tmp
 
 
 @pytest.mark.asyncio
-async def test_verify_mode_runs_gate_commands_against_patched_verification_worktree(tmp_path: Path) -> None:
+async def test_verify_mode_runs_gate_commands_against_commit_snapshot(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
     subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
@@ -1146,21 +1155,20 @@ async def test_verify_mode_runs_gate_commands_against_patched_verification_workt
     subprocess.run(["git", "add", "README.md"], cwd=repo, check=True)
     subprocess.run(["git", "commit", "-m", "base"], cwd=repo, check=True, capture_output=True, text=True)
     base_revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
-    (repo / "created.txt").write_text("from patch\n", encoding="utf-8")
+    (repo / "created.txt").write_text("from commit\n", encoding="utf-8")
     subprocess.run(["git", "add", "created.txt"], cwd=repo, check=True)
-    patch = subprocess.check_output(["git", "diff", "--binary", "--cached"], cwd=repo, text=True)
-    expected_tree = subprocess.check_output(["git", "write-tree"], cwd=repo, text=True).strip()
-    subprocess.run(["git", "reset", "--hard", "HEAD"], cwd=repo, check=True, capture_output=True, text=True)
-    patch_path = tmp_path / "patch.diff"
-    patch_path.write_text(patch, encoding="utf-8")
+    subprocess.run(["git", "commit", "-m", "execute node"], cwd=repo, check=True, capture_output=True, text=True)
+    commit_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+    branch_name = subprocess.check_output(["git", "branch", "--show-current"], cwd=repo, text=True).strip()
+    subprocess.run(["git", "checkout", "--quiet", base_revision], cwd=repo, check=True)
     gate = GateSpecSnapshot.create(
         gate_id="gate-1",
         task_id="node-1",
         created_by="plan-1",
         created_at="2026-07-06T00:00:00Z",
         content=GateSpecContent(
-            acceptance_criteria=["created file exists after patch"],
-            verification_procedure=["test \"$(cat created.txt)\" = \"from patch\""],
+            acceptance_criteria=["created file exists after execute commit"],
+            verification_procedure=["test \"$(cat created.txt)\" = \"from commit\""],
             rubric={str(score): f"score {score}" for score in range(5)},
             pass_threshold=3,
         ),
@@ -1183,9 +1191,8 @@ async def test_verify_mode_runs_gate_commands_against_patched_verification_workt
                     "execute_attempt_id": "exec-1",
                     "base_revision": base_revision,
                     "repository_path": str(repo),
-                    "patch_uri": f"file://{patch_path}",
-                    "patch_hash": "sha256:" + hashlib.sha256(patch.encode("utf-8")).hexdigest(),
-                    "expected_result_tree": expected_tree,
+                    "branch_name": branch_name,
+                    "commit_sha": commit_sha,
                     "artifact_uris": [],
                     "declared_commands": [],
                     "evidence_uri": "artifact://evidence",
@@ -1424,7 +1431,7 @@ async def test_verify_mode_runs_pytest_without_generated_cache_mutation(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_execute_mode_collects_git_patch_and_snapshot(tmp_path: Path) -> None:
+async def test_execute_mode_commits_worktree_branch_and_snapshot(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
     subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
@@ -1462,9 +1469,13 @@ async def test_execute_mode_collects_git_patch_and_snapshot(tmp_path: Path) -> N
     assert payload["graph_revision"] == 4
     assert payload["lease_id"] == "lease-exec"
     assert snapshot["base_revision"] == base_revision
-    assert snapshot["patch_hash"].startswith("sha256:")
-    assert Path(snapshot["patch_uri"].removeprefix("file://")).read_text(encoding="utf-8")
-    assert snapshot["expected_result_tree"]
+    assert snapshot["branch_name"] == "main"
+    assert snapshot["commit_sha"]
+    assert snapshot["repository_path"] == str(repo)
+    assert snapshot["workspace_path"] == str(repo)
+    assert "patch_hash" not in snapshot
+    assert "patch_uri" not in snapshot
+    assert subprocess.check_output(["git", "show", "--format=%s", "--no-patch", snapshot["commit_sha"]], cwd=repo, text=True).strip() == "Execute pipeline node node-1"
 
 
 @pytest.mark.asyncio
@@ -1507,7 +1518,7 @@ async def test_execute_mode_without_injected_backend_fails_closed_without_codex_
 
 
 @pytest.mark.asyncio
-async def test_execute_mode_runs_backend_before_collecting_patch(tmp_path: Path) -> None:
+async def test_execute_mode_runs_backend_before_collecting_commit(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
     subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
@@ -1540,15 +1551,17 @@ async def test_execute_mode_runs_backend_before_collecting_patch(tmp_path: Path)
     await run_mode_attempt(RuntimeMode.EXECUTE, request_path, result_path, agent_backend=backend)
 
     payload = json.loads(result_path.read_text(encoding="utf-8"))
-    patch_text = Path(payload["verification_input"]["patch_uri"].removeprefix("file://")).read_text(encoding="utf-8")
+    snapshot = payload["verification_input"]
     assert backend.calls == 1
     assert "All file writes must happen inside the current execution workspace" in backend.prompts[0]
-    assert "BACKEND.txt" in patch_text
-    assert "created by backend" in patch_text
+    assert snapshot["commit_sha"]
+    assert "BACKEND.txt" in _commit_file_names(repo, snapshot["commit_sha"])
+    assert _commit_file(repo, snapshot["commit_sha"], "BACKEND.txt") == "created by backend\n"
+    assert "patch_uri" not in snapshot
 
 
 @pytest.mark.asyncio
-async def test_execute_mode_excludes_generated_python_test_caches_from_patch(tmp_path: Path) -> None:
+async def test_execute_mode_excludes_generated_python_test_caches_from_commit(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
     subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
@@ -1580,11 +1593,12 @@ async def test_execute_mode_excludes_generated_python_test_caches_from_patch(tmp
     await run_mode_attempt(RuntimeMode.EXECUTE, request_path, result_path, agent_backend=_CacheWritingBackend())
 
     payload = json.loads(result_path.read_text(encoding="utf-8"))
-    patch_text = Path(payload["verification_input"]["patch_uri"].removeprefix("file://")).read_text(encoding="utf-8")
-    assert "BACKEND.txt" in patch_text
-    assert "__pycache__" not in patch_text
-    assert ".pytest_cache" not in patch_text
-    assert ".pyc" not in patch_text
+    snapshot = payload["verification_input"]
+    changed_files = _commit_file_names(repo, snapshot["commit_sha"])
+    assert "BACKEND.txt" in changed_files
+    assert all("__pycache__" not in name for name in changed_files)
+    assert all(".pytest_cache" not in name for name in changed_files)
+    assert all(not name.endswith(".pyc") for name in changed_files)
 
 
 @pytest.mark.asyncio
@@ -1800,11 +1814,11 @@ async def test_execute_mode_uses_structured_repository_path_from_managed_request
 
     payload = json.loads(result_path.read_text(encoding="utf-8"))
     snapshot = payload["verification_input"]
-    patch_text = Path(snapshot["patch_uri"].removeprefix("file://")).read_text(encoding="utf-8")
     assert backend.calls == 1
     assert snapshot["repository_path"] == str(repo)
-    assert "BACKEND.txt" in patch_text
-    assert "created by structured request" in patch_text
+    assert "BACKEND.txt" in _commit_file_names(repo, snapshot["commit_sha"])
+    assert _commit_file(repo, snapshot["commit_sha"], "BACKEND.txt") == "created by structured request\n"
+    assert "patch_uri" not in snapshot
 
 
 @pytest.mark.asyncio
@@ -1845,11 +1859,11 @@ async def test_execute_mode_materializes_attempt_workspace_from_repository_basel
     payload = json.loads(result_path.read_text(encoding="utf-8"))
     snapshot = payload["verification_input"]
     workspace = attempt_dir / "workspace"
-    patch_text = Path(snapshot["patch_uri"].removeprefix("file://")).read_text(encoding="utf-8")
     assert backend.workspace_paths == [workspace]
     assert snapshot["repository_path"] == str(repo)
     assert snapshot["workspace_path"] == str(workspace)
-    assert "created in isolated workspace" in patch_text
+    assert _commit_file(workspace, snapshot["commit_sha"], "BACKEND.txt") == "created in isolated workspace\n"
+    assert "patch_uri" not in snapshot
     assert not (repo / "BACKEND.txt").exists()
     assert subprocess.check_output(["git", "status", "--short"], cwd=repo, text=True) == ""
 

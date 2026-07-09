@@ -1084,6 +1084,38 @@ def test_verification_input_snapshot_preserves_repository_and_workspace_paths() 
     assert VerificationInputSnapshot.from_dict(snapshot.to_dict()) == snapshot
 
 
+def test_verification_input_snapshot_prefers_branch_commit_handoff() -> None:
+    snapshot = VerificationInputSnapshot(
+        task_id="node-1",
+        execute_attempt_id="exec-1",
+        base_revision="base",
+        branch_name="symphony/node-1",
+        commit_sha="commit-sha",
+        artifact_uris=[],
+        declared_commands=["pytest -q"],
+        evidence_uri="file:///workspace/.symphony/pipeline/exec-1/evidence.json",
+        gate_snapshot_hash="gate-hash",
+        repository_path="/source/repo",
+        workspace_path="/execute/workspace",
+    )
+
+    payload = snapshot.to_dict()
+
+    assert payload["branch_name"] == "symphony/node-1"
+    assert payload["commit_sha"] == "commit-sha"
+    assert "patch_hash" not in payload
+    assert "expected_result_tree" not in payload
+    assert VerificationInputSnapshot.from_dict(payload) == snapshot
+
+
+def test_graph_node_state_uses_need_human_with_legacy_awaiting_human_compatibility() -> None:
+    states = {state.value for state in GraphNodeState}
+
+    assert "need_human" in states
+    assert "awaiting_human" not in states
+    assert GraphNodeState.from_value("awaiting_human") is GraphNodeState.NEED_HUMAN
+
+
 def test_scheduler_policy_defaults_to_verify_passed_dependencies() -> None:
     policy = SchedulerPolicy(
         policy_id="policy-verify-only",

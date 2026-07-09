@@ -43,16 +43,26 @@ RUNTIME_BACKENDS_BY_MODE = {
 class GraphNodeState(StrEnum):
     PLANNED = "planned"
     READY = "ready"
+    REWORKING = "ready"
     EXECUTING = "executing"
     EXECUTE_FAILED = "execute_failed"
     VERIFYING = "verifying"
     VERIFY_PASSED = "verify_passed"
     VERIFY_FAILED = "verify_failed"
-    REWORKING = "reworking"
     REPLANNING = "replanning"
     SUPERSEDED = "superseded"
-    AWAITING_HUMAN = "awaiting_human"
+    NEED_HUMAN = "need_human"
+    AWAITING_HUMAN = "need_human"
     FAILED = "failed"
+
+    @classmethod
+    def from_value(cls, value: Any) -> GraphNodeState:
+        normalized = str(value or cls.PLANNED.value)
+        if normalized == "awaiting_human":
+            normalized = cls.NEED_HUMAN.value
+        if normalized == "reworking":
+            normalized = cls.READY.value
+        return cls(normalized)
 
 
 class AttemptState(StrEnum):
@@ -431,7 +441,7 @@ class GraphNode:
         return cls(
             node_id=str(payload.get("node_id") or ""),
             title=str(payload.get("title") or ""),
-            state=GraphNodeState(str(payload.get("state") or GraphNodeState.PLANNED.value)),
+            state=GraphNodeState.from_value(payload.get("state") or GraphNodeState.PLANNED.value),
             issue_id=_optional_str(payload.get("issue_id")),
             issue_identifier=_optional_str(payload.get("issue_identifier")),
             parent_node_id=_optional_str(payload.get("parent_node_id")),
@@ -935,19 +945,28 @@ class VerificationInputSnapshot:
     task_id: str
     execute_attempt_id: str
     base_revision: str
-    patch_uri: str
-    patch_hash: str
-    expected_result_tree: str
     artifact_uris: list[dict[str, Any]]
     declared_commands: list[str]
     evidence_uri: str
     gate_snapshot_hash: str
     repository_path: str = ""
     workspace_path: str = ""
+    branch_name: str = ""
+    commit_sha: str = ""
+    no_changes: bool = False
+    patch_uri: str = ""
+    patch_hash: str = ""
+    expected_result_tree: str = ""
     result_revision: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        payload = asdict(self)
+        for key in ("patch_uri", "patch_hash", "expected_result_tree", "result_revision"):
+            if not payload.get(key):
+                payload.pop(key, None)
+        if not payload.get("no_changes"):
+            payload.pop("no_changes", None)
+        return payload
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> VerificationInputSnapshot:
@@ -955,15 +974,18 @@ class VerificationInputSnapshot:
             task_id=str(payload.get("task_id") or ""),
             execute_attempt_id=str(payload.get("execute_attempt_id") or ""),
             base_revision=str(payload.get("base_revision") or ""),
-            patch_uri=str(payload.get("patch_uri") or ""),
-            patch_hash=str(payload.get("patch_hash") or ""),
-            expected_result_tree=str(payload.get("expected_result_tree") or ""),
             artifact_uris=[_dict(item) for item in payload.get("artifact_uris") or [] if isinstance(item, dict)],
             declared_commands=_str_list(payload.get("declared_commands")),
             evidence_uri=str(payload.get("evidence_uri") or ""),
             gate_snapshot_hash=str(payload.get("gate_snapshot_hash") or ""),
             repository_path=str(payload.get("repository_path") or ""),
             workspace_path=str(payload.get("workspace_path") or ""),
+            branch_name=str(payload.get("branch_name") or ""),
+            commit_sha=str(payload.get("commit_sha") or payload.get("result_revision") or ""),
+            no_changes=bool(payload.get("no_changes", False)),
+            patch_uri=str(payload.get("patch_uri") or ""),
+            patch_hash=str(payload.get("patch_hash") or ""),
+            expected_result_tree=str(payload.get("expected_result_tree") or ""),
             result_revision=_optional_str(payload.get("result_revision")),
         )
 
@@ -1347,6 +1369,7 @@ class PipelineView:
     runtime_waits: list[dict[str, Any]] = field(default_factory=list)
     stuck_observations: list[dict[str, Any]] = field(default_factory=list)
     linear_projections: list[dict[str, Any]] = field(default_factory=list)
+    graph_deliveries: list[dict[str, Any]] = field(default_factory=list)
     prediction_basis: dict[str, Any] = field(default_factory=dict)
     runtime_config: dict[str, Any] = field(default_factory=dict)
 
@@ -1374,6 +1397,7 @@ class PipelineView:
             "runtime_waits": [_jsonable_dict(wait) for wait in self.runtime_waits],
             "stuck_observations": [_jsonable_dict(observation) for observation in self.stuck_observations],
             "linear_projections": [_jsonable_dict(projection) for projection in self.linear_projections],
+            "graph_deliveries": [_jsonable_dict(delivery) for delivery in self.graph_deliveries],
             "prediction_basis": _jsonable_dict(self.prediction_basis),
             "runtime_config": _jsonable_dict(self.runtime_config),
         }

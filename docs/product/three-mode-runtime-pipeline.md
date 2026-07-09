@@ -569,10 +569,9 @@ verification_input:
   task_id: <node id>
   execute_attempt_id: <id>
   base_revision: <git sha before>
-  patch_uri: <artifact store>
-  patch_hash: <sha256 of patch>
-  expected_result_tree: <git tree sha after applying patch>
-  result_revision: <optional git commit sha; provenance/optimization only>
+  branch_name: symphony/<node id>
+  commit_sha: <executor commit sha>
+  no_changes: <bool>
   artifact_uris:
     - { uri: ..., sha256: ..., type: ... }
   declared_commands: [...]          # informational only, not trusted as evidence
@@ -580,24 +579,19 @@ verification_input:
   gate_snapshot_hash: <hash>
 ```
 
-Verifier canonical workflow (apply-patch is the normative path; `result_revision`
-is used only for provenance or as an optimization after verifying it resolves to
-the same tree):
+Verifier canonical workflow:
 
 1. create a fresh, disposable worktree/workspace;
-2. checkout `base_revision`;
-3. fetch `patch_uri` and verify `patch_hash`;
-4. apply the patch;
-5. assert the resulting git tree hash equals `expected_result_tree`;
-6. optionally assert `result_revision`, if present, resolves to the same tree;
-7. pull read-only artifacts and verify their hashes;
-8. load the frozen gate snapshot by hash;
-9. execute the gate's verification procedure;
-10. emit a verdict via Conductor API.
+2. materialize `commit_sha` with `git worktree add --detach`;
+3. pull read-only artifacts and verify their hashes;
+4. load the frozen gate snapshot by hash;
+5. execute the gate's verification procedure;
+6. emit a verdict via Conductor API.
 
-Directly checking out `result_revision` as the primary path is forbidden: it may
-carry executor commits, temporary merges, or state not belonging to this attempt,
-which would weaken the "executor output is an immutable bundle" boundary.
+Legacy patch snapshots (`patch_uri`, `patch_hash`, `expected_result_tree`, and
+`result_revision`) may be accepted for migration compatibility, but the current
+execute contract is branch/commit handoff. New executors commit directly to the
+node branch and do not publish patches.
 
 `declared_commands` are context only; a passing verdict must come from the
 verifier actually running the gate procedure, never from the executor's
@@ -615,12 +609,12 @@ Isolation includes capability limits, not just separate homes.
 
 - **Planner**: may propose graph/gate (proposal only); cannot run
   implementation; cannot write verify verdicts.
-- **Executor**: may modify code, produce patches, upload evidence; cannot mutate
+- **Executor**: may modify code, commit to its node branch, upload evidence; cannot mutate
   frozen gates; cannot write verify verdicts.
 - **Verifier**: disposable worktree/workspace with mutation detection; may run
   tests and read artifacts; cannot push commits, cannot modify task content
   except writing the verdict via Conductor API, cannot change gates or the
-  dependency graph, cannot produce rework patches.
+  dependency graph, cannot produce executor commits.
 
 ## Backend Abstraction
 
@@ -915,12 +909,9 @@ claim full verify-gating before the verifier exists (S3). Its first job is to
 introduce the hook and the reporting model; the `verify_passed` predicate is only
 enabled once S3 is present.
 
-- Introduce a pluggable `DependencySatisfactionPolicy`:
-  - default (pre-S3): `blocker satisfied = blocker terminal success`;
-  - target (enabled in S3): `blocker satisfied = blocker VERIFY_PASSED and
-    gate_score >= pass_threshold`.
-- The dispatchability check consults this predicate instead of a hardcoded
-  `phase == DONE`.
+- The dispatchability check uses one predicate: `blocker satisfied = blocker
+  VERIFY_PASSED, gate_score >= pass_threshold, and a verified branch output
+  manifest exists`.
 - Linear `blocks` remains a required precondition and is reused as-is.
 
 Observability — Conductor reports scheduler state; Podium exposes a read-only
@@ -1016,7 +1007,7 @@ replaced by `T1 -> T2`, the rewrite yields `A blocks T1` and `T2 blocks B`.
 Because all modes run in Conductor's control loop, the failure is observable and
 the loop closes.
 
-## Patch Integration and Conflict Model
+## Branch Join and Conflict Model
 
 Fully parallel executors create a real integration problem: two independent nodes
 may both verify-pass while modifying overlapping parts of the repository. Passing
@@ -1027,21 +1018,39 @@ The minimum required model is:
 
 - each execute attempt runs against a computed input baseline;
 - for entry nodes, the baseline is the graph's base revision;
-- for dependent nodes, the baseline is the integrated result of all verified
-  blockers or the verified output manifests explicitly named as inputs;
-- independently verified patches are **not** automatically treated as globally
+- for dependent nodes, Conductor creates a worktree branch from that base and
+  merges every verified blocker branch;
+- independently verified branches are **not** automatically treated as globally
   integrated;
-- Conductor owns a deterministic integration step or integration queue;
-- if verified patches conflict, the affected node or graph escalates to
-  `AWAITING_HUMAN` or `REPLANNING` rather than silently merging;
+- Conductor owns the deterministic git join before dispatching the dependent
+  executor;
+- if verified blocker branches conflict during a downstream join, Conductor
+  inserts a merge-conflict resolver execute node; unresolved conflicts escalate
+  to `NEED_HUMAN`;
 - a downstream node may consume an upstream node only through a verified output
-  manifest whose code revision / patch has been integrated into the downstream
-  baseline, or is explicitly listed as an input artifact.
+  manifest whose branch/commit is merged into that downstream node's worktree, or
+  is explicitly listed as an input artifact.
 
-This RFC does not require a full merge engine in the first implementation, but it
-does require the architecture to acknowledge that `VERIFY_PASSED` on parallel
-nodes is not, by itself, a statement about the global integrated repository
-state.
+The join is ordinary git: Conductor creates a per-node worktree branch from the
+base revision and merges all verified blocker branches before dispatching the
+executor.
+
+## Final Graph Delivery
+
+When every active graph node is `VERIFY_PASSED` (or `SUPERSEDED`), Conductor can
+produce the operator-facing delivery branch:
+
+1. create or reset `symphony/<issue-identifier>` in a delivery worktree;
+2. merge every exit node's verified branch/commit manifest;
+3. push the final branch to `origin`;
+4. open a PR with the configured git host integration (`gh pr create` in the
+   local GitHub implementation);
+5. record the delivery result in durable pipeline state and expose it through the
+   pipeline view's `graph_deliveries`.
+
+CI and the final merge remain outside Symphony. If push or PR creation fails,
+the sanitized error is recorded as a failed graph delivery rather than hidden in
+local stdout.
 
 ## Human Escalation
 
@@ -1079,9 +1088,8 @@ completing that issue is what resumes the affected node.
     score: 3
     code:
       base_revision: ...
-      patch_uri: ...
-      expected_result_tree: ...
-      integrated_revision: ...   # optional, if an integration step exists
+      branch_name: symphony/<node id>
+      commit_sha: ...
     artifacts:
       - { name: migration_plan, uri: ..., type: markdown, sha256: ... }
   ```
@@ -1270,18 +1278,18 @@ guesses.
 
 ## S0-b — Dependency-satisfaction predicate + pipeline observability
 
-**Final shape.** Dispatchability consults a pluggable
-`DependencySatisfactionPolicy`. Pre-S3 default: a blocker is satisfied at terminal
-success. From S3: a blocker is satisfied only at `VERIFY_PASSED` with
-`score >= 3`. Linear `blocks` remains a hard precondition. Podium exposes a
+**Final shape.** Dispatchability uses a single dependency predicate: a blocker is
+satisfied only at `VERIFY_PASSED` with `score >= 3` and a verified branch output
+manifest that can be joined by git. Linear `blocks` remains a hard precondition.
+Podium exposes a
 **read-only** pipeline view: per-mode active/limit/queued, which nodes are in
 plan/execute/verify, and a **conditional** predicted call order that always
 carries its `prediction_basis` (`graph_revision`, `policy_revision`,
 `assumption: unknown verifies pass`, `generated_at`) and per-node
 `confidence: conditional`.
 
-- **L done when:** the predicate is swappable and unit-tested for both variants;
-  `blocks` precondition holds; predicted-order simulation is deterministic for a
+- **L done when:** the predicate is unit-tested; `blocks` precondition holds;
+  predicted-order simulation is deterministic for a
   fixed graph+policy and always emits `prediction_basis`.
 - **R done when:** the Podium `/api/v1/pipeline` view reflects a real run's live
   per-mode detail, and the predicted order visibly re-computes as nodes complete.
@@ -1395,25 +1403,24 @@ write verdicts. (This subproject closes Root cause A.)
 
 **Final shape.** `performer --mode verify` runs in an **isolated** runtime against
 an immutable `VerificationInputSnapshot`. Canonical path: fresh disposable
-workspace → checkout `base_revision` → fetch `patch_uri` and verify `patch_hash` →
-apply patch → assert resulting tree == `expected_result_tree` → pull hash-checked
-read-only artifacts → load frozen gate by hash → run the gate procedure → emit a
-0–4 verdict via Conductor API. Direct checkout of `result_revision` as the primary
-path is forbidden. Verifier cannot push commits, mutate gates, change the graph,
-or produce rework patches. On pass (`>= 3`), Conductor publishes the
+worktree → materialize `commit_sha` detached from the executor branch → pull
+hash-checked read-only artifacts → load frozen gate by hash → run the gate
+procedure → emit a 0-4 verdict via Conductor API. Verifier cannot push commits,
+mutate gates, change the graph, or produce executor commits. On pass (`>= 3`),
+Conductor publishes the
 `TaskOutputManifest`; downstream gating switches to verify-passed.
 
 - **L done when:** verify attempt requires a frozen gate + verification input
-  (rejects otherwise); apply-patch path + tree-hash assertion + artifact-hash
-  checks are unit-tested; verdict scoring maps to the calibrated rubric;
+  (rejects otherwise); commit materialization + artifact-hash checks are
+  unit-tested; verdict scoring maps to the calibrated rubric;
   `score == 2` does not satisfy dependents.
-- **R done when:** a real run verifies a real executor patch in an isolated
+- **R done when:** a real run verifies a real executor commit in an isolated
   worktree/home distinct from the executor's, scores against the frozen gate, and
   a real downstream node dispatches only after upstream `VERIFY_PASSED >= 3`.
 - **H done when:** the `local-verifier` mutation-detection reliably **fails** a run
   where the verifier environment alters tracked state (self-report / tampering is
-  caught, not trusted); a patch whose applied tree ≠ `expected_result_tree` is
-  rejected; a verdict written under an expired lease/fencing token is refused.
+  caught, not trusted); a missing or wrong `commit_sha` is rejected; a verdict
+  written under an expired lease/fencing token is refused.
 - **Current:** present-partial. Verify mode + frozen-gate/input requirement +
   local-verifier home present-local; R isolation evidence and mutation-detection
   failure H are the critical remaining bars.
@@ -1441,20 +1448,20 @@ current active revision.
 - **Current:** present-partial. Replan rewrite present-local; real replan loop and
   revision-fencing H pending.
 
-## Patch Integration and Conflict Model
+## Branch Join and Conflict Model
 
 **Final shape.** Each execute attempt runs against a computed input baseline:
-entry nodes use the graph base revision; dependent nodes use the integrated result
-of verified blockers (or explicitly named verified output manifests).
-Independently verified patches are **not** treated as globally integrated;
-Conductor owns a deterministic integration step/queue. Conflicting verified patches
-escalate to `AWAITING_HUMAN` or `REPLANNING` rather than silently merging. A full
-merge engine is *not* required in the first implementation, but the boundary
-("`VERIFY_PASSED` on parallel nodes ≠ globally integrated state") must hold.
+entry nodes use the graph base revision; dependent nodes use a Conductor-created
+worktree branch where every verified blocker branch has been merged.
+Independently verified branches are **not** treated as globally integrated;
+Conductor owns the deterministic git join before each downstream execute.
+Conflicting verified branches spawn an ordinary merge-conflict resolver node; if
+that resolver cannot produce a clean branch, the pipeline escalates to
+`NEED_HUMAN` rather than silently merging.
 
 - **L done when:** baseline computation is deterministic and unit-tested; a
-  synthetic conflict between two verified patches is detected and escalated, not
-  merged.
+  synthetic conflict between two verified branches inserts a resolver node, not a
+  silent merge.
 - **R done when:** a real run with two parallel executors touching overlapping
   files reaches a defined outcome (integrated or escalated), never a silent
   last-writer-wins.
@@ -1534,8 +1541,8 @@ mechanism and traces to a root cause:
   stripped or demoted to `planner_inferred` and cannot alone fail a correct node.
 - **runtime-wait**: a Codex/runtime wait surfaces as `operator_wait_kind` and
   resumes correctly.
-- **integration-conflict**: two overlapping verified patches reach a defined
-  outcome (integrated or escalated), never silent last-writer-wins.
+- **integration-conflict**: two overlapping verified branches create a resolver
+  node or escalate, never silent last-writer-wins.
 
 **Fail-fast checkpoints.** Every DoD-critical *shape* is asserted at the earliest
 possible checkpoint, not after the full pipeline drains. In particular, the
@@ -1556,11 +1563,12 @@ acceptance run (Podium → Conductor → Performer → Linear) in which:
    revision, and projected as a correct `blocks` tree in Linear;
 2. executors run in parallel under per-mode Podium-pushed capacity, with leases and
    fencing observed;
-3. verification runs isolated, apply-patch canonical, mutation detection proven to
-   fail tampering, and downstream gates only on `VERIFY_PASSED >= 3`;
+3. verification runs isolated against executor commits, mutation detection proven
+   to fail tampering, and downstream gates only on `VERIFY_PASSED >= 3` plus
+   verified branch output;
 4. at least one induced failure is replanned into a working subgraph, or escalates
    to a structured `AWAITING_HUMAN` that a human resumes via the child issue;
-5. parallel-conflict is either integrated or escalated, never silently merged;
+5. parallel-conflict creates a resolver node or escalates, never silently merges;
 6. the Podium pipeline view shows live per-mode detail and a conditional predicted
    order with its basis;
 7. no managed run touches the operator's global `~/.codex`;

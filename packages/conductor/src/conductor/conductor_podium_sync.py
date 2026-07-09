@@ -373,8 +373,6 @@ class ConductorPodiumSyncMixin:
                 node_id,
                 reason="pipeline node has no live driver",
             )
-            if int(observation.get("count") or 0) < 2:
-                continue
             node = self.pipeline_store.get_node(node_id)
             finding = {
                 "event": "pipeline_node_stuck",
