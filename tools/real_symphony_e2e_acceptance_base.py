@@ -13,7 +13,6 @@ from real_symphony_e2e_analysis import pipeline_nodes_terminal
 from real_symphony_e2e_common import Evidence, api_url, http_json
 from real_symphony_e2e_linear import fetch_linear_issue_tree
 
-
 APPENDIX_PYTEST_HARDENING_PROBES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("appendix:s1-terminal-attempt-immutable", ("tests/test_conductor_managed_run_coordinator.py::test_managed_run_coordinator_rejects_unapproved_replacement_plan_after_acceptance",)),
     ("appendix:s1-superseded-revision-refused", ("tests/test_conductor_managed_run_coordinator.py::test_managed_run_coordinator_cancels_removed_work_items_on_approved_revision",)),
@@ -46,8 +45,6 @@ APPENDIX_PYTEST_HARDENING_PROBES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("appendix:s4-invalid-replan-escalates", ("tests/test_conductor_managed_run_coordinator.py::test_managed_run_coordinator_exhausts_bounded_plan_validation_retries",)),
     ("appendix:linear-legitimate-blocks-edits-ingested", ("tests/test_real_run_tools_part1.py::test_linear_tree_audit_summarizes_children_and_blocks_relations",)),
 )
-
-
 def _run_appendix_pytest_hardening_probes(evidence: Evidence, *, env: dict[str, str]) -> None:
     python = str(Path.cwd() / ".venv" / "bin" / "python")
     for check_name, nodeids in APPENDIX_PYTEST_HARDENING_PROBES:
@@ -77,8 +74,6 @@ def _pipeline_live_refresh_evidence(samples: list[dict[str, Any]]) -> dict[str, 
     distinct_node_states = len(set(node_state_signatures))
     distinct_lease_counts = len(set(active_lease_counts))
     return {"passed": len(samples) >= 2 and (distinct_node_states >= 2 or distinct_lease_counts >= 2), "sample_count": len(samples), "distinct_node_state_snapshots": distinct_node_states, "distinct_active_lease_counts": distinct_lease_counts}
-
-
 async def _lower_policy_during_parallel_execute_probe(
     *,
     podium_port: int,
@@ -111,8 +106,6 @@ async def _wait_for_parallel_execute_leases(conductor_port: int, timeout_seconds
             return execute_leases
         await asyncio.sleep(1)
     return []
-
-
 async def _observe_lowered_policy_no_preempt(conductor_port: int, lowered_version: int, observed_leases: list[dict[str, Any]]) -> dict[str, Any]:
     observed_ids = {str(lease.get("lease_id") or "") for lease in observed_leases}
     latest_policy_revision = 0
@@ -258,12 +251,18 @@ def _pipeline_node_requires_gate(node: dict[str, Any], nodes: list[dict[str, Any
 
 def _pipeline_linear_issue_tree_finalized(tree: dict[str, Any]) -> dict[str, Any]:
     children = (tree.get("children") or {}).get("nodes")
-    pipeline_children = [child for child in children if isinstance(child, dict) and any(isinstance(label, dict) and label.get("name") == "symphony:type/work-item" for label in ((child.get("labels") or {}).get("nodes") or []))] if isinstance(children, list) else []
+    pipeline_children = [child for child in children if isinstance(child, dict) and _is_pipeline_work_item_child(child)] if isinstance(children, list) else []
     child_states = [{"identifier": child.get("identifier"), "title": child.get("title"), "state": (child.get("state") or {}).get("name") if isinstance(child.get("state"), dict) else None, "state_type": (child.get("state") or {}).get("type") if isinstance(child.get("state"), dict) else None} for child in pipeline_children]
     root_state = tree.get("state") if isinstance(tree.get("state"), dict) else {}
     root_state_type = str(root_state.get("type") or "")
     children_final = bool(pipeline_children) and all(str(item.get("state_type") or "") in {"completed", "canceled"} for item in child_states)
     return {"passed": root_state_type == "completed" and children_final, "root_identifier": tree.get("identifier"), "root_state": root_state.get("name"), "root_state_type": root_state_type, "managed_run_children": child_states}
+
+
+def _is_pipeline_work_item_child(child: dict[str, Any]) -> bool:
+    labels = (child.get("labels") or {}).get("nodes") if isinstance(child.get("labels"), dict) else []
+    description = str(child.get("description") or "")
+    return any(isinstance(label, dict) and label.get("name") == "symphony:type/work-item" for label in labels) or all(heading in description for heading in ["Objective:", "Acceptance Criteria:", "Verification:", "Managed Run State:"])
 
 
 def _managed_run_nodes(view: dict[str, Any]) -> list[dict[str, Any]]:

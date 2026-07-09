@@ -82,7 +82,7 @@ def labels(node: dict[str, Any]) -> list[str]:
 
 def audit_tree(tree: dict[str, Any]) -> dict[str, Any]:
     children = tree.get("children", {}).get("nodes", [])
-    work_items = [child for child in children if WORK_ITEM_LABEL in labels(child)]
+    work_items = [child for child in children if is_work_item_child(child)]
     blocks_relations = [
         relation
         for child in work_items
@@ -144,6 +144,14 @@ def summarize_tree(tree: dict[str, Any]) -> dict[str, Any]:
         ],
         "raw": tree,
     }
+
+
+def is_work_item_child(issue: dict[str, Any]) -> bool:
+    if WORK_ITEM_LABEL in labels(issue):
+        return True
+    description = str(issue.get("description") or "")
+    required_headings = ["Objective:", "Acceptance Criteria:", "Verification:", "Managed Run State:"]
+    return all(heading in description for heading in required_headings)
 
 
 def _issue_with_relations(issue: dict[str, Any]) -> dict[str, Any]:

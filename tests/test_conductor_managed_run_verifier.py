@@ -36,6 +36,27 @@ def test_local_verifier_runs_gate_in_detached_disposable_worktree(tmp_path: Path
     assert _git_text(Path(outcome.evidence["workspace_path"]), "branch", "--show-current") == ""
 
 
+def test_local_verifier_materializes_uncommitted_declared_changes(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    _write_commit(repo, "README.md", "base\n", "base")
+    (repo / "result.txt").write_text("ok\n", encoding="utf-8")
+    command = "python -c \"from pathlib import Path; assert Path('result.txt').read_text() == 'ok\\\\n'\""
+
+    outcome = run_local_verifier(
+        _work_item(command),
+        _result(command, artifact_hashes=[{"path": "result.txt", "sha256": _sha256(repo / "result.txt")}]),
+        source_workspace=repo,
+        state_root=tmp_path / "state",
+        verify_attempt_id="verify-1",
+    )
+
+    workspace = Path(outcome.evidence["workspace_path"])
+    assert outcome.passed is True
+    assert (workspace / "result.txt").read_text(encoding="utf-8") == "ok\n"
+    assert _git_text(workspace, "status", "--porcelain") == ""
+    assert _git_text(repo, "status", "--porcelain") == "?? result.txt"
+
+
 def test_local_verifier_blocks_artifact_hash_mismatch_before_running_gate(tmp_path: Path) -> None:
     repo = _repo(tmp_path)
     _write_commit(repo, "result.txt", "ok\n", "result")

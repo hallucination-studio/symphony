@@ -154,6 +154,46 @@ def test_real_symphony_e2e_requires_replan_linear_issue_tree_final_states() -> N
     assert finalized["passed"] is True
 
 
+def test_real_symphony_e2e_finalization_recognizes_managed_run_child_without_label() -> None:
+    tool = load_tool("real_symphony_e2e_run")
+    tree = {
+        "identifier": "HELL-857",
+        "state": {"name": "Done", "type": "completed"},
+        "children": {
+            "nodes": [
+                {
+                    "identifier": "HELL-860",
+                    "title": "Run smoke",
+                    "description": "\n".join(
+                        [
+                            "Objective: Run smoke",
+                            "",
+                            "Acceptance Criteria:",
+                            "- result exists",
+                            "",
+                            "Verification:",
+                            "- GREEN: test -f SYMPHONY_REAL_E2E_RESULT.md",
+                            "",
+                            "Managed Run State:",
+                            "- state: done",
+                            "- gate: verification passed",
+                        ]
+                    ),
+                    "state": {"name": "Done", "type": "completed"},
+                    "labels": {"nodes": []},
+                },
+            ]
+        },
+    }
+
+    finalized = tool._pipeline_linear_issue_tree_finalized(tree)
+
+    assert finalized["passed"] is True
+    assert finalized["managed_run_children"] == [
+        {"identifier": "HELL-860", "title": "Run smoke", "state": "Done", "state_type": "completed"}
+    ]
+
+
 def test_real_symphony_e2e_has_optional_codex_connectivity_probe() -> None:
     tool = load_tool("real_symphony_e2e")
     run_tool = load_tool("real_symphony_e2e_run")

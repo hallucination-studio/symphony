@@ -213,7 +213,9 @@ async def test_managed_run_driver_runs_plan_work_item_and_verify(tmp_path: Path)
     applied_plan = await driver.drive_once()
     started_work = await driver.drive_once()
     work_attempt = store.get_run(accepted.run_id)["payload"]["active_attempt"]
-    _write_result(work_attempt["result_path"], {"turn_kind": "work_item", "thread_id": "thread-1", "result": _work_item_result().to_dict()})
+    result = _work_item_result()
+    _materialize_result_files(instance, result)
+    _write_result(work_attempt["result_path"], {"turn_kind": "work_item", "thread_id": "thread-1", "result": result.to_dict()})
     applied_work = await driver.drive_once()
     verified = await driver.drive_once()
 
@@ -367,11 +369,13 @@ async def test_managed_run_driver_starts_and_collects_parallel_work_items(tmp_pa
     first_attempt, second_attempt = active_attempts
     first_path = "SYMPHONY_REAL_E2E_RESULT.md" if first_attempt["work_item_id"] == "wi-1" else "SECOND_RESULT.md"
     first_result = _work_item_result(str(first_attempt["work_item_id"]), first_path)
+    _materialize_result_files(instance, first_result)
     _write_result(first_attempt["result_path"], {"turn_kind": "work_item", "thread_id": "thread-1", "result": first_result.to_dict()})
     applied_first = await driver.drive_once()
     still_waiting = await driver.drive_once()
     second_path = "SYMPHONY_REAL_E2E_RESULT.md" if second_attempt["work_item_id"] == "wi-1" else "SECOND_RESULT.md"
     second_result = _work_item_result(str(second_attempt["work_item_id"]), second_path)
+    _materialize_result_files(instance, second_result)
     _write_result(second_attempt["result_path"], {"turn_kind": "work_item", "thread_id": "thread-1", "result": second_result.to_dict()})
     applied_second = await driver.drive_once()
     verified_second = await driver.drive_once()
@@ -443,6 +447,7 @@ async def test_managed_run_driver_blocks_when_independent_green_command_fails(tm
             },
         }
     )
+    _materialize_result_files(instance, claimed_result)
     _write_result(work_attempt["result_path"], {"turn_kind": "work_item", "thread_id": "thread-1", "result": claimed_result.to_dict()})
     await driver.drive_once()
     verified = await driver.drive_once()
@@ -578,6 +583,21 @@ def _write_result(path: str, payload: dict[str, Any]) -> None:
     result_path = Path(path)
     result_path.parent.mkdir(parents=True, exist_ok=True)
     result_path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _materialize_result_files(instance: InstanceRecord, result: WorkItemResult) -> None:
+    repo = Path(instance.resolved_repo_path)
+    for changed in result.changed_files:
+        relative = Path(changed.path)
+        if relative.is_absolute() or any(part == ".." for part in relative.parts):
+            raise AssertionError(f"invalid changed file path in fixture: {changed.path}")
+        target = repo / relative
+        if changed.action.lower() in {"deleted", "removed", "delete", "remove"}:
+            if target.exists():
+                target.unlink()
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(f"managed-run result for {result.work_item_id}\n", encoding="utf-8")
 
 
 def _complete_with_manifest(store: ConductorManagedRunStore, run_id: str, work_item_id: str, *, branch_name: str) -> None:

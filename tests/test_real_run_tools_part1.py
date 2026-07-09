@@ -136,6 +136,60 @@ def test_linear_tree_audit_requires_work_item_state_gate_details() -> None:
     assert result["pass"] is False
     assert "work_item_gate_missing:HELL-2" in result["failures"]
 
+
+def test_linear_tree_audit_recognizes_managed_run_child_without_label() -> None:
+    tool = load_tool("linear_tree_audit")
+
+    result = tool.audit_tree(
+        {
+            "id": "business-1",
+            "identifier": "HELL-1",
+            "title": "Business",
+            "description": "<!-- symphony:run-summary:start -->\n## Symphony Managed Run Summary\n<!-- symphony:run-summary:end -->",
+            "state": {"name": "Done", "type": "completed"},
+            "labels": {"nodes": []},
+            "children": {
+                "nodes": [
+                    {
+                        "id": "node-1",
+                        "identifier": "HELL-2",
+                        "title": "Work item",
+                        "description": "\n".join(
+                            [
+                                "Objective: Project one work item",
+                                "",
+                                "Acceptance Criteria:",
+                                "- child issue exists",
+                                "",
+                                "Likely Files:",
+                                "- `SYMPHONY_REAL_E2E_RESULT.md`",
+                                "",
+                                "Verification:",
+                                "- RED: test -f SYMPHONY_REAL_E2E_RESULT.md",
+                                "- GREEN: test -f SYMPHONY_REAL_E2E_RESULT.md",
+                                "",
+                                "Managed Run State:",
+                                "- state: done",
+                                "- gate: verification passed",
+                            ]
+                        ),
+                        "parent": {"id": "business-1", "identifier": "HELL-1"},
+                        "state": {"name": "Done", "type": "completed"},
+                        "labels": {"nodes": []},
+                        "children": {"nodes": []},
+                        "inverseRelations": {"nodes": []},
+                    },
+                ]
+            },
+            "inverseRelations": {"nodes": []},
+        }
+    )
+
+    assert result["pass"] is True
+    assert result["work_item_count"] == 1
+    assert result["work_items"][0]["identifier"] == "HELL-2"
+
+
 def test_linear_tree_audit_summarizes_children_and_blocks_relations() -> None:
     tool = load_tool("linear_tree_audit")
 
