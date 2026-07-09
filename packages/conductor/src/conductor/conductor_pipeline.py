@@ -20,7 +20,6 @@ from performer_api.pipeline import (
     ExecuteAttemptResult,
     ExecuteAttemptRequest,
     PASS_THRESHOLD,
-    DependencySatisfactionPolicy,
     GateSpecContent,
     GateSpecSnapshot,
     GateStep,
@@ -197,6 +196,11 @@ class ConductorPipelineStore:
                   comment_key TEXT PRIMARY KEY,
                   linear_issue_id TEXT NOT NULL,
                   comment_id TEXT NOT NULL,
+                  payload_json TEXT NOT NULL,
+                  updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS linear_projection_health (
+                  id INTEGER PRIMARY KEY CHECK (id = 1),
                   payload_json TEXT NOT NULL,
                   updated_at TEXT NOT NULL
                 );
@@ -712,55 +716,6 @@ class ConductorPipelineStore:
             ]
             if node.parent_node_id == parent_node_id
         ]
-
-    def derive_parent_state(self, parent_node_id: str) -> GraphNodeState:
-        children = self.children_for(parent_node_id)
-        if not children:
-            return self.get_node(parent_node_id).state
-        if any(child.state is GraphNodeState.NEED_HUMAN for child in children):
-            return GraphNodeState.NEED_HUMAN
-        if any(child.state is GraphNodeState.FAILED for child in children):
-            return GraphNodeState.FAILED
-        if all(child.state is GraphNodeState.SUPERSEDED for child in children):
-            return GraphNodeState.SUPERSEDED
-        if all(child.state in {GraphNodeState.VERIFY_PASSED, GraphNodeState.SUPERSEDED} for child in children):
-            parent = self.get_node(parent_node_id)
-            if parent.gate_snapshot_hash is None and not all(
-                child.state is GraphNodeState.SUPERSEDED or self.verified_branch_manifest_for_node(child.node_id) is not None
-                for child in children
-            ):
-                return GraphNodeState.PLANNED
-            return GraphNodeState.VERIFY_PASSED
-        return GraphNodeState.PLANNED
-
-    def refresh_aggregate_parent_state(self, parent_node_id: str) -> GraphNode:
-        children = self.children_for(parent_node_id)
-        parent = self.get_node(parent_node_id)
-        state = self.derive_parent_state(parent_node_id)
-        verified_scores = [
-            int(child.verify_score or 0)
-            for child in children
-            if child.state is GraphNodeState.VERIFY_PASSED
-        ]
-        verify_score = (
-            min(verified_scores)
-            if state is GraphNodeState.VERIFY_PASSED and verified_scores
-            else None
-        )
-        return GraphNode(
-            node_id=parent.node_id,
-            title=parent.title,
-            state=state,
-            issue_id=parent.issue_id,
-            issue_identifier=parent.issue_identifier,
-            parent_node_id=parent.parent_node_id,
-            gate_snapshot_hash=parent.gate_snapshot_hash,
-            verify_score=verify_score,
-            rework_count=parent.rework_count,
-            replan_depth=parent.replan_depth,
-            superseded_by=list(parent.superseded_by),
-            human_reason=parent.human_reason if state is GraphNodeState.NEED_HUMAN else None,
-        )
 
     def gate_for_node(self, node_id: str) -> GateSpecSnapshot | None:
         try:
@@ -1355,6 +1310,15 @@ class ConductorPipelineStore:
         patch_uri = str(code.get("patch_uri") or "").strip()
         expected_tree = str(code.get("expected_result_tree") or "").strip()
         patch_hash = str(code.get("patch_hash") or "").strip()
+        commit_sha = str(code.get("commit_sha") or code.get("result_revision") or "").strip()
+        workspace_path = str(code.get("workspace_path") or "").strip()
+        if commit_sha and workspace_path:
+            return self._integrate_manifest_commit(
+                repository_path,
+                manifest=manifest,
+                commit_sha=commit_sha,
+                workspace_path=Path(workspace_path),
+            )
         if not base_revision or not patch_uri.startswith("file://") or not expected_tree:
             raise ValueError("manifest lacks integration inputs")
         patch_path = Path(patch_uri.removeprefix("file://"))
@@ -1388,6 +1352,35 @@ class ConductorPipelineStore:
             _git(["apply", "--index", str(patch_path)], cwd=repository_path)
             _git(["write-tree"], cwd=repository_path).strip()
             _git(["commit", "--quiet", "-m", f"Integrate pipeline node {manifest.node_id}"], cwd=repository_path)
+            integrated_revision = _git(["rev-parse", "HEAD"], cwd=repository_path).strip()
+            self._record_integrated_revision(repository_path, integrated_revision)
+            return integrated_revision
+        except Exception:
+            _rollback_repository(repository_path, original_revision)
+            raise
+
+    def _integrate_manifest_commit(
+        self,
+        repository_path: Path,
+        *,
+        manifest: TaskOutputManifest,
+        commit_sha: str,
+        workspace_path: Path,
+    ) -> str:
+        if not workspace_path.exists():
+            raise ValueError("integration workspace unavailable")
+        original_revision = _git(["rev-parse", "HEAD"], cwd=repository_path).strip()
+        integration_base = self.current_integrated_revision(repository_path) or original_revision
+        fetch_ref = f"refs/symphony/integration/{_safe_path_part(manifest.verify_attempt_id)}"
+        try:
+            _git(["checkout", "--quiet", integration_base], cwd=repository_path)
+            _git(["fetch", "--quiet", str(workspace_path), f"{commit_sha}:{fetch_ref}"], cwd=repository_path)
+            try:
+                _git(["merge", "--no-ff", "--no-edit", fetch_ref], cwd=repository_path)
+            except subprocess.CalledProcessError as exc:
+                output = str(exc.output or "")
+                if "Already up to date" not in output:
+                    raise
             integrated_revision = _git(["rev-parse", "HEAD"], cwd=repository_path).strip()
             self._record_integrated_revision(repository_path, integrated_revision)
             return integrated_revision
@@ -1501,8 +1494,6 @@ class ConductorPipelineStore:
                         "error": error,
                     },
                 )
-        if status == "integrated":
-            self._drive_parent_aggregate_state(str(payload["node_id"]))
         return payload
 
     def list_task_output_manifests(self) -> list[TaskOutputManifest]:
@@ -1676,7 +1667,6 @@ class ConductorPipelineStore:
                 _resume_state_for_human_wait(payload),
                 human_reason=None,
             )
-        self._drive_parent_aggregate_state(node_id)
         return payload
 
     def attach_human_wait_child_issue(self, wait_id: str, *, child_issue_id: str) -> dict[str, Any]:
@@ -1882,6 +1872,64 @@ class ConductorPipelineStore:
                 (projection_id, node_id, linear_issue_id, _json_dumps(payload), payload["updated_at"]),
             )
         return payload
+
+    def record_linear_projection_success(self, *, revision: int | None = None) -> dict[str, Any]:
+        now = _now()
+        payload = {
+            "healthy": True,
+            "last_successful_projection_at": now,
+            "last_projected_revision": revision if revision is not None else self.current_graph_revision(),
+            "last_projection_error": "",
+            "updated_at": now,
+        }
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO linear_projection_health (id, payload_json, updated_at)
+                VALUES (1, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                  payload_json = excluded.payload_json,
+                  updated_at = excluded.updated_at
+                """,
+                (_json_dumps(payload), now),
+            )
+        return payload
+
+    def record_linear_projection_failure(self, error: str, *, revision: int | None = None) -> dict[str, Any]:
+        existing = self.linear_projection_health()
+        now = _now()
+        payload = {
+            "healthy": False,
+            "last_successful_projection_at": existing.get("last_successful_projection_at") or "",
+            "last_projected_revision": existing.get("last_projected_revision") or revision or self.current_graph_revision(),
+            "last_projection_error": _sanitize_error(error),
+            "updated_at": now,
+        }
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO linear_projection_health (id, payload_json, updated_at)
+                VALUES (1, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                  payload_json = excluded.payload_json,
+                  updated_at = excluded.updated_at
+                """,
+                (_json_dumps(payload), now),
+            )
+        return payload
+
+    def linear_projection_health(self) -> dict[str, Any]:
+        with self.connect() as connection:
+            row = connection.execute("SELECT payload_json FROM linear_projection_health WHERE id = 1").fetchone()
+        if row is None:
+            return {
+                "healthy": True,
+                "last_successful_projection_at": "",
+                "last_projected_revision": None,
+                "last_projection_error": "",
+                "updated_at": "",
+            }
+        return _json_loads(row["payload_json"])
 
     def list_linear_projections(self) -> list[dict[str, Any]]:
         with self.connect() as connection:
@@ -2445,6 +2493,7 @@ class ConductorPipelineStore:
                     code=code,
                 )
                 self.publish_task_output_manifest(manifest)
+                self.enqueue_integration(manifest)
             else:
                 self.update_node_state(
                     result.node_id,
@@ -2453,7 +2502,6 @@ class ConductorPipelineStore:
                 )
         else:
             return False
-        self._drive_parent_aggregate_state(result.node_id)
         self._finish_attempt(
             result,
             state=AttemptState.SUCCEEDED,
@@ -2473,22 +2521,6 @@ class ConductorPipelineStore:
         if revision.root_node_id == node_id and len(self.list_nodes()) == 1:
             return False
         return True
-
-    def _drive_parent_aggregate_state(self, node_id: str) -> None:
-        try:
-            node = self.get_node(node_id)
-        except KeyError:
-            return
-        parent_id = node.parent_node_id
-        while parent_id:
-            refreshed = self.refresh_aggregate_parent_state(parent_id)
-            self.update_node_state(
-                parent_id,
-                refreshed.state,
-                verify_score=refreshed.verify_score,
-                human_reason=refreshed.human_reason,
-            )
-            parent_id = refreshed.parent_node_id
 
     def _intent_spec_for_plan_node(self, node_id: str) -> IntentSpec:
         context = self.resolved_dispatch_context_for_node(node_id)
@@ -2747,7 +2779,6 @@ class ConductorPipelineStore:
                 rework_count=next_retry_count,
                 human_reason=reason,
             )
-            self._drive_parent_aggregate_state(result.node_id)
             return
         self.update_node_state(
             result.node_id,
@@ -2792,7 +2823,6 @@ class ConductorPipelineStore:
                 {
                     **node.to_dict(),
                     "graph_revision": self.current_graph_revision(),
-                    "aggregate_state": self._aggregate_display_state(node),
                     "progress_measure": self._node_progress_measure(node, envelope),
                 }
                 for node in nodes
@@ -2821,7 +2851,6 @@ class ConductorPipelineStore:
                 "policy_revision": envelope.scheduler_policy.version,
                 "assumption": "unknown verifies pass",
                 "generated_at": _now(),
-                "dependency_policy": envelope.scheduler_policy.dependency_policy.value,
                 "pass_threshold": PASS_THRESHOLD,
                 "policy_id": str(scheduler_policy.get("policy_id") or envelope.scheduler_policy.policy_id),
                 "policy_version": int(scheduler_policy.get("policy_version") or envelope.scheduler_policy.version),
@@ -2882,7 +2911,6 @@ class ConductorPipelineStore:
                     predicted_position=predicted_position,
                     blocked_by=blocked_by,
                     earliest_mode=earliest_mode,
-                    aggregate_state=self._aggregate_display_state(node),
                 )
             )
         return order
@@ -2912,29 +2940,16 @@ class ConductorPipelineStore:
         return ordered
 
     def _dependency_block_reasons(self, blocker: GraphNode) -> list[str]:
-        children = self.children_for(blocker.node_id)
-        if children:
-            derived_state = self.derive_parent_state(blocker.node_id)
-            if derived_state is GraphNodeState.NEED_HUMAN:
-                return [f"{blocker.node_id}: awaiting human"]
-            if derived_state is not GraphNodeState.VERIFY_PASSED:
-                return [f"{blocker.node_id}: verify not passed"]
-            if not all(self._child_ready_for_aggregate_downstream(child) for child in children):
-                return [f"{blocker.node_id}: verified branch output missing"]
-            return []
         if blocker.state is GraphNodeState.NEED_HUMAN:
             reason = f" ({blocker.human_reason.value})" if blocker.human_reason is not None else ""
             return [f"{blocker.node_id}: awaiting human{reason}"]
+        if blocker.state is GraphNodeState.FAILED:
+            return [f"{blocker.node_id}: failed"]
         if not _node_verify_passed(blocker):
             return [f"{blocker.node_id}: verify not passed"]
         if self.verified_branch_manifest_for_node(blocker.node_id) is None:
             return [f"{blocker.node_id}: verified branch output missing"]
         return []
-
-    def _child_ready_for_aggregate_downstream(self, child: GraphNode) -> bool:
-        if child.state is GraphNodeState.SUPERSEDED:
-            return True
-        return _node_verify_passed(child) and self.verified_branch_manifest_for_node(child.node_id) is not None
 
     def _reserve_prediction_wave(
         self,
@@ -2970,14 +2985,6 @@ class ConductorPipelineStore:
             return False
         return True
 
-    def _aggregate_display_state(self, node: GraphNode) -> str | None:
-        if not self.children_for(node.node_id):
-            return None
-        derived_state = self.derive_parent_state(node.node_id)
-        if derived_state is GraphNodeState.PLANNED:
-            return "in_progress"
-        return derived_state.value
-
     def _node_progress_measure(self, node: GraphNode, envelope: RuntimeConfigEnvelope) -> dict[str, Any]:
         return {
             "replan_depth": node.replan_depth,
@@ -3000,19 +3007,7 @@ class PipelineScheduler:
 
     def is_dependency_satisfied(self, node_id: str) -> bool:
         node = self.store.get_node(node_id)
-        children = self.store.children_for(node_id)
-        if children:
-            derived_state = self.store.derive_parent_state(node_id)
-            if self.store.active_runtime_config().scheduler_policy.dependency_policy is DependencySatisfactionPolicy.VERIFY_PASSED:
-                return derived_state is GraphNodeState.VERIFY_PASSED and all(self._node_ready_for_downstream(child) for child in children)
-            return derived_state in {GraphNodeState.VERIFY_PASSED, GraphNodeState.SUPERSEDED}
-        policy = self.store.active_runtime_config().scheduler_policy.dependency_policy
-        if policy is DependencySatisfactionPolicy.VERIFY_PASSED:
-            return self._node_ready_for_downstream(node)
-        return node.state in {
-            GraphNodeState.VERIFY_PASSED,
-            GraphNodeState.SUPERSEDED,
-        }
+        return self._node_ready_for_downstream(node)
 
     def _node_ready_for_downstream(self, node: GraphNode) -> bool:
         if node.state is GraphNodeState.SUPERSEDED:
@@ -3023,8 +3018,6 @@ class PipelineScheduler:
         nodes = self.store.list_nodes()
         dispatchable: list[str] = []
         for node in nodes:
-            if self.store.children_for(node.node_id):
-                continue
             if node.state not in _DISPATCHABLE_STATES:
                 continue
             if _mode_for_state(node.state) is not mode:
@@ -3041,8 +3034,6 @@ class PipelineScheduler:
         promoted: list[str] = []
         for node in self.store.list_nodes():
             if node.state is not GraphNodeState.PLANNED:
-                continue
-            if self.store.children_for(node.node_id):
                 continue
             if all(self.is_dependency_satisfied(blocker_id) for blocker_id in self.store.blockers_for(node.node_id)):
                 self.store.update_node_state(node.node_id, GraphNodeState.READY)
@@ -3087,9 +3078,6 @@ class PipelineScheduler:
                     continue
                 if any(self.store.get_node(blocker_id).state not in terminal_states for blocker_id in blocker_ids):
                     continue
-            children = self.store.children_for(node.node_id)
-            if children and any(child.state not in terminal_states for child in children):
-                continue
             stuck.append(node.node_id)
         return stuck
 
@@ -3113,6 +3101,7 @@ class PipelineLinearProjector:
         if revision is None or not self.root_issue_id:
             return 0
         projected = 0
+        projected += await self._project_root_status_comment(revision)
         issue_ids_by_node: dict[str, str] = {}
         existing = await self._existing_node_issues()
         prior_metadata_by_node = {
@@ -3139,7 +3128,7 @@ class PipelineLinearProjector:
                 )
             issue_id = str(issue.get("id") or "")
             if not issue_id:
-                continue
+                raise RuntimeError(f"linear_projection_issue_missing_id node_id={node.node_id}")
             update_description = getattr(self.tracker, "update_issue_description_marker_block", None)
             if update_description is not None:
                 await update_description(issue_id, "SYMPHONY PIPELINE NODE", self._description_block(node, revision))
@@ -3161,6 +3150,7 @@ class PipelineLinearProjector:
             issue_ids_by_node[node.node_id] = issue_id
             projected += 1
         projected += await self._project_block_edges(issue_ids_by_node)
+        self.store.record_linear_projection_success(revision=revision.revision)
         projected += await self._project_root_status_comment(revision)
         return projected
 
@@ -3223,6 +3213,9 @@ class PipelineLinearProjector:
             if update_comment is None:
                 return False
             result = await update_comment(comment_id, body)
+            if isinstance(result, dict) and result.get("success") is False:
+                reason = str(result.get("reason") or "comment_update_rejected")
+                raise RuntimeError(f"linear_projection_comment_update_failed issue_id={issue_id} comment_key={comment_key} reason={reason}")
             if isinstance(result, dict) and result.get("success"):
                 next_comment_id = str(result.get("comment_id") or comment_id)
                 self.store.record_linear_projection_comment(
@@ -3232,8 +3225,11 @@ class PipelineLinearProjector:
                 )
                 return True
         result = await create_comment(issue_id, body)
+        if isinstance(result, dict) and result.get("success") is False:
+            reason = str(result.get("reason") or "comment_create_rejected")
+            raise RuntimeError(f"linear_projection_comment_create_failed issue_id={issue_id} comment_key={comment_key} reason={reason}")
         if not isinstance(result, dict) or not result.get("success"):
-            return False
+            raise RuntimeError(f"linear_projection_comment_create_failed issue_id={issue_id} comment_key={comment_key} reason=invalid_response")
         comment_id = str(result.get("comment_id") or "").strip()
         if not comment_id:
             return False
@@ -3309,14 +3305,20 @@ class PipelineLinearProjector:
 
     def _root_status_block(self, revision: GraphRevision) -> str:
         debug_projection = _debug_projection_enabled()
+        projection_health = self.store.linear_projection_health()
+        projection_healthy = bool(projection_health.get("healthy", True))
         lines = [
             "```yaml",
             "symphony_pipeline:",
             f"  graph_id: {revision.graph_id}",
             f"  conductor_revision: {revision.revision}",
             f"  graph_complete: {str(self._graph_complete()).lower()}",
-            "  nodes:",
+            f"  projection_healthy: {str(projection_healthy).lower()}",
+            f"  last_successful_projection_at: {_yaml_scalar(projection_health.get('last_successful_projection_at') or '')}",
         ]
+        if not projection_healthy:
+            lines.append(f"  last_projection_error: {_yaml_scalar(projection_health.get('last_projection_error') or '')}")
+        lines.append("  nodes:")
         for node in self.store.list_nodes():
             metadata = self._metadata(node, revision)
             active_lease = metadata.get("active_lease") if isinstance(metadata.get("active_lease"), dict) else None
@@ -3607,31 +3609,7 @@ class PipelineCoordinator:
         self.scheduler = PipelineScheduler(store)
 
     def drive_convergence_once(self) -> int:
-        changed = 0
-        terminal_parent_states = {
-            GraphNodeState.FAILED,
-            GraphNodeState.SUPERSEDED,
-        }
-        for node in self.store.list_nodes():
-            if node.state in terminal_parent_states:
-                continue
-            if not self.store.children_for(node.node_id):
-                continue
-            refreshed = self.store.refresh_aggregate_parent_state(node.node_id)
-            if (
-                refreshed.state is not node.state
-                or refreshed.verify_score != node.verify_score
-                or refreshed.human_reason != node.human_reason
-            ):
-                self.store.update_node_state(
-                    node.node_id,
-                    refreshed.state,
-                    verify_score=refreshed.verify_score,
-                    human_reason=refreshed.human_reason,
-                )
-                changed += 1
-        changed += len(self.scheduler.promote_ready_nodes())
-        return changed
+        return len(self.scheduler.promote_ready_nodes())
 
     def heartbeat_active_leases(
         self,
@@ -3757,6 +3735,31 @@ class PipelineCoordinator:
                 active_by_mode=active_by_mode,
             )
             if remaining == 0:
+                capacity_configured_zero = (
+                    envelope.scheduler_policy.capacity.global_limit == 0
+                    or envelope.scheduler_policy.capacity.by_mode.get(mode) == 0
+                )
+                for node_id in self.scheduler.dispatchable_nodes(mode):
+                    _append_instance_log(
+                        instance,
+                        (
+                            "pipeline_capacity_starved "
+                            f"mode={mode.value} node_id={node_id} graph_revision={graph_revision} "
+                            f"policy_revision={policy_revision} action_required=increase_runtime_capacity"
+                        ),
+                    )
+                    if capacity_configured_zero and not self._has_open_human_wait(node_id):
+                        self.store.create_human_wait(
+                            node_id,
+                            reason=HumanEscalationReason.CAPACITY_STARVED.value,
+                            details={
+                                "mode": mode.value,
+                                "error": f"runtime capacity exhausted for {mode.value}",
+                                "graph_revision": graph_revision,
+                                "policy_revision": policy_revision,
+                                "action_required": "increase_runtime_capacity",
+                            },
+                        )
                 continue
             started_for_mode = 0
             for node_id in self.scheduler.dispatchable_nodes(mode):
@@ -3892,6 +3895,12 @@ class PipelineCoordinator:
                 active_global += 1
                 active_by_mode[mode] = active_by_mode.get(mode, 0) + 1
         return started
+
+    def _has_open_human_wait(self, node_id: str) -> bool:
+        return any(
+            str(wait.get("node_id") or "") == node_id and str(wait.get("status") or "waiting") == "waiting"
+            for wait in self.store.list_human_waits()
+        )
 
     def _fail_started_attempt_for_backend_error(
         self,
@@ -4262,7 +4271,7 @@ class PipelineCoordinator:
                 repository={"resolved_repo_path": repository_path, "branch_name": branch_name},
                 artifact_paths={"attempt_dir": str(attempt_dir), "workspace_path": workspace_path},
                 upstream_manifests=[manifest.to_dict() for manifest in upstream_manifests],
-                reason="dependency_policy_satisfied",
+                reason="dependencies_verified",
                 expected_thread_id=self.store.latest_thread_id_for_node(node_id),
                 thread_state_workspace_path=repository_path,
             )
@@ -4563,6 +4572,10 @@ def _need_human_instruction_block(node: GraphNode, wait: dict[str, Any]) -> str:
     error = str(details.get("error") or "").strip()
     if error:
         lines.extend(["", f"Sanitized reason: {_sanitize_error(error)}"])
+    blocked_by = [str(item) for item in details.get("blocked_by") or [] if str(item).strip()]
+    if blocked_by:
+        lines.extend(["", "Blocked by:"])
+        lines.extend(f"- {_sanitize_error(item)}" for item in blocked_by)
     return "\n".join(lines)
 
 
@@ -4614,18 +4627,16 @@ def _linear_workflow_state_target_for_node(
     if node.state in {GraphNodeState.PLANNED, GraphNodeState.READY}:
         return (["Todo", "Unstarted", "Backlog"], "unstarted")
     if node.state is GraphNodeState.NEED_HUMAN:
-        return (["Blocked", "Needs Human", "Need Human"], "started")
+        return (["Blocked", "Needs Human", "Need Human"], "")
     if node.state in {
         GraphNodeState.EXECUTING,
         GraphNodeState.VERIFYING,
         GraphNodeState.REPLANNING,
     }:
         return (["In Progress", "Started", "Doing"], "started")
-    if node.state is GraphNodeState.NEED_HUMAN:
-        return (["Blocked", "Needs Human", "Need Human"], "started")
     if node.state is GraphNodeState.VERIFY_PASSED:
         return (["In Review", "Review"], "started")
-    if node.state in {GraphNodeState.FAILED, GraphNodeState.SUPERSEDED, GraphNodeState.EXECUTE_FAILED, GraphNodeState.VERIFY_FAILED}:
+    if node.state in {GraphNodeState.FAILED, GraphNodeState.SUPERSEDED}:
         return (["Canceled", "Cancelled"], "canceled")
     return (["Todo", "Unstarted", "Backlog"], "unstarted")
 
@@ -4963,14 +4974,6 @@ def _instance_log_error_tail(instance: Any) -> str:
     if not lines:
         return ""
     return " | ".join(lines[-3:])[-300:]
-
-
-def _failed_state_for_mode(mode: RuntimeMode) -> GraphNodeState:
-    if mode is RuntimeMode.EXECUTE:
-        return GraphNodeState.EXECUTE_FAILED
-    if mode is RuntimeMode.VERIFY:
-        return GraphNodeState.VERIFY_FAILED
-    return GraphNodeState.NEED_HUMAN
 
 
 def _visible_attempt_error(result: PlanAttemptResult | ExecuteAttemptResult | VerifyAttemptResult) -> str:

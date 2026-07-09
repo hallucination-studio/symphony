@@ -51,10 +51,8 @@ PLAN_RESULT_SCHEMA: dict[str, object] = {
                                     "planned",
                                     "ready",
                                     "executing",
-                                    "execute_failed",
                                     "verifying",
                                     "verify_passed",
-                                    "verify_failed",
                                     "replanning",
                                     "superseded",
                                     "need_human",
@@ -71,7 +69,6 @@ PLAN_RESULT_SCHEMA: dict[str, object] = {
                                 "type": "string",
                                 "enum": ["", *[reason.value for reason in HumanEscalationReason]],
                             },
-                            "aggregate_state": {"type": "string"},
                             "superseded_by": {"type": "array", "items": {"type": "string"}},
                         },
                         "required": [
@@ -85,7 +82,6 @@ PLAN_RESULT_SCHEMA: dict[str, object] = {
                             "verify_score",
                             "rework_count",
                             "human_reason",
-                            "aggregate_state",
                             "superseded_by",
                         ],
                         "additionalProperties": False,
@@ -168,9 +164,8 @@ PLAN_RESULT_SCHEMA: dict[str, object] = {
                     "properties": {
                         "max_subtasks": {"type": "integer"},
                         "allowed_edge_kinds": {"type": "array", "items": {"type": "string"}},
-                        "dependency_policy": {"type": "string"},
                     },
-                    "required": ["max_subtasks", "allowed_edge_kinds", "dependency_policy"],
+                    "required": ["max_subtasks", "allowed_edge_kinds"],
                     "additionalProperties": False,
                 },
             },
@@ -341,6 +336,8 @@ def _planner_prompt(payload: dict[str, object]) -> str:
         pipeline_intent_instruction = (
             "The attempt request includes `pipeline_intent`, a structured Conductor intent contract. "
             "Use any node_ids named there exactly in the returned proposal so Conductor can validate the shape. "
+            "If `pipeline_intent.parallel_dependency_shape` names branch and downstream node ids, include those nodes "
+            "and add `blocks` from every branch node to every downstream node. "
         )
     replan_instruction = ""
     if isinstance(payload.get("failure_context"), dict) and payload.get("failure_context"):
@@ -355,14 +352,14 @@ def _planner_prompt(payload: dict[str, object]) -> str:
         )
     return (
         "Produce a Symphony PlanProposal JSON object in a top-level `proposal` field. "
-        "Every node must have a frozen gate snapshot, valid 0-4 rubric, pass_threshold=3, "
+        "Every returned node, including `root_node_id` if included, must have a frozen gate "
+        "snapshot, valid 0-4 rubric, pass_threshold=3, "
         "and dependency edges must be acyclic. The proposal must contain at least one planned "
         "executable node, at least one frozen gate whose task_id matches a node_id, and non-empty "
         "entry_node_ids and exit_node_ids. Do not return an empty plan. Entry nodes must exactly "
         "be nodes with no incoming blocks; exit nodes must exactly be nodes with no outgoing blocks. "
-        "The root business-issue node must be the parent when a plan has multiple subtasks: every subtask node must set "
-        "parent_node_id to root_node_id, and the root node has no gate and no blocks edges. Parent-child aggregation is "
-        "not a dependency edge. "
+        "`parent_node_id` is only for Linear nesting/display and is never a dependency edge. "
+        "Fan-in and fan-out must be expressed with `blocks` edges. "
         "Use the Linear issue description as the source of task truth; the frozen gate acceptance "
         "criteria and verification procedure must preserve concrete requested files, commands, and "
         "success conditions from that description. Each verification_procedure entry must carry "
@@ -567,6 +564,7 @@ async def _run_execute_mode(payload: dict[str, object], *, agent_backend: Any | 
             gate_hash=gate_hash,
             base_revision=str(payload.get("base_revision") or ""),
             repository_path=source_repository_path,
+            requested_branch_name=_execute_branch_name(payload),
         )
     else:
         verification_input = {
@@ -785,6 +783,13 @@ def _execute_repository_path(payload: dict[str, object]) -> str | None:
     return None
 
 
+def _execute_branch_name(payload: dict[str, object]) -> str | None:
+    repository = payload.get("repository")
+    if isinstance(repository, dict):
+        return _optional_payload_str(repository.get("branch_name"))
+    return None
+
+
 def _materialize_execute_workspace(
     *,
     source_repository_path: Path,
@@ -910,13 +915,14 @@ def _collect_git_verification_input(
     gate_hash: str,
     base_revision: str,
     repository_path: str | None = None,
+    requested_branch_name: str | None = None,
 ) -> dict[str, object]:
     _remove_generated_verification_caches(workspace_path)
     _git(["add", "--all"], cwd=workspace_path)
     no_changes = _git_command_succeeds(["diff", "--cached", "--quiet"], cwd=workspace_path)
     if not no_changes:
         _git(["commit", "--quiet", "-m", f"Execute pipeline node {node_id}"], cwd=workspace_path)
-    branch_name = _git(["branch", "--show-current"], cwd=workspace_path).strip()
+    branch_name = _git(["branch", "--show-current"], cwd=workspace_path).strip() or (requested_branch_name or "")
     commit_sha = _git(["rev-parse", "HEAD"], cwd=workspace_path).strip()
     evidence_path = workspace_path / ".symphony" / "pipeline" / attempt_id / "evidence.json"
     evidence_path.parent.mkdir(parents=True, exist_ok=True)
@@ -962,7 +968,9 @@ class _PatchVerificationResult:
 def _verify_patch_hash(verification_input: dict[str, object]) -> _PatchVerificationResult:
     commit_sha = _optional_payload_str(verification_input.get("commit_sha"))
     if commit_sha:
-        workspace = _optional_payload_str(verification_input.get("repository_path"))
+        workspace = _optional_payload_str(verification_input.get("workspace_path")) or _optional_payload_str(
+            verification_input.get("repository_path")
+        )
         if not workspace:
             return _PatchVerificationResult(reason="commit_unavailable")
         verify_workspace = _commit_verify_workspace(verification_input, fallback_parent=Path(workspace))

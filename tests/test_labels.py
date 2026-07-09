@@ -29,7 +29,6 @@ def test_label_scheme_has_unique_static_labels_across_axes() -> None:
         "verifying",
         "verify_passed",
         "need_human",
-        "awaiting_human",
         "failed",
     }
     assert set(LABEL_SCHEME.types) == {"human_action", "repository_integration", "pipeline_node"}
@@ -52,4 +51,3 @@ def test_label_scheme_does_not_include_legacy_runtime_labels() -> None:
 def test_pipeline_labels_replace_phase_contract() -> None:
     assert PIPELINE_LABELS["executing"] == "performer:pipeline/executing"
     assert PIPELINE_LABELS["need_human"] == "performer:pipeline/need-human"
-    assert PIPELINE_LABELS["awaiting_human"] == "performer:pipeline/awaiting-human"

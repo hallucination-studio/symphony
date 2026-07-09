@@ -91,7 +91,6 @@ async def test_runtime_report_returns_stored_runtime_config_for_conductor() -> N
                 "version": 7,
                 "effective_at": "2026-07-07T00:00:00Z",
                 "capacity": {"global": 3, "by_mode": {"plan": 1, "execute": 1, "verify": 1}},
-                "dependency_policy": "verify_passed",
                 "max_rework_attempts": 1,
             },
             "profiles": {

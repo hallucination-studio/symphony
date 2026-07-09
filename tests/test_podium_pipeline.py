@@ -15,7 +15,6 @@ async def test_runtime_config_push_rejects_stale_versions_and_sanitizes_pipeline
                 "version": 2,
                 "effective_at": "2026-07-06T00:00:00Z",
                 "capacity": {"global": 4, "by_mode": {"plan": 1, "execute": None, "verify": 2}},
-                "dependency_policy": "verify_passed",
             },
             "profiles": {
                 "plan": {
@@ -85,7 +84,6 @@ async def test_runtime_config_push_rejects_incomplete_pipeline_profiles() -> Non
                     "version": 3,
                     "effective_at": "2026-07-06T00:00:00Z",
                     "capacity": {"global": 4, "by_mode": {"plan": 1, "execute": 1, "verify": 1}},
-                    "dependency_policy": "verify_passed",
                 },
                 "profiles": {
                     "plan": {"name": "planner", "backend": "codex", "settings": {"model": "gpt-5.3-codex"}}

@@ -15,7 +15,6 @@ class LabelScheme:
             "verifying": "performer:pipeline/verifying",
             "verify_passed": "performer:pipeline/verify-passed",
             "need_human": "performer:pipeline/need-human",
-            "awaiting_human": "performer:pipeline/awaiting-human",
             "failed": "performer:pipeline/failed",
         }
     )
@@ -41,7 +40,6 @@ PIPELINE_LABELS = {
     "verifying": LABEL_SCHEME.pipeline["verifying"],
     "verify_passed": LABEL_SCHEME.pipeline["verify_passed"],
     "need_human": LABEL_SCHEME.pipeline["need_human"],
-    "awaiting_human": LABEL_SCHEME.pipeline["awaiting_human"],
     "failed": LABEL_SCHEME.pipeline["failed"],
 }
 

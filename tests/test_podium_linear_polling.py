@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime, timezone
 
 import httpx
+import podium.linear_polling as linear_polling
 
 from podium.app import create_app
 from podium.config import PodiumConfig
@@ -242,6 +244,91 @@ async def test_linear_delegate_poller_persists_initial_cursor_when_no_issues(tmp
     assert poll_state is not None
     assert poll_state["cursor"]
     assert requested_cursors[1] == poll_state["cursor"]
+
+
+async def test_linear_delegate_poller_cold_start_catches_recently_delegated_issue(tmp_path, monkeypatch) -> None:
+    store = PodiumStore(data_dir=tmp_path)
+    await store.create_user("workspace-1", email="workspace@example.com", password_hash="x", created_at="2026-01-01T00:00:00Z")
+    await store.upsert_conductor(
+        {
+            "id": "runtime-1",
+            "user_id": "workspace-1",
+            "runtime_group_id": "group-workspace-1",
+            "hostname": "host",
+            "label": "Host",
+            "version": "1",
+            "runtime_token_hash": "runtime-hash",
+            "proxy_token_hash": "proxy-hash",
+            "disabled": False,
+            "revoked": False,
+            "created_at": "2026-01-01T00:00:00Z",
+            "last_report_at": None,
+        }
+    )
+    await store.upsert_project_binding(
+        {
+            "id": "runtime-1:inst-1",
+            "conductor_id": "runtime-1",
+            "user_id": "workspace-1",
+            "instance_id": "inst-1",
+            "name": "Instance",
+            "linear_project": "ALPHA",
+            "project_slug": "ALPHA",
+            "agent_app_user_id": "agent-app-1",
+            "pipeline_profile": "default",
+            "process_status": "idle",
+            "constraint_labels": [],
+            "repo_source": {},
+            "updated_at": "2026-07-08T12:00:30Z",
+        }
+    )
+
+    class FrozenDatetime:
+        @classmethod
+        def now(cls, tz: timezone | None = None) -> datetime:
+            return datetime(2026, 7, 8, 12, 0, 30, tzinfo=tz)
+
+    monkeypatch.setattr(linear_polling, "datetime", FrozenDatetime)
+
+    def recently_delegated_transport(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    "issues": {
+                        "nodes": [
+                            {
+                                "id": "issue-created-before-binding",
+                                "identifier": "ALPHA-30",
+                                "title": "Delegated just before runtime binding",
+                                "description": "",
+                                "createdAt": "2026-07-08T12:00:00Z",
+                                "updatedAt": "2026-07-08T12:00:00Z",
+                                "project": {"slugId": "ALPHA"},
+                                "delegate": {"id": "agent-app-1"},
+                                "parent": None,
+                                "inverseRelations": {"nodes": []},
+                            }
+                        ]
+                    }
+                }
+            },
+        )
+
+    poller = LinearDelegatePoller(
+        store=store,
+        application_id="agent-app-1",
+        app_token="app-token",
+        transport=recently_delegated_transport,
+        initial_lookback_seconds=0,
+    )
+
+    result = await poller.poll_once()
+    leased = await store.lease_dispatch("runtime-1", binding_ids=["runtime-1:inst-1"], lease_until="2099-01-01T00:00:00Z")
+
+    assert result["queued"] == 1
+    assert leased is not None
+    assert leased["issue_id"] == "issue-created-before-binding"
 
 
 async def test_linear_delegate_poller_skips_issue_created_before_initial_cursor(tmp_path) -> None:

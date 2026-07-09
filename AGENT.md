@@ -334,13 +334,13 @@ Do not rely only on nested query shape.
 Use these meanings:
 
 - `retry`: failed or timed-out fenced attempt that can be retried under a fresh lease.
-- `rework`: verifier failure that returns the graph node to `REWORKING`.
+- `rework`: verifier failure that returns the graph node to `READY`.
 - `replan`: bounded rework exhaustion that replaces the failed node with a validated subgraph revision.
 
 Expected evidence:
 
 - attempt records with lease id, fencing token, graph revision, and policy revision;
-- node state transitions through `READY` / `EXECUTING` / `VERIFYING` / `VERIFY_PASSED` or `REWORKING`;
+- node state transitions through `READY` / `EXECUTING` / `VERIFYING` / `VERIFY_PASSED`, with failed verifier rework returning to `READY`;
 - verification scores use the fixed `0-4` rubric and pass only at `>= 3`;
 - failed stale or mismatched fenced results are rejected without mutating current graph state;
 - replan creates a new immutable graph revision and supersedes the replaced node.

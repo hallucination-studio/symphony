@@ -11,6 +11,8 @@ docs/superpowers
 conductor-data
 .symphony
 .claude
+.agents/
 .superpowers
+skills-lock.json
 .test-real-flow
 tmp

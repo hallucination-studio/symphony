@@ -392,7 +392,7 @@ def test_real_symphony_e2e_detects_conductor_pipeline_human_action() -> None:
                     "node_id": "node-1",
                     "issue_id": "issue-1",
                     "issue_identifier": "HELL-1",
-                    "state": "awaiting_human",
+                    "state": "need_human",
                 }
             ],
         }
@@ -404,7 +404,7 @@ def test_real_symphony_e2e_detects_conductor_pipeline_human_action() -> None:
             "node_id": "node-1",
             "issue_id": "issue-1",
             "issue_identifier": "HELL-1",
-            "state": "awaiting_human",
+            "state": "need_human",
             "status": "open",
             "reason": "LINEAR_SYNC_CONFLICT",
             "child_issue_id": "child-1",
@@ -494,7 +494,7 @@ def test_real_symphony_e2e_pipeline_integrated_accepts_human_resolved_conflict()
     )
 
 
-def test_real_symphony_e2e_final_view_uses_parent_aggregate_state() -> None:
+def test_real_symphony_e2e_final_view_uses_flat_node_states() -> None:
     tool = load_tool("real_symphony_e2e_run")
 
     pipeline_view = {
@@ -502,12 +502,11 @@ def test_real_symphony_e2e_final_view_uses_parent_aggregate_state() -> None:
         "nodes": [
             {
                 "node_id": "parent",
-                "state": "planned",
-                "aggregate_state": "verify_passed",
+                "state": "verify_passed",
                 "gate_snapshot_hash": "gate-parent",
             },
-            {"node_id": "child-a", "state": "verify_passed", "aggregate_state": "verify_passed"},
-            {"node_id": "child-b", "state": "verify_passed", "aggregate_state": "verify_passed"},
+            {"node_id": "child-a", "state": "verify_passed"},
+            {"node_id": "child-b", "state": "verify_passed"},
         ],
         "linear_projections": [
             {
@@ -1191,7 +1190,7 @@ def test_real_symphony_e2e_overload_failure_acceptance_detects_raw_status() -> N
                 "pipeline_nodes": [
                     {
                         "node_id": "node-1",
-                        "state": "reworking",
+                        "state": "replanning",
                         "retry_count": 0,
                         "crash_count": 0,
                         "overload_count": 1,
@@ -1390,7 +1389,7 @@ def test_real_symphony_e2e_surfaces_immediate_pipeline_failures() -> None:
                     "error": "managed_codex_home_required",
                 }
             ],
-            "pipeline_nodes": [{"node_id": "issue-1", "state": "awaiting_human"}],
+            "pipeline_nodes": [{"node_id": "issue-1", "state": "need_human"}],
         }
     )
 
@@ -1603,7 +1602,7 @@ def test_plan_offline_analysis_detects_empty_intent_shadowing_pipeline_intent() 
     )
     gates = []
     gated_nodes = []
-    for node in [branch_a, branch_b, downstream]:
+    for node in [root, branch_a, branch_b, downstream]:
         gate = pipeline.GateSpecSnapshot.create(
             gate_id=f"gate-{node.node_id}",
             task_id=node.node_id,
@@ -1614,7 +1613,7 @@ def test_plan_offline_analysis_detects_empty_intent_shadowing_pipeline_intent() 
                 verification_procedure=[
                     pipeline.GateStep("pytest tests/test_smoke.py -q", pipeline.GateStepSource.APPENDIX_HARNESS)
                 ],
-                rubric={"correctness": "3"},
+                rubric={str(score): f"score {score}" for score in range(5)},
             ),
         )
         gates.append(gate)
@@ -1623,11 +1622,11 @@ def test_plan_offline_analysis_detects_empty_intent_shadowing_pipeline_intent() 
         graph_id="graph-1",
         plan_attempt_id="plan-1",
         root_node_id="root",
-        nodes=[root, *gated_nodes],
+        nodes=gated_nodes,
         blocks=[("hell-parallel-a", "hell-downstream-integration"), ("hell-parallel-b", "hell-downstream-integration")],
         gates=gates,
-        entry_node_ids=["hell-parallel-a", "hell-parallel-b"],
-        exit_node_ids=["hell-downstream-integration"],
+        entry_node_ids=["root", "hell-parallel-a", "hell-parallel-b"],
+        exit_node_ids=["root", "hell-downstream-integration"],
     )
 
     report = analysis.analyze_plan_artifacts(
@@ -1665,8 +1664,8 @@ def test_plan_offline_analysis_detects_empty_intent_shadowing_pipeline_intent() 
 
     assert report["status"] == "analyzed"
     assert "intent_shadowed_by_empty_intent" in report["root_cause_codes"]
-    assert report["current_intent"]["requires_parent_aggregate"] is True
-    assert report["preferred_intent"]["requires_parent_aggregate"] is True
+    assert report["current_intent"]["requires_parent_aggregate"] is False
+    assert report["preferred_intent"]["requires_parent_aggregate"] is False
     assert "missing_gate" not in report["validator_errors_current"]
     assert "missing_gate" not in report["validator_errors_preferred_after_repair"]
 
@@ -1818,7 +1817,7 @@ def test_real_symphony_e2e_wait_artifacts_are_written_on_early_exit(tmp_path: Pa
 
     result = tool.write_wait_artifacts(
         evidence=evidence,
-        samples=[{"at": "2026-07-04T00:00:00Z", "phase": "awaiting_human"}],
+        samples=[{"at": "2026-07-04T00:00:00Z", "phase": "need_human"}],
         result_path=result_path,
         final_issue={"id": "issue-1", "identifier": "HELL-1", "state": {"name": "In Progress"}},
         state_path=state_path,

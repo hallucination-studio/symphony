@@ -28,7 +28,6 @@ from performer_api.pipeline import (
     AttemptRecord,
     AttemptState,
     ExecuteAttemptResult,
-    DependencySatisfactionPolicy,
     GateSpecContent,
     GateSpecSnapshot,
     GateStep,
@@ -54,7 +53,6 @@ from performer_api.pipeline import (
 def _policy(
     version: int,
     *,
-    dependency_policy: DependencySatisfactionPolicy = DependencySatisfactionPolicy.VERIFY_PASSED,
     max_rework_attempts: int = 3,
 ) -> SchedulerPolicy:
     return SchedulerPolicy(
@@ -62,7 +60,6 @@ def _policy(
         version=version,
         effective_at="2026-07-06T00:00:00Z",
         capacity=SchedulerCapacity(global_limit=2, by_mode={RuntimeMode.PLAN: 1, RuntimeMode.EXECUTE: None, RuntimeMode.VERIFY: 1}),
-        dependency_policy=dependency_policy,
         max_rework_attempts=max_rework_attempts,
     )
 
@@ -101,6 +98,7 @@ def _proposal() -> PlanProposal:
 
 
 def _parent_proposal() -> PlanProposal:
+    gate_root = _gate("root")
     gate_a = _gate("a")
     gate_b = _gate("b")
     return PlanProposal(
@@ -108,14 +106,14 @@ def _parent_proposal() -> PlanProposal:
         plan_attempt_id="plan-parent",
         root_node_id="root",
         nodes=[
-            GraphNode(node_id="root", title="Root", state=GraphNodeState.PLANNED),
+            GraphNode(node_id="root", title="Root", state=GraphNodeState.PLANNED, gate_snapshot_hash=gate_root.hash),
             GraphNode(node_id="a", title="A", state=GraphNodeState.READY, parent_node_id="root", gate_snapshot_hash=gate_a.hash),
             GraphNode(node_id="b", title="B", state=GraphNodeState.READY, parent_node_id="root", gate_snapshot_hash=gate_b.hash),
         ],
         blocks=[],
-        gates=[gate_a, gate_b],
-        entry_node_ids=["a", "b"],
-        exit_node_ids=["a", "b"],
+        gates=[gate_root, gate_a, gate_b],
+        entry_node_ids=["root", "a", "b"],
+        exit_node_ids=["root", "a", "b"],
     )
 
 
@@ -145,7 +143,6 @@ def _parent_intent() -> IntentSpec:
         issue_id="issue-root",
         issue_identifier="ENG-ROOT",
         issue_description="Parent aggregate issue",
-        requires_parent_aggregate=True,
     )
 
 
@@ -390,66 +387,6 @@ def test_thread_lost_execute_failure_creates_thread_lost_human_wait(tmp_path: Pa
     assert store.get_attempt("exec-thread-lost").thread_id == "thread-1"
 
 
-def test_parent_aggregate_waits_for_child_integration_terminal(tmp_path: Path) -> None:
-    store = ConductorPipelineStore(tmp_path)
-    store.apply_runtime_config(RuntimeConfigEnvelope("group-1", 1, _policy(1)))
-    store.commit_plan(_parent_proposal(), intent_spec=_parent_intent())
-    store.update_node_state("a", GraphNodeState.VERIFY_PASSED, verify_score=3)
-    store.update_node_state("b", GraphNodeState.VERIFY_PASSED, verify_score=4)
-    queued_manifest = _publish_manifest(store, "a", verify_attempt_id="verify-a")
-    store.enqueue_integration(queued_manifest)
-    integrated_manifest = _publish_manifest(store, "b", verify_attempt_id="verify-b")
-    store.enqueue_integration(integrated_manifest)
-    store.complete_integration(
-        f"integration-{integrated_manifest.node_id}-{integrated_manifest.verify_attempt_id}",
-        status="integrated",
-        integrated_revision="commit-b",
-    )
-
-    refreshed = store.refresh_aggregate_parent_state("root")
-
-    assert refreshed.state is GraphNodeState.PLANNED
-    assert refreshed.verify_score is None
-
-
-def test_parent_aggregate_all_superseded_children_does_not_require_verify_score(tmp_path: Path) -> None:
-    store = ConductorPipelineStore(tmp_path)
-    store.apply_runtime_config(RuntimeConfigEnvelope("group-1", 1, _policy(1)))
-    store.commit_plan(_parent_proposal(), intent_spec=_parent_intent())
-    store.update_node_state("a", GraphNodeState.SUPERSEDED)
-    store.update_node_state("b", GraphNodeState.SUPERSEDED)
-
-    refreshed = store.refresh_aggregate_parent_state("root")
-
-    assert refreshed.state is GraphNodeState.SUPERSEDED
-    assert refreshed.verify_score is None
-
-
-def test_resolving_linear_sync_conflict_refreshes_parent_aggregate_state(tmp_path: Path) -> None:
-    store = ConductorPipelineStore(tmp_path)
-    store.apply_runtime_config(RuntimeConfigEnvelope("group-1", 1, _policy(1)))
-    store.commit_plan(_parent_proposal(), intent_spec=_parent_intent())
-    for node_id, verify_attempt_id, revision in [
-        ("a", "verify-a", "commit-a"),
-        ("b", "verify-b", "commit-b"),
-    ]:
-        store.update_node_state(node_id, GraphNodeState.VERIFY_PASSED, verify_score=3)
-        _publish_branch_manifest(store, node_id, verify_attempt_id=verify_attempt_id, commit_sha=revision)
-    wait = store.create_human_wait(
-        "b",
-        reason="LINEAR_SYNC_CONFLICT",
-        details={"integration_id": "integration-b-verify-b"},
-    )
-    store.update_node_state("root", GraphNodeState.NEED_HUMAN, human_reason=HumanEscalationReason.LINEAR_SYNC_CONFLICT)
-
-    resumed = store.resume_human_wait(wait["wait_id"], resolution="conflict resolved by operator")
-
-    assert resumed["status"] == "resolved"
-    assert store.get_node("b").state is GraphNodeState.VERIFY_PASSED
-    assert store.get_node("root").state is GraphNodeState.VERIFY_PASSED
-    assert store.get_node("root").human_reason is None
-
-
 def test_linear_projector_treats_superseded_nodes_as_complete_for_replanned_graph(tmp_path: Path) -> None:
     store = ConductorPipelineStore(tmp_path)
     store.apply_runtime_config(RuntimeConfigEnvelope("group-1", 1, _policy(1)))
@@ -460,27 +397,6 @@ def test_linear_projector_treats_superseded_nodes_as_complete_for_replanned_grap
     projector = PipelineLinearProjector(store=store, tracker=object(), root_issue_id="root-linear")
 
     assert projector._graph_complete() is True
-
-
-def test_drive_convergence_refreshes_aggregate_parent_and_promotes_downstream(tmp_path: Path) -> None:
-    store = ConductorPipelineStore(tmp_path)
-    store.apply_runtime_config(RuntimeConfigEnvelope("group-1", 1, _policy(1)))
-    store.commit_plan(_parent_blocks_downstream_proposal(), intent_spec=_parent_intent())
-    coordinator = PipelineCoordinator(store=store, runtime_manager=object())
-    for node_id, verify_attempt_id, revision in [
-        ("a", "verify-a", "commit-a"),
-        ("b", "verify-b", "commit-b"),
-    ]:
-        store.update_node_state(node_id, GraphNodeState.VERIFY_PASSED, verify_score=3)
-        _publish_branch_manifest(store, node_id, verify_attempt_id=verify_attempt_id, commit_sha=revision)
-    store.update_node_state("root", GraphNodeState.AWAITING_HUMAN, human_reason=HumanEscalationReason.LINEAR_SYNC_CONFLICT)
-
-    changed = coordinator.drive_convergence_once()
-
-    assert changed >= 2
-    assert store.get_node("root").state is GraphNodeState.VERIFY_PASSED
-    assert store.get_node("root").human_reason is None
-    assert store.get_node("c").state is GraphNodeState.READY
 
 
 def test_conductor_instance_creation_does_not_generate_or_persist_workflow(
@@ -855,7 +771,7 @@ def test_start_due_attempts_fail_closed_when_mode_environment_cannot_materialize
 
     assert asyncio.run(coordinator.start_due_attempts(Instance())) == 0
     node = store.get_node("a")
-    assert node.state is GraphNodeState.AWAITING_HUMAN
+    assert node.state is GraphNodeState.NEED_HUMAN
     assert node.human_reason is HumanEscalationReason.BACKEND_UNAVAILABLE
     assert store.active_lease("a", RuntimeMode.EXECUTE) is None
     attempt = store.list_attempts()[0]
@@ -903,7 +819,7 @@ def test_start_due_attempts_refuses_ineligible_backend_before_dispatch(tmp_path:
     assert asyncio.run(coordinator.start_due_attempts(Instance())) == 0
     assert store.list_attempts() == []
     assert store.active_lease("a", RuntimeMode.EXECUTE) is None
-    assert store.get_node("a").state is GraphNodeState.AWAITING_HUMAN
+    assert store.get_node("a").state is GraphNodeState.NEED_HUMAN
     assert store.get_node("a").human_reason is HumanEscalationReason.BACKEND_UNAVAILABLE
 
 
@@ -1363,18 +1279,12 @@ def test_need_human_projects_to_blocked_linear_state() -> None:
         human_reason=HumanEscalationReason.BACKEND_UNAVAILABLE,
     )
 
-    assert _linear_workflow_state_target_for_node(node) == (["Blocked", "Needs Human", "Need Human"], "started")
+    assert _linear_workflow_state_target_for_node(node) == (["Blocked", "Needs Human", "Need Human"], "")
 
 
-def test_dependency_policy_terminal_success_variant_does_not_require_integration_manifest(tmp_path: Path) -> None:
+def test_dependency_satisfaction_requires_verified_manifest_for_downstream(tmp_path: Path) -> None:
     store = ConductorPipelineStore(tmp_path)
-    store.apply_runtime_config(
-        RuntimeConfigEnvelope(
-            "group-1",
-            1,
-            _policy(1, dependency_policy=DependencySatisfactionPolicy.TERMINAL_SUCCESS),
-        )
-    )
+    store.apply_runtime_config(RuntimeConfigEnvelope("group-1", 1, _policy(1)))
     store.commit_plan(_proposal())
     scheduler = PipelineScheduler(store)
 
@@ -1382,7 +1292,12 @@ def test_dependency_policy_terminal_success_variant_does_not_require_integration
     assert scheduler.is_dependency_satisfied("a") is False
     assert scheduler.dispatchable_nodes(RuntimeMode.EXECUTE) == []
 
-    store.update_node_state("a", GraphNodeState.VERIFY_PASSED, verify_score=0)
+    store.update_node_state("a", GraphNodeState.VERIFY_PASSED, verify_score=3)
+    assert scheduler.is_dependency_satisfied("a") is False
+    assert scheduler.promote_ready_nodes() == []
+    assert scheduler.dispatchable_nodes(RuntimeMode.EXECUTE) == []
+
+    _publish_branch_manifest(store, "a", verify_attempt_id="verify-a")
     assert scheduler.is_dependency_satisfied("a") is True
     assert scheduler.promote_ready_nodes() == ["b"]
     assert scheduler.dispatchable_nodes(RuntimeMode.EXECUTE) == ["b"]
@@ -1599,6 +1514,7 @@ def test_lowered_policy_limit_stops_new_dispatch_without_preempting_active_lease
     assert store.active_lease("b", RuntimeMode.EXECUTE) is None
     assert store.get_node("a").state is GraphNodeState.EXECUTING
     assert store.get_node("b").state is GraphNodeState.READY
+    assert store.list_human_waits() == []
 
 
 def test_result_fence_accepts_inflight_attempt_after_policy_revision_changes(tmp_path: Path) -> None:
@@ -1954,7 +1870,53 @@ def test_pipeline_coordinator_heartbeats_running_attempt_leases(tmp_path: Path) 
     assert store.get_attempt("exec-1").state is AttemptState.RUNNING
 
 
-def test_verify_pass_publishes_branch_manifest_without_integration_queue(tmp_path: Path) -> None:
+def test_background_heartbeat_uses_active_leases_not_instance_process_status(tmp_path: Path) -> None:
+    data_root = tmp_path / "conductor-data"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    store = ConductorStore(data_root)
+    instance_dir = data_root / "instances" / "inst-1"
+    instance = InstanceRecord.create(
+        id="inst-1",
+        name="Alpha",
+        repo_source_type="local_path",
+        repo_source_value=str(repo),
+        resolved_repo_path=str(repo),
+        instance_dir=str(instance_dir),
+        workspace_root=str(instance_dir / "workspace" / "repo"),
+        persistence_path=str(instance_dir / "state" / "performer.json"),
+        log_path=str(instance_dir / "logs" / "performer.log"),
+        http_port=8801,
+        linear_project="ENG",
+        linear_filters={"linear_agent_app_user_id": "agent-1"},
+    ).with_updates(process_status="exited", pid=None, last_exit_code=0)
+    store.save_instance(instance)
+
+    class ExitedRuntime:
+        def refresh(self, record):
+            return record.with_updates(process_status="exited", pid=None, last_exit_code=0)
+
+    service = ConductorService(store=store, data_root=data_root, runtime_manager=ExitedRuntime())  # type: ignore[arg-type]
+    service.pipeline_store.apply_runtime_config(RuntimeConfigEnvelope("group-1", 1, _policy(1)))
+    service.pipeline_store.commit_plan(_proposal())
+    now = datetime.now(timezone.utc)
+    lease = service.pipeline_store.start_attempt(
+        RuntimeMode.EXECUTE,
+        node_id="a",
+        attempt_id="exec-1",
+        now=now,
+        ttl_seconds=5,
+    )
+
+    assert service._heartbeat_running_pipeline_leases() == 1
+
+    refreshed = service.pipeline_store.active_lease("a", RuntimeMode.EXECUTE)
+    assert refreshed is not None
+    assert refreshed.expires_at > lease.expires_at
+    assert service.pipeline_store.get_attempt("exec-1").state is AttemptState.RUNNING
+
+
+def test_verify_pass_publishes_branch_manifest_and_enqueues_integration(tmp_path: Path) -> None:
     store = ConductorPipelineStore(tmp_path)
     store.apply_runtime_config(RuntimeConfigEnvelope("group-1", 1, _policy(1)))
     store.commit_plan(_proposal())
@@ -2007,7 +1969,12 @@ def test_verify_pass_publishes_branch_manifest_without_integration_queue(tmp_pat
     )
 
     manifest = store.list_task_output_manifests()[0]
-    assert store.list_integration_queue() == []
+    queue = store.list_integration_queue()
+    assert len(queue) == 1
+    assert queue[0]["integration_id"] == "integration-a-verify-1"
+    assert queue[0]["node_id"] == "a"
+    assert queue[0]["verify_attempt_id"] == "verify-1"
+    assert queue[0]["status"] == "queued"
     assert manifest.code["base_revision"] == "base"
     assert manifest.code["branch_name"] == "symphony/a"
     assert manifest.code["commit_sha"] == "commit-a"
@@ -2157,7 +2124,7 @@ def test_failed_plan_attempt_result_creates_structured_human_wait(tmp_path: Path
 
     node = store.get_node("issue-1")
     waits = store.list_human_waits()
-    assert node.state is GraphNodeState.AWAITING_HUMAN
+    assert node.state is GraphNodeState.NEED_HUMAN
     assert node.human_reason is HumanEscalationReason.BACKEND_UNAVAILABLE
     assert waits[0]["reason"] == HumanEscalationReason.BACKEND_UNAVAILABLE.value
     assert waits[0]["details"]["attempt_id"] == "plan-1"
@@ -2209,7 +2176,7 @@ def test_invalid_initial_plan_result_escalates_plan_invalid_without_failed_node(
     node = store.get_node(accepted.node_id)
     waits = store.list_human_waits()
     assert store.current_graph_revision() == 1
-    assert node.state is GraphNodeState.AWAITING_HUMAN
+    assert node.state is GraphNodeState.NEED_HUMAN
     assert node.human_reason is HumanEscalationReason.PLAN_INVALID
     assert waits[-1]["reason"] == HumanEscalationReason.PLAN_INVALID.value
     assert store.get_attempt("plan-invalid").state is AttemptState.FAILED
@@ -2247,7 +2214,7 @@ def test_failed_invalid_initial_plan_result_escalates_plan_invalid_without_backe
 
     node = store.get_node(accepted.node_id)
     waits = store.list_human_waits()
-    assert node.state is GraphNodeState.AWAITING_HUMAN
+    assert node.state is GraphNodeState.NEED_HUMAN
     assert node.human_reason is HumanEscalationReason.PLAN_INVALID
     assert waits[-1]["reason"] == HumanEscalationReason.PLAN_INVALID.value
     assert waits[-1]["details"]["error"] == "invalid_plan_proposal:missing_gate"
@@ -2642,7 +2609,7 @@ def test_integration_conflict_creates_human_wait_and_pauses_node(tmp_path: Path)
     waits = store.list_human_waits()
     assert completed["status"] == "conflict"
     assert completed["error"] == "patch conflict"
-    assert node.state is GraphNodeState.AWAITING_HUMAN
+    assert node.state is GraphNodeState.NEED_HUMAN
     assert node.human_reason is not None
     assert node.human_reason.value == "LINEAR_SYNC_CONFLICT"
     assert waits[0]["node_id"] == "a"
@@ -2749,6 +2716,56 @@ def test_process_queued_integration_applies_patch_and_records_integrated_revisio
     assert "policy_revision=1" in log_text
     assert "integration_id=integration-a-verify-1" in log_text
     assert f"integrated_revision={completed['integrated_revision']}" in log_text
+
+
+def test_process_queued_integration_merges_verified_commit_manifest(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True)
+    (repo / "README.md").write_text("before\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=repo, check=True, capture_output=True, text=True)
+    base_revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+
+    workspace = tmp_path / "workspace"
+    subprocess.run(["git", "clone", "--quiet", str(repo), str(workspace)], check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=workspace, check=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=workspace, check=True)
+    (workspace / "RESULT.md").write_text("verified commit output\n", encoding="utf-8")
+    subprocess.run(["git", "add", "RESULT.md"], cwd=workspace, check=True)
+    subprocess.run(["git", "commit", "-m", "execute node a"], cwd=workspace, check=True, capture_output=True, text=True)
+    commit_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=workspace, text=True).strip()
+
+    store = ConductorPipelineStore(tmp_path / "pipeline")
+    store.apply_runtime_config(RuntimeConfigEnvelope("group-1", 1, _policy(1)))
+    store.commit_plan(_proposal())
+    manifest = TaskOutputManifest(
+        node_id="a",
+        verify_attempt_id="verify-1",
+        gate_snapshot_hash=store.get_node("a").gate_snapshot_hash or "",
+        score=3,
+        code={
+            "base_revision": base_revision,
+            "workspace_path": str(workspace),
+            "repository_path": str(repo),
+            "branch_name": "symphony/a",
+            "commit_sha": commit_sha,
+        },
+    )
+    store.publish_task_output_manifest(manifest)
+    store.enqueue_integration(manifest)
+
+    assert store.process_queued_integrations(repo) == 1
+
+    completed = store.list_integration_queue()[0]
+    updated_manifest = store.integrated_manifest_for_node("a")
+    assert completed["status"] == "integrated"
+    assert completed["integrated_revision"]
+    assert updated_manifest is not None
+    assert updated_manifest.code["integrated_revision"] == completed["integrated_revision"]
+    assert (repo / "RESULT.md").read_text(encoding="utf-8") == "verified commit output\n"
 
 
 def test_process_queued_integrations_preserves_prior_integrated_patches(tmp_path: Path) -> None:
@@ -2883,7 +2900,7 @@ def test_process_queued_integrations_detects_overlapping_verified_patch_conflict
     assert queue[1]["status"] == "conflict"
     assert queue[1]["error"]
     assert (repo / "README.md").read_text(encoding="utf-8") == "after from a\n"
-    assert store.get_node("b").state is GraphNodeState.AWAITING_HUMAN
+    assert store.get_node("b").state is GraphNodeState.NEED_HUMAN
     assert store.get_node("b").human_reason is HumanEscalationReason.LINEAR_SYNC_CONFLICT
     assert waits[0]["node_id"] == "b"
     assert waits[0]["reason"] == "LINEAR_SYNC_CONFLICT"
@@ -3978,7 +3995,7 @@ async def test_podium_human_answered_command_without_completed_child_does_not_re
     waits = service.pipeline_store.list_human_waits()
     assert result == {"status": "ignored", "reason": "completed_child_required", "wait_id": wait["wait_id"]}
     assert waits[0]["status"] == "waiting"
-    assert service.pipeline_store.get_node("a").state is GraphNodeState.AWAITING_HUMAN
+    assert service.pipeline_store.get_node("a").state is GraphNodeState.NEED_HUMAN
 
 
 async def test_unresolved_human_action_child_emits_reconcile_finding(tmp_path: Path) -> None:
@@ -4256,7 +4273,7 @@ async def test_pipeline_linear_projector_refreshes_operator_status_after_state_c
                     "id": "child-a",
                     "description": "```yaml\nsymphony:\n  node_id: a\n```",
                     "labels": ["performer:type/pipeline-node"],
-                    "parent_issue_id": "root-linear",
+                    "parent_issue_id": "root",
                 }
             ]
             self.description_blocks: dict[str, str] = {}
@@ -4297,7 +4314,7 @@ async def test_pipeline_linear_projector_refreshes_operator_status_after_state_c
             return {"success": True}
 
     tracker = Tracker()
-    projector = PipelineLinearProjector(store=store, tracker=tracker, root_issue_id="root-linear")
+    projector = PipelineLinearProjector(store=store, tracker=tracker, root_issue_id="root")
     store.update_node_state("a", GraphNodeState.VERIFYING)
     await projector.reconcile_once()
     assert store.list_linear_projections()[0]["metadata"]["operator_status"] == "verifying"
@@ -4349,6 +4366,140 @@ async def test_pipeline_linear_projector_surfaces_workflow_transition_failure(tm
 
     with pytest.raises(Exception, match="linear_workflow_transition_failed"):
         await projector.reconcile_once()
+
+
+async def test_linear_projection_failure_is_persisted_and_projected_to_root_status(tmp_path: Path) -> None:
+    data_root = tmp_path / "conductor-data"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    conductor_store = ConductorStore(data_root)
+    instance_dir = data_root / "instances" / "inst-1"
+    conductor_store.save_instance(
+        InstanceRecord.create(
+            id="inst-1",
+            name="Alpha",
+            repo_source_type="local_path",
+            repo_source_value=str(repo),
+            resolved_repo_path=str(repo),
+            instance_dir=str(instance_dir),
+            workspace_root=str(instance_dir / "workspace" / "repo"),
+            persistence_path=str(instance_dir / "state" / "performer.json"),
+            log_path=str(instance_dir / "logs" / "performer.log"),
+            http_port=8801,
+            linear_project="ENG",
+            linear_filters={"linear_agent_app_user_id": "agent-1"},
+        )
+    )
+    service = ConductorService(
+        store=conductor_store,
+        data_root=data_root,
+        runtime_manager=ConductorRuntimeManager(command="performer"),
+    )
+    service.pipeline_store.apply_runtime_config(RuntimeConfigEnvelope("group-1", 1, _policy(1)))
+    service.pipeline_store.commit_plan(_proposal())
+
+    class Tracker:
+        def __init__(self) -> None:
+            self.comments: list[dict[str, str]] = []
+
+        async def fetch_child_issues(self, parent_issue_id: str, *, label_name: str | None = None) -> list[dict[str, object]]:
+            return [
+                {
+                    "id": "child-a",
+                    "description": "```yaml\nsymphony:\n  node_id: a\n```",
+                    "labels": ["performer:type/pipeline-node"],
+                    "parent_issue_id": "root-linear",
+                }
+            ]
+
+        async def update_issue_description_marker_block(self, issue_id: str, marker_name: str, block: str) -> dict[str, object]:
+            return {"success": True}
+
+        async def create_child_issue_for(
+            self,
+            *,
+            parent_issue_id: str,
+            title: str,
+            description: str,
+            label_names: list[str],
+            delegate_id: str | None = None,
+        ) -> dict[str, object]:
+            return {"id": "child-b", "description": description}
+
+        async def transition_issue_by_state_target(
+            self, issue_id: str, *, names: list[str], state_type: str
+        ) -> dict[str, object]:
+            return {"success": False, "issue_id": issue_id, "state": "Backlog", "reason": "state_not_found"}
+
+        async def comment_issue(self, issue_id: str, body: str) -> dict[str, object]:
+            self.comments.append({"issue_id": issue_id, "body": body})
+            return {"success": True, "comment_id": f"comment-{len(self.comments)}"}
+
+        async def update_issue_comment(self, comment_id: str, body: str) -> dict[str, object]:
+            self.comments.append({"issue_id": "root", "body": body})
+            return {"success": True, "comment_id": comment_id}
+
+    tracker = Tracker()
+    service.repository_handoff_tracker_factory = lambda _instance: tracker  # type: ignore[method-assign]
+
+    projected = await service.reconcile_linear_pipeline_projections_once()
+
+    assert projected == 1
+    health = service.pipeline_store.linear_projection_health()
+    assert health["healthy"] is False
+    assert "linear_workflow_transition_failed" in health["last_projection_error"]
+    root_status_comments = [comment["body"] for comment in tracker.comments if comment["issue_id"] == "root"]
+    assert root_status_comments
+    assert "projection_healthy: false" in root_status_comments[-1]
+    assert "last_projection_error:" in root_status_comments[-1]
+
+
+async def test_linear_projection_comment_rejection_is_persisted_as_unhealthy(tmp_path: Path) -> None:
+    data_root = tmp_path / "conductor-data"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    conductor_store = ConductorStore(data_root)
+    instance_dir = data_root / "instances" / "inst-1"
+    conductor_store.save_instance(
+        InstanceRecord.create(
+            id="inst-1",
+            name="Alpha",
+            repo_source_type="local_path",
+            repo_source_value=str(repo),
+            resolved_repo_path=str(repo),
+            instance_dir=str(instance_dir),
+            workspace_root=str(instance_dir / "workspace" / "repo"),
+            persistence_path=str(instance_dir / "state" / "performer.json"),
+            log_path=str(instance_dir / "logs" / "performer.log"),
+            http_port=8801,
+            linear_project="ENG",
+            linear_filters={"linear_agent_app_user_id": "agent-1"},
+        )
+    )
+    service = ConductorService(
+        store=conductor_store,
+        data_root=data_root,
+        runtime_manager=ConductorRuntimeManager(command="performer"),
+    )
+    service.pipeline_store.apply_runtime_config(RuntimeConfigEnvelope("group-1", 1, _policy(1)))
+    service.pipeline_store.commit_plan(_proposal())
+
+    class Tracker:
+        async def fetch_child_issues(self, parent_issue_id: str, *, label_name: str | None = None) -> list[dict[str, object]]:
+            return []
+
+        async def comment_issue(self, issue_id: str, body: str) -> dict[str, object]:
+            return {"success": False, "reason": "api_unavailable"}
+
+    service.repository_handoff_tracker_factory = lambda _instance: Tracker()  # type: ignore[method-assign]
+
+    projected = await service.reconcile_linear_pipeline_projections_once()
+
+    assert projected == 0
+    health = service.pipeline_store.linear_projection_health()
+    assert health["healthy"] is False
+    assert "linear_projection_comment_create_failed" in health["last_projection_error"]
+    assert "api_unavailable" in health["last_projection_error"]
 
 
 async def test_pipeline_linear_projector_posts_agent_status_comment_activity_and_workflow(tmp_path: Path, monkeypatch) -> None:
@@ -4527,7 +4678,7 @@ async def test_pipeline_linear_projector_projects_attempt_comment_by_attempt_id(
         if comment["issue_id"] == "child-a" and "Execute Attempt" in str(comment["body"])
     ]
     assert len(attempt_comments) == 1
-    assert ("comment-1", str(attempt_comments[0]["body"])) in tracker.updated_comments
+    assert any(body == str(attempt_comments[0]["body"]) for _comment_id, body in tracker.updated_comments)
     block = str(attempt_comments[0]["body"])
     assert "<!-- SYMPHONY ATTEMPT" not in block
     assert "🟣 Execute Attempt" in block
@@ -4542,7 +4693,7 @@ async def test_pipeline_linear_projector_projects_attempt_comment_by_attempt_id(
     assert store.get_attempt("exec-1").kind == "codex"
     projection_comment = store.get_linear_projection_comment("attempt:exec-1")
     assert projection_comment is not None
-    assert projection_comment["comment_id"] == "comment-1"
+    assert projection_comment["comment_id"] == attempt_comments[0]["id"]
     assert projection_comment["linear_issue_id"] == "child-a"
 
 
@@ -4588,7 +4739,7 @@ async def test_pipeline_linear_projector_posts_need_human_instruction_comment(tm
 
     await projector.reconcile_once()
 
-    assert ("child-a", ("Blocked", "Needs Human", "Need Human"), "started") in tracker.transitions
+    assert ("child-a", ("Blocked", "Needs Human", "Need Human"), "") in tracker.transitions
     instruction = next(comment for comment in tracker.comments if comment["issue_id"] == "child-a")
     body = str(instruction["body"])
     assert "<!-- SYMPHONY NEED HUMAN" not in body
@@ -4694,6 +4845,7 @@ async def test_pipeline_linear_projector_reuses_local_projection_when_remote_mar
 
 async def test_pipeline_linear_projector_projects_nested_node_issues_under_parent_node(tmp_path: Path) -> None:
     store = ConductorPipelineStore(tmp_path)
+    gate_root = _gate("root")
     gate_parent = _gate("parent")
     gate_child = _gate("child")
     store.commit_plan(
@@ -4702,7 +4854,13 @@ async def test_pipeline_linear_projector_projects_nested_node_issues_under_paren
             plan_attempt_id="plan-1",
             root_node_id="root",
             nodes=[
-                GraphNode(node_id="root", title="Root", state=GraphNodeState.PLANNED, issue_id="root-linear"),
+                GraphNode(
+                    node_id="root",
+                    title="Root",
+                    state=GraphNodeState.PLANNED,
+                    issue_id="root-linear",
+                    gate_snapshot_hash=gate_root.hash,
+                ),
                 GraphNode(
                     node_id="parent",
                     title="Parent",
@@ -4719,9 +4877,9 @@ async def test_pipeline_linear_projector_projects_nested_node_issues_under_paren
                 ),
             ],
             blocks=[],
-            gates=[gate_parent, gate_child],
-            entry_node_ids=["parent", "child"],
-            exit_node_ids=["parent", "child"],
+            gates=[gate_root, gate_parent, gate_child],
+            entry_node_ids=["root", "parent", "child"],
+            exit_node_ids=["root", "parent", "child"],
         )
     )
 
@@ -5554,6 +5712,7 @@ def test_replanning_replacement_validation_uses_root_parent_intent(tmp_path: Pat
             "pipeline_intent": root_intent,
         },
     )
+    gate_root = _gate("root")
     gate_t = _gate("t")
     store.commit_plan(
         PlanProposal(
@@ -5561,7 +5720,7 @@ def test_replanning_replacement_validation_uses_root_parent_intent(tmp_path: Pat
             plan_attempt_id="plan-1",
             root_node_id="root",
             nodes=[
-                GraphNode(node_id="root", title="Root", state=GraphNodeState.PLANNED),
+                GraphNode(node_id="root", title="Root", state=GraphNodeState.PLANNED, gate_snapshot_hash=gate_root.hash),
                 GraphNode(
                     node_id="t",
                     title="T",
@@ -5571,9 +5730,9 @@ def test_replanning_replacement_validation_uses_root_parent_intent(tmp_path: Pat
                 ),
             ],
             blocks=[],
-            gates=[gate_t],
-            entry_node_ids=["t"],
-            exit_node_ids=["t"],
+            gates=[gate_root, gate_t],
+            entry_node_ids=["root", "t"],
+            exit_node_ids=["root", "t"],
         ),
         intent_spec=IntentSpec.from_dispatch_context(
             {
@@ -5618,7 +5777,7 @@ def test_replanning_replacement_validation_uses_root_parent_intent(tmp_path: Pat
     )
 
     assert store.current_graph_revision() == 2
-    assert store.get_node("root").gate_snapshot_hash is None
+    assert store.get_node("root").gate_snapshot_hash == gate_root.hash
     assert store.get_node("t1").parent_node_id == "root"
     assert store.get_node("t2").parent_node_id == "root"
     assert store.get_attempt("plan-parent-repair").state is AttemptState.SUCCEEDED
@@ -5697,7 +5856,7 @@ def test_replanning_validation_failure_escalates_to_human_without_failed_node(tm
     node = store.get_node("t")
     waits = store.list_human_waits()
     assert store.current_graph_revision() == 1
-    assert node.state is GraphNodeState.AWAITING_HUMAN
+    assert node.state is GraphNodeState.NEED_HUMAN
     assert node.human_reason is HumanEscalationReason.REPLAN_LIMIT_EXCEEDED
     assert waits[-1]["reason"] == HumanEscalationReason.REPLAN_LIMIT_EXCEEDED.value
     assert store.get_attempt("plan-invalid-rewrite").state is AttemptState.FAILED
@@ -5768,7 +5927,7 @@ def test_replan_depth_limit_escalates_before_rewriting_again(tmp_path: Path) -> 
 
     node = store.get_node("t")
     assert store.current_graph_revision() == 1
-    assert node.state is GraphNodeState.AWAITING_HUMAN
+    assert node.state is GraphNodeState.NEED_HUMAN
     assert node.human_reason is HumanEscalationReason.REPLAN_LIMIT_EXCEEDED
     assert store.list_human_waits()[-1]["reason"] == HumanEscalationReason.REPLAN_LIMIT_EXCEEDED.value
 
@@ -5835,7 +5994,7 @@ def test_failed_invalid_replanning_attempt_escalates_replan_limit_without_backen
     node = store.get_node("t")
     waits = store.list_human_waits()
     assert store.current_graph_revision() == 1
-    assert node.state is GraphNodeState.AWAITING_HUMAN
+    assert node.state is GraphNodeState.NEED_HUMAN
     assert node.human_reason is HumanEscalationReason.REPLAN_LIMIT_EXCEEDED
     assert waits[-1]["reason"] == HumanEscalationReason.REPLAN_LIMIT_EXCEEDED.value
     assert waits[-1]["details"]["error"] == "invalid_plan_proposal:missing_gate"
@@ -5896,161 +6055,46 @@ def test_initial_dispatch_plan_attempt_completion_commits_planner_graph(tmp_path
     assert store.get_attempt("plan-initial").state is AttemptState.SUCCEEDED
 
 
-def test_parent_node_state_is_derived_from_exit_children_before_downstream_dispatch(tmp_path: Path) -> None:
+def test_diamond_fan_in_uses_graph_edges_without_aggregate_parent(tmp_path: Path) -> None:
     store = ConductorPipelineStore(tmp_path)
-    gate_parent = _gate("parent")
-    gate_child_1 = _gate("child-1")
-    gate_child_2 = _gate("child-2")
-    gate_downstream = _gate("downstream")
+    gate_a = _gate("a")
+    gate_b = _gate("b")
+    gate_c = _gate("c")
+    gate_d = _gate("d")
     store.apply_runtime_config(RuntimeConfigEnvelope("group-1", 1, _policy(1)))
     store.commit_plan(
         PlanProposal(
             graph_id="graph-1",
             plan_attempt_id="plan-1",
-            root_node_id="parent",
+            root_node_id="a",
             nodes=[
-                GraphNode(
-                    node_id="parent",
-                    title="Parent",
-                    state=GraphNodeState.PLANNED,
-                    gate_snapshot_hash=gate_parent.hash,
-                ),
-                GraphNode(
-                    node_id="child-1",
-                    title="Child 1",
-                    state=GraphNodeState.VERIFY_PASSED,
-                    parent_node_id="parent",
-                    gate_snapshot_hash=gate_child_1.hash,
-                    verify_score=3,
-                ),
-                GraphNode(
-                    node_id="child-2",
-                    title="Child 2",
-                    state=GraphNodeState.PLANNED,
-                    parent_node_id="parent",
-                    gate_snapshot_hash=gate_child_2.hash,
-                ),
-                GraphNode(
-                    node_id="downstream",
-                    title="Downstream",
-                    state=GraphNodeState.PLANNED,
-                    gate_snapshot_hash=gate_downstream.hash,
-                ),
+                GraphNode(node_id="a", title="A", state=GraphNodeState.VERIFY_PASSED, gate_snapshot_hash=gate_a.hash, verify_score=3),
+                GraphNode(node_id="b", title="B", state=GraphNodeState.PLANNED, gate_snapshot_hash=gate_b.hash),
+                GraphNode(node_id="c", title="C", state=GraphNodeState.PLANNED, gate_snapshot_hash=gate_c.hash),
+                GraphNode(node_id="d", title="D", state=GraphNodeState.PLANNED, gate_snapshot_hash=gate_d.hash),
             ],
-            blocks=[("child-1", "child-2"), ("parent", "downstream")],
-            gates=[gate_parent, gate_child_1, gate_child_2, gate_downstream],
-            entry_node_ids=["child-1", "parent"],
-            exit_node_ids=["child-2", "downstream"],
+            blocks=[("a", "b"), ("a", "c"), ("b", "d"), ("c", "d")],
+            gates=[gate_a, gate_b, gate_c, gate_d],
+            entry_node_ids=["a"],
+            exit_node_ids=["d"],
         )
     )
     scheduler = PipelineScheduler(store)
 
-    assert store.derive_parent_state("parent") is GraphNodeState.PLANNED
-    parent_prediction = next(
-        call for call in store.pipeline_view().to_dict()["predicted_call_order"] if call["node"] == "parent"
-    )
-    assert parent_prediction["aggregate_state"] == "in_progress"
-    assert scheduler.is_dependency_satisfied("parent") is False
-    assert scheduler.dispatchable_nodes(RuntimeMode.EXECUTE) == []
+    _publish_branch_manifest(store, "a", verify_attempt_id="verify-a")
+    assert scheduler.promote_ready_nodes() == ["b", "c"]
+    assert scheduler.dispatchable_nodes(RuntimeMode.EXECUTE) == ["b", "c"]
 
-    store.publish_task_output_manifest(
-        TaskOutputManifest(
-            node_id="child-1",
-            verify_attempt_id="verify-child-1",
-            gate_snapshot_hash=gate_child_1.hash,
-            score=3,
-            code={"base_revision": "base", "branch_name": "symphony/child-1", "commit_sha": "commit-child-1"},
-        )
-        )
-    assert scheduler.promote_ready_nodes() == ["child-2"]
-    assert scheduler.dispatchable_nodes(RuntimeMode.EXECUTE) == ["child-2"]
+    store.update_node_state("b", GraphNodeState.VERIFY_PASSED, verify_score=3)
+    _publish_branch_manifest(store, "b", verify_attempt_id="verify-b")
+    assert scheduler.promote_ready_nodes() == []
+    assert scheduler.dispatchable_nodes(RuntimeMode.EXECUTE) == ["c"]
+    assert store.get_node("d").state is GraphNodeState.PLANNED
 
-    store.update_node_state("child-2", GraphNodeState.VERIFY_PASSED, verify_score=3)
-    refreshed = store.refresh_aggregate_parent_state("parent")
-
-    assert refreshed.state is GraphNodeState.VERIFY_PASSED
-    assert refreshed.verify_score == 3
-    assert store.get_node("parent").state is GraphNodeState.PLANNED
-    assert store.get_node("parent").verify_score is None
-    assert scheduler.is_dependency_satisfied("parent") is False
-    assert scheduler.dispatchable_nodes(RuntimeMode.EXECUTE) == []
-
-    store.publish_task_output_manifest(
-        TaskOutputManifest(
-            node_id="child-2",
-            verify_attempt_id="verify-child-2",
-            gate_snapshot_hash=gate_child_2.hash,
-            score=3,
-            code={"base_revision": "base", "branch_name": "symphony/child-2", "commit_sha": "commit-child-2"},
-        )
-    )
-    parent_view = next(node for node in store.pipeline_view().to_dict()["nodes"] if node["node_id"] == "parent")
-    assert parent_view["state"] == "planned"
-    assert parent_view["aggregate_state"] == "verify_passed"
-    assert scheduler.is_dependency_satisfied("parent") is True
-    assert scheduler.promote_ready_nodes() == ["downstream"]
-    assert scheduler.dispatchable_nodes(RuntimeMode.EXECUTE) == ["downstream"]
-
-
-def test_successful_child_verify_drives_parent_state_to_persisted_aggregate_terminal(tmp_path: Path) -> None:
-    store = ConductorPipelineStore(tmp_path)
-    store.apply_runtime_config(RuntimeConfigEnvelope("group-1", 1, _policy(1)))
-    gate_parent = _gate("parent")
-    gate_child_1 = _gate("child-1")
-    gate_child_2 = _gate("child-2")
-    store.commit_plan(
-        PlanProposal(
-            graph_id="graph-1",
-            plan_attempt_id="plan-1",
-            root_node_id="parent",
-            nodes=[
-                GraphNode(node_id="parent", title="Parent", state=GraphNodeState.PLANNED, gate_snapshot_hash=gate_parent.hash),
-                GraphNode(
-                    node_id="child-1",
-                    title="Child 1",
-                    state=GraphNodeState.VERIFY_PASSED,
-                    parent_node_id="parent",
-                    gate_snapshot_hash=gate_child_1.hash,
-                    verify_score=3,
-                ),
-                GraphNode(
-                    node_id="child-2",
-                    title="Child 2",
-                    state=GraphNodeState.VERIFYING,
-                    parent_node_id="parent",
-                    gate_snapshot_hash=gate_child_2.hash,
-                ),
-            ],
-            blocks=[("child-1", "child-2")],
-            gates=[gate_parent, gate_child_1, gate_child_2],
-            entry_node_ids=["parent", "child-1"],
-            exit_node_ids=["parent", "child-2"],
-        )
-    )
-    now = datetime(2026, 7, 6, tzinfo=timezone.utc)
-    _publish_verification_input(store, "child-2", execute_attempt_id="exec-child-2")
-    lease = store.start_attempt(RuntimeMode.VERIFY, node_id="child-2", attempt_id="verify-child-2", now=now, ttl_seconds=30)
-
-    assert store.complete_attempt_with_fencing(
-        VerifyAttemptResult(
-            attempt_id="verify-child-2",
-            node_id="child-2",
-            status=AttemptState.SUCCEEDED,
-            graph_revision=1,
-            policy_revision=1,
-            gate_snapshot_hash=gate_child_2.hash,
-            lease_id=lease.lease_id,
-            fencing_token=lease.fencing_token,
-            score=3,
-            passed=True,
-            execute_attempt_id="exec-child-2",
-        ),
-        at=now,
-    )
-
-    parent = store.get_node("parent")
-    assert parent.state is GraphNodeState.VERIFY_PASSED
-    assert parent.verify_score == 3
+    store.update_node_state("c", GraphNodeState.VERIFY_PASSED, verify_score=3)
+    _publish_branch_manifest(store, "c", verify_attempt_id="verify-c")
+    assert scheduler.promote_ready_nodes() == ["d"]
+    assert scheduler.dispatchable_nodes(RuntimeMode.EXECUTE) == ["d"]
 
 
 def test_scheduler_finds_stuck_nonterminal_nodes_without_live_driver(tmp_path: Path) -> None:
@@ -6157,6 +6201,8 @@ async def test_coordinate_surfaces_stuck_pipeline_nodes_as_reconcile_findings_an
     waits = service.pipeline_store.list_human_waits()
     assert waits[-1]["node_id"] == "b"
     assert waits[-1]["reason"] == HumanEscalationReason.CAPACITY_STARVED.value
+    assert waits[-1]["details"]["blocked_by"] == ["a: failed"]
+    assert waits[-1]["details"]["error"] == "pipeline node has no live driver: a: failed"
     observations = service.pipeline_store.pipeline_view().to_dict()["stuck_observations"]
     assert observations == [
         {
@@ -6165,7 +6211,7 @@ async def test_coordinate_surfaces_stuck_pipeline_nodes_as_reconcile_findings_an
             "graph_revision": 1,
             "last_seen_at": observations[0]["last_seen_at"],
             "node_id": "b",
-            "reason": "pipeline node has no live driver",
+            "reason": "a: failed",
         }
     ]
 
@@ -6329,7 +6375,6 @@ def test_pipeline_view_includes_mode_counts_and_conditional_prediction(tmp_path:
     assert payload["manifests"] == []
     assert payload["human_waits"][0]["wait_id"] == wait["wait_id"]
     assert payload["linear_projections"][0]["metadata"]["conductor_revision"] == 1
-    assert payload["prediction_basis"]["dependency_policy"] == "verify_passed"
     assert payload["prediction_basis"]["graph_revision"] == 1
     assert payload["prediction_basis"]["policy_revision"] == 1
     assert payload["prediction_basis"]["assumption"] == "unknown verifies pass"
@@ -6398,7 +6443,7 @@ def test_pipeline_view_excludes_terminal_and_human_wait_nodes_from_mode_queues(t
     store = ConductorPipelineStore(tmp_path)
     store.apply_runtime_config(RuntimeConfigEnvelope("group-1", 1, _policy(1)))
     store.commit_plan(_proposal())
-    store.update_node_state("a", GraphNodeState.AWAITING_HUMAN, human_reason=HumanEscalationReason.BACKEND_UNAVAILABLE)
+    store.update_node_state("a", GraphNodeState.NEED_HUMAN, human_reason=HumanEscalationReason.BACKEND_UNAVAILABLE)
     store.update_node_state("b", GraphNodeState.VERIFY_PASSED, verify_score=3)
 
     payload = store.pipeline_view().to_dict()
@@ -6437,7 +6482,7 @@ def test_pipeline_prediction_does_not_rank_non_dispatchable_terminal_or_human_wa
     store = ConductorPipelineStore(tmp_path)
     store.apply_runtime_config(RuntimeConfigEnvelope("group-1", 1, _policy(1)))
     store.commit_plan(_proposal())
-    store.update_node_state("a", GraphNodeState.AWAITING_HUMAN, human_reason=HumanEscalationReason.BACKEND_UNAVAILABLE)
+    store.update_node_state("a", GraphNodeState.NEED_HUMAN, human_reason=HumanEscalationReason.BACKEND_UNAVAILABLE)
     store.update_node_state("b", GraphNodeState.VERIFY_PASSED, verify_score=3)
 
     payload = store.pipeline_view().to_dict()
@@ -6560,7 +6605,7 @@ def test_pipeline_coordinator_launches_planner_for_new_dispatch_with_mode_isolat
         RuntimeConfigEnvelope(
             "group-1",
             1,
-            _policy(1, dependency_policy=DependencySatisfactionPolicy.VERIFY_PASSED),
+            _policy(1),
             profiles={
                 RuntimeMode.PLAN: RuntimeProfile(
                     name="planner",
@@ -7257,7 +7302,7 @@ def test_pipeline_coordinator_resumes_existing_root_planning_node_for_duplicate_
         },
         instance_id="inst-1",
     )
-    store.update_node_state("issue-1", GraphNodeState.AWAITING_HUMAN)
+    store.update_node_state("issue-1", GraphNodeState.NEED_HUMAN)
 
     second = coordinator.accept_dispatch(
         {
@@ -7272,7 +7317,7 @@ def test_pipeline_coordinator_resumes_existing_root_planning_node_for_duplicate_
     assert second == first
     assert store.current_graph_revision() == 1
     assert node.title == "Plan feature"
-    assert node.state is GraphNodeState.AWAITING_HUMAN
+    assert node.state is GraphNodeState.NEED_HUMAN
 
 
 def test_pipeline_coordinator_resumes_existing_root_by_issue_identifier(tmp_path: Path) -> None:
@@ -7399,7 +7444,6 @@ def test_conductor_runtime_config_ingest_surfaces_invalid_config(tmp_path: Path)
                 "version": 2,
                 "effective_at": "2026-07-06T00:00:00Z",
                 "capacity": {"global": 3, "by_mode": {"plan": 1, "execute": 1, "verify": 1}},
-                "dependency_policy": "verify_passed",
             },
             "profiles": {
                 "plan": {"name": "planner", "backend": "codex", "mode": "plan", "settings": {"model": "gpt-5.3-codex"}}
@@ -7598,7 +7642,7 @@ async def test_background_coordination_fails_running_attempt_when_process_exits_
     assert attempt.state is AttemptState.FAILED
     assert "401 Unauthorized" in str(attempt.error)
     assert service.pipeline_store.active_lease("issue-1", RuntimeMode.PLAN) is None
-    assert node.state is GraphNodeState.AWAITING_HUMAN
+    assert node.state is GraphNodeState.NEED_HUMAN
     assert node.human_reason is HumanEscalationReason.BACKEND_UNAVAILABLE
     assert waits[0]["reason"] == HumanEscalationReason.BACKEND_UNAVAILABLE.value
     assert waits[0]["details"]["attempt_id"] == "plan-1"

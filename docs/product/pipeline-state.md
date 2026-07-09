@@ -45,19 +45,17 @@ Graph nodes use these durable states:
 PLANNED
 READY
 EXECUTING
-EXECUTE_FAILED
 VERIFYING
 VERIFY_PASSED
-VERIFY_FAILED
 REPLANNING
 SUPERSEDED
-AWAITING_HUMAN
+NEED_HUMAN
 FAILED
 ```
 
 `READY` means dependencies are satisfied and capacity may schedule the next
 mode. `SUPERSEDED` is terminal for a node replaced by a new graph revision.
-`AWAITING_HUMAN` is terminal until an operator resumes the node.
+`NEED_HUMAN` is terminal until an operator resumes the node.
 
 Same-stage retries do not create replacement nodes. They create new attempts on
 the same node, bounded by policy. A regression to an earlier stage creates a
@@ -80,20 +78,12 @@ Plan, execute, and verify attempts are stored with mode, attempt id, node id,
 lease id, fencing token, request/result paths, backend kind, thread id when the
 backend exposes one, sanitized error, timestamps, and artifact references.
 
-## Parent Aggregation
+## Parentage
 
-Parent nodes are aggregate nodes and are not executed directly. Their display
-state is derived from child state:
-
-```text
-all exit children VERIFY_PASSED           -> parent VERIFY_PASSED
-any child unrecoverably FAILED            -> parent FAILED
-any child AWAITING_HUMAN                  -> parent AWAITING_HUMAN
-otherwise any child active                -> parent IN_PROGRESS (derived)
-```
-
-The coordinator acts on this aggregation. A parent whose children are all
-terminal may not remain parked in an active display state.
+`parent_node_id` expresses Linear issue nesting and decomposition ownership only.
+It does not participate in scheduler dependency satisfaction, dispatchability,
+or derived lifecycle state. Fan-in is represented directly by multiple incoming
+`blocks` edges on a node.
 
 ## Scheduling
 
@@ -101,8 +91,8 @@ Conductor schedules from the active graph, active scheduler policy, current
 runtime profiles, dependency predicate, and live leases.
 
 The dependency predicate is verify-gated: a blocker is satisfied only when the
-upstream node verify-passed at score `>= 3`. Execute completion does not satisfy
-dependencies.
+upstream node verify-passed at score `>= 3` and its verified branch output
+manifest is available. Execute completion does not satisfy dependencies.
 
 Capacity is versioned and per-mode:
 
@@ -136,12 +126,19 @@ warnings with durable reasons, not silent no-ops.
 
 ## Convergence
 
-Every non-terminal node must have at least one live driver: a dispatchable mode,
-an active attempt, or an open human/runtime wait. A node with no live driver is a
-stuck-node finding and must be surfaced in state and logs.
+Every non-terminal node must have at least one live driver or explanation:
+
+- an active attempt/lease is running;
+- the node can be promoted or dispatched in this scheduler tick;
+- an open human/runtime wait explains why it is parked.
+
+A non-terminal node with no live driver is a stuck-node finding. The finding
+must create a durable wait/comment with the concrete blockers, capacity error,
+profile error, or dispatch-skip reason, and must be visible in state, logs, API
+views, and Linear projection when Linear is configured.
 
 Backward movement is bounded by retry count and replan depth. Exhaustion
-escalates to `AWAITING_HUMAN` with a structured reason instead of looping. This
+escalates to `NEED_HUMAN` with a structured reason instead of looping. This
 guarantees the graph reaches a terminal state or an explicit operator wait.
 
 ## Verification

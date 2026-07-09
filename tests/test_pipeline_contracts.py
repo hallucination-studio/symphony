@@ -9,7 +9,6 @@ from performer_api.pipeline import (
     AttemptState,
     ExecuteAttemptResult,
     canonical_gate_hash,
-    DependencySatisfactionPolicy,
     GateStep,
     GateStepSource,
     GateSpecContent,
@@ -39,11 +38,27 @@ from performer_api.pipeline import (
 
 
 def test_linear_topology_state_set_uses_need_human_and_removes_reworking() -> None:
-    states = {state.value for state in GraphNodeState}
+    states = {state.name: state.value for state in GraphNodeState}
 
-    assert "need_human" in states
-    assert "reworking" not in states
-    assert GraphNodeState.from_value("awaiting_human") is GraphNodeState.NEED_HUMAN
+    assert states == {
+        "PLANNED": "planned",
+        "READY": "ready",
+        "EXECUTING": "executing",
+        "VERIFYING": "verifying",
+        "VERIFY_PASSED": "verify_passed",
+        "REPLANNING": "replanning",
+        "SUPERSEDED": "superseded",
+        "NEED_HUMAN": "need_human",
+        "FAILED": "failed",
+    }
+    assert not hasattr(GraphNodeState, "REWORKING")
+    assert not hasattr(GraphNodeState, "AWAITING_HUMAN")
+    assert not hasattr(GraphNodeState, "EXECUTE_FAILED")
+    assert not hasattr(GraphNodeState, "VERIFY_FAILED")
+    with pytest.raises(ValueError):
+        GraphNodeState.from_value("awaiting_human")
+    with pytest.raises(ValueError):
+        GraphNodeState.from_value("reworking")
 
 
 def test_gate_snapshot_hash_is_canonical_and_threshold_is_fixed() -> None:
@@ -196,7 +211,7 @@ def test_intent_spec_uses_pipeline_intent_when_intent_is_empty() -> None:
         }
     )
 
-    assert intent.requires_parent_aggregate is True
+    assert not hasattr(intent, "requires_parent_aggregate")
     assert intent.requires_all_parallel_branches_for_downstream is True
     assert intent.parallel_branch_node_ids == ["parallel-a", "parallel-b"]
     assert intent.downstream_node_ids == ["integration"]
@@ -221,7 +236,7 @@ def test_intent_spec_uses_intent_when_pipeline_intent_is_empty() -> None:
         }
     )
 
-    assert intent.requires_parent_aggregate is True
+    assert not hasattr(intent, "requires_parent_aggregate")
     assert intent.requires_all_parallel_branches_for_downstream is True
     assert intent.parallel_branch_node_ids == ["parallel-a", "parallel-b"]
     assert intent.downstream_node_ids == ["integration"]
@@ -291,7 +306,7 @@ def test_plan_repair_is_idempotent_and_repairs_required_parallel_shape() -> None
     assert GateStep("test -f SYMPHONY_REAL_E2E_RESULT.md", GateStepSource.APPENDIX_HARNESS) in integration_gate.content.verification_procedure
 
 
-def test_plan_repair_promotes_business_issue_root_to_pure_parent_for_aggregate_intent() -> None:
+def test_plan_repair_ignores_legacy_parent_aggregate_intent_and_keeps_explicit_edges() -> None:
     intent = IntentSpec.from_dispatch_context(
         {
             "issue_id": "issue-1",
@@ -337,84 +352,39 @@ def test_plan_repair_promotes_business_issue_root_to_pure_parent_for_aggregate_i
     repaired_again = PlanRepair(intent).repair(repaired)
 
     root = next(node for node in repaired.nodes if node.node_id == "root")
-    subtasks = [node for node in repaired.nodes if node.node_id != "root"]
     assert root.parent_node_id is None
-    assert root.gate_snapshot_hash is None
-    assert all(node.parent_node_id == "root" for node in subtasks)
-    assert {gate.task_id for gate in repaired.gates} == {"parallel-a", "parallel-b", "integration"}
-    assert not any("root" in edge for edge in repaired.blocks)
-    assert repaired.entry_node_ids == ["parallel-a", "parallel-b"]
+    assert root.gate_snapshot_hash == next(gate.hash for gate in repaired.gates if gate.task_id == "root")
+    assert not any(node.parent_node_id == "root" for node in repaired.nodes if node.node_id != "root")
+    assert {gate.task_id for gate in repaired.gates} == {"root", "parallel-a", "parallel-b", "integration"}
+    assert ("root", "parallel-a") in repaired.blocks
+    assert ("parallel-b", "integration") in repaired.blocks
+    assert repaired.entry_node_ids == ["root", "parallel-b"]
     assert repaired.exit_node_ids == ["integration"]
     assert PlanValidator(intent_spec=intent).validate(repaired) == set()
     assert repaired_again.to_dict() == repaired.to_dict()
 
 
-def test_plan_repair_promotes_parent_aggregate_from_pipeline_intent_shadowed_by_empty_intent() -> None:
+def test_parent_node_id_remains_serialized_but_does_not_create_aggregate_validator_exception() -> None:
     intent = IntentSpec.from_dispatch_context(
         {
             "issue_id": "issue-1",
             "issue_identifier": "ENG-1",
-            "intent": {},
-            "pipeline_intent": {
-                "requires_parent_aggregate": True,
-                "parallel_dependency_shape": {
-                    "parallel_branch_node_ids": ["parallel-a", "parallel-b"],
-                    "downstream_node_ids": ["integration"],
-                },
-            },
+            "intent": {"requires_parent_aggregate": True},
         }
     )
-    gates: list[GateSpecSnapshot] = []
-    nodes: list[GraphNode] = []
-    for node_id in ("root", "parallel-a", "parallel-b", "integration"):
-        gate = GateSpecSnapshot.create(
-            gate_id=f"gate-{node_id}",
-            task_id=node_id,
-            created_by="plan-1",
-            created_at="2026-07-06T00:00:00Z",
-            content=GateSpecContent(
-                acceptance_criteria=[f"{node_id} works"],
-                verification_procedure=[GateStep("true", GateStepSource.ISSUE_REQUIREMENT)],
-                rubric={str(score): f"score {score}" for score in range(5)},
-                pass_threshold=3,
-            ),
-        )
-        gates.append(gate)
-        nodes.append(GraphNode(node_id=node_id, title=node_id, state=GraphNodeState.PLANNED, gate_snapshot_hash=gate.hash))
-    proposal = PlanProposal(
-        graph_id="graph-1",
-        plan_attempt_id="plan-1",
-        root_node_id="root",
-        nodes=nodes,
-        blocks=[("root", "parallel-a"), ("parallel-a", "integration")],
-        gates=gates,
-        entry_node_ids=["root", "parallel-b"],
-        exit_node_ids=["parallel-b", "integration"],
+    parent_gate = GateSpecSnapshot.create(
+        gate_id="gate-parent",
+        task_id="issue-1",
+        created_by="plan-1",
+        created_at="2026-07-06T00:00:00Z",
+        content=GateSpecContent(
+            acceptance_criteria=["parent issue remains executable"],
+            verification_procedure=[GateStep("true", GateStepSource.ISSUE_REQUIREMENT)],
+            rubric={str(score): f"score {score}" for score in range(5)},
+            pass_threshold=3,
+        ),
     )
-
-    repaired = PlanRepair(intent).repair(proposal)
-
-    root = next(node for node in repaired.nodes if node.node_id == "root")
-    subtasks = [node for node in repaired.nodes if node.node_id != "root"]
-    assert root.parent_node_id is None
-    assert root.gate_snapshot_hash is None
-    assert all(node.parent_node_id == "root" for node in subtasks)
-    assert {gate.task_id for gate in repaired.gates} == {"parallel-a", "parallel-b", "integration"}
-    assert not any("root" in edge for edge in repaired.blocks)
-    assert repaired.entry_node_ids == ["parallel-a", "parallel-b"]
-    assert repaired.exit_node_ids == ["integration"]
-    assert PlanValidator(intent_spec=intent).validate(repaired) == set()
-
-
-def test_plan_repair_infers_gate_less_root_parent_as_aggregate() -> None:
-    intent = IntentSpec.from_dispatch_context(
-        {
-            "issue_id": "issue-1",
-            "issue_identifier": "ENG-1",
-            "intent": {},
-        }
-    )
-    gate = GateSpecSnapshot.create(
+    child_gate = GateSpecSnapshot.create(
         gate_id="gate-child",
         task_id="task-create-result",
         created_by="plan-1",
@@ -437,17 +407,18 @@ def test_plan_repair_infers_gate_less_root_parent_as_aggregate() -> None:
                 state=GraphNodeState.PLANNED,
                 issue_id="issue-1",
                 issue_identifier="ENG-1",
+                gate_snapshot_hash=parent_gate.hash,
             ),
             GraphNode(
                 node_id="task-create-result",
                 title="Create result",
                 state=GraphNodeState.PLANNED,
                 parent_node_id="issue-1",
-                gate_snapshot_hash=gate.hash,
+                gate_snapshot_hash=child_gate.hash,
             ),
         ],
         blocks=[],
-        gates=[gate],
+        gates=[parent_gate, child_gate],
         entry_node_ids=["issue-1", "task-create-result"],
         exit_node_ids=["issue-1", "task-create-result"],
     )
@@ -455,28 +426,12 @@ def test_plan_repair_infers_gate_less_root_parent_as_aggregate() -> None:
     repaired = PlanRepair(intent).repair(proposal)
     repaired_again = PlanRepair(intent).repair(repaired)
 
-    assert repaired.entry_node_ids == ["task-create-result"]
-    assert repaired.exit_node_ids == ["task-create-result"]
+    assert repaired.entry_node_ids == ["issue-1", "task-create-result"]
+    assert repaired.exit_node_ids == ["issue-1", "task-create-result"]
+    assert repaired.nodes[1].parent_node_id == "issue-1"
+    assert GraphNode.from_dict(repaired.nodes[1].to_dict()).parent_node_id == "issue-1"
     assert PlanValidator(intent_spec=intent).validate(repaired) == set()
     assert repaired_again.to_dict() == repaired.to_dict()
-
-
-def test_plan_validator_rejects_missing_parent_aggregate_when_intent_requires_it() -> None:
-    intent = IntentSpec.from_dispatch_context(
-        {
-            "issue_id": "issue-1",
-            "issue_identifier": "ENG-1",
-            "intent": {"requires_parent_aggregate": True},
-        }
-    )
-    proposal = _parallel_shape_proposal(
-        blocks=[("parallel-a", "integration"), ("parallel-b", "integration")],
-        titles={"parallel-a": "First branch", "parallel-b": "Second branch", "integration": "Join work"},
-    )
-
-    errors = PlanValidator(intent_spec=intent).validate(proposal)
-
-    assert PlanValidatorError.PARENT_AGGREGATE_MISSING in errors
 
 
 def test_plan_validator_rejects_unrepaired_required_parallel_shape() -> None:
@@ -748,7 +703,6 @@ def test_runtime_config_validation_requires_complete_three_mode_profiles() -> No
         version=1,
         effective_at="2026-07-06T00:00:00Z",
         capacity=SchedulerCapacity(global_limit=3, by_mode={mode: 1 for mode in RuntimeMode}),
-        dependency_policy=DependencySatisfactionPolicy.VERIFY_PASSED,
         max_rework_attempts=1,
     )
     incomplete = RuntimeConfigEnvelope(
@@ -781,7 +735,6 @@ def test_runtime_config_validation_enforces_mode_backend_eligibility() -> None:
         version=1,
         effective_at="2026-07-06T00:00:00Z",
         capacity=SchedulerCapacity(global_limit=3, by_mode={mode: 1 for mode in RuntimeMode}),
-        dependency_policy=DependencySatisfactionPolicy.VERIFY_PASSED,
         max_rework_attempts=1,
     )
     local_verify = RuntimeConfigEnvelope(
@@ -1146,15 +1099,18 @@ def test_verification_input_snapshot_prefers_branch_commit_handoff() -> None:
     assert VerificationInputSnapshot.from_dict(payload) == snapshot
 
 
-def test_graph_node_state_uses_need_human_with_legacy_awaiting_human_compatibility() -> None:
+def test_graph_node_state_uses_need_human_without_legacy_state_compatibility() -> None:
     states = {state.value for state in GraphNodeState}
 
     assert "need_human" in states
     assert "awaiting_human" not in states
-    assert GraphNodeState.from_value("awaiting_human") is GraphNodeState.NEED_HUMAN
+    with pytest.raises(ValueError):
+        GraphNodeState.from_value("awaiting_human")
+    with pytest.raises(ValueError):
+        GraphNodeState.from_value("reworking")
 
 
-def test_scheduler_policy_defaults_to_verify_passed_dependencies() -> None:
+def test_scheduler_policy_no_longer_serializes_dependency_policy() -> None:
     policy = SchedulerPolicy(
         policy_id="policy-verify-only",
         version=1,
@@ -1162,8 +1118,8 @@ def test_scheduler_policy_defaults_to_verify_passed_dependencies() -> None:
         capacity=SchedulerCapacity(global_limit=None),
     )
 
-    assert policy.dependency_policy is DependencySatisfactionPolicy.VERIFY_PASSED
-    assert SchedulerPolicy.from_dict(policy.to_dict()).dependency_policy is DependencySatisfactionPolicy.VERIFY_PASSED
+    assert "dependency_policy" not in policy.to_dict()
+    assert "dependency_policy" not in SchedulerPolicy.from_dict(policy.to_dict()).to_dict()
 
 
 def test_execute_and_verify_requests_carry_frozen_gate_revision_and_artifacts() -> None:

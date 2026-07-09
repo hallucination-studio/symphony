@@ -43,25 +43,17 @@ RUNTIME_BACKENDS_BY_MODE = {
 class GraphNodeState(StrEnum):
     PLANNED = "planned"
     READY = "ready"
-    REWORKING = "ready"
     EXECUTING = "executing"
-    EXECUTE_FAILED = "execute_failed"
     VERIFYING = "verifying"
     VERIFY_PASSED = "verify_passed"
-    VERIFY_FAILED = "verify_failed"
     REPLANNING = "replanning"
     SUPERSEDED = "superseded"
     NEED_HUMAN = "need_human"
-    AWAITING_HUMAN = "need_human"
     FAILED = "failed"
 
     @classmethod
     def from_value(cls, value: Any) -> GraphNodeState:
         normalized = str(value or cls.PLANNED.value)
-        if normalized == "awaiting_human":
-            normalized = cls.NEED_HUMAN.value
-        if normalized == "reworking":
-            normalized = cls.READY.value
         return cls(normalized)
 
 
@@ -85,11 +77,6 @@ class HumanEscalationReason(StrEnum):
     THREAD_LOST = "THREAD_LOST"
 
 
-class DependencySatisfactionPolicy(StrEnum):
-    TERMINAL_SUCCESS = "terminal_success"
-    VERIFY_PASSED = "verify_passed"
-
-
 class PlanValidatorError(StrEnum):
     MISSING_GATE = "missing_gate"
     GATE_UNEXECUTABLE = "gate_unexecutable"
@@ -104,7 +91,6 @@ class PlanValidatorError(StrEnum):
     NO_AUTHORITATIVE_GATE_STEP = "no_authoritative_gate_step"
     INVALID_GATE_STEP_SOURCE = "invalid_gate_step_source"
     REQUIRED_PARALLEL_SHAPE_MISSING = "required_parallel_shape_missing"
-    PARENT_AGGREGATE_MISSING = "parent_aggregate_missing"
 
 
 class GateStepSource(StrEnum):
@@ -161,7 +147,6 @@ class IntentSpec:
     issue_description: str
     required_gate_steps: list[GateStep] = field(default_factory=list)
     requires_all_parallel_branches_for_downstream: bool = False
-    requires_parent_aggregate: bool = False
     parallel_branch_node_ids: list[str] = field(default_factory=list)
     downstream_node_ids: list[str] = field(default_factory=list)
 
@@ -199,11 +184,6 @@ class IntentSpec:
             issue_description=str(payload.get("description") or payload.get("issue_description") or ""),
             required_gate_steps=required_gate_steps,
             requires_all_parallel_branches_for_downstream=requires_all_parallel_branches_for_downstream,
-            requires_parent_aggregate=bool(
-                intent.get("requires_parent_aggregate")
-                or parallel_branch_node_ids
-                or requires_all_parallel_branches_for_downstream
-            ),
             parallel_branch_node_ids=parallel_branch_node_ids,
             downstream_node_ids=downstream_node_ids,
         )
@@ -280,7 +260,6 @@ class SchedulerPolicy:
     version: int
     effective_at: str
     capacity: SchedulerCapacity
-    dependency_policy: DependencySatisfactionPolicy = DependencySatisfactionPolicy.VERIFY_PASSED
     max_rework_attempts: int = 3
 
     def to_dict(self) -> dict[str, Any]:
@@ -289,7 +268,6 @@ class SchedulerPolicy:
             "version": self.version,
             "effective_at": self.effective_at,
             "capacity": self.capacity.to_dict(),
-            "dependency_policy": self.dependency_policy.value,
             "max_rework_attempts": self.max_rework_attempts,
         }
 
@@ -300,9 +278,6 @@ class SchedulerPolicy:
             version=_int(payload.get("version"), default=0),
             effective_at=str(payload.get("effective_at") or ""),
             capacity=SchedulerCapacity.from_dict(_dict(payload.get("capacity"))),
-            dependency_policy=DependencySatisfactionPolicy(
-                str(payload.get("dependency_policy") or DependencySatisfactionPolicy.VERIFY_PASSED.value)
-            ),
             max_rework_attempts=_int(payload.get("max_rework_attempts"), default=3),
         )
 
@@ -1087,13 +1062,12 @@ class PlanRepair:
         self.intent_spec = intent_spec
 
     def repair(self, proposal: PlanProposal) -> PlanProposal:
-        parent_repaired = self._repair_parent_aggregate_shape(proposal)
-        next_blocks = self._repair_parallel_dependency_shape(parent_repaired)
-        normalized_gate_content = self._normalized_gate_content(parent_repaired)
-        target_node_ids = set(parent_repaired.exit_node_ids or [node.node_id for node in parent_repaired.nodes])
+        next_blocks = self._repair_parallel_dependency_shape(proposal)
+        normalized_gate_content = self._normalized_gate_content(proposal)
+        target_node_ids = set(proposal.exit_node_ids or [node.node_id for node in proposal.nodes])
         next_gates: list[GateSpecSnapshot] = []
         changed_hash_by_task: dict[str, str] = {}
-        for gate in parent_repaired.gates:
+        for gate in proposal.gates:
             existing_content = normalized_gate_content.get(gate.task_id) or gate.content
             missing_required_steps = (
                 [step for step in self.intent_spec.required_gate_steps if step not in existing_content.verification_procedure]
@@ -1126,81 +1100,24 @@ class PlanRepair:
             )
             next_gates.append(updated)
             changed_hash_by_task[updated.task_id] = updated.hash
-        blocks_changed = next_blocks != list(parent_repaired.blocks)
-        structure_changed = parent_repaired.to_dict() != proposal.to_dict()
-        if not changed_hash_by_task and not blocks_changed and not structure_changed:
+        blocks_changed = next_blocks != list(proposal.blocks)
+        if not changed_hash_by_task and not blocks_changed:
             return proposal
         next_nodes = [
             replace(node, gate_snapshot_hash=changed_hash_by_task[node.node_id])
             if node.node_id in changed_hash_by_task
             else node
-            for node in parent_repaired.nodes
+            for node in proposal.nodes
         ]
         entry_node_ids, exit_node_ids = (
             _entry_exit_node_ids_for_blocks(
-                _entry_exit_nodes_for_intent(next_nodes, parent_repaired.root_node_id, self.intent_spec),
+                _entry_exit_nodes_for_intent(next_nodes, proposal.root_node_id, self.intent_spec),
                 next_blocks,
             )
             if blocks_changed
-            else (list(parent_repaired.entry_node_ids), list(parent_repaired.exit_node_ids))
+            else (list(proposal.entry_node_ids), list(proposal.exit_node_ids))
         )
         return PlanProposal(
-            graph_id=parent_repaired.graph_id,
-            plan_attempt_id=parent_repaired.plan_attempt_id,
-            root_node_id=parent_repaired.root_node_id,
-            nodes=next_nodes,
-            blocks=next_blocks,
-            gates=next_gates,
-            entry_node_ids=entry_node_ids,
-            exit_node_ids=exit_node_ids,
-        )
-
-    def _repair_parent_aggregate_shape(self, proposal: PlanProposal) -> PlanProposal:
-        if len(proposal.nodes) <= 1:
-            return proposal
-        root_node_id = proposal.root_node_id
-        if not root_node_id:
-            return proposal
-        root_node = next((node for node in proposal.nodes if node.node_id == root_node_id), None)
-        has_root_parentage = any(node.node_id != root_node_id and node.parent_node_id == root_node_id for node in proposal.nodes)
-        inferred_parent_aggregate = bool(
-            has_root_parentage
-            and root_node is not None
-            and not root_node.gate_snapshot_hash
-        )
-        if not self.intent_spec.requires_parent_aggregate and not inferred_parent_aggregate:
-            return proposal
-        root_exists = any(node.node_id == root_node_id for node in proposal.nodes)
-        if root_node is None:
-            root_node = GraphNode(
-                node_id=root_node_id,
-                title=self.intent_spec.issue_identifier or self.intent_spec.issue_id or "Business issue",
-                state=GraphNodeState.PLANNED,
-                issue_id=self.intent_spec.issue_id or None,
-                issue_identifier=self.intent_spec.issue_identifier or None,
-            )
-        needs_parent_rewrite = not has_root_parentage
-        next_nodes: list[GraphNode] = []
-        if not root_exists:
-            next_nodes.append(root_node)
-        for node in proposal.nodes:
-            if node.node_id == root_node_id:
-                next_nodes.append(replace(node, parent_node_id=None, gate_snapshot_hash=None))
-            elif needs_parent_rewrite:
-                next_nodes.append(replace(node, parent_node_id=root_node_id))
-            else:
-                next_nodes.append(node)
-        if not root_exists:
-            next_nodes[0] = replace(next_nodes[0], parent_node_id=None, gate_snapshot_hash=None)
-        next_blocks = [
-            (source, target)
-            for source, target in proposal.blocks
-            if source != root_node_id and target != root_node_id
-        ]
-        next_gates = [gate for gate in proposal.gates if gate.task_id != root_node_id]
-        executable_nodes = _entry_exit_nodes_for_intent(next_nodes, root_node_id, self.intent_spec)
-        entry_node_ids, exit_node_ids = _entry_exit_node_ids_for_blocks(executable_nodes, next_blocks)
-        next_proposal = PlanProposal(
             graph_id=proposal.graph_id,
             plan_attempt_id=proposal.plan_attempt_id,
             root_node_id=proposal.root_node_id,
@@ -1210,7 +1127,6 @@ class PlanRepair:
             entry_node_ids=entry_node_ids,
             exit_node_ids=exit_node_ids,
         )
-        return next_proposal
 
     def _repair_parallel_dependency_shape(self, proposal: PlanProposal) -> list[tuple[str, str]]:
         if not self.intent_spec.requires_all_parallel_branches_for_downstream:
@@ -1348,7 +1264,6 @@ class PredictedCall:
     blocked_by: list[str]
     earliest_mode: RuntimeMode | None
     confidence: str = "conditional"
-    aggregate_state: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -1357,7 +1272,6 @@ class PredictedCall:
             "blocked_by": list(self.blocked_by),
             "earliest_mode": self.earliest_mode.value if self.earliest_mode is not None else None,
             "confidence": self.confidence,
-            "aggregate_state": self.aggregate_state,
         }
 
 
@@ -1435,7 +1349,6 @@ class PlanValidator:
         errors: set[PlanValidatorError] = set()
         node_id_list = [node.node_id for node in proposal.nodes]
         node_ids = set(node_id_list)
-        aggregate_root_id = _aggregate_root_id_for_proposal(proposal, self.intent_spec)
         executable_nodes = _entry_exit_nodes_for_intent(proposal.nodes, proposal.root_node_id, self.intent_spec)
         executable_node_ids = {node.node_id for node in executable_nodes}
         gate_task_list = [gate.task_id for gate in proposal.gates]
@@ -1463,17 +1376,7 @@ class PlanValidator:
         computed_exits = executable_node_ids - {source for source, _target in executable_edges}
         if set(proposal.entry_node_ids) != computed_entries or set(proposal.exit_node_ids) != computed_exits:
             errors.add(PlanValidatorError.MISSING_ENTRY_EXIT)
-        if aggregate_root_id:
-            if aggregate_root_id not in node_ids or not any(
-                node.node_id != aggregate_root_id and node.parent_node_id == aggregate_root_id
-                for node in proposal.nodes
-            ):
-                errors.add(PlanValidatorError.PARENT_AGGREGATE_MISSING)
-            if aggregate_root_id in gate_by_task:
-                errors.add(PlanValidatorError.MISSING_GATE)
         for node in proposal.nodes:
-            if node.node_id == aggregate_root_id:
-                continue
             gate = gate_by_task.get(node.node_id)
             if gate is None or not node.gate_snapshot_hash:
                 errors.add(PlanValidatorError.MISSING_GATE)
@@ -1588,34 +1491,7 @@ def _entry_exit_nodes_for_intent(
     root_node_id: str,
     intent_spec: IntentSpec | None,
 ) -> list[GraphNode]:
-    if not root_node_id:
-        return list(nodes)
-    root_node = next((node for node in nodes if node.node_id == root_node_id), None)
-    has_root_parentage = any(node.node_id != root_node_id and node.parent_node_id == root_node_id for node in nodes)
-    inferred_parent_aggregate = bool(
-        has_root_parentage
-        and root_node is not None
-        and not root_node.gate_snapshot_hash
-    )
-    if (intent_spec is None or not intent_spec.requires_parent_aggregate) and not inferred_parent_aggregate:
-        return list(nodes)
-    return [node for node in nodes if node.node_id != root_node_id]
-
-
-def _aggregate_root_id_for_proposal(
-    proposal: PlanProposal,
-    intent_spec: IntentSpec | None,
-) -> str:
-    root_node_id = proposal.root_node_id
-    if not root_node_id:
-        return ""
-    root_node = next((node for node in proposal.nodes if node.node_id == root_node_id), None)
-    has_root_parentage = any(node.node_id != root_node_id and node.parent_node_id == root_node_id for node in proposal.nodes)
-    if intent_spec is not None and intent_spec.requires_parent_aggregate:
-        return root_node_id
-    if has_root_parentage and root_node is not None and not root_node.gate_snapshot_hash:
-        return root_node_id
-    return ""
+    return list(nodes)
 
 
 def _looks_like_executable_gate_command(step: str) -> bool:

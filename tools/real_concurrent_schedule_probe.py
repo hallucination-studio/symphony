@@ -78,7 +78,7 @@ def _assert_schedule(
     capacity_non_cause = global_capacity >= 3 and any(
         sample["background"].get("blocked_waiting", 0) >= 1
         and any(node["issue_id"] == child_c_id and not node["is_dispatchable"] for node in sample["nodes"])
-        and len([node for node in sample["nodes"] if node["state"] in {"executing", "verifying", "reworking"}])
+        and len([node for node in sample["nodes"] if node["state"] in {"executing", "verifying", "replanning"}])
         < global_capacity
         for sample in before_a_done
     )

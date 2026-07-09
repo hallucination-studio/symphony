@@ -219,6 +219,33 @@ def test_planner_prompt_for_replan_preserves_original_concrete_requirements() ->
     assert "must not drop `pytest tests/test_smoke.py -q` if it was part of the original task" in prompt
 
 
+def test_planner_prompt_requires_flat_edge_topology_and_gates_for_every_node() -> None:
+    prompt = performer_cli._planner_prompt(
+        {
+            "attempt_id": "plan-1",
+            "graph_id": "graph-1",
+            "root_node_id": "root",
+            "node_id": "root",
+            "issue_id": "issue-1",
+            "issue_identifier": "ENG-1",
+            "title": "Parallel work",
+            "pipeline_intent": {
+                "parallel_dependency_shape": {
+                    "parallel_branch_node_ids": ["parallel-a", "parallel-b"],
+                    "downstream_node_ids": ["integration"],
+                }
+            },
+        }
+    )
+
+    assert "Every returned node, including `root_node_id` if included, must have a frozen gate" in prompt
+    assert "`parent_node_id` is only for Linear nesting/display and is never a dependency edge" in prompt
+    assert "Fan-in and fan-out must be expressed with `blocks` edges" in prompt
+    assert "add `blocks` from every branch node to every downstream node" in prompt
+    assert "the root node has no gate" not in prompt
+    assert "Parent-child aggregation is not a dependency edge" not in prompt
+
+
 def test_performer_plan_payload_parser_preserves_raw_model_gate_without_intent_repair() -> None:
     gate = _passing_gate().to_dict()
     gate["task_id"] = "downstream"
@@ -660,7 +687,6 @@ async def test_plan_mode_canonicalizes_model_gate_hashes_and_dict_edges(tmp_path
                             "verify_score": 0,
                             "rework_count": 0,
                             "human_reason": "freeform rationale from model",
-                            "aggregate_state": "",
                             "superseded_by": [],
                         },
                         {
@@ -674,7 +700,6 @@ async def test_plan_mode_canonicalizes_model_gate_hashes_and_dict_edges(tmp_path
                             "verify_score": 0,
                             "rework_count": 0,
                             "human_reason": "",
-                            "aggregate_state": "",
                             "superseded_by": [],
                         },
                     ],
@@ -1216,6 +1241,77 @@ async def test_verify_mode_runs_gate_commands_against_commit_snapshot(tmp_path: 
 
 
 @pytest.mark.asyncio
+async def test_verify_mode_uses_execute_workspace_when_commit_is_not_in_source_repo(tmp_path: Path) -> None:
+    source_repo = tmp_path / "source"
+    source_repo.mkdir()
+    subprocess.run(["git", "init"], cwd=source_repo, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=source_repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=source_repo, check=True)
+    (source_repo / "README.md").write_text("before\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=source_repo, check=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=source_repo, check=True, capture_output=True, text=True)
+    base_revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source_repo, text=True).strip()
+    execute_workspace = tmp_path / "execute-workspace"
+    subprocess.run(["git", "clone", "--quiet", str(source_repo), str(execute_workspace)], check=True)
+    subprocess.run(["git", "checkout", "--quiet", base_revision], cwd=execute_workspace, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=execute_workspace, check=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=execute_workspace, check=True)
+    (execute_workspace / "created.txt").write_text("from isolated execute workspace\n", encoding="utf-8")
+    subprocess.run(["git", "add", "created.txt"], cwd=execute_workspace, check=True)
+    subprocess.run(["git", "commit", "-m", "execute node"], cwd=execute_workspace, check=True, capture_output=True, text=True)
+    commit_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=execute_workspace, text=True).strip()
+    gate = GateSpecSnapshot.create(
+        gate_id="gate-1",
+        task_id="node-1",
+        created_by="plan-1",
+        created_at="2026-07-06T00:00:00Z",
+        content=GateSpecContent(
+            acceptance_criteria=["created file exists after execute commit"],
+            verification_procedure=["test \"$(cat created.txt)\" = \"from isolated execute workspace\""],
+            rubric={str(score): f"score {score}" for score in range(5)},
+            pass_threshold=3,
+        ),
+    )
+    request_path = tmp_path / "verify-request.json"
+    result_path = tmp_path / "verify-result.json"
+    request_path.write_text(
+        json.dumps(
+            {
+                "attempt_id": "verify-1",
+                "node_id": "node-1",
+                "graph_revision": 5,
+                "policy_revision": 2,
+                "lease_id": "lease-verify",
+                "fencing_token": "token-verify",
+                "gate_snapshot_hash": gate.hash,
+                "gate_snapshot": gate.to_dict(),
+                "verification_input": {
+                    "task_id": "node-1",
+                    "execute_attempt_id": "exec-1",
+                    "base_revision": base_revision,
+                    "repository_path": str(source_repo),
+                    "workspace_path": str(execute_workspace),
+                    "branch_name": "symphony/node-1",
+                    "commit_sha": commit_sha,
+                    "artifact_uris": [],
+                    "declared_commands": [],
+                    "evidence_uri": "artifact://evidence",
+                    "gate_snapshot_hash": gate.hash,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    await run_mode_attempt(RuntimeMode.VERIFY, request_path, result_path)
+
+    payload = json.loads(result_path.read_text(encoding="utf-8"))
+    assert payload["status"] == "succeeded"
+    assert payload["passed"] is True
+    assert not (source_repo / "created.txt").exists()
+
+
+@pytest.mark.asyncio
 async def test_verify_mode_accepts_empty_patch_when_base_tree_already_matches_expected(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -1482,6 +1578,49 @@ async def test_execute_mode_commits_worktree_branch_and_snapshot(tmp_path: Path)
     assert "patch_hash" not in snapshot
     assert "patch_uri" not in snapshot
     assert subprocess.check_output(["git", "show", "--format=%s", "--no-patch", snapshot["commit_sha"]], cwd=repo, text=True).strip() == "Execute pipeline node node-1"
+
+
+@pytest.mark.asyncio
+async def test_execute_mode_uses_requested_branch_name_for_detached_materialized_workspace(tmp_path: Path) -> None:
+    source_repo = tmp_path / "source"
+    source_repo.mkdir()
+    subprocess.run(["git", "init"], cwd=source_repo, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=source_repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=source_repo, check=True)
+    (source_repo / "README.md").write_text("before\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=source_repo, check=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=source_repo, check=True, capture_output=True, text=True)
+    base_revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source_repo, text=True).strip()
+    request_path = tmp_path / "execute-request.json"
+    result_path = tmp_path / "execute-result.json"
+    workspace = tmp_path / "attempt" / "workspace"
+    request_path.write_text(
+        json.dumps(
+            {
+                "attempt_id": "exec-1",
+                "node_id": "node-1",
+                "graph_revision": 4,
+                "policy_revision": 2,
+                "lease_id": "lease-exec",
+                "fencing_token": "token-exec",
+                "gate_snapshot_hash": "sha256:gate",
+                "base_revision": base_revision,
+                "repository": {
+                    "resolved_repo_path": str(source_repo),
+                    "branch_name": "symphony/node-1",
+                },
+                "artifact_paths": {"workspace_path": str(workspace)},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    await run_mode_attempt(RuntimeMode.EXECUTE, request_path, result_path, agent_backend=_NoopBackend())
+
+    payload = json.loads(result_path.read_text(encoding="utf-8"))
+    snapshot = payload["verification_input"]
+    assert subprocess.check_output(["git", "branch", "--show-current"], cwd=workspace, text=True).strip() == ""
+    assert snapshot["branch_name"] == "symphony/node-1"
 
 
 @pytest.mark.asyncio

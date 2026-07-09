@@ -81,18 +81,6 @@ def analyze_plan_artifacts(
                 "empty dispatch intent shadowed non-empty pipeline_intent",
                 fix="Treat empty intent as absent, or prefer non-empty pipeline_intent when deriving IntentSpec.",
             )
-        if (
-            "missing_gate" in current_errors
-            and "missing_gate" not in preferred_errors
-            and not current_intent.requires_parent_aggregate
-            and preferred_intent.requires_parent_aggregate
-        ):
-            _add_plan_root_cause(
-                report,
-                "root_parent_intent_not_applied",
-                "root business issue was validated as an executable node instead of an aggregate parent",
-                fix="Apply structured parent aggregate intent before plan repair and validation.",
-            )
     except Exception as exc:
         report.update(
             {
@@ -380,11 +368,10 @@ APPENDIX_FEATURE_SCORE_REQUIREMENTS: tuple[dict[str, Any], ...] = (
     {
         "feature": "S1",
         "summary": "three-layer state model plus graph store and artifacts",
-        "r_checks": {"appendix:s1-parent-aggregate-real", "stage:final-pipeline-verified"},
+        "r_checks": {"stage:final-pipeline-verified"},
         "h_checks": {
             "appendix:s1-superseded-revision-refused",
             "appendix:s1-terminal-attempt-immutable",
-            "appendix:s1-parent-failed-child-not-passing",
         },
     },
     {
@@ -535,9 +522,6 @@ def appendix_exit_bar_audit(reports: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def pipeline_node_effective_state(node: dict[str, Any]) -> str:
-    aggregate_state = str(node.get("aggregate_state") or "").strip().lower()
-    if aggregate_state:
-        return aggregate_state
     return str(node.get("state") or "").strip().lower()
 
 

@@ -11,6 +11,7 @@ from .podium_shared import utc_now_iso
 
 
 LINEAR_GRAPHQL_ENDPOINT = "https://api.linear.app/graphql"
+COLD_START_LOOKBACK_SECONDS = 300
 
 DELEGATED_ISSUES_QUERY = """
 query SymphonyDelegatedIssues($projectSlug: String!, $delegateId: ID!, $updatedAfter: DateTimeOrDuration, $first: Int!) {
@@ -67,7 +68,7 @@ class LinearDelegatePoller:
         self.endpoint = endpoint
         self.transport = transport
         self.page_size = max(1, int(page_size or 50))
-        self.initial_lookback_seconds = max(0, int(initial_lookback_seconds or 0))
+        self.initial_lookback_seconds = max(COLD_START_LOOKBACK_SECONDS, int(initial_lookback_seconds or 0))
 
     async def poll_once(self) -> dict[str, int]:
         if not self.application_id or not self.app_token:

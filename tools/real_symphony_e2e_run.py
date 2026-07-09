@@ -113,7 +113,6 @@ def build_runtime_config_payload(
             "version": version,
             "effective_at": utc_now(),
             "capacity": {"global": 3, "by_mode": by_mode},
-            "dependency_policy": "verify_passed",
             "max_rework_attempts": 1,
         },
         "profiles": {
@@ -905,7 +904,7 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
                     pipeline_nodes_terminal(
                         nodes,
                         terminal_states=(
-                            {"verify_passed", "superseded", "awaiting_human"}
+                            {"verify_passed", "superseded", "need_human"}
                             if pipeline_scenario == "integration-conflict"
                             else {"verify_passed", "superseded"}
                         ),
@@ -914,7 +913,6 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
                         {
                             "node_id": node.get("node_id"),
                             "state": node.get("state"),
-                            "aggregate_state": node.get("aggregate_state"),
                         }
                         for node in nodes
                     ],
@@ -1410,7 +1408,6 @@ def _pipeline_scenario_intent(scenario: str) -> dict[str, Any]:
         ]
     }
     if scenario in {"parallel", "integration-conflict", "overall-dod"}:
-        intent["requires_parent_aggregate"] = True
         intent["parallel_dependency_shape"] = {
             "parallel_branch_node_ids": ["hell-parallel-a", "hell-parallel-b"],
             "downstream_node_ids": ["hell-downstream-integration"],
@@ -1458,7 +1455,7 @@ def _pipeline_final_view_converged(pipeline_view: dict[str, Any], *, allow_human
     nodes = [node for node in pipeline_view.get("nodes", []) if isinstance(node, dict)]
     terminal_states = {"verify_passed", "superseded"}
     if allow_human_wait:
-        terminal_states.add("awaiting_human")
+        terminal_states.add("need_human")
     return pipeline_nodes_terminal(nodes, terminal_states=terminal_states) and _pipeline_projection_matches_current_revision(
         pipeline_view
     )
@@ -1749,13 +1746,6 @@ def _check_appendix_overall_acceptance(
         graph_revision=pipeline_view.get("graph_revision"),
         prediction_basis=basis,
     )
-    parent_evidence = _parent_aggregate_evidence(pipeline_view)
-    evidence.check("appendix:s1-parent-aggregate-real", parent_evidence["has_verified_parent"], **parent_evidence)
-    evidence.check(
-        "appendix:s1-parent-failed-child-not-passing",
-        parent_evidence["failed_or_waiting_child_not_passing"],
-        **parent_evidence,
-    )
     downstream_evidence = _downstream_verify_gate_evidence(pipeline_view)
     evidence.check(
         "appendix:s3-downstream-gated-on-verify-passed",
@@ -1838,35 +1828,6 @@ def _runtime_home_evidence(
         and not any(left & right for index, left in enumerate(mode_home_sets) for right in mode_home_sets[index + 1 :]),
         "concurrent_execute_homes_distinct": execute_attempt_count < 2
         or (len(execute_homes) >= execute_attempt_count and len(execute_homes) == len(set(execute_homes))),
-    }
-
-
-def _parent_aggregate_evidence(pipeline_view: dict[str, Any]) -> dict[str, Any]:
-    nodes = [node for node in pipeline_view.get("nodes", []) if isinstance(node, dict)]
-    children_by_parent: dict[str, list[dict[str, Any]]] = {}
-    for node in nodes:
-        parent = str(node.get("parent_node_id") or "")
-        if parent:
-            children_by_parent.setdefault(parent, []).append(node)
-    verified_parent_ids: list[str] = []
-    bad_parent_ids: list[str] = []
-    for parent_id, children in children_by_parent.items():
-        parent = next((node for node in nodes if node.get("node_id") == parent_id), None)
-        if parent is None:
-            continue
-        parent_state = str(parent.get("aggregate_state") or parent.get("state") or "")
-        child_states = {str(child.get("aggregate_state") or child.get("state") or "") for child in children}
-        passing_child_states = {"verify_passed", "superseded"}
-        if parent_state == "verify_passed" and child_states and all(state in passing_child_states for state in child_states):
-            verified_parent_ids.append(parent_id)
-        if parent_state == "verify_passed" and any(state in {"failed", "awaiting_human", "verify_failed"} for state in child_states):
-            bad_parent_ids.append(parent_id)
-    return {
-        "has_verified_parent": bool(verified_parent_ids),
-        "failed_or_waiting_child_not_passing": not bad_parent_ids,
-        "verified_parent_ids": verified_parent_ids,
-        "bad_parent_ids": bad_parent_ids,
-        "parent_count": len(children_by_parent),
     }
 
 

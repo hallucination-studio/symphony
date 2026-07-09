@@ -115,13 +115,15 @@ as a new graph revision.
 
 In Linear, the supersession is projected as a canceled old issue and a new issue
 at the same level with `replaces` / `replaced-by` links. The original business
-root issue remains immutable and aggregates child results.
+root issue remains immutable and carries run status, including projection
+health.
 
 ## Human And Runtime Waits
 
 Pipeline work that needs operator input enters `need_human` on the affected
 node. The operator resumes it by flipping the node out of the blocked-style
-state. Comments provide context only.
+state. Comments provide context only and include the concrete blocker, capacity,
+profile, or runtime reason that parked the node.
 
 Runtime approval, permission, and tool-input waits are separate runtime waits.
 They are surfaced through node metadata and the product's runtime wait
@@ -137,3 +139,6 @@ projection identifiers through durable state, logs, and API views.
 A failed attempt is not handled until its sanitized reason is visible in durable
 state, the relevant operator view, correlated logs, and Linear projection when
 Linear is part of the managed run.
+
+Every reconciliation tick must avoid silent non-terminal parking: each node is
+running, can progress, or has an open wait/comment explaining why it cannot.

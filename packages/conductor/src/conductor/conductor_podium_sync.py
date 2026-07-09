@@ -22,6 +22,12 @@ class ConductorPodiumSyncMixin:
         project_slug = str(event.get("project_slug") or "").strip()
         agent_app_user_id = str(event.get("agent_app_user_id") or event.get("app_user_id") or "").strip()
         if not agent_app_user_id:
+            self._record_dispatch_skip_finding(
+                reason="missing_linear_agent_app_user",
+                issue_id=issue_id,
+                issue_identifier=issue_identifier,
+                project_slug=project_slug,
+            )
             return {
                 "status": "skipped",
                 "issue_id": issue_id or None,
@@ -34,6 +40,12 @@ class ConductorPodiumSyncMixin:
             instance_id=str(event.get("instance_id") or "").strip(),
         )
         if instance is None:
+            self._record_dispatch_skip_finding(
+                reason="no_matching_instance",
+                issue_id=issue_id,
+                issue_identifier=issue_identifier,
+                project_slug=project_slug,
+            )
             return {
                 "status": "skipped",
                 "issue_id": issue_id or None,
@@ -48,6 +60,21 @@ class ConductorPodiumSyncMixin:
         if self._pipeline_configured():
             started_count = await self.pipeline_coordinator.start_due_attempts(refreshed)
             runtime_mode = "plan" if started_count else None
+        else:
+            if not any(
+                str(wait.get("node_id") or "") == accepted.node_id and str(wait.get("status") or "waiting") == "waiting"
+                for wait in self.pipeline_store.list_human_waits()
+            ):
+                self.pipeline_store.create_human_wait(
+                    accepted.node_id,
+                    reason=HumanEscalationReason.BACKEND_UNAVAILABLE.value,
+                    details={
+                        "error": "pipeline runtime profiles are not configured",
+                        "action_required": "configure_runtime_profiles",
+                        "issue_id": issue_id or None,
+                        "issue_identifier": issue_identifier or None,
+                    },
+                )
         attempt_ack = self._pipeline_dispatch_attempt_ack(accepted.node_id)
         return {
             "status": "accepted",
@@ -62,6 +89,32 @@ class ConductorPodiumSyncMixin:
             "runtime_mode": runtime_mode,
             **attempt_ack,
         }
+
+    def _record_dispatch_skip_finding(
+        self,
+        *,
+        reason: str,
+        issue_id: str,
+        issue_identifier: str,
+        project_slug: str,
+    ) -> None:
+        findings = getattr(self, "_pipeline_reconcile_findings", None)
+        if findings is None:
+            findings = []
+            self._pipeline_reconcile_findings = findings
+        findings.append(
+            {
+                "event": "podium_dispatch_skipped",
+                "severity": "warning",
+                "error_type": "RuntimeError",
+                "sanitized_reason": reason,
+                "action_required": "fix_dispatch_routing",
+                "retryable": True,
+                "issue_id": issue_id or None,
+                "issue_identifier": issue_identifier or None,
+                "project_slug": project_slug or None,
+            }
+        )
 
     def _pipeline_dispatch_attempt_ack(self, node_id: str) -> dict[str, Any]:
         attempts = [attempt for attempt in self.pipeline_store.list_attempts() if attempt.node_id == node_id]
@@ -369,21 +422,31 @@ class ConductorPodiumSyncMixin:
             findings = []
             self._pipeline_reconcile_findings = findings
         for node_id in sorted(stuck_node_ids):
+            blocked_by: list[str] = []
+            for blocker_id in self.pipeline_store.blockers_for(node_id):
+                try:
+                    blocker = self.pipeline_store.get_node(blocker_id)
+                except KeyError:
+                    blocked_by.append(f"{blocker_id}: missing blocker")
+                    continue
+                blocked_by.extend(self.pipeline_store._dependency_block_reasons(blocker))
+            reason_text = "; ".join(blocked_by) if blocked_by else "pipeline node has no live driver"
             observation = self.pipeline_store.record_stuck_node_observation(
                 node_id,
-                reason="pipeline node has no live driver",
+                reason=reason_text,
             )
             node = self.pipeline_store.get_node(node_id)
             finding = {
                 "event": "pipeline_node_stuck",
                 "severity": "warning",
                 "error_type": "RuntimeError",
-                "sanitized_reason": "pipeline node has no live driver",
+                "sanitized_reason": reason_text,
                 "action_required": "inspect_pipeline_node",
                 "retryable": True,
                 "node_id": node_id,
                 "state": node.state.value,
                 "graph_revision": self.pipeline_store.current_graph_revision(),
+                "blocked_by": blocked_by,
                 "observation_count": int(observation.get("count") or 0),
                 "first_seen_at": observation.get("first_seen_at"),
                 "last_seen_at": observation.get("last_seen_at"),
@@ -394,7 +457,8 @@ class ConductorPodiumSyncMixin:
                     node_id,
                     reason=HumanEscalationReason.CAPACITY_STARVED.value,
                     details={
-                        "error": "pipeline node has no live driver",
+                        "error": f"pipeline node has no live driver: {reason_text}",
+                        "blocked_by": blocked_by,
                         "graph_revision": self.pipeline_store.current_graph_revision(),
                         "state": node.state.value,
                         "observation_count": int(observation.get("count") or 0),
@@ -479,12 +543,12 @@ class ConductorPodiumSyncMixin:
         return observed
 
     def _heartbeat_running_pipeline_leases(self) -> int:
-        heartbeats = 0
-        for instance in self.store.list_instances():
-            refreshed = self.get_instance(instance.id) or instance
-            if refreshed.process_status in {"running", "starting"}:
-                heartbeats += self.pipeline_coordinator.heartbeat_active_leases()
-        return heartbeats
+        instances = self.store.list_instances()
+        if not instances:
+            return 0
+        for instance in instances:
+            self.get_instance(instance.id)
+        return self.pipeline_coordinator.heartbeat_active_leases()
 
     def _process_pipeline_integrations(self) -> int:
         processed = 0
@@ -522,12 +586,33 @@ class ConductorPodiumSyncMixin:
                 )
                 projected += await projector.reconcile_once()
             except Exception as exc:
+                error = _sanitize_error(exc)
+                self.pipeline_store.record_linear_projection_failure(
+                    error,
+                    revision=revision.revision,
+                )
                 self._record_pipeline_sync_failure(
                     "linear_pipeline_projection_failed",
                     instance,
                     exc,
                     action_required="retry_projection",
                 )
+                try:
+                    tracker = self.repository_handoff_tracker_factory(instance)
+                    projector = PipelineLinearProjector(
+                        store=self.pipeline_store,
+                        tracker=tracker,
+                        root_issue_id=root_issue_id,
+                        delegate_id=_linear_agent_app_user_id(instance.linear_filters) or None,
+                    )
+                    projected += await projector._project_root_status_comment(revision)
+                except Exception as status_exc:
+                    self._record_pipeline_sync_failure(
+                        "linear_pipeline_projection_health_failed",
+                        instance,
+                        status_exc,
+                        action_required="retry_projection",
+                    )
                 continue
         return projected
 
@@ -829,7 +914,7 @@ def _pipeline_report_metrics(pipeline: dict[str, Any]) -> dict[str, Any]:
     failed_nodes = sum(
         1
         for node in nodes
-        if isinstance(node, dict) and str(node.get("state") or "") in {"failed", "execute_failed", "verify_failed"}
+        if isinstance(node, dict) and str(node.get("state") or "") == "failed"
     )
     blocked_predictions = sum(
         1

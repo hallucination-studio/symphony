@@ -11,8 +11,8 @@ commands.
 
 ## Issue Topology
 
-The root business issue is immutable delegated intent. It aggregates child
-state and is not executed directly.
+The root business issue is immutable delegated intent and the status anchor for
+the run. It is not a scheduler aggregate node.
 
 Each graph node projects to one Linear issue or sub-issue. Parent/child nesting
 expresses decomposition. Linear `blocks` relations mirror the DAG dependencies.
@@ -69,6 +69,18 @@ Runtime approval, permission, and tool-input waits may still project as
 completion as the resume signal. Those child issues are runtime wait artifacts,
 not a replacement for node-level pipeline projection.
 
+## Projection Health
+
+The root issue carries a `symphony_pipeline` status comment. That block includes:
+
+- `projection_healthy: true|false`;
+- `last_successful_projection_at`;
+- `last_projection_error` when the latest projection attempt failed.
+
+Projection failures are durable state, not log-only warnings. If per-node
+projection fails, Conductor records the sanitized error and makes a best-effort
+root-status update before retrying on the next tick.
+
 ## Supersede Chains
 
 When a node must return to planning, Conductor creates a new node and marks the
@@ -105,7 +117,7 @@ passwords, or raw backend profile settings.
 ## Final Shape
 
 ```text
-Root business issue (aggregate)
+Root business issue (status anchor)
   [node] implement login        Done
     comment: plan#1 succeeded
     comment: execute#1 failed: <sanitized reason>
@@ -121,5 +133,5 @@ blocks: login -> logout v2
 
 A real run must prove the Linear tree matches durable state: node issues,
 parentage, `blocks`, supersede links, attempt comments by `comment_id`,
-`need_human` state flips, runtime wait child issues when used, and sanitized
-error summaries.
+`need_human` state flips, runtime wait child issues when used, projection health,
+and sanitized error summaries.
