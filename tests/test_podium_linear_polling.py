@@ -485,6 +485,83 @@ async def test_linear_delegate_poller_skips_symphony_projection_issues(tmp_path)
     assert leased is None
 
 
+async def test_linear_delegate_poller_skips_delegated_child_issues_without_projection_marker(tmp_path) -> None:
+    store = PodiumStore(data_dir=tmp_path)
+    await store.create_user("workspace-1", email="workspace@example.com", password_hash="x", created_at="2026-01-01T00:00:00Z")
+    await store.upsert_conductor(
+        {
+            "id": "runtime-1",
+            "user_id": "workspace-1",
+            "runtime_group_id": "group-workspace-1",
+            "hostname": "host",
+            "label": "Host",
+            "version": "1",
+            "runtime_token_hash": "runtime-hash",
+            "proxy_token_hash": "proxy-hash",
+            "disabled": False,
+            "revoked": False,
+            "created_at": "2026-01-01T00:00:00Z",
+            "last_report_at": None,
+        }
+    )
+    await store.upsert_project_binding(
+        {
+            "id": "runtime-1:inst-1",
+            "conductor_id": "runtime-1",
+            "user_id": "workspace-1",
+            "instance_id": "inst-1",
+            "name": "Instance",
+            "linear_project": "ALPHA",
+            "project_slug": "ALPHA",
+            "agent_app_user_id": "agent-app-1",
+            "managed_run_profile": "default",
+            "process_status": "idle",
+            "constraint_labels": [],
+            "repo_source": {},
+            "updated_at": "2026-01-01T00:00:00Z",
+        }
+    )
+
+    def child_issue_transport(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    "issues": {
+                        "nodes": [
+                            {
+                                "id": "child-issue",
+                                "identifier": "ALPHA-2",
+                                "title": "Create result report",
+                                "description": "Objective: Create the report",
+                                "createdAt": "2099-01-01T00:00:00Z",
+                                "updatedAt": "2099-01-01T00:01:00Z",
+                                "project": {"slugId": "ALPHA"},
+                                "delegate": {"id": "agent-app-1"},
+                                "parent": {"id": "root-issue", "identifier": "ALPHA-1"},
+                                "inverseRelations": {"nodes": []},
+                            }
+                        ]
+                    }
+                }
+            },
+        )
+
+    poller = LinearDelegatePoller(
+        store=store,
+        application_id="agent-app-1",
+        app_token="app-token",
+        transport=child_issue_transport,
+        initial_lookback_seconds=0,
+    )
+
+    result = await poller.poll_once()
+    leased = await store.lease_dispatch("runtime-1", binding_ids=["runtime-1:inst-1"], lease_until="2099-01-01T00:00:00Z")
+
+    assert result["queued"] == 0
+    assert leased is None
+
+
 async def test_linear_delegate_poller_skips_runtime_wait_human_action_issues(tmp_path) -> None:
     store = PodiumStore(data_dir=tmp_path)
     await store.create_user("workspace-1", email="workspace@example.com", password_hash="x", created_at="2026-01-01T00:00:00Z")

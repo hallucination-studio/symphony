@@ -167,6 +167,8 @@ class LinearDelegatePoller:
             return None
         if str(project.get("slugId") or "") != str(binding.get("project_slug") or ""):
             return None
+        if _parent_issue_id(issue):
+            return None
         if _is_symphony_projection_issue(issue):
             return None
         issue_id = str(issue.get("id") or "")
