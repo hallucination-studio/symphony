@@ -1,12 +1,17 @@
 import { useState } from "react";
 import { useSaveRepository } from "../../api/hooks";
 import { SetupStepShell } from "../../components/SetupStepShell";
-import { ActionPanel } from "../../components/ActionPanel";
 import { useToast } from "../../components/Toast";
 import { ApiError } from "../../api/client";
 import type { RepositoryMode } from "../../api/types";
 import type { StepProps } from "./types";
 import { useI18n } from "../../i18n";
+import {
+  PrivateRepositoryPanel,
+  RepositoryModeFields,
+  RepositoryValueField,
+} from "./RepositoryStep.components";
+import { validateRepositoryValue } from "./RepositoryStep.helpers";
 
 export function RepositoryStep({
   stepNumber,
@@ -22,18 +27,8 @@ export function RepositoryStep({
   const [value, setValue] = useState("");
   const [error, setError] = useState<string | null>(null);
 
-  function validate(): string | null {
-    if (!value.trim()) return t("Repository value is required.");
-    if (mode === "git_url") {
-      if (!/^(https?:\/\/|git@|ssh:\/\/)/.test(value.trim())) {
-        return t("Git URL must start with http(s)://, git@, or ssh://.");
-      }
-    }
-    return null;
-  }
-
   async function handleSave() {
-    const clientError = validate();
+    const clientError = validateRepositoryValue(mode, value, t);
     if (clientError) {
       setError(clientError);
       return;
@@ -71,93 +66,25 @@ export function RepositoryStep({
       nextDisabled={!value.trim()}
       nextLoading={save.isPending}
     >
-      <div className="choice-group" role="radiogroup" aria-label={t("Repository source")}>
-        <label
-          className="choice"
-          data-selected={mode === "local_path"}
-          role="radio"
-          aria-checked={mode === "local_path"}
-        >
-          <input
-            type="radio"
-            name="repo-mode"
-            checked={mode === "local_path"}
-            onChange={() => {
-              setMode("local_path");
-              setError(null);
-            }}
-          />
-          <div>
-            <div className="choice-title">
-              {t("The repo is already on my runtime machine")}
-            </div>
-            <div className="choice-description">
-              {t("Point Podium at a local path. Best when you already have the code checked out where the runtime runs.")}
-            </div>
-          </div>
-        </label>
+      <RepositoryModeFields
+        mode={mode}
+        onModeChange={(nextMode) => {
+          setMode(nextMode);
+          setError(null);
+        }}
+      />
 
-        <label
-          className="choice"
-          data-selected={mode === "git_url"}
-          role="radio"
-          aria-checked={mode === "git_url"}
-        >
-          <input
-            type="radio"
-            name="repo-mode"
-            checked={mode === "git_url"}
-            onChange={() => {
-              setMode("git_url");
-              setError(null);
-            }}
-          />
-          <div>
-            <div className="choice-title">{t("Clone from a Git URL")}</div>
-            <div className="choice-description">
-              {t("Podium's runtime will clone the repo. Use an HTTPS or SSH URL.")}
-            </div>
-          </div>
-        </label>
-      </div>
+      <RepositoryValueField
+        mode={mode}
+        value={value}
+        error={error}
+        onValueChange={(nextValue) => {
+          setValue(nextValue);
+          if (error) setError(null);
+        }}
+      />
 
-      <label className="field">
-        <span className="field-label">
-          {mode === "local_path" ? t("Local path") : t("Git URL")}
-        </span>
-        <input
-          className="text-input"
-          type="text"
-          value={value}
-          placeholder={
-            mode === "local_path"
-              ? "/home/agent/projects/my-repo"
-              : "https://github.com/acme/my-repo.git"
-          }
-          aria-invalid={error ? true : undefined}
-          onChange={(e) => {
-            setValue(e.target.value);
-            if (error) setError(null);
-          }}
-        />
-        {error ? (
-          <span className="field-error">{error}</span>
-        ) : (
-          <span className="field-hint">
-            {mode === "local_path"
-              ? t("Absolute path on the runtime host.")
-              : t("Starts with http(s)://, git@, or ssh://.")}
-          </span>
-        )}
-      </label>
-
-      {mode === "git_url" ? (
-        <ActionPanel
-          tone="info"
-          title={t("Private repo?")}
-          description={t("Make sure the runtime host has credentials (deploy key or token) to clone this URL.")}
-        />
-      ) : null}
+      <PrivateRepositoryPanel mode={mode} />
     </SetupStepShell>
   );
 }

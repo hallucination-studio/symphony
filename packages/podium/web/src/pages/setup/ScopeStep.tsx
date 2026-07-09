@@ -1,10 +1,17 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useLinearScope, useSaveScope } from "../../api/hooks";
 import { SetupStepShell } from "../../components/SetupStepShell";
-import { ActionPanel } from "../../components/ActionPanel";
 import { useToast } from "../../components/Toast";
 import type { StepProps } from "./types";
 import { useI18n } from "../../i18n";
+import {
+  ScopeContent,
+  ScopeLoadError,
+} from "./ScopeStep.components";
+import {
+  toggleSelection,
+  useDefaultTeamSelection,
+} from "./ScopeStep.helpers";
 
 export function ScopeStep({
   stepNumber,
@@ -20,25 +27,12 @@ export function ScopeStep({
   const [teams, setTeams] = useState<Set<string>>(new Set());
   const [projects, setProjects] = useState<Set<string>>(new Set());
 
-  // Safe narrow default: preselect the first team once, nothing else.
-  useEffect(() => {
-    if (scope.data?.teams?.length && teams.size === 0 && projects.size === 0) {
-      setTeams(new Set([scope.data.teams[0].id]));
-    }
-    // Only seed once when data first arrives.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scope.data]);
-
-  function toggle(
-    set: Set<string>,
-    setter: (s: Set<string>) => void,
-    id: string,
-  ) {
-    const next = new Set(set);
-    if (next.has(id)) next.delete(id);
-    else next.add(id);
-    setter(next);
-  }
+  useDefaultTeamSelection({
+    scope: scope.data,
+    teams,
+    projects,
+    setTeams,
+  });
 
   async function handleSave() {
     try {
@@ -70,55 +64,16 @@ export function ScopeStep({
       {scope.isLoading ? (
         <div className="state-message">{t("Loading teams and projects…")}</div>
       ) : scope.error ? (
-        <ActionPanel
-          tone="critical"
-          title={t("Couldn't load Linear scope")}
-          description={t("This usually means Linear isn't connected yet. Reconnect on the previous step.")}
-          actionLabel={t("Back to Connect Linear")}
-          onAction={onBack ?? (() => {})}
-        />
+        <ScopeLoadError onBack={onBack} />
       ) : (
-        <>
-          <div className="scope-section-title">{t("Teams")}</div>
-          {scope.data && scope.data.teams.length > 0 ? (
-            <div className="scope-list">
-              {scope.data.teams.map((team) => (
-                <label className="scope-item" key={team.id}>
-                  <input
-                    type="checkbox"
-                    checked={teams.has(team.id)}
-                    onChange={() => toggle(teams, setTeams, team.id)}
-                  />
-                  <span>{team.name}</span>
-                </label>
-              ))}
-            </div>
-          ) : (
-            <p className="muted">{t("No teams available.")}</p>
-          )}
-
-          <div className="scope-section-title">{t("Projects")}</div>
-          {scope.data && scope.data.projects.length > 0 ? (
-            <div className="scope-list">
-              {scope.data.projects.map((project) => (
-                <label className="scope-item" key={project.id}>
-                  <input
-                    type="checkbox"
-                    checked={projects.has(project.id)}
-                    onChange={() => toggle(projects, setProjects, project.id)}
-                  />
-                  <span>{project.name}</span>
-                </label>
-              ))}
-            </div>
-          ) : (
-            <p className="muted">{t("No projects available.")}</p>
-          )}
-
-          {nothingSelected ? (
-            <p className="field-hint">{t("Select at least one team or project.")}</p>
-          ) : null}
-        </>
+        <ScopeContent
+          data={scope.data}
+          teams={teams}
+          projects={projects}
+          nothingSelected={nothingSelected}
+          onToggleTeam={(id) => setTeams(toggleSelection(teams, id))}
+          onToggleProject={(id) => setProjects(toggleSelection(projects, id))}
+        />
       )}
     </SetupStepShell>
   );
