@@ -65,27 +65,46 @@ satisfied by verified results and capacity is available. The executor receives
 the node, its frozen gate hash, a prepared workspace, and any verified upstream
 manifests explicitly listed as inputs.
 
-The executor may modify code, produce patches, and upload evidence. It cannot
-change gates, graph topology, verify verdicts, scheduler policy, or durable
-attempt state directly.
+Before dispatch, Conductor prepares the executor workspace with git. Entry nodes
+start from the graph base revision. Dependent nodes get a per-node worktree
+branch and Conductor merges every verified blocker branch into it. This merge is
+the join point for fan-out/fan-in DAGs.
+
+The executor may modify code, commit to its node branch, and upload evidence. It
+cannot change gates, graph topology, verify verdicts, scheduler policy, or
+durable attempt state directly.
 
 Every terminal execute attempt publishes an immutable verification input bundle:
-base revision, patch URI and hash, expected result tree, optional result
-revision, artifact URIs and hashes, evidence URI, and the gate hash.
+base revision, branch name, commit sha, artifact URIs and hashes, evidence URI,
+and the gate hash.
 
 ## Verification
 
 Verification runs in a separate mode. The verifier checks one execute attempt
 against one frozen gate snapshot. It reconstructs the executor output in a fresh
-disposable workspace, verifies hashes, applies the patch, checks the expected
-tree, loads the frozen gate by hash, runs the gate procedure, and emits a score.
+disposable worktree at the execute commit, verifies artifact hashes, loads the
+frozen gate by hash, runs the gate procedure, and emits a score.
 
 A node verify-passes only at rubric score `>= 3`. Downstream dependencies are
-satisfied by verify-pass, not by execute completion or a self-reported success.
+satisfied by verify-pass plus a verified branch output manifest, not by execute
+completion or a self-reported success.
 
 The first default verifier is `local-verifier`: it uses a disposable worktree
 and mutation detection after gate execution. This is intentionally not described
 as OS-level read-only enforcement.
+
+## Join Conflicts And Delivery
+
+If a downstream join cannot merge verified blocker branches cleanly, Conductor
+inserts an ordinary merge-conflict resolver execute node between the blockers
+and the downstream node. If that resolver cannot produce a clean branch, the
+pipeline escalates to `need_human`.
+
+When every active graph node is `VERIFY_PASSED` or `SUPERSEDED`, Conductor may
+produce an operator-facing delivery branch: create or reset
+`symphony/<issue-identifier>`, merge every exit node's verified branch/commit,
+push the final branch, and open a PR through the configured git host integration.
+Delivery outcomes are durable pipeline state and appear in `graph_deliveries`.
 
 ## Replan And Supersession
 

@@ -21,7 +21,10 @@ from performer_api.pipeline import (
     ExecuteAttemptRequest,
     PASS_THRESHOLD,
     DependencySatisfactionPolicy,
+    GateSpecContent,
     GateSpecSnapshot,
+    GateStep,
+    GateStepSource,
     GraphNode,
     GraphNodeState,
     HumanEscalationReason,
@@ -205,6 +208,14 @@ class ConductorPipelineStore:
                   first_seen_at TEXT NOT NULL,
                   last_seen_at TEXT NOT NULL,
                   PRIMARY KEY (graph_revision, node_id)
+                );
+                CREATE TABLE IF NOT EXISTS graph_deliveries (
+                  delivery_id TEXT PRIMARY KEY,
+                  graph_revision INTEGER NOT NULL,
+                  status TEXT NOT NULL,
+                  payload_json TEXT NOT NULL,
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS scheduler_tick_policy (
                   id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -629,6 +640,54 @@ class ConductorPipelineStore:
             ).fetchall()
         return [_json_loads(row["payload_json"]) for row in rows]
 
+    def record_graph_delivery(
+        self,
+        *,
+        status: str,
+        branch_name: str = "",
+        pr_url: str = "",
+        repository_path: str = "",
+        error: str = "",
+        details: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        created_at = _now()
+        payload = {
+            "delivery_id": f"delivery-{uuid4().hex}",
+            "graph_revision": self.current_graph_revision(),
+            "status": status,
+            "branch_name": branch_name,
+            "pr_url": pr_url,
+            "repository_path": repository_path,
+            "error": error,
+            "details": details or {},
+            "created_at": created_at,
+            "updated_at": created_at,
+        }
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO graph_deliveries (
+                  delivery_id, graph_revision, status, payload_json, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    payload["delivery_id"],
+                    payload["graph_revision"],
+                    payload["status"],
+                    _json_dumps(payload),
+                    created_at,
+                    created_at,
+                ),
+            )
+        return payload
+
+    def list_graph_deliveries(self) -> list[dict[str, Any]]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT payload_json FROM graph_deliveries ORDER BY created_at, delivery_id"
+            ).fetchall()
+        return [_json_loads(row["payload_json"]) for row in rows]
+
     def children_for(self, parent_node_id: str) -> list[GraphNode]:
         revision = self.current_graph_revision()
         with self.connect() as connection:
@@ -667,7 +726,7 @@ class ConductorPipelineStore:
         if all(child.state in {GraphNodeState.VERIFY_PASSED, GraphNodeState.SUPERSEDED} for child in children):
             parent = self.get_node(parent_node_id)
             if parent.gate_snapshot_hash is None and not all(
-                child.state is GraphNodeState.SUPERSEDED or self.integration_terminal_for_node(child.node_id)
+                child.state is GraphNodeState.SUPERSEDED or self.verified_branch_manifest_for_node(child.node_id) is not None
                 for child in children
             ):
                 return GraphNodeState.PLANNED
@@ -1469,6 +1528,24 @@ class ConductorPipelineStore:
                 return manifest
         return None
 
+    def verified_branch_manifest_for_node(self, node_id: str) -> TaskOutputManifest | None:
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT payload_json FROM task_output_manifests
+                WHERE node_id = ?
+                ORDER BY verify_attempt_id DESC
+                """,
+                (node_id,),
+            ).fetchall()
+        for row in rows:
+            manifest = TaskOutputManifest.from_dict(_json_loads(row["payload_json"]))
+            branch_name = str(manifest.code.get("branch_name") or "").strip()
+            commit_sha = str(manifest.code.get("commit_sha") or manifest.code.get("result_revision") or "").strip()
+            if branch_name and commit_sha:
+                return manifest
+        return None
+
     def integration_terminal_for_node(self, node_id: str) -> bool:
         if self.integrated_manifest_for_node(node_id) is not None:
             return True
@@ -1494,7 +1571,7 @@ class ConductorPipelineStore:
     def integrated_manifests_for_blockers(self, node_id: str) -> list[TaskOutputManifest]:
         manifests: list[TaskOutputManifest] = []
         for blocker_id in self.blockers_for(node_id):
-            manifest = self.integrated_manifest_for_node(blocker_id)
+            manifest = self.verified_branch_manifest_for_node(blocker_id)
             if manifest is not None:
                 manifests.append(manifest)
         return manifests
@@ -2045,6 +2122,67 @@ class ConductorPipelineStore:
     def replace_current_edges_from_linear(self, edges: list[tuple[str, str]], *, reason: str) -> GraphRevision | None:
         return self.merge_human_added_blocks(edges, reason=reason)
 
+    def insert_merge_conflict_resolver(self, target_node_id: str, *, error: str) -> GraphRevision:
+        current = self.current_graph_revision_record()
+        if current is None:
+            raise KeyError(target_node_id)
+        target = self.get_node(target_node_id)
+        blocker_ids = self.blockers_for(target_node_id)
+        if not blocker_ids:
+            raise ValueError("merge conflict resolver requires blockers")
+        existing_node_ids = {node.node_id for node in self.list_nodes()}
+        base_resolver_id = f"{target_node_id}-merge-conflict"
+        resolver_id = base_resolver_id
+        suffix = 2
+        while resolver_id in existing_node_ids:
+            resolver_id = f"{base_resolver_id}-{suffix}"
+            suffix += 1
+        gate = GateSpecSnapshot.create(
+            gate_id=f"gate-{resolver_id}",
+            task_id=resolver_id,
+            created_by="conductor-merge-conflict",
+            created_at=_now(),
+            content=GateSpecContent(
+                acceptance_criteria=[f"Resolve merge conflict before {target_node_id} executes."],
+                verification_procedure=[GateStep("git diff --check", GateStepSource.SYSTEM_REPAIR)],
+                rubric={str(score): f"score {score}" for score in range(5)},
+                pass_threshold=PASS_THRESHOLD,
+            ),
+        )
+        resolver = GraphNode(
+            node_id=resolver_id,
+            title=f"Resolve merge conflict for {target.title}",
+            state=GraphNodeState.READY,
+            gate_snapshot_hash=gate.hash,
+            issue_id=target.issue_id,
+            issue_identifier=target.issue_identifier,
+        )
+        nodes = [*self.list_nodes(), resolver]
+        blocks = [
+            (source, blocked)
+            for source, blocked in self.current_blocks()
+            if not (blocked == target_node_id and source in blocker_ids)
+        ]
+        blocks.extend((blocker_id, resolver_id) for blocker_id in blocker_ids)
+        blocks.append((resolver_id, target_node_id))
+        node_ids = {node.node_id for node in nodes}
+        blockers = {blocked for _source, blocked in blocks}
+        blocked_by = {source for source, _blocked in blocks}
+        gates = [gate for node in nodes for gate in [self.gate_for_node(node.node_id)] if gate is not None]
+        gates.append(gate)
+        return self.commit_plan(
+            PlanProposal(
+                graph_id=current.graph_id,
+                plan_attempt_id=current.plan_attempt_id,
+                root_node_id=current.root_node_id,
+                nodes=nodes,
+                blocks=blocks,
+                gates=gates,
+                entry_node_ids=sorted(node_ids - blockers),
+                exit_node_ids=sorted(node_ids - blocked_by),
+            )
+        )
+
     def replace_node_with_subgraph(self, node_id: str, subgraph: PlanProposal, *, intent_spec: IntentSpec | None = None) -> GraphRevision:
         if intent_spec is not None:
             subgraph = PlanRepair(intent_spec).repair(subgraph)
@@ -2307,7 +2445,6 @@ class ConductorPipelineStore:
                     code=code,
                 )
                 self.publish_task_output_manifest(manifest)
-                self.enqueue_integration(manifest)
             else:
                 self.update_node_state(
                     result.node_id,
@@ -2397,6 +2534,16 @@ class ConductorPipelineStore:
             return False
         if snapshot.gate_snapshot_hash != result.gate_snapshot_hash:
             return False
+        branch_required = [
+            snapshot.base_revision,
+            snapshot.branch_name,
+            snapshot.commit_sha,
+            snapshot.evidence_uri,
+            snapshot.repository_path,
+            snapshot.workspace_path,
+        ]
+        if all(str(value).strip() for value in branch_required):
+            return True
         required = [
             snapshot.base_revision,
             snapshot.patch_uri,
@@ -2668,6 +2815,7 @@ class ConductorPipelineStore:
             runtime_waits=self.list_runtime_waits(),
             stuck_observations=self.list_stuck_node_observations(),
             linear_projections=self._current_linear_projections(nodes),
+            graph_deliveries=self.list_graph_deliveries(),
             prediction_basis={
                 "graph_revision": self.current_graph_revision(),
                 "policy_revision": envelope.scheduler_policy.version,
@@ -2772,21 +2920,21 @@ class ConductorPipelineStore:
             if derived_state is not GraphNodeState.VERIFY_PASSED:
                 return [f"{blocker.node_id}: verify not passed"]
             if not all(self._child_ready_for_aggregate_downstream(child) for child in children):
-                return [f"{blocker.node_id}: integration not completed"]
+                return [f"{blocker.node_id}: verified branch output missing"]
             return []
         if blocker.state is GraphNodeState.NEED_HUMAN:
             reason = f" ({blocker.human_reason.value})" if blocker.human_reason is not None else ""
             return [f"{blocker.node_id}: awaiting human{reason}"]
         if not _node_verify_passed(blocker):
             return [f"{blocker.node_id}: verify not passed"]
-        if not self.integration_terminal_for_node(blocker.node_id):
-            return [f"{blocker.node_id}: integration not completed"]
+        if self.verified_branch_manifest_for_node(blocker.node_id) is None:
+            return [f"{blocker.node_id}: verified branch output missing"]
         return []
 
     def _child_ready_for_aggregate_downstream(self, child: GraphNode) -> bool:
         if child.state is GraphNodeState.SUPERSEDED:
             return True
-        return _node_verify_passed(child) and self.integration_terminal_for_node(child.node_id)
+        return _node_verify_passed(child) and self.verified_branch_manifest_for_node(child.node_id) is not None
 
     def _reserve_prediction_wave(
         self,
@@ -2869,7 +3017,7 @@ class PipelineScheduler:
     def _node_ready_for_downstream(self, node: GraphNode) -> bool:
         if node.state is GraphNodeState.SUPERSEDED:
             return True
-        return _node_verify_passed(node) and self.store.integration_terminal_for_node(node.node_id)
+        return _node_verify_passed(node) and self.store.verified_branch_manifest_for_node(node.node_id) is not None
 
     def dispatchable_nodes(self, mode: RuntimeMode) -> list[str]:
         nodes = self.store.list_nodes()
@@ -3694,6 +3842,35 @@ class PipelineCoordinator:
                     )
                 except Exception as exc:
                     error = _sanitize_error(exc)
+                    if mode is RuntimeMode.EXECUTE and isinstance(exc, _MergeConflictError):
+                        result = ExecuteAttemptResult(
+                            attempt_id=attempt_id,
+                            node_id=node_id,
+                            status=AttemptState.CANCELLED,
+                            graph_revision=graph_revision,
+                            policy_revision=policy_revision,
+                            gate_snapshot_hash=self.store.get_node(node_id).gate_snapshot_hash or "",
+                            lease_id=lease.lease_id,
+                            fencing_token=lease.fencing_token,
+                            error=error,
+                        )
+                        self.store._finish_attempt(result, state=AttemptState.CANCELLED, at=now, error=error)
+                        self.store._deactivate_lease(lease.lease_id)
+                        self.store.insert_merge_conflict_resolver(node_id, error=error)
+                        _append_pipeline_log_event(
+                            instance,
+                            "pipeline_merge_conflict_resolver_inserted",
+                            graph_revision=graph_revision,
+                            policy_revision=policy_revision,
+                            node_id=node_id,
+                            attempt_id=attempt_id,
+                            mode=mode.value,
+                            lease_id=lease.lease_id,
+                            error_type=exc.__class__.__name__,
+                            sanitized_reason=error,
+                            action_required="resolver_execute",
+                        )
+                        continue
                     _append_instance_log(
                         instance,
                         (
@@ -4061,30 +4238,29 @@ class PipelineCoordinator:
             "kind": _runtime_kind_for_mode(envelope, mode),
         }
         if mode is RuntimeMode.EXECUTE:
-            blocker_ids = self.store.blockers_for(node_id)
             upstream_manifests = self.store.integrated_manifests_for_blockers(node_id)
-            integrated_revisions = [
-                str(manifest.code.get("integrated_revision") or "").strip()
-                for manifest in upstream_manifests
-                if str(manifest.code.get("integrated_revision") or "").strip()
-            ]
             repository_path = str(getattr(instance, "resolved_repo_path", "") or "")
-            current_integrated_revision = (
-                self.store.current_integrated_revision(repository_path)
-                if blocker_ids and len(upstream_manifests) == len(blocker_ids)
-                else None
-            )
+            base_revision = _repository_head_revision(repository_path)
+            workspace_path = ""
+            branch_name = ""
+            if repository_path and base_revision:
+                prepared = _prepare_execute_worktree(
+                    repository_path=Path(repository_path),
+                    node_id=node_id,
+                    attempt_dir=attempt_dir,
+                    base_revision=base_revision,
+                    upstream_manifests=upstream_manifests,
+                )
+                workspace_path = str(prepared["workspace_path"])
+                branch_name = str(prepared["branch_name"])
             request = ExecuteAttemptRequest(
                 **common,
                 task_title=str(dispatch_context.get("title") or node.title),
                 issue_identifier=str(dispatch_context.get("issue_identifier") or node.issue_identifier or ""),
                 issue_description=str(dispatch_context.get("description") or ""),
-                base_revision=(
-                    current_integrated_revision
-                    or (integrated_revisions[-1] if integrated_revisions else _repository_head_revision(repository_path))
-                ),
-                repository={"resolved_repo_path": repository_path},
-                artifact_paths={"attempt_dir": str(attempt_dir)},
+                base_revision=base_revision,
+                repository={"resolved_repo_path": repository_path, "branch_name": branch_name},
+                artifact_paths={"attempt_dir": str(attempt_dir), "workspace_path": workspace_path},
                 upstream_manifests=[manifest.to_dict() for manifest in upstream_manifests],
                 reason="dependency_policy_satisfied",
                 expected_thread_id=self.store.latest_thread_id_for_node(node_id),
@@ -4107,6 +4283,138 @@ class PipelineCoordinator:
         root = instance_dir / "state" / "pipeline" / attempt_id
         root.mkdir(parents=True, exist_ok=True)
         return {"request_path": root / "attempt-request.json", "result_path": root / "attempt-result.json"}
+
+
+class _MergeConflictError(RuntimeError):
+    pass
+
+
+def _prepare_execute_worktree(
+    *,
+    repository_path: Path,
+    node_id: str,
+    attempt_dir: Path,
+    base_revision: str,
+    upstream_manifests: list[TaskOutputManifest],
+) -> dict[str, Path | str]:
+    if not base_revision:
+        raise ValueError("repository base revision unavailable")
+    branch_name = f"symphony/{_safe_path_part(node_id)}"
+    workspace_path = attempt_dir / "workspace"
+    if workspace_path.exists():
+        subprocess.run(
+            ["git", "worktree", "remove", "--force", str(workspace_path)],
+            cwd=repository_path,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        shutil.rmtree(workspace_path, ignore_errors=True)
+    workspace_path.parent.mkdir(parents=True, exist_ok=True)
+    _git(["worktree", "add", "--force", "-B", branch_name, str(workspace_path), base_revision], cwd=repository_path)
+    for manifest in upstream_manifests:
+        merge_ref = str(manifest.code.get("branch_name") or manifest.code.get("commit_sha") or "").strip()
+        if not merge_ref:
+            raise ValueError(f"blocker {manifest.node_id} lacks branch output")
+        try:
+            _git(["merge", "--no-ff", "--no-edit", merge_ref], cwd=workspace_path)
+        except subprocess.CalledProcessError as exc:
+            raise _MergeConflictError(_sanitize_error(exc.output or exc)) from exc
+    return {"workspace_path": workspace_path, "branch_name": branch_name}
+
+
+def deliver_completed_graph_with_gh(
+    store: ConductorPipelineStore,
+    *,
+    repository_path: Path,
+    issue_identifier: str,
+    run_command: Any = subprocess.run,
+) -> dict[str, Any]:
+    revision = store.current_graph_revision_record()
+    branch_source = issue_identifier or (revision.root_node_id if revision else "issue")
+    branch_name = f"symphony/{_safe_path_part(branch_source)}"
+    nodes = store.list_nodes()
+    if not nodes or any(node.state not in {GraphNodeState.VERIFY_PASSED, GraphNodeState.SUPERSEDED} for node in nodes):
+        result = {"status": "not_ready"}
+        store.record_graph_delivery(
+            status="not_ready",
+            branch_name=branch_name,
+            repository_path=str(repository_path),
+            details={"reason": "nodes_not_terminal"},
+        )
+        return result
+    exit_node_ids = _exit_node_ids_for_current_graph(store)
+    if not exit_node_ids:
+        result = {"status": "not_ready", "reason": "no_exit_nodes"}
+        store.record_graph_delivery(
+            status="not_ready",
+            branch_name=branch_name,
+            repository_path=str(repository_path),
+            details={"reason": "no_exit_nodes"},
+        )
+        return result
+    try:
+        base_revision = _repository_head_revision(str(repository_path))
+        if not base_revision:
+            raise RuntimeError("repository base revision unavailable")
+        worktree_path = store.artifact_root / "delivery-worktrees" / _safe_path_part(branch_name)
+        if worktree_path.exists():
+            subprocess.run(
+                ["git", "worktree", "remove", "--force", str(worktree_path)],
+                cwd=repository_path,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            shutil.rmtree(worktree_path, ignore_errors=True)
+        worktree_path.parent.mkdir(parents=True, exist_ok=True)
+        _git(["worktree", "add", "--force", "-B", branch_name, str(worktree_path), base_revision], cwd=repository_path)
+        for node_id in exit_node_ids:
+            manifest = store.verified_branch_manifest_for_node(node_id)
+            if manifest is None:
+                raise RuntimeError(f"exit node {node_id} lacks verified branch output")
+            merge_ref = str(manifest.code.get("branch_name") or manifest.code.get("commit_sha") or "").strip()
+            if not merge_ref:
+                raise RuntimeError(f"exit node {node_id} lacks merge ref")
+            _git(["merge", "--no-ff", "--no-edit", merge_ref], cwd=worktree_path)
+        _git(["push", "origin", branch_name], cwd=worktree_path)
+        pr = run_command(
+            ["gh", "pr", "create", "--fill", "--head", branch_name],
+            cwd=worktree_path,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except Exception as exc:
+        error = _sanitize_error(exc)
+        store.record_graph_delivery(
+            status="failed",
+            branch_name=branch_name,
+            repository_path=str(repository_path),
+            error=error,
+            details={"exit_node_ids": exit_node_ids},
+        )
+        raise
+    result = {
+        "status": "delivered",
+        "branch_name": branch_name,
+        "worktree_path": str(worktree_path),
+        "pr_url": str(getattr(pr, "stdout", "") or "").strip(),
+    }
+    store.record_graph_delivery(
+        status="delivered",
+        branch_name=branch_name,
+        pr_url=result["pr_url"],
+        repository_path=str(repository_path),
+        details={"exit_node_ids": exit_node_ids, "worktree_path": str(worktree_path)},
+    )
+    return result
+
+
+def _exit_node_ids_for_current_graph(store: ConductorPipelineStore) -> list[str]:
+    nodes = store.list_nodes()
+    source_ids = {source for source, _target in store.current_blocks()}
+    return sorted(node.node_id for node in nodes if node.node_id not in source_ids and node.state is not GraphNodeState.SUPERSEDED)
 
 
 _DISPATCHABLE_STATES = {
@@ -4305,6 +4613,8 @@ def _linear_workflow_state_target_for_node(
         return (["Done", "Completed", "Merged", "Shipped"], "completed")
     if node.state in {GraphNodeState.PLANNED, GraphNodeState.READY}:
         return (["Todo", "Unstarted", "Backlog"], "unstarted")
+    if node.state is GraphNodeState.NEED_HUMAN:
+        return (["Blocked", "Needs Human", "Need Human"], "started")
     if node.state in {
         GraphNodeState.EXECUTING,
         GraphNodeState.VERIFYING,

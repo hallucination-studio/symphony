@@ -15,6 +15,8 @@ from conductor.conductor_pipeline import (
     PipelineCoordinator,
     PipelineLinearProjector,
     PipelineScheduler,
+    deliver_completed_graph_with_gh,
+    _linear_workflow_state_target_for_node,
     prepare_mode_environment,
 )
 from conductor.conductor_runtime import ConductorRuntimeManager
@@ -189,6 +191,30 @@ def _publish_manifest(
             "patch_uri": "artifact://patch",
             "patch_hash": "sha256:patch",
             "expected_result_tree": "tree",
+        },
+    )
+    store.publish_task_output_manifest(manifest)
+    return manifest
+
+
+def _publish_branch_manifest(
+    store: ConductorPipelineStore,
+    node_id: str,
+    *,
+    verify_attempt_id: str,
+    branch_name: str | None = None,
+    commit_sha: str | None = None,
+    score: int = 3,
+) -> TaskOutputManifest:
+    manifest = TaskOutputManifest(
+        node_id=node_id,
+        verify_attempt_id=verify_attempt_id,
+        gate_snapshot_hash=store.get_node(node_id).gate_snapshot_hash or "",
+        score=score,
+        code={
+            "base_revision": "base",
+            "branch_name": branch_name or f"symphony/{node_id}",
+            "commit_sha": commit_sha or f"commit-{node_id}",
         },
     )
     store.publish_task_output_manifest(manifest)
@@ -408,14 +434,7 @@ def test_resolving_linear_sync_conflict_refreshes_parent_aggregate_state(tmp_pat
         ("b", "verify-b", "commit-b"),
     ]:
         store.update_node_state(node_id, GraphNodeState.VERIFY_PASSED, verify_score=3)
-        manifest = _publish_manifest(store, node_id, verify_attempt_id=verify_attempt_id)
-        store.enqueue_integration(manifest)
-        if node_id == "a":
-            store.complete_integration(
-                f"integration-{manifest.node_id}-{manifest.verify_attempt_id}",
-                status="integrated",
-                integrated_revision=revision,
-            )
+        _publish_branch_manifest(store, node_id, verify_attempt_id=verify_attempt_id, commit_sha=revision)
     wait = store.create_human_wait(
         "b",
         reason="LINEAR_SYNC_CONFLICT",
@@ -453,13 +472,7 @@ def test_drive_convergence_refreshes_aggregate_parent_and_promotes_downstream(tm
         ("b", "verify-b", "commit-b"),
     ]:
         store.update_node_state(node_id, GraphNodeState.VERIFY_PASSED, verify_score=3)
-        manifest = _publish_manifest(store, node_id, verify_attempt_id=verify_attempt_id)
-        store.enqueue_integration(manifest)
-        store.complete_integration(
-            f"integration-{manifest.node_id}-{manifest.verify_attempt_id}",
-            status="integrated",
-            integrated_revision=revision,
-        )
+        _publish_branch_manifest(store, node_id, verify_attempt_id=verify_attempt_id, commit_sha=revision)
     store.update_node_state("root", GraphNodeState.AWAITING_HUMAN, human_reason=HumanEscalationReason.LINEAR_SYNC_CONFLICT)
 
     changed = coordinator.drive_convergence_once()
@@ -1313,7 +1326,7 @@ def test_pipeline_store_migrates_legacy_node_primary_key(tmp_path: Path) -> None
     assert store.get_node("legacy", revision=1).title == "Legacy"
 
 
-def test_dependency_policy_requires_verify_passed_score_by_default(tmp_path: Path) -> None:
+def test_dependency_requires_verified_branch_output_by_default(tmp_path: Path) -> None:
     store = ConductorPipelineStore(tmp_path)
     store.apply_runtime_config(RuntimeConfigEnvelope("group-1", 1, _policy(1)))
     store.commit_plan(_proposal())
@@ -1334,17 +1347,23 @@ def test_dependency_policy_requires_verify_passed_score_by_default(tmp_path: Pat
             verify_attempt_id="verify-a",
             gate_snapshot_hash=store.get_node("a").gate_snapshot_hash or "",
             score=3,
-            code={"base_revision": "base", "patch_uri": "artifact://patch"},
+            code={"base_revision": "base", "branch_name": "symphony/a", "commit_sha": "commit-a"},
         )
     )
-    assert scheduler.is_dependency_satisfied("a") is False
-    assert scheduler.dispatchable_nodes(RuntimeMode.EXECUTE) == []
-
-    queued = store.enqueue_integration(store.list_task_output_manifests()[0])
-    store.complete_integration(queued["integration_id"], status="integrated", integrated_revision="commit-a")
     assert scheduler.is_dependency_satisfied("a") is True
     assert scheduler.promote_ready_nodes() == ["b"]
     assert scheduler.dispatchable_nodes(RuntimeMode.EXECUTE) == ["b"]
+
+
+def test_need_human_projects_to_blocked_linear_state() -> None:
+    node = GraphNode(
+        node_id="a",
+        title="A",
+        state=GraphNodeState.NEED_HUMAN,
+        human_reason=HumanEscalationReason.BACKEND_UNAVAILABLE,
+    )
+
+    assert _linear_workflow_state_target_for_node(node) == (["Blocked", "Needs Human", "Need Human"], "started")
 
 
 def test_dependency_policy_terminal_success_variant_does_not_require_integration_manifest(tmp_path: Path) -> None:
@@ -1379,17 +1398,7 @@ def test_planned_nodes_do_not_execute_until_promoted_to_ready(tmp_path: Path) ->
     assert scheduler.dispatchable_nodes(RuntimeMode.EXECUTE) == ["a"]
 
     store.update_node_state("a", GraphNodeState.VERIFY_PASSED, verify_score=3)
-    store.publish_task_output_manifest(
-        TaskOutputManifest(
-            node_id="a",
-            verify_attempt_id="verify-a",
-            gate_snapshot_hash=store.get_node("a").gate_snapshot_hash or "",
-            score=3,
-            code={"base_revision": "base", "patch_uri": "artifact://patch"},
-        )
-    )
-    queued = store.enqueue_integration(store.list_task_output_manifests()[0])
-    store.complete_integration(queued["integration_id"], status="integrated", integrated_revision="commit-a")
+    _publish_branch_manifest(store, "a", verify_attempt_id="verify-a", commit_sha="commit-a")
 
     assert scheduler.dispatchable_nodes(RuntimeMode.EXECUTE) == []
     assert scheduler.promote_ready_nodes() == ["b"]
@@ -1945,7 +1954,7 @@ def test_pipeline_coordinator_heartbeats_running_attempt_leases(tmp_path: Path) 
     assert store.get_attempt("exec-1").state is AttemptState.RUNNING
 
 
-def test_verify_pass_enqueues_integration_and_completion_publishes_manifest(tmp_path: Path) -> None:
+def test_verify_pass_publishes_branch_manifest_without_integration_queue(tmp_path: Path) -> None:
     store = ConductorPipelineStore(tmp_path)
     store.apply_runtime_config(RuntimeConfigEnvelope("group-1", 1, _policy(1)))
     store.commit_plan(_proposal())
@@ -1966,9 +1975,8 @@ def test_verify_pass_enqueues_integration_and_completion_publishes_manifest(tmp_
                 "task_id": "a",
                 "execute_attempt_id": "exec-1",
                 "base_revision": "base",
-                "patch_uri": "artifact://patch",
-                "patch_hash": "sha256:patch",
-                "expected_result_tree": "tree",
+                "branch_name": "symphony/a",
+                "commit_sha": "commit-a",
                 "artifact_uris": [],
                 "declared_commands": ["pytest -q"],
                 "evidence_uri": "artifact://evidence",
@@ -1998,19 +2006,11 @@ def test_verify_pass_enqueues_integration_and_completion_publishes_manifest(tmp_
         at=now,
     )
 
-    queued = store.list_integration_queue()
-    assert queued[0]["status"] == "queued"
-    assert queued[0]["node_id"] == "a"
-    store.complete_integration(queued[0]["integration_id"], status="integrated", integrated_revision="commit-1")
-    completed = store.list_integration_queue()[0]
     manifest = store.list_task_output_manifests()[0]
-    assert completed["status"] == "integrated"
-    assert completed["integrated_revision"] == "commit-1"
-    assert manifest.code["integrated_revision"] == "commit-1"
+    assert store.list_integration_queue() == []
     assert manifest.code["base_revision"] == "base"
-    assert manifest.code["patch_uri"] == "artifact://patch"
-    assert manifest.code["patch_hash"] == "sha256:patch"
-    assert manifest.code["expected_result_tree"] == "tree"
+    assert manifest.code["branch_name"] == "symphony/a"
+    assert manifest.code["commit_sha"] == "commit-a"
 
 
 def test_verify_pass_requires_matching_execute_snapshot_before_manifest(tmp_path: Path) -> None:
@@ -2652,7 +2652,7 @@ def test_integration_conflict_creates_human_wait_and_pauses_node(tmp_path: Path)
     assert waits[0]["details"]["error"] == "patch conflict"
 
 
-def test_resolving_integration_conflict_wait_marks_integration_resolved_and_unpauses_node(tmp_path: Path) -> None:
+def test_resolving_legacy_integration_conflict_wait_marks_queue_resolved_only(tmp_path: Path) -> None:
     store = ConductorPipelineStore(tmp_path)
     store.apply_runtime_config(RuntimeConfigEnvelope("group-1", 1, _policy(1)))
     store.commit_plan(_proposal())
@@ -2685,9 +2685,9 @@ def test_resolving_integration_conflict_wait_marks_integration_resolved_and_unpa
     assert integration["completed_at"]
     assert integration["error"] == "patch conflict"
     assert integration["human_resolution"] == "conflict resolved"
-    assert scheduler.is_dependency_satisfied("a") is True
-    assert scheduler.promote_ready_nodes() == ["b"]
-    assert scheduler.dispatchable_nodes(RuntimeMode.EXECUTE) == ["b"]
+    assert scheduler.is_dependency_satisfied("a") is False
+    assert scheduler.promote_ready_nodes() == []
+    assert scheduler.dispatchable_nodes(RuntimeMode.EXECUTE) == []
 
 
 def test_process_queued_integration_applies_patch_and_records_integrated_revision(tmp_path: Path) -> None:
@@ -5959,7 +5959,7 @@ def test_parent_node_state_is_derived_from_exit_children_before_downstream_dispa
             verify_attempt_id="verify-child-1",
             gate_snapshot_hash=gate_child_1.hash,
             score=3,
-            code={"integrated_revision": "commit-child-1"},
+            code={"base_revision": "base", "branch_name": "symphony/child-1", "commit_sha": "commit-child-1"},
         )
         )
     assert scheduler.promote_ready_nodes() == ["child-2"]
@@ -5981,7 +5981,7 @@ def test_parent_node_state_is_derived_from_exit_children_before_downstream_dispa
             verify_attempt_id="verify-child-2",
             gate_snapshot_hash=gate_child_2.hash,
             score=3,
-            code={"integrated_revision": "commit-child-2"},
+            code={"base_revision": "base", "branch_name": "symphony/child-2", "commit_sha": "commit-child-2"},
         )
     )
     parent_view = next(node for node in store.pipeline_view().to_dict()["nodes"] if node["node_id"] == "parent")
@@ -6153,8 +6153,10 @@ async def test_coordinate_surfaces_stuck_pipeline_nodes_as_reconcile_findings_an
 
     first = await service.coordinate_background_once()
 
-    assert not any(finding.get("event") == "pipeline_node_stuck" for finding in first.reconcile_findings)
-    assert service.pipeline_store.list_human_waits() == []
+    assert any(finding.get("event") == "pipeline_node_stuck" and finding.get("node_id") == "b" for finding in first.reconcile_findings)
+    waits = service.pipeline_store.list_human_waits()
+    assert waits[-1]["node_id"] == "b"
+    assert waits[-1]["reason"] == HumanEscalationReason.CAPACITY_STARVED.value
     observations = service.pipeline_store.pipeline_view().to_dict()["stuck_observations"]
     assert observations == [
         {
@@ -6166,13 +6168,6 @@ async def test_coordinate_surfaces_stuck_pipeline_nodes_as_reconcile_findings_an
             "reason": "pipeline node has no live driver",
         }
     ]
-
-    second = await service.coordinate_background_once()
-
-    assert any(finding.get("event") == "pipeline_node_stuck" and finding.get("node_id") == "b" for finding in second.reconcile_findings)
-    waits = service.pipeline_store.list_human_waits()
-    assert waits[-1]["node_id"] == "b"
-    assert waits[-1]["reason"] == HumanEscalationReason.CAPACITY_STARVED.value
 
 
 def test_predicted_call_order_uses_topological_dependency_order_not_node_id_sort(tmp_path: Path) -> None:
@@ -6435,7 +6430,7 @@ def test_pipeline_prediction_blocks_on_unintegrated_verified_manifest(tmp_path: 
     prediction_b = next(call for call in payload["predicted_call_order"] if call["node"] == "b")
 
     assert prediction_b["predicted_position"] is None
-    assert prediction_b["blocked_by"] == ["a: integration not completed"]
+    assert prediction_b["blocked_by"] == ["a: verified branch output missing"]
 
 
 def test_pipeline_prediction_does_not_rank_non_dispatchable_terminal_or_human_wait_nodes(tmp_path: Path) -> None:
@@ -6913,7 +6908,23 @@ def test_child_replan_attempt_request_falls_back_to_root_dispatch_context(tmp_pa
     ]
 
 
-def test_execute_attempt_request_uses_integrated_blocker_manifests_as_baseline(tmp_path: Path) -> None:
+def test_execute_attempt_request_prepares_worktree_from_verified_blocker_branch(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True)
+    (repo / "README.md").write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=repo, check=True, capture_output=True, text=True)
+    base_revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+    subprocess.run(["git", "checkout", "-b", "symphony/a"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "a.txt").write_text("from blocker\n", encoding="utf-8")
+    subprocess.run(["git", "add", "a.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "execute a"], cwd=repo, check=True, capture_output=True, text=True)
+    blocker_commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+    subprocess.run(["git", "checkout", "--quiet", base_revision], cwd=repo, check=True)
+
     store = ConductorPipelineStore(tmp_path)
     store.apply_runtime_config(RuntimeConfigEnvelope("group-1", 1, _policy(1)))
     store.commit_plan(_proposal())
@@ -6923,10 +6934,9 @@ def test_execute_attempt_request_uses_integrated_blocker_manifests_as_baseline(t
         gate_snapshot_hash=store.get_node("a").gate_snapshot_hash or "",
         score=3,
         code={
-            "base_revision": "base-a",
-            "patch_uri": "artifact://patch-a",
-            "expected_result_tree": "tree-a",
-            "integrated_revision": "commit-a",
+            "base_revision": base_revision,
+            "branch_name": "symphony/a",
+            "commit_sha": blocker_commit,
         },
     )
     store.publish_task_output_manifest(manifest)
@@ -6935,7 +6945,7 @@ def test_execute_attempt_request_uses_integrated_blocker_manifests_as_baseline(t
 
     class Instance:
         instance_dir = str(tmp_path / "inst-1")
-        resolved_repo_path = str(tmp_path / "repo")
+        resolved_repo_path = str(repo)
 
     coordinator = PipelineCoordinator(store=store, runtime_manager=object())
 
@@ -6948,12 +6958,166 @@ def test_execute_attempt_request_uses_integrated_blocker_manifests_as_baseline(t
         attempt_dir=tmp_path / "attempt",
     )
 
-    assert request["base_revision"] == "commit-a"
+    workspace_path = Path(request["artifact_paths"]["workspace_path"])
+    assert request["base_revision"] == base_revision
+    assert request["repository"]["branch_name"] == "symphony/b"
+    assert workspace_path.is_dir()
+    assert (workspace_path / "a.txt").read_text(encoding="utf-8") == "from blocker\n"
+    assert subprocess.check_output(["git", "branch", "--show-current"], cwd=workspace_path, text=True).strip() == "symphony/b"
     assert request["upstream_manifests"][0]["node_id"] == "a"
-    assert request["upstream_manifests"][0]["code"]["integrated_revision"] == "commit-a"
+    assert request["upstream_manifests"][0]["code"]["commit_sha"] == blocker_commit
 
 
-def test_execute_attempt_request_with_two_blockers_uses_current_integrated_revision(tmp_path: Path) -> None:
+def test_deliver_completed_graph_pushes_final_branch_and_invokes_gh_pr_create(tmp_path: Path) -> None:
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True, text=True)
+    repo = tmp_path / "repo"
+    subprocess.run(["git", "clone", str(remote), str(repo)], check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True)
+    (repo / "README.md").write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "push", "origin", "HEAD:main"], cwd=repo, check=True, capture_output=True, text=True)
+    base_revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+    subprocess.run(["git", "checkout", "-b", "symphony/a"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "RESULT.md").write_text("done\n", encoding="utf-8")
+    subprocess.run(["git", "add", "RESULT.md"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "execute a"], cwd=repo, check=True, capture_output=True, text=True)
+    commit_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+    subprocess.run(["git", "checkout", "--quiet", base_revision], cwd=repo, check=True)
+
+    gate = _gate("a")
+    store = ConductorPipelineStore(tmp_path / "store")
+    store.commit_plan(
+        PlanProposal(
+            graph_id="graph-1",
+            plan_attempt_id="plan-1",
+            root_node_id="issue-1",
+            nodes=[GraphNode(node_id="a", title="A", state=GraphNodeState.VERIFY_PASSED, verify_score=3, gate_snapshot_hash=gate.hash)],
+            blocks=[],
+            gates=[gate],
+            entry_node_ids=["a"],
+            exit_node_ids=["a"],
+        )
+    )
+    store.publish_task_output_manifest(
+        TaskOutputManifest(
+            node_id="a",
+            verify_attempt_id="verify-a",
+            gate_snapshot_hash=gate.hash,
+            score=3,
+            code={"base_revision": base_revision, "branch_name": "symphony/a", "commit_sha": commit_sha},
+        )
+    )
+    gh_calls: list[list[str]] = []
+
+    def fake_run(args, **kwargs):
+        gh_calls.append(list(args))
+        return subprocess.CompletedProcess(args, 0, stdout="https://github.example/pr/1\n", stderr="")
+
+    result = deliver_completed_graph_with_gh(
+        store,
+        repository_path=repo,
+        issue_identifier="HELL-1",
+        run_command=fake_run,
+    )
+
+    pushed = subprocess.check_output(["git", "--git-dir", str(remote), "rev-parse", "symphony/HELL-1:RESULT.md"], text=True).strip()
+    local_blob = subprocess.check_output(["git", "rev-parse", "symphony/HELL-1:RESULT.md"], cwd=repo, text=True).strip()
+    assert pushed == local_blob
+    assert result["status"] == "delivered"
+    assert result["branch_name"] == "symphony/HELL-1"
+    assert gh_calls == [["gh", "pr", "create", "--fill", "--head", "symphony/HELL-1"]]
+    deliveries = store.pipeline_view().to_dict()["graph_deliveries"]
+    assert deliveries[-1]["status"] == "delivered"
+    assert deliveries[-1]["branch_name"] == "symphony/HELL-1"
+    assert deliveries[-1]["pr_url"] == "https://github.example/pr/1"
+
+
+@pytest.mark.asyncio
+async def test_execute_join_conflict_inserts_resolver_node_before_dispatch(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True)
+    (repo / "shared.txt").write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "add", "shared.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=repo, check=True, capture_output=True, text=True)
+    base_revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+    commits: dict[str, str] = {}
+    for node_id, content in {"a": "branch a\n", "c": "branch c\n"}.items():
+        subprocess.run(["git", "checkout", "-B", f"symphony/{node_id}", base_revision], cwd=repo, check=True, capture_output=True, text=True)
+        (repo / "shared.txt").write_text(content, encoding="utf-8")
+        subprocess.run(["git", "add", "shared.txt"], cwd=repo, check=True)
+        subprocess.run(["git", "commit", "-m", f"execute {node_id}"], cwd=repo, check=True, capture_output=True, text=True)
+        commits[node_id] = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+    subprocess.run(["git", "checkout", "--quiet", base_revision], cwd=repo, check=True)
+
+    gate_a = _gate("a")
+    gate_c = _gate("c")
+    gate_d = _gate("d")
+    store = ConductorPipelineStore(tmp_path / "store")
+    store.apply_runtime_config(
+        RuntimeConfigEnvelope(
+            "group-1",
+            1,
+            _policy(1),
+            profiles={RuntimeMode.EXECUTE: RuntimeProfile(name="executor", backend="codex", mode=RuntimeMode.EXECUTE)},
+        )
+    )
+    store.commit_plan(
+        PlanProposal(
+            graph_id="graph-1",
+            plan_attempt_id="plan-1",
+            root_node_id="d",
+            nodes=[
+                GraphNode(node_id="a", title="A", state=GraphNodeState.VERIFY_PASSED, verify_score=3, gate_snapshot_hash=gate_a.hash),
+                GraphNode(node_id="c", title="C", state=GraphNodeState.VERIFY_PASSED, verify_score=3, gate_snapshot_hash=gate_c.hash),
+                GraphNode(node_id="d", title="D", state=GraphNodeState.READY, gate_snapshot_hash=gate_d.hash),
+            ],
+            blocks=[("a", "d"), ("c", "d")],
+            gates=[gate_a, gate_c, gate_d],
+            entry_node_ids=["a", "c"],
+            exit_node_ids=["d"],
+        )
+    )
+    for node_id in ("a", "c"):
+        store.publish_task_output_manifest(
+            TaskOutputManifest(
+                node_id=node_id,
+                verify_attempt_id=f"verify-{node_id}",
+                gate_snapshot_hash=store.get_node(node_id).gate_snapshot_hash or "",
+                score=3,
+                code={"base_revision": base_revision, "branch_name": f"symphony/{node_id}", "commit_sha": commits[node_id]},
+            )
+        )
+
+    class Runtime:
+        calls = 0
+
+        async def start(self, instance, **kwargs):
+            self.calls += 1
+            return instance
+
+    class Instance:
+        instance_dir = str(tmp_path / "inst-1")
+        resolved_repo_path = str(repo)
+        log_path = str(tmp_path / "inst-1" / "logs" / "performer.log")
+
+    runtime = Runtime()
+    started = await PipelineCoordinator(store=store, runtime_manager=runtime).start_due_attempts(Instance())
+
+    resolver_ids = [node.node_id for node in store.list_nodes() if node.node_id.startswith("d-merge-conflict")]
+    assert started == 0
+    assert runtime.calls == 0
+    assert len(resolver_ids) == 1
+    assert sorted(store.blockers_for(resolver_ids[0])) == ["a", "c"]
+    assert store.blockers_for("d") == [resolver_ids[0]]
+
+
+def test_execute_attempt_request_with_two_blockers_joins_verified_branches(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
     subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
@@ -6964,22 +7128,14 @@ def test_execute_attempt_request_with_two_blockers_uses_current_integrated_revis
     subprocess.run(["git", "add", "a.txt", "c.txt"], cwd=repo, check=True)
     subprocess.run(["git", "commit", "-m", "base"], cwd=repo, check=True, capture_output=True, text=True)
     base_revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
-
-    patches: dict[str, tuple[str, str, str]] = {}
+    commits: dict[str, str] = {}
     for node_id, filename, content in (("c", "c.txt", "c after\n"), ("a", "a.txt", "a after\n")):
-        target = repo / filename
-        target.write_text(content, encoding="utf-8")
+        subprocess.run(["git", "checkout", "-B", f"symphony/{node_id}", base_revision], cwd=repo, check=True, capture_output=True, text=True)
+        (repo / filename).write_text(content, encoding="utf-8")
         subprocess.run(["git", "add", filename], cwd=repo, check=True)
-        patch = subprocess.check_output(["git", "diff", "--binary", "--cached"], cwd=repo, text=True)
-        expected_tree = subprocess.check_output(["git", "write-tree"], cwd=repo, text=True).strip()
-        subprocess.run(["git", "reset", "--hard", base_revision], cwd=repo, check=True, capture_output=True, text=True)
-        patch_path = tmp_path / f"{node_id}.diff"
-        patch_path.write_text(patch, encoding="utf-8")
-        patches[node_id] = (
-            f"file://{patch_path}",
-            "sha256:" + hashlib.sha256(patch.encode("utf-8")).hexdigest(),
-            expected_tree,
-        )
+        subprocess.run(["git", "commit", "-m", f"execute {node_id}"], cwd=repo, check=True, capture_output=True, text=True)
+        commits[node_id] = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+    subprocess.run(["git", "checkout", "--quiet", base_revision], cwd=repo, check=True)
 
     gate_a = _gate("a")
     gate_c = _gate("c")
@@ -7003,7 +7159,6 @@ def test_execute_attempt_request_with_two_blockers_uses_current_integrated_revis
         )
     )
     for node_id in ("c", "a"):
-        patch_uri, patch_hash, expected_tree = patches[node_id]
         manifest = TaskOutputManifest(
             node_id=node_id,
             verify_attempt_id=f"verify-{node_id}",
@@ -7011,18 +7166,11 @@ def test_execute_attempt_request_with_two_blockers_uses_current_integrated_revis
             score=3,
             code={
                 "base_revision": base_revision,
-                "patch_uri": patch_uri,
-                "patch_hash": patch_hash,
-                "expected_result_tree": expected_tree,
+                "branch_name": f"symphony/{node_id}",
+                "commit_sha": commits[node_id],
             },
         )
         store.publish_task_output_manifest(manifest)
-        store.enqueue_integration(manifest)
-    store.process_queued_integrations(repo)
-    queue = store.list_integration_queue()
-    current_integrated_revision = queue[1]["integrated_revision"]
-    assert queue[0]["node_id"] == "c"
-    assert queue[1]["node_id"] == "a"
 
     lease = WorkerLease.create(
         lease_id="lease-exec",
@@ -7046,9 +7194,15 @@ def test_execute_attempt_request_with_two_blockers_uses_current_integrated_revis
         attempt_dir=tmp_path / "attempt",
     )
 
-    assert request["base_revision"] == current_integrated_revision
+    workspace = tmp_path / "attempt" / "workspace"
+    assert request["base_revision"] == base_revision
+    assert request["repository"]["branch_name"] == "symphony/d"
+    assert request["artifact_paths"]["workspace_path"] == str(workspace)
+    assert (workspace / "a.txt").read_text(encoding="utf-8") == "a after\n"
+    assert (workspace / "c.txt").read_text(encoding="utf-8") == "c after\n"
     assert [manifest["node_id"] for manifest in request["upstream_manifests"]] == ["a", "c"]
-    assert all(manifest["code"]["integrated_revision"] for manifest in request["upstream_manifests"])
+    assert [manifest["code"]["branch_name"] for manifest in request["upstream_manifests"]] == ["symphony/a", "symphony/c"]
+    assert all(manifest["code"]["commit_sha"] for manifest in request["upstream_manifests"])
 
 
 def test_execute_attempt_request_freezes_entry_baseline_revision(tmp_path: Path) -> None:

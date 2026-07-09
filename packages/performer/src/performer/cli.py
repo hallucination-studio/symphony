@@ -9,6 +9,7 @@ import re
 from pathlib import Path
 import shutil
 import subprocess
+import tempfile
 from typing import Any
 
 from performer_api.config import CodexConfig
@@ -911,17 +912,25 @@ def _collect_git_verification_input(
     repository_path: str | None = None,
 ) -> dict[str, object]:
     _remove_generated_verification_caches(workspace_path)
-    _git(["add", "--intent-to-add", "--all"], cwd=workspace_path)
-    diff = _git(["diff", "--binary"], cwd=workspace_path)
     _git(["add", "--all"], cwd=workspace_path)
-    patch_path = workspace_path / ".symphony" / "pipeline" / attempt_id / "patch.diff"
-    patch_path.parent.mkdir(parents=True, exist_ok=True)
-    patch_path.write_text(diff, encoding="utf-8")
-    evidence_path = patch_path.parent / "evidence.json"
-    expected_tree = _git(["write-tree"], cwd=workspace_path).strip()
-    patch_hash = "sha256:" + hashlib.sha256(diff.encode("utf-8")).hexdigest()
+    no_changes = _git_command_succeeds(["diff", "--cached", "--quiet"], cwd=workspace_path)
+    if not no_changes:
+        _git(["commit", "--quiet", "-m", f"Execute pipeline node {node_id}"], cwd=workspace_path)
+    branch_name = _git(["branch", "--show-current"], cwd=workspace_path).strip()
+    commit_sha = _git(["rev-parse", "HEAD"], cwd=workspace_path).strip()
+    evidence_path = workspace_path / ".symphony" / "pipeline" / attempt_id / "evidence.json"
+    evidence_path.parent.mkdir(parents=True, exist_ok=True)
     evidence_path.write_text(
-        json.dumps({"attempt_id": attempt_id, "node_id": node_id, "patch_hash": patch_hash}, sort_keys=True),
+        json.dumps(
+            {
+                "attempt_id": attempt_id,
+                "node_id": node_id,
+                "branch_name": branch_name,
+                "commit_sha": commit_sha,
+                "no_changes": no_changes,
+            },
+            sort_keys=True,
+        ),
         encoding="utf-8",
     )
     return {
@@ -930,14 +939,18 @@ def _collect_git_verification_input(
         "base_revision": base_revision or _git(["rev-parse", "HEAD"], cwd=workspace_path).strip(),
         "repository_path": repository_path or str(workspace_path),
         "workspace_path": str(workspace_path),
-        "patch_uri": f"file://{patch_path}",
-        "patch_hash": patch_hash,
-        "expected_result_tree": expected_tree,
+        "branch_name": branch_name,
+        "commit_sha": commit_sha,
+        "no_changes": no_changes,
         "artifact_uris": [{"uri": f"file://{evidence_path}", "sha256": _file_sha256(evidence_path), "type": "evidence"}],
         "declared_commands": [],
         "evidence_uri": f"file://{evidence_path}",
         "gate_snapshot_hash": gate_hash,
     }
+
+
+def _git_command_succeeds(args: list[str], *, cwd: Path) -> bool:
+    return subprocess.run(["git", *args], cwd=cwd, check=False, capture_output=True, text=True).returncode == 0
 
 
 class _PatchVerificationResult:
@@ -947,6 +960,20 @@ class _PatchVerificationResult:
 
 
 def _verify_patch_hash(verification_input: dict[str, object]) -> _PatchVerificationResult:
+    commit_sha = _optional_payload_str(verification_input.get("commit_sha"))
+    if commit_sha:
+        workspace = _optional_payload_str(verification_input.get("repository_path"))
+        if not workspace:
+            return _PatchVerificationResult(reason="commit_unavailable")
+        verify_workspace = _commit_verify_workspace(verification_input, fallback_parent=Path(workspace))
+        if verify_workspace.exists():
+            shutil.rmtree(verify_workspace)
+        try:
+            verify_workspace.parent.mkdir(parents=True, exist_ok=True)
+            _git(["worktree", "add", "--detach", "--quiet", str(verify_workspace), commit_sha], cwd=Path(workspace))
+        except (subprocess.SubprocessError, OSError):
+            return _PatchVerificationResult(reason="verification_workspace_unavailable")
+        return _PatchVerificationResult(workspace=verify_workspace)
     patch_uri = str(verification_input.get("patch_uri") or "")
     expected_hash = str(verification_input.get("patch_hash") or "")
     if not patch_uri.startswith("file://") or not expected_hash.startswith("sha256:"):
@@ -992,6 +1019,16 @@ def _verify_patch_hash(verification_input: dict[str, object]) -> _PatchVerificat
         if result_revision_tree != actual_tree:
             return _PatchVerificationResult(reason="result_revision_tree_mismatch")
     return _PatchVerificationResult(workspace=verify_workspace)
+
+
+def _commit_verify_workspace(verification_input: dict[str, object], *, fallback_parent: Path) -> Path:
+    evidence_uri = str(verification_input.get("evidence_uri") or "")
+    if evidence_uri.startswith("file://"):
+        return Path(evidence_uri.removeprefix("file://")).parent / "verify-worktree"
+    attempt_id = _optional_payload_str(verification_input.get("execute_attempt_id")) or "verify"
+    parent = fallback_parent / ".symphony" / "verify"
+    parent.mkdir(parents=True, exist_ok=True)
+    return Path(tempfile.mkdtemp(prefix=f"{attempt_id}-verify-", dir=str(parent)))
 
 
 def _verify_artifact_hashes(verification_input: dict[str, object]) -> str | None:

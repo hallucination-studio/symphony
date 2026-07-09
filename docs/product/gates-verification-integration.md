@@ -79,13 +79,17 @@ Every terminal execute attempt produces an immutable verification input snapshot
 
 - task/node id and execute attempt id;
 - base revision;
-- patch URI and patch hash;
-- expected result tree;
-- optional result revision;
+- branch name;
+- commit sha;
+- no-change flag when applicable;
 - artifact URIs and hashes;
 - declared commands as context only;
 - evidence URI;
 - gate snapshot hash.
+
+Legacy patch snapshots (`patch_uri`, `patch_hash`, `expected_result_tree`, and
+`result_revision`) may be accepted for migration compatibility, but the current
+execute contract is branch/commit handoff.
 
 Declared commands are never trusted as proof. A passing verdict comes from the
 verifier running the gate procedure.
@@ -95,15 +99,11 @@ verifier running the gate procedure.
 The verifier:
 
 1. creates a fresh disposable workspace;
-2. checks out the base revision;
-3. fetches the patch and verifies its hash;
-4. applies the patch;
-5. asserts the resulting tree equals the expected tree;
-6. verifies optional result revision provenance if present;
-7. verifies artifact hashes;
-8. loads the frozen gate by hash;
-9. runs the gate procedure;
-10. emits a score and sanitized evidence through Conductor.
+2. materializes the execute commit in a detached worktree;
+3. verifies artifact hashes;
+4. loads the frozen gate by hash;
+5. runs the gate procedure;
+6. emits a score and sanitized evidence through Conductor.
 
 The first `local-verifier` uses a disposable worktree and mutation detection
 after gate execution. It is not OS-level read-only enforcement.
@@ -112,24 +112,26 @@ after gate execution. It is not OS-level read-only enforcement.
 
 Conductor publishes a task output manifest only after verify passes. The
 manifest is bound to `node_id`, `verify_attempt_id`, `gate_snapshot_hash`, score,
-code revision or patch references, artifact references, and integration status.
+branch name, commit sha, and artifact references.
 
 Executors may suggest output metadata, but Conductor is the publisher. A
 downstream node may consume upstream work only through verified manifests.
 
-## Integration
+## Branch Join
 
-Parallel verified patches are not automatically globally integrated. Each
+Parallel verified branches are not automatically globally integrated. Each
 execute attempt runs against a computed baseline. Entry nodes use the graph base
-revision. Dependent nodes use the integrated result of verified blockers or
-verified manifests explicitly listed as inputs.
+revision. Dependent nodes use a Conductor-created worktree branch where every
+verified blocker branch has been merged.
 
-Conductor owns deterministic integration or an integration queue. Conflicts
-escalate to `AWAITING_HUMAN` or replanning. The system must not silently merge
-conflicting verified patches or let downstream work consume unintegrated output.
+Conductor owns the deterministic git join before dispatching the dependent
+executor. Conflicts create a merge-conflict resolver node; unresolved conflicts
+escalate to `need_human`. The system must not silently merge conflicting
+verified branches or let downstream work consume unjoined output.
 
 ## Verification
 
 Acceptance evidence must show the gate hash on execute and verify attempts, the
 verification input snapshot, the verifier's actual command/evidence, the score,
-the manifest published by Conductor, and any integration or conflict result.
+the manifest published by Conductor, and any join, resolver, delivery, or
+conflict result.
