@@ -933,13 +933,33 @@ def test_real_symphony_e2e_enrolls_runtime_with_resolved_project_slug() -> None:
     resolve_index = source.index("linear_project = await resolve_project")
     enrollment_index = source.index('"/api/v1/runtime/enrollment-tokens"')
     enrollment_payload_start = source.index('"runtime_group_id": f"group-{run_id}"')
-    enrollment_payload_end = source.index('"managed_run_profile": "gated-task"')
+    enrollment_payload_end = source.index("build_instance_payload includes managed_run_profile")
     enrollment_payload = source[enrollment_payload_start:enrollment_payload_end]
 
     assert resolve_index < enrollment_index
     assert '"project_slug": linear_project["slugId"]' in enrollment_payload
     assert '"project_slug": args.project_slug' not in enrollment_payload
+    assert '"managed_run_profile"' not in enrollment_payload
     assert "performer:gate/passed" not in source
+
+
+def test_real_symphony_e2e_enrollment_token_payload_excludes_instance_profile() -> None:
+    setup = load_tool("real_symphony_e2e_run_setup")
+
+    payload = setup.build_enrollment_token_payload(
+        run_id="run-1",
+        workspace_id="workspace-1",
+        project_slug_id="project-slug-id",
+        agent_app_user_id="agent-1",
+    )
+
+    assert payload == {
+        "runtime_group_id": "group-run-1",
+        "linear_workspace_id": "workspace-1",
+        "project_slug": "project-slug-id",
+        "linear_agent_app_user_id": "agent-1",
+    }
+    assert "managed_run_profile" not in payload
 
 async def test_real_symphony_e2e_waits_for_delegate_visibility_before_poller_dispatch(monkeypatch) -> None:
     tool = load_tool("real_symphony_e2e")

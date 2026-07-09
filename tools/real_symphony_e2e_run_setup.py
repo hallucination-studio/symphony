@@ -197,11 +197,35 @@ async def _enroll_runtime(state: E2ERunState) -> None:
     state.evidence.data["linear_project"] = {"requested": state.args.project_slug, "slugId": linear_project["slugId"], "name": linear_project.get("name")}
     state.evidence.data["linear_agent_app_user_id"] = state.agent_app_user_id
     state.evidence.check("linear-agent:app-user-selected", bool(state.agent_app_user_id), source="PODIUM_LINEAR_APPLICATION_ID", viewer={key: viewer.get(key) for key in ["id", "name", "email"]})
-    status, body = http_json("POST", api_url(state.podium_port, "/api/v1/runtime/enrollment-tokens"), {"runtime_group_id": f"group-{state.run_id}", "linear_workspace_id": state.workspace_id, "project_slug": linear_project["slugId"], "linear_agent_app_user_id": state.agent_app_user_id, "managed_run_profile": "gated-task" if state.args.pipeline_gates else "default"})
+    status, body = http_json(
+        "POST",
+        api_url(state.podium_port, "/api/v1/runtime/enrollment-tokens"),
+        build_enrollment_token_payload(
+            run_id=state.run_id,
+            workspace_id=state.workspace_id,
+            project_slug_id=linear_project["slugId"],
+            agent_app_user_id=state.agent_app_user_id,
+        ),
+    )
     state.evidence.check("podium-api:/api/v1/runtime/enrollment-tokens", status == 200, status=status, body=body)
     status, enrolled = http_json("POST", api_url(state.podium_port, "/api/v1/runtime/enroll"), {"enrollment_token": body.get("enrollment_token") if isinstance(body, dict) else ""})
     state.enrolled_runtime = enrolled
     state.evidence.check("podium-api:/api/v1/runtime/enroll", status == 200 and bool(enrolled.get("runtime_id")) and bool(enrolled.get("runtime_token")) and bool(enrolled.get("proxy_token")), status=status, body={key: bool(enrolled.get(key)) for key in ["runtime_id", "runtime_token", "proxy_token"]})
+
+
+def build_enrollment_token_payload(
+    *,
+    run_id: str,
+    workspace_id: str,
+    project_slug_id: str,
+    agent_app_user_id: str,
+) -> dict[str, str]:
+    return {
+        "runtime_group_id": f"group-{run_id}",
+        "linear_workspace_id": workspace_id,
+        "project_slug": project_slug_id,
+        "linear_agent_app_user_id": agent_app_user_id,
+    }
 
 
 async def start_conductor_and_configure(state: E2ERunState) -> None:
