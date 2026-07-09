@@ -1175,11 +1175,11 @@ def _codex_settings_from_args(args: argparse.Namespace) -> dict[str, Any]:
 APPENDIX_PYTEST_HARDENING_PROBES: tuple[tuple[str, tuple[str, ...]], ...] = (
     (
         "appendix:s1-terminal-attempt-immutable",
-        ("tests/test_conductor_pipeline.py::test_attempt_lifecycle_rejects_stale_fenced_results_and_publishes_verified_manifest",),
+        ("tests/conductor_pipeline/test_scheduler_views_and_requests.py::test_attempt_lifecycle_rejects_stale_fenced_results_and_publishes_verified_manifest",),
     ),
     (
         "appendix:s1-superseded-revision-refused",
-        ("tests/test_conductor_pipeline.py::test_replan_rejects_replacement_subgraph_that_reuses_superseded_node_id",),
+        ("tests/conductor_pipeline/test_replanning.py::test_replan_rejects_replacement_subgraph_that_reuses_superseded_node_id",),
     ),
     (
         "appendix:s2-malformed-proposal-refused",
@@ -1191,13 +1191,13 @@ APPENDIX_PYTEST_HARDENING_PROBES: tuple[tuple[str, tuple[str, ...]], ...] = (
     (
         "appendix:s2-gate-post-freeze-immutable",
         (
-            "tests/test_conductor_pipeline.py::test_execute_attempt_cannot_start_without_frozen_gate_snapshot",
-            "tests/test_conductor_pipeline.py::test_verify_attempt_cannot_start_without_frozen_gate_snapshot",
+            "tests/conductor_pipeline/test_store_and_runtime_env.py::test_execute_attempt_cannot_start_without_frozen_gate_snapshot",
+            "tests/conductor_pipeline/test_store_and_runtime_env.py::test_verify_attempt_cannot_start_without_frozen_gate_snapshot",
         ),
     ),
     (
         "appendix:s2-linear-idempotent-rerun",
-        ("tests/test_conductor_pipeline.py::test_pipeline_coordinator_resumes_existing_root_planning_node_for_duplicate_dispatch",),
+        ("tests/conductor_pipeline/test_scheduler_views_and_requests.py::test_pipeline_coordinator_resumes_existing_root_planning_node_for_duplicate_dispatch",),
     ),
     (
         "appendix:s3-verifier-mutation-detection",
@@ -1212,19 +1212,19 @@ APPENDIX_PYTEST_HARDENING_PROBES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ),
     (
         "appendix:s3-expired-fencing-refused",
-        ("tests/test_conductor_pipeline.py::test_attempt_lifecycle_rejects_stale_fenced_results_and_publishes_verified_manifest",),
+        ("tests/conductor_pipeline/test_scheduler_views_and_requests.py::test_attempt_lifecycle_rejects_stale_fenced_results_and_publishes_verified_manifest",),
     ),
     (
         "appendix:s4-superseded-revision-fenced",
-        ("tests/test_conductor_pipeline.py::test_replan_rejects_replacement_subgraph_that_reuses_superseded_node_id",),
+        ("tests/conductor_pipeline/test_replanning.py::test_replan_rejects_replacement_subgraph_that_reuses_superseded_node_id",),
     ),
     (
         "appendix:s4-invalid-replan-escalates",
-        ("tests/test_conductor_pipeline.py::test_replanning_validation_failure_escalates_to_human_without_failed_node",),
+        ("tests/conductor_pipeline/test_replanning.py::test_replanning_validation_failure_escalates_to_human_without_failed_node",),
     ),
     (
         "appendix:linear-legitimate-blocks-edits-ingested",
-        ("tests/test_conductor_pipeline.py::test_pipeline_linear_projector_ingests_human_added_blocks_as_new_graph_revision",),
+        ("tests/conductor_pipeline/test_linear_projection.py::test_pipeline_linear_projector_ingests_human_added_blocks_as_new_graph_revision",),
     ),
 )
 

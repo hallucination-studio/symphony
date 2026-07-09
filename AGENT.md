@@ -80,7 +80,7 @@ Run focused pipeline checks:
 
 ```bash
 PYTHONPATH=$(pwd)/packages/performer-api/src:$(pwd)/packages/performer/src:$(pwd)/packages/conductor/src:$(pwd)/packages/podium/src \
-  .venv/bin/python -m pytest tests/test_pipeline_contracts.py tests/test_conductor_pipeline.py tests/test_performer_modes.py tests/test_podium_pipeline.py -q
+  .venv/bin/python -m pytest tests/test_pipeline_contracts.py tests/conductor_pipeline tests/test_performer_modes.py tests/test_podium_pipeline.py -q
 ```
 
 Install all editable packages:
