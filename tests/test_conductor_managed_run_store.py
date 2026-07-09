@@ -184,6 +184,61 @@ def test_managed_run_store_records_verification_inputs_and_publishes_manifests(t
     assert view["manifests"][0]["score"] == 3
 
 
+def test_managed_run_view_exposes_complete_evidence_bundle(tmp_path) -> None:
+    store = ConductorManagedRunStore(tmp_path)
+    run = store.accept_dispatch({"issue_id": "root-1", "issue_identifier": "HELL-6"}, instance_id="instance-1")
+    store.save_plan(run.run_id, _plan(), backend_session_id="thread-1")
+    gate_hash = str(store.list_gate_snapshots(run.run_id)[0]["content_hash"])
+    store.record_verification_input(
+        run.run_id,
+        VerificationInputSnapshot(
+            work_item_id="wi-1",
+            execute_attempt_id="execute-1",
+            base_revision="base-sha",
+            branch_name="managed-run/wi-1",
+            commit_sha="commit-sha",
+            no_change=False,
+            artifact_hashes=[{"path": "result.txt", "sha256": "abc"}],
+            declared_commands=["pytest -q"],
+            evidence_uri="artifact://evidence/wi-1.json",
+            gate_snapshot_hash=gate_hash,
+        ),
+    )
+    store.publish_task_output_manifest(
+        run.run_id,
+        TaskOutputManifest(
+            work_item_id="wi-1",
+            verify_attempt_id="verify-1",
+            plan_version=1,
+            score=3,
+            branch_name="managed-run/wi-1",
+            commit_sha="commit-sha",
+            artifacts=[{"path": "result.txt", "sha256": "abc"}],
+            created_at="2026-07-09T00:01:00Z",
+        ),
+    )
+    store.record_checkpoint_result(run.run_id, after=["wi-1"], verify=["pytest -q"], passed=True, reason="pytest passed")
+    store.merge_run_payload(
+        run.run_id,
+        {
+            "branch_joins": [{"status": "integrated", "branch_name": "managed-run/run-1/wi-2/join"}],
+            "final_completion_report": {
+                "rubric_results": [{"area": "correctness", "status": "passed", "evidence": [gate_hash]}],
+                "residual_risks": [],
+            },
+        },
+    )
+
+    bundle = store.managed_run_view()["runs"][0]["evidence_bundle"]
+
+    assert bundle["gate_snapshot_hashes"][0] == gate_hash
+    assert bundle["verification_inputs"][0]["execute_attempt_id"] == "execute-1"
+    assert bundle["manifests"][0]["verify_attempt_id"] == "verify-1"
+    assert bundle["branch_joins"][0]["status"] == "integrated"
+    assert bundle["checkpoint_results"][0]["reason"] == "pytest passed"
+    assert bundle["final_rubric_results"][0]["area"] == "correctness"
+
+
 def test_managed_run_view_uses_run_and_work_item_language(tmp_path) -> None:
     store = ConductorManagedRunStore(tmp_path)
     run = store.accept_dispatch({"issue_id": "root-1", "issue_identifier": "HELL-3"}, instance_id="instance-1")

@@ -130,17 +130,46 @@ class ConductorManagedRunStoreViewMixin:
         for run in self.list_runs():
             payload = run.get("payload") if isinstance(run.get("payload"), dict) else {}
             run_attempts = _run_attempts_for_view(str(run["run_id"]), payload)
+            checkpoints = self.list_checkpoint_results(str(run["run_id"]))
+            gate_snapshots = self.list_gate_snapshots(str(run["run_id"]))
+            verification_inputs = self.list_verification_inputs(str(run["run_id"]))
+            manifests = self.list_task_output_manifests(str(run["run_id"]))
             attempts.extend(run_attempts)
             runs.append(
                 {
                     **run,
                     "work_items": self.list_work_items(str(run["run_id"])),
                     "linear_projections": self.list_linear_projections(str(run["run_id"])),
-                    "checkpoint_results": self.list_checkpoint_results(str(run["run_id"])),
-                    "gate_snapshots": self.list_gate_snapshots(str(run["run_id"])),
-                    "verification_inputs": self.list_verification_inputs(str(run["run_id"])),
-                    "manifests": self.list_task_output_manifests(str(run["run_id"])),
+                    "checkpoint_results": checkpoints,
+                    "gate_snapshots": gate_snapshots,
+                    "verification_inputs": verification_inputs,
+                    "manifests": manifests,
+                    "branch_joins": _branch_joins(payload),
+                    "evidence_bundle": _evidence_bundle(payload, gate_snapshots, verification_inputs, manifests, checkpoints),
                     "attempts": run_attempts,
                 }
             )
         return {"runs": runs, "attempts": attempts}
+
+
+def _evidence_bundle(
+    payload: dict[str, Any],
+    gate_snapshots: list[dict[str, Any]],
+    verification_inputs: list[dict[str, Any]],
+    manifests: list[dict[str, Any]],
+    checkpoint_results: list[dict[str, Any]],
+) -> dict[str, Any]:
+    final_report = payload.get("final_completion_report") if isinstance(payload.get("final_completion_report"), dict) else {}
+    return {
+        "gate_snapshot_hashes": [str(snapshot.get("content_hash") or "") for snapshot in gate_snapshots if snapshot.get("content_hash")],
+        "verification_inputs": verification_inputs,
+        "manifests": manifests,
+        "branch_joins": _branch_joins(payload),
+        "checkpoint_results": checkpoint_results,
+        "final_rubric_results": [dict(item) for item in final_report.get("rubric_results") or [] if isinstance(item, dict)],
+        "residual_risks": [str(item) for item in final_report.get("residual_risks") or []],
+    }
+
+
+def _branch_joins(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    return [dict(item) for item in payload.get("branch_joins") or [] if isinstance(item, dict)]
