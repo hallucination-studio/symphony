@@ -270,6 +270,17 @@ class ConductorManagedRunStore(ConductorManagedRunStoreViewMixin, ConductorManag
                     ),
                 )
 
+    def update_work_item_payload(self, run_id: str, work_item_id: str, payload: dict[str, Any]) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                """
+                UPDATE managed_run_work_items
+                SET payload_json = ?, updated_at = ?
+                WHERE run_id = ? AND work_item_id = ?
+                """,
+                (_json_dumps(payload), _now(), run_id, work_item_id),
+            )
+
     def _existing_run(self, *, parent_issue_id: str, issue_identifier: str) -> dict[str, Any] | None:
         with self.connect() as connection:
             row = connection.execute(
