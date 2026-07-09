@@ -128,6 +128,61 @@ async def test_managed_run_projector_creates_child_issue_and_parent_summary(tmp_
     assert store.list_linear_projections(accepted.run_id)[0]["linear_issue_id"] == "child-1"
 
 
+async def test_managed_run_projector_records_label_degraded_child_projection(tmp_path) -> None:
+    store = ConductorManagedRunStore(tmp_path)
+    coordinator = ConductorManagedRunCoordinator(store=store)
+    accepted = coordinator.accept_dispatch({"issue_id": "root-1", "issue_identifier": "HELL-1"}, instance_id="instance-1")
+    coordinator.apply_plan(accepted.run_id, _plan(), backend_session_id="thread-1")
+    tracker = Tracker()
+
+    original_create = tracker.create_child_issue_for
+
+    async def create_without_label(*args, **kwargs):
+        issue = await original_create(*args, **kwargs)
+        issue["labels"] = []
+        issue["skipped_label_names"] = ["symphony:type/work-item"]
+        return issue
+
+    tracker.create_child_issue_for = create_without_label  # type: ignore[method-assign]
+
+    await ManagedRunLinearProjector(store=store, tracker=tracker, root_issue_id="root-1").reconcile_once(accepted.run_id)
+
+    projection = store.list_linear_projections(accepted.run_id)[0]
+    assert projection["linear_issue_id"] == "child-1"
+    assert projection["metadata"]["label_projection_degraded"] is True
+    assert projection["metadata"]["skipped_label_names"] == ["symphony:type/work-item"]
+
+
+async def test_managed_run_projector_reuses_unlabeled_child_issue_from_durable_projection(tmp_path) -> None:
+    store = ConductorManagedRunStore(tmp_path)
+    coordinator = ConductorManagedRunCoordinator(store=store)
+    accepted = coordinator.accept_dispatch({"issue_id": "root-1", "issue_identifier": "HELL-1"}, instance_id="instance-1")
+    coordinator.apply_plan(accepted.run_id, _plan(), backend_session_id="thread-1")
+    tracker = Tracker()
+    tracker.children.append(
+        {
+            "id": "child-1",
+            "identifier": "HELL-10",
+            "parent_issue_id": "root-1",
+            "title": "Add projector",
+            "description": "",
+            "labels": [],
+            "delegate_id": None,
+        }
+    )
+    store.record_linear_projection(
+        accepted.run_id,
+        "wi-1",
+        linear_issue_id="child-1",
+        metadata={"run_id": accepted.run_id, "work_item_id": "wi-1"},
+    )
+
+    await ManagedRunLinearProjector(store=store, tracker=tracker, root_issue_id="root-1").reconcile_once(accepted.run_id)
+
+    assert len(tracker.children) == 1
+    assert tracker.children[0]["id"] == "child-1"
+
+
 async def test_managed_run_projector_maps_child_lifecycle_states(tmp_path) -> None:
     store = ConductorManagedRunStore(tmp_path)
     coordinator = ConductorManagedRunCoordinator(store=store)

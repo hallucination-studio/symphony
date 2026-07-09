@@ -56,7 +56,13 @@ query RepositoryHandoffChildren($issueId: String!) {
     ) -> dict[str, Any]:
         _ = assignee_id
         context = await self._creation_context(parent_issue_id)
-        label_ids = [await self._ensure_label_id(context["team_id"], name) for name in label_names]
+        label_ids: list[str] = []
+        skipped_label_names: list[str] = []
+        for name in label_names:
+            try:
+                label_ids.append(await self._ensure_label_id(context["team_id"], name))
+            except LinearDirectProxyError:
+                skipped_label_names.append(name)
         payload = await self.graphql(
             """
 mutation RepositoryHandoffCreateChild(
@@ -107,7 +113,10 @@ mutation RepositoryHandoffCreateChild(
         issue = result.get("issue") if isinstance(result, dict) else {}
         if not result.get("success") or not isinstance(issue, dict) or not issue.get("id"):
             raise LinearDirectProxyError("linear_issue_create_failed", "Linear issueCreate returned success=false")
-        return _normalize_linear_issue_dict(issue)
+        normalized = _normalize_linear_issue_dict(issue)
+        if skipped_label_names:
+            normalized["skipped_label_names"] = skipped_label_names
+        return normalized
 
     async def agent_activity_create(
         self,

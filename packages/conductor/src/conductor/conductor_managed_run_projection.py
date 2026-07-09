@@ -81,7 +81,7 @@ class ManagedRunLinearProjector:
                 run_id,
                 work_item_id,
                 linear_issue_id=issue_id,
-                metadata=self._projection_metadata(run_id, run, item),
+                metadata=self._projection_metadata(run_id, run, item, issue),
             )
             projected += await self._project_human_action_instruction(run_id, item, issue_id)
             projected += await self._project_attempt_comments(run_id, run, work_item_id, issue_id)
@@ -140,7 +140,7 @@ class ManagedRunLinearProjector:
         fetch = getattr(self.tracker, "fetch_child_issues", None)
         if fetch is None:
             return []
-        loaded = await fetch(self.root_issue_id, label_name=WORK_ITEM_LABEL)
+        loaded = await fetch(self.root_issue_id, label_name=None)
         return [dict(item) for item in loaded if isinstance(item, dict)]
 
     def _existing_by_work_item(self, run_id: str, existing: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
@@ -257,9 +257,12 @@ class ManagedRunLinearProjector:
                     projected += 1
         return projected
 
-    def _projection_metadata(self, run_id: str, run: dict[str, Any], item: dict[str, Any]) -> dict[str, Any]:
+    def _projection_metadata(self, run_id: str, run: dict[str, Any], item: dict[str, Any], issue: dict[str, Any] | None = None) -> dict[str, Any]:
         work_item_id = str(item["work_item_id"])
         payload = run.get("payload") if isinstance(run.get("payload"), dict) else {}
+        skipped_label_names = []
+        if isinstance(issue, dict):
+            skipped_label_names = [str(name) for name in issue.get("skipped_label_names") or [] if str(name)]
         return {
             "run_id": run_id,
             "work_item_id": work_item_id,
@@ -273,6 +276,8 @@ class ManagedRunLinearProjector:
             "linear_projection_id": f"{run_id}:{work_item_id}",
             "last_synced_comment_ids": last_synced_comment_ids(payload, work_item_id),
             "work_item_attempt_ids": attempt_ids_for_work_item(payload, work_item_id),
+            "label_projection_degraded": bool(skipped_label_names),
+            "skipped_label_names": skipped_label_names,
             "state": item["state"],
             "gate_status": item.get("gate_status") or "",
         }

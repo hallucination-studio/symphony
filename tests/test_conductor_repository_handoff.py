@@ -164,6 +164,59 @@ async def test_conductor_linear_proxy_ensures_blocks_relation() -> None:
     }
 
 
+async def test_conductor_linear_proxy_creates_child_without_labels_when_label_create_forbidden() -> None:
+    transport = RecordingTransport(
+        [
+            {"data": {"issue": {"team": {"id": "team-1"}, "project": {"id": "project-1"}, "state": {"id": "state-1"}}}},
+            {"data": {"issueLabels": {"nodes": []}}},
+            {
+                "errors": [
+                    {
+                        "message": "not allowed to take action",
+                        "path": ["issueLabelCreate"],
+                        "extensions": {"code": "FORBIDDEN", "statusCode": 403},
+                    }
+                ]
+            },
+            {
+                "data": {
+                    "issueCreate": {
+                        "success": True,
+                        "issue": {
+                            "id": "child-1",
+                            "identifier": "ENG-2",
+                            "title": "Work item",
+                            "description": "Do work",
+                            "url": "https://linear.test/ENG-2",
+                            "delegate": {"id": "agent-1"},
+                            "labels": {"nodes": []},
+                        },
+                    }
+                }
+            },
+        ]
+    )
+    proxy = RepositoryHandoffLinearProxy(endpoint="https://linear.test/graphql", api_key="token", transport=transport)  # type: ignore[arg-type]
+
+    issue = await proxy.create_child_issue_for(
+        parent_issue_id="parent-1",
+        title="Work item",
+        description="Do work",
+        label_names=["symphony:type/work-item"],
+        delegate_id="agent-1",
+    )
+
+    assert issue["id"] == "child-1"
+    assert issue["parent_issue_id"] is None
+    assert issue["labels"] == []
+    assert issue["skipped_label_names"] == ["symphony:type/work-item"]
+    create_request = transport.requests[3]["json"]
+    assert "issueCreate" in create_request["query"]
+    assert create_request["variables"]["parentId"] == "parent-1"
+    assert create_request["variables"]["labelIds"] == []
+    assert create_request["variables"]["delegateId"] == "agent-1"
+
+
 async def test_conductor_linear_proxy_updates_comment_by_id() -> None:
     transport = RecordingTransport(
         [
