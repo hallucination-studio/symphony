@@ -4,10 +4,11 @@ import json
 import re
 import subprocess
 from datetime import datetime, timezone
+import hashlib
 from pathlib import Path
 from typing import Any
 
-from performer_api.managed_runs import ManagedRunRuntimeRole, RuntimeConfigEnvelope
+from performer_api.managed_runs import ManagedRunRuntimeRole, RuntimeConfigEnvelope, TaskOutputManifest, VerificationInputSnapshot, WorkItemResult
 
 from .conductor_models import InstanceRecord
 
@@ -62,6 +63,13 @@ def _completed_attempts(run: dict[str, Any]) -> list[dict[str, Any]]:
     payload = run.get("payload") if isinstance(run.get("payload"), dict) else {}
     raw_attempts = payload.get("completed_attempts")
     return [dict(attempt) for attempt in raw_attempts if isinstance(attempt, dict)] if isinstance(raw_attempts, list) else []
+
+
+def _completed_attempt_for_work_item(run: dict[str, Any], work_item_id: str) -> dict[str, Any]:
+    for attempt in reversed(_completed_attempts(run)):
+        if str(attempt.get("work_item_id") or "") == work_item_id:
+            return attempt
+    return {}
 
 
 def _complete_attempt(attempt: dict[str, Any], *, state: str, events: list[dict[str, Any]] | None = None, thread_id: str = "") -> dict[str, Any]:
@@ -122,8 +130,83 @@ def _read_json(path: Path) -> dict[str, Any]:
     return payload
 
 
+def _verification_input_snapshot(
+    item: dict[str, Any],
+    result: WorkItemResult,
+    instance: InstanceRecord,
+    *,
+    attempt: dict[str, Any],
+    gate_snapshot_hash: str,
+) -> VerificationInputSnapshot:
+    workspace = Path(instance.resolved_repo_path)
+    return VerificationInputSnapshot(
+        work_item_id=str(item["work_item_id"]),
+        execute_attempt_id=str(attempt.get("attempt_id") or ""),
+        base_revision=str(attempt.get("base_revision") or _git_text(workspace, "rev-parse", "HEAD") or "workspace"),
+        branch_name=_git_text(workspace, "branch", "--show-current") or "workspace",
+        commit_sha=_git_text(workspace, "rev-parse", "HEAD") or "workspace",
+        no_change=not bool(result.changed_files or result.undeclared_files),
+        artifact_hashes=_artifact_hashes(result, workspace),
+        declared_commands=list(result.tests.get("green_commands_run") or []),
+        evidence_uri=str(attempt.get("result_path") or ""),
+        gate_snapshot_hash=gate_snapshot_hash,
+    )
+
+
+def _task_output_manifest(
+    item: dict[str, Any],
+    result: WorkItemResult,
+    instance: InstanceRecord,
+    *,
+    attempt: dict[str, Any],
+    plan_version: int,
+) -> TaskOutputManifest:
+    workspace = Path(instance.resolved_repo_path)
+    attempt_id = str(attempt.get("attempt_id") or "")
+    return TaskOutputManifest(
+        work_item_id=str(item["work_item_id"]),
+        verify_attempt_id=f"verify-{attempt_id}" if attempt_id else f"verify-{item['work_item_id']}",
+        plan_version=plan_version,
+        score=3,
+        branch_name=_git_text(workspace, "branch", "--show-current") or "workspace",
+        commit_sha=_git_text(workspace, "rev-parse", "HEAD") or "workspace",
+        artifacts=_artifact_hashes(result, workspace),
+        created_at=_utc_now(),
+    )
+
+
 def _safe_id(value: str) -> str:
     return "".join(ch if ch.isalnum() or ch in {"-", "_"} else "-" for ch in value)[:180]
+
+
+def _artifact_hashes(result: WorkItemResult, workspace: Path) -> list[dict[str, Any]]:
+    artifacts: list[dict[str, Any]] = []
+    for changed in result.changed_files:
+        path = workspace / changed.path
+        item: dict[str, Any] = {"uri": changed.path, "path": changed.path}
+        if path.is_file():
+            item["sha256"] = _sha256(path)
+        artifacts.append(item)
+    return artifacts
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _git_text(workspace: Path, *args: str) -> str:
+    result = subprocess.run(
+        ["git", "-C", str(workspace), *args],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        check=False,
+    )
+    return result.stdout.strip() if result.returncode == 0 else ""
 
 
 def _sanitize(exc: Exception) -> str:

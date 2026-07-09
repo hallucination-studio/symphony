@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from conductor.conductor_managed_run_store import ConductorManagedRunStore
 from performer_api.managed_runs import (
+    GateSnapshot,
+    TaskOutputManifest,
+    VerificationInputSnapshot,
     ManagedRunPlan,
     ManagedRunState,
     ParallelizationPolicy,
@@ -126,6 +129,59 @@ def test_managed_run_store_records_checkpoint_results(tmp_path) -> None:
     assert result["checkpoint_key"] == "wi-1::pytest -q"
     assert store.list_checkpoint_results(run.run_id)[0]["passed"] is True
     assert store.managed_run_view()["runs"][0]["checkpoint_results"][0]["reason"] == "pytest passed"
+
+
+def test_managed_run_store_freezes_gate_snapshots_when_plan_is_saved(tmp_path) -> None:
+    store = ConductorManagedRunStore(tmp_path)
+    run = store.accept_dispatch({"issue_id": "root-1", "issue_identifier": "HELL-4"}, instance_id="instance-1")
+
+    version = store.save_plan(run.run_id, _plan(), backend_session_id="thread-1")
+    snapshots = store.list_gate_snapshots(run.run_id)
+
+    assert version == 1
+    assert [snapshot["work_item_id"] for snapshot in snapshots] == ["wi-1", "wi-2"]
+    assert all(snapshot["frozen"] is True for snapshot in snapshots)
+    assert all(snapshot["pass_threshold"] == 3 for snapshot in snapshots)
+    assert all(str(snapshot["content_hash"]).startswith("sha256:") for snapshot in snapshots)
+    loaded = GateSnapshot.from_dict(store.get_gate_snapshot(str(snapshots[0]["content_hash"])) or {})
+    assert loaded.validation_errors() == []
+
+
+def test_managed_run_store_records_verification_inputs_and_publishes_manifests(tmp_path) -> None:
+    store = ConductorManagedRunStore(tmp_path)
+    run = store.accept_dispatch({"issue_id": "root-1", "issue_identifier": "HELL-5"}, instance_id="instance-1")
+    store.save_plan(run.run_id, _plan(), backend_session_id="thread-1")
+    gate_hash = str(store.list_gate_snapshots(run.run_id)[0]["content_hash"])
+    verification_input = VerificationInputSnapshot(
+        work_item_id="wi-1",
+        execute_attempt_id="execute-1",
+        base_revision="base-sha",
+        branch_name="managed-run/wi-1",
+        commit_sha="commit-sha",
+        no_change=False,
+        artifact_hashes=[{"uri": "artifact://bundle", "sha256": "abc"}],
+        declared_commands=["pytest -q"],
+        evidence_uri="artifact://evidence/wi-1.json",
+        gate_snapshot_hash=gate_hash,
+    )
+    manifest = TaskOutputManifest(
+        work_item_id="wi-1",
+        verify_attempt_id="verify-1",
+        plan_version=1,
+        score=3,
+        branch_name="managed-run/wi-1",
+        commit_sha="commit-sha",
+        artifacts=[{"uri": "artifact://bundle", "sha256": "abc"}],
+        created_at="2026-07-09T00:01:00Z",
+    )
+
+    store.record_verification_input(run.run_id, verification_input)
+    store.publish_task_output_manifest(run.run_id, manifest)
+
+    view = store.managed_run_view()["runs"][0]
+    assert view["verification_inputs"][0]["gate_snapshot_hash"] == gate_hash
+    assert view["manifests"][0]["verify_attempt_id"] == "verify-1"
+    assert view["manifests"][0]["score"] == 3
 
 
 def test_managed_run_view_uses_run_and_work_item_language(tmp_path) -> None:

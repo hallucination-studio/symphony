@@ -137,8 +137,10 @@ class ConductorManagedRunStoreViewMixin:
                     "work_items": self.list_work_items(str(run["run_id"])),
                     "linear_projections": self.list_linear_projections(str(run["run_id"])),
                     "checkpoint_results": self.list_checkpoint_results(str(run["run_id"])),
+                    "gate_snapshots": self.list_gate_snapshots(str(run["run_id"])),
+                    "verification_inputs": self.list_verification_inputs(str(run["run_id"])),
+                    "manifests": self.list_task_output_manifests(str(run["run_id"])),
                     "attempts": run_attempts,
                 }
             )
         return {"runs": runs, "attempts": attempts}
-

@@ -5,11 +5,16 @@ import pytest
 from performer_api.managed_runs import (
     ChangedFile,
     Checkpoint,
+    GateSnapshot,
+    GateStep,
+    GateStepSource,
     ManagedRunPlan,
     ManagedRunPlanValidator,
     ManagedRunPlanValidatorError,
     ParallelizationPolicy,
+    TaskOutputManifest,
     ThreadCompletionReport,
+    VerificationInputSnapshot,
     VerificationRubric,
     WorkItem,
     WorkItemResult,
@@ -130,6 +135,67 @@ def test_managed_run_plan_validator_rejects_prose_checkpoint_verification() -> N
     errors = ManagedRunPlanValidator().validate(plan)
 
     assert ManagedRunPlanValidatorError.INVALID_CHECKPOINT_COMMAND in errors
+
+
+def test_gate_snapshot_is_frozen_hashed_and_requires_authoritative_step() -> None:
+    item = _work_item()
+
+    snapshot = GateSnapshot.from_work_item(
+        run_id="run-1",
+        work_item=item,
+        plan_version=3,
+        creator_attempt_id="plan-attempt-1",
+        created_at="2026-07-09T00:00:00Z",
+    )
+    loaded = GateSnapshot.from_dict(snapshot.to_dict())
+
+    assert loaded == snapshot
+    assert loaded.frozen is True
+    assert loaded.pass_threshold == 3
+    assert loaded.content_hash.startswith("sha256:")
+    assert loaded.validation_errors() == []
+    assert loaded.verification_procedure[0].source is GateStepSource.ISSUE_REQUIREMENT
+
+    advisory_only = GateSnapshot.from_dict(
+        {
+            **snapshot.to_dict(),
+            "verification_procedure": [
+                GateStep(command="pytest -q", source=GateStepSource.PLANNER_INFERRED).to_dict()
+            ],
+        }
+    )
+
+    assert "authoritative_gate_step_required" in advisory_only.validation_errors()
+
+
+def test_verification_input_snapshot_and_task_manifest_roundtrip_with_score_threshold() -> None:
+    verification_input = VerificationInputSnapshot(
+        work_item_id="wi-1",
+        execute_attempt_id="execute-1",
+        base_revision="base-sha",
+        branch_name="managed-run/wi-1",
+        commit_sha="commit-sha",
+        no_change=False,
+        artifact_hashes=[{"uri": "artifact://bundle", "sha256": "abc"}],
+        declared_commands=["pytest -q"],
+        evidence_uri="artifact://evidence/wi-1.json",
+        gate_snapshot_hash="sha256:gate",
+    )
+    manifest = TaskOutputManifest(
+        work_item_id="wi-1",
+        verify_attempt_id="verify-1",
+        plan_version=3,
+        score=3,
+        branch_name="managed-run/wi-1",
+        commit_sha="commit-sha",
+        artifacts=[{"uri": "artifact://bundle", "sha256": "abc"}],
+        created_at="2026-07-09T00:01:00Z",
+    )
+
+    assert VerificationInputSnapshot.from_dict(verification_input.to_dict()) == verification_input
+    assert TaskOutputManifest.from_dict(manifest.to_dict()) == manifest
+    assert manifest.validation_errors() == []
+    assert TaskOutputManifest.from_dict({**manifest.to_dict(), "score": 2}).validation_errors() == ["score_below_pass_threshold"]
 
 
 def test_work_item_result_roundtrips_file_impact_manifest() -> None:

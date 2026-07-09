@@ -8,6 +8,7 @@ from uuid import uuid4
 
 from performer_api.managed_runs import ManagedRunPlan, ManagedRunState, WorkItemState
 
+from conductor.conductor_managed_run_store_artifacts import ConductorManagedRunStoreArtifactsMixin, gate_snapshots_for_plan
 from conductor.conductor_managed_run_store_rows import (
     _json_dumps,
     _json_loads,
@@ -26,7 +27,7 @@ class ManagedRunDispatchAccepted:
     issue_identifier: str
 
 
-class ConductorManagedRunStore(ConductorManagedRunStoreViewMixin):
+class ConductorManagedRunStore(ConductorManagedRunStoreViewMixin, ConductorManagedRunStoreArtifactsMixin):
     def __init__(self, data_root: Path):
         self.data_root = data_root
         self.db_path = data_root / "managed_run.db"
@@ -138,6 +139,7 @@ class ConductorManagedRunStore(ConductorManagedRunStoreViewMixin):
                         removed_id,
                     ),
                 )
+            payload = self._plan_payload_for_save(connection, run_id, plan, version, backend_session_id, now)
             connection.execute(
                 """
                 UPDATE managed_run_runs
@@ -148,7 +150,7 @@ class ConductorManagedRunStore(ConductorManagedRunStoreViewMixin):
                     ManagedRunState.READY.value,
                     version,
                     backend_session_id,
-                    _json_dumps({**self._run_payload(connection, run_id), "plan_validation_failures": 0}),
+                    _json_dumps(payload),
                     now,
                     run_id,
                 ),
@@ -286,6 +288,27 @@ class ConductorManagedRunStore(ConductorManagedRunStoreViewMixin):
         if row is None:
             return {}
         return _json_loads(row["payload_json"])
+
+    def _plan_payload_for_save(
+        self,
+        connection: sqlite3.Connection,
+        run_id: str,
+        plan: ManagedRunPlan,
+        version: int,
+        backend_session_id: str,
+        now: str,
+    ) -> dict[str, Any]:
+        return {
+            **self._run_payload(connection, run_id),
+            "gate_snapshots": gate_snapshots_for_plan(
+                run_id=run_id,
+                plan=plan,
+                plan_version=version,
+                creator_attempt_id=backend_session_id or f"plan-{version}",
+                created_at=now,
+            ),
+            "plan_validation_failures": 0,
+        }
 
     def _init_db(self) -> None:
         with self.connect() as connection:

@@ -15,6 +15,13 @@ from performer_api.managed_runs_enums import (
     WorkItemSliceType,
     WorkItemState,
 )
+from performer_api.managed_runs_gates import (
+    GateSnapshot,
+    GateStep,
+    GateStepSource,
+    TaskOutputManifest,
+    VerificationInputSnapshot,
+)
 from performer_api.managed_runs_plan import (
     Checkpoint,
     ManagedRunPlan,
@@ -45,6 +52,9 @@ __all__ = [
     "CanonicalAgentEventType",
     "ChangedFile",
     "Checkpoint",
+    "GateSnapshot",
+    "GateStep",
+    "GateStepSource",
     "LinearChangeClass",
     "LinearRevisionAction",
     "MANAGED_RUN_BACKENDS_BY_ROLE",
@@ -62,7 +72,9 @@ __all__ = [
     "RuntimeConfigEnvelope",
     "RuntimeProfile",
     "SECRET_SETTING_KEYS",
+    "TaskOutputManifest",
     "ThreadCompletionReport",
+    "VerificationInputSnapshot",
     "VerificationRubric",
     "WorkItem",
     "WorkItemResult",

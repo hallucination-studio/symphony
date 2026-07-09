@@ -18,7 +18,24 @@ state, API/report output, and Linear projection when the design requires it.
 | Projection failures expose sanitized error state in API and durable payload. | `linear-projection.md` | `test_projection_sync_failure_is_visible_in_managed_run_state_and_api` | covered |
 | Attempt comments use durable `attempt_id -> linear_comment_id` replay keys. | `linear-projection.md` | `test_managed_run_projector_projects_attempt_comment_by_durable_comment_id` | covered |
 | Runtime waits use Managed Runs wait state, not legacy human-answer comments. | `linear-projection.md` | `test_runtime_human_answered_ignore_reason_uses_managed_run_language` | covered |
+| Accepted work items freeze immutable gate snapshots with authoritative step provenance and canonical hashes. | `gates-verification-integration.md` | `test_gate_snapshot_is_frozen_hashed_and_requires_authoritative_step`; `test_managed_run_store_freezes_gate_snapshots_when_plan_is_saved` | covered |
+| Terminal execute attempts record verification input snapshots and Conductor-published task output manifests. | `gates-verification-integration.md` | `test_verification_input_snapshot_and_task_manifest_roundtrip_with_score_threshold`; `test_managed_run_store_records_verification_inputs_and_publishes_manifests`; `test_managed_run_driver_runs_plan_work_item_and_verify` | covered |
+| Dependent work items consume upstream output only through verified manifests. | `gates-verification-integration.md` | `test_managed_run_driver_starts_dependent_work_item_from_joined_verified_manifests` | covered |
+| Verified parallel branches are joined deterministically before downstream execution. | `gates-verification-integration.md` | `test_managed_run_branch_join_merges_verified_manifest_branches`; `test_managed_run_driver_starts_dependent_work_item_from_joined_verified_manifests` | covered |
+| Verified branch merge conflicts block the affected work item with visible action required. | `gates-verification-integration.md` | `test_managed_run_branch_join_blocks_on_conflicting_verified_branches`; `test_managed_run_driver_blocks_dependent_work_item_on_join_conflict` | covered |
+| Linear child topology mirrors work-item dependencies as `blocks` relations with operator metadata. | `linear-projection.md` | `test_managed_run_projector_projects_dependency_blocks_and_operator_metadata` | covered |
 | Real E2E classifies external instability separately from product failures. | `real-run-testing-guide.md` | `test_real_codex_connectivity_probe_classifies_upstream_and_auth_failures` | covered |
+
+## Remaining Blocking Gaps
+
+| Requirement | Source | Needed Blocking Test | Status |
+|---|---|---|---|
+| The local verifier creates a fresh disposable workspace, materializes the execute commit, verifies artifact hashes, and detects mutation after gate execution. | `gates-verification-integration.md` | Driver/verifier test using a real git repo and a mutating gate command. | gap |
+| Plan revision approval mirrors unchanged, canceled, and new work-item issues with visible revision context. | `linear-projection.md` | Projection test for an approved revision containing kept, canceled, and added child issues plus refreshed `blocks`. | gap |
+| Work-item blocked human action writes one durable instruction update and resumes only by blocked-state flip, not by free-text comments. | `linear-projection.md` | Store/projection/ingestion test for wait identity, instruction comment idempotency, ignored comment-only resume, and accepted state-flip resume. | gap |
+| Linear dependency ingestion is union-only and never deletes local edges on lagging reads. | `linear-projection.md` | Topology ingestion test that adds human-created `blocks`, drops canceled edges, and commits nothing when unchanged. | gap |
+| Attempt comment projection covers plan, execute, and verify attempts with stable durable `attempt_id -> linear_comment_id` mappings. | `linear-projection.md` | Projection test with multiple attempt kinds, replayed sync, and verify score/error updates. | gap |
+| Final release evidence includes gate hash, verification input, verifier command/evidence, score, manifest, join or conflict result, and final rubric. | `gates-verification-integration.md` | Managed-run report/view test asserting the complete evidence bundle. | gap |
 
 ## External E2E Boundary
 

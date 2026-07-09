@@ -23,6 +23,7 @@ class Tracker:
         self.transitions: list[tuple[str, list[str], str]] = []
         self.comments: list[tuple[str, str]] = []
         self.updated_comments: list[tuple[str, str]] = []
+        self.relations: list[tuple[str, str, str]] = []
 
     async def fetch_child_issues(self, parent_issue_id: str, *, label_name: str | None = None) -> list[dict[str, object]]:
         return [
@@ -68,6 +69,10 @@ class Tracker:
     async def update_issue_comment(self, comment_id: str, body: str) -> dict[str, object]:
         self.updated_comments.append((comment_id, body))
         return {"success": True, "comment_id": comment_id, "body": body}
+
+    async def ensure_issue_relation(self, *, issue_id: str, related_issue_id: str, relation_type: str) -> dict[str, object]:
+        self.relations.append((issue_id, related_issue_id, relation_type))
+        return {"success": True, "id": f"relation-{len(self.relations)}"}
 
 
 def _plan() -> ManagedRunPlan:
@@ -311,3 +316,50 @@ async def test_managed_run_projector_projects_attempt_comment_by_durable_comment
     mapping = run["payload"]["attempt_comment_projections"]["attempt-wi-1"]
     assert mapping["linear_comment_id"] == "comment-1"
     assert mapping["work_item_id"] == "wi-1"
+
+
+async def test_managed_run_projector_projects_dependency_blocks_and_operator_metadata(tmp_path) -> None:
+    store = ConductorManagedRunStore(tmp_path)
+    coordinator = ConductorManagedRunCoordinator(store=store)
+    accepted = coordinator.accept_dispatch({"issue_id": "root-1", "issue_identifier": "HELL-1"}, instance_id="instance-1")
+    base = _plan()
+    dependent = WorkItem.from_dict(
+        {
+            **base.work_items[0].to_dict(),
+            "id": "wi-2",
+            "title": "Add dependent projection",
+            "dependencies": ["wi-1"],
+            "files_likely_touched": ["packages/conductor/src/conductor/conductor_managed_run_projection.py"],
+        }
+    )
+    plan = ManagedRunPlan.from_dict({**base.to_dict(), "work_items": [base.work_items[0].to_dict(), dependent.to_dict()]})
+    coordinator.apply_plan(accepted.run_id, plan, backend_session_id="thread-1")
+    store.merge_run_payload(
+        accepted.run_id,
+        {
+            "active_attempts": [
+                {
+                    "attempt_id": "attempt-wi-2",
+                    "kind": "work_item",
+                    "work_item_id": "wi-2",
+                    "state": "running",
+                }
+            ],
+            "last_managed_run_policy_id": "policy-group-1",
+            "last_managed_run_policy_version": 4,
+        },
+    )
+    tracker = Tracker()
+
+    await ManagedRunLinearProjector(store=store, tracker=tracker, root_issue_id="root-1").reconcile_once(accepted.run_id)
+
+    assert ("child-1", "child-2", "blocks") in tracker.relations
+    projection = {item["work_item_id"]: item for item in store.list_linear_projections(accepted.run_id)}["wi-2"]
+    metadata = projection["metadata"]
+    assert metadata["parent_issue_id"] == "root-1"
+    assert metadata["plan_version"] == 1
+    assert metadata["active_policy_id"] == "policy-group-1"
+    assert metadata["active_policy_version"] == 4
+    assert metadata["operator_status"] == "todo"
+    assert metadata["work_item_attempt_ids"] == ["attempt-wi-2"]
+    assert metadata["linear_projection_id"] == projection["projection_id"]

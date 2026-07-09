@@ -5,7 +5,7 @@ from typing import Any
 
 import httpx
 
-from .conductor_managed_run_driver import drive_managed_run_runs_once
+from .conductor_managed_run_driver_service import drive_managed_run_runs_once
 from .conductor_service_types import CoordinationResult
 
 

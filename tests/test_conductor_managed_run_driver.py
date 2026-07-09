@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,7 @@ from performer_api.managed_runs import (
     ManagedRunPlan,
     ManagedRunState,
     ParallelizationPolicy,
+    TaskOutputManifest,
     VerificationRubric,
     WorkItem,
     WorkItemResult,
@@ -139,6 +141,21 @@ def _parallel_plan() -> ManagedRunPlan:
     return ManagedRunPlan.from_dict({**_plan().to_dict(), "work_items": [first.to_dict(), second.to_dict()]})
 
 
+def _dependent_join_plan() -> ManagedRunPlan:
+    base = _parallel_plan()
+    downstream = WorkItem.from_dict(
+        {
+            **_plan().work_items[0].to_dict(),
+            "id": "wi-3",
+            "title": "Implement joined result",
+            "dependencies": ["wi-1", "wi-2"],
+            "files_likely_touched": ["JOINED_RESULT.md"],
+            "parallelization": {"safe_to_parallelize": False, "reason": "joins verified upstream output"},
+        }
+    )
+    return ManagedRunPlan.from_dict({**base.to_dict(), "work_items": [*base.to_dict()["work_items"], downstream.to_dict()]})
+
+
 def _work_item_result(work_item_id: str = "wi-1", path: str = "SYMPHONY_REAL_E2E_RESULT.md") -> WorkItemResult:
     green_command = "python -c \"print('managed-run verification ok')\""
     return WorkItemResult(
@@ -208,6 +225,12 @@ async def test_managed_run_driver_runs_plan_work_item_and_verify(tmp_path: Path)
     assert run["state"] == ManagedRunState.VERIFIED.value
     assert item["state"] == WorkItemState.DONE.value
     assert [call["mode"] for call in runtime_manager.starts] == ["plan", "execute"]
+    view = store.managed_run_view()["runs"][0]
+    assert view["verification_inputs"][0]["execute_attempt_id"] == work_attempt["attempt_id"]
+    assert view["verification_inputs"][0]["gate_snapshot_hash"] == view["gate_snapshots"][0]["content_hash"]
+    assert view["manifests"][0]["work_item_id"] == "wi-1"
+    assert view["manifests"][0]["verify_attempt_id"] == f"verify-{work_attempt['attempt_id']}"
+    assert view["manifests"][0]["score"] == 3
 
 
 @pytest.mark.asyncio
@@ -432,6 +455,84 @@ async def test_managed_run_driver_blocks_when_independent_green_command_fails(tm
 
 
 @pytest.mark.asyncio
+async def test_managed_run_driver_starts_dependent_work_item_from_joined_verified_manifests(tmp_path: Path) -> None:
+    store = ConductorManagedRunStore(tmp_path / "managed_run")
+    coordinator = ConductorManagedRunCoordinator(store=store)
+    runtime_manager = FakeRuntimeManager()
+    instance = _instance(tmp_path)
+    _init_repo(Path(instance.resolved_repo_path))
+    _write_commit(Path(instance.resolved_repo_path), "base.txt", "base\n", "base")
+    _branch_commit(Path(instance.resolved_repo_path), "managed-run/wi-1", "a.txt", "one\n", "wi-1")
+    _git(Path(instance.resolved_repo_path), "checkout", "main")
+    _branch_commit(Path(instance.resolved_repo_path), "managed-run/wi-2", "b.txt", "two\n", "wi-2")
+    _git(Path(instance.resolved_repo_path), "checkout", "main")
+    instances = {instance.id: instance}
+    accepted = coordinator.accept_dispatch({"issue_id": "issue-1", "issue_identifier": "HELL-1"}, instance_id=instance.id)
+    coordinator.apply_plan(accepted.run_id, _dependent_join_plan(), backend_session_id="thread-1")
+    _complete_with_manifest(store, accepted.run_id, "wi-1", branch_name="managed-run/wi-1")
+    _complete_with_manifest(store, accepted.run_id, "wi-2", branch_name="managed-run/wi-2")
+    driver = ConductorManagedRunDriver(
+        store=store,
+        coordinator=coordinator,
+        runtime_manager=runtime_manager,
+        instance_lookup=instances.get,
+        instance_update=lambda updated: instances.__setitem__(updated.id, updated),
+        runtime_config=_runtime_config(),
+    )
+
+    started = await driver.drive_once()
+
+    request = json.loads(Path(runtime_manager.starts[0]["attempt_request_path"]).read_text(encoding="utf-8"))
+    workspace = Path(request["workspace_path"])
+    join = store.get_run(accepted.run_id)["payload"]["branch_joins"][0]
+    assert started["started"] == 1
+    assert request["work_item"]["id"] == "wi-3"
+    assert workspace == Path(join["worktree_path"])
+    assert join["status"] == "integrated"
+    assert (workspace / "a.txt").read_text(encoding="utf-8") == "one\n"
+    assert (workspace / "b.txt").read_text(encoding="utf-8") == "two\n"
+
+
+@pytest.mark.asyncio
+async def test_managed_run_driver_blocks_dependent_work_item_on_join_conflict(tmp_path: Path) -> None:
+    store = ConductorManagedRunStore(tmp_path / "managed_run")
+    coordinator = ConductorManagedRunCoordinator(store=store)
+    runtime_manager = FakeRuntimeManager()
+    instance = _instance(tmp_path)
+    _init_repo(Path(instance.resolved_repo_path))
+    _write_commit(Path(instance.resolved_repo_path), "same.txt", "base\n", "base")
+    _branch_commit(Path(instance.resolved_repo_path), "managed-run/wi-1", "same.txt", "one\n", "wi-1")
+    _git(Path(instance.resolved_repo_path), "checkout", "main")
+    _branch_commit(Path(instance.resolved_repo_path), "managed-run/wi-2", "same.txt", "two\n", "wi-2")
+    _git(Path(instance.resolved_repo_path), "checkout", "main")
+    accepted = coordinator.accept_dispatch({"issue_id": "issue-1", "issue_identifier": "HELL-1"}, instance_id=instance.id)
+    coordinator.apply_plan(accepted.run_id, _dependent_join_plan(), backend_session_id="thread-1")
+    _complete_with_manifest(store, accepted.run_id, "wi-1", branch_name="managed-run/wi-1")
+    _complete_with_manifest(store, accepted.run_id, "wi-2", branch_name="managed-run/wi-2")
+    driver = ConductorManagedRunDriver(
+        store=store,
+        coordinator=coordinator,
+        runtime_manager=runtime_manager,
+        instance_lookup={instance.id: instance}.get,
+        instance_update=lambda updated: None,
+        runtime_config=_runtime_config(),
+    )
+
+    blocked = await driver.drive_once()
+
+    run = store.get_run(accepted.run_id)
+    item = next(row for row in store.list_work_items(accepted.run_id) if row["work_item_id"] == "wi-3")
+    join = run["payload"]["branch_joins"][0]
+    assert blocked["failed"] == 1
+    assert runtime_manager.starts == []
+    assert run["state"] == ManagedRunState.BLOCKED.value
+    assert item["state"] == WorkItemState.BLOCKED.value
+    assert item["gate_status"] == "verified_branch_join_conflict:same.txt"
+    assert join["status"] == "conflicted"
+    assert join["conflict_files"] == ["same.txt"]
+
+
+@pytest.mark.asyncio
 async def test_managed_run_driver_fails_plan_turn_when_process_exits_without_result(tmp_path: Path) -> None:
     store = ConductorManagedRunStore(tmp_path / "managed_run")
     coordinator = ConductorManagedRunCoordinator(store=store)
@@ -475,3 +576,43 @@ def _write_result(path: str, payload: dict[str, Any]) -> None:
     result_path = Path(path)
     result_path.parent.mkdir(parents=True, exist_ok=True)
     result_path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _complete_with_manifest(store: ConductorManagedRunStore, run_id: str, work_item_id: str, *, branch_name: str) -> None:
+    store.update_work_item_state(run_id, work_item_id, WorkItemState.DONE, gate_status="verification passed")
+    store.publish_task_output_manifest(
+        run_id,
+        TaskOutputManifest(
+            work_item_id=work_item_id,
+            verify_attempt_id=f"verify-{work_item_id}",
+            plan_version=1,
+            score=3,
+            branch_name=branch_name,
+            commit_sha="commit-sha",
+            artifacts=[],
+            created_at="2026-07-09T00:00:00Z",
+        ),
+    )
+
+
+def _init_repo(repo: Path) -> None:
+    _git(repo, "init", "-b", "main")
+    _git(repo, "config", "user.email", "test@example.com")
+    _git(repo, "config", "user.name", "Test User")
+
+
+def _branch_commit(repo: Path, branch: str, path: str, text: str, message: str) -> None:
+    _git(repo, "checkout", "-B", branch)
+    _write_commit(repo, path, text, message)
+
+
+def _write_commit(repo: Path, path: str, text: str, message: str) -> None:
+    target = repo / path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(text, encoding="utf-8")
+    _git(repo, "add", path)
+    _git(repo, "commit", "-m", message)
+
+
+def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(["git", "-C", str(repo), *args], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
