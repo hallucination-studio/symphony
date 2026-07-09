@@ -47,6 +47,7 @@ class ManagedRunLinearProjector:
             return 0
         projected = 0
         projected += await self._project_parent_summary(run_id, run)
+        projected += await self._project_attempt_comments(run_id, run, "", self.root_issue_id)
         existing = await self._existing_child_issues()
         existing_by_work_item = self._existing_by_work_item(run_id, existing)
         issue_by_work_item = dict(existing_by_work_item)
@@ -183,7 +184,8 @@ class ManagedRunLinearProjector:
         update_comment = getattr(self.tracker, "update_issue_comment", None)
         if not callable(comment_issue):
             return 0
-        payload = run.get("payload") if isinstance(run.get("payload"), dict) else {}
+        latest = self.store.get_run(run_id) or run
+        payload = latest.get("payload") if isinstance(latest.get("payload"), dict) else {}
         existing = payload.get("attempt_comment_projections") if isinstance(payload.get("attempt_comment_projections"), dict) else {}
         mappings = {str(key): dict(value) for key, value in existing.items() if isinstance(value, dict)}
         projected = 0
@@ -208,7 +210,7 @@ class ManagedRunLinearProjector:
                 "work_item_id": work_item_id,
                 "linear_issue_id": issue_id,
                 "linear_comment_id": saved_comment_id,
-                    "updated_at": summary_text(attempt.get("completed_at") or attempt.get("started_at")),
+                "updated_at": summary_text(attempt.get("completed_at") or attempt.get("started_at")),
             }
             projected += 1
         if projected:

@@ -318,6 +318,37 @@ async def test_managed_run_projector_projects_attempt_comment_by_durable_comment
     assert mapping["work_item_id"] == "wi-1"
 
 
+async def test_managed_run_projector_projects_plan_execute_and_verify_attempt_comments(tmp_path) -> None:
+    store = ConductorManagedRunStore(tmp_path)
+    coordinator = ConductorManagedRunCoordinator(store=store)
+    accepted = coordinator.accept_dispatch({"issue_id": "root-1", "issue_identifier": "HELL-1"}, instance_id="instance-1")
+    coordinator.apply_plan(accepted.run_id, _plan(), backend_session_id="thread-1")
+    store.merge_run_payload(
+        accepted.run_id,
+        {
+            "completed_attempts": [
+                {"attempt_id": "attempt-plan", "kind": "plan", "state": "succeeded", "thread_id": "thread-1"},
+                {"attempt_id": "attempt-execute", "kind": "work_item", "mode": "execute", "work_item_id": "wi-1", "state": "succeeded"},
+                {"attempt_id": "attempt-verify", "kind": "verify", "mode": "verify", "work_item_id": "wi-1", "state": "succeeded", "verify_score": 3},
+            ]
+        },
+    )
+    tracker = Tracker()
+    projector = ManagedRunLinearProjector(store=store, tracker=tracker, root_issue_id="root-1")
+
+    await projector.reconcile_once(accepted.run_id)
+    await projector.reconcile_once(accepted.run_id)
+
+    assert len(tracker.comments) == 3
+    assert tracker.comments[0][0] == "root-1"
+    assert "attempt_id: attempt-plan" in tracker.comments[0][1]
+    assert {issue_id for issue_id, body in tracker.comments if "attempt-execute" in body or "attempt-verify" in body} == {"child-1"}
+    assert any("verify_score: 3" in body for _, body in tracker.comments)
+    assert len(tracker.updated_comments) == 3
+    mappings = (store.get_run(accepted.run_id) or {})["payload"]["attempt_comment_projections"]
+    assert sorted(mappings) == ["attempt-execute", "attempt-plan", "attempt-verify"]
+
+
 async def test_managed_run_projector_projects_dependency_blocks_and_operator_metadata(tmp_path) -> None:
     store = ConductorManagedRunStore(tmp_path)
     coordinator = ConductorManagedRunCoordinator(store=store)
