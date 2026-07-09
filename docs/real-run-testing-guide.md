@@ -97,7 +97,8 @@ A real run evidence bundle should include:
 - Attempt records with mode, lease id, fencing token, graph revision, policy revision, status, and sanitized error.
 - Verification input snapshots, verifier score, and frozen gate procedure output.
 - Task output manifest, integration queue status, integrated revision or conflict error.
-- Human waits and `[Human Action]` child issues when applicable.
+- Human waits on the affected pipeline node, including the need_human workflow state,
+  instruction comment, and state-flip resume evidence when applicable.
 - Podium pipeline report/API payload with sanitized runtime config.
 - Performer log excerpts around plan, execute, verify, manifest publication, integration, rework, replan, and human wait.
 - Cleanup audit after the run.
@@ -111,7 +112,7 @@ For pipeline acceptance, success requires:
 - verify pass publishes a verified-but-unintegrated manifest before integration;
 - integration success records the integrated revision, or conflict creates a pipeline human wait;
 - Linear projection includes `graph_id`, `node_id`, `plan_attempt_id`, `gate_snapshot_hash`, `conductor_revision`, and `operator_status`.
-- Runtime approval/permission/tool-input waits appear in the Linear projection with `operator_status: waiting_for_runtime_input`, `operator_wait_kind`, and a Runtime Wait detail block, and Conductor also creates a `[Human Action]` child issue containing `symphony_runtime_wait` metadata.
+- Runtime approval/permission/tool-input waits appear in the Linear projection with `operator_status: waiting_for_runtime_input`, `operator_wait_kind`, and a Runtime Wait detail block.
 
 ## Stall Diagnosis
 
@@ -162,19 +163,19 @@ Common real-run failure signatures:
 - downstream node starts while a blocker lacks `VERIFY_PASSED` with score `>= 3`.
 - manifest exists but integration queue never completes.
 - Linear projection lacks graph metadata or shows a stale conductor revision.
-- a human-action scenario resumes from a parent issue comment: this is invalid. Conductor must create a `[Human Action]` child issue and resume only after that child issue is moved to `Done`.
+- a human-action scenario resumes from a comment alone: this is invalid. Conductor resumes only from the affected node issue being moved out of the need_human/blocked workflow state.
 
 ## Human Action Flow
 
-Any real-run scenario that needs human judgment must validate the Linear child issue flow:
+Any real-run scenario that needs human judgment must validate the in-place node issue flow:
 
-1. Conductor creates a direct child issue titled `[Human Action] <parent>: ...`.
-2. The pipeline node enters `AWAITING_HUMAN` and records the wait reason.
-3. The child description contains the reason, required action, `Human response`, and the instruction to move the child to `Done`.
-4. The human completes the child issue and moves that child issue to `Done`.
-5. Performer resumes only from the child issue state. Parent issue comments, including command-like comments, are informational only and do not count as acceptance evidence.
+1. The pipeline node issue enters the need_human/blocked workflow state and records the wait reason.
+2. Conductor posts one durable `comment_id`-replayed instruction comment on that node explaining the structured reason, what information to provide, and how to resume.
+3. The human adds any required context as comments on that same node issue.
+4. The human moves that node issue out of the need_human/blocked workflow state.
+5. Performer resumes only from the state flip. Comments, including command-like comments, are informational only and do not count as acceptance evidence.
 
-For input requests, the `Human response` section must contain the answer. A child issue marked `Done` with an empty response must not resume the parent task.
+For input requests, the node issue comments must contain the answer. A comment without the state flip must not resume the task.
 
 ## Codex Requirements
 
@@ -193,15 +194,15 @@ For long real turns:
 
 Use these terms consistently:
 
-- `retry`: a failed or timed-out fenced attempt can be rerun under a fresh lease.
-- `rework`: verifier failure returns the node to `REWORKING`.
-- `replan`: configured rework exhaustion invokes planning with failure context and replaces the failed node with a validated subgraph revision.
+- `retry`: a failed or timed-out fenced attempt in the same stage can be rerun under a fresh lease, bounded by the retry counter.
+- `need_human`: same-stage retry exhaustion or an operator-required condition blocks the affected node in place until a state flip resumes it.
+- `replan`: a verifier judgment that the approach is wrong invokes planning with failure context and replaces the failed node with a validated superseding node/subgraph revision.
 
 Evidence should show:
 
 - attempts are fenced by graph revision, policy revision, lease id, and gate hash;
-- rework increments node state/count without replacing the graph revision;
-- replan creates a new immutable graph revision and supersedes the failed node.
+- retry increments the node retry count without replacing the graph revision;
+- replan creates a new immutable graph revision and supersedes the failed node, preserving inherited block edges.
 
 ## Minimum Local Verification
 

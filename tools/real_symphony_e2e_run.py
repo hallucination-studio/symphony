@@ -945,11 +945,28 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
             status, body = http_json(method, api_url(conductor_port, path), payload)
             evidence.check(f"conductor-api-removed:{method} {path}", status == 404, status=status, body=body)
 
-        if not (root / "final-issue-tree.json").exists():
-            tree = await fetch_linear_issue_tree(token, linear["issue"]["id"])
-            tree_path = root / "final-issue-tree.json"
+        tree_path = root / "final-issue-tree.json"
+        final_states: dict[str, Any] | None = None
+        if args.pipeline_gates and not expected_failure and not permission_approval_probe and pipeline_scenario == "replan":
+            tree, final_states = await _wait_for_pipeline_linear_issue_tree_finalized(
+                token=token,
+                issue_id=linear["issue"]["id"],
+                timeout_seconds=min(max(args.stage_timeout, 10), 120),
+            )
             tree_path.write_text(json.dumps(tree, indent=2, sort_keys=True), encoding="utf-8")
             evidence.artifact("final_issue_tree", tree_path)
+        elif not tree_path.exists():
+            tree = await fetch_linear_issue_tree(token, linear["issue"]["id"])
+            tree_path.write_text(json.dumps(tree, indent=2, sort_keys=True), encoding="utf-8")
+            evidence.artifact("final_issue_tree", tree_path)
+        else:
+            tree = json.loads(tree_path.read_text(encoding="utf-8"))
+        if final_states is not None:
+            evidence.check(
+                "stage:pipeline-linear-final-states",
+                bool(final_states.get("passed")),
+                **{key: value for key, value in final_states.items() if key != "passed"},
+            )
         _archive_pipeline_artifacts(evidence=evidence, root=root, data_root=data_root, instance_id=instance_id)
 
         if pipeline_scenario == "overall-dod":
@@ -1629,6 +1646,59 @@ def _check_pipeline_scenario_acceptance(evidence: Evidence, scenario: str, pipel
         _check_pipeline_scenario_acceptance(evidence, "integration-conflict", pipeline_view)
         _check_pipeline_scenario_acceptance(evidence, "runtime-wait", pipeline_view)
         _check_pipeline_scenario_acceptance(evidence, "gate-normalization", pipeline_view)
+
+
+def _pipeline_linear_issue_tree_finalized(tree: dict[str, Any]) -> dict[str, Any]:
+    children = (tree.get("children") or {}).get("nodes")
+    if not isinstance(children, list):
+        children = []
+    pipeline_children = [
+        child
+        for child in children
+        if isinstance(child, dict)
+        and any(
+            isinstance(label, dict) and label.get("name") == "performer:type/pipeline-node"
+            for label in ((child.get("labels") or {}).get("nodes") or [])
+        )
+    ]
+    child_states = [
+        {
+            "identifier": child.get("identifier"),
+            "title": child.get("title"),
+            "state": (child.get("state") or {}).get("name") if isinstance(child.get("state"), dict) else None,
+            "state_type": (child.get("state") or {}).get("type") if isinstance(child.get("state"), dict) else None,
+        }
+        for child in pipeline_children
+    ]
+    root_state = tree.get("state") if isinstance(tree.get("state"), dict) else {}
+    root_state_type = str(root_state.get("type") or "")
+    children_final = bool(pipeline_children) and all(
+        str(item.get("state_type") or "") in {"completed", "canceled"} for item in child_states
+    )
+    return {
+        "passed": root_state_type == "completed" and children_final,
+        "root_identifier": tree.get("identifier"),
+        "root_state": root_state.get("name"),
+        "root_state_type": root_state_type,
+        "pipeline_children": child_states,
+    }
+
+
+async def _wait_for_pipeline_linear_issue_tree_finalized(
+    *,
+    token: str,
+    issue_id: str,
+    timeout_seconds: int,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    deadline = time.monotonic() + max(timeout_seconds, 1)
+    last_tree: dict[str, Any] = {}
+    last_result: dict[str, Any] = {"passed": False, "reason": "not_checked"}
+    while True:
+        last_tree = await fetch_linear_issue_tree(token, issue_id)
+        last_result = _pipeline_linear_issue_tree_finalized(last_tree)
+        if bool(last_result.get("passed")) or time.monotonic() >= deadline:
+            return last_tree, last_result
+        await asyncio.sleep(2)
 
 
 def _safe_int(value: Any) -> int:

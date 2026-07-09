@@ -190,6 +190,13 @@ class ConductorPipelineStore:
                   payload_json TEXT NOT NULL,
                   updated_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS linear_projection_comments (
+                  comment_key TEXT PRIMARY KEY,
+                  linear_issue_id TEXT NOT NULL,
+                  comment_id TEXT NOT NULL,
+                  payload_json TEXT NOT NULL,
+                  updated_at TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS stuck_node_observations (
                   graph_revision INTEGER NOT NULL,
                   node_id TEXT NOT NULL,
@@ -651,8 +658,8 @@ class ConductorPipelineStore:
         children = self.children_for(parent_node_id)
         if not children:
             return self.get_node(parent_node_id).state
-        if any(child.state is GraphNodeState.AWAITING_HUMAN for child in children):
-            return GraphNodeState.AWAITING_HUMAN
+        if any(child.state is GraphNodeState.NEED_HUMAN for child in children):
+            return GraphNodeState.NEED_HUMAN
         if any(child.state is GraphNodeState.FAILED for child in children):
             return GraphNodeState.FAILED
         if all(child.state is GraphNodeState.SUPERSEDED for child in children):
@@ -693,7 +700,7 @@ class ConductorPipelineStore:
             rework_count=parent.rework_count,
             replan_depth=parent.replan_depth,
             superseded_by=list(parent.superseded_by),
-            human_reason=parent.human_reason if state is GraphNodeState.AWAITING_HUMAN else None,
+            human_reason=parent.human_reason if state is GraphNodeState.NEED_HUMAN else None,
         )
 
     def gate_for_node(self, node_id: str) -> GateSpecSnapshot | None:
@@ -824,6 +831,7 @@ class ConductorPipelineStore:
         ttl_seconds: int = 300,
         graph_revision: int | None = None,
         policy_revision: int | None = None,
+        kind: str | None = None,
     ) -> WorkerLease:
         try:
             existing_attempt = self.get_attempt(attempt_id)
@@ -861,6 +869,7 @@ class ConductorPipelineStore:
             fencing_token=lease.fencing_token,
             gate_snapshot_hash=node.gate_snapshot_hash,
             started_at=_format_time(_utc(now)),
+            kind=kind,
         )
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -945,6 +954,7 @@ class ConductorPipelineStore:
             error=attempt.error,
             process_pid=process_pid,
             thread_id=attempt.thread_id,
+            kind=attempt.kind,
         )
         with self.connect() as connection:
             connection.execute(
@@ -1052,6 +1062,7 @@ class ConductorPipelineStore:
             error=error,
             process_pid=attempt.process_pid,
             thread_id=attempt.thread_id,
+            kind=attempt.kind,
         )
         connection.execute(
             """
@@ -1065,14 +1076,10 @@ class ConductorPipelineStore:
             "SELECT payload_json FROM node_runtime_state WHERE node_id = ?",
             (attempt.node_id,),
         ).fetchone()
-        runtime_payload = _json_loads(runtime_row["payload_json"]) if runtime_row is not None else {}
-        rework_count = int(runtime_payload.get("rework_count") or 0)
         if attempt.mode is RuntimeMode.PLAN:
             retry_state = GraphNodeState.REPLANNING
         elif attempt.mode is RuntimeMode.VERIFY:
             retry_state = GraphNodeState.VERIFYING
-        elif rework_count > 0:
-            retry_state = GraphNodeState.REWORKING
         else:
             retry_state = GraphNodeState.READY
         self._update_node_state_on_connection(
@@ -1543,7 +1550,7 @@ class ConductorPipelineStore:
         self._update_node_state_on_connection(
             connection,
             node_id,
-            GraphNodeState.AWAITING_HUMAN,
+            GraphNodeState.NEED_HUMAN,
             human_reason=reason,
         )
         return payload
@@ -1585,12 +1592,14 @@ class ConductorPipelineStore:
                             """,
                             ("resolved", _json_dumps(integration_payload), payload["resolved_at"], integration_id),
                         )
+            node_id = str(payload["node_id"])
             self._update_node_state_on_connection(
                 connection,
-                str(payload["node_id"]),
+                node_id,
                 _resume_state_for_human_wait(payload),
                 human_reason=None,
             )
+        self._drive_parent_aggregate_state(node_id)
         return payload
 
     def attach_human_wait_child_issue(self, wait_id: str, *, child_issue_id: str) -> dict[str, Any]:
@@ -1804,6 +1813,44 @@ class ConductorPipelineStore:
             ).fetchall()
         return [_json_loads(row["payload_json"]) for row in rows]
 
+    def get_linear_projection_comment(self, comment_key: str) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT payload_json FROM linear_projection_comments WHERE comment_key = ?",
+                (comment_key,),
+            ).fetchone()
+        return _json_loads(row["payload_json"]) if row is not None else None
+
+    def record_linear_projection_comment(
+        self,
+        *,
+        comment_key: str,
+        linear_issue_id: str,
+        comment_id: str,
+    ) -> dict[str, Any]:
+        payload = {
+            "comment_key": comment_key,
+            "linear_issue_id": linear_issue_id,
+            "comment_id": comment_id,
+            "updated_at": _now(),
+        }
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO linear_projection_comments (
+                  comment_key, linear_issue_id, comment_id, payload_json, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(comment_key) DO UPDATE SET
+                  linear_issue_id = excluded.linear_issue_id,
+                  comment_id = excluded.comment_id,
+                  payload_json = excluded.payload_json,
+                  updated_at = excluded.updated_at
+                """,
+                (comment_key, linear_issue_id, comment_id, _json_dumps(payload), payload["updated_at"]),
+            )
+        return payload
+
     def prune_linear_projections_except(self, node_ids: set[str]) -> int:
         with self.connect() as connection:
             rows = connection.execute("SELECT projection_id, node_id FROM linear_projections").fetchall()
@@ -1848,8 +1895,12 @@ class ConductorPipelineStore:
                     "state": attempt.state.value,
                     "score": attempt.score,
                     "thread_id": attempt.thread_id,
+                    "kind": attempt.kind,
                     "process_pid": attempt.process_pid,
                     "lease_id": attempt.lease_id,
+                    "started_at": attempt.started_at,
+                    "error": attempt.error,
+                    "completed_at": attempt.completed_at,
                 }
                 for attempt in attempts
             ],
@@ -1872,8 +1923,8 @@ class ConductorPipelineStore:
             for wait in self.list_human_waits()
             if str(wait.get("node_id") or "") == node.node_id and str(wait.get("status") or "waiting") == "waiting"
         ]
-        if active_human_waits or node.state is GraphNodeState.AWAITING_HUMAN:
-            return "awaiting_human_action"
+        if active_human_waits or node.state is GraphNodeState.NEED_HUMAN:
+            return "need_human"
         for mode in RuntimeMode:
             if self.active_lease(node.node_id, mode) is not None:
                 return f"running_{mode.value}"
@@ -2175,7 +2226,10 @@ class ConductorPipelineStore:
             visible_error = _visible_attempt_error(result)
             self._finish_attempt(result, state=terminal_state, at=at, error=visible_error)
             self._deactivate_lease(result.lease_id)
-            self._create_attempt_failure_human_wait(result, error=visible_error)
+            if result.mode in {RuntimeMode.EXECUTE, RuntimeMode.VERIFY}:
+                self._handle_same_stage_attempt_failure(result, error=visible_error)
+            else:
+                self._create_attempt_failure_human_wait(result, error=visible_error)
             return True
         if isinstance(result, PlanAttemptResult):
             if result.proposal is None:
@@ -2255,13 +2309,10 @@ class ConductorPipelineStore:
                 self.publish_task_output_manifest(manifest)
                 self.enqueue_integration(manifest)
             else:
-                next_rework_count = node.rework_count + 1
-                max_rework_attempts = self.active_runtime_config().scheduler_policy.max_rework_attempts
                 self.update_node_state(
                     result.node_id,
-                    GraphNodeState.REPLANNING if next_rework_count >= max_rework_attempts else GraphNodeState.REWORKING,
+                    GraphNodeState.REPLANNING,
                     verify_score=result.score,
-                    rework_count=next_rework_count,
                 )
         else:
             return False
@@ -2294,8 +2345,6 @@ class ConductorPipelineStore:
         parent_id = node.parent_node_id
         while parent_id:
             refreshed = self.refresh_aggregate_parent_state(parent_id)
-            if refreshed.state is GraphNodeState.PLANNED:
-                return
             self.update_node_state(
                 parent_id,
                 refreshed.state,
@@ -2418,6 +2467,7 @@ class ConductorPipelineStore:
             error=error,
             process_pid=attempt.process_pid,
             thread_id=result.thread_id or attempt.thread_id,
+            kind=result.kind or attempt.kind,
         )
         with self.connect() as connection:
             connection.execute(
@@ -2467,6 +2517,7 @@ class ConductorPipelineStore:
             error=error,
             process_pid=attempt.process_pid,
             thread_id=attempt.thread_id,
+            kind=attempt.kind,
         )
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -2511,6 +2562,51 @@ class ConductorPipelineStore:
                 "lease_id": result.lease_id,
                 "error": visible_error,
             },
+        )
+
+    def _handle_same_stage_attempt_failure(
+        self,
+        result: PlanAttemptResult | ExecuteAttemptResult | VerifyAttemptResult,
+        *,
+        error: str,
+    ) -> None:
+        if error == HumanEscalationReason.THREAD_LOST.value or "thread_lost" in error.lower():
+            self._create_attempt_failure_human_wait(result, error=error)
+            return
+        node = self.get_node(result.node_id)
+        next_retry_count = node.rework_count + 1
+        max_retries = self.active_runtime_config().scheduler_policy.max_rework_attempts
+        if next_retry_count >= max_retries:
+            reason = (
+                HumanEscalationReason.GATE_UNEXECUTABLE
+                if result.mode is RuntimeMode.VERIFY
+                else HumanEscalationReason.BACKEND_UNAVAILABLE
+            )
+            self.create_human_wait(
+                result.node_id,
+                reason=reason.value,
+                details={
+                    "mode": result.mode.value,
+                    "attempt_id": result.attempt_id,
+                    "lease_id": result.lease_id,
+                    "error": error,
+                    "retry_count": next_retry_count,
+                    "max_retries": max_retries,
+                },
+            )
+            self.update_node_state(
+                result.node_id,
+                GraphNodeState.NEED_HUMAN,
+                rework_count=next_retry_count,
+                human_reason=reason,
+            )
+            self._drive_parent_aggregate_state(result.node_id)
+            return
+        self.update_node_state(
+            result.node_id,
+            _retry_state_for_attempt_mode(result.mode),
+            rework_count=next_retry_count,
+            human_reason=None,
         )
 
     def pipeline_view(self) -> PipelineView:
@@ -2607,7 +2703,7 @@ class ConductorPipelineStore:
         for node in self._topological_nodes(nodes):
             blocked_by: list[str] = []
             earliest_mode = _mode_for_state(node.state) if node.state in _DISPATCHABLE_STATES or node.state is GraphNodeState.PLANNED else None
-            if node.state is GraphNodeState.AWAITING_HUMAN:
+            if node.state is GraphNodeState.NEED_HUMAN:
                 reason = f" ({node.human_reason.value})" if node.human_reason is not None else ""
                 blocked_by.append(f"{node.node_id}: awaiting human{reason}")
             elif node.state not in _PREDICTABLE_DISPATCH_STATES:
@@ -2671,14 +2767,14 @@ class ConductorPipelineStore:
         children = self.children_for(blocker.node_id)
         if children:
             derived_state = self.derive_parent_state(blocker.node_id)
-            if derived_state is GraphNodeState.AWAITING_HUMAN:
+            if derived_state is GraphNodeState.NEED_HUMAN:
                 return [f"{blocker.node_id}: awaiting human"]
             if derived_state is not GraphNodeState.VERIFY_PASSED:
                 return [f"{blocker.node_id}: verify not passed"]
             if not all(self._child_ready_for_aggregate_downstream(child) for child in children):
                 return [f"{blocker.node_id}: integration not completed"]
             return []
-        if blocker.state is GraphNodeState.AWAITING_HUMAN:
+        if blocker.state is GraphNodeState.NEED_HUMAN:
             reason = f" ({blocker.human_reason.value})" if blocker.human_reason is not None else ""
             return [f"{blocker.node_id}: awaiting human{reason}"]
         if not _node_verify_passed(blocker):
@@ -2744,7 +2840,7 @@ class ConductorPipelineStore:
                 GraphNodeState.VERIFY_PASSED,
                 GraphNodeState.FAILED,
                 GraphNodeState.SUPERSEDED,
-                GraphNodeState.AWAITING_HUMAN,
+                GraphNodeState.NEED_HUMAN,
             },
             "next_action": _node_next_action(node),
         }
@@ -2810,7 +2906,7 @@ class PipelineScheduler:
             GraphNodeState.VERIFY_PASSED,
             GraphNodeState.FAILED,
             GraphNodeState.SUPERSEDED,
-            GraphNodeState.AWAITING_HUMAN,
+            GraphNodeState.NEED_HUMAN,
         }
         active_lease_node_ids = {lease.node_id for lease in self.store.list_active_leases()}
         open_human_wait_node_ids = {
@@ -2881,12 +2977,13 @@ class PipelineLinearProjector:
             issue_id = str(projection.get("linear_issue_id") or "")
             if node_id and issue_id and node_id not in existing:
                 existing[node_id] = {"id": issue_id}
-        for node in self.store.list_nodes():
+        for node in _nodes_parent_first(self.store.list_nodes()):
             is_root_issue_node = node.node_id == revision.root_node_id and node.issue_id == self.root_issue_id
             issue = {"id": self.root_issue_id} if is_root_issue_node else existing.get(node.node_id)
             if issue is None:
+                parent_issue_id = self._projection_parent_issue_id(node, issue_ids_by_node)
                 issue = await self.tracker.create_child_issue_for(
-                    parent_issue_id=self.root_issue_id,
+                    parent_issue_id=parent_issue_id,
                     title=node.title,
                     description=self._description_block(node, revision),
                     label_names=["performer:type/pipeline-node"],
@@ -2899,6 +2996,8 @@ class PipelineLinearProjector:
             if update_description is not None:
                 await update_description(issue_id, "SYMPHONY PIPELINE NODE", self._description_block(node, revision))
             metadata = self._metadata(node, revision)
+            projected += await self._project_attempt_comments(issue_id=issue_id, metadata=metadata)
+            projected += await self._project_need_human_instruction(issue_id=issue_id, node=node, metadata=metadata)
             projected += await self._project_workflow_state(issue_id, node)
             projected += await self._project_agent_activity(
                 issue_id=issue_id,
@@ -2917,12 +3016,85 @@ class PipelineLinearProjector:
         projected += await self._project_root_status_comment(revision)
         return projected
 
-    async def _project_root_status_comment(self, revision: GraphRevision) -> int:
-        update_comment = getattr(self.tracker, "update_issue_comment_marker_block", None)
-        if update_comment is None:
+    async def _project_attempt_comments(self, *, issue_id: str, metadata: dict[str, Any]) -> int:
+        projected = 0
+        for attempt in metadata.get("attempts") or []:
+            if not isinstance(attempt, dict):
+                continue
+            attempt_id = str(attempt.get("attempt_id") or "").strip()
+            if not attempt_id:
+                continue
+            if await self._upsert_projection_comment(
+                issue_id=issue_id,
+                comment_key=f"attempt:{attempt_id}",
+                body=_attempt_comment_block(attempt),
+            ):
+                projected += 1
+        return projected
+
+    async def _project_need_human_instruction(
+        self,
+        *,
+        issue_id: str,
+        node: GraphNode,
+        metadata: dict[str, Any],
+    ) -> int:
+        if node.state is not GraphNodeState.NEED_HUMAN:
             return 0
-        await update_comment(self.root_issue_id, "SYMPHONY PIPELINE STATUS", self._root_status_block(revision))
-        return 1
+        reason = node.human_reason.value if node.human_reason is not None else "NEED_HUMAN"
+        waits = [wait for wait in metadata.get("human_waits") or [] if isinstance(wait, dict)]
+        wait = waits[-1] if waits else {}
+        comment_suffix = str(wait.get("wait_id") or f"{node.node_id}:{reason}")
+        projected = await self._upsert_projection_comment(
+            issue_id=issue_id,
+            comment_key=f"need-human:{comment_suffix}",
+            body=_need_human_instruction_block(node, wait),
+        )
+        return 1 if projected else 0
+
+    async def _project_root_status_comment(self, revision: GraphRevision) -> int:
+        projected = await self._upsert_projection_comment(
+            issue_id=self.root_issue_id,
+            comment_key=f"root-status:{self.root_issue_id}",
+            body=self._root_status_block(revision),
+        )
+        return 1 if projected else 0
+
+    async def _upsert_projection_comment(self, *, issue_id: str, comment_key: str, body: str) -> bool:
+        create_comment = getattr(self.tracker, "comment_issue", None)
+        if create_comment is None:
+            return False
+        stored = self.store.get_linear_projection_comment(comment_key)
+        update_comment = getattr(self.tracker, "update_issue_comment", None)
+        if (
+            isinstance(stored, dict)
+            and str(stored.get("linear_issue_id") or "") == issue_id
+            and str(stored.get("comment_id") or "").strip()
+        ):
+            comment_id = str(stored["comment_id"])
+            if update_comment is None:
+                return False
+            result = await update_comment(comment_id, body)
+            if isinstance(result, dict) and result.get("success"):
+                next_comment_id = str(result.get("comment_id") or comment_id)
+                self.store.record_linear_projection_comment(
+                    comment_key=comment_key,
+                    linear_issue_id=issue_id,
+                    comment_id=next_comment_id,
+                )
+                return True
+        result = await create_comment(issue_id, body)
+        if not isinstance(result, dict) or not result.get("success"):
+            return False
+        comment_id = str(result.get("comment_id") or "").strip()
+        if not comment_id:
+            return False
+        self.store.record_linear_projection_comment(
+            comment_key=comment_key,
+            linear_issue_id=issue_id,
+            comment_id=comment_id,
+        )
+        return True
 
     async def _project_agent_activity(
         self,
@@ -2969,7 +3141,12 @@ class PipelineLinearProjector:
 
     def _graph_complete(self) -> bool:
         nodes = self.store.list_nodes()
-        return bool(nodes) and all(node.state is GraphNodeState.VERIFY_PASSED for node in nodes)
+        complete_states = {GraphNodeState.VERIFY_PASSED, GraphNodeState.SUPERSEDED}
+        return (
+            bool(nodes)
+            and any(node.state is GraphNodeState.VERIFY_PASSED for node in nodes)
+            and all(node.state in complete_states for node in nodes)
+        )
 
     def _agent_session_id_for_node(self, node_id: str) -> str:
         context = self.store.resolved_dispatch_context_for_node(node_id)
@@ -3068,7 +3245,35 @@ class PipelineLinearProjector:
             return 0
         edges = self._linear_block_edges(children, node_by_issue_id)
         graph_revision = self.store.merge_human_added_blocks(edges, reason="human_linear_blocks_ingested")
-        return 1 if graph_revision is not None else 0
+        resumed = self._ingest_need_human_state_flips(children)
+        return (1 if graph_revision is not None else 0) + resumed
+
+    def _ingest_need_human_state_flips(self, children: dict[str, dict[str, Any]]) -> int:
+        resumed = 0
+        waiting_by_node: dict[str, list[dict[str, Any]]] = {}
+        for wait in self.store.list_human_waits():
+            if str(wait.get("status") or "waiting") != "waiting":
+                continue
+            waiting_by_node.setdefault(str(wait.get("node_id") or ""), []).append(wait)
+        if not waiting_by_node:
+            return 0
+        for node_id, waits in waiting_by_node.items():
+            try:
+                node = self.store.get_node(node_id)
+            except KeyError:
+                continue
+            if node.state is not GraphNodeState.NEED_HUMAN:
+                continue
+            issue = children.get(node_id)
+            if issue is None or _linear_issue_in_need_human_state(issue):
+                continue
+            for wait in waits:
+                self.store.resume_human_wait(
+                    str(wait["wait_id"]),
+                    resolution=f"Linear issue state flip resumed node {node_id}.",
+                )
+                resumed += 1
+        return resumed
 
     def _linear_block_edges(
         self,
@@ -3093,18 +3298,42 @@ class PipelineLinearProjector:
                     edges.append((blocker_node_id, source_node_id))
         return list(dict.fromkeys(edges))
 
+    def _projection_parent_issue_id(self, node: GraphNode, issue_ids_by_node: dict[str, str]) -> str:
+        parent_node_id = str(node.parent_node_id or "").strip()
+        if parent_node_id:
+            parent_issue_id = issue_ids_by_node.get(parent_node_id)
+            if parent_issue_id:
+                return parent_issue_id
+            try:
+                parent_node = self.store.get_node(parent_node_id)
+            except KeyError:
+                parent_node = None
+            if parent_node is not None and parent_node.issue_id == self.root_issue_id:
+                return self.root_issue_id
+        return self.root_issue_id
+
     async def _existing_node_issues(self) -> dict[str, dict[str, Any]]:
         fetch = getattr(self.tracker, "fetch_child_issues", None)
         if fetch is None:
             return {}
-        children = await fetch(self.root_issue_id, label_name="performer:type/pipeline-node")
         result: dict[str, dict[str, Any]] = {}
-        for child in children or []:
-            if not isinstance(child, dict):
+        pending = [self.root_issue_id]
+        seen_issue_ids: set[str] = set()
+        while pending:
+            parent_issue_id = pending.pop(0)
+            if parent_issue_id in seen_issue_ids:
                 continue
-            node_id = _projected_node_id_from_description(str(child.get("description") or ""))
-            if node_id:
-                result[node_id] = child
+            seen_issue_ids.add(parent_issue_id)
+            children = await fetch(parent_issue_id, label_name="performer:type/pipeline-node")
+            for child in children or []:
+                if not isinstance(child, dict):
+                    continue
+                issue_id = str(child.get("id") or "")
+                node_id = _projected_node_id_from_description(str(child.get("description") or ""))
+                if node_id:
+                    result[node_id] = child
+                if issue_id:
+                    pending.append(issue_id)
         return result
 
     def _metadata(self, node: GraphNode, revision: GraphRevision) -> dict[str, Any]:
@@ -3147,6 +3376,8 @@ class PipelineLinearProjector:
             )
             if attempt.get("thread_id"):
                 lines.append(f"      thread_id: {_yaml_scalar(attempt.get('thread_id'))}")
+            if attempt.get("kind"):
+                lines.append(f"      kind: {_yaml_scalar(attempt.get('kind'))}")
             if debug_projection:
                 lines.extend(
                     [
@@ -3415,6 +3646,7 @@ class PipelineCoordinator:
                     now=now,
                     graph_revision=graph_revision,
                     policy_revision=policy_revision,
+                    kind=profile.backend if profile is not None else None,
                 )
                 try:
                     paths = self._attempt_paths(Path(instance.instance_dir), attempt_id)
@@ -3511,6 +3743,7 @@ class PipelineCoordinator:
             lease_id=lease_id,
             fencing_token="",
             error=error,
+            kind=_runtime_kind_for_mode(self.store.active_runtime_config(), mode),
         )
         self.store._finish_attempt(result, state=AttemptState.FAILED, at=at, error=error)
         self.store._deactivate_lease(lease_id)
@@ -3762,9 +3995,10 @@ class PipelineCoordinator:
     ) -> dict[str, Any]:
         node = self.store.get_node(node_id)
         dispatch_context = self.store.resolved_dispatch_context_for_node(node_id)
+        envelope = self.store.active_runtime_config()
         graph_revision = self.store.current_graph_revision() if graph_revision is None else graph_revision
         policy_revision = (
-            self.store.active_runtime_config().scheduler_policy.version
+            envelope.scheduler_policy.version
             if policy_revision is None
             else policy_revision
         )
@@ -3810,6 +4044,7 @@ class PipelineCoordinator:
                 ),
                 failure_context=failure_context,
                 expected_thread_id=self.store.latest_thread_id_for_node(node_id),
+                kind=_runtime_kind_for_mode(envelope, mode),
             )
             return request.to_dict()
         gate = self.store.gate_for_node(node_id)
@@ -3823,6 +4058,7 @@ class PipelineCoordinator:
             "gate_snapshot": gate,
             "lease_id": lease.lease_id,
             "fencing_token": lease.fencing_token,
+            "kind": _runtime_kind_for_mode(envelope, mode),
         }
         if mode is RuntimeMode.EXECUTE:
             blocker_ids = self.store.blockers_for(node_id)
@@ -3875,7 +4111,6 @@ class PipelineCoordinator:
 
 _DISPATCHABLE_STATES = {
     GraphNodeState.READY,
-    GraphNodeState.REWORKING,
     GraphNodeState.REPLANNING,
     GraphNodeState.VERIFYING,
 }
@@ -3921,6 +4156,106 @@ def _plan_validator_errors_from_error(error: str) -> set[PlanValidatorError]:
 def _plan_validation_error_summary(errors: set[PlanValidatorError]) -> str:
     names = ", ".join(sorted(error.value for error in errors))
     return f"invalid plan proposal: {names}"
+
+
+def _attempt_comment_block(attempt: dict[str, Any]) -> str:
+    mode = str(attempt.get("mode") or "").strip()
+    state = str(attempt.get("state") or "").strip()
+    duration = _format_duration(attempt.get("started_at"), attempt.get("completed_at"))
+    kind = _comment_scalar(attempt.get("kind"))
+    thread_id = _comment_scalar(attempt.get("thread_id"))
+    completed_at = _comment_scalar(attempt.get("completed_at"))
+    lines = [
+        f"{_attempt_mode_icon(mode)} {_attempt_mode_label(mode)} Attempt",
+        f"{_attempt_state_icon(state)} Status: {_comment_scalar(state)}",
+    ]
+    if duration:
+        lines.append(f"⏱️  Duration: {duration}")
+    if kind:
+        lines.append(f"🧩 Kind: {kind}")
+    if thread_id:
+        lines.append(f"🔗 Thread: {thread_id}")
+    if completed_at:
+        lines.append(f"⏱️  Completed: {completed_at}")
+    lines.append(f"ID: {_comment_scalar(attempt.get('attempt_id'))}")
+    error = str(attempt.get("error") or "").strip()
+    if error:
+        lines.append(f"⚠️ Error: {_comment_scalar(_sanitize_error(error))}")
+    return "\n".join(lines)
+
+
+def _attempt_mode_icon(mode: str) -> str:
+    return {
+        RuntimeMode.PLAN.value: "🔵",
+        RuntimeMode.EXECUTE.value: "🟣",
+        RuntimeMode.VERIFY.value: "🟢",
+    }.get(mode, "⚪")
+
+
+def _attempt_mode_label(mode: str) -> str:
+    return {
+        RuntimeMode.PLAN.value: "Plan",
+        RuntimeMode.EXECUTE.value: "Execute",
+        RuntimeMode.VERIFY.value: "Verify",
+    }.get(mode, mode.title() if mode else "Unknown")
+
+
+def _attempt_state_icon(state: str) -> str:
+    return {
+        AttemptState.SUCCEEDED.value: "✅",
+        AttemptState.FAILED.value: "❌",
+        AttemptState.RUNNING.value: "🔄",
+        AttemptState.TIMED_OUT.value: "⏱️",
+        AttemptState.PENDING.value: "⏳",
+    }.get(state, "⚪")
+
+
+def _format_duration(started_at_str: Any, completed_at_str: Any) -> str:
+    started_at = _parse_time(started_at_str)
+    completed_at = _parse_time(completed_at_str)
+    if started_at is None or completed_at is None:
+        return ""
+    total_seconds = int((completed_at - started_at).total_seconds())
+    if total_seconds < 0:
+        return ""
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours:
+        return f"{hours}h {minutes:02d}m {seconds:02d}s"
+    if minutes:
+        return f"{minutes}m {seconds:02d}s"
+    return f"{seconds}s"
+
+
+def _comment_scalar(value: Any) -> str:
+    if value is None:
+        return ""
+    return str(value).replace("\x00", "").replace("\r", " ").replace("\n", " ")[:500]
+
+
+def _need_human_instruction_block(node: GraphNode, wait: dict[str, Any]) -> str:
+    reason = str(wait.get("reason") or (node.human_reason.value if node.human_reason is not None else "NEED_HUMAN"))
+    details = wait.get("details") if isinstance(wait.get("details"), dict) else {}
+    lines = [
+        "Symphony needs human input on this node.",
+        "",
+        "```yaml",
+        "symphony_need_human:",
+        f"  node_id: {_comment_scalar(node.node_id)}",
+        f"  reason: {_comment_scalar(reason)}",
+        f"  wait_id: {_comment_scalar(wait.get('wait_id'))}",
+        f"  mode: {_comment_scalar(details.get('mode'))}",
+        f"  attempt_id: {_comment_scalar(details.get('attempt_id'))}",
+        "```",
+        "",
+        "Add the missing information as a comment on this issue.",
+        "Move this issue out of the need_human state to resume.",
+        "Commenting alone will not resume Symphony.",
+    ]
+    error = str(details.get("error") or "").strip()
+    if error:
+        lines.extend(["", f"Sanitized reason: {_sanitize_error(error)}"])
+    return "\n".join(lines)
 
 
 def _resume_state_for_human_wait(payload: dict[str, Any]) -> GraphNodeState:
@@ -3973,11 +4308,11 @@ def _linear_workflow_state_target_for_node(
     if node.state in {
         GraphNodeState.EXECUTING,
         GraphNodeState.VERIFYING,
-        GraphNodeState.REWORKING,
         GraphNodeState.REPLANNING,
-        GraphNodeState.AWAITING_HUMAN,
     }:
         return (["In Progress", "Started", "Doing"], "started")
+    if node.state is GraphNodeState.NEED_HUMAN:
+        return (["Blocked", "Needs Human", "Need Human"], "started")
     if node.state is GraphNodeState.VERIFY_PASSED:
         return (["In Review", "Review"], "started")
     if node.state in {GraphNodeState.FAILED, GraphNodeState.SUPERSEDED, GraphNodeState.EXECUTE_FAILED, GraphNodeState.VERIFY_FAILED}:
@@ -3997,7 +4332,7 @@ def _linear_activity_content(
     status = str(metadata.get("operator_status") or node.state.value)
     if graph_complete:
         return {"type": "response", "body": f"Symphony completed all pipeline nodes for node {node.node_id}."}
-    if status == "awaiting_human_action":
+    if status in {"need_human", "awaiting_human_action"}:
         reason = node.human_reason.value if node.human_reason is not None else "human action required"
         return {"type": "elicitation", "body": f"Symphony is awaiting human action on node {node.node_id}: {reason}."}
     if node.state is GraphNodeState.FAILED:
@@ -4029,7 +4364,7 @@ def _mode_for_state(state: GraphNodeState) -> RuntimeMode:
 def _queued_mode_for_state(state: GraphNodeState) -> RuntimeMode | None:
     if state is GraphNodeState.REPLANNING:
         return RuntimeMode.PLAN
-    if state in {GraphNodeState.READY, GraphNodeState.REWORKING}:
+    if state is GraphNodeState.READY:
         return RuntimeMode.EXECUTE
     if state is GraphNodeState.VERIFYING:
         return RuntimeMode.VERIFY
@@ -4045,6 +4380,26 @@ def _projected_node_id_from_description(description: str) -> str | None:
     return None
 
 
+def _nodes_parent_first(nodes: list[GraphNode]) -> list[GraphNode]:
+    by_id = {node.node_id: node for node in nodes}
+    visited: set[str] = set()
+    ordered: list[GraphNode] = []
+
+    def visit(node: GraphNode) -> None:
+        if node.node_id in visited:
+            return
+        parent_id = str(node.parent_node_id or "")
+        parent = by_id.get(parent_id)
+        if parent is not None:
+            visit(parent)
+        visited.add(node.node_id)
+        ordered.append(node)
+
+    for node in nodes:
+        visit(node)
+    return ordered
+
+
 def _issue_relations(issue: dict[str, Any]) -> list[dict[str, Any]]:
     relations = issue.get("relations")
     if isinstance(relations, dict):
@@ -4053,6 +4408,21 @@ def _issue_relations(issue: dict[str, Any]) -> list[dict[str, Any]]:
     if isinstance(relations, list):
         return [relation for relation in relations if isinstance(relation, dict)]
     return []
+
+
+def _linear_issue_in_need_human_state(issue: dict[str, Any]) -> bool:
+    state = issue.get("state")
+    state_name = ""
+    state_type = ""
+    if isinstance(state, dict):
+        state_name = str(state.get("name") or "").strip().lower()
+        state_type = str(state.get("type") or "").strip().lower()
+    else:
+        state_name = str(state or issue.get("state_name") or "").strip().lower()
+        state_type = str(issue.get("state_type") or "").strip().lower()
+    if state_name in {"blocked", "needs human", "need human", "need_human"}:
+        return True
+    return state_type == "blocked"
 
 
 def prepare_mode_environment(
@@ -4073,6 +4443,13 @@ def _runtime_profile_preflight_error(mode: RuntimeMode, profile: RuntimeProfile 
     if profile.backend not in RUNTIME_BACKENDS_BY_MODE.get(mode, set()):
         return f"unsupported runtime backend for {mode.value}: {profile.backend}"
     return None
+
+
+def _runtime_kind_for_mode(envelope: RuntimeConfigEnvelope, mode: RuntimeMode) -> str | None:
+    profile = envelope.profiles.get(mode)
+    if profile is None:
+        return None
+    return str(profile.backend or "").strip() or None
 
 
 def materialize_planner_workspace(attempt_dir: Path, resolved_repo_path: str | Path | None) -> Path:
@@ -4283,7 +4660,7 @@ def _failed_state_for_mode(mode: RuntimeMode) -> GraphNodeState:
         return GraphNodeState.EXECUTE_FAILED
     if mode is RuntimeMode.VERIFY:
         return GraphNodeState.VERIFY_FAILED
-    return GraphNodeState.AWAITING_HUMAN
+    return GraphNodeState.NEED_HUMAN
 
 
 def _visible_attempt_error(result: PlanAttemptResult | ExecuteAttemptResult | VerifyAttemptResult) -> str:
@@ -4390,11 +4767,9 @@ def _node_next_action(node: GraphNode) -> str:
         return "wait_for_execute_result"
     if node.state is GraphNodeState.VERIFYING:
         return "dispatch_or_wait_for_verify"
-    if node.state is GraphNodeState.REWORKING:
-        return "dispatch_execute_rework"
     if node.state is GraphNodeState.REPLANNING:
         return "dispatch_plan_rewrite"
-    if node.state is GraphNodeState.AWAITING_HUMAN:
+    if node.state is GraphNodeState.NEED_HUMAN:
         return "wait_for_human_action"
     return "terminal"
 

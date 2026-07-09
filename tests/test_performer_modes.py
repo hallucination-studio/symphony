@@ -341,6 +341,7 @@ async def test_plan_mode_writes_structured_result_file(tmp_path: Path) -> None:
                 "lease_id": "lease-plan",
                 "fencing_token": "token-plan",
                 "workspace_path": str(workspace),
+                "kind": "claude",
             }
         ),
         encoding="utf-8",
@@ -387,6 +388,7 @@ async def test_plan_mode_writes_structured_result_file(tmp_path: Path) -> None:
     assert payload["policy_revision"] == 3
     assert payload["lease_id"] == "lease-plan"
     assert payload["fencing_token"] == "token-plan"
+    assert payload["kind"] == "claude"
     assert payload["proposal"]["graph_id"] == "graph-1"
     assert payload["proposal"]["nodes"][0]["gate_snapshot_hash"] == payload["proposal"]["gates"][0]["hash"]
     assert backend.calls == 1
@@ -882,6 +884,7 @@ async def test_verify_mode_scores_snapshot_against_gate_threshold(tmp_path: Path
                 "gate_snapshot_hash": gate.hash,
                 "gate_snapshot": gate.to_dict(),
                 "verification_input": verification_input,
+                "kind": "local-verifier",
             }
         ),
         encoding="utf-8",
@@ -896,6 +899,7 @@ async def test_verify_mode_scores_snapshot_against_gate_threshold(tmp_path: Path
     assert payload["graph_revision"] == 5
     assert payload["policy_revision"] == 2
     assert payload["lease_id"] == "lease-verify"
+    assert payload["kind"] == "local-verifier"
     assert payload["execute_attempt_id"] == "exec-1"
 
 
@@ -1449,6 +1453,7 @@ async def test_execute_mode_collects_git_patch_and_snapshot(tmp_path: Path) -> N
                 "gate_snapshot_hash": "sha256:gate",
                 "workspace_path": str(repo),
                 "base_revision": base_revision,
+                "kind": "claude",
             }
         ),
         encoding="utf-8",
@@ -1461,6 +1466,7 @@ async def test_execute_mode_collects_git_patch_and_snapshot(tmp_path: Path) -> N
     assert payload["status"] == "succeeded"
     assert payload["graph_revision"] == 4
     assert payload["lease_id"] == "lease-exec"
+    assert payload["kind"] == "claude"
     assert snapshot["base_revision"] == base_revision
     assert snapshot["patch_hash"].startswith("sha256:")
     assert Path(snapshot["patch_uri"].removeprefix("file://")).read_text(encoding="utf-8")

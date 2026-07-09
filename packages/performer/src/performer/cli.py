@@ -54,10 +54,9 @@ PLAN_RESULT_SCHEMA: dict[str, object] = {
                                     "verifying",
                                     "verify_passed",
                                     "verify_failed",
-                                    "reworking",
                                     "replanning",
                                     "superseded",
-                                    "awaiting_human",
+                                    "need_human",
                                     "failed",
                                 ],
                             },
@@ -298,6 +297,7 @@ async def _run_plan_mode(payload: dict[str, object], *, agent_backend: Any | Non
             **_fencing_fields(payload),
             "gate_snapshot_hash": "",
             "thread_id": getattr(result, "thread_id", None),
+            "kind": _payload_kind(payload, default="codex"),
             "proposal": proposal.to_dict(),
         }
     return _failed_plan_result(
@@ -326,6 +326,7 @@ def _failed_plan_result(
         "proposal": None,
         "error": error,
         "thread_id": thread_id,
+        "kind": _payload_kind(payload, default="codex"),
     }
 
 
@@ -524,6 +525,7 @@ async def _run_execute_mode(payload: dict[str, object], *, agent_backend: Any | 
                 "gate_snapshot_hash": gate_hash,
                 "verification_input": {},
                 "error": str(exc),
+                "kind": _payload_kind(payload, default="codex"),
             }
         try:
             on_event = _attempt_event_printer(RuntimeMode.EXECUTE, attempt_id=attempt_id, node_id=node_id)
@@ -587,6 +589,7 @@ async def _run_execute_mode(payload: dict[str, object], *, agent_backend: Any | 
         "node_id": node_id,
         "gate_snapshot_hash": gate_hash,
         "thread_id": locals().get("result") and getattr(locals()["result"], "thread_id", None),
+        "kind": _payload_kind(payload, default="codex"),
         "verification_input": verification_input,
     }
 
@@ -610,6 +613,7 @@ def _failed_execute_result(
         "verification_input": {},
         "error": error,
         "thread_id": thread_id,
+        "kind": _payload_kind(payload, default="codex"),
     }
 
 
@@ -767,6 +771,10 @@ def _thread_state_workspace_path(payload: dict[str, object], *, fallback: Path) 
     return fallback
 
 
+def _payload_kind(payload: dict[str, object], *, default: str) -> str:
+    return _optional_payload_str(payload.get("kind")) or default
+
+
 def _execute_repository_path(payload: dict[str, object]) -> str | None:
     repository = payload.get("repository")
     if isinstance(repository, dict):
@@ -826,6 +834,7 @@ def _run_verify_mode(payload: dict[str, object]) -> dict[str, object]:
         "passed": True,
         "gate_snapshot_hash": gate_hash,
         "verification_input": dict(verification_input),
+        "kind": _payload_kind(payload, default="local-verifier"),
     }
 
 
@@ -848,6 +857,7 @@ def _failed_verify_result(
         "passed": False,
         "reason": sanitized_reason,
         "error": sanitized_reason,
+        "kind": _payload_kind(payload, default="local-verifier"),
     }
 
 
@@ -870,6 +880,7 @@ def _failed_gate_verify_result(
         "passed": False,
         "error": sanitized_reason,
         "verification_input": dict(verification_input),
+        "kind": _payload_kind(payload, default="local-verifier"),
     }
 
 

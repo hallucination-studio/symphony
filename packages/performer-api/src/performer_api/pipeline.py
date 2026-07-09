@@ -48,11 +48,20 @@ class GraphNodeState(StrEnum):
     VERIFYING = "verifying"
     VERIFY_PASSED = "verify_passed"
     VERIFY_FAILED = "verify_failed"
-    REWORKING = "reworking"
     REPLANNING = "replanning"
     SUPERSEDED = "superseded"
-    AWAITING_HUMAN = "awaiting_human"
+    NEED_HUMAN = "need_human"
+    AWAITING_HUMAN = "need_human"
     FAILED = "failed"
+
+    @classmethod
+    def from_value(cls, value: Any) -> GraphNodeState:
+        normalized = str(value or cls.PLANNED.value)
+        if normalized == "awaiting_human":
+            normalized = cls.NEED_HUMAN.value
+        if normalized == "reworking":
+            normalized = cls.READY.value
+        return cls(normalized)
 
 
 class AttemptState(StrEnum):
@@ -431,7 +440,7 @@ class GraphNode:
         return cls(
             node_id=str(payload.get("node_id") or ""),
             title=str(payload.get("title") or ""),
-            state=GraphNodeState(str(payload.get("state") or GraphNodeState.PLANNED.value)),
+            state=GraphNodeState.from_value(payload.get("state") or GraphNodeState.PLANNED.value),
             issue_id=_optional_str(payload.get("issue_id")),
             issue_identifier=_optional_str(payload.get("issue_identifier")),
             parent_node_id=_optional_str(payload.get("parent_node_id")),
@@ -563,6 +572,7 @@ class AttemptRecord:
     error: str | None = None
     process_pid: int | None = None
     thread_id: str | None = None
+    kind: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -582,6 +592,7 @@ class AttemptRecord:
             "error": self.error,
             "process_pid": self.process_pid,
             "thread_id": self.thread_id,
+            "kind": self.kind,
         }
 
     @classmethod
@@ -603,6 +614,7 @@ class AttemptRecord:
             error=_optional_str(payload.get("error")),
             process_pid=_optional_int(payload.get("process_pid")),
             thread_id=_optional_str(payload.get("thread_id")),
+            kind=_optional_str(payload.get("kind")),
         )
 
 
@@ -661,6 +673,7 @@ class FencedAttemptResult:
     fencing_token: str
     error: str | None = None
     thread_id: str | None = None
+    kind: str | None = None
 
     mode: RuntimeMode = RuntimeMode.EXECUTE
 
@@ -677,6 +690,7 @@ class FencedAttemptResult:
             "fencing_token": self.fencing_token,
             "error": self.error,
             "thread_id": self.thread_id,
+            "kind": self.kind,
         }
 
 
@@ -699,6 +713,7 @@ class PlanAttemptRequest:
     pipeline_intent: dict[str, Any] = field(default_factory=dict)
     failure_context: dict[str, Any] = field(default_factory=dict)
     expected_thread_id: str | None = None
+    kind: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -723,6 +738,7 @@ class PlanAttemptRequest:
             pipeline_intent=_dict(payload.get("pipeline_intent")),
             failure_context=_dict(payload.get("failure_context")),
             expected_thread_id=_optional_str(payload.get("expected_thread_id")),
+            kind=_optional_str(payload.get("kind")),
         )
 
 
@@ -750,6 +766,7 @@ class PlanAttemptResult(FencedAttemptResult):
             fencing_token=str(payload.get("fencing_token") or ""),
             error=_optional_str(payload.get("error")),
             thread_id=_optional_str(payload.get("thread_id")),
+            kind=_optional_str(payload.get("kind")),
             proposal=PlanProposal.from_dict(proposal_payload) if isinstance(proposal_payload, dict) else None,
         )
 
@@ -773,6 +790,7 @@ class ExecuteAttemptRequest:
     reason: str | None = None
     expected_thread_id: str | None = None
     thread_state_workspace_path: str | None = None
+    kind: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -794,6 +812,7 @@ class ExecuteAttemptRequest:
             "reason": self.reason,
             "expected_thread_id": self.expected_thread_id,
             "thread_state_workspace_path": self.thread_state_workspace_path,
+            "kind": self.kind,
         }
 
     @classmethod
@@ -819,6 +838,7 @@ class ExecuteAttemptRequest:
             reason=_optional_str(payload.get("reason")),
             expected_thread_id=_optional_str(payload.get("expected_thread_id")),
             thread_state_workspace_path=_optional_str(payload.get("thread_state_workspace_path")),
+            kind=_optional_str(payload.get("kind")),
         )
 
 
@@ -845,6 +865,7 @@ class ExecuteAttemptResult(FencedAttemptResult):
             fencing_token=str(payload.get("fencing_token") or ""),
             error=_optional_str(payload.get("error")),
             thread_id=_optional_str(payload.get("thread_id")),
+            kind=_optional_str(payload.get("kind")),
             verification_input=_dict(payload.get("verification_input")),
         )
 
@@ -862,6 +883,7 @@ class VerifyAttemptRequest:
     verification_input: dict[str, Any]
     artifact_paths: dict[str, Any] = field(default_factory=dict)
     reason: str | None = None
+    kind: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -877,6 +899,7 @@ class VerifyAttemptRequest:
             "verification_input": _jsonable_dict(self.verification_input),
             "artifact_paths": _jsonable_dict(self.artifact_paths),
             "reason": self.reason,
+            "kind": self.kind,
         }
 
     @classmethod
@@ -896,6 +919,7 @@ class VerifyAttemptRequest:
             verification_input=_dict(payload.get("verification_input")),
             artifact_paths=_dict(payload.get("artifact_paths")),
             reason=_optional_str(payload.get("reason")),
+            kind=_optional_str(payload.get("kind")),
         )
 
 
@@ -924,6 +948,7 @@ class VerifyAttemptResult(FencedAttemptResult):
             fencing_token=str(payload.get("fencing_token") or ""),
             error=_optional_str(payload.get("error")),
             thread_id=_optional_str(payload.get("thread_id")),
+            kind=_optional_str(payload.get("kind")),
             score=_int(payload.get("score"), default=0),
             passed=bool(payload.get("passed")),
             execute_attempt_id=str(payload.get("execute_attempt_id") or ""),

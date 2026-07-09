@@ -33,8 +33,17 @@ from performer_api.pipeline import (
     VerificationInputSnapshot,
     ExecuteAttemptRequest,
     VerifyAttemptRequest,
+    VerifyAttemptResult,
     WorkerLease,
 )
+
+
+def test_linear_topology_state_set_uses_need_human_and_removes_reworking() -> None:
+    states = {state.value for state in GraphNodeState}
+
+    assert "need_human" in states
+    assert "reworking" not in states
+    assert GraphNodeState.from_value("awaiting_human") is GraphNodeState.NEED_HUMAN
 
 
 def test_gate_snapshot_hash_is_canonical_and_threshold_is_fixed() -> None:
@@ -568,6 +577,7 @@ def test_attempt_requests_round_trip_issue_and_task_context() -> None:
         lease_id="lease-plan",
         fencing_token="fence-plan",
         workspace_path="/repo",
+        kind="codex",
     )
     execute = ExecuteAttemptRequest(
         attempt_id="exec-1",
@@ -581,16 +591,20 @@ def test_attempt_requests_round_trip_issue_and_task_context() -> None:
         lease_id="lease-exec",
         fencing_token="fence-exec",
         expected_thread_id="thread-exec",
+        kind="claude",
     )
 
     assert PlanAttemptRequest.from_dict(plan.to_dict()).issue_description == plan.issue_description
+    assert PlanAttemptRequest.from_dict(plan.to_dict()).kind == "codex"
     execute_payload = execute.to_dict()
     assert execute_payload["task_title"] == "Real E2E"
     assert execute_payload["issue_identifier"] == "HELL-1"
     assert execute_payload["issue_description"] == "Create SYMPHONY_REAL_E2E_RESULT.md and run pytest."
     assert execute_payload["expected_thread_id"] == "thread-exec"
+    assert execute_payload["kind"] == "claude"
     assert ExecuteAttemptRequest.from_dict(execute_payload).issue_description == execute.issue_description
     assert ExecuteAttemptRequest.from_dict(execute_payload).expected_thread_id == "thread-exec"
+    assert ExecuteAttemptRequest.from_dict(execute_payload).kind == "claude"
 
 
 def test_attempt_record_persists_fencing_and_revision_context() -> None:
@@ -606,6 +620,7 @@ def test_attempt_record_persists_fencing_and_revision_context() -> None:
         gate_snapshot_hash="sha256:gate",
         process_pid=4242,
         thread_id="thread-1",
+        kind="codex",
     )
 
     payload = attempt.to_dict()
@@ -617,15 +632,17 @@ def test_attempt_record_persists_fencing_and_revision_context() -> None:
     assert payload["fencing_token"] == "fence-exec"
     assert payload["process_pid"] == 4242
     assert payload["thread_id"] == "thread-1"
+    assert payload["kind"] == "codex"
     assert restored.graph_revision == 7
     assert restored.policy_revision == 3
     assert restored.lease_id == "lease-exec"
     assert restored.fencing_token == "fence-exec"
     assert restored.process_pid == 4242
     assert restored.thread_id == "thread-1"
+    assert restored.kind == "codex"
 
 
-def test_attempt_results_persist_codex_thread_id_for_resume() -> None:
+def test_attempt_results_persist_thread_id_and_backend_kind_for_resume() -> None:
     plan = PlanAttemptResult(
         attempt_id="plan-1",
         node_id="node-1",
@@ -636,6 +653,7 @@ def test_attempt_results_persist_codex_thread_id_for_resume() -> None:
         lease_id="lease-plan",
         fencing_token="fence-plan",
         thread_id="thread-plan",
+        kind="codex",
     )
     execute = ExecuteAttemptResult(
         attempt_id="exec-1",
@@ -647,11 +665,31 @@ def test_attempt_results_persist_codex_thread_id_for_resume() -> None:
         lease_id="lease-exec",
         fencing_token="fence-exec",
         thread_id="thread-exec",
+        kind="claude",
         verification_input={},
+    )
+    verify = VerifyAttemptResult(
+        attempt_id="verify-1",
+        node_id="node-1",
+        status=AttemptState.FAILED,
+        graph_revision=1,
+        policy_revision=2,
+        gate_snapshot_hash="sha256:gate",
+        lease_id="lease-verify",
+        fencing_token="fence-verify",
+        thread_id="thread-verify",
+        kind="local-verifier",
+        score=1,
+        passed=False,
+        execute_attempt_id="exec-1",
     )
 
     assert PlanAttemptResult.from_dict(plan.to_dict()).thread_id == "thread-plan"
+    assert PlanAttemptResult.from_dict(plan.to_dict()).kind == "codex"
     assert ExecuteAttemptResult.from_dict(execute.to_dict()).thread_id == "thread-exec"
+    assert ExecuteAttemptResult.from_dict(execute.to_dict()).kind == "claude"
+    assert VerifyAttemptResult.from_dict(verify.to_dict()).thread_id == "thread-verify"
+    assert VerifyAttemptResult.from_dict(verify.to_dict()).kind == "local-verifier"
 
 
 def test_plan_validator_rejects_cycles_missing_gates_and_incomplete_rubrics() -> None:
@@ -1134,6 +1172,7 @@ def test_execute_and_verify_requests_carry_frozen_gate_revision_and_artifacts() 
         verification_input={"task_id": "node-1", "patch_uri": "artifact://patch"},
         artifact_paths={"workspace": "/tmp/verify"},
         reason="execute_succeeded",
+        kind="local-verifier",
     )
 
     assert ExecuteAttemptRequest.from_dict(execute.to_dict()) == execute

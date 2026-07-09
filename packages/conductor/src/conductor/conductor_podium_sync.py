@@ -560,85 +560,10 @@ class ConductorPodiumSyncMixin:
         return ingested
 
     async def reconcile_pipeline_human_actions_once(self) -> int:
-        waits = [
-            wait
-            for wait in self.pipeline_store.list_human_waits()
-            if wait.get("status") == "waiting" and not str(wait.get("child_issue_id") or "").strip()
-        ]
-        if not waits:
-            return 0
-        root_issue_id = self._pipeline_root_issue_id()
-        if not root_issue_id:
-            return 0
-        created = 0
-        for instance in self.store.list_instances():
-            try:
-                tracker = self.repository_handoff_tracker_factory(instance)
-                delegate_id = _linear_agent_app_user_id(instance.linear_filters) or None
-                for wait in waits:
-                    issue = await tracker.create_child_issue_for(
-                        parent_issue_id=root_issue_id,
-                        title=f"[Human Action] {wait.get('reason') or 'Pipeline input required'}",
-                        description=self._pipeline_human_action_description(wait),
-                        label_names=["performer:type/human-action"],
-                        delegate_id=delegate_id,
-                    )
-                    issue_id = str(issue.get("id") or "").strip()
-                    if not issue_id:
-                        continue
-                    self.pipeline_store.attach_human_wait_child_issue(str(wait["wait_id"]), child_issue_id=issue_id)
-                    created += 1
-                break
-            except Exception as exc:
-                self._record_pipeline_sync_failure(
-                    "pipeline_human_wait_projection_failed",
-                    instance,
-                    exc,
-                    action_required="retry_human_wait_projection",
-                )
-                continue
-        return created
+        return 0
 
     async def reconcile_pipeline_runtime_wait_actions_once(self) -> int:
-        waits = [
-            wait
-            for wait in self.pipeline_store.list_runtime_waits(status="waiting")
-            if not str(wait.get("child_issue_id") or "").strip()
-        ]
-        if not waits:
-            return 0
-        root_issue_id = self._pipeline_root_issue_id()
-        if not root_issue_id:
-            return 0
-        created = 0
-        for instance in self.store.list_instances():
-            try:
-                tracker = self.repository_handoff_tracker_factory(instance)
-                delegate_id = _linear_agent_app_user_id(instance.linear_filters) or None
-                for wait in waits:
-                    wait_kind = str(wait.get("wait_kind") or "runtime_wait").strip() or "runtime_wait"
-                    issue = await tracker.create_child_issue_for(
-                        parent_issue_id=root_issue_id,
-                        title=f"[Human Action] Runtime wait: {wait_kind}",
-                        description=self._pipeline_runtime_wait_action_description(wait),
-                        label_names=[HUMAN_ACTION_LABEL],
-                        delegate_id=delegate_id,
-                    )
-                    issue_id = str(issue.get("id") or "").strip()
-                    if not issue_id:
-                        continue
-                    self.pipeline_store.attach_runtime_wait_child_issue(str(wait["wait_id"]), child_issue_id=issue_id)
-                    created += 1
-                break
-            except Exception as exc:
-                self._record_pipeline_sync_failure(
-                    "pipeline_runtime_wait_projection_failed",
-                    instance,
-                    exc,
-                    action_required="retry_runtime_wait_projection",
-                )
-                continue
-        return created
+        return 0
 
     async def reconcile_completed_pipeline_human_actions_once(self) -> int:
         waits: list[tuple[str, dict[str, Any]]] = [

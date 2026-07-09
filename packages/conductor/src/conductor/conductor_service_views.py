@@ -133,7 +133,7 @@ class ConductorServiceViewsMixin:
         _ = self._require_instance(instance_id), issue_id
         raise ConductorServiceError(
             "runtime_error_approval_removed",
-            "Runtime approvals must be completed through the Linear [Human Action] child issue.",
+            "Runtime approvals must be completed on the blocked pipeline node issue and resumed by moving it out of need_human.",
         )
 
     def instance_runtime(self, instance_id: str) -> dict[str, object]:

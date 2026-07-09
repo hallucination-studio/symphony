@@ -164,6 +164,29 @@ async def test_conductor_linear_proxy_ensures_blocks_relation() -> None:
     }
 
 
+async def test_conductor_linear_proxy_updates_comment_by_id() -> None:
+    transport = RecordingTransport(
+        [
+            {
+                "data": {
+                    "commentUpdate": {
+                        "success": True,
+                        "comment": {"id": "comment-1", "body": "updated"},
+                    }
+                }
+            }
+        ]
+    )
+    proxy = RepositoryHandoffLinearProxy(endpoint="https://linear.test/graphql", api_key="token", transport=transport)  # type: ignore[arg-type]
+
+    result = await proxy.update_issue_comment("comment-1", "updated")
+
+    assert result == {"success": True, "comment_id": "comment-1", "body": "updated"}
+    request = transport.requests[0]
+    assert "commentUpdate" in request["json"]["query"]
+    assert request["json"]["variables"] == {"commentId": "comment-1", "body": "updated"}
+
+
 async def test_transition_issue_by_state_target_falls_back_to_state_type() -> None:
     # Team has no "In Progress" state; resolver must fall back to the first
     # started-type state ("Doing") since none of the candidate names match.

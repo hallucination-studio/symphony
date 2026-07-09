@@ -112,6 +112,48 @@ def test_real_codex_connectivity_probe_extracts_custom_schema_from_final_respons
     assert tool._planner_shape_valid(structured) is True
 
 
+def test_real_symphony_e2e_requires_replan_linear_issue_tree_final_states() -> None:
+    tool = load_tool("real_symphony_e2e_run")
+    stale_tree = {
+        "identifier": "HELL-857",
+        "state": {"name": "Backlog", "type": "backlog"},
+        "children": {
+            "nodes": [
+                {
+                    "identifier": "HELL-860",
+                    "title": "Run smoke",
+                    "state": {"name": "In Progress", "type": "started"},
+                    "labels": {"nodes": [{"name": "performer:type/pipeline-node"}]},
+                },
+                {
+                    "identifier": "HELL-858",
+                    "title": "Superseded",
+                    "state": {"name": "Canceled", "type": "canceled"},
+                    "labels": {"nodes": [{"name": "performer:type/pipeline-node"}]},
+                },
+            ]
+        },
+    }
+    finalized_tree = {
+        **stale_tree,
+        "state": {"name": "Done", "type": "completed"},
+        "children": {
+            "nodes": [
+                {**stale_tree["children"]["nodes"][0], "state": {"name": "Done", "type": "completed"}},
+                stale_tree["children"]["nodes"][1],
+            ]
+        },
+    }
+
+    stale = tool._pipeline_linear_issue_tree_finalized(stale_tree)
+    finalized = tool._pipeline_linear_issue_tree_finalized(finalized_tree)
+
+    assert stale["passed"] is False
+    assert stale["root_state_type"] == "backlog"
+    assert stale["pipeline_children"][0]["state_type"] == "started"
+    assert finalized["passed"] is True
+
+
 def test_real_symphony_e2e_has_optional_codex_connectivity_probe() -> None:
     tool = load_tool("real_symphony_e2e")
     run_tool = load_tool("real_symphony_e2e_run")

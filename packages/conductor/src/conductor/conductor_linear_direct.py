@@ -188,6 +188,26 @@ mutation RepositoryHandoffComment($issueId: String!, $body: String!) {
         comment = result.get("comment") if isinstance(result, dict) else {}
         return {"success": bool(result.get("success")), "comment_id": comment.get("id") if isinstance(comment, dict) else None}
 
+    async def update_issue_comment(self, comment_id: str, body: str) -> dict[str, Any]:
+        payload = await self.graphql(
+            """
+mutation RepositoryHandoffCommentUpdate($commentId: String!, $body: String!) {
+  commentUpdate(id: $commentId, input: { body: $body }) {
+    success
+    comment { id body }
+  }
+}
+""",
+            {"commentId": comment_id, "body": body},
+        )
+        result = ((payload.get("data") or {}).get("commentUpdate") or {})
+        comment = result.get("comment") if isinstance(result, dict) else {}
+        return {
+            "success": bool(result.get("success")),
+            "comment_id": comment.get("id") if isinstance(comment, dict) else comment_id,
+            "body": body,
+        }
+
     async def fetch_issue_comments(self, issue_id: str, *, first: int = 50) -> list[dict[str, Any]]:
         payload = await self.graphql(
             """

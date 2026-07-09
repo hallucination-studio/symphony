@@ -14,6 +14,14 @@ waits, and S4 replan graph rewrite. That local coverage is not final acceptance
 evidence. Final acceptance still requires the real acceptance matrix for managed
 Podium -> Conductor -> Performer -> Linear runs.
 
+State/projection evolution: `docs/product/linear-topology-mirror.md` updates the
+Linear-facing topology and human-handling rules from this base RFC. In current
+implementation, `REWORKING` is removed, the operator-blocked node state is
+`need_human`, attempt records project as durable `comment_id`-replayed Linear
+comments, and human resume is triggered by moving the affected node issue out of
+the blocked need_human workflow state rather than by completing a separate
+`[Human Action]` child issue.
+
 This RFC evolves and absorbs:
 
 - `docs/product/runtime-orchestration-architecture.md` (Conductor owns state,
@@ -1467,22 +1475,24 @@ merge engine is *not* required in the first implementation, but the boundary
 
 ## Human Escalation
 
-**Final shape.** Abnormal conditions escalate to `AWAITING_HUMAN` with a structured
+**Final shape.** Abnormal conditions escalate to `need_human` with a structured
 reason (`PLAN_INVALID`, `GATE_UNEXECUTABLE`, `LINEAR_SYNC_CONFLICT`,
 `CREDENTIAL_REQUIRED`, `REPLAN_LIMIT_EXCEEDED`, `BACKEND_UNAVAILABLE`,
-`CAPACITY_STARVED`), never a silent collapse into `FAILED`. Per AGENT.md, human
-intervention uses a Linear `[Human Action]` child issue; the human completing that
-issue is what resumes the affected node.
+`CAPACITY_STARVED`), never a silent collapse into `FAILED`. Per
+`linear-topology-mirror.md`, human intervention happens in place on the affected
+node issue; moving that issue out of the blocked need_human workflow state is what
+resumes the affected node.
 
 - **L done when:** each reason is reachable and unit-tested; escalation does not
   mark the node `FAILED`.
-- **R done when:** a real escalation creates the `[Human Action]` child, the parent
-  goes `blocked`, and completing the child resumes exactly that node.
-- **H done when:** parent comments / command-like comments never resume work (only
-  the completed child issue does); an unresolved escalation is surfaced by
+- **R done when:** a real escalation marks the affected node issue blocked,
+  creates the durable `comment_id`-replayed instruction comment, and moving that
+  same issue out of blocked resumes exactly that node.
+- **H done when:** comments / command-like comments never resume work (only the
+  node issue state flip does); an unresolved escalation is surfaced by
   reconcile findings rather than silently stalling.
-- **Current:** present-partial. Reasons + AWAITING_HUMAN present-local; the real
-  child-issue resume loop is the key R bar.
+- **Current:** present-local. Reasons + `need_human` present-local; real state-flip
+  evidence is the key R bar.
 
 ## Linear projection (operator visibility)
 
