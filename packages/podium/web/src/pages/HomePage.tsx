@@ -64,98 +64,74 @@ function Home({
   const next = activeStep(onboarding);
   const linearState = linearHealth(linear);
   const runtimeState = runtimeHealthStatus(onboarding);
-  const { t } = useI18n();
 
   return (
     <div className="home-grid">
-      <div className="span-2">
-        {complete ? (
-          <ActionPanel
-            tone="success"
-            title={t("You're all set")}
-            description={t("Onboarding is complete. Podium is routing issues to your runtime.")}
-            actionLabel={t("View pipeline")}
-            onAction={() => navigate("/pipeline")}
-          />
-        ) : next ? (
-          <ActionPanel
-            tone="info"
-            title={t(onboarding.next_action || next.title)}
-            description={t(next.description)}
-            actionLabel={t(next.ctaLabel)}
-            onAction={() => navigate(`/setup/${next.path}`)}
-          />
-        ) : null}
+      <NextActionPanel complete={complete} next={next} nextAction={onboarding.next_action} onNavigate={navigate} />
+      <SetupProgressCard onboarding={onboarding} complete={complete} />
+      <SystemHealthCard complete={complete} linearState={linearState} runtimeState={runtimeState} smoke={smoke} />
+      <PipelineCard pipeline={pipeline} pipelineLoading={pipelineLoading} />
+    </div>
+  );
+}
+
+function NextActionPanel({ complete, next, nextAction, onNavigate }: { complete: boolean; next: ReturnType<typeof activeStep>; nextAction?: string | null; onNavigate: (path: string) => void }) {
+  const { t } = useI18n();
+  return (
+    <div className="span-2">
+      {complete ? (
+        <ActionPanel tone="success" title={t("You're all set")} description={t("Onboarding is complete. Podium is routing issues to your runtime.")} actionLabel={t("View pipeline")} onAction={() => onNavigate("/pipeline")} />
+      ) : next ? (
+        <ActionPanel tone="info" title={t(nextAction || next.title)} description={t(next.description)} actionLabel={t(next.ctaLabel)} onAction={() => onNavigate(`/setup/${next.path}`)} />
+      ) : null}
+    </div>
+  );
+}
+
+function SetupProgressCard({ onboarding, complete }: { onboarding: OnboardingProgress; complete: boolean }) {
+  const { t } = useI18n();
+  const actions = !complete ? <LinkButton to="/setup" variant="secondary">{t("Continue")}</LinkButton> : undefined;
+  return (
+    <Card title={t("Setup progress")} description={complete ? t("All steps complete") : t("Finish setup to start routing")} actions={actions}>
+      <OnboardingProgressView onboarding={onboarding} showSteps />
+    </Card>
+  );
+}
+
+function SystemHealthCard({ complete, linearState, runtimeState, smoke }: { complete: boolean; linearState: ReturnType<typeof linearHealth>; runtimeState: GlobalStatus; smoke: SmokeCheckResult | null }) {
+  const { t } = useI18n();
+  const runtimeHint = runtimeState === "online" ? t("At least one runtime online") : t("No runtime online");
+  return (
+    <Card title={t("System health")} description={t("Live status of core services")}>
+      <div className="health-list">
+        <HealthRow label={t("Linear")} status={linearState.status} hint={t(linearState.hint)} />
+        <HealthRow label={t("Runtime")} status={runtimeState} hint={runtimeHint} />
+        <HealthRow label={t("Routing")} status={complete ? "healthy" : "degraded"} hint={complete ? t("Issues route to runtimes") : t("Finish setup to enable")} />
+        <HealthRow label={t("Smoke check")} status={smokeHealthStatus(smoke)} hint={t(smokeHint(smoke))} />
       </div>
+    </Card>
+  );
+}
 
-      <Card
-        title={t("Setup progress")}
-        description={
-          complete ? t("All steps complete") : t("Finish setup to start routing")
-        }
-        actions={
-          !complete ? (
-            <LinkButton to="/setup" variant="secondary">
-              {t("Continue")}
-            </LinkButton>
-          ) : undefined
-        }
-      >
-        <OnboardingProgressView onboarding={onboarding} showSteps />
-      </Card>
+function PipelineCard({ pipeline, pipelineLoading }: { pipeline: PipelineStatus | null; pipelineLoading: boolean }) {
+  const { t } = useI18n();
+  return (
+    <Card className="span-2" title={t("Pipeline")} actions={<LinkButton to="/pipeline" variant="ghost">{t("View pipeline")}</LinkButton>}>
+      <QueryState isLoading={pipelineLoading} error={null}>
+        {!pipeline?.pipeline ? <EmptyState title={t("No pipeline report yet")} description={t("Pipeline state appears after a Conductor posts its next runtime report.")} /> : <PipelineMetrics pipeline={pipeline} />}
+      </QueryState>
+    </Card>
+  );
+}
 
-      <Card title={t("System health")} description={t("Live status of core services")}>
-        <div className="health-list">
-          <HealthRow
-            label={t("Linear")}
-            status={linearState.status}
-            hint={t(linearState.hint)}
-          />
-          <HealthRow
-            label={t("Runtime")}
-            status={runtimeState}
-            hint={
-              runtimeState === "online"
-                ? t("At least one runtime online")
-                : t("No runtime online")
-            }
-          />
-          <HealthRow
-            label={t("Routing")}
-            status={complete ? "healthy" : "degraded"}
-            hint={
-              complete ? t("Issues route to runtimes") : t("Finish setup to enable")
-            }
-          />
-          <HealthRow
-            label={t("Smoke check")}
-            status={smokeHealthStatus(smoke)}
-            hint={t(smokeHint(smoke))}
-          />
-        </div>
-      </Card>
-
-      <Card
-        className="span-2"
-        title={t("Pipeline")}
-        actions={<LinkButton to="/pipeline" variant="ghost">{t("View pipeline")}</LinkButton>}
-      >
-        <QueryState isLoading={pipelineLoading} error={null}>
-          {!pipeline?.pipeline ? (
-            <EmptyState
-              title={t("No pipeline report yet")}
-              description={t("Pipeline state appears after a Conductor posts its next runtime report.")}
-            />
-          ) : (
-            <div className="pipeline-revisions">
-              <Metric label={t("Graph revision")} value={pipeline.pipeline.graph_revision ?? 0} />
-              <Metric label={t("Policy revision")} value={pipeline.policy_revision} />
-              <Metric label={t("Human waits")} value={pipeline.pipeline.human_waits?.length ?? 0} />
-              <Metric label={t("Runtime waits")} value={pipeline.pipeline.runtime_waits?.length ?? 0} />
-            </div>
-          )}
-        </QueryState>
-      </Card>
+function PipelineMetrics({ pipeline }: { pipeline: PipelineStatus }) {
+  const { t } = useI18n();
+  return (
+    <div className="pipeline-revisions">
+      <Metric label={t("Graph revision")} value={pipeline.pipeline.graph_revision ?? 0} />
+      <Metric label={t("Policy revision")} value={pipeline.policy_revision} />
+      <Metric label={t("Human waits")} value={pipeline.pipeline.human_waits?.length ?? 0} />
+      <Metric label={t("Runtime waits")} value={pipeline.pipeline.runtime_waits?.length ?? 0} />
     </div>
   );
 }

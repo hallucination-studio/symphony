@@ -70,10 +70,47 @@ export function LinearApplicationCard({
 }: {
   initial: LinearAppConfig | null;
 }) {
+  const { t } = useI18n();
+  const state = useLinearApplicationState(initial);
+  const custom = state.config?.configured ?? false;
+
+  return (
+    <Card
+      title={t("Linear application")}
+      description={t("Use the official shared Podium app, or bring your own Linear OAuth app.")}
+    >
+      <div className="row-between" style={{ marginBottom: "var(--space-4)" }}>
+        <span className="muted">{t("Mode")}</span>
+        {custom ? (
+          <StatusBadge status="healthy" label="Custom app configured" />
+        ) : (
+          <span className="muted">{t("Using official Podium app")}</span>
+        )}
+      </div>
+
+      {custom && state.config ? (
+        <ConfiguredLinearApp config={state.config} clearing={state.clearing} onUseOfficial={state.useOfficial} />
+      ) : (
+        <CustomLinearAppForm
+          clientId={state.clientId}
+          clientSecret={state.clientSecret}
+          redirectUri={state.redirectUri}
+          error={state.error}
+          saving={state.saving}
+          onClientIdChange={state.setClientId}
+          onClientSecretChange={state.setClientSecret}
+          onRedirectUriChange={state.setRedirectUri}
+          onSubmit={state.save}
+        />
+      )}
+    </Card>
+  );
+}
+
+function useLinearApplicationState(initial: LinearAppConfig | null) {
   const { notify } = useToast();
   const { t } = useI18n();
-  // Seed from the real config on `me` so a refresh reflects the saved state;
-  // mutation results then keep it current within the session.
+  // Seed from `me` so refresh reflects saved state; mutation results keep it current.
   const [config, setConfig] = useState<LinearAppConfig | null>(initial);
   const [clientId, setClientId] = useState("");
   const [clientSecret, setClientSecret] = useState("");
@@ -81,8 +118,6 @@ export function LinearApplicationCard({
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [clearing, setClearing] = useState(false);
-
-  const custom = config?.configured ?? false;
 
   async function save(e: FormEvent) {
     e.preventDefault();
@@ -99,7 +134,6 @@ export function LinearApplicationCard({
         redirect_uri: redirectUri.trim() || undefined,
       });
       setConfig(res.linear_app);
-      // Never keep the secret in memory / never echo it back.
       setClientSecret("");
       notify(t("Custom Linear app saved"), "success");
     } catch {
@@ -125,94 +159,84 @@ export function LinearApplicationCard({
     }
   }
 
+  return { config, clientId, clientSecret, redirectUri, error, saving, clearing, setClientId, setClientSecret, setRedirectUri, save, useOfficial };
+}
+
+function ConfiguredLinearApp({
+  config,
+  clearing,
+  onUseOfficial,
+}: {
+  config: LinearAppConfig;
+  clearing: boolean;
+  onUseOfficial: () => void;
+}) {
+  const { t } = useI18n();
   return (
-    <Card
-      title={t("Linear application")}
-      description={t("Use the official shared Podium app, or bring your own Linear OAuth app.")}
-    >
-      <div className="row-between" style={{ marginBottom: "var(--space-4)" }}>
-        <span className="muted">{t("Mode")}</span>
-        {custom ? (
-          <StatusBadge status="healthy" label="Custom app configured" />
-        ) : (
-          <span className="muted">{t("Using official Podium app")}</span>
-        )}
+    <>
+      <DetailList
+        rows={[
+          { key: t("Client ID"), value: <code className="code">{config.client_id}</code> },
+          {
+            key: t("Redirect URI"),
+            value: config.redirect_uri ? <code className="code">{config.redirect_uri}</code> : <span className="muted">{t("Default")}</span>,
+          },
+        ]}
+      />
+      <div style={{ marginTop: "var(--space-4)" }}>
+        <ActionPanel
+          tone="info"
+          title={t("Use official app")}
+          description={t("Switch back to the shared Podium Linear app and remove your custom credentials.")}
+          actionLabel={t("Use official app")}
+          onAction={onUseOfficial}
+          actionLoading={clearing}
+        />
       </div>
+    </>
+  );
+}
 
-      {custom && config ? (
-        <>
-          <DetailList
-            rows={[
-              {
-                key: t("Client ID"),
-                value: <code className="code">{config.client_id}</code>,
-              },
-              {
-                key: t("Redirect URI"),
-                value: config.redirect_uri ? (
-                  <code className="code">{config.redirect_uri}</code>
-                ) : (
-                  <span className="muted">{t("Default")}</span>
-                ),
-              },
-            ]}
-          />
-          <div style={{ marginTop: "var(--space-4)" }}>
-            <ActionPanel
-              tone="info"
-              title={t("Use official app")}
-              description={t("Switch back to the shared Podium Linear app and remove your custom credentials.")}
-              actionLabel={t("Use official app")}
-              onAction={useOfficial}
-              actionLoading={clearing}
-            />
-          </div>
-        </>
-      ) : (
-        <form onSubmit={save}>
-          <label className="field">
-            <span className="field-label">{t("Client ID")}</span>
-            <input
-              className="text-input"
-              aria-label={t("Client ID")}
-              value={clientId}
-              onChange={(e) => setClientId(e.target.value)}
-            />
-          </label>
-          <label className="field">
-            <span className="field-label">{t("Client secret")}</span>
-            <input
-              className="text-input"
-              type="password"
-              aria-label={t("Client secret")}
-              autoComplete="off"
-              value={clientSecret}
-              onChange={(e) => setClientSecret(e.target.value)}
-            />
-            <span className="field-hint">{t("Write-only — never displayed after saving.")}</span>
-          </label>
-          <label className="field">
-            <span className="field-label">{t("Redirect URI (optional)")}</span>
-            <input
-              className="text-input"
-              aria-label={t("Redirect URI (optional)")}
-              value={redirectUri}
-              onChange={(e) => setRedirectUri(e.target.value)}
-            />
-          </label>
-
-          {error ? (
-            <p className="field-error" role="alert">
-              {error}
-            </p>
-          ) : null}
-
-          <Button type="submit" loading={saving}>
-            {t("Save custom app")}
-          </Button>
-        </form>
-      )}
-    </Card>
+function CustomLinearAppForm({
+  clientId,
+  clientSecret,
+  redirectUri,
+  error,
+  saving,
+  onClientIdChange,
+  onClientSecretChange,
+  onRedirectUriChange,
+  onSubmit,
+}: {
+  clientId: string;
+  clientSecret: string;
+  redirectUri: string;
+  error: string | null;
+  saving: boolean;
+  onClientIdChange: (value: string) => void;
+  onClientSecretChange: (value: string) => void;
+  onRedirectUriChange: (value: string) => void;
+  onSubmit: (e: FormEvent) => void;
+}) {
+  const { t } = useI18n();
+  return (
+    <form onSubmit={onSubmit}>
+      <label className="field">
+        <span className="field-label">{t("Client ID")}</span>
+        <input className="text-input" aria-label={t("Client ID")} value={clientId} onChange={(e) => onClientIdChange(e.target.value)} />
+      </label>
+      <label className="field">
+        <span className="field-label">{t("Client secret")}</span>
+        <input className="text-input" type="password" aria-label={t("Client secret")} autoComplete="off" value={clientSecret} onChange={(e) => onClientSecretChange(e.target.value)} />
+        <span className="field-hint">{t("Write-only — never displayed after saving.")}</span>
+      </label>
+      <label className="field">
+        <span className="field-label">{t("Redirect URI (optional)")}</span>
+        <input className="text-input" aria-label={t("Redirect URI (optional)")} value={redirectUri} onChange={(e) => onRedirectUriChange(e.target.value)} />
+      </label>
+      {error ? <p className="field-error" role="alert">{error}</p> : null}
+      <Button type="submit" loading={saving}>{t("Save custom app")}</Button>
+    </form>
   );
 }
 

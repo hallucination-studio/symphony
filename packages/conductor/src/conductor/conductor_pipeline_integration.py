@@ -105,58 +105,16 @@ def deliver_completed_graph_with_gh(
     revision = store.current_graph_revision_record()
     branch_source = issue_identifier or (revision.root_node_id if revision else "issue")
     branch_name = f"symphony/{_safe_path_part(branch_source)}"
-    nodes = store.list_nodes()
-    if not nodes or any(node.state not in {GraphNodeState.VERIFY_PASSED, GraphNodeState.SUPERSEDED} for node in nodes):
-        result = {"status": "not_ready"}
-        store.record_graph_delivery(
-            status="not_ready",
-            branch_name=branch_name,
-            repository_path=str(repository_path),
-            details={"reason": "nodes_not_terminal"},
-        )
-        return result
+    not_ready = _delivery_not_ready_result(store, repository_path, branch_name)
+    if not_ready is not None:
+        return not_ready
     exit_node_ids = _exit_node_ids_for_current_graph(store)
     if not exit_node_ids:
-        result = {"status": "not_ready", "reason": "no_exit_nodes"}
-        store.record_graph_delivery(
-            status="not_ready",
-            branch_name=branch_name,
-            repository_path=str(repository_path),
-            details={"reason": "no_exit_nodes"},
-        )
-        return result
+        return _record_delivery_not_ready(store, repository_path, branch_name, "no_exit_nodes")
     try:
-        base_revision = _repository_head_revision(str(repository_path))
-        if not base_revision:
-            raise RuntimeError("repository base revision unavailable")
-        worktree_path = store.artifact_root / "delivery-worktrees" / _safe_path_part(branch_name)
-        if worktree_path.exists():
-            subprocess.run(
-                ["git", "worktree", "remove", "--force", str(worktree_path)],
-                cwd=repository_path,
-                check=False,
-                capture_output=True,
-                text=True,
-            )
-            shutil.rmtree(worktree_path, ignore_errors=True)
-        worktree_path.parent.mkdir(parents=True, exist_ok=True)
-        _git(["worktree", "add", "--force", "-B", branch_name, str(worktree_path), base_revision], cwd=repository_path)
-        for node_id in exit_node_ids:
-            manifest = store.verified_branch_manifest_for_node(node_id)
-            if manifest is None:
-                raise RuntimeError(f"exit node {node_id} lacks verified branch output")
-            merge_ref = str(manifest.code.get("branch_name") or manifest.code.get("commit_sha") or "").strip()
-            if not merge_ref:
-                raise RuntimeError(f"exit node {node_id} lacks merge ref")
-            _git(["merge", "--no-ff", "--no-edit", merge_ref], cwd=worktree_path)
-        _git(["push", "origin", branch_name], cwd=worktree_path)
-        pr = run_command(
-            ["gh", "pr", "create", "--fill", "--head", branch_name],
-            cwd=worktree_path,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
+        worktree_path = _prepare_delivery_worktree(store, repository_path, branch_name)
+        _merge_exit_manifests(store, worktree_path, exit_node_ids)
+        pr = _push_and_create_pr(worktree_path, branch_name, run_command)
     except Exception as exc:
         error = _sanitize_error(exc)
         store.record_graph_delivery(
@@ -181,6 +139,75 @@ def deliver_completed_graph_with_gh(
         details={"exit_node_ids": exit_node_ids, "worktree_path": str(worktree_path)},
     )
     return result
+
+
+def _delivery_not_ready_result(
+    store: ConductorPipelineStore,
+    repository_path: Path,
+    branch_name: str,
+) -> dict[str, Any] | None:
+    nodes = store.list_nodes()
+    terminal_states = {GraphNodeState.VERIFY_PASSED, GraphNodeState.SUPERSEDED}
+    if nodes and all(node.state in terminal_states for node in nodes):
+        return None
+    return _record_delivery_not_ready(store, repository_path, branch_name, "nodes_not_terminal")
+
+
+def _record_delivery_not_ready(
+    store: ConductorPipelineStore,
+    repository_path: Path,
+    branch_name: str,
+    reason: str,
+) -> dict[str, Any]:
+    result = {"status": "not_ready"} if reason == "nodes_not_terminal" else {"status": "not_ready", "reason": reason}
+    store.record_graph_delivery(
+        status="not_ready",
+        branch_name=branch_name,
+        repository_path=str(repository_path),
+        details={"reason": reason},
+    )
+    return result
+
+
+def _prepare_delivery_worktree(store: ConductorPipelineStore, repository_path: Path, branch_name: str) -> Path:
+    base_revision = _repository_head_revision(str(repository_path))
+    if not base_revision:
+        raise RuntimeError("repository base revision unavailable")
+    worktree_path = store.artifact_root / "delivery-worktrees" / _safe_path_part(branch_name)
+    if worktree_path.exists():
+        subprocess.run(
+            ["git", "worktree", "remove", "--force", str(worktree_path)],
+            cwd=repository_path,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        shutil.rmtree(worktree_path, ignore_errors=True)
+    worktree_path.parent.mkdir(parents=True, exist_ok=True)
+    _git(["worktree", "add", "--force", "-B", branch_name, str(worktree_path), base_revision], cwd=repository_path)
+    return worktree_path
+
+
+def _merge_exit_manifests(store: ConductorPipelineStore, worktree_path: Path, exit_node_ids: list[str]) -> None:
+    for node_id in exit_node_ids:
+        manifest = store.verified_branch_manifest_for_node(node_id)
+        if manifest is None:
+            raise RuntimeError(f"exit node {node_id} lacks verified branch output")
+        merge_ref = str(manifest.code.get("branch_name") or manifest.code.get("commit_sha") or "").strip()
+        if not merge_ref:
+            raise RuntimeError(f"exit node {node_id} lacks merge ref")
+        _git(["merge", "--no-ff", "--no-edit", merge_ref], cwd=worktree_path)
+
+
+def _push_and_create_pr(worktree_path: Path, branch_name: str, run_command: Any) -> Any:
+    _git(["push", "origin", branch_name], cwd=worktree_path)
+    return run_command(
+        ["gh", "pr", "create", "--fill", "--head", branch_name],
+        cwd=worktree_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
 
 
 def _exit_node_ids_for_current_graph(store: ConductorPipelineStore) -> list[str]:

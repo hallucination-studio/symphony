@@ -7,8 +7,7 @@ from typing import Any
 def shlex_quote(value: str) -> str:
     return shlex.quote(value)
 
-def render_install_script() -> str:
-    return r'''#!/usr/bin/env bash
+INSTALL_SCRIPT = r'''#!/usr/bin/env bash
 set -euo pipefail
 
 ENROLLMENT_TOKEN="${PODIUM_ENROLLMENT_TOKEN:-}"
@@ -170,5 +169,9 @@ PY
 
 echo "Podium conductor enrolled as ${RUNTIME_ID}."
 echo "Conductor API: http://127.0.0.1:${CONDUCTOR_PORT}"
-    '''
+'''
+
+
+def render_install_script() -> str:
+    return INSTALL_SCRIPT + "    "
 

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import inspect
-import itertools
 import json
 import logging
 import os
@@ -11,6 +10,8 @@ from pathlib import Path
 from typing import Any
 
 from performer_api.config import CodexConfig
+from .codex_client_helper_adapter import _ThreadRunAdapter
+from .codex_client_helper_async import _maybe_await
 
 logger = logging.getLogger(__name__)
 
@@ -238,12 +239,6 @@ def _latest_turn_identity(
     return default_turn_id, default_session_id
 
 
-async def _maybe_await(value: Any) -> Any:
-    if hasattr(value, "__await__"):
-        return await value
-    return value
-
-
 async def _close_sdk_client(client: Any) -> None:
     close = getattr(client, "close", None)
     if not callable(close):
@@ -345,25 +340,3 @@ def _int_from_keys(values: dict[str, Any], *keys: str) -> int:
         if isinstance(value, str) and value.strip().isdigit():
             return int(value.strip())
     return 0
-
-
-_ADAPTER_TURN_IDS = itertools.count(1)
-
-
-class _ThreadRunAdapter:
-    def __init__(self, thread: Any, output_schema: dict[str, Any], prompt: str):
-        self.id = f"turn-{next(_ADAPTER_TURN_IDS)}"
-        self.thread = thread
-        self.output_schema = output_schema
-        self.prompt = prompt
-
-    async def run(self) -> Any:
-        run = getattr(self.thread, "run")
-        try:
-            result = await _maybe_await(run(self.prompt, output_schema=self.output_schema))
-        except TypeError:
-            result = await _maybe_await(run(self.prompt))
-        nested_run = getattr(result, "run", None)
-        if callable(nested_run):
-            return await _maybe_await(nested_run())
-        return result

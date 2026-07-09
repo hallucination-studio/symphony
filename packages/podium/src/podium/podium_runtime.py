@@ -24,6 +24,27 @@ class PodiumRuntimeMixin:
         runtime = await self.store.get_runtime(runtime_id)
         if runtime is None:
             return {"status": "unknown_runtime", "bindings_upserted": 0}
+        conductor = await self._runtime_report_conductor(runtime_id, runtime, payload)
+        await self.store.upsert_conductor(conductor)
+        bindings = payload.get("bindings") if isinstance(payload.get("bindings"), list) else []
+        metrics = payload.get("metrics") if isinstance(payload.get("metrics"), dict) else {}
+        queue = payload.get("queue") if isinstance(payload.get("queue"), dict) else {}
+        log_tail = payload.get("log_tail") if isinstance(payload.get("log_tail"), dict) else {}
+        upserted = 0
+        for raw_binding in bindings:
+            binding = self._binding_from_report(runtime_id, conductor, raw_binding)
+            if binding is None:
+                continue
+            await self._store_binding_report(runtime_id, conductor, binding, metrics, queue, log_tail)
+            upserted += 1
+        return {"status": "ok", "bindings_upserted": upserted}
+
+    async def _runtime_report_conductor(
+        self,
+        runtime_id: str,
+        runtime: dict[str, Any],
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
         conductor_rows = await self.store.list_conductors_for_user(str(runtime.get("user_id") or ""))
         conductor = next((row for row in conductor_rows if str(row.get("id") or "") == runtime_id), {})
         conductor = {
@@ -44,72 +65,81 @@ class PodiumRuntimeMixin:
                 conductor[key] = str(payload.get(key) or "")
             else:
                 conductor.setdefault(key, "")
-        await self.store.upsert_conductor(conductor)
-        bindings = payload.get("bindings") if isinstance(payload.get("bindings"), list) else []
-        metrics = payload.get("metrics") if isinstance(payload.get("metrics"), dict) else {}
-        queue = payload.get("queue") if isinstance(payload.get("queue"), dict) else {}
-        log_tail = payload.get("log_tail") if isinstance(payload.get("log_tail"), dict) else {}
-        upserted = 0
-        for raw_binding in bindings:
-            if not isinstance(raw_binding, dict):
-                continue
-            instance_id = str(raw_binding.get("instance_id") or "").strip()
-            if not instance_id:
-                continue
-            binding_id = f"{runtime_id}:{instance_id}"
-            binding = {
-                "id": binding_id,
-                "conductor_id": runtime_id,
-                "user_id": str(conductor.get("user_id") or ""),
-                "instance_id": instance_id,
-                "name": str(raw_binding.get("name") or instance_id),
-                "linear_project": str(raw_binding.get("linear_project") or ""),
-                "project_slug": str(raw_binding.get("project_slug") or raw_binding.get("linear_project") or ""),
-                "agent_app_user_id": str(raw_binding.get("agent_app_user_id") or raw_binding.get("linear_agent_app_user_id") or ""),
-                "pipeline_profile": str(raw_binding.get("pipeline_profile") or "default"),
-                "process_status": str(raw_binding.get("process_status") or ""),
-                "constraint_labels": [
-                    str(label)
-                    for label in (raw_binding.get("constraint_labels") or [])
-                    if isinstance(label, str) and label
-                ],
-                "repo_source": raw_binding.get("repo_source") if isinstance(raw_binding.get("repo_source"), dict) else {},
-                "updated_at": utc_now_iso(),
-            }
-            await self.store.upsert_project_binding(binding)
-            instance_metrics = metrics.get(instance_id) if isinstance(metrics.get(instance_id), dict) else {}
-            instance_queue = queue.get(instance_id) if isinstance(queue.get(instance_id), dict) else {}
-            queue_depth = int(instance_queue.get("queue_depth") or instance_queue.get("queued") or 0) + int(instance_queue.get("leased") or 0)
-            await self.store.upsert_metrics_snapshot(
+        return conductor
+
+    def _binding_from_report(
+        self,
+        runtime_id: str,
+        conductor: dict[str, Any],
+        raw_binding: Any,
+    ) -> dict[str, Any] | None:
+        if not isinstance(raw_binding, dict):
+            return None
+        instance_id = str(raw_binding.get("instance_id") or "").strip()
+        if not instance_id:
+            return None
+        return {
+            "id": f"{runtime_id}:{instance_id}",
+            "conductor_id": runtime_id,
+            "user_id": str(conductor.get("user_id") or ""),
+            "instance_id": instance_id,
+            "name": str(raw_binding.get("name") or instance_id),
+            "linear_project": str(raw_binding.get("linear_project") or ""),
+            "project_slug": str(raw_binding.get("project_slug") or raw_binding.get("linear_project") or ""),
+            "agent_app_user_id": str(raw_binding.get("agent_app_user_id") or raw_binding.get("linear_agent_app_user_id") or ""),
+            "pipeline_profile": str(raw_binding.get("pipeline_profile") or "default"),
+            "process_status": str(raw_binding.get("process_status") or ""),
+            "constraint_labels": [
+                str(label)
+                for label in (raw_binding.get("constraint_labels") or [])
+                if isinstance(label, str) and label
+            ],
+            "repo_source": raw_binding.get("repo_source") if isinstance(raw_binding.get("repo_source"), dict) else {},
+            "updated_at": utc_now_iso(),
+        }
+
+    async def _store_binding_report(
+        self,
+        runtime_id: str,
+        conductor: dict[str, Any],
+        binding: dict[str, Any],
+        metrics: dict[str, Any],
+        queue: dict[str, Any],
+        log_tail: dict[str, Any],
+    ) -> None:
+        await self.store.upsert_project_binding(binding)
+        instance_id = str(binding.get("instance_id") or "")
+        instance_metrics = metrics.get(instance_id) if isinstance(metrics.get(instance_id), dict) else {}
+        instance_queue = queue.get(instance_id) if isinstance(queue.get(instance_id), dict) else {}
+        queue_depth = int(instance_queue.get("queue_depth") or instance_queue.get("queued") or 0) + int(instance_queue.get("leased") or 0)
+        await self.store.upsert_metrics_snapshot(
+            runtime_id,
+            instance_id,
+            {
+                "tokens": int(instance_metrics.get("tokens") or 0),
+                "runtime_seconds": float(instance_metrics.get("runtime_seconds") or 0),
+                "retries": int(instance_metrics.get("retries") or 0),
+                "continuations": int(instance_metrics.get("continuations") or 0),
+                "blocked": int(instance_metrics.get("blocked") or 0),
+                "pending_human": int(instance_metrics.get("pending_human") or 0),
+                "failures": int(instance_metrics.get("failures") or 0),
+                "queue_depth": queue_depth,
+                "running": bool(instance_queue.get("running") or binding["process_status"] == "running"),
+                "captured_at": conductor["last_report_at"],
+            },
+        )
+        tail = log_tail.get(instance_id) if isinstance(log_tail.get(instance_id), dict) else None
+        if tail is not None:
+            await self.store.upsert_instance_log_tail(
                 runtime_id,
                 instance_id,
                 {
-                    "tokens": int(instance_metrics.get("tokens") or 0),
-                    "runtime_seconds": float(instance_metrics.get("runtime_seconds") or 0),
-                    "retries": int(instance_metrics.get("retries") or 0),
-                    "continuations": int(instance_metrics.get("continuations") or 0),
-                    "blocked": int(instance_metrics.get("blocked") or 0),
-                    "pending_human": int(instance_metrics.get("pending_human") or 0),
-                    "failures": int(instance_metrics.get("failures") or 0),
-                    "queue_depth": queue_depth,
-                    "running": bool(instance_queue.get("running") or binding["process_status"] == "running"),
-                    "captured_at": conductor["last_report_at"],
+                    "generation": tail.get("generation"),
+                    "offset_end": int(tail.get("offset_end") or 0),
+                    "updated_at": conductor["last_report_at"],
+                    "lines": list(tail.get("lines") or []),
                 },
             )
-            tail = log_tail.get(instance_id) if isinstance(log_tail.get(instance_id), dict) else None
-            if tail is not None:
-                await self.store.upsert_instance_log_tail(
-                    runtime_id,
-                    instance_id,
-                    {
-                        "generation": tail.get("generation"),
-                        "offset_end": int(tail.get("offset_end") or 0),
-                        "updated_at": conductor["last_report_at"],
-                        "lines": list(tail.get("lines") or []),
-                    },
-                )
-            upserted += 1
-        return {"status": "ok", "bindings_upserted": upserted}
 
     async def list_conductors_for_user(self, user_id: str) -> list[dict[str, Any]]:
         result: list[dict[str, Any]] = []
