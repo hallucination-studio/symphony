@@ -10,6 +10,8 @@ from performer_api.managed_runs import (
     ThreadCompletionReport,
     VerificationRubric,
     WorkItem,
+    WorkItemResult,
+    WorkItemResultStatus,
     WorkItemSliceType,
     WorkItemState,
     WorkItemVerification,
@@ -347,6 +349,51 @@ async def test_managed_run_projector_projects_plan_execute_and_verify_attempt_co
     assert len(tracker.updated_comments) == 3
     mappings = (store.get_run(accepted.run_id) or {})["payload"]["attempt_comment_projections"]
     assert sorted(mappings) == ["attempt-execute", "attempt-plan", "attempt-verify"]
+
+
+async def test_managed_run_projector_projects_approved_plan_revision_shape(tmp_path) -> None:
+    store = ConductorManagedRunStore(tmp_path)
+    coordinator = ConductorManagedRunCoordinator(store=store)
+    accepted = coordinator.accept_dispatch({"issue_id": "root-1", "issue_identifier": "HELL-1"}, instance_id="instance-1")
+    base = _plan()
+    removed = WorkItem.from_dict({**base.work_items[0].to_dict(), "id": "wi-2", "title": "Add removed item"})
+    coordinator.apply_plan(accepted.run_id, ManagedRunPlan.from_dict({**base.to_dict(), "work_items": [base.work_items[0].to_dict(), removed.to_dict()]}), backend_session_id="thread-1")
+    tracker = Tracker()
+    projector = ManagedRunLinearProjector(store=store, tracker=tracker, root_issue_id="root-1")
+    await projector.reconcile_once(accepted.run_id)
+    coordinator.start_work_item(accepted.run_id, "wi-1")
+    coordinator.submit_work_item_result(
+        accepted.run_id,
+        WorkItemResult.from_dict(
+            {
+                "work_item_id": "wi-1",
+                "status_claimed": WorkItemResultStatus.PLAN_REVISION_REQUESTED.value,
+                "changed_files": [],
+                "undeclared_files": [],
+                "tests": {"red_observed": True, "green_commands_run": [], "secret_scan_passed": True},
+                "acceptance_results": [{"criterion": "child issue exists", "status": "passed"}],
+                "blocked_reason": None,
+                "plan_revision": {"reason": "replace wi-2 with wi-3"},
+                "notes": "revision",
+            }
+        ),
+    )
+    added = WorkItem.from_dict({**base.work_items[0].to_dict(), "id": "wi-3", "title": "Add revised item", "dependencies": ["wi-1"]})
+    coordinator.approve_plan_revision(
+        accepted.run_id,
+        ManagedRunPlan.from_dict({**base.to_dict(), "work_items": [base.work_items[0].to_dict(), added.to_dict()]}),
+        backend_session_id="thread-1",
+        approval_id="approval-1",
+    )
+
+    await projector.reconcile_once(accepted.run_id)
+
+    assert len(tracker.children) == 3
+    assert ("child-2", ["Canceled", "Cancelled"], "canceled") in tracker.transitions
+    assert ("child-1", "child-3", "blocks") in tracker.relations
+    assert any(marker == "SYMPHONY RUN SUMMARY" and "Plan version: 2" in block for _, marker, block in tracker.description_blocks)
+    assert any(marker == "SYMPHONY RUN SUMMARY" and "plan_revision_approved:approval-1" in block for _, marker, block in tracker.description_blocks)
+    assert any(marker == "SYMPHONY WORK ITEM" and "cancelled_by_plan_revision:2" in block for _, marker, block in tracker.description_blocks)
 
 
 async def test_managed_run_projector_projects_dependency_blocks_and_operator_metadata(tmp_path) -> None:

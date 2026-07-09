@@ -27,13 +27,13 @@ state, API/report output, and Linear projection when the design requires it.
 | The local verifier creates a fresh disposable detached worktree, verifies artifact hashes before commands, and detects gate workspace mutation. | `gates-verification-integration.md` | `test_local_verifier_runs_gate_in_detached_disposable_worktree`; `test_local_verifier_blocks_artifact_hash_mismatch_before_running_gate`; `test_local_verifier_blocks_gate_workspace_mutation_without_touching_source_repo` | covered |
 | Final release evidence includes gate hash, verification input, verifier command/evidence, score, manifest, join or conflict result, checkpoint evidence, and final rubric. | `gates-verification-integration.md` | `test_managed_run_view_exposes_complete_evidence_bundle` | covered |
 | Linear child topology mirrors work-item dependencies as `blocks` relations with operator metadata. | `linear-projection.md` | `test_managed_run_projector_projects_dependency_blocks_and_operator_metadata` | covered |
+| Approved plan revisions keep unchanged child issues, cancel removed child issues, create new child issues, refresh `blocks`, and show revision context. | `linear-projection.md` | `test_managed_run_projector_projects_approved_plan_revision_shape` | covered |
 | Real E2E classifies external instability separately from product failures. | `real-run-testing-guide.md` | `test_real_codex_connectivity_probe_classifies_upstream_and_auth_failures` | covered |
 
 ## Remaining Blocking Gaps
 
 | Requirement | Source | Needed Blocking Test | Status |
 |---|---|---|---|
-| Plan revision approval mirrors unchanged, canceled, and new work-item issues with visible revision context. | `linear-projection.md` | Projection test for an approved revision containing kept, canceled, and added child issues plus refreshed `blocks`. | gap |
 | Work-item blocked human action writes one durable instruction update and resumes only by blocked-state flip, not by free-text comments. | `linear-projection.md` | Store/projection/ingestion test for wait identity, instruction comment idempotency, ignored comment-only resume, and accepted state-flip resume. | gap |
 | Linear dependency ingestion is union-only and never deletes local edges on lagging reads. | `linear-projection.md` | Topology ingestion test that adds human-created `blocks`, drops canceled edges, and commits nothing when unchanged. | gap |
 
