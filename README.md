@@ -1,78 +1,87 @@
 # Symphony
 
-Symphony is one orchestration system for running coding agents as an "orchestra":
+Symphony is one orchestration system for running coding agents as an
+"orchestra":
 
-- **Podium** is the managed SaaS control plane. It owns auth, Linear app/OAuth state, runtime enrollment, delegated-issue polling, dispatch queueing, and the Linear proxy.
-- **Conductor** is the customer-side local daemon. It owns local instance metadata, connects outbound to Podium as an enrolled runtime, leases dispatches, starts/stops Performers, and reports local state.
-- **Performer** is the execution worker. It runs short-lived `plan`, `execute`, or `verify` attempts from Conductor-owned attempt request files.
-- **performer-api** contains the shared contracts that let those roles speak the same language without cross-importing each other's runtime code.
+- **Podium** is the managed SaaS control plane. It owns auth, Linear OAuth/app
+  state, runtime enrollment, dispatch queueing, runtime config, Podium Web, and
+  the Linear proxy.
+- **Conductor** is the customer-side daemon. It connects outbound to Podium,
+  leases dispatches, owns durable pipeline graph state, starts Performers, and
+  reports local state.
+- **Performer** is the execution worker. It runs one fenced `plan`, `execute`,
+  or `verify` attempt from Conductor-owned request/result JSON paths.
+- **performer-api** contains the shared contracts that let those roles exchange
+  state without importing each other's runtime code.
 
-The repository is still named `symphony` because the product is the whole orchestra. The old `symphony` Python package and `symphony` CLI have been removed; runtime execution now uses the `performer`, `conductor`, and `podium` commands.
+The repository is named `symphony` because the product is the whole system. The
+old `symphony` Python package and CLI have been removed; runtime execution uses
+the `performer`, `conductor`, and `podium` commands.
 
-Symphony runtime execution is Conductor-owned durable `plan -> execute -> verify`
-pipeline work. Linear is the collaboration surface, Podium is the dispatch/config
-surface, and Performer only runs fenced per-mode attempts. In managed mode the
-flow is:
+## Architecture Docs
+
+Start with [docs/product/README.md](docs/product/README.md). The runtime source
+of truth is split by concern:
+
+- [Runtime Pipeline](docs/product/runtime-pipeline.md)
+- [Pipeline State](docs/product/pipeline-state.md)
+- [Gates, Verification, And Integration](docs/product/gates-verification-integration.md)
+- [Linear Projection](docs/product/linear-projection.md)
+- [Runtime Profiles And Backends](docs/product/runtime-profiles-backends.md)
+- [Linear Integration](docs/product/linear-integration.md)
+- [Podium Web](docs/product/podium-web.md)
+- [Runtime Installation](docs/product/runtime-installation.md)
+- [Security Model](docs/product/security-model.md)
+- [Real Run Testing Guide](docs/real-run-testing-guide.md)
+
+## Runtime Flow
+
+Managed execution is Conductor-owned durable `plan -> execute -> verify` work:
 
 1. A Linear issue is delegated to the Symphony custom agent.
-2. Podium polls Linear for issues delegated to the configured Symphony application id.
-3. Podium matches the delegated custom agent, project, and runtime group, then queues a dispatch.
+2. Podium receives or discovers the delegated issue and applies routing.
+3. Podium queues a dispatch for an eligible runtime group.
 4. Conductor leases the dispatch over outbound runtime auth.
-5. Conductor commits or resumes a durable pipeline graph and starts short-lived Performer workers in `plan`, `execute`, or `verify` mode.
+5. Conductor commits or resumes a durable graph.
+6. Performer runs one fenced attempt for each scheduled mode.
+7. Conductor collects results, gates verification, integrates manifests, and
+   projects sanitized state to Podium and Linear.
 
-The three-mode runtime pipeline foundation from `docs/product/three-mode-runtime-pipeline.md`
-is the only runtime path. `performer-api`
-defines `RuntimeMode` (`plan`, `execute`, `verify`), versioned
-`SchedulerPolicy`, per-mode runtime profiles, graph node/attempt states, frozen
-gate snapshots, verification input snapshots, task output manifests, pipeline
-view DTOs, and deterministic `PlanValidator` semantics. Conductor persists graph
-revisions, nodes, blocks edges, frozen gates, worker leases, verification input
-snapshots, and verified task output manifests in its pipeline store. Managed
-Conductor dispatch does not create orchestration phase runs, poll Linear directly, apply
-phase result files, or project `performer:phase/*` labels as scheduling truth.
-
-Performer accepts only managed one-shot mode attempts:
-
-```bash
-.venv/bin/performer \
-  --mode plan|execute|verify \
-  --attempt-request-path /path/to/request.json \
-  --attempt-result-path /path/to/result.json
-```
-
-Positional `WORKFLOW.md`, `--once`, `--dispatch-issue-id`,
-`--advance-request-path`, and `--phase-result-path` are not supported by the
-Performer CLI.
-
-A Performer:
-
-1. Reads a fenced attempt request from Conductor.
-2. Runs the requested mode in an isolated per-mode runtime profile.
-3. Writes a fenced attempt result for Conductor to collect.
-4. Never leases dispatches, polls Linear, or owns durable graph state directly.
-
-The default tracker is Linear. Performer also exposes a small tracker adapter registry for non-Linear integrations. In normal operation, you run Performer through Conductor so the local daemon can operate it and collect status/events centrally.
+Dispatch routing is based on custom-agent delegate, project scope, active state,
+blockers, verified graph dependencies, and runtime capacity. Labels and human
+assignee are not scheduling truth.
 
 ## Install
+
+```bash
+make install
+```
+
+Equivalent editable install:
 
 ```bash
 python3 -m venv .venv
 .venv/bin/python -m pip install -e packages/performer-api -e packages/performer[test] -e packages/conductor -e packages/podium
 ```
 
-## Configure
+## Test
 
-Managed workflows generated by Conductor use Podium's Linear proxy:
-
-```yaml
-tracker:
-  kind: linear
-  endpoint: https://podium.example/api/v1/linear/graphql
-  api_key: $PODIUM_PROXY_TOKEN
-  required_delegate_id: <linear-agent-app-user-id>
+```bash
+make test
 ```
 
-Do not use labels or human assignee as dispatch routing in managed mode. Dispatch eligibility is based on the Linear custom agent delegate, project scope, active state, blockers, and runtime capacity.
+Focused tests need all package `src/` paths on `PYTHONPATH`:
+
+```bash
+PYTHONPATH=$(pwd)/packages/performer-api/src:$(pwd)/packages/performer/src:$(pwd)/packages/conductor/src:$(pwd)/packages/podium/src \
+  .venv/bin/python -m pytest tests/test_product_docs_pipeline.py -q
+```
+
+Real Linear integration runs also pin repo source roots:
+
+```bash
+PYTHONPATH=$(pwd)/packages/performer-api/src:$(pwd)/packages/performer/src:$(pwd)/packages/conductor/src:$(pwd)/packages/podium/src .venv/bin/python tools/real_symphony_e2e.py --project-slug <linear-project-slug> --pipeline-gates --timeout 600
+```
 
 ## Run Conductor
 
@@ -86,21 +95,51 @@ Equivalent direct command:
 .venv/bin/conductor --port 8081 --data-root ./.conductor
 ```
 
-## Conductor
-
-`Conductor` is the host-local daemon/control plane for the Symphony runtime. It manages multiple Performer instances, persists per-instance metadata under `.conductor/instances/<id>/`, owns durable pipeline graph state, leases dispatches from Podium, starts and stops per-mode Performer attempts, collects result files, and exposes a JSON API for instance CRUD, runtime controls, logs, repo inspection, Podium registration/reporting, and pipeline observability.
-
-Conductor does not ship a local web console in this build. It is the daemon/API layer that operates Performers and connects upward to Podium using enrolled runtime credentials.
-
-Run it with:
+## Run Podium
 
 ```bash
-.venv/bin/conductor --port 8081 --data-root ./.conductor
+export PODIUM_DATABASE_URL=postgresql://podium@localhost/podium
+.venv/bin/podium api --host 127.0.0.1 --port 8090
 ```
 
-Current API surface includes:
+## Run Performer Attempt
 
-- `GET /`
+Performer accepts only managed one-shot mode attempts:
+
+```bash
+.venv/bin/performer \
+  --mode plan|execute|verify \
+  --attempt-request-path /path/to/request.json \
+  --attempt-result-path /path/to/result.json
+```
+
+A Performer reads a fenced request, runs the requested mode under the prepared
+runtime profile, writes a fenced result, and exits. It never leases dispatches,
+queries Linear as scheduler truth, or owns durable graph state.
+
+## Podium API Surface
+
+Managed Podium endpoints include:
+
+- `GET /api/v1/health`
+- `POST /api/v1/auth/register`
+- `POST /api/v1/auth/login`
+- `POST /api/v1/auth/logout`
+- `GET /api/v1/auth/me`
+- `POST /api/v1/runtime/enrollment-tokens`
+- `POST /api/v1/runtime/enroll`
+- `GET /api/v1/runtime/ws`
+- `POST /api/v1/runtime/dispatches/lease`
+- `POST /api/v1/runtime/dispatches/ack`
+- `POST /api/v1/runtime/config`
+- `GET /api/v1/runtime/config`
+- `GET /api/v1/pipeline`
+- `POST /api/v1/linear/graphql`
+
+## Conductor API Surface
+
+Managed Conductor endpoints include:
+
 - `GET /api/instances`
 - `POST /api/instances`
 - `GET /api/instances/:id`
@@ -117,134 +156,17 @@ Current API surface includes:
 - `GET /api/settings`
 - `PATCH /api/settings`
 
-## Podium
+## Runtime Config
 
-`Podium` is the SaaS boundary for the Symphony system. The managed API surface includes:
+Podium pushes versioned scheduler policy and per-mode runtime profiles to
+Conductor. Conductor materializes isolated runtime homes under managed instance
+state and fails closed if a required mode profile is missing.
 
-- `GET /`
-- `GET /api/v1/health`
-- `POST /api/v1/auth/register`
-- `POST /api/v1/auth/login`
-- `POST /api/v1/auth/logout`
-- `GET /api/v1/auth/me`
-- `POST /api/v1/runtime/enrollment-tokens`
-- `POST /api/v1/runtime/enroll`
-- `GET /api/v1/runtime/ws`
-- `POST /api/v1/runtime/dispatches/lease`
-- `POST /api/v1/runtime/dispatches/ack`
-- `POST /api/v1/runtime/config`
-- `GET /api/v1/runtime/config`
-- `GET /api/v1/pipeline`
-- `POST /api/v1/linear/graphql`
+Codex-backed profiles receive isolated `CODEX_HOME` directories. The default
+`verify` profile may use `local-verifier`, which runs frozen gate commands in a
+disposable worktree with mutation detection after gate execution. That is not
+OS-level read-only enforcement.
 
-Run it with:
-
-```bash
-export PODIUM_DATABASE_URL=postgresql://podium@localhost/podium
-.venv/bin/podium api --host 127.0.0.1 --port 8090
-```
-
-Conductor managed settings are populated from Podium runtime enrollment: `podium_url`, `podium_runtime_id`, `podium_runtime_token`, `podium_proxy_token`, `podium_ws_url`, `runtime_group_id`, and `managed_mode`.
-
-Runtime-group policy/config is versioned. Podium accepts higher-version runtime
-config envelopes containing scheduler policy and per-mode runtime profiles,
-rejects stale versions, and returns only sanitized profile settings to browser
-APIs. Conductor materializes isolated runtime homes under managed instance state
-(`runtime-homes/<mode>/<backend>`). Codex-backed `plan` and `execute` profiles
-use isolated `CODEX_HOME` directories; the first-version `verify` profile may use
-`local-verifier`, which runs deterministic frozen gate commands without a model
-backend. The first local-verifier implementation uses a disposable worktree with
-mutation detection after gate execution, not OS-level read-only enforcement.
-Managed mode fails closed if a mode attempt has no runtime profile.
-
-Example runtime config envelope:
-
-```json
-{
-  "runtime_group_id": "group-example",
-  "version": 1,
-  "scheduler_policy": {
-    "policy_id": "policy-group-example",
-    "version": 1,
-    "effective_at": "2026-07-07T00:00:00Z",
-    "capacity": {"global": 3, "by_mode": {"plan": 1, "execute": 2, "verify": 1}},
-    "dependency_policy": "verify_passed",
-    "max_rework_attempts": 1
-  },
-  "profiles": {
-    "plan": {"name": "codex-plan", "backend": "codex", "mode": "plan", "settings": {"codex_home_source": "$SYMPHONY_E2E_CODEX_HOME_SOURCE"}},
-    "execute": {"name": "codex-execute", "backend": "codex", "mode": "execute", "settings": {"codex_home_source": "$SYMPHONY_E2E_CODEX_HOME_SOURCE"}},
-    "verify": {"name": "local-verifier", "backend": "local-verifier", "mode": "verify", "settings": {}}
-  }
-}
-```
-
-The offline importer in `conductor.offline_plan_importer` is intentionally
-non-scheduling: it imports hand-written plans through the same gate snapshot,
-`PlanValidator`, and graph revision commit path, but it does not acquire leases
-or dispatch Performer work.
-
-This build supports `local_path` repository sources for instance creation and repo inspection. On create, Conductor initializes an instance-level repository workspace once when the managed workspace is empty, then reuses that workspace for future runs. The Git clone flow is still a stub and returns a structured API error.
-
-Verified task output manifests enqueue deterministic local patch integration. Integration conflicts create `[Human Action]` Linear child issues and move the relevant pipeline node to `AWAITING_HUMAN`.
-
-## Codex Permissions
-
-Per-mode runtime profiles carry backend settings. Conductor materializes an
-isolated runtime home per mode/backend and fails closed if a mode profile cannot
-be resolved. Codex profiles receive an isolated `CODEX_HOME`; `local-verifier`
-profiles do not receive Codex SDK settings.
-
-Runtime confirmation policy:
-
-- Command execution approval requests are approved for the session.
-- File-change approval requests are accepted for the session.
-- User-input requests fail the run instead of waiting indefinitely.
-- Unsupported dynamic tool calls return a structured protocol error and the session continues.
-- Linear access flows through Podium's server-side proxy. Tokens and client secrets never reach browser responses or Performer result payloads.
-
-## Workspace and Safety Posture
-
-This implementation targets a trusted local automation environment. Managed Conductor instances use one prepared repository workspace per instance and rely on Codex/worktree behavior for per-task working state. Verify attempts that use `local-verifier` run frozen gate commands in a disposable worktree and fail if mutation detection finds implementation changes after the gate. Performer still validates that the configured workspace stays inside its managed root and honors the configured Codex approval/sandbox posture.
-
-Secrets should be provided through `$VAR` indirection such as `$PODIUM_PROXY_TOKEN`. Performer validates that required secrets are present but does not print token values. Hook scripts and agent prompts are trusted inputs and can still leak data if they are written unsafely.
-
-The `linear_graphql` tool intentionally gives the agent access to configured Linear auth through Podium's proxy. Narrow dispatch scope with project slug, custom-agent delegate, and active states when running against shared workspaces.
-
-## Extensions
-
-The following extensions are shipped:
-
-- `linear_graphql` client-side tool for Codex sessions when `tracker.kind: linear`.
-- JSON persistence for retry queue and running session metadata.
-- First-class Linear comment and state transition APIs.
-- Pluggable tracker adapter registry via `performer.tracker.register_tracker_adapter()`.
-- Appendix A SSH worker execution.
-
-SSH worker configuration:
-
-```yaml
-worker:
-  ssh_hosts:
-    - builder-1
-    - builder-2
-  max_concurrent_agents_per_host: 1
-```
-
-When `worker.ssh_hosts` is omitted, work runs locally. When configured, Performer assigns each worker run to an available host and launches the Codex app-server as `ssh <host> 'cd <workspace_path> && <codex.command>'`. If all SSH hosts are saturated, dispatch waits instead of falling back to local execution. Remote hosts must already provide the expected shell, workspace path, Codex command, repository contents, and credentials.
-
-## Tests
-
-```bash
-make test
-```
-
-Real Linear integration checks are skipped by default. To run the managed custom-agent E2E, source a local `.env` that contains `PODIUM_LINEAR_APPLICATION_ID` and `PODIUM_LINEAR_APP_ACCESS_TOKEN` for the installed custom agent. Do not use a human/operator Linear token for this path:
-
-```bash
-set -a && source .env && set +a
-export SYMPHONY_E2E_CODEX_HOME_SEED="$(pwd)/.test-real-flow/codex-seed"
-PYTHONPATH=$(pwd)/packages/performer-api/src:$(pwd)/packages/performer/src:$(pwd)/packages/conductor/src:$(pwd)/packages/podium/src .venv/bin/python tools/real_symphony_e2e.py --project-slug <linear-project-slug> --pipeline-gates --timeout 600
-```
-
-`SYMPHONY_E2E_CODEX_HOME_SEED` must point at a fixed copied seed directory that already contains the approved Codex seed files: `config.toml`, `auth.json`, and optionally `version.json` / `models_cache.json`. The E2E runner stages a per-run copy from that seed and rejects direct user Codex home inputs.
+Secrets flow through `$VAR` indirection such as `$PODIUM_PROXY_TOKEN`. Values are
+validated but never printed in responses, logs, result payloads, or browser API
+responses. Linear access flows through Podium's server-side proxy.

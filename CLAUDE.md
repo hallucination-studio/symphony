@@ -77,6 +77,6 @@ npm run design:lint  # lint DESIGN.md against the @google/design.md spec
 ## Conventions
 
 - This is a hard break from the old `symphony` package/CLI — do not add compatibility shims for old `symphony` imports, commands, labels, or state/log files unless explicitly asked.
-- `docs/product/three-mode-runtime-pipeline.md` is the runtime architecture source of truth. Do not add direct polling, legacy phase scheduling, or legacy workflow execution instructions.
+- The runtime architecture source of truth is split across `docs/product/runtime-pipeline.md`, `docs/product/pipeline-state.md`, `docs/product/gates-verification-integration.md`, `docs/product/linear-projection.md`, and `docs/product/runtime-profiles-backends.md`. Do not add legacy scheduling or legacy workflow execution instructions.
 - Secrets flow through `$VAR` indirection (e.g. `$PODIUM_PROXY_TOKEN`); values are validated but never printed in responses, logs, or API output.
 - Prefer small role-owned modules over large cross-role files, and use the existing structured models/parsers instead of ad hoc string manipulation for workflow config, persisted state, ops snapshots, and Linear data.

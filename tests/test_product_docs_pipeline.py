@@ -3,110 +3,155 @@ from __future__ import annotations
 from pathlib import Path
 
 
-def test_runtime_architecture_doc_is_pipeline_only() -> None:
-    path = Path("docs/product/runtime-orchestration-architecture.md")
-    text = path.read_text(encoding="utf-8")
+PRODUCT_DOCS = {
+    "README.md",
+    "product-shape.md",
+    "runtime-pipeline.md",
+    "pipeline-state.md",
+    "gates-verification-integration.md",
+    "linear-projection.md",
+    "runtime-profiles-backends.md",
+    "linear-integration.md",
+    "podium-web.md",
+    "runtime-installation.md",
+    "security-model.md",
+}
 
-    assert "Superseded by `docs/product/three-mode-runtime-pipeline.md`" in text
-    assert "direct mode" not in text.lower()
-    assert "phase state" not in text.lower()
-    assert "phase-oriented" not in text.lower()
-    assert "phase executor" not in text.lower()
+REMOVED_DOCS = {
+    Path("docs/product/three-mode-runtime-pipeline.md"),
+    Path("docs/product/runtime-orchestration-architecture.md"),
+    Path("docs/product/linear-podium-integration.md"),
+    Path("docs/product/linear-topology-mirror.md"),
+    Path("docs/product/podium-web-onboarding.md"),
+    Path("docs/product/runtime-installer-and-updates.md"),
+    Path("docs/product/symphony-linear-tree-skill.md"),
+}
+
+ENTRYPOINT_DOCS = [
+    Path("README.md"),
+    Path("AGENTS.md"),
+    Path("AGENT.md"),
+    Path("CLAUDE.md"),
+    Path("docs.md"),
+]
 
 
-def test_readme_does_not_publish_workflow_management_api_surface() -> None:
-    text = Path("README.md").read_text(encoding="utf-8")
-
-    assert "preview-workflow" not in text
-    assert "generate-workflow" not in text
-    assert "validate-workflow" not in text
-    assert "workflow-profiles" not in text
+def _read(path: Path) -> str:
+    return path.read_text(encoding="utf-8")
 
 
-def test_agent_guides_do_not_publish_legacy_runtime_entrypoints() -> None:
-    docs = [
-        Path("AGENTS.md"),
-        Path("AGENT.md"),
-        Path("CLAUDE.md"),
+def test_product_docs_are_current_focused_set() -> None:
+    actual = {path.name for path in Path("docs/product").glob("*.md")}
+
+    assert actual == PRODUCT_DOCS
+    for path in REMOVED_DOCS:
+        assert not path.exists(), f"{path} should not be preserved as a pointer"
+
+
+def test_implemented_superpower_plans_are_removed() -> None:
+    assert list(Path("docs/superpowers/plans").glob("*.md")) == []
+
+
+def test_product_readme_links_to_source_of_truth_docs() -> None:
+    text = _read(Path("docs/product/README.md"))
+
+    for doc in PRODUCT_DOCS - {"README.md"}:
+        assert f"./{doc}" in text or f"../{doc}" in text
+    assert "../real-run-testing-guide.md" in text
+
+
+def test_entrypoints_reference_new_runtime_docs() -> None:
+    required = [
+        "docs/product/runtime-pipeline.md",
+        "docs/product/pipeline-state.md",
+        "docs/product/gates-verification-integration.md",
+        "docs/product/linear-projection.md",
+        "docs/product/runtime-profiles-backends.md",
     ]
+    removed_names = [str(path) for path in REMOVED_DOCS]
 
-    forbidden = [
-        "make once",
-        ".venv/bin/performer WORKFLOW.md",
-        "--dispatch-issue-id",
-        "direct Performer polling loop",
-        "direct/legacy polling mode",
-        "Keep repo-owned workflow behavior in `WORKFLOW.md`",
+    for path in ENTRYPOINT_DOCS:
+        text = _read(path)
+        for doc in required:
+            assert doc in text, f"{path} does not point to {doc}"
+        for removed in removed_names:
+            assert removed not in text, f"{path} still points to removed {removed}"
+
+
+def test_docs_do_not_contain_historical_status_language() -> None:
+    stale_phrases = [
+        "present-partial",
+        "L done when",
+        "Current:",
+        "Open questions for implementation",
+        "marker-keyed",
+        "Definition of Done per Feature",
+        "Subproject Build Order",
+        "Documents Evolved or Superseded",
     ]
+    docs = list(Path("docs/product").glob("*.md")) + [Path("docs/real-run-testing-guide.md")]
 
     for path in docs:
-        text = path.read_text(encoding="utf-8")
-        for phrase in forbidden:
-            assert phrase not in text, f"{path} still publishes {phrase!r}"
+        text = _read(path)
+        for phrase in stale_phrases:
+            assert phrase not in text, f"{path} still contains historical phrase {phrase!r}"
 
 
-def test_root_docs_md_is_not_runtime_architecture_guidance() -> None:
-    text = Path("docs.md").read_text(encoding="utf-8")
+def test_product_docs_stay_compact() -> None:
+    for path in Path("docs/product").glob("*.md"):
+        line_count = len(_read(path).splitlines())
+        assert line_count <= 170, f"{path} has {line_count} lines"
 
-    assert "Historical legacy spec" in text
-    assert "Do not use this file" in text
-    assert "WORKFLOW.md" not in text
-    assert "Poll the issue tracker" not in text
-    assert "Polling orchestrator" not in text
-
-
-def test_linear_tree_skill_doc_is_offline_pipeline_importer_only() -> None:
-    path = Path("docs/product/symphony-linear-tree-skill.md")
-    text = path.read_text(encoding="utf-8")
-    lower = text.lower()
-
-    assert "optional offline pipeline plan importer" in lower
-    assert "phase-parent" not in lower
-    assert "phase parent" not in lower
-    assert "phase sections" not in lower
-    assert "phase issues" not in lower
-    assert "phase:" not in lower
-    assert "primary decomposition path" not in lower
+    real_run_lines = len(_read(Path("docs/real-run-testing-guide.md")).splitlines())
+    assert real_run_lines <= 220
 
 
-def test_docs_do_not_publish_legacy_workflow_or_phase_instructions() -> None:
+def test_docs_do_not_publish_legacy_runtime_instructions() -> None:
     forbidden = [
         "performer WORKFLOW",
         "WORKFLOW.md --once",
         "--once",
+        "--dispatch-issue-id",
+        "--advance-request-path",
+        "--phase-result-path",
         "phase_runs",
         "runtime_phase",
         "orchestration_runs",
+        "performer:phase/",
         "direct polling",
+        "direct Performer polling",
+        "legacy phase",
+        "phase scheduling",
     ]
-    allowed_paths = {
-        Path("docs/product/three-mode-runtime-pipeline.md"),
-        Path("docs/product/symphony-linear-tree-skill.md"),
-    }
+    docs = list(Path("docs").rglob("*.md")) + ENTRYPOINT_DOCS
 
-    for path in Path("docs").rglob("*.md"):
-        if path in allowed_paths:
-            continue
-        text = path.read_text(encoding="utf-8")
+    for path in docs:
+        text = _read(path)
         for phrase in forbidden:
             assert phrase not in text, f"{path} still publishes {phrase!r}"
 
 
-def test_pipeline_docs_are_honest_about_first_verify_isolation() -> None:
-    pipeline = Path("docs/product/three-mode-runtime-pipeline.md").read_text(encoding="utf-8")
-    readme = Path("README.md").read_text(encoding="utf-8")
-    combined = pipeline + "\n" + readme
+def test_linear_projection_uses_durable_comment_ids_not_hidden_markers() -> None:
+    text = _read(Path("docs/product/linear-projection.md"))
+
+    assert "attempt_id -> linear_comment_id" in text
+    assert "comment_id" in text
+    assert "There are no hidden comment markers" in text
+    assert "hidden HTML" not in text
+    assert "marker-keyed" not in text
+
+
+def test_pipeline_docs_are_honest_about_verify_isolation() -> None:
+    combined = "\n".join(
+        _read(path)
+        for path in [
+            Path("README.md"),
+            Path("docs/product/runtime-pipeline.md"),
+            Path("docs/product/gates-verification-integration.md"),
+        ]
+    )
 
     assert "disposable worktree" in combined
     assert "mutation detection" in combined
     assert "not OS-level read-only enforcement" in combined
-    assert "read-only checkout + disposable workspace" not in pipeline
-    assert "OS-level read-only" not in combined.replace("not OS-level read-only enforcement", "")
-
-
-def test_pipeline_docs_keep_s4_local_implementation_distinct_from_real_acceptance() -> None:
-    text = Path("docs/product/three-mode-runtime-pipeline.md").read_text(encoding="utf-8")
-
-    assert "S4 local/unit implementation is present" in text
-    assert "real acceptance matrix" in text
-    assert "not final acceptance evidence" in text
+    assert "read-only checkout + disposable workspace" not in combined

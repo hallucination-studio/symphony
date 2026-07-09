@@ -2,90 +2,90 @@
 
 ## Overview
 
-Symphony should be delivered as a hosted control plane plus a customer-installed
-runtime. Podium is the hosted product surface. It owns the Linear OAuth
-application, stores Linear workspace tokens, polls delegated Linear issues,
-routes work, and exposes the web UI. Customers install a local runtime that contains
-Conductor and Performer. That runtime runs on the customer's machine or server
-and performs code work close to the customer's repositories and credentials.
+Symphony is one managed product with a hosted control plane and a
+customer-installed runtime. Podium is the hosted product surface. Conductor and
+Performer run near the customer's repositories and execution credentials.
+`performer-api` carries shared contracts so those roles do not import each
+other's runtime code.
 
-The customer should not need to create their own Linear application. Symphony
-creates and operates one official Linear application. Customers authorize that
-application into their Linear workspace from Podium.
+Linear integration terminates at Podium. Customer runtimes connect outbound to
+Podium. Linear OAuth tokens never leave Podium.
 
-## Product Components
+## Product Roles
 
 ### Podium
 
-Podium is the SaaS boundary. It is public internet-facing and must have stable
-HTTPS endpoints for:
+Podium is the SaaS boundary and public HTTPS surface. It owns:
 
-- Linear OAuth callback
-- Runtime registration
-- Runtime heartbeat and command channels
-- Linear GraphQL proxy
-- Web UI and API
-
-Podium owns the sensitive integration state:
-
-- Linear OAuth access tokens
-- Linear refresh tokens
-- Runtime enrollment tokens
-- Runtime dispatch/proxy tokens
+- user authentication and Podium Web APIs;
+- Linear OAuth/app installation state;
+- delegated Linear issue intake;
+- routing rules and runtime groups;
+- runtime enrollment and update policy;
+- dispatch queues and runtime configuration;
+- the scoped Linear GraphQL proxy;
+- sanitized pipeline views for operators.
 
 ### Conductor
 
-Conductor is installed in the customer's environment. It manages local state and
-runtime processes, but it does not hold Linear OAuth tokens. It registers itself
-with Podium, receives dispatches, starts and stops Performers, exposes local
-health, and uploads operational state back to Podium.
+Conductor is the customer-side daemon. It owns local instance metadata,
+durable pipeline graph state, runtime credentials, dispatch leases, per-mode
+runtime profile materialization, Performer process lifecycle, result
+collection, local logs, and reports back to Podium.
 
-Conductor should only need outbound connectivity to Podium for the primary
-product path. Direct inbound calls from Podium to a customer's machine should be
-treated as an optional development mode, not the default SaaS posture.
+Conductor is the only local process manager for Performer. It launches
+Performer through the installed `performer` command or the repo-local fallback;
+it does not import Performer internals.
 
 ### Performer
 
-Performer runs exactly one fenced pipeline attempt in `plan`, `execute`, or
-`verify` mode. It receives attempt JSON from Conductor, uses the isolated
-runtime environment prepared for that mode, and writes one fenced result JSON
-back to Conductor. It may access local repositories, workspaces, Codex, shell
-tools, and customer-approved secrets needed for the attempt.
+Performer is a short-lived worker. It runs exactly one fenced attempt in
+`plan`, `execute`, or `verify` mode from Conductor-owned request/result JSON
+paths. It may use local repositories, shell tools, model backends, and
+customer-approved execution secrets prepared for that mode.
 
-Performer must not require `LINEAR_API_KEY` in the managed product path and must
-not poll Linear directly. Linear collaboration flows through Podium and
-Conductor's pipeline projection.
+Performer does not lease dispatches, poll Linear, own graph state, or receive
+Linear OAuth tokens.
 
-## Core User Journey
+### performer-api
+
+`performer-api` is the shared contract package. It owns runtime modes,
+scheduler policy DTOs, runtime profile DTOs, pipeline graph and attempt state,
+frozen gate snapshots, verification input snapshots, task output manifests,
+projection models, and registration DTOs.
+
+## Managed Journey
 
 1. A user signs in to Podium.
-2. The user connects a Linear workspace by authorizing the Symphony Linear app.
-3. Podium stores the Linear workspace installation.
-4. The user selects Linear projects and routing rules.
-5. Podium generates a runtime install command.
-6. The user runs the install command on a local machine or server.
-7. The installed Conductor enrolls with Podium.
-8. Podium polls Linear for issues delegated to the Symphony custom agent.
-9. Podium routes each delegated issue to an eligible Conductor.
-10. Conductor schedules fenced `plan -> execute -> verify` attempts and starts
-    short-lived Performers for each mode.
-11. Podium shows pipeline graph state, capacity, leases, attempts, manifests,
-    integration, human waits, and runtime health.
+2. The user connects Linear by authorizing the Symphony Linear app.
+3. The user selects project scope and repository mapping.
+4. Podium generates a runtime install command.
+5. The installed Conductor enrolls with Podium and receives scoped credentials.
+6. A Linear issue is delegated to the Symphony custom agent.
+7. Podium accepts the delegated issue and queues a dispatch for an eligible
+   runtime group.
+8. Conductor leases the dispatch and commits or resumes a durable pipeline
+   graph.
+9. Performer runs fenced `plan`, `execute`, and `verify` attempts under
+   per-mode profiles.
+10. Podium and Linear show sanitized operator state: nodes, attempts, capacity,
+    leases, gates, manifests, waits, conflicts, and runtime health.
 
-## Default Architecture Decision
+## Product Boundaries
 
-The default should be:
+- The product is Symphony, not four independent tools.
+- Package boundaries are runtime boundaries.
+- The managed path is Podium -> Conductor -> Performer, with Conductor-owned
+  durable state.
+- Linear is a collaboration and projection surface, not scheduler truth.
+- Runtime install and update flows do not ask customers to clone this repo or
+  copy Linear tokens.
 
-> Linear integration terminates at Podium. Customer runtimes connect outbound to
-> Podium. Linear tokens never leave Podium.
+## Non-Goals
 
-This keeps the customer installation simpler and avoids asking users to expose a
-local machine to the public internet.
-
-## Non-Goals for the First Managed Version
-
-- No customer-created Linear OAuth applications.
-- No requirement for customer machines to expose public webhook endpoints.
-- No Linear OAuth tokens on Conductor or Performer.
-- No Kubernetes requirement for customer runtime.
-- No local UI required on the customer machine.
+- No customer-created Linear OAuth application for the managed path.
+- No inbound public callback requirement for customer machines.
+- No Linear OAuth token on Conductor or Performer.
+- No local web console requirement on customer machines.
+- No compatibility shim for the removed `symphony` Python package, CLI,
+  labels, state files, or workflow runner paths.

@@ -33,7 +33,12 @@ Current hard renames:
 - Do not reintroduce Performer HTTP status/web UI or Conductor static web UI unless the product direction explicitly changes. Runtime status should flow through persisted state/ops and Conductor APIs.
 - Avoid compatibility shims for old `symphony` imports, commands, labels, files, or logs unless explicitly requested. This refactor is a hard break.
 - Do not print secrets. Settings such as `linear_api_key`, `podium_token`, and environment-resolved tokens may be validated or passed through, but final responses, logs, and API responses must not echo secret values.
-- Keep runtime behavior aligned with `docs/product/three-mode-runtime-pipeline.md`. Do not add direct polling, legacy phase scheduling, or `WORKFLOW.md` execution paths.
+- Keep runtime behavior aligned with `docs/product/runtime-pipeline.md`,
+  `docs/product/pipeline-state.md`,
+  `docs/product/gates-verification-integration.md`,
+  `docs/product/linear-projection.md`, and
+  `docs/product/runtime-profiles-backends.md`. Do not add legacy scheduling or
+  `WORKFLOW.md` execution paths.
 - Prefer small focused modules over large cross-role files. When adding behavior, put lifecycle, repo materialization, ops/retention reads, registration/reporting, tracker integration, and Codex process handling in clearly owned modules.
 - Use structured models and parsers already in the codebase instead of ad hoc string manipulation for workflow config, persisted state, ops snapshots, registration payloads, and Linear data.
 - Tests should cover both the role-local behavior and the cross-role contract. Add or update import-boundary tests when package relationships change.
@@ -129,15 +134,15 @@ the running product. Use the real-run tools in this file and
 
 For Podium onboarding, Podium Web, runtime enrollment, installed Conductor behavior, Podium dispatch routing, or Linear delegated work, use the `Podium Web To Linear Acceptance` scenario in `docs/real-run-testing-guide.md`. That file is the canonical test procedure for the browser -> Podium -> install command -> local Conductor -> Linear issue -> Performer -> Podium run-completion path; keep new lessons and required checks there rather than duplicating the full flow in this file.
 
-Human intervention must use Linear child issues. When the pipeline needs input,
-runtime approval, tool input, integration-conflict review, or verifier judgment,
-Conductor must create a `[Human Action]` child issue. Pipeline human waits record
-their reason code; runtime approval/tool-input waits record a durable
+Human intervention must be visible in Linear. Pipeline waits use node-level
+`need_human`: Conductor moves the affected issue to the blocked-style state,
+records the reason code, and resumes only when the operator flips that issue out
+of the blocked-style state. Runtime approval/tool-input waits record a durable
 `runtime_wait` with `wait_kind`, `attempt_id`, `lease_id`, sanitized message, and
-the projected child issue id. Updating only local stdout, local logs, or a hidden
-runtime table is not enough. A real acceptance run is only valid if the human
-completes the child issue and moves it to `Done`; parent issue comments or
-command-like comments are informational only and must not resume Performer.
+the projected child issue id when that runtime wait flow uses a `[Human Action]`
+child issue. Updating only local stdout, local logs, or a hidden runtime table is
+not enough. Comments are informational context and must not resume Performer by
+themselves.
 
 This follows the Superpowers verification rule: evidence before claims, always.
 
@@ -312,7 +317,9 @@ For the three-mode pipeline:
   `gate_snapshot_hash`, `conductor_revision`, and an operator-readable
   `operator_status`. Runtime approval/permission/tool-input waits must also
   include `operator_wait_kind` and a Runtime Wait block in the Linear projection.
-- Human input resumes only through `[Human Action]` child issues.
+- Pipeline `need_human` resumes only through the node state flip; runtime
+  approval/permission/tool-input waits resume through their recorded runtime wait
+  channel, including `[Human Action]` child issues when that flow uses them.
 
 Always verify parent relationships using explicit Linear fields:
 
