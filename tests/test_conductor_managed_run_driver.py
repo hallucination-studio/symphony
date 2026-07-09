@@ -48,6 +48,8 @@ class FakeRuntimeManager:
 def _instance(tmp_path: Path) -> InstanceRecord:
     repo = tmp_path / "repo"
     repo.mkdir()
+    _init_repo(repo)
+    _write_commit(repo, ".managed-run-base", "base\n", "base")
     instance_dir = tmp_path / "instances" / "inst-1"
     return InstanceRecord.create(
         id="inst-1",
@@ -596,6 +598,8 @@ def _complete_with_manifest(store: ConductorManagedRunStore, run_id: str, work_i
 
 
 def _init_repo(repo: Path) -> None:
+    if (repo / ".git").exists():
+        return
     _git(repo, "init", "-b", "main")
     _git(repo, "config", "user.email", "test@example.com")
     _git(repo, "config", "user.name", "Test User")

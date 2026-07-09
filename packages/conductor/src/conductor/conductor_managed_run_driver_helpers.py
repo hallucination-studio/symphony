@@ -213,34 +213,6 @@ def _sanitize(exc: Exception) -> str:
     return str(exc).replace("\n", " ")[:500] or exc.__class__.__name__
 
 
-def _run_verification_command(command: str, *, workspace_path: Path, timeout_seconds: int = 300) -> str:
-    try:
-        completed = subprocess.run(
-            command,
-            cwd=workspace_path,
-            shell=True,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=timeout_seconds,
-            check=False,
-        )
-    except subprocess.TimeoutExpired as exc:
-        return f"verification_command_timeout:{_safe_command(command)}:{_output_tail(exc.stdout or '', exc.stderr or '')}"
-    if completed.returncode != 0:
-        return f"verification_command_failed:{_safe_command(command)}:exit_{completed.returncode}:{_output_tail(completed.stdout, completed.stderr)}"
-    return ""
-
-
-def _safe_command(command: str) -> str:
-    return _redact_secret_text(str(command or "").replace("\n", " ").replace("\r", " ").strip())[:200]
-
-
-def _output_tail(stdout: Any, stderr: Any) -> str:
-    text = f"{stdout or ''}\n{stderr or ''}".replace("\n", " ").replace("\r", " ").strip()
-    return _redact_secret_text(text or "no output")[-200:]
-
-
 _SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"Bearer\s+[A-Za-z0-9._~+/=-]+", re.IGNORECASE),
     re.compile(r"sk-[A-Za-z0-9_-]+", re.IGNORECASE),

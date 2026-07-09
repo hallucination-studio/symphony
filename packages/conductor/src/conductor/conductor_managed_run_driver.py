@@ -19,13 +19,13 @@ from .conductor_managed_run_driver_helpers import (
     _issue_description,
     _read_json,
     _role_capacity,
-    _run_verification_command,
     _sanitize,
     _task_output_manifest,
     _verification_input_snapshot,
     _write_json,
 )
 from .conductor_managed_run_store import ConductorManagedRunStore
+from .conductor_managed_run_verifier import run_local_verifier
 from .conductor_models import InstanceRecord
 from .runtime_backends import prepare_backend_environment
 
@@ -281,14 +281,16 @@ class ConductorManagedRunDriver:
         applied = 0
         for item in items:
             result = WorkItemResult.from_dict(item["result"])
-            for command in WorkItem.from_dict(item["payload"]).verification.green_commands:
-                if command not in result.tests.get("green_commands_run", []):
-                    self.coordinator.verify_work_item(str(run["run_id"]), str(item["work_item_id"]), gate_status=f"verification missing:{command}", passed=False)
-                    return {"failed": 1}
-                failure = _run_verification_command(command, workspace_path=Path(instance.resolved_repo_path))
-                if failure:
-                    self.coordinator.verify_work_item(str(run["run_id"]), str(item["work_item_id"]), gate_status=failure, passed=False)
-                    return {"failed": 1}
+            outcome = run_local_verifier(
+                WorkItem.from_dict(item["payload"]),
+                result,
+                source_workspace=Path(instance.resolved_repo_path),
+                state_root=Path(instance.instance_dir) / "state",
+                verify_attempt_id=f"verify-{str(item['work_item_id'])}",
+            )
+            if not outcome.passed:
+                self.coordinator.verify_work_item(str(run["run_id"]), str(item["work_item_id"]), gate_status=outcome.gate_status, passed=False)
+                return {"failed": 1}
             self.coordinator.verify_work_item(str(run["run_id"]), str(item["work_item_id"]), gate_status="verification passed")
             self._record_successful_verification(run, item, result, instance)
             applied += 1

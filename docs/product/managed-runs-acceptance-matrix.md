@@ -23,6 +23,7 @@ state, API/report output, and Linear projection when the design requires it.
 | Dependent work items consume upstream output only through verified manifests. | `gates-verification-integration.md` | `test_managed_run_driver_starts_dependent_work_item_from_joined_verified_manifests` | covered |
 | Verified parallel branches are joined deterministically before downstream execution. | `gates-verification-integration.md` | `test_managed_run_branch_join_merges_verified_manifest_branches`; `test_managed_run_driver_starts_dependent_work_item_from_joined_verified_manifests` | covered |
 | Verified branch merge conflicts block the affected work item with visible action required. | `gates-verification-integration.md` | `test_managed_run_branch_join_blocks_on_conflicting_verified_branches`; `test_managed_run_driver_blocks_dependent_work_item_on_join_conflict` | covered |
+| The local verifier creates a fresh disposable detached worktree, verifies artifact hashes before commands, and detects gate workspace mutation. | `gates-verification-integration.md` | `test_local_verifier_runs_gate_in_detached_disposable_worktree`; `test_local_verifier_blocks_artifact_hash_mismatch_before_running_gate`; `test_local_verifier_blocks_gate_workspace_mutation_without_touching_source_repo` | covered |
 | Linear child topology mirrors work-item dependencies as `blocks` relations with operator metadata. | `linear-projection.md` | `test_managed_run_projector_projects_dependency_blocks_and_operator_metadata` | covered |
 | Real E2E classifies external instability separately from product failures. | `real-run-testing-guide.md` | `test_real_codex_connectivity_probe_classifies_upstream_and_auth_failures` | covered |
 
@@ -30,7 +31,6 @@ state, API/report output, and Linear projection when the design requires it.
 
 | Requirement | Source | Needed Blocking Test | Status |
 |---|---|---|---|
-| The local verifier creates a fresh disposable workspace, materializes the execute commit, verifies artifact hashes, and detects mutation after gate execution. | `gates-verification-integration.md` | Driver/verifier test using a real git repo and a mutating gate command. | gap |
 | Plan revision approval mirrors unchanged, canceled, and new work-item issues with visible revision context. | `linear-projection.md` | Projection test for an approved revision containing kept, canceled, and added child issues plus refreshed `blocks`. | gap |
 | Work-item blocked human action writes one durable instruction update and resumes only by blocked-state flip, not by free-text comments. | `linear-projection.md` | Store/projection/ingestion test for wait identity, instruction comment idempotency, ignored comment-only resume, and accepted state-flip resume. | gap |
 | Linear dependency ingestion is union-only and never deletes local edges on lagging reads. | `linear-projection.md` | Topology ingestion test that adds human-created `blocks`, drops canceled edges, and commits nothing when unchanged. | gap |
