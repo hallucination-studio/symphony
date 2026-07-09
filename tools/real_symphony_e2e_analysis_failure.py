@@ -231,5 +231,4 @@ def build_instance_payload(
         "repo_source_value": str(fixture),
         "linear_project": project_slug,
         "linear_filters": {"linear_agent_app_user_id": agent_app_user_id},
-        "managed_run_profile": "gated-task" if pipeline_gates else "default",
     }

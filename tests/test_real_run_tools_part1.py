@@ -880,7 +880,7 @@ def test_real_symphony_e2e_instance_payload_always_requires_delegate_filter() ->
     assert payload["linear_filters"] == {
         "linear_agent_app_user_id": "agent-1",
     }
-    assert payload["managed_run_profile"] == "default"
+    assert "managed_run_profile" not in payload
     assert "workflow_profile" not in payload
     assert "workflow_inputs" not in payload
 
@@ -898,7 +898,7 @@ def test_real_symphony_e2e_real_instance_payload_requires_delegate() -> None:
     assert payload["linear_filters"] == {
         "linear_agent_app_user_id": "agent-1",
     }
-    assert payload["managed_run_profile"] == "gated-task"
+    assert "managed_run_profile" not in payload
     assert "workflow_profile" not in payload
     assert "workflow_inputs" not in payload
 
@@ -933,7 +933,7 @@ def test_real_symphony_e2e_enrolls_runtime_with_resolved_project_slug() -> None:
     resolve_index = source.index("linear_project = await resolve_project")
     enrollment_index = source.index('"/api/v1/runtime/enrollment-tokens"')
     enrollment_payload_start = source.index('"runtime_group_id": f"group-{run_id}"')
-    enrollment_payload_end = source.index("build_instance_payload includes managed_run_profile")
+    enrollment_payload_end = source.index("build_instance_payload excludes managed_run_profile")
     enrollment_payload = source[enrollment_payload_start:enrollment_payload_end]
 
     assert resolve_index < enrollment_index

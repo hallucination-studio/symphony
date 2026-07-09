@@ -332,10 +332,10 @@ async def _check_restart_recovers_completed_one_shot(state: E2ERunState) -> None
 
 def _check_disposable_instance_delete(state: E2ERunState) -> None:
     disposable_fixture = make_fixture_repo(state.root / "fixture-repo-disposable")
-    payload = {"name": f"Disposable {state.run_id}", "repo_source_type": "local_path", "repo_source_value": str(disposable_fixture), "linear_project": state.linear["project"]["slugId"], "linear_filters": {"linear_agent_app_user_id": state.agent_app_user_id}, "managed_run_profile": "default"}
+    payload = {"name": f"Disposable {state.run_id}", "repo_source_type": "local_path", "repo_source_value": str(disposable_fixture), "linear_project": state.linear["project"]["slugId"], "linear_filters": {"linear_agent_app_user_id": state.agent_app_user_id}}
     status, body = http_json("POST", api_url(state.conductor_port, "/api/instances"), payload)
     disposable_id = body.get("instance", {}).get("id") if status == 201 else None
-    state.evidence.check("conductor-api:POST /api/instances disposable", status == 201, status=status)
+    state.evidence.check("conductor-api:POST /api/instances disposable", status == 201, status=status, body=body)
     if disposable_id:
         status, _body = http_json("DELETE", api_url(state.conductor_port, f"/api/instances/{disposable_id}"))
         state.evidence.check("conductor-api:DELETE /api/instances/{id}", status == 200, status=status)

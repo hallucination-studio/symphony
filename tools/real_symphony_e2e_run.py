@@ -117,7 +117,7 @@ LINEAR_AGENT_OAUTH_SCOPE = "read,write,app:assignable,app:mentionable"
 # "/api/v1/runtime/enrollment-tokens"
 # "runtime_group_id": f"group-{run_id}"
 # "project_slug": linear_project["slugId"]
-# build_instance_payload includes managed_run_profile
+# build_instance_payload excludes managed_run_profile
 # "conductor-dispatch:poller-starts-one-shot"
 # "/api/managed-runs"
 # codex-connectivity:connected

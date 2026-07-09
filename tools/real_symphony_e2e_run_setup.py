@@ -292,7 +292,9 @@ async def create_issue_and_instance(state: E2ERunState) -> None:
 async def _create_conductor_instance(state: E2ERunState) -> None:
     payload = build_instance_payload(run_id=state.run_id, fixture=state.fixture, project_slug=state.linear["project"]["slugId"], agent_app_user_id=state.agent_app_user_id, pipeline_gates=state.args.pipeline_gates)
     status, body = http_json("POST", api_url(state.conductor_port, "/api/instances"), payload)
-    state.evidence.check("conductor-api:POST /api/instances", status == 201, status=status)
+    state.evidence.check("conductor-api:POST /api/instances", status == 201, status=status, body=body)
+    if status != 201 or not isinstance(body, dict) or not isinstance(body.get("instance"), dict):
+        raise RuntimeError("conductor instance creation failed")
     state.instance = body["instance"]
     state.instance_id = state.instance["id"]
     for method, path in [("GET", f"/api/instances/{state.instance_id}"), ("GET", f"/api/instances/{state.instance_id}/runtime"), ("GET", f"/api/instances/{state.instance_id}/logs"), ("GET", f"/api/instances/{state.instance_id}/logs?tail=5&order=desc")]:
