@@ -97,6 +97,7 @@ def _looks_like_shell_command(command: str) -> bool:
     return first.startswith("./") or first in {
         "bash",
         "git",
+        "grep",
         "make",
         "mypy",
         "npm",
@@ -106,6 +107,7 @@ def _looks_like_shell_command(command: str) -> bool:
         "python3",
         "ruff",
         "sh",
+        "test",
         "tox",
         "uv",
         "yarn",

@@ -137,6 +137,27 @@ def test_managed_run_plan_validator_rejects_prose_checkpoint_verification() -> N
     assert ManagedRunPlanValidatorError.INVALID_CHECKPOINT_COMMAND in errors
 
 
+def test_managed_run_plan_validator_accepts_common_shell_checkpoint_commands() -> None:
+    plan = ManagedRunPlan.from_dict(
+        {
+            **_plan().to_dict(),
+            "checkpoints": [
+                Checkpoint(
+                    after=["wi-1"],
+                    verify=[
+                        "test -f SYMPHONY_REAL_E2E_RESULT.md",
+                        "grep -q 'Podium, Conductor, and Performer reached Codex' SYMPHONY_REAL_E2E_RESULT.md",
+                    ],
+                ).to_dict()
+            ],
+        }
+    )
+
+    errors = ManagedRunPlanValidator().validate(plan)
+
+    assert ManagedRunPlanValidatorError.INVALID_CHECKPOINT_COMMAND not in errors
+
+
 def test_gate_snapshot_is_frozen_hashed_and_requires_authoritative_step() -> None:
     item = _work_item()
 
