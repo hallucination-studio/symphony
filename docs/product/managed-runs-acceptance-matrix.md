@@ -28,13 +28,13 @@ state, API/report output, and Linear projection when the design requires it.
 | Final release evidence includes gate hash, verification input, verifier command/evidence, score, manifest, join or conflict result, checkpoint evidence, and final rubric. | `gates-verification-integration.md` | `test_managed_run_view_exposes_complete_evidence_bundle` | covered |
 | Linear child topology mirrors work-item dependencies as `blocks` relations with operator metadata. | `linear-projection.md` | `test_managed_run_projector_projects_dependency_blocks_and_operator_metadata` | covered |
 | Approved plan revisions keep unchanged child issues, cancel removed child issues, create new child issues, refresh `blocks`, and show revision context. | `linear-projection.md` | `test_managed_run_projector_projects_approved_plan_revision_shape` | covered |
+| Work-item blocked human action writes one durable instruction update and resumes only by blocked-state flip, not by free-text comments. | `linear-projection.md` | `test_managed_run_human_action_instruction_is_idempotent_and_state_flip_resumes` | covered |
 | Real E2E classifies external instability separately from product failures. | `real-run-testing-guide.md` | `test_real_codex_connectivity_probe_classifies_upstream_and_auth_failures` | covered |
 
 ## Remaining Blocking Gaps
 
 | Requirement | Source | Needed Blocking Test | Status |
 |---|---|---|---|
-| Work-item blocked human action writes one durable instruction update and resumes only by blocked-state flip, not by free-text comments. | `linear-projection.md` | Store/projection/ingestion test for wait identity, instruction comment idempotency, ignored comment-only resume, and accepted state-flip resume. | gap |
 | Linear dependency ingestion is union-only and never deletes local edges on lagging reads. | `linear-projection.md` | Topology ingestion test that adds human-created `blocks`, drops canceled edges, and commits nothing when unchanged. | gap |
 
 ## External E2E Boundary
