@@ -1,14 +1,22 @@
 from __future__ import annotations
 
-import json
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from performer_api.managed_runs import Checkpoint, ManagedRunPlan, ManagedRunState, WorkItemState
+from performer_api.managed_runs import ManagedRunPlan, ManagedRunState, WorkItemState
+
+from conductor.conductor_managed_run_store_rows import (
+    _json_dumps,
+    _json_loads,
+    _now,
+    _run_from_row,
+    _work_item_from_row,
+    init_managed_run_db,
+)
+from conductor.conductor_managed_run_store_views import ConductorManagedRunStoreViewMixin
 
 
 @dataclass(frozen=True)
@@ -18,7 +26,7 @@ class ManagedRunDispatchAccepted:
     issue_identifier: str
 
 
-class ConductorManagedRunStore:
+class ConductorManagedRunStore(ConductorManagedRunStoreViewMixin):
     def __init__(self, data_root: Path):
         self.data_root = data_root
         self.db_path = data_root / "managed_run.db"
@@ -260,132 +268,6 @@ class ConductorManagedRunStore:
                     ),
                 )
 
-    def record_linear_projection(
-        self,
-        run_id: str,
-        work_item_id: str,
-        *,
-        linear_issue_id: str,
-        metadata: dict[str, Any],
-    ) -> dict[str, Any]:
-        projection_id = f"{run_id}:{work_item_id or 'parent'}"
-        now = _now()
-        with self.connect() as connection:
-            connection.execute(
-                """
-                INSERT INTO managed_run_linear_projections (
-                  projection_id, run_id, work_item_id, linear_issue_id, metadata_json, updated_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(projection_id) DO UPDATE SET
-                  linear_issue_id = excluded.linear_issue_id,
-                  metadata_json = excluded.metadata_json,
-                  updated_at = excluded.updated_at
-                """,
-                (projection_id, run_id, work_item_id, linear_issue_id, _json_dumps(metadata), now),
-            )
-        return {
-            "projection_id": projection_id,
-            "run_id": run_id,
-            "work_item_id": work_item_id,
-            "linear_issue_id": linear_issue_id,
-            "metadata": _json_loads(_json_dumps(metadata)),
-            "updated_at": now,
-        }
-
-    def list_linear_projections(self, run_id: str) -> list[dict[str, Any]]:
-        with self.connect() as connection:
-            rows = connection.execute(
-                "SELECT * FROM managed_run_linear_projections WHERE run_id = ? ORDER BY projection_id",
-                (run_id,),
-            ).fetchall()
-        return [_projection_from_row(row) for row in rows]
-
-    def record_checkpoint_result(
-        self,
-        run_id: str,
-        *,
-        after: list[str],
-        verify: list[str],
-        passed: bool,
-        reason: str = "",
-    ) -> dict[str, Any]:
-        checkpoint_key = checkpoint_key_for(Checkpoint(after=after, verify=verify))
-        now = _now()
-        payload = {
-            "checkpoint_key": checkpoint_key,
-            "run_id": run_id,
-            "after": list(after),
-            "verify": list(verify),
-            "passed": bool(passed),
-            "reason": reason,
-            "updated_at": now,
-        }
-        with self.connect() as connection:
-            connection.execute(
-                """
-                INSERT INTO managed_run_checkpoint_results (
-                  run_id, checkpoint_key, after_json, verify_json, passed, reason, updated_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(run_id, checkpoint_key) DO UPDATE SET
-                  after_json = excluded.after_json,
-                  verify_json = excluded.verify_json,
-                  passed = excluded.passed,
-                  reason = excluded.reason,
-                  updated_at = excluded.updated_at
-                """,
-                (
-                    run_id,
-                    checkpoint_key,
-                    _json_dumps({"items": list(after)}),
-                    _json_dumps({"commands": list(verify)}),
-                    1 if passed else 0,
-                    reason,
-                    now,
-                ),
-            )
-        return payload
-
-    def list_checkpoint_results(self, run_id: str) -> list[dict[str, Any]]:
-        with self.connect() as connection:
-            rows = connection.execute(
-                "SELECT * FROM managed_run_checkpoint_results WHERE run_id = ? ORDER BY checkpoint_key",
-                (run_id,),
-            ).fetchall()
-        return [_checkpoint_result_from_row(row) for row in rows]
-
-    def recovery_cursor(self, run_id: str) -> dict[str, Any]:
-        items = self.list_work_items(run_id)
-        verified = [item["work_item_id"] for item in items if item["state"] == WorkItemState.DONE.value]
-        next_item = next((item for item in items if item["state"] != WorkItemState.DONE.value), None)
-        run = self.get_run(run_id) or {}
-        return {
-            "run_id": run_id,
-            "backend_session_id": str(run.get("backend_session_id") or ""),
-            "verified_work_item_ids": verified,
-            "next_work_item_id": next_item["work_item_id"] if next_item else None,
-            "state": run.get("state"),
-        }
-
-    def managed_run_view(self) -> dict[str, Any]:
-        runs = []
-        attempts: list[dict[str, Any]] = []
-        for run in self.list_runs():
-            payload = run.get("payload") if isinstance(run.get("payload"), dict) else {}
-            run_attempts = _run_attempts_for_view(str(run["run_id"]), payload)
-            attempts.extend(run_attempts)
-            runs.append(
-                {
-                    **run,
-                    "work_items": self.list_work_items(str(run["run_id"])),
-                    "linear_projections": self.list_linear_projections(str(run["run_id"])),
-                    "checkpoint_results": self.list_checkpoint_results(str(run["run_id"])),
-                    "attempts": run_attempts,
-                }
-            )
-        return {"runs": runs, "attempts": attempts}
-
     def _existing_run(self, *, parent_issue_id: str, issue_identifier: str) -> dict[str, Any] | None:
         with self.connect() as connection:
             row = connection.execute(
@@ -407,150 +289,7 @@ class ConductorManagedRunStore:
 
     def _init_db(self) -> None:
         with self.connect() as connection:
-            connection.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS managed_run_runs (
-                  run_id TEXT PRIMARY KEY,
-                  parent_issue_id TEXT NOT NULL,
-                  issue_identifier TEXT NOT NULL,
-                  instance_id TEXT NOT NULL,
-                  state TEXT NOT NULL,
-                  active_work_item_id TEXT NOT NULL DEFAULT '',
-                  latest_reason TEXT NOT NULL DEFAULT '',
-                  plan_version INTEGER NOT NULL,
-                  backend_session_id TEXT NOT NULL,
-                  payload_json TEXT NOT NULL,
-                  created_at TEXT NOT NULL,
-                  updated_at TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS managed_run_plan_versions (
-                  run_id TEXT NOT NULL,
-                  version INTEGER NOT NULL,
-                  payload_json TEXT NOT NULL,
-                  created_at TEXT NOT NULL,
-                  PRIMARY KEY (run_id, version)
-                );
-                CREATE TABLE IF NOT EXISTS managed_run_work_items (
-                  run_id TEXT NOT NULL,
-                  work_item_id TEXT NOT NULL,
-                  plan_version INTEGER NOT NULL,
-                  position INTEGER NOT NULL,
-                  state TEXT NOT NULL,
-                  gate_status TEXT NOT NULL,
-                  payload_json TEXT NOT NULL,
-                  result_json TEXT NOT NULL DEFAULT '{}',
-                  updated_at TEXT NOT NULL,
-                  PRIMARY KEY (run_id, work_item_id)
-                );
-                CREATE TABLE IF NOT EXISTS managed_run_linear_projections (
-                  projection_id TEXT PRIMARY KEY,
-                  run_id TEXT NOT NULL,
-                  work_item_id TEXT NOT NULL,
-                  linear_issue_id TEXT NOT NULL,
-                  metadata_json TEXT NOT NULL,
-                  updated_at TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS managed_run_checkpoint_results (
-                  run_id TEXT NOT NULL,
-                  checkpoint_key TEXT NOT NULL,
-                  after_json TEXT NOT NULL,
-                  verify_json TEXT NOT NULL,
-                  passed INTEGER NOT NULL,
-                  reason TEXT NOT NULL,
-                  updated_at TEXT NOT NULL,
-                  PRIMARY KEY (run_id, checkpoint_key)
-                );
-                """
-            )
+            init_managed_run_db(connection)
 
 
-def _run_from_row(row: sqlite3.Row) -> dict[str, Any]:
-    return {
-        "run_id": row["run_id"],
-        "parent_issue_id": row["parent_issue_id"],
-        "issue_identifier": row["issue_identifier"],
-        "instance_id": row["instance_id"],
-        "state": row["state"],
-        "active_work_item_id": row["active_work_item_id"],
-        "latest_reason": row["latest_reason"],
-        "plan_version": int(row["plan_version"]),
-        "backend_session_id": row["backend_session_id"],
-        "payload": _json_loads(row["payload_json"]),
-        "created_at": row["created_at"],
-        "updated_at": row["updated_at"],
-    }
-
-
-def _work_item_from_row(row: sqlite3.Row) -> dict[str, Any]:
-    return {
-        "run_id": row["run_id"],
-        "work_item_id": row["work_item_id"],
-        "plan_version": int(row["plan_version"]),
-        "position": int(row["position"]),
-        "state": row["state"],
-        "gate_status": row["gate_status"],
-        "payload": _json_loads(row["payload_json"]),
-        "result": _json_loads(row["result_json"]),
-        "updated_at": row["updated_at"],
-    }
-
-
-def _projection_from_row(row: sqlite3.Row) -> dict[str, Any]:
-    return {
-        "projection_id": row["projection_id"],
-        "run_id": row["run_id"],
-        "work_item_id": row["work_item_id"],
-        "linear_issue_id": row["linear_issue_id"],
-        "metadata": _json_loads(row["metadata_json"]),
-        "updated_at": row["updated_at"],
-    }
-
-
-def _checkpoint_result_from_row(row: sqlite3.Row) -> dict[str, Any]:
-    after = _json_loads(row["after_json"]).get("items", [])
-    verify = _json_loads(row["verify_json"]).get("commands", [])
-    return {
-        "checkpoint_key": row["checkpoint_key"],
-        "run_id": row["run_id"],
-        "after": [str(item) for item in after] if isinstance(after, list) else [],
-        "verify": [str(item) for item in verify] if isinstance(verify, list) else [],
-        "passed": bool(row["passed"]),
-        "reason": row["reason"],
-        "updated_at": row["updated_at"],
-    }
-
-
-def _run_attempts_for_view(run_id: str, payload: dict[str, Any]) -> list[dict[str, Any]]:
-    attempts: list[dict[str, Any]] = []
-    for attempt in payload.get("completed_attempts") or []:
-        if isinstance(attempt, dict):
-            attempts.append({"run_id": run_id, **attempt})
-    for attempt in payload.get("active_attempts") or []:
-        if isinstance(attempt, dict):
-            attempts.append({"run_id": run_id, **attempt, "state": attempt.get("state") or "running"})
-    return attempts
-
-
-def checkpoint_key_for(checkpoint: Checkpoint) -> str:
-    after = ",".join(checkpoint.after)
-    verify = " && ".join(checkpoint.verify)
-    return f"{after}::{verify}"
-
-
-def _json_dumps(payload: dict[str, Any]) -> str:
-    return json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
-
-
-def _json_loads(payload: str) -> dict[str, Any]:
-    try:
-        loaded = json.loads(payload)
-    except json.JSONDecodeError:
-        return {}
-    return loaded if isinstance(loaded, dict) else {}
-
-
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-
-
-__all__ = ["ConductorManagedRunStore", "ManagedRunDispatchAccepted", "checkpoint_key_for"]
+__all__ = ["ConductorManagedRunStore", "ManagedRunDispatchAccepted"]
