@@ -7,9 +7,9 @@ profiles, or real scheduler state requires real evidence before it is accepted.
 Mocks and unit tests are useful, but they do not prove a managed run works.
 
 Real-run tools must fail loudly on known defects. If an attempt fails, a runtime
-wait is created, a proxy call is denied, a pipeline node stalls, or an expected
-artifact is missing, the tool emits a failing check with a sanitized reason and
-archives evidence before continuing or exiting.
+wait is created, a proxy call is denied, a Managed Run work item stalls, or an
+expected artifact is missing, the tool emits a failing check with a sanitized
+reason and archives evidence before continuing or exiting.
 
 ## Environment
 
@@ -59,7 +59,7 @@ A complete managed report includes:
 
 - Podium log and Conductor log;
 - per-instance Performer stdout/stderr logs with attempt correlation;
-- pipeline view/report JSON;
+- Managed Run view/report JSON;
 - graph, node, attempt, lease, policy, and runtime profile snapshots;
 - attempt request/result JSON;
 - frozen gate snapshots and verification input snapshots;
@@ -93,9 +93,9 @@ No report with failures but without linked runtime logs is complete evidence.
 
 ## Human And Runtime Waits
 
-Pipeline `need_human` waits are visible on the affected Linear node and resume
-only when the operator flips that node out of the blocked-style state. Comments
-provide context but do not resume work by themselves.
+Managed Run `need_human` waits are visible on the affected Linear work item and
+resume only when the operator flips that work item out of the blocked-style
+state. Comments provide context but do not resume work by themselves.
 
 Runtime approval, permission, and tool-input waits are projected as runtime wait
 state and, where product code uses them, `[Human Action]` child issues. Completing

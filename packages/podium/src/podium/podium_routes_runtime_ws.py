@@ -5,7 +5,7 @@ from typing import Any, Callable
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
-from .podium_routes_runtime_helpers import pipeline_ack_payload
+from .podium_routes_runtime_helpers import managed_run_ack_payload
 from .podium_shared import dispatch_public
 
 
@@ -64,7 +64,7 @@ async def _handle_runtime_ws_dispatch_ack(
         str(message.get("status") or "accepted"),
         fencing_token=fencing_token,
         reason=message.get("reason") if isinstance(message.get("reason"), str) else None,
-        pipeline=pipeline_ack_payload(message),
+        managed_run=managed_run_ack_payload(message),
     )
     await websocket.send_json({"type": "dispatch.ack.ok", "dispatch": dispatch_public(dispatch) if dispatch else None})
 

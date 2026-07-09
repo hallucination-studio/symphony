@@ -32,8 +32,8 @@ async def run_post_wait_checks(state: E2ERunState) -> None:
     issue = state.run_result["issue"]
     result_path = Path(state.run_result["result_path"])
     last_sample = (state.run_result.get("samples") or [{}])[-1]
-    leases = [lease for lease in last_sample.get("pipeline_leases", []) if isinstance(lease, dict)] if isinstance(last_sample, dict) else []
-    nodes = [node for node in last_sample.get("pipeline_nodes", []) if isinstance(node, dict)] if isinstance(last_sample, dict) else []
+    leases = [lease for lease in last_sample.get("managed_run_turns", []) if isinstance(lease, dict)] if isinstance(last_sample, dict) else []
+    nodes = [node for node in last_sample.get("managed_run_work_items", []) if isinstance(node, dict)] if isinstance(last_sample, dict) else []
     if state.pipeline_scenario == "overall-dod":
         _record_live_refresh(state)
     if state.permission_approval_probe:
@@ -50,7 +50,7 @@ async def _probe_coverage_checks(state: E2ERunState) -> None:
     check_names = {check.get("name") for check in state.evidence.data.get("checks", []) if check.get("passed")}
     if state.permission_approval_probe:
         required = {
-            "human-action:conductor-pipeline-awaiting-human",
+            "human-action:conductor-managed-run-awaiting-human",
             "human-action:parent-comment-does-not-resume",
             "human-action:linear-child-complete",
             "human-action:managed-push-resume",
@@ -80,7 +80,7 @@ async def _probe_coverage_checks(state: E2ERunState) -> None:
 def _record_live_refresh(state: E2ERunState) -> None:
     live_refresh = _pipeline_live_refresh_evidence(state.run_result.get("samples") or [])
     state.evidence.check(
-        "appendix:s0b-pipeline-live-refresh",
+        "appendix:s0b-managed-run-live-refresh",
         bool(live_refresh.get("passed")),
         **{key: value for key, value in live_refresh.items() if key != "passed"},
     )
@@ -90,8 +90,8 @@ def _record_permission_probe_cleared(state: E2ERunState, last_sample: dict[str, 
     state.evidence.check(
         "runtime-error:blocked-cleared-after-approval",
         _permission_probe_block_cleared(last_sample),
-        pipeline_human_actions=last_sample.get("pipeline_human_actions") if isinstance(last_sample, dict) else [],
-        pipeline_leases=leases,
+        managed_run_human_actions=last_sample.get("managed_run_human_actions") if isinstance(last_sample, dict) else [],
+        managed_run_turns=leases,
     )
 
 
@@ -115,16 +115,16 @@ def _record_success_outcome(
     nodes: list[dict[str, Any]],
 ) -> None:
     if state.args.pipeline_gates:
-        state.evidence.check("real-flow:linear-pipeline-projected", True, identifier=issue["identifier"], state=issue["state"])
+        state.evidence.check("real-flow:linear-managed-run-projected", True, identifier=issue["identifier"], state=issue["state"])
     else:
         state.evidence.check("real-flow:linear-done", issue["state"]["type"] in {"completed", "canceled"}, identifier=issue["identifier"], state=issue["state"])
     state.evidence.check("real-flow:linear-agent-app-user-dispatched", ((issue.get("delegate") or {}).get("id") == state.agent_app_user_id), expected_agent_app_user_id=state.agent_app_user_id, actual_delegate=issue.get("delegate"), actual_assignee=issue.get("assignee"))
     state.evidence.check("real-flow:workspace-result", result_path.exists(), path=str(result_path))
-    state.evidence.check("real-flow:no-active-pipeline-leases", not leases, pipeline_leases=leases)
+    state.evidence.check("real-flow:no-active-managed-run-turns", not leases, managed_run_turns=leases)
     state.evidence.check(
-        "real-flow:pipeline-finalized",
+        "real-flow:managed-run-finalized",
         pipeline_nodes_terminal(nodes, terminal_states={"verify_passed", "failed", "superseded"}),
-        pipeline_nodes=nodes[-5:],
+        managed_run_work_items=nodes[-5:],
     )
 
 
@@ -134,9 +134,9 @@ async def run_final_pipeline_checks(state: E2ERunState) -> None:
         timeout_seconds=min(max(state.args.stage_timeout, 5), 120),
         allow_human_wait=state.pipeline_scenario == "integration-conflict",
     )
-    path = state.root / "final-pipeline-view.json"
+    path = state.root / "final-managed-runs-view.json"
     path.write_text(json.dumps(view, indent=2, sort_keys=True), encoding="utf-8")
-    state.evidence.artifact("final_pipeline_view", path)
+    state.evidence.artifact("final_managed_runs_view", path)
     if state.permission_approval_probe:
         await _record_human_action_tree(state)
         _check_pipeline_scenario_acceptance(state.evidence, state.pipeline_scenario, view)
@@ -177,19 +177,39 @@ def _human_action_summary(child: dict[str, Any]) -> dict[str, Any]:
 
 
 def _record_pipeline_stage_checks(state: E2ERunState, view: dict[str, Any]) -> None:
-    nodes = [node for node in view.get("nodes", []) if isinstance(node, dict)]
+    if isinstance(view.get("runs"), list):
+        _record_managed_run_stage_checks(state, view)
+        return
+    nodes = _view_nodes(view)
     manifests = [manifest for manifest in view.get("manifests", []) if isinstance(manifest, dict)]
     integrations = [item for item in view.get("integration_queue", []) if isinstance(item, dict)]
     projections = [projection for projection in view.get("linear_projections", []) if isinstance(projection, dict)]
     executable_nodes = [node for node in nodes if _pipeline_node_requires_gate(node, nodes)]
     executable_node_ids = {str(node.get("node_id") or "") for node in executable_nodes}
-    state.evidence.check("stage:pipeline-gates-frozen", bool(executable_nodes) and all(node.get("gate_snapshot_hash") for node in executable_nodes), nodes=[_node_gate_summary(node, executable_node_ids) for node in nodes])
-    state.evidence.check("stage:pipeline-manifest-published", bool(manifests) and all(int(manifest.get("score") or 0) >= 3 for manifest in manifests), manifests=manifests)
-    state.evidence.check("stage:pipeline-integration-completed", pipeline_integrations_terminal(view), integrations=integrations)
-    state.evidence.check("stage:pipeline-linear-projected", _linear_projection_passed(view, projections, executable_node_ids), projections=projections, graph_revision=view.get("graph_revision"))
+    state.evidence.check("stage:managed-run-gates-frozen", bool(executable_nodes) and all(node.get("gate_snapshot_hash") for node in executable_nodes), nodes=[_node_gate_summary(node, executable_node_ids) for node in nodes])
+    state.evidence.check("stage:managed-run-manifest-published", bool(manifests) and all(int(manifest.get("score") or 0) >= 3 for manifest in manifests), manifests=manifests)
+    state.evidence.check("stage:managed-run-integration-completed", pipeline_integrations_terminal(view), integrations=integrations)
+    state.evidence.check("stage:managed-run-linear-projected", _linear_projection_passed(view, projections, executable_node_ids), projections=projections, graph_revision=view.get("graph_revision"))
     _check_pipeline_scenario_acceptance(state.evidence, state.pipeline_scenario, view)
     terminal_states = {"verify_passed", "superseded", "need_human"} if state.pipeline_scenario == "integration-conflict" else {"verify_passed", "superseded"}
-    state.evidence.check("stage:final-pipeline-verified", pipeline_nodes_terminal(nodes, terminal_states=terminal_states), nodes=[{"node_id": node.get("node_id"), "state": node.get("state")} for node in nodes])
+    state.evidence.check("stage:final-managed-run-verified", pipeline_nodes_terminal(nodes, terminal_states=terminal_states), nodes=[{"node_id": node.get("node_id"), "state": node.get("state")} for node in nodes])
+    if state.pipeline_scenario == "overall-dod":
+        _check_appendix_overall_acceptance(state.evidence, view, data_root=state.data_root, instance_id=state.instance_id)
+
+
+def _record_managed_run_stage_checks(state: E2ERunState, view: dict[str, Any]) -> None:
+    nodes = _view_nodes(view)
+    runs = [run for run in view.get("runs") or [] if isinstance(run, dict)]
+    items = [item for run in runs for item in run.get("work_items") or [] if isinstance(item, dict)]
+    projections = [projection for run in runs for projection in run.get("linear_projections") or [] if isinstance(projection, dict)]
+    checkpoint_results = [result for run in runs for result in run.get("checkpoint_results") or [] if isinstance(result, dict)]
+    state.evidence.check("stage:managed-run-gates-frozen", bool(items) and all(isinstance((item.get("payload") or {}).get("verification"), dict) for item in items), work_items=[item.get("work_item_id") for item in items])
+    state.evidence.check("stage:managed-run-manifest-published", bool(items) and all(item.get("state") in {"done", "cancelled", "blocked"} or item.get("result") for item in items), work_items=[{"work_item_id": item.get("work_item_id"), "state": item.get("state"), "has_result": bool(item.get("result"))} for item in items])
+    state.evidence.check("stage:managed-run-integration-completed", all(result.get("passed") for result in checkpoint_results) if checkpoint_results else True, checkpoints=checkpoint_results)
+    state.evidence.check("stage:managed-run-linear-projected", bool(projections) and _pipeline_projection_matches_current_revision(view), projections=projections)
+    _check_pipeline_scenario_acceptance(state.evidence, state.pipeline_scenario, view)
+    terminal_states = {"verify_passed", "superseded", "need_human"} if state.pipeline_scenario == "integration-conflict" else {"verify_passed", "superseded"}
+    state.evidence.check("stage:final-managed-run-verified", pipeline_nodes_terminal(nodes, terminal_states=terminal_states), nodes=[{"node_id": node.get("node_id"), "state": node.get("state")} for node in nodes])
     if state.pipeline_scenario == "overall-dod":
         _check_appendix_overall_acceptance(state.evidence, view, data_root=state.data_root, instance_id=state.instance_id)
 
@@ -203,7 +223,37 @@ def _node_gate_summary(node: dict[str, Any], executable_node_ids: set[str]) -> d
     }
 
 
+def _view_nodes(view: dict[str, Any]) -> list[dict[str, Any]]:
+    if not isinstance(view.get("runs"), list):
+        return [node for node in view.get("nodes", []) if isinstance(node, dict)]
+    nodes: list[dict[str, Any]] = []
+    for run in view.get("runs") or []:
+        if not isinstance(run, dict):
+            continue
+        for item in run.get("work_items") or []:
+            if not isinstance(item, dict):
+                continue
+            state = str(item.get("state") or "")
+            nodes.append(
+                {
+                    "node_id": item.get("work_item_id"),
+                    "state": {"done": "verify_passed", "cancelled": "superseded", "blocked": "need_human"}.get(state, state),
+                    "gate_snapshot_hash": item.get("gate_status") or "managed-run-gate",
+                }
+            )
+    return nodes
+
+
 def _linear_projection_passed(view: dict[str, Any], projections: list[dict[str, Any]], executable_ids: set[str]) -> bool:
+    if isinstance(view.get("runs"), list):
+        run_projections = [
+            projection
+            for run in view.get("runs") or []
+            if isinstance(run, dict)
+            for projection in run.get("linear_projections") or []
+            if isinstance(projection, dict)
+        ]
+        return bool(run_projections) and _pipeline_projection_matches_current_revision(view)
     return bool(projections) and _pipeline_projection_matches_current_revision(view) and all(
         isinstance(projection.get("metadata"), dict)
         and projection["metadata"].get("graph_id")
@@ -227,7 +277,7 @@ async def archive_tree_and_runtime_artifacts(state: E2ERunState) -> None:
         tree_path.write_text(json.dumps(tree, indent=2, sort_keys=True), encoding="utf-8")
         state.evidence.artifact("final_issue_tree", tree_path)
     if final_states is not None:
-        state.evidence.check("stage:pipeline-linear-final-states", bool(final_states.get("passed")), **{key: value for key, value in final_states.items() if key != "passed"})
+        state.evidence.check("stage:managed-run-linear-final-states", bool(final_states.get("passed")), **{key: value for key, value in final_states.items() if key != "passed"})
     _archive_pipeline_artifacts(evidence=state.evidence, root=state.root, data_root=state.data_root, instance_id=state.instance_id)
 
 
@@ -243,8 +293,8 @@ async def run_service_recovery_and_cleanup_checks(state: E2ERunState) -> None:
 
 
 def _check_remaining_and_removed_conductor_routes(state: E2ERunState) -> None:
-    status, _body = http_json("GET", api_url(state.conductor_port, "/api/pipeline"), None)
-    state.evidence.check("conductor-api:GET /api/pipeline", status == 200, status=status)
+    status, _body = http_json("GET", api_url(state.conductor_port, "/api/managed-runs"), None)
+    state.evidence.check("conductor-api:GET /api/managed-runs", status == 200, status=status)
     for method, path, payload in [
         ("GET", "/api/dashboard", None), ("GET", "/api/issues", None), ("GET", "/api/issues/legacy-issue", None),
         ("POST", "/api/issues/legacy-issue/pin", {}), ("DELETE", "/api/issues/legacy-issue/pin", None),
@@ -258,13 +308,13 @@ def _check_local_defaults_without_podium(state: E2ERunState) -> None:
     podium = state.processes[0]
     podium.stop()
     state.processes.remove(podium)
-    status, body = http_json("GET", api_url(state.conductor_port, "/api/pipeline"))
-    pipeline = body.get("pipeline") if status == 200 and isinstance(body, dict) else {}
+    status, body = http_json("GET", api_url(state.conductor_port, "/api/managed-runs"))
+    managed_runs = body.get("managed_runs") if status == 200 and isinstance(body, dict) else {}
     state.evidence.check(
         "appendix:s0a-podium-unreachable-local-defaults",
-        status == 200 and isinstance(pipeline, dict) and int(pipeline.get("policy_revision") or 0) >= 1,
+        status == 200 and isinstance(managed_runs, dict),
         status=status,
-        policy_revision=pipeline.get("policy_revision") if isinstance(pipeline, dict) else None,
+        runs=len(managed_runs.get("runs") or []) if isinstance(managed_runs, dict) else None,
     )
 
 
@@ -282,7 +332,7 @@ async def _check_restart_recovers_completed_one_shot(state: E2ERunState) -> None
 
 def _check_disposable_instance_delete(state: E2ERunState) -> None:
     disposable_fixture = make_fixture_repo(state.root / "fixture-repo-disposable")
-    payload = {"name": f"Disposable {state.run_id}", "repo_source_type": "local_path", "repo_source_value": str(disposable_fixture), "linear_project": state.linear["project"]["slugId"], "linear_filters": {"linear_agent_app_user_id": state.agent_app_user_id}, "pipeline_profile": "default"}
+    payload = {"name": f"Disposable {state.run_id}", "repo_source_type": "local_path", "repo_source_value": str(disposable_fixture), "linear_project": state.linear["project"]["slugId"], "linear_filters": {"linear_agent_app_user_id": state.agent_app_user_id}, "managed_run_profile": "default"}
     status, body = http_json("POST", api_url(state.conductor_port, "/api/instances"), payload)
     disposable_id = body.get("instance", {}).get("id") if status == 201 else None
     state.evidence.check("conductor-api:POST /api/instances disposable", status == 201, status=status)

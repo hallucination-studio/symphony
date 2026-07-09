@@ -52,7 +52,7 @@ def _check_runtime_home_acceptance(
 def _check_prediction_acceptance(evidence: Evidence, pipeline_view: dict[str, Any]) -> None:
     basis = pipeline_view.get("prediction_basis") if isinstance(pipeline_view.get("prediction_basis"), dict) else {}
     evidence.check(
-        "appendix:pipeline-prediction-conditional",
+        "appendix:managed-run-prediction-conditional",
         _pipeline_prediction_is_conditional(pipeline_view),
         prediction_basis=pipeline_view.get("prediction_basis"),
         predicted_call_order=pipeline_view.get("predicted_call_order"),
@@ -200,8 +200,8 @@ def _overall_downstream_depends_on_both_parallel_evidence(pipeline_view: dict[st
 
 
 def _gate_step_provenance_evidence(pipeline_view: dict[str, Any]) -> dict[str, Any]:
-    valid_sources = {"issue_requirement", "appendix_harness", "planner_inferred", "system_repair"}
-    authoritative_sources = {"issue_requirement", "appendix_harness", "system_repair"}
+    valid_sources = {"issue_requirement", "acceptance_appendix", "planner_inferred", "system_repair"}
+    authoritative_sources = {"issue_requirement", "acceptance_appendix", "system_repair"}
     missing: list[dict[str, Any]] = []
     invalid: list[dict[str, Any]] = []
     gates_without_authoritative: list[str] = []

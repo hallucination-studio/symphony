@@ -285,10 +285,10 @@ async def test_create_issue_uses_issue_create_with_labels() -> None:
                         "issue": {
                             "id": "pipeline-node-1",
                             "identifier": "MT-2",
-                            "title": "[Pipeline Node] MT-1",
+                            "title": "[Work Item] MT-1",
                             "url": "https://linear.app/x/issue/MT-2",
                             "state": {"name": "Todo"},
-                            "labels": {"nodes": [{"name": "performer:type/pipeline-node"}]},
+                            "labels": {"nodes": [{"name": "symphony:type/work-item"}]},
                         },
                     }
                 }
@@ -302,7 +302,7 @@ async def test_create_issue_uses_issue_create_with_labels() -> None:
         project_id="project-1",
         state_id="state-todo",
         label_ids=["label-node"],
-        title="[Pipeline Node] MT-1",
+        title="[Work Item] MT-1",
         description="Review MT-1 evidence.",
     )
 
@@ -314,7 +314,7 @@ async def test_create_issue_uses_issue_create_with_labels() -> None:
         "projectId": "project-1",
         "stateId": "state-todo",
         "labelIds": ["label-node"],
-        "title": "[Pipeline Node] MT-1",
+        "title": "[Work Item] MT-1",
         "description": "Review MT-1 evidence.",
         "parentId": None,
         "assigneeId": None,

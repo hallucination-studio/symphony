@@ -17,7 +17,7 @@ class JsonStoreDispatchMixin:
                 "linear_workspace_id": str(binding.get("user_id") or ""),
                 "project_slug": str(binding.get("project_slug") or ""),
                 "linear_agent_app_user_id": str(binding.get("agent_app_user_id") or ""),
-                "pipeline_profile": str(binding.get("pipeline_profile") or "default"),
+                "managed_run_profile": str(binding.get("managed_run_profile") or "default"),
                 "project_binding_id": str(binding["id"]),
             }
         )
@@ -85,7 +85,7 @@ class JsonStoreDispatchMixin:
         *,
         fencing_token: int | None,
         reason: str = "",
-        pipeline: dict[str, Any] | None = None,
+        managed_run: dict[str, Any] | None = None,
         completed_at: str | None = None,
     ) -> dict[str, Any] | None:
         rows = self._load_map("dispatches.json")
@@ -98,8 +98,8 @@ class JsonStoreDispatchMixin:
             return None
         dispatch["status"] = status
         dispatch["reason"] = reason
-        if pipeline:
-            dispatch.update(pipeline)
+        if managed_run:
+            dispatch.update(managed_run)
         dispatch["updated_at"] = utc_now_iso()
         if completed_at is not None:
             dispatch["completed_at"] = completed_at

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 
 
 PRODUCT_DOCS = {
@@ -11,6 +12,8 @@ PRODUCT_DOCS = {
     "gates-verification-integration.md",
     "linear-projection.md",
     "runtime-profiles-backends.md",
+    "linear-native-managed-runs.md",
+    "managed-runs-acceptance-matrix.md",
     "linear-integration.md",
     "podium-web.md",
     "runtime-installation.md",
@@ -139,6 +142,31 @@ def test_linear_projection_uses_durable_comment_ids_not_hidden_markers() -> None
     assert "There are no hidden comment markers" in text
     assert "hidden HTML" not in text
     assert "marker-keyed" not in text
+
+
+def test_managed_runs_acceptance_matrix_maps_design_to_blocking_tests() -> None:
+    text = _read(Path("docs/product/managed-runs-acceptance-matrix.md"))
+
+    for phrase in [
+        "linear-native-managed-runs.md",
+        "linear-projection.md",
+        "gates-verification-integration.md",
+        "test_projection_sync_success_marks_managed_run_projection_healthy",
+        "test_managed_run_projector_projects_attempt_comment_by_durable_comment_id",
+        "test_managed_run_driver_blocks_when_independent_green_command_fails",
+        "external_service_unavailable",
+    ]:
+        assert phrase in text
+
+
+def test_managed_runs_acceptance_matrix_references_real_tests() -> None:
+    text = _read(Path("docs/product/managed-runs-acceptance-matrix.md"))
+    referenced = set(re.findall(r"`(test_[a-zA-Z0-9_]+)`", text))
+    test_sources = "\n".join(_read(path) for path in Path("tests").glob("test_*.py"))
+
+    assert referenced
+    for test_name in referenced:
+        assert re.search(rf"^(async\s+)?def {re.escape(test_name)}\(", test_sources, re.MULTILINE), test_name
 
 
 def test_pipeline_docs_are_honest_about_verify_isolation() -> None:

@@ -7,10 +7,10 @@ Symphony is one orchestration system for running coding agents as an
   state, runtime enrollment, dispatch queueing, runtime config, Podium Web, and
   the Linear proxy.
 - **Conductor** is the customer-side daemon. It connects outbound to Podium,
-  leases dispatches, owns durable pipeline graph state, starts Performers, and
-  reports local state.
-- **Performer** is the execution worker. It runs one fenced `plan`, `execute`,
-  or `verify` attempt from Conductor-owned request/result JSON paths.
+  leases dispatches, owns durable managed-run state, starts Performers, and reports
+  local state.
+- **Performer** is the execution worker. It runs one fenced managed-run turn from
+  Conductor-owned request/result JSON paths.
 - **performer-api** contains the shared contracts that let those roles exchange
   state without importing each other's runtime code.
 
@@ -23,8 +23,8 @@ the `performer`, `conductor`, and `podium` commands.
 Start with [docs/product/README.md](docs/product/README.md). The runtime source
 of truth is split by concern:
 
-- [Runtime Pipeline](docs/product/runtime-pipeline.md)
-- [Pipeline State](docs/product/pipeline-state.md)
+- [Managed Run Runtime](docs/product/runtime-pipeline.md)
+- [Managed Run State](docs/product/pipeline-state.md)
 - [Gates, Verification, And Integration](docs/product/gates-verification-integration.md)
 - [Linear Projection](docs/product/linear-projection.md)
 - [Runtime Profiles And Backends](docs/product/runtime-profiles-backends.md)
@@ -36,20 +36,20 @@ of truth is split by concern:
 
 ## Runtime Flow
 
-Managed execution is Conductor-owned durable `plan -> execute -> verify` work:
+Managed execution is a Conductor-owned Linear-native managed run:
 
 1. A Linear issue is delegated to the Symphony custom agent.
 2. Podium receives or discovers the delegated issue and applies routing.
 3. Podium queues a dispatch for an eligible runtime group.
 4. Conductor leases the dispatch over outbound runtime auth.
-5. Conductor commits or resumes a durable graph.
-6. Performer runs one fenced attempt for each scheduled mode.
-7. Conductor collects results, gates verification, integrates manifests, and
+5. Conductor commits or resumes one durable managed run for the parent issue.
+6. Performer runs plan or work-item turns under the managed-run contract.
+7. Conductor verifies work-item results, records checkpoints, and
    projects sanitized state to Podium and Linear.
 
 Dispatch routing is based on custom-agent delegate, project scope, active state,
-blockers, verified graph dependencies, and runtime capacity. Labels and human
-assignee are not scheduling truth.
+blockers, work-item dependencies, and runtime capacity. Labels and human
+assignee are not managed-run truth.
 
 ## Install
 
@@ -80,7 +80,7 @@ PYTHONPATH=$(pwd)/packages/performer-api/src:$(pwd)/packages/performer/src:$(pwd
 Real Linear integration runs also pin repo source roots:
 
 ```bash
-PYTHONPATH=$(pwd)/packages/performer-api/src:$(pwd)/packages/performer/src:$(pwd)/packages/conductor/src:$(pwd)/packages/podium/src .venv/bin/python tools/real_symphony_e2e.py --project-slug <linear-project-slug> --pipeline-gates --timeout 600
+PYTHONPATH=$(pwd)/packages/performer-api/src:$(pwd)/packages/performer/src:$(pwd)/packages/conductor/src:$(pwd)/packages/podium/src .venv/bin/python tools/real_symphony_e2e.py --project-slug <linear-project-slug> --managed-run-gates --timeout 600
 ```
 
 ## Run Conductor
@@ -102,20 +102,20 @@ export PODIUM_DATABASE_URL=postgresql://podium@localhost/podium
 .venv/bin/podium api --host 127.0.0.1 --port 8090
 ```
 
-## Run Performer Attempt
+## Run Performer Turn
 
-Performer accepts only managed one-shot mode attempts:
+Performer accepts only managed one-shot turns:
 
 ```bash
 .venv/bin/performer \
-  --mode plan|execute|verify \
-  --attempt-request-path /path/to/request.json \
-  --attempt-result-path /path/to/result.json
+  --turn-request-path /path/to/turn-request.json \
+  --turn-result-path /path/to/turn-result.json
 ```
 
-A Performer reads a fenced request, runs the requested mode under the prepared
-runtime profile, writes a fenced result, and exits. It never leases dispatches,
-queries Linear as scheduler truth, or owns durable graph state.
+A Performer reads a fenced turn request, runs the requested managed-run role under
+the prepared runtime profile, writes a fenced turn result, and exits. It never
+leases dispatches, queries Linear as scheduler truth, or owns durable managed-run
+state.
 
 ## Podium API Surface
 
@@ -133,7 +133,7 @@ Managed Podium endpoints include:
 - `POST /api/v1/runtime/dispatches/ack`
 - `POST /api/v1/runtime/config`
 - `GET /api/v1/runtime/config`
-- `GET /api/v1/pipeline`
+- `GET /api/v1/managed-runs`
 - `POST /api/v1/linear/graphql`
 
 ## Conductor API Surface
@@ -150,17 +150,16 @@ Managed Conductor endpoints include:
 - `POST /api/instances/:id/restart`
 - `GET /api/instances/:id/logs`
 - `GET /api/instances/:id/runtime`
-- `GET /api/pipeline`
-- `POST /api/pipeline/human-waits/:wait_id/human-answered`
+- `GET /api/managed-runs`
 - `POST /api/repo/inspect`
 - `GET /api/settings`
 - `PATCH /api/settings`
 
 ## Runtime Config
 
-Podium pushes versioned scheduler policy and per-mode runtime profiles to
+Podium pushes versioned managed-run policy and per-role runtime profiles to
 Conductor. Conductor materializes isolated runtime homes under managed instance
-state and fails closed if a required mode profile is missing.
+state and fails closed if a required role profile is missing.
 
 Codex-backed profiles receive isolated `CODEX_HOME` directories. The default
 `verify` profile may use `local-verifier`, which runs frozen gate commands in a

@@ -73,7 +73,7 @@ def _push_runtime_config(state: E2ERunState) -> None:
         "runtime-config:podium-pushed",
         status == 200
         and pushed.get("version") == state.runtime_config["version"]
-        and sorted((pushed.get("profiles") or {}).keys()) == ["execute", "plan", "verify"],
+        and sorted((pushed.get("profiles") or {}).keys()) == ["plan", "verify", "work_item"],
         status=status,
         body=body,
     )
@@ -97,9 +97,9 @@ def _reject_stale_runtime_config(state: E2ERunState) -> None:
 def _reject_ineligible_backend(state: E2ERunState) -> None:
     invalid = json.loads(json.dumps(state.runtime_config))
     invalid["version"] = int(state.runtime_config.get("version") or 1) + 1
-    invalid["scheduler_policy"]["version"] = invalid["version"]
-    invalid["profiles"]["execute"]["backend"] = "local-verifier"
-    invalid["profiles"]["execute"]["name"] = "ineligible-execute"
+    invalid["managed_run_policy"]["version"] = invalid["version"]
+    invalid["profiles"]["work_item"]["backend"] = "local-verifier"
+    invalid["profiles"]["work_item"]["name"] = "ineligible-work-item"
     status, body = http_json(
         "POST",
         api_url(state.podium_port, "/api/v1/runtime/config"),
@@ -109,7 +109,7 @@ def _reject_ineligible_backend(state: E2ERunState) -> None:
     details = str(((body or {}).get("error") or {}).get("details"))
     state.evidence.check(
         "appendix:s0c-ineligible-backend-refused-before-dispatch",
-        status == 400 and "runtime_profile_backend_unsupported:execute:local-verifier" in details,
+        status == 400 and "runtime_profile_backend_unsupported:work_item:local-verifier" in details,
         status=status,
         body=body,
     )

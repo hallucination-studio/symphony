@@ -224,8 +224,8 @@ class RuntimeLifecycleMixin:
                 log_task = loop.create_task(self._follow_recovered_process(pid))
             except RuntimeError:
                 log_task = _CompletedLogTask()
-            request_path = str(Path(instance.instance_dir) / "state" / "pipeline" / attempt_id / "attempt-request.json")
-            result_path = str(Path(instance.instance_dir) / "state" / "pipeline" / attempt_id / "attempt-result.json")
+            request_path = str(Path(instance.instance_dir) / "state" / "managed_run" / attempt_id / "turn-request.json")
+            result_path = str(Path(instance.instance_dir) / "state" / "managed_run" / attempt_id / "turn-result.json")
             self._handles[handle_key] = RuntimeHandle(
                 process=RecoveredProcess(pid),
                 log_task=log_task,  # type: ignore[arg-type]

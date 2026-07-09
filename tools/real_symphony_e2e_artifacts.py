@@ -219,7 +219,7 @@ def _failed_plan_attempt_id(failure: dict[str, Any]) -> str:
 
 
 def _looks_like_plan_request(payload: dict[str, Any]) -> bool:
-    return bool(payload.get("pipeline_intent") is not None or payload.get("root_node_id") or payload.get("issue_description"))
+    return bool(payload.get("managed_run_intent") is not None or payload.get("root_node_id") or payload.get("issue_description"))
 
 
 def _dispatch_context_for_plan_attempt(*, data_root: Path, plan_paths: dict[str, Path | None]) -> dict[str, Any]:

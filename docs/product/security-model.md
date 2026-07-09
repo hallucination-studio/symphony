@@ -24,8 +24,8 @@ Runtime-held secrets:
 
 - runtime identity credential;
 - scoped dispatch/proxy credential;
-- customer-local execution secrets explicitly configured for attempts;
-- staged per-mode backend homes, such as managed `CODEX_HOME` copies.
+- customer-local execution secrets explicitly configured for managed-run turns;
+- staged per-role backend homes, such as managed `CODEX_HOME` copies.
 
 Runtime-held credentials are scoped to one account/runtime group and revocable
 from Podium.
@@ -62,9 +62,9 @@ actions.
 
 Secrets flow through `$VAR` indirection in runtime profiles. Podium and
 Conductor validate that required variables exist without rendering secret values
-in browser responses, logs, reports, or attempt JSON.
+in browser responses, logs, reports, or turn JSON.
 
-Managed mode fails closed when a required per-mode profile, backend home, or
+Managed-run execution fails closed when a required per-role profile, backend home, or
 credential materialization step is missing. It must not fall back to the
 operator's global `~/.codex`.
 

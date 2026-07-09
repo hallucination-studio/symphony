@@ -26,28 +26,28 @@ def dispatch_public(dispatch: dict[str, Any]) -> dict[str, Any]:
         "agent_session_id": agent_session_id,
         "agent_app_user_id": dispatch.get("agent_app_user_id") or "",
         "routing_rule_id": dispatch.get("routing_rule_id") or project_binding_id,
-        "pipeline_profile": dispatch.get("pipeline_profile") or "default",
+        "managed_run_profile": dispatch.get("managed_run_profile") or "default",
         "blocked_by": list(dispatch.get("blocked_by") or []),
         "parent_issue_id": dispatch.get("parent_issue_id") or "",
         "status": dispatch["status"],
         "fencing_token": int(dispatch.get("fencing_token") or 0),
         "reason": dispatch.get("reason") or "",
     }
-    pipeline_intent = dispatch.get("pipeline_intent")
-    if isinstance(pipeline_intent, dict):
-        payload["pipeline_intent"] = pipeline_intent
+    managed_run_intent = dispatch.get("managed_run_intent")
+    if isinstance(managed_run_intent, dict):
+        payload["managed_run_intent"] = managed_run_intent
     for key in (
-        "graph_id",
-        "node_id",
-        "attempt_id",
-        "mode",
-        "attempt_status",
-        "graph_revision",
-        "policy_revision",
-        "lease_id",
+        "run_id",
+        "parent_issue_id",
+        "active_work_item_id",
+        "plan_version",
+        "backend_session_id",
     ):
         if dispatch.get(key) not in {None, ""}:
             payload[key] = dispatch[key]
+    managed_run_state = dispatch.get("managed_run_state")
+    if managed_run_state not in {None, ""}:
+        payload["managed_run_state"] = managed_run_state
     return payload
 
 def sanitize_runtime_config(value: Any, *, hide_runtime_sources: bool = False) -> dict[str, Any]:
@@ -57,15 +57,15 @@ def sanitize_runtime_config(value: Any, *, hide_runtime_sources: bool = False) -
     profiles = payload.get("profiles")
     if isinstance(profiles, dict):
         payload["profiles"] = {
-            str(mode): {
+            str(role): {
                 **(profile if isinstance(profile, dict) else {}),
-                "mode": str((profile or {}).get("mode") or mode) if isinstance(profile, dict) else str(mode),
+                "role": str((profile or {}).get("role") or role) if isinstance(profile, dict) else str(role),
                 "settings": _sanitize_profile_settings(
                     profile.get("settings") if isinstance(profile, dict) and isinstance(profile.get("settings"), dict) else {},
                     hide_runtime_sources=hide_runtime_sources,
                 ),
             }
-            for mode, profile in profiles.items()
+            for role, profile in profiles.items()
         }
     return payload
 

@@ -11,7 +11,7 @@ class PgDispatchMixin:
             """
             INSERT INTO project_bindings (
               id, conductor_id, user_id, instance_id, name, linear_project, project_slug,
-              agent_app_user_id, pipeline_profile, process_status, constraint_labels, repo_source, updated_at
+              agent_app_user_id, managed_run_profile, process_status, constraint_labels, repo_source, updated_at
             )
             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12::jsonb,$13::timestamptz)
             ON CONFLICT (id) DO UPDATE SET
@@ -19,7 +19,7 @@ class PgDispatchMixin:
               linear_project = EXCLUDED.linear_project,
               project_slug = EXCLUDED.project_slug,
               agent_app_user_id = EXCLUDED.agent_app_user_id,
-              pipeline_profile = EXCLUDED.pipeline_profile,
+              managed_run_profile = EXCLUDED.managed_run_profile,
               process_status = EXCLUDED.process_status,
               constraint_labels = EXCLUDED.constraint_labels,
               repo_source = EXCLUDED.repo_source,
@@ -33,7 +33,7 @@ class PgDispatchMixin:
             str(binding.get("linear_project") or ""),
             str(binding.get("project_slug") or ""),
             str(binding.get("agent_app_user_id") or ""),
-            str(binding.get("pipeline_profile") or "default"),
+            str(binding.get("managed_run_profile") or "default"),
             str(binding.get("process_status") or ""),
             _pg_json(binding.get("constraint_labels") or []),
             _pg_json(binding.get("repo_source") or {}),
@@ -45,7 +45,7 @@ class PgDispatchMixin:
                 "linear_workspace_id": str(binding["user_id"]),
                 "project_slug": str(binding.get("project_slug") or ""),
                 "linear_agent_app_user_id": str(binding.get("agent_app_user_id") or ""),
-                "pipeline_profile": str(binding.get("pipeline_profile") or "default"),
+                "managed_run_profile": str(binding.get("managed_run_profile") or "default"),
                 "project_binding_id": str(binding["id"]),
             }
         )
@@ -74,14 +74,14 @@ class PgDispatchMixin:
             """
             INSERT INTO dispatches (
               id, project_binding_id, user_id, issue_id, issue_identifier, issue_title, issue_description,
-              pipeline_intent, workspace_id, project_slug, agent_session_id, status, reason,
+              managed_run_intent, workspace_id, project_slug, agent_session_id, status, reason,
               agent_app_user_id, issue_delegate_id, leased_conductor_id, leased_until, fencing_token,
-              graph_id, node_id, attempt_id, mode, attempt_status, graph_revision, policy_revision, lease_id,
+              run_id, parent_issue_id, active_work_item_id, managed_run_state, plan_version, backend_session_id,
               created_at, updated_at, completed_at
             )
             VALUES (
               $1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12,$13,$14,$15,$16,$17::timestamptz,$18,
-              $19,$20,$21,$22,$23,$24,$25,$26,$27::timestamptz,$28::timestamptz,$29::timestamptz
+              $19,$20,$21,$22,$23,$24,$25::timestamptz,$26::timestamptz,$27::timestamptz
             )
             ON CONFLICT DO NOTHING
             RETURNING id
@@ -93,7 +93,7 @@ class PgDispatchMixin:
             str(dispatch.get("issue_identifier") or ""),
             str(dispatch.get("issue_title") or ""),
             str(dispatch.get("issue_description") or ""),
-            _pg_json(dispatch.get("pipeline_intent") or {}),
+            _pg_json(dispatch.get("managed_run_intent") or {}),
             str(dispatch.get("linear_workspace_id") or dispatch.get("workspace_id") or ""),
             str(dispatch.get("project_slug") or ""),
             str(dispatch.get("agent_session_id") or ""),
@@ -104,14 +104,12 @@ class PgDispatchMixin:
             dispatch.get("leased_runtime_id") or dispatch.get("leased_conductor_id"),
             _pg_datetime(dispatch.get("leased_until")),
             int(dispatch.get("fencing_token") or 0),
-            str(dispatch.get("graph_id") or ""),
-            str(dispatch.get("node_id") or ""),
-            str(dispatch.get("attempt_id") or ""),
-            str(dispatch.get("mode") or ""),
-            str(dispatch.get("attempt_status") or ""),
-            int(dispatch.get("graph_revision") or 0),
-            int(dispatch.get("policy_revision") or 0),
-            str(dispatch.get("lease_id") or ""),
+            str(dispatch.get("run_id") or ""),
+            str(dispatch.get("parent_issue_id") or ""),
+            str(dispatch.get("active_work_item_id") or ""),
+            str(dispatch.get("managed_run_state") or ""),
+            int(dispatch.get("plan_version") or 0),
+            str(dispatch.get("backend_session_id") or ""),
             _pg_datetime(dispatch.get("created_at")),
             _pg_datetime(dispatch.get("updated_at") or dispatch.get("created_at")),
             _pg_datetime(dispatch.get("completed_at")),
@@ -155,24 +153,22 @@ class PgDispatchMixin:
         *,
         fencing_token: int | None,
         reason: str = "",
-        pipeline: dict[str, Any] | None = None,
+        managed_run: dict[str, Any] | None = None,
         completed_at: str | None = None,
     ) -> dict[str, Any] | None:
-        pipeline = pipeline or {}
+        managed_run = managed_run or {}
         row = await self.pool.fetchrow(
             """
             UPDATE dispatches
             SET status = $3,
                 reason = $4,
                 completed_at = $5::timestamptz,
-                graph_id = COALESCE($7, graph_id),
-                node_id = COALESCE($8, node_id),
-                attempt_id = COALESCE($9, attempt_id),
-                mode = COALESCE($10, mode),
-                attempt_status = COALESCE($11, attempt_status),
-                graph_revision = COALESCE($12, graph_revision),
-                policy_revision = COALESCE($13, policy_revision),
-                lease_id = COALESCE($14, lease_id),
+                run_id = COALESCE($7, run_id),
+                parent_issue_id = COALESCE($8, parent_issue_id),
+                active_work_item_id = COALESCE($9, active_work_item_id),
+                managed_run_state = COALESCE($10, managed_run_state),
+                plan_version = COALESCE($11, plan_version),
+                backend_session_id = COALESCE($12, backend_session_id),
                 updated_at = now()
             WHERE id = $2 AND leased_conductor_id = $1 AND fencing_token = $6::bigint
             RETURNING *
@@ -183,14 +179,12 @@ class PgDispatchMixin:
             reason,
             _pg_datetime(completed_at),
             fencing_token,
-            pipeline.get("graph_id"),
-            pipeline.get("node_id"),
-            pipeline.get("attempt_id"),
-            pipeline.get("mode"),
-            pipeline.get("attempt_status"),
-            pipeline.get("graph_revision"),
-            pipeline.get("policy_revision"),
-            pipeline.get("lease_id"),
+            managed_run.get("run_id"),
+            managed_run.get("parent_issue_id"),
+            managed_run.get("active_work_item_id"),
+            managed_run.get("managed_run_state"),
+            managed_run.get("plan_version"),
+            managed_run.get("backend_session_id"),
         )
         return _record_to_dispatch(row) if row is not None else None
 

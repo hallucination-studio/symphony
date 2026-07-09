@@ -13,7 +13,7 @@ def test_runtime_claims_audit_flags_errorless_retry_and_claim_stall() -> None:
                     "identifier": "HELL-1",
                     "attempt": 2,
                     "error": None,
-                    "status_label": "performer:pipeline/verify-passed",
+                    "status_label": "symphony:managed-run/verified",
                 }
             ],
             "continuations": [],
@@ -39,7 +39,7 @@ def test_runtime_claims_audit_allows_blocked_human_approval_state() -> None:
                     "identifier": "HELL-1",
                     "attempt": 2,
                     "error": "runtime_permission_blocked: writing outside of the project",
-                    "status_label": "performer:pipeline/awaiting-human",
+                    "status_label": "symphony:managed-run/need-human",
                 }
             ],
         },
@@ -50,7 +50,7 @@ def test_runtime_claims_audit_allows_blocked_human_approval_state() -> None:
     assert result["counts"]["blocked"] == 1
     assert result["blocked"][0]["identifier"] == "HELL-1"
 
-def test_linear_tree_audit_requires_pipeline_projection_metadata() -> None:
+def test_linear_tree_audit_requires_work_item_contract_projection() -> None:
     tool = load_tool("linear_tree_audit")
 
     result = tool.audit_tree(
@@ -58,6 +58,7 @@ def test_linear_tree_audit_requires_pipeline_projection_metadata() -> None:
             "id": "business-1",
             "identifier": "HELL-1",
             "title": "Business",
+            "description": "",
             "state": {"name": "In Review", "type": "started"},
             "labels": {"nodes": [{"name": "performer:type/task"}]},
             "children": {
@@ -65,11 +66,11 @@ def test_linear_tree_audit_requires_pipeline_projection_metadata() -> None:
                     {
                         "id": "node-1",
                         "identifier": "HELL-2",
-                        "title": "Pipeline node",
+                        "title": "Work item",
                         "description": "```yaml\nsymphony:\n  graph_id: graph-1\n  node_id: node-1\n```\n",
                         "parent": {"id": "other", "identifier": "HELL-X"},
                         "state": {"name": "Todo", "type": "unstarted"},
-                        "labels": {"nodes": [{"name": "performer:type/pipeline-node"}]},
+                        "labels": {"nodes": [{"name": "symphony:type/work-item"}]},
                         "children": {"nodes": []},
                     },
                 ]
@@ -79,15 +80,13 @@ def test_linear_tree_audit_requires_pipeline_projection_metadata() -> None:
     )
 
     assert result["pass"] is False
-    assert "pipeline_node_parent_mismatch:HELL-2" in result["failures"]
-    assert (
-        "pipeline_metadata_missing:HELL-2:plan_attempt_id,gate_snapshot_hash,conductor_revision,operator_status"
-        in result["failures"]
-    )
-    assert "frozen_gate_missing:HELL-2" in result["failures"]
+    assert "managed_run_summary_missing:HELL-1" in result["failures"]
+    assert "work_item_parent_mismatch:HELL-2" in result["failures"]
+    assert "work_item_objective_missing:HELL-2" in result["failures"]
+    assert "work_item_state_missing:HELL-2" in result["failures"]
 
 
-def test_linear_tree_audit_requires_runtime_wait_projection_details() -> None:
+def test_linear_tree_audit_requires_work_item_state_gate_details() -> None:
     tool = load_tool("linear_tree_audit")
 
     result = tool.audit_tree(
@@ -95,6 +94,7 @@ def test_linear_tree_audit_requires_runtime_wait_projection_details() -> None:
             "id": "business-1",
             "identifier": "HELL-1",
             "title": "Business",
+            "description": "<!-- symphony:run-summary:start -->\n## Symphony Managed Run Summary\n<!-- symphony:run-summary:end -->",
             "state": {"name": "In Progress", "type": "started"},
             "labels": {"nodes": []},
             "children": {
@@ -102,25 +102,28 @@ def test_linear_tree_audit_requires_runtime_wait_projection_details() -> None:
                     {
                         "id": "node-1",
                         "identifier": "HELL-2",
-                        "title": "Pipeline node",
+                        "title": "Work item",
                         "description": "\n".join(
                             [
-                                "```yaml",
-                                "symphony:",
-                                "  graph_id: graph-1",
-                                "  node_id: node-1",
-                                "  plan_attempt_id: plan-1",
-                                "  gate_snapshot_hash: sha256:gate",
-                                "  conductor_revision: 1",
-                                "  operator_status: waiting_for_runtime_input",
-                                "```",
+                                "Objective: Project one work item",
                                 "",
-                                "### Frozen Gate",
+                                "Acceptance Criteria:",
+                                "- child issue exists",
+                                "",
+                                "Likely Files:",
+                                "- `packages/conductor/src/conductor/conductor_managed_run_projection.py`",
+                                "",
+                                "Verification:",
+                                "- RED: pytest tests/test_conductor_managed_run_projection.py -q",
+                                "- GREEN: pytest tests/test_conductor_managed_run_projection.py -q",
+                                "",
+                                "Managed Run State:",
+                                "- state: in_progress",
                             ]
                         ),
                         "parent": {"id": "business-1", "identifier": "HELL-1"},
                         "state": {"name": "In Progress", "type": "started"},
-                        "labels": {"nodes": [{"name": "performer:type/pipeline-node"}]},
+                        "labels": {"nodes": [{"name": "symphony:type/work-item"}]},
                         "children": {"nodes": []},
                         "inverseRelations": {"nodes": []},
                     },
@@ -131,8 +134,7 @@ def test_linear_tree_audit_requires_runtime_wait_projection_details() -> None:
     )
 
     assert result["pass"] is False
-    assert "pipeline_runtime_wait_kind_missing:HELL-2" in result["failures"]
-    assert "pipeline_runtime_wait_block_missing:HELL-2" in result["failures"]
+    assert "work_item_gate_missing:HELL-2" in result["failures"]
 
 def test_linear_tree_audit_summarizes_children_and_blocks_relations() -> None:
     tool = load_tool("linear_tree_audit")
@@ -339,7 +341,7 @@ def test_real_symphony_e2e_runtime_config_uses_explicit_codex_home_source() -> N
     )
 
     assert payload["version"] == 7
-    for profile in [payload["profiles"]["plan"], payload["profiles"]["execute"]]:
+    for profile in [payload["profiles"]["plan"], payload["profiles"]["work_item"]]:
         assert profile["settings"]["codex_home_source"] == "$SYMPHONY_E2E_CODEX_HOME_SOURCE"
         assert "model" not in profile["settings"]
         assert "auth.json" not in str(profile)
@@ -356,7 +358,7 @@ def test_real_symphony_e2e_runtime_config_model_is_explicit_override_only(monkey
 
     assert all("model" not in profile["settings"] for profile in inherited["profiles"].values())
     assert explicit["profiles"]["plan"]["settings"]["model"] == "gpt-5.5"
-    assert explicit["profiles"]["execute"]["settings"]["model"] == "gpt-5.5"
+    assert explicit["profiles"]["work_item"]["settings"]["model"] == "gpt-5.5"
     assert "model" not in explicit["profiles"]["verify"]["settings"]
 
 
@@ -370,19 +372,35 @@ def test_real_symphony_e2e_runtime_config_carries_codex_execution_settings() -> 
         codex_settings={"hard_turn_timeout_ms": 120000, "config_overrides": ["model_provider=custom"]},
     )
 
-    for profile in [payload["profiles"]["plan"], payload["profiles"]["execute"]]:
+    for profile in [payload["profiles"]["plan"], payload["profiles"]["work_item"]]:
         assert profile["settings"]["hard_turn_timeout_ms"] == 120000
         assert profile["settings"]["config_overrides"] == ["model_provider=custom"]
     assert payload["profiles"]["verify"]["settings"] == {}
 
 
-def test_real_symphony_e2e_cli_accepts_pipeline_scenarios() -> None:
+def test_real_symphony_e2e_cli_accepts_managed_run_scenarios() -> None:
     tool = load_tool("real_symphony_e2e")
 
     for scenario in ["basic", "parallel", "replan", "integration-conflict", "runtime-wait", "overall-dod"]:
-        args = tool.parser().parse_args(["--pipeline-scenario", scenario])
+        args = tool.parser().parse_args(["--managed-run-scenario", scenario])
 
         assert args.pipeline_scenario == scenario
+
+    with pytest.raises(SystemExit):
+        tool.parser().parse_args(["--pipeline-scenario", "basic"])
+
+
+def test_real_symphony_e2e_appendix_hardening_probes_reference_existing_tests() -> None:
+    tool = load_tool("real_symphony_e2e_acceptance")
+
+    for _check_name, nodeids in tool.APPENDIX_PYTEST_HARDENING_PROBES:
+        for nodeid in nodeids:
+            path_text, _, test_name = nodeid.partition("::")
+            test_path = ROOT / path_text
+
+            assert test_path.is_file(), nodeid
+            assert test_name, nodeid
+            assert f"def {test_name}(" in test_path.read_text(encoding="utf-8"), nodeid
 
 
 def test_real_symphony_e2e_defaults_to_hell_project() -> None:
@@ -392,7 +410,7 @@ def test_real_symphony_e2e_defaults_to_hell_project() -> None:
     assert args.project_slug == "8ab43179fb54"
 
 
-def test_real_symphony_e2e_parallel_scenario_raises_execute_capacity() -> None:
+def test_real_symphony_e2e_parallel_scenario_raises_work_item_capacity() -> None:
     tool = load_tool("real_symphony_e2e")
 
     payload = tool.build_runtime_config_payload(
@@ -401,7 +419,7 @@ def test_real_symphony_e2e_parallel_scenario_raises_execute_capacity() -> None:
         pipeline_scenario="parallel",
     )
 
-    assert payload["scheduler_policy"]["capacity"]["by_mode"]["execute"] == 2
+    assert payload["managed_run_policy"]["capacity"]["by_role"]["work_item"] == 2
 
 
 def test_real_symphony_e2e_integration_conflict_scenario_forces_parallel_conflict_shape() -> None:
@@ -414,7 +432,7 @@ def test_real_symphony_e2e_integration_conflict_scenario_forces_parallel_conflic
     )
     description = tool._pipeline_scenario_issue_description("integration-conflict", "run-1")
 
-    assert payload["scheduler_policy"]["capacity"]["by_mode"]["execute"] == 2
+    assert payload["managed_run_policy"]["capacity"]["by_role"]["work_item"] == 2
     assert "two independent parallel subtasks" in description
     assert "must not add a blocks dependency" in description
     assert "SYMPHONY_CONFLICT_SHARED.md" in description
@@ -456,8 +474,8 @@ def test_real_symphony_e2e_overall_dod_combines_required_probes() -> None:
     description = tool._pipeline_scenario_issue_description("overall-dod", "run-1")
     intent = tool._pipeline_scenario_intent("overall-dod")
 
-    assert payload["scheduler_policy"]["capacity"]["by_mode"]["execute"] == 2
-    assert payload["profiles"]["execute"]["settings"]["emit_runtime_wait_probe"] is True
+    assert payload["managed_run_policy"]["capacity"]["by_role"]["work_item"] == 2
+    assert payload["profiles"]["work_item"]["settings"]["emit_runtime_wait_probe"] is True
     assert payload["profiles"]["verify"]["settings"] == {"force_first_verify_failure_for_replan": True}
     assert "two independent parallel subtasks" in description
     assert "depend on both parallel subtasks" in description
@@ -468,7 +486,7 @@ def test_real_symphony_e2e_overall_dod_combines_required_probes() -> None:
         "parallel_branch_node_ids": ["hell-parallel-a", "hell-parallel-b"],
         "downstream_node_ids": ["hell-downstream-integration"],
     }
-    assert {"step": "pytest tests/test_smoke.py -q", "source": "appendix_harness"} in intent["required_gate_steps"]
+    assert {"step": "pytest tests/test_smoke.py -q", "source": "acceptance_appendix"} in intent["required_gate_steps"]
     assert 'pipeline_scenario == "overall-dod"' in source
     assert "appendix:s0a-crashed-worker-lease-reclaimed" in source
     assert "PODIUM_LINEAR_APP_ACCESS_TOKEN" in source
@@ -498,7 +516,7 @@ def test_real_symphony_e2e_runtime_wait_scenario_enables_permission_probe() -> N
         pipeline_scenario="runtime-wait",
     )
 
-    assert payload["profiles"]["execute"]["settings"]["emit_runtime_wait_probe"] is True
+    assert payload["profiles"]["work_item"]["settings"]["emit_runtime_wait_probe"] is True
 
 
 def test_real_symphony_e2e_overall_dod_scenario_is_not_downgraded() -> None:
@@ -862,7 +880,7 @@ def test_real_symphony_e2e_instance_payload_always_requires_delegate_filter() ->
     assert payload["linear_filters"] == {
         "linear_agent_app_user_id": "agent-1",
     }
-    assert payload["pipeline_profile"] == "default"
+    assert payload["managed_run_profile"] == "default"
     assert "workflow_profile" not in payload
     assert "workflow_inputs" not in payload
 
@@ -880,7 +898,7 @@ def test_real_symphony_e2e_real_instance_payload_requires_delegate() -> None:
     assert payload["linear_filters"] == {
         "linear_agent_app_user_id": "agent-1",
     }
-    assert payload["pipeline_profile"] == "gated-task"
+    assert payload["managed_run_profile"] == "gated-task"
     assert "workflow_profile" not in payload
     assert "workflow_inputs" not in payload
 
@@ -896,10 +914,11 @@ def test_real_symphony_e2e_run_no_longer_patches_workflow_content() -> None:
     assert "workflow_path" not in source
 
 
-def test_real_symphony_e2e_run_uses_pipeline_view_not_legacy_runs_or_gate_children() -> None:
+def test_real_symphony_e2e_run_uses_managed_runs_view_not_legacy_runs_or_gate_children() -> None:
     source = (ROOT / "tools" / "real_symphony_e2e_run.py").read_text(encoding="utf-8")
 
-    assert '"/api/pipeline"' in source
+    assert '"/api/managed-runs"' in source
+    assert '"/api/pipeline"' not in source
     assert '"/api/runs"' not in source
     assert '"/api/runs/' not in source
     assert "pipeline_runs" not in source
@@ -914,7 +933,7 @@ def test_real_symphony_e2e_enrolls_runtime_with_resolved_project_slug() -> None:
     resolve_index = source.index("linear_project = await resolve_project")
     enrollment_index = source.index('"/api/v1/runtime/enrollment-tokens"')
     enrollment_payload_start = source.index('"runtime_group_id": f"group-{run_id}"')
-    enrollment_payload_end = source.index('"pipeline_profile": "gated-task"')
+    enrollment_payload_end = source.index('"managed_run_profile": "gated-task"')
     enrollment_payload = source[enrollment_payload_start:enrollment_payload_end]
 
     assert resolve_index < enrollment_index
@@ -944,6 +963,31 @@ async def test_real_symphony_e2e_waits_for_delegate_visibility_before_poller_dis
 
     assert issue["delegate"] == {"id": "agent-1"}
     assert seen == []
+
+
+async def test_real_symphony_e2e_linear_facade_waits_without_recursive_fetch(monkeypatch) -> None:
+    tool = load_tool("real_symphony_e2e_linear")
+    seen = [
+        {"id": "issue-1", "delegate": None},
+        {"id": "issue-1", "delegate": {"id": "agent-1"}},
+    ]
+
+    async def fake_linear_graphql(_token: str, _query: str, _variables: dict[str, object]) -> dict[str, object]:
+        return {"issue": seen.pop(0)}
+
+    monkeypatch.setattr(tool, "linear_graphql", fake_linear_graphql)
+
+    issue = await tool.wait_for_linear_delegate_visible(
+        "token",
+        "issue-1",
+        "agent-1",
+        timeout_seconds=1,
+        poll_seconds=0,
+    )
+
+    assert issue["delegate"] == {"id": "agent-1"}
+    assert seen == []
+
 
 def test_real_symphony_e2e_evidence_redacts_tokens(tmp_path: Path) -> None:
     tool = load_tool("real_symphony_e2e")

@@ -11,7 +11,7 @@ vi.mock("./api/client", async (importOriginal) => {
     api: {
       me: vi.fn(),
       bootstrap: vi.fn(),
-      pipeline: vi.fn(),
+      managedRuns: vi.fn(),
       smokeCheckResult: vi.fn(),
     },
   };
@@ -20,7 +20,7 @@ vi.mock("./api/client", async (importOriginal) => {
 const mockApi = api as unknown as {
   me: ReturnType<typeof vi.fn>;
   bootstrap: ReturnType<typeof vi.fn>;
-  pipeline: ReturnType<typeof vi.fn>;
+  managedRuns: ReturnType<typeof vi.fn>;
   smokeCheckResult: ReturnType<typeof vi.fn>;
 };
 
@@ -28,11 +28,11 @@ describe("App auth gate", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.unstubAllEnvs();
-    mockApi.pipeline.mockResolvedValue({
+    mockApi.managedRuns.mockResolvedValue({
       runtime_group_id: "group-1",
       policy_revision: 1,
       profiles: {},
-      pipeline: { graph_revision: 0, modes: [], predicted_call_order: [], human_waits: [] },
+      managed_runs: { runs: [] },
     });
     mockApi.smokeCheckResult.mockRejectedValue(new Error("404"));
     mockApi.bootstrap.mockResolvedValue({

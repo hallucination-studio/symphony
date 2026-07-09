@@ -114,13 +114,13 @@ class JsonStoreOpsMixin:
         row = self._load_map("runtime_configs.json").get(runtime_group_id)
         return dict(row) if isinstance(row, dict) else None
 
-    async def save_pipeline_view(self, runtime_group_id: str, view: dict[str, Any]) -> None:
-        rows = self._load_map("pipeline_views.json")
+    async def save_managed_run_view(self, runtime_group_id: str, view: dict[str, Any]) -> None:
+        rows = self._load_map("managed_run_views.json")
         rows[runtime_group_id] = dict(view)
-        self._write("pipeline_views.json", rows)
+        self._write("managed_run_views.json", rows)
 
-    async def get_pipeline_view(self, runtime_group_id: str) -> dict[str, Any] | None:
-        row = self._load_map("pipeline_views.json").get(runtime_group_id)
+    async def get_managed_run_view(self, runtime_group_id: str) -> dict[str, Any] | None:
+        row = self._load_map("managed_run_views.json").get(runtime_group_id)
         return dict(row) if isinstance(row, dict) else None
 
     async def append_runtime_command(self, runtime_id: str, command: dict[str, Any]) -> dict[str, Any]:

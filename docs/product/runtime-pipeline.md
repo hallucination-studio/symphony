@@ -1,144 +1,105 @@
-# Runtime Pipeline
+# Managed Run Runtime
 
 ## Purpose
 
-The Symphony runtime path is a Conductor-owned durable
-`plan -> execute -> verify` pipeline. Podium routes work and pushes runtime
-configuration. Performer only runs fenced one-shot attempts. Linear is the
-operator projection and collaboration surface.
+The Symphony runtime path is a Conductor-owned Linear-native managed run. Podium
+routes delegated Linear work and pushes runtime configuration. Performer runs
+one fenced managed-run turn at a time. Linear is the operator projection and
+collaboration surface.
 
-This is the only runtime execution path. Legacy workflow runners and Performer
-tracker polling are not product paths.
+This is the only runtime execution path. Legacy workflow runners, direct
+Performer polling, graph schedulers, and standalone mode attempts are not
+product paths.
 
 ## Intake
 
 1. A Linear issue is delegated to the Symphony custom agent.
 2. Podium accepts the delegated work through its Linear integration.
 3. Podium matches workspace, project scope, custom-agent delegate, routing rule,
-   runtime group, active state, blockers, and runtime capacity.
+   runtime group, active state, blockers, and managed-run capacity.
 4. Podium queues a dispatch.
 5. Conductor leases the dispatch over outbound runtime authentication.
-6. Conductor commits or resumes the durable graph for the delegated issue.
+6. Conductor commits or resumes one durable managed run for the delegated issue.
 
 Dispatch routing never uses labels or human assignee as scheduler truth.
 
-## Attempt Modes
+## Managed-Run Turns
 
-Each mode is a separate dispatchable unit with its own runtime profile,
-workspace boundary, backend home, request file, result file, logs, lease, and
-attempt record.
-
-```text
-plan    -> produce graph and gate proposal
-execute -> implement one graph node and publish immutable output bundle
-verify  -> verify one execute attempt against one frozen gate snapshot
-```
-
-Performer accepts only managed one-shot attempts:
+Performer accepts only one-shot managed-run turns:
 
 ```bash
-.venv/bin/performer --mode plan|execute|verify --attempt-request-path /path/request.json --attempt-result-path /path/result.json
+.venv/bin/performer --turn-request-path /path/turn-request.json --turn-result-path /path/turn-result.json
 ```
 
-The removed positional workflow entrypoint and old result-file flags are not
-supported.
+The turn request names `turn_kind` as `plan` or `work_item`. A plan turn returns
+a structured plan payload and does not change files. A work-item turn executes
+exactly one accepted work item and returns a structured `WorkItemResult`.
+
+Conductor prepares runtime homes, request files, result files, logs, leases, and
+fencing. Performer never leases dispatches, writes Linear directly, or decides
+terminal managed-run state.
 
 ## Planning
 
 The planner receives the delegated issue, structured project context, current
-graph state, policy limits, and acceptance harness inputs. Its output is a
-proposal, not product fact.
+managed-run state, policy limits, and acceptance inputs. Its output is a proposal,
+not product fact.
 
-Before commit, Conductor derives authoritative intent from structured inputs,
-runs deterministic repair, and validates the plan. A valid plan commits as a new
-graph revision containing nodes, parentage, `blocks` edges, and frozen gate
-bindings.
+Before acceptance, Conductor validates the plan: work items must be bounded,
+acyclic, scoped to likely files, verifiable through RED/GREEN commands, safe in
+their parallelization claims, and covered by a complete Definition-of-Done
+rubric.
 
-The planner may emit one node or a decomposed DAG. Decomposition depth is a model
-decision bounded by scheduler policy and deterministic validation, not a
-hardcoded issue-size threshold.
+The accepted plan is immutable for execution. If implementation needs a new file
+scope, dependency, acceptance criterion, or human decision, the backend returns a
+plan-revision request. Conductor records a new plan version only after approval
+and keeps prior versions for audit.
 
 ## Execution
 
-An executable node becomes dispatchable only when all upstream dependencies are
-satisfied by verified results and capacity is available. The executor receives
-the node, its frozen gate hash, a prepared workspace, and any verified upstream
-manifests explicitly listed as inputs.
+Conductor selects the next dependency-ready work item. A work item becomes
+ready only when its dependencies are Done, its file scope is present, and
+runtime capacity is available.
 
-Before dispatch, Conductor prepares the executor workspace with git. Entry nodes
-start from the graph base revision. Dependent nodes get a per-node worktree
-branch and Conductor merges every verified blocker branch into it. This merge is
-the join point for fan-out/fan-in DAGs.
+The executor receives the work item, accepted plan version, likely touched
+files, RED command, GREEN commands, and any verified upstream outputs explicitly
+listed as inputs. It may modify implementation files within scope and report
+evidence. It cannot change plan topology, policy, verification verdicts, Linear
+terminal state, or durable managed-run state directly.
 
-The executor may modify code, commit to its node branch, and upload evidence. It
-cannot change gates, graph topology, verify verdicts, scheduler policy, or
-durable attempt state directly.
-
-Every terminal execute attempt publishes an immutable verification input bundle:
-base revision, branch name, commit sha, artifact URIs and hashes, evidence URI,
-and the gate hash.
+Every result includes changed files, planned/unplanned classification,
+undeclared files, RED/GREEN evidence, acceptance results, blocker details, plan
+revision payload when applicable, and notes.
 
 ## Verification
 
-Verification runs in a separate mode. The verifier checks one execute attempt
-against one frozen gate snapshot. It reconstructs the executor output in a fresh
-disposable worktree at the execute commit, verifies artifact hashes, loads the
-frozen gate by hash, runs the gate procedure, and emits a score.
+Conductor independently verifies work-item results before moving a Linear child
+issue to Done. Verification checks file impact, declared scope, RED/GREEN
+evidence, acceptance criteria, secrets, checkpoint commands, and result schema.
 
-A node verify-passes only at rubric score `>= 3`. Downstream dependencies are
-satisfied by verify-pass plus a verified branch output manifest, not by execute
-completion or a self-reported success.
+Command verification uses a disposable worktree with mutation detection after
+gate execution. This is intentionally not OS-level read-only enforcement.
 
-The first default verifier is `local-verifier`: it uses a disposable worktree
-and mutation detection after gate execution. This is intentionally not described
-as OS-level read-only enforcement.
-
-## Join Conflicts And Delivery
-
-If a downstream join cannot merge verified blocker branches cleanly, Conductor
-inserts an ordinary merge-conflict resolver execute node between the blockers
-and the downstream node. If that resolver cannot produce a clean branch, the
-pipeline escalates to `need_human`.
-
-When every active graph node is `VERIFY_PASSED` or `SUPERSEDED`, Conductor may
-produce an operator-facing delivery branch: create or reset
-`symphony/<issue-identifier>`, merge every exit node's verified branch/commit,
-push the final branch, and open a PR through the configured git host integration.
-Delivery outcomes are durable pipeline state and appear in `graph_deliveries`.
-
-## Replan And Supersession
-
-When verification shows the approach must return to planning, Conductor performs
-an atomic graph rewrite. The old node becomes `SUPERSEDED`, the replacement
-subgraph inherits upstream and downstream `blocks` edges, and the rewrite commits
-as a new graph revision.
-
-In Linear, the supersession is projected as a canceled old issue and a new issue
-at the same level with `replaces` / `replaced-by` links. The original business
-root issue remains immutable and carries run status, including projection
-health.
+Failed verification leaves the work item out of Done, records a sanitized
+reason in durable state, logs it with correlation ids, and updates the relevant
+Linear projection.
 
 ## Human And Runtime Waits
 
-Pipeline work that needs operator input enters `need_human` on the affected
-node. The operator resumes it by flipping the node out of the blocked-style
-state. Comments provide context only and include the concrete blocker, capacity,
-profile, or runtime reason that parked the node.
+Managed-run work that needs operator input blocks the parent run or affected work
+item with a concrete reason and required action. Comments provide context only;
+Conductor state owns resume semantics.
 
 Runtime approval, permission, and tool-input waits are separate runtime waits.
-They are surfaced through node metadata and the product's runtime wait
-projection, including `[Human Action]` child issues where the runtime wait flow
-uses them.
+They are surfaced through work-item metadata and the product's runtime wait
+projection, including `[Human Action]` child issues where that flow uses them.
 
-## Observability
+## Completion
 
-The runtime must expose current graph revision, policy revision, nodes, attempts,
-leases, capacity, gates, manifests, integration state, waits, errors, and Linear
-projection identifiers through durable state, logs, and API views.
+A run is complete only when all active work items are Done or explicitly
+canceled by approved revision, checkpoints passed, final Definition-of-Done
+rubric is recorded, changed files and verification evidence are visible,
+residual risks are listed, and the Linear parent summary is current.
 
-A failed attempt is not handled until its sanitized reason is visible in durable
-state, the relevant operator view, correlated logs, and Linear projection when
-Linear is part of the managed run.
-
-Every reconciliation tick must avoid silent non-terminal parking: each node is
-running, can progress, or has an open wait/comment explaining why it cannot.
+Failures are handled only when the sanitized reason appears in durable state,
+operator logs, and the relevant Linear projection.

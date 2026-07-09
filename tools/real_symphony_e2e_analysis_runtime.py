@@ -47,6 +47,9 @@ def write_wait_artifacts(
 
 
 def conductor_human_actions(pipeline_payload: dict[str, Any]) -> list[dict[str, Any]]:
+    runs = pipeline_payload.get("runs")
+    if isinstance(runs, list):
+        return _managed_run_human_actions(runs)
     nodes = {
         str(node.get("node_id") or ""): node
         for node in pipeline_payload.get("nodes", [])
@@ -107,7 +110,83 @@ def conductor_human_actions(pipeline_payload: dict[str, Any]) -> list[dict[str, 
 
 
 def conductor_pipeline_nodes(pipeline_payload: dict[str, Any]) -> list[dict[str, Any]]:
+    runs = pipeline_payload.get("runs")
+    if isinstance(runs, list):
+        return _managed_run_work_items(runs)
     nodes = pipeline_payload.get("nodes")
     if not isinstance(nodes, list):
         return []
     return [node for node in nodes if isinstance(node, dict) and node.get("node_id")]
+
+
+def _managed_run_work_items(runs: list[Any]) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for run in runs:
+        if not isinstance(run, dict):
+            continue
+        for item in run.get("work_items") or []:
+            if not isinstance(item, dict):
+                continue
+            payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+            items.append(
+                {
+                    "run_id": run.get("run_id"),
+                    "node_id": item.get("work_item_id"),
+                    "work_item_id": item.get("work_item_id"),
+                    "title": payload.get("title") or item.get("work_item_id"),
+                    "state": _managed_run_terminal_state(str(item.get("state") or "")),
+                    "gate_status": item.get("gate_status"),
+                    "issue_id": _projection_issue_id(run, str(item.get("work_item_id") or "")),
+                    "issue_identifier": run.get("issue_identifier"),
+                    "last_reason": run.get("latest_reason") or item.get("gate_status"),
+                }
+            )
+    return items
+
+
+def _managed_run_human_actions(runs: list[Any]) -> list[dict[str, Any]]:
+    actions: list[dict[str, Any]] = []
+    for run in runs:
+        if not isinstance(run, dict):
+            continue
+        for item in run.get("work_items") or []:
+            if not isinstance(item, dict):
+                continue
+            gate_status = str(item.get("gate_status") or "")
+            if str(item.get("state") or "") != "blocked" or gate_status != "human_approval_required":
+                continue
+            work_item_id = str(item.get("work_item_id") or "")
+            wait_id = f"{run.get('run_id')}:{work_item_id}:human_approval_required"
+            actions.append(
+                {
+                    "wait_id": wait_id,
+                    "node_id": work_item_id,
+                    "work_item_id": work_item_id,
+                    "issue_id": _projection_issue_id(run, work_item_id),
+                    "issue_identifier": run.get("issue_identifier"),
+                    "state": "blocked",
+                    "status": "waiting",
+                    "reason": "human_approval_required",
+                    "child_issue_id": _projection_issue_id(run, work_item_id),
+                    "child_identifier": None,
+                    "child_url": None,
+                    "details": {"wait_kind": "human_approval_required", "run_id": str(run.get("run_id") or "")},
+                }
+            )
+    return actions
+
+
+def _managed_run_terminal_state(state: str) -> str:
+    return {
+        "done": "verify_passed",
+        "cancelled": "superseded",
+        "blocked": "need_human",
+    }.get(state, state)
+
+
+def _projection_issue_id(run: dict[str, Any], work_item_id: str) -> str | None:
+    for projection in run.get("linear_projections") or []:
+        if isinstance(projection, dict) and str(projection.get("work_item_id") or "") == work_item_id:
+            issue_id = str(projection.get("linear_issue_id") or "")
+            return issue_id or None
+    return None

@@ -29,7 +29,7 @@ POSTGRES_MIGRATION_STATEMENTS: Iterable[str] = (
                 linear_workspace_id TEXT NOT NULL DEFAULT '',
                 project_slug TEXT NOT NULL DEFAULT '',
                 linear_agent_app_user_id TEXT NOT NULL DEFAULT '',
-                pipeline_profile TEXT NOT NULL DEFAULT 'default',
+                managed_run_profile TEXT NOT NULL DEFAULT 'default',
                 project_binding_id TEXT NOT NULL DEFAULT '',
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
             )
@@ -96,7 +96,7 @@ POSTGRES_MIGRATION_STATEMENTS: Iterable[str] = (
                 linear_project TEXT NOT NULL DEFAULT '',
                 project_slug TEXT NOT NULL DEFAULT '',
                 agent_app_user_id TEXT NOT NULL DEFAULT '',
-                pipeline_profile TEXT NOT NULL DEFAULT 'default',
+                managed_run_profile TEXT NOT NULL DEFAULT 'default',
                 process_status TEXT NOT NULL DEFAULT '',
                 constraint_labels JSONB NOT NULL DEFAULT '[]'::jsonb,
                 repo_source JSONB,
@@ -114,7 +114,7 @@ POSTGRES_MIGRATION_STATEMENTS: Iterable[str] = (
                 issue_identifier TEXT NOT NULL DEFAULT '',
                 issue_title TEXT NOT NULL DEFAULT '',
                 issue_description TEXT NOT NULL DEFAULT '',
-                pipeline_intent JSONB NOT NULL DEFAULT '{}'::jsonb,
+                managed_run_intent JSONB NOT NULL DEFAULT '{}'::jsonb,
                 workspace_id TEXT NOT NULL DEFAULT '',
                 project_slug TEXT NOT NULL DEFAULT '',
                 agent_session_id TEXT NOT NULL DEFAULT '',
@@ -125,14 +125,12 @@ POSTGRES_MIGRATION_STATEMENTS: Iterable[str] = (
                 leased_conductor_id TEXT REFERENCES conductors(id) ON DELETE SET NULL,
                 leased_until TIMESTAMPTZ,
                 fencing_token BIGINT NOT NULL DEFAULT 0,
-                graph_id TEXT NOT NULL DEFAULT '',
-                node_id TEXT NOT NULL DEFAULT '',
-                attempt_id TEXT NOT NULL DEFAULT '',
-                mode TEXT NOT NULL DEFAULT '',
-                attempt_status TEXT NOT NULL DEFAULT '',
-                graph_revision BIGINT NOT NULL DEFAULT 0,
-                policy_revision BIGINT NOT NULL DEFAULT 0,
-                lease_id TEXT NOT NULL DEFAULT '',
+                run_id TEXT NOT NULL DEFAULT '',
+                parent_issue_id TEXT NOT NULL DEFAULT '',
+                active_work_item_id TEXT NOT NULL DEFAULT '',
+                managed_run_state TEXT NOT NULL DEFAULT '',
+                plan_version BIGINT NOT NULL DEFAULT 0,
+                backend_session_id TEXT NOT NULL DEFAULT '',
                 created_at TIMESTAMPTZ NOT NULL,
                 updated_at TIMESTAMPTZ NOT NULL,
                 completed_at TIMESTAMPTZ
@@ -141,17 +139,15 @@ POSTGRES_MIGRATION_STATEMENTS: Iterable[str] = (
             "ALTER TABLE dispatches ADD COLUMN IF NOT EXISTS fencing_token BIGINT NOT NULL DEFAULT 0",
             "ALTER TABLE dispatches ADD COLUMN IF NOT EXISTS issue_title TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE dispatches ADD COLUMN IF NOT EXISTS issue_description TEXT NOT NULL DEFAULT ''",
-            "ALTER TABLE dispatches ADD COLUMN IF NOT EXISTS pipeline_intent JSONB NOT NULL DEFAULT '{}'::jsonb",
+            "ALTER TABLE dispatches ADD COLUMN IF NOT EXISTS managed_run_intent JSONB NOT NULL DEFAULT '{}'::jsonb",
             "ALTER TABLE dispatches ADD COLUMN IF NOT EXISTS agent_app_user_id TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE dispatches ADD COLUMN IF NOT EXISTS issue_delegate_id TEXT NOT NULL DEFAULT ''",
-            "ALTER TABLE dispatches ADD COLUMN IF NOT EXISTS graph_id TEXT NOT NULL DEFAULT ''",
-            "ALTER TABLE dispatches ADD COLUMN IF NOT EXISTS node_id TEXT NOT NULL DEFAULT ''",
-            "ALTER TABLE dispatches ADD COLUMN IF NOT EXISTS attempt_id TEXT NOT NULL DEFAULT ''",
-            "ALTER TABLE dispatches ADD COLUMN IF NOT EXISTS mode TEXT NOT NULL DEFAULT ''",
-            "ALTER TABLE dispatches ADD COLUMN IF NOT EXISTS attempt_status TEXT NOT NULL DEFAULT ''",
-            "ALTER TABLE dispatches ADD COLUMN IF NOT EXISTS graph_revision BIGINT NOT NULL DEFAULT 0",
-            "ALTER TABLE dispatches ADD COLUMN IF NOT EXISTS policy_revision BIGINT NOT NULL DEFAULT 0",
-            "ALTER TABLE dispatches ADD COLUMN IF NOT EXISTS lease_id TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE dispatches ADD COLUMN IF NOT EXISTS run_id TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE dispatches ADD COLUMN IF NOT EXISTS parent_issue_id TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE dispatches ADD COLUMN IF NOT EXISTS active_work_item_id TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE dispatches ADD COLUMN IF NOT EXISTS managed_run_state TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE dispatches ADD COLUMN IF NOT EXISTS plan_version BIGINT NOT NULL DEFAULT 0",
+            "ALTER TABLE dispatches ADD COLUMN IF NOT EXISTS backend_session_id TEXT NOT NULL DEFAULT ''",
             """
             CREATE UNIQUE INDEX IF NOT EXISTS dispatches_binding_session_unique
             ON dispatches (project_binding_id, agent_session_id)
@@ -195,7 +191,7 @@ POSTGRES_MIGRATION_STATEMENTS: Iterable[str] = (
             )
             """,
             """
-            CREATE TABLE IF NOT EXISTS pipeline_views (
+            CREATE TABLE IF NOT EXISTS managed_run_views (
                 runtime_group_id TEXT PRIMARY KEY,
                 view_json JSONB NOT NULL,
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT now()

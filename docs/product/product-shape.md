@@ -24,13 +24,13 @@ Podium is the SaaS boundary and public HTTPS surface. It owns:
 - runtime enrollment and update policy;
 - dispatch queues and runtime configuration;
 - the scoped Linear GraphQL proxy;
-- sanitized pipeline views for operators.
+- sanitized managed-runs views for operators.
 
 ### Conductor
 
 Conductor is the customer-side daemon. It owns local instance metadata,
-durable pipeline graph state, runtime credentials, dispatch leases, per-mode
-runtime profile materialization, Performer process lifecycle, result
+durable managed-run state, runtime credentials, dispatch leases, per-role runtime
+profile materialization, Performer process lifecycle, turn result
 collection, local logs, and reports back to Podium.
 
 Conductor is the only local process manager for Performer. It launches
@@ -40,18 +40,17 @@ it does not import Performer internals.
 ### Performer
 
 Performer is a short-lived worker. It runs exactly one fenced attempt in
-`plan`, `execute`, or `verify` mode from Conductor-owned request/result JSON
-paths. It may use local repositories, shell tools, model backends, and
-customer-approved execution secrets prepared for that mode.
+the Linear-native managed-run flow from Conductor-owned request/result JSON paths. It may
+use local repositories, shell tools, model backends, and customer-approved
+execution secrets prepared for that role.
 
-Performer does not lease dispatches, poll Linear, own graph state, or receive
+Performer does not lease dispatches, poll Linear, own managed-run state, or receive
 Linear OAuth tokens.
 
 ### performer-api
 
-`performer-api` is the shared contract package. It owns runtime modes,
-scheduler policy DTOs, runtime profile DTOs, pipeline graph and attempt state,
-frozen gate snapshots, verification input snapshots, task output manifests,
+`performer-api` is the shared contract package. It owns managed-run DTOs, runtime
+policy DTOs, runtime profile DTOs, plan/work-item state, verification evidence,
 projection models, and registration DTOs.
 
 ## Managed Journey
@@ -64,12 +63,11 @@ projection models, and registration DTOs.
 6. A Linear issue is delegated to the Symphony custom agent.
 7. Podium accepts the delegated issue and queues a dispatch for an eligible
    runtime group.
-8. Conductor leases the dispatch and commits or resumes a durable pipeline
-   graph.
-9. Performer runs fenced `plan`, `execute`, and `verify` attempts under
-   per-mode profiles.
-10. Podium and Linear show sanitized operator state: nodes, attempts, capacity,
-    leases, gates, manifests, waits, conflicts, and runtime health.
+8. Conductor leases the dispatch and commits or resumes a durable managed run.
+9. Performer runs fenced plan and work-item turns under per-role profiles.
+10. Podium and Linear show sanitized operator state: runs, work items,
+    capacity, leases, verification evidence, waits, conflicts, and runtime
+    health.
 
 ## Product Boundaries
 

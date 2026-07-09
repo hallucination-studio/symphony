@@ -120,7 +120,7 @@ async def test_update_issue_description_marker_block_preserves_user_text_and_rep
                     "issue": {
                         "id": "issue-1",
                         "identifier": "MT-1",
-                        "description": "User text\n\n<!-- BEGIN SYMPHONY PIPELINE -->\nold\n<!-- END SYMPHONY PIPELINE -->\n\nTail",
+                            "description": "User text\n\n<!-- BEGIN SYMPHONY WORK ITEM -->\nold\n<!-- END SYMPHONY WORK ITEM -->\n\nTail",
                     }
                 }
             },
@@ -142,17 +142,17 @@ async def test_update_issue_description_marker_block_preserves_user_text_and_rep
 
     await client.update_issue_description_marker_block(
         "issue-1",
-        "SYMPHONY PIPELINE",
-        "pipeline_node_id: pipeline-node-1",
+        "SYMPHONY WORK ITEM",
+        "work_item_id: wi-1",
     )
 
     updated_description = transport.requests[1]["json"]["variables"]["description"]
     assert updated_description.startswith("User text")
     assert "old" not in updated_description
-    assert "pipeline_node_id: pipeline-node-1" in updated_description
+    assert "work_item_id: wi-1" in updated_description
     assert updated_description.endswith("Tail")
 
-async def test_set_issue_pipeline_label_replaces_only_pipeline_labels() -> None:
+async def test_set_issue_managed_run_label_replaces_only_managed_run_and_legacy_pipeline_labels() -> None:
     transport = RecordingTransport(
         [
             {
@@ -164,6 +164,7 @@ async def test_set_issue_pipeline_label_replaces_only_pipeline_labels() -> None:
                         "labels": {
                             "nodes": [
                                 {"id": "label-business", "name": "codex2"},
+                                {"id": "label-current", "name": "symphony:managed-run/planning"},
                                 {"id": "label-old", "name": "performer:pipeline/planning"},
                             ]
                         },
@@ -173,7 +174,7 @@ async def test_set_issue_pipeline_label_replaces_only_pipeline_labels() -> None:
             {
                 "data": {
                     "issueLabels": {
-                            "nodes": [{"id": "label-executing", "name": "performer:pipeline/executing"}]
+                            "nodes": [{"id": "label-executing", "name": "symphony:managed-run/executing"}]
                     }
                 }
             },
@@ -187,7 +188,7 @@ async def test_set_issue_pipeline_label_replaces_only_pipeline_labels() -> None:
                             "labels": {
                                 "nodes": [
                                     {"id": "label-business", "name": "codex2"},
-                                        {"id": "label-executing", "name": "performer:pipeline/executing"},
+                                    {"id": "label-executing", "name": "symphony:managed-run/executing"},
                                 ]
                             },
                         },
@@ -199,20 +200,20 @@ async def test_set_issue_pipeline_label_replaces_only_pipeline_labels() -> None:
     client = LinearClient("https://api.linear.app/graphql", "linear-token", transport=transport)
     tracker = LinearTracker(make_config(), client=client)
 
-    result = await tracker.set_issue_pipeline_label("issue-1", "performer:pipeline/executing")
+    result = await tracker.set_issue_managed_run_label("issue-1", "symphony:managed-run/executing")
 
     assert result == {
         "success": True,
         "issue_id": "issue-1",
         "identifier": "MT-1",
-        "label": "performer:pipeline/executing",
+        "label": "symphony:managed-run/executing",
         "label_ids": ["label-business", "label-executing"],
     }
     assert "issue(id: $issueId)" in transport.requests[0]["json"]["query"]
     assert transport.requests[0]["json"]["variables"] == {"issueId": "issue-1"}
     assert "issueLabels" in transport.requests[1]["json"]["query"]
     assert transport.requests[1]["json"]["variables"] == {
-        "name": "performer:pipeline/executing",
+        "name": "symphony:managed-run/executing",
         "teamId": "team-1",
     }
     update_request = transport.requests[2]["json"]
@@ -222,7 +223,7 @@ async def test_set_issue_pipeline_label_replaces_only_pipeline_labels() -> None:
         "labelIds": ["label-business", "label-executing"],
     }
 
-async def test_set_issue_pipeline_label_drops_legacy_gate_and_score_labels() -> None:
+async def test_set_issue_managed_run_label_drops_legacy_projection_labels() -> None:
     transport = RecordingTransport(
         [
             {
@@ -233,7 +234,7 @@ async def test_set_issue_pipeline_label_drops_legacy_gate_and_score_labels() -> 
                         "team": {"id": "team-1"},
                         "labels": {
                             "nodes": [
-                                {"id": "label-node", "name": "performer:type/pipeline-node"},
+                                {"id": "label-work-item", "name": "symphony:type/work-item"},
                                 {"id": "label-human", "name": "performer:gate/pending"},
                                 {"id": "label-score", "name": "performer:score/3/4"},
                                 {"id": "label-old", "name": "performer:pipeline/executing"},
@@ -245,7 +246,7 @@ async def test_set_issue_pipeline_label_drops_legacy_gate_and_score_labels() -> 
             {
                 "data": {
                     "issueLabels": {
-                        "nodes": [{"id": "label-verified", "name": "performer:pipeline/verify-passed"}]
+                        "nodes": [{"id": "label-verified", "name": "symphony:managed-run/verified"}]
                     }
                 }
             },
@@ -258,8 +259,8 @@ async def test_set_issue_pipeline_label_drops_legacy_gate_and_score_labels() -> 
                             "identifier": "MT-1",
                             "labels": {
                                 "nodes": [
-                                    {"id": "label-node", "name": "performer:type/pipeline-node"},
-                                        {"id": "label-verified", "name": "performer:pipeline/verify-passed"},
+                                    {"id": "label-work-item", "name": "symphony:type/work-item"},
+                                    {"id": "label-verified", "name": "symphony:managed-run/verified"},
                                 ]
                             },
                         },
@@ -270,13 +271,13 @@ async def test_set_issue_pipeline_label_drops_legacy_gate_and_score_labels() -> 
     )
     client = LinearClient("https://api.linear.app/graphql", "linear-token", transport=transport)
 
-    result = await client.set_issue_pipeline_label("issue-1", "performer:pipeline/verify-passed")
+    result = await client.set_issue_managed_run_label("issue-1", "symphony:managed-run/verified")
 
-    assert result["label_ids"] == ["label-node", "label-verified"]
+    assert result["label_ids"] == ["label-work-item", "label-verified"]
     update_request = transport.requests[2]["json"]
     assert update_request["variables"] == {
         "issueId": "issue-1",
-        "labelIds": ["label-node", "label-verified"],
+        "labelIds": ["label-work-item", "label-verified"],
     }
 
 async def test_tracker_does_not_publish_generic_label_group_api() -> None:
@@ -285,7 +286,7 @@ async def test_tracker_does_not_publish_generic_label_group_api() -> None:
 
     assert not hasattr(tracker, "set_issue_label_group")
 
-async def test_set_issue_pipeline_label_creates_missing_label_for_issue_team() -> None:
+async def test_set_issue_managed_run_label_creates_missing_label_for_issue_team() -> None:
     transport = RecordingTransport(
         [
             {
@@ -317,7 +318,7 @@ async def test_set_issue_pipeline_label_creates_missing_label_for_issue_team() -
                             "labels": {
                                 "nodes": [
                                     {"id": "label-business", "name": "codex"},
-                                    {"id": "label-starting", "name": "performer:pipeline/executing"},
+                                    {"id": "label-starting", "name": "symphony:managed-run/executing"},
                                 ]
                             },
                         },
@@ -328,18 +329,20 @@ async def test_set_issue_pipeline_label_creates_missing_label_for_issue_team() -
     )
     client = LinearClient("https://api.linear.app/graphql", "linear-token", transport=transport)
 
-    result = await client.set_issue_pipeline_label("issue-1", "performer:pipeline/executing")
+    result = await client.set_issue_managed_run_label("issue-1", "symphony:managed-run/executing")
 
     assert result["label_ids"] == ["label-business", "label-starting"]
     create_request = transport.requests[2]["json"]
     assert "issueLabelCreate" in create_request["query"]
-    assert create_request["variables"] == {"name": "performer:pipeline/executing", "teamId": "team-1"}
+    assert create_request["variables"] == {"name": "symphony:managed-run/executing", "teamId": "team-1"}
 
-async def test_set_issue_pipeline_label_rejects_phase_labels() -> None:
+async def test_set_issue_managed_run_label_rejects_old_phase_and_pipeline_labels() -> None:
     client = LinearClient("https://api.linear.app/graphql", "linear-token", transport=RecordingTransport([]))
 
     with pytest.raises(ValueError):
-        await client.set_issue_pipeline_label("issue-1", "performer:phase/implementation")
+        await client.set_issue_managed_run_label("issue-1", "performer:phase/implementation")
+    with pytest.raises(ValueError):
+        await client.set_issue_managed_run_label("issue-1", "performer:pipeline/executing")
 
 async def test_graphql_errors_are_mapped() -> None:
     transport = RecordingTransport([{"errors": [{"message": "bad query"}]}])

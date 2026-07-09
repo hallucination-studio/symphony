@@ -4,9 +4,8 @@ from typing import Any
 
 import httpx
 
-from .conductor_podium_sync_report import _pipeline_report_metrics, _pipeline_report_queue
 from .conductor_service_helpers import _desired_project_labels, _hostname, _linear_agent_app_user_id
-from performer_api.pipeline import RuntimeConfigEnvelope
+from performer_api.managed_runs import RuntimeConfigEnvelope
 
 
 class PodiumReportMixin:
@@ -16,9 +15,9 @@ class PodiumReportMixin:
         metrics: dict[str, dict[str, Any]] = {}
         queue: dict[str, dict[str, Any]] = {}
         log_tail: dict[str, dict[str, Any]] = {}
-        pipeline_view = self.pipeline_store.pipeline_view().to_dict()
-        pipeline_metrics = _pipeline_report_metrics(pipeline_view)
-        pipeline_queue = _pipeline_report_queue(pipeline_view)
+        managed_runs_view = self.managed_run_store.managed_run_view()
+        managed_run_metrics = _managed_run_report_metrics(managed_runs_view)
+        managed_run_queue = _managed_run_report_queue(managed_runs_view)
         instances = self.store.list_instances()
         for instance in instances:
             agent_app_user_id = _linear_agent_app_user_id(instance.linear_filters)
@@ -35,12 +34,12 @@ class PodiumReportMixin:
                 }
             )
             metrics[instance.id] = {
-                **pipeline_metrics,
+                **managed_run_metrics,
                 "running": bool(instance.process_status == "running"),
             }
             queue[instance.id] = {
-                "queued": pipeline_queue["queued"],
-                "leased": pipeline_queue["leased"],
+                "queued": managed_run_queue["queued"],
+                "leased": managed_run_queue["leased"],
                 "running": 1 if instance.process_status == "running" else 0,
             }
             logs = self.query_instance_logs(instance.id, tail=log_tail_lines, order="desc")
@@ -58,7 +57,7 @@ class PodiumReportMixin:
             "metrics": metrics,
             "queue": queue,
             "log_tail": log_tail,
-            "pipeline": pipeline_view,
+            "managed_runs": managed_runs_view,
         }
 
     async def post_podium_report(
@@ -93,7 +92,7 @@ class PodiumReportMixin:
             envelope = RuntimeConfigEnvelope.from_dict(payload)
             envelope.validate()
         except Exception as exc:
-            self._record_pipeline_sync_failure(
+            self._record_managed_run_sync_failure(
                 "runtime_config_apply_failed",
                 None,
                 exc,
@@ -104,4 +103,22 @@ class PodiumReportMixin:
                 },
             )
             return False
-        return self.pipeline_store.apply_runtime_config(envelope)
+        self._managed_run_runtime_config = envelope.to_dict()
+        return True
+
+
+def _managed_run_report_metrics(view: dict[str, Any]) -> dict[str, Any]:
+    runs = view.get("runs") if isinstance(view.get("runs"), list) else []
+    return {
+        "runs_total": len(runs),
+        "runs_blocked": sum(1 for run in runs if isinstance(run, dict) and run.get("state") in {"blocked", "failed"}),
+        "runs_done": sum(1 for run in runs if isinstance(run, dict) and run.get("state") == "done"),
+    }
+
+
+def _managed_run_report_queue(view: dict[str, Any]) -> dict[str, int]:
+    runs = view.get("runs") if isinstance(view.get("runs"), list) else []
+    return {
+        "queued": sum(1 for run in runs if isinstance(run, dict) and run.get("state") in {"queued", "planning", "ready"}),
+        "leased": sum(1 for run in runs if isinstance(run, dict) and run.get("state") in {"executing", "reviewing"}),
+    }

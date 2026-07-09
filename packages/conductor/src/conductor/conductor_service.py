@@ -17,7 +17,8 @@ from .conductor_models import (
 )
 from .conductor_runtime import ConductorRuntimeManager
 from .conductor_runtime import LogQuery
-from .conductor_pipeline import ConductorPipelineStore, PipelineCoordinator
+from .conductor_managed_run_coordinator import ConductorManagedRunCoordinator
+from .conductor_managed_run_store import ConductorManagedRunStore
 from .conductor_store import ConductorStore
 from .conductor_podium_sync import ConductorPodiumSyncMixin
 from .conductor_service_views import ConductorServiceViewsMixin
@@ -43,8 +44,9 @@ class ConductorService(ConductorPodiumSyncMixin, ConductorServiceViewsMixin):
         self.store = store
         self.data_root = data_root
         self.runtime_manager = runtime_manager or ConductorRuntimeManager()
-        self.pipeline_store = ConductorPipelineStore(data_root / "pipeline")
-        self.pipeline_coordinator = PipelineCoordinator(store=self.pipeline_store, runtime_manager=self.runtime_manager)
+        self.managed_run_store = ConductorManagedRunStore(data_root / "managed_run")
+        self.managed_run_coordinator = ConductorManagedRunCoordinator(store=self.managed_run_store)
+        self._managed_run_runtime_config: dict[str, Any] = {}
         self._startup_locks: dict[str, asyncio.Lock] = {}
         self.repository_handoff_tracker_factory = self._repository_handoff_tracker
         self.project_label_proxy_factory = self._project_label_proxy
@@ -58,7 +60,6 @@ class ConductorService(ConductorPodiumSyncMixin, ConductorServiceViewsMixin):
         # loop only calls Linear when an instance's scope actually changes.
         self._project_label_signatures: dict[str, str] = {}
         self.data_root.mkdir(parents=True, exist_ok=True)
-        self.reconcile_pipeline_attempts_on_startup()
 
     def list_instances(self) -> list[InstanceRecord]:
         return self.store.list_instances()

@@ -114,7 +114,7 @@ async def build_initial_state(args: argparse.Namespace) -> E2ERunState:
     )
     _record_codex_home_source(state)
     state.evidence.data["run_id"] = state.run_id
-    state.evidence.data["pipeline_scenario"] = state.pipeline_scenario
+    state.evidence.data["managed_run_scenario"] = state.pipeline_scenario
     state.evidence.write()
     return state
 
@@ -153,7 +153,7 @@ async def run_connectivity_preflight(state: E2ERunState) -> bool:
 
 def prepare_fixture_and_cli(state: E2ERunState) -> None:
     state.evidence.check(
-        "pipeline-scenario:selected",
+        "managed-run-scenario:selected",
         state.pipeline_scenario in {"basic", "parallel", "replan", "integration-conflict", "runtime-wait", "overall-dod"},
         scenario=state.pipeline_scenario,
         permission_approval_probe=state.permission_approval_probe,
@@ -197,7 +197,7 @@ async def _enroll_runtime(state: E2ERunState) -> None:
     state.evidence.data["linear_project"] = {"requested": state.args.project_slug, "slugId": linear_project["slugId"], "name": linear_project.get("name")}
     state.evidence.data["linear_agent_app_user_id"] = state.agent_app_user_id
     state.evidence.check("linear-agent:app-user-selected", bool(state.agent_app_user_id), source="PODIUM_LINEAR_APPLICATION_ID", viewer={key: viewer.get(key) for key in ["id", "name", "email"]})
-    status, body = http_json("POST", api_url(state.podium_port, "/api/v1/runtime/enrollment-tokens"), {"runtime_group_id": f"group-{state.run_id}", "linear_workspace_id": state.workspace_id, "project_slug": linear_project["slugId"], "linear_agent_app_user_id": state.agent_app_user_id, "pipeline_profile": "gated-task" if state.args.pipeline_gates else "default"})
+    status, body = http_json("POST", api_url(state.podium_port, "/api/v1/runtime/enrollment-tokens"), {"runtime_group_id": f"group-{state.run_id}", "linear_workspace_id": state.workspace_id, "project_slug": linear_project["slugId"], "linear_agent_app_user_id": state.agent_app_user_id, "managed_run_profile": "gated-task" if state.args.pipeline_gates else "default"})
     state.evidence.check("podium-api:/api/v1/runtime/enrollment-tokens", status == 200, status=status, body=body)
     status, enrolled = http_json("POST", api_url(state.podium_port, "/api/v1/runtime/enroll"), {"enrollment_token": body.get("enrollment_token") if isinstance(body, dict) else ""})
     state.enrolled_runtime = enrolled
@@ -233,7 +233,7 @@ def _smoke_conductor_api(state: E2ERunState) -> None:
     clone_target = state.root / "non-empty-clone"
     for method, path, payload in [
         ("GET", "/api/settings", None),
-        ("GET", "/api/pipeline", None),
+        ("GET", "/api/managed-runs", None),
         ("GET", "/api/instances", None),
         ("POST", "/api/repo/inspect", {"repo_source_type": "local_path", "repo_source_value": str(state.fixture)}),
         ("POST", "/api/repo/clone", {"repo_url": "https://example.invalid/repo.git", "target_path": str(clone_target)}),
@@ -243,8 +243,8 @@ def _smoke_conductor_api(state: E2ERunState) -> None:
             (clone_target / "keep.txt").write_text("keep\n", encoding="utf-8")
         status, body = http_json(method, api_url(state.conductor_port, path), payload)
         state.evidence.check(f"conductor-api:{method} {path}", status in {200, 201}, status=status, body=body)
-    status, body = http_json("POST", api_url(state.conductor_port, "/api/pipeline"), {"nodes": []})
-    state.evidence.check("appendix:s0b-view-read-only", status in {404, 405}, status=status, body=body)
+    status, body = http_json("POST", api_url(state.conductor_port, "/api/managed-runs"), {"runs": []})
+    state.evidence.check("appendix:s0b-managed-runs-view-read-only", status in {404, 405}, status=status, body=body)
 
 
 async def create_issue_and_instance(state: E2ERunState) -> None:

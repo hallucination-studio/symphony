@@ -11,7 +11,7 @@ vi.mock("../api/client", async (importOriginal) => {
     ...actual,
     api: {
       bootstrap: vi.fn(),
-      pipeline: vi.fn(),
+      managedRuns: vi.fn(),
       smokeCheckResult: vi.fn(),
     },
   };
@@ -19,7 +19,7 @@ vi.mock("../api/client", async (importOriginal) => {
 
 const mockApi = api as unknown as {
   bootstrap: ReturnType<typeof vi.fn>;
-  pipeline: ReturnType<typeof vi.fn>;
+  managedRuns: ReturnType<typeof vi.fn>;
   smokeCheckResult: ReturnType<typeof vi.fn>;
 };
 
@@ -39,7 +39,7 @@ function bootstrap(overrides: Partial<Bootstrap> = {}): Bootstrap {
 describe("HomePage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mockApi.pipeline.mockResolvedValue({ runtime_group_id: "group-1", policy_revision: 1, pipeline: null });
+    mockApi.managedRuns.mockResolvedValue({ runtime_group_id: "group-1", policy_revision: 1, managed_runs: { runs: [] } });
     mockApi.smokeCheckResult.mockRejectedValue(new Error("404"));
   });
 
@@ -77,10 +77,10 @@ describe("HomePage", () => {
     expect(await screen.findByText("You're all set")).toBeInTheDocument();
   });
 
-  it("renders an empty state when there is no pipeline report", async () => {
+  it("renders an empty state when there is no managed run report", async () => {
     mockApi.bootstrap.mockResolvedValue(bootstrap());
     renderWithProviders(<HomePage />);
 
-    expect(await screen.findByText("No pipeline report yet")).toBeInTheDocument();
+    expect(await screen.findByText("No managed run report yet")).toBeInTheDocument();
   });
 });

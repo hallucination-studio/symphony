@@ -146,11 +146,9 @@ async def test_start_launches_performer_process_and_captures_logs(tmp_path: Path
 
     assert captured["args"] == (
         "performer",
-        "--mode",
-        "plan",
-        "--attempt-request-path",
+        "--turn-request-path",
         "/tmp/request.json",
-        "--attempt-result-path",
+        "--turn-result-path",
         "/tmp/result.json",
     )
     assert captured["kwargs"]["cwd"] == instance.resolved_repo_path
@@ -410,11 +408,9 @@ def test_default_command_falls_back_to_python_module_in_editable_repo() -> None:
             attempt_result_path="/tmp/result.json",
         ) == (
             manager.command,
-            "--mode",
-            "plan",
-            "--attempt-request-path",
+            "--turn-request-path",
             "/tmp/request.json",
-            "--attempt-result-path",
+            "--turn-result-path",
             "/tmp/result.json",
         )
     else:
@@ -426,11 +422,9 @@ def test_default_command_falls_back_to_python_module_in_editable_repo() -> None:
             manager.command,
             "-m",
             "performer.cli",
-            "--mode",
-            "plan",
-            "--attempt-request-path",
+            "--turn-request-path",
             "/tmp/request.json",
-            "--attempt-result-path",
+            "--turn-result-path",
             "/tmp/result.json",
         )
 
@@ -444,11 +438,9 @@ def test_command_args_do_not_include_legacy_dispatch_issue() -> None:
         attempt_result_path="/tmp/result.json",
     ) == (
         "performer",
-        "--mode",
-        "execute",
-        "--attempt-request-path",
+        "--turn-request-path",
         "/tmp/request.json",
-        "--attempt-result-path",
+        "--turn-result-path",
         "/tmp/result.json",
     )
 
@@ -461,7 +453,7 @@ def test_command_args_signature_has_no_legacy_phase_paths() -> None:
     assert "phase_result_path" not in parameters
 
 
-def test_command_args_include_runtime_mode_attempt_paths() -> None:
+def test_command_args_include_managed_run_turn_paths() -> None:
     manager = ConductorRuntimeManager(command="performer")
 
     assert manager._command_args(
@@ -470,11 +462,9 @@ def test_command_args_include_runtime_mode_attempt_paths() -> None:
         attempt_result_path="/tmp/attempt-result.json",
     ) == (
         "performer",
-        "--mode",
-        "verify",
-        "--attempt-request-path",
+        "--turn-request-path",
         "/tmp/attempt-request.json",
-        "--attempt-result-path",
+        "--turn-result-path",
         "/tmp/attempt-result.json",
     )
 

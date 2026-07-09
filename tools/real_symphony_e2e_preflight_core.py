@@ -25,17 +25,17 @@ def build_runtime_config_payload(
     pipeline_scenario: str = "basic",
 ) -> dict[str, Any]:
     settings = _base_codex_settings(model, codex_home_source, codex_settings)
-    by_mode = {"plan": 1, "execute": 1, "verify": 1}
+    by_role = {"plan": 1, "work_item": 1, "verify": 1}
     if pipeline_scenario in {"parallel", "integration-conflict", "overall-dod"}:
-        by_mode["execute"] = 2
+        by_role["work_item"] = 2
     return {
         "runtime_group_id": runtime_group_id,
         "version": version,
-        "scheduler_policy": {
+        "managed_run_policy": {
             "policy_id": f"policy-{runtime_group_id}",
             "version": version,
             "effective_at": utc_now(),
-            "capacity": {"global": 3, "by_mode": by_mode},
+            "capacity": {"global": 3, "by_role": by_role},
             "max_rework_attempts": 1,
         },
         "profiles": _runtime_profiles(settings, pipeline_scenario),
@@ -57,17 +57,17 @@ def _base_codex_settings(
 
 
 def _runtime_profiles(settings: dict[str, Any], pipeline_scenario: str) -> dict[str, dict[str, Any]]:
-    execute_settings = dict(settings)
+    work_item_settings = dict(settings)
     if pipeline_scenario in {"runtime-wait", "overall-dod"}:
-        execute_settings["emit_runtime_wait_probe"] = True
-        execute_settings["runtime_wait_probe_seconds"] = 90
+        work_item_settings["emit_runtime_wait_probe"] = True
+        work_item_settings["runtime_wait_probe_seconds"] = 90
     verify_settings: dict[str, Any] = {}
     if pipeline_scenario in {"replan", "overall-dod"}:
         verify_settings["force_first_verify_failure_for_replan"] = True
     return {
-        "plan": {"name": "codex-plan", "backend": "codex", "mode": "plan", "settings": dict(settings)},
-        "execute": {"name": "codex-execute", "backend": "codex", "mode": "execute", "settings": execute_settings},
-        "verify": {"name": "local-verifier", "backend": "local-verifier", "mode": "verify", "settings": verify_settings},
+        "plan": {"name": "codex-plan", "backend": "codex", "role": "plan", "settings": dict(settings)},
+        "work_item": {"name": "codex-work-item", "backend": "codex", "role": "work_item", "settings": work_item_settings},
+        "verify": {"name": "local-verifier", "backend": "local-verifier", "role": "verify", "settings": verify_settings},
     }
 
 

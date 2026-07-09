@@ -80,14 +80,12 @@ async def test_dispatch_lease_returns_fencing_token_and_ack_requires_current_tok
                 "dispatch_id": dispatch["dispatch_id"],
                 "fencing_token": dispatch["fencing_token"] - 1,
                 "status": "completed",
-                "graph_id": "graph-1",
-                "node_id": "node-1",
-                "attempt_id": "attempt-1",
-                "mode": "verify",
-                "attempt_status": "succeeded",
-                "graph_revision": 1,
-                "policy_revision": 1,
-                "lease_id": "lease-1",
+                "run_id": "run-1",
+                "parent_issue_id": "issue-1",
+                "active_work_item_id": "wi-1",
+                "managed_run_state": "done",
+                "plan_version": 1,
+                "backend_session_id": "thread-1",
             },
         )
         current_ack = await client.post(
@@ -97,14 +95,12 @@ async def test_dispatch_lease_returns_fencing_token_and_ack_requires_current_tok
                 "dispatch_id": dispatch["dispatch_id"],
                 "fencing_token": dispatch["fencing_token"],
                 "status": "completed",
-                "graph_id": "graph-1",
-                "node_id": "node-1",
-                "attempt_id": "attempt-1",
-                "mode": "verify",
-                "attempt_status": "succeeded",
-                "graph_revision": 1,
-                "policy_revision": 1,
-                "lease_id": "lease-1",
+                "run_id": "run-1",
+                "parent_issue_id": "issue-1",
+                "active_work_item_id": "wi-1",
+                "managed_run_state": "done",
+                "plan_version": 1,
+                "backend_session_id": "thread-1",
             },
         )
 
@@ -116,7 +112,9 @@ async def test_dispatch_lease_returns_fencing_token_and_ack_requires_current_tok
     assert current_ack.status_code == 200
     assert current_ack.json()["dispatch"]["status"] == "completed"
     assert "runtime_phase" not in current_ack.json()["dispatch"]
-    assert current_ack.json()["dispatch"]["graph_id"] == "graph-1"
+    assert current_ack.json()["dispatch"]["run_id"] == "run-1"
+    assert current_ack.json()["dispatch"]["managed_run_state"] == "done"
+    assert "graph_id" not in current_ack.json()["dispatch"]
 
 def test_runtime_ws_rejects_invalid_fencing_token_without_closing_loop() -> None:
     app = make_app()

@@ -184,7 +184,7 @@ class LinearDelegatePoller:
             "issue_delegate_id": str(delegate.get("id") or ""),
             "blocked_by": _blocked_by_ids(issue),
             "parent_issue_id": _parent_issue_id(issue),
-            "pipeline_intent": {},
+            "managed_run_intent": {},
         }
 
     async def _queue_dispatch(self, event: dict[str, Any]) -> bool:
@@ -206,20 +206,17 @@ class LinearDelegatePoller:
                 "agent_session_id": "",
                 "agent_app_user_id": event.get("agent_app_user_id") or "",
                 "routing_rule_id": group["id"],
-                "pipeline_profile": group.get("pipeline_profile") or "default",
+                "managed_run_profile": group.get("managed_run_profile") or "default",
                 "blocked_by": list(event.get("blocked_by") or []),
                 "parent_issue_id": event.get("parent_issue_id") or "",
-                "pipeline_intent": dict(event.get("pipeline_intent") or {}),
+                "managed_run_intent": dict(event.get("managed_run_intent") or {}),
                 "status": "queued",
                 "reason": "",
-                "graph_id": "",
-                "node_id": "",
-                "attempt_id": "",
-                "mode": "",
-                "attempt_status": "",
-                "graph_revision": 0,
-                "policy_revision": 0,
-                "lease_id": "",
+                "run_id": "",
+                "active_work_item_id": "",
+                "managed_run_state": "",
+                "plan_version": 0,
+                "backend_session_id": "",
                 "leased_runtime_id": None,
                 "leased_until": None,
                 "fencing_token": 0,
@@ -244,7 +241,7 @@ class LinearDelegatePoller:
             "linear_workspace_id": str(binding.get("user_id") or ""),
             "project_slug": str(binding.get("project_slug") or ""),
             "linear_agent_app_user_id": str(binding.get("agent_app_user_id") or ""),
-            "pipeline_profile": str(binding.get("pipeline_profile") or "default"),
+            "managed_run_profile": str(binding.get("managed_run_profile") or "default"),
             "project_binding_id": binding_id,
         }
 
@@ -291,8 +288,4 @@ def _is_symphony_projection_issue(issue: dict[str, Any]) -> bool:
     description = str(issue.get("description") or "")
     if title.startswith("[Human Action]"):
         return True
-    if "symphony_runtime_wait:" in description or "symphony_human_wait:" in description:
-        return True
-    if "symphony:" not in description:
-        return False
-    return "graph_id:" in description and "node_id:" in description and "operator_status:" in description
+    return "symphony:run-summary:start" in description or "SYMPHONY WORK ITEM" in description

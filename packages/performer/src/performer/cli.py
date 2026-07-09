@@ -7,106 +7,88 @@ import os
 from pathlib import Path
 from typing import Any
 
-from performer_api.pipeline import RuntimeMode
+from performer_api.config import CodexConfig
+from performer_api.managed_runs import WorkItem
 
-from . import mode_common as _mode_common
-from .mode_common import CodexSdkClient
-from .execute_mode import (
-    _collect_git_verification_input,
-    _execute_branch_name,
-    _execute_repository_path,
-    _execute_workspace_path,
-    _executor_prompt,
-    _failed_execute_result,
-    _git_command_succeeds,
-    _materialize_execute_workspace,
-    _remove_generated_verification_caches,
-    _run_execute_mode,
-)
-from .mode_common import (
-    _attempt_event_printer,
-    _emit_runtime_wait_probe_if_requested,
-    _env_bool,
-    _env_config_overrides,
-    _env_float,
-    _env_int,
-    _env_sandbox,
-    _env_str,
-    _file_sha256,
-    _fencing_fields,
-    _git,
-    _managed_codex_backend,
-    _optional_payload_str,
-    _payload_kind,
-    _run,
-    _sanitize_error,
-    _thread_state_workspace_path,
-)
-from .plan_mode import (
-    PLAN_RESULT_SCHEMA,
-    _failed_plan_result,
-    _planner_prompt,
-    _planner_prompt_payload,
-    _planner_retry_prompt,
-    _planner_structured_result,
-    _planner_workspace_path,
-    _positive_int,
-    _proposal_blocks,
-    _proposal_from_model_payload,
-    _run_plan_mode,
-)
-from .verify_mode import (
-    _PatchVerificationResult,
-    _commit_verify_workspace,
-    _failed_gate_verify_result,
-    _failed_verify_result,
-    _forced_first_verify_failure_reason,
-    _gate_command_failure_reason,
-    _run_gate_commands,
-    _run_verify_mode,
-    _single_line_tail,
-    _verification_command_cwd,
-    _verification_command_env,
-    _verify_artifact_hashes,
-    _verify_patch_hash,
-)
+from .codex_client import CodexSdkClient
+from .managed_run_backend import CodexManagedRunBackend
 
 
-async def run_mode_attempt(
-    mode: RuntimeMode,
-    attempt_request_path: Path,
-    attempt_result_path: Path,
+async def run_managed_run_turn(
+    turn_request_path: Path,
+    turn_result_path: Path,
     *,
-    agent_backend: Any | None = None,
+    codex_client: Any | None = None,
 ) -> dict[str, object]:
     try:
-        payload = json.loads(attempt_request_path.read_text(encoding="utf-8"))
+        payload = json.loads(turn_request_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        raise RuntimeError(f"could not read {mode.value} attempt request: {attempt_request_path}") from exc
+        raise RuntimeError(f"could not read managed-run turn request: {turn_request_path}") from exc
     if not isinstance(payload, dict):
-        raise RuntimeError(f"{mode.value} attempt request must be a JSON object: {attempt_request_path}")
-    if mode is RuntimeMode.PLAN:
-        result = await _run_plan_mode(payload, agent_backend=agent_backend)
-    elif mode is RuntimeMode.EXECUTE:
-        _mode_common.CodexSdkClient = CodexSdkClient
-        result = await _run_execute_mode(payload, agent_backend=agent_backend)
-    elif mode is RuntimeMode.VERIFY:
-        result = _run_verify_mode(payload)
+        raise RuntimeError(f"managed-run turn request must be a JSON object: {turn_request_path}")
+    backend = CodexManagedRunBackend(codex_client or _managed_codex_backend())
+    turn_kind = str(payload.get("turn_kind") or "")
+    workspace_path = Path(str(payload.get("workspace_path") or "")).expanduser().resolve()
+    if turn_kind == "plan":
+        result = await backend.plan_turn(
+            workspace_path,
+            str(payload.get("issue_description") or ""),
+            existing_thread_id=_optional_str(payload.get("thread_id")),
+        )
+        body: dict[str, object] = {
+            "turn_kind": "plan",
+            "thread_id": result.thread_id,
+            "plan": result.plan.to_dict(),
+            "events": result.events,
+        }
+    elif turn_kind == "work_item":
+        work_item_payload = payload.get("work_item")
+        if not isinstance(work_item_payload, dict):
+            raise RuntimeError("work_item turn requires work_item payload")
+        result = await backend.execute_turn(
+            workspace_path,
+            WorkItem.from_dict(work_item_payload),
+            thread_id=str(payload.get("thread_id") or ""),
+        )
+        body = {
+            "turn_kind": "work_item",
+            "thread_id": result.thread_id,
+            "result": result.result.to_dict(),
+            "events": result.events,
+        }
     else:
-        raise RuntimeError(f"unsupported runtime mode: {mode.value}")
-    _write_json_atomic(attempt_result_path, result)
-    return result
+        raise RuntimeError(f"unsupported managed-run turn kind: {turn_kind}")
+    _write_json_atomic(turn_result_path, body)
+    return body
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run one managed Performer plan/execute/verify attempt.")
-    parser.add_argument("--mode", choices=[mode.value for mode in RuntimeMode], default=None, help="Run one managed plan/execute/verify attempt.")
-    parser.add_argument("--attempt-request-path", default=None, help="Read one managed mode attempt request JSON file.")
-    parser.add_argument("--attempt-result-path", default=None, help="Write one managed mode attempt result JSON file.")
-    args = parser.parse_args(argv)
-    if not args.mode or not args.attempt_request_path or not args.attempt_result_path:
-        parser.error("--mode, --attempt-request-path, and --attempt-result-path are required")
-    return args
+    parser = argparse.ArgumentParser(description="Run one Symphony managed-run turn.")
+    parser.add_argument("--turn-request-path", required=True, help="Read one managed-run turn request JSON file.")
+    parser.add_argument("--turn-result-path", required=True, help="Write one managed-run turn result JSON file.")
+    return parser.parse_args(argv)
+
+
+def _managed_codex_backend() -> CodexSdkClient:
+    codex_home = os.environ.get("CODEX_HOME")
+    if not codex_home or not Path(codex_home).is_dir():
+        raise RuntimeError("managed_codex_home_required")
+    return CodexSdkClient(
+        CodexConfig(
+            model=_env_str("CODEX_MODEL"),
+            sdk_codex_bin=_env_str("CODEX_SDK_CODEX_BIN"),
+            sandbox=_env_sandbox("CODEX_SANDBOX"),
+            config_overrides=_env_config_overrides("CODEX_CONFIG_OVERRIDES"),
+            hard_turn_timeout_ms=_env_int("CODEX_HARD_TURN_TIMEOUT_MS", 3_600_000),
+            read_timeout_ms=_env_int("CODEX_READ_TIMEOUT_MS", 5_000),
+            init_max_attempts=_env_int("CODEX_INIT_MAX_ATTEMPTS", 4),
+            init_backoff_ms=_env_int("CODEX_INIT_BACKOFF_MS", 500),
+            init_backoff_max_ms=_env_int("CODEX_INIT_BACKOFF_MAX_MS", 8_000),
+            overload_max_attempts=_env_int("CODEX_OVERLOAD_MAX_ATTEMPTS", 5),
+            overload_initial_delay_ms=_env_int("CODEX_OVERLOAD_INITIAL_DELAY_MS", 250),
+            overload_max_delay_ms=_env_int("CODEX_OVERLOAD_MAX_DELAY_MS", 8_000),
+        )
+    )
 
 
 def _write_json_atomic(path: Path, payload: dict[str, object]) -> None:
@@ -116,14 +98,57 @@ def _write_json_atomic(path: Path, payload: dict[str, object]) -> None:
     tmp.replace(path)
 
 
+def _optional_str(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _env_str(key: str) -> str | None:
+    value = os.environ.get(key)
+    if value is None:
+        return None
+    value = value.strip()
+    return value or None
+
+
+def _env_sandbox(key: str) -> str | None:
+    value = _env_str(key)
+    return value.replace("-", "_") if value is not None else None
+
+
+def _env_int(key: str, default: int) -> int:
+    value = os.environ.get(key)
+    if value is None or not value.strip():
+        return default
+    try:
+        parsed = int(value)
+    except ValueError:
+        return default
+    return parsed if parsed > 0 else default
+
+
+def _env_config_overrides(key: str) -> tuple[str, ...]:
+    raw = os.environ.get(key)
+    if raw is None or not raw.strip():
+        return ()
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return tuple(item for item in raw.split(os.pathsep) if item)
+    if not isinstance(parsed, list):
+        return ()
+    return tuple(str(item) for item in parsed if str(item).strip())
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     try:
         asyncio.run(
-            run_mode_attempt(
-                RuntimeMode(args.mode),
-                Path(args.attempt_request_path).resolve(),
-                Path(args.attempt_result_path).resolve(),
+            run_managed_run_turn(
+                Path(args.turn_request_path).resolve(),
+                Path(args.turn_result_path).resolve(),
             )
         )
         os._exit(0)

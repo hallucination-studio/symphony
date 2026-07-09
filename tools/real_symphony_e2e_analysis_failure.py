@@ -13,18 +13,18 @@ from real_symphony_e2e_linear import (
 )
 
 def audit_expected_failure_run(run_result: dict[str, Any], tree: dict[str, Any], *, expected: str) -> dict[str, Any]:
-    pipeline_nodes = [
+    managed_run_work_items = [
         node
         for sample in run_result.get("samples", [])
         if isinstance(sample, dict)
-        for node in sample.get("pipeline_nodes", [])
+        for node in sample.get("managed_run_work_items", [])
         if isinstance(node, dict)
     ]
-    max_overload_count = max([_int_value(node.get("overload_count")) for node in pipeline_nodes] or [0])
-    max_retry_count = max([_int_value(node.get("retry_count")) for node in pipeline_nodes] or [0])
-    max_crash_count = max([_int_value(node.get("crash_count")) for node in pipeline_nodes] or [0])
-    reasons = [str(node.get("last_reason") or "") for node in pipeline_nodes]
-    failed_terminal = any(node.get("state") == "failed" for node in pipeline_nodes)
+    max_overload_count = max([_int_value(node.get("overload_count")) for node in managed_run_work_items] or [0])
+    max_retry_count = max([_int_value(node.get("retry_count")) for node in managed_run_work_items] or [0])
+    max_crash_count = max([_int_value(node.get("crash_count")) for node in managed_run_work_items] or [0])
+    reasons = [str(node.get("last_reason") or "") for node in managed_run_work_items]
+    failed_terminal = any(node.get("state") == "failed" for node in managed_run_work_items)
     human_actions = _human_action_children(tree)
     descriptions = "\n\n".join(str(child.get("description") or "") for child in human_actions)
     if max_overload_count == 0:
@@ -147,7 +147,7 @@ def parent_comment_negative_control_body(wait_id: str) -> str:
         "Symphony E2E negative control for human-action routing.\n\n"
         f"wait_id={normalized_wait_id}\n"
         "No action is required. This is not a Symphony human-action resume command; "
-        "the waiting pipeline task must remain blocked until its [Human Action] child issue is completed."
+        "the waiting managed-run work item must remain blocked until its [Human Action] child issue is completed."
     )
 
 
@@ -231,5 +231,5 @@ def build_instance_payload(
         "repo_source_value": str(fixture),
         "linear_project": project_slug,
         "linear_filters": {"linear_agent_app_user_id": agent_app_user_id},
-        "pipeline_profile": "gated-task" if pipeline_gates else "default",
+        "managed_run_profile": "gated-task" if pipeline_gates else "default",
     }

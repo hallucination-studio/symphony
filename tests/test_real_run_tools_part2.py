@@ -123,13 +123,13 @@ def test_real_symphony_e2e_requires_replan_linear_issue_tree_final_states() -> N
                     "identifier": "HELL-860",
                     "title": "Run smoke",
                     "state": {"name": "In Progress", "type": "started"},
-                    "labels": {"nodes": [{"name": "performer:type/pipeline-node"}]},
+                    "labels": {"nodes": [{"name": "symphony:type/work-item"}]},
                 },
                 {
                     "identifier": "HELL-858",
                     "title": "Superseded",
                     "state": {"name": "Canceled", "type": "canceled"},
-                    "labels": {"nodes": [{"name": "performer:type/pipeline-node"}]},
+                    "labels": {"nodes": [{"name": "symphony:type/work-item"}]},
                 },
             ]
         },
@@ -150,7 +150,7 @@ def test_real_symphony_e2e_requires_replan_linear_issue_tree_final_states() -> N
 
     assert stale["passed"] is False
     assert stale["root_state_type"] == "backlog"
-    assert stale["pipeline_children"][0]["state_type"] == "started"
+    assert stale["managed_run_children"][0]["state_type"] == "started"
     assert finalized["passed"] is True
 
 
@@ -548,20 +548,20 @@ def test_real_symphony_e2e_permission_probe_allows_active_lease_after_wait_clear
 
     assert tool._permission_probe_block_cleared(
         {
-            "pipeline_human_actions": [],
-            "pipeline_leases": [{"lease_id": "execute-lease-1", "mode": "execute"}],
+            "managed_run_human_actions": [],
+            "managed_run_turns": [{"lease_id": "execute-lease-1", "mode": "execute"}],
         }
     )
     assert not tool._permission_probe_block_cleared(
         {
-            "pipeline_human_actions": [
+            "managed_run_human_actions": [
                 {
                     "wait_id": "runtime-wait-exec-1-approval_requested",
                     "status": "waiting",
                     "details": {"wait_kind": "approval_requested"},
                 }
             ],
-            "pipeline_leases": [{"lease_id": "execute-lease-1", "mode": "execute"}],
+            "managed_run_turns": [{"lease_id": "execute-lease-1", "mode": "execute"}],
         }
     )
 
@@ -572,18 +572,18 @@ def test_appendix_exit_bar_audit_requires_all_overall_items() -> None:
         {
             "failures": [],
             "checks": [
-                {"name": "stage:pipeline-gates-frozen", "passed": True},
-                {"name": "stage:pipeline-linear-projected", "passed": True},
+                {"name": "stage:managed-run-gates-frozen", "passed": True},
+                {"name": "stage:managed-run-linear-projected", "passed": True},
                 {"name": "scenario:parallel-execute-overlap", "passed": True},
                 {"name": "runtime-config:podium-pushed", "passed": True},
-                {"name": "stage:pipeline-manifest-published", "passed": True},
-                {"name": "stage:final-pipeline-verified", "passed": True},
+                {"name": "stage:managed-run-manifest-published", "passed": True},
+                {"name": "stage:final-managed-run-verified", "passed": True},
                 {"name": "appendix:s3-verifier-mutation-detection", "passed": True},
                 {"name": "appendix:s3-expired-fencing-refused", "passed": True},
                 {"name": "scenario:replan-replacement-subgraph", "passed": True},
                 {"name": "scenario:integration-conflict-human-action", "passed": True},
-                {"name": "conductor-api:GET /api/pipeline", "passed": True},
-                {"name": "appendix:pipeline-prediction-conditional", "passed": True},
+                {"name": "conductor-api:GET /api/managed-runs", "passed": True},
+                {"name": "appendix:managed-run-prediction-conditional", "passed": True},
                 {"name": "runtime-config:codex-home-source-staged", "passed": True},
                 {"name": "appendix:no-global-codex-home", "passed": True},
                 {"name": "appendix:reconcile-findings-clean", "passed": True},
@@ -614,18 +614,18 @@ def test_appendix_overall_acceptance_scores_after_required_checks(tmp_path: Path
     }
     required_names.update(
         {
-            "stage:pipeline-gates-frozen",
-            "stage:pipeline-linear-projected",
+            "stage:managed-run-gates-frozen",
+            "stage:managed-run-linear-projected",
             "scenario:parallel-execute-overlap",
             "runtime-config:podium-pushed",
-            "stage:pipeline-manifest-published",
-            "stage:final-pipeline-verified",
+            "stage:managed-run-manifest-published",
+            "stage:final-managed-run-verified",
             "appendix:s3-verifier-mutation-detection",
             "appendix:s3-expired-fencing-refused",
             "scenario:replan-replacement-subgraph",
             "appendix:overall-downstream-depends-on-both-parallel-subtasks",
             "scenario:integration-conflict-human-action",
-            "conductor-api:GET /api/pipeline",
+            "conductor-api:GET /api/managed-runs",
             "runtime-config:codex-home-source-staged",
         }
     )
@@ -642,7 +642,7 @@ def test_appendix_overall_acceptance_scores_after_required_checks(tmp_path: Path
         "predicted_call_order": [{"node_id": "a", "confidence": "conditional"}],
         "runtime_config": {
             "profiles": {
-                "execute": {"settings": {"codex_home_source": "$SYMPHONY_E2E_CODEX_HOME_SOURCE"}},
+                "work_item": {"settings": {"codex_home_source": "$SYMPHONY_E2E_CODEX_HOME_SOURCE"}},
                 "verify": {"backend": "local-verifier", "settings": {}},
             }
         },
@@ -732,7 +732,7 @@ def test_appendix_overall_acceptance_fails_without_downstream_depending_on_both_
             "predicted_call_order": [{"node_id": "a", "confidence": "conditional"}],
             "runtime_config": {
                 "profiles": {
-                    "execute": {"settings": {"codex_home_source": "$SYMPHONY_E2E_CODEX_HOME_SOURCE"}},
+                    "work_item": {"settings": {"codex_home_source": "$SYMPHONY_E2E_CODEX_HOME_SOURCE"}},
                     "verify": {"backend": "local-verifier", "settings": {}},
                 }
             },
@@ -900,7 +900,7 @@ def test_real_symphony_e2e_parallel_acceptance_requires_podium_pushed_policy_sou
         {
             "policy_id": "local-default",
             "policy_source": "local_default",
-            "capacity": {"by_mode": {"execute": 2}},
+            "capacity": {"by_role": {"work_item": 2}},
             "attempts": [
                 {"attempt_id": "exec-a", "mode": "execute", "started_at": "2026-07-08T00:00:00Z", "completed_at": "2026-07-08T00:01:00Z"},
                 {"attempt_id": "exec-b", "mode": "execute", "started_at": "2026-07-08T00:00:30Z", "completed_at": "2026-07-08T00:01:30Z"},
@@ -915,7 +915,7 @@ def test_real_symphony_e2e_parallel_acceptance_requires_podium_pushed_policy_sou
     assert check["policy_source"] == "local_default"
 
 
-def test_real_symphony_e2e_parallel_acceptance_requires_scheduler_tick_policy_match(tmp_path: Path) -> None:
+def test_real_symphony_e2e_parallel_acceptance_requires_managed_run_tick_policy_match(tmp_path: Path) -> None:
     tool = load_tool("real_symphony_e2e_run")
     evidence = tool.Evidence(tmp_path / "report.json")
 
@@ -925,11 +925,11 @@ def test_real_symphony_e2e_parallel_acceptance_requires_scheduler_tick_policy_ma
         {
             "policy_id": "policy-group-1",
             "policy_source": "podium_pushed",
-            "last_scheduler_policy_id": "local-default",
-            "last_scheduler_policy_version": 1,
-            "last_scheduler_policy_source": "local_default",
-            "runtime_config": {"scheduler_policy": {"policy_id": "policy-group-1", "version": 4}},
-            "capacity": {"by_mode": {"execute": 2}},
+            "last_managed_run_policy_id": "local-default",
+            "last_managed_run_policy_version": 1,
+            "last_managed_run_policy_source": "local_default",
+            "runtime_config": {"managed_run_policy": {"policy_id": "policy-group-1", "version": 4}},
+            "capacity": {"by_role": {"work_item": 2}},
             "attempts": [
                 {"attempt_id": "exec-a", "mode": "execute", "started_at": "2026-07-08T00:00:00Z", "completed_at": "2026-07-08T00:01:00Z"},
                 {"attempt_id": "exec-b", "mode": "execute", "started_at": "2026-07-08T00:00:30Z", "completed_at": "2026-07-08T00:01:30Z"},
@@ -940,12 +940,12 @@ def test_real_symphony_e2e_parallel_acceptance_requires_scheduler_tick_policy_ma
     check = evidence.data["checks"][-1]
     assert check["name"] == "scenario:parallel-execute-overlap"
     assert check["passed"] is False
-    assert check["expected_scheduler_policy_id"] == "policy-group-1"
-    assert check["last_scheduler_policy_id"] == "local-default"
-    assert check["last_scheduler_policy_source"] == "local_default"
+    assert check["expected_managed_run_policy_id"] == "policy-group-1"
+    assert check["last_managed_run_policy_id"] == "local-default"
+    assert check["last_managed_run_policy_source"] == "local_default"
 
 
-def test_real_symphony_e2e_parallel_acceptance_passes_with_matching_scheduler_tick_policy(tmp_path: Path) -> None:
+def test_real_symphony_e2e_parallel_acceptance_passes_with_matching_managed_run_tick_policy(tmp_path: Path) -> None:
     tool = load_tool("real_symphony_e2e_run")
     evidence = tool.Evidence(tmp_path / "report.json")
 
@@ -955,12 +955,12 @@ def test_real_symphony_e2e_parallel_acceptance_passes_with_matching_scheduler_ti
         {
             "policy_id": "policy-group-1",
             "policy_source": "podium_pushed",
-            "last_scheduler_policy_id": "policy-group-1",
-            "last_scheduler_policy_version": 4,
-            "last_scheduler_policy_source": "podium_pushed",
-            "last_scheduler_tick_at": "2026-07-08T00:00:00Z",
-            "runtime_config": {"scheduler_policy": {"policy_id": "policy-group-1", "version": 4}},
-            "capacity": {"by_mode": {"execute": 2}},
+            "last_managed_run_policy_id": "policy-group-1",
+            "last_managed_run_policy_version": 4,
+            "last_managed_run_policy_source": "podium_pushed",
+            "last_managed_run_tick_at": "2026-07-08T00:00:00Z",
+            "runtime_config": {"managed_run_policy": {"policy_id": "policy-group-1", "version": 4}},
+            "capacity": {"by_role": {"work_item": 2}},
             "attempts": [
                 {"attempt_id": "exec-a", "mode": "execute", "started_at": "2026-07-08T00:00:00Z", "completed_at": "2026-07-08T00:01:00Z"},
                 {"attempt_id": "exec-b", "mode": "execute", "started_at": "2026-07-08T00:00:30Z", "completed_at": "2026-07-08T00:01:30Z"},
@@ -984,12 +984,12 @@ def test_real_symphony_e2e_parallel_acceptance_allows_final_lowered_capacity_aft
         {
             "policy_id": "policy-group-1",
             "policy_source": "podium_pushed",
-            "last_scheduler_policy_id": "policy-group-1",
-            "last_scheduler_policy_version": 5,
-            "last_scheduler_policy_source": "podium_pushed",
-            "last_scheduler_tick_at": "2026-07-08T00:02:00Z",
-            "runtime_config": {"scheduler_policy": {"policy_id": "policy-group-1", "version": 5}},
-            "capacity": {"by_mode": {"execute": 1}},
+            "last_managed_run_policy_id": "policy-group-1",
+            "last_managed_run_policy_version": 5,
+            "last_managed_run_policy_source": "podium_pushed",
+            "last_managed_run_tick_at": "2026-07-08T00:02:00Z",
+            "runtime_config": {"managed_run_policy": {"policy_id": "policy-group-1", "version": 5}},
+            "capacity": {"by_role": {"work_item": 1}},
             "attempts": [
                 {"attempt_id": "exec-a", "mode": "execute", "started_at": "2026-07-08T00:00:00Z", "completed_at": "2026-07-08T00:01:00Z"},
                 {"attempt_id": "exec-b", "mode": "execute", "started_at": "2026-07-08T00:00:00Z", "completed_at": "2026-07-08T00:01:30Z"},
@@ -1000,7 +1000,7 @@ def test_real_symphony_e2e_parallel_acceptance_allows_final_lowered_capacity_aft
     check = evidence.data["checks"][-1]
     assert check["name"] == "scenario:parallel-execute-overlap"
     assert check["passed"] is True
-    assert check["execute_limit"] == 1
+    assert check["work_item_limit"] == 1
 
 
 def test_real_symphony_e2e_downstream_gate_uses_blocker_verify_times_not_latest_verify() -> None:
@@ -1132,9 +1132,9 @@ def test_real_symphony_e2e_human_answered_push_accepts_completed_child_required_
 def test_real_symphony_e2e_wait_skips_stale_wait_resolved_by_attempt_success() -> None:
     tool = load_tool("real_symphony_e2e_wait")
 
-    assert tool._wait_resolved_before_harness_resume({"status": "resolved", "resolution": "attempt succeeded"})
-    assert not tool._wait_resolved_before_harness_resume({"status": "waiting", "resolution": None})
-    assert not tool._wait_resolved_before_harness_resume({"status": "resolved", "resolution": "parent comment"})
+    assert tool._wait_resolved_before_managed_run_resume({"status": "resolved", "resolution": "attempt succeeded"})
+    assert not tool._wait_resolved_before_managed_run_resume({"status": "waiting", "resolution": None})
+    assert not tool._wait_resolved_before_managed_run_resume({"status": "resolved", "resolution": "parent comment"})
 
 
 def test_real_symphony_e2e_resume_observed_reads_resolved_runtime_waits() -> None:
@@ -1187,7 +1187,7 @@ def test_real_symphony_e2e_overload_failure_acceptance_detects_raw_status() -> N
         "state": {"sessions": [], "retry_attempts": [], "continuations": [], "blocked": []},
         "samples": [
             {
-                "pipeline_nodes": [
+                "managed_run_work_items": [
                     {
                         "node_id": "node-1",
                         "state": "replanning",
@@ -1238,7 +1238,7 @@ def test_real_symphony_e2e_overload_failure_audit_reads_counters_from_child_desc
         {
             "samples": [
                 {
-                    "pipeline_nodes": [
+                    "managed_run_work_items": [
                         {
                             "state": "failed",
                             "last_reason": "upstream_overloaded_exhausted",
@@ -1376,12 +1376,12 @@ def test_real_symphony_e2e_parent_comment_probe_is_explicit_negative_control() -
     assert "No action is required" in body
     assert "not a Symphony human-action resume command" in body
 
-def test_real_symphony_e2e_surfaces_immediate_pipeline_failures() -> None:
+def test_real_symphony_e2e_surfaces_immediate_managed_run_failures() -> None:
     tool = load_tool("real_symphony_e2e")
 
     failure = tool.immediate_pipeline_failure(
         {
-            "pipeline_attempts": [
+            "managed_run_attempts": [
                 {
                     "attempt_id": "plan-1",
                     "mode": "plan",
@@ -1389,7 +1389,7 @@ def test_real_symphony_e2e_surfaces_immediate_pipeline_failures() -> None:
                     "error": "managed_codex_home_required",
                 }
             ],
-            "pipeline_nodes": [{"node_id": "issue-1", "state": "need_human"}],
+            "managed_run_work_items": [{"node_id": "issue-1", "state": "need_human"}],
         }
     )
 
@@ -1411,7 +1411,7 @@ def test_real_symphony_e2e_expected_failure_mode_keeps_waiting_for_failure_audit
 
     assert (
         tool.immediate_pipeline_failure(
-            {"pipeline_attempts": [{"attempt_id": "plan-1", "state": "failed"}]},
+            {"managed_run_attempts": [{"attempt_id": "plan-1", "state": "failed"}]},
             expected_failure="overload",
         )
         is None
@@ -1424,7 +1424,7 @@ def test_real_symphony_e2e_permission_probe_keeps_waiting_on_runtime_wait() -> N
     assert (
         tool.immediate_pipeline_failure(
             {
-                "pipeline_human_actions": [
+                "managed_run_human_actions": [
                     {
                         "wait_id": "runtime-wait-exec-1-approval_requested",
                         "reason": "approval_requested",
@@ -1465,6 +1465,37 @@ def test_real_symphony_e2e_crash_probe_filter_exempts_probe_and_keeps_real_failu
         )
         is None
     )
+
+
+def test_real_symphony_e2e_immediate_failure_detects_failed_managed_run_without_work_items() -> None:
+    tool = load_tool("real_symphony_e2e_wait")
+
+    failure = tool.immediate_pipeline_failure(
+        {
+            "managed_run_runs": [
+                {
+                    "run_id": "run-1",
+                    "state": "failed",
+                    "latest_reason": "plan_result_missing_after_process_exit",
+                    "work_items": [],
+                }
+            ],
+            "managed_run_work_items": [],
+            "managed_run_attempts": [],
+        }
+    )
+
+    assert failure == {
+        "kind": "managed_run_failed",
+        "runs": [
+            {
+                "run_id": "run-1",
+                "state": "failed",
+                "latest_reason": "plan_result_missing_after_process_exit",
+                "work_items": [],
+            }
+        ],
+    }
 
 
 def test_real_symphony_e2e_summary_includes_failure_details() -> None:
@@ -1549,7 +1580,7 @@ def test_real_symphony_e2e_summary_includes_blocked_and_first_blocker() -> None:
             "actionable_root_causes": [
                 {
                     "code": "intent_shadowed_by_empty_intent",
-                    "summary": "empty intent shadowed pipeline_intent",
+                    "summary": "empty intent shadowed managed_run_intent",
                 }
             ],
         },
@@ -1572,239 +1603,10 @@ def test_real_symphony_e2e_summary_includes_blocked_and_first_blocker() -> None:
     assert summary["actionable_root_causes"] == [
         {
             "code": "intent_shadowed_by_empty_intent",
-            "summary": "empty intent shadowed pipeline_intent",
+                "summary": "empty intent shadowed managed_run_intent",
         }
     ]
 
-
-def test_plan_offline_analysis_detects_empty_intent_shadowing_pipeline_intent() -> None:
-    analysis = load_tool("real_symphony_e2e_analysis")
-    from performer_api import pipeline
-
-    root = pipeline.GraphNode(node_id="root", title="HELL-773", state=pipeline.GraphNodeState.PLANNED)
-    branch_a = pipeline.GraphNode(
-        node_id="hell-parallel-a",
-        title="Parallel A",
-        state=pipeline.GraphNodeState.PLANNED,
-        parent_node_id="root",
-    )
-    branch_b = pipeline.GraphNode(
-        node_id="hell-parallel-b",
-        title="Parallel B",
-        state=pipeline.GraphNodeState.PLANNED,
-        parent_node_id="root",
-    )
-    downstream = pipeline.GraphNode(
-        node_id="hell-downstream-integration",
-        title="Downstream",
-        state=pipeline.GraphNodeState.PLANNED,
-        parent_node_id="root",
-    )
-    gates = []
-    gated_nodes = []
-    for node in [root, branch_a, branch_b, downstream]:
-        gate = pipeline.GateSpecSnapshot.create(
-            gate_id=f"gate-{node.node_id}",
-            task_id=node.node_id,
-            created_by="plan-1",
-            created_at="2026-07-08T00:00:00Z",
-            content=pipeline.GateSpecContent(
-                acceptance_criteria=["Work is complete."],
-                verification_procedure=[
-                    pipeline.GateStep("pytest tests/test_smoke.py -q", pipeline.GateStepSource.APPENDIX_HARNESS)
-                ],
-                rubric={str(score): f"score {score}" for score in range(5)},
-            ),
-        )
-        gates.append(gate)
-        gated_nodes.append(pipeline.replace(node, gate_snapshot_hash=gate.hash))
-    proposal = pipeline.PlanProposal(
-        graph_id="graph-1",
-        plan_attempt_id="plan-1",
-        root_node_id="root",
-        nodes=gated_nodes,
-        blocks=[("hell-parallel-a", "hell-downstream-integration"), ("hell-parallel-b", "hell-downstream-integration")],
-        gates=gates,
-        entry_node_ids=["root", "hell-parallel-a", "hell-parallel-b"],
-        exit_node_ids=["root", "hell-downstream-integration"],
-    )
-
-    report = analysis.analyze_plan_artifacts(
-        attempt_request={
-            "attempt_id": "plan-1",
-            "issue_id": "issue-1",
-            "issue_identifier": "HELL-773",
-            "pipeline_intent": {
-                "requires_parent_aggregate": True,
-                "parallel_dependency_shape": {
-                    "parallel_branch_node_ids": ["hell-parallel-a", "hell-parallel-b"],
-                    "downstream_node_ids": ["hell-downstream-integration"],
-                },
-            },
-        },
-        attempt_result={
-            "attempt_id": "plan-1",
-            "node_id": "root",
-            "status": "succeeded",
-            "proposal": proposal.to_dict(),
-        },
-        dispatch_context={
-            "issue_id": "issue-1",
-            "issue_identifier": "HELL-773",
-            "intent": {},
-            "pipeline_intent": {
-                "requires_parent_aggregate": True,
-                "parallel_dependency_shape": {
-                    "parallel_branch_node_ids": ["hell-parallel-a", "hell-parallel-b"],
-                    "downstream_node_ids": ["hell-downstream-integration"],
-                },
-            },
-        },
-    )
-
-    assert report["status"] == "analyzed"
-    assert "intent_shadowed_by_empty_intent" in report["root_cause_codes"]
-    assert report["current_intent"]["requires_parent_aggregate"] is False
-    assert report["preferred_intent"]["requires_parent_aggregate"] is False
-    assert "missing_gate" not in report["validator_errors_current"]
-    assert "missing_gate" not in report["validator_errors_preferred_after_repair"]
-
-
-def test_real_symphony_e2e_runtime_blocker_writes_plan_analysis_and_blocks_downstream(
-    tmp_path: Path,
-) -> None:
-    tool = load_tool("real_symphony_e2e_run")
-    from performer_api import pipeline
-
-    evidence = tool.Evidence(tmp_path / "report.json")
-    evidence.check(
-        "pipeline-runtime-error:visible",
-        False,
-        failure={
-            "kind": "attempt_failed",
-            "attempts": [{"attempt_id": "plan-1", "mode": "plan", "error": "invalid plan proposal: missing_gate"}],
-        },
-    )
-    data_root = tmp_path / "data"
-    attempt_dir = data_root / "instances" / "inst-1" / "state" / "pipeline" / "plan-1"
-    attempt_dir.mkdir(parents=True)
-    intent = {
-        "requires_parent_aggregate": True,
-        "parallel_dependency_shape": {
-            "parallel_branch_node_ids": ["hell-parallel-a", "hell-parallel-b"],
-            "downstream_node_ids": ["hell-downstream-integration"],
-        },
-    }
-    (attempt_dir / "attempt-request.json").write_text(
-        json.dumps(
-            {
-                "attempt_id": "plan-1",
-                "node_id": "root",
-                "root_node_id": "root",
-                "issue_id": "issue-1",
-                "issue_identifier": "HELL-773",
-                "pipeline_intent": intent,
-            }
-        ),
-        encoding="utf-8",
-    )
-    gate_content = pipeline.GateSpecContent(
-        acceptance_criteria=["Work is complete."],
-        verification_procedure=[pipeline.GateStep("pytest tests/test_smoke.py -q", pipeline.GateStepSource.APPENDIX_HARNESS)],
-        rubric={"correctness": "3"},
-    )
-    gates = [
-        pipeline.GateSpecSnapshot.create(
-            gate_id=f"gate-{node_id}",
-            task_id=node_id,
-            created_by="plan-1",
-            created_at="2026-07-08T00:00:00Z",
-            content=gate_content,
-        )
-        for node_id in ["hell-parallel-a", "hell-parallel-b", "hell-downstream-integration"]
-    ]
-    gate_by_node = {gate.task_id: gate for gate in gates}
-    proposal = pipeline.PlanProposal(
-        graph_id="graph-1",
-        plan_attempt_id="plan-1",
-        root_node_id="root",
-        nodes=[
-            pipeline.GraphNode(node_id="root", title="HELL-773", state=pipeline.GraphNodeState.PLANNED),
-            pipeline.GraphNode(
-                node_id="hell-parallel-a",
-                title="Parallel A",
-                state=pipeline.GraphNodeState.PLANNED,
-                parent_node_id="root",
-                gate_snapshot_hash=gate_by_node["hell-parallel-a"].hash,
-            ),
-            pipeline.GraphNode(
-                node_id="hell-parallel-b",
-                title="Parallel B",
-                state=pipeline.GraphNodeState.PLANNED,
-                parent_node_id="root",
-                gate_snapshot_hash=gate_by_node["hell-parallel-b"].hash,
-            ),
-            pipeline.GraphNode(
-                node_id="hell-downstream-integration",
-                title="Downstream",
-                state=pipeline.GraphNodeState.PLANNED,
-                parent_node_id="root",
-                gate_snapshot_hash=gate_by_node["hell-downstream-integration"].hash,
-            ),
-        ],
-        blocks=[("hell-parallel-a", "hell-downstream-integration"), ("hell-parallel-b", "hell-downstream-integration")],
-        gates=gates,
-        entry_node_ids=["hell-parallel-a", "hell-parallel-b"],
-        exit_node_ids=["hell-downstream-integration"],
-    )
-    (attempt_dir / "attempt-result.json.applied").write_text(
-        json.dumps(
-            {
-                "attempt_id": "plan-1",
-                "node_id": "root",
-                "status": "succeeded",
-                "proposal": proposal.to_dict(),
-            }
-        ),
-        encoding="utf-8",
-    )
-    import sqlite3
-
-    (data_root / "pipeline").mkdir(parents=True)
-    with sqlite3.connect(data_root / "pipeline" / "pipeline.db") as connection:
-        connection.execute(
-            "CREATE TABLE dispatch_context (node_id TEXT PRIMARY KEY, payload_json TEXT NOT NULL, updated_at TEXT NOT NULL)"
-        )
-        connection.execute(
-            "INSERT INTO dispatch_context (node_id, payload_json, updated_at) VALUES (?, ?, ?)",
-            (
-                "root",
-                json.dumps({"issue_id": "issue-1", "issue_identifier": "HELL-773", "intent": {}, "pipeline_intent": intent}),
-                "2026-07-08T00:00:00Z",
-            ),
-        )
-
-    handled = tool._handle_pipeline_runtime_blocker(
-        evidence=evidence,
-        root=tmp_path,
-        data_root=data_root,
-        instance_id="inst-1",
-        run_result={"samples": [{"pipeline_attempts": [{"attempt_id": "plan-1"}]}]},
-    )
-
-    assert handled is True
-    assert Path(evidence.data["artifacts"]["plan_offline_analysis"]).exists()
-    assert "checkpoint:04-dispatch-and-plan" in evidence.data["artifacts"]
-    assert "checkpoint:05-plan-offline-analysis" in evidence.data["artifacts"]
-    assert {item["name"] for item in evidence.data["blocked"]} == {
-        "06-graph-shape",
-        "07-scheduler-capacity",
-        "08-execute-verify",
-        "09-replan-recovery",
-        "10-integration",
-        "11-final-acceptance",
-    }
-    assert evidence.data["actionable_root_causes"][0]["code"] == "intent_shadowed_by_empty_intent"
 
 def test_real_symphony_e2e_wait_artifacts_are_written_on_early_exit(tmp_path: Path) -> None:
     tool = load_tool("real_symphony_e2e")

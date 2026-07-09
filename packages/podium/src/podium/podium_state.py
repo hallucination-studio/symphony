@@ -121,7 +121,7 @@ class PodiumStateBaseMixin:
                 "linear_workspace_id": workspace_id,
                 "project_slug": "",
                 "linear_agent_app_user_id": "",
-                "pipeline_profile": "default",
+                "managed_run_profile": "default",
                 "project_binding_id": "",
             }
         )

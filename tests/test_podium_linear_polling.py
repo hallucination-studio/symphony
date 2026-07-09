@@ -59,7 +59,7 @@ async def test_linear_delegate_poller_queues_matching_delegated_issue_once(tmp_p
             "linear_project": "ALPHA",
             "project_slug": "ALPHA",
             "agent_app_user_id": "agent-app-1",
-            "pipeline_profile": "default",
+            "managed_run_profile": "default",
             "process_status": "idle",
             "constraint_labels": [],
             "repo_source": {},
@@ -149,7 +149,7 @@ async def test_linear_delegate_poller_leases_newest_issue_before_backfilled_olde
             "linear_project": "ALPHA",
             "project_slug": "ALPHA",
             "agent_app_user_id": "agent-app-1",
-            "pipeline_profile": "default",
+            "managed_run_profile": "default",
             "process_status": "idle",
             "constraint_labels": [],
             "repo_source": {},
@@ -216,7 +216,7 @@ async def test_linear_delegate_poller_persists_initial_cursor_when_no_issues(tmp
             "linear_workspace_id": "workspace-1",
             "project_slug": "ALPHA",
             "linear_agent_app_user_id": "agent-app-1",
-            "pipeline_profile": "default",
+            "managed_run_profile": "default",
             "project_binding_id": "binding-1",
         }
     )
@@ -275,7 +275,7 @@ async def test_linear_delegate_poller_cold_start_catches_recently_delegated_issu
             "linear_project": "ALPHA",
             "project_slug": "ALPHA",
             "agent_app_user_id": "agent-app-1",
-            "pipeline_profile": "default",
+            "managed_run_profile": "default",
             "process_status": "idle",
             "constraint_labels": [],
             "repo_source": {},
@@ -360,7 +360,7 @@ async def test_linear_delegate_poller_skips_issue_created_before_initial_cursor(
             "linear_project": "ALPHA",
             "project_slug": "ALPHA",
             "agent_app_user_id": "agent-app-1",
-            "pipeline_profile": "default",
+            "managed_run_profile": "default",
             "process_status": "idle",
             "constraint_labels": [],
             "repo_source": {},
@@ -437,7 +437,7 @@ async def test_linear_delegate_poller_skips_symphony_projection_issues(tmp_path)
             "linear_project": "ALPHA",
             "project_slug": "ALPHA",
             "agent_app_user_id": "agent-app-1",
-            "pipeline_profile": "default",
+            "managed_run_profile": "default",
             "process_status": "idle",
             "constraint_labels": [],
             "repo_source": {},
@@ -456,7 +456,7 @@ async def test_linear_delegate_poller_skips_symphony_projection_issues(tmp_path)
                                 "id": "projection-issue",
                                 "identifier": "ALPHA-2",
                                 "title": "Projected child task",
-                                "description": "```yaml\nsymphony:\n  graph_id: graph-1\n  node_id: child-1\n  operator_status: ready\n```",
+                                "description": "<!-- SYMPHONY WORK ITEM:start -->\nwork item projection\n<!-- SYMPHONY WORK ITEM:end -->",
                                 "createdAt": "2099-01-01T00:00:00Z",
                                 "updatedAt": "2099-01-01T00:01:00Z",
                                 "project": {"slugId": "ALPHA"},
@@ -514,7 +514,7 @@ async def test_linear_delegate_poller_skips_runtime_wait_human_action_issues(tmp
             "linear_project": "ALPHA",
             "project_slug": "ALPHA",
             "agent_app_user_id": "agent-app-1",
-            "pipeline_profile": "default",
+            "managed_run_profile": "default",
             "process_status": "idle",
             "constraint_labels": [],
             "repo_source": {},
@@ -534,7 +534,7 @@ async def test_linear_delegate_poller_skips_runtime_wait_human_action_issues(tmp
                                 "identifier": "ALPHA-3",
                                 "title": "[Human Action] Runtime wait: approval_requested",
                                 "description": (
-                                    "Pipeline runtime wait requires operator attention.\n\n"
+                                    "Managed run wait requires operator attention.\n\n"
                                     "```yaml\n"
                                     "symphony_runtime_wait:\n"
                                     "  wait_id: runtime-wait-execute-1-approval_requested\n"
@@ -582,7 +582,7 @@ async def test_linear_delegate_poller_records_error_without_advancing_cursor(tmp
             "linear_workspace_id": "workspace-1",
             "project_slug": "ALPHA",
             "linear_agent_app_user_id": "agent-app-1",
-            "pipeline_profile": "default",
+            "managed_run_profile": "default",
             "project_binding_id": "binding-1",
         }
     )
@@ -637,7 +637,7 @@ async def test_podium_lifespan_starts_delegate_poller_when_application_token_con
             "linear_project": "ALPHA",
             "project_slug": "ALPHA",
             "agent_app_user_id": "agent-app-1",
-            "pipeline_profile": "default",
+            "managed_run_profile": "default",
             "process_status": "idle",
             "constraint_labels": [],
             "repo_source": {},

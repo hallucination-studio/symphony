@@ -560,7 +560,7 @@ async def test_runtimes_list_returns_online_status() -> None:
         ws, cookie = await _auth(server)
         group_id = f"group_{ws}"
         await server.app.state.podium.store.upsert_runtime_group(
-            {"id": group_id, "linear_workspace_id": ws, "pipeline_profile": "default"}
+            {"id": group_id, "linear_workspace_id": ws, "managed_run_profile": "default"}
         )
         await server.app.state.podium.store.upsert_conductor({
             "id": "rt-1",
@@ -573,6 +573,21 @@ async def test_runtimes_list_returns_online_status() -> None:
             "revoked": False,
             "created_at": "2026-01-01T00:00:00Z",
         })
+        await server.app.state.podium.store.upsert_project_binding({
+            "id": "rt-1:inst-1",
+            "conductor_id": "rt-1",
+            "user_id": ws,
+            "instance_id": "inst-1",
+            "name": "Performer",
+            "linear_project": "ALPHA",
+            "project_slug": "ALPHA",
+            "agent_app_user_id": "agent-app-1",
+            "managed_run_profile": "default",
+            "process_status": "running",
+            "constraint_labels": [],
+            "repo_source": {},
+            "updated_at": "2026-01-01T00:00:00Z",
+        })
         await server.app.state.podium.set_presence("rt-1")
         status, _, body = await request(
             server.port, "GET", "/api/v1/runtimes", headers={"Cookie": cookie}
@@ -583,6 +598,8 @@ async def test_runtimes_list_returns_online_status() -> None:
     assert status == 200
     payload = json.loads(body)
     assert any(r["runtime_id"] == "rt-1" and r["online"] for r in payload["runtimes"])
+    binding = payload["conductors"][0]["bindings"][0]
+    assert binding["managed_run_profile"] == "default"
 
 
 @pytest.mark.asyncio
@@ -601,7 +618,7 @@ async def test_runtime_detail_404_for_unknown() -> None:
     assert json.loads(body)["error"]["code"] == "not_found"
 
 
-# ===== Pipeline-only Runtime Surface =====
+# ===== Managed Runs Runtime Surface =====
 
 
 @pytest.mark.asyncio

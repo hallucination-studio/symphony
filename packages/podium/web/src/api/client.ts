@@ -8,7 +8,7 @@ import type {
   LinearAppConfig,
   LinearScope,
   OnboardingProgress,
-  PipelineStatus,
+  ManagedRunsReport,
   PodiumConfig,
   RepositoryMapping,
   RepositoryMode,
@@ -192,7 +192,7 @@ export const api = {
     );
   },
 
-  pipeline(): Promise<PipelineStatus> {
-    return request<PipelineStatus>("/api/v1/pipeline");
+  managedRuns(): Promise<ManagedRunsReport> {
+    return request<ManagedRunsReport>("/api/v1/managed-runs");
   },
 };

@@ -57,10 +57,10 @@ export function useInstanceLogs(
   });
 }
 
-export function usePipeline() {
+export function useManagedRuns() {
   return useQuery({
-    queryKey: ["pipeline"],
-    queryFn: () => api.pipeline(),
+    queryKey: ["managed-runs"],
+    queryFn: () => api.managedRuns(),
     refetchInterval: 5000,
   });
 }

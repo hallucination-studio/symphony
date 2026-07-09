@@ -107,7 +107,7 @@ export interface ConductorBinding {
   linear_project: string;
   project_slug: string;
   agent_app_user_id: string;
-  pipeline_profile: string;
+  managed_run_profile: string;
   process_status: string;
   // `symphony:` labels Conductor mirrors onto the Linear project for this
   // Performer. Present once the Conductor has reported.
@@ -158,46 +158,39 @@ export interface InstanceLogs {
   offset_end?: number;
 }
 
-export interface PipelineModeView {
-  mode: "plan" | "execute" | "verify";
-  active: number;
-  limit?: number | null;
-  queued: number;
-  node_ids: string[];
+export interface ManagedRunWorkItem {
+  work_item_id: string;
+  state: "todo" | "in_progress" | "in_review" | "done" | "blocked" | "cancelled" | string;
+  gate_status?: string;
+  payload?: {
+    title?: string;
+    objective?: string;
+    files_likely_touched?: string[];
+    dependencies?: string[];
+  };
 }
 
-export interface PipelinePredictedCall {
-  node: string;
-  predicted_position?: number | null;
-  blocked_by: string[];
-  earliest_mode?: "plan" | "execute" | "verify" | null;
-  confidence: string;
+export interface ManagedRun {
+  run_id: string;
+  parent_issue_id: string;
+  issue_identifier: string;
+  state: string;
+  active_work_item_id?: string;
+  latest_reason?: string;
+  plan_version: number;
+  backend_session_id?: string;
+  work_items: ManagedRunWorkItem[];
 }
 
-export interface PipelineRuntimeWait {
-  node_id: string;
-  attempt_id: string;
-  mode: "plan" | "execute" | "verify";
-  wait_kind: string;
-  status: string;
-  message?: string | null;
-  command?: string | null;
+export interface ManagedRunsView {
+  runs: ManagedRun[];
 }
 
-export interface PipelineView {
-  graph_revision: number;
-  policy_revision: number;
-  modes: PipelineModeView[];
-  predicted_call_order: PipelinePredictedCall[];
-  human_waits: Array<{ node_id: string; reason?: string | null }>;
-  runtime_waits: PipelineRuntimeWait[];
-}
-
-export interface PipelineStatus {
+export interface ManagedRunsReport {
   runtime_group_id: string;
   policy_revision: number;
   profiles: Record<string, unknown>;
-  pipeline: Partial<PipelineView>;
+  managed_runs: Partial<ManagedRunsView>;
 }
 
 export interface EnrollmentStatus {

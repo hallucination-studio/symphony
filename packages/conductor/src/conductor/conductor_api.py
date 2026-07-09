@@ -145,17 +145,8 @@ class ConductorApiServer:
         try:
             if method == "GET" and path == "/":
                 return 200, {"service": "conductor", "status": "ok"}
-            if method == "GET" and path == "/api/pipeline":
-                return 200, {"pipeline": self.service.pipeline_store.pipeline_view().to_dict()}
-            if method == "POST" and path.startswith("/api/pipeline/human-waits/") and path.endswith("/human-answered"):
-                wait_id = path.removeprefix("/api/pipeline/human-waits/").removesuffix("/human-answered")
-                command = {
-                    "type": "human.answered",
-                    "wait_id": wait_id,
-                    "child_issue_id": body.get("child_issue_id"),
-                    "human_response": body.get("human_response") or body.get("response"),
-                }
-                return 200, await self.service.handle_podium_ws_command(command)
+            if method == "GET" and path == "/api/managed-runs":
+                return 200, {"managed_runs": self.service.managed_run_store.managed_run_view()}
             if method == "GET" and path == "/api/instances":
                 return 200, {
                     "instances": [_public_instance(instance) for instance in self.service.list_instances()]
@@ -166,7 +157,8 @@ class ConductorApiServer:
                 settings = self.service.update_settings_json(body)
                 return 200, {"settings": settings.to_public_dict()}
             if method == "POST" and path == "/api/instances":
-                instance = self.service.create_instance(InstanceCreateRequest(**body))
+                _reject_legacy_instance_fields(body)
+                instance = self.service.create_instance(InstanceCreateRequest(**_instance_request_body(body)))
                 return 201, {"instance": _public_instance(instance)}
             if method == "POST" and path == "/api/repo/inspect":
                 repo = self.service.inspect_repo(body["repo_source_type"], body["repo_source_value"])
@@ -197,12 +189,8 @@ class ConductorApiServer:
                 return 404, {"error": {"code": "instance_not_found", "message": f"Instance not found: {instance_id}"}}
             return 200, {"instance": _public_instance(instance)}
         if method == "PATCH" and not action:
-            if any(key in body for key in {"workflow_content", "workflow_path", "workflow_profile", "workflow_inputs"}):
-                raise ConductorServiceError(
-                    "workflow_runtime_surface_removed",
-                    "Runtime workflow fields are not part of the pipeline instance API.",
-                )
-            instance = self.service.update_instance(instance_id, InstancePatchRequest(**body))
+            _reject_legacy_instance_fields(body)
+            instance = self.service.update_instance(instance_id, InstancePatchRequest(**_instance_request_body(body)))
             return 200, {"instance": _public_instance(instance)}
         if method == "DELETE" and not action:
             self.service.delete_instance(instance_id)
@@ -282,8 +270,31 @@ def _optional_int(value: Any, default: int | None) -> int | None:
     return _int(value, default or 0)
 
 
+def _reject_legacy_instance_fields(body: dict[str, Any]) -> None:
+    if "managed_run_profile" in body:
+        raise ConductorServiceError(
+            "legacy_runtime_profile_field",
+            "Use managed_run_profile for managed-run instance configuration.",
+        )
+    if any(key in body for key in {"workflow_content", "workflow_path", "workflow_profile", "workflow_inputs", "pipeline_profile"}):
+        raise ConductorServiceError(
+            "workflow_runtime_surface_removed",
+            "Runtime workflow fields are not part of the managed-run instance API.",
+        )
+
+
 def _public_instance(instance: InstanceRecord) -> dict[str, Any]:
-    return instance.to_public_dict()
+    payload = instance.to_public_dict()
+    payload["managed_run_profile"] = payload.get("managed_run_profile") or "default"
+    payload.pop("managed_run_profile", None)
+    return payload
+
+
+def _instance_request_body(body: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(body)
+    if "managed_run_profile" in payload:
+        payload["managed_run_profile"] = payload.pop("managed_run_profile")
+    return payload
 
 
 def _bool(value: Any) -> bool:

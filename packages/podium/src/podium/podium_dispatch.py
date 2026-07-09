@@ -28,20 +28,18 @@ class PodiumDispatchMixin:
                 "agent_session_id": str(event.get("agent_session_id") or ""),
                 "agent_app_user_id": event.get("agent_app_user_id") or "",
                 "routing_rule_id": group["id"],
-                "pipeline_profile": group.get("pipeline_profile") or "default",
+                "managed_run_profile": group.get("managed_run_profile") or "default",
                 "blocked_by": list(event.get("blocked_by") or []),
                 "parent_issue_id": event.get("parent_issue_id") or "",
-                "pipeline_intent": dict(event.get("pipeline_intent") or {}),
+                "managed_run_intent": dict(event.get("managed_run_intent") or {}),
                 "status": "queued",
                 "reason": "",
-                "graph_id": "",
-                "node_id": "",
-                "attempt_id": "",
-                "mode": "",
-                "attempt_status": "",
-                "graph_revision": 0,
-                "policy_revision": 0,
-                "lease_id": "",
+                "run_id": "",
+                "parent_issue_id": event.get("parent_issue_id") or "",
+                "active_work_item_id": "",
+                "managed_run_state": "",
+                "plan_version": 0,
+                "backend_session_id": "",
                 "leased_runtime_id": None,
                 "leased_until": None,
                 "fencing_token": 0,
@@ -77,7 +75,7 @@ class PodiumDispatchMixin:
             "linear_workspace_id": str(binding.get("user_id") or ""),
             "project_slug": str(binding.get("project_slug") or ""),
             "linear_agent_app_user_id": str(binding.get("agent_app_user_id") or ""),
-            "pipeline_profile": str(binding.get("pipeline_profile") or "default"),
+            "managed_run_profile": str(binding.get("managed_run_profile") or "default"),
             "project_binding_id": binding_id,
         }
 
@@ -111,7 +109,7 @@ class PodiumDispatchMixin:
                 {
                     "runtime_group_id": str(group.get("id") or leased.get("project_binding_id") or ""),
                     "routing_rule_id": str(group.get("id") or leased.get("project_binding_id") or ""),
-                    "pipeline_profile": str(group.get("pipeline_profile") or "default"),
+                    "managed_run_profile": str(group.get("managed_run_profile") or "default"),
                     "blocked_by": list(leased.get("blocked_by") or []),
                     "parent_issue_id": str(leased.get("parent_issue_id") or ""),
                 }
@@ -129,11 +127,11 @@ class PodiumDispatchMixin:
         *,
         fencing_token: int | None = None,
         reason: str | None = None,
-        pipeline: dict[str, Any] | None = None,
+        managed_run: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         if fencing_token is None:
             return {"dispatch_id": dispatch_id, "_ack_error": "stale_dispatch_lease"}
-        pipeline = _sanitize_pipeline_ack(pipeline or {})
+        managed_run = _sanitize_managed_run_ack(managed_run or {})
         completed_at = utc_now_iso() if status in {"completed", "failed", "cancelled", "canceled"} else None
         saved = await self.store.ack_dispatch(
             runtime_id,
@@ -141,7 +139,7 @@ class PodiumDispatchMixin:
             status,
             fencing_token=fencing_token,
             reason=reason or "",
-            pipeline=pipeline,
+            managed_run=managed_run,
             completed_at=completed_at,
         )
         if saved is None:
@@ -152,13 +150,13 @@ class PodiumDispatchMixin:
         return []
 
 
-def _sanitize_pipeline_ack(payload: dict[str, Any]) -> dict[str, Any]:
+def _sanitize_managed_run_ack(payload: dict[str, Any]) -> dict[str, Any]:
     sanitized: dict[str, Any] = {}
-    for key in ("graph_id", "node_id", "attempt_id", "mode", "attempt_status", "lease_id"):
+    for key in ("run_id", "parent_issue_id", "active_work_item_id", "managed_run_state", "backend_session_id"):
         value = payload.get(key)
         if isinstance(value, str) and value:
             sanitized[key] = value[:256]
-    for key in ("graph_revision", "policy_revision"):
+    for key in ("plan_version",):
         try:
             sanitized[key] = int(payload.get(key) or 0)
         except (TypeError, ValueError):

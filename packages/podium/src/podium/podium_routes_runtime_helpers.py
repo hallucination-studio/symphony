@@ -3,18 +3,16 @@ from __future__ import annotations
 from typing import Any
 
 
-def pipeline_ack_payload(payload: dict[str, Any]) -> dict[str, Any]:
+def managed_run_ack_payload(payload: dict[str, Any]) -> dict[str, Any]:
     return {
         key: payload.get(key)
         for key in (
-            "graph_id",
-            "node_id",
-            "attempt_id",
-            "mode",
-            "attempt_status",
-            "graph_revision",
-            "policy_revision",
-            "lease_id",
+            "run_id",
+            "parent_issue_id",
+            "active_work_item_id",
+            "managed_run_state",
+            "plan_version",
+            "backend_session_id",
         )
     }
 
@@ -38,7 +36,7 @@ def normalize_agent_session_event(payload: dict[str, Any]) -> dict[str, Any]:
     agent = session.get("agent") if isinstance(session.get("agent"), dict) else {}
     workspace = payload.get("workspace") if isinstance(payload.get("workspace"), dict) else {}
     parent = issue.get("parent") if isinstance(issue.get("parent"), dict) else payload.get("parent")
-    pipeline_intent = _pipeline_intent(payload, issue)
+    managed_run_intent = _managed_run_intent(payload, issue)
     return {
         "workspace_id": str(workspace.get("id") or payload.get("workspace_id") or ""),
         "project_slug": str(project.get("slugId") or payload.get("project_slug") or ""),
@@ -62,19 +60,19 @@ def normalize_agent_session_event(payload: dict[str, Any]) -> dict[str, Any]:
         "issue_delegate_id": str(((issue.get("delegate") or {}) if isinstance(issue.get("delegate"), dict) else {}).get("id") or ""),
         "blocked_by": _issue_ref_ids(issue.get("blocked_by") or payload.get("blocked_by")),
         "parent_issue_id": _issue_ref_id(issue.get("parent_issue_id") or parent or payload.get("parent_issue_id")),
-        "pipeline_intent": dict(pipeline_intent) if isinstance(pipeline_intent, dict) else {},
+        "managed_run_intent": dict(managed_run_intent) if isinstance(managed_run_intent, dict) else {},
     }
 
 
-def _pipeline_intent(payload: dict[str, Any], issue: dict[str, Any]) -> dict[str, Any]:
-    pipeline_intent = payload.get("pipeline_intent")
-    if not isinstance(pipeline_intent, dict):
-        pipeline_intent = payload.get("intent")
-    if not isinstance(pipeline_intent, dict):
-        pipeline_intent = issue.get("pipeline_intent")
-    if not isinstance(pipeline_intent, dict):
-        pipeline_intent = issue.get("intent")
-    return pipeline_intent if isinstance(pipeline_intent, dict) else {}
+def _managed_run_intent(payload: dict[str, Any], issue: dict[str, Any]) -> dict[str, Any]:
+    managed_run_intent = payload.get("managed_run_intent")
+    if not isinstance(managed_run_intent, dict):
+        managed_run_intent = payload.get("intent")
+    if not isinstance(managed_run_intent, dict):
+        managed_run_intent = issue.get("managed_run_intent")
+    if not isinstance(managed_run_intent, dict):
+        managed_run_intent = issue.get("intent")
+    return managed_run_intent if isinstance(managed_run_intent, dict) else {}
 
 
 def _issue_ref_ids(value: Any) -> list[str]:

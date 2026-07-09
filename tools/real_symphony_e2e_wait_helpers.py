@@ -13,7 +13,8 @@ def immediate_pipeline_failure(
 ) -> dict[str, Any] | None:
     if expected_failure != "none":
         return None
-    attempts = [attempt for attempt in sample.get("pipeline_attempts", []) if isinstance(attempt, dict)]
+    attempts_payload = sample.get("managed_run_attempts", [])
+    attempts = [attempt for attempt in attempts_payload if isinstance(attempt, dict)]
     failed_attempts = [
         attempt
         for attempt in attempts
@@ -21,11 +22,18 @@ def immediate_pipeline_failure(
     ]
     if failed_attempts:
         return {"kind": "attempt_failed", "attempts": failed_attempts}
-    nodes = [node for node in sample.get("pipeline_nodes", []) if isinstance(node, dict)]
+    runs_payload = sample.get("managed_run_runs", [])
+    runs = [run for run in runs_payload if isinstance(run, dict)]
+    failed_runs = [run for run in runs if str(run.get("state") or "").lower() == "failed"]
+    if failed_runs:
+        return {"kind": "managed_run_failed", "runs": failed_runs}
+    nodes_payload = sample.get("managed_run_work_items", [])
+    nodes = [node for node in nodes_payload if isinstance(node, dict)]
     failed_nodes = [node for node in nodes if str(node.get("state") or "").lower() == "failed"]
     if failed_nodes:
         return {"kind": "node_failed", "nodes": failed_nodes}
-    waits = [action for action in sample.get("pipeline_human_actions", []) if isinstance(action, dict)]
+    waits_payload = sample.get("managed_run_human_actions", [])
+    waits = [action for action in waits_payload if isinstance(action, dict)]
     backend_waits = [
         action
         for action in waits
@@ -56,11 +64,11 @@ def _human_answered_push_satisfies_resume_probe(status: int, body: Any) -> bool:
     return body.get("status") == "ignored" and body.get("reason") == "completed_child_required"
 
 
-def _wait_resolved_before_harness_resume(wait: dict[str, Any]) -> bool:
+def _wait_resolved_before_managed_run_resume(wait: dict[str, Any]) -> bool:
     if wait.get("status") != "resolved":
         return False
     resolution = str(wait.get("resolution") or "").strip().lower()
-    return resolution in {"attempt succeeded", "attempt cancelled", "attempt failed", "attempt timed_out"}
+    return resolution in {"approval completed", "attempt succeeded", "attempt cancelled", "attempt failed", "attempt timed_out"}
 
 
 def _immediate_failure_matches_attempt(failure: dict[str, Any], attempt_id: str | None) -> bool:
@@ -112,6 +120,15 @@ def _immediate_failure_without_attempt(failure: dict[str, Any], attempt_id: str 
 
 def _resolved_pipeline_wait_ids(pipeline_payload: dict[str, Any]) -> set[str]:
     wait_ids: set[str] = set()
+    for run in pipeline_payload.get("runs") or []:
+        if not isinstance(run, dict):
+            continue
+        for item in run.get("work_items") or []:
+            if not isinstance(item, dict) or item.get("state") == "blocked":
+                continue
+            gate_status = str(item.get("gate_status") or "")
+            if gate_status.startswith("human_approval_approved:"):
+                wait_ids.add(f"{run.get('run_id')}:{item.get('work_item_id')}:human_approval_required")
     for key in ("human_waits", "runtime_waits"):
         waits = pipeline_payload.get(key)
         if not isinstance(waits, list):
@@ -126,6 +143,17 @@ def _resolved_pipeline_wait_ids(pipeline_payload: dict[str, Any]) -> set[str]:
 
 
 def _pipeline_wait_by_id(pipeline_payload: dict[str, Any], wait_id: str) -> dict[str, Any]:
+    for run in pipeline_payload.get("runs") or []:
+        if not isinstance(run, dict):
+            continue
+        for item in run.get("work_items") or []:
+            if not isinstance(item, dict):
+                continue
+            candidate = f"{run.get('run_id')}:{item.get('work_item_id')}:human_approval_required"
+            if candidate != wait_id:
+                continue
+            approved = str(item.get("gate_status") or "").startswith("human_approval_approved:")
+            return {"wait_id": wait_id, "status": "resolved" if approved else "waiting", "resolution": "approval completed" if approved else ""}
     for key in ("human_waits", "runtime_waits"):
         waits = pipeline_payload.get(key)
         if not isinstance(waits, list):

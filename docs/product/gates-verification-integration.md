@@ -2,19 +2,20 @@
 
 ## Gate Authority
 
-Gates are immutable snapshots bound to graph nodes by hash. Linear may render a
-gate for humans, but Conductor's `GateSpecSnapshot` is authoritative.
+Gates are immutable verification contracts bound to accepted work items. Linear
+may render a gate for humans, but Conductor's accepted plan and result checks are
+authoritative.
 
-A node cannot execute until it has a frozen gate hash. Execute attempts may read
-the snapshot but cannot mutate it. Verify attempts must use the same hash.
-Changing a gate requires a new gate version or a replacement node through
-replanning.
+A work item cannot execute until it has file scope, RED/GREEN commands,
+acceptance criteria, and dependency state from the accepted plan. Execute turns
+may read that contract but cannot mutate it. Changing the contract requires an
+approved plan revision.
 
 ## Gate Snapshot
 
 A gate snapshot contains:
 
-- snapshot id, task/node id, version, creator attempt id, and timestamp;
+- run id, work item id, plan version, creator attempt id, and timestamp;
 - acceptance criteria;
 - executable verification procedure;
 - provenance tag on every verification step;
@@ -32,17 +33,17 @@ Every verification step has one source:
 
 ```text
 issue_requirement
-appendix_harness
+acceptance_appendix
 planner_inferred
 system_repair
 ```
 
-`issue_requirement`, `appendix_harness`, and `system_repair` steps are
-authoritative. Failing them fails the node.
+`issue_requirement`, `acceptance_appendix`, and `system_repair` steps are
+authoritative. Failing them fails the work item.
 
 `planner_inferred` steps are advisory-conservative. They may lower confidence
-within an otherwise satisfied gate, but they cannot be the sole reason a node
-falls below the pass threshold. A gate with no authoritative step is invalid.
+within an otherwise satisfied gate, but they cannot be the sole reason a work
+item falls below the pass threshold. A gate with no authoritative step is invalid.
 
 ## Rubric
 
@@ -56,20 +57,20 @@ Scores have stable semantics:
 4 = gate passes with robust evidence and edge-case coverage
 ```
 
-Only score `>= 3` verify-passes a node and satisfies dependencies.
+Only score `>= 3` verifies a work item and satisfies dependencies.
 
 ## Plan Repair And Validation
 
-Planner output is a proposal. Conductor applies deterministic repair and then
-deterministic validation before committing a graph revision.
+Planner output is a proposal. Conductor applies deterministic validation before
+committing a managed-run plan version.
 
-Repair may add missing dependency edges, normalize gate structure, and demote
-unsupported exact-text assertions to advisory provenance. Repairs are stamped as
-`system_repair` where they carry authority.
+System repairs may normalize gate structure and demote unsupported exact-text
+assertions to advisory provenance. Repairs are stamped as `system_repair` where
+they carry authority.
 
 Validation rejects proposals with missing gates, non-executable procedures,
-invalid rubrics, threshold changes, cycles, illegal `blocks`, missing entry/exit
-nodes, too many subtasks, executor-only verifier requirements, inaccessible
+invalid rubrics, threshold changes, dependency cycles, too many work items,
+executor-only verifier requirements, inaccessible
 credentials, no authoritative gate step, invalid provenance, or required
 parallel dependency shape violations.
 
@@ -77,7 +78,7 @@ parallel dependency shape violations.
 
 Every terminal execute attempt produces an immutable verification input snapshot:
 
-- task/node id and execute attempt id;
+- work item id and execute attempt id;
 - base revision;
 - branch name;
 - commit sha;
@@ -85,11 +86,10 @@ Every terminal execute attempt produces an immutable verification input snapshot
 - artifact URIs and hashes;
 - declared commands as context only;
 - evidence URI;
-- gate snapshot hash.
+- gate snapshot hash or accepted plan version.
 
-Legacy patch snapshots (`patch_uri`, `patch_hash`, `expected_result_tree`, and
-`result_revision`) may be accepted for migration compatibility, but the current
-execute contract is branch/commit handoff.
+Patch snapshots are diagnostic artifacts only. The accepted execution handoff is
+the branch/commit plus the structured `WorkItemResult`.
 
 Declared commands are never trusted as proof. A passing verdict comes from the
 verifier running the gate procedure.
@@ -111,21 +111,21 @@ after gate execution. It is not OS-level read-only enforcement.
 ## Task Output Manifests
 
 Conductor publishes a task output manifest only after verify passes. The
-manifest is bound to `node_id`, `verify_attempt_id`, `gate_snapshot_hash`, score,
-branch name, commit sha, and artifact references.
+manifest is bound to `work_item_id`, `verify_attempt_id`, accepted plan version,
+score, branch name, commit sha, and artifact references.
 
 Executors may suggest output metadata, but Conductor is the publisher. A
-downstream node may consume upstream work only through verified manifests.
+downstream work item may consume upstream work only through verified manifests.
 
 ## Branch Join
 
 Parallel verified branches are not automatically globally integrated. Each
-execute attempt runs against a computed baseline. Entry nodes use the graph base
-revision. Dependent nodes use a Conductor-created worktree branch where every
+execute attempt runs against a computed baseline. Entry work items use the
+managed-run base revision. Dependent work items use a Conductor-created worktree branch where every
 verified blocker branch has been merged.
 
 Conductor owns the deterministic git join before dispatching the dependent
-executor. Conflicts create a merge-conflict resolver node; unresolved conflicts
+executor. Conflicts block the affected work item or require an approved resolver work item; unresolved conflicts
 escalate to `need_human`. The system must not silently merge conflicting
 verified branches or let downstream work consume unjoined output.
 

@@ -28,44 +28,44 @@ def _check_pipeline_scenario_acceptance(evidence: Evidence, scenario: str, pipel
 def _check_parallel_acceptance(evidence: Evidence, pipeline_view: dict[str, Any]) -> None:
     attempts = [attempt for attempt in pipeline_view.get("attempts", []) if isinstance(attempt, dict)]
     execute_attempts = [attempt for attempt in attempts if attempt.get("mode") == "execute"]
-    expected_policy = _expected_scheduler_policy(pipeline_view)
-    scheduler_match = _scheduler_policy_matches(pipeline_view, expected_policy)
+    expected_policy = _expected_managed_run_policy(pipeline_view)
+    policy_match = _managed_run_policy_matches(pipeline_view, expected_policy)
     evidence.check(
         "scenario:parallel-execute-overlap",
         str(pipeline_view.get("policy_source") or "") == "podium_pushed"
         and bool(str(pipeline_view.get("policy_id") or ""))
-        and scheduler_match
+        and policy_match
         and len(execute_attempts) >= 2
         and _attempt_intervals_overlap(execute_attempts),
         execute_attempts=[_attempt_window(attempt) for attempt in execute_attempts],
-        execute_limit=((pipeline_view.get("capacity") or {}).get("by_mode") or {}).get("execute"),
+        work_item_limit=((pipeline_view.get("capacity") or {}).get("by_role") or {}).get("work_item"),
         policy_id=str(pipeline_view.get("policy_id") or ""),
         policy_source=str(pipeline_view.get("policy_source") or ""),
-        expected_scheduler_policy_id=str(expected_policy.get("policy_id") or ""),
-        expected_scheduler_policy_version=_safe_int(expected_policy.get("version")),
-        last_scheduler_policy_id=str(pipeline_view.get("last_scheduler_policy_id") or ""),
-        last_scheduler_policy_version=_safe_int(pipeline_view.get("last_scheduler_policy_version")),
-        last_scheduler_policy_source=str(pipeline_view.get("last_scheduler_policy_source") or ""),
-        last_scheduler_tick_at=str(pipeline_view.get("last_scheduler_tick_at") or ""),
+        expected_managed_run_policy_id=str(expected_policy.get("policy_id") or ""),
+        expected_managed_run_policy_version=_safe_int(expected_policy.get("version")),
+        last_managed_run_policy_id=str(pipeline_view.get("last_managed_run_policy_id") or ""),
+        last_managed_run_policy_version=_safe_int(pipeline_view.get("last_managed_run_policy_version")),
+        last_managed_run_policy_source=str(pipeline_view.get("last_managed_run_policy_source") or ""),
+        last_managed_run_tick_at=str(pipeline_view.get("last_managed_run_tick_at") or ""),
     )
 
 
-def _expected_scheduler_policy(pipeline_view: dict[str, Any]) -> dict[str, Any]:
+def _expected_managed_run_policy(pipeline_view: dict[str, Any]) -> dict[str, Any]:
     runtime_config = pipeline_view.get("runtime_config") if isinstance(pipeline_view.get("runtime_config"), dict) else {}
-    policy = runtime_config.get("scheduler_policy") if isinstance(runtime_config.get("scheduler_policy"), dict) else {}
+    policy = runtime_config.get("managed_run_policy") if isinstance(runtime_config.get("managed_run_policy"), dict) else {}
     return policy if isinstance(policy, dict) else {}
 
 
-def _scheduler_policy_matches(pipeline_view: dict[str, Any], expected_policy: dict[str, Any]) -> bool:
+def _managed_run_policy_matches(pipeline_view: dict[str, Any], expected_policy: dict[str, Any]) -> bool:
     expected_id = str(expected_policy.get("policy_id") or "")
     expected_version = _safe_int(expected_policy.get("version"))
     return (
         bool(expected_id)
         and expected_version > 0
-        and str(pipeline_view.get("last_scheduler_policy_source") or "") == "podium_pushed"
-        and str(pipeline_view.get("last_scheduler_policy_id") or "") == expected_id
-        and _safe_int(pipeline_view.get("last_scheduler_policy_version")) == expected_version
-        and bool(str(pipeline_view.get("last_scheduler_tick_at") or ""))
+        and str(pipeline_view.get("last_managed_run_policy_source") or "") == "podium_pushed"
+        and str(pipeline_view.get("last_managed_run_policy_id") or "") == expected_id
+        and _safe_int(pipeline_view.get("last_managed_run_policy_version")) == expected_version
+        and bool(str(pipeline_view.get("last_managed_run_tick_at") or ""))
     )
 
 

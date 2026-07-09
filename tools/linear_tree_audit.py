@@ -9,7 +9,7 @@ from typing import Any
 from linear_project_issues import graphql
 
 
-PIPELINE_NODE_LABEL = "performer:type/pipeline-node"
+WORK_ITEM_LABEL = "symphony:type/work-item"
 
 
 async def fetch_issue_tree(issue_id: str) -> dict[str, Any]:
@@ -82,51 +82,48 @@ def labels(node: dict[str, Any]) -> list[str]:
 
 def audit_tree(tree: dict[str, Any]) -> dict[str, Any]:
     children = tree.get("children", {}).get("nodes", [])
-    pipeline_nodes = [child for child in children if PIPELINE_NODE_LABEL in labels(child)]
+    work_items = [child for child in children if WORK_ITEM_LABEL in labels(child)]
     blocks_relations = [
         relation
-        for child in pipeline_nodes
+        for child in work_items
         for relation in child.get("inverseRelations", {}).get("nodes", [])
         if relation.get("type") == "blocks"
     ]
     failures: list[str] = []
-    for node in pipeline_nodes:
-        if (node.get("parent") or {}).get("id") != tree.get("id"):
-            failures.append(f"pipeline_node_parent_mismatch:{node.get('identifier')}")
-        metadata = _pipeline_metadata(node)
-        missing = [
-            key
-            for key in [
-                "graph_id",
-                "node_id",
-                "plan_attempt_id",
-                "gate_snapshot_hash",
-                "conductor_revision",
-                "operator_status",
-            ]
-            if not metadata.get(key)
-        ]
-        if missing:
-            failures.append(f"pipeline_metadata_missing:{node.get('identifier')}:{','.join(missing)}")
-        if metadata.get("operator_status") == "waiting_for_runtime_input":
-            description = str(node.get("description") or "")
-            if not metadata.get("operator_wait_kind"):
-                failures.append(f"pipeline_runtime_wait_kind_missing:{node.get('identifier')}")
-            if "Runtime Wait" not in description or "runtime_wait:" not in description:
-                failures.append(f"pipeline_runtime_wait_block_missing:{node.get('identifier')}")
-        if "Frozen Gate" not in str(node.get("description") or ""):
-            failures.append(f"frozen_gate_missing:{node.get('identifier')}")
+    if "<!-- symphony:run-summary:start -->" not in str(tree.get("description") or ""):
+        failures.append(f"managed_run_summary_missing:{tree.get('identifier')}")
+    for item in work_items:
+        identifier = item.get("identifier")
+        if (item.get("parent") or {}).get("id") != tree.get("id"):
+            failures.append(f"work_item_parent_mismatch:{identifier}")
+        description = str(item.get("description") or "")
+        for heading, code in [
+            ("Objective:", "work_item_objective_missing"),
+            ("Acceptance Criteria:", "work_item_acceptance_missing"),
+            ("Likely Files:", "work_item_files_missing"),
+            ("Verification:", "work_item_verification_missing"),
+            ("Managed Run State:", "work_item_state_missing"),
+        ]:
+            if heading not in description:
+                failures.append(f"{code}:{identifier}")
+        state = _managed_run_state(description)
+        if not state.get("state"):
+            failures.append(f"work_item_state_value_missing:{identifier}")
+        if not state.get("gate"):
+            failures.append(f"work_item_gate_missing:{identifier}")
+        if str((item.get("state") or {}).get("type") or "").lower() == "completed" and state.get("state") != "done":
+            failures.append(f"work_item_done_state_mismatch:{identifier}:{state.get('state')}")
     return {
         "business_issue": _issue_row(tree),
-        "pipeline_node_count": len(pipeline_nodes),
+        "work_item_count": len(work_items),
         "blocks_relation_count": len(blocks_relations),
-        "pipeline_nodes": [
+        "work_items": [
             {
-                **_issue_row(node),
-                "metadata": _pipeline_metadata(node),
-                "children": [_issue_row(child) for child in node.get("children", {}).get("nodes", [])],
+                **_issue_row(item),
+                "managed_run_state": _managed_run_state(str(item.get("description") or "")),
+                "children": [_issue_row(child) for child in item.get("children", {}).get("nodes", [])],
             }
-            for node in pipeline_nodes
+            for item in work_items
         ],
         "blocks_relations": blocks_relations,
         "failures": failures,
@@ -171,20 +168,19 @@ def _blocks_relations(issue: dict[str, Any], *, scope: str) -> list[dict[str, An
     ]
 
 
-def _pipeline_metadata(issue: dict[str, Any]) -> dict[str, str]:
-    description = str(issue.get("description") or "")
+def _managed_run_state(description: str) -> dict[str, str]:
     result: dict[str, str] = {}
-    in_symphony = False
+    in_state = False
     for line in description.splitlines():
         stripped = line.strip()
-        if stripped == "symphony:":
-            in_symphony = True
+        if stripped == "Managed Run State:":
+            in_state = True
             continue
-        if in_symphony and stripped.startswith("```"):
+        if in_state and not stripped:
             break
-        if not in_symphony or ":" not in stripped:
+        if not in_state or not stripped.startswith("- ") or ":" not in stripped:
             continue
-        key, value = stripped.split(":", 1)
+        key, value = stripped[2:].split(":", 1)
         result[key.strip()] = value.strip()
     return result
 
@@ -213,13 +209,13 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def parser() -> argparse.ArgumentParser:
-    arg_parser = argparse.ArgumentParser(description="Audit a Linear projection of a Symphony pipeline graph.")
+    arg_parser = argparse.ArgumentParser(description="Audit a Linear projection of a Symphony Managed Run.")
     arg_parser.add_argument("issue", help="Linear issue id or identifier accepted by Linear's issue(id:) field.")
     arg_parser.add_argument(
         "--mode",
         choices=["audit", "summary"],
         default="audit",
-        help="Use audit for pipeline projection checks or summary to export parent/child/blocks relationships.",
+        help="Use audit for Managed Run projection checks or summary to export parent/child/blocks relationships.",
     )
     arg_parser.add_argument("--out", type=Path, help="Write JSON evidence to this path.")
     return arg_parser

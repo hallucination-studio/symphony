@@ -52,22 +52,22 @@ describe("api client", () => {
     expect(result.turnstile.enabled).toBe(false);
   });
 
-  it("pipeline requests the runtime group pipeline view", async () => {
+  it("managedRuns requests the runtime group managed runs view", async () => {
     const fetchMock = mockFetch(200, {
       runtime_group_id: "group-1",
       policy_revision: 2,
       profiles: {},
-      pipeline: { graph_revision: 3, modes: [], predicted_call_order: [], human_waits: [] },
+      managed_runs: { runs: [{ run_id: "run-1", work_items: [] }] },
     });
     global.fetch = fetchMock;
 
-    const result = await api.pipeline();
+    const result = await api.managedRuns();
 
     expect(fetchMock).toHaveBeenCalledWith(
-      "/api/v1/pipeline",
+      "/api/v1/managed-runs",
       expect.objectContaining({ credentials: "include" }),
     );
-    expect(result.pipeline.graph_revision).toBe(3);
+    expect(result.managed_runs.runs?.[0]?.run_id).toBe("run-1");
   });
 
   it("saveRepository POSTs a JSON body without workspace_id", async () => {

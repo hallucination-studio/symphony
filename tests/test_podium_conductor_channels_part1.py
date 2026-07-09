@@ -20,7 +20,7 @@ async def test_runtime_report_upserts_conductor_bindings_metrics_and_log_tail() 
                         "linear_project": "Project Alpha",
                         "project_slug": "ALPHA",
                         "agent_app_user_id": "agent-alpha",
-                        "pipeline_profile": "gated-task",
+                        "managed_run_profile": "gated-task",
                         "process_status": "running",
                         "constraint_labels": ["symphony:performer/Alpha", "symphony:profile/gated-task"],
                         "repo_source": {"type": "local_path", "value": "/repo/a"},
@@ -31,7 +31,7 @@ async def test_runtime_report_upserts_conductor_bindings_metrics_and_log_tail() 
                         "linear_project": "Project Beta",
                         "project_slug": "BETA",
                         "agent_app_user_id": "agent-beta",
-                        "pipeline_profile": "default",
+                        "managed_run_profile": "default",
                         "process_status": "stopped",
                     },
                 ],
@@ -86,17 +86,17 @@ async def test_runtime_report_returns_stored_runtime_config_for_conductor() -> N
         enrolled = await enroll_conductor(client)
         config = {
             "version": 7,
-            "scheduler_policy": {
+            "managed_run_policy": {
                 "policy_id": "policy-e2e",
                 "version": 7,
                 "effective_at": "2026-07-07T00:00:00Z",
-                "capacity": {"global": 3, "by_mode": {"plan": 1, "execute": 1, "verify": 1}},
+                "capacity": {"global": 3, "by_role": {"plan": 1, "work_item": 1, "verify": 1}},
                 "max_rework_attempts": 1,
             },
             "profiles": {
-                "plan": {"name": "codex-plan", "backend": "codex", "mode": "plan", "settings": {"model": "gpt-5.3-codex"}},
-                "execute": {"name": "codex-execute", "backend": "codex", "mode": "execute", "settings": {"model": "gpt-5.3-codex"}},
-                "verify": {"name": "codex-verify", "backend": "codex", "mode": "verify", "settings": {"model": "gpt-5.3-codex"}},
+                "plan": {"name": "codex-plan", "backend": "codex", "role": "plan", "settings": {"model": "gpt-5.3-codex"}},
+                "work_item": {"name": "codex-work-item", "backend": "codex", "role": "work_item", "settings": {"model": "gpt-5.3-codex"}},
+                "verify": {"name": "codex-verify", "backend": "codex", "role": "verify", "settings": {"model": "gpt-5.3-codex"}},
             },
         }
 
@@ -117,7 +117,7 @@ async def test_runtime_report_returns_stored_runtime_config_for_conductor() -> N
     assert body["status"] == "ok"
     assert body["config"]["runtime_group_id"] == enrolled["runtime_group_id"]
     assert body["config"]["version"] == 7
-    assert sorted(body["config"]["profiles"]) == ["execute", "plan", "verify"]
+    assert sorted(body["config"]["profiles"]) == ["plan", "verify", "work_item"]
     assert body["config"]["profiles"]["plan"]["settings"]["model"] == "gpt-5.3-codex"
 
 async def test_injected_json_store_persists_auth_across_app_restart() -> None:
@@ -230,7 +230,7 @@ async def test_injected_postgres_persists_queued_dispatch_across_app_restart() -
     assert lease.json()["dispatch"]["fencing_token"] == 1
 
 
-async def test_injected_postgres_persists_structured_pipeline_intent_across_app_restart() -> None:
+async def test_injected_postgres_persists_structured_managed_run_intent_across_app_restart() -> None:
     from podium.store import PodiumStore
 
     store = PodiumStore()
@@ -250,7 +250,7 @@ async def test_injected_postgres_persists_structured_pipeline_intent_across_app_
         )
         queued = await queue_agent_session(
             app,
-            agent_session_payload_with_pipeline_intent(
+            agent_session_payload_with_managed_run_intent(
                 workspace_id=user_id,
                 project_slug="ALPHA",
                 delegate_id="agent-alpha",
@@ -272,7 +272,8 @@ async def test_injected_postgres_persists_structured_pipeline_intent_across_app_
     assert queued.status_code == 200
     assert queued.json()["queued"] == 1
     assert lease.status_code == 200
-    assert lease.json()["dispatch"]["pipeline_intent"]["parallel_dependency_shape"]["parallel_branch_node_ids"] == [
+    dispatch = lease.json()["dispatch"]
+    assert dispatch["managed_run_intent"]["parallel_dependency_shape"]["parallel_branch_node_ids"] == [
         "parallel-a",
         "parallel-b",
     ]
@@ -386,14 +387,12 @@ async def test_injected_postgres_acks_leased_dispatch_across_distinct_workers_an
                 "fencing_token": dispatch["fencing_token"],
                 "status": "completed",
                 "reason": "completed_by_runtime",
-                "graph_id": "graph-1",
-                "node_id": "node-1",
-                "attempt_id": "attempt-1",
-                "mode": "verify",
-                "attempt_status": "succeeded",
-                "graph_revision": 1,
-                "policy_revision": 1,
-                "lease_id": "lease-1",
+                "run_id": "run-1",
+                "parent_issue_id": "issue-1",
+                "active_work_item_id": "wi-1",
+                "managed_run_state": "done",
+                "plan_version": 1,
+                "backend_session_id": "thread-1",
             },
         )
 
@@ -556,7 +555,7 @@ async def test_direct_dispatch_preserves_dependency_metadata_for_runtime_dispatc
     assert dispatch["blocked_by"] == ["blocker-1"]
 
 
-async def test_direct_dispatch_preserves_structured_pipeline_intent_for_runtime_dispatch() -> None:
+async def test_direct_dispatch_preserves_structured_managed_run_intent_for_runtime_dispatch() -> None:
     app = make_app()
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
         user_id = await register(client, "intent-routing@example.com")
@@ -572,7 +571,7 @@ async def test_direct_dispatch_preserves_structured_pipeline_intent_for_runtime_
         )
         queued = await queue_agent_session(
             app,
-            agent_session_payload_with_pipeline_intent(
+            agent_session_payload_with_managed_run_intent(
                 workspace_id=user_id,
                 project_slug="ALPHA",
                 delegate_id="agent-alpha",
@@ -586,12 +585,12 @@ async def test_direct_dispatch_preserves_structured_pipeline_intent_for_runtime_
     assert queued.status_code == 200
     assert queued.json()["queued"] == 1
     dispatch = lease.json()["dispatch"]
-    assert dispatch["pipeline_intent"]["parallel_dependency_shape"] == {
+    assert dispatch["managed_run_intent"]["parallel_dependency_shape"] == {
         "parallel_branch_node_ids": ["parallel-a", "parallel-b"],
         "downstream_node_ids": ["downstream"],
     }
-    assert dispatch["pipeline_intent"]["required_gate_steps"] == [
-        {"step": "pytest tests/test_smoke.py -q", "source": "appendix_harness"}
+    assert dispatch["managed_run_intent"]["required_gate_steps"] == [
+        {"step": "pytest tests/test_smoke.py -q", "source": "acceptance_appendix"}
     ]
 
 
@@ -619,7 +618,7 @@ async def test_direct_dispatch_queue_and_runtime_ack_completes_it() -> None:
                         "instance_id": "inst-a",
                         "project_slug": "ALPHA",
                         "agent_app_user_id": "agent-alpha",
-                        "pipeline_profile": "gated-task",
+                        "managed_run_profile": "gated-task",
                     }
                 ]
             },
@@ -655,14 +654,12 @@ async def test_direct_dispatch_queue_and_runtime_ack_completes_it() -> None:
                 "fencing_token": dispatch["fencing_token"],
                 "status": "completed",
                 "reason": "completed_by_runtime",
-                "graph_id": "graph-1",
-                "node_id": "node-1",
-                "attempt_id": "attempt-1",
-                "mode": "verify",
-                "attempt_status": "succeeded",
-                "graph_revision": 1,
-                "policy_revision": 1,
-                "lease_id": "lease-1",
+                "run_id": "run-1",
+                "parent_issue_id": "issue-1",
+                "active_work_item_id": "wi-1",
+                "managed_run_state": "done",
+                "plan_version": 1,
+                "backend_session_id": "thread-1",
             },
         )
 
@@ -672,13 +669,16 @@ async def test_direct_dispatch_queue_and_runtime_ack_completes_it() -> None:
     assert queued.json()["queued"] == 1
     assert dispatch["issue_id"] == "issue-1"
     assert dispatch["issue_identifier"] == "ALPHA-1"
-    assert dispatch["pipeline_profile"] == "gated-task"
+    assert dispatch["managed_run_profile"] == "gated-task"
     assert "workflow_profile" not in dispatch
     assert ack.status_code == 200
     assert ack.json()["dispatch"]["status"] == "completed"
     assert ack.json()["dispatch"]["reason"] == "completed_by_runtime"
     assert "runtime_phase" not in ack.json()["dispatch"]
-    assert ack.json()["dispatch"]["graph_id"] == "graph-1"
+    assert ack.json()["dispatch"]["run_id"] == "run-1"
+    assert ack.json()["dispatch"]["active_work_item_id"] == "wi-1"
+    assert ack.json()["dispatch"]["managed_run_state"] == "done"
+    assert "graph_id" not in ack.json()["dispatch"]
 
 async def test_direct_dispatch_queue_is_idempotent_by_binding_and_agent_session() -> None:
     app = make_app()
@@ -694,14 +694,18 @@ async def test_direct_dispatch_queue_is_idempotent_by_binding_and_agent_session(
 
         first = await queue_agent_session(app, payload)
         second = await queue_agent_session(app, payload)
-        pipeline = await client.get("/api/v1/pipeline")
+        managed_runs = await client.get("/api/v1/managed-runs")
+        removed_managed_run = await client.get("/api/v1/managed_run")
+        old_pipeline = await client.get("/api/v1/pipeline")
 
     assert first.status_code == 200
     assert first.json()["queued"] == 1
     assert second.status_code == 200
     assert second.json()["queued"] == 0
-    assert pipeline.status_code == 200
-    assert "pipeline" in pipeline.json()
+    assert managed_runs.status_code == 200
+    assert removed_managed_run.status_code == 404
+    assert "managed_runs" in managed_runs.json()
+    assert old_pipeline.status_code == 404
 
 async def test_injected_postgres_empty_agent_session_id_dedupes_by_issue_not_binding_only() -> None:
     from podium.store import PodiumStore

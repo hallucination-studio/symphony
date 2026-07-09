@@ -45,6 +45,9 @@ from real_symphony_e2e_analysis_runtime import (
     write_wait_artifacts,
 )
 
+conductor_managed_run_work_items = conductor_pipeline_nodes
+managed_run_work_items_terminal = pipeline_nodes_terminal
+
 
 async def complete_conductor_human_action(*args, **kwargs):
     originals = (

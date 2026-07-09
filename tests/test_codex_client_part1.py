@@ -504,6 +504,73 @@ async def test_sdk_backend_allows_non_handoff_output_schema(tmp_path: Path) -> N
     assert result.final_response == '{"score":4,"result":"pass"}'
     assert result.structured_result == {"score": 4, "result": "pass"}
 
+async def test_sdk_backend_parses_custom_schema_final_response_without_default_shape(tmp_path: Path) -> None:
+    class PlanTurn:
+        id = "turn-1"
+
+        async def run(self) -> dict[str, Any]:
+            return {"final_response": '{"summary":"managed run","work_items":[],"approval_required":false}'}
+
+    class PlanThread(FakeSdkThread):
+        def turn(self, *args: Any, **kwargs: Any) -> PlanTurn:
+            self.prompts.append((args, kwargs))
+            return PlanTurn()
+
+    class PlanSdk(FakeSdk):
+        async def thread_start(self, **kwargs: Any) -> PlanThread:
+            return PlanThread("thread-plan")
+
+    client = CodexSdkClient(CodexConfig(), sdk_factory=lambda config: PlanSdk())
+
+    result = await client.run_session(tmp_path, "Plan", "Managed Run", output_schema={"type": "object"})
+
+    assert result.structured_result == {"summary": "managed run", "work_items": [], "approval_required": False}
+
+async def test_sdk_backend_reasks_once_for_invalid_custom_schema_output(tmp_path: Path) -> None:
+    class FlakyCustomThread(FakeSdkThread):
+        def __init__(self, thread_id: str):
+            super().__init__(thread_id)
+            self.calls = 0
+
+        def turn(self, *args: Any, **kwargs: Any) -> Any:
+            self.calls += 1
+            self.prompts.append((args, kwargs))
+            if self.calls == 1:
+                class BadTurn:
+                    id = "turn-bad"
+
+                    async def run(self) -> dict[str, Any]:
+                        return {"final_response": "not json"}
+
+                return BadTurn()
+
+            class GoodTurn:
+                id = "turn-good"
+
+                async def run(self) -> dict[str, Any]:
+                    return {"final_response": '{"score":4,"result":"pass"}'}
+
+            return GoodTurn()
+
+    class FlakyCustomSdk(FakeSdk):
+        def __init__(self) -> None:
+            super().__init__()
+            self.thread = FlakyCustomThread("thread-custom")
+
+        async def thread_start(self, **kwargs: Any) -> FlakyCustomThread:
+            return self.thread
+
+    fake_sdk = FlakyCustomSdk()
+    events: list[dict[str, Any]] = []
+    client = CodexSdkClient(CodexConfig(), sdk_factory=lambda config: fake_sdk)
+
+    result = await client.run_session(tmp_path, "Gate", "Acceptance", on_event=events.append, output_schema={"type": "object"})
+
+    assert result.structured_result == {"score": 4, "result": "pass"}
+    assert fake_sdk.thread.calls == 2
+    assert "previous response did not match" in fake_sdk.thread.prompts[1][0][0]
+    assert [event["event"] for event in events if event["event"] == "turn_retrying"]
+
 async def test_sdk_backend_retries_transient_init_until_thread_succeeds(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

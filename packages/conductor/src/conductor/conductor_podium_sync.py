@@ -5,7 +5,6 @@ from .conductor_podium_sync_dispatch import PodiumDispatchMixin
 from .conductor_podium_sync_failure import PodiumSyncFailureMixin
 from .conductor_podium_sync_linear import PodiumLinearReconcileMixin
 from .conductor_podium_sync_project_label import PodiumProjectLabelMixin
-from .conductor_podium_sync_reconcile import PodiumReconcileMixin
 from .conductor_podium_sync_reporter import PodiumReportMixin
 from .conductor_podium_sync_ws import PodiumWebSocketMixin
 
@@ -16,7 +15,6 @@ class ConductorPodiumSyncMixin(
     PodiumReportMixin,
     PodiumWebSocketMixin,
     PodiumBackgroundMixin,
-    PodiumReconcileMixin,
     PodiumLinearReconcileMixin,
     PodiumProjectLabelMixin,
 ):

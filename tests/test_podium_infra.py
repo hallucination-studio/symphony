@@ -127,13 +127,13 @@ def test_pg_migrator_exposes_phase_0_schema() -> None:
     assert "WHERE agent_session_id <> ''" in sql
     assert "dispatches_binding_issue_empty_session_unique" in sql
     assert "WHERE agent_session_id = ''" in sql
-    assert "pipeline_profile TEXT NOT NULL DEFAULT 'default'" in sql
+    assert "managed_run_profile TEXT NOT NULL DEFAULT 'default'" in sql
     assert "workflow_profile" not in sql
     assert "CREATE TABLE IF NOT EXISTS sessions" in sql
     assert "CREATE TABLE IF NOT EXISTS enrollment_tokens" in sql
     assert "CREATE TABLE IF NOT EXISTS runtime_presence" in sql
     assert "CREATE TABLE IF NOT EXISTS runtime_configs" in sql
-    assert "CREATE TABLE IF NOT EXISTS pipeline_views" in sql
+    assert "CREATE TABLE IF NOT EXISTS managed_run_views" in sql
     assert "CREATE TABLE IF NOT EXISTS runtime_commands" in sql
 
 
@@ -159,7 +159,7 @@ def test_dispatch_public_tolerates_pg_ack_record_without_route_fields() -> None:
     )
 
     assert payload["routing_rule_id"] == "runtime-1:inst-1"
-    assert payload["pipeline_profile"] == "default"
+    assert payload["managed_run_profile"] == "default"
 
 
 async def test_json_store_persists_session_and_does_not_revive_revoked_token(tmp_path) -> None:
@@ -202,6 +202,24 @@ async def test_runtime_enrollment_token_creates_workspace_user_for_durable_fk(tm
 
     assert created.status_code == 200
     assert await store.get_user("real-workspace-1") is not None
+
+
+async def test_runtime_enrollment_token_rejects_legacy_managed_run_profile_field(tmp_path) -> None:
+    store = PodiumStore(tmp_path)
+    app = create_app(store=store, secret_key="test-secret", secure_cookies=False)
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
+        response = await client.post(
+            "/api/v1/runtime/enrollment-tokens",
+            json={
+                "runtime_group_id": "group-real-workspace",
+                "linear_workspace_id": "real-workspace-1",
+                "managed_run_profile": "gated-task",
+            },
+        )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "legacy_runtime_profile_field"
 
 
 async def test_json_store_persists_presence_and_log_fetch_result(tmp_path) -> None:

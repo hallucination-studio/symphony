@@ -50,14 +50,16 @@ class _SdkErrorClassification:
     http_status: int | None = None
 
 
-def _parse_structured_result(value: str | None) -> dict[str, Any] | None:
+def _parse_structured_result(value: str | None, *, validate: bool = True) -> dict[str, Any] | None:
     if not value:
         return None
     try:
         parsed = json.loads(value)
     except json.JSONDecodeError:
         return None
-    return parsed if _valid_structured_result(parsed) else None
+    if not isinstance(parsed, dict):
+        return None
+    return parsed if not validate or _valid_structured_result(parsed) else None
 
 
 def _valid_structured_result(value: Any) -> bool:

@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -45,12 +46,18 @@ async def fetch_linear_issue(*args: Any, **kwargs: Any) -> dict[str, Any]:
 
 
 async def wait_for_linear_delegate_visible(*args: Any, **kwargs: Any) -> dict[str, Any]:
-    original = _linear.fetch_linear_issue
-    _linear.fetch_linear_issue = fetch_linear_issue
-    try:
-        return await _linear.wait_for_linear_delegate_visible(*args, **kwargs)
-    finally:
-        _linear.fetch_linear_issue = original
+    token, issue_id, delegate_id = args[:3]
+    timeout_seconds = float(kwargs.get("timeout_seconds", 20))
+    poll_seconds = float(kwargs.get("poll_seconds", 0.5))
+    deadline = time.monotonic() + timeout_seconds
+    last_issue: dict[str, Any] | None = None
+    while True:
+        last_issue = await fetch_linear_issue(token, issue_id)
+        if ((last_issue.get("delegate") or {}).get("id")) == delegate_id:
+            return last_issue
+        if time.monotonic() >= deadline:
+            return last_issue
+        await asyncio.sleep(poll_seconds)
 
 
 async def fetch_linear_human_action_issue(*args: Any, **kwargs: Any) -> dict[str, Any]:
@@ -103,9 +110,10 @@ def parser() -> argparse.ArgumentParser:
     arg_parser = argparse.ArgumentParser(description="Run a real Symphony Podium/Conductor/Performer e2e matrix.")
     arg_parser.add_argument("--out", type=Path, default=Path(".test-real-flow/e2e-matrix"))
     arg_parser.add_argument("--project-slug", default=DEFAULT_PROJECT_SLUG)
-    arg_parser.add_argument("--pipeline-gates", action=argparse.BooleanOptionalAction, default=True)
+    arg_parser.add_argument("--managed-run-gates", dest="pipeline_gates", action=argparse.BooleanOptionalAction, default=True)
     arg_parser.add_argument(
-        "--pipeline-scenario",
+        "--managed-run-scenario",
+        dest="pipeline_scenario",
         choices=["basic", "parallel", "replan", "integration-conflict", "runtime-wait", "overall-dod"],
         default="basic",
     )

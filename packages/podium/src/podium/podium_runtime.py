@@ -87,7 +87,7 @@ class PodiumRuntimeMixin:
             "linear_project": str(raw_binding.get("linear_project") or ""),
             "project_slug": str(raw_binding.get("project_slug") or raw_binding.get("linear_project") or ""),
             "agent_app_user_id": str(raw_binding.get("agent_app_user_id") or raw_binding.get("linear_agent_app_user_id") or ""),
-            "pipeline_profile": str(raw_binding.get("pipeline_profile") or "default"),
+            "managed_run_profile": str(raw_binding.get("managed_run_profile") or "default"),
             "process_status": str(raw_binding.get("process_status") or ""),
             "constraint_labels": [
                 str(label)
@@ -170,7 +170,9 @@ class PodiumRuntimeMixin:
         return result
 
     def binding_public(self, binding: dict[str, Any]) -> dict[str, Any]:
-        return dict(binding)
+        payload = dict(binding)
+        payload["managed_run_profile"] = str(payload.get("managed_run_profile") or "default")
+        return payload
 
     async def conductor_belongs_to_user(self, conductor_id: str, user_id: str) -> bool:
         return any(str(row.get("id") or "") == conductor_id for row in await self.store.list_conductors_for_user(user_id))

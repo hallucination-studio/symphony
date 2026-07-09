@@ -5,87 +5,70 @@ from typing import Any
 from .conductor_service_helpers import _runtime_metrics
 
 
-def pipeline_runtime_snapshot(pipeline_store) -> dict[str, Any]:
-    view = pipeline_store.pipeline_view().to_dict()
-    nodes = view.get("nodes") if isinstance(view.get("nodes"), list) else []
-    attempts = view.get("attempts") if isinstance(view.get("attempts"), list) else []
-    predicted = view.get("predicted_call_order") if isinstance(view.get("predicted_call_order"), list) else []
-    human_waits = view.get("human_waits") if isinstance(view.get("human_waits"), list) else []
-    runtime_waits = view.get("runtime_waits") if isinstance(view.get("runtime_waits"), list) else []
-    running = _running_attempts(attempts)
-    retrying = _retrying_nodes(nodes)
-    blocked = _blocked_calls(predicted)
-    human_interventions = _waiting_human_interventions(human_waits, runtime_waits)
+def managed_run_runtime_snapshot(managed_run_store) -> dict[str, Any]:
+    view = managed_run_store.managed_run_view()
+    runs = view.get("runs") if isinstance(view.get("runs"), list) else []
+    running = _running_runs(runs)
+    blocked = _blocked_runs(runs)
+    pending_human = _human_attention_runs(runs)
     return {
-        "source": "pipeline",
-        "graph_revision": view.get("graph_revision"),
-        "policy_revision": view.get("policy_revision"),
+        "source": "managed_run",
+        "runs_total": len(runs),
         "counts": {
             "running": len(running),
-            "retrying": len(retrying),
+            "retrying": 0,
             "continuing": 0,
             "blocked": len(blocked),
-            "pending_human": len(human_interventions),
+            "pending_human": len(pending_human),
         },
         "running": running,
-        "retrying": retrying,
+        "retrying": [],
         "continuing": [],
         "blocked": blocked,
-        "human_interventions": human_interventions,
-        "issues": running + retrying + blocked + human_interventions,
+        "human_interventions": pending_human,
+        "issues": running + blocked + pending_human,
     }
 
 
-def pipeline_runtime_metrics(pipeline_store) -> dict[str, Any]:
-    return _runtime_metrics(pipeline_runtime_snapshot(pipeline_store))
+def managed_run_runtime_metrics(managed_run_store) -> dict[str, Any]:
+    return _runtime_metrics(managed_run_runtime_snapshot(managed_run_store))
 
 
-def _running_attempts(attempts: list[Any]) -> list[dict[str, Any]]:
+def _running_runs(runs: list[Any]) -> list[dict[str, Any]]:
     return [
         {
-            "attempt_id": attempt.get("attempt_id"),
-            "issue_id": attempt.get("node_id"),
-            "mode": attempt.get("mode"),
-            "state": attempt.get("state"),
-            "started_at": attempt.get("started_at"),
+            "run_id": run.get("run_id"),
+            "issue_id": run.get("parent_issue_id"),
+            "issue_identifier": run.get("issue_identifier"),
+            "state": run.get("state"),
+            "active_work_item_id": run.get("active_work_item_id"),
         }
-        for attempt in attempts
-        if isinstance(attempt, dict) and str(attempt.get("state") or "") == "running"
+        for run in runs
+        if isinstance(run, dict) and str(run.get("state") or "") in {"planning", "projecting_plan", "ready", "executing", "reviewing"}
     ]
 
 
-def _retrying_nodes(nodes: list[Any]) -> list[dict[str, Any]]:
+def _blocked_runs(runs: list[Any]) -> list[dict[str, Any]]:
     return [
         {
-            "issue_id": node.get("node_id"),
-            "state": node.get("state"),
-            "rework_count": node.get("rework_count"),
+            "run_id": run.get("run_id"),
+            "issue_id": run.get("parent_issue_id"),
+            "issue_identifier": run.get("issue_identifier"),
+            "reason": run.get("latest_reason") or "blocked",
         }
-        for node in nodes
-        if isinstance(node, dict) and int(node.get("rework_count") or 0) > 0
+        for run in runs
+        if isinstance(run, dict) and str(run.get("state") or "") in {"blocked", "failed"}
     ]
 
 
-def _blocked_calls(predicted: list[Any]) -> list[dict[str, Any]]:
+def _human_attention_runs(runs: list[Any]) -> list[dict[str, Any]]:
     return [
         {
-            "issue_id": call.get("node"),
-            "blocked_by": call.get("blocked_by"),
-            "earliest_mode": call.get("earliest_mode"),
+            "run_id": run.get("run_id"),
+            "issue_id": run.get("parent_issue_id"),
+            "issue_identifier": run.get("issue_identifier"),
+            "reason": run.get("latest_reason") or "human attention required",
         }
-        for call in predicted
-        if isinstance(call, dict) and isinstance(call.get("blocked_by"), list) and call["blocked_by"]
-    ]
-
-
-def _waiting_human_interventions(human_waits: list[Any], runtime_waits: list[Any]) -> list[dict[str, Any]]:
-    return [
-        {
-            "issue_id": wait.get("node_id"),
-            "wait_id": wait.get("wait_id"),
-            "reason": wait.get("reason") or wait.get("wait_kind"),
-            "status": wait.get("status"),
-        }
-        for wait in [*human_waits, *runtime_waits]
-        if isinstance(wait, dict) and str(wait.get("status") or "waiting") == "waiting"
+        for run in runs
+        if isinstance(run, dict) and str(run.get("state") or "") == "blocked"
     ]

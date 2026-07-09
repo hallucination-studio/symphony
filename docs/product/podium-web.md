@@ -3,7 +3,7 @@
 ## Purpose
 
 Podium Web guides an operator from an empty account to a working Linear-powered
-runtime, then shows managed pipeline health without exposing secrets or requiring
+runtime, then shows Managed Runs health without exposing secrets or requiring
 the operator to understand internal process boundaries.
 
 The UI is served by Podium's BFF/static host. Browser responses never include
@@ -67,13 +67,13 @@ Routing:
 - capacity limits;
 - enabled/disabled state.
 
-Pipeline:
+Managed Runs:
 
-- graph nodes and `blocks`;
-- active policy/capacity/leases;
-- attempts and backend thread ids;
-- gates, verification scores, manifests, and integration state;
-- `need_human` and runtime waits;
+- parent runs and work items;
+- active policy, capacity, and runtime profiles;
+- backend thread ids and latest turn state;
+- verification results, checkpoint results, and file impact;
+- blocked work items, human approval waits, and runtime waits;
 - Linear projection links and sanitized errors.
 
 ## Error Surfaces

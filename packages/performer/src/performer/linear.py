@@ -186,5 +186,5 @@ class LinearTracker:
             relation_type=relation_type,
         )
 
-    async def set_issue_pipeline_label(self, issue_id: str, label_name: str) -> dict[str, Any]:
-        return await self.client.set_issue_pipeline_label(issue_id, label_name)
+    async def set_issue_managed_run_label(self, issue_id: str, label_name: str) -> dict[str, Any]:
+        return await self.client.set_issue_managed_run_label(issue_id, label_name)

@@ -122,8 +122,10 @@ def _register_runtime_listing_routes(
 
 def _register_runtime_enrollment_routes(app: FastAPI, *, state: Any, error_response: ErrorResponse) -> None:
     @app.post("/api/v1/runtime/enrollment-tokens")
-    async def create_enrollment_token(request: Request) -> dict[str, str]:
+    async def create_enrollment_token(request: Request):
         payload = await request.json()
+        if "managed_run_profile" in payload:
+            return error_response(400, "legacy_runtime_profile_field", "Use managed_run_profile for runtime enrollment")
         token = secrets.token_urlsafe(32)
         token_hash = hash_secret(token)
         runtime_group_id = await runtime_group_from_payload(state, payload)
@@ -189,7 +191,7 @@ async def runtime_group_from_payload(state: Any, payload: dict[str, Any]) -> str
             "linear_workspace_id": workspace_id,
             "project_slug": str(payload.get("project_slug") or ""),
             "linear_agent_app_user_id": str(payload.get("linear_agent_app_user_id") or payload.get("agent_app_user_id") or ""),
-            "pipeline_profile": str(payload.get("pipeline_profile") or "default"),
+            "managed_run_profile": str(payload.get("managed_run_profile") or "default"),
             "project_binding_id": "",
         }
     )
@@ -221,7 +223,7 @@ async def save_runtime_record(
         "linear_workspace_id": "",
         "project_slug": "",
         "linear_agent_app_user_id": "",
-        "pipeline_profile": "default",
+        "managed_run_profile": "default",
         "project_binding_id": "",
     }
     conductor = {

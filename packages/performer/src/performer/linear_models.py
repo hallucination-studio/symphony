@@ -165,7 +165,7 @@ def _normalize_comments(nodes: list[Any]) -> list[dict[str, Any]]:
     return comments
 
 
-def _preserve_pipeline_projection_label(name: str) -> bool:
+def _preserve_managed_run_projection_label(name: str) -> bool:
     lowered = name.lower()
     if not lowered.startswith("performer:"):
         return True
@@ -173,7 +173,7 @@ def _preserve_pipeline_projection_label(name: str) -> bool:
 
 
 def _preserve_non_phase_performer_label(name: str) -> bool:
-    return _preserve_pipeline_projection_label(name)
+    return _preserve_managed_run_projection_label(name)
 
 
 def replace_marker_block(description: str, marker_name: str, block: str) -> str:

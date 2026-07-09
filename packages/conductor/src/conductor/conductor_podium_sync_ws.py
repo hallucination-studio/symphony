@@ -51,27 +51,5 @@ class PodiumWebSocketMixin:
         return {"status": "ignored", "reason": "unsupported_command"}
 
     def _handle_podium_human_answered(self, command: dict[str, Any]) -> dict[str, Any]:
-        child_issue_id = str(command.get("child_issue_id") or "").strip()
-        human_response = str(command.get("human_response") or command.get("response") or "Human action completed.").strip()
-        if not human_response:
-            human_response = "Human action completed."
-        wait_id = str(command.get("wait_id") or "").strip()
-        wait = None
-        for candidate in self.pipeline_store.list_human_waits():
-            if wait_id and candidate.get("wait_id") == wait_id:
-                wait = candidate
-                break
-            if child_issue_id and candidate.get("child_issue_id") == child_issue_id:
-                wait = candidate
-                break
-        if wait is None:
-            for candidate in self.pipeline_store.list_runtime_waits(status="waiting"):
-                if wait_id and candidate.get("wait_id") == wait_id:
-                    wait = candidate
-                    break
-                if child_issue_id and candidate.get("child_issue_id") == child_issue_id:
-                    wait = candidate
-                    break
-        if wait is None:
-            return {"status": "ignored", "reason": "human_wait_not_found"}
-        return {"status": "ignored", "reason": "completed_child_required", "wait_id": str(wait["wait_id"])}
+        _ = command
+        return {"status": "ignored", "reason": "managed_runs_use_runtime_wait_state"}
