@@ -9,11 +9,10 @@ from typing import Any
 from .conductor_models import InstanceCreateRequest, InstancePatchRequest, InstanceRecord
 from .conductor_runtime import LogQuery
 from .conductor_service_helpers import *  # noqa: F403
+from .conductor_service_runtime_view import pipeline_runtime_snapshot
 from .conductor_service_types import *  # noqa: F403
 from performer_api.models import utc_now
 from performer_api.ops_store import OpsStore
-
-
 class ConductorServiceViewsMixin:
     def update_podium_connection(self, channel: str, *, status: str, error: str | None = None) -> None:
         sanitized = _sanitize_connection_error(error)
@@ -153,70 +152,7 @@ class ConductorServiceViewsMixin:
         return runtime
 
     def _pipeline_runtime_snapshot(self) -> dict[str, Any]:
-        view = self.pipeline_store.pipeline_view().to_dict()
-        nodes = view.get("nodes") if isinstance(view.get("nodes"), list) else []
-        attempts = view.get("attempts") if isinstance(view.get("attempts"), list) else []
-        predicted = view.get("predicted_call_order") if isinstance(view.get("predicted_call_order"), list) else []
-        human_waits = view.get("human_waits") if isinstance(view.get("human_waits"), list) else []
-        runtime_waits = view.get("runtime_waits") if isinstance(view.get("runtime_waits"), list) else []
-
-        running = [
-            {
-                "attempt_id": attempt.get("attempt_id"),
-                "issue_id": attempt.get("node_id"),
-                "mode": attempt.get("mode"),
-                "state": attempt.get("state"),
-                "started_at": attempt.get("started_at"),
-            }
-            for attempt in attempts
-            if isinstance(attempt, dict) and str(attempt.get("state") or "") == "running"
-        ]
-        retrying = [
-            {
-                "issue_id": node.get("node_id"),
-                "state": node.get("state"),
-                "rework_count": node.get("rework_count"),
-            }
-            for node in nodes
-            if isinstance(node, dict) and int(node.get("rework_count") or 0) > 0
-        ]
-        blocked = [
-            {
-                "issue_id": call.get("node"),
-                "blocked_by": call.get("blocked_by"),
-                "earliest_mode": call.get("earliest_mode"),
-            }
-            for call in predicted
-            if isinstance(call, dict) and isinstance(call.get("blocked_by"), list) and call["blocked_by"]
-        ]
-        human_interventions = [
-            {
-                "issue_id": wait.get("node_id"),
-                "wait_id": wait.get("wait_id"),
-                "reason": wait.get("reason") or wait.get("wait_kind"),
-                "status": wait.get("status"),
-            }
-            for wait in [*human_waits, *runtime_waits]
-            if isinstance(wait, dict) and str(wait.get("status") or "waiting") == "waiting"
-        ]
-        return {
-            "source": "pipeline",
-            "graph_revision": view.get("graph_revision"),
-            "policy_revision": view.get("policy_revision"),
-            "counts": {
-                "running": len(running),
-                "retrying": len(retrying),
-                "continuing": 0,
-                "blocked": len(blocked),
-                "pending_human": len(human_interventions),
-            },
-            "running": running,
-            "retrying": retrying,
-            "continuing": [],
-            "blocked": blocked,
-            "human_interventions": human_interventions,
-            "issues": running + retrying + blocked + human_interventions,
-        }
+        return pipeline_runtime_snapshot(self.pipeline_store)
 
     def _write_manual_plan_request(self, instance: InstanceRecord, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)

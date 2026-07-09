@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type MutableRefObject, type RefObject } from "react";
 import { useConfig } from "../api/hooks";
 import { getTurnstileToken } from "../lib/turnstile";
 
@@ -39,6 +39,22 @@ export function TurnstileWidget({
   const [scriptReady, setScriptReady] = useState(false);
   const enabled = Boolean(config?.turnstile.enabled && config.turnstile.site_key);
 
+  useTurnstileReadiness({ enabled, isError, isLoading, onReadyChange, onToken });
+  useTurnstileScript({ enabled, onReadyChange, onToken, setScriptReady });
+  useTurnstileRender({ config, containerRef, enabled, onReadyChange, onToken, scriptReady, widgetIdRef });
+
+  if (!enabled) return null;
+
+  return (
+    <div
+      ref={containerRef}
+      className="turnstile-widget"
+      data-testid="turnstile-widget"
+    />
+  );
+}
+
+function useTurnstileReadiness({ enabled, isError, isLoading, onReadyChange, onToken }: { enabled: boolean; isError: boolean; isLoading: boolean; onReadyChange: (ready: boolean) => void; onToken: (token: string) => void }) {
   useEffect(() => {
     if (isLoading) {
       onReadyChange(false);
@@ -53,7 +69,9 @@ export function TurnstileWidget({
     onToken("");
     onReadyChange(false);
   }, [enabled, isError, isLoading, onReadyChange, onToken]);
+}
 
+function useTurnstileScript({ enabled, onReadyChange, onToken, setScriptReady }: { enabled: boolean; onReadyChange: (ready: boolean) => void; onToken: (token: string) => void; setScriptReady: (ready: boolean) => void }) {
   useEffect(() => {
     if (!enabled) {
       setScriptReady(false);
@@ -74,8 +92,10 @@ export function TurnstileWidget({
     return () => {
       cancelled = true;
     };
-  }, [enabled, onReadyChange, onToken]);
+  }, [enabled, onReadyChange, onToken, setScriptReady]);
+}
 
+function useTurnstileRender({ config, containerRef, enabled, onReadyChange, onToken, scriptReady, widgetIdRef }: { config: ReturnType<typeof useConfig>["data"]; containerRef: RefObject<HTMLDivElement | null>; enabled: boolean; onReadyChange: (ready: boolean) => void; onToken: (token: string) => void; scriptReady: boolean; widgetIdRef: MutableRefObject<string | null> }) {
   useEffect(() => {
     if (!enabled || !scriptReady || !containerRef.current || !config) return;
     if (!window.turnstile) {
@@ -111,17 +131,7 @@ export function TurnstileWidget({
       onToken("");
       onReadyChange(false);
     };
-  }, [config, enabled, onReadyChange, onToken, scriptReady]);
-
-  if (!enabled) return null;
-
-  return (
-    <div
-      ref={containerRef}
-      className="turnstile-widget"
-      data-testid="turnstile-widget"
-    />
-  );
+  }, [config, containerRef, enabled, onReadyChange, onToken, scriptReady, widgetIdRef]);
 }
 
 function loadTurnstileScript(): Promise<void> {

@@ -1,0 +1,107 @@
+from __future__ import annotations
+
+from typing import Any
+
+import httpx
+
+from .conductor_podium_sync_report import _pipeline_report_metrics, _pipeline_report_queue
+from .conductor_service_helpers import _desired_project_labels, _hostname, _linear_agent_app_user_id
+from performer_api.pipeline import RuntimeConfigEnvelope
+
+
+class PodiumReportMixin:
+    def build_podium_report(self, *, log_tail_lines: int = 200) -> dict[str, Any]:
+        settings = self.store.get_settings()
+        bindings: list[dict[str, Any]] = []
+        metrics: dict[str, dict[str, Any]] = {}
+        queue: dict[str, dict[str, Any]] = {}
+        log_tail: dict[str, dict[str, Any]] = {}
+        pipeline_view = self.pipeline_store.pipeline_view().to_dict()
+        pipeline_metrics = _pipeline_report_metrics(pipeline_view)
+        pipeline_queue = _pipeline_report_queue(pipeline_view)
+        instances = self.store.list_instances()
+        for instance in instances:
+            agent_app_user_id = _linear_agent_app_user_id(instance.linear_filters)
+            bindings.append(
+                {
+                    "instance_id": instance.id,
+                    "name": instance.name,
+                    "linear_project": instance.linear_project,
+                    "project_slug": instance.linear_project,
+                    "agent_app_user_id": agent_app_user_id,
+                    "process_status": instance.process_status,
+                    "constraint_labels": _desired_project_labels(instance),
+                    "repo_source": {"type": instance.repo_source_type, "value": instance.repo_source_value},
+                }
+            )
+            metrics[instance.id] = {
+                **pipeline_metrics,
+                "running": bool(instance.process_status == "running"),
+            }
+            queue[instance.id] = {
+                "queued": pipeline_queue["queued"],
+                "leased": pipeline_queue["leased"],
+                "running": 1 if instance.process_status == "running" else 0,
+            }
+            logs = self.query_instance_logs(instance.id, tail=log_tail_lines, order="desc")
+            log_tail[instance.id] = {
+                "generation": logs.get("generation"),
+                "offset_end": logs.get("offset_end", 0),
+                "lines": logs.get("lines") or [],
+            }
+        return {
+            "conductor_id": settings.conductor_id,
+            "hostname": _hostname(),
+            "label": "",
+            "version": "",
+            "bindings": bindings,
+            "metrics": metrics,
+            "queue": queue,
+            "log_tail": log_tail,
+            "pipeline": pipeline_view,
+        }
+
+    async def post_podium_report(
+        self,
+        *,
+        transport: httpx.AsyncBaseTransport | None = None,
+        log_tail_lines: int = 200,
+    ) -> dict[str, Any]:
+        settings = self.store.get_settings()
+        podium_url = settings.podium_url.strip().rstrip("/")
+        runtime_token = settings.podium_runtime_token.strip()
+        if not podium_url or not runtime_token:
+            return {"status": "skipped", "reason": "runtime_not_configured"}
+        async with httpx.AsyncClient(timeout=10, trust_env=False, transport=transport) as client:
+            response = await client.post(
+                f"{podium_url}/api/v1/runtime/report",
+                headers={"Authorization": f"Bearer {runtime_token}"},
+                json=self.build_podium_report(log_tail_lines=log_tail_lines),
+            )
+        if response.status_code == 401:
+            return {"status": "skipped", "reason": "runtime_unauthorized"}
+        response.raise_for_status()
+        payload = response.json()
+        if isinstance(payload, dict):
+            self._apply_runtime_config_payload(payload.get("config"))
+        return payload if isinstance(payload, dict) else {"status": "ok"}
+
+    def _apply_runtime_config_payload(self, payload: Any) -> bool:
+        if not isinstance(payload, dict) or not payload:
+            return False
+        try:
+            envelope = RuntimeConfigEnvelope.from_dict(payload)
+            envelope.validate()
+        except Exception as exc:
+            self._record_pipeline_sync_failure(
+                "runtime_config_apply_failed",
+                None,
+                exc,
+                action_required="fix_runtime_config",
+                extra={
+                    "runtime_group_id": payload.get("runtime_group_id"),
+                    "version": payload.get("version"),
+                },
+            )
+            return False
+        return self.pipeline_store.apply_runtime_config(envelope)

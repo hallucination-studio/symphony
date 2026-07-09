@@ -8,7 +8,7 @@ from uuid import uuid4
 from performer_api.models import utc_now
 from performer_api.ops_models import AttemptRecord, IssueRecord, RepositoryHandoffReport, RunRecord, TraceEvent, TurnRecord
 from performer_api.ops_store import OpsStore
-
+from .ops_telemetry_mutations import finish_latest_open_for_issue_snapshot
 
 class ExecutionTelemetryRecorder:
     def __init__(self, store: OpsStore):
@@ -294,63 +294,26 @@ class ExecutionTelemetryRecorder:
         failure_summary: str | None = None,
     ) -> None:
         def mutate(snapshot):
-            open_runs = [
-                run
-                for run in snapshot.runs.values()
-                if run.issue_id == issue_id and run.status == "running"
-            ]
+            now = _utc_now_iso()
+            open_runs = [run for run in snapshot.runs.values() if run.issue_id == issue_id and run.status == "running"]
             if not open_runs:
                 return
             run = open_runs[-1]
-            now = _utc_now_iso()
-            open_attempts = [
-                attempt
-                for attempt in snapshot.attempts.values()
-                if attempt.run_id == run.run_id and attempt.status == "running"
-            ]
-            for attempt in open_attempts:
-                snapshot.attempts[attempt.attempt_id] = replace(
-                    attempt,
-                    status=status,
-                    completed_at=now,
-                    failure_code=failure_code,
-                    failure_summary=failure_summary,
-                    last_activity_at=now,
-                )
-                for turn in list(snapshot.turns.values()):
-                    if turn.attempt_id != attempt.attempt_id or turn.status != "running":
-                        continue
-                    snapshot.turns[turn.turn_id] = replace(
-                        turn,
-                        status=status,
-                        completed_at=now,
-                        stop_reason=failure_summary,
-                        last_activity_at=now,
-                    )
-            snapshot.runs[run.run_id] = replace(
-                run,
+            event = self.make_event(
+                f"run_{status}",
+                issue_id=run.issue_id,
+                run_id=run.run_id,
+                retention_tier="summary",
+                summary=failure_summary,
+            )
+            finish_latest_open_for_issue_snapshot(
+                snapshot,
+                issue_id,
                 status=status,
-                completed_at=now,
                 failure_code=failure_code,
                 failure_summary=failure_summary,
-                last_activity_at=now,
-            )
-            issue = snapshot.issues.get(run.issue_id)
-            if issue is not None:
-                snapshot.issues[issue.issue_id] = replace(
-                    issue,
-                    state=status,
-                    failure_reason=failure_summary,
-                    last_activity_at=now,
-                )
-            snapshot.events.append(
-                self.make_event(
-                    f"run_{status}",
-                    issue_id=run.issue_id,
-                    run_id=run.run_id,
-                    retention_tier="summary",
-                    summary=failure_summary,
-                )
+                now=now,
+                event=event,
             )
 
         self.store.update(mutate)
@@ -382,7 +345,6 @@ class ExecutionTelemetryRecorder:
 
     def next_event_id(self) -> str:
         return f"evt-{uuid4().hex}"
-
 
 def _utc_now_iso() -> str:
     return utc_now().astimezone(timezone.utc).isoformat().replace("+00:00", "Z")

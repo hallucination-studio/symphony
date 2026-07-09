@@ -7,12 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .conductor_models import InstanceRecord
-from .conductor_repository_handoff import (
-    repository_handoff_closeout_event,
-    repository_handoff_comment,
-    repository_handoff_marker,
-    repository_integration_description,
-)
+from .conductor_service_repository_helpers import *  # noqa: F403
 from .conductor_service_types import PROJECT_LABEL_PREFIX
 from performer_api.ops_models import OpsSnapshot, TraceEvent
 
@@ -203,28 +198,6 @@ def _sanitize_connection_error(error: str | None) -> str | None:
         if marker in text:
             text = text.split(marker, 1)[0] + marker + "[redacted]"
     return text[:500]
-
-
-def _repository_handoff_marker(source_issue_id: str) -> str:
-    return repository_handoff_marker(source_issue_id)
-
-
-def _repository_handoff_closeout_event(
-    snapshot: OpsSnapshot,
-    *,
-    source_event: TraceEvent,
-    status: str,
-    payload: dict[str, Any],
-) -> TraceEvent:
-    return repository_handoff_closeout_event(snapshot, source_event=source_event, status=status, payload=payload)
-
-
-def _repository_integration_description(report: dict[str, Any], *, instance: InstanceRecord) -> str:
-    return repository_integration_description(report, instance=instance)
-
-
-def _repository_handoff_comment(report: dict[str, Any], *, child: dict[str, Any], mention: str) -> str:
-    return repository_handoff_comment(report, child=child, mention=mention)
 
 
 def _pipeline_diagnostic_comment(

@@ -30,6 +30,7 @@ async def _run_execute_mode(payload: dict[str, object], *, agent_backend: Any | 
     workspace_path = _execute_workspace_path(payload)
     source_repository_path = _execute_repository_path(payload)
     verification_input: dict[str, object]
+    result: object | None = None
     if workspace_path:
         workspace = Path(workspace_path)
         if source_repository_path and Path(source_repository_path) != workspace:
@@ -38,52 +39,16 @@ async def _run_execute_mode(payload: dict[str, object], *, agent_backend: Any | 
                 workspace_path=workspace,
                 base_revision=str(payload.get("base_revision") or ""),
             )
-        try:
-            backend = agent_backend or _managed_codex_backend()
-        except RuntimeError as exc:
-            return {
-                "attempt_id": attempt_id,
-                "mode": RuntimeMode.EXECUTE.value,
-                "status": "failed",
-                **_fencing_fields(payload),
-                "node_id": node_id,
-                "gate_snapshot_hash": gate_hash,
-                "verification_input": {},
-                "error": str(exc),
-                "kind": _payload_kind(payload, default="codex"),
-            }
-        try:
-            on_event = _attempt_event_printer(RuntimeMode.EXECUTE, attempt_id=attempt_id, node_id=node_id)
-            await _emit_runtime_wait_probe_if_requested(on_event)
-            execution_state = WorkspaceExecutionState(_thread_state_workspace_path(payload, fallback=workspace))
-            existing_thread_id = execution_state.sdk_thread_id(issue_id=node_id)
-            expected_thread_id = _optional_payload_str(payload.get("expected_thread_id"))
-            if expected_thread_id and existing_thread_id != expected_thread_id:
-                return _failed_execute_result(
-                    payload,
-                    attempt_id=attempt_id,
-                    node_id=node_id,
-                    gate_hash=gate_hash,
-                    error=HumanEscalationReason.THREAD_LOST.value,
-                    thread_id=expected_thread_id,
-                )
-            result = await backend.run_session(
-                workspace,
-                _executor_prompt(payload),
-                f"Execute {node_id}",
-                on_event=on_event,
-                max_turns=1,
-                existing_thread_id=existing_thread_id,
-            )
-            execution_state.write_sdk_thread(issue_id=node_id, result=result)
-        except Exception as exc:
-            return _failed_execute_result(
-                payload,
-                attempt_id=attempt_id,
-                node_id=node_id,
-                gate_hash=gate_hash,
-                error=_sanitize_error(exc),
-            )
+        result, failure = await _invoke_execute_backend(
+            payload,
+            workspace,
+            agent_backend,
+            attempt_id=attempt_id,
+            node_id=node_id,
+            gate_hash=gate_hash,
+        )
+        if failure is not None:
+            return failure
         verification_input = _collect_git_verification_input(
             workspace_path=workspace,
             attempt_id=attempt_id,
@@ -94,19 +59,7 @@ async def _run_execute_mode(payload: dict[str, object], *, agent_backend: Any | 
             requested_branch_name=_execute_branch_name(payload),
         )
     else:
-        verification_input = {
-            "task_id": node_id,
-            "execute_attempt_id": attempt_id,
-            "base_revision": str(payload.get("base_revision") or ""),
-            "patch_uri": str(payload.get("patch_uri") or ""),
-            "patch_hash": str(payload.get("patch_hash") or ""),
-            "expected_result_tree": str(payload.get("expected_result_tree") or ""),
-            "artifact_uris": list(payload.get("artifact_uris") or []),
-            "declared_commands": list(payload.get("declared_commands") or []),
-            "evidence_uri": str(payload.get("evidence_uri") or ""),
-            "gate_snapshot_hash": gate_hash,
-            "result_revision": _optional_payload_str(payload.get("result_revision")),
-        }
+        verification_input = _request_verification_input(payload, attempt_id=attempt_id, node_id=node_id, gate_hash=gate_hash)
     return {
         "attempt_id": attempt_id,
         "mode": RuntimeMode.EXECUTE.value,
@@ -114,9 +67,73 @@ async def _run_execute_mode(payload: dict[str, object], *, agent_backend: Any | 
         **_fencing_fields(payload),
         "node_id": node_id,
         "gate_snapshot_hash": gate_hash,
-        "thread_id": locals().get("result") and getattr(locals()["result"], "thread_id", None),
+        "thread_id": getattr(result, "thread_id", None),
         "kind": _payload_kind(payload, default="codex"),
         "verification_input": verification_input,
+    }
+
+
+async def _invoke_execute_backend(
+    payload: dict[str, object],
+    workspace: Path,
+    agent_backend: Any | None,
+    *,
+    attempt_id: str,
+    node_id: str,
+    gate_hash: str,
+) -> tuple[object | None, dict[str, object] | None]:
+    try:
+        backend = agent_backend or _managed_codex_backend()
+    except RuntimeError as exc:
+        return None, _failed_execute_result(payload, attempt_id=attempt_id, node_id=node_id, gate_hash=gate_hash, error=str(exc))
+    try:
+        on_event = _attempt_event_printer(RuntimeMode.EXECUTE, attempt_id=attempt_id, node_id=node_id)
+        await _emit_runtime_wait_probe_if_requested(on_event)
+        execution_state = WorkspaceExecutionState(_thread_state_workspace_path(payload, fallback=workspace))
+        existing_thread_id = execution_state.sdk_thread_id(issue_id=node_id)
+        expected_thread_id = _optional_payload_str(payload.get("expected_thread_id"))
+        if expected_thread_id and existing_thread_id != expected_thread_id:
+            return None, _failed_execute_result(
+                payload,
+                attempt_id=attempt_id,
+                node_id=node_id,
+                gate_hash=gate_hash,
+                error=HumanEscalationReason.THREAD_LOST.value,
+                thread_id=expected_thread_id,
+            )
+        result = await backend.run_session(
+            workspace,
+            _executor_prompt(payload),
+            f"Execute {node_id}",
+            on_event=on_event,
+            max_turns=1,
+            existing_thread_id=existing_thread_id,
+        )
+        execution_state.write_sdk_thread(issue_id=node_id, result=result)
+        return result, None
+    except Exception as exc:
+        return None, _failed_execute_result(payload, attempt_id=attempt_id, node_id=node_id, gate_hash=gate_hash, error=_sanitize_error(exc))
+
+
+def _request_verification_input(
+    payload: dict[str, object],
+    *,
+    attempt_id: str,
+    node_id: str,
+    gate_hash: str,
+) -> dict[str, object]:
+    return {
+        "task_id": node_id,
+        "execute_attempt_id": attempt_id,
+        "base_revision": str(payload.get("base_revision") or ""),
+        "patch_uri": str(payload.get("patch_uri") or ""),
+        "patch_hash": str(payload.get("patch_hash") or ""),
+        "expected_result_tree": str(payload.get("expected_result_tree") or ""),
+        "artifact_uris": list(payload.get("artifact_uris") or []),
+        "declared_commands": list(payload.get("declared_commands") or []),
+        "evidence_uri": str(payload.get("evidence_uri") or ""),
+        "gate_snapshot_hash": gate_hash,
+        "result_revision": _optional_payload_str(payload.get("result_revision")),
     }
 
 
@@ -275,4 +292,3 @@ def _remove_generated_verification_caches(workspace_path: Path) -> None:
     for compiled in workspace_path.rglob("*.py[co]"):
         if ".git" not in compiled.parts:
             compiled.unlink(missing_ok=True)
-

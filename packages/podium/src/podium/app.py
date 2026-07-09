@@ -48,7 +48,7 @@ def create_app(
     config: PodiumConfig | None = None,
     debug_auth: bool = False,
 ) -> FastAPI:
-    state = ManagedPodiumState(
+    state = _create_state(
         turnstile_verifier=turnstile_verifier or verify_turnstile_with_cloudflare,
         session_cookie_name=session_cookie_name,
         secure_cookies=secure_cookies,
@@ -61,28 +61,10 @@ def create_app(
         config=config or PodiumConfig.from_env(),
         debug_auth=debug_auth,
     )
-
-    @asynccontextmanager
-    async def lifespan(app: FastAPI):
-        app.state.dispatch_reaper_task = asyncio.create_task(_dispatch_lease_reaper_loop(app))
-        app.state.linear_delegate_poller_task = _start_linear_delegate_poller(
-            state,
-            linear_graphql_transport=linear_graphql_transport,
-        )
-        try:
-            yield
-        finally:
-            for task_name in ("linear_delegate_poller_task", "dispatch_reaper_task"):
-                task = getattr(app.state, task_name, None)
-                if task is None:
-                    continue
-                task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await task
-                setattr(app.state, task_name, None)
-            app.state.dispatch_reaper_task = None
-
-    app = FastAPI(title="Symphony Podium", lifespan=lifespan)
+    app = FastAPI(
+        title="Symphony Podium",
+        lifespan=_make_lifespan(state, linear_graphql_transport=linear_graphql_transport),
+    )
     app.state.podium = state
     app.state.dispatch_reaper_task = None
     app.state.linear_delegate_poller_task = None
@@ -93,6 +75,96 @@ def create_app(
         podium_session = request.cookies.get(state.session_cookie_name)
         return await state.user_for_session(podium_session or "")
 
+    _register_base_routes(app, state=state, static_root=static_root, index_file=index_file)
+    register_core_routes(
+        app,
+        state=state,
+        require_user=require_user,
+        linear_token_exchange=linear_token_exchange,
+        linear_scope_fetch=linear_scope_fetch,
+        linear_graphql_transport=linear_graphql_transport,
+        error_response=error_response,
+    )
+    register_runtime_routes(
+        app,
+        state=state,
+        require_user=require_user,
+        podium_base_url=podium_base_url,
+        linear_graphql_transport=linear_graphql_transport,
+        error_response=error_response,
+    )
+    _register_static_fallback(app, static_root=static_root, index_file=index_file)
+    return app
+
+
+def _create_state(
+    *,
+    turnstile_verifier: TurnstileVerifier,
+    session_cookie_name: str,
+    secure_cookies: bool,
+    secret_key: str,
+    linear_client_id: str,
+    linear_client_secret: str,
+    linear_redirect_uri: str,
+    data_dir: str | Path | None,
+    store: Any,
+    config: PodiumConfig,
+    debug_auth: bool,
+) -> "ManagedPodiumState":
+    return ManagedPodiumState(
+        turnstile_verifier=turnstile_verifier,
+        session_cookie_name=session_cookie_name,
+        secure_cookies=secure_cookies,
+        secret_key=secret_key,
+        linear_client_id=linear_client_id,
+        linear_client_secret=linear_client_secret,
+        linear_redirect_uri=linear_redirect_uri,
+        data_dir=data_dir,
+        store=store,
+        config=config,
+        debug_auth=debug_auth,
+    )
+
+
+def _make_lifespan(
+    state: Any,
+    *,
+    linear_graphql_transport: Callable[[httpx.Request], Any] | None,
+) -> Any:
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        app.state.dispatch_reaper_task = asyncio.create_task(_dispatch_lease_reaper_loop(app))
+        app.state.linear_delegate_poller_task = _start_linear_delegate_poller(
+            state,
+            linear_graphql_transport=linear_graphql_transport,
+        )
+        try:
+            yield
+        finally:
+            await _cancel_background_tasks(app)
+
+    return lifespan
+
+
+async def _cancel_background_tasks(app: FastAPI) -> None:
+    for task_name in ("linear_delegate_poller_task", "dispatch_reaper_task"):
+        task = getattr(app.state, task_name, None)
+        if task is None:
+            continue
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        setattr(app.state, task_name, None)
+    app.state.dispatch_reaper_task = None
+
+
+def _register_base_routes(
+    app: FastAPI,
+    *,
+    state: Any,
+    static_root: Path | None,
+    index_file: Path | None,
+) -> None:
     @app.get("/")
     async def root() -> Response:
         if static_root and index_file and index_file.exists():
@@ -111,36 +183,24 @@ def create_app(
     async def install_script() -> Response:
         return Response(render_install_script(), media_type="text/x-shellscript; charset=utf-8")
 
-    register_core_routes(
-        app,
-        state=state,
-        require_user=require_user,
-        linear_token_exchange=linear_token_exchange,
-        linear_scope_fetch=linear_scope_fetch,
-        linear_graphql_transport=linear_graphql_transport,
-        error_response=error_response,
-    )
 
-    register_runtime_routes(
-        app,
-        state=state,
-        require_user=require_user,
-        podium_base_url=podium_base_url,
-        linear_graphql_transport=linear_graphql_transport,
-        error_response=error_response,
-    )
+def _register_static_fallback(
+    app: FastAPI,
+    *,
+    static_root: Path | None,
+    index_file: Path | None,
+) -> None:
+    if not static_root or not index_file or not index_file.exists():
+        return
 
-    if static_root and index_file and index_file.exists():
-        @app.get("/{full_path:path}")
-        async def static_or_spa(full_path: str) -> Response:
-            if full_path.startswith("api/"):
-                return error_response(404, "not_found", "Route not found")
-            candidate = (static_root / full_path).resolve()
-            if candidate.is_file() and (candidate == static_root or static_root in candidate.parents):
-                return FileResponse(candidate)
-            return HTMLResponse(index_file.read_text(encoding="utf-8"))
-
-    return app
+    @app.get("/{full_path:path}")
+    async def static_or_spa(full_path: str) -> Response:
+        if full_path.startswith("api/"):
+            return error_response(404, "not_found", "Route not found")
+        candidate = (static_root / full_path).resolve()
+        if candidate.is_file() and (candidate == static_root or static_root in candidate.parents):
+            return FileResponse(candidate)
+        return HTMLResponse(index_file.read_text(encoding="utf-8"))
 
 
 def _start_linear_delegate_poller(
