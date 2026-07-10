@@ -23,14 +23,35 @@ def make_app(
     store: Any = None,
 ):
     selected_store = store or PodiumStore(data_dir=data_dir)
+    selected_transport = linear_graphql_transport or successful_project_label_transport
     return create_app(
         turnstile_verifier=lambda token, _ip: token == "turnstile-ok",
         secure_cookies=False,
-        linear_graphql_transport=linear_graphql_transport,
+        linear_graphql_transport=selected_transport,
         data_dir=data_dir,
         secret_key=secret_key,
         store=selected_store,
     )
+
+
+async def successful_project_label_transport(request: httpx.Request) -> httpx.Response:
+    payload = json.loads(request.content)
+    operation = str(payload.get("operationName") or "")
+    variables = payload.get("variables") or {}
+    if operation == "ManagedProjectLabelLookup":
+        data = {"projectLabels": {"nodes": []}}
+    elif operation == "ManagedProjectLabelCreate":
+        data = {
+            "projectLabelCreate": {
+                "success": True,
+                "projectLabel": {"id": "managed-label", "name": variables["name"]},
+            }
+        }
+    elif operation == "ManagedProjectAddLabel":
+        data = {"projectAddLabel": {"success": True}}
+    else:
+        raise AssertionError(f"unexpected default Linear operation: {operation}")
+    return httpx.Response(200, json={"data": data}, request=request)
 
 
 class QueueResult:
@@ -139,6 +160,8 @@ async def bind_and_ack_conductor(
     report_overrides: dict[str, Any] | None = None,
     report_extras: dict[str, Any] | None = None,
 ) -> tuple[httpx.Response, dict[str, Any]]:
+    if app.state.podium.linear_graphql_transport is None:
+        app.state.podium.linear_graphql_transport = successful_project_label_transport
     if await app.state.podium.get_active_linear_installation(user_id) is None:
         await activate_linear_installation(
             app,

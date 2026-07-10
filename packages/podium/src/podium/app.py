@@ -23,6 +23,7 @@ from .podium_linear_installations import PodiumLinearInstallationsMixin
 from .podium_linear_cutover import PodiumLinearCutoverMixin
 from .podium_linear_projects import PodiumLinearProjectsMixin
 from .podium_project_bindings import PodiumProjectBindingsMixin
+from .podium_project_labels import PodiumProjectLabelsMixin
 from .podium_routes_core import register_core_routes
 from .podium_routes_runtime import register_runtime_routes
 from .podium_runtime import PodiumRuntimeMixin
@@ -74,6 +75,7 @@ def create_app(
         store=store or PodiumStore(data_dir=data_dir),
         config=resolved_config,
         debug_auth=debug_auth,
+        linear_graphql_transport=linear_graphql_transport,
     )
     app = FastAPI(
         title="Symphony Podium",
@@ -127,6 +129,7 @@ def _create_state(
     store: Any,
     config: PodiumConfig,
     debug_auth: bool,
+    linear_graphql_transport: Callable[[httpx.Request], Any] | None,
 ) -> "ManagedPodiumState":
     return ManagedPodiumState(
         turnstile_verifier=turnstile_verifier,
@@ -143,6 +146,7 @@ def _create_state(
         store=store,
         config=config,
         debug_auth=debug_auth,
+        linear_graphql_transport=linear_graphql_transport,
     )
 
 
@@ -254,6 +258,7 @@ class ManagedPodiumState(
     PodiumLinearCutoverMixin,
     PodiumLinearProjectsMixin,
     PodiumConductorsMixin,
+    PodiumProjectLabelsMixin,
     PodiumProjectBindingsMixin,
     PodiumRuntimeMixin,
     PodiumDispatchMixin,
@@ -273,6 +278,7 @@ class ManagedPodiumState(
     store: Any | None = None
     config: PodiumConfig = field(default_factory=PodiumConfig.from_env)
     debug_auth: bool = False
+    linear_graphql_transport: Callable[[httpx.Request], Any] | None = None
 
 
 async def verify_turnstile_with_cloudflare(token: str, ip: str | None) -> bool:

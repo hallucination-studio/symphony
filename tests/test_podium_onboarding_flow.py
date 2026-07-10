@@ -8,7 +8,10 @@ import pytest
 
 from podium.server import PodiumServer
 from podium.store import PodiumStore
-from test_podium_conductor_channels_support import activate_linear_installation
+from test_podium_conductor_channels_support import (
+    activate_linear_installation,
+    successful_project_label_transport,
+)
 
 
 async def request(
@@ -62,6 +65,9 @@ async def test_full_onboarding_flow_reaches_complete(tmp_path) -> None:
     runtime acknowledgement -> smoke check -> complete.
     """
     async def proxy_transport(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        if str(payload.get("operationName") or "").startswith("ManagedProject"):
+            return await successful_project_label_transport(request)
         return httpx.Response(
             200,
             json={

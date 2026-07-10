@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from .podium_project_labels import LinearProjectLabelError
 from .podium_shared import utc_now_iso
 
 
@@ -124,6 +125,13 @@ class PodiumProjectBindingsMixin:
             "sanitized_reason": "",
             "updated_at": utc_now_iso(),
         }
+        try:
+            ready = await self.ensure_managed_project_label(ready)
+        except LinearProjectLabelError as exc:
+            raise ProjectBindingError(
+                "linear_project_label_sync_failed",
+                "Linear project label operation failed",
+            ) from exc
         await self.store.upsert_project_binding(ready)
         await self._mark_onboarding(str(binding.get("user_id") or ""), "repository_mapping")
         return ready

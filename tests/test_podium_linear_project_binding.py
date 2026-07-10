@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 from typing import Any
@@ -7,7 +8,48 @@ from typing import Any
 import httpx
 import pytest
 
-from test_podium_conductor_channels_support import activate_linear_installation, make_app, register
+from test_podium_conductor_channels_support import (
+    activate_linear_installation,
+    bind_and_ack_conductor,
+    make_app,
+    register,
+)
+
+
+class ProjectLabelTransport:
+    def __init__(self, *, existing_label_id: str = "", fail_operation: str = "") -> None:
+        self.existing_label_id = existing_label_id
+        self.fail_operation = fail_operation
+        self.requests: list[dict[str, Any]] = []
+
+    async def __call__(self, request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        self.requests.append(payload)
+        operation = str(payload.get("operationName") or "")
+        if operation == self.fail_operation:
+            return httpx.Response(
+                200,
+                json={"errors": [{"message": "Linear rejected the project label operation"}]},
+                request=request,
+            )
+        variables = payload.get("variables") or {}
+        if operation == "ManagedProjectLabelLookup":
+            nodes = []
+            if self.existing_label_id:
+                nodes.append({"id": self.existing_label_id, "name": variables["name"]})
+            data = {"projectLabels": {"nodes": nodes}}
+        elif operation == "ManagedProjectLabelCreate":
+            data = {
+                "projectLabelCreate": {
+                    "success": True,
+                    "projectLabel": {"id": "label-created", "name": variables["name"]},
+                }
+            }
+        elif operation == "ManagedProjectAddLabel":
+            data = {"projectAddLabel": {"success": True}}
+        else:
+            raise AssertionError(f"unexpected Linear operation: {operation}")
+        return httpx.Response(200, json={"data": data}, request=request)
 
 
 async def _prepare_workspace(client: httpx.AsyncClient, app: Any) -> str:
@@ -179,3 +221,95 @@ async def test_binding_ack_enforces_one_project_per_conductor_and_one_conductor_
     ready = runtimes.json()["conductors"][0]["bindings"][0]
     assert ready["state"] == "ready"
     assert ready["acknowledged_config_version"] == binding["config_version"]
+
+
+@pytest.mark.asyncio
+async def test_ready_binding_creates_and_attaches_exact_managed_project_label() -> None:
+    transport = ProjectLabelTransport()
+    app = make_app(linear_graphql_transport=transport)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
+        user_id = await _prepare_workspace(client, app)
+        enrollment = await _issue_enrollment(client, name="Beethoven")
+        enrolled = await _enroll(client, enrollment)
+
+        report, pending = await bind_and_ack_conductor(app, client, user_id, enrolled)
+        ready = await app.state.podium.store.get_project_binding(pending["id"])
+        request_count = len(transport.requests)
+        repeated = await client.post(
+            "/api/v1/runtime/report",
+            headers={"Authorization": f"Bearer {enrolled['runtime_token']}"},
+            json={
+                "bindings": [
+                    {
+                        "instance_id": "inst-a",
+                        "linear_project_id": "project-alpha",
+                        "project_slug": "ALPHA",
+                        "agent_app_user_id": "agent-alpha",
+                        "binding_config_version": pending["config_version"],
+                        "repo_source": {"type": "local_path", "value": "/repo/a"},
+                        "process_status": "stopped",
+                    }
+                ]
+            },
+        )
+
+    expected_name = f"symphony:conductor/Beethoven-{enrollment['conductor']['public_id']}"
+    assert report.status_code == 200
+    assert ready["state"] == "ready"
+    assert ready["label_id"] == "label-created"
+    assert ready["label_name"] == expected_name
+    assert [request["operationName"] for request in transport.requests] == [
+        "ManagedProjectLabelLookup",
+        "ManagedProjectLabelCreate",
+        "ManagedProjectAddLabel",
+    ]
+    assert transport.requests[-1]["variables"] == {
+        "projectId": "project-alpha",
+        "labelId": "label-created",
+    }
+    assert repeated.status_code == 200
+    assert len(transport.requests) == request_count
+
+
+@pytest.mark.asyncio
+async def test_ready_binding_reuses_existing_managed_project_label_by_exact_name() -> None:
+    transport = ProjectLabelTransport(existing_label_id="label-existing")
+    app = make_app(linear_graphql_transport=transport)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
+        user_id = await _prepare_workspace(client, app)
+        enrollment = await _issue_enrollment(client, name="Mozart")
+        enrolled = await _enroll(client, enrollment)
+
+        report, pending = await bind_and_ack_conductor(app, client, user_id, enrolled)
+        ready = await app.state.podium.store.get_project_binding(pending["id"])
+
+    assert report.status_code == 200
+    assert ready["label_id"] == "label-existing"
+    assert [request["operationName"] for request in transport.requests] == [
+        "ManagedProjectLabelLookup",
+        "ManagedProjectAddLabel",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_project_label_failure_keeps_binding_unroutable_and_visible(caplog: pytest.LogCaptureFixture) -> None:
+    transport = ProjectLabelTransport(fail_operation="ManagedProjectLabelCreate")
+    app = make_app(linear_graphql_transport=transport)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
+        user_id = await _prepare_workspace(client, app)
+        enrolled = await _enroll(client, await _issue_enrollment(client, name="Ravel"))
+
+        report, pending = await bind_and_ack_conductor(app, client, user_id, enrolled)
+        failed = await app.state.podium.store.get_project_binding(pending["id"])
+        runtimes = await client.get("/api/v1/runtimes")
+
+    assert report.status_code == 409
+    assert report.json()["error"]["code"] == "linear_project_label_sync_failed"
+    assert failed["state"] == "failed"
+    assert failed["error_code"] == "linear_project_label_sync_failed"
+    assert failed["sanitized_reason"] == "Linear project label operation failed"
+    visible = runtimes.json()["conductors"][0]["bindings"][0]
+    assert visible["error_code"] == "linear_project_label_sync_failed"
+    assert visible["sanitized_reason"] == "Linear project label operation failed"
+    assert "event=linear_project_label_sync_failed" in caplog.text
+    assert "next_action=retry_project_binding_report" in caplog.text
