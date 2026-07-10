@@ -24,6 +24,7 @@ from real_symphony_e2e_analysis import (
 from real_symphony_e2e_artifacts import _archive_pipeline_artifacts
 from real_symphony_e2e_common import api_url, http_json, make_fixture_repo, start_process, wait_for_http_ready
 from real_symphony_e2e_linear import fetch_linear_issue_tree
+from real_symphony_e2e_linear_audit import record_managed_run_linear_tree_audit
 from real_symphony_e2e_run_state import E2ERunState
 
 
@@ -137,6 +138,13 @@ async def run_final_pipeline_checks(state: E2ERunState) -> None:
     path = state.root / "final-managed-runs-view.json"
     path.write_text(json.dumps(view, indent=2, sort_keys=True), encoding="utf-8")
     state.evidence.artifact("final_managed_runs_view", path)
+    await record_managed_run_linear_tree_audit(
+        token=state.token,
+        issue_id=state.linear["issue"]["id"],
+        root=state.root,
+        evidence=state.evidence,
+        view=view,
+    )
     if state.permission_approval_probe:
         await _record_human_action_tree(state)
         _check_pipeline_scenario_acceptance(state.evidence, state.pipeline_scenario, view)

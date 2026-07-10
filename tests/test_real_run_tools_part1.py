@@ -190,6 +190,66 @@ def test_linear_tree_audit_recognizes_managed_run_child_without_label() -> None:
     assert result["work_items"][0]["identifier"] == "HELL-2"
 
 
+def test_linear_tree_audit_requires_exact_work_item_ids_and_dependency_relations() -> None:
+    tool = load_tool("linear_tree_audit")
+    description = "\n".join(
+        [
+            "Managed Run Type: work-item",
+            "Managed Run Work Item: wi-1",
+            "",
+            "Objective: Project one work item",
+            "",
+            "Acceptance Criteria:",
+            "- child issue exists",
+            "",
+            "Likely Files:",
+            "- `result.txt`",
+            "",
+            "Verification:",
+            "- RED: test -f result.txt",
+            "- GREEN: test -f result.txt",
+            "",
+            "Managed Run State:",
+            "- state: done",
+            "- gate: verification passed",
+        ]
+    )
+    tree = {
+        "id": "business-1",
+        "identifier": "HELL-1",
+        "description": "<!-- symphony:run-summary:start -->",
+        "state": {"name": "Done", "type": "completed"},
+        "labels": {"nodes": []},
+        "children": {
+            "nodes": [
+                {
+                    "id": "child-1",
+                    "identifier": "HELL-2",
+                    "title": "First work item",
+                    "description": description,
+                    "parent": {"id": "business-1", "identifier": "HELL-1"},
+                    "state": {"name": "Done", "type": "completed"},
+                    "labels": {"nodes": []},
+                    "children": {"nodes": []},
+                    "inverseRelations": {"nodes": []},
+                }
+            ]
+        },
+        "inverseRelations": {"nodes": []},
+    }
+
+    result = tool.audit_tree(
+        tree,
+        expected_work_item_ids=["wi-1", "wi-2"],
+        expected_dependencies={"wi-2": ["wi-1"]},
+    )
+
+    assert result["pass"] is False
+    assert "work_item_count_mismatch:expected_2:actual_1" in result["failures"]
+    assert "work_item_projection_missing:wi-2" in result["failures"]
+    assert "work_item_dependency_projection_missing:wi-1->wi-2" in result["failures"]
+
+
 def test_linear_tree_audit_summarizes_children_and_blocks_relations() -> None:
     tool = load_tool("linear_tree_audit")
 

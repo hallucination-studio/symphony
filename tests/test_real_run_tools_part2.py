@@ -194,6 +194,72 @@ def test_real_symphony_e2e_finalization_recognizes_managed_run_child_without_lab
     ]
 
 
+def test_real_symphony_e2e_linear_tree_audit_matches_durable_work_item_contract() -> None:
+    tool = load_tool("real_symphony_e2e_linear_audit")
+    description = "\n".join(
+        [
+            "Managed Run Type: work-item",
+            "Managed Run Label: symphony:type/work-item",
+            "Managed Run Work Item: wi-1",
+            "",
+            "Objective: Create result",
+            "",
+            "Acceptance Criteria:",
+            "- result exists",
+            "",
+            "Likely Files:",
+            "- `result.txt`",
+            "",
+            "Verification:",
+            "- RED: test -f result.txt",
+            "- GREEN: test -f result.txt",
+            "",
+            "Managed Run State:",
+            "- state: done",
+            "- gate: verification passed",
+        ]
+    )
+    view = {
+        "runs": [
+            {
+                "run_id": "run-1",
+                "work_items": [
+                    {"work_item_id": "wi-1", "payload": {"dependencies": []}},
+                ],
+            }
+        ]
+    }
+    tree = {
+        "id": "root-1",
+        "identifier": "HELL-1",
+        "description": "<!-- symphony:run-summary:start -->",
+        "state": {"name": "Done", "type": "completed"},
+        "labels": {"nodes": []},
+        "children": {
+            "nodes": [
+                {
+                    "id": "child-1",
+                    "identifier": "HELL-2",
+                    "title": "Create result",
+                    "description": description,
+                    "parent": {"id": "root-1", "identifier": "HELL-1"},
+                    "state": {"name": "Done", "type": "completed"},
+                    "labels": {"nodes": []},
+                    "children": {"nodes": []},
+                    "inverseRelations": {"nodes": []},
+                }
+            ]
+        },
+        "inverseRelations": {"nodes": []},
+    }
+
+    result = tool.audit_managed_run_linear_tree(view, tree)
+
+    assert result["pass"] is True
+    assert result["expected_work_item_ids"] == ["wi-1"]
+    assert result["work_item_count"] == 1
+
+
 def test_real_symphony_e2e_has_optional_codex_connectivity_probe() -> None:
     tool = load_tool("real_symphony_e2e")
     run_tool = load_tool("real_symphony_e2e_run")

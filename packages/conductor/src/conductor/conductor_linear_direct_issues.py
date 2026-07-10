@@ -59,9 +59,10 @@ query RepositoryHandoffChildren($issueId: String!) {
         label_ids: list[str] = []
         skipped_label_names: list[str] = []
         for name in label_names:
-            try:
-                label_ids.append(await self._ensure_label_id(context["team_id"], name))
-            except LinearDirectProxyError:
+            label_id = await self._existing_label_id(context["team_id"], name)
+            if label_id:
+                label_ids.append(label_id)
+            else:
                 skipped_label_names.append(name)
         payload = await self.graphql(
             """

@@ -121,6 +121,7 @@ async def test_managed_run_projector_creates_child_issue_and_parent_summary(tmp_
     assert projected == 3
     assert tracker.children[0]["parent_issue_id"] == "root-1"
     assert "Objective: Project one work item" in str(tracker.children[0]["description"])
+    assert "Managed Run Work Item: wi-1" in str(tracker.children[0]["description"])
     assert "Managed Run State:" in str(tracker.children[0]["description"])
     assert "ManagedRun State:" not in str(tracker.children[0]["description"])
     assert ("child-1", ["Todo"], "unstarted") in tracker.transitions

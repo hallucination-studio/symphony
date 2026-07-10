@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -80,7 +81,12 @@ def labels(node: dict[str, Any]) -> list[str]:
     return [label["name"] for label in node.get("labels", {}).get("nodes", [])]
 
 
-def audit_tree(tree: dict[str, Any]) -> dict[str, Any]:
+def audit_tree(
+    tree: dict[str, Any],
+    *,
+    expected_work_item_ids: list[str] | None = None,
+    expected_dependencies: dict[str, list[str]] | None = None,
+) -> dict[str, Any]:
     children = tree.get("children", {}).get("nodes", [])
     work_items = [child for child in children if is_work_item_child(child)]
     blocks_relations = [
@@ -92,6 +98,9 @@ def audit_tree(tree: dict[str, Any]) -> dict[str, Any]:
     failures: list[str] = []
     if "<!-- symphony:run-summary:start -->" not in str(tree.get("description") or ""):
         failures.append(f"managed_run_summary_missing:{tree.get('identifier')}")
+    work_items_by_id = _work_items_by_id(work_items)
+    _check_expected_work_items(failures, work_items, work_items_by_id, expected_work_item_ids)
+    _check_expected_dependencies(failures, work_items_by_id, blocks_relations, expected_dependencies)
     for item in work_items:
         identifier = item.get("identifier")
         if (item.get("parent") or {}).get("id") != tree.get("id"):
@@ -116,6 +125,8 @@ def audit_tree(tree: dict[str, Any]) -> dict[str, Any]:
     return {
         "business_issue": _issue_row(tree),
         "work_item_count": len(work_items),
+        "expected_work_item_count": len(expected_work_item_ids) if expected_work_item_ids is not None else None,
+        "expected_work_item_ids": list(expected_work_item_ids or []),
         "blocks_relation_count": len(blocks_relations),
         "work_items": [
             {
@@ -152,6 +163,57 @@ def is_work_item_child(issue: dict[str, Any]) -> bool:
     description = str(issue.get("description") or "")
     required_headings = ["Objective:", "Acceptance Criteria:", "Verification:", "Managed Run State:"]
     return all(heading in description for heading in required_headings)
+
+
+def _work_items_by_id(work_items: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    result: dict[str, dict[str, Any]] = {}
+    for item in work_items:
+        work_item_id = _work_item_id(item)
+        if work_item_id:
+            result[work_item_id] = item
+    return result
+
+
+def _check_expected_work_items(
+    failures: list[str],
+    work_items: list[dict[str, Any]],
+    work_items_by_id: dict[str, dict[str, Any]],
+    expected_work_item_ids: list[str] | None,
+) -> None:
+    if expected_work_item_ids is None:
+        return
+    expected = {str(work_item_id) for work_item_id in expected_work_item_ids if str(work_item_id)}
+    actual = set(work_items_by_id)
+    if len(work_items) != len(expected):
+        failures.append(f"work_item_count_mismatch:expected_{len(expected)}:actual_{len(work_items)}")
+    for work_item_id in sorted(expected - actual):
+        failures.append(f"work_item_projection_missing:{work_item_id}")
+    for work_item_id in sorted(actual - expected):
+        failures.append(f"work_item_projection_unexpected:{work_item_id}")
+
+
+def _check_expected_dependencies(
+    failures: list[str],
+    work_items_by_id: dict[str, dict[str, Any]],
+    blocks_relations: list[dict[str, Any]],
+    expected_dependencies: dict[str, list[str]] | None,
+) -> None:
+    if expected_dependencies is None:
+        return
+    ids_by_linear_issue = {str(item.get("id") or ""): work_item_id for work_item_id, item in work_items_by_id.items()}
+    actual = {
+        (ids_by_linear_issue.get(str((relation.get("issue") or {}).get("id") or "")), ids_by_linear_issue.get(str((relation.get("relatedIssue") or {}).get("id") or "")))
+        for relation in blocks_relations
+    }
+    for dependent, dependencies in expected_dependencies.items():
+        for dependency in dependencies:
+            if (str(dependency), str(dependent)) not in actual:
+                failures.append(f"work_item_dependency_projection_missing:{dependency}->{dependent}")
+
+
+def _work_item_id(issue: dict[str, Any]) -> str:
+    match = re.search(r"^Managed Run Work Item:\s*(\S+)\s*$", str(issue.get("description") or ""), flags=re.MULTILINE)
+    return match.group(1) if match else ""
 
 
 def _issue_with_relations(issue: dict[str, Any]) -> dict[str, Any]:

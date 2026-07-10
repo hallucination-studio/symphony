@@ -61,7 +61,7 @@ class ManagedRunLinearProjector:
                     parent_issue_id=self.root_issue_id,
                     title=str(item["payload"].get("title") or work_item_id),
                     description=self._work_item_description(item),
-                    label_names=[WORK_ITEM_LABEL],
+                    label_names=[],
                     delegate_id=self.delegate_id,
                 )
                 projected += 1
@@ -156,6 +156,10 @@ class ManagedRunLinearProjector:
         payload = item["payload"] if isinstance(item.get("payload"), dict) else {}
         parallel = payload.get("parallelization") if isinstance(payload.get("parallelization"), dict) else {}
         lines = [
+            "Managed Run Type: work-item",
+            f"Managed Run Label: {WORK_ITEM_LABEL}",
+            f"Managed Run Work Item: {item['work_item_id']}",
+            "",
             f"Objective: {payload.get('objective') or ''}",
             "",
             "Acceptance Criteria:",
