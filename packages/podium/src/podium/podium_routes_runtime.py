@@ -11,6 +11,7 @@ from .podium_routes_conductor_bindings import register_conductor_binding_routes
 from .podium_routes_runtime_helpers import normalize_agent_session_event
 from .podium_routes_runtime_ops import register_runtime_ops_routes
 from .podium_routes_runtime_proxy import register_linear_proxy_route
+from .podium_routes_runtime_smoke import register_runtime_smoke_route
 from .podium_routes_runtime_ws import register_runtime_ws_route
 
 RequireUser = Callable[[Request], Awaitable[dict[str, Any] | None]]
@@ -40,6 +41,7 @@ def register_runtime_routes(
         error_response=error_response,
     )
     register_runtime_ops_routes(app, state=state, require_user=require_user, error_response=error_response)
+    register_runtime_smoke_route(app, state=state, error_response=error_response)
     register_runtime_ws_route(app, state=state)
     register_linear_proxy_route(
         app,

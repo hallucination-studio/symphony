@@ -28,6 +28,7 @@ from .podium_project_replacements import PodiumProjectReplacementsMixin
 from .podium_routes_core import register_core_routes
 from .podium_routes_runtime import register_runtime_routes
 from .podium_runtime import PodiumRuntimeMixin
+from .podium_smoke_checks import PodiumSmokeChecksMixin
 from .podium_shared import utc_now_iso
 from .podium_state import PodiumStateBaseMixin
 from .store import PodiumStore
@@ -263,6 +264,7 @@ class ManagedPodiumState(
     PodiumProjectBindingsMixin,
     PodiumProjectReplacementsMixin,
     PodiumRuntimeMixin,
+    PodiumSmokeChecksMixin,
     PodiumDispatchMixin,
 ):
     turnstile_verifier: TurnstileVerifier

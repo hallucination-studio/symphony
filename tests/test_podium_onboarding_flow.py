@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime, timezone
 
 import httpx
 import pytest
@@ -214,16 +215,65 @@ async def test_full_onboarding_flow_reaches_complete(tmp_path) -> None:
         assert status == 200
         assert json.loads(body)["binding_state"] == "ready"
 
-        # 7. Smoke check - all prerequisites met, should pass and complete onboarding.
+        # 7. Publish the runtime config and seed successful reconciliation
+        #    evidence produced by this test's Linear transport.
+        status, headers, body = await request(
+            port,
+            "POST",
+            "/api/v1/runtime/config",
+            _runtime_config(enrollment["runtime_group_id"]),
+            headers={"Authorization": f"Bearer {enrollment['runtime_token']}"},
+        )
+        assert status == 200
+        installation = await server.app.state.podium.get_active_linear_installation(ws)
+        assert installation is not None
+        await server.app.state.podium.update_linear_installation_health(
+            installation,
+            reconciliation_state="healthy",
+            last_reconciliation_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        )
+
+        # 8. Smoke check starts asynchronously and completes only after the
+        #    authenticated Conductor reports every required runtime check.
         status, headers, body = await request(
             port, "POST", "/api/v1/onboarding/smoke-check", {}, headers=auth
+        )
+        assert status == 202
+        smoke = json.loads(body)
+        assert smoke["status"] == "running"
+        runtime_smoke = smoke["conductors"][0]
+        status, headers, body = await request(
+            port,
+            "POST",
+            "/api/v1/runtime/smoke-check/result",
+            {
+                "smoke_check_id": smoke["smoke_check_id"],
+                "binding_id": runtime_smoke["binding_id"],
+                "status": "passed",
+                "checks": [
+                    {"name": name, "passed": True}
+                    for name in (
+                        "binding_identity",
+                        "repository_readiness",
+                        "linear_proxy_access",
+                        "runtime_config_validity",
+                        "project_label_state",
+                    )
+                ],
+                "error_code": "",
+                "sanitized_reason": "",
+                "retryable": False,
+                "action_required": "",
+                "next_action": "",
+            },
+            headers={"Authorization": f"Bearer {enrollment['runtime_token']}"},
         )
         assert status == 200
         smoke = json.loads(body)
         assert smoke["status"] == "passed"
         assert smoke["recommendations"] == []
 
-        # 8. Final bootstrap - onboarding complete, reached over HTTP only
+        # 9. Final bootstrap - onboarding complete, reached over HTTP only
         status, headers, body = await request(port, "GET", "/api/v1/bootstrap", headers=auth)
         assert status == 200
         final = json.loads(body)
@@ -231,6 +281,28 @@ async def test_full_onboarding_flow_reaches_complete(tmp_path) -> None:
         assert b"secret-linear-token" not in body
     finally:
         await server.stop()
+
+
+def _runtime_config(runtime_group_id: str) -> dict[str, object]:
+    return {
+        "runtime_group_id": runtime_group_id,
+        "version": 1,
+        "managed_run_policy": {
+            "policy_id": "onboarding-policy",
+            "version": 1,
+            "effective_at": "2026-07-10T00:00:00Z",
+            "capacity": {"global": 3, "by_role": {"plan": 1, "work_item": 1, "verify": 1}},
+        },
+        "profiles": {
+            role: {
+                "name": role,
+                "backend": "codex",
+                "role": role,
+                "settings": {"model": "gpt-5.3-codex"},
+            }
+            for role in ("plan", "work_item", "verify")
+        },
+    }
 
 
 @pytest.mark.asyncio

@@ -61,6 +61,16 @@ connectivity, binding identity, repository readiness, Linear proxy access,
 runtime config validity, and project label state. It does not require Codex to
 make source changes.
 
+Starting a smoke check first evaluates durable Podium prerequisites. A failed
+prerequisite produces an immediate sanitized failure and does not complete
+onboarding. Otherwise Podium creates one versioned check, durably queues one
+idempotent `smoke.check` command per ready project Conductor, and returns
+`running`. Each Conductor reports through its authenticated runtime channel;
+Podium validates the check, runtime, binding, result shape, and error fields.
+It remains `running` until every expected Conductor reports, then atomically
+records `passed` or `failed`. Missing reports become an explicit timeout rather
+than an indefinite wait. Only the final `passed` state completes onboarding.
+
 ## Main Surfaces
 
 Integrations shows application source, active and candidate installations,

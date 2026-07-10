@@ -104,13 +104,22 @@ class PodiumStateBaseMixin:
         await self._mark_onboarding(workspace_id, "runtime_enrollment")
         return await self.onboarding_progress(workspace_id)
 
-    async def set_smoke_result(self, workspace_id: str, result: dict[str, Any]) -> dict[str, Any]:
-        await self.store.save_smoke_result(workspace_id, result)
-        await self._mark_onboarding(workspace_id, "smoke_check")
+    async def sync_smoke_onboarding(self, workspace_id: str) -> dict[str, Any]:
+        result = await self.store.get_smoke_result(workspace_id) or {}
+        row = await self.load_onboarding_state(workspace_id)
+        completed = row.setdefault("completed_steps", [])
+        if result.get("status") == "passed" and "smoke_check" not in completed:
+            completed.append("smoke_check")
+        elif result.get("status") != "passed" and "smoke_check" in completed:
+            completed.remove("smoke_check")
+        await self.persist_onboarding_state(workspace_id, row)
         return await self.onboarding_progress(workspace_id)
 
     async def get_smoke_result(self, workspace_id: str) -> dict[str, Any] | None:
-        return await self.store.get_smoke_result(workspace_id)
+        result = await self.store.get_smoke_result(workspace_id)
+        if not isinstance(result, dict):
+            return None
+        return await self.expire_smoke_check(workspace_id, result)
 
     async def save_enrollment_token(
         self,

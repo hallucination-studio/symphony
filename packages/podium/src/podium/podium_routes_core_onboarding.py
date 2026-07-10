@@ -5,8 +5,6 @@ from typing import Any, Awaitable, Callable
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from .podium_shared import utc_now_iso
-
 RequireUser = Callable[[Request], Awaitable[dict[str, Any] | None]]
 ErrorResponse = Callable[[int, str, str], JSONResponse]
 
@@ -97,15 +95,9 @@ def _register_onboarding_smoke_routes(
         user = await require_user(request)
         if user is None:
             return error_response(401, "unauthorized", "Unauthorized")
-        result = {
-            "status": "passed",
-            "checks": [{"name": "runtime_online", "passed": True}],
-            "recommendations": [],
-            "timestamp": utc_now_iso(),
-        }
         user_id = str(user["id"])
-        await state.set_smoke_result(user_id, result)
-        return JSONResponse(result)
+        result = await state.start_smoke_check(user_id)
+        return JSONResponse(result, status_code=202 if result.get("status") == "running" else 200)
 
     @app.get("/api/v1/onboarding/smoke-check/result")
     async def onboarding_smoke_check_result(request: Request) -> JSONResponse:
