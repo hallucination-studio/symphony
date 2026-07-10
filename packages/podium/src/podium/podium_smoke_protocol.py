@@ -108,7 +108,8 @@ def installation_identity_ready(installation: dict[str, Any] | None, callback_re
         return False
     scopes = {str(scope) for scope in installation.get("scope") or []}
     return bool(
-        expires_at.tzinfo is not None
+        installation.get("state") == "ready"
+        and expires_at.tzinfo is not None
         and expires_at > datetime.now(timezone.utc)
         and REQUIRED_LINEAR_SCOPES <= scopes
         and str(installation.get("actor") or "").lower() == "app"

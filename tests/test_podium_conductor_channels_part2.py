@@ -190,7 +190,7 @@ async def test_linear_proxy_requires_proxy_token_and_audits_requests() -> None:
     assert still_unbound.json()["error"]["code"] == "linear_project_binding_required"
     assert allowed.status_code == 200
     assert allowed.json() == {"data": {"viewer": {"id": "viewer-1"}}}
-    assert seen_authorization == ["oauth-installation-token"]
+    assert seen_authorization == ["Bearer oauth-installation-token"]
 
 async def test_linear_proxy_persists_audit_event_when_postgres_is_injected() -> None:
     from podium.store import PodiumStore

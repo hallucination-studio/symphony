@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from .linear_graphql_client import LinearGraphQLRequestError, execute_linear_graphql
+from .linear_graphql_client import LinearGraphQLRequestError
 
 
 LOGGER = logging.getLogger(__name__)
@@ -194,12 +194,11 @@ class PodiumProjectLabelsMixin:
         variables: dict[str, Any],
         operation_name: str,
     ) -> dict[str, Any]:
-        return await execute_linear_graphql(
-            access_token=str(installation.get("access_token") or ""),
+        return await self.linear_graphql_for_installation(
+            installation,
             query=query,
             variables=variables,
             operation_name=operation_name,
-            transport=self.linear_graphql_transport,
         )
 
 

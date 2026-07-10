@@ -8,6 +8,7 @@ import httpx
 from fastapi import FastAPI, Header, Request
 from fastapi.responses import JSONResponse
 
+from .linear_token_service import LinearTokenUnavailable
 from .podium_routes_runtime_helpers import linear_installation_actor_is_app, linear_payload_is_mutation
 from .podium_shared import utc_now_iso
 from .podium_state import SecretDecryptionError
@@ -54,16 +55,35 @@ async def linear_graphql_response(
     if str(installation.get("id") or "") != str(binding.get("installation_id") or ""):
         await _audit_proxy_context_denial(state, runtime, binding, "runtime_installation_mismatch")
         return error_response(409, "runtime_installation_mismatch", "Runtime binding installation is not active")
-    token = _proxy_token_from_installation(installation)
-    token_error = await _validate_proxy_token(state, runtime, workspace_id, payload, installation, token, error_response)
+    try:
+        upstream_token = await state.linear_access_token(installation)
+    except LinearTokenUnavailable as exc:
+        return await _linear_token_error(state, runtime, workspace_id, exc, error_response)
+    token_error = await _validate_proxy_token(
+        state, runtime, workspace_id, payload, installation, upstream_token, error_response
+    )
     if token_error is not None:
         return token_error
-    upstream_token, token_source = token
-    if not upstream_token:
-        await _record_proxy_token_missing(state, runtime, payload, workspace_id)
-        return error_response(400, "linear_installation_required", "An active Linear installation is required")
-    await _record_proxy_allowed(state, runtime, binding, payload, workspace_id, token_source)
-    return await _forward_linear_graphql(payload, upstream_token, linear_graphql_transport)
+    await _record_proxy_allowed(state, runtime, binding, payload, workspace_id, "installation")
+    response = await _forward_linear_graphql(payload, upstream_token, linear_graphql_transport)
+    if response.status_code != 401:
+        return response
+    try:
+        refreshed = await state.linear_access_token(
+            installation,
+            force_refresh=True,
+            rejected_access_token=upstream_token,
+        )
+    except LinearTokenUnavailable as exc:
+        return await _linear_token_error(state, runtime, workspace_id, exc, error_response)
+    response = await _forward_linear_graphql(payload, refreshed, linear_graphql_transport)
+    if response.status_code != 401:
+        return response
+    current = await state.get_active_linear_installation(workspace_id)
+    if current is not None:
+        await state.mark_linear_reauthorization_required(current, "linear_token_rejected_after_refresh")
+    failure = LinearTokenUnavailable("linear_reauthorization_required", "Linear authorization must be renewed")
+    return await _linear_token_error(state, runtime, workspace_id, failure, error_response)
 
 
 async def _ready_proxy_binding_or_error(
@@ -154,21 +174,15 @@ async def _linear_installation_or_error(
     return error_response(400, "linear_installation_required", "An active Linear installation is required")
 
 
-def _proxy_token_from_installation(installation: dict[str, Any] | None) -> tuple[str, str]:
-    upstream_token = str((installation or {}).get("access_token") or "").strip()
-    return upstream_token, "installation" if upstream_token else ""
-
-
 async def _validate_proxy_token(
     state: Any,
     runtime: dict[str, Any],
     workspace_id: str,
     payload: dict[str, Any],
     installation: dict[str, Any] | None,
-    token: tuple[str, str],
+    upstream_token: str,
     error_response: ErrorResponse,
 ) -> JSONResponse | None:
-    upstream_token, _token_source = token
     if not linear_payload_is_mutation(payload) or not upstream_token:
         return None
     if linear_installation_actor_is_app(installation):
@@ -190,19 +204,23 @@ async def _validate_proxy_token(
     )
 
 
-async def _record_proxy_token_missing(
-    state: Any, runtime: dict[str, Any], payload: dict[str, Any], workspace_id: str
-) -> None:
+async def _linear_token_error(
+    state: Any,
+    runtime: dict[str, Any],
+    workspace_id: str,
+    error: LinearTokenUnavailable,
+    error_response: ErrorResponse,
+) -> JSONResponse:
     await state.record_proxy_audit(
         {
             "runtime_id": runtime["id"],
             "allowed": False,
-            "reason": "linear_installation_required",
-            "operation_name": payload.get("operationName"),
+            "reason": error.code,
             "workspace_id": workspace_id,
             "timestamp": utc_now_iso(),
         }
     )
+    return error_response(401, error.code, error.reason)
 
 
 async def _record_proxy_allowed(
@@ -238,7 +256,7 @@ async def _forward_linear_graphql(
         upstream = await client.post(
             upstream_endpoint,
             json=payload,
-            headers={"Authorization": upstream_token, "Content-Type": "application/json"},
+            headers={"Authorization": f"Bearer {upstream_token}", "Content-Type": "application/json"},
         )
     try:
         upstream_payload = upstream.json()

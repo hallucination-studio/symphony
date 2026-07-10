@@ -99,10 +99,8 @@ class PodiumLinearInstallationsMixin:
         row = await self.store.consume_oauth_state(hash_secret(token))
         if row is None:
             return None
-        return {
-            **row,
-            "code_verifier": self.decrypt_secret(str(row.pop("code_verifier_enc"))),
-        }
+        verifier_enc = str(row.pop("code_verifier_enc"))
+        return {**row, "code_verifier": self.decrypt_secret(verifier_enc)}
 
     async def save_linear_installation_record(self, installation: dict[str, Any]) -> None:
         row = dict(installation)
@@ -116,6 +114,19 @@ class PodiumLinearInstallationsMixin:
 
     async def get_candidate_linear_installation(self, user_id: str) -> dict[str, Any] | None:
         row = await self.store.get_candidate_workspace_installation(user_id)
+        return self._workspace_installation_from_disk(row) if row is not None else None
+
+    async def get_linear_installation_record(self, user_id: str, installation_id: str) -> dict[str, Any] | None:
+        rows = await self.store.list_workspace_installations(user_id)
+        row = next((item for item in rows if str(item.get("id") or "") == installation_id), None)
+        return self._workspace_installation_from_disk(row) if row is not None else None
+
+    async def get_linear_revocation_failure(self, user_id: str) -> dict[str, Any] | None:
+        rows = await self.store.list_workspace_installations(user_id)
+        row = next(
+            (item for item in reversed(rows) if str(item.get("state") or "").endswith("_revocation_failed")),
+            None,
+        )
         return self._workspace_installation_from_disk(row) if row is not None else None
 
     async def find_active_linear_installation(
@@ -134,7 +145,9 @@ class PodiumLinearInstallationsMixin:
         installation: dict[str, Any],
         **changes: Any,
     ) -> dict[str, Any]:
-        updated = {**installation, **changes, "updated_at": utc_now_iso()}
+        active = await self.get_active_linear_installation(str(installation.get("user_id") or ""))
+        current = active if active and active.get("id") == installation.get("id") else installation
+        updated = {**current, **changes, "updated_at": utc_now_iso()}
         await self.save_linear_installation_record(updated)
         return updated
 

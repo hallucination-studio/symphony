@@ -35,5 +35,6 @@ def register_linear_cutover_route(
                 "cutover_state": result["cutover_state"],
                 "active": state.linear_installation_public(result.get("active")),
                 "candidate": state.linear_installation_public(result.get("candidate")),
+                "retirement_error": bool(result.get("retirement_error")),
             }
         )

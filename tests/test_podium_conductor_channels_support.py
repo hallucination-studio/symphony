@@ -18,6 +18,7 @@ def make_app(
     data_dir: Any = None,
     secret_key: str = "test-secret",
     store: Any = None,
+    **overrides: Any,
 ):
     selected_store = store or PodiumStore(data_dir=data_dir)
     selected_transport = linear_graphql_transport or successful_project_label_transport
@@ -28,6 +29,7 @@ def make_app(
         data_dir=data_dir,
         secret_key=secret_key,
         store=selected_store,
+        **overrides,
     )
 
 

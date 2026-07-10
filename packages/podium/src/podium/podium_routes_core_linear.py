@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse
 from .linear_constants import LINEAR_AUTHORIZE_URL, LINEAR_DEFAULT_SCOPE
 from .podium_routes_linear_application import register_linear_application_routes
 from .podium_routes_linear_cutover import register_linear_cutover_route
+from .podium_routes_linear_disconnect import register_linear_disconnect_route
 from .podium_routes_linear_oauth import register_linear_oauth_routes
 from .podium_routes_linear_projects import register_linear_project_routes
 
@@ -42,6 +43,12 @@ def register_linear_routes(
         error_response=error_response,
     )
     register_linear_project_routes(
+        app,
+        state=state,
+        require_user=require_user,
+        error_response=error_response,
+    )
+    register_linear_disconnect_route(
         app,
         state=state,
         require_user=require_user,

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any
 
@@ -7,6 +9,16 @@ from ..podium_shared import _datetime_from_json
 
 
 class JsonStoreLinearMixin:
+    @asynccontextmanager
+    async def linear_installation_token_lock(self, installation_id: str):
+        locks = getattr(self, "_linear_installation_token_locks", None)
+        if locks is None:
+            locks = {}
+            self._linear_installation_token_locks = locks
+        lock = locks.setdefault(installation_id, asyncio.Lock())
+        async with lock:
+            yield
+
     async def save_linear_application_config(self, config: dict[str, Any]) -> None:
         rows = self._load_map("linear_application_configs.json")
         rows[str(config["id"])] = dict(config)
@@ -78,7 +90,18 @@ class JsonStoreLinearMixin:
 
     async def get_candidate_workspace_installation(self, user_id: str) -> dict[str, Any] | None:
         rows = await self.list_workspace_installations(user_id)
-        return next((row for row in reversed(rows) if not bool(row.get("active")) and row.get("state") != "retired"), None)
+        candidate_states = {"accepted", "draining", "preparing", "failed"}
+        return next(
+            (row for row in reversed(rows) if not bool(row.get("active")) and row.get("state") in candidate_states),
+            None,
+        )
+
+    async def disconnect_workspace_installation(self, user_id: str, installation_id: str) -> None:
+        rows = self._load_map("linear_workspace_installations.json")
+        row = rows.get(installation_id)
+        if isinstance(row, dict) and str(row.get("user_id") or "") == user_id:
+            rows[installation_id] = {**row, "active": False, "state": "disconnected"}
+            self._write("linear_workspace_installations.json", rows)
 
     async def find_active_workspace_installation(
         self,

@@ -94,13 +94,14 @@ def register_linear_oauth_routes(
         user_id = str(user["id"])
         active = await state.get_active_linear_installation(user_id)
         candidate = await state.get_candidate_linear_installation(user_id)
+        revocation = await state.get_linear_revocation_failure(user_id)
         return JSONResponse(
             {
                 "active": state.linear_installation_public(active),
                 "candidate": state.linear_installation_public(candidate),
+                "revocation": state.linear_installation_public(revocation),
             }
         )
-
 
 async def _complete_callback(
     *,

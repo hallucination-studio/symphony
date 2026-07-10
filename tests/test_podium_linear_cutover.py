@@ -99,7 +99,12 @@ async def test_candidate_stays_draining_while_dispatch_is_open() -> None:
 
 @pytest.mark.asyncio
 async def test_candidate_switches_only_after_every_binding_is_prepared() -> None:
-    app = make_app()
+    revoked: list[tuple[str, str]] = []
+
+    async def revoke(token: str, token_type_hint: str) -> None:
+        revoked.append((token, token_type_hint))
+
+    app = make_app(linear_token_revoke=revoke)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
         user_id, enrolled, binding = await _ready(client, app)
         old_installation = await app.state.podium.get_active_linear_installation(user_id)
@@ -165,3 +170,7 @@ async def test_candidate_switches_only_after_every_binding_is_prepared() -> None
     old_row = app.state.podium.store._load_map("linear_workspace_installations.json")[old_installation["id"]]
     assert old_row["state"] == "retired"
     assert old_row["active"] is False
+    assert revoked == [
+        ("oauth-refresh-token", "refresh_token"),
+        ("oauth-installation-token", "access_token"),
+    ]

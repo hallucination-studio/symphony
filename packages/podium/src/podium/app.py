@@ -16,6 +16,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 from .config import PodiumConfig
 from .linear_reconciliation import LinearReconciler, run_linear_reconciliation_loop
+from .linear_token_service import PodiumLinearTokenMixin
 from .podium_dispatch import PodiumDispatchMixin
 from .podium_conductors import PodiumConductorsMixin
 from .podium_install import render_install_script
@@ -50,6 +51,8 @@ def create_app(
     linear_application_version: int | None = None,
     linear_token_exchange: Callable[..., Any] | None = None,
     linear_installation_fetch: Callable[..., Any] | None = None,
+    linear_token_refresh: Callable[..., Any] | None = None,
+    linear_token_revoke: Callable[..., Any] | None = None,
     linear_graphql_transport: Callable[[httpx.Request], Any] | None = None,
     podium_base_url: str = "https://podium.example",
     store: Any | None = None,
@@ -76,6 +79,8 @@ def create_app(
         config=resolved_config,
         debug_auth=debug_auth,
         linear_graphql_transport=linear_graphql_transport,
+        linear_token_refresh=linear_token_refresh,
+        linear_token_revoke=linear_token_revoke,
     )
     app = FastAPI(
         title="Symphony Podium",
@@ -129,6 +134,8 @@ def _create_state(
     config: PodiumConfig,
     debug_auth: bool,
     linear_graphql_transport: Callable[[httpx.Request], Any] | None,
+    linear_token_refresh: Callable[..., Any] | None,
+    linear_token_revoke: Callable[..., Any] | None,
 ) -> "ManagedPodiumState":
     return ManagedPodiumState(
         turnstile_verifier=turnstile_verifier,
@@ -145,6 +152,8 @@ def _create_state(
         config=config,
         debug_auth=debug_auth,
         linear_graphql_transport=linear_graphql_transport,
+        linear_token_refresh=linear_token_refresh,
+        linear_token_revoke=linear_token_revoke,
     )
 
 
@@ -253,6 +262,7 @@ def _start_linear_reconciliation(
 class ManagedPodiumState(
     PodiumStateBaseMixin,
     PodiumLinearInstallationsMixin,
+    PodiumLinearTokenMixin,
     PodiumLinearCutoverMixin,
     PodiumLinearProjectsMixin,
     PodiumConductorsMixin,
@@ -278,6 +288,8 @@ class ManagedPodiumState(
     config: PodiumConfig = field(default_factory=PodiumConfig.from_env)
     debug_auth: bool = False
     linear_graphql_transport: Callable[[httpx.Request], Any] | None = None
+    linear_token_refresh: Callable[..., Any] | None = None
+    linear_token_revoke: Callable[..., Any] | None = None
 
 
 async def verify_turnstile_with_cloudflare(token: str, ip: str | None) -> bool:

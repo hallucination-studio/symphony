@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from .linear_token_service import LinearTokenUnavailable
 from .podium_shared import utc_now_iso
 
 
@@ -28,10 +29,12 @@ class PodiumLinearCutoverMixin:
                     str(candidate["id"]),
                     str(candidate["app_user_id"]),
                 )
+                retirement_error = not await self._retire_linear_credentials(active)
                 return {
                     "cutover_state": "switched",
                     "active": await self.get_active_linear_installation(user_id),
                     "candidate": None,
+                    "retirement_error": retirement_error,
                 }
             await self._prepare_candidate(candidate, bindings)
             candidate = {
@@ -53,6 +56,7 @@ class PodiumLinearCutoverMixin:
             str(candidate["id"]),
             str(candidate["app_user_id"]),
         )
+        retirement_error = not await self._retire_linear_credentials(active)
         switched_bindings = await self.store.list_project_bindings_for_user(user_id)
         for binding in switched_bindings:
             await self.enqueue_runtime_command(
@@ -67,7 +71,17 @@ class PodiumLinearCutoverMixin:
             "cutover_state": "switched",
             "active": await self.get_active_linear_installation(user_id),
             "candidate": None,
+            "retirement_error": retirement_error,
         }
+
+    async def _retire_linear_credentials(self, installation: dict[str, Any]) -> bool:
+        try:
+            await self._revoke_linear_credentials(
+                {**installation, "active": False, "state": "retired", "updated_at": utc_now_iso()}
+            )
+        except LinearTokenUnavailable:
+            return False
+        return True
 
     async def _prepare_candidate(
         self,

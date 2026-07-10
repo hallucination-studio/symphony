@@ -123,7 +123,7 @@ class PgLinearMixin:
         row = await self.pool.fetchrow(
             """
             SELECT * FROM linear_workspace_installations
-            WHERE user_id = $1 AND active = FALSE AND state <> 'retired'
+            WHERE user_id = $1 AND active = FALSE AND state IN ('accepted', 'draining', 'preparing', 'failed')
             ORDER BY created_at DESC, id DESC LIMIT 1
             """,
             user_id,

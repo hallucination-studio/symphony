@@ -9,11 +9,12 @@ from .linear_constants import LINEAR_GRAPHQL_URL
 
 
 class LinearGraphQLRequestError(RuntimeError):
-    def __init__(self, code: str, reason: str, *, retryable: bool) -> None:
+    def __init__(self, code: str, reason: str, *, retryable: bool, status_code: int = 0) -> None:
         super().__init__(reason)
         self.code = code
         self.reason = reason
         self.retryable = retryable
+        self.status_code = status_code
 
 
 async def execute_linear_graphql(
@@ -53,9 +54,10 @@ async def execute_linear_graphql(
         )
     if response.status_code >= 400:
         raise LinearGraphQLRequestError(
-            "linear_graphql_rejected",
+            "linear_graphql_unauthorized" if response.status_code == 401 else "linear_graphql_rejected",
             "Linear GraphQL request was rejected",
             retryable=False,
+            status_code=response.status_code,
         )
     try:
         payload = response.json()

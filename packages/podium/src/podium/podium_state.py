@@ -193,9 +193,14 @@ class PodiumStateBaseMixin:
         installation = await self.get_active_linear_installation(workspace_id)
         if not installation:
             return {"workspace_id": workspace_id, "state": "not_connected"}
+        connection_state = (
+            "reauthorization_required"
+            if installation.get("state") == "reauthorization_required"
+            else "connected"
+        )
         return {
             "workspace_id": workspace_id,
-            "state": "connected",
+            "state": connection_state,
             "scope": installation.get("scope"),
             "expires_at": installation.get("expires_at"),
             "app_user_id": installation.get("app_user_id"),

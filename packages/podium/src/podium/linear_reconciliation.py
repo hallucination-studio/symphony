@@ -140,29 +140,42 @@ class LinearReconciler:
         project: dict[str, Any],
         updated_after: str,
     ) -> list[dict[str, Any]]:
-        transport = httpx.MockTransport(self.transport) if self.transport is not None else None
-        async with httpx.AsyncClient(timeout=30, trust_env=False, transport=transport) as client:
-            response = await client.post(
-                LINEAR_GRAPHQL_ENDPOINT,
-                json={
-                    "query": DELEGATED_ISSUES_QUERY,
-                    "variables": {
-                        "projectId": str(project["linear_project_id"]),
-                        "delegateId": str(installation["app_user_id"]),
-                        "updatedAfter": updated_after,
-                        "first": self.page_size,
-                    },
-                },
-                headers={
-                    "Authorization": f"Bearer {installation['access_token']}",
-                    "Content-Type": "application/json",
-                },
+        payload = {
+            "query": DELEGATED_ISSUES_QUERY,
+            "variables": {
+                "projectId": str(project["linear_project_id"]),
+                "delegateId": str(installation["app_user_id"]),
+                "updatedAfter": updated_after,
+                "first": self.page_size,
+            },
+        }
+        token = await self.state.linear_access_token(installation)
+        response = await self._post_graphql(payload, token)
+        if response.status_code == 401:
+            token = await self.state.linear_access_token(
+                installation,
+                force_refresh=True,
+                rejected_access_token=token,
             )
+            response = await self._post_graphql(payload, token)
+        if response.status_code == 401:
+            current = await self.state.get_active_linear_installation(str(installation.get("user_id") or ""))
+            if current is not None:
+                await self.state.mark_linear_reauthorization_required(current, "linear_token_rejected_after_refresh")
         payload = response.json()
         if response.status_code != 200 or payload.get("errors"):
             raise RuntimeError(f"linear_reconciliation_failed status={response.status_code}")
         nodes = (((payload.get("data") or {}).get("issues") or {}).get("nodes") or [])
         return [node for node in nodes if isinstance(node, dict)]
+
+    async def _post_graphql(self, payload: dict[str, Any], token: str) -> httpx.Response:
+        transport = httpx.MockTransport(self.transport) if self.transport is not None else None
+        async with httpx.AsyncClient(timeout=30, trust_env=False, transport=transport) as client:
+            return await client.post(
+                LINEAR_GRAPHQL_ENDPOINT,
+                json=payload,
+                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            )
 
     async def _record_binding_error(
         self,

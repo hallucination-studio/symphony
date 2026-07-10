@@ -206,4 +206,4 @@ async def test_podium_smoke_runs_through_real_conductor_and_linear_proxy(tmp_pat
     assert "smoke_check" in progress.json()["completed_steps"]
     proxy_calls = [call for call in linear.calls if "query ProjectLabel" in call["query"]]
     assert len(proxy_calls) == 2
-    assert {call["authorization"] for call in proxy_calls} == {"oauth-installation-token"}
+    assert {call["authorization"] for call in proxy_calls} == {"Bearer oauth-installation-token"}
