@@ -38,6 +38,7 @@ async def _archive_podium_snapshots(state: Any) -> None:
             root=Path(state.root),
             evidence=state.evidence,
             prefix="early-exit",
+            tolerate_endpoint_errors=True,
         )
     except Exception as exc:
         state.evidence.check(

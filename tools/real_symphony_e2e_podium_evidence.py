@@ -24,10 +24,23 @@ async def archive_podium_api_snapshots(
     root: Path,
     evidence: Evidence,
     prefix: str,
+    tolerate_endpoint_errors: bool = False,
 ) -> dict[str, dict[str, Any]]:
     snapshots: dict[str, dict[str, Any]] = {}
     for name, endpoint in PODIUM_SNAPSHOT_ENDPOINTS.items():
-        payload = await session.request("GET", endpoint)
+        try:
+            payload = await session.request("GET", endpoint)
+        except E2EConfigurationError as exc:
+            if not tolerate_endpoint_errors:
+                raise
+            payload = {
+                "error": {
+                    "code": exc.error_code,
+                    "sanitized_reason": exc.sanitized_reason,
+                    "retryable": exc.retryable,
+                    "next_action": exc.next_action,
+                }
+            }
         sanitized = redact_evidence_value(payload)
         snapshots[name] = sanitized
         path = root / f"{prefix}-podium-{name.replace('_', '-')}.json"

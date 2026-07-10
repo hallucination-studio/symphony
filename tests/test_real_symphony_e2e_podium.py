@@ -299,6 +299,39 @@ async def test_podium_api_snapshots_are_session_backed_and_redacted(tmp_path) ->
         assert "hidden" not in text
 
 
+async def test_early_podium_snapshots_archive_unavailable_endpoints_without_masking_primary_failure(tmp_path) -> None:
+    tool = load_tool("real_symphony_e2e_podium_evidence")
+
+    class Session:
+        async def request(self, _method: str, path: str) -> dict[str, object]:
+            if path == "/api/v1/linear/projects":
+                raise tool.E2EConfigurationError(
+                    failure_class="environment_failure",
+                    error_code="linear_installation_required",
+                    sanitized_reason="An active Linear installation is required",
+                    retryable=False,
+                    next_action="authorize_linear",
+                )
+            return {"path": path}
+
+    evidence = tool.Evidence(tmp_path / "evidence.json")
+    snapshots = await tool.archive_podium_api_snapshots(
+        Session(),
+        root=tmp_path,
+        evidence=evidence,
+        prefix="early-exit",
+        tolerate_endpoint_errors=True,
+    )
+
+    assert snapshots["linear_projects"]["error"]["code"] == "linear_installation_required"
+    assert set(evidence.data["artifacts"]) == {
+        "early-exit_podium_managed_runs",
+        "early-exit_podium_linear_installations",
+        "early-exit_podium_linear_projects",
+        "early-exit_podium_runtimes",
+    }
+
+
 def test_enrollment_result_must_match_reserved_conductor() -> None:
     tool = load_tool("real_symphony_e2e_podium_runtime")
 
