@@ -28,6 +28,17 @@ class PodiumRuntimeMixin:
         conductor = await self._runtime_report_conductor(runtime_id, runtime, payload)
         await self.store.upsert_conductor(conductor)
         bindings = payload.get("bindings") if isinstance(payload.get("bindings"), list) else []
+        if payload.get("unbound_binding_id"):
+            try:
+                binding = await self.acknowledge_project_unbind(runtime_id, payload)
+            except ProjectBindingError as exc:
+                return {
+                    "status": "rejected",
+                    "error_code": exc.code,
+                    "sanitized_reason": exc.reason,
+                    "bindings_upserted": 0,
+                }
+            return {"status": "ok", "bindings_upserted": 0, "binding_state": binding["state"]}
         if len(bindings) > 1:
             return {
                 "status": "rejected",
@@ -137,7 +148,11 @@ class PodiumRuntimeMixin:
         result: list[dict[str, Any]] = []
         for conductor in await self.store.list_conductors_for_user(user_id):
             conductor_id = str(conductor["id"])
-            bindings = [self.binding_public(binding) for binding in await self.store.list_project_bindings_for_conductor(conductor_id)]
+            bindings = [
+                self.binding_public(binding)
+                for binding in await self.store.list_project_bindings_for_conductor(conductor_id)
+                if binding.get("active", True)
+            ]
             for binding in bindings:
                 metrics = await self.store.get_metrics_snapshot(conductor_id, str(binding.get("instance_id") or ""))
                 binding["metrics"] = metrics or {}

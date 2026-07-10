@@ -32,6 +32,12 @@ def register_conductor_binding_routes(
         require_user=require_user,
         error_response=error_response,
     )
+    _register_conductor_unbind_route(
+        app,
+        state=state,
+        require_user=require_user,
+        error_response=error_response,
+    )
 
 
 def _register_conductor_rename_route(
@@ -93,3 +99,28 @@ def _register_conductor_bind_route(
         except SecretDecryptionError:
             return error_response(500, "linear_installation_secret_unreadable", "Linear installation could not be decrypted")
         return JSONResponse({"binding": state.binding_public(binding)}, status_code=202)
+
+
+def _register_conductor_unbind_route(
+    app: FastAPI,
+    *,
+    state: Any,
+    require_user: RequireUser,
+    error_response: ErrorResponse,
+) -> None:
+    @app.delete("/api/v1/conductors/{conductor_id}/binding")
+    async def unbind_conductor(conductor_id: str, request: Request) -> JSONResponse:
+        user = await require_user(request)
+        if user is None:
+            return error_response(401, "unauthorized", "Unauthorized")
+        try:
+            binding, active = await state.begin_project_unbind(str(user["id"]), conductor_id)
+        except ProjectBindingError as exc:
+            statuses = {
+                "conductor_not_found": 404,
+                "project_binding_not_found": 404,
+                "managed_runs_active": 409,
+            }
+            return error_response(statuses.get(exc.code, 409), exc.code, exc.reason)
+        status_code = 202 if active else 200
+        return JSONResponse({"binding": state.binding_public(binding)}, status_code=status_code)

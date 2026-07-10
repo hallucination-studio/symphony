@@ -10,8 +10,10 @@ import pytest
 
 from test_podium_conductor_channels_support import (
     activate_linear_installation,
+    agent_session_payload,
     bind_and_ack_conductor,
     make_app,
+    queue_agent_session,
     register,
 )
 
@@ -54,6 +56,10 @@ class ProjectLabelTransport:
                     "projectLabel": {"id": variables["labelId"], "name": variables["name"]},
                 }
             }
+        elif operation == "ManagedProjectRemoveLabel":
+            data = {"projectRemoveLabel": {"success": True}}
+        elif operation == "ManagedProjectLabelDelete":
+            data = {"projectLabelDelete": {"success": True}}
         else:
             raise AssertionError(f"unexpected Linear operation: {operation}")
         return httpx.Response(200, json={"data": data}, request=request)
@@ -404,3 +410,116 @@ async def test_rename_label_failure_preserves_working_binding_and_surfaces_error
     assert binding["error_code"] == "linear_project_label_rename_failed"
     assert binding["sanitized_reason"] == "Linear project label rename failed"
     assert "event=linear_project_label_rename_failed" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_unbind_waits_for_runtime_ack_then_removes_managed_label(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level("INFO", logger="podium.podium_project_bindings")
+    transport = ProjectLabelTransport()
+    app = make_app(linear_graphql_transport=transport)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
+        user_id = await _prepare_workspace(client, app)
+        enrolled = await _enroll(client, await _issue_enrollment(client, name="Bach"))
+        _, ready = await bind_and_ack_conductor(app, client, user_id, enrolled)
+        request_count = len(transport.requests)
+
+        started = await client.delete(f"/api/v1/conductors/{enrolled['runtime_id']}/binding")
+        blocked_intake = await queue_agent_session(
+            app,
+            agent_session_payload(
+                workspace_id=user_id,
+                project_slug="ALPHA",
+                delegate_id="agent-alpha",
+            ),
+        )
+        command = app.state.podium.store._load_map("runtime_commands.json")[enrolled["runtime_id"]][-1]["command"]
+        acknowledged = await client.post(
+            "/api/v1/runtime/report",
+            headers={"Authorization": f"Bearer {enrolled['runtime_token']}"},
+            json={
+                "bindings": [],
+                "unbound_binding_id": ready["id"],
+                "unbound_config_version": ready["config_version"] + 1,
+            },
+        )
+        repeated = await client.delete(f"/api/v1/conductors/{enrolled['runtime_id']}/binding")
+        binding = await app.state.podium.store.get_project_binding(ready["id"])
+        runtimes = await client.get("/api/v1/runtimes")
+
+    assert started.status_code == 202
+    assert started.json()["binding"]["state"] == "pending_unbind"
+    assert blocked_intake.json()["queued"] == 0
+    assert command == {
+        "type": "project.unconfigure",
+        "binding_id": ready["id"],
+        "config_version": ready["config_version"] + 1,
+        "delete_repository": False,
+    }
+    assert acknowledged.status_code == 200
+    assert acknowledged.json()["binding_state"] == "unbound"
+    assert binding["active"] is False
+    assert binding["state"] == "unbound"
+    assert [request["operationName"] for request in transport.requests[request_count:]] == [
+        "ManagedProjectRemoveLabel",
+        "ManagedProjectLabelDelete",
+    ]
+    assert repeated.status_code == 200
+    assert runtimes.json()["conductors"][0]["bindings"] == []
+    assert "event=project_unbind_requested" in caplog.text
+    assert "event=project_unbound" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_unbind_rejects_active_managed_run_dispatch(caplog: pytest.LogCaptureFixture) -> None:
+    app = make_app()
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
+        user_id = await _prepare_workspace(client, app)
+        enrolled = await _enroll(client, await _issue_enrollment(client, name="Chopin"))
+        _, ready = await bind_and_ack_conductor(app, client, user_id, enrolled)
+        queued = await queue_agent_session(
+            app,
+            agent_session_payload(
+                workspace_id=user_id,
+                project_slug="ALPHA",
+                delegate_id="agent-alpha",
+            ),
+        )
+
+        rejected = await client.delete(f"/api/v1/conductors/{enrolled['runtime_id']}/binding")
+        binding = await app.state.podium.store.get_project_binding(ready["id"])
+
+    assert queued.json()["queued"] == 1
+    assert rejected.status_code == 409
+    assert rejected.json()["error"]["code"] == "managed_runs_active"
+    assert binding["state"] == "ready"
+    assert "event=project_unbind_blocked" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_unbind_label_failure_remains_unroutable_and_visible(caplog: pytest.LogCaptureFixture) -> None:
+    transport = ProjectLabelTransport(fail_operation="ManagedProjectRemoveLabel")
+    app = make_app(linear_graphql_transport=transport)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
+        user_id = await _prepare_workspace(client, app)
+        enrolled = await _enroll(client, await _issue_enrollment(client, name="Debussy"))
+        _, ready = await bind_and_ack_conductor(app, client, user_id, enrolled)
+        await client.delete(f"/api/v1/conductors/{enrolled['runtime_id']}/binding")
+
+        acknowledged = await client.post(
+            "/api/v1/runtime/report",
+            headers={"Authorization": f"Bearer {enrolled['runtime_token']}"},
+            json={
+                "bindings": [],
+                "unbound_binding_id": ready["id"],
+                "unbound_config_version": ready["config_version"] + 1,
+            },
+        )
+        binding = await app.state.podium.store.get_project_binding(ready["id"])
+
+    assert acknowledged.status_code == 409
+    assert acknowledged.json()["error"]["code"] == "linear_project_label_remove_failed"
+    assert binding["active"] is True
+    assert binding["state"] == "pending_unbind"
+    assert binding["error_code"] == "linear_project_label_remove_failed"
+    assert binding["sanitized_reason"] == "Linear project label removal failed"
+    assert "event=linear_project_label_remove_failed" in caplog.text

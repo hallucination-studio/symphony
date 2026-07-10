@@ -36,6 +36,16 @@ mutation ManagedProjectLabelUpdate($labelId: String!, $name: String!) {
   }
 }
 """
+PROJECT_REMOVE_LABEL = """
+mutation ManagedProjectRemoveLabel($projectId: String!, $labelId: String!) {
+  projectRemoveLabel(id: $projectId, labelId: $labelId) { success }
+}
+"""
+LABEL_DELETE = """
+mutation ManagedProjectLabelDelete($labelId: String!) {
+  projectLabelDelete(id: $labelId) { success }
+}
+"""
 
 
 class LinearProjectLabelError(RuntimeError):
@@ -101,6 +111,35 @@ class PodiumProjectLabelsMixin:
             "error_code": "",
             "sanitized_reason": "",
         }
+
+    async def remove_managed_project_label(self, binding: dict[str, Any]) -> None:
+        label_id = str(binding.get("label_id") or "")
+        if not label_id:
+            return
+        installation = await self.get_active_linear_installation(str(binding.get("user_id") or ""))
+        if installation is None or str(installation.get("id") or "") != str(binding.get("installation_id") or ""):
+            raise LinearProjectLabelError("active_linear_installation_mismatch")
+        try:
+            removed = await self._project_label_graphql(
+                installation,
+                PROJECT_REMOVE_LABEL,
+                {
+                    "projectId": str(binding.get("linear_project_id") or ""),
+                    "labelId": label_id,
+                },
+                "ManagedProjectRemoveLabel",
+            )
+            _require_success(removed, "projectRemoveLabel")
+            deleted = await self._project_label_graphql(
+                installation,
+                LABEL_DELETE,
+                {"labelId": label_id},
+                "ManagedProjectLabelDelete",
+            )
+            _require_success(deleted, "projectLabelDelete")
+        except (LinearGraphQLRequestError, LinearProjectLabelError) as exc:
+            _log_label_remove_failure(binding, exc)
+            raise LinearProjectLabelError("linear_project_label_remove_failed") from exc
 
     async def _find_or_create_project_label(
         self,
@@ -168,6 +207,12 @@ def managed_project_label_name(conductor: dict[str, Any]) -> str:
     return f"symphony:conductor/{conductor.get('name')}-{conductor.get('public_id')}"
 
 
+def _require_success(data: dict[str, Any], field: str) -> None:
+    payload = data.get(field)
+    if not isinstance(payload, dict) or payload.get("success") is not True:
+        raise LinearProjectLabelError(f"{field}_invalid")
+
+
 def _log_label_failure(binding: dict[str, Any], error: Exception) -> None:
     LOGGER.error(
         "event=linear_project_label_sync_failed conductor_id=%s instance_id=%s linear_project_id=%s "
@@ -191,4 +236,17 @@ def _log_label_rename_failure(binding: dict[str, Any], error: Exception) -> None
         binding.get("linear_project_id"),
         type(error).__name__,
         "Linear project label rename failed",
+    )
+
+
+def _log_label_remove_failure(binding: dict[str, Any], error: Exception) -> None:
+    LOGGER.error(
+        "event=linear_project_label_remove_failed conductor_id=%s instance_id=%s linear_project_id=%s "
+        "error_type=%s error_code=linear_project_label_remove_failed sanitized_reason=%s "
+        "action_required=retry retryable=true next_action=retry_runtime_unbind_report",
+        binding.get("conductor_id"),
+        binding.get("instance_id"),
+        binding.get("linear_project_id"),
+        type(error).__name__,
+        "Linear project label removal failed",
     )

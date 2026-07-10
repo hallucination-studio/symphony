@@ -31,6 +31,8 @@ class PodiumWebSocketMixin:
             return self._handle_podium_human_answered(command)
         if kind == "project.configure":
             return self._handle_project_configure(command)
+        if kind == "project.unconfigure":
+            return self._handle_project_unconfigure(command)
         if kind == "project.prepare_installation":
             return self._handle_installation_prepare(command)
         if kind == "project.activate_installation":
@@ -103,6 +105,8 @@ class PodiumWebSocketMixin:
         current_project_id = str(instance.linear_filters.get("linear_project_id") or "")
         current_version = _optional_int(instance.linear_filters.get("binding_config_version"), 0) or 0
         if current_project_id != project_id:
+            if not current_project_id and instance.linear_filters.get("unbound_binding_id"):
+                return self._rebind_project_instance(instance, command, project_id, version, mode, value)
             return {
                 "status": "rejected",
                 "reason": "conductor_already_bound_to_project",
@@ -125,6 +129,62 @@ class PodiumWebSocketMixin:
             ),
         )
         return {"status": "applied", "instance_id": updated.id, "config_version": version}
+
+    def _rebind_project_instance(
+        self,
+        instance: Any,
+        command: dict[str, Any],
+        project_id: str,
+        version: int,
+        mode: str,
+        value: str,
+    ) -> dict[str, Any]:
+        unbound_version = _optional_int(instance.linear_filters.get("unbound_config_version"), 0) or 0
+        if version <= unbound_version:
+            return {"status": "rejected", "reason": "stale_project_config", "current_version": unbound_version}
+        expected_type = "git" if mode == "git_url" else "local_path"
+        if instance.repo_source_type != expected_type or instance.repo_source_value != value:
+            return {"status": "rejected", "reason": "repository_change_requires_rebind"}
+        filters = _project_filters(command, project_id, version)
+        updated = self.update_instance(
+            instance.id,
+            InstancePatchRequest(
+                name=str(command.get("project_name") or command.get("project_slug") or project_id),
+                linear_project=str(command.get("project_slug") or ""),
+                linear_filters=filters,
+            ),
+        )
+        return {"status": "applied", "instance_id": updated.id, "config_version": version}
+
+    def _handle_project_unconfigure(self, command: dict[str, Any]) -> dict[str, Any]:
+        instances = self.store.list_instances()
+        if len(instances) != 1:
+            return {"status": "rejected", "reason": "project_binding_required"}
+        instance = instances[0]
+        binding_id = str(command.get("binding_id") or "")
+        version = _optional_int(command.get("config_version"), 0) or 0
+        filters = dict(instance.linear_filters)
+        if (
+            binding_id == str(filters.get("unbound_binding_id") or "")
+            and version == (_optional_int(filters.get("unbound_config_version"), 0) or 0)
+        ):
+            return {"status": "already_unbound", "binding_id": binding_id, "config_version": version}
+        if binding_id != str(filters.get("binding_id") or ""):
+            return {"status": "rejected", "reason": "project_binding_mismatch"}
+        current_version = _optional_int(filters.get("binding_config_version"), 0) or 0
+        if version <= current_version:
+            return {"status": "rejected", "reason": "stale_project_config", "current_version": current_version}
+        if instance.process_status in {"running", "starting"}:
+            return {"status": "rejected", "reason": "instance_running"}
+        tombstone = {
+            "unbound_binding_id": binding_id,
+            "unbound_config_version": version,
+        }
+        self.update_instance(
+            instance.id,
+            InstancePatchRequest(linear_project="", linear_filters=tombstone),
+        )
+        return {"status": "unbound", "binding_id": binding_id, "config_version": version}
 
     def _handle_installation_prepare(self, command: dict[str, Any]) -> dict[str, Any]:
         instances = self.store.list_instances()

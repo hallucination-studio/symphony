@@ -53,6 +53,16 @@ class JsonStoreDispatchMixin:
             and str(row.get("status") or "") not in terminal
         )
 
+    async def count_open_dispatches_for_binding(self, binding_id: str) -> int:
+        terminal = {"completed", "failed", "cancelled", "canceled"}
+        return sum(
+            1
+            for row in self._load_map("dispatches.json").values()
+            if isinstance(row, dict)
+            and str(row.get("project_binding_id") or "") == binding_id
+            and str(row.get("status") or "") not in terminal
+        )
+
     async def get_active_project_binding_for_project(
         self,
         user_id: str,

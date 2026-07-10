@@ -144,7 +144,11 @@ class PodiumConductorsMixin:
 
     async def conductor_public(self, conductor: dict[str, Any]) -> dict[str, Any]:
         conductor_id = str(conductor["id"])
-        bindings = await self.store.list_project_bindings_for_conductor(conductor_id)
+        bindings = [
+            row
+            for row in await self.store.list_project_bindings_for_conductor(conductor_id)
+            if row.get("active", True)
+        ]
         return {
             "id": conductor_id,
             "name": str(conductor.get("name") or ""),

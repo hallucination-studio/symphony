@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from .podium_project_labels import LinearProjectLabelError
 from .podium_shared import utc_now_iso
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 class ProjectBindingError(RuntimeError):
@@ -29,7 +33,8 @@ class PodiumProjectBindingsMixin:
             raise ProjectBindingError("conductor_not_enrolled", "Conductor is not enrolled")
         if not await self.is_runtime_online(conductor_id):
             raise ProjectBindingError("conductor_offline", "Conductor must be online before binding")
-        if await self.store.list_project_bindings_for_conductor(conductor_id):
+        prior_bindings = await self.store.list_project_bindings_for_conductor(conductor_id)
+        if any(row.get("active", True) for row in prior_bindings):
             raise ProjectBindingError("conductor_already_bound", "Conductor already has a project binding")
         selected = {
             str(row.get("linear_project_id") or ""): row
@@ -66,7 +71,7 @@ class PodiumProjectBindingsMixin:
             },
             "state": "pending_ack",
             "active": True,
-            "config_version": 1,
+            "config_version": max((int(row.get("config_version") or 0) for row in prior_bindings), default=0) + 1,
             "acknowledged_config_version": 0,
             "candidate_installation_id": "",
             "candidate_agent_app_user_id": "",
@@ -81,6 +86,126 @@ class PodiumProjectBindingsMixin:
         await self.store.upsert_project_binding(binding)
         await self.enqueue_runtime_command(conductor_id, self.project_binding_command(binding))
         return binding
+
+    async def begin_project_unbind(
+        self,
+        user_id: str,
+        conductor_id: str,
+    ) -> tuple[dict[str, Any], bool]:
+        conductor = await self.conductor_for_user(conductor_id, user_id)
+        if conductor is None:
+            raise ProjectBindingError("conductor_not_found", "Conductor not found")
+        bindings = await self.store.list_project_bindings_for_conductor(conductor_id)
+        active = next((row for row in bindings if row.get("active", True)), None)
+        if active is None:
+            previous = bindings[-1] if bindings else None
+            if previous is None:
+                raise ProjectBindingError("project_binding_not_found", "Conductor has no project binding")
+            return previous, False
+        if str(active.get("state") or "") == "pending_unbind":
+            return active, True
+        if await self.store.count_open_dispatches_for_binding(str(active["id"])):
+            LOGGER.warning(
+                "event=project_unbind_blocked conductor_id=%s instance_id=%s linear_project_id=%s "
+                "error_code=managed_runs_active sanitized_reason=%s action_required=drain retryable=true "
+                "next_action=wait_for_managed_runs",
+                conductor_id,
+                active.get("instance_id"),
+                active.get("linear_project_id"),
+                "Managed Runs must finish before unbinding",
+            )
+            raise ProjectBindingError("managed_runs_active", "Managed Runs must finish before unbinding")
+        pending = {
+            **active,
+            "state": "pending_unbind",
+            "config_version": int(active.get("config_version") or 0) + 1,
+            "error_code": "",
+            "sanitized_reason": "",
+            "updated_at": utc_now_iso(),
+        }
+        await self.store.upsert_project_binding(pending)
+        await self.enqueue_runtime_command(
+            conductor_id,
+            {
+                "type": "project.unconfigure",
+                "binding_id": str(pending["id"]),
+                "config_version": int(pending["config_version"]),
+                "delete_repository": False,
+            },
+        )
+        LOGGER.info(
+            "event=project_unbind_requested conductor_id=%s instance_id=%s linear_project_id=%s "
+            "config_version=%s",
+            conductor_id,
+            pending.get("instance_id"),
+            pending.get("linear_project_id"),
+            pending.get("config_version"),
+        )
+        return pending, True
+
+    async def acknowledge_project_unbind(
+        self,
+        conductor_id: str,
+        report: dict[str, Any],
+    ) -> dict[str, Any]:
+        binding_id = str(report.get("unbound_binding_id") or "")
+        version = int(report.get("unbound_config_version") or 0)
+        binding = await self.store.get_project_binding(binding_id)
+        if binding is None or str(binding.get("conductor_id") or "") != conductor_id:
+            raise ProjectBindingError("project_unbind_mismatch", "Runtime unbind does not match its Conductor")
+        if not binding.get("active", True) and str(binding.get("state") or "") == "unbound":
+            return binding
+        if str(binding.get("state") or "") != "pending_unbind" or version != int(binding.get("config_version") or 0):
+            raise ProjectBindingError("project_unbind_version_mismatch", "Runtime unbind config version is stale")
+        try:
+            await self.remove_managed_project_label(binding)
+        except LinearProjectLabelError as exc:
+            failed = {
+                **binding,
+                "error_code": "linear_project_label_remove_failed",
+                "sanitized_reason": "Linear project label removal failed",
+                "updated_at": utc_now_iso(),
+            }
+            await self.store.upsert_project_binding(failed)
+            raise ProjectBindingError(
+                "linear_project_label_remove_failed",
+                "Linear project label removal failed",
+            ) from exc
+        unbound = {
+            **binding,
+            "state": "unbound",
+            "active": False,
+            "acknowledged_config_version": version,
+            "process_status": "",
+            "error_code": "",
+            "sanitized_reason": "",
+            "updated_at": utc_now_iso(),
+        }
+        await self.store.upsert_project_binding(unbound)
+        await self._clear_runtime_group_binding(conductor_id)
+        LOGGER.info(
+            "event=project_unbound conductor_id=%s instance_id=%s linear_project_id=%s config_version=%s",
+            conductor_id,
+            unbound.get("instance_id"),
+            unbound.get("linear_project_id"),
+            version,
+        )
+        return unbound
+
+    async def _clear_runtime_group_binding(self, conductor_id: str) -> None:
+        conductor = await self.store.get_runtime(conductor_id)
+        group_id = str((conductor or {}).get("runtime_group_id") or "")
+        group = await self.store.get_runtime_group(group_id)
+        if group is None:
+            return
+        await self.store.upsert_runtime_group(
+            {
+                **group,
+                "project_slug": "",
+                "linear_agent_app_user_id": "",
+                "project_binding_id": "",
+            }
+        )
 
     def project_binding_command(self, binding: dict[str, Any]) -> dict[str, Any]:
         return {
