@@ -2169,6 +2169,56 @@ async def test_real_symphony_e2e_linear_auth_failure_is_immediate_and_classified
     assert error.value.retryable is False
 
 
+async def test_real_symphony_e2e_linear_app_user_scope_failure_is_immediate_and_classified(monkeypatch) -> None:
+    tool = load_tool("real_symphony_e2e_linear_core")
+    calls = 0
+
+    class Response:
+        status_code = 200
+
+        @staticmethod
+        def json() -> dict:
+            return {
+                "errors": [
+                    {
+                        "message": "App user not valid",
+                        "extensions": {
+                            "code": "INPUT_ERROR",
+                            "statusCode": 400,
+                            "userPresentableMessage": "One or more app users lack the required scope.",
+                        },
+                    }
+                ]
+            }
+
+    class Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args) -> None:
+            return None
+
+        async def post(self, *_args, **_kwargs) -> Response:
+            nonlocal calls
+            calls += 1
+            return Response()
+
+    async def no_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(tool.httpx, "AsyncClient", lambda **_kwargs: Client())
+    monkeypatch.setattr(tool.asyncio, "sleep", no_sleep)
+
+    with pytest.raises(tool.LinearE2EError) as error:
+        await tool.linear_graphql("token", "mutation DelegateIssue { issueUpdate { success } }", {})
+
+    assert calls == 1
+    assert error.value.failure_class == "credential_or_config_failure"
+    assert error.value.error_code == "linear_app_user_scope_invalid"
+    assert error.value.retryable is False
+    assert error.value.next_action == "refresh_linear_app_access_token_with_app_assignable_and_mentionable_scopes"
+
+
 def test_real_symphony_e2e_records_external_failure_classification(tmp_path: Path) -> None:
     early_exit = load_tool("real_symphony_e2e_early_exit")
     linear = load_tool("real_symphony_e2e_linear_core")

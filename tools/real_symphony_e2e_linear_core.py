@@ -38,6 +38,8 @@ async def linear_graphql(token: str, query: str, variables: dict[str, Any]) -> d
                 ) from exc
             if _has_linear_authentication_error(payload):
                 raise _linear_authentication_error(response.status_code)
+            if _has_linear_app_user_scope_error(payload):
+                raise _linear_app_user_scope_error()
             if response.status_code != 200 or payload.get("errors"):
                 raise RuntimeError(json.dumps({"status": response.status_code, "payload": payload}, indent=2))
             return payload["data"]
@@ -61,6 +63,16 @@ def _linear_authentication_error(status_code: int) -> LinearE2EError:
     )
 
 
+def _linear_app_user_scope_error() -> LinearE2EError:
+    return LinearE2EError(
+        failure_class="credential_or_config_failure",
+        error_code="linear_app_user_scope_invalid",
+        sanitized_reason="Linear app user delegation requires app:assignable and app:mentionable scopes.",
+        retryable=False,
+        next_action="refresh_linear_app_access_token_with_app_assignable_and_mentionable_scopes",
+    )
+
+
 def _has_linear_authentication_error(payload: Any) -> bool:
     if not isinstance(payload, dict):
         return False
@@ -73,6 +85,28 @@ def _has_linear_authentication_error(payload: Any) -> bool:
         and str((error.get("extensions") or {}).get("code") or "").upper() in auth_codes
         for error in errors
     )
+
+
+def _has_linear_app_user_scope_error(payload: Any) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    errors = payload.get("errors")
+    if not isinstance(errors, list):
+        return False
+    for error in errors:
+        if not isinstance(error, dict):
+            continue
+        extensions = (
+            error.get("extensions") if isinstance(error.get("extensions"), dict) else {}
+        )
+        text = " ".join(
+            str(value).lower()
+            for value in (error.get("message"), extensions.get("userPresentableMessage"))
+            if value
+        )
+        if "app user" in text and "required scope" in text:
+            return True
+    return False
 
 
 async def fetch_linear_viewer(token: str) -> dict[str, Any]:
