@@ -85,17 +85,6 @@ class LinearTracker:
     ) -> dict[str, Any]:
         return await self.client.update_issue_comment_marker_block(issue_id, marker_name, block)
 
-    async def agent_activity_create(
-        self,
-        *,
-        agent_session_id: str,
-        content: dict[str, Any],
-    ) -> dict[str, Any]:
-        return await self.client.agent_activity_create(
-            agent_session_id=agent_session_id,
-            content=content,
-        )
-
     async def fetch_issue_comments(self, issue_id: str, *, first: int = 20) -> list[dict[str, Any]]:
         return await self.client.fetch_issue_comments(issue_id, first=first)
 
@@ -186,5 +175,5 @@ class LinearTracker:
             relation_type=relation_type,
         )
 
-    async def set_issue_pipeline_label(self, issue_id: str, label_name: str) -> dict[str, Any]:
-        return await self.client.set_issue_pipeline_label(issue_id, label_name)
+    async def set_issue_managed_run_label(self, issue_id: str, label_name: str) -> dict[str, Any]:
+        return await self.client.set_issue_managed_run_label(issue_id, label_name)

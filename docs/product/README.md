@@ -7,16 +7,20 @@ not historical plans, RFC trackers, or implementation scorecards.
 
 - [Product Shape](./product-shape.md) describes the managed product journey and
   the Podium, Conductor, Performer, and `performer-api` roles.
-- [Runtime Pipeline](./runtime-pipeline.md) describes the end-to-end
-  `plan -> execute -> verify` flow.
-- [Pipeline State](./pipeline-state.md) owns graph revisions, nodes, attempts,
-  leases, scheduling, capacity, and convergence.
+- [Managed Run Runtime](./runtime-pipeline.md) describes the end-to-end
+  Linear-native managed-run flow.
+- [Managed Run State](./pipeline-state.md) owns durable managed-run state, leases,
+  capacity, and convergence.
 - [Gates, Verification, And Integration](./gates-verification-integration.md)
   owns frozen gates, rubrics, verifier handoff, manifests, and integration.
 - [Linear Projection](./linear-projection.md) owns the Linear issue topology,
   attempt comments, `need_human`, resume semantics, and supersede chains.
-- [Runtime Profiles And Backends](./runtime-profiles-backends.md) owns per-mode
+- [Runtime Profiles And Backends](./runtime-profiles-backends.md) owns per-role
   profiles, backend selection, thread identity, and Codex home isolation.
+- [Linear-Native Managed Runs](./linear-native-managed-runs.md) owns one-issue agent
+  runs, work-item state, managed-run verification, and Linear-native projection.
+- [Managed Runs Acceptance Matrix](./managed-runs-acceptance-matrix.md) maps
+  design requirements to blocking tests and external E2E failure classes.
 - [Linear Integration](./linear-integration.md) owns OAuth/app setup, delegated
   issue intake, routing, and the GraphQL proxy.
 - [Podium Web](./podium-web.md) owns onboarding and operator UI surfaces.
@@ -26,6 +30,9 @@ not historical plans, RFC trackers, or implementation scorecards.
   enrollment/update safety.
 - [Real Run Testing Guide](../real-run-testing-guide.md) owns the managed
   acceptance procedure and required evidence.
+- [ADR-0001](../decisions/0001-linear-installations-and-single-project-conductors.md)
+  records why Linear installations are unified and Conductors are
+  single-project runtimes.
 
 ## Doc Rules
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ._postgres_records import _pg_datetime, _pg_json, _pg_json_value
+from ._postgres_records import _pg_datetime, _pg_json, _pg_json_value, _row_count
 
 
 class PgOpsMixin:
@@ -41,6 +41,35 @@ class PgOpsMixin:
             user_id,
             _pg_json(result),
         )
+
+    async def compare_and_save_smoke_result(
+        self,
+        user_id: str,
+        expected_revision: int,
+        result: dict[str, Any],
+    ) -> bool:
+        updated = await self.pool.execute(
+            """
+            UPDATE smoke_results SET result_json = $3::jsonb, updated_at = now()
+            WHERE user_id = $1 AND COALESCE(result_json->>'revision', '0') = $2
+            """,
+            user_id,
+            str(expected_revision),
+            _pg_json(result),
+        )
+        if _row_count(updated) == 1:
+            return True
+        if expected_revision != 0:
+            return False
+        inserted = await self.pool.execute(
+            """
+            INSERT INTO smoke_results (user_id, result_json, updated_at)
+            VALUES ($1,$2::jsonb,now()) ON CONFLICT (user_id) DO NOTHING
+            """,
+            user_id,
+            _pg_json(result),
+        )
+        return _row_count(inserted) == 1
 
     async def get_smoke_result(self, user_id: str) -> dict[str, Any] | None:
         row = await self.pool.fetchrow("SELECT result_json FROM smoke_results WHERE user_id = $1", user_id)
@@ -95,10 +124,10 @@ class PgOpsMixin:
         row = await self.pool.fetchrow("SELECT result_json FROM log_fetch_results WHERE request_id = $1", request_id)
         return dict(_pg_json_value(row["result_json"], {})) if row is not None else None
 
-    async def save_pipeline_view(self, runtime_group_id: str, view: dict[str, Any]) -> None:
+    async def save_managed_run_view(self, runtime_group_id: str, view: dict[str, Any]) -> None:
         await self.pool.execute(
             """
-            INSERT INTO pipeline_views (runtime_group_id, view_json, updated_at)
+            INSERT INTO managed_run_views (runtime_group_id, view_json, updated_at)
             VALUES ($1,$2::jsonb,now())
             ON CONFLICT (runtime_group_id) DO UPDATE SET view_json = EXCLUDED.view_json, updated_at = now()
             """,
@@ -106,6 +135,6 @@ class PgOpsMixin:
             _pg_json(view),
         )
 
-    async def get_pipeline_view(self, runtime_group_id: str) -> dict[str, Any] | None:
-        row = await self.pool.fetchrow("SELECT view_json FROM pipeline_views WHERE runtime_group_id = $1", runtime_group_id)
+    async def get_managed_run_view(self, runtime_group_id: str) -> dict[str, Any] | None:
+        row = await self.pool.fetchrow("SELECT view_json FROM managed_run_views WHERE runtime_group_id = $1", runtime_group_id)
         return dict(_pg_json_value(row["view_json"], {})) if row is not None else None

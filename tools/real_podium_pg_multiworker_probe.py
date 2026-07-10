@@ -85,7 +85,7 @@ def _binding_payload() -> dict[str, str]:
         "instance_id": "inst-a",
         "project_slug": "ALPHA",
         "agent_app_user_id": "agent-alpha",
-        "pipeline_profile": "gated-task",
+        "managed_run_profile": "gated-task",
     }
 
 

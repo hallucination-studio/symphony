@@ -6,10 +6,15 @@ This file captures repo-specific commands, product boundaries, coding standards,
 
 Symphony is one product, not four unrelated projects. The repository remains `symphony` because the system is the full orchestra:
 
-- `podium` is the SaaS-facing web boundary. In this refactor it is a small HTTP service for Conductor registration and health checks.
-- `conductor` is the local daemon, reporting hub, and operator API. It owns durable pipeline graph state, starts/stops per-mode Performer attempts, and reports state/events upward to Podium.
-- `performer` is the execution worker. A Conductor may operate multiple Performer instances, and each Performer runs exactly one fenced `plan`, `execute`, or `verify` attempt from request/result JSON paths.
-- `performer_api` is the shared contract package: pipeline DTOs, frozen gates, graph/attempt state, ops projections, runtime config, and registration DTOs.
+- `podium` is the SaaS-facing web boundary. It owns authentication, Linear
+  installations, selected projects, Conductor enrollment/binding, dispatch,
+  runtime configuration, the Linear proxy, and operator views.
+- `conductor` is the customer-side daemon. One Conductor binds exactly one
+  Linear project and one repository, owns that project's durable managed-run
+  state, starts Performer turns, and reports state/events upward to Podium.
+- `performer` is the execution worker. Each short-lived Performer runs exactly
+  one fenced managed-run turn from request/result JSON paths.
+- `performer_api` is the shared contract package: managed-run DTOs, plan/work-item state, ops projections, runtime config, and registration DTOs.
 
 Package boundaries are runtime boundaries, not product boundaries. Keep user-facing language anchored in Symphony as the whole system, with Podium, Conductor, and Performer as roles inside that system.
 
@@ -76,11 +81,11 @@ Run the full local suite:
 make test
 ```
 
-Run focused pipeline checks:
+Run focused managed-run checks:
 
 ```bash
 PYTHONPATH=$(pwd)/packages/performer-api/src:$(pwd)/packages/performer/src:$(pwd)/packages/conductor/src:$(pwd)/packages/podium/src \
-  .venv/bin/python -m pytest tests/test_pipeline_contracts.py tests/conductor_pipeline tests/test_performer_modes.py tests/test_podium_pipeline.py -q
+  .venv/bin/python -m pytest tests/test_managed_run_contracts.py tests/test_conductor_managed_run_store.py tests/test_conductor_managed_run_coordinator.py tests/test_podium_managed_runs.py -q
 ```
 
 Install all editable packages:
@@ -102,10 +107,10 @@ export PODIUM_DATABASE_URL=postgresql://podium@localhost/podium
 .venv/bin/podium api --host 127.0.0.1 --port 8090
 ```
 
-Run a single Performer attempt only through request/result files:
+Run a single Performer managed-run turn only through request/result files:
 
 ```bash
-.venv/bin/performer --mode plan --attempt-request-path /tmp/request.json --attempt-result-path /tmp/result.json
+.venv/bin/performer --turn-request-path /tmp/turn-request.json --turn-result-path /tmp/turn-result.json
 ```
 
 Stop local Performer/Conductor processes launched by the Makefile:
@@ -267,23 +272,48 @@ changes, mock-only tests are not enough.
 
 A real run must:
 
-1. Use `.env` with Podium's Linear application id and app actor token.
-2. Start a Conductor instance first.
-3. Create a real Linear business issue after Conductor is running.
-4. Let Conductor operate Performer so Performer creates gates, dispatches Codex, verifies completion, creates evidence, and transitions states.
-5. Use real `codex app-server` when the scenario says real Codex.
-6. Record Linear tree, runtime state, ops snapshot, logs, and cleanup evidence.
-7. Archive/audit the test project before and after the scenario.
+1. Use `.env` with the default Linear application's client credentials and
+   Podium's fixed callback configuration; never inject a human or deployment-
+   global access token into the managed path.
+2. Complete the real OAuth callback and record the accepted organization,
+   workspace-specific app user, scopes, token health, and selected project.
+3. Start and bind one isolated Conductor to that project and the real fixture
+   repository before creating the business issue.
+4. Create a real Linear business issue after the project binding is ready.
+5. Let fully paginated baseline/incremental polling dispatch the issue exactly
+   once for its delegation epoch, then let Conductor operate Performer through
+   gates, Codex, verification, evidence, and state transitions.
+6. Use real `codex app-server` when the scenario says real Codex.
+7. Record installation, project binding, polling checkpoints/delegation epoch,
+   Linear tree, runtime state, ops snapshot, logs, cleanup, and deduplication
+   evidence.
+8. Archive/audit the test project before and after the scenario.
 
 For Podium-managed flows, the real run must additionally follow `docs/real-run-testing-guide.md#podium-web-to-linear-acceptance`:
 
-1. Start Podium with `PODIUM_LINEAR_APPLICATION_ID` and `PODIUM_LINEAR_APP_ACCESS_TOKEN` set to an `actor=app` Linear OAuth token; that token must include the agent scopes `app:assignable` and `app:mentionable`. Do not set a human/operator `LINEAR_API_KEY` or `PODIUM_LINEAR_ACCESS_TOKEN` for the managed path.
-2. Start Podium Web and verify onboarding/runtime/pipeline with Chrome MCP or an equivalent real browser.
-3. Create the Conductor enrollment token from Podium and run the generated install command locally.
-4. Verify the installed Conductor reports managed mode, Podium runtime/proxy tokens, and the Podium WebSocket URL.
-5. Create a real git fixture repo and a real Linear issue delegated to `$PODIUM_LINEAR_APPLICATION_ID`.
-6. Let Podium's delegate poller discover the issue, then let Conductor and Performer complete the work.
-7. Verify Podium `/api/v1/pipeline`, Linear pipeline graph projection, Performer attempt logs, fixture repo contents, and smoke tests.
+1. Start Podium with the default Linear application's client credentials,
+   Podium's fixed OAuth callback URL, and a public HTTPS origin.
+   Do not inject a human token or deployment-global app actor access token into
+   the managed path.
+2. In a real browser, authorize the default or staged customer application with
+   `actor=app`; verify callback acceptance for actor, scopes, organization,
+   workspace-specific app user, token metadata, and fully paginated project
+   access. Verify success and denied consent return to `/setup/linear`.
+3. Select the real test project without mutating project `memberIds`.
+4. Create a named Conductor enrollment token, run the generated install command,
+   and verify the isolated runtime enrolls online but unbound.
+5. Bind that Conductor to exactly one selected project and one real fixture
+   repository; verify a second project binding and duplicate active Conductor
+   for the project are rejected.
+6. Verify the exact `symphony:conductor/<Name>-<public-id>` project label, while
+   confirming routing uses the durable project binding rather than that label.
+7. Delegate a real Linear issue to the installed workspace app user. Verify a
+   full baseline or incremental poll queues one dispatch, then prove restart,
+   repeated observations, and redelegation preserve checkpoint and epoch
+   semantics without a skipped or duplicate dispatch.
+8. Let Conductor and Performer complete the work, then verify Podium
+   `/api/v1/managed-runs`, Linear projection, turn logs, repository contents,
+   installation/binding health, and smoke tests.
 
 Focused regression files for this path include:
 
@@ -293,31 +323,33 @@ Focused regression files for this path include:
 - `tests/test_podium_linear_polling.py`
 - `tests/test_no_podium_memory_state.py`
 
-The harness may create the initial issue and observe state. It must not manually:
+Managed runs may create the initial issue and observe state. They must not manually:
 
 - move the business issue to `In Review` or `Done`;
-- mutate frozen gate snapshots, verifier scores, manifests, integration queue
-  rows, or Linear projection metadata outside Conductor's fenced attempt/result
+- mutate managed-run plan versions, verification evidence, manifests, integration
+  queue rows, or Linear projection metadata outside Conductor's fenced
+  turn/result paths;
+- mutate managed run or work-item state outside Conductor's fenced turn/result
   paths;
-- mutate pipeline graph state outside Conductor's fenced attempt/result paths;
 - claim success from fake Codex when real Codex was requested.
 
-## Pipeline Gate Acceptance Requirements
+## Managed Runs Acceptance Requirements
 
-For the three-mode pipeline:
+For the Linear-native managed runs:
 
-- Conductor's durable graph is the scheduling source of truth.
-- Every executable node has a frozen `GateSpecSnapshot` before execute starts.
-- Execute and verify attempts carry graph revision, policy revision, lease id,
-  fencing token, and gate snapshot hash.
-- Verifier results score the fixed `0-4` rubric and only pass at `>= 3`.
-- Verify pass publishes a `TaskOutputManifest` and queues deterministic local
-  integration.
-- Linear projection includes `graph_id`, `node_id`, `plan_attempt_id`,
-  `gate_snapshot_hash`, `conductor_revision`, and an operator-readable
-  `operator_status`. Runtime approval/permission/tool-input waits must also
-  include `operator_wait_kind` and a Runtime Wait block in the Linear projection.
-- Pipeline `need_human` resumes only through the node state flip; runtime
+- Conductor's durable managed-run store is the source of truth.
+- One Conductor binds exactly one selected Linear project and one repository;
+  one project has at most one active Conductor.
+- One delegated Linear parent issue maps to one managed run.
+- The accepted plan creates bounded work items with file scope, dependencies,
+  RED/GREEN commands, and a Definition-of-Done rubric.
+- Performer turns carry run id, work item id when applicable, policy revision,
+  plan version, lease id, and fencing token.
+- Work-item review verifies file impact, RED/GREEN evidence, acceptance
+  criteria, secrets, and checkpoint commands before marking Linear Done.
+- Linear projection includes run id, work item id, plan version, current managed-run
+  state, gate status, operator status, and actionable sanitized failure reasons.
+- Managed-run human-action resumes only through recorded managed-run state; runtime
   approval/permission/tool-input waits resume through their recorded runtime wait
   channel, including `[Human Action]` child issues when that flow uses them.
 
@@ -333,32 +365,32 @@ Do not rely only on nested query shape.
 
 Use these meanings:
 
-- `retry`: failed or timed-out fenced attempt that can be retried under a fresh lease.
-- `rework`: verifier failure that returns the graph node to `READY`.
-- `replan`: bounded rework exhaustion that replaces the failed node with a validated subgraph revision.
+- `retry`: failed or timed-out fenced turn that can be retried under a fresh lease.
+- `rework`: managed-run verification failure that returns the work item to an executable state.
+- `plan revision`: approved change to file scope, dependencies, acceptance criteria, or human decisions.
 
 Expected evidence:
 
-- attempt records with lease id, fencing token, graph revision, and policy revision;
-- node state transitions through `READY` / `EXECUTING` / `VERIFYING` / `VERIFY_PASSED`, with failed verifier rework returning to `READY`;
-- verification scores use the fixed `0-4` rubric and pass only at `>= 3`;
-- failed stale or mismatched fenced results are rejected without mutating current graph state;
-- replan creates a new immutable graph revision and supersedes the replaced node.
+- turn records with lease id, fencing token, plan version, and policy revision;
+- work-item transitions through `todo`, `in_progress`, `in_review`, `done`, or `blocked`;
+- verification evidence records RED/GREEN commands, acceptance results, and checkpoint status;
+- failed stale or mismatched fenced results are rejected without mutating current managed-run state;
+- plan revision creates a new immutable plan version and preserves prior versions for audit.
 
 ## When To Stop Waiting
 
-Conductor coordination should surface pipeline stalls as structured state rather
+Conductor coordination should surface managed-run stalls as structured state rather
 than requiring a human to keep waiting and inspect logs:
 
 - expired or missing worker lease;
-- stale result rejected by graph/policy revision, gate hash, or fencing token;
-- `gate_parent_relationship_drift`;
+- stale result rejected by plan/policy revision or fencing token;
+- Linear parent/work-item relationship drift;
 - verified manifest without integration completion;
 - Codex approval or tool-input wait visible only in stdout and not in durable
-  runtime wait state plus Linear pipeline projection;
+  runtime wait state plus Linear managed-run projection;
 - integration conflict awaiting a human child issue;
 - `scenario_timeout_unresolved`;
-- Linear projection drift for pipeline graph metadata.
+- Linear projection drift for managed-run metadata.
 
 When a reconcile finding appears, treat it as product evidence: fix the bug,
 archive the project if a real run was involved, and rerun from a clean state.

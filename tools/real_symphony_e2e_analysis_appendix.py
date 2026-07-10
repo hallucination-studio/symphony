@@ -6,7 +6,7 @@ APPENDIX_EXIT_BAR_ITEMS: tuple[dict[str, Any], ...] = (
     {
         "item": 1,
         "summary": "real business issue decomposed, PlanValidated, committed, and projected as a Linear blocks tree",
-        "required_checks": {"stage:pipeline-gates-frozen", "stage:pipeline-linear-projected"},
+        "required_checks": {"stage:managed-run-gates-frozen", "stage:managed-run-linear-projected"},
     },
     {
         "item": 2,
@@ -17,8 +17,8 @@ APPENDIX_EXIT_BAR_ITEMS: tuple[dict[str, Any], ...] = (
         "item": 3,
         "summary": "isolated canonical verification, tamper failure, expired fencing refusal, and verify-passed gating",
         "required_checks": {
-            "stage:pipeline-manifest-published",
-            "stage:final-pipeline-verified",
+            "stage:managed-run-manifest-published",
+            "stage:final-managed-run-verified",
             "appendix:s3-verifier-mutation-detection",
             "appendix:s3-expired-fencing-refused",
         },
@@ -35,8 +35,8 @@ APPENDIX_EXIT_BAR_ITEMS: tuple[dict[str, Any], ...] = (
     },
     {
         "item": 6,
-        "summary": "Podium pipeline view shows live per-mode detail and conditional predicted order with basis",
-        "required_checks": {"conductor-api:GET /api/pipeline", "appendix:pipeline-prediction-conditional"},
+        "summary": "Managed Runs view shows live work-item detail and conditional predicted order with basis",
+        "required_checks": {"conductor-api:GET /api/managed-runs", "appendix:managed-run-prediction-conditional"},
     },
     {
         "item": 7,
@@ -68,10 +68,10 @@ APPENDIX_FEATURE_SCORE_REQUIREMENTS: tuple[dict[str, Any], ...] = (
     },
     {
         "feature": "S0-b",
-        "summary": "dependency predicate plus pipeline observability",
-        "r_checks": {"conductor-api:GET /api/pipeline", "appendix:s0b-pipeline-live-refresh"},
+        "summary": "dependency predicate plus Managed Runs observability",
+        "r_checks": {"conductor-api:GET /api/managed-runs", "appendix:s0b-managed-run-live-refresh"},
         "h_checks": {
-            "appendix:pipeline-prediction-conditional",
+            "appendix:managed-run-prediction-conditional",
             "appendix:s0b-view-refreshes-after-rewrite",
             "appendix:s0b-view-read-only",
         },
@@ -92,7 +92,7 @@ APPENDIX_FEATURE_SCORE_REQUIREMENTS: tuple[dict[str, Any], ...] = (
     {
         "feature": "S1",
         "summary": "three-layer state model plus graph store and artifacts",
-        "r_checks": {"stage:final-pipeline-verified"},
+        "r_checks": {"stage:final-managed-run-verified"},
         "h_checks": {
             "appendix:s1-superseded-revision-refused",
             "appendix:s1-terminal-attempt-immutable",
@@ -101,7 +101,7 @@ APPENDIX_FEATURE_SCORE_REQUIREMENTS: tuple[dict[str, Any], ...] = (
     {
         "feature": "S2",
         "summary": "planner mode, PlanValidator, and Linear projection",
-        "r_checks": {"stage:pipeline-gates-frozen", "stage:pipeline-linear-projected"},
+        "r_checks": {"stage:managed-run-gates-frozen", "stage:managed-run-linear-projected"},
         "h_checks": {
             "appendix:s2-malformed-proposal-refused",
             "appendix:s2-linear-idempotent-rerun",
@@ -112,8 +112,8 @@ APPENDIX_FEATURE_SCORE_REQUIREMENTS: tuple[dict[str, Any], ...] = (
         "feature": "S3",
         "summary": "isolated verifier plus verify-passed dependency gating",
         "r_checks": {
-            "stage:pipeline-manifest-published",
-            "stage:final-pipeline-verified",
+            "stage:managed-run-manifest-published",
+            "stage:final-managed-run-verified",
             "appendix:s3-downstream-gated-on-verify-passed",
         },
         "h_checks": {
@@ -261,6 +261,23 @@ def pipeline_nodes_terminal(
 
 
 def pipeline_integrations_terminal(pipeline_payload: dict[str, Any]) -> bool:
+    runs = pipeline_payload.get("runs")
+    if isinstance(runs, list):
+        items = [
+            item
+            for run in runs
+            if isinstance(run, dict)
+            for item in run.get("work_items") or []
+            if isinstance(item, dict)
+        ]
+        checkpoints = [
+            result
+            for run in runs
+            if isinstance(run, dict)
+            for result in run.get("checkpoint_results") or []
+            if isinstance(result, dict)
+        ]
+        return bool(items) and all(item.get("state") in {"done", "cancelled"} for item in items) and all(result.get("passed") for result in checkpoints)
     integrations = [item for item in pipeline_payload.get("integration_queue", []) if isinstance(item, dict)]
     return bool(integrations) and all(item.get("status") in {"integrated", "resolved"} for item in integrations)
 

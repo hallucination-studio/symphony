@@ -3,6 +3,7 @@ from __future__ import annotations
 import hmac
 from typing import Any
 
+from .podium_project_bindings import ProjectBindingError
 from .podium_shared import bearer_token, hash_secret, utc_now_iso
 
 
@@ -27,17 +28,50 @@ class PodiumRuntimeMixin:
         conductor = await self._runtime_report_conductor(runtime_id, runtime, payload)
         await self.store.upsert_conductor(conductor)
         bindings = payload.get("bindings") if isinstance(payload.get("bindings"), list) else []
+        if payload.get("unbound_binding_id"):
+            try:
+                binding = await self.acknowledge_project_unbind(runtime_id, payload)
+            except ProjectBindingError as exc:
+                return {
+                    "status": "rejected",
+                    "error_code": exc.code,
+                    "sanitized_reason": exc.reason,
+                    "bindings_upserted": 0,
+                }
+            return {"status": "ok", "bindings_upserted": 0, "binding_state": binding["state"]}
+        if len(bindings) > 1:
+            return {
+                "status": "rejected",
+                "error_code": "multiple_project_bindings",
+                "sanitized_reason": "A Conductor may report at most one project binding",
+                "bindings_upserted": 0,
+            }
         metrics = payload.get("metrics") if isinstance(payload.get("metrics"), dict) else {}
         queue = payload.get("queue") if isinstance(payload.get("queue"), dict) else {}
         log_tail = payload.get("log_tail") if isinstance(payload.get("log_tail"), dict) else {}
-        upserted = 0
-        for raw_binding in bindings:
-            binding = self._binding_from_report(runtime_id, conductor, raw_binding)
-            if binding is None:
-                continue
-            await self._store_binding_report(runtime_id, conductor, binding, metrics, queue, log_tail)
-            upserted += 1
-        return {"status": "ok", "bindings_upserted": upserted}
+        if not bindings:
+            return {"status": "ok", "bindings_upserted": 0, "binding_state": "unbound"}
+        raw_binding = bindings[0]
+        if not isinstance(raw_binding, dict):
+            return {
+                "status": "rejected",
+                "error_code": "invalid_project_binding_report",
+                "sanitized_reason": "Project binding report must be an object",
+                "bindings_upserted": 0,
+            }
+        try:
+            await self.acknowledge_candidate_installation(runtime_id, raw_binding)
+            binding = await self.acknowledge_project_binding(runtime_id, raw_binding)
+        except ProjectBindingError as exc:
+            await self.fail_project_binding(runtime_id, exc)
+            return {
+                "status": "rejected",
+                "error_code": exc.code,
+                "sanitized_reason": exc.reason,
+                "bindings_upserted": 0,
+            }
+        await self._store_binding_report(runtime_id, conductor, binding, metrics, queue, log_tail)
+        return {"status": "ok", "bindings_upserted": 1, "binding_state": binding["state"]}
 
     async def _runtime_report_conductor(
         self,
@@ -66,37 +100,6 @@ class PodiumRuntimeMixin:
             else:
                 conductor.setdefault(key, "")
         return conductor
-
-    def _binding_from_report(
-        self,
-        runtime_id: str,
-        conductor: dict[str, Any],
-        raw_binding: Any,
-    ) -> dict[str, Any] | None:
-        if not isinstance(raw_binding, dict):
-            return None
-        instance_id = str(raw_binding.get("instance_id") or "").strip()
-        if not instance_id:
-            return None
-        return {
-            "id": f"{runtime_id}:{instance_id}",
-            "conductor_id": runtime_id,
-            "user_id": str(conductor.get("user_id") or ""),
-            "instance_id": instance_id,
-            "name": str(raw_binding.get("name") or instance_id),
-            "linear_project": str(raw_binding.get("linear_project") or ""),
-            "project_slug": str(raw_binding.get("project_slug") or raw_binding.get("linear_project") or ""),
-            "agent_app_user_id": str(raw_binding.get("agent_app_user_id") or raw_binding.get("linear_agent_app_user_id") or ""),
-            "pipeline_profile": str(raw_binding.get("pipeline_profile") or "default"),
-            "process_status": str(raw_binding.get("process_status") or ""),
-            "constraint_labels": [
-                str(label)
-                for label in (raw_binding.get("constraint_labels") or [])
-                if isinstance(label, str) and label
-            ],
-            "repo_source": raw_binding.get("repo_source") if isinstance(raw_binding.get("repo_source"), dict) else {},
-            "updated_at": utc_now_iso(),
-        }
 
     async def _store_binding_report(
         self,
@@ -145,7 +148,11 @@ class PodiumRuntimeMixin:
         result: list[dict[str, Any]] = []
         for conductor in await self.store.list_conductors_for_user(user_id):
             conductor_id = str(conductor["id"])
-            bindings = [self.binding_public(binding) for binding in await self.store.list_project_bindings_for_conductor(conductor_id)]
+            bindings = [
+                self.binding_public(binding)
+                for binding in await self.store.list_project_bindings_for_conductor(conductor_id)
+                if binding.get("active", True)
+            ]
             for binding in bindings:
                 metrics = await self.store.get_metrics_snapshot(conductor_id, str(binding.get("instance_id") or ""))
                 binding["metrics"] = metrics or {}
@@ -154,23 +161,22 @@ class PodiumRuntimeMixin:
                     "running": (metrics or {}).get("running", False),
                 }
             bindings.sort(key=lambda row: str(row.get("project_slug") or ""))
-            result.append(
-                {
-                    "id": conductor_id,
-                    "conductor_id": conductor_id,
-                    "runtime_id": conductor_id,
-                    "hostname": conductor.get("hostname") or "",
-                    "label": conductor.get("label") or "",
-                    "version": conductor.get("version") or "",
-                    "online": await self.is_runtime_online(conductor_id),
-                    "last_report_at": conductor.get("last_report_at"),
-                    "bindings": bindings,
-                }
-            )
+            public = await self.conductor_public(conductor)
+            public.update({"conductor_id": conductor_id, "runtime_id": conductor_id, "bindings": bindings})
+            result.append(public)
         return result
 
     def binding_public(self, binding: dict[str, Any]) -> dict[str, Any]:
-        return dict(binding)
+        payload = dict(binding)
+        payload["managed_run_profile"] = str(payload.get("managed_run_profile") or "default")
+        source = payload.pop("repo_source", {})
+        source = source if isinstance(source, dict) else {}
+        source_type = str(source.get("type") or "")
+        payload["repository"] = {
+            "mode": "git_url" if source_type == "git" else source_type,
+            "value": str(source.get("value") or ""),
+        }
+        return payload
 
     async def conductor_belongs_to_user(self, conductor_id: str, user_id: str) -> bool:
         return any(str(row.get("id") or "") == conductor_id for row in await self.store.list_conductors_for_user(user_id))
@@ -184,6 +190,15 @@ class PodiumRuntimeMixin:
 
     async def enqueue_runtime_command(self, runtime_id: str, command: dict[str, Any]) -> dict[str, Any]:
         await self.store.append_runtime_command(runtime_id, command)
+        return command
+
+    async def enqueue_runtime_command_once(
+        self,
+        runtime_id: str,
+        dedupe_key: str,
+        command: dict[str, Any],
+    ) -> dict[str, Any]:
+        await self.store.append_runtime_command_once(runtime_id, dedupe_key, command)
         return command
 
     async def apply_log_chunk(self, runtime_id: str, payload: dict[str, Any]) -> dict[str, Any]:

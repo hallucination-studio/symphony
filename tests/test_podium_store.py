@@ -79,9 +79,9 @@ def test_store_writes_json_atomically_without_leaving_temp_file(tmp_path) -> Non
     assert list(tmp_path.glob("runtimes.json.tmp*")) == []
 
 
-async def test_json_store_persists_linear_poll_state(tmp_path) -> None:
+async def test_json_store_persists_linear_reconciliation_state(tmp_path) -> None:
     store = PodiumStore(data_dir=tmp_path)
-    await store.save_linear_poll_state(
+    await store.save_linear_reconciliation_state(
         "binding-1",
         {
             "binding_id": "binding-1",
@@ -93,7 +93,7 @@ async def test_json_store_persists_linear_poll_state(tmp_path) -> None:
     )
 
     reloaded = PodiumStore(data_dir=tmp_path)
-    state = await reloaded.get_linear_poll_state("binding-1")
+    state = await reloaded.get_linear_reconciliation_state("binding-1")
 
     assert state == {
         "binding_id": "binding-1",

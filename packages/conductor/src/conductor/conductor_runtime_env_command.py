@@ -48,18 +48,17 @@ class RuntimeEnvCommandMixin:
         attempt_request_path: str | None = None,
         attempt_result_path: str | None = None,
     ) -> tuple[str, ...]:
-        if not mode or not attempt_request_path or not attempt_result_path:
-            raise ValueError("--mode, --attempt-request-path, and --attempt-result-path are required for Performer launches")
+        _ = mode
+        if not attempt_request_path or not attempt_result_path:
+            raise ValueError("--turn-request-path and --turn-result-path are required for Performer launches")
         if self.command == sys.executable:
             args = (self.command, "-m", "performer.cli")
         else:
             args = (self.command,)
         return (
             *args,
-            "--mode",
-            mode,
-            "--attempt-request-path",
+            "--turn-request-path",
             attempt_request_path,
-            "--attempt-result-path",
+            "--turn-result-path",
             attempt_result_path,
         )

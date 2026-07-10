@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from performer_api.config import sanitize_codex_config_template
-from performer_api.pipeline import RuntimeMode, RuntimeProfile
+from performer_api.managed_runs import ManagedRunRuntimeRole, RuntimeProfile
 
 
 @dataclass(frozen=True)
@@ -42,7 +42,7 @@ class RuntimeBackendRegistry:
             raise ValueError("runtime profile is required for managed mode attempts")
         provider = self._providers.get(profile.backend)
         if provider is None:
-            raise ValueError(f"unsupported runtime backend for {profile.mode.value}: {profile.backend}")
+            raise ValueError(f"unsupported runtime backend for {profile.role.value}: {profile.backend}")
         workspace = Path(workspace_path) if workspace_path is not None else None
         return provider.prepare_environment(
             BackendEnvironmentContext(
@@ -103,8 +103,8 @@ class LocalVerifierRuntimeBackendProvider:
 
     def prepare_environment(self, context: BackendEnvironmentContext) -> dict[str, str]:
         profile = context.profile
-        if profile.mode is not RuntimeMode.VERIFY:
-            raise ValueError(f"unsupported runtime backend for {profile.mode.value}: {profile.backend}")
+        if profile.role is not ManagedRunRuntimeRole.VERIFY:
+            raise ValueError(f"unsupported runtime backend for {profile.role.value}: {profile.backend}")
         verifier_home = _runtime_home_root(context, "local-verifier")
         try:
             verifier_home.mkdir(parents=True, exist_ok=True)
@@ -148,7 +148,7 @@ def _runtime_home_root(context: BackendEnvironmentContext, backend_name: str) ->
 
 
 def _runtime_mode_home_root(context: BackendEnvironmentContext) -> Path:
-    return context.instance_state_root / "runtime-homes" / context.profile.mode.value
+    return context.instance_state_root / "runtime-homes" / context.profile.role.value
 
 
 def _safe_home_scope(value: str) -> str:

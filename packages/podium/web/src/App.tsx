@@ -1,9 +1,9 @@
-import { Navigate, NavLink, Route, Routes } from "react-router-dom";
+import { Link, Navigate, NavLink, Route, Routes } from "react-router-dom";
 import HomePage from "./pages/HomePage";
 import SetupPage from "./pages/SetupPage";
 import IntegrationsPage from "./pages/IntegrationsPage";
 import RuntimesPage from "./pages/RuntimesPage";
-import PipelinePage from "./pages/PipelinePage";
+import ManagedRunsPage from "./pages/ManagedRunsPage";
 import AccountPage from "./pages/AccountPage";
 import LoginPage from "./pages/LoginPage";
 import RegisterPage from "./pages/RegisterPage";
@@ -17,7 +17,7 @@ const NAV = [
   { to: "/setup", label: "Setup", end: false },
   { to: "/integrations", label: "Integrations", end: false },
   { to: "/runtimes", label: "Runtimes", end: false },
-  { to: "/pipeline", label: "Pipeline", end: false },
+  { to: "/managed-runs", label: "Managed Runs", end: false },
   { to: "/account", label: "Account", end: false },
 ];
 
@@ -86,7 +86,7 @@ function AppShell({ user }: { user: AuthUser }) {
           <Route path="/setup/:step" element={<SetupPage />} />
           <Route path="/integrations" element={<IntegrationsPage />} />
           <Route path="/runtimes" element={<RuntimesPage />} />
-          <Route path="/pipeline" element={<PipelinePage />} />
+          <Route path="/managed-runs" element={<ManagedRunsPage />} />
           <Route path="/account" element={<AccountPage />} />
           {/* Signed-in users hitting auth routes go home. */}
           <Route path="/login" element={<Navigate to="/" replace />} />
@@ -108,18 +108,13 @@ function debugAuthEnabled(): boolean {
 function AccountChip({ user }: { user: AuthUser }) {
   const { t } = useI18n();
   return (
-    <NavLink
-      to="/account"
-      className={({ isActive }) =>
-        isActive ? "account-chip active" : "account-chip"
-      }
-    >
+    <Link to="/account" className="account-chip">
       <span className="account-chip-dot" data-tone="positive" aria-hidden />
       <span className="account-chip-body">
         <span className="account-chip-label">{t("Signed in")}</span>
         <span className="account-chip-value">{user.email}</span>
       </span>
-    </NavLink>
+    </Link>
   );
 }
 
@@ -129,6 +124,8 @@ function LanguageSwitch() {
     <label className="language-switch">
       <span>{t("Language")}</span>
       <select
+        id="podium-language"
+        name="language"
         value={locale}
         aria-label={t("Language")}
         onChange={(e) => setLocale(e.target.value as Locale)}

@@ -21,7 +21,7 @@ make stop           # kill Makefile-launched Conductor/Performer processes
 
 ```bash
 PYTHONPATH=$(pwd)/packages/performer-api/src:$(pwd)/packages/performer/src:$(pwd)/packages/conductor/src:$(pwd)/packages/podium/src \
-  .venv/bin/python -m pytest tests/conductor_pipeline -q
+  .venv/bin/python -m pytest tests/test_conductor_managed_run_store.py tests/test_conductor_managed_run_coordinator.py tests/test_conductor_managed_run_projection.py -q
 # single case:
 PYTHONPATH=... .venv/bin/python -m pytest tests/test_podium_auth.py::test_login -q
 ```
@@ -29,7 +29,7 @@ PYTHONPATH=... .venv/bin/python -m pytest tests/test_podium_auth.py::test_login 
 Run the services directly:
 
 ```bash
-.venv/bin/performer --mode plan|execute|verify --attempt-request-path /tmp/request.json --attempt-result-path /tmp/result.json
+.venv/bin/performer --turn-request-path /tmp/turn-request.json --turn-result-path /tmp/turn-result.json
 .venv/bin/conductor --port 8081 --data-root ./.conductor
 .venv/bin/podium api --host 127.0.0.1 --port 8090
 ```
@@ -40,10 +40,10 @@ Real Linear E2E is skipped by default; it needs a sourced `.env` — see the "Re
 
 Symphony is **one product** split into four Python packages under `packages/`, each a role in the "orchestra". Package boundaries are runtime boundaries, not product boundaries — keep user-facing language anchored on Symphony as the whole system.
 
-- **`performer-api`** — shared contracts: pipeline DTOs, frozen gate snapshots, graph/attempt state, runtime config, ops projections/models, and registration DTOs. The other three depend on it; it depends on none of them.
-- **`performer`** — the execution worker. It only runs fenced `plan`, `execute`, or `verify` attempts from JSON request/result paths under isolated per-mode runtime profiles.
-- **`conductor`** — customer-side local daemon. Manages multiple Performer instances (`.conductor/instances/<id>/`), owns durable pipeline graph state, leases Podium dispatches, starts/stops per-mode Performers, and connects outbound to Podium as an enrolled runtime (`conductor_service.py`, `conductor_runtime.py`, `conductor_api.py`, `conductor_pipeline.py`).
-- **`podium`** — SaaS control plane + BFF/static host. Owns auth, Linear OAuth/app state, runtime enrollment, dispatch queueing, webhooks, and the Linear proxy. `server.py` is a thin asyncio orchestrator over `auth_service.py`, `linear_service.py`, `runtime_service.py`, `onboarding_service.py`, and `store.py`.
+- **`performer-api`** — shared contracts: managed-run DTOs, plan/work-item state, runtime config, ops projections/models, and registration DTOs. The other three depend on it; it depends on none of them.
+- **`performer`** — the execution worker. It only runs fenced managed-run turns from JSON request/result paths under isolated per-role runtime profiles.
+- **`conductor`** — customer-side local daemon. One Conductor binds exactly one Linear project and one repository, owns that project's durable managed-run state, leases Podium dispatches, starts Performer turns, and connects outbound to Podium as an enrolled runtime. Multiple isolated Conductors may run on one host for different projects.
+- **`podium`** — SaaS control plane + BFF/static host. Owns auth, default and customer-owned Linear application configuration, versioned OAuth installations, selected projects, one-to-one Conductor bindings, dispatch queueing, reliable polling, token refresh, and the Linear proxy.
 
 ### Import-boundary invariant (enforced by tests)
 
@@ -57,7 +57,7 @@ Conductor is the only local process manager for Performer, and it launches it vi
 
 ### Managed dispatch flow
 
-The runtime path is event-driven, not polling: a Linear issue is delegated to the Symphony custom agent → Linear sends an AgentSession webhook to Podium → Podium matches agent/project/runtime-group and queues a dispatch → Conductor leases it over outbound runtime auth → Conductor commits or resumes a durable `plan -> execute -> verify` graph → Performer runs one fenced `--mode plan|execute|verify` attempt. Dispatch routing is by custom-agent delegate, project scope, active state, blockers, verified graph dependencies, and runtime capacity — never labels or human assignee.
+The runtime path is polling-only: a Linear issue is delegated to the installed Symphony app user → installation/project-scoped baseline or incremental polling discovers it through full cursor pagination → Podium transactionally records the issue, delegation epoch, dispatch, and checkpoint → Podium matches the active installation and unique project/Conductor binding → that Conductor leases the dispatch → Conductor commits or resumes one durable managed run → Performer runs one fenced managed-run turn. Dispatch routing is by organization, project binding, app user, active state, blockers, work-item dependencies, and runtime capacity, never project labels or human assignee.
 
 ### Podium web frontend
 

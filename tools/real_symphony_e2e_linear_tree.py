@@ -19,7 +19,6 @@ async def fetch_linear_issue_tree(token: str, issue_id: str) -> dict[str, Any]:
                 state { name type }
                 assignee { id name }
                 delegate { id name }
-                agentSessions(first: 5) { nodes { id status appUser { id name } } }
                 labels { nodes { name } }
                 children(first: 50) {
                   nodes {
@@ -27,9 +26,18 @@ async def fetch_linear_issue_tree(token: str, issue_id: str) -> dict[str, Any]:
                     identifier
                     title
                     description
+                    parent { id identifier }
                     state { name type }
                     delegate { id name }
                     labels { nodes { name } }
+                    inverseRelations {
+                      nodes {
+                        id
+                        type
+                        issue { id identifier title }
+                        relatedIssue { id identifier title }
+                      }
+                    }
                     comments(first: 20) { nodes { body createdAt } }
                     children(first: 50) {
                       nodes {

@@ -31,14 +31,14 @@ def audit_runtime_state(state: dict[str, Any], log_text: str = "") -> dict[str, 
 
     for continuation in continuations:
         status_label = continuation.get("status_label")
-        if status_label not in {None, "performer:pipeline/executing"}:
+        if status_label not in {None, "symphony:managed-run/executing"}:
             failures.append(f"continuation_unexpected_label:{continuation.get('identifier')}:{status_label}")
 
     for blocked_entry in blocked:
         if blocked_entry.get("error") is None:
             failures.append(f"blocked_without_error:{blocked_entry.get('identifier') or blocked_entry.get('issue_identifier')}")
         status_label = blocked_entry.get("status_label")
-        if status_label not in {None, "performer:pipeline/awaiting-human"}:
+        if status_label not in {None, "symphony:managed-run/need-human"}:
             failures.append(f"blocked_unexpected_label:{blocked_entry.get('identifier')}:{status_label}")
 
     repeated_claim_stalls = _claim_stalls(log_text)

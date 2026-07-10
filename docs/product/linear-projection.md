@@ -2,9 +2,10 @@
 
 ## Authority Boundary
 
-Conductor's durable graph is scheduler truth. Linear is an operator-visible
-mirror and human-event inbox. Conductor writes graph topology, status, attempts,
-waits, and supersession to Linear, then ingests only allowed human events.
+Conductor's durable managed-run store is scheduler truth. Linear is an
+operator-visible mirror and human-event inbox. Conductor writes run status,
+work-item contracts, attempts, waits, and approved revision state to Linear, then
+ingests only allowed human events.
 
 Linear comments are projection and context. They are never parsed as scheduler
 commands.
@@ -14,19 +15,19 @@ commands.
 The root business issue is immutable delegated intent and the status anchor for
 the run. It is not a scheduler aggregate node.
 
-Each graph node projects to one Linear issue or sub-issue. Parent/child nesting
-expresses decomposition. Linear `blocks` relations mirror the DAG dependencies.
-`blocks` remains a required dependency shape, but dependency satisfaction still
-comes from upstream `VERIFY_PASSED >= 3` in Conductor.
+Each accepted work item projects to one Linear child issue. Parent/child nesting
+expresses the managed-run plan. Linear `blocks` relations may mirror work-item
+dependencies for operator readability, but dependency satisfaction comes only
+from Conductor work-item state: dependencies must be Done.
 
 ## Ingestion
 
 Linear ingestion is union-only and idempotent:
 
-- start from current local `blocks` edges whose endpoints are live;
+- start from the accepted plan's work-item dependencies;
 - add new human-created `blocks` edges;
-- drop edges touching superseded nodes;
-- validate the merged DAG before commit;
+- drop edges touching canceled work items;
+- validate the merged dependency set before commit;
 - commit nothing when topology is unchanged.
 
 A lagging Linear read must not delete a live local edge. Deleting or rewiring
@@ -34,8 +35,8 @@ dependencies requires a validated topology change.
 
 ## Attempt Comments
 
-Every attempt projects to exactly one status-bearing comment on its node issue.
-The comment includes mode, attempt state, attempt id, backend thread id when
+Every attempt projects to exactly one status-bearing comment on its work-item
+issue. The comment includes turn kind, attempt state, attempt id, backend thread id when
 available, verify score, sanitized error summary, and links to safe evidence.
 
 Idempotency is by durable projection mapping:
@@ -48,15 +49,15 @@ Reconcile updates the known `comment_id` when it exists and creates a comment
 only when no mapping exists. There are no hidden comment markers; the durable
 `comment_id` mapping is the replay key.
 
-## need_human
+## Human Action
 
-Pipeline waits use `need_human` on the affected node. Entering `need_human`
-moves the Linear issue to a blocked-style workflow state and posts one
-instruction comment keyed by the wait identity and stored `comment_id`.
+Managed Runs use blocked parent or work-item state for operator action. Entering
+a blocked state moves the relevant Linear issue to a blocked-style workflow
+state and records one instruction update keyed by the managed-run wait identity.
 
 The instruction comment states:
 
-- the structured reason the node stalled;
+- the structured reason the run or work item stalled;
 - what information or action the operator should provide;
 - that comments are context only;
 - that resume requires flipping the issue out of the blocked-style state.
@@ -67,11 +68,11 @@ work.
 Runtime approval, permission, and tool-input waits may still project as
 `[Human Action]` child issues where that runtime wait flow uses child issue
 completion as the resume signal. Those child issues are runtime wait artifacts,
-not a replacement for node-level pipeline projection.
+not a replacement for work-item-level Managed Runs projection.
 
 ## Projection Health
 
-The root issue carries a `symphony_pipeline` status comment. That block includes:
+The root issue carries a Managed Runs summary block. That block includes:
 
 - `projection_healthy: true|false`;
 - `last_successful_projection_at`;
@@ -81,31 +82,30 @@ Projection failures are durable state, not log-only warnings. If per-node
 projection fails, Conductor records the sanitized error and makes a best-effort
 root-status update before retrying on the next tick.
 
-## Supersede Chains
+## Plan Revisions
 
-When a node must return to planning, Conductor creates a new node and marks the
-old node `SUPERSEDED`. Linear mirrors this as:
+When implementation needs changed scope, dependencies, acceptance criteria, or a
+human decision, Conductor records a new plan version only after approval. Linear
+mirrors the approved revision as:
 
-- old node issue moved to Canceled;
-- new node issue created at the same parent level;
-- upstream and downstream `blocks` inherited by the new node;
-- visible `replaces` / `replaced-by` references between issues;
-- an archived comment on the old issue with sanitized context.
+- unchanged work-item issues updated in place;
+- removed work-item issues moved to Canceled;
+- new work-item issues created under the same parent;
+- dependency `blocks` refreshed from the approved plan;
+- visible revision context with sanitized reason and plan version.
 
-The root business issue is not rewritten. Supersede chains grow beside the old
-node so operators can see what ran, why it was replaced, and which node is now
-active.
+The root business issue is not rewritten. Operators can see what ran, why the
+plan changed, which work items were canceled, and which work items are active.
 
 ## Operator Fields
 
 Projection payloads include stable metadata needed to join Linear to durable
 state:
 
-- graph id and graph revision;
-- node id and parent node id;
+- run id and plan version;
+- work item id and parent issue id;
 - active policy id/version;
-- gate snapshot hash;
-- plan, execute, and verify attempt ids;
+- plan, work-item, and verification attempt ids;
 - operator status;
 - operator wait kind;
 - runtime wait id where present;
@@ -118,20 +118,20 @@ passwords, or raw backend profile settings.
 
 ```text
 Root business issue (status anchor)
-  [node] implement login        Done
+  [work item] implement login        Done
     comment: plan#1 succeeded
-    comment: execute#1 failed: <sanitized reason>
-    comment: execute#2 succeeded
-    comment: verify#1 passed score=3
-  [node] implement logout v2    In Progress, replaces logout
-  [node] implement logout       Canceled, replaced by logout v2
+    comment: work-item#1 failed: <sanitized reason>
+    comment: work-item#2 succeeded
+    comment: verification passed
+  [work item] implement logout v2    In Progress
+  [work item] implement logout       Canceled by approved revision
 
 blocks: login -> logout v2
 ```
 
 ## Verification
 
-A real run must prove the Linear tree matches durable state: node issues,
-parentage, `blocks`, supersede links, attempt comments by `comment_id`,
-`need_human` state flips, runtime wait child issues when used, projection health,
-and sanitized error summaries.
+A real run must prove the Linear tree matches durable state: work-item issues,
+parentage, dependency `blocks`, approved revision effects, attempt comments by
+`comment_id`, blocked-state flips, runtime wait child issues when used,
+projection health, and sanitized error summaries.

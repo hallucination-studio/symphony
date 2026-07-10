@@ -2,103 +2,112 @@
 
 ## Purpose
 
-Customers install the Symphony runtime with one Podium-generated command. They
-do not clone this repository, manage editable Python packages manually, or copy
-Linear tokens to the runtime.
+Customers install Symphony with one Podium-generated command. They do not clone
+this repository, manage editable packages manually, or copy Linear tokens to a
+runtime.
+
+One Conductor binds one Linear project and one repository. Multiple isolated
+Conductors may run on the same host for different projects.
+
+## Identity And Naming
+
+Podium assigns every Conductor an immutable six-character non-secret public id.
+The operator supplies a single ASCII word of at most 16 characters or lets
+Podium allocate an unused historical musician surname. Names are
+case-insensitively unique within the Podium workspace. When the base list is
+exhausted, Podium appends the shortest available numeric suffix.
+
+The public project label is:
+
+```text
+symphony:conductor/Beethoven-k7m3p2
+```
+
+The label is operator metadata and never routing truth.
 
 ## Install Command
 
-Podium creates a short-lived enrollment token and displays:
+Podium creates a short-lived enrollment token for the named but unbound
+Conductor and displays:
 
 ```bash
 curl -fsSL https://<podium-host>/install.sh | bash -s -- \
   --enrollment-token <one-time-token>
 ```
 
-The token is scoped to account, runtime group, OS/architecture, expiry, and
-optional install profile. It is single-use where possible and stored hashed in
-Podium.
+The token is scoped to account, Conductor identity, OS/architecture, expiry,
+and optional install profile. It is single-use and stored hashed in Podium.
+Project and repository are assigned only after enrollment.
 
-## Installed Layout
+## Isolated Layout
 
-The installer places runtime files under a managed directory such as:
+Every installed Conductor has independent state:
 
 ```text
 ~/.symphony/
   bin/
-  config/
-  state/
-  logs/
-  versions/
+  conductors/
+    <runtime-id>/
+      config/
+      state/
+      logs/
+      versions/
 ```
 
-It installs the runtime CLI, Conductor daemon, Performer worker package, service
-definition, runtime config, update metadata, and log directories. macOS uses
-`launchd`; Linux uses `systemd` when available, with foreground/container modes
-for development and containers.
+Its service name, data root, local port, credentials, logs, update state, and
+Performer artifacts cannot collide with another Conductor on the same host.
+macOS uses a named `launchd` service and Linux uses a named `systemd` service
+when available. Foreground/container modes preserve the same isolation.
 
-## Enrollment
+## Enrollment And Binding
 
-1. Installer downloads the runtime package.
-2. Installer verifies checksum and signature.
-3. Installer writes local bootstrap config.
-4. Installer starts Conductor.
-5. Conductor calls Podium enrollment with the one-time token.
-6. Podium validates scope and returns runtime identity plus scoped credentials.
-7. Conductor stores credentials locally.
-8. Conductor opens heartbeat/config/dispatch connectivity.
-9. Podium marks the runtime online.
+1. Installer downloads and verifies the runtime package.
+2. Installer exchanges the one-time token for runtime identity, scoped runtime
+   and proxy credentials, WebSocket URL, name, and public id.
+3. Installer writes bootstrap configuration before process start.
+4. Installer registers and starts the isolated Conductor service.
+5. Conductor opens outbound heartbeat, config, report, and dispatch channels.
+6. Podium marks the Conductor online but unbound.
+7. The operator selects one unoccupied project and supplies that project's
+   repository mapping.
+8. Podium reserves the one-to-one binding and sends versioned project config.
+9. Conductor validates the repository, creates its single project Performer
+   binding, and durably acknowledges the config.
+10. Podium verifies the report, adds the Linear project label, and enables
+    dispatch.
 
-Runtime credentials include runtime id, identity secret or certificate, dispatch
-credential, Linear proxy token, runtime group, and rotation metadata.
+Binding or rename failure preserves the prior working state and records a
+sanitized, retryable operation with a concrete next action. Unbinding drains
+Managed Runs, disables dispatch, removes the managed project label, and clears
+project configuration without deleting the repository unless explicitly
+requested.
 
 ## Connectivity
 
-The managed product prefers outbound runtime connectivity. Conductor leases
-dispatches over Podium APIs or maintains a long-lived WebSocket/SSE channel.
-Inbound HTTP callbacks to customer machines are development or self-hosted
-options, not the default SaaS posture.
+Conductor uses outbound connectivity to Podium for heartbeat, configuration,
+commands, reports, log retrieval, and dispatch leasing. Customer machines do
+not require public inbound callbacks. Linear access continues through Podium's
+scoped proxy.
 
 ## Updates
 
-Runtime updates are assigned by Podium channel:
-
-```text
-stable
-beta
-dev
-```
-
-Update flow:
-
-1. Runtime checks assigned version and channel.
-2. Podium returns URL, checksum, signature, and rollback metadata.
-3. Runtime downloads into `versions/<version>`.
-4. Runtime verifies checksum and signature.
-5. Runtime switches service target or symlink.
-6. Runtime restarts gracefully.
-7. Runtime reports version and health.
-
-The previous version remains installed until the new version passes health
-checks. Rollback is an explicit supported operation.
+Runtime updates are assigned by Podium channel: `stable`, `beta`, or `dev`.
+Conductor downloads a version into its isolated directory, verifies checksum
+and signature, switches its service target, restarts, and reports health. The
+previous version remains available until the new version passes health checks;
+rollback is explicit and project scoped.
 
 ## Install Profiles
 
-Initial profiles:
-
 - `local-dev`: foreground or user service with easy logs;
-- `workstation`: user daemon with auto-update;
-- `server`: system daemon with stricter restart/log behavior;
-- `container`: foreground process without service manager.
-
-## Uninstall
-
-`symphony uninstall` stops the service, removes binaries, optionally removes
-local state, and revokes runtime credentials in Podium. Repository workspaces
-are not deleted without explicit confirmation.
+- `workstation`: isolated user daemon with auto-update;
+- `server`: isolated system daemon with stricter restart/log behavior;
+- `container`: foreground process without a service manager.
 
 ## Verification
 
-Acceptance evidence must show package verification, enrollment token invalidation,
-runtime credential storage, heartbeat, active config version, update channel,
-rollback metadata, logs, and absence of Linear OAuth tokens in runtime files.
+Acceptance evidence must show token invalidation, unique name/public id,
+isolated same-host services, credential storage, heartbeat, single-project and
+single-repository binding, Conductor acknowledgement, project label, active
+config version, updates, logs, unbind behavior, and absence of Linear OAuth
+tokens from runtime files.

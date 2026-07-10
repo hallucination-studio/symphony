@@ -18,74 +18,81 @@ Podium. Linear OAuth tokens never leave Podium.
 Podium is the SaaS boundary and public HTTPS surface. It owns:
 
 - user authentication and Podium Web APIs;
-- Linear OAuth/app installation state;
-- delegated Linear issue intake;
-- routing rules and runtime groups;
-- runtime enrollment and update policy;
-- dispatch queues and runtime configuration;
+- default and customer-owned Linear application configuration;
+- versioned Linear OAuth installation state and callback acceptance;
+- refreshable installation credentials and reliable delegated-issue polling;
+- selected projects, single-project Conductor bindings, and routing rules;
+- runtime enrollment, dispatch queues, and runtime configuration;
 - the scoped Linear GraphQL proxy;
-- sanitized pipeline views for operators.
+- sanitized Managed Runs views for operators.
 
 ### Conductor
 
-Conductor is the customer-side daemon. It owns local instance metadata,
-durable pipeline graph state, runtime credentials, dispatch leases, per-mode
-runtime profile materialization, Performer process lifecycle, result
-collection, local logs, and reports back to Podium.
+Conductor is the customer-side daemon. One Conductor binds exactly one Linear
+project and one repository. It owns that project's local instance metadata,
+durable Managed Runs state, runtime credentials, dispatch leases, per-role
+runtime profile materialization, Performer lifecycle, turn collection, local
+logs, and reports back to Podium.
 
-Conductor is the only local process manager for Performer. It launches
-Performer through the installed `performer` command or the repo-local fallback;
-it does not import Performer internals.
+Conductor is the only local process manager for Performer. It launches Performer
+through the installed `performer` command or the repo-local fallback; it does
+not import Performer internals. Multiple isolated Conductors may run on the same
+host for different projects.
 
 ### Performer
 
-Performer is a short-lived worker. It runs exactly one fenced attempt in
-`plan`, `execute`, or `verify` mode from Conductor-owned request/result JSON
-paths. It may use local repositories, shell tools, model backends, and
-customer-approved execution secrets prepared for that mode.
+Performer is a short-lived worker. It runs exactly one fenced attempt in the
+Linear-native Managed Runs flow from Conductor-owned request/result JSON paths.
+It may use local repositories, shell tools, model backends, and
+customer-approved execution secrets prepared for that role.
 
-Performer does not lease dispatches, poll Linear, own graph state, or receive
-Linear OAuth tokens.
+Performer does not lease dispatches, poll Linear, own Managed Runs state, or
+receive Linear OAuth tokens.
 
 ### performer-api
 
-`performer-api` is the shared contract package. It owns runtime modes,
-scheduler policy DTOs, runtime profile DTOs, pipeline graph and attempt state,
-frozen gate snapshots, verification input snapshots, task output manifests,
+`performer-api` is the shared contract package. It owns Managed Runs DTOs,
+runtime policy and profile DTOs, plan/work-item state, verification evidence,
 projection models, and registration DTOs.
 
 ## Managed Journey
 
 1. A user signs in to Podium.
-2. The user connects Linear by authorizing the Symphony Linear app.
-3. The user selects project scope and repository mapping.
-4. Podium generates a runtime install command.
-5. The installed Conductor enrolls with Podium and receives scoped credentials.
-6. A Linear issue is delegated to the Symphony custom agent.
-7. Podium accepts the delegated issue and queues a dispatch for an eligible
-   runtime group.
-8. Conductor leases the dispatch and commits or resumes a durable pipeline
-   graph.
-9. Performer runs fenced `plan`, `execute`, and `verify` attempts under
-   per-mode profiles.
-10. Podium and Linear show sanitized operator state: nodes, attempts, capacity,
-    leases, gates, manifests, waits, conflicts, and runtime health.
+2. The user chooses Podium's default Linear application or stages a custom one.
+3. A Linear workspace admin authorizes the app actor; Podium validates the
+   callback and installation identity.
+4. The user selects the Linear projects Symphony may manage.
+5. Podium generates an enrollment command for a named, initially unbound
+   Conductor.
+6. After the Conductor is online, the user binds one selected project and its
+   repository; Podium verifies configuration and adds the managed project label.
+7. A Linear issue is delegated to the installed app actor.
+8. Full baseline and incremental polling discovers delegated issues with
+   transactional checkpoints and queues one dispatch per delegation epoch.
+9. The project Conductor leases the dispatch and commits or resumes one durable
+   managed run.
+10. Performer runs fenced plan and work-item turns under per-role profiles.
+11. Podium and Linear show sanitized state: runs, work items, capacity, leases,
+    verification evidence, waits, conflicts, installation health, and runtime
+    health.
 
 ## Product Boundaries
 
 - The product is Symphony, not four independent tools.
 - Package boundaries are runtime boundaries.
 - The managed path is Podium -> Conductor -> Performer, with Conductor-owned
-  durable state.
+  durable Managed Runs state.
 - Linear is a collaboration and projection surface, not scheduler truth.
+- Project bindings are routing truth; project labels and human assignee are not.
 - Runtime install and update flows do not ask customers to clone this repo or
   copy Linear tokens.
 
 ## Non-Goals
 
-- No customer-created Linear OAuth application for the managed path.
+- No project-level OAuth installation or automatic project-member mutation.
+- No Conductor that serves more than one Linear project.
 - No inbound public callback requirement for customer machines.
 - No Linear OAuth token on Conductor or Performer.
 - No local web console requirement on customer machines.
-- No compatibility shim for the removed `symphony` Python package, CLI,
-  labels, state files, or workflow runner paths.
+- No compatibility shim for removed packages, commands, labels, state files,
+  global Linear app tokens, or workflow runner paths.

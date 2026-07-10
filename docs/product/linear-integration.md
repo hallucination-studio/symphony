@@ -2,103 +2,154 @@
 
 ## Purpose
 
-Podium is the only managed component that directly integrates with Linear as an
-OAuth application. Conductor and Performer use Podium's scoped proxy and
-projection APIs.
+Podium is the only managed component that directly integrates with Linear.
+Conductor and Performer use Podium's scoped proxy and projection APIs; Linear
+OAuth access and refresh tokens never leave Podium.
 
-## Application Ownership
+## Application Selection
 
-Symphony operates one official Linear application. Customers authorize that app
-from Podium; they do not create their own Linear app for the managed path.
+Podium provides one default Linear OAuth application from deployment
+configuration. An operator may instead stage a customer-owned application with
+only its client id and client secret. Both sources enter one versioned OAuth
+installation lifecycle and use the same acceptance, project, polling, proxy,
+dispatch, refresh, and retirement logic.
 
-The app owns:
+Podium owns the callback URL:
 
-- OAuth callback at `https://<podium-host>/api/v1/linear/oauth/callback`;
-- minimum scopes for issues, comments, states, project/team reads, and agent
-  session workflows;
-- application id and app actor token used for delegated issue intake.
+```text
+https://<podium-host>/api/v1/linear/oauth/callback
+```
 
-OAuth access and refresh tokens are encrypted at rest in Podium.
+A customer-owned application must register that URL. Podium does not accept an
+operator-supplied callback URL. Client secrets are encrypted at rest, treated as
+write-only, and never returned to the browser. Podium exposes no separate
+inbound Linear event endpoint.
 
-## OAuth Flow
+## OAuth Installation
 
-1. The user clicks Connect Linear in Podium.
-2. Podium creates an install attempt with signed state.
-3. The browser redirects to Linear authorization.
-4. The user approves the Symphony app.
-5. Linear redirects to Podium with code and state.
-6. Podium validates state and exchanges the code.
-7. Podium stores the workspace installation.
-8. Podium fetches workspace, teams, projects, states, labels, and app user id.
-9. Podium marks the workspace connected and starts health checks.
+Authorization uses `actor=app` and `prompt=consent`; the exact required scopes
+are `read`, `write`, and `app:assignable`. Linear installs one app actor at
+workspace scope. Project selection is a later Podium routing decision, not a
+project-level OAuth installation.
 
-Stored installation state includes workspace id, organization URL key, scopes,
-token expiry, app user id, creating user, timestamps, and sanitized health.
+Podium creates a hashed, one-time, short-lived OAuth state bound to the Podium
+workspace, return location, and immutable application config id and version.
+Authorization uses `S256` PKCE. The callback rejects expired, consumed, unknown,
+or configuration-stale state, and token exchange uses the exact config version
+that started authorization.
+
+The callback handles success and denied consent as durable, sanitized outcomes.
+It always returns `303 See Other` to `/setup/linear`; the setup page reads the
+outcome from Podium rather than displaying tokens or a standalone callback page.
+
+Every successful exchange runs acceptance before serving traffic. It verifies:
+
+- a valid access token and refresh metadata;
+- the app actor and exact required scope set;
+- `viewer.app=true`;
+- the real Linear organization id, URL key, and display name;
+- the workspace-specific app user id returned by the viewer query;
+- fully paginated project discovery and access to every selected project;
+- sanitized, durable success or failure evidence.
+
+First installation activates immediately. Reauthorization with the same
+application, organization, and app-user identity atomically rotates credentials
+without draining or changing installation generation. Different app identity in
+the same organization remains a candidate while Podium drains Managed Runs and
+dispatches, prepares every bound Conductor with the candidate app user id, and
+switches atomically before retiring the old credentials. Different Linear
+organization identity is rejected until an operator performs an explicit reset
+or migration. A failed candidate never replaces the active installation.
+
+## Token Lifecycle
+
+Linear access tokens expire after 24 hours and refresh tokens rotate. A central
+token service supplies credentials for project discovery, polling, proxy, and
+acceptance calls. It performs proactive refresh under a per-installation
+single-flight lock, atomically persists the new access token and rotated refresh
+token, and permits one refresh-and-retry after a Linear `401`.
+
+An invalid or rejected refresh marks the installation
+`reauthorization_required`, stops new managed traffic, and exposes a sanitized
+action in durable health, APIs, logs, and Podium Web. Podium revokes credentials
+on disconnect or retirement; a failed revocation remains visible for retry.
+There is no global application-id/token fallback.
+
+## Project Scope
+
+After authorization, Podium lists projects visible to the installation. Project
+discovery follows `pageInfo.hasNextPage` and `endCursor` and never truncates a
+workspace at a fixed first page. The operator may select multiple projects that
+Symphony is allowed to manage; stable Linear project ids are authoritative and
+slug and name are display metadata.
+
+Project selection does not mutate `ProjectUpdateInput.memberIds`. Workspace and
+team access granted by Linear remain the permission boundary. Podium verifies
+that each selected project is readable and writable, then records routing scope
+and health.
+
+Each selected project may have at most one active Conductor. Each Conductor may
+bind exactly one selected project and one repository mapping. The project
+binding, not a Linear label, is routing truth. Multiple independent Conductors
+may run on the same host when identities, data roots, ports, credentials, and
+logs are isolated.
+
+When a binding is ready, Podium adds
+`symphony:conductor/<Name>-<six-character-public-id>` as operator metadata. Names
+are workspace-unique, case-insensitive ASCII words of at most 16 characters;
+the public id is immutable and non-secret. Rename is idempotent. Labels are
+never dispatch filters.
 
 ## Delegated Issue Intake
 
-A managed work item starts when the Linear issue is delegated to the Symphony
-custom agent. Podium receives or discovers the delegated issue, normalizes it to
-a dispatch event, records cursor/error state, and applies routing.
+Reliable polling is the only delegated-issue intake path. Each new binding runs
+a full baseline scan of currently delegated root issues before incremental
+polling begins; it does not use a short lookback window. Incremental scans
+include delegated and no-longer-delegated issues updated in the selected project
+so ownership transitions cannot disappear from state.
 
-First-version normalized event:
+Every scan uses full cursor pagination. Podium follows Linear `pageInfo`, sorts
+the durable processing order by `(updatedAt, issue_id)`, and overlaps the last
+timestamp boundary so equal timestamps cannot skip an issue. In one database
+transaction, each page persists issue observations, delegation state,
+idempotency records, queued dispatches, and its transactional page checkpoint.
+The high-water mark advances only after the final page commits. A crash resumes
+from the last committed page without losing or duplicating work.
 
-```json
-{
-  "event_type": "linear.delegated_issue",
-  "workspace_id": "linear-workspace-id",
-  "project_slug": "project-slug",
-  "issue_id": "linear-issue-id",
-  "issue_identifier": "AI-149",
-  "agent_session_id": "linear-agent-session-id"
-}
-```
+Repeated observations belong to one continuously observed delegation epoch and
+reuse its dispatch idempotency key. Podium closes that epoch only after a
+durably observed non-delegated transition. A later delegation starts a new epoch,
+allowing exactly one Managed Run per delegation epoch. Parent/projection issues
+are excluded before dispatch.
 
-Intake errors keep sanitized durable state: last success, cursor, error code,
-sanitized reason, retryability, and next action.
+Poll failures retain the last safe checkpoint, error code, sanitized reason,
+retry count, and next attempt. The scheduler uses durable exponential backoff
+with jitter and a bounded retry interval; success clears degraded health. No
+error path advances a checkpoint or waits indefinitely without operator-visible
+state.
 
-## Routing
+## Routing And Proxy
 
-A routing rule maps Linear work to runtime capacity by:
+Podium routes only when the active installation, selected project, project
+binding, Conductor, repository, app user, issue state, blockers, and runtime
+capacity all match. Human assignee and project labels are excluded from routing
+truth.
 
-- Linear workspace;
-- project/team scope;
-- custom-agent delegate id;
-- issue active states;
-- repository mapping;
-- runtime group;
-- concurrency limits;
-- enabled/disabled state.
+Managed runtimes call `POST /api/v1/linear/graphql` with a runtime proxy token.
+Podium resolves it through the Conductor's single project binding, obtains a
+fresh active-installation token through the central token service, and enforces
+organization, project, operation, audit, rate-limit, and redaction policy.
 
-Labels and human assignee are not managed dispatch routing truth.
+## Health And Verification
 
-## GraphQL Proxy
+Installation health distinguishes authorization, ready, refreshing,
+reauthorization-required, draining, switching, failed, disconnected, and retired
+states. Polling health records baseline/incremental mode, page checkpoint,
+high-water mark, last success, retry count, and sanitized error.
 
-Managed runtimes call:
-
-```text
-POST https://<podium-host>/api/v1/linear/graphql
-Authorization: Bearer <runtime-proxy-token>
-```
-
-Podium resolves the proxy token to runtime, account, workspace installation,
-project/team scope, and audit policy, then sends the GraphQL request to Linear
-with the stored OAuth token.
-
-The proxy enforces runtime auth, allowed workspace, allowed project/team,
-optional operation policy, token refresh, audit logging, rate limits, and secret
-redaction.
-
-## Development Mode
-
-Loopback Podium is acceptable for local development and acceptance when OAuth
-redirect settings allow it. The managed architecture still assumes deployed
-Podium has stable HTTPS endpoints and customer runtimes use outbound
-connectivity.
-
-## Verification
-
-Acceptance evidence must show connected workspace health, delegated issue intake,
-cursor/error visibility, routing decision, queued dispatch, proxy authorization,
-and absence of Linear OAuth tokens from runtime config, browser responses, logs,
-and artifacts.
+Acceptance evidence must show application source/config version, callback and
+denial behavior, organization/app user identity, token rotation, project
+pagination and access, baseline/incremental checkpoint behavior, delegation
+idempotency, single-project Conductor binding, repository mapping, project label,
+proxy authorization, dispatch, cutover behavior, and absence of secrets from
+browser responses, runtime files, logs, and artifacts.

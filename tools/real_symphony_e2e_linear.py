@@ -34,14 +34,11 @@ async def delegate_linear_issue(*args: Any, **kwargs: Any) -> dict[str, Any]:
 
 async def wait_for_linear_delegate_visible(*args: Any, **kwargs: Any) -> dict[str, Any]:
     original_graphql = _actions.linear_graphql
-    original_fetch = _actions.fetch_linear_issue
     _actions.linear_graphql = linear_graphql
-    _actions.fetch_linear_issue = fetch_linear_issue
     try:
         return await _actions.wait_for_linear_delegate_visible(*args, **kwargs)
     finally:
         _actions.linear_graphql = original_graphql
-        _actions.fetch_linear_issue = original_fetch
 
 
 async def comment_linear_issue(*args: Any, **kwargs: Any) -> dict[str, Any]:

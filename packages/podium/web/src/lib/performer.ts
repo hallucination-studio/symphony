@@ -15,7 +15,7 @@ export interface PerformerConstraint {
 
 /**
  * The scoping rules that decide which Linear issues this Performer runs:
- * its project, the custom-agent delegate, and the pipeline profile. These are
+ * its project, the custom-agent delegate, and the managed-run profile. These are
  * exactly the constraints Conductor mirrors onto the Linear project as labels.
  */
 export function performerConstraints(binding: ConductorBinding): PerformerConstraint[] {
@@ -28,7 +28,7 @@ export function performerConstraints(binding: ConductorBinding): PerformerConstr
   });
   constraints.push({
     label: "Profile",
-    value: binding.pipeline_profile || "default",
+    value: binding.managed_run_profile || "default",
   });
   return constraints;
 }

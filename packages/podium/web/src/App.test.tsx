@@ -11,7 +11,7 @@ vi.mock("./api/client", async (importOriginal) => {
     api: {
       me: vi.fn(),
       bootstrap: vi.fn(),
-      pipeline: vi.fn(),
+      managedRuns: vi.fn(),
       smokeCheckResult: vi.fn(),
     },
   };
@@ -20,7 +20,7 @@ vi.mock("./api/client", async (importOriginal) => {
 const mockApi = api as unknown as {
   me: ReturnType<typeof vi.fn>;
   bootstrap: ReturnType<typeof vi.fn>;
-  pipeline: ReturnType<typeof vi.fn>;
+  managedRuns: ReturnType<typeof vi.fn>;
   smokeCheckResult: ReturnType<typeof vi.fn>;
 };
 
@@ -28,11 +28,8 @@ describe("App auth gate", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.unstubAllEnvs();
-    mockApi.pipeline.mockResolvedValue({
-      runtime_group_id: "group-1",
-      policy_revision: 1,
-      profiles: {},
-      pipeline: { graph_revision: 0, modes: [], predicted_call_order: [], human_waits: [] },
+    mockApi.managedRuns.mockResolvedValue({
+      conductors: [],
     });
     mockApi.smokeCheckResult.mockRejectedValue(new Error("404"));
     mockApi.bootstrap.mockResolvedValue({
@@ -86,5 +83,17 @@ describe("App auth gate", () => {
     expect(screen.getByText("Home")).toBeInTheDocument();
     expect(screen.queryByText("Runs")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Sign in" })).not.toBeInTheDocument();
+  });
+
+  it("does not mark the signed-in identity chip active on the Account page", async () => {
+    mockApi.me.mockResolvedValue({
+      user: { id: "user_1", email: "a@b.com" },
+    });
+    renderWithProviders(<App />, { route: "/account" });
+
+    const label = await screen.findByText("Signed in");
+    const chip = label.closest("a");
+    expect(chip).toHaveClass("account-chip");
+    expect(chip).not.toHaveClass("active");
   });
 });

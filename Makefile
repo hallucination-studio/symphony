@@ -12,7 +12,7 @@ dev: install
 
 stop:
 	-pkill -f '$(CONDUCTOR) --port 8081 --data-root ./.conductor'
-	-pkill -f '$(PERFORMER) --mode '
+	-pkill -f '$(PERFORMER) --turn-request-path '
 
 once: install
 	@echo "make once has been removed; pipeline attempts are leased and started by Conductor."

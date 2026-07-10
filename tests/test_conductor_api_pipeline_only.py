@@ -13,7 +13,7 @@ class PipelineOnlyService:
     def __init__(self) -> None:
         self.instance = InstanceRecord.create(
             id="inst-1",
-            name="Pipeline Runtime",
+            name="Managed Run Runtime",
             repo_source_type="local_path",
             repo_source_value="/tmp/repo",
             resolved_repo_path="/tmp/repo",
@@ -110,7 +110,7 @@ async def test_conductor_api_does_not_expose_legacy_ops_routes() -> None:
             "POST",
             "/api/instances",
             {
-                "name": "Pipeline Runtime",
+                "name": "Managed Run Runtime",
                 "repo_source_type": "local_path",
                 "repo_source_value": "/tmp/repo",
                 "linear_project": "AI",
@@ -150,6 +150,38 @@ async def test_conductor_instance_api_rejects_workflow_content_patch_before_serv
     assert status == 400
     assert isinstance(payload, dict)
     assert payload["error"]["code"] == "workflow_runtime_surface_removed"
+
+
+@pytest.mark.asyncio
+async def test_conductor_instance_api_rejects_legacy_managed_run_profile_field() -> None:
+    server = ConductorApiServer(PipelineOnlyService())
+
+    create_status, create_payload = await server._route(
+        "POST",
+        "/api/instances",
+        json.dumps(
+            {
+                "name": "Managed Run Runtime",
+                "repo_source_type": "local_path",
+                "repo_source_value": "/tmp/repo",
+                "linear_project": "AI",
+                "linear_filters": {},
+                "managed_run_profile": "gated-task",
+            }
+        ).encode(),
+    )
+    patch_status, patch_payload = await server._route(
+        "PATCH",
+        "/api/instances/inst-1",
+        json.dumps({"managed_run_profile": "gated-task"}).encode(),
+    )
+
+    assert create_status == 400
+    assert isinstance(create_payload, dict)
+    assert create_payload["error"]["code"] == "legacy_runtime_profile_field"
+    assert patch_status == 400
+    assert isinstance(patch_payload, dict)
+    assert patch_payload["error"]["code"] == "legacy_runtime_profile_field"
 
 
 @pytest.mark.asyncio

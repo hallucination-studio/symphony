@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import shutil
 import subprocess
 from pathlib import Path
@@ -9,7 +8,7 @@ from typing import Any
 from .conductor_models import InstanceCreateRequest, InstancePatchRequest, InstanceRecord
 from .conductor_runtime import LogQuery
 from .conductor_service_helpers import *  # noqa: F403
-from .conductor_service_runtime_view import pipeline_runtime_snapshot
+from .conductor_service_runtime_view import managed_run_runtime_snapshot
 from .conductor_service_types import *  # noqa: F403
 from performer_api.models import utc_now
 from performer_api.ops_store import OpsStore
@@ -35,6 +34,11 @@ class ConductorServiceViewsMixin:
         return refreshed
 
     def create_instance(self, request: InstanceCreateRequest) -> InstanceRecord:
+        if self.store.list_instances():
+            raise ConductorServiceError(
+                "single_project_conductor",
+                "A Conductor may manage exactly one project instance",
+            )
         instance = self._build_instance_candidate(request)
         self._materialize_instance(instance)
         self._initialize_workspace(instance)
@@ -86,16 +90,7 @@ class ConductorServiceViewsMixin:
 
     async def start_instance(self, instance_id: str) -> InstanceRecord:
         current = self._require_instance(instance_id)
-        request_path = Path(current.instance_dir) / "state" / "pipeline" / "manual-start-request.json"
-        result_path = Path(current.instance_dir) / "state" / "pipeline" / "manual-start-result.json"
-        self._write_manual_plan_request(current, request_path)
-        started = await self.runtime_manager.start(
-            current.with_updates(process_status="starting"),
-            env=self._runtime_env(),
-            mode="plan",
-            attempt_request_path=str(request_path),
-            attempt_result_path=str(result_path),
-        )
+        started = current.with_updates(process_status="running")
         self.store.update_instance(started)
         return started
 
@@ -107,24 +102,8 @@ class ConductorServiceViewsMixin:
 
     async def restart_instance(self, instance_id: str) -> InstanceRecord:
         current = self._require_instance(instance_id)
-        if self.pipeline_store.current_graph_revision_record() is not None:
-            stopped = await self.runtime_manager.stop(current)
-            self.store.update_instance(stopped)
-            self.reconcile_pipeline_attempts_on_startup()
-            self._drive_pipeline_convergence()
-            await self._start_due_pipeline_attempts()
-            return self.get_instance(instance_id) or stopped
-        request_path = Path(current.instance_dir) / "state" / "pipeline" / "manual-restart-request.json"
-        result_path = Path(current.instance_dir) / "state" / "pipeline" / "manual-restart-result.json"
-        self._write_manual_plan_request(current, request_path)
         await self.runtime_manager.stop(current)
-        restarted = await self.runtime_manager.start(
-            current.with_updates(process_status="starting"),
-            env=self._runtime_env(),
-            mode="plan",
-            attempt_request_path=str(request_path),
-            attempt_result_path=str(result_path),
-        )
+        restarted = current.with_updates(process_status="running", pid=None)
         self.store.update_instance(restarted)
         return restarted
 
@@ -132,13 +111,13 @@ class ConductorServiceViewsMixin:
         _ = self._require_instance(instance_id), issue_id
         raise ConductorServiceError(
             "runtime_error_approval_removed",
-            "Runtime approvals must be completed on the blocked pipeline node issue and resumed by moving it out of need_human.",
+            "Runtime approvals must be completed on the blocked managed-run work item issue and resumed through Managed Runs.",
         )
 
     def instance_runtime(self, instance_id: str) -> dict[str, object]:
         current = self._require_instance(instance_id)
         runtime = dict(self.runtime_manager.runtime_snapshot(current))
-        performer = self._pipeline_runtime_snapshot()
+        performer = self._managed_run_runtime_snapshot()
         runtime["workspace"] = {
             "root": current.workspace_root,
             "strategy": "instance_repo_workspace",
@@ -151,25 +130,8 @@ class ConductorServiceViewsMixin:
         runtime["metrics"] = _runtime_metrics(performer)
         return runtime
 
-    def _pipeline_runtime_snapshot(self) -> dict[str, Any]:
-        return pipeline_runtime_snapshot(self.pipeline_store)
-
-    def _write_manual_plan_request(self, instance: InstanceRecord, path: Path) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "attempt_id": path.stem,
-            "graph_id": f"graph-{instance.id}",
-            "root_node_id": instance.id,
-            "node_id": instance.id,
-            "issue_id": instance.id,
-            "issue_identifier": instance.name,
-            "title": instance.name,
-            "graph_revision": self.pipeline_store.current_graph_revision(),
-            "policy_revision": self.pipeline_store.active_runtime_config().scheduler_policy.version,
-            "lease_id": "",
-            "fencing_token": "",
-        }
-        path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+    def _managed_run_runtime_snapshot(self) -> dict[str, Any]:
+        return managed_run_runtime_snapshot(self.managed_run_store)
 
     def query_instance_logs(
         self,

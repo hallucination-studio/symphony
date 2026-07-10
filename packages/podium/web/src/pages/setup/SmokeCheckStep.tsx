@@ -19,18 +19,20 @@ export function SmokeCheckStep({
   const { notify } = useToast();
   const { t } = useI18n();
 
-  // Prefer a freshly-run result; fall back to the last stored one.
   const result: SmokeCheckResult | null =
-    run.data ?? existing.data ?? null;
+    existing.data ?? run.data ?? null;
   const passed = result?.status === "passed";
+  const running = result?.status === "running";
 
   async function handleRun() {
     try {
       const res = await run.mutateAsync();
       if (res.status === "passed") {
         notify(t("Smoke check passed"), "success");
-      } else {
+      } else if (res.status === "failed") {
         notify(t("Smoke check found issues"), "error");
+      } else {
+        notify(t("Smoke check started"), "info");
       }
     } catch {
       notify(t("Couldn't run smoke check. Try again."), "error");
@@ -58,6 +60,12 @@ export function SmokeCheckStep({
           tone="success"
           title={t("Everything checks out")}
           description={t("Your workspace is fully set up. Podium is ready to route issues.")}
+        />
+      ) : running ? (
+        <ActionPanel
+          tone="info"
+          title={t("Smoke check running")}
+          description={t("Waiting for Conductor checks to complete.")}
         />
       ) : (
         <ActionPanel

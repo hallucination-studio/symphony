@@ -7,106 +7,210 @@ import os
 from pathlib import Path
 from typing import Any
 
-from performer_api.pipeline import RuntimeMode
+from performer_api.config import CodexConfig
+from performer_api.managed_runs import ManagedRunRuntimeWait, ManagedRunTurnContext, WorkItem, WorkItemResultStatus
 
-from . import mode_common as _mode_common
-from .mode_common import CodexSdkClient
-from .execute_mode import (
-    _collect_git_verification_input,
-    _execute_branch_name,
-    _execute_repository_path,
-    _execute_workspace_path,
-    _executor_prompt,
-    _failed_execute_result,
-    _git_command_succeeds,
-    _materialize_execute_workspace,
-    _remove_generated_verification_caches,
-    _run_execute_mode,
-)
-from .mode_common import (
-    _attempt_event_printer,
-    _emit_runtime_wait_probe_if_requested,
-    _env_bool,
-    _env_config_overrides,
-    _env_float,
-    _env_int,
-    _env_sandbox,
-    _env_str,
-    _file_sha256,
-    _fencing_fields,
-    _git,
-    _managed_codex_backend,
-    _optional_payload_str,
-    _payload_kind,
-    _run,
-    _sanitize_error,
-    _thread_state_workspace_path,
-)
-from .plan_mode import (
-    PLAN_RESULT_SCHEMA,
-    _failed_plan_result,
-    _planner_prompt,
-    _planner_prompt_payload,
-    _planner_retry_prompt,
-    _planner_structured_result,
-    _planner_workspace_path,
-    _positive_int,
-    _proposal_blocks,
-    _proposal_from_model_payload,
-    _run_plan_mode,
-)
-from .verify_mode import (
-    _PatchVerificationResult,
-    _commit_verify_workspace,
-    _failed_gate_verify_result,
-    _failed_verify_result,
-    _forced_first_verify_failure_reason,
-    _gate_command_failure_reason,
-    _run_gate_commands,
-    _run_verify_mode,
-    _single_line_tail,
-    _verification_command_cwd,
-    _verification_command_env,
-    _verify_artifact_hashes,
-    _verify_patch_hash,
-)
+from .codex_client import CodexSdkClient
+from .managed_run_backend import CodexManagedRunBackend
 
 
-async def run_mode_attempt(
-    mode: RuntimeMode,
-    attempt_request_path: Path,
-    attempt_result_path: Path,
+async def run_managed_run_turn(
+    turn_request_path: Path,
+    turn_result_path: Path,
     *,
-    agent_backend: Any | None = None,
+    codex_client: Any | None = None,
 ) -> dict[str, object]:
     try:
-        payload = json.loads(attempt_request_path.read_text(encoding="utf-8"))
+        payload = json.loads(turn_request_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        raise RuntimeError(f"could not read {mode.value} attempt request: {attempt_request_path}") from exc
+        raise RuntimeError(f"could not read managed-run turn request: {turn_request_path}") from exc
     if not isinstance(payload, dict):
-        raise RuntimeError(f"{mode.value} attempt request must be a JSON object: {attempt_request_path}")
-    if mode is RuntimeMode.PLAN:
-        result = await _run_plan_mode(payload, agent_backend=agent_backend)
-    elif mode is RuntimeMode.EXECUTE:
-        _mode_common.CodexSdkClient = CodexSdkClient
-        result = await _run_execute_mode(payload, agent_backend=agent_backend)
-    elif mode is RuntimeMode.VERIFY:
-        result = _run_verify_mode(payload)
+        raise RuntimeError(f"managed-run turn request must be a JSON object: {turn_request_path}")
+    context_payload = payload.get("context") if isinstance(payload.get("context"), dict) else {}
+    context = ManagedRunTurnContext.from_dict(context_payload)
+    errors = context.validation_errors()
+    if errors:
+        raise RuntimeError("managed_run_turn_context_invalid:" + ",".join(errors))
+    backend = CodexManagedRunBackend(codex_client or _managed_codex_backend())
+    turn_kind = str(payload.get("turn_kind") or "")
+    workspace_path = Path(str(payload.get("workspace_path") or "")).expanduser().resolve()
+    if turn_kind == "plan":
+        result = await backend.plan_turn(
+            workspace_path,
+            str(payload.get("issue_description") or ""),
+            existing_thread_id=_optional_str(payload.get("thread_id")),
+        )
+        body: dict[str, object] = {
+            "turn_kind": "plan",
+            "context": context.to_dict(),
+            "thread_id": result.thread_id,
+            "plan": result.plan.to_dict(),
+            "events": result.events,
+        }
+    elif turn_kind == "work_item":
+        work_item_payload = payload.get("work_item")
+        if not isinstance(work_item_payload, dict):
+            raise RuntimeError("work_item turn requires work_item payload")
+        work_item = WorkItem.from_dict(work_item_payload)
+        if context.work_item_id != work_item.id:
+            raise RuntimeError("managed_run_turn_context_work_item_mismatch")
+        wait = _runtime_wait_probe(payload)
+        if wait is not None:
+            body = _runtime_wait_body(context, str(payload.get("thread_id") or ""), wait, [{"event": "runtime_wait_probe"}])
+        else:
+            result = await backend.execute_turn(
+                workspace_path,
+                work_item,
+                thread_id=str(payload.get("thread_id") or ""),
+            )
+            wait = _runtime_wait_from_events(result.events) if result.result.status_claimed is WorkItemResultStatus.BLOCKED else None
+            body = (
+                _runtime_wait_body(context, result.thread_id, wait, result.events)
+                if wait is not None
+                else {
+                    "turn_kind": "work_item",
+                    "context": context.to_dict(),
+                    "thread_id": result.thread_id,
+                    "result": result.result.to_dict(),
+                    "events": result.events,
+                }
+            )
     else:
-        raise RuntimeError(f"unsupported runtime mode: {mode.value}")
-    _write_json_atomic(attempt_result_path, result)
-    return result
+        raise RuntimeError(f"unsupported managed-run turn kind: {turn_kind}")
+    _write_json_atomic(turn_result_path, body)
+    return body
+
+
+def _runtime_wait_probe(payload: dict[str, Any]) -> ManagedRunRuntimeWait | None:
+    if payload.get("runtime_wait_probe") is not True:
+        return None
+    return ManagedRunRuntimeWait(
+        wait_kind="approval_requested",
+        message="Symphony runtime wait probe requires approval.",
+    )
+
+
+def _runtime_wait_from_events(events: list[dict[str, Any]]) -> ManagedRunRuntimeWait | None:
+    completed_reviews = _completed_approval_reviews(events)
+    completed_without_id = any(
+        _runtime_wait_event_name(event) == "item_autoapprovalreview_completed" and not _approval_review_id(event)
+        for event in events
+        if isinstance(event, dict)
+    )
+    for event in reversed(events):
+        if not isinstance(event, dict):
+            continue
+        event_name = _runtime_wait_event_name(event)
+        if event_name == "item_autoapprovalreview_started":
+            review_id = _approval_review_id(event)
+            if (review_id and review_id in completed_reviews) or (not review_id and completed_without_id):
+                continue
+            return ManagedRunRuntimeWait(
+                wait_kind=_approval_wait_kind(event),
+                message=_runtime_wait_message(event, "Codex requested approval."),
+            )
+        if event_name == "item_commandexecution_terminalinteraction":
+            return ManagedRunRuntimeWait(
+                wait_kind="tool_input_required",
+                message=_runtime_wait_message(event, "Codex requested terminal input."),
+            )
+        if event_name == "guardianwarning":
+            return ManagedRunRuntimeWait(
+                wait_kind="permission_required",
+                message=_runtime_wait_message(event, "Codex reported a guardian warning."),
+            )
+    return None
+
+
+def _completed_approval_reviews(events: list[dict[str, Any]]) -> set[str]:
+    return {
+        review_id
+        for event in events
+        if isinstance(event, dict)
+        and _runtime_wait_event_name(event) == "item_autoapprovalreview_completed"
+        and (review_id := _approval_review_id(event))
+    }
+
+
+def _runtime_wait_event_name(event: dict[str, Any]) -> str:
+    payload = _event_payload(event)
+    name = payload.get("type") or payload.get("event") or payload.get("method") or event.get("type") or event.get("event")
+    normalized = str(name or "").replace("/", "_").replace(".", "_").replace("-", "_").lower()
+    return normalized.removeprefix("sdk_")
+
+
+def _approval_review_id(event: dict[str, Any]) -> str:
+    payload = _event_payload(event)
+    return str(payload.get("reviewId") or payload.get("review_id") or event.get("reviewId") or event.get("review_id") or "")
+
+
+def _approval_wait_kind(event: dict[str, Any]) -> str:
+    action = _event_payload(event).get("action")
+    action_type = str(action.get("type") or "").lower() if isinstance(action, dict) else ""
+    if action_type in {"requestpermissions", "networkaccess"}:
+        return "permission_required"
+    if action_type == "mcptoolcall":
+        return "tool_input_required"
+    return "approval_requested"
+
+
+def _runtime_wait_message(event: dict[str, Any], fallback: str) -> str:
+    payload = _event_payload(event)
+    action = payload.get("action") if isinstance(payload.get("action"), dict) else {}
+    for value in (event.get("message"), payload.get("message"), payload.get("stdin"), action.get("reason")):
+        message = str(value or "").strip()
+        if message:
+            return message
+    return fallback
+
+
+def _event_payload(event: dict[str, Any]) -> dict[str, Any]:
+    payload = event.get("payload")
+    return payload if isinstance(payload, dict) else event
+
+
+def _runtime_wait_body(
+    context: ManagedRunTurnContext,
+    thread_id: str,
+    wait: ManagedRunRuntimeWait,
+    events: list[dict[str, Any]],
+) -> dict[str, object]:
+    return {
+        "turn_kind": "work_item",
+        "context": context.to_dict(),
+        "thread_id": thread_id,
+        "runtime_wait": wait.to_dict(),
+        "events": events,
+    }
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run one managed Performer plan/execute/verify attempt.")
-    parser.add_argument("--mode", choices=[mode.value for mode in RuntimeMode], default=None, help="Run one managed plan/execute/verify attempt.")
-    parser.add_argument("--attempt-request-path", default=None, help="Read one managed mode attempt request JSON file.")
-    parser.add_argument("--attempt-result-path", default=None, help="Write one managed mode attempt result JSON file.")
-    args = parser.parse_args(argv)
-    if not args.mode or not args.attempt_request_path or not args.attempt_result_path:
-        parser.error("--mode, --attempt-request-path, and --attempt-result-path are required")
-    return args
+    parser = argparse.ArgumentParser(description="Run one Symphony managed-run turn.")
+    parser.add_argument("--turn-request-path", required=True, help="Read one managed-run turn request JSON file.")
+    parser.add_argument("--turn-result-path", required=True, help="Write one managed-run turn result JSON file.")
+    return parser.parse_args(argv)
+
+
+def _managed_codex_backend() -> CodexSdkClient:
+    codex_home = os.environ.get("CODEX_HOME")
+    if not codex_home or not Path(codex_home).is_dir():
+        raise RuntimeError("managed_codex_home_required")
+    return CodexSdkClient(
+        CodexConfig(
+            model=_env_str("CODEX_MODEL"),
+            sdk_codex_bin=_env_str("CODEX_SDK_CODEX_BIN"),
+            sandbox=_env_sandbox("CODEX_SANDBOX"),
+            config_overrides=_env_config_overrides("CODEX_CONFIG_OVERRIDES"),
+            hard_turn_timeout_ms=_env_int("CODEX_HARD_TURN_TIMEOUT_MS", 3_600_000),
+            read_timeout_ms=_env_int("CODEX_READ_TIMEOUT_MS", 5_000),
+            init_max_attempts=_env_int("CODEX_INIT_MAX_ATTEMPTS", 4),
+            init_backoff_ms=_env_int("CODEX_INIT_BACKOFF_MS", 500),
+            init_backoff_max_ms=_env_int("CODEX_INIT_BACKOFF_MAX_MS", 8_000),
+            overload_max_attempts=_env_int("CODEX_OVERLOAD_MAX_ATTEMPTS", 5),
+            overload_initial_delay_ms=_env_int("CODEX_OVERLOAD_INITIAL_DELAY_MS", 250),
+            overload_max_delay_ms=_env_int("CODEX_OVERLOAD_MAX_DELAY_MS", 8_000),
+        )
+    )
 
 
 def _write_json_atomic(path: Path, payload: dict[str, object]) -> None:
@@ -116,14 +220,57 @@ def _write_json_atomic(path: Path, payload: dict[str, object]) -> None:
     tmp.replace(path)
 
 
+def _optional_str(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _env_str(key: str) -> str | None:
+    value = os.environ.get(key)
+    if value is None:
+        return None
+    value = value.strip()
+    return value or None
+
+
+def _env_sandbox(key: str) -> str | None:
+    value = _env_str(key)
+    return value.replace("-", "_") if value is not None else None
+
+
+def _env_int(key: str, default: int) -> int:
+    value = os.environ.get(key)
+    if value is None or not value.strip():
+        return default
+    try:
+        parsed = int(value)
+    except ValueError:
+        return default
+    return parsed if parsed > 0 else default
+
+
+def _env_config_overrides(key: str) -> tuple[str, ...]:
+    raw = os.environ.get(key)
+    if raw is None or not raw.strip():
+        return ()
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return tuple(item for item in raw.split(os.pathsep) if item)
+    if not isinstance(parsed, list):
+        return ()
+    return tuple(str(item) for item in parsed if str(item).strip())
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     try:
         asyncio.run(
-            run_mode_attempt(
-                RuntimeMode(args.mode),
-                Path(args.attempt_request_path).resolve(),
-                Path(args.attempt_result_path).resolve(),
+            run_managed_run_turn(
+                Path(args.turn_request_path).resolve(),
+                Path(args.turn_result_path).resolve(),
             )
         )
         os._exit(0)

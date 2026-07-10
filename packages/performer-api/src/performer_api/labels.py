@@ -5,42 +5,42 @@ from dataclasses import dataclass, field
 
 @dataclass(frozen=True)
 class LabelScheme:
-    pipeline_prefix: str = "performer:pipeline/"
+    managed_run_prefix: str = "symphony:managed-run/"
     type_prefix: str = "performer:type/"
-    pipeline: dict[str, str] = field(
+    managed_run: dict[str, str] = field(
         default_factory=lambda: {
-            "planning": "performer:pipeline/planning",
-            "ready": "performer:pipeline/ready",
-            "executing": "performer:pipeline/executing",
-            "verifying": "performer:pipeline/verifying",
-            "verify_passed": "performer:pipeline/verify-passed",
-            "need_human": "performer:pipeline/need-human",
-            "failed": "performer:pipeline/failed",
+            "planning": "symphony:managed-run/planning",
+            "ready": "symphony:managed-run/ready",
+            "executing": "symphony:managed-run/executing",
+            "reviewing": "symphony:managed-run/reviewing",
+            "verified": "symphony:managed-run/verified",
+            "need_human": "symphony:managed-run/need-human",
+            "failed": "symphony:managed-run/failed",
         }
     )
     types: dict[str, str] = field(
         default_factory=lambda: {
             "human_action": "performer:type/human-action",
             "repository_integration": "performer:type/repository-integration",
-            "pipeline_node": "performer:type/pipeline-node",
+            "work_item": "symphony:type/work-item",
         }
     )
 
     def all_static_labels(self) -> list[str]:
-        return [*self.pipeline.values(), *self.types.values()]
+        return [*self.managed_run.values(), *self.types.values()]
 
 
 LABEL_SCHEME = LabelScheme()
 
 
-PIPELINE_LABELS = {
-    "planning": LABEL_SCHEME.pipeline["planning"],
-    "ready": LABEL_SCHEME.pipeline["ready"],
-    "executing": LABEL_SCHEME.pipeline["executing"],
-    "verifying": LABEL_SCHEME.pipeline["verifying"],
-    "verify_passed": LABEL_SCHEME.pipeline["verify_passed"],
-    "need_human": LABEL_SCHEME.pipeline["need_human"],
-    "failed": LABEL_SCHEME.pipeline["failed"],
+MANAGED_RUN_LABELS = {
+    "planning": LABEL_SCHEME.managed_run["planning"],
+    "ready": LABEL_SCHEME.managed_run["ready"],
+    "executing": LABEL_SCHEME.managed_run["executing"],
+    "reviewing": LABEL_SCHEME.managed_run["reviewing"],
+    "verified": LABEL_SCHEME.managed_run["verified"],
+    "need_human": LABEL_SCHEME.managed_run["need_human"],
+    "failed": LABEL_SCHEME.managed_run["failed"],
 }
 
 TYPE_LABELS = LABEL_SCHEME.types

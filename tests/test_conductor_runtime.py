@@ -10,7 +10,7 @@ from typing import Any
 import pytest
 
 from conductor.conductor_models import InstanceRecord
-from conductor.conductor_runtime import ConductorRuntimeManager, LogQuery, RuntimeHandle
+from conductor.conductor_runtime import ConductorRuntimeManager, LogQuery, RuntimeHandle, _CompletedLogTask
 
 
 class FakeStream:
@@ -146,11 +146,9 @@ async def test_start_launches_performer_process_and_captures_logs(tmp_path: Path
 
     assert captured["args"] == (
         "performer",
-        "--mode",
-        "plan",
-        "--attempt-request-path",
+        "--turn-request-path",
         "/tmp/request.json",
-        "--attempt-result-path",
+        "--turn-result-path",
         "/tmp/result.json",
     )
     assert captured["kwargs"]["cwd"] == instance.resolved_repo_path
@@ -200,6 +198,24 @@ async def test_parallel_attempts_for_same_instance_start_distinct_performer_proc
     assert stopped.process_status == "stopped"
     assert all(process.returncode == 0 for process in started_processes)
     assert manager._handles == {}
+
+
+@pytest.mark.asyncio
+async def test_stop_attempts_stops_only_named_parallel_attempts(tmp_path: Path) -> None:
+    manager = ConductorRuntimeManager(command="performer")
+    instance = make_instance(tmp_path).with_updates(process_status="running", pid=5002)
+    first = PendingProcess(5001)
+    second = PendingProcess(5002)
+    manager._handles[(instance.id, "exec-1")] = RuntimeHandle(process=first, log_task=_CompletedLogTask(), process_status="running", attempt_id="exec-1")
+    manager._handles[(instance.id, "exec-2")] = RuntimeHandle(process=second, log_task=_CompletedLogTask(), process_status="running", attempt_id="exec-2")
+
+    stopped = await manager.stop_attempts(instance, ["exec-1"])
+
+    assert first.returncode == 0
+    assert second.returncode is None
+    assert set(manager._handles) == {("inst-1", "exec-2")}
+    assert stopped.process_status == "running"
+    assert stopped.pid == 5002
 
 
 @pytest.mark.asyncio
@@ -410,11 +426,9 @@ def test_default_command_falls_back_to_python_module_in_editable_repo() -> None:
             attempt_result_path="/tmp/result.json",
         ) == (
             manager.command,
-            "--mode",
-            "plan",
-            "--attempt-request-path",
+            "--turn-request-path",
             "/tmp/request.json",
-            "--attempt-result-path",
+            "--turn-result-path",
             "/tmp/result.json",
         )
     else:
@@ -426,11 +440,9 @@ def test_default_command_falls_back_to_python_module_in_editable_repo() -> None:
             manager.command,
             "-m",
             "performer.cli",
-            "--mode",
-            "plan",
-            "--attempt-request-path",
+            "--turn-request-path",
             "/tmp/request.json",
-            "--attempt-result-path",
+            "--turn-result-path",
             "/tmp/result.json",
         )
 
@@ -444,11 +456,9 @@ def test_command_args_do_not_include_legacy_dispatch_issue() -> None:
         attempt_result_path="/tmp/result.json",
     ) == (
         "performer",
-        "--mode",
-        "execute",
-        "--attempt-request-path",
+        "--turn-request-path",
         "/tmp/request.json",
-        "--attempt-result-path",
+        "--turn-result-path",
         "/tmp/result.json",
     )
 
@@ -461,7 +471,7 @@ def test_command_args_signature_has_no_legacy_phase_paths() -> None:
     assert "phase_result_path" not in parameters
 
 
-def test_command_args_include_runtime_mode_attempt_paths() -> None:
+def test_command_args_include_managed_run_turn_paths() -> None:
     manager = ConductorRuntimeManager(command="performer")
 
     assert manager._command_args(
@@ -470,11 +480,9 @@ def test_command_args_include_runtime_mode_attempt_paths() -> None:
         attempt_result_path="/tmp/attempt-result.json",
     ) == (
         "performer",
-        "--mode",
-        "verify",
-        "--attempt-request-path",
+        "--turn-request-path",
         "/tmp/attempt-request.json",
-        "--attempt-result-path",
+        "--turn-result-path",
         "/tmp/attempt-result.json",
     )
 

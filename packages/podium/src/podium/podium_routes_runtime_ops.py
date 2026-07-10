@@ -1,14 +1,15 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import secrets
 from typing import Any, Awaitable, Callable
 
 from fastapi import FastAPI, Header, Request
 from fastapi.responses import JSONResponse
-from performer_api.pipeline import RuntimeConfigEnvelope
+from performer_api.managed_runs import RuntimeConfigEnvelope
 
-from .podium_routes_runtime_helpers import pipeline_ack_payload
+from .podium_routes_runtime_helpers import managed_run_ack_payload
 from .podium_shared import dispatch_public, optional_int, query_bool, sanitize_runtime_config
 
 RequireUser = Callable[[Request], Awaitable[dict[str, Any] | None]]
@@ -21,7 +22,7 @@ def register_runtime_ops_routes(
     _register_runtime_dispatch_routes(app, state=state, error_response=error_response)
     _register_runtime_report_endpoint(app, state=state, error_response=error_response)
     _register_runtime_config_endpoints(app, state=state, error_response=error_response)
-    _register_pipeline_view_endpoint(app, state=state, require_user=require_user, error_response=error_response)
+    _register_managed_run_view_endpoint(app, state=state, require_user=require_user, error_response=error_response)
     _register_runtime_log_routes(app, state=state, require_user=require_user, error_response=error_response)
 
 
@@ -51,7 +52,7 @@ def _register_runtime_dispatch_routes(app: FastAPI, *, state: Any, error_respons
             str(payload.get("status") or "accepted"),
             fencing_token=fencing_token,
             reason=payload.get("reason") if isinstance(payload.get("reason"), str) else None,
-            pipeline=pipeline_ack_payload(payload),
+            managed_run=managed_run_ack_payload(payload),
         )
         if dispatch is None:
             return error_response(404, "dispatch_not_found", "Dispatch not found")
@@ -68,10 +69,16 @@ def _register_runtime_report_endpoint(app: FastAPI, *, state: Any, error_respons
             return error_response(401, "unauthorized", "Unauthorized")
         payload = await request.json()
         result = await state.apply_runtime_report(str(runtime["id"]), payload if isinstance(payload, dict) else {})
-        pipeline = payload.get("pipeline") if isinstance(payload, dict) else None
+        if result.get("status") == "rejected":
+            return error_response(
+                409,
+                str(result.get("error_code") or "runtime_report_rejected"),
+                str(result.get("sanitized_reason") or "Runtime report was rejected"),
+            )
+        managed_runs = payload.get("managed_runs") if isinstance(payload, dict) else None
         group_id = str(runtime.get("runtime_group_id") or "")
-        if isinstance(pipeline, dict):
-            await state.store.save_pipeline_view(group_id, sanitize_runtime_config(pipeline))
+        if isinstance(managed_runs, dict):
+            await state.store.save_managed_run_view(group_id, sanitize_runtime_config(managed_runs))
         config = await state.store.get_runtime_config(group_id) or {}
         if isinstance(result, dict):
             result = {**result, "config": config}
@@ -106,7 +113,7 @@ async def _save_runtime_config(
     try:
         RuntimeConfigEnvelope.from_dict(config).validate()
     except Exception as exc:
-        response = error_response(400, "invalid_runtime_config", "Runtime config failed pipeline validation")
+        response = error_response(400, "invalid_runtime_config", "Runtime config failed managed-run validation")
         body = json.loads(response.body.decode("utf-8"))
         body["error"]["details"] = str(exc)
         return JSONResponse(body, status_code=400)
@@ -120,28 +127,82 @@ async def _save_runtime_config(
     return JSONResponse({"accepted": True, "config": sanitized})
 
 
-def _register_pipeline_view_endpoint(
+def _register_managed_run_view_endpoint(
     app: FastAPI, *, state: Any, require_user: RequireUser, error_response: ErrorResponse
 ) -> None:
-    @app.get("/api/v1/pipeline")
-    async def pipeline_view(request: Request) -> JSONResponse:
+    @app.get("/api/v1/managed-runs")
+    async def managed_runs_view(request: Request) -> JSONResponse:
         user = await require_user(request)
         if user is None:
             return error_response(401, "unauthorized", "Unauthorized")
-        workspace_id = str(user["id"])
-        group_id = f"group_{workspace_id}"
-        config = await state.store.get_runtime_config(group_id) or {}
-        view = await state.store.get_pipeline_view(group_id) or {}
-        browser_config = sanitize_runtime_config(config, hide_runtime_sources=True)
-        scheduler_policy = browser_config.get("scheduler_policy") if isinstance(browser_config.get("scheduler_policy"), dict) else {}
-        return JSONResponse(
-            {
-                "runtime_group_id": group_id,
-                "policy_revision": optional_int(scheduler_policy.get("version"), optional_int(browser_config.get("version"), 0)) or 0,
-                "profiles": browser_config.get("profiles") if isinstance(browser_config.get("profiles"), dict) else {},
-                "pipeline": view,
-            }
+        reports = await _managed_run_reports_for_user(state, str(user["id"]))
+        return JSONResponse({"conductors": reports})
+
+
+async def _managed_run_reports_for_user(state: Any, workspace_id: str) -> list[dict[str, Any]]:
+    conductors = await state.store.list_conductors_for_user(workspace_id)
+    enrolled = {
+        str(conductor.get("id") or ""): conductor
+        for conductor in conductors
+        if conductor.get("enrollment_state") == "enrolled"
+    }
+    bindings = await state.store.list_project_bindings_for_user(workspace_id)
+    reports = await asyncio.gather(
+        *(
+            _managed_run_report(state, enrolled[str(binding.get("conductor_id") or "")], binding)
+            for binding in bindings
+            if str(binding.get("conductor_id") or "") in enrolled
         )
+    )
+    return sorted(
+        reports,
+        key=lambda row: (str(row["project"].get("slug") or ""), str(row["conductor"].get("id") or "")),
+    )
+
+
+async def _managed_run_report(
+    state: Any,
+    conductor: dict[str, Any],
+    binding: dict[str, Any],
+) -> dict[str, Any]:
+    conductor_id = str(conductor.get("id") or "")
+    group_id = str(conductor.get("runtime_group_id") or "")
+    config, view, online = await asyncio.gather(
+        state.store.get_runtime_config(group_id),
+        state.store.get_managed_run_view(group_id),
+        state.is_runtime_online(conductor_id),
+    )
+    config = config or {}
+    browser_config = sanitize_runtime_config(config, hide_runtime_sources=True)
+    policy = browser_config.get("managed_run_policy")
+    managed_run_policy = policy if isinstance(policy, dict) else {}
+    return {
+        "conductor": {
+            "id": conductor_id,
+            "name": str(conductor.get("name") or ""),
+            "public_id": str(conductor.get("public_id") or ""),
+            "online": online,
+        },
+        "project": {
+            "id": str(binding.get("linear_project_id") or ""),
+            "slug": str(binding.get("project_slug") or ""),
+            "name": str(binding.get("project_name") or ""),
+        },
+        "binding": {
+            "id": str(binding.get("id") or ""),
+            "instance_id": str(binding.get("instance_id") or ""),
+            "state": str(binding.get("state") or ""),
+            "error_code": str(binding.get("error_code") or ""),
+            "sanitized_reason": str(binding.get("sanitized_reason") or ""),
+        },
+        "runtime_group_id": group_id,
+        "policy_revision": optional_int(
+            managed_run_policy.get("version"),
+            optional_int(browser_config.get("version"), 0),
+        ) or 0,
+        "profiles": browser_config.get("profiles") if isinstance(browser_config.get("profiles"), dict) else {},
+        "managed_runs": view or {},
+    }
 
 
 def _register_runtime_log_routes(

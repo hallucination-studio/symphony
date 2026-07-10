@@ -26,7 +26,7 @@ class TrackerConfig:
     project_slug: str
     api_key: str
     required_delegate_id: str | None = None
-    pipeline_labels_enabled: bool = True
+    managed_run_labels_enabled: bool = True
     terminal_states: list[str] = field(
         default_factory=lambda: ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]
     )
@@ -148,7 +148,7 @@ def _tracker_config(raw: dict[str, Any], base_path: Path) -> TrackerConfig:
         project_slug=_string(raw.get("project_slug"), "") or "",
         api_key=_resolve_env(_string(raw.get("api_key"))) or "",
         required_delegate_id=_resolve_env(_string(raw.get("required_delegate_id"))),
-        pipeline_labels_enabled=_bool(raw.get("pipeline_labels_enabled"), True),
+        managed_run_labels_enabled=_bool(raw.get("managed_run_labels_enabled"), True),
         terminal_states=list(
             raw.get("terminal_states") or ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]
         ),

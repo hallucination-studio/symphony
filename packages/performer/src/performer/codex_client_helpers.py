@@ -50,14 +50,16 @@ class _SdkErrorClassification:
     http_status: int | None = None
 
 
-def _parse_structured_result(value: str | None) -> dict[str, Any] | None:
+def _parse_structured_result(value: str | None, *, validate: bool = True) -> dict[str, Any] | None:
     if not value:
         return None
     try:
         parsed = json.loads(value)
     except json.JSONDecodeError:
         return None
-    return parsed if _valid_structured_result(parsed) else None
+    if not isinstance(parsed, dict):
+        return None
+    return parsed if not validate or _valid_structured_result(parsed) else None
 
 
 def _valid_structured_result(value: Any) -> bool:
@@ -282,25 +284,6 @@ def _first_dict(
         if isinstance(raw, dict) and (not validate or _valid_structured_result(raw)):
             return raw
     return default
-
-
-def _sdk_event_to_dict(event: Any) -> dict[str, Any] | None:
-    if isinstance(event, dict):
-        raw = dict(event)
-    else:
-        raw = {
-            key: getattr(event, key)
-            for key in ("type", "event", "message", "command", "exit_code", "usage", "turn_id", "thread_id")
-            if hasattr(event, key)
-        }
-    name = raw.get("event") or raw.get("type")
-    if not isinstance(name, str):
-        return None
-    mapped = {"event": f"sdk_{name.replace('.', '_').replace('/', '_')}", "backend": "sdk", "payload": raw}
-    for key in ("message", "command", "exit_code", "usage", "turn_id", "thread_id"):
-        if key in raw:
-            mapped[key] = raw[key]
-    return mapped
 
 
 def _usage_from_any(value: Any) -> dict[str, int] | None:

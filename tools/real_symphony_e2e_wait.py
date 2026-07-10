@@ -8,7 +8,7 @@ from real_symphony_e2e_wait_helpers import (
     _pipeline_integrated_result_path,
     _pipeline_wait_by_id,
     _resolved_pipeline_wait_ids,
-    _wait_resolved_before_harness_resume,
+    _wait_resolved_before_managed_run_resume,
     immediate_pipeline_failure,
 )
 from real_symphony_e2e_wait_loop import wait_for_run
@@ -26,7 +26,7 @@ __all__ = [
     "_pipeline_integrated_result_path",
     "_pipeline_wait_by_id",
     "_resolved_pipeline_wait_ids",
-    "_wait_resolved_before_harness_resume",
+    "_wait_resolved_before_managed_run_resume",
     "immediate_pipeline_failure",
     "wait_for_run",
 ]

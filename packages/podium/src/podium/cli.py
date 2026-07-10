@@ -17,6 +17,15 @@ def env_flag(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def secure_cookies_from_env() -> bool:
+    value = os.environ.get("PODIUM_SECURE_COOKIES", "").strip().lower()
+    if not value or value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    raise RuntimeError("podium_secure_cookies_invalid")
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the Symphony Podium SaaS boundary.")
     subparsers = parser.add_subparsers(dest="command")
@@ -45,6 +54,7 @@ async def async_main(argv: list[str] | None = None) -> int:
     await store.migrate()
     default_static = Path(__file__).resolve().parent / "static"
     app = create_app(
+        secure_cookies=secure_cookies_from_env(),
         session_cookie_name=os.environ.get("PODIUM_SESSION_COOKIE_NAME", "podium_session"),
         static_dir=str(default_static) if default_static.exists() else None,
         data_dir=os.environ.get("PODIUM_DATA_DIR"),

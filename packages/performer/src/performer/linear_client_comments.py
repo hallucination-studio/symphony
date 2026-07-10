@@ -8,7 +8,6 @@ from performer_api.models import Issue
 from .linear_errors import LinearError
 from .linear_models import _normalize_comments, _normalize_issue, replace_marker_block
 from .linear_queries import (
-    AGENT_ACTIVITY_CREATE_MUTATION,
     COMMENT_CREATE_MUTATION,
     COMMENT_UPDATE_MUTATION,
     ISSUE_COMMENTS_QUERY,
@@ -59,20 +58,6 @@ class LinearCommentMixin:
             "comment_id": comment.get("id") if isinstance(comment, dict) else fallback_id,
             "body": body,
         }
-
-    async def agent_activity_create(
-        self,
-        *,
-        agent_session_id: str,
-        content: dict[str, Any],
-    ) -> dict[str, Any]:
-        payload = await self.graphql(
-            AGENT_ACTIVITY_CREATE_MUTATION,
-            {"input": {"agentSessionId": agent_session_id, "content": content}},
-        )
-        result = ((payload.get("data") or {}).get("agentActivityCreate") or {})
-        activity = result.get("agentActivity") if isinstance(result, dict) else {}
-        return {"success": bool(result.get("success")), "activity_id": activity.get("id") if isinstance(activity, dict) else None}
 
     async def fetch_issue_comments(self, issue_id: str, *, first: int = 20) -> list[dict[str, Any]]:
         payload = await self.graphql(ISSUE_COMMENTS_QUERY, {"issueId": issue_id, "first": first})

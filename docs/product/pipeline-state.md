@@ -1,148 +1,117 @@
-# Pipeline State
+# Managed Run State
 
 ## Authority
 
-Conductor's durable graph store is the scheduling source of truth. Linear is a
-projection and human-event inbox. Podium supplies dispatches, scheduler policy,
-and runtime profiles, but Conductor owns local graph commits, attempts, leases,
-fencing, and convergence.
+Conductor's durable managed-run store is the execution source of truth. Linear
+is the operator projection and human-event surface. Podium supplies dispatches,
+runtime configuration, and reporting transport, but Conductor owns local run
+state, plan versions, work-item state, checkpoint results, and convergence.
 
-Every dispatch and attempt is stamped with the graph revision and policy
-revision used when it was scheduled.
+Every delegated Linear parent issue maps to one managed run. The run is resumed
+by `run_id`, parent issue id, or issue identifier; duplicate dispatches reuse
+the existing run instead of creating a second execution path.
 
-## Topology And Runtime State
+## Durable Objects
 
-`graph_revision` versions topology only:
+The store owns these objects:
 
-- node identity and parentage;
-- `blocks` edges;
-- frozen gate hash bindings;
-- supersession links;
-- entry and exit structure.
+- `runs`: parent issue mapping, instance id, run state, active work item,
+  backend session id, latest sanitized reason, timestamps, and plan version.
+- `plan_versions`: immutable accepted plan payloads.
+- `work_items`: current work-item lifecycle, accepted payload, verification
+  gate status, and latest structured result.
+- `checkpoint_results`: post-group verification command results.
+- `linear_projections`: parent/work-item issue mapping and projection metadata.
 
-Topology is immutable once committed. A new revision is minted only by a plan
-commit, an atomic replan rewrite, or an ingestion that genuinely changes
-topology. A reconciliation pass that observes no topology change must not mint a
-revision.
+## Run State
 
-Mutable runtime state is keyed by `node_id` and updated in place:
-
-- lifecycle state;
-- current attempt pointers;
-- retry count and replan depth;
-- verify score;
-- escalation reason;
-- wait identifiers.
-
-Runtime state is never copied per revision. This keeps in-flight attempts stable
-when unrelated topology changes occur.
-
-## Node State
-
-Graph nodes use these durable states:
+Managed runs use these durable states:
 
 ```text
-PLANNED
-READY
-EXECUTING
-VERIFYING
-VERIFY_PASSED
-REPLANNING
-SUPERSEDED
-NEED_HUMAN
-FAILED
+queued
+planning
+projecting_plan
+awaiting_approval
+ready
+executing
+reviewing
+verified
+blocked
+failed
+done
 ```
 
-`READY` means dependencies are satisfied and capacity may schedule the next
-mode. `SUPERSEDED` is terminal for a node replaced by a new graph revision.
-`NEED_HUMAN` is terminal until an operator resumes the node.
+`ready` means Conductor may select the next dependency-ready work item or
+checkpoint. `awaiting_approval` means a planned human approval gate is blocking
+execution. `blocked` always carries `latest_reason` with a sanitized,
+operator-visible cause. `verified` means all active work items are Done or
+canceled by approved revision and all required checkpoints passed. `done` is
+allowed only after final Definition-of-Done evidence, residual risks, and the
+parent Linear summary are recorded.
 
-Same-stage retries do not create replacement nodes. They create new attempts on
-the same node, bounded by policy. A regression to an earlier stage creates a
-supersede chain.
+## Work-Item State
 
-## Attempt State
-
-Each attempt is immutable once terminal:
+Work items use the normal Linear lifecycle:
 
 ```text
-PENDING
-RUNNING
-SUCCEEDED
-FAILED
-CANCELLED
-TIMED_OUT
+todo
+in_progress
+in_review
+done
+blocked
+cancelled
 ```
 
-Plan, execute, and verify attempts are stored with mode, attempt id, node id,
-lease id, fencing token, request/result paths, backend kind, thread id when the
-backend exposes one, sanitized error, timestamps, and artifact references.
+Conductor selects one dependency-ready `todo` item at a time unless the accepted
+plan declares safe backend parallelism. A work item can start only when:
 
-## Parentage
+- its dependencies are Done;
+- no required checkpoint is pending;
+- its file scope is present;
+- any `needs_human_approval` gate has been approved;
+- runtime capacity allows the turn.
 
-`parent_node_id` expresses Linear issue nesting and decomposition ownership only.
-It does not participate in scheduler dependency satisfaction, dispatchability,
-or derived lifecycle state. Fan-in is represented directly by multiple incoming
-`blocks` edges on a node.
+`blocked` work items stay out of Done and expose their `gate_status` in durable
+state and Linear projection.
 
-## Scheduling
+## Plan Versions
 
-Conductor schedules from the active graph, active scheduler policy, current
-runtime profiles, dependency predicate, and live leases.
+The first turn produces a structured plan and must not modify files. Conductor
+validates scope, dependency shape, RED/GREEN commands, acceptance criteria,
+parallelization policy, and Definition-of-Done rubric coverage before saving
+plan version `1`.
 
-The dependency predicate is verify-gated: a blocker is satisfied only when the
-upstream node verify-passed at score `>= 3` and its verified branch output
-manifest is available. Execute completion does not satisfy dependencies.
+Accepted plan versions are immutable. If execution needs a new file scope,
+dependency, acceptance criterion, or human decision, the backend requests a plan
+revision. Conductor saves the new plan version only after approval, resets the
+affected item to Todo, and marks removed work items `cancelled`.
 
-Capacity is versioned and per-mode:
+## Verification And Checkpoints
 
-```yaml
-capacity:
-  global: 12
-  by_mode:
-    plan: 2
-    execute: null
-    verify: 4
-```
+Execution results are claims, not verdicts. Conductor verifies:
 
-`null` means no mode-local cap; it is still bounded by global capacity and
-dependencies. The API view reports the same active policy object used by the
-scheduler, including `policy_id`, `version`, source, limits, active counts, and
-remaining counts. Local-default fallback is a surfaced state, not a silent
-substitute.
+- changed files are declared and planned;
+- undeclared changes are absent;
+- RED evidence was observed;
+- required GREEN commands ran;
+- acceptance criteria passed;
+- secret checks pass;
+- checkpoint commands pass after configured work-item groups.
 
-## Leases And Fencing
+Verification failure blocks the run with a concrete reason. Checkpoint failure
+blocks the run even when individual work items passed local checks.
 
-Capacity accounting is lease-based. A worker may commit a result only if:
+## Recovery
 
-- the attempt is still `RUNNING`;
-- its lease token is current and unexpired;
-- the node has not been superseded;
-- execute/verify gate hash still matches the node binding;
-- the result path belongs to the fenced attempt.
+A restarted Conductor resumes from durable state:
 
-Expired leases are reclaimed. Stale result files and stale fencing tokens are
-warnings with durable reasons, not silent no-ops.
+- Done and cancelled work items remain terminal;
+- checkpoint results remain authoritative;
+- the latest backend session id is reused when available;
+- the next non-terminal dependency-ready work item is selected;
+- blocked reasons remain visible until a real operator action or approved plan
+  revision resolves them.
 
-## Convergence
-
-Every non-terminal node must have at least one live driver or explanation:
-
-- an active attempt/lease is running;
-- the node can be promoted or dispatched in this scheduler tick;
-- an open human/runtime wait explains why it is parked.
-
-A non-terminal node with no live driver is a stuck-node finding. The finding
-must create a durable wait/comment with the concrete blockers, capacity error,
-profile error, or dispatch-skip reason, and must be visible in state, logs, API
-views, and Linear projection when Linear is configured.
-
-Backward movement is bounded by retry count and replan depth. Exhaustion
-escalates to `NEED_HUMAN` with a structured reason instead of looping. This
-guarantees the graph reaches a terminal state or an explicit operator wait.
-
-## Verification
-
-To verify state behavior, inspect the pipeline API/report and confirm the graph
-revision, policy revision, node states, attempt records, leases, queue counts,
-and stuck-node findings match correlated Conductor and Performer logs.
+Logs are evidence, not state. Every terminal or human-action-causing failure
+must be present in durable state, operator logs, and the relevant Linear
+projection.

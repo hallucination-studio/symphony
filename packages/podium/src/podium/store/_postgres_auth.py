@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ._postgres_records import _pg_datetime, _pg_json, _record_to_user
+from ._postgres_records import _pg_datetime, _record_to_user
 
 
 class PgAuthMixin:
@@ -15,7 +15,7 @@ class PgAuthMixin:
             """
             INSERT INTO users (id, email, password_hash, created_at)
             VALUES ($1, $2, $3, $4::timestamptz)
-            RETURNING id, email, password_hash, created_at, linear_app_json
+            RETURNING id, email, password_hash, created_at
             """,
             user_id,
             email,
@@ -25,15 +25,12 @@ class PgAuthMixin:
         return _record_to_user(row)
 
     async def get_user(self, user_id: str) -> dict[str, Any] | None:
-        row = await self.pool.fetchrow("SELECT id, email, password_hash, created_at, linear_app_json FROM users WHERE id = $1", user_id)
+        row = await self.pool.fetchrow("SELECT id, email, password_hash, created_at FROM users WHERE id = $1", user_id)
         return _record_to_user(row) if row is not None else None
 
     async def get_user_by_email(self, email: str) -> dict[str, Any] | None:
-        row = await self.pool.fetchrow("SELECT id, email, password_hash, created_at, linear_app_json FROM users WHERE email = $1", email)
+        row = await self.pool.fetchrow("SELECT id, email, password_hash, created_at FROM users WHERE email = $1", email)
         return _record_to_user(row) if row is not None else None
-
-    async def set_user_linear_app(self, user_id: str, linear_app: dict[str, Any] | None) -> None:
-        await self.pool.execute("UPDATE users SET linear_app_json = $2::jsonb WHERE id = $1", user_id, _pg_json(linear_app) if linear_app is not None else None)
 
     async def save_session(self, token_hash: str, *, user_id: str, expires_at: str) -> None:
         await self.pool.execute(

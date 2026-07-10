@@ -1,4 +1,4 @@
-from performer_api.labels import LABEL_SCHEME, PIPELINE_LABELS
+from performer_api.labels import LABEL_SCHEME, MANAGED_RUN_LABELS
 
 
 LEGACY_LABEL_FIXTURES = {
@@ -21,17 +21,17 @@ def test_label_scheme_has_unique_static_labels_across_axes() -> None:
     labels = LABEL_SCHEME.all_static_labels()
 
     assert len(labels) == len(set(labels))
-    assert all(label.startswith("performer:") for label in labels)
-    assert set(LABEL_SCHEME.pipeline) == {
+    assert all(label.startswith(("performer:", "symphony:")) for label in labels)
+    assert set(LABEL_SCHEME.managed_run) == {
         "planning",
         "ready",
         "executing",
-        "verifying",
-        "verify_passed",
+        "reviewing",
+        "verified",
         "need_human",
         "failed",
     }
-    assert set(LABEL_SCHEME.types) == {"human_action", "repository_integration", "pipeline_node"}
+    assert set(LABEL_SCHEME.types) == {"human_action", "repository_integration", "work_item"}
 
 
 def test_label_scheme_does_not_include_legacy_runtime_labels() -> None:
@@ -48,6 +48,6 @@ def test_label_scheme_does_not_include_legacy_runtime_labels() -> None:
     assert not any(label.startswith("performer:score/") for label in labels)
 
 
-def test_pipeline_labels_replace_phase_contract() -> None:
-    assert PIPELINE_LABELS["executing"] == "performer:pipeline/executing"
-    assert PIPELINE_LABELS["need_human"] == "performer:pipeline/need-human"
+def test_managed_run_labels_replace_phase_contract() -> None:
+    assert MANAGED_RUN_LABELS["executing"] == "symphony:managed-run/executing"
+    assert MANAGED_RUN_LABELS["need_human"] == "symphony:managed-run/need-human"

@@ -5,9 +5,8 @@ from typing import Any
 
 import httpx
 
-from .conductor_pipeline import _sanitize_error
+from .conductor_podium_sync_failure import _sanitize_error
 from .conductor_service_types import ConductorServiceError
-from performer_api.pipeline import HumanEscalationReason
 
 
 class PodiumDispatchMixin:
@@ -49,42 +48,20 @@ class PodiumDispatchMixin:
                 "issue_identifier": issue_identifier or None,
                 "reason": "no_matching_instance",
             }
-        accepted = self.pipeline_coordinator.accept_dispatch(event, instance_id=instance.id)
-        refreshed = self.get_instance(instance.id) or instance
-        runtime_mode = None
-        if not self._pipeline_configured():
-            await self.post_podium_report()
-        if self._pipeline_configured():
-            started_count = await self.pipeline_coordinator.start_due_attempts(refreshed)
-            runtime_mode = "plan" if started_count else None
-        else:
-            if not any(
-                str(wait.get("node_id") or "") == accepted.node_id and str(wait.get("status") or "waiting") == "waiting"
-                for wait in self.pipeline_store.list_human_waits()
-            ):
-                self.pipeline_store.create_human_wait(
-                    accepted.node_id,
-                    reason=HumanEscalationReason.BACKEND_UNAVAILABLE.value,
-                    details={
-                        "error": "pipeline runtime profiles are not configured",
-                        "action_required": "configure_runtime_profiles",
-                        "issue_id": issue_id or None,
-                        "issue_identifier": issue_identifier or None,
-                    },
-                )
-        attempt_ack = self._pipeline_dispatch_attempt_ack(accepted.node_id)
+        accepted = self.managed_run_coordinator.accept_dispatch(event, instance_id=instance.id)
+        run = self.managed_run_store.get_run(accepted.run_id) or {}
         return {
             "status": "accepted",
             "issue_id": issue_id or None,
             "issue_identifier": issue_identifier or None,
             "instance_id": instance.id,
-            "agent_session_id": event.get("agent_session_id") or None,
             "agent_app_user_id": agent_app_user_id,
-            "graph_node_id": accepted.node_id,
-            "graph_id": accepted.graph_id,
-            "plan_attempt_id": accepted.plan_attempt_id,
-            "runtime_mode": runtime_mode,
-            **attempt_ack,
+            "run_id": accepted.run_id,
+            "parent_issue_id": accepted.parent_issue_id,
+            "active_work_item_id": run.get("active_work_item_id") or "",
+            "managed_run_state": run.get("state") or "planning",
+            "plan_version": run.get("plan_version") or 0,
+            "backend_session_id": run.get("backend_session_id") or "",
         }
 
     def _record_dispatch_skip_finding(
@@ -95,10 +72,10 @@ class PodiumDispatchMixin:
         issue_identifier: str,
         project_slug: str,
     ) -> None:
-        findings = getattr(self, "_pipeline_reconcile_findings", None)
+        findings = getattr(self, "_managed_run_reconcile_findings", None)
         if findings is None:
             findings = []
-            self._pipeline_reconcile_findings = findings
+            self._managed_run_reconcile_findings = findings
         findings.append(
             {
                 "event": "podium_dispatch_skipped",
@@ -112,37 +89,6 @@ class PodiumDispatchMixin:
                 "project_slug": project_slug or None,
             }
         )
-
-    def _pipeline_dispatch_attempt_ack(self, node_id: str) -> dict[str, Any]:
-        attempts = [attempt for attempt in self.pipeline_store.list_attempts() if attempt.node_id == node_id]
-        if not attempts:
-            return {
-                "node_id": node_id,
-                "attempt_id": "",
-                "mode": "",
-                "attempt_status": "",
-                "graph_revision": self.pipeline_store.current_graph_revision(),
-                "policy_revision": self.pipeline_store.active_runtime_config().scheduler_policy.version,
-                "lease_id": "",
-            }
-        attempt = attempts[-1]
-        lease = self.pipeline_store.active_lease(attempt.node_id, attempt.mode)
-        return {
-            "node_id": attempt.node_id,
-            "attempt_id": attempt.attempt_id,
-            "mode": attempt.mode.value,
-            "attempt_status": attempt.state.value,
-            "graph_revision": self.pipeline_store.current_graph_revision(),
-            "policy_revision": self.pipeline_store.active_runtime_config().scheduler_policy.version,
-            "lease_id": lease.lease_id if lease is not None and lease.attempt_id == attempt.attempt_id else "",
-        }
-
-    def _pipeline_configured(self) -> bool:
-        try:
-            envelope = self.pipeline_store.active_runtime_config()
-        except Exception:
-            return False
-        return bool(envelope.profiles)
 
     async def poll_podium_dispatch_once(self) -> dict[str, Any]:
         settings = self.store.get_settings()
@@ -168,14 +114,12 @@ class PodiumDispatchMixin:
                     "fencing_token": leased.get("fencing_token"),
                     "status": result.get("status", "accepted"),
                     "reason": result.get("reason"),
-                    "graph_id": result.get("graph_id"),
-                    "node_id": result.get("node_id"),
-                    "attempt_id": result.get("attempt_id"),
-                    "mode": result.get("mode"),
-                    "attempt_status": result.get("attempt_status"),
-                    "graph_revision": result.get("graph_revision"),
-                    "policy_revision": result.get("policy_revision"),
-                    "lease_id": result.get("lease_id"),
+                    "run_id": result.get("run_id"),
+                    "parent_issue_id": result.get("parent_issue_id"),
+                    "active_work_item_id": result.get("active_work_item_id"),
+                    "managed_run_state": result.get("managed_run_state"),
+                    "plan_version": result.get("plan_version"),
+                    "backend_session_id": result.get("backend_session_id"),
                 },
             )
             return {"status": "leased", "dispatch": leased, "result": result}
@@ -195,7 +139,7 @@ class PodiumDispatchMixin:
                 else:
                     result = await self.dispatch_podium_event(event)
             except Exception as exc:
-                self._record_pipeline_sync_failure(
+                self._record_managed_run_sync_failure(
                     "podium_dispatch_drain_failed",
                     None,
                     exc,

@@ -24,12 +24,18 @@ class E2ERunState:
     workspace_id: str
     fixture: Path
     podium_port: int
+    podium_base_url: str
     conductor_port: int
     data_root: Path
     staged_codex_home: Path
     processes: list[ManagedProcess] = field(default_factory=list)
     postgres_container: Any = None
     enrolled_runtime: dict[str, Any] = field(default_factory=dict)
+    enrollment_reservation: dict[str, Any] = field(default_factory=dict)
+    installation: dict[str, Any] = field(default_factory=dict)
+    linear_project: dict[str, Any] = field(default_factory=dict)
+    binding: dict[str, Any] = field(default_factory=dict)
+    podium_session: Any = None
     runtime_config: dict[str, Any] = field(default_factory=dict)
     linear: dict[str, Any] = field(default_factory=dict)
     instance: dict[str, Any] = field(default_factory=dict)

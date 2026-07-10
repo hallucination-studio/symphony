@@ -19,9 +19,10 @@ export interface LinearHealth {
 
 export function linearHealth(linear: LinearStatus): LinearHealth {
   const connected = linear.state === "connected";
+  const reauthorizationRequired = linear.state === "reauthorization_required";
   const expired = linear.state === "expired";
   const error = linear.state === "error";
-  const broken = expired || error;
+  const broken = reauthorizationRequired || expired || error;
 
   if (connected) {
     return {
@@ -33,6 +34,19 @@ export function linearHealth(linear: LinearStatus): LinearHealth {
       actionLabel: "Reconnect Linear",
       hint: "Connected",
       description: "Your workspace is authorized.",
+    };
+  }
+
+  if (reauthorizationRequired) {
+    return {
+      connected,
+      broken,
+      status: "degraded",
+      tone: "warning",
+      title: "Linear authorization required",
+      actionLabel: "Reauthorize Linear",
+      hint: "Reauthorization required",
+      description: "Reauthorize Linear to restore project polling.",
     };
   }
 

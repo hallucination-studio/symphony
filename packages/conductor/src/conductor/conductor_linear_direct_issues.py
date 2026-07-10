@@ -7,6 +7,28 @@ from .conductor_linear_direct_helpers import _normalize_linear_issue_dict
 
 
 class RepositoryHandoffIssueMixin:
+    async def fetch_issue(self, issue_id: str) -> dict[str, Any]:
+        payload = await self.graphql(
+            """
+query RepositoryHandoffIssue($issueId: String!) {
+  issue(id: $issueId) {
+    id
+    identifier
+    title
+    description
+    url
+    state { name type }
+    parent { id identifier }
+    delegate { id }
+    labels { nodes { name } }
+  }
+}
+""",
+            {"issueId": issue_id},
+        )
+        issue = ((payload.get("data") or {}).get("issue") or {})
+        return _normalize_linear_issue_dict(issue) if isinstance(issue, dict) and issue.get("id") else {}
+
     async def fetch_child_issues(self, parent_issue_id: str, *, label_name: str | None = None) -> list[dict[str, Any]]:
         payload = await self.graphql(
             """
@@ -56,7 +78,14 @@ query RepositoryHandoffChildren($issueId: String!) {
     ) -> dict[str, Any]:
         _ = assignee_id
         context = await self._creation_context(parent_issue_id)
-        label_ids = [await self._ensure_label_id(context["team_id"], name) for name in label_names]
+        label_ids: list[str] = []
+        skipped_label_names: list[str] = []
+        for name in label_names:
+            label_id = await self._existing_label_id(context["team_id"], name)
+            if label_id:
+                label_ids.append(label_id)
+            else:
+                skipped_label_names.append(name)
         payload = await self.graphql(
             """
 mutation RepositoryHandoffCreateChild(
@@ -107,31 +136,10 @@ mutation RepositoryHandoffCreateChild(
         issue = result.get("issue") if isinstance(result, dict) else {}
         if not result.get("success") or not isinstance(issue, dict) or not issue.get("id"):
             raise LinearDirectProxyError("linear_issue_create_failed", "Linear issueCreate returned success=false")
-        return _normalize_linear_issue_dict(issue)
-
-    async def agent_activity_create(
-        self,
-        *,
-        agent_session_id: str,
-        content: dict[str, Any],
-    ) -> dict[str, Any]:
-        payload = await self.graphql(
-            """
-mutation RepositoryHandoffAgentActivity($input: AgentActivityCreateInput!) {
-  agentActivityCreate(input: $input) {
-    success
-    agentActivity { id }
-  }
-}
-""",
-            {"input": {"agentSessionId": agent_session_id, "content": content}},
-        )
-        result = ((payload.get("data") or {}).get("agentActivityCreate") or {})
-        activity = result.get("agentActivity") if isinstance(result, dict) else {}
-        return {
-            "success": bool(result.get("success")),
-            "activity_id": activity.get("id") if isinstance(activity, dict) else None,
-        }
+        normalized = _normalize_linear_issue_dict(issue)
+        if skipped_label_names:
+            normalized["skipped_label_names"] = skipped_label_names
+        return normalized
 
     async def transition_issue(self, issue_id: str, state_id: str) -> dict[str, Any]:
         payload = await self.graphql(

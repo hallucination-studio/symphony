@@ -90,6 +90,7 @@ class CodexSdkClient(_CodexSdkRuntimeMixin):
                 "cwd": str(workspace_path),
             }
         )
+        validate_default_shape = output_schema is None
         client, thread, thread_id = await self._init_thread(workspace_path, existing_thread_id, emit=emit)
         emit({"event": "session_started", "backend": "sdk", "thread_id": thread_id, "session_id": f"{thread_id}-", "cwd": str(workspace_path)})
         turn_id, session_id, turn_count, final_response, structured = await self._run_session_turns(
@@ -101,7 +102,7 @@ class CodexSdkClient(_CodexSdkRuntimeMixin):
             events=events,
             max_turns=max_turns,
             continuation_provider=continuation_provider,
-            requires_handoff=output_schema is None,
+            validate_default_shape=validate_default_shape,
         )
         await _close_sdk_client(client)
         return CodexRunResult(
@@ -127,7 +128,7 @@ class CodexSdkClient(_CodexSdkRuntimeMixin):
         events: list[dict[str, Any]],
         max_turns: int,
         continuation_provider: ContinuationProvider | None,
-        requires_handoff: bool,
+        validate_default_shape: bool,
     ) -> tuple[str, str, int, str | None, dict[str, Any] | None]:
         final_response: str | None = None
         structured: dict[str, Any] | None = None
@@ -137,7 +138,7 @@ class CodexSdkClient(_CodexSdkRuntimeMixin):
         turn_prompt: str | None = prompt
         max_turn_count = max(1, int(max_turns or 1))
         while turn_prompt is not None and turn_count < max_turn_count:
-            validate_this_turn = requires_handoff and (turn_count + 1 >= max_turn_count or continuation_provider is None)
+            require_structured_this_turn = turn_count + 1 >= max_turn_count or continuation_provider is None
             turn, turn_id, session_id, final_response, turn_structured = await self._run_structured_turn(
                 thread,
                 turn_prompt,
@@ -145,10 +146,11 @@ class CodexSdkClient(_CodexSdkRuntimeMixin):
                 thread_id=thread_id,
                 emit=emit,
                 events=events,
-                validate_structured=validate_this_turn,
+                require_structured=require_structured_this_turn,
+                validate_default_shape=validate_default_shape,
             )
             if turn_structured is None:
-                turn_structured = _parse_structured_result(final_response)
+                turn_structured = _parse_structured_result(final_response, validate=validate_default_shape)
             if turn_structured is not None:
                 structured = turn_structured
             turn_count += 1
@@ -191,7 +193,8 @@ class CodexSdkClient(_CodexSdkRuntimeMixin):
         thread_id: str,
         emit: EventCallback,
         events: list[dict[str, Any]],
-        validate_structured: bool,
+        require_structured: bool,
+        validate_default_shape: bool,
     ) -> tuple[Any, str, str, str | None, dict[str, Any] | None]:
         turn_id = "turn"
         session_id = f"{thread_id}-{turn_id}"
@@ -204,11 +207,11 @@ class CodexSdkClient(_CodexSdkRuntimeMixin):
                     output_schema,
                     thread_id=thread_id,
                     emit=emit,
-                    validate_structured=validate_structured,
+                    validate_structured=validate_default_shape,
                 )
-                if validate_structured and structured is None:
-                    structured = _parse_structured_result(final_response)
-                if validate_structured and structured is None:
+                if structured is None:
+                    structured = _parse_structured_result(final_response, validate=validate_default_shape)
+                if require_structured and structured is None:
                     raise CodexError("invalid_structured_output", "Codex SDK turn did not produce the required structured JSON result")
                 return turn, turn_id, session_id, final_response, structured
             except (asyncio.TimeoutError, TimeoutError) as exc:

@@ -2,33 +2,67 @@
 
 ## Primary Boundary
 
-Podium is the trust boundary for third-party integrations. It holds Linear OAuth
-tokens, serves public HTTPS endpoints, authenticates users and runtimes, and
-turns privileged integration access into scoped runtime operations.
+Podium is the trust boundary for third-party integrations. It holds Linear
+application credentials and workspace installation tokens, serves public HTTPS
+endpoints, authenticates users and runtimes, and turns privileged integration
+access into project-scoped runtime operations.
 
-Customer runtimes are trusted to execute code in the customer's environment, but
-they do not receive Linear OAuth access or refresh tokens.
+Customer runtimes execute code in the customer's environment but never receive
+Linear OAuth access tokens, refresh tokens, or client secrets.
 
-## Token Ownership
+## Linear Secret Ownership
 
-Podium-held secrets:
+Deployment configuration provides the default application's client id, client
+secret, and fixed callback URL. A customer-owned application stores only its
+client id and encrypted client secret as a versioned configuration in Podium;
+the callback remains Podium-owned. There is no deployment-global app actor
+access token used for intake or proxy fallback.
 
-- Linear OAuth access and refresh tokens;
-- Linear app actor token and application id;
-- runtime enrollment token hashes;
-- runtime identity credentials;
-- dispatch and proxy token mappings;
-- update signing and channel metadata.
+Every authorized workspace has its own encrypted installation access and
+refresh token, real Linear organization id, workspace-specific app user id,
+scope set, configuration version, and health state. A candidate installation
+cannot replace the active installation until acceptance and drain gates pass.
 
-Runtime-held secrets:
+Browser responses may show non-secret client ids, the callback URL, organization
+metadata, app user ids, scopes, health, timestamps, and sanitized errors. They
+never include secret values.
 
-- runtime identity credential;
-- scoped dispatch/proxy credential;
-- customer-local execution secrets explicitly configured for attempts;
-- staged per-mode backend homes, such as managed `CODEX_HOME` copies.
+## OAuth And Callback Safety
 
-Runtime-held credentials are scoped to one account/runtime group and revocable
-from Podium.
+OAuth uses hashed one-time state with a short expiry, Podium workspace binding,
+application config id/version, and `S256` PKCE. The callback rejects replay or
+configuration drift and validates the token response as untrusted input.
+
+Acceptance requires an app actor, the exact `read write app:assignable` scopes,
+an app-capable viewer, real organization identity, workspace-specific app user
+id, and fully paginated project access. Failed candidates retain durable
+diagnostics and cannot affect the active installation. Callback success and
+denial both return to the setup surface without exposing credentials.
+
+## Polling And Token Safety
+
+Polling is the only delegated-issue intake and is installation- and
+project-scoped. Baseline and incremental scans paginate to completion. Issue
+observations, delegation epochs, idempotency rows, dispatches, and page
+checkpoints commit transactionally before the high-water mark advances.
+
+The central token service serializes refresh per installation, rotates access
+and refresh tokens atomically, refreshes proactively, and retries once after an
+authenticated `401`. Refresh rejection fails closed as
+`reauthorization_required`. Poll failures retain the last safe checkpoint,
+retry count, sanitized reason, and bounded backoff state for operators.
+
+## Project And Runtime Scope
+
+Podium stores selected Linear project ids and verifies access without rewriting
+project members. Each project has at most one active Conductor and each
+Conductor has one project, repository, runtime group, and proxy credential.
+Database uniqueness and transactional reservation enforce the one-to-one
+binding.
+
+The six-character Conductor public id is non-secret. The project label contains
+only the workspace-unique display name and public id. Labels never authorize or
+route work.
 
 ## Linear Proxy Rules
 
@@ -39,51 +73,34 @@ POST /api/v1/linear/graphql
 Authorization: Bearer <runtime-proxy-token>
 ```
 
-Podium resolves the proxy token to the runtime, account, Linear workspace
-installation, project/team scope, and audit policy. It injects the stored Linear
-OAuth token only into the outbound request to Linear.
+Podium resolves the proxy token through the Conductor's project binding to the
+active Linear installation. It injects that installation token server-side and
+enforces organization, project, operation, audit, rate limit, refresh, and
+redaction policy. It never falls back to an environment access token.
 
-The proxy enforces runtime authentication, workspace authorization, project/team
-scope, operation auditing, rate limits, token refresh, and secret redaction. It
-must not log raw OAuth tokens, refresh tokens, cookies, passwords,
-Authorization headers, runtime profile secrets, or proxy token values.
+## Enrollment And Runtime Secrets
 
-## Enrollment Safety
+Enrollment tokens are short-lived, single-use, account- and Conductor-scoped,
+and stored hashed. After enrollment, each isolated Conductor holds only its
+runtime identity credential, scoped proxy credential, and customer-local
+execution secrets. Same-host Conductors use separate data roots and service
+identities.
 
-Runtime enrollment tokens are short-lived, single-use where possible, bound to a
-customer account, and optionally bound to runtime group, OS/architecture, and
-install profile. Podium stores enrollment token hashes, not raw reusable tokens.
-
-After enrollment, Podium returns scoped runtime credentials and invalidates the
-enrollment token. Re-enrollment and token rotation are explicit operator
-actions.
-
-## Runtime Configuration
-
-Secrets flow through `$VAR` indirection in runtime profiles. Podium and
-Conductor validate that required variables exist without rendering secret values
-in browser responses, logs, reports, or attempt JSON.
-
-Managed mode fails closed when a required per-mode profile, backend home, or
-credential materialization step is missing. It must not fall back to the
-operator's global `~/.codex`.
-
-## Update Security
-
-Runtime packages are distributed with version metadata, checksums, signatures,
-rollback metadata, and an assigned channel. The updater verifies artifacts before
-switching versions. The previous version remains available until the new version
-passes health checks.
+Runtime profile secrets use `$VAR` indirection. Podium and Conductor validate
+required variables without rendering values in browser responses, logs,
+reports, or turn JSON. Managed execution fails closed rather than falling back
+to global operator credentials such as `~/.codex`.
 
 ## Operator Controls
 
-Podium Web exposes actions to revoke a Linear workspace connection, rotate
-runtime tokens, disable routing, disable a runtime, force an update, and inspect
-recent dispatch/proxy audit logs. Destructive actions are explicit and auditable.
+Podium exposes staged application replacement, reconnect, revoke, project
+select/deselect, Conductor bind/unbind/replace, runtime token rotation, routing
+disable, update, and audit-log actions. Destructive actions are explicit,
+drain-aware, and auditable.
 
 ## Acceptable First-Version Risk
 
-Bearer runtime tokens over HTTPS are acceptable for the first managed version
-when they are scoped, revocable, sanitized from logs, and never exposed to the
-browser as raw credentials. mTLS can strengthen runtime identity later without
-changing the authority boundary.
+Scoped bearer runtime tokens over HTTPS are acceptable when revocable and
+sanitized from logs. OAuth client secrets remain shared secrets; later
+key-managed signing or mTLS can strengthen runtime boundaries without changing
+the installation and project authority model.

@@ -13,7 +13,7 @@ class JsonStoreAuthMixin:
 
     async def create_user(self, user_id: str, *, email: str, password_hash: str, created_at: str) -> dict[str, Any]:
         rows = self._load_map("users.json")
-        user = {"id": user_id, "email": email, "password_hash": password_hash, "created_at": created_at, "linear_app": None}
+        user = {"id": user_id, "email": email, "password_hash": password_hash, "created_at": created_at}
         rows[user_id] = user
         self._write("users.json", rows)
         return dict(user)
@@ -27,15 +27,6 @@ class JsonStoreAuthMixin:
             if isinstance(row, dict) and str(row.get("email") or "") == email:
                 return dict(row)
         return None
-
-    async def set_user_linear_app(self, user_id: str, linear_app: dict[str, Any] | None) -> None:
-        rows = self._load_map("users.json")
-        user = rows.get(user_id)
-        if not isinstance(user, dict):
-            return
-        user["linear_app"] = linear_app
-        rows[user_id] = user
-        self._write("users.json", rows)
 
     async def save_session(self, token_hash: str, *, user_id: str, expires_at: str) -> None:
         rows = self._load_map("sessions.json")

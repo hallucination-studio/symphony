@@ -44,15 +44,14 @@ from real_symphony_e2e_analysis import (
 from real_symphony_e2e_artifacts import (
     DEPENDENT_RUNTIME_STAGES_AFTER_PLAN,
     E2E_STAGE_ORDER,
-    _archive_pipeline_artifacts,
+    _archive_managed_run_artifacts,
     _checkpoint_and_block_after_stage,
     _dispatch_context_for_plan_attempt,
     _failed_plan_attempt_id,
     _failed_plan_attempt_paths,
-    _handle_pipeline_runtime_blocker,
-    _latest_pipeline_runtime_failure,
+    _handle_managed_run_runtime_blocker,
+    _latest_managed_run_runtime_failure,
     _looks_like_plan_request,
-    _pipeline_runtime_failure_reason,
     _read_json_file,
     _stages_after,
 )
@@ -95,14 +94,9 @@ from real_symphony_e2e_run_orchestrator import run
 from real_symphony_e2e_wait import wait_for_run
 
 
-LINEAR_AGENT_OAUTH_SCOPE = "read,write,app:assignable,app:mentionable"
+LINEAR_AGENT_OAUTH_SCOPE = "read,write,app:assignable"
 
 # Source-level invariants preserved for tests and reviewers:
-# os.environ.get("PODIUM_LINEAR_APP_ACCESS_TOKEN"
-# Linear app actor token is required
-# PODIUM_LINEAR_APPLICATION_ID
-# PODIUM_LINEAR_POLL_INTERVAL_SECONDS
-# PODIUM_LINEAR_POLL_INITIAL_LOOKBACK_SECONDS"] = "0"
 # build_runtime_config_payload
 # "/api/v1/runtime/config"
 # runtime-config:podium-pushed
@@ -114,12 +108,11 @@ LINEAR_AGENT_OAUTH_SCOPE = "read,write,app:assignable,app:mentionable"
 # asyncpg.connect
 # await start_e2e_postgres_if_needed
 # linear_project = await resolve_project(token, args.project_slug)
-# "/api/v1/runtime/enrollment-tokens"
 # "runtime_group_id": f"group-{run_id}"
 # "project_slug": linear_project["slugId"]
-# "pipeline_profile": "gated-task"
+# build_instance_payload excludes managed_run_profile
 # "conductor-dispatch:poller-starts-one-shot"
-# "/api/pipeline"
+# "/api/managed-runs"
 # codex-connectivity:connected
 # codex-connectivity:planner-shaped
 

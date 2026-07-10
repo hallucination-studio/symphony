@@ -6,9 +6,10 @@ import time
 from typing import Any
 
 from real_symphony_e2e_acceptance import _lower_policy_during_parallel_execute_probe
-from real_symphony_e2e_artifacts import _latest_pipeline_runtime_failure
+from real_symphony_e2e_artifacts import _latest_managed_run_runtime_failure
 from real_symphony_e2e_common import api_url, http_json
 from real_symphony_e2e_preflight import _codex_settings_from_args, build_runtime_config_payload
+from real_symphony_e2e_podium import managed_runtime_env
 from real_symphony_e2e_run_state import E2ERunState
 from real_symphony_e2e_wait import wait_for_run
 
@@ -47,7 +48,7 @@ async def _restart_conductor_after_instance_create(state: E2ERunState) -> None:
     conductor = start_process(
         "conductor",
         [str(state.bin_dir / "conductor"), "--port", str(state.conductor_port), "--data-root", str(state.data_root)],
-        env=state.env,
+        env=managed_runtime_env(state.env),
         stdout_path=state.root / "conductor-restarted.log",
     )
     state.processes.append(conductor)
@@ -73,7 +74,7 @@ def _push_runtime_config(state: E2ERunState) -> None:
         "runtime-config:podium-pushed",
         status == 200
         and pushed.get("version") == state.runtime_config["version"]
-        and sorted((pushed.get("profiles") or {}).keys()) == ["execute", "plan", "verify"],
+        and sorted((pushed.get("profiles") or {}).keys()) == ["plan", "verify", "work_item"],
         status=status,
         body=body,
     )
@@ -97,9 +98,9 @@ def _reject_stale_runtime_config(state: E2ERunState) -> None:
 def _reject_ineligible_backend(state: E2ERunState) -> None:
     invalid = json.loads(json.dumps(state.runtime_config))
     invalid["version"] = int(state.runtime_config.get("version") or 1) + 1
-    invalid["scheduler_policy"]["version"] = invalid["version"]
-    invalid["profiles"]["execute"]["backend"] = "local-verifier"
-    invalid["profiles"]["execute"]["name"] = "ineligible-execute"
+    invalid["managed_run_policy"]["version"] = invalid["version"]
+    invalid["profiles"]["work_item"]["backend"] = "local-verifier"
+    invalid["profiles"]["work_item"]["name"] = "ineligible-work-item"
     status, body = http_json(
         "POST",
         api_url(state.podium_port, "/api/v1/runtime/config"),
@@ -109,7 +110,7 @@ def _reject_ineligible_backend(state: E2ERunState) -> None:
     details = str(((body or {}).get("error") or {}).get("details"))
     state.evidence.check(
         "appendix:s0c-ineligible-backend-refused-before-dispatch",
-        status == 400 and "runtime_profile_backend_unsupported:execute:local-verifier" in details,
+        status == 400 and "runtime_profile_backend_unsupported:work_item:local-verifier" in details,
         status=status,
         body=body,
     )
@@ -150,6 +151,7 @@ async def wait_for_dispatch_and_run(state: E2ERunState) -> None:
         else None,
         continue_after_human_resume=state.pipeline_scenario == "overall-dod",
         expected_failure=state.args.expected_failure,
+        pipeline_scenario=state.pipeline_scenario,
     )
     _checkpoint_dispatch_and_plan(state)
 
@@ -190,14 +192,14 @@ def _checkpoint_dispatch_and_plan(state: E2ERunState) -> None:
         if isinstance(check, dict)
         and (
             str(check.get("name") or "").startswith("stage:")
-            or str(check.get("name") or "").startswith("pipeline-runtime-error:")
+            or str(check.get("name") or "").startswith("managed-run-runtime-error:")
             or str(check.get("name") or "").startswith("human-action:")
         )
     ]
     state.evidence.checkpoint(
         "04-dispatch-and-plan",
         {
-            "status": "completed" if _latest_pipeline_runtime_failure(state.evidence) is None else "failed",
+            "status": "completed" if _latest_managed_run_runtime_failure(state.evidence) is None else "failed",
             "checks": checks,
             "failures": [failure for failure in state.evidence.data.get("failures", []) if isinstance(failure, dict)],
             "samples": (state.run_result.get("samples") or [])[-3:],

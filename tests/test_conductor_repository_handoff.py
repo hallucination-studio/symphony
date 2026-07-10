@@ -164,6 +164,87 @@ async def test_conductor_linear_proxy_ensures_blocks_relation() -> None:
     }
 
 
+async def test_conductor_linear_proxy_creates_child_without_creating_missing_label() -> None:
+    transport = RecordingTransport(
+        [
+            {"data": {"issue": {"team": {"id": "team-1"}, "project": {"id": "project-1"}, "state": {"id": "state-1"}}}},
+            {"data": {"issueLabels": {"nodes": []}}},
+            {
+                "data": {
+                    "issueCreate": {
+                        "success": True,
+                        "issue": {
+                            "id": "child-1",
+                            "identifier": "ENG-2",
+                            "title": "Work item",
+                            "description": "Do work",
+                            "url": "https://linear.test/ENG-2",
+                            "delegate": {"id": "agent-1"},
+                            "labels": {"nodes": []},
+                        },
+                    }
+                }
+            },
+        ]
+    )
+    proxy = RepositoryHandoffLinearProxy(endpoint="https://linear.test/graphql", api_key="token", transport=transport)  # type: ignore[arg-type]
+
+    issue = await proxy.create_child_issue_for(
+        parent_issue_id="parent-1",
+        title="Work item",
+        description="Do work",
+        label_names=["symphony:type/work-item"],
+        delegate_id="agent-1",
+    )
+
+    assert issue["id"] == "child-1"
+    assert issue["parent_issue_id"] is None
+    assert issue["labels"] == []
+    assert issue["skipped_label_names"] == ["symphony:type/work-item"]
+    assert all("issueLabelCreate" not in request["json"]["query"] for request in transport.requests)
+    create_request = transport.requests[2]["json"]
+    assert "issueCreate" in create_request["query"]
+    assert create_request["variables"]["parentId"] == "parent-1"
+    assert create_request["variables"]["labelIds"] == []
+    assert create_request["variables"]["delegateId"] == "agent-1"
+
+
+async def test_conductor_linear_proxy_reuses_existing_child_label() -> None:
+    transport = RecordingTransport(
+        [
+            {"data": {"issue": {"team": {"id": "team-1"}, "project": {"id": "project-1"}, "state": {"id": "state-1"}}}},
+            {"data": {"issueLabels": {"nodes": [{"id": "label-1", "name": "symphony:type/work-item"}]}}},
+            {
+                "data": {
+                    "issueCreate": {
+                        "success": True,
+                        "issue": {
+                            "id": "child-1",
+                            "identifier": "ENG-2",
+                            "title": "Work item",
+                            "description": "Do work",
+                            "url": "https://linear.test/ENG-2",
+                            "labels": {"nodes": [{"name": "symphony:type/work-item"}]},
+                        },
+                    }
+                }
+            },
+        ]
+    )
+    proxy = RepositoryHandoffLinearProxy(endpoint="https://linear.test/graphql", api_key="token", transport=transport)  # type: ignore[arg-type]
+
+    issue = await proxy.create_child_issue_for(
+        parent_issue_id="parent-1",
+        title="Work item",
+        description="Do work",
+        label_names=["symphony:type/work-item"],
+    )
+
+    assert issue["labels"] == ["symphony:type/work-item"]
+    assert "skipped_label_names" not in issue
+    assert transport.requests[2]["json"]["variables"]["labelIds"] == ["label-1"]
+
+
 async def test_conductor_linear_proxy_updates_comment_by_id() -> None:
     transport = RecordingTransport(
         [
@@ -185,6 +266,36 @@ async def test_conductor_linear_proxy_updates_comment_by_id() -> None:
     request = transport.requests[0]
     assert "commentUpdate" in request["json"]["query"]
     assert request["json"]["variables"] == {"commentId": "comment-1", "body": "updated"}
+
+
+async def test_conductor_linear_proxy_fetches_root_issue_state_for_human_action_ingestion() -> None:
+    transport = RecordingTransport(
+        [
+            {
+                "data": {
+                    "issue": {
+                        "id": "issue-1",
+                        "identifier": "ENG-1",
+                        "title": "Approve plan",
+                        "description": "Managed Run",
+                        "state": {"name": "In Progress", "type": "started"},
+                        "parent": None,
+                        "labels": {"nodes": []},
+                    }
+                }
+            }
+        ]
+    )
+    proxy = RepositoryHandoffLinearProxy(endpoint="https://linear.test/graphql", api_key="token", transport=transport)  # type: ignore[arg-type]
+
+    issue = await proxy.fetch_issue("issue-1")
+
+    assert issue["id"] == "issue-1"
+    assert issue["identifier"] == "ENG-1"
+    assert issue["state"] == "In Progress"
+    assert issue["state_type"] == "started"
+    assert transport.requests[0]["json"]["variables"] == {"issueId": "issue-1"}
+    assert "state { name type }" in transport.requests[0]["json"]["query"]
 
 
 async def test_transition_issue_by_state_target_falls_back_to_state_type() -> None:

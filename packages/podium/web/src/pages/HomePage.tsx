@@ -1,5 +1,5 @@
 import { useNavigate } from "react-router-dom";
-import { useBootstrap, usePipeline, useSmokeCheckResult } from "../api/hooks";
+import { useBootstrap, useManagedRuns, useSmokeCheckResult } from "../api/hooks";
 import { Card } from "../components/Card";
 import { LinkButton } from "../components/Button";
 import { ActionPanel } from "../components/ActionPanel";
@@ -14,8 +14,8 @@ import {
 import { linearHealth } from "../lib/linear";
 import type {
   Bootstrap,
+  ManagedRunsReport,
   OnboardingProgress,
-  PipelineStatus,
   SmokeCheckResult,
 } from "../api/types";
 import type { GlobalStatus } from "../lib/format";
@@ -23,7 +23,7 @@ import { useI18n } from "../i18n";
 
 export default function HomePage() {
   const bootstrap = useBootstrap();
-  const pipeline = usePipeline();
+  const managedRuns = useManagedRuns();
   const smoke = useSmokeCheckResult();
   const { t } = useI18n();
 
@@ -37,8 +37,8 @@ export default function HomePage() {
         {bootstrap.data ? (
           <Home
             data={bootstrap.data}
-            pipeline={pipeline.data ?? null}
-            pipelineLoading={pipeline.isLoading}
+            managedRuns={managedRuns.data ?? null}
+            managedRunsLoading={managedRuns.isLoading}
             smoke={smoke.data ?? null}
           />
         ) : null}
@@ -49,13 +49,13 @@ export default function HomePage() {
 
 function Home({
   data,
-  pipeline,
-  pipelineLoading,
+  managedRuns,
+  managedRunsLoading,
   smoke,
 }: {
   data: Bootstrap;
-  pipeline: PipelineStatus | null;
-  pipelineLoading: boolean;
+  managedRuns: ManagedRunsReport | null;
+  managedRunsLoading: boolean;
   smoke: SmokeCheckResult | null;
 }) {
   const navigate = useNavigate();
@@ -70,7 +70,7 @@ function Home({
       <NextActionPanel complete={complete} next={next} nextAction={onboarding.next_action} onNavigate={navigate} />
       <SetupProgressCard onboarding={onboarding} complete={complete} />
       <SystemHealthCard complete={complete} linearState={linearState} runtimeState={runtimeState} smoke={smoke} />
-      <PipelineCard pipeline={pipeline} pipelineLoading={pipelineLoading} />
+      <ManagedRunsCard managedRuns={managedRuns} managedRunsLoading={managedRunsLoading} />
     </div>
   );
 }
@@ -80,7 +80,7 @@ function NextActionPanel({ complete, next, nextAction, onNavigate }: { complete:
   return (
     <div className="span-2">
       {complete ? (
-        <ActionPanel tone="success" title={t("You're all set")} description={t("Onboarding is complete. Podium is routing issues to your runtime.")} actionLabel={t("View pipeline")} onAction={() => onNavigate("/pipeline")} />
+        <ActionPanel tone="success" title={t("You're all set")} description={t("Onboarding is complete. Podium is routing issues to your runtime.")} actionLabel={t("View managed runs")} onAction={() => onNavigate("/managed-runs")} />
       ) : next ? (
         <ActionPanel tone="info" title={t(nextAction || next.title)} description={t(next.description)} actionLabel={t(next.ctaLabel)} onAction={() => onNavigate(`/setup/${next.path}`)} />
       ) : null}
@@ -113,34 +113,42 @@ function SystemHealthCard({ complete, linearState, runtimeState, smoke }: { comp
   );
 }
 
-function PipelineCard({ pipeline, pipelineLoading }: { pipeline: PipelineStatus | null; pipelineLoading: boolean }) {
+function ManagedRunsCard({ managedRuns, managedRunsLoading }: { managedRuns: ManagedRunsReport | null; managedRunsLoading: boolean }) {
   const { t } = useI18n();
+  const reports = managedRuns?.conductors ?? [];
+  const runCount = reports.reduce((total, report) => total + (report.managed_runs.runs?.length ?? 0), 0);
   return (
-    <Card className="span-2" title={t("Pipeline")} actions={<LinkButton to="/pipeline" variant="ghost">{t("View pipeline")}</LinkButton>}>
-      <QueryState isLoading={pipelineLoading} error={null}>
-        {!pipeline?.pipeline ? <EmptyState title={t("No pipeline report yet")} description={t("Pipeline state appears after a Conductor posts its next runtime report.")} /> : <PipelineMetrics pipeline={pipeline} />}
+    <Card className="span-2" title={t("Managed Runs")} actions={<LinkButton to="/managed-runs" variant="ghost">{t("View managed runs")}</LinkButton>}>
+      <QueryState isLoading={managedRunsLoading} error={null}>
+        {managedRuns === null || runCount === 0 ? <EmptyState title={t("No managed run report yet")} description={t("Managed run state appears after a Conductor posts its next runtime report.")} /> : <ManagedRunsMetrics managedRuns={managedRuns} />}
       </QueryState>
     </Card>
   );
 }
 
-function PipelineMetrics({ pipeline }: { pipeline: PipelineStatus }) {
+function ManagedRunsMetrics({ managedRuns }: { managedRuns: ManagedRunsReport }) {
   const { t } = useI18n();
+  const reports = managedRuns.conductors;
+  const runs = reports.flatMap((report) => report.managed_runs.runs ?? []);
+  const workItems = runs.flatMap((run) => run.work_items ?? []);
+  const blocked = workItems.filter((item) => item.state === "blocked").length;
+  const done = workItems.filter((item) => ["done", "verified"].includes(item.state)).length;
   return (
-    <div className="pipeline-revisions">
-      <Metric label={t("Graph revision")} value={pipeline.pipeline.graph_revision ?? 0} />
-      <Metric label={t("Policy revision")} value={pipeline.policy_revision} />
-      <Metric label={t("Human waits")} value={pipeline.pipeline.human_waits?.length ?? 0} />
-      <Metric label={t("Runtime waits")} value={pipeline.pipeline.runtime_waits?.length ?? 0} />
+    <div className="managed-run-revisions">
+      <Metric label={t("Runs")} value={runs.length} />
+      <Metric label={t("Conductors")} value={reports.length} />
+      <Metric label={t("Work items")} value={workItems.length} />
+      <Metric label={t("Blocked")} value={blocked} />
+      <Metric label={t("Done")} value={done} />
     </div>
   );
 }
 
 function Metric({ label, value }: { label: string; value: string | number }) {
   return (
-    <div className="pipeline-revision">
-      <span className="pipeline-label">{label}</span>
-      <span className="pipeline-value">{value}</span>
+    <div className="managed-run-revision">
+      <span className="managed-run-label">{label}</span>
+      <span className="managed-run-value">{value}</span>
     </div>
   );
 }

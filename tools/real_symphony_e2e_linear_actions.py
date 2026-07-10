@@ -53,7 +53,6 @@ async def fetch_linear_issue(token: str, issue_id: str) -> dict[str, Any]:
                 assignee { id name }
                 delegate { id name }
                 parent { id identifier }
-                agentSessions(first: 5) { nodes { id status appUser { id name } } }
                 labels { nodes { name } }
                 comments(first: 20) { nodes { body createdAt } }
               }
@@ -78,7 +77,6 @@ async def delegate_linear_issue(token: str, issue_id: str, delegate_id: str) -> 
                   title
                   description
                   delegate { id name }
-                  agentSessions(first: 5) { nodes { id status appUser { id name } } }
                 }
               }
             }
