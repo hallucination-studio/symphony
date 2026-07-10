@@ -28,6 +28,14 @@ mutation ManagedProjectAddLabel($projectId: String!, $labelId: String!) {
   projectAddLabel(id: $projectId, labelId: $labelId) { success }
 }
 """
+LABEL_UPDATE = """
+mutation ManagedProjectLabelUpdate($labelId: String!, $name: String!) {
+  projectLabelUpdate(id: $labelId, input: {name: $name}) {
+    success
+    projectLabel { id name }
+  }
+}
+"""
 
 
 class LinearProjectLabelError(RuntimeError):
@@ -52,6 +60,47 @@ class PodiumProjectLabelsMixin:
             _log_label_failure(binding, exc)
             raise LinearProjectLabelError("linear_project_label_sync_failed") from exc
         return {**binding, "label_id": label_id, "label_name": label_name}
+
+    async def rename_managed_project_label(
+        self,
+        binding: dict[str, Any],
+        conductor: dict[str, Any],
+    ) -> dict[str, Any]:
+        label_id = str(binding.get("label_id") or "")
+        label_name = managed_project_label_name(conductor)
+        if not label_id:
+            raise LinearProjectLabelError("linear_project_label_required")
+        if str(binding.get("label_name") or "") == label_name:
+            return binding
+        installation = await self.get_active_linear_installation(str(binding.get("user_id") or ""))
+        if installation is None or str(installation.get("id") or "") != str(binding.get("installation_id") or ""):
+            raise LinearProjectLabelError("active_linear_installation_mismatch")
+        try:
+            data = await self._project_label_graphql(
+                installation,
+                LABEL_UPDATE,
+                {"labelId": label_id, "name": label_name},
+                "ManagedProjectLabelUpdate",
+            )
+            payload = data.get("projectLabelUpdate")
+            label = payload.get("projectLabel") if isinstance(payload, dict) else None
+            if (
+                not isinstance(payload, dict)
+                or payload.get("success") is not True
+                or not isinstance(label, dict)
+                or str(label.get("id") or "") != label_id
+                or str(label.get("name") or "") != label_name
+            ):
+                raise LinearProjectLabelError("linear_project_label_update_invalid")
+        except (LinearGraphQLRequestError, LinearProjectLabelError) as exc:
+            _log_label_rename_failure(binding, exc)
+            raise LinearProjectLabelError("linear_project_label_rename_failed") from exc
+        return {
+            **binding,
+            "label_name": label_name,
+            "error_code": "",
+            "sanitized_reason": "",
+        }
 
     async def _find_or_create_project_label(
         self,
@@ -129,4 +178,17 @@ def _log_label_failure(binding: dict[str, Any], error: Exception) -> None:
         binding.get("linear_project_id"),
         type(error).__name__,
         "Linear project label operation failed",
+    )
+
+
+def _log_label_rename_failure(binding: dict[str, Any], error: Exception) -> None:
+    LOGGER.error(
+        "event=linear_project_label_rename_failed conductor_id=%s instance_id=%s linear_project_id=%s "
+        "error_type=%s error_code=linear_project_label_rename_failed sanitized_reason=%s "
+        "action_required=retry retryable=true next_action=retry_conductor_rename",
+        binding.get("conductor_id"),
+        binding.get("instance_id"),
+        binding.get("linear_project_id"),
+        type(error).__name__,
+        "Linear project label rename failed",
     )

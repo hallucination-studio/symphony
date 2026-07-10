@@ -47,6 +47,13 @@ class ProjectLabelTransport:
             }
         elif operation == "ManagedProjectAddLabel":
             data = {"projectAddLabel": {"success": True}}
+        elif operation == "ManagedProjectLabelUpdate":
+            data = {
+                "projectLabelUpdate": {
+                    "success": True,
+                    "projectLabel": {"id": variables["labelId"], "name": variables["name"]},
+                }
+            }
         else:
             raise AssertionError(f"unexpected Linear operation: {operation}")
         return httpx.Response(200, json={"data": data}, request=request)
@@ -313,3 +320,87 @@ async def test_project_label_failure_keeps_binding_unroutable_and_visible(caplog
     assert visible["sanitized_reason"] == "Linear project label operation failed"
     assert "event=linear_project_label_sync_failed" in caplog.text
     assert "next_action=retry_project_binding_report" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_rename_conductor_updates_managed_label_and_preserves_public_id() -> None:
+    transport = ProjectLabelTransport()
+    app = make_app(linear_graphql_transport=transport)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
+        user_id = await _prepare_workspace(client, app)
+        enrollment = await _issue_enrollment(client, name="Beethoven")
+        enrolled = await _enroll(client, enrollment)
+        _, pending = await bind_and_ack_conductor(app, client, user_id, enrolled)
+        request_count = len(transport.requests)
+
+        renamed = await client.patch(
+            f"/api/v1/conductors/{enrolled['runtime_id']}",
+            json={"name": "Mozart"},
+        )
+        repeated = await client.patch(
+            f"/api/v1/conductors/{enrolled['runtime_id']}",
+            json={"name": "Mozart"},
+        )
+        binding = await app.state.podium.store.get_project_binding(pending["id"])
+
+    expected = f"symphony:conductor/Mozart-{enrollment['conductor']['public_id']}"
+    assert renamed.status_code == 200
+    assert renamed.json()["conductor"]["name"] == "Mozart"
+    assert renamed.json()["conductor"]["public_id"] == enrollment["conductor"]["public_id"]
+    assert binding["label_id"] == "label-created"
+    assert binding["label_name"] == expected
+    update = transport.requests[request_count]
+    assert update["operationName"] == "ManagedProjectLabelUpdate"
+    assert update["variables"] == {
+        "labelId": "label-created",
+        "name": expected,
+    }
+    assert repeated.status_code == 200
+    assert len(transport.requests) == request_count + 1
+
+
+@pytest.mark.asyncio
+async def test_rename_conductor_rejects_case_insensitive_duplicate_name() -> None:
+    app = make_app()
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
+        await _prepare_workspace(client, app)
+        first = await _issue_enrollment(client, name="Bach")
+        await _issue_enrollment(client, name="Mozart")
+
+        renamed = await client.patch(
+            f"/api/v1/conductors/{first['conductor']['id']}",
+            json={"name": "mozart"},
+        )
+
+    assert renamed.status_code == 409
+    assert renamed.json()["error"]["code"] == "conductor_name_taken"
+
+
+@pytest.mark.asyncio
+async def test_rename_label_failure_preserves_working_binding_and_surfaces_error(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    transport = ProjectLabelTransport(fail_operation="ManagedProjectLabelUpdate")
+    app = make_app(linear_graphql_transport=transport)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
+        user_id = await _prepare_workspace(client, app)
+        enrollment = await _issue_enrollment(client, name="Ravel")
+        enrolled = await _enroll(client, enrollment)
+        _, pending = await bind_and_ack_conductor(app, client, user_id, enrolled)
+
+        renamed = await client.patch(
+            f"/api/v1/conductors/{enrolled['runtime_id']}",
+            json={"name": "Mahler"},
+        )
+        conductor = await app.state.podium.store.get_runtime(enrolled["runtime_id"])
+        binding = await app.state.podium.store.get_project_binding(pending["id"])
+
+    original_label = f"symphony:conductor/Ravel-{enrollment['conductor']['public_id']}"
+    assert renamed.status_code == 502
+    assert renamed.json()["error"]["code"] == "linear_project_label_rename_failed"
+    assert conductor["name"] == "Ravel"
+    assert binding["state"] == "ready"
+    assert binding["label_name"] == original_label
+    assert binding["error_code"] == "linear_project_label_rename_failed"
+    assert binding["sanitized_reason"] == "Linear project label rename failed"
+    assert "event=linear_project_label_rename_failed" in caplog.text

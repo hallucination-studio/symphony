@@ -5,6 +5,7 @@ import secrets
 import string
 from typing import Any
 
+from .podium_project_labels import LinearProjectLabelError
 from .podium_shared import utc_now_iso
 
 
@@ -84,6 +85,52 @@ class PodiumConductorsMixin:
         )
         await self.store.upsert_conductor(conductor)
         return conductor
+
+    async def rename_conductor(self, user_id: str, conductor_id: str, requested_name: str) -> dict[str, Any]:
+        conductor = await self.conductor_for_user(conductor_id, user_id)
+        if conductor is None:
+            raise ConductorIdentityError("conductor_not_found", "Conductor not found")
+        name = requested_name.strip()
+        if not CONDUCTOR_NAME.fullmatch(name):
+            raise ConductorIdentityError(
+                "invalid_conductor_name",
+                "Conductor name must be one ASCII word of at most 16 characters",
+            )
+        others = [
+            row
+            for row in await self.store.list_conductors_for_user(user_id)
+            if str(row.get("id") or "") != conductor_id
+        ]
+        if name.casefold() in {str(row.get("name") or "").casefold() for row in others}:
+            raise ConductorIdentityError("conductor_name_taken", "Conductor name is already in use")
+        if name == str(conductor.get("name") or ""):
+            return conductor
+        renamed = {**conductor, "name": name, "label": name}
+        active_bindings = [
+            row
+            for row in await self.store.list_project_bindings_for_conductor(conductor_id)
+            if row.get("active", True)
+        ]
+        if active_bindings:
+            binding = active_bindings[0]
+            try:
+                updated_binding = await self.rename_managed_project_label(binding, renamed)
+            except LinearProjectLabelError as exc:
+                await self.store.upsert_project_binding(
+                    {
+                        **binding,
+                        "error_code": "linear_project_label_rename_failed",
+                        "sanitized_reason": "Linear project label rename failed",
+                        "updated_at": utc_now_iso(),
+                    }
+                )
+                raise ConductorIdentityError(
+                    "linear_project_label_rename_failed",
+                    "Linear project label rename failed",
+                ) from exc
+            await self.store.upsert_project_binding({**updated_binding, "updated_at": utc_now_iso()})
+        await self.store.upsert_conductor(renamed)
+        return renamed
 
     async def conductor_for_user(self, conductor_id: str, user_id: str) -> dict[str, Any] | None:
         return next(

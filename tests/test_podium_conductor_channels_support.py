@@ -49,6 +49,13 @@ async def successful_project_label_transport(request: httpx.Request) -> httpx.Re
         }
     elif operation == "ManagedProjectAddLabel":
         data = {"projectAddLabel": {"success": True}}
+    elif operation == "ManagedProjectLabelUpdate":
+        data = {
+            "projectLabelUpdate": {
+                "success": True,
+                "projectLabel": {"id": variables["labelId"], "name": variables["name"]},
+            }
+        }
     else:
         raise AssertionError(f"unexpected default Linear operation: {operation}")
     return httpx.Response(200, json={"data": data}, request=request)
