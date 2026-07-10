@@ -52,6 +52,20 @@ describe("api client", () => {
     expect(result.turnstile.enabled).toBe(false);
   });
 
+  it("starts Linear OAuth through the installation lifecycle endpoint", async () => {
+    const fetchMock = mockFetch(200, {
+      authorization_url: "https://linear.app/oauth/authorize",
+    });
+    global.fetch = fetchMock;
+
+    await api.startLinear();
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/linear/installations/oauth",
+      expect.objectContaining({ method: "POST", credentials: "include" }),
+    );
+  });
+
   it("managedRuns requests every project Conductor managed runs view", async () => {
     const fetchMock = mockFetch(200, {
       conductors: [

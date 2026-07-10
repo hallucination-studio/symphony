@@ -118,8 +118,8 @@ export const api = {
     return request<Bootstrap>("/api/v1/bootstrap");
   },
 
-  startLinear(): Promise<{ authorization_url: string; workspace_id: string }> {
-    return request("/api/v1/onboarding/linear/start", { method: "POST" });
+  startLinear(): Promise<{ authorization_url: string }> {
+    return request("/api/v1/linear/installations/oauth", { method: "POST" });
   },
 
   linearScope(): Promise<LinearScope> {
