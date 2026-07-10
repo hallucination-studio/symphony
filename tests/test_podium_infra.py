@@ -151,6 +151,35 @@ def test_pg_migrator_exposes_phase_0_schema() -> None:
     assert "CREATE TABLE IF NOT EXISTS runtime_configs" in sql
     assert "CREATE TABLE IF NOT EXISTS managed_run_views" in sql
     assert "CREATE TABLE IF NOT EXISTS runtime_commands" in sql
+    assert "runtime_commands_dedupe_unique" in sql
+    assert "WHERE dedupe_key <> ''" in sql
+
+
+@pytest.mark.asyncio
+async def test_json_store_runtime_command_dedupe_key_is_durable() -> None:
+    store = PodiumStore()
+
+    first = await store.append_runtime_command_once("runtime-1", "smoke:one", {"type": "smoke.check"})
+    repeated = await store.append_runtime_command_once("runtime-1", "smoke:one", {"type": "different"})
+    second = await store.append_runtime_command_once("runtime-1", "smoke:two", {"type": "smoke.check"})
+
+    assert repeated == first
+    assert repeated["command"] == {"type": "smoke.check"}
+    assert second["id"] == first["id"] + 1
+
+
+@pytest.mark.asyncio
+async def test_json_store_smoke_result_compare_and_save_rejects_stale_revision() -> None:
+    store = PodiumStore()
+
+    created = await store.compare_and_save_smoke_result("user-1", 0, {"revision": 1, "status": "running"})
+    stale = await store.compare_and_save_smoke_result("user-1", 0, {"revision": 1, "status": "failed"})
+    updated = await store.compare_and_save_smoke_result("user-1", 1, {"revision": 2, "status": "passed"})
+
+    assert created is True
+    assert stale is False
+    assert updated is True
+    assert await store.get_smoke_result("user-1") == {"revision": 2, "status": "passed"}
 
 
 def test_pg_project_binding_upsert_values_match_replacement_schema() -> None:

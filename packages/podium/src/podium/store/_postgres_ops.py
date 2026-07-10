@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ._postgres_records import _pg_datetime, _pg_json, _pg_json_value
+from ._postgres_records import _pg_datetime, _pg_json, _pg_json_value, _row_count
 
 
 class PgOpsMixin:
@@ -41,6 +41,35 @@ class PgOpsMixin:
             user_id,
             _pg_json(result),
         )
+
+    async def compare_and_save_smoke_result(
+        self,
+        user_id: str,
+        expected_revision: int,
+        result: dict[str, Any],
+    ) -> bool:
+        updated = await self.pool.execute(
+            """
+            UPDATE smoke_results SET result_json = $3::jsonb, updated_at = now()
+            WHERE user_id = $1 AND COALESCE(result_json->>'revision', '0') = $2
+            """,
+            user_id,
+            str(expected_revision),
+            _pg_json(result),
+        )
+        if _row_count(updated) == 1:
+            return True
+        if expected_revision != 0:
+            return False
+        inserted = await self.pool.execute(
+            """
+            INSERT INTO smoke_results (user_id, result_json, updated_at)
+            VALUES ($1,$2::jsonb,now()) ON CONFLICT (user_id) DO NOTHING
+            """,
+            user_id,
+            _pg_json(result),
+        )
+        return _row_count(inserted) == 1
 
     async def get_smoke_result(self, user_id: str) -> dict[str, Any] | None:
         row = await self.pool.fetchrow("SELECT result_json FROM smoke_results WHERE user_id = $1", user_id)

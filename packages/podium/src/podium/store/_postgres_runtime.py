@@ -213,6 +213,33 @@ class PgRuntimeMixin:
         await self.pool.execute("SELECT pg_notify($1, $2)", f"runtime_commands_{runtime_id}", str(row["id"]))
         return _record_to_runtime_command(row)
 
+    async def append_runtime_command_once(
+        self, runtime_id: str, dedupe_key: str, command: dict[str, Any]
+    ) -> dict[str, Any]:
+        row = await self.pool.fetchrow(
+            """
+            INSERT INTO runtime_commands (runtime_id, dedupe_key, command_json, created_at)
+            VALUES ($1,$2,$3::jsonb,now())
+            ON CONFLICT (runtime_id, dedupe_key) WHERE dedupe_key <> '' DO NOTHING
+            RETURNING id, runtime_id, command_json, created_at
+            """,
+            runtime_id,
+            dedupe_key,
+            _pg_json(command),
+        )
+        if row is None:
+            row = await self.pool.fetchrow(
+                """
+                SELECT id, runtime_id, command_json, created_at FROM runtime_commands
+                WHERE runtime_id = $1 AND dedupe_key = $2
+                """,
+                runtime_id,
+                dedupe_key,
+            )
+            return _record_to_runtime_command(row)
+        await self.pool.execute("SELECT pg_notify($1, $2)", f"runtime_commands_{runtime_id}", str(row["id"]))
+        return _record_to_runtime_command(row)
+
     async def next_runtime_command(self, runtime_id: str, *, after_id: int = 0) -> dict[str, Any] | None:
         row = await self.pool.fetchrow(
             "SELECT id, runtime_id, command_json, created_at FROM runtime_commands WHERE runtime_id = $1 AND id > $2 ORDER BY id LIMIT 1",

@@ -21,6 +21,20 @@ class JsonStoreOpsMixin:
         rows[user_id] = dict(result)
         self._write("smoke_results.json", rows)
 
+    async def compare_and_save_smoke_result(
+        self,
+        user_id: str,
+        expected_revision: int,
+        result: dict[str, Any],
+    ) -> bool:
+        rows = self._load_map("smoke_results.json")
+        current = rows.get(user_id) if isinstance(rows.get(user_id), dict) else {}
+        if int(current.get("revision") or 0) != expected_revision:
+            return False
+        rows[user_id] = dict(result)
+        self._write("smoke_results.json", rows)
+        return True
+
     async def get_smoke_result(self, user_id: str) -> dict[str, Any] | None:
         row = self._load_map("smoke_results.json").get(user_id)
         return dict(row) if isinstance(row, dict) else None
@@ -94,6 +108,27 @@ class JsonStoreOpsMixin:
         commands = rows.get(runtime_id) if isinstance(rows.get(runtime_id), list) else []
         command_id = len(commands) + 1
         row = {"id": command_id, "runtime_id": runtime_id, "command": dict(command), "created_at": utc_now_iso(), "delivered": False}
+        commands.append(row)
+        rows[runtime_id] = commands
+        self._write("runtime_commands.json", rows)
+        return row
+
+    async def append_runtime_command_once(
+        self, runtime_id: str, dedupe_key: str, command: dict[str, Any]
+    ) -> dict[str, Any]:
+        rows = self._load_map("runtime_commands.json")
+        commands = rows.get(runtime_id) if isinstance(rows.get(runtime_id), list) else []
+        existing = next((row for row in commands if row.get("dedupe_key") == dedupe_key), None)
+        if isinstance(existing, dict):
+            return dict(existing)
+        row = {
+            "id": len(commands) + 1,
+            "runtime_id": runtime_id,
+            "dedupe_key": dedupe_key,
+            "command": dict(command),
+            "created_at": utc_now_iso(),
+            "delivered": False,
+        }
         commands.append(row)
         rows[runtime_id] = commands
         self._write("runtime_commands.json", rows)

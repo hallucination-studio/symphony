@@ -192,6 +192,15 @@ class PodiumRuntimeMixin:
         await self.store.append_runtime_command(runtime_id, command)
         return command
 
+    async def enqueue_runtime_command_once(
+        self,
+        runtime_id: str,
+        dedupe_key: str,
+        command: dict[str, Any],
+    ) -> dict[str, Any]:
+        await self.store.append_runtime_command_once(runtime_id, dedupe_key, command)
+        return command
+
     async def apply_log_chunk(self, runtime_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         request_id = str(payload.get("request_id") or "")
         instance_id = str(payload.get("instance_id") or "")

@@ -249,10 +249,13 @@ POSTGRES_MIGRATION_STATEMENTS: Iterable[str] = (
             CREATE TABLE IF NOT EXISTS runtime_commands (
                 id BIGSERIAL PRIMARY KEY,
                 runtime_id TEXT NOT NULL REFERENCES conductors(id) ON DELETE CASCADE,
+                dedupe_key TEXT NOT NULL DEFAULT '',
                 command_json JSONB NOT NULL,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT now()
             )
             """,
+            "ALTER TABLE runtime_commands ADD COLUMN IF NOT EXISTS dedupe_key TEXT NOT NULL DEFAULT ''",
+            "CREATE UNIQUE INDEX IF NOT EXISTS runtime_commands_dedupe_unique ON runtime_commands (runtime_id, dedupe_key) WHERE dedupe_key <> ''",
             """
             CREATE TABLE IF NOT EXISTS linear_reconciliation_state (
                 binding_id TEXT PRIMARY KEY,
