@@ -8,10 +8,13 @@ LINEAR_REQUIRED_SCOPES = frozenset({"read", "write", "app:assignable"})
 LINEAR_DEFAULT_SCOPE = ",".join(sorted(LINEAR_REQUIRED_SCOPES))
 
 LINEAR_ACCEPTANCE_QUERY = """
-query SymphonyInstallationAcceptance {
+query SymphonyInstallationAcceptance($first: Int!, $after: String) {
   viewer { id name app }
   organization { id name urlKey }
-  projects(first: 250) { nodes { id name slugId } }
+  projects(first: $first, after: $after) {
+    nodes { id name slugId }
+    pageInfo { hasNextPage endCursor }
+  }
 }
 """
 

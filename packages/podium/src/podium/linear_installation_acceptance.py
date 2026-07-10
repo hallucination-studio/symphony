@@ -53,17 +53,61 @@ async def fetch_installation_acceptance(
     access_token: str,
     *,
     transport: Callable[[httpx.Request], httpx.Response] | None = None,
+    page_size: int = 50,
 ) -> dict[str, Any]:
     client_transport = httpx.MockTransport(transport) if transport is not None else None
+    after: str | None = None
+    seen_cursors: set[str] = set()
+    identity: dict[str, Any] = {}
+    projects: list[dict[str, Any]] = []
     async with httpx.AsyncClient(timeout=30, trust_env=False, transport=client_transport) as client:
-        response = await client.post(
-            LINEAR_GRAPHQL_URL,
-            json={"query": LINEAR_ACCEPTANCE_QUERY},
-            headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
-        )
-    payload = response.json()
+        while True:
+            response = await client.post(
+                LINEAR_GRAPHQL_URL,
+                json={
+                    "query": LINEAR_ACCEPTANCE_QUERY,
+                    "variables": {"first": max(1, int(page_size or 50)), "after": after},
+                },
+                headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
+            )
+            data = _acceptance_page(response)
+            page_identity = {key: data.get(key) for key in ("viewer", "organization")}
+            if identity and page_identity != identity:
+                raise LinearInstallationRejected(
+                    "linear_acceptance_identity_changed",
+                    "Linear installation identity changed during project pagination",
+                )
+            identity = identity or page_identity
+            connection = data.get("projects") if isinstance(data.get("projects"), dict) else {}
+            projects.extend(node for node in connection.get("nodes") or [] if isinstance(node, dict))
+            page_info = connection.get("pageInfo") if isinstance(connection.get("pageInfo"), dict) else {}
+            if not page_info.get("hasNextPage"):
+                return {**identity, "projects": projects}
+            next_cursor = str(page_info.get("endCursor") or "")
+            if not next_cursor or next_cursor in seen_cursors:
+                raise LinearInstallationRejected(
+                    "linear_project_pagination_invalid",
+                    "Linear project pagination cursor did not advance",
+                )
+            seen_cursors.add(next_cursor)
+            after = next_cursor
+
+
+def _acceptance_page(response: httpx.Response) -> dict[str, Any]:
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise LinearInstallationRejected(
+            "linear_acceptance_query_failed",
+            "Linear installation acceptance query returned invalid data",
+            retryable=True,
+        ) from exc
     if response.status_code != 200 or not isinstance(payload, dict) or payload.get("errors"):
-        raise LinearInstallationRejected("linear_acceptance_query_failed", "Linear installation acceptance query failed", retryable=True)
+        raise LinearInstallationRejected(
+            "linear_acceptance_query_failed",
+            "Linear installation acceptance query failed",
+            retryable=True,
+        )
     data = payload.get("data")
     return dict(data) if isinstance(data, dict) else {}
 
