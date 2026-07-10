@@ -19,7 +19,6 @@ async def fetch_linear_issue_tree(token: str, issue_id: str) -> dict[str, Any]:
                 state { name type }
                 assignee { id name }
                 delegate { id name }
-                agentSessions(first: 5) { nodes { id status appUser { id name } } }
                 labels { nodes { name } }
                 children(first: 50) {
                   nodes {

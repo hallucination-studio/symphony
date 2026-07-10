@@ -171,7 +171,6 @@ async def create_linear_issue(
                   assignee { id name }
                   delegate { id name }
                   parent { id identifier }
-                  agentSessions(first: 5) { nodes { id status appUser { id name } } }
                   labels { nodes { name } }
                 }
               }
