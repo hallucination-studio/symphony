@@ -71,6 +71,15 @@ It remains `running` until every expected Conductor reports, then atomically
 records `passed` or `failed`. Missing reports become an explicit timeout rather
 than an indefinite wait. Only the final `passed` state completes onboarding.
 
+Each Conductor checks the exact assigned binding and repository, the applied
+runtime-config version, Linear proxy access, and the exact managed project
+label id/name pair. It persists the immutable result before authenticated
+delivery. Replayed commands reuse that evidence without rerunning Linear
+checks; retryable delivery failures use durable backoff, while terminal
+rejections remain stopped until a new smoke check is issued. Delivery state and
+sanitized reasons are visible through the local `/api/smoke-checks` endpoint,
+structured process logs, and the bound instance log.
+
 ## Main Surfaces
 
 Integrations shows application source, active and candidate installations,

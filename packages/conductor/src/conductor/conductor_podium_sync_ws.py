@@ -13,6 +13,7 @@ class PodiumWebSocketMixin:
         command: dict[str, Any],
         *,
         post_log_chunk: Any | None = None,
+        post_smoke_result: Any | None = None,
     ) -> dict[str, Any]:
         kind = str(command.get("type") or "")
         if kind == "dispatch.available":
@@ -29,6 +30,8 @@ class PodiumWebSocketMixin:
             }
         if kind == "human.answered":
             return self._handle_podium_human_answered(command)
+        if kind == "smoke.check":
+            return await self.handle_smoke_check(command, post_smoke_result=post_smoke_result)
         if kind == "project.configure":
             return self._handle_project_configure(command)
         if kind == "project.unconfigure":
