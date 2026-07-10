@@ -84,4 +84,16 @@ describe("App auth gate", () => {
     expect(screen.queryByText("Runs")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Sign in" })).not.toBeInTheDocument();
   });
+
+  it("does not mark the signed-in identity chip active on the Account page", async () => {
+    mockApi.me.mockResolvedValue({
+      user: { id: "user_1", email: "a@b.com" },
+    });
+    renderWithProviders(<App />, { route: "/account" });
+
+    const label = await screen.findByText("Signed in");
+    const chip = label.closest("a");
+    expect(chip).toHaveClass("account-chip");
+    expect(chip).not.toHaveClass("active");
+  });
 });

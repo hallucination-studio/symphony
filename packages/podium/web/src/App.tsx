@@ -1,4 +1,4 @@
-import { Navigate, NavLink, Route, Routes } from "react-router-dom";
+import { Link, Navigate, NavLink, Route, Routes } from "react-router-dom";
 import HomePage from "./pages/HomePage";
 import SetupPage from "./pages/SetupPage";
 import IntegrationsPage from "./pages/IntegrationsPage";
@@ -108,18 +108,13 @@ function debugAuthEnabled(): boolean {
 function AccountChip({ user }: { user: AuthUser }) {
   const { t } = useI18n();
   return (
-    <NavLink
-      to="/account"
-      className={({ isActive }) =>
-        isActive ? "account-chip active" : "account-chip"
-      }
-    >
+    <Link to="/account" className="account-chip">
       <span className="account-chip-dot" data-tone="positive" aria-hidden />
       <span className="account-chip-body">
         <span className="account-chip-label">{t("Signed in")}</span>
         <span className="account-chip-value">{user.email}</span>
       </span>
-    </NavLink>
+    </Link>
   );
 }
 
