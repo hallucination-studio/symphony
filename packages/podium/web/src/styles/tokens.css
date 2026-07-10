@@ -28,6 +28,8 @@
     monospace;
   --font-size-title: 15px;
   --line-height-title: 20px;
+  --font-size-caption: 13px;
+  --line-height-caption: 18px;
   --font-size-label: 11px;
   --line-height-label: 16px;
   --font-weight-label: 600;

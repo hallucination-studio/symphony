@@ -73,18 +73,52 @@ export interface RepositoryMapping {
   validation_message?: string | null;
 }
 
-export type SmokeCheckStatus = "pending" | "running" | "passed" | "failed";
+export type SmokeCheckStatus = "running" | "passed" | "failed";
 
 export interface SmokeCheckItem {
   name: string;
   passed: boolean;
 }
 
+export type SmokeConductorStatus = "blocked" | "running" | "passed" | "failed";
+
+export interface SmokeConductorResult {
+  runtime_id: string;
+  runtime_group_id: string;
+  instance_id: string;
+  binding_id: string;
+  linear_project_id: string;
+  project_slug: string;
+  binding_config_version: number;
+  runtime_config_version: number;
+  repository: { mode: RepositoryMode; value: string };
+  expected_label: { id: string; name: string };
+  status: SmokeConductorStatus;
+  checks: SmokeCheckItem[];
+  error_code: string;
+  sanitized_reason: string;
+  retryable: boolean;
+  action_required: string;
+  next_action: string;
+  completed_at: string | null;
+}
+
 export interface SmokeCheckResult {
+  smoke_check_id: string;
+  workspace_id: string;
+  revision: number;
   status: SmokeCheckStatus;
   checks: SmokeCheckItem[];
+  conductors: SmokeConductorResult[];
   recommendations: string[];
+  error_code: string;
+  sanitized_reason: string;
+  retryable: boolean;
+  action_required: string;
+  next_action: string;
   timestamp: string;
+  completed_at: string | null;
+  expires_at: string;
 }
 
 export interface RuntimeRecord {

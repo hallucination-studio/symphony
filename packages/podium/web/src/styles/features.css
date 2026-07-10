@@ -215,11 +215,12 @@
 }
 
 .step-shell-eyebrow {
-  font-size: 12px;
-  font-weight: 600;
+  font-size: var(--font-size-label);
+  line-height: var(--line-height-label);
+  font-weight: var(--font-weight-label);
   text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: var(--color-text-subtle);
+  letter-spacing: 0;
+  color: var(--color-text-muted);
 }
 
 .step-shell-title {
@@ -377,20 +378,24 @@
   display: flex;
   align-items: flex-start;
   gap: var(--space-3);
-  padding: var(--space-3);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
+  min-width: 0;
+  padding: var(--space-3) 0;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.check-item:last-child {
+  border-bottom: 0;
 }
 
 .check-icon {
   width: 20px;
   height: 20px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   display: grid;
   place-items: center;
-  font-size: 12px;
+  font-size: var(--font-size-label);
   font-weight: 700;
-  color: #fff;
+  color: var(--color-surface);
   flex-shrink: 0;
 }
 
@@ -404,13 +409,97 @@
 
 .check-title {
   font-weight: 600;
-  font-size: 14px;
+  font-size: var(--font-size-title);
+  line-height: var(--line-height-title);
 }
 
 .check-action {
-  font-size: 13px;
+  font-size: var(--font-size-caption);
+  line-height: var(--line-height-caption);
   color: var(--status-blocked);
-  margin-top: 2px;
+  margin-top: var(--space-1);
+}
+
+.smoke-check-groups {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+
+.smoke-check-group {
+  min-width: 0;
+}
+
+.smoke-check-group + .smoke-check-group {
+  padding-top: var(--space-5);
+  border-top: 1px solid var(--color-border);
+}
+
+.smoke-check-group-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin-bottom: var(--space-3);
+}
+
+.smoke-check-group-identity {
+  min-width: 0;
+}
+
+.smoke-check-group-title {
+  margin: 0 0 var(--space-3);
+  font-size: var(--font-size-title);
+  line-height: var(--line-height-title);
+}
+
+.smoke-check-group-header .smoke-check-group-title {
+  margin-bottom: 0;
+}
+
+.smoke-check-runtime {
+  display: block;
+  margin-top: var(--space-1);
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-caption);
+  line-height: var(--line-height-caption);
+  overflow-wrap: anywhere;
+}
+
+.smoke-check-wait {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-caption);
+  line-height: var(--line-height-caption);
+}
+
+.smoke-check-error {
+  display: grid;
+  gap: var(--space-1);
+  margin-top: var(--space-3);
+  padding: var(--space-3);
+  border-radius: var(--radius-sm);
+  background: var(--status-blocked-bg);
+}
+
+.smoke-check-error-code {
+  color: var(--status-blocked);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-caption);
+  line-height: var(--line-height-caption);
+  overflow-wrap: anywhere;
+}
+
+.smoke-check-error-reason,
+.smoke-check-error-action {
+  margin: 0;
+  font-size: var(--font-size-caption);
+  line-height: var(--line-height-caption);
+}
+
+.smoke-check-error-action {
+  color: var(--status-blocked);
 }
 
 /* Runtime lists */

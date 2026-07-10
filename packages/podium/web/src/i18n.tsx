@@ -7,12 +7,14 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { ZH_SMOKE_TRANSLATIONS } from "./translations/zhSmoke";
 
 export type Locale = "en" | "zh";
 
 const STORAGE_KEY = "podium.locale";
 
 const ZH_TRANSLATIONS: Record<string, string> = {
+  ...ZH_SMOKE_TRANSLATIONS,
   "Account": "账号",
   "Account identity": "账号身份",
   "Active": "运行中",

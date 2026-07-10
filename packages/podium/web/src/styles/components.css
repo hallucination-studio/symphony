@@ -227,6 +227,10 @@
   background: var(--color-accent-soft);
 }
 
+.action-panel[data-tone="info"] .action-panel-description {
+  color: var(--color-text);
+}
+
 .action-panel[data-tone="warning"] {
   border-color: #fcd34d;
   background: #fffbeb;
@@ -244,13 +248,15 @@
 
 .action-panel-title {
   font-weight: 600;
-  font-size: 14px;
+  font-size: var(--font-size-title);
+  line-height: var(--line-height-title);
 }
 
 .action-panel-description {
-  font-size: 13px;
+  font-size: var(--font-size-caption);
+  line-height: var(--line-height-caption);
   color: var(--color-text-muted);
-  margin-top: 2px;
+  margin-top: var(--space-1);
 }
 
 .action-panel-actions {

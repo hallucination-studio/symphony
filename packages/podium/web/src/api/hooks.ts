@@ -70,6 +70,8 @@ export function useSmokeCheckResult() {
     queryKey: ["smoke-check"],
     queryFn: () => api.smokeCheckResult(),
     retry: false,
+    refetchInterval: (query) =>
+      query.state.data?.status === "running" ? 1000 : false,
   });
 }
 
@@ -131,9 +133,9 @@ export function useRunSmokeCheck() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: () => api.runSmokeCheck(),
-    onSuccess: () => {
+    onSuccess: (result) => {
+      qc.setQueryData(["smoke-check"], result);
       invalidate();
-      qc.invalidateQueries({ queryKey: ["smoke-check"] });
     },
   });
 }
