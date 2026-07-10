@@ -79,13 +79,12 @@ async def _auth(server: PodiumServer, *, linear_token: str | None = "secret-line
                 "access_token": linear_token,
                 "refresh_token": "test-refresh-token",
                 "token_type": "Bearer",
-                "scope": ["read", "write", "app:assignable", "app:mentionable"],
+                "scope": ["read", "write", "app:assignable"],
                 "expires_at": (now + timedelta(hours=1)).isoformat().replace("+00:00", "Z"),
                 "linear_organization_id": "linear-org-1",
                 "organization_url_key": "acme",
                 "organization_name": "Acme",
                 "app_user_id": "app-1",
-                "supports_agent_sessions": True,
                 "projects": [{"id": "proj-1", "name": "Podium", "slug_id": "podium"}],
                 "error_code": "",
                 "sanitized_reason": "",
@@ -187,7 +186,6 @@ async def test_onboarding_linear_start_returns_authorization_url() -> None:
         linear_client_id="client-1",
         linear_client_secret="client-secret",
         linear_redirect_uri="https://podium.example/api/v1/linear/oauth/callback",
-        linear_webhook_secret="webhook-secret",
     )
     await server.start(port=0)
     try:

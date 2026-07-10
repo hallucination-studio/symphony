@@ -47,23 +47,21 @@ def register_linear_application_routes(
         if not state.secret_key:
             return error_response(500, "encryption_unavailable", "Encryption is not configured")
         payload = await request.json()
-        forbidden = {"redirect_uri", "callback_url", "webhook_url"} & set(payload)
-        if forbidden:
-            return error_response(400, "custom_redirect_forbidden", "Podium owns the Linear callback and webhook URLs")
+        unexpected = set(payload) - {"client_id", "client_secret"}
+        if unexpected:
+            return error_response(400, "invalid_linear_application", "Only client_id and client_secret are accepted")
         client_id = str(payload.get("client_id") or "").strip()
         client_secret = str(payload.get("client_secret") or "").strip()
-        webhook_secret = str(payload.get("webhook_secret") or "").strip()
-        if not client_id or not client_secret or not webhook_secret:
+        if not client_id or not client_secret:
             return error_response(
                 400,
                 "invalid_linear_application",
-                "client_id, client_secret, and webhook_secret are required",
+                "client_id and client_secret are required",
             )
         config = await state.stage_custom_linear_application(
             str(user["id"]),
             client_id=client_id,
             client_secret=client_secret,
-            webhook_secret=webhook_secret,
         )
         return JSONResponse({"application": state.linear_application_public(config)})
 

@@ -10,9 +10,8 @@ class PgLinearMixin:
         await self.pool.execute(
             """
             INSERT INTO linear_application_configs (
-              id, user_id, source, version, client_id, client_secret_enc,
-              webhook_secret_enc, callback_url, webhook_url, created_at
-            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::timestamptz)
+              id, user_id, source, version, client_id, client_secret_enc, callback_url, created_at
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::timestamptz)
             ON CONFLICT (id) DO NOTHING
             """,
             str(config["id"]),
@@ -21,9 +20,7 @@ class PgLinearMixin:
             int(config["version"]),
             str(config["client_id"]),
             str(config["client_secret_enc"]),
-            str(config["webhook_secret_enc"]),
             str(config["callback_url"]),
-            str(config["webhook_url"]),
             _pg_datetime(config.get("created_at")),
         )
 
@@ -62,21 +59,30 @@ class PgLinearMixin:
             INSERT INTO linear_workspace_installations (
               id, user_id, application_config_id, application_config_version, application_source,
               state, active, access_token_enc, refresh_token_enc, token_type, actor, scope, expires_at,
-              linear_organization_id, organization_url_key, organization_name, app_user_id,
-              supports_agent_sessions, projects_json, webhook_state, last_webhook_at,
+              linear_organization_id, organization_url_key, organization_name, app_user_id, projects_json,
               reconciliation_state, last_reconciliation_at, reconciliation_error,
               reconciliation_retry_count, error_code, sanitized_reason, retryable,
               action_required, next_action, created_at, updated_at
             ) VALUES (
               $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13::timestamptz,$14,$15,$16,$17,
-              $18,$19::jsonb,$20,$21::timestamptz,$22,$23::timestamptz,$24,$25,$26,$27,$28,$29,
-              $30,$31::timestamptz,$32::timestamptz
+              $18::jsonb,$19,$20::timestamptz,$21,$22,$23,$24,$25,$26,$27,$28::timestamptz,$29::timestamptz
             )
             ON CONFLICT (id) DO UPDATE SET
-              state = EXCLUDED.state, active = EXCLUDED.active, error_code = EXCLUDED.error_code,
+              application_config_id = EXCLUDED.application_config_id,
+              application_config_version = EXCLUDED.application_config_version,
+              application_source = EXCLUDED.application_source,
+              state = EXCLUDED.state, active = EXCLUDED.active,
+              access_token_enc = EXCLUDED.access_token_enc,
+              refresh_token_enc = EXCLUDED.refresh_token_enc,
+              token_type = EXCLUDED.token_type, actor = EXCLUDED.actor,
+              scope = EXCLUDED.scope, expires_at = EXCLUDED.expires_at,
+              linear_organization_id = EXCLUDED.linear_organization_id,
+              organization_url_key = EXCLUDED.organization_url_key,
+              organization_name = EXCLUDED.organization_name,
+              app_user_id = EXCLUDED.app_user_id, projects_json = EXCLUDED.projects_json,
+              error_code = EXCLUDED.error_code,
               sanitized_reason = EXCLUDED.sanitized_reason, retryable = EXCLUDED.retryable,
               action_required = EXCLUDED.action_required, next_action = EXCLUDED.next_action,
-              webhook_state = EXCLUDED.webhook_state, last_webhook_at = EXCLUDED.last_webhook_at,
               reconciliation_state = EXCLUDED.reconciliation_state,
               last_reconciliation_at = EXCLUDED.last_reconciliation_at,
               reconciliation_error = EXCLUDED.reconciliation_error,
@@ -123,6 +129,19 @@ class PgLinearMixin:
             user_id,
         )
         return _workspace_installation(row) if row is not None else None
+
+    async def find_active_workspace_installation(self, linear_organization_id: str) -> dict[str, Any] | None:
+        row = await self.pool.fetchrow(
+            "SELECT * FROM linear_workspace_installations WHERE linear_organization_id = $1 AND active = TRUE",
+            linear_organization_id,
+        )
+        return _workspace_installation(row) if row is not None else None
+
+    async def list_active_workspace_installations(self) -> list[dict[str, Any]]:
+        rows = await self.pool.fetch(
+            "SELECT * FROM linear_workspace_installations WHERE active = TRUE ORDER BY user_id"
+        )
+        return [_workspace_installation(row) for row in rows]
 
     async def replace_selected_linear_projects(self, user_id: str, projects: list[dict[str, Any]]) -> None:
         async with self.pool.acquire() as connection:
@@ -198,12 +217,14 @@ class PgLinearMixin:
         await self.pool.execute(
             """
             INSERT INTO oauth_states (
-              state, workspace_id, application_config_id, application_config_version, expires_at, created_at
-            ) VALUES ($1,$2,$3,$4,$5::timestamptz,now())
+              state, workspace_id, application_config_id, application_config_version,
+              code_verifier_enc, expires_at, created_at
+            ) VALUES ($1,$2,$3,$4,$5,$6::timestamptz,now())
             ON CONFLICT (state) DO UPDATE SET
               workspace_id = EXCLUDED.workspace_id,
               application_config_id = EXCLUDED.application_config_id,
               application_config_version = EXCLUDED.application_config_version,
+              code_verifier_enc = EXCLUDED.code_verifier_enc,
               expires_at = EXCLUDED.expires_at,
               created_at = now()
             """,
@@ -211,6 +232,7 @@ class PgLinearMixin:
             str(record["workspace_id"]),
             str(record["application_config_id"]),
             int(record["application_config_version"]),
+            str(record["code_verifier_enc"]),
             _pg_datetime(record.get("expires_at")),
         )
 
@@ -218,7 +240,8 @@ class PgLinearMixin:
         row = await self.pool.fetchrow(
             """
             DELETE FROM oauth_states WHERE state = $1 AND expires_at >= now()
-            RETURNING workspace_id, application_config_id, application_config_version, expires_at
+            RETURNING workspace_id, application_config_id, application_config_version,
+              code_verifier_enc, expires_at
             """,
             state,
         )
@@ -229,6 +252,7 @@ class PgLinearMixin:
             "workspace_id": str(row["workspace_id"]),
             "application_config_id": str(row["application_config_id"]),
             "application_config_version": int(row["application_config_version"]),
+            "code_verifier_enc": str(row["code_verifier_enc"]),
             "expires_at": row["expires_at"].isoformat(),
         }
 
@@ -256,9 +280,7 @@ def _linear_application_config(row: Any) -> dict[str, Any]:
         "version": int(row["version"]),
         "client_id": str(row["client_id"]),
         "client_secret_enc": str(row["client_secret_enc"]),
-        "webhook_secret_enc": str(row["webhook_secret_enc"]),
         "callback_url": str(row["callback_url"]),
-        "webhook_url": str(row["webhook_url"]),
         "created_at": row["created_at"].isoformat(),
     }
 
@@ -272,8 +294,7 @@ def _installation_values(row: dict[str, Any]) -> tuple[Any, ...]:
         _pg_json(row.get("scope") or []), _pg_datetime(row.get("expires_at")),
         str(row.get("linear_organization_id") or ""), str(row.get("organization_url_key") or ""),
         str(row.get("organization_name") or ""), str(row.get("app_user_id") or ""),
-        bool(row.get("supports_agent_sessions")), _pg_json(row.get("projects") or []),
-        str(row.get("webhook_state") or "pending"), _pg_datetime(row.get("last_webhook_at")),
+        _pg_json(row.get("projects") or []),
         str(row.get("reconciliation_state") or "pending"), _pg_datetime(row.get("last_reconciliation_at")),
         str(row.get("reconciliation_error") or ""), int(row.get("reconciliation_retry_count") or 0),
         str(row.get("error_code") or ""), str(row.get("sanitized_reason") or ""), bool(row.get("retryable")),
@@ -295,10 +316,8 @@ def _workspace_installation(row: Any) -> dict[str, Any]:
         "expires_at": row["expires_at"].isoformat() if row["expires_at"] is not None else None,
         "linear_organization_id": str(row["linear_organization_id"]),
         "organization_url_key": str(row["organization_url_key"]), "organization_name": str(row["organization_name"]),
-        "app_user_id": str(row["app_user_id"]), "supports_agent_sessions": bool(row["supports_agent_sessions"]),
+        "app_user_id": str(row["app_user_id"]),
         "projects": _pg_json_value(row["projects_json"], []),
-        "webhook_state": str(row["webhook_state"]),
-        "last_webhook_at": row["last_webhook_at"].isoformat() if row["last_webhook_at"] is not None else None,
         "reconciliation_state": str(row["reconciliation_state"]),
         "last_reconciliation_at": (
             row["last_reconciliation_at"].isoformat() if row["last_reconciliation_at"] is not None else None

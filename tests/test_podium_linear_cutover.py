@@ -21,7 +21,6 @@ async def _candidate(app: Any, user_id: str) -> str:
         user_id,
         client_id="replacement-client",
         client_secret="replacement-secret",
-        webhook_secret="replacement-webhook",
     )
     installation_id = f"candidate-{user_id}"
     await app.state.podium.save_linear_installation_record(
@@ -37,16 +36,13 @@ async def _candidate(app: Any, user_id: str) -> str:
             "refresh_token": "replacement-refresh-token",
             "token_type": "Bearer",
             "actor": "app",
-            "scope": ["read", "write", "app:assignable", "app:mentionable"],
+            "scope": ["read", "write", "app:assignable"],
             "expires_at": (now + timedelta(hours=1)).isoformat().replace("+00:00", "Z"),
             "linear_organization_id": f"org-{user_id}",
             "organization_url_key": "acme",
             "organization_name": "Acme",
             "app_user_id": "agent-beta",
-            "supports_agent_sessions": True,
             "projects": [{"id": "project-alpha", "name": "Alpha", "slug_id": "ALPHA"}],
-            "webhook_state": "pending",
-            "last_webhook_at": None,
             "reconciliation_state": "pending",
             "last_reconciliation_at": None,
             "reconciliation_error": "",

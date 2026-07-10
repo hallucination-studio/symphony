@@ -141,30 +141,6 @@ mutation RepositoryHandoffCreateChild(
             normalized["skipped_label_names"] = skipped_label_names
         return normalized
 
-    async def agent_activity_create(
-        self,
-        *,
-        agent_session_id: str,
-        content: dict[str, Any],
-    ) -> dict[str, Any]:
-        payload = await self.graphql(
-            """
-mutation RepositoryHandoffAgentActivity($input: AgentActivityCreateInput!) {
-  agentActivityCreate(input: $input) {
-    success
-    agentActivity { id }
-  }
-}
-""",
-            {"input": {"agentSessionId": agent_session_id, "content": content}},
-        )
-        result = ((payload.get("data") or {}).get("agentActivityCreate") or {})
-        activity = result.get("agentActivity") if isinstance(result, dict) else {}
-        return {
-            "success": bool(result.get("success")),
-            "activity_id": activity.get("id") if isinstance(activity, dict) else None,
-        }
-
     async def transition_issue(self, issue_id: str, state_id: str) -> dict[str, Any]:
         payload = await self.graphql(
             """

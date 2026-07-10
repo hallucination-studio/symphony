@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import json
-import hashlib
-import hmac
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -11,7 +9,6 @@ import pytest
 from fastapi.testclient import TestClient
 
 from podium.app import create_app
-from podium.podium_routes_runtime import normalize_agent_session_event
 from podium.store import PodiumStore
 
 
@@ -77,7 +74,30 @@ class QueueResult:
 async def queue_agent_session(app: Any, payload: dict[str, Any]) -> QueueResult:
     if payload.get("type") != "AgentSessionEvent":
         return QueueResult(status_code=200, body={"status": "ignored", "queued": 0})
-    queued = await app.state.podium.queue_dispatches(normalize_agent_session_event(payload))
+    session = payload.get("agentSession") if isinstance(payload.get("agentSession"), dict) else {}
+    issue = session.get("issue") if isinstance(session.get("issue"), dict) else {}
+    project = issue.get("project") if isinstance(issue.get("project"), dict) else {}
+    delegate = issue.get("delegate") if isinstance(issue.get("delegate"), dict) else {}
+    parent = issue.get("parent") if isinstance(issue.get("parent"), dict) else {}
+    blocked_by = issue.get("blocked_by") if isinstance(issue.get("blocked_by"), list) else []
+    workspace = payload.get("workspace") if isinstance(payload.get("workspace"), dict) else {}
+    event = {
+        "workspace_id": str(workspace.get("id") or payload.get("workspace_id") or ""),
+        "linear_organization_id": str(payload.get("organizationId") or ""),
+        "linear_project_id": str(project.get("id") or ""),
+        "project_slug": str(project.get("slugId") or ""),
+        "issue_id": str(issue.get("id") or ""),
+        "issue_identifier": str(issue.get("identifier") or ""),
+        "issue_title": str(issue.get("title") or ""),
+        "issue_description": str(issue.get("description") or ""),
+        "agent_app_user_id": str(session.get("appUserId") or ""),
+        "issue_delegate_id": str(delegate.get("id") or ""),
+        "blocked_by": [str(item.get("id") or "") for item in blocked_by if isinstance(item, dict)],
+        "parent_issue_id": str(parent.get("id") or payload.get("parent_issue_id") or ""),
+        "managed_run_intent": dict(payload.get("managed_run_intent") or {}),
+        "intake_key": f"linear-issue:{str(issue.get('id') or '')}",
+    }
+    queued = await app.state.podium.queue_dispatches(event)
     return QueueResult(status_code=200, body={"status": "accepted", "queued": queued})
 
 
@@ -113,7 +133,6 @@ async def activate_linear_installation(
     access_token: str = "oauth-installation-token",
     app_user_id: str = "agent-alpha",
     projects: list[dict[str, str]] | None = None,
-    webhook_secret: str = "test-webhook-secret",
 ) -> str:
     now = datetime.now(timezone.utc)
     installation_id = f"installation-{user_id}"
@@ -121,7 +140,6 @@ async def activate_linear_installation(
         user_id,
         client_id="test-linear-client",
         client_secret="test-linear-client-secret",
-        webhook_secret=webhook_secret,
     )
     await app.state.podium.save_linear_installation_record(
         {
@@ -136,13 +154,12 @@ async def activate_linear_installation(
             "refresh_token": "oauth-refresh-token",
             "token_type": "Bearer",
             "actor": "app",
-            "scope": ["read", "write", "app:assignable", "app:mentionable"],
+            "scope": ["read", "write", "app:assignable"],
             "expires_at": (now + timedelta(hours=1)).isoformat().replace("+00:00", "Z"),
             "linear_organization_id": f"org-{user_id}",
             "organization_url_key": "acme",
             "organization_name": "Acme",
             "app_user_id": app_user_id,
-            "supports_agent_sessions": True,
             "projects": projects or [{"id": "project-alpha", "name": "Alpha", "slug_id": "ALPHA"}],
             "error_code": "",
             "sanitized_reason": "",
@@ -282,7 +299,3 @@ def dependent_agent_session_payload(*, workspace_id: str, project_slug: str, del
     payload["agentSession"]["issue"]["parent"] = {"id": "parent-1", "identifier": "ALPHA-ROOT"}
     payload["agentSession"]["issue"]["blocked_by"] = [{"id": "blocker-1", "identifier": "ALPHA-1"}]
     return payload
-
-
-def signature(raw: bytes, secret: str) -> str:
-    return hmac.new(secret.encode(), raw, hashlib.sha256).hexdigest()

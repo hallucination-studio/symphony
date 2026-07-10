@@ -85,17 +85,6 @@ class LinearTracker:
     ) -> dict[str, Any]:
         return await self.client.update_issue_comment_marker_block(issue_id, marker_name, block)
 
-    async def agent_activity_create(
-        self,
-        *,
-        agent_session_id: str,
-        content: dict[str, Any],
-    ) -> dict[str, Any]:
-        return await self.client.agent_activity_create(
-            agent_session_id=agent_session_id,
-            content=content,
-        )
-
     async def fetch_issue_comments(self, issue_id: str, *, first: int = 20) -> list[dict[str, Any]]:
         return await self.client.fetch_issue_comments(issue_id, first=first)
 

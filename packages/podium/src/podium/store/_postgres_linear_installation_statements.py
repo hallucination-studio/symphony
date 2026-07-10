@@ -12,9 +12,7 @@ LINEAR_INSTALLATION_STATEMENTS: Iterable[str] = (
         version BIGINT NOT NULL,
         client_id TEXT NOT NULL,
         client_secret_enc TEXT NOT NULL,
-        webhook_secret_enc TEXT NOT NULL,
         callback_url TEXT NOT NULL,
-        webhook_url TEXT NOT NULL,
         created_at TIMESTAMPTZ NOT NULL,
         UNIQUE(user_id, source, version)
     )
@@ -45,10 +43,7 @@ LINEAR_INSTALLATION_STATEMENTS: Iterable[str] = (
         organization_url_key TEXT NOT NULL DEFAULT '',
         organization_name TEXT NOT NULL DEFAULT '',
         app_user_id TEXT NOT NULL DEFAULT '',
-        supports_agent_sessions BOOLEAN NOT NULL DEFAULT FALSE,
         projects_json JSONB NOT NULL DEFAULT '[]'::jsonb,
-        webhook_state TEXT NOT NULL DEFAULT 'pending',
-        last_webhook_at TIMESTAMPTZ,
         reconciliation_state TEXT NOT NULL DEFAULT 'pending',
         last_reconciliation_at TIMESTAMPTZ,
         reconciliation_error TEXT NOT NULL DEFAULT '',
@@ -63,8 +58,6 @@ LINEAR_INSTALLATION_STATEMENTS: Iterable[str] = (
     )
     """,
     "ALTER TABLE linear_workspace_installations ADD COLUMN IF NOT EXISTS actor TEXT NOT NULL DEFAULT ''",
-    "ALTER TABLE linear_workspace_installations ADD COLUMN IF NOT EXISTS webhook_state TEXT NOT NULL DEFAULT 'pending'",
-    "ALTER TABLE linear_workspace_installations ADD COLUMN IF NOT EXISTS last_webhook_at TIMESTAMPTZ",
     "ALTER TABLE linear_workspace_installations ADD COLUMN IF NOT EXISTS reconciliation_state TEXT NOT NULL DEFAULT 'pending'",
     "ALTER TABLE linear_workspace_installations ADD COLUMN IF NOT EXISTS last_reconciliation_at TIMESTAMPTZ",
     "ALTER TABLE linear_workspace_installations ADD COLUMN IF NOT EXISTS reconciliation_error TEXT NOT NULL DEFAULT ''",
@@ -81,17 +74,12 @@ LINEAR_INSTALLATION_STATEMENTS: Iterable[str] = (
         PRIMARY KEY(user_id, linear_project_id)
     )
     """,
-    """
-    CREATE TABLE IF NOT EXISTS linear_webhook_deliveries (
-        delivery_id TEXT PRIMARY KEY,
-        installation_id TEXT NOT NULL REFERENCES linear_workspace_installations(id) ON DELETE CASCADE,
-        status TEXT NOT NULL,
-        event_key TEXT NOT NULL DEFAULT '',
-        error_code TEXT NOT NULL DEFAULT '',
-        received_at TIMESTAMPTZ NOT NULL,
-        updated_at TIMESTAMPTZ NOT NULL
-    )
-    """,
+    "ALTER TABLE linear_application_configs DROP COLUMN IF EXISTS webhook_secret_enc",
+    "ALTER TABLE linear_application_configs DROP COLUMN IF EXISTS webhook_url",
+    "ALTER TABLE linear_workspace_installations DROP COLUMN IF EXISTS supports_agent_sessions",
+    "ALTER TABLE linear_workspace_installations DROP COLUMN IF EXISTS webhook_state",
+    "ALTER TABLE linear_workspace_installations DROP COLUMN IF EXISTS last_webhook_at",
+    "DROP TABLE IF EXISTS linear_webhook_deliveries",
     """
     CREATE UNIQUE INDEX IF NOT EXISTS linear_workspace_installations_active_unique
     ON linear_workspace_installations (user_id)
@@ -99,4 +87,5 @@ LINEAR_INSTALLATION_STATEMENTS: Iterable[str] = (
     """,
     "ALTER TABLE oauth_states ADD COLUMN IF NOT EXISTS application_config_id TEXT NOT NULL DEFAULT ''",
     "ALTER TABLE oauth_states ADD COLUMN IF NOT EXISTS application_config_version BIGINT NOT NULL DEFAULT 0",
+    "ALTER TABLE oauth_states ADD COLUMN IF NOT EXISTS code_verifier_enc TEXT NOT NULL DEFAULT ''",
 )

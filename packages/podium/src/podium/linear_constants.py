@@ -4,12 +4,12 @@ from __future__ import annotations
 LINEAR_AUTHORIZE_URL = "https://linear.app/oauth/authorize"
 LINEAR_TOKEN_URL = "https://api.linear.app/oauth/token"
 LINEAR_GRAPHQL_URL = "https://api.linear.app/graphql"
-LINEAR_REQUIRED_SCOPES = frozenset({"read", "write", "app:assignable", "app:mentionable"})
+LINEAR_REQUIRED_SCOPES = frozenset({"read", "write", "app:assignable"})
 LINEAR_DEFAULT_SCOPE = ",".join(sorted(LINEAR_REQUIRED_SCOPES))
 
 LINEAR_ACCEPTANCE_QUERY = """
 query SymphonyInstallationAcceptance {
-  viewer { id name app supportsAgentSessions }
+  viewer { id name app }
   organization { id name urlKey }
   projects(first: 250) { nodes { id name slugId } }
 }

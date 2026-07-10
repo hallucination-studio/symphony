@@ -25,7 +25,6 @@ class PodiumDispatchMixin:
                 "issue_description": event.get("issue_description") or "",
                 "linear_workspace_id": event["workspace_id"],
                 "project_slug": event["project_slug"],
-                "agent_session_id": str(event.get("agent_session_id") or ""),
                 "agent_app_user_id": event.get("agent_app_user_id") or "",
                 "routing_rule_id": group["id"],
                 "managed_run_profile": group.get("managed_run_profile") or "default",

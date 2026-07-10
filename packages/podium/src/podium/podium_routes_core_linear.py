@@ -11,7 +11,6 @@ from .podium_routes_linear_application import register_linear_application_routes
 from .podium_routes_linear_cutover import register_linear_cutover_route
 from .podium_routes_linear_oauth import register_linear_oauth_routes
 from .podium_routes_linear_projects import register_linear_project_routes
-from .podium_routes_linear_webhooks import register_linear_webhook_route
 
 RequireUser = Callable[[Request], Awaitable[dict[str, Any] | None]]
 ErrorResponse = Callable[[int, str, str], JSONResponse]
@@ -48,7 +47,6 @@ def register_linear_routes(
         require_user=require_user,
         error_response=error_response,
     )
-    register_linear_webhook_route(app, state=state, error_response=error_response)
     register_linear_cutover_route(
         app,
         state=state,

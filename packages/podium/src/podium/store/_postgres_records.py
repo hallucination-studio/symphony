@@ -120,7 +120,6 @@ def _record_to_dispatch(row: Any) -> dict[str, Any]:
         "intake_key": str(row["intake_key"]),
         "linear_workspace_id": str(row["workspace_id"]),
         "project_slug": str(row["project_slug"]),
-        "agent_session_id": str(row["agent_session_id"]),
         "agent_app_user_id": str(row["agent_app_user_id"]),
         "issue_delegate_id": str(row["issue_delegate_id"]),
         "status": str(row["status"]),

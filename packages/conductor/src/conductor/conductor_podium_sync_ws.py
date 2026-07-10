@@ -26,7 +26,6 @@ class PodiumWebSocketMixin:
                 "status": "queued",
                 "issue_id": dispatch.get("issue_id") or None,
                 "issue_identifier": dispatch.get("issue_identifier") or None,
-                "agent_session_id": dispatch.get("agent_session_id") or None,
             }
         if kind == "human.answered":
             return self._handle_podium_human_answered(command)

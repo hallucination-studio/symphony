@@ -138,11 +138,8 @@ def test_pg_migrator_exposes_phase_0_schema() -> None:
     assert "CREATE TABLE IF NOT EXISTS onboarding_state" in sql
     assert "CREATE TABLE IF NOT EXISTS proxy_audit_events" in sql
     assert "fencing_token BIGINT NOT NULL DEFAULT 0" in sql
-    assert "UNIQUE(project_binding_id, agent_session_id)" not in sql
-    assert "dispatches_binding_session_unique" in sql
-    assert "WHERE agent_session_id <> ''" in sql
-    assert "dispatches_binding_issue_empty_session_unique" in sql
-    assert "WHERE agent_session_id = ''" in sql
+    assert "dispatches_binding_intake_unique" in sql
+    assert "DROP COLUMN IF EXISTS agent_session_id" in sql
     assert "managed_run_profile TEXT NOT NULL DEFAULT 'default'" in sql
     assert "workflow_profile" not in sql
     assert "CREATE TABLE IF NOT EXISTS sessions" in sql

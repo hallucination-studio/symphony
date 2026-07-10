@@ -25,7 +25,11 @@ class LinearInstallationRejected(RuntimeError):
         self.next_action = next_action
 
 
-async def exchange_authorization_code(code: str, application: dict[str, Any]) -> dict[str, Any]:
+async def exchange_authorization_code(
+    code: str,
+    application: dict[str, Any],
+    code_verifier: str,
+) -> dict[str, Any]:
     async with httpx.AsyncClient(timeout=30, trust_env=False) as client:
         response = await client.post(
             LINEAR_TOKEN_URL,
@@ -35,6 +39,7 @@ async def exchange_authorization_code(code: str, application: dict[str, Any]) ->
                 "client_id": application["client_id"],
                 "client_secret": application["client_secret"],
                 "redirect_uri": application["callback_url"],
+                "code_verifier": code_verifier,
             },
             headers={"Content-Type": "application/x-www-form-urlencoded"},
         )
@@ -97,10 +102,7 @@ def accepted_installation(
         "organization_url_key": str(organization["urlKey"]),
         "organization_name": str(organization["name"]),
         "app_user_id": str(viewer["id"]),
-        "supports_agent_sessions": True,
         "projects": projects,
-        "webhook_state": "pending",
-        "last_webhook_at": None,
         "reconciliation_state": "pending",
         "last_reconciliation_at": None,
         "reconciliation_error": "",
@@ -141,10 +143,7 @@ def rejected_installation(
         "organization_url_key": "",
         "organization_name": "",
         "app_user_id": "",
-        "supports_agent_sessions": False,
         "projects": [],
-        "webhook_state": "failed",
-        "last_webhook_at": None,
         "reconciliation_state": "pending",
         "last_reconciliation_at": None,
         "reconciliation_error": "",
@@ -172,6 +171,12 @@ def _validate_token(token: dict[str, Any]) -> tuple[str, str, set[str], str]:
     missing = sorted(LINEAR_REQUIRED_SCOPES - scopes)
     if missing:
         raise LinearInstallationRejected("linear_scope_missing", f"Linear OAuth scopes are missing: {', '.join(missing)}")
+    unexpected = sorted(scopes - LINEAR_REQUIRED_SCOPES)
+    if unexpected:
+        raise LinearInstallationRejected(
+            "linear_scope_unexpected",
+            f"Linear OAuth scopes are unexpected: {', '.join(unexpected)}",
+        )
     try:
         expires_in = int(token.get("expires_in") or 0)
     except (TypeError, ValueError) as exc:
@@ -190,8 +195,6 @@ def _validate_identity(acceptance: dict[str, Any]) -> tuple[dict[str, Any], dict
         raw_projects = raw_projects.get("nodes")
     if not viewer.get("app"):
         raise LinearInstallationRejected("linear_viewer_not_app", "Linear viewer is not an app user")
-    if not viewer.get("supportsAgentSessions"):
-        raise LinearInstallationRejected("linear_agent_sessions_unsupported", "Linear app user does not support Agent Sessions")
     if not str(viewer.get("id") or ""):
         raise LinearInstallationRejected("linear_app_user_missing", "Linear app user id is missing")
     if not all(str(organization.get(key) or "") for key in ("id", "name", "urlKey")):

@@ -165,14 +165,14 @@ class PgDispatchMixin:
             """
             INSERT INTO dispatches (
               id, project_binding_id, user_id, issue_id, issue_identifier, issue_title, issue_description,
-              managed_run_intent, intake_key, workspace_id, project_slug, agent_session_id, status, reason,
+              managed_run_intent, intake_key, workspace_id, project_slug, status, reason,
               agent_app_user_id, issue_delegate_id, leased_conductor_id, leased_until, fencing_token,
               run_id, parent_issue_id, active_work_item_id, managed_run_state, plan_version, backend_session_id,
               created_at, updated_at, completed_at
             )
             VALUES (
-              $1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18::timestamptz,$19,
-              $20,$21,$22,$23,$24,$25,$26::timestamptz,$27::timestamptz,$28::timestamptz
+              $1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12,$13,$14,$15,$16,$17::timestamptz,$18,
+              $19,$20,$21,$22,$23,$24,$25::timestamptz,$26::timestamptz,$27::timestamptz
             )
             ON CONFLICT DO NOTHING
             RETURNING id
@@ -188,7 +188,6 @@ class PgDispatchMixin:
             str(dispatch.get("intake_key") or ""),
             str(dispatch.get("linear_workspace_id") or dispatch.get("workspace_id") or ""),
             str(dispatch.get("project_slug") or ""),
-            str(dispatch.get("agent_session_id") or ""),
             str(dispatch.get("status") or "queued"),
             str(dispatch.get("reason") or ""),
             str(dispatch.get("agent_app_user_id") or ""),

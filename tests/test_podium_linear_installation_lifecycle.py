@@ -15,19 +15,17 @@ DEFAULT_APP = {
     "linear_client_id": "default-client",
     "linear_client_secret": "default-secret",
     "linear_redirect_uri": "https://podium.test/api/v1/linear/oauth/callback",
-    "linear_webhook_secret": "default-webhook-secret",
     "linear_application_version": 7,
     "podium_base_url": "https://podium.test",
 }
 
 
-def _acceptance(*, app: bool = True, supports_agent_sessions: bool = True) -> dict[str, Any]:
+def _acceptance(*, app: bool = True) -> dict[str, Any]:
     return {
         "viewer": {
             "id": "linear-app-user-1",
             "name": "Symphony",
             "app": app,
-            "supportsAgentSessions": supports_agent_sessions,
         },
         "organization": {"id": "linear-org-1", "name": "Acme", "urlKey": "acme"},
         "projects": [
@@ -43,7 +41,7 @@ def _token(access_token: str = "access-1") -> dict[str, Any]:
         "refresh_token": f"refresh-{access_token}",
         "token_type": "Bearer",
         "expires_in": 3600,
-        "scope": "read write app:assignable app:mentionable",
+        "scope": "read write app:assignable",
         "actor": "app",
     }
 
@@ -83,7 +81,6 @@ def test_config_reads_default_application_and_removes_global_actor_path(monkeypa
     monkeypatch.setenv("LINEAR_CLIENT_ID", "client-id")
     monkeypatch.setenv("LINEAR_CLIENT_SECRET", "client-secret")
     monkeypatch.setenv("LINEAR_REDIRECT_URI", "https://podium.test/api/v1/linear/oauth/callback")
-    monkeypatch.setenv("LINEAR_WEBHOOK_SECRET", "webhook-secret")
     monkeypatch.setenv("LINEAR_APPLICATION_VERSION", "9")
     monkeypatch.setenv("PODIUM_LINEAR_APPLICATION_ID", "removed-app-id")
     monkeypatch.setenv("PODIUM_LINEAR_APP_ACCESS_TOKEN", "removed-app-token")
@@ -93,10 +90,10 @@ def test_config_reads_default_application_and_removes_global_actor_path(monkeypa
     assert config.linear_client_id == "client-id"
     assert config.linear_client_secret == "client-secret"
     assert config.linear_redirect_uri == "https://podium.test/api/v1/linear/oauth/callback"
-    assert config.linear_webhook_secret == "webhook-secret"
     assert config.linear_application_version == 9
     assert not hasattr(config, "linear_application_id")
     assert not hasattr(config, "linear_app_access_token")
+    assert not hasattr(config, "linear_webhook_secret")
 
 
 @pytest.mark.asyncio
@@ -109,19 +106,17 @@ async def test_custom_application_uses_fixed_podium_urls_and_never_returns_secre
             json={
                 "client_id": "custom-client",
                 "client_secret": "custom-secret",
-                "webhook_secret": "custom-webhook-secret",
                 "redirect_uri": "https://attacker.test/callback",
             },
         )
         assert rejected.status_code == 400
-        assert rejected.json()["error"]["code"] == "custom_redirect_forbidden"
+        assert rejected.json()["error"]["code"] == "invalid_linear_application"
 
         saved = await client.put(
             "/api/v1/linear/application",
             json={
                 "client_id": "custom-client",
                 "client_secret": "custom-secret",
-                "webhook_secret": "custom-webhook-secret",
             },
         )
         assert saved.status_code == 200
@@ -129,10 +124,8 @@ async def test_custom_application_uses_fixed_podium_urls_and_never_returns_secre
         assert application["source"] == "custom"
         assert application["client_id"] == "custom-client"
         assert application["callback_url"] == "https://podium.test/api/v1/linear/oauth/callback"
-        assert application["webhook_url"] == "https://podium.test/api/v1/linear/webhooks"
         assert application["version"] == 1
         assert "custom-secret" not in saved.text
-        assert "custom-webhook-secret" not in saved.text
 
         loaded = await client.get("/api/v1/linear/application")
         assert loaded.json()["application"] == application
@@ -153,7 +146,9 @@ async def test_default_application_is_selected_without_customer_configuration() 
         assert params["client_id"] == "default-client"
         assert params["redirect_uri"] == application["callback_url"]
         assert params["actor"] == "app"
-        assert set(params["scope"].split(",")) == {"read", "write", "app:assignable", "app:mentionable"}
+        assert set(params["scope"].split(",")) == {"read", "write", "app:assignable"}
+        assert params["code_challenge_method"] == "S256"
+        assert params["code_challenge"]
 
 
 @pytest.mark.asyncio
@@ -163,7 +158,7 @@ async def test_selecting_default_after_custom_keeps_both_versions_immutable() ->
         await _register(client)
         custom = await client.put(
             "/api/v1/linear/application",
-            json={"client_id": "custom", "client_secret": "custom-secret", "webhook_secret": "custom-webhook"},
+            json={"client_id": "custom", "client_secret": "custom-secret"},
         )
         selected_default = await client.post("/api/v1/linear/application/default")
         assert selected_default.status_code == 200
@@ -190,7 +185,7 @@ async def test_oauth_state_uses_the_immutable_application_version_that_started_i
         await _register(client)
         first = await client.put(
             "/api/v1/linear/application",
-            json={"client_id": "custom-v1", "client_secret": "secret-v1", "webhook_secret": "webhook-v1"},
+            json={"client_id": "custom-v1", "client_secret": "secret-v1"},
         )
         first_config = first.json()["application"]
         oauth = await client.post("/api/v1/linear/installations/oauth")
@@ -201,7 +196,7 @@ async def test_oauth_state_uses_the_immutable_application_version_that_started_i
 
         second = await client.put(
             "/api/v1/linear/application",
-            json={"client_id": "custom-v2", "client_secret": "secret-v2", "webhook_secret": "webhook-v2"},
+            json={"client_id": "custom-v2", "client_secret": "secret-v2"},
         )
         assert second.json()["application"]["version"] == 2
 
@@ -209,7 +204,7 @@ async def test_oauth_state_uses_the_immutable_application_version_that_started_i
             "/api/v1/linear/oauth/callback",
             params={"code": "code-for-v1", "state": params["state"]},
         )
-        assert callback.status_code == 200
+        assert callback.status_code == 303
 
     assert exchanged["code"] == "code-for-v1"
     assert exchanged["application"]["id"] == first_config["id"]
@@ -232,7 +227,7 @@ async def test_callback_acceptance_activates_fresh_installation_and_keeps_tokens
             "/api/v1/linear/oauth/callback",
             params={"code": "valid-code", "state": params["state"]},
         )
-        assert callback.status_code == 200
+        assert callback.status_code == 303
 
         status = await client.get("/api/v1/linear/installations")
         assert status.status_code == 200
@@ -240,7 +235,6 @@ async def test_callback_acceptance_activates_fresh_installation_and_keeps_tokens
         assert active["state"] == "ready"
         assert active["linear_organization_id"] == "linear-org-1"
         assert active["app_user_id"] == "linear-app-user-1"
-        assert active["supports_agent_sessions"] is True
         assert active["project_count"] == 2
         assert status.json()["candidate"] is None
         assert "active-access" not in status.text
@@ -271,19 +265,19 @@ async def test_rejected_candidate_never_replaces_the_active_installation() -> No
                 "/api/v1/linear/oauth/callback",
                 params={"code": "active", "state": first["state"]},
             )
-        ).status_code == 200
+        ).status_code == 303
 
         await client.put(
             "/api/v1/linear/application",
-            json={"client_id": "bad-client", "client_secret": "bad-secret", "webhook_secret": "bad-webhook"},
+            json={"client_id": "bad-client", "client_secret": "bad-secret"},
         )
         second = _oauth_params(await client.post("/api/v1/linear/installations/oauth"))
         rejected = await client.get(
             "/api/v1/linear/oauth/callback",
             params={"code": "invalid", "state": second["state"]},
         )
-        assert rejected.status_code == 422
-        assert rejected.json()["error"]["code"] == "linear_viewer_not_app"
+        assert rejected.status_code == 303
+        assert "code=linear_viewer_not_app" in rejected.headers["location"]
 
         status = (await client.get("/api/v1/linear/installations")).json()
         assert status["active"]["state"] == "ready"
@@ -298,7 +292,7 @@ async def test_rejected_candidate_never_replaces_the_active_installation() -> No
 @pytest.mark.asyncio
 async def test_callback_rejects_missing_required_scope_with_durable_reason() -> None:
     token = _token()
-    token["scope"] = "read write app:assignable"
+    token["scope"] = "read write"
     client, _app, _store = _client(
         linear_token_exchange=lambda _code, _application: token,
         linear_installation_fetch=lambda _token: _acceptance(),
@@ -310,8 +304,8 @@ async def test_callback_rejects_missing_required_scope_with_durable_reason() -> 
             "/api/v1/linear/oauth/callback",
             params={"code": "missing-scope", "state": state},
         )
-        assert rejected.status_code == 422
-        assert rejected.json()["error"]["code"] == "linear_scope_missing"
+        assert rejected.status_code == 303
+        assert "code=linear_scope_missing" in rejected.headers["location"]
         candidate = (await client.get("/api/v1/linear/installations")).json()["candidate"]
         assert candidate["state"] == "failed"
         assert candidate["error_code"] == "linear_scope_missing"
@@ -340,7 +334,7 @@ async def test_callback_state_is_one_time_and_works_across_app_workers() -> None
             "/api/v1/linear/oauth/callback",
             params={"code": "cross-worker", "state": state},
         )
-    assert accepted.status_code == 200
+    assert accepted.status_code == 303
     assert replay.status_code == 400
     assert replay.json()["error"]["code"] == "invalid_state"
 
@@ -349,12 +343,14 @@ async def test_callback_state_is_one_time_and_works_across_app_workers() -> None
 async def test_callback_requires_code_and_state() -> None:
     client, _app, _store = _client()
     async with client:
+        await _register(client)
         missing_state = await client.get("/api/v1/linear/oauth/callback", params={"code": "code"})
-        missing_code = await client.get("/api/v1/linear/oauth/callback", params={"state": "state"})
+        state = _oauth_params(await client.post("/api/v1/linear/installations/oauth"))["state"]
+        missing_code = await client.get("/api/v1/linear/oauth/callback", params={"state": state})
     assert missing_state.status_code == 400
     assert missing_state.json()["error"]["code"] == "missing_state"
-    assert missing_code.status_code == 400
-    assert missing_code.json()["error"]["code"] == "missing_code"
+    assert missing_code.status_code == 303
+    assert "code=missing_code" in missing_code.headers["location"]
 
 
 @pytest.mark.asyncio
@@ -377,7 +373,7 @@ async def test_projects_are_selected_by_stable_id_without_mutating_linear_member
             "/api/v1/linear/oauth/callback",
             params={"code": "project-selection", "state": state},
         )
-        assert accepted.status_code == 200
+        assert accepted.status_code == 303
 
         available = await client.get("/api/v1/linear/projects")
         assert available.status_code == 200
@@ -472,7 +468,7 @@ async def test_replacement_candidate_must_access_every_selected_project() -> Non
         )
         await client.put(
             "/api/v1/linear/application",
-            json={"client_id": "replacement", "client_secret": "secret", "webhook_secret": "webhook"},
+            json={"client_id": "replacement", "client_secret": "secret"},
         )
         replacement_state = _oauth_params(await client.post("/api/v1/linear/installations/oauth"))["state"]
 
@@ -482,8 +478,8 @@ async def test_replacement_candidate_must_access_every_selected_project() -> Non
         )
         installations = (await client.get("/api/v1/linear/installations")).json()
 
-    assert rejected.status_code == 422
-    assert rejected.json()["error"]["code"] == "linear_selected_project_missing"
+    assert rejected.status_code == 303
+    assert "code=linear_selected_project_missing" in rejected.headers["location"]
     assert installations["active"]["application_source"] == "default"
     assert installations["candidate"]["state"] == "failed"
     assert installations["candidate"]["error_code"] == "linear_selected_project_missing"

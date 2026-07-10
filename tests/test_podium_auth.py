@@ -433,7 +433,7 @@ async def test_linear_application_route_requires_auth() -> None:
     try:
         status, _, body = await request(
             server.port, "PUT", "/api/v1/linear/application",
-            {"client_id": "c", "client_secret": "s", "webhook_secret": "w"},
+            {"client_id": "c", "client_secret": "s"},
         )
     finally:
         await server.stop()
@@ -488,7 +488,6 @@ async def test_linear_application_secret_decryption_failure_is_visible() -> None
         linear_client_id="official-client",
         linear_client_secret="official-secret",
         linear_redirect_uri="https://podium.example/api/v1/linear/oauth/callback",
-        linear_webhook_secret="official-webhook",
     )
     await server.start(port=0)
     try:
@@ -499,7 +498,6 @@ async def test_linear_application_secret_decryption_failure_is_visible() -> None
             {
                 "client_id": "custom-client",
                 "client_secret": "custom-secret",
-                "webhook_secret": "custom-webhook",
             },
             headers={"Cookie": cookie},
         )
@@ -528,7 +526,6 @@ async def test_default_linear_application_is_selected_when_no_custom_app_exists(
         linear_client_id="official-client",
         linear_client_secret="official-secret",
         linear_redirect_uri="https://podium.example/api/v1/linear/oauth/callback",
-        linear_webhook_secret="official-webhook",
     )
     await server.start(port=0)
     try:

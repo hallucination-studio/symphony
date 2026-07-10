@@ -7,7 +7,6 @@ from typing import Any, Callable
 
 import httpx
 
-from .podium_routes_runtime_helpers import normalize_agent_session_event
 from .podium_shared import utc_now_iso
 
 
@@ -226,19 +225,23 @@ def _event_from_issue(
         return None
     if _parent_issue_id(issue) or _is_symphony_projection_issue(issue):
         return None
-    payload = {
-        "type": "AgentSessionEvent",
-        "organizationId": installation.get("linear_organization_id"),
+    return {
+        "event_type": "linear.delegated_issue",
+        "linear_organization_id": str(installation.get("linear_organization_id") or ""),
         "workspace_id": installation.get("user_id"),
-        "agentSession": {
-            "appUserId": installation.get("app_user_id"),
-            "issue": issue,
-        },
+        "linear_project_id": str(issue_project.get("id") or ""),
+        "project_slug": str(project.get("project_slug") or issue_project.get("slugId") or ""),
+        "issue_id": str(issue.get("id") or ""),
+        "issue_identifier": str(issue.get("identifier") or ""),
+        "issue_title": str(issue.get("title") or ""),
+        "issue_description": str(issue.get("description") or ""),
+        "agent_app_user_id": str(installation.get("app_user_id") or ""),
+        "issue_delegate_id": str(delegate.get("id") or ""),
+        "blocked_by": _blocked_by_ids(issue),
+        "parent_issue_id": _parent_issue_id(issue),
+        "managed_run_intent": {},
+        "intake_key": f"linear-issue:{str(issue.get('id') or '')}",
     }
-    event = normalize_agent_session_event(payload)
-    event["project_slug"] = str(project.get("project_slug") or "")
-    event["blocked_by"] = _blocked_by_ids(issue)
-    return event if event.get("issue_id") else None
 
 
 def _blocked_by_ids(issue: dict[str, Any]) -> list[str]:

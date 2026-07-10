@@ -50,6 +50,7 @@ POSTGRES_MIGRATION_STATEMENTS: Iterable[str] = (
                 workspace_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
                 application_config_id TEXT NOT NULL DEFAULT '',
                 application_config_version BIGINT NOT NULL DEFAULT 0,
+                code_verifier_enc TEXT NOT NULL DEFAULT '',
                 expires_at TIMESTAMPTZ NOT NULL,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT now()
             )
@@ -159,7 +160,6 @@ POSTGRES_MIGRATION_STATEMENTS: Iterable[str] = (
                 intake_key TEXT NOT NULL DEFAULT '',
                 workspace_id TEXT NOT NULL DEFAULT '',
                 project_slug TEXT NOT NULL DEFAULT '',
-                agent_session_id TEXT NOT NULL DEFAULT '',
                 agent_app_user_id TEXT NOT NULL DEFAULT '',
                 issue_delegate_id TEXT NOT NULL DEFAULT '',
                 status TEXT NOT NULL,
@@ -196,16 +196,9 @@ POSTGRES_MIGRATION_STATEMENTS: Iterable[str] = (
             ON dispatches (project_binding_id, intake_key)
             WHERE intake_key <> ''
             """,
-            """
-            CREATE UNIQUE INDEX IF NOT EXISTS dispatches_binding_session_unique
-            ON dispatches (project_binding_id, agent_session_id)
-            WHERE agent_session_id <> ''
-            """,
-            """
-            CREATE UNIQUE INDEX IF NOT EXISTS dispatches_binding_issue_empty_session_unique
-            ON dispatches (project_binding_id, issue_id)
-            WHERE agent_session_id = ''
-            """,
+            "DROP INDEX IF EXISTS dispatches_binding_session_unique",
+            "DROP INDEX IF EXISTS dispatches_binding_issue_empty_session_unique",
+            "ALTER TABLE dispatches DROP COLUMN IF EXISTS agent_session_id",
             """
             CREATE TABLE IF NOT EXISTS metrics_snapshots (
                 conductor_id TEXT NOT NULL REFERENCES conductors(id) ON DELETE CASCADE,

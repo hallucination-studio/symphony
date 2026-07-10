@@ -47,7 +47,6 @@ def create_app(
     linear_client_id: str = "",
     linear_client_secret: str = "",
     linear_redirect_uri: str = "",
-    linear_webhook_secret: str = "",
     linear_application_version: int | None = None,
     linear_token_exchange: Callable[..., Any] | None = None,
     linear_installation_fetch: Callable[..., Any] | None = None,
@@ -66,7 +65,6 @@ def create_app(
         linear_client_id=linear_client_id or resolved_config.linear_client_id,
         linear_client_secret=linear_client_secret or resolved_config.linear_client_secret,
         linear_redirect_uri=linear_redirect_uri or resolved_config.linear_redirect_uri,
-        linear_webhook_secret=linear_webhook_secret or resolved_config.linear_webhook_secret,
         linear_application_version=(
             resolved_config.linear_application_version
             if linear_application_version is None
@@ -124,7 +122,6 @@ def _create_state(
     linear_client_id: str,
     linear_client_secret: str,
     linear_redirect_uri: str,
-    linear_webhook_secret: str,
     linear_application_version: int,
     podium_base_url: str,
     data_dir: str | Path | None,
@@ -141,7 +138,6 @@ def _create_state(
         linear_client_id=linear_client_id,
         linear_client_secret=linear_client_secret,
         linear_redirect_uri=linear_redirect_uri,
-        linear_webhook_secret=linear_webhook_secret,
         linear_application_version=linear_application_version,
         podium_base_url=podium_base_url,
         data_dir=data_dir,
@@ -275,7 +271,6 @@ class ManagedPodiumState(
     linear_client_id: str = ""
     linear_client_secret: str = ""
     linear_redirect_uri: str = ""
-    linear_webhook_secret: str = ""
     linear_application_version: int = 1
     podium_base_url: str = "https://podium.example"
     password_hasher: PasswordHasher = field(default_factory=PasswordHasher)

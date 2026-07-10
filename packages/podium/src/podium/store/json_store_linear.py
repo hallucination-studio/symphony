@@ -107,20 +107,6 @@ class JsonStoreLinearMixin:
         row = self._load_map("linear_reconciliation_state.json").get(binding_id)
         return dict(row) if isinstance(row, dict) else None
 
-    async def claim_linear_webhook_delivery(self, delivery: dict[str, Any]) -> bool:
-        rows = self._load_map("linear_webhook_deliveries.json")
-        delivery_id = str(delivery["delivery_id"])
-        if delivery_id in rows:
-            return False
-        rows[delivery_id] = dict(delivery)
-        self._write("linear_webhook_deliveries.json", rows)
-        return True
-
-    async def save_linear_webhook_delivery(self, delivery: dict[str, Any]) -> None:
-        rows = self._load_map("linear_webhook_deliveries.json")
-        rows[str(delivery["delivery_id"])] = dict(delivery)
-        self._write("linear_webhook_deliveries.json", rows)
-
     async def switch_workspace_installation(
         self,
         user_id: str,

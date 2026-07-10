@@ -25,7 +25,6 @@ class PodiumServer:
         linear_client_id: str = "",
         linear_client_secret: str = "",
         linear_redirect_uri: str = "",
-        linear_webhook_secret: str = "",
         linear_application_version: int = 1,
         linear_graphql_transport: Callable[..., Any] | None = None,
         podium_base_url: str = "https://podium.example",
@@ -38,7 +37,6 @@ class PodiumServer:
         self.linear_client_id = linear_client_id
         self.linear_client_secret = linear_client_secret
         self.linear_redirect_uri = linear_redirect_uri
-        self.linear_webhook_secret = linear_webhook_secret
         self.linear_application_version = linear_application_version
         self.linear_graphql_transport = linear_graphql_transport
         self.podium_base_url = podium_base_url
@@ -63,7 +61,6 @@ class PodiumServer:
             linear_client_id=self.linear_client_id,
             linear_client_secret=self.linear_client_secret,
             linear_redirect_uri=self.linear_redirect_uri,
-            linear_webhook_secret=self.linear_webhook_secret,
             linear_application_version=self.linear_application_version,
             linear_graphql_transport=self.linear_graphql_transport,
             podium_base_url=self.podium_base_url,

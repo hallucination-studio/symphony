@@ -1,10 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import hmac
 import json
-import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -76,41 +73,6 @@ async def test_reconciliation_uses_active_installation_token_and_stable_project_
     state = await app.state.podium.store.get_linear_reconciliation_state(binding_id)
     assert state["cursor"] == issue["updatedAt"]
     assert state["last_error"] == ""
-
-
-@pytest.mark.asyncio
-async def test_webhook_and_reconciliation_share_issue_idempotency_key() -> None:
-    def transport(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"data": {"issues": {"nodes": [_issue()]}}})
-
-    app = make_app()
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
-        user_id, _enrolled, _binding_id = await _ready(client, app)
-        payload = {
-            "type": "AgentSessionEvent",
-            "action": "created",
-            "organizationId": f"org-{user_id}",
-            "webhookTimestamp": int(time.time() * 1000),
-            "agentSession": {"id": "session-1", "appUserId": "agent-alpha", "issue": _issue()},
-        }
-        raw = json.dumps(payload, separators=(",", ":")).encode()
-        signature = hmac.new(b"test-webhook-secret", raw, hashlib.sha256).hexdigest()
-        webhook = await client.post(
-            "/api/v1/linear/webhooks",
-            content=raw,
-            headers={
-                "Content-Type": "application/json",
-                "Linear-Delivery": "delivery-shared",
-                "Linear-Signature": signature,
-            },
-        )
-        reconciliation = await LinearReconciler(state=app.state.podium, transport=transport).reconcile_once()
-
-    assert webhook.json()["queued"] == 1
-    assert reconciliation["queued"] == 0
-    dispatches = app.state.podium.store._load_map("dispatches.json")
-    assert len(dispatches) == 1
-    assert next(iter(dispatches.values()))["intake_key"] == "linear-issue:issue-1"
 
 
 @pytest.mark.asyncio

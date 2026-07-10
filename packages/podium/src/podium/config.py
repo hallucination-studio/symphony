@@ -17,7 +17,6 @@ class PodiumConfig:
     linear_client_id: str = ""
     linear_client_secret: str = ""
     linear_redirect_uri: str = ""
-    linear_webhook_secret: str = ""
     linear_application_version: int = 1
     linear_reconciliation_interval_seconds: int = 15
     linear_reconciliation_page_size: int = 50
@@ -37,7 +36,6 @@ class PodiumConfig:
             linear_client_id=os.environ.get("LINEAR_CLIENT_ID", "").strip(),
             linear_client_secret=os.environ.get("LINEAR_CLIENT_SECRET", "").strip(),
             linear_redirect_uri=os.environ.get("LINEAR_REDIRECT_URI", "").strip(),
-            linear_webhook_secret=os.environ.get("LINEAR_WEBHOOK_SECRET", "").strip(),
             linear_application_version=_env_int("LINEAR_APPLICATION_VERSION", 1),
             linear_reconciliation_interval_seconds=_env_int(
                 "PODIUM_LINEAR_RECONCILIATION_INTERVAL_SECONDS",

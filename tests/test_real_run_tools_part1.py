@@ -619,7 +619,7 @@ def test_real_symphony_e2e_overall_dod_combines_required_probes() -> None:
     assert "PODIUM_LINEAR_APP_ACCESS_TOKEN" in source
     assert "Linear app actor token is required" in source
     assert "app:assignable" in source
-    assert "app:mentionable" in source
+    assert "app:mentionable" not in source
     assert "asyncpg.connect" in source
     assert "await start_e2e_postgres_if_needed" in source
 

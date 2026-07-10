@@ -16,7 +16,7 @@ RUNTIME_CHECK_NAMES = {
     "runtime_config_validity",
     "project_label_state",
 }
-REQUIRED_LINEAR_SCOPES = {"read", "write", "app:assignable", "app:mentionable"}
+REQUIRED_LINEAR_SCOPES = {"read", "write", "app:assignable"}
 
 
 class SmokeCheckError(RuntimeError):
@@ -95,9 +95,8 @@ def valid_runtime_config_version(config: Any, group_id: str) -> int:
 def intake_ready(installation: dict[str, Any] | None) -> bool:
     if not installation:
         return False
-    webhook = installation.get("webhook_state") == "healthy" and bool(installation.get("last_webhook_at"))
     polling = installation.get("reconciliation_state") == "healthy" and bool(installation.get("last_reconciliation_at"))
-    return bool(webhook or polling)
+    return bool(polling)
 
 
 def installation_identity_ready(installation: dict[str, Any] | None, callback_ready: bool) -> bool:
@@ -113,7 +112,6 @@ def installation_identity_ready(installation: dict[str, Any] | None, callback_re
         and expires_at > datetime.now(timezone.utc)
         and REQUIRED_LINEAR_SCOPES <= scopes
         and str(installation.get("actor") or "").lower() == "app"
-        and installation.get("supports_agent_sessions") is True
         and installation.get("linear_organization_id")
         and installation.get("app_user_id")
     )
@@ -134,7 +132,7 @@ def recommendation(name: str) -> str:
         "callback_acceptance": "Authorize a Linear application",
         "installation_identity": "Reauthorize Linear with an app actor",
         "selected_project_access": "Select accessible Linear projects",
-        "intake_health": "Restore signed webhooks or healthy reconciliation",
+        "intake_health": "Restore healthy Linear reconciliation",
         "ready_bindings": "Bind every selected project to a ready Conductor",
         "runtime_connectivity": "Bring every bound Conductor online",
         "runtime_config_validity": "Publish a valid runtime configuration",

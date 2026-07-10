@@ -59,7 +59,6 @@ class ConductorManagedRunStore(ConductorManagedRunStoreViewMixin, ConductorManag
         payload = {
             "issue_title": str(event.get("issue_title") or event.get("title") or issue_identifier or parent_issue_id),
             "issue_description": str(event.get("issue_description") or event.get("description") or ""),
-            "agent_session_id": str(event.get("agent_session_id") or ""),
             "instance_id": instance_id,
         }
         with self.connect() as connection:

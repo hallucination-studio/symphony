@@ -83,7 +83,6 @@ async def _ready_workspace(
     assert installation is not None
     await app.state.podium.update_linear_installation_health(
         installation,
-        webhook_state="failed",
         reconciliation_state="healthy",
         last_reconciliation_at=utc_now_iso(),
     )
@@ -430,7 +429,7 @@ async def test_smoke_preflight_rejects_expired_or_under_scoped_installation() ->
 
 
 @pytest.mark.asyncio
-async def test_signed_webhook_health_can_replace_reconciliation_for_smoke_preflight() -> None:
+async def test_reconciliation_health_is_required_for_smoke_preflight() -> None:
     app = make_app()
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
         user_id, _enrolled_rows = await _ready_workspace(client, app)
@@ -438,14 +437,12 @@ async def test_signed_webhook_health_can_replace_reconciliation_for_smoke_prefli
         assert installation is not None
         await app.state.podium.update_linear_installation_health(
             installation,
-            webhook_state="healthy",
-            last_webhook_at=utc_now_iso(),
             reconciliation_state="degraded",
             last_reconciliation_at=None,
         )
 
         started = await client.post("/api/v1/onboarding/smoke-check")
 
-    assert started.status_code == 202
-    assert started.json()["status"] == "running"
-    assert next(check for check in started.json()["checks"] if check["name"] == "intake_health")["passed"] is True
+    assert started.status_code == 200
+    assert started.json()["status"] == "failed"
+    assert next(check for check in started.json()["checks"] if check["name"] == "intake_health")["passed"] is False

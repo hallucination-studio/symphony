@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import base64
+import hashlib
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from .podium_shared import utc_now_iso
+from .podium_shared import hash_secret, utc_now_iso
 
 
 class LinearApplicationNotConfigured(RuntimeError):
@@ -17,7 +19,7 @@ class LinearApplicationVersionConflict(RuntimeError):
 
 class PodiumLinearInstallationsMixin:
     async def stage_default_linear_application(self, user_id: str) -> dict[str, Any]:
-        if not self.linear_client_id or not self.linear_client_secret or not self.linear_webhook_secret:
+        if not self.linear_client_id or not self.linear_client_secret:
             raise LinearApplicationNotConfigured("linear_default_application_not_configured")
         version = max(1, int(self.linear_application_version or 1))
         existing = await self._application_by_source_version(user_id, "default", version)
@@ -27,7 +29,6 @@ class PodiumLinearInstallationsMixin:
             version=version,
             client_id=self.linear_client_id,
             client_secret=self.linear_client_secret,
-            webhook_secret=self.linear_webhook_secret,
         )
         if existing is not None:
             if not self._same_application(existing, expected):
@@ -42,7 +43,6 @@ class PodiumLinearInstallationsMixin:
         *,
         client_id: str,
         client_secret: str,
-        webhook_secret: str,
     ) -> dict[str, Any]:
         configs = await self.list_linear_application_configs(user_id)
         versions = [int(row.get("version") or 0) for row in configs if row.get("source") == "custom"]
@@ -52,7 +52,6 @@ class PodiumLinearInstallationsMixin:
             version=max(versions, default=0) + 1,
             client_id=client_id,
             client_secret=client_secret,
-            webhook_secret=webhook_secret,
         )
         await self.store.save_linear_application_config(self._application_to_disk(config))
         await self.store.set_linear_application_preference(user_id, str(config["id"]))
@@ -79,22 +78,31 @@ class PodiumLinearInstallationsMixin:
         rows = await self.store.list_linear_application_configs(user_id)
         return [self._application_from_disk(row) for row in rows]
 
-    async def create_linear_oauth_state(self, user_id: str, config: dict[str, Any]) -> str:
+    async def create_linear_oauth_state(self, user_id: str, config: dict[str, Any]) -> dict[str, str]:
         token = secrets.token_urlsafe(32)
+        verifier = secrets.token_urlsafe(64)
+        challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")
         expires_at = (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat().replace("+00:00", "Z")
         await self.store.save_oauth_state(
-            token,
+            hash_secret(token),
             {
                 "workspace_id": user_id,
                 "application_config_id": str(config["id"]),
                 "application_config_version": int(config["version"]),
+                "code_verifier_enc": self.encrypt_secret(verifier),
                 "expires_at": expires_at,
             },
         )
-        return token
+        return {"state": token, "code_challenge": challenge}
 
     async def consume_linear_oauth_state(self, token: str) -> dict[str, Any] | None:
-        return await self.store.consume_oauth_state(token)
+        row = await self.store.consume_oauth_state(hash_secret(token))
+        if row is None:
+            return None
+        return {
+            **row,
+            "code_verifier": self.decrypt_secret(str(row.pop("code_verifier_enc"))),
+        }
 
     async def save_linear_installation_record(self, installation: dict[str, Any]) -> None:
         row = dict(installation)
@@ -140,7 +148,6 @@ class PodiumLinearInstallationsMixin:
             "version": int(config["version"]),
             "client_id": str(config["client_id"]),
             "callback_url": str(config["callback_url"]),
-            "webhook_url": str(config["webhook_url"]),
         }
 
     def linear_installation_public(self, row: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -151,9 +158,9 @@ class PodiumLinearInstallationsMixin:
             for key in (
                 "id", "application_config_id", "application_config_version", "application_source",
                 "state", "actor", "linear_organization_id", "organization_url_key", "organization_name",
-                "app_user_id", "supports_agent_sessions", "expires_at", "error_code",
+                "app_user_id", "expires_at", "error_code",
                 "sanitized_reason", "retryable", "action_required", "next_action", "created_at", "updated_at",
-                "webhook_state", "last_webhook_at", "reconciliation_state", "last_reconciliation_at",
+                "reconciliation_state", "last_reconciliation_at",
                 "reconciliation_error", "reconciliation_retry_count",
             )
         } | {"scope": list(row.get("scope") or []), "project_count": len(row.get("projects") or [])}
@@ -172,20 +179,17 @@ class PodiumLinearInstallationsMixin:
             "id": f"linear_app_{secrets.token_urlsafe(12)}",
             **values,
             "callback_url": self.linear_callback_url,
-            "webhook_url": self.linear_webhook_url,
             "created_at": utc_now_iso(),
         }
 
     def _application_to_disk(self, config: dict[str, Any]) -> dict[str, Any]:
         row = dict(config)
         row["client_secret_enc"] = self.encrypt_secret(str(row.pop("client_secret")))
-        row["webhook_secret_enc"] = self.encrypt_secret(str(row.pop("webhook_secret")))
         return row
 
     def _application_from_disk(self, raw: dict[str, Any]) -> dict[str, Any]:
         row = dict(raw)
         row["client_secret"] = self.decrypt_secret(str(row.pop("client_secret_enc")))
-        row["webhook_secret"] = self.decrypt_secret(str(row.pop("webhook_secret_enc")))
         return row
 
     def _workspace_installation_from_disk(self, raw: dict[str, Any]) -> dict[str, Any]:
@@ -196,14 +200,10 @@ class PodiumLinearInstallationsMixin:
 
     @staticmethod
     def _same_application(current: dict[str, Any], expected: dict[str, Any]) -> bool:
-        keys = ("client_id", "client_secret", "webhook_secret", "callback_url", "webhook_url")
+        keys = ("client_id", "client_secret", "callback_url")
         return all(current.get(key) == expected.get(key) for key in keys)
 
     @property
     def linear_callback_url(self) -> str:
         configured = str(self.linear_redirect_uri or "").strip()
         return configured or f"{str(self.podium_base_url).rstrip('/')}/api/v1/linear/oauth/callback"
-
-    @property
-    def linear_webhook_url(self) -> str:
-        return f"{str(self.podium_base_url).rstrip('/')}/api/v1/linear/webhooks"

@@ -8,7 +8,6 @@ from fastapi.responses import JSONResponse
 
 from .podium_routes_runtime_enrollment import register_runtime_identity_routes
 from .podium_routes_conductor_bindings import register_conductor_binding_routes
-from .podium_routes_runtime_helpers import normalize_agent_session_event
 from .podium_routes_runtime_ops import register_runtime_ops_routes
 from .podium_routes_runtime_proxy import register_linear_proxy_route
 from .podium_routes_runtime_smoke import register_runtime_smoke_route

@@ -126,10 +126,7 @@ class JsonStoreDispatchMixin:
             if same_binding and str(dispatch.get("intake_key") or ""):
                 if existing.get("intake_key") == dispatch.get("intake_key"):
                     return False
-            if same_binding and str(dispatch.get("agent_session_id") or ""):
-                if existing.get("agent_session_id") == dispatch.get("agent_session_id"):
-                    return False
-            elif same_binding and existing.get("issue_id") == dispatch.get("issue_id") and not str(existing.get("agent_session_id") or ""):
+            if same_binding and existing.get("issue_id") == dispatch.get("issue_id"):
                 return False
         rows[str(dispatch["dispatch_id"])] = dict(dispatch)
         self._write("dispatches.json", rows)
