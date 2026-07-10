@@ -76,6 +76,9 @@ async def test_install_script_exists_and_uses_enrollment_token() -> None:
     assert 'token = os.environ.get("PODIUM_ENROLLMENT_TOKEN", "")' in script
     assert '"$ENROLLMENT_TOKEN" <<' not in script
     assert "token = sys.argv[2]" not in script
+    assert 'ENROLLMENT_RESULT_PATH="${PODIUM_ENROLLMENT_RESULT_PATH:-}"' in script
+    assert 'umask 077' in script
+    assert 'chmod 600 "$ENROLLMENT_RESULT_PATH"' in script
     assert "/api/v1/runtime/enroll" in script
     assert "/api/settings" in script
 
