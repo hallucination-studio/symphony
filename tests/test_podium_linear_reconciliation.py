@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import json
 import time
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
@@ -23,13 +24,14 @@ from test_podium_conductor_channels_support import (
 
 
 def _issue(*, issue_id: str = "issue-1", title: str = "Do the work", description: str = "") -> dict[str, Any]:
+    now = datetime.now(timezone.utc)
     return {
         "id": issue_id,
         "identifier": "ALPHA-1",
         "title": title,
         "description": description,
-        "createdAt": "2026-07-10T10:00:00Z",
-        "updatedAt": "2026-07-10T10:01:00Z",
+        "createdAt": (now - timedelta(seconds=30)).isoformat().replace("+00:00", "Z"),
+        "updatedAt": (now - timedelta(seconds=10)).isoformat().replace("+00:00", "Z"),
         "project": {"id": "project-alpha", "slugId": "ALPHA"},
         "delegate": {"id": "agent-alpha"},
         "parent": None,
@@ -50,11 +52,12 @@ async def _ready(client: httpx.AsyncClient, app: Any) -> tuple[str, dict[str, An
 @pytest.mark.asyncio
 async def test_reconciliation_uses_active_installation_token_and_stable_project_id() -> None:
     seen: dict[str, Any] = {}
+    issue = _issue()
 
     def transport(request: httpx.Request) -> httpx.Response:
         seen["authorization"] = request.headers.get("Authorization")
         seen["variables"] = json.loads(request.content)["variables"]
-        return httpx.Response(200, json={"data": {"issues": {"nodes": [_issue()]}}})
+        return httpx.Response(200, json={"data": {"issues": {"nodes": [issue]}}})
 
     app = make_app()
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
@@ -71,7 +74,7 @@ async def test_reconciliation_uses_active_installation_token_and_stable_project_
     assert seen["variables"]["delegateId"] == "agent-alpha"
     assert lease.json()["dispatch"]["issue_id"] == "issue-1"
     state = await app.state.podium.store.get_linear_reconciliation_state(binding_id)
-    assert state["cursor"] == "2026-07-10T10:01:00Z"
+    assert state["cursor"] == issue["updatedAt"]
     assert state["last_error"] == ""
 
 
