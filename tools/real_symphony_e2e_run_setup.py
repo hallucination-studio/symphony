@@ -29,6 +29,7 @@ from real_symphony_e2e_common import (
     utc_now,
     wait_for_http_ready,
 )
+from real_symphony_e2e_errors import E2EConfigurationError
 from real_symphony_e2e_linear import (
     create_linear_issue,
     delegate_linear_issue,
@@ -39,10 +40,11 @@ from real_symphony_e2e_linear import (
 from real_symphony_e2e_preflight import (
     _codex_settings_from_args,
     build_runtime_config_payload,
+    cleanup_staged_codex_home,
     e2e_codex_home_seed_source,
     run_codex_connectivity_probe,
     run_codex_planner_shaped_probe,
-    stage_codex_home_seed,
+    stage_e2e_codex_home_seed,
     start_e2e_postgres_if_needed,
 )
 from real_symphony_e2e_run_state import E2ERunState
@@ -65,10 +67,22 @@ def _runtime_env() -> dict[str, str]:
 def _linear_token_and_agent() -> tuple[str, str]:
     token = os.environ.get("PODIUM_LINEAR_APP_ACCESS_TOKEN", "").strip()
     if not token:
-        raise RuntimeError("Linear app actor token is required: set PODIUM_LINEAR_APP_ACCESS_TOKEN")
+        raise E2EConfigurationError(
+            failure_class="environment_failure",
+            error_code="linear_app_access_token_required",
+            sanitized_reason="Linear app actor token is required.",
+            retryable=False,
+            next_action="set_podium_linear_app_access_token",
+        )
     agent_app_user_id = os.environ.get("PODIUM_LINEAR_APPLICATION_ID", "").strip()
     if not agent_app_user_id:
-        raise RuntimeError("PODIUM_LINEAR_APPLICATION_ID is required and must be the Linear custom-agent app user's id.")
+        raise E2EConfigurationError(
+            failure_class="environment_failure",
+            error_code="linear_application_id_required",
+            sanitized_reason="PODIUM_LINEAR_APPLICATION_ID is required for the Linear custom-agent app user.",
+            retryable=False,
+            next_action="set_podium_linear_application_id",
+        )
     return token, agent_app_user_id
 
 
@@ -94,29 +108,34 @@ async def build_initial_state(args: argparse.Namespace) -> E2ERunState:
     root = args.out.resolve()
     root.mkdir(parents=True, exist_ok=True)
     run_id = "symphony-e2e-matrix-" + datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S") + "-" + uuid.uuid4().hex[:6]
-    state = E2ERunState(
-        args=args,
-        token=token,
-        agent_app_user_id=agent_app_user_id,
-        root=root,
-        evidence=Evidence(root / "real-symphony-e2e-report.json"),
-        env=_runtime_env(),
-        bin_dir=Path.cwd() / ".venv" / "bin",
-        run_id=run_id,
-        pipeline_scenario=_pipeline_scenario(args),
-        permission_approval_probe=_effective_permission_approval_probe(args),
-        workspace_id=f"real-workspace-{run_id}",
-        fixture=root / "fixture-repo",
-        podium_port=allocate_port(),
-        conductor_port=allocate_port(),
-        data_root=root / "conductor-data",
-        staged_codex_home=stage_codex_home_seed(source=e2e_codex_home_seed_source(), destination=root / "codex-home-source"),
-    )
-    _record_codex_home_source(state)
-    state.evidence.data["run_id"] = state.run_id
-    state.evidence.data["managed_run_scenario"] = state.pipeline_scenario
-    state.evidence.write()
-    return state
+    staged_codex_home = stage_e2e_codex_home_seed(source=e2e_codex_home_seed_source())
+    try:
+        state = E2ERunState(
+            args=args,
+            token=token,
+            agent_app_user_id=agent_app_user_id,
+            root=root,
+            evidence=Evidence(root / "real-symphony-e2e-report.json"),
+            env=_runtime_env(),
+            bin_dir=Path.cwd() / ".venv" / "bin",
+            run_id=run_id,
+            pipeline_scenario=_pipeline_scenario(args),
+            permission_approval_probe=_effective_permission_approval_probe(args),
+            workspace_id=f"real-workspace-{run_id}",
+            fixture=root / "fixture-repo",
+            podium_port=allocate_port(),
+            conductor_port=allocate_port(),
+            data_root=root / "conductor-data",
+            staged_codex_home=staged_codex_home,
+        )
+        _record_codex_home_source(state)
+        state.evidence.data["run_id"] = state.run_id
+        state.evidence.data["managed_run_scenario"] = state.pipeline_scenario
+        state.evidence.write()
+        return state
+    except Exception:
+        cleanup_staged_codex_home(staged_codex_home)
+        raise
 
 
 async def run_connectivity_preflight(state: E2ERunState) -> bool:

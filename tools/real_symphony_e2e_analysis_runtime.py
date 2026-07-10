@@ -49,7 +49,11 @@ def write_wait_artifacts(
 def conductor_human_actions(pipeline_payload: dict[str, Any]) -> list[dict[str, Any]]:
     runs = pipeline_payload.get("runs")
     if isinstance(runs, list):
-        return _managed_run_human_actions(runs)
+        actions = _managed_run_human_actions(runs)
+        runtime_waits = pipeline_payload.get("runtime_waits")
+        if isinstance(runtime_waits, list):
+            actions.extend(_managed_run_runtime_wait_actions(runs, runtime_waits))
+        return actions
     nodes = {
         str(node.get("node_id") or ""): node
         for node in pipeline_payload.get("nodes", [])
@@ -173,6 +177,42 @@ def _managed_run_human_actions(runs: list[Any]) -> list[dict[str, Any]]:
                     "details": {"wait_kind": "human_approval_required", "run_id": str(run.get("run_id") or "")},
                 }
             )
+    return actions
+
+
+def _managed_run_runtime_wait_actions(runs: list[Any], waits: list[Any]) -> list[dict[str, Any]]:
+    runs_by_id = {
+        str(run.get("run_id") or ""): run
+        for run in runs
+        if isinstance(run, dict) and run.get("run_id")
+    }
+    actions: list[dict[str, Any]] = []
+    for wait in waits:
+        if not isinstance(wait, dict) or str(wait.get("status") or "") not in {"waiting", "open"}:
+            continue
+        work_item_id = str(wait.get("work_item_id") or "")
+        run = runs_by_id.get(str(wait.get("run_id") or ""), {})
+        wait_kind = str(wait.get("wait_kind") or "") or None
+        actions.append(
+            {
+                "wait_id": str(wait.get("wait_id") or ""),
+                "node_id": work_item_id,
+                "work_item_id": work_item_id,
+                "issue_id": _projection_issue_id(run, work_item_id),
+                "issue_identifier": str(run.get("issue_identifier") or "") or None,
+                "state": "blocked",
+                "status": str(wait.get("status") or ""),
+                "reason": wait_kind,
+                "child_issue_id": str(wait.get("child_issue_id") or "") or None,
+                "child_identifier": str(wait.get("child_issue_identifier") or wait.get("child_identifier") or "") or None,
+                "child_url": str(wait.get("child_url") or "") or None,
+                "details": {
+                    "attempt_id": str(wait.get("attempt_id") or ""),
+                    "lease_id": str(wait.get("lease_id") or ""),
+                    "wait_kind": wait_kind or "",
+                },
+            }
+        )
     return actions
 
 

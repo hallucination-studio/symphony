@@ -3,16 +3,19 @@ from __future__ import annotations
 import argparse
 import os
 import shutil
+import tempfile
 from pathlib import Path
 from typing import Any
 
 from performer_api.config import sanitize_codex_config_template
 from real_symphony_e2e_common import utc_now
+from real_symphony_e2e_errors import E2EConfigurationError
 
 
 CODEX_HOME_SEED_FILES = ("config.toml", "auth.json", "version.json", "models_cache.json")
 CODEX_HOME_SEED_ENV = "SYMPHONY_E2E_CODEX_HOME_SEED"
 DEFAULT_E2E_HARD_TURN_TIMEOUT_MS = 900_000
+_E2E_CODEX_STAGING_PREFIX = "symphony-e2e-codex-"
 
 
 def build_runtime_config_payload(
@@ -74,9 +77,12 @@ def _runtime_profiles(settings: dict[str, Any], pipeline_scenario: str) -> dict[
 def e2e_codex_home_seed_source() -> Path:
     raw_source = os.environ.get(CODEX_HOME_SEED_ENV, "").strip()
     if not raw_source:
-        raise RuntimeError(
-            f"{CODEX_HOME_SEED_ENV} is required and must point to a fixed copied Codex config seed. "
-            "Do not point real-run E2E at the default user .codex directory."
+        raise E2EConfigurationError(
+            failure_class="environment_failure",
+            error_code="managed_codex_home_seed_required",
+            sanitized_reason=f"{CODEX_HOME_SEED_ENV} is required and must point to a fixed copied Codex config seed.",
+            retryable=False,
+            next_action="set_symphony_e2e_codex_home_seed",
         )
     return Path(raw_source)
 
@@ -84,19 +90,64 @@ def e2e_codex_home_seed_source() -> Path:
 def stage_codex_home_seed(*, source: Path, destination: Path) -> Path:
     source = source.expanduser().resolve()
     if source.name == ".codex":
-        raise RuntimeError(f"Codex config source must be a fixed copied seed, not the default user .codex directory: {source}")
+        raise _invalid_codex_home_seed(
+            "Codex config source must be a fixed copied seed, not the default user .codex directory."
+        )
     if not source.is_dir():
-        raise RuntimeError(f"Codex config source is not a directory: {source}")
+        raise _invalid_codex_home_seed("Codex config source is not a directory.")
     if destination.exists():
         shutil.rmtree(destination)
     destination.mkdir(parents=True)
     for relative in CODEX_HOME_SEED_FILES:
         _copy_seed_file(source, destination, relative)
     if not (destination / "config.toml").is_file():
-        raise RuntimeError(f"Codex config source is missing config.toml: {source}")
+        raise _invalid_codex_home_seed("Codex config source is missing config.toml.")
     if not (destination / "auth.json").is_file():
-        raise RuntimeError(f"Codex config source is missing auth.json: {source}")
+        raise _invalid_codex_home_seed("Codex config source is missing auth.json.")
     return destination
+
+
+def stage_e2e_codex_home_seed(*, source: Path) -> Path:
+    staging_root = Path(tempfile.mkdtemp(prefix=_E2E_CODEX_STAGING_PREFIX))
+    staged_home = staging_root / "home"
+    try:
+        return stage_codex_home_seed(source=source, destination=staged_home)
+    except Exception:
+        cleanup_staged_codex_home(staged_home)
+        raise
+
+
+def cleanup_staged_codex_home(staged_home: Path | None) -> None:
+    if staged_home is None:
+        return
+    staging_root = staged_home.parent
+    if not staging_root.name.startswith(_E2E_CODEX_STAGING_PREFIX):
+        raise RuntimeError("Refusing to remove a Codex staging directory without the E2E staging prefix.")
+    if staging_root.exists():
+        shutil.rmtree(staging_root)
+
+
+def scrub_e2e_runtime_credentials(data_root: Path | None) -> int:
+    if data_root is None or not data_root.exists():
+        return 0
+    removed = 0
+    for auth_path in data_root.rglob("auth.json"):
+        if "runtime-homes" not in auth_path.parts:
+            continue
+        if auth_path.is_file() or auth_path.is_symlink():
+            auth_path.unlink()
+            removed += 1
+    return removed
+
+
+def _invalid_codex_home_seed(reason: str) -> E2EConfigurationError:
+    return E2EConfigurationError(
+        failure_class="environment_failure",
+        error_code="managed_codex_home_seed_invalid",
+        sanitized_reason=reason,
+        retryable=False,
+        next_action="stage_approved_codex_home_seed",
+    )
 
 
 def _copy_seed_file(source: Path, destination: Path, relative: str) -> None:

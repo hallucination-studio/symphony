@@ -1,4 +1,5 @@
 from test_real_run_tools_support import *  # noqa: F401,F403
+import shutil
 import subprocess
 
 def test_runtime_claims_audit_flags_errorless_retry_and_claim_stall() -> None:
@@ -727,6 +728,18 @@ def test_real_symphony_e2e_run_does_not_default_to_user_codex_home() -> None:
     assert "args.codex_home_source" not in source
 
 
+def test_real_symphony_e2e_missing_linear_token_is_configuration_failure(monkeypatch) -> None:
+    tool = load_tool("real_symphony_e2e_run_setup")
+    monkeypatch.delenv("PODIUM_LINEAR_APP_ACCESS_TOKEN", raising=False)
+
+    with pytest.raises(tool.E2EConfigurationError) as error:
+        tool._linear_token_and_agent()
+
+    assert error.value.failure_class == "environment_failure"
+    assert error.value.error_code == "linear_app_access_token_required"
+    assert error.value.retryable is False
+
+
 def test_real_symphony_e2e_rejects_direct_user_codex_home_seed(tmp_path: Path) -> None:
     tool = load_tool("real_symphony_e2e")
     home = tmp_path / "home"
@@ -756,6 +769,47 @@ def test_real_symphony_e2e_stages_codex_home_source_before_injection(tmp_path: P
     assert (staged / "auth.json").is_file()
     assert not (staged / "history.jsonl").exists()
     assert not (staged / "sessions").exists()
+
+
+async def test_real_symphony_e2e_stages_codex_home_outside_evidence_root(tmp_path: Path, monkeypatch) -> None:
+    tool = load_tool("real_symphony_e2e_run_setup")
+    source = tmp_path / "seed"
+    source.mkdir()
+    (source / "config.toml").write_text("model = 'gpt-5.3-codex'\n", encoding="utf-8")
+    (source / "auth.json").write_text('{"token":"secret-token"}\n', encoding="utf-8")
+    monkeypatch.setattr(tool, "_linear_token_and_agent", lambda: ("linear-token", "agent-id"))
+    monkeypatch.setattr(tool, "e2e_codex_home_seed_source", lambda: source)
+
+    state = await tool.build_initial_state(
+        SimpleNamespace(out=tmp_path / "evidence", pipeline_scenario="basic", permission_approval_probe=False)
+    )
+    staging_root = state.staged_codex_home.parent
+    try:
+        assert staging_root.name.startswith("symphony-e2e-codex-")
+        assert not state.staged_codex_home.is_relative_to(state.root)
+        assert not (state.root / "codex-home-source").exists()
+    finally:
+        shutil.rmtree(staging_root, ignore_errors=True)
+
+
+def test_real_symphony_e2e_scrubs_only_runtime_home_credentials(tmp_path: Path) -> None:
+    tool = load_tool("real_symphony_e2e_preflight_core")
+    data_root = tmp_path / "conductor-data"
+    runtime_auth = data_root / "instances" / "inst-1" / "runtime-homes" / "plan" / "plan-1" / "codex" / "auth.json"
+    runtime_auth.parent.mkdir(parents=True)
+    runtime_auth.write_text('{"token":"runtime-secret"}\n', encoding="utf-8")
+    runtime_config = runtime_auth.with_name("config.toml")
+    runtime_config.write_text("model = 'gpt-5.5'\n", encoding="utf-8")
+    seed_auth = tmp_path / "seed" / "auth.json"
+    seed_auth.parent.mkdir()
+    seed_auth.write_text('{"token":"seed-secret"}\n', encoding="utf-8")
+
+    removed = tool.scrub_e2e_runtime_credentials(data_root)
+
+    assert removed == 1
+    assert not runtime_auth.exists()
+    assert runtime_config.is_file()
+    assert seed_auth.is_file()
 
 
 def test_real_symphony_e2e_sanitizes_codex_config_template(tmp_path: Path) -> None:

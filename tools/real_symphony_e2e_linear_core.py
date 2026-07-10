@@ -7,6 +7,12 @@ from typing import Any
 import httpx
 
 from real_symphony_e2e_common import LINEAR_ENDPOINT
+from real_symphony_e2e_errors import E2EFailure
+
+
+class LinearE2EError(E2EFailure):
+    pass
+
 
 async def linear_graphql(token: str, query: str, variables: dict[str, Any]) -> dict[str, Any]:
     last_error: Exception | None = None
@@ -19,6 +25,8 @@ async def linear_graphql(token: str, query: str, variables: dict[str, Any]) -> d
                     json={"query": query, "variables": variables},
                     headers={"Authorization": token, "Content-Type": "application/json"},
                 )
+            if response.status_code in {401, 403}:
+                raise _linear_authentication_error(response.status_code)
             try:
                 payload = response.json()
             except json.JSONDecodeError as exc:
@@ -28,15 +36,43 @@ async def linear_graphql(token: str, query: str, variables: dict[str, Any]) -> d
                         indent=2,
                     )
                 ) from exc
+            if _has_linear_authentication_error(payload):
+                raise _linear_authentication_error(response.status_code)
             if response.status_code != 200 or payload.get("errors"):
                 raise RuntimeError(json.dumps({"status": response.status_code, "payload": payload}, indent=2))
             return payload["data"]
+        except LinearE2EError:
+            raise
         except (httpx.HTTPError, TimeoutError, RuntimeError) as exc:
             last_error = exc
             if attempt == max_attempts:
                 break
             await asyncio.sleep(min(2 ** (attempt - 1), 20))
     raise RuntimeError(f"Linear GraphQL request failed after retries: {last_error!r}") from last_error
+
+
+def _linear_authentication_error(status_code: int) -> LinearE2EError:
+    return LinearE2EError(
+        failure_class="credential_or_config_failure",
+        error_code="linear_authentication_failed",
+        sanitized_reason=f"Linear authentication or authorization failed (HTTP {status_code}).",
+        retryable=False,
+        next_action="refresh_linear_app_access_token",
+    )
+
+
+def _has_linear_authentication_error(payload: Any) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    errors = payload.get("errors")
+    if not isinstance(errors, list):
+        return False
+    auth_codes = {"AUTHENTICATION_ERROR", "AUTHORIZATION_ERROR", "FORBIDDEN"}
+    return any(
+        isinstance(error, dict)
+        and str((error.get("extensions") or {}).get("code") or "").upper() in auth_codes
+        for error in errors
+    )
 
 
 async def fetch_linear_viewer(token: str) -> dict[str, Any]:

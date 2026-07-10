@@ -646,6 +646,53 @@ def test_real_symphony_e2e_detects_runtime_wait_human_action() -> None:
     ]
 
 
+def test_real_symphony_e2e_extracts_runtime_waits_from_managed_run_view() -> None:
+    tool = load_tool("real_symphony_e2e")
+
+    actions = tool.conductor_human_actions(
+        {
+            "runs": [
+                {
+                    "run_id": "run-1",
+                    "issue_identifier": "HELL-1",
+                    "work_items": [],
+                    "linear_projections": [],
+                }
+            ],
+            "runtime_waits": [
+                {
+                    "run_id": "run-1",
+                    "wait_id": "runtime-wait-1",
+                    "work_item_id": "wi-1",
+                    "attempt_id": "attempt-1",
+                    "lease_id": "lease-1",
+                    "wait_kind": "approval_requested",
+                    "status": "waiting",
+                    "child_issue_id": "child-runtime-1",
+                    "child_issue_identifier": "HELL-2",
+                }
+            ],
+        }
+    )
+
+    assert actions == [
+        {
+            "wait_id": "runtime-wait-1",
+            "node_id": "wi-1",
+            "work_item_id": "wi-1",
+            "issue_id": None,
+            "issue_identifier": "HELL-1",
+            "state": "blocked",
+            "status": "waiting",
+            "reason": "approval_requested",
+            "child_issue_id": "child-runtime-1",
+            "child_identifier": "HELL-2",
+            "child_url": None,
+            "details": {"attempt_id": "attempt-1", "lease_id": "lease-1", "wait_kind": "approval_requested"},
+        }
+    ]
+
+
 def test_real_symphony_e2e_wait_uses_integrated_manifest_repository_result_path(tmp_path) -> None:
     tool = load_tool("real_symphony_e2e_wait")
     repository = tmp_path / "repo"
@@ -1909,3 +1956,244 @@ def test_real_symphony_e2e_wait_artifacts_are_written_on_early_exit(tmp_path: Pa
     assert Path(evidence.data["artifacts"]["final_issue"]).exists()
     assert "state" not in result
     assert "ops" not in result
+
+
+async def test_real_symphony_e2e_early_exit_archives_available_runtime_evidence(tmp_path: Path, monkeypatch) -> None:
+    tool = load_tool("real_symphony_e2e_early_exit")
+    root = tmp_path / "e2e"
+    data_root = root / "conductor-data"
+    instance_root = data_root / "instances" / "inst-1"
+    (instance_root / "state").mkdir(parents=True)
+    (instance_root / "logs").mkdir()
+    (root / "podium.log").write_text("podium event\n", encoding="utf-8")
+    (root / "conductor.log").write_text("conductor event\n", encoding="utf-8")
+    (instance_root / "state" / "performer.json").write_text("{}", encoding="utf-8")
+    (instance_root / "state" / "ops.json").write_text("{}", encoding="utf-8")
+    (instance_root / "logs" / "performer.log").write_text("performer event\n", encoding="utf-8")
+    evidence = load_tool("real_symphony_e2e").Evidence(root / "report.json")
+    state = SimpleNamespace(
+        evidence=evidence,
+        root=root,
+        data_root=data_root,
+        instance_id="inst-1",
+        conductor_port=8081,
+        token="token",
+        linear={},
+    )
+    monkeypatch.setattr(tool, "http_json", lambda *_args, **_kwargs: (503, {"error": "unavailable"}))
+
+    await tool.archive_early_exit_artifacts(state)
+
+    assert Path(evidence.data["artifacts"]["podium_log"]).exists()
+    assert Path(evidence.data["artifacts"]["conductor_log"]).exists()
+    assert Path(evidence.data["artifacts"]["instance_log"]).exists()
+    snapshot = Path(evidence.data["artifacts"]["early_managed_runs_view"])
+    assert json.loads(snapshot.read_text(encoding="utf-8"))["status"] == 503
+    assert evidence.data["artifacts"]["managed_run_e2e_report"] == str(root / "report.json")
+
+
+async def test_real_symphony_e2e_archives_before_process_cleanup_after_unhandled_exception(tmp_path: Path, monkeypatch) -> None:
+    tool = load_tool("real_symphony_e2e_run_orchestrator")
+    evidence = load_tool("real_symphony_e2e").Evidence(tmp_path / "report.json")
+    staging_root = tmp_path / "symphony-e2e-codex-test"
+    staged_codex_home = staging_root / "home"
+    staged_codex_home.mkdir(parents=True)
+    data_root = tmp_path / "conductor-data"
+    runtime_auth = data_root / "instances" / "inst-1" / "runtime-homes" / "plan" / "plan-1" / "codex" / "auth.json"
+    runtime_auth.parent.mkdir(parents=True)
+    runtime_auth.write_text('{"token":"runtime-secret"}\n', encoding="utf-8")
+
+    class Process:
+        stopped = False
+
+        def stop(self) -> None:
+            self.stopped = True
+
+    process = Process()
+    state = SimpleNamespace(
+        evidence=evidence,
+        processes=[process],
+        postgres_container=None,
+        staged_codex_home=staged_codex_home,
+        data_root=data_root,
+    )
+    archived_before_cleanup: list[bool] = []
+
+    async def build_initial_state(_args):
+        return state
+
+    async def start_podium_and_enroll(_state) -> None:
+        raise RuntimeError("Authorization: Bearer secret-value failed")
+
+    async def archive_early_exit_artifacts(_state) -> None:
+        archived_before_cleanup.append(process.stopped)
+
+    monkeypatch.setattr(tool, "build_initial_state", build_initial_state)
+    monkeypatch.setattr(tool, "run_connectivity_preflight", lambda _state: _async_true())
+    monkeypatch.setattr(tool, "prepare_fixture_and_cli", lambda _state: None)
+    monkeypatch.setattr(tool, "start_podium_and_enroll", start_podium_and_enroll)
+    monkeypatch.setattr(tool, "archive_early_exit_artifacts", archive_early_exit_artifacts, raising=False)
+    monkeypatch.setattr(tool, "stop_e2e_postgres", lambda _container: None)
+
+    report = await tool.run(SimpleNamespace())
+
+    assert archived_before_cleanup == [False]
+    assert process.stopped is True
+    assert not staging_root.exists()
+    assert not runtime_auth.exists()
+    assert any(
+        check.get("name") == "runtime-config:e2e-runtime-credentials-cleaned" and check.get("removed_auth_files") == 1
+        for check in report["checks"]
+    )
+    assert report["failures"][0]["name"] == "real-e2e:unhandled-exception"
+    assert "secret-value" not in report["failures"][0]["sanitized_reason"]
+
+
+async def test_real_symphony_e2e_scrubs_runtime_credentials_when_process_cleanup_fails(tmp_path: Path, monkeypatch) -> None:
+    tool = load_tool("real_symphony_e2e_run_orchestrator")
+    evidence = load_tool("real_symphony_e2e").Evidence(tmp_path / "report.json")
+    data_root = tmp_path / "conductor-data"
+    runtime_auth = data_root / "instances" / "inst-1" / "runtime-homes" / "plan" / "plan-1" / "codex" / "auth.json"
+    runtime_auth.parent.mkdir(parents=True)
+    runtime_auth.write_text('{"token":"runtime-secret"}\n', encoding="utf-8")
+
+    class Process:
+        def stop(self) -> None:
+            raise RuntimeError("process cleanup failed")
+
+    state = SimpleNamespace(evidence=evidence, processes=[Process()], postgres_container=None, data_root=data_root)
+
+    async def build_initial_state(_args):
+        return state
+
+    async def archive_early_exit_artifacts(_state) -> None:
+        return None
+
+    monkeypatch.setattr(tool, "build_initial_state", build_initial_state)
+    monkeypatch.setattr(tool, "run_connectivity_preflight", lambda _state: _async_false())
+    monkeypatch.setattr(tool, "archive_early_exit_artifacts", archive_early_exit_artifacts, raising=False)
+    monkeypatch.setattr(tool, "stop_e2e_postgres", lambda _container: None)
+
+    report = await tool.run(SimpleNamespace())
+
+    assert not runtime_auth.exists()
+    assert any(failure.get("name") == "real-e2e:process-cleanup-failed" for failure in report["failures"])
+
+
+async def test_real_symphony_e2e_records_bootstrap_failure(tmp_path: Path, monkeypatch) -> None:
+    tool = load_tool("real_symphony_e2e_run_orchestrator")
+    linear = load_tool("real_symphony_e2e_linear_core")
+
+    async def build_initial_state(_args):
+        raise linear.LinearE2EError(
+            failure_class="credential_or_config_failure",
+            error_code="linear_authentication_failed",
+            sanitized_reason="Linear authentication failed.",
+            retryable=False,
+            next_action="refresh_linear_app_access_token",
+        )
+
+    monkeypatch.setattr(tool, "build_initial_state", build_initial_state)
+
+    report = await tool.run(SimpleNamespace(out=tmp_path))
+
+    failure = report["failures"][0]
+    assert failure["failure_class"] == "credential_or_config_failure"
+    assert failure["error_code"] == "linear_authentication_failed"
+    assert failure["next_action"] == "refresh_linear_app_access_token"
+    assert (tmp_path / "real-symphony-e2e-report.json").is_file()
+
+
+async def test_real_symphony_e2e_records_archive_failure_and_still_stops_processes(tmp_path: Path, monkeypatch) -> None:
+    tool = load_tool("real_symphony_e2e_run_orchestrator")
+    evidence = load_tool("real_symphony_e2e").Evidence(tmp_path / "report.json")
+
+    class Process:
+        stopped = False
+
+        def stop(self) -> None:
+            self.stopped = True
+
+    process = Process()
+    state = SimpleNamespace(evidence=evidence, processes=[process], postgres_container=None)
+
+    async def build_initial_state(_args):
+        return state
+
+    async def archive_early_exit_artifacts(_state) -> None:
+        raise RuntimeError("token=secret-value archive failed")
+
+    monkeypatch.setattr(tool, "build_initial_state", build_initial_state)
+    monkeypatch.setattr(tool, "run_connectivity_preflight", lambda _state: _async_false())
+    monkeypatch.setattr(tool, "archive_early_exit_artifacts", archive_early_exit_artifacts, raising=False)
+    monkeypatch.setattr(tool, "stop_e2e_postgres", lambda _container: None)
+
+    report = await tool.run(SimpleNamespace())
+
+    assert process.stopped is True
+    assert report["failures"][0]["name"] == "real-e2e:evidence-archive-failed"
+    assert "secret-value" not in report["failures"][0]["sanitized_reason"]
+
+
+async def test_real_symphony_e2e_linear_auth_failure_is_immediate_and_classified(monkeypatch) -> None:
+    tool = load_tool("real_symphony_e2e_linear_core")
+    calls = 0
+
+    class Response:
+        status_code = 401
+
+        @staticmethod
+        def json() -> dict:
+            return {"errors": [{"message": "Authentication required", "extensions": {"code": "AUTHENTICATION_ERROR"}}]}
+
+    class Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args) -> None:
+            return None
+
+        async def post(self, *_args, **_kwargs) -> Response:
+            nonlocal calls
+            calls += 1
+            return Response()
+
+    monkeypatch.setattr(tool.httpx, "AsyncClient", lambda **_kwargs: Client())
+
+    with pytest.raises(tool.LinearE2EError) as error:
+        await tool.linear_graphql("token", "query Viewer { viewer { id } }", {})
+
+    assert calls == 1
+    assert error.value.failure_class == "credential_or_config_failure"
+    assert error.value.error_code == "linear_authentication_failed"
+    assert error.value.retryable is False
+
+
+def test_real_symphony_e2e_records_external_failure_classification(tmp_path: Path) -> None:
+    early_exit = load_tool("real_symphony_e2e_early_exit")
+    linear = load_tool("real_symphony_e2e_linear_core")
+    evidence = load_tool("real_symphony_e2e").Evidence(tmp_path / "report.json")
+
+    early_exit.record_unhandled_e2e_exception(
+        evidence,
+        linear.LinearE2EError(
+            failure_class="credential_or_config_failure",
+            error_code="linear_authentication_failed",
+            sanitized_reason="Linear authentication failed.",
+            retryable=False,
+            next_action="refresh_linear_app_access_token",
+        ),
+    )
+
+    failure = evidence.data["failures"][0]
+    assert failure["failure_class"] == "credential_or_config_failure"
+    assert failure["error_code"] == "linear_authentication_failed"
+    assert failure["next_action"] == "refresh_linear_app_access_token"
+
+
+async def _async_true() -> bool:
+    return True
+
+
+async def _async_false() -> bool:
+    return False

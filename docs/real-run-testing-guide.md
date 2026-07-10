@@ -29,7 +29,11 @@ PYTHONPATH=$(pwd)/packages/performer-api/src:$(pwd)/packages/performer/src:$(pwd
 Managed Codex runs use a staged seed copy. The runner must not default to
 `~/.codex`. If local credentials are needed, copy only approved seed files into
 a fixed seed directory, set `SYMPHONY_E2E_CODEX_HOME_SEED`, and let the runner
-create a per-run copy.
+create a per-run copy. The per-run copy must be in a private temporary directory
+outside the evidence root, must never be registered as an artifact, and must be
+removed after evidence archival and process shutdown. Per-role runtime-home
+`auth.json` copies under the E2E data root must also be removed during teardown,
+including when a process cleanup step fails.
 
 ## Reusable Tools
 
@@ -70,6 +74,9 @@ A complete managed report includes:
   retryability, and next action.
 
 No report with failures but without linked runtime logs is complete evidence.
+Linear 401 or 403 must fail on the first request as a non-retryable
+`credential_or_config_failure`, preserve its `error_code` and `next_action` in
+the report, and direct the operator to refresh the Linear app access token.
 
 ## Managed Acceptance Flow
 
