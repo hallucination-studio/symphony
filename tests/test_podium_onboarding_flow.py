@@ -8,6 +8,7 @@ import pytest
 
 from podium.server import PodiumServer
 from podium.store import PodiumStore
+from test_podium_conductor_channels_support import activate_linear_installation
 
 
 async def request(
@@ -56,9 +57,9 @@ async def request(
 @pytest.mark.asyncio
 async def test_full_onboarding_flow_reaches_complete(tmp_path) -> None:
     """
-    Walk a workspace through the entire onboarding flow end-to-end via HTTP:
-    bootstrap -> linear (pre-connected) -> scope -> repository ->
-    runtime enrollment + heartbeat -> smoke check -> complete.
+    Walk a workspace through the product onboarding order via HTTP:
+    authorize -> select project -> enroll named Conductor -> bind repository ->
+    runtime acknowledgement -> smoke check -> complete.
     """
     async def proxy_transport(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
@@ -89,15 +90,11 @@ async def test_full_onboarding_flow_reaches_complete(tmp_path) -> None:
         )
         cookie = (reg_headers.get("set-cookie") or "").split(";", 1)[0]
         ws = json.loads(reg_body)["user"]["id"]
-        # Seed a connected Linear installation for this user's workspace.
-        await server.app.state.podium.save_linear_installation(
+        await activate_linear_installation(
+            server.app,
             ws,
-            {
-                "workspace_id": ws,
-                "access_token": "secret-linear-token",
-                "scope": "read,write",
-                "actor": "app",
-            },
+            access_token="secret-linear-token",
+            projects=[{"id": "proj-1", "name": "Podium", "slug_id": "POD"}],
         )
         auth = {"Cookie": cookie}
 
@@ -111,56 +108,57 @@ async def test_full_onboarding_flow_reaches_complete(tmp_path) -> None:
         assert "linear_connect" in boot["onboarding"]["completed_steps"]
         assert b"secret-linear-token" not in body
 
-        # 2. Linear scope discovery
-        status, headers, body = await request(port, "GET", "/api/v1/onboarding/linear/scope", headers=auth)
+        # 2. Discover and select a stable Linear project id.
+        status, headers, body = await request(port, "GET", "/api/v1/linear/projects", headers=auth)
         assert status == 200
         scope_data = json.loads(body)
-        assert scope_data["teams"][0]["id"] == "team-1"
+        assert scope_data["projects"][0]["id"] == "proj-1"
         assert b"secret-linear-token" not in body
 
-        # 3. Save scope (advances past linear_connect + scope_selection over HTTP)
+        # 3. Persist the project selection. This is Podium scope and must not
+        #    mutate Linear project membership.
         status, headers, body = await request(
-            port, "POST", "/api/v1/onboarding/scope",
-            {"teams": ["team-1"], "projects": ["proj-1"]},
+            port,
+            "PUT",
+            "/api/v1/linear/projects",
+            {"project_ids": ["proj-1"]},
             headers=auth,
         )
         assert status == 200
-        assert json.loads(body)["onboarding"]["current_step"] == "repository_mapping"
+        assert json.loads(body)["projects"][0]["selected"] is True
 
-        # 4. Save repository
-        status, headers, body = await request(
-            port, "POST", "/api/v1/onboarding/repository",
-            {"mode": "git_url", "value": "https://github.com/acme/repo.git"},
-            headers=auth,
-        )
-        assert status == 200
-        repo_payload = json.loads(body)
-        assert repo_payload["repository"]["validation_state"] == "valid"
-        assert repo_payload["onboarding"]["current_step"] == "runtime_enrollment"
-
-        # 5. Generate enrollment token (backend also composes the install command)
+        # 4. Reserve the named, unbound Conductor and generate its token.
         status, headers, body = await request(
             port, "POST", "/api/v1/onboarding/runtime/enrollment-token",
-            {},
+            {"name": "Beethoven"},
             headers=auth,
         )
         assert status == 200
         token_payload = json.loads(body)
         token = token_payload["enrollment_token"]
+        assert token_payload["conductor"]["name"] == "Beethoven"
+        assert token_payload["conductor"]["binding"] is None
         assert token
         assert "PODIUM_ENROLLMENT_TOKEN=" in token_payload["install_command"]
         assert f"--enrollment-token {token}" not in token_payload["install_command"]
 
-        # 6. A real runtime (Conductor) enrolls purely over HTTP using the
+        # 5. A real runtime (Conductor) enrolls purely over HTTP using the
         #    one-time token, then heartbeats. No in-process service calls: this
         #    alone must drive runtime_enrollment complete via derived-step
         #    reconciliation.
         status, headers, body = await request(
             port, "POST", "/api/v1/runtime/enroll",
-            {"enrollment_token": token, "hostname": "runtime-host", "version": "1.0.0"},
+            {
+                "enrollment_token": token,
+                "hostname": "runtime-host",
+                "version": "1.0.0",
+                "service_identity": "symphony-conductor-test",
+                "data_root": "/srv/symphony/conductors/test",
+            },
         )
         assert status == 200
-        runtime_id = json.loads(body)["runtime_id"]
+        enrollment = json.loads(body)
+        runtime_id = enrollment["runtime_id"]
 
         await server.app.state.podium.set_presence(runtime_id)
 
@@ -172,7 +170,45 @@ async def test_full_onboarding_flow_reaches_complete(tmp_path) -> None:
         assert status == 200
         assert "runtime_enrollment" in json.loads(body)["completed_steps"]
 
-        # 7. Smoke check - all prerequisites met, should pass and complete onboarding
+        # 6. Bind the selected project and repository, then acknowledge the
+        #    exact versioned binding from the enrolled Conductor.
+        repository = "https://github.com/acme/repo.git"
+        status, headers, body = await request(
+            port,
+            "PUT",
+            f"/api/v1/conductors/{runtime_id}/binding",
+            {
+                "linear_project_id": "proj-1",
+                "repository": {"mode": "git_url", "value": repository},
+            },
+            headers=auth,
+        )
+        assert status == 202
+        binding = json.loads(body)["binding"]
+
+        status, headers, body = await request(
+            port,
+            "POST",
+            "/api/v1/runtime/report",
+            {
+                "bindings": [
+                    {
+                        "instance_id": "project-instance",
+                        "linear_project_id": "proj-1",
+                        "project_slug": "POD",
+                        "agent_app_user_id": "agent-alpha",
+                        "binding_config_version": binding["config_version"],
+                        "repo_source": {"type": "git", "value": repository},
+                        "process_status": "stopped",
+                    }
+                ]
+            },
+            headers={"Authorization": f"Bearer {enrollment['runtime_token']}"},
+        )
+        assert status == 200
+        assert json.loads(body)["binding_state"] == "ready"
+
+        # 7. Smoke check - all prerequisites met, should pass and complete onboarding.
         status, headers, body = await request(
             port, "POST", "/api/v1/onboarding/smoke-check", {}, headers=auth
         )

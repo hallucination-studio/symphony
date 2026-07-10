@@ -15,11 +15,15 @@ from fastapi import FastAPI, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 from .config import PodiumConfig
-from .linear_polling import LinearDelegatePoller, run_linear_delegate_poll_loop
+from .linear_reconciliation import LinearReconciler, run_linear_reconciliation_loop
 from .podium_dispatch import PodiumDispatchMixin
+from .podium_conductors import PodiumConductorsMixin
 from .podium_install import render_install_script
-from .podium_oauth import PodiumOAuthMixin
-from .podium_routes_core import LINEAR_AUTHORIZE_URL, LINEAR_DEFAULT_SCOPE, public_user, register_core_routes
+from .podium_linear_installations import PodiumLinearInstallationsMixin
+from .podium_linear_cutover import PodiumLinearCutoverMixin
+from .podium_linear_projects import PodiumLinearProjectsMixin
+from .podium_project_bindings import PodiumProjectBindingsMixin
+from .podium_routes_core import register_core_routes
 from .podium_routes_runtime import register_runtime_routes
 from .podium_runtime import PodiumRuntimeMixin
 from .podium_shared import utc_now_iso
@@ -40,25 +44,35 @@ def create_app(
     linear_client_id: str = "",
     linear_client_secret: str = "",
     linear_redirect_uri: str = "",
-    linear_token_exchange: Callable[[str, str], dict[str, Any]] | None = None,
-    linear_scope_fetch: Callable[[str, str], dict[str, Any]] | None = None,
+    linear_webhook_secret: str = "",
+    linear_application_version: int | None = None,
+    linear_token_exchange: Callable[..., Any] | None = None,
+    linear_installation_fetch: Callable[..., Any] | None = None,
     linear_graphql_transport: Callable[[httpx.Request], Any] | None = None,
     podium_base_url: str = "https://podium.example",
     store: Any | None = None,
     config: PodiumConfig | None = None,
     debug_auth: bool = False,
 ) -> FastAPI:
+    resolved_config = config or PodiumConfig.from_env()
     state = _create_state(
         turnstile_verifier=turnstile_verifier or verify_turnstile_with_cloudflare,
         session_cookie_name=session_cookie_name,
         secure_cookies=secure_cookies,
         secret_key=secret_key,
-        linear_client_id=linear_client_id,
-        linear_client_secret=linear_client_secret,
-        linear_redirect_uri=linear_redirect_uri,
+        linear_client_id=linear_client_id or resolved_config.linear_client_id,
+        linear_client_secret=linear_client_secret or resolved_config.linear_client_secret,
+        linear_redirect_uri=linear_redirect_uri or resolved_config.linear_redirect_uri,
+        linear_webhook_secret=linear_webhook_secret or resolved_config.linear_webhook_secret,
+        linear_application_version=(
+            resolved_config.linear_application_version
+            if linear_application_version is None
+            else linear_application_version
+        ),
+        podium_base_url=podium_base_url,
         data_dir=data_dir,
         store=store or PodiumStore(data_dir=data_dir),
-        config=config or PodiumConfig.from_env(),
+        config=resolved_config,
         debug_auth=debug_auth,
     )
     app = FastAPI(
@@ -67,7 +81,7 @@ def create_app(
     )
     app.state.podium = state
     app.state.dispatch_reaper_task = None
-    app.state.linear_delegate_poller_task = None
+    app.state.linear_reconciliation_task = None
     static_root = Path(static_dir).resolve() if static_dir else None
     index_file = static_root / "index.html" if static_root else None
 
@@ -81,7 +95,7 @@ def create_app(
         state=state,
         require_user=require_user,
         linear_token_exchange=linear_token_exchange,
-        linear_scope_fetch=linear_scope_fetch,
+        linear_installation_fetch=linear_installation_fetch,
         linear_graphql_transport=linear_graphql_transport,
         error_response=error_response,
     )
@@ -106,6 +120,9 @@ def _create_state(
     linear_client_id: str,
     linear_client_secret: str,
     linear_redirect_uri: str,
+    linear_webhook_secret: str,
+    linear_application_version: int,
+    podium_base_url: str,
     data_dir: str | Path | None,
     store: Any,
     config: PodiumConfig,
@@ -119,6 +136,9 @@ def _create_state(
         linear_client_id=linear_client_id,
         linear_client_secret=linear_client_secret,
         linear_redirect_uri=linear_redirect_uri,
+        linear_webhook_secret=linear_webhook_secret,
+        linear_application_version=linear_application_version,
+        podium_base_url=podium_base_url,
         data_dir=data_dir,
         store=store,
         config=config,
@@ -134,7 +154,7 @@ def _make_lifespan(
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         app.state.dispatch_reaper_task = asyncio.create_task(_dispatch_lease_reaper_loop(app))
-        app.state.linear_delegate_poller_task = _start_linear_delegate_poller(
+        app.state.linear_reconciliation_task = _start_linear_reconciliation(
             state,
             linear_graphql_transport=linear_graphql_transport,
         )
@@ -147,7 +167,7 @@ def _make_lifespan(
 
 
 async def _cancel_background_tasks(app: FastAPI) -> None:
-    for task_name in ("linear_delegate_poller_task", "dispatch_reaper_task"):
+    for task_name in ("linear_reconciliation_task", "dispatch_reaper_task"):
         task = getattr(app.state, task_name, None)
         if task is None:
             continue
@@ -203,34 +223,41 @@ def _register_static_fallback(
         return HTMLResponse(index_file.read_text(encoding="utf-8"))
 
 
-def _start_linear_delegate_poller(
+def _start_linear_reconciliation(
     state: Any,
     *,
     linear_graphql_transport: Callable[[httpx.Request], Any] | None,
-) -> asyncio.Task[Any] | None:
+) -> asyncio.Task[Any]:
     config = state.config
-    application_id = str(getattr(config, "linear_application_id", "") or "").strip()
-    app_token = str(getattr(config, "linear_app_access_token", "") or "").strip()
-    if not application_id or not app_token:
-        return None
-    poller = LinearDelegatePoller(
-        store=state.store,
-        application_id=application_id,
-        app_token=app_token,
+    reconciler = LinearReconciler(
+        state=state,
         transport=linear_graphql_transport,
-        page_size=int(getattr(config, "linear_poll_page_size", 50) or 50),
-        initial_lookback_seconds=int(getattr(config, "linear_poll_initial_lookback_seconds", 0)),
+        page_size=int(getattr(config, "linear_reconciliation_page_size", 50) or 50),
+        initial_lookback_seconds=int(
+            getattr(config, "linear_reconciliation_initial_lookback_seconds", 0)
+        ),
     )
     return asyncio.create_task(
-        run_linear_delegate_poll_loop(
-            poller,
-            interval_seconds=float(getattr(config, "linear_poll_interval_seconds", 15) or 15),
+        run_linear_reconciliation_loop(
+            reconciler,
+            interval_seconds=float(
+                getattr(config, "linear_reconciliation_interval_seconds", 15) or 15
+            ),
         )
     )
 
 
 @dataclass
-class ManagedPodiumState(PodiumStateBaseMixin, PodiumOAuthMixin, PodiumRuntimeMixin, PodiumDispatchMixin):
+class ManagedPodiumState(
+    PodiumStateBaseMixin,
+    PodiumLinearInstallationsMixin,
+    PodiumLinearCutoverMixin,
+    PodiumLinearProjectsMixin,
+    PodiumConductorsMixin,
+    PodiumProjectBindingsMixin,
+    PodiumRuntimeMixin,
+    PodiumDispatchMixin,
+):
     turnstile_verifier: TurnstileVerifier
     session_cookie_name: str
     secure_cookies: bool
@@ -239,6 +266,9 @@ class ManagedPodiumState(PodiumStateBaseMixin, PodiumOAuthMixin, PodiumRuntimeMi
     linear_client_id: str = ""
     linear_client_secret: str = ""
     linear_redirect_uri: str = ""
+    linear_webhook_secret: str = ""
+    linear_application_version: int = 1
+    podium_base_url: str = "https://podium.example"
     password_hasher: PasswordHasher = field(default_factory=PasswordHasher)
     store: Any | None = None
     config: PodiumConfig = field(default_factory=PodiumConfig.from_env)
@@ -259,20 +289,6 @@ async def verify_turnstile_with_cloudflare(token: str, ip: str | None) -> bool:
     except json.JSONDecodeError:
         return False
     return bool(payload.get("success"))
-
-
-def public_user(user: dict[str, Any]) -> dict[str, Any]:
-    linear_app = user.get("linear_app") if isinstance(user, dict) else None
-    if linear_app:
-        public_app: dict[str, Any] | None = {
-            "client_id": str(linear_app.get("client_id") or ""),
-            "redirect_uri": str(linear_app.get("redirect_uri") or ""),
-            "configured": True,
-        }
-    else:
-        public_app = None
-    user_id = str(user["id"])
-    return {"id": user_id, "email": str(user["email"]), "linear_app": public_app}
 
 
 async def _dispatch_lease_reaper_loop(app: FastAPI) -> None:

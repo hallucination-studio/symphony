@@ -20,8 +20,8 @@ def register_core_routes(
     *,
     state: Any,
     require_user: RequireUser,
-    linear_token_exchange: Callable[[str, str], dict[str, Any]] | None,
-    linear_scope_fetch: Callable[[str, str], dict[str, Any]] | None,
+    linear_token_exchange: Callable[..., Any] | None,
+    linear_installation_fetch: Callable[..., Any] | None,
     linear_graphql_transport: Callable[[httpx.Request], Any] | None,
     error_response: ErrorResponse,
 ) -> None:
@@ -32,7 +32,7 @@ def register_core_routes(
         state=state,
         require_user=require_user,
         linear_token_exchange=linear_token_exchange,
-        linear_scope_fetch=linear_scope_fetch,
+        linear_installation_fetch=linear_installation_fetch,
         linear_graphql_transport=linear_graphql_transport,
         error_response=error_response,
     )

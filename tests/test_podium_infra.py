@@ -29,21 +29,26 @@ def test_config_reads_podium_database_url(monkeypatch) -> None:
     assert config.turnstile_secret_key == ""
 
 
-def test_config_requires_explicit_linear_application_id_env(monkeypatch) -> None:
-    monkeypatch.setenv("LINEAR_AGENT_APP_USER_ID", "legacy-agent-user")
-    monkeypatch.delenv("PODIUM_LINEAR_APPLICATION_ID", raising=False)
+def test_config_does_not_read_removed_global_linear_actor_env(monkeypatch) -> None:
+    monkeypatch.setenv("PODIUM_LINEAR_APPLICATION_ID", "removed-app-id")
+    monkeypatch.setenv("PODIUM_LINEAR_APP_ACCESS_TOKEN", "removed-app-token")
+    monkeypatch.delenv("LINEAR_CLIENT_ID", raising=False)
 
     config = PodiumConfig.from_env()
 
-    assert config.linear_application_id == ""
+    assert config.linear_client_id == ""
+    assert not hasattr(config, "linear_application_id")
+    assert not hasattr(config, "linear_app_access_token")
 
 
-def test_config_defaults_linear_poll_initial_lookback_to_no_backfill(monkeypatch) -> None:
-    monkeypatch.delenv("PODIUM_LINEAR_POLL_INITIAL_LOOKBACK_SECONDS", raising=False)
+def test_config_defaults_linear_reconciliation_initial_lookback_to_no_backfill(monkeypatch) -> None:
+    monkeypatch.setenv("PODIUM_LINEAR_POLL_INITIAL_LOOKBACK_SECONDS", "86400")
+    monkeypatch.delenv("PODIUM_LINEAR_RECONCILIATION_INITIAL_LOOKBACK_SECONDS", raising=False)
 
     config = PodiumConfig.from_env()
 
-    assert config.linear_poll_initial_lookback_seconds == 0
+    assert config.linear_reconciliation_initial_lookback_seconds == 0
+    assert not hasattr(config, "linear_poll_initial_lookback_seconds")
 
 
 def test_config_reads_turnstile_disable_flags(monkeypatch) -> None:
@@ -109,9 +114,12 @@ def test_pg_migrator_exposes_phase_0_schema() -> None:
     sql = "\n".join(PgMigrator().statements())
 
     assert "CREATE TABLE IF NOT EXISTS users" in sql
-    assert "CREATE TABLE IF NOT EXISTS linear_installations" in sql
-    assert "actor TEXT NOT NULL DEFAULT ''" in sql
-    assert "ALTER TABLE linear_installations ADD COLUMN IF NOT EXISTS actor TEXT NOT NULL DEFAULT ''" in sql
+    assert "CREATE TABLE IF NOT EXISTS linear_application_configs" in sql
+    assert "CREATE TABLE IF NOT EXISTS linear_application_preferences" in sql
+    assert "CREATE TABLE IF NOT EXISTS linear_workspace_installations" in sql
+    assert "linear_workspace_installations_active_unique" in sql
+    assert "application_config_id TEXT NOT NULL" in sql
+    assert "application_config_version BIGINT NOT NULL" in sql
     assert "CREATE TABLE IF NOT EXISTS conductors" in sql
     assert "CREATE TABLE IF NOT EXISTS project_bindings" in sql
     assert "CREATE TABLE IF NOT EXISTS dispatches" in sql
@@ -179,43 +187,70 @@ async def test_json_store_persists_session_and_does_not_revive_revoked_token(tmp
 async def test_json_store_consumes_enrollment_token_once(tmp_path) -> None:
     store = PodiumStore(tmp_path)
     await store.upsert_runtime_group({"id": "group_1", "linear_workspace_id": "user_1"})
-    await store.save_enrollment_token("token-hash", runtime_group_id="group_1", expires_at="2099-01-01T00:00:00Z")
+    await store.save_enrollment_token(
+        "token-hash",
+        runtime_group_id="group_1",
+        conductor_id="conductor_1",
+        expires_at="2099-01-01T00:00:00Z",
+    )
 
-    assert (await store.consume_enrollment_token("token-hash"))[0]["runtime_group_id"] == "group_1"
+    consumed = (await store.consume_enrollment_token("token-hash"))[0]
+    assert consumed["runtime_group_id"] == "group_1"
+    assert consumed["conductor_id"] == "conductor_1"
     assert await store.consume_enrollment_token("token-hash") == (None, "enrollment_token_used")
 
 
-async def test_runtime_enrollment_token_creates_workspace_user_for_durable_fk(tmp_path) -> None:
+async def test_onboarding_enrollment_token_reserves_conductor_for_authenticated_user(tmp_path) -> None:
     store = PodiumStore(tmp_path)
-    app = create_app(store=store, secret_key="test-secret", secure_cookies=False)
+    app = create_app(
+        store=store,
+        secret_key="test-secret",
+        secure_cookies=False,
+        turnstile_verifier=lambda token, _ip: token == "turnstile-ok",
+    )
 
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
-        created = await client.post(
-            "/api/v1/runtime/enrollment-tokens",
+        registered = await client.post(
+            "/api/v1/auth/register",
             json={
-                "runtime_group_id": "group-real-workspace",
-                "linear_workspace_id": "real-workspace-1",
-                "project_slug": "ALPHA",
-                "linear_agent_app_user_id": "agent-app-1",
+                "email": "runtime-owner@example.com",
+                "password": "correct-horse",
+                "turnstile_token": "turnstile-ok",
             },
         )
+        created = await client.post(
+            "/api/v1/onboarding/runtime/enrollment-token",
+            json={"name": "Mahler"},
+        )
 
+    user_id = registered.json()["user"]["id"]
     assert created.status_code == 200
-    assert await store.get_user("real-workspace-1") is not None
+    conductor = await store.get_runtime(created.json()["conductor"]["id"])
+    assert conductor["user_id"] == user_id
+    assert conductor["name"] == "Mahler"
 
 
 async def test_runtime_enrollment_token_rejects_legacy_managed_run_profile_field(tmp_path) -> None:
     store = PodiumStore(tmp_path)
-    app = create_app(store=store, secret_key="test-secret", secure_cookies=False)
+    app = create_app(
+        store=store,
+        secret_key="test-secret",
+        secure_cookies=False,
+        turnstile_verifier=lambda token, _ip: token == "turnstile-ok",
+    )
 
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
-        response = await client.post(
-            "/api/v1/runtime/enrollment-tokens",
+        await client.post(
+            "/api/v1/auth/register",
             json={
-                "runtime_group_id": "group-real-workspace",
-                "linear_workspace_id": "real-workspace-1",
-                "managed_run_profile": "gated-task",
+                "email": "legacy-profile@example.com",
+                "password": "correct-horse",
+                "turnstile_token": "turnstile-ok",
             },
+        )
+        response = await client.post(
+            "/api/v1/onboarding/runtime/enrollment-token",
+            json={"managed_run_profile": "gated-task"},
         )
 
     assert response.status_code == 400

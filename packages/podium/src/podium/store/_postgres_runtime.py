@@ -46,25 +46,34 @@ class PgRuntimeMixin:
         rows = await self.pool.fetch("SELECT * FROM runtime_groups ORDER BY id")
         return [_record_to_runtime_group(row) for row in rows]
 
-    async def save_enrollment_token(self, token_hash: str, *, runtime_group_id: str, expires_at: str) -> None:
+    async def save_enrollment_token(
+        self,
+        token_hash: str,
+        *,
+        runtime_group_id: str,
+        conductor_id: str,
+        expires_at: str,
+    ) -> None:
         await self.pool.execute(
             """
-            INSERT INTO enrollment_tokens (token_hash, runtime_group_id, used, expires_at, created_at)
-            VALUES ($1,$2,FALSE,$3::timestamptz,now())
+            INSERT INTO enrollment_tokens (token_hash, runtime_group_id, conductor_id, used, expires_at, created_at)
+            VALUES ($1,$2,$3,FALSE,$4::timestamptz,now())
             ON CONFLICT (token_hash) DO UPDATE SET
               runtime_group_id = EXCLUDED.runtime_group_id,
+              conductor_id = EXCLUDED.conductor_id,
               used = FALSE,
               expires_at = EXCLUDED.expires_at,
               created_at = now()
             """,
             token_hash,
             runtime_group_id,
+            conductor_id,
             _pg_datetime(expires_at),
         )
 
     async def consume_enrollment_token(self, token_hash: str) -> tuple[dict[str, Any] | None, str | None]:
         async with self.pool.acquire() as connection:
-            row = await connection.fetchrow("SELECT runtime_group_id, used, expires_at FROM enrollment_tokens WHERE token_hash = $1 FOR UPDATE", token_hash)
+            row = await connection.fetchrow("SELECT runtime_group_id, conductor_id, used, expires_at FROM enrollment_tokens WHERE token_hash = $1 FOR UPDATE", token_hash)
             if row is None:
                 return None, "invalid_enrollment_token"
             if bool(row["used"]):
@@ -72,7 +81,12 @@ class PgRuntimeMixin:
             if row["expires_at"] < datetime.now(row["expires_at"].tzinfo):
                 return None, "enrollment_token_expired"
             await connection.execute("UPDATE enrollment_tokens SET used = TRUE WHERE token_hash = $1", token_hash)
-        return {"runtime_group_id": str(row["runtime_group_id"]), "used": True, "expires_at": row["expires_at"].isoformat()}, None
+        return {
+            "runtime_group_id": str(row["runtime_group_id"]),
+            "conductor_id": str(row["conductor_id"]),
+            "used": True,
+            "expires_at": row["expires_at"].isoformat(),
+        }, None
 
     async def has_pending_enrollment(self, runtime_group_id: str) -> bool:
         value = await self.pool.fetchval(
@@ -86,15 +100,21 @@ class PgRuntimeMixin:
             """
             INSERT INTO conductors (
               id, user_id, hostname, label, version, conductor_id, runtime_group_id,
+              name, public_id, enrollment_state, service_identity, data_root,
               runtime_token_hash, proxy_token_hash, disabled, revoked, created_at, last_report_at
             )
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::timestamptz,$13::timestamptz)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17::timestamptz,$18::timestamptz)
             ON CONFLICT (id) DO UPDATE SET
               user_id = EXCLUDED.user_id,
               hostname = EXCLUDED.hostname,
               label = EXCLUDED.label,
               version = EXCLUDED.version,
               runtime_group_id = EXCLUDED.runtime_group_id,
+              name = EXCLUDED.name,
+              public_id = EXCLUDED.public_id,
+              enrollment_state = EXCLUDED.enrollment_state,
+              service_identity = EXCLUDED.service_identity,
+              data_root = EXCLUDED.data_root,
               runtime_token_hash = EXCLUDED.runtime_token_hash,
               proxy_token_hash = EXCLUDED.proxy_token_hash,
               disabled = EXCLUDED.disabled,
@@ -108,6 +128,11 @@ class PgRuntimeMixin:
             str(conductor.get("version") or ""),
             str(conductor.get("conductor_id") or conductor["id"]),
             str(conductor.get("runtime_group_id") or f"group_{conductor['user_id']}"),
+            str(conductor.get("name") or ""),
+            str(conductor.get("public_id") or ""),
+            str(conductor.get("enrollment_state") or "pending"),
+            str(conductor.get("service_identity") or ""),
+            str(conductor.get("data_root") or ""),
             str(conductor.get("runtime_token_hash") or ""),
             str(conductor.get("proxy_token_hash") or ""),
             bool(conductor.get("disabled")),
@@ -119,20 +144,24 @@ class PgRuntimeMixin:
     async def get_runtime_by_token_hash(self, token_hash: str, *, proxy: bool = False) -> dict[str, Any] | None:
         column = "proxy_token_hash" if proxy else "runtime_token_hash"
         row = await self.pool.fetchrow(
-            f"SELECT id, user_id, runtime_group_id, runtime_token_hash, proxy_token_hash, disabled, revoked, created_at, hostname, label, version FROM conductors WHERE {column} = $1",
+            f"SELECT * FROM conductors WHERE {column} = $1",
             token_hash,
         )
         return _record_to_runtime(row) if row is not None else None
 
     async def get_runtime(self, runtime_id: str) -> dict[str, Any] | None:
         row = await self.pool.fetchrow(
-            "SELECT id, user_id, runtime_group_id, runtime_token_hash, proxy_token_hash, disabled, revoked, created_at, hostname, label, version FROM conductors WHERE id = $1",
+            "SELECT * FROM conductors WHERE id = $1",
             runtime_id,
         )
         return _record_to_runtime(row) if row is not None else None
 
     async def list_conductors_for_user(self, user_id: str) -> list[dict[str, Any]]:
         rows = await self.pool.fetch("SELECT * FROM conductors WHERE user_id = $1 ORDER BY created_at, id", user_id)
+        return [_record_to_conductor(row) for row in rows]
+
+    async def list_all_conductors(self) -> list[dict[str, Any]]:
+        rows = await self.pool.fetch("SELECT * FROM conductors ORDER BY created_at, id")
         return [_record_to_conductor(row) for row in rows]
 
     async def set_presence(self, runtime_id: str, *, timestamp: str, expires_at: str) -> None:

@@ -25,40 +25,6 @@ class JsonStoreOpsMixin:
         row = self._load_map("smoke_results.json").get(user_id)
         return dict(row) if isinstance(row, dict) else None
 
-    async def save_linear_installation(self, workspace_id: str, installation: dict[str, Any]) -> None:
-        rows = self._load_map("linear_installations.json")
-        rows[workspace_id] = dict(installation)
-        self._write("linear_installations.json", rows)
-
-    async def get_linear_installation(self, workspace_id: str) -> dict[str, Any] | None:
-        row = self._load_map("linear_installations.json").get(workspace_id)
-        return dict(row) if isinstance(row, dict) else None
-
-    async def save_linear_poll_state(self, binding_id: str, state: dict[str, Any]) -> None:
-        rows = self._load_map("linear_poll_state.json")
-        rows[binding_id] = {"binding_id": binding_id, **dict(state)}
-        self._write("linear_poll_state.json", rows)
-
-    async def get_linear_poll_state(self, binding_id: str) -> dict[str, Any] | None:
-        row = self._load_map("linear_poll_state.json").get(binding_id)
-        return dict(row) if isinstance(row, dict) else None
-
-    async def save_oauth_state(self, state: str, *, workspace_id: str, expires_at: str) -> None:
-        rows = self._load_map("oauth_states.json")
-        rows[state] = {"workspace_id": workspace_id, "expires_at": expires_at}
-        self._write("oauth_states.json", rows)
-
-    async def consume_oauth_state(self, state: str) -> str | None:
-        rows = self._load_map("oauth_states.json")
-        row = rows.pop(state, None)
-        self._write("oauth_states.json", rows)
-        if not isinstance(row, dict):
-            return None
-        expires_at = _datetime_from_json(str(row.get("expires_at") or ""))
-        if expires_at is not None and expires_at < datetime.now(timezone.utc):
-            return None
-        return str(row.get("workspace_id") or "") or None
-
     async def set_presence(self, runtime_id: str, *, timestamp: str, expires_at: str) -> None:
         rows = self._load_map("runtime_presence.json")
         rows[runtime_id] = {"runtime_id": runtime_id, "last_seen_at": timestamp, "expires_at": expires_at}

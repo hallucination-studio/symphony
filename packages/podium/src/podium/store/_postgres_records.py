@@ -11,7 +11,6 @@ def _record_to_user(row: Any) -> dict[str, Any]:
         "email": str(row["email"]),
         "password_hash": str(row["password_hash"]),
         "created_at": row["created_at"].isoformat() if row["created_at"] is not None else "",
-        "linear_app": _pg_json_value(row["linear_app_json"], None),
     }
 
 
@@ -40,6 +39,11 @@ def _record_to_runtime(row: Any) -> dict[str, Any]:
         "hostname": str(row["hostname"]),
         "label": str(row["label"]),
         "version": str(row["version"]),
+        "name": str(row["name"]),
+        "public_id": str(row["public_id"]),
+        "enrollment_state": str(row["enrollment_state"]),
+        "service_identity": str(row["service_identity"]),
+        "data_root": str(row["data_root"]),
     }
 
 
@@ -52,6 +56,11 @@ def _record_to_conductor(row: Any) -> dict[str, Any]:
         "version": str(row["version"]),
         "conductor_id": str(row["conductor_id"]),
         "runtime_group_id": str(row["runtime_group_id"] or f"group_{row['user_id']}"),
+        "name": str(row["name"]),
+        "public_id": str(row["public_id"]),
+        "enrollment_state": str(row["enrollment_state"]),
+        "service_identity": str(row["service_identity"]),
+        "data_root": str(row["data_root"]),
         "runtime_token_hash": str(row["runtime_token_hash"]),
         "proxy_token_hash": str(row["proxy_token_hash"]),
         "disabled": bool(row["disabled"]),
@@ -69,12 +78,27 @@ def _record_to_project_binding(row: Any) -> dict[str, Any]:
         "instance_id": str(row["instance_id"]),
         "name": str(row["name"]),
         "linear_project": str(row["linear_project"]),
+        "linear_project_id": str(row["linear_project_id"]),
+        "project_name": str(row["project_name"]),
         "project_slug": str(row["project_slug"]),
         "agent_app_user_id": str(row["agent_app_user_id"]),
+        "installation_id": str(row["installation_id"]),
         "managed_run_profile": str(row["managed_run_profile"]),
         "process_status": str(row["process_status"]),
         "constraint_labels": list(_pg_json_value(row["constraint_labels"], [])),
         "repo_source": _pg_json_value(row["repo_source"], {}),
+        "state": str(row["state"]),
+        "active": bool(row["active"]),
+        "config_version": int(row["config_version"]),
+        "acknowledged_config_version": int(row["acknowledged_config_version"]),
+        "candidate_installation_id": str(row["candidate_installation_id"]),
+        "candidate_agent_app_user_id": str(row["candidate_agent_app_user_id"]),
+        "candidate_config_version": int(row["candidate_config_version"]),
+        "candidate_acknowledged_config_version": int(row["candidate_acknowledged_config_version"]),
+        "label_id": str(row["label_id"]),
+        "label_name": str(row["label_name"]),
+        "error_code": str(row["error_code"]),
+        "sanitized_reason": str(row["sanitized_reason"]),
         "updated_at": row["updated_at"].isoformat() if row["updated_at"] is not None else "",
     }
 
@@ -89,6 +113,7 @@ def _record_to_dispatch(row: Any) -> dict[str, Any]:
         "issue_title": str(row["issue_title"]),
         "issue_description": str(row["issue_description"]),
         "managed_run_intent": _pg_json_value(row["managed_run_intent"], {}),
+        "intake_key": str(row["intake_key"]),
         "linear_workspace_id": str(row["workspace_id"]),
         "project_slug": str(row["project_slug"]),
         "agent_session_id": str(row["agent_session_id"]),

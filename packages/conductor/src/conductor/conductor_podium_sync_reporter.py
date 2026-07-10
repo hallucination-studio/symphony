@@ -27,6 +27,12 @@ class PodiumReportMixin:
                     "name": instance.name,
                     "linear_project": instance.linear_project,
                     "project_slug": instance.linear_project,
+                    "linear_project_id": str(instance.linear_filters.get("linear_project_id") or ""),
+                    "binding_config_version": int(instance.linear_filters.get("binding_config_version") or 0),
+                    "prepared_installation_id": str(instance.linear_filters.get("pending_installation_id") or ""),
+                    "prepared_binding_config_version": int(
+                        instance.linear_filters.get("pending_binding_config_version") or 0
+                    ),
                     "agent_app_user_id": agent_app_user_id,
                     "process_status": instance.process_status,
                     "constraint_labels": _desired_project_labels(instance),

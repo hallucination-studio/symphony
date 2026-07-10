@@ -11,37 +11,49 @@ class PgDispatchMixin:
             """
             INSERT INTO project_bindings (
               id, conductor_id, user_id, instance_id, name, linear_project, project_slug,
-              agent_app_user_id, managed_run_profile, process_status, constraint_labels, repo_source, updated_at
+              linear_project_id, project_name, agent_app_user_id, installation_id,
+              managed_run_profile, process_status,
+              constraint_labels, repo_source, state, active, config_version, acknowledged_config_version,
+              candidate_installation_id, candidate_agent_app_user_id, candidate_config_version,
+              candidate_acknowledged_config_version, label_id, label_name, error_code,
+              sanitized_reason, updated_at
             )
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12::jsonb,$13::timestamptz)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14::jsonb,$15::jsonb,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28::timestamptz)
             ON CONFLICT (id) DO UPDATE SET
               name = EXCLUDED.name,
               linear_project = EXCLUDED.linear_project,
               project_slug = EXCLUDED.project_slug,
+              linear_project_id = EXCLUDED.linear_project_id,
+              project_name = EXCLUDED.project_name,
               agent_app_user_id = EXCLUDED.agent_app_user_id,
+              installation_id = EXCLUDED.installation_id,
               managed_run_profile = EXCLUDED.managed_run_profile,
               process_status = EXCLUDED.process_status,
               constraint_labels = EXCLUDED.constraint_labels,
               repo_source = EXCLUDED.repo_source,
+              state = EXCLUDED.state,
+              active = EXCLUDED.active,
+              config_version = EXCLUDED.config_version,
+              acknowledged_config_version = EXCLUDED.acknowledged_config_version,
+              candidate_installation_id = EXCLUDED.candidate_installation_id,
+              candidate_agent_app_user_id = EXCLUDED.candidate_agent_app_user_id,
+              candidate_config_version = EXCLUDED.candidate_config_version,
+              candidate_acknowledged_config_version = EXCLUDED.candidate_acknowledged_config_version,
+              label_id = EXCLUDED.label_id,
+              label_name = EXCLUDED.label_name,
+              error_code = EXCLUDED.error_code,
+              sanitized_reason = EXCLUDED.sanitized_reason,
               updated_at = EXCLUDED.updated_at
             """,
-            str(binding["id"]),
+            *_binding_values(binding),
+        )
+        runtime_group_id = await self.pool.fetchval(
+            "SELECT runtime_group_id FROM conductors WHERE id = $1",
             str(binding["conductor_id"]),
-            str(binding["user_id"]),
-            str(binding["instance_id"]),
-            str(binding.get("name") or ""),
-            str(binding.get("linear_project") or ""),
-            str(binding.get("project_slug") or ""),
-            str(binding.get("agent_app_user_id") or ""),
-            str(binding.get("managed_run_profile") or "default"),
-            str(binding.get("process_status") or ""),
-            _pg_json(binding.get("constraint_labels") or []),
-            _pg_json(binding.get("repo_source") or {}),
-            _pg_datetime(binding.get("updated_at")),
         )
         await self.upsert_runtime_group(
             {
-                "id": str(binding["id"]),
+                "id": str(runtime_group_id or binding["id"]),
                 "linear_workspace_id": str(binding["user_id"]),
                 "project_slug": str(binding.get("project_slug") or ""),
                 "linear_agent_app_user_id": str(binding.get("agent_app_user_id") or ""),
@@ -54,12 +66,47 @@ class PgDispatchMixin:
         rows = await self.pool.fetch("SELECT * FROM project_bindings WHERE conductor_id = $1 ORDER BY id", conductor_id)
         return [_record_to_project_binding(row) for row in rows]
 
+    async def get_project_binding(self, binding_id: str) -> dict[str, Any] | None:
+        row = await self.pool.fetchrow("SELECT * FROM project_bindings WHERE id = $1", binding_id)
+        return _record_to_project_binding(row) if row is not None else None
+
+    async def list_project_bindings_for_user(self, user_id: str) -> list[dict[str, Any]]:
+        rows = await self.pool.fetch(
+            "SELECT * FROM project_bindings WHERE user_id = $1 AND active = TRUE ORDER BY id",
+            user_id,
+        )
+        return [_record_to_project_binding(row) for row in rows]
+
+    async def count_open_dispatches_for_user(self, user_id: str) -> int:
+        value = await self.pool.fetchval(
+            """
+            SELECT count(*) FROM dispatches
+            WHERE user_id = $1 AND status NOT IN ('completed', 'failed', 'cancelled', 'canceled')
+            """,
+            user_id,
+        )
+        return int(value or 0)
+
+    async def get_active_project_binding_for_project(
+        self,
+        user_id: str,
+        linear_project_id: str,
+    ) -> dict[str, Any] | None:
+        row = await self.pool.fetchrow(
+            "SELECT * FROM project_bindings WHERE user_id = $1 AND linear_project_id = $2 AND active = TRUE",
+            user_id,
+            linear_project_id,
+        )
+        return _record_to_project_binding(row) if row is not None else None
+
     async def list_project_bindings_for_route(self, *, user_id: str, project_slug: str, agent_app_user_ids: list[str]) -> list[dict[str, Any]]:
         rows = await self.pool.fetch(
             """
             SELECT * FROM project_bindings
             WHERE user_id = $1
               AND project_slug = $2
+              AND active = TRUE
+              AND state = 'ready'
               AND (agent_app_user_id = '' OR agent_app_user_id = ANY($3::text[]))
             ORDER BY id
             """,
@@ -74,14 +121,14 @@ class PgDispatchMixin:
             """
             INSERT INTO dispatches (
               id, project_binding_id, user_id, issue_id, issue_identifier, issue_title, issue_description,
-              managed_run_intent, workspace_id, project_slug, agent_session_id, status, reason,
+              managed_run_intent, intake_key, workspace_id, project_slug, agent_session_id, status, reason,
               agent_app_user_id, issue_delegate_id, leased_conductor_id, leased_until, fencing_token,
               run_id, parent_issue_id, active_work_item_id, managed_run_state, plan_version, backend_session_id,
               created_at, updated_at, completed_at
             )
             VALUES (
-              $1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12,$13,$14,$15,$16,$17::timestamptz,$18,
-              $19,$20,$21,$22,$23,$24,$25::timestamptz,$26::timestamptz,$27::timestamptz
+              $1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18::timestamptz,$19,
+              $20,$21,$22,$23,$24,$25,$26::timestamptz,$27::timestamptz,$28::timestamptz
             )
             ON CONFLICT DO NOTHING
             RETURNING id
@@ -94,6 +141,7 @@ class PgDispatchMixin:
             str(dispatch.get("issue_title") or ""),
             str(dispatch.get("issue_description") or ""),
             _pg_json(dispatch.get("managed_run_intent") or {}),
+            str(dispatch.get("intake_key") or ""),
             str(dispatch.get("linear_workspace_id") or dispatch.get("workspace_id") or ""),
             str(dispatch.get("project_slug") or ""),
             str(dispatch.get("agent_session_id") or ""),
@@ -197,3 +245,22 @@ class PgDispatchMixin:
             """
         )
         return _row_count(result)
+
+
+def _binding_values(binding: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        str(binding["id"]), str(binding["conductor_id"]), str(binding["user_id"]),
+        str(binding["instance_id"]), str(binding.get("name") or ""),
+        str(binding.get("linear_project") or ""), str(binding.get("project_slug") or ""),
+        str(binding.get("linear_project_id") or ""), str(binding.get("project_name") or ""),
+        str(binding.get("agent_app_user_id") or ""), str(binding.get("installation_id") or ""),
+        str(binding.get("managed_run_profile") or "default"), str(binding.get("process_status") or ""),
+        _pg_json(binding.get("constraint_labels") or []), _pg_json(binding.get("repo_source") or {}),
+        str(binding.get("state") or "pending_ack"), bool(binding.get("active", True)),
+        int(binding.get("config_version") or 0), int(binding.get("acknowledged_config_version") or 0),
+        str(binding.get("candidate_installation_id") or ""),
+        str(binding.get("candidate_agent_app_user_id") or ""), int(binding.get("candidate_config_version") or 0),
+        int(binding.get("candidate_acknowledged_config_version") or 0), str(binding.get("label_id") or ""),
+        str(binding.get("label_name") or ""), str(binding.get("error_code") or ""),
+        str(binding.get("sanitized_reason") or ""), _pg_datetime(binding.get("updated_at")),
+    )

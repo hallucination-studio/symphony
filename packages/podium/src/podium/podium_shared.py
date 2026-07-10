@@ -16,7 +16,8 @@ def dispatch_public(dispatch: dict[str, Any]) -> dict[str, Any]:
     payload = {
         "dispatch_id": dispatch["dispatch_id"],
         "project_binding_id": project_binding_id,
-        "instance_id": project_binding_id.split(":", 1)[1] if ":" in project_binding_id else "",
+        "instance_id": str(dispatch.get("instance_id") or "")
+        or (project_binding_id.split(":", 1)[1] if ":" in project_binding_id else ""),
         "issue_id": dispatch["issue_id"],
         "issue_identifier": dispatch["issue_identifier"],
         "issue_title": dispatch.get("issue_title") or "",

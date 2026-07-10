@@ -32,6 +32,7 @@ class PodiumDispatchMixin:
                 "blocked_by": list(event.get("blocked_by") or []),
                 "parent_issue_id": event.get("parent_issue_id") or "",
                 "managed_run_intent": dict(event.get("managed_run_intent") or {}),
+                "intake_key": str(event.get("intake_key") or f"linear-issue:{event['issue_id']}"),
                 "status": "queued",
                 "reason": "",
                 "run_id": "",
@@ -77,17 +78,14 @@ class PodiumDispatchMixin:
             "linear_agent_app_user_id": str(binding.get("agent_app_user_id") or ""),
             "managed_run_profile": str(binding.get("managed_run_profile") or "default"),
             "project_binding_id": binding_id,
+            "instance_id": str(binding.get("instance_id") or ""),
         }
 
     async def _binding_for_group(self, group: dict[str, Any]) -> dict[str, Any] | None:
         binding_id = str(group.get("project_binding_id") or "")
         if not binding_id:
             return None
-        conductor_id = binding_id.split(":", 1)[0] if ":" in binding_id else ""
-        for binding in await self.store.list_project_bindings_for_conductor(conductor_id):
-            if str(binding.get("id") or "") == binding_id:
-                return binding
-        return None
+        return await self.store.get_project_binding(binding_id)
 
     async def lease_dispatch(self, runtime_id: str) -> dict[str, Any] | None:
         runtime = await self.store.get_runtime(runtime_id)
@@ -105,6 +103,7 @@ class PodiumDispatchMixin:
         )
         if leased is not None:
             group = await self.store.get_runtime_group(str(leased.get("project_binding_id") or "")) or {}
+            binding = await self.store.get_project_binding(str(leased.get("project_binding_id") or ""))
             leased.update(
                 {
                     "runtime_group_id": str(group.get("id") or leased.get("project_binding_id") or ""),
@@ -112,6 +111,7 @@ class PodiumDispatchMixin:
                     "managed_run_profile": str(group.get("managed_run_profile") or "default"),
                     "blocked_by": list(leased.get("blocked_by") or []),
                     "parent_issue_id": str(leased.get("parent_issue_id") or ""),
+                    "instance_id": str((binding or {}).get("instance_id") or ""),
                 }
             )
         return leased

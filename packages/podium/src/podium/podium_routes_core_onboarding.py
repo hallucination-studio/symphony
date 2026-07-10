@@ -32,7 +32,7 @@ def _register_onboarding_status_routes(
         if user is None:
             return error_response(401, "unauthorized", "Unauthorized")
         user_id = str(user["id"])
-        if await state.get_linear_installation(user_id) is not None:
+        if await state.get_active_linear_installation(user_id) is not None:
             await state.mark_linear_connected(user_id)
         return JSONResponse(await state.onboarding_progress(user_id))
 
@@ -42,7 +42,7 @@ def _register_onboarding_status_routes(
         if user is None:
             return error_response(401, "unauthorized", "Unauthorized")
         user_id = str(user["id"])
-        if await state.get_linear_installation(user_id) is not None:
+        if await state.get_active_linear_installation(user_id) is not None:
             await state.mark_linear_connected(user_id)
         return JSONResponse(
             {

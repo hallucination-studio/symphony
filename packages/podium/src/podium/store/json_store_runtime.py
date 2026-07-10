@@ -19,9 +19,21 @@ class JsonStoreRuntimeMixin:
     async def list_runtime_groups(self) -> list[dict[str, Any]]:
         return [dict(row) for row in self._load_map("runtime_groups.json").values() if isinstance(row, dict)]
 
-    async def save_enrollment_token(self, token_hash: str, *, runtime_group_id: str, expires_at: str) -> None:
+    async def save_enrollment_token(
+        self,
+        token_hash: str,
+        *,
+        runtime_group_id: str,
+        conductor_id: str,
+        expires_at: str,
+    ) -> None:
         rows = self._load_map("enrollment_tokens.json")
-        rows[token_hash] = {"runtime_group_id": runtime_group_id, "used": False, "expires_at": expires_at}
+        rows[token_hash] = {
+            "runtime_group_id": runtime_group_id,
+            "conductor_id": conductor_id,
+            "used": False,
+            "expires_at": expires_at,
+        }
         self._write("enrollment_tokens.json", rows)
 
     async def consume_enrollment_token(self, token_hash: str) -> tuple[dict[str, Any] | None, str | None]:
@@ -73,6 +85,13 @@ class JsonStoreRuntimeMixin:
         ]
         return sorted(rows, key=lambda row: str(row.get("created_at") or ""))
 
+    async def list_all_conductors(self) -> list[dict[str, Any]]:
+        return [
+            dict(row)
+            for row in self._load_map("conductors.json").values()
+            if isinstance(row, dict)
+        ]
+
 
 def _runtime_from_conductor(row: dict[str, Any]) -> dict[str, Any]:
     user_id = str(row.get("user_id") or "")
@@ -88,4 +107,9 @@ def _runtime_from_conductor(row: dict[str, Any]) -> dict[str, Any]:
         "hostname": str(row.get("hostname") or ""),
         "label": str(row.get("label") or ""),
         "version": str(row.get("version") or ""),
+        "name": str(row.get("name") or ""),
+        "public_id": str(row.get("public_id") or ""),
+        "enrollment_state": str(row.get("enrollment_state") or "pending"),
+        "service_identity": str(row.get("service_identity") or ""),
+        "data_root": str(row.get("data_root") or ""),
     }

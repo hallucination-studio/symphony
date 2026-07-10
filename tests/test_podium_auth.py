@@ -240,8 +240,7 @@ async def test_me_with_valid_cookie_returns_user() -> None:
     assert status == 200
     payload = json.loads(body)
     assert payload["user"]["email"] == "me@example.com"
-    # A brand-new user has no custom Linear app configured.
-    assert payload["user"]["linear_app"] is None
+    assert set(payload["user"]) == {"id", "email"}
 
 
 @pytest.mark.asyncio
@@ -270,7 +269,6 @@ async def test_debug_auth_me_creates_internal_session_when_enabled() -> None:
     assert response.json()["user"] == {
         "id": "debug",
         "email": "debug@podium.local",
-        "linear_app": None,
     }
     assert "podium_session=" in response.headers["set-cookie"]
 
@@ -412,34 +410,35 @@ async def test_bootstrap_without_session_is_401() -> None:
 
 
 @pytest.mark.asyncio
-async def test_linear_app_requires_fields() -> None:
+async def test_removed_account_linear_app_route_is_not_available() -> None:
     server = PodiumServer(secret_key=SECRET)
     await server.start(port=0)
     try:
         _, cookie = await _register(server.port, "missing@example.com")
         status, _, body = await request(
             server.port, "PUT", "/api/v1/account/linear-app",
-            {"client_id": "only-id"},
+            {"client_id": "legacy", "client_secret": "legacy"},
             headers={"Cookie": cookie},
         )
     finally:
         await server.stop()
-    assert status == 400
-    assert json.loads(body)["error"]["code"] == "invalid_linear_app"
+    assert status == 404
+    assert json.loads(body)["detail"] == "Not Found"
 
 
 @pytest.mark.asyncio
-async def test_linear_app_requires_auth() -> None:
+async def test_linear_application_route_requires_auth() -> None:
     server = PodiumServer(secret_key=SECRET)
     await server.start(port=0)
     try:
         status, _, body = await request(
-            server.port, "PUT", "/api/v1/account/linear-app",
-            {"client_id": "c", "client_secret": "s"},
+            server.port, "PUT", "/api/v1/linear/application",
+            {"client_id": "c", "client_secret": "s", "webhook_secret": "w"},
         )
     finally:
         await server.stop()
     assert status == 401
+    assert json.loads(body)["error"]["code"] == "unauthorized"
 
 
 # ===== C2: empty PODIUM_SECRET_KEY must raise =====
@@ -483,47 +482,67 @@ async def test_auth_routes_return_500_when_secret_key_missing() -> None:
 
 
 @pytest.mark.asyncio
-async def test_resolve_credentials_raises_when_custom_app_decrypt_fails() -> None:
-    # A custom app is configured but the secret key is rotated so decrypt fails.
-    # This must surface (raise), not silently revert to the official app.
+async def test_linear_application_secret_decryption_failure_is_visible() -> None:
     server = PodiumServer(
         secret_key=SECRET,
         linear_client_id="official-client",
-        linear_redirect_uri="https://podium.example/cb",
+        linear_client_secret="official-secret",
+        linear_redirect_uri="https://podium.example/api/v1/linear/oauth/callback",
+        linear_webhook_secret="official-webhook",
     )
     await server.start(port=0)
     try:
         payload, cookie = await _register(server.port, "rotate@example.com")
-        ws = payload["user"]["id"]
-        await request(
-            server.port, "PUT", "/api/v1/account/linear-app",
-            {"client_id": "custom-client", "client_secret": "s"},
+        assert payload["user"]["id"]
+        saved_status, _, _ = await request(
+            server.port, "PUT", "/api/v1/linear/application",
+            {
+                "client_id": "custom-client",
+                "client_secret": "custom-secret",
+                "webhook_secret": "custom-webhook",
+            },
+            headers={"Cookie": cookie},
+        )
+        assert saved_status == 200
+        configs = server.store._load_map("linear_application_configs.json")
+        config_id = next(iter(configs))
+        configs[config_id]["client_secret_enc"] = "not-a-fernet-token"
+        server.store._write("linear_application_configs.json", configs)
+        status, _, body = await request(
+            server.port,
+            "GET",
+            "/api/v1/linear/application",
             headers={"Cookie": cookie},
         )
     finally:
         await server.stop()
 
-    # Simulate key rotation: swap AuthService to one with a different key.
-    from podium.auth_service import AuthService
-
-    server.auth_service = AuthService(server.store, "a-completely-different-key")
-    with pytest.raises(Exception):
-        server._resolve_linear_credentials(ws)
+    assert status == 500
+    assert json.loads(body)["error"]["code"] == "linear_application_secret_unreadable"
 
 
 @pytest.mark.asyncio
-async def test_resolve_credentials_uses_global_when_no_custom_app() -> None:
+async def test_default_linear_application_is_selected_when_no_custom_app_exists() -> None:
     server = PodiumServer(
         secret_key=SECRET,
         linear_client_id="official-client",
-        linear_redirect_uri="https://podium.example/cb",
+        linear_client_secret="official-secret",
+        linear_redirect_uri="https://podium.example/api/v1/linear/oauth/callback",
+        linear_webhook_secret="official-webhook",
     )
     await server.start(port=0)
     try:
-        payload, _ = await _register(server.port, "noapp@example.com")
-        ws = payload["user"]["id"]
+        _, cookie = await _register(server.port, "noapp@example.com")
+        status, _, body = await request(
+            server.port,
+            "GET",
+            "/api/v1/linear/application",
+            headers={"Cookie": cookie},
+        )
     finally:
         await server.stop()
 
-    creds = server._resolve_linear_credentials(ws)
-    assert creds.client_id == "official-client"
+    assert status == 200
+    application = json.loads(body)["application"]
+    assert application["source"] == "default"
+    assert application["client_id"] == "official-client"

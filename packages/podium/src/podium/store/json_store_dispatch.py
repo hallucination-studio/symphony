@@ -11,9 +11,11 @@ class JsonStoreDispatchMixin:
         rows = self._load_map("project_bindings.json")
         rows[str(binding["id"])] = dict(binding)
         self._write("project_bindings.json", rows)
+        conductor = self._load_map("conductors.json").get(str(binding.get("conductor_id") or ""))
+        runtime_group_id = str((conductor or {}).get("runtime_group_id") or "")
         await self.upsert_runtime_group(
             {
-                "id": str(binding["id"]),
+                "id": runtime_group_id or str(binding["id"]),
                 "linear_workspace_id": str(binding.get("user_id") or ""),
                 "project_slug": str(binding.get("project_slug") or ""),
                 "linear_agent_app_user_id": str(binding.get("agent_app_user_id") or ""),
@@ -30,6 +32,43 @@ class JsonStoreDispatchMixin:
         ]
         return sorted(rows, key=lambda row: str(row.get("id") or ""))
 
+    async def get_project_binding(self, binding_id: str) -> dict[str, Any] | None:
+        row = self._load_map("project_bindings.json").get(binding_id)
+        return dict(row) if isinstance(row, dict) else None
+
+    async def list_project_bindings_for_user(self, user_id: str) -> list[dict[str, Any]]:
+        return [
+            dict(row)
+            for row in self._load_map("project_bindings.json").values()
+            if isinstance(row, dict) and str(row.get("user_id") or "") == user_id and bool(row.get("active", True))
+        ]
+
+    async def count_open_dispatches_for_user(self, user_id: str) -> int:
+        terminal = {"completed", "failed", "cancelled", "canceled"}
+        return sum(
+            1
+            for row in self._load_map("dispatches.json").values()
+            if isinstance(row, dict)
+            and str(row.get("user_id") or "") == user_id
+            and str(row.get("status") or "") not in terminal
+        )
+
+    async def get_active_project_binding_for_project(
+        self,
+        user_id: str,
+        linear_project_id: str,
+    ) -> dict[str, Any] | None:
+        for row in self._load_map("project_bindings.json").values():
+            if not isinstance(row, dict):
+                continue
+            if (
+                str(row.get("user_id") or "") == user_id
+                and str(row.get("linear_project_id") or "") == linear_project_id
+                and bool(row.get("active", True))
+            ):
+                return dict(row)
+        return None
+
     async def list_project_bindings_for_route(self, *, user_id: str, project_slug: str, agent_app_user_ids: list[str]) -> list[dict[str, Any]]:
         expected_agents = {str(agent_id) for agent_id in agent_app_user_ids if str(agent_id)}
         return [
@@ -38,6 +77,8 @@ class JsonStoreDispatchMixin:
             if isinstance(row, dict)
             and str(row.get("user_id") or "") == user_id
             and str(row.get("project_slug") or "") == project_slug
+            and bool(row.get("active", True))
+            and str(row.get("state") or "ready") == "ready"
             and (not str(row.get("agent_app_user_id") or "") or str(row.get("agent_app_user_id") or "") in expected_agents)
         ]
 
@@ -47,6 +88,9 @@ class JsonStoreDispatchMixin:
             if not isinstance(existing, dict):
                 continue
             same_binding = existing.get("project_binding_id") == dispatch.get("project_binding_id")
+            if same_binding and str(dispatch.get("intake_key") or ""):
+                if existing.get("intake_key") == dispatch.get("intake_key"):
+                    return False
             if same_binding and str(dispatch.get("agent_session_id") or ""):
                 if existing.get("agent_session_id") == dispatch.get("agent_session_id"):
                     return False

@@ -3,38 +3,18 @@ from test_podium_conductor_channels_support import *  # noqa: F401,F403
 async def test_runtime_report_upserts_conductor_bindings_metrics_and_log_tail() -> None:
     app = make_app()
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
-        await register(client)
+        user_id = await register(client)
         enrolled = await enroll_conductor(client)
-
-        report = await client.post(
-            "/api/v1/runtime/report",
-            headers={"Authorization": f"Bearer {enrolled['runtime_token']}"},
-            json={
+        report, _ = await bind_and_ack_conductor(
+            app,
+            client,
+            user_id,
+            enrolled,
+            report_overrides={"process_status": "running"},
+            report_extras={
                 "hostname": "server-a",
                 "label": "Server A",
                 "version": "0.2.1",
-                "bindings": [
-                    {
-                        "instance_id": "inst-a",
-                        "name": "Alpha",
-                        "linear_project": "Project Alpha",
-                        "project_slug": "ALPHA",
-                        "agent_app_user_id": "agent-alpha",
-                        "managed_run_profile": "gated-task",
-                        "process_status": "running",
-                        "constraint_labels": ["symphony:performer/Alpha", "symphony:profile/gated-task"],
-                        "repo_source": {"type": "local_path", "value": "/repo/a"},
-                    },
-                    {
-                        "instance_id": "inst-b",
-                        "name": "Beta",
-                        "linear_project": "Project Beta",
-                        "project_slug": "BETA",
-                        "agent_app_user_id": "agent-beta",
-                        "managed_run_profile": "default",
-                        "process_status": "stopped",
-                    },
-                ],
                 "metrics": {
                     "inst-a": {
                         "tokens": 10,
@@ -61,20 +41,16 @@ async def test_runtime_report_upserts_conductor_bindings_metrics_and_log_tail() 
         logs = await client.get(f"/api/v1/runtimes/{enrolled['runtime_id']}/instances/inst-a/logs?tail=2&order=desc")
 
     assert report.status_code == 200
-    assert report.json()["bindings_upserted"] == 2
+    assert report.json()["bindings_upserted"] == 1
     assert listed.status_code == 200
     conductor = listed.json()["conductors"][0]
     assert conductor["conductor_id"] == enrolled["runtime_id"]
-    assert conductor["online"] is False
-    assert [binding["project_slug"] for binding in conductor["bindings"]] == ["ALPHA", "BETA"]
+    assert conductor["online"] is True
+    assert [binding["project_slug"] for binding in conductor["bindings"]] == ["ALPHA"]
     assert conductor["bindings"][0]["metrics"]["tokens"] == 10
     assert conductor["bindings"][0]["metrics"]["pending_human"] == 4
     assert conductor["bindings"][0]["queue"]["queue_depth"] == 6
-    assert conductor["bindings"][0]["constraint_labels"] == [
-        "symphony:performer/Alpha",
-        "symphony:profile/gated-task",
-    ]
-    assert conductor["bindings"][1]["constraint_labels"] == []
+    assert conductor["bindings"][0]["constraint_labels"] == []
     assert logs.status_code == 200
     assert logs.json()["logs"]["lines"] == ["newest", "older"]
     assert logs.json()["logs"]["cursor"] == 123
@@ -168,8 +144,10 @@ async def test_injected_postgres_persists_runtime_credentials_across_app_restart
         store=store,
     )
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
-        await register(client, "durable-runtime@example.com")
+        user_id = await register(client, "durable-runtime@example.com")
         enrolled = await enroll_conductor(client)
+        initial_report, binding = await bind_and_ack_conductor(app, client, user_id, enrolled)
+        assert initial_report.status_code == 200
 
     restarted = create_app(
         turnstile_verifier=lambda token, _ip: token == "turnstile-ok",
@@ -181,12 +159,23 @@ async def test_injected_postgres_persists_runtime_credentials_across_app_restart
         report = await client.post(
             "/api/v1/runtime/report",
             headers={"Authorization": f"Bearer {enrolled['runtime_token']}"},
-            json={"bindings": [{"instance_id": "inst-a", "project_slug": "ALPHA", "agent_app_user_id": "agent-alpha"}]},
+            json={
+                "bindings": [
+                    {
+                        "instance_id": "inst-a",
+                        "linear_project_id": "project-alpha",
+                        "project_slug": "ALPHA",
+                        "agent_app_user_id": "agent-alpha",
+                        "binding_config_version": binding["config_version"],
+                        "repo_source": {"type": "local_path", "value": "/repo/a"},
+                    }
+                ]
+            },
         )
 
     assert report.status_code == 200
     assert report.json()["bindings_upserted"] == 1
-    assert f"{enrolled['runtime_id']}:inst-a" in store._load_map("project_bindings.json")
+    assert f"binding_{enrolled['runtime_id']}" in store._load_map("project_bindings.json")
 
 async def test_injected_postgres_persists_queued_dispatch_across_app_restart() -> None:
     from podium.store import PodiumStore
@@ -201,11 +190,7 @@ async def test_injected_postgres_persists_queued_dispatch_across_app_restart() -
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
         user_id = await register(client, "durable-dispatch@example.com")
         enrolled = await enroll_conductor(client)
-        await client.post(
-            "/api/v1/runtime/report",
-            headers={"Authorization": f"Bearer {enrolled['runtime_token']}"},
-            json={"bindings": [{"instance_id": "inst-a", "project_slug": "ALPHA", "agent_app_user_id": "agent-alpha"}]},
-        )
+        await bind_and_ack_conductor(app, client, user_id, enrolled)
         queued = await queue_agent_session(
             app,
             agent_session_payload(workspace_id=user_id, project_slug="ALPHA", delegate_id="agent-alpha"),
@@ -243,11 +228,7 @@ async def test_injected_postgres_persists_structured_managed_run_intent_across_a
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
         user_id = await register(client, "durable-intent-dispatch@example.com")
         enrolled = await enroll_conductor(client)
-        await client.post(
-            "/api/v1/runtime/report",
-            headers={"Authorization": f"Bearer {enrolled['runtime_token']}"},
-            json={"bindings": [{"instance_id": "inst-a", "project_slug": "ALPHA", "agent_app_user_id": "agent-alpha"}]},
-        )
+        await bind_and_ack_conductor(app, client, user_id, enrolled)
         queued = await queue_agent_session(
             app,
             agent_session_payload_with_managed_run_intent(
@@ -288,11 +269,7 @@ async def test_injected_store_routes_direct_dispatch_and_lease_across_distinct_w
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=enrollment_app), base_url="http://podium.test") as client:
         user_id = await register(client, "multiworker@example.com")
         enrolled = await enroll_conductor(client)
-        report = await client.post(
-            "/api/v1/runtime/report",
-            headers={"Authorization": f"Bearer {enrolled['runtime_token']}"},
-            json={"bindings": [{"instance_id": "inst-a", "project_slug": "ALPHA", "agent_app_user_id": "agent-alpha"}]},
-        )
+        report, _ = await bind_and_ack_conductor(enrollment_app, client, user_id, enrolled)
 
     queue_app = make_app(store=store)
     queued = await queue_agent_session(
@@ -313,7 +290,7 @@ async def test_injected_store_routes_direct_dispatch_and_lease_across_distinct_w
     assert lease.status_code == 200
     dispatch = lease.json()["dispatch"]
     assert dispatch["issue_identifier"] == "ALPHA-1"
-    assert dispatch["project_binding_id"] == f"{enrolled['runtime_id']}:inst-a"
+    assert dispatch["project_binding_id"] == f"binding_{enrolled['runtime_id']}"
     assert dispatch["fencing_token"] == 1
 
 async def test_injected_store_lease_loads_runtime_from_persisted_state_after_restart() -> None:
@@ -324,11 +301,7 @@ async def test_injected_store_lease_loads_runtime_from_persisted_state_after_res
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=enroll_app), base_url="http://podium.test") as client:
         user_id = await register(client, "lease-pg-runtime@example.com")
         enrolled = await enroll_conductor(client)
-        await client.post(
-            "/api/v1/runtime/report",
-            headers={"Authorization": f"Bearer {enrolled['runtime_token']}"},
-            json={"bindings": [{"instance_id": "inst-a", "project_slug": "ALPHA", "agent_app_user_id": "agent-alpha"}]},
-        )
+        await bind_and_ack_conductor(enroll_app, client, user_id, enrolled)
         queued = await queue_agent_session(
             enroll_app,
             agent_session_payload(workspace_id=user_id, project_slug="ALPHA", delegate_id="agent-alpha"),
@@ -352,11 +325,7 @@ async def test_injected_postgres_acks_leased_dispatch_across_distinct_workers_an
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=enrollment_app), base_url="http://podium.test") as client:
         user_id = await register(client, "multiworker-ack@example.com")
         enrolled = await enroll_conductor(client)
-        await client.post(
-            "/api/v1/runtime/report",
-            headers={"Authorization": f"Bearer {enrolled['runtime_token']}"},
-            json={"bindings": [{"instance_id": "inst-a", "project_slug": "ALPHA", "agent_app_user_id": "agent-alpha"}]},
-        )
+        await bind_and_ack_conductor(enrollment_app, client, user_id, enrolled)
 
     queue_app = make_app(store=store)
     queued = await queue_agent_session(
@@ -413,11 +382,7 @@ async def test_injected_postgres_reaps_expired_leased_dispatch_for_release() -> 
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
         user_id = await register(client, "reaper@example.com")
         enrolled = await enroll_conductor(client)
-        await client.post(
-            "/api/v1/runtime/report",
-            headers={"Authorization": f"Bearer {enrolled['runtime_token']}"},
-            json={"bindings": [{"instance_id": "inst-a", "project_slug": "ALPHA", "agent_app_user_id": "agent-alpha"}]},
-        )
+        await bind_and_ack_conductor(app, client, user_id, enrolled)
         await queue_agent_session(
             app,
             agent_session_payload(workspace_id=user_id, project_slug="ALPHA", delegate_id="agent-alpha"),
@@ -451,35 +416,41 @@ async def test_dispatch_routes_by_project_binding_not_single_workspace_group() -
     app = make_app()
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
         user_id = await register(client, "routing@example.com")
-        enrolled = await enroll_conductor(client)
-        await client.post(
-            "/api/v1/runtime/report",
-            headers={"Authorization": f"Bearer {enrolled['runtime_token']}"},
-            json={
-                "bindings": [
-                    {"instance_id": "inst-a", "project_slug": "ALPHA", "agent_app_user_id": "agent-alpha"},
-                    {
-                        "instance_id": "inst-b",
-                        "project_slug": "BETA",
-                        "agent_app_user_id": "agent-beta",
-                    },
-                ]
-            },
+        await activate_linear_installation(
+            app,
+            user_id,
+            projects=[
+                {"id": "project-alpha", "name": "Alpha", "slug_id": "ALPHA"},
+                {"id": "project-beta", "name": "Beta", "slug_id": "BETA"},
+            ],
+        )
+        alpha = await enroll_conductor(client)
+        beta = await enroll_conductor(client)
+        await bind_and_ack_conductor(app, client, user_id, alpha)
+        await bind_and_ack_conductor(
+            app,
+            client,
+            user_id,
+            beta,
+            project_id="project-beta",
+            project_slug="BETA",
+            app_user_id="agent-alpha",
+            instance_id="inst-b",
         )
         queued = await queue_agent_session(
             app,
-            agent_session_payload(workspace_id=user_id, project_slug="BETA", delegate_id="agent-beta"),
+            agent_session_payload(workspace_id=user_id, project_slug="BETA", delegate_id="agent-alpha"),
         )
         lease = await client.post(
             "/api/v1/runtime/dispatches/lease",
-            headers={"Authorization": f"Bearer {enrolled['runtime_token']}"},
+            headers={"Authorization": f"Bearer {beta['runtime_token']}"},
         )
 
     assert queued.status_code == 200
     assert queued.json()["queued"] == 1
     assert lease.status_code == 200
     dispatch = lease.json()["dispatch"]
-    assert dispatch["project_binding_id"].endswith(":inst-b")
+    assert dispatch["project_binding_id"] == f"binding_{beta['runtime_id']}"
     assert dispatch["project_slug"] == "BETA"
     assert dispatch["instance_id"] == "inst-b"
     assert "codex_profile" not in dispatch
@@ -489,16 +460,26 @@ async def test_direct_dispatch_routes_when_either_session_or_issue_delegate_matc
     app = make_app()
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
         user_id = await register(client, "routing-or@example.com")
-        enrolled = await enroll_conductor(client)
-        await client.post(
-            "/api/v1/runtime/report",
-            headers={"Authorization": f"Bearer {enrolled['runtime_token']}"},
-            json={
-                "bindings": [
-                    {"instance_id": "inst-a", "project_slug": "ALPHA", "agent_app_user_id": "agent-alpha"},
-                    {"instance_id": "inst-b", "project_slug": "BETA", "agent_app_user_id": "agent-beta"},
-                ]
-            },
+        await activate_linear_installation(
+            app,
+            user_id,
+            projects=[
+                {"id": "project-alpha", "name": "Alpha", "slug_id": "ALPHA"},
+                {"id": "project-beta", "name": "Beta", "slug_id": "BETA"},
+            ],
+        )
+        alpha = await enroll_conductor(client)
+        beta = await enroll_conductor(client)
+        await bind_and_ack_conductor(app, client, user_id, alpha)
+        await bind_and_ack_conductor(
+            app,
+            client,
+            user_id,
+            beta,
+            project_id="project-beta",
+            project_slug="BETA",
+            app_user_id="agent-alpha",
+            instance_id="inst-b",
         )
 
         issue_delegate_match = await queue_agent_session(
@@ -515,7 +496,7 @@ async def test_direct_dispatch_routes_when_either_session_or_issue_delegate_matc
             agent_session_payload_with_distinct_session_app_user(
                 workspace_id=user_id,
                 project_slug="BETA",
-                session_app_user_id="agent-beta",
+                session_app_user_id="agent-alpha",
                 issue_delegate_id="other-agent",
             ),
         )
@@ -530,15 +511,7 @@ async def test_direct_dispatch_preserves_dependency_metadata_for_runtime_dispatc
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
         user_id = await register(client, "dependency-routing@example.com")
         enrolled = await enroll_conductor(client)
-        await client.post(
-            "/api/v1/runtime/report",
-            headers={"Authorization": f"Bearer {enrolled['runtime_token']}"},
-            json={
-                "bindings": [
-                    {"instance_id": "inst-a", "project_slug": "ALPHA", "agent_app_user_id": "agent-alpha"}
-                ]
-            },
-        )
+        await bind_and_ack_conductor(app, client, user_id, enrolled)
         queued = await queue_agent_session(
             app,
             dependent_agent_session_payload(workspace_id=user_id, project_slug="ALPHA", delegate_id="agent-alpha"),
@@ -560,15 +533,7 @@ async def test_direct_dispatch_preserves_structured_managed_run_intent_for_runti
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
         user_id = await register(client, "intent-routing@example.com")
         enrolled = await enroll_conductor(client)
-        await client.post(
-            "/api/v1/runtime/report",
-            headers={"Authorization": f"Bearer {enrolled['runtime_token']}"},
-            json={
-                "bindings": [
-                    {"instance_id": "inst-a", "project_slug": "ALPHA", "agent_app_user_id": "agent-alpha"}
-                ]
-            },
-        )
+        await bind_and_ack_conductor(app, client, user_id, enrolled)
         queued = await queue_agent_session(
             app,
             agent_session_payload_with_managed_run_intent(
@@ -609,20 +574,7 @@ async def test_direct_dispatch_queue_and_runtime_ack_completes_it() -> None:
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
         user_id = await register(client, "direct-routing@example.com")
         enrolled = await enroll_conductor(client)
-        await client.post(
-            "/api/v1/runtime/report",
-            headers={"Authorization": f"Bearer {enrolled['runtime_token']}"},
-            json={
-                "bindings": [
-                    {
-                        "instance_id": "inst-a",
-                        "project_slug": "ALPHA",
-                        "agent_app_user_id": "agent-alpha",
-                        "managed_run_profile": "gated-task",
-                    }
-                ]
-            },
-        )
+        await bind_and_ack_conductor(app, client, user_id, enrolled)
 
         rejected = await queue_agent_session(
             app,
@@ -669,7 +621,7 @@ async def test_direct_dispatch_queue_and_runtime_ack_completes_it() -> None:
     assert queued.json()["queued"] == 1
     assert dispatch["issue_id"] == "issue-1"
     assert dispatch["issue_identifier"] == "ALPHA-1"
-    assert dispatch["managed_run_profile"] == "gated-task"
+    assert dispatch["managed_run_profile"] == "default"
     assert "workflow_profile" not in dispatch
     assert ack.status_code == 200
     assert ack.json()["dispatch"]["status"] == "completed"
@@ -685,11 +637,7 @@ async def test_direct_dispatch_queue_is_idempotent_by_binding_and_agent_session(
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
         user_id = await register(client, "idempotent-dispatch@example.com")
         enrolled = await enroll_conductor(client)
-        await client.post(
-            "/api/v1/runtime/report",
-            headers={"Authorization": f"Bearer {enrolled['runtime_token']}"},
-            json={"bindings": [{"instance_id": "inst-a", "project_slug": "ALPHA", "agent_app_user_id": "agent-alpha"}]},
-        )
+        await bind_and_ack_conductor(app, client, user_id, enrolled)
         payload = agent_session_payload(workspace_id=user_id, project_slug="ALPHA", delegate_id="agent-alpha")
 
         first = await queue_agent_session(app, payload)
@@ -715,11 +663,7 @@ async def test_injected_postgres_empty_agent_session_id_dedupes_by_issue_not_bin
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
         user_id = await register(client, "empty-session@example.com")
         enrolled = await enroll_conductor(client)
-        await client.post(
-            "/api/v1/runtime/report",
-            headers={"Authorization": f"Bearer {enrolled['runtime_token']}"},
-            json={"bindings": [{"instance_id": "inst-a", "project_slug": "ALPHA", "agent_app_user_id": "agent-alpha"}]},
-        )
+        await bind_and_ack_conductor(app, client, user_id, enrolled)
         issue_a = agent_session_payload_without_session_id(
             workspace_id=user_id,
             project_slug="ALPHA",

@@ -14,11 +14,14 @@ class PodiumConfig:
     turnstile_site_key: str = ""
     turnstile_secret_key: str = ""
     turnstile_disabled: bool = False
-    linear_application_id: str = ""
-    linear_app_access_token: str = ""
-    linear_poll_interval_seconds: int = 15
-    linear_poll_page_size: int = 50
-    linear_poll_initial_lookback_seconds: int = 0
+    linear_client_id: str = ""
+    linear_client_secret: str = ""
+    linear_redirect_uri: str = ""
+    linear_webhook_secret: str = ""
+    linear_application_version: int = 1
+    linear_reconciliation_interval_seconds: int = 15
+    linear_reconciliation_page_size: int = 50
+    linear_reconciliation_initial_lookback_seconds: int = 0
 
     @classmethod
     def from_env(cls) -> PodiumConfig:
@@ -31,11 +34,20 @@ class PodiumConfig:
                 or _env_flag("PODIUM_DEBUG_DISABLE_TURNSTILE")
                 or _env_flag("PODIUM_DEBUG_AUTH")
             ),
-            linear_application_id=os.environ.get("PODIUM_LINEAR_APPLICATION_ID", "").strip(),
-            linear_app_access_token=os.environ.get("PODIUM_LINEAR_APP_ACCESS_TOKEN", "").strip(),
-            linear_poll_interval_seconds=_env_int("PODIUM_LINEAR_POLL_INTERVAL_SECONDS", 15),
-            linear_poll_page_size=_env_int("PODIUM_LINEAR_POLL_PAGE_SIZE", 50),
-            linear_poll_initial_lookback_seconds=_env_int("PODIUM_LINEAR_POLL_INITIAL_LOOKBACK_SECONDS", 0),
+            linear_client_id=os.environ.get("LINEAR_CLIENT_ID", "").strip(),
+            linear_client_secret=os.environ.get("LINEAR_CLIENT_SECRET", "").strip(),
+            linear_redirect_uri=os.environ.get("LINEAR_REDIRECT_URI", "").strip(),
+            linear_webhook_secret=os.environ.get("LINEAR_WEBHOOK_SECRET", "").strip(),
+            linear_application_version=_env_int("LINEAR_APPLICATION_VERSION", 1),
+            linear_reconciliation_interval_seconds=_env_int(
+                "PODIUM_LINEAR_RECONCILIATION_INTERVAL_SECONDS",
+                15,
+            ),
+            linear_reconciliation_page_size=_env_int("PODIUM_LINEAR_RECONCILIATION_PAGE_SIZE", 50),
+            linear_reconciliation_initial_lookback_seconds=_env_int(
+                "PODIUM_LINEAR_RECONCILIATION_INITIAL_LOOKBACK_SECONDS",
+                0,
+            ),
         )
 
 

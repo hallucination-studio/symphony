@@ -68,6 +68,12 @@ def _register_runtime_report_endpoint(app: FastAPI, *, state: Any, error_respons
             return error_response(401, "unauthorized", "Unauthorized")
         payload = await request.json()
         result = await state.apply_runtime_report(str(runtime["id"]), payload if isinstance(payload, dict) else {})
+        if result.get("status") == "rejected":
+            return error_response(
+                409,
+                str(result.get("error_code") or "runtime_report_rejected"),
+                str(result.get("sanitized_reason") or "Runtime report was rejected"),
+            )
         managed_runs = payload.get("managed_runs") if isinstance(payload, dict) else None
         group_id = str(runtime.get("runtime_group_id") or "")
         if isinstance(managed_runs, dict):
@@ -129,7 +135,7 @@ def _register_managed_run_view_endpoint(
         if user is None:
             return error_response(401, "unauthorized", "Unauthorized")
         workspace_id = str(user["id"])
-        group_id = f"group_{workspace_id}"
+        group_id = await _managed_run_group_id_for_user(state, workspace_id)
         config = await state.store.get_runtime_config(group_id) or {}
         view = await state.store.get_managed_run_view(group_id) or {}
         browser_config = sanitize_runtime_config(config, hide_runtime_sources=True)
@@ -142,6 +148,18 @@ def _register_managed_run_view_endpoint(
                 "managed_runs": view,
             }
         )
+
+
+async def _managed_run_group_id_for_user(state: Any, workspace_id: str) -> str:
+    conductors = await state.store.list_conductors_for_user(workspace_id)
+    enrolled = [
+        conductor
+        for conductor in conductors
+        if conductor.get("enrollment_state") == "enrolled"
+    ]
+    if not enrolled:
+        return ""
+    return str(enrolled[0].get("runtime_group_id") or "")
 
 
 def _register_runtime_log_routes(

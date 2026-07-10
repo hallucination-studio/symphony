@@ -58,11 +58,7 @@ async def test_dispatch_lease_returns_fencing_token_and_ack_requires_current_tok
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
         user_id = await register(client, "fencing@example.com")
         enrolled = await enroll_conductor(client)
-        await client.post(
-            "/api/v1/runtime/report",
-            headers={"Authorization": f"Bearer {enrolled['runtime_token']}"},
-            json={"bindings": [{"instance_id": "inst-a", "project_slug": "ALPHA", "agent_app_user_id": "agent-alpha"}]},
-        )
+        await bind_and_ack_conductor(app, client, user_id, enrolled)
         await queue_agent_session(
             app,
             agent_session_payload(workspace_id=user_id, project_slug="ALPHA", delegate_id="agent-alpha"),
@@ -145,13 +141,9 @@ def test_runtime_ws_rejects_invalid_fencing_token_without_closing_loop() -> None
 async def test_dispatch_ack_reconcile_has_no_phase_drift_findings() -> None:
     app = make_app()
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
-        await register(client, "dispatch-reconcile@example.com")
+        user_id = await register(client, "dispatch-reconcile@example.com")
         enrolled = await enroll_conductor(client)
-        await client.post(
-            "/api/v1/runtime/report",
-            headers={"Authorization": f"Bearer {enrolled['runtime_token']}"},
-            json={"bindings": [{"instance_id": "inst-a", "project_slug": "ALPHA", "agent_app_user_id": "agent-alpha"}]},
-        )
+        await bind_and_ack_conductor(app, client, user_id, enrolled)
         findings = app.state.podium.reconcile_dispatch_acks()
 
     assert findings == []
@@ -175,12 +167,7 @@ async def test_linear_proxy_requires_proxy_token_and_audits_requests() -> None:
             headers={"Authorization": f"Bearer {enrolled['proxy_token']}"},
         )
 
-        await app.state.podium.save_linear_installation(user_id, {
-            "workspace_id": user_id,
-            "access_token": "oauth-installation-token",
-            "scope": "read write",
-            "expires_at": None,
-        })
+        await activate_linear_installation(app, user_id)
         allowed = await client.post(
             "/api/v1/linear/graphql",
             json={"operationName": "Viewer", "query": "{ viewer { id } }"},
@@ -189,7 +176,7 @@ async def test_linear_proxy_requires_proxy_token_and_audits_requests() -> None:
 
     assert unauthorized.status_code == 401
     assert missing_installation.status_code == 400
-    assert missing_installation.json()["error"]["code"] == "linear_app_token_required"
+    assert missing_installation.json()["error"]["code"] == "linear_installation_required"
     assert allowed.status_code == 200
     assert allowed.json() == {"data": {"viewer": {"id": "viewer-1"}}}
     assert seen_authorization == ["oauth-installation-token"]
@@ -212,12 +199,7 @@ async def test_linear_proxy_persists_audit_event_when_postgres_is_injected() -> 
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
         user_id = await register(client, "pg-audit@example.com")
         enrolled = await enroll_conductor(client)
-        await app.state.podium.save_linear_installation(user_id, {
-            "workspace_id": user_id,
-            "access_token": "oauth-installation-token",
-            "scope": "read write",
-            "expires_at": None,
-        })
+        await activate_linear_installation(app, user_id)
         proxied = await client.post(
             "/api/v1/linear/graphql",
             json={"operationName": "Viewer", "query": "query Viewer { viewer { id } }"},
@@ -245,18 +227,10 @@ async def test_linear_proxy_returns_structured_error_for_corrupt_stored_token() 
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
         user_id = await register(client, "proxy-secret-error@example.com")
         enrolled = await enroll_conductor(client)
-        await app.state.podium.save_linear_installation(
-            user_id,
-            {
-                "workspace_id": user_id,
-                "access_token": "oauth-installation-token",
-                "scope": "read write",
-                "expires_at": None,
-            },
-        )
-        installations = store._load_map("linear_installations.json")
-        installations[user_id]["access_token_encrypted"] = "not-a-fernet-token"
-        store._write("linear_installations.json", installations)
+        installation_id = await activate_linear_installation(app, user_id)
+        installations = store._load_map("linear_workspace_installations.json")
+        installations[installation_id]["access_token_enc"] = "not-a-fernet-token"
+        store._write("linear_workspace_installations.json", installations)
 
         response = await client.post(
             "/api/v1/linear/graphql",
@@ -268,7 +242,7 @@ async def test_linear_proxy_returns_structured_error_for_corrupt_stored_token() 
     assert response.json()["error"]["code"] == "secret_decryption_failed"
     assert store._load_list("proxy_audit_events.json")[-1]["reason"] == "secret_decryption_failed"
 
-async def test_linear_proxy_can_use_environment_app_token_without_workspace_installation(
+async def test_linear_proxy_ignores_removed_environment_app_token(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured: dict[str, str | None] = {}
@@ -288,9 +262,9 @@ async def test_linear_proxy_can_use_environment_app_token_without_workspace_inst
             headers={"Authorization": f"Bearer {enrolled['proxy_token']}"},
         )
 
-    assert proxied.status_code == 200
-    assert proxied.json() == {"data": {"viewer": {"id": "viewer-1"}}}
-    assert captured["authorization"] == "app-linear-token"
+    assert proxied.status_code == 400
+    assert proxied.json()["error"]["code"] == "linear_installation_required"
+    assert captured == {}
 
 
 async def test_linear_proxy_rejects_query_when_only_operator_environment_token_exists(
@@ -315,7 +289,7 @@ async def test_linear_proxy_rejects_query_when_only_operator_environment_token_e
         )
 
     assert proxied.status_code == 400
-    assert proxied.json()["error"]["code"] == "linear_app_token_required"
+    assert proxied.json()["error"]["code"] == "linear_installation_required"
     assert called is False
 
 def test_runtime_ws_presence_dispatch_wakeup_and_log_fetch_roundtrip() -> None:
@@ -329,16 +303,38 @@ def test_runtime_ws_presence_dispatch_wakeup_and_log_fetch_roundtrip() -> None:
         user_id = register_response.json()["user"]["id"]
         token_response = client.post("/api/v1/onboarding/runtime/enrollment-token")
         enrolled = client.post("/api/v1/runtime/enroll", json={"enrollment_token": token_response.json()["enrollment_token"]}).json()
+        asyncio.run(activate_linear_installation(app, user_id))
+        asyncio.run(app.state.podium.select_linear_projects(user_id, ["project-alpha"]))
+        asyncio.run(app.state.podium.set_presence(enrolled["runtime_id"]))
+        bound = client.put(
+            f"/api/v1/conductors/{enrolled['runtime_id']}/binding",
+            json={
+                "linear_project_id": "project-alpha",
+                "repository": {"mode": "local_path", "value": "/repo/a"},
+            },
+        ).json()["binding"]
         client.post(
             "/api/v1/runtime/report",
             headers={"Authorization": f"Bearer {enrolled['runtime_token']}"},
-            json={"bindings": [{"instance_id": "inst-a", "project_slug": "ALPHA", "agent_app_user_id": "agent-alpha"}]},
+            json={
+                "bindings": [
+                    {
+                        "instance_id": "inst-a",
+                        "linear_project_id": "project-alpha",
+                        "project_slug": "ALPHA",
+                        "agent_app_user_id": "agent-alpha",
+                        "binding_config_version": bound["config_version"],
+                        "repo_source": {"type": "local_path", "value": "/repo/a"},
+                    }
+                ]
+            },
         )
 
         with client.websocket_connect(
             "/api/v1/runtime/ws",
             headers={"Authorization": f"Bearer {enrolled['runtime_token']}"},
         ) as ws:
+            assert ws.receive_json()["type"] == "project.configure"
             ws.send_json({"type": "hello"})
             assert ws.receive_json()["type"] == "ping"
 

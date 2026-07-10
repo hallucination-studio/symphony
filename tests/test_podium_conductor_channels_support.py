@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import hmac
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
@@ -69,6 +72,116 @@ async def enroll_conductor(client: httpx.AsyncClient) -> dict[str, Any]:
     )
     assert enrolled.status_code == 200
     return enrolled.json()
+
+
+async def activate_linear_installation(
+    app: Any,
+    user_id: str,
+    *,
+    access_token: str = "oauth-installation-token",
+    app_user_id: str = "agent-alpha",
+    projects: list[dict[str, str]] | None = None,
+    webhook_secret: str = "test-webhook-secret",
+) -> str:
+    now = datetime.now(timezone.utc)
+    installation_id = f"installation-{user_id}"
+    application = await app.state.podium.stage_custom_linear_application(
+        user_id,
+        client_id="test-linear-client",
+        client_secret="test-linear-client-secret",
+        webhook_secret=webhook_secret,
+    )
+    await app.state.podium.save_linear_installation_record(
+        {
+            "id": installation_id,
+            "user_id": user_id,
+            "application_config_id": application["id"],
+            "application_config_version": application["version"],
+            "application_source": application["source"],
+            "state": "accepted",
+            "active": False,
+            "access_token": access_token,
+            "refresh_token": "oauth-refresh-token",
+            "token_type": "Bearer",
+            "actor": "app",
+            "scope": ["read", "write", "app:assignable", "app:mentionable"],
+            "expires_at": (now + timedelta(hours=1)).isoformat().replace("+00:00", "Z"),
+            "linear_organization_id": f"org-{user_id}",
+            "organization_url_key": "acme",
+            "organization_name": "Acme",
+            "app_user_id": app_user_id,
+            "supports_agent_sessions": True,
+            "projects": projects or [{"id": "project-alpha", "name": "Alpha", "slug_id": "ALPHA"}],
+            "error_code": "",
+            "sanitized_reason": "",
+            "retryable": False,
+            "action_required": "",
+            "next_action": "",
+            "created_at": now.isoformat().replace("+00:00", "Z"),
+            "updated_at": now.isoformat().replace("+00:00", "Z"),
+        }
+    )
+    await app.state.podium.activate_linear_installation(user_id, installation_id)
+    return installation_id
+
+
+async def bind_and_ack_conductor(
+    app: Any,
+    client: httpx.AsyncClient,
+    user_id: str,
+    enrolled: dict[str, Any],
+    *,
+    project_id: str = "project-alpha",
+    project_slug: str = "ALPHA",
+    app_user_id: str = "agent-alpha",
+    instance_id: str = "inst-a",
+    repository: str = "/repo/a",
+    report_overrides: dict[str, Any] | None = None,
+    report_extras: dict[str, Any] | None = None,
+) -> tuple[httpx.Response, dict[str, Any]]:
+    if await app.state.podium.get_active_linear_installation(user_id) is None:
+        await activate_linear_installation(
+            app,
+            user_id,
+            app_user_id=app_user_id,
+            projects=[{"id": project_id, "name": project_slug.title(), "slug_id": project_slug}],
+        )
+    selected_ids = {
+        str(row.get("linear_project_id") or "")
+        for row in await app.state.podium.list_selected_linear_projects(user_id)
+    }
+    if project_id not in selected_ids:
+        await app.state.podium.select_linear_projects(user_id, sorted({*selected_ids, project_id}))
+    await app.state.podium.set_presence(enrolled["runtime_id"])
+    bound = await client.put(
+        f"/api/v1/conductors/{enrolled['runtime_id']}/binding",
+        json={
+            "linear_project_id": project_id,
+            "repository": {"mode": "local_path", "value": repository},
+        },
+    )
+    assert bound.status_code == 202, bound.text
+    binding = bound.json()["binding"]
+    payload = {
+        "instance_id": instance_id,
+        "name": project_slug.title(),
+        "linear_project_id": project_id,
+        "linear_project": project_slug,
+        "project_slug": project_slug,
+        "agent_app_user_id": app_user_id,
+        "binding_config_version": binding["config_version"],
+        "managed_run_profile": "default",
+        "process_status": "stopped",
+        "constraint_labels": [],
+        "repo_source": {"type": "local_path", "value": repository},
+        **(report_overrides or {}),
+    }
+    report = await client.post(
+        "/api/v1/runtime/report",
+        headers={"Authorization": f"Bearer {enrolled['runtime_token']}"},
+        json={"bindings": [payload], **(report_extras or {})},
+    )
+    return report, binding
 
 
 def agent_session_payload(*, workspace_id: str, project_slug: str, delegate_id: str) -> dict[str, Any]:

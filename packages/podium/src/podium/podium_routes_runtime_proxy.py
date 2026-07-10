@@ -54,10 +54,10 @@ async def linear_graphql_response(
     token_error = await _validate_proxy_token(state, runtime, workspace_id, payload, installation, token, error_response)
     if token_error is not None:
         return token_error
-    upstream_token, token_source = _proxy_upstream_token(token)
+    upstream_token, token_source = token
     if not upstream_token:
         await _record_proxy_token_missing(state, runtime, payload, workspace_id)
-        return error_response(400, "linear_app_token_required", "Linear proxy requests require an app actor installation token.")
+        return error_response(400, "linear_installation_required", "An active Linear installation is required")
     await _record_proxy_allowed(state, runtime, payload, workspace_id, token_source)
     return await _forward_linear_graphql(payload, upstream_token, linear_graphql_transport)
 
@@ -72,7 +72,7 @@ async def _linear_installation_or_error(
     state: Any, runtime: dict[str, Any], workspace_id: str, error_response: ErrorResponse
 ) -> dict[str, Any] | None | JSONResponse:
     try:
-        return await state.get_linear_installation(workspace_id)
+        installation = await state.get_active_linear_installation(workspace_id)
     except SecretDecryptionError:
         await state.record_proxy_audit(
             {
@@ -83,6 +83,18 @@ async def _linear_installation_or_error(
             }
         )
         return error_response(400, "secret_decryption_failed", "Stored Linear installation token could not be decrypted")
+    if installation is not None:
+        return installation
+    await state.record_proxy_audit(
+        {
+            "runtime_id": runtime["id"],
+            "workspace_id": workspace_id,
+            "allowed": False,
+            "reason": "linear_installation_required",
+            "timestamp": utc_now_iso(),
+        }
+    )
+    return error_response(400, "linear_installation_required", "An active Linear installation is required")
 
 
 def _proxy_token_from_installation(installation: dict[str, Any] | None) -> tuple[str, str]:
@@ -121,14 +133,6 @@ async def _validate_proxy_token(
     )
 
 
-def _proxy_upstream_token(token: tuple[str, str]) -> tuple[str, str]:
-    upstream_token, token_source = token
-    if upstream_token:
-        return upstream_token, token_source
-    upstream_token = os.environ.get("PODIUM_LINEAR_APP_ACCESS_TOKEN", "").strip()
-    return upstream_token, "app_environment" if upstream_token else ""
-
-
 async def _record_proxy_token_missing(
     state: Any, runtime: dict[str, Any], payload: dict[str, Any], workspace_id: str
 ) -> None:
@@ -136,7 +140,7 @@ async def _record_proxy_token_missing(
         {
             "runtime_id": runtime["id"],
             "allowed": False,
-            "reason": "linear_app_token_required",
+            "reason": "linear_installation_required",
             "operation_name": payload.get("operationName"),
             "workspace_id": workspace_id,
             "timestamp": utc_now_iso(),

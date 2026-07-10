@@ -38,7 +38,10 @@ def normalize_agent_session_event(payload: dict[str, Any]) -> dict[str, Any]:
     parent = issue.get("parent") if isinstance(issue.get("parent"), dict) else payload.get("parent")
     managed_run_intent = _managed_run_intent(payload, issue)
     return {
+        "event_type": "linear.delegated_issue",
         "workspace_id": str(workspace.get("id") or payload.get("workspace_id") or ""),
+        "linear_organization_id": str(payload.get("organizationId") or payload.get("linear_organization_id") or ""),
+        "linear_project_id": str(project.get("id") or payload.get("linear_project_id") or ""),
         "project_slug": str(project.get("slugId") or payload.get("project_slug") or ""),
         "issue_id": str(issue.get("id") or payload.get("issue_id") or ""),
         "issue_identifier": str(issue.get("identifier") or payload.get("issue_identifier") or ""),
@@ -61,6 +64,7 @@ def normalize_agent_session_event(payload: dict[str, Any]) -> dict[str, Any]:
         "blocked_by": _issue_ref_ids(issue.get("blocked_by") or payload.get("blocked_by")),
         "parent_issue_id": _issue_ref_id(issue.get("parent_issue_id") or parent or payload.get("parent_issue_id")),
         "managed_run_intent": dict(managed_run_intent) if isinstance(managed_run_intent, dict) else {},
+        "intake_key": f"linear-issue:{str(issue.get('id') or payload.get('issue_id') or '')}",
     }
 
 

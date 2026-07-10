@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime, timedelta, timezone
 
-import httpx
 import pytest
 
 from podium.server import PodiumServer
@@ -66,16 +66,37 @@ async def _auth(server: PodiumServer, *, linear_token: str | None = "secret-line
     cookie = (headers.get("set-cookie") or "").split(";", 1)[0]
     workspace_id = json.loads(body)["user"]["id"]
     if linear_token is not None:
-        await server.app.state.podium.save_linear_installation(
-            workspace_id,
+        now = datetime.now(timezone.utc)
+        await server.app.state.podium.save_linear_installation_record(
             {
-                "workspace_id": workspace_id,
+                "id": f"installation-{workspace_id}",
+                "user_id": workspace_id,
+                "application_config_id": "test-config",
+                "application_config_version": 1,
+                "application_source": "default",
+                "state": "accepted",
+                "active": False,
                 "access_token": linear_token,
-                "scope": "read,write",
-                "actor": "app",
+                "refresh_token": "test-refresh-token",
+                "token_type": "Bearer",
+                "scope": ["read", "write", "app:assignable", "app:mentionable"],
+                "expires_at": (now + timedelta(hours=1)).isoformat().replace("+00:00", "Z"),
+                "linear_organization_id": "linear-org-1",
+                "organization_url_key": "acme",
+                "organization_name": "Acme",
                 "app_user_id": "app-1",
-            },
+                "supports_agent_sessions": True,
+                "projects": [{"id": "proj-1", "name": "Podium", "slug_id": "podium"}],
+                "error_code": "",
+                "sanitized_reason": "",
+                "retryable": False,
+                "action_required": "",
+                "next_action": "",
+                "created_at": now.isoformat().replace("+00:00", "Z"),
+                "updated_at": now.isoformat().replace("+00:00", "Z"),
+            }
         )
+        await server.app.state.podium.activate_linear_installation(workspace_id, f"installation-{workspace_id}")
     return workspace_id, cookie
 
 
@@ -164,7 +185,9 @@ async def test_onboarding_linear_start_returns_authorization_url() -> None:
     server = PodiumServer(
         secret_key="test-secret",
         linear_client_id="client-1",
-        linear_redirect_uri="https://podium.example/cb",
+        linear_client_secret="client-secret",
+        linear_redirect_uri="https://podium.example/api/v1/linear/oauth/callback",
+        linear_webhook_secret="webhook-secret",
     )
     await server.start(port=0)
     try:
@@ -172,7 +195,7 @@ async def test_onboarding_linear_start_returns_authorization_url() -> None:
         status, _, body = await request(
             server.port,
             "POST",
-            "/api/v1/onboarding/linear/start",
+            "/api/v1/linear/installations/oauth",
             {},
             headers={"Cookie": cookie},
         )
@@ -182,43 +205,6 @@ async def test_onboarding_linear_start_returns_authorization_url() -> None:
     assert status == 200
     payload = json.loads(body)
     assert payload["authorization_url"].startswith("https://linear.app/oauth/authorize")
-
-
-@pytest.mark.asyncio
-async def test_onboarding_linear_scope_lists_projects_and_teams() -> None:
-    async def proxy_transport(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200,
-            json={
-                "data": {
-                    "teams": {"nodes": [{"id": "team-1", "name": "Engineering"}]},
-                    "projects": {"nodes": [{"id": "proj-1", "name": "Podium"}]},
-                }
-            },
-            request=request,
-        )
-
-    server = PodiumServer(
-        secret_key="test-secret",
-        linear_graphql_transport=proxy_transport,
-    )
-    await server.start(port=0)
-    try:
-        ws, cookie = await _auth(server)
-        status, _, body = await request(
-            server.port,
-            "GET",
-            "/api/v1/onboarding/linear/scope",
-            headers={"Cookie": cookie},
-        )
-    finally:
-        await server.stop()
-
-    assert status == 200
-    payload = json.loads(body)
-    assert payload["teams"][0]["name"] == "Engineering"
-    assert payload["projects"][0]["name"] == "Podium"
-    assert b"secret-linear-token" not in body
 
 
 @pytest.mark.asyncio
