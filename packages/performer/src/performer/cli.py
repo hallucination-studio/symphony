@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from performer_api.config import CodexConfig
-from performer_api.managed_runs import WorkItem
+from performer_api.managed_runs import ManagedRunRuntimeWait, ManagedRunTurnContext, WorkItem, WorkItemResultStatus
 
 from .codex_client import CodexSdkClient
 from .managed_run_backend import CodexManagedRunBackend
@@ -26,6 +26,11 @@ async def run_managed_run_turn(
         raise RuntimeError(f"could not read managed-run turn request: {turn_request_path}") from exc
     if not isinstance(payload, dict):
         raise RuntimeError(f"managed-run turn request must be a JSON object: {turn_request_path}")
+    context_payload = payload.get("context") if isinstance(payload.get("context"), dict) else {}
+    context = ManagedRunTurnContext.from_dict(context_payload)
+    errors = context.validation_errors()
+    if errors:
+        raise RuntimeError("managed_run_turn_context_invalid:" + ",".join(errors))
     backend = CodexManagedRunBackend(codex_client or _managed_codex_backend())
     turn_kind = str(payload.get("turn_kind") or "")
     workspace_path = Path(str(payload.get("workspace_path") or "")).expanduser().resolve()
@@ -37,6 +42,7 @@ async def run_managed_run_turn(
         )
         body: dict[str, object] = {
             "turn_kind": "plan",
+            "context": context.to_dict(),
             "thread_id": result.thread_id,
             "plan": result.plan.to_dict(),
             "events": result.events,
@@ -45,21 +51,137 @@ async def run_managed_run_turn(
         work_item_payload = payload.get("work_item")
         if not isinstance(work_item_payload, dict):
             raise RuntimeError("work_item turn requires work_item payload")
-        result = await backend.execute_turn(
-            workspace_path,
-            WorkItem.from_dict(work_item_payload),
-            thread_id=str(payload.get("thread_id") or ""),
-        )
-        body = {
-            "turn_kind": "work_item",
-            "thread_id": result.thread_id,
-            "result": result.result.to_dict(),
-            "events": result.events,
-        }
+        work_item = WorkItem.from_dict(work_item_payload)
+        if context.work_item_id != work_item.id:
+            raise RuntimeError("managed_run_turn_context_work_item_mismatch")
+        wait = _runtime_wait_probe(payload)
+        if wait is not None:
+            body = _runtime_wait_body(context, str(payload.get("thread_id") or ""), wait, [{"event": "runtime_wait_probe"}])
+        else:
+            result = await backend.execute_turn(
+                workspace_path,
+                work_item,
+                thread_id=str(payload.get("thread_id") or ""),
+            )
+            wait = _runtime_wait_from_events(result.events) if result.result.status_claimed is WorkItemResultStatus.BLOCKED else None
+            body = (
+                _runtime_wait_body(context, result.thread_id, wait, result.events)
+                if wait is not None
+                else {
+                    "turn_kind": "work_item",
+                    "context": context.to_dict(),
+                    "thread_id": result.thread_id,
+                    "result": result.result.to_dict(),
+                    "events": result.events,
+                }
+            )
     else:
         raise RuntimeError(f"unsupported managed-run turn kind: {turn_kind}")
     _write_json_atomic(turn_result_path, body)
     return body
+
+
+def _runtime_wait_probe(payload: dict[str, Any]) -> ManagedRunRuntimeWait | None:
+    if payload.get("runtime_wait_probe") is not True:
+        return None
+    return ManagedRunRuntimeWait(
+        wait_kind="approval_requested",
+        message="Symphony runtime wait probe requires approval.",
+    )
+
+
+def _runtime_wait_from_events(events: list[dict[str, Any]]) -> ManagedRunRuntimeWait | None:
+    completed_reviews = _completed_approval_reviews(events)
+    completed_without_id = any(
+        _runtime_wait_event_name(event) == "item_autoapprovalreview_completed" and not _approval_review_id(event)
+        for event in events
+        if isinstance(event, dict)
+    )
+    for event in reversed(events):
+        if not isinstance(event, dict):
+            continue
+        event_name = _runtime_wait_event_name(event)
+        if event_name == "item_autoapprovalreview_started":
+            review_id = _approval_review_id(event)
+            if (review_id and review_id in completed_reviews) or (not review_id and completed_without_id):
+                continue
+            return ManagedRunRuntimeWait(
+                wait_kind=_approval_wait_kind(event),
+                message=_runtime_wait_message(event, "Codex requested approval."),
+            )
+        if event_name == "item_commandexecution_terminalinteraction":
+            return ManagedRunRuntimeWait(
+                wait_kind="tool_input_required",
+                message=_runtime_wait_message(event, "Codex requested terminal input."),
+            )
+        if event_name == "guardianwarning":
+            return ManagedRunRuntimeWait(
+                wait_kind="permission_required",
+                message=_runtime_wait_message(event, "Codex reported a guardian warning."),
+            )
+    return None
+
+
+def _completed_approval_reviews(events: list[dict[str, Any]]) -> set[str]:
+    return {
+        review_id
+        for event in events
+        if isinstance(event, dict)
+        and _runtime_wait_event_name(event) == "item_autoapprovalreview_completed"
+        and (review_id := _approval_review_id(event))
+    }
+
+
+def _runtime_wait_event_name(event: dict[str, Any]) -> str:
+    payload = _event_payload(event)
+    name = payload.get("type") or payload.get("event") or payload.get("method") or event.get("type") or event.get("event")
+    normalized = str(name or "").replace("/", "_").replace(".", "_").replace("-", "_").lower()
+    return normalized.removeprefix("sdk_")
+
+
+def _approval_review_id(event: dict[str, Any]) -> str:
+    payload = _event_payload(event)
+    return str(payload.get("reviewId") or payload.get("review_id") or event.get("reviewId") or event.get("review_id") or "")
+
+
+def _approval_wait_kind(event: dict[str, Any]) -> str:
+    action = _event_payload(event).get("action")
+    action_type = str(action.get("type") or "").lower() if isinstance(action, dict) else ""
+    if action_type in {"requestpermissions", "networkaccess"}:
+        return "permission_required"
+    if action_type == "mcptoolcall":
+        return "tool_input_required"
+    return "approval_requested"
+
+
+def _runtime_wait_message(event: dict[str, Any], fallback: str) -> str:
+    payload = _event_payload(event)
+    action = payload.get("action") if isinstance(payload.get("action"), dict) else {}
+    for value in (event.get("message"), payload.get("message"), payload.get("stdin"), action.get("reason")):
+        message = str(value or "").strip()
+        if message:
+            return message
+    return fallback
+
+
+def _event_payload(event: dict[str, Any]) -> dict[str, Any]:
+    payload = event.get("payload")
+    return payload if isinstance(payload, dict) else event
+
+
+def _runtime_wait_body(
+    context: ManagedRunTurnContext,
+    thread_id: str,
+    wait: ManagedRunRuntimeWait,
+    events: list[dict[str, Any]],
+) -> dict[str, object]:
+    return {
+        "turn_kind": "work_item",
+        "context": context.to_dict(),
+        "thread_id": thread_id,
+        "runtime_wait": wait.to_dict(),
+        "events": events,
+    }
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:

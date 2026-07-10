@@ -43,6 +43,7 @@ from performer_api.managed_runs_runtime import (
     RuntimeConfigEnvelope,
     RuntimeProfile,
 )
+from performer_api.managed_runs_turns import ManagedRunRuntimeWait, ManagedRunTurnContext
 from performer_api.managed_runs_summary import render_run_summary_block, replace_managed_run_summary_block
 from performer_api.managed_runs_utils import sanitize_profile_settings
 from performer_api.managed_runs_validation import ManagedRunPlanValidator
@@ -63,8 +64,10 @@ __all__ = [
     "ManagedRunPlanValidator",
     "ManagedRunPlanValidatorError",
     "ManagedRunPolicy",
+    "ManagedRunRuntimeWait",
     "ManagedRunRuntimeRole",
     "ManagedRunState",
+    "ManagedRunTurnContext",
     "ParallelizationPolicy",
     "RUN_SUMMARY_END",
     "RUN_SUMMARY_START",

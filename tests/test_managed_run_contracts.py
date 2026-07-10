@@ -11,6 +11,8 @@ from performer_api.managed_runs import (
     ManagedRunPlan,
     ManagedRunPlanValidator,
     ManagedRunPlanValidatorError,
+    ManagedRunRuntimeWait,
+    ManagedRunTurnContext,
     ParallelizationPolicy,
     TaskOutputManifest,
     ThreadCompletionReport,
@@ -73,6 +75,46 @@ def test_managed_run_plan_roundtrips_with_work_item_contract() -> None:
     assert loaded == plan
     assert loaded.work_items[0].id == "wi-1"
     assert loaded.verification_rubric.to_dict()["ship_readiness"] == ["residual risk recorded"]
+
+
+def test_managed_run_turn_context_requires_and_compares_fencing_fields() -> None:
+    context = ManagedRunTurnContext(
+        run_id="run-1",
+        work_item_id="wi-1",
+        policy_revision=3,
+        plan_version=2,
+        lease_id="lease-1",
+        fencing_token="fence-1",
+        turn_id="turn-1",
+    )
+
+    loaded = ManagedRunTurnContext.from_dict(context.to_dict())
+    invalid = ManagedRunTurnContext.from_dict({"run_id": "", "policy_revision": 0, "plan_version": -1})
+
+    assert loaded == context
+    assert context.validation_errors() == []
+    assert context.mismatch_reason(ManagedRunTurnContext.from_dict({**context.to_dict(), "plan_version": 3})) == "stale_plan_version"
+    assert context.mismatch_reason(ManagedRunTurnContext.from_dict({**context.to_dict(), "policy_revision": 4})) == "stale_policy_revision"
+    assert context.mismatch_reason(ManagedRunTurnContext.from_dict({**context.to_dict(), "lease_id": "lease-stale"})) == "stale_lease_id"
+    assert context.mismatch_reason(ManagedRunTurnContext.from_dict({**context.to_dict(), "fencing_token": "fence-stale"})) == "stale_fencing_token"
+    assert context.mismatch_reason(ManagedRunTurnContext.from_dict({**context.to_dict(), "turn_id": "turn-stale"})) == "stale_turn_id"
+    assert invalid.validation_errors() == [
+        "run_id_required",
+        "policy_revision_required",
+        "plan_version_invalid",
+        "lease_id_required",
+        "fencing_token_required",
+        "turn_id_required",
+    ]
+
+
+def test_managed_run_runtime_wait_requires_a_known_kind_and_message() -> None:
+    wait = ManagedRunRuntimeWait(wait_kind="approval_requested", message="Approve this runtime action.")
+    invalid = ManagedRunRuntimeWait.from_dict({"wait_kind": "unknown", "message": ""})
+
+    assert ManagedRunRuntimeWait.from_dict(wait.to_dict()) == wait
+    assert wait.validation_errors() == []
+    assert invalid.validation_errors() == ["runtime_wait_kind_invalid", "runtime_wait_message_required"]
 
 
 @pytest.mark.parametrize(

@@ -17,11 +17,11 @@ from .codex_client_helpers import (
     _is_terminal_init_error,
     _is_transient_codex_error,
     _maybe_await,
-    _sdk_event_to_dict,
     _string_attr,
     _timeout_seconds,
     _usage_from_any,
 )
+from .codex_client_sdk_events import _sdk_event_to_dict
 
 
 class _CodexSdkRuntimeMixin:

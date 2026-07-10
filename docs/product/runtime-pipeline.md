@@ -35,6 +35,12 @@ The turn request names `turn_kind` as `plan` or `work_item`. A plan turn returns
 a structured plan payload and does not change files. A work-item turn executes
 exactly one accepted work item and returns a structured `WorkItemResult`.
 
+Every request and result carries the same fenced turn context: `run_id`,
+`work_item_id` when applicable, `policy_revision`, `plan_version`, `lease_id`,
+`fencing_token`, and `turn_id`. Performer rejects an invalid request context and
+echoes the accepted context in its result. Conductor rejects a missing, stale, or
+mismatched result context before applying the result to durable work-item state.
+
 Conductor prepares runtime homes, request files, result files, logs, leases, and
 fencing. Performer never leases dispatches, writes Linear directly, or decides
 terminal managed-run state.
