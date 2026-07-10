@@ -8,6 +8,7 @@ import httpx
 from fastapi import FastAPI, Header, Request
 from fastapi.responses import JSONResponse
 
+from .linear_token_service import LinearTokenUnavailable
 from .podium_routes_runtime_helpers import linear_installation_actor_is_app, linear_payload_is_mutation
 from .podium_shared import utc_now_iso
 from .podium_state import SecretDecryptionError
@@ -44,22 +45,80 @@ async def linear_graphql_response(
         await _audit_runtime_proxy_denial(state, runtime, "runtime_disabled")
         return error_response(401, "runtime_disabled", "Runtime is disabled")
     payload = await request.json()
-    group_id = str(runtime.get("runtime_group_id") or "")
-    group = await state.store.get_runtime_group(group_id) or {}
-    workspace_id = str(group.get("linear_workspace_id") or "")
+    binding = await _ready_proxy_binding_or_error(state, runtime, error_response)
+    if isinstance(binding, JSONResponse):
+        return binding
+    workspace_id = str(binding.get("user_id") or "")
     installation = await _linear_installation_or_error(state, runtime, workspace_id, error_response)
     if isinstance(installation, JSONResponse):
         return installation
-    token = _proxy_token_from_installation(installation)
-    token_error = await _validate_proxy_token(state, runtime, workspace_id, payload, installation, token, error_response)
+    if str(installation.get("id") or "") != str(binding.get("installation_id") or ""):
+        await _audit_proxy_context_denial(state, runtime, binding, "runtime_installation_mismatch")
+        return error_response(409, "runtime_installation_mismatch", "Runtime binding installation is not active")
+    try:
+        upstream_token = await state.linear_access_token(installation)
+    except LinearTokenUnavailable as exc:
+        return await _linear_token_error(state, runtime, workspace_id, exc, error_response)
+    token_error = await _validate_proxy_token(
+        state, runtime, workspace_id, payload, installation, upstream_token, error_response
+    )
     if token_error is not None:
         return token_error
-    upstream_token, token_source = _proxy_upstream_token(token)
-    if not upstream_token:
-        await _record_proxy_token_missing(state, runtime, payload, workspace_id)
-        return error_response(400, "linear_app_token_required", "Linear proxy requests require an app actor installation token.")
-    await _record_proxy_allowed(state, runtime, payload, workspace_id, token_source)
-    return await _forward_linear_graphql(payload, upstream_token, linear_graphql_transport)
+    await _record_proxy_allowed(state, runtime, binding, payload, workspace_id, "installation")
+    response = await _forward_linear_graphql(payload, upstream_token, linear_graphql_transport)
+    if response.status_code != 401:
+        return response
+    try:
+        refreshed = await state.linear_access_token(
+            installation,
+            force_refresh=True,
+            rejected_access_token=upstream_token,
+        )
+    except LinearTokenUnavailable as exc:
+        return await _linear_token_error(state, runtime, workspace_id, exc, error_response)
+    response = await _forward_linear_graphql(payload, refreshed, linear_graphql_transport)
+    if response.status_code != 401:
+        return response
+    current = await state.get_active_linear_installation(workspace_id)
+    if current is not None:
+        await state.mark_linear_reauthorization_required(current, "linear_token_rejected_after_refresh")
+    failure = LinearTokenUnavailable("linear_reauthorization_required", "Linear authorization must be renewed")
+    return await _linear_token_error(state, runtime, workspace_id, failure, error_response)
+
+
+async def _ready_proxy_binding_or_error(
+    state: Any,
+    runtime: dict[str, Any],
+    error_response: ErrorResponse,
+) -> dict[str, Any] | JSONResponse:
+    runtime_id = str(runtime.get("id") or "")
+    bindings = [
+        row
+        for row in await state.store.list_project_bindings_for_conductor(runtime_id)
+        if row.get("active", True)
+    ]
+    if not bindings:
+        await _audit_runtime_proxy_denial(state, runtime, "linear_project_binding_required")
+        return error_response(409, "linear_project_binding_required", "A ready project binding is required")
+    if len(bindings) != 1 or str(bindings[0].get("state") or "") != "ready":
+        binding = bindings[0]
+        await _audit_proxy_context_denial(state, runtime, binding, "linear_project_binding_not_ready")
+        return error_response(409, "linear_project_binding_not_ready", "Project binding is not ready")
+    binding = bindings[0]
+    group = await state.store.get_runtime_group(str(runtime.get("runtime_group_id") or "")) or {}
+    if (
+        str(group.get("project_binding_id") or "") != str(binding.get("id") or "")
+        or str(group.get("linear_workspace_id") or "") != str(binding.get("user_id") or "")
+    ):
+        await _audit_proxy_context_denial(state, runtime, binding, "runtime_project_binding_mismatch")
+        return error_response(409, "runtime_project_binding_mismatch", "Runtime project binding does not match")
+    selected = await state.store.list_selected_linear_projects(str(binding.get("user_id") or ""))
+    if str(binding.get("linear_project_id") or "") not in {
+        str(row.get("linear_project_id") or "") for row in selected
+    }:
+        await _audit_proxy_context_denial(state, runtime, binding, "linear_project_scope_mismatch")
+        return error_response(409, "linear_project_scope_mismatch", "Runtime project is outside selected scope")
+    return binding
 
 
 async def _audit_runtime_proxy_denial(state: Any, runtime: dict[str, Any], reason: str) -> None:
@@ -68,11 +127,29 @@ async def _audit_runtime_proxy_denial(state: Any, runtime: dict[str, Any], reaso
     )
 
 
+async def _audit_proxy_context_denial(
+    state: Any,
+    runtime: dict[str, Any],
+    binding: dict[str, Any],
+    reason: str,
+) -> None:
+    await state.record_proxy_audit(
+        {
+            "runtime_id": runtime["id"],
+            "project_binding_id": binding.get("id"),
+            "linear_project_id": binding.get("linear_project_id"),
+            "allowed": False,
+            "reason": reason,
+            "timestamp": utc_now_iso(),
+        }
+    )
+
+
 async def _linear_installation_or_error(
     state: Any, runtime: dict[str, Any], workspace_id: str, error_response: ErrorResponse
 ) -> dict[str, Any] | None | JSONResponse:
     try:
-        return await state.get_linear_installation(workspace_id)
+        installation = await state.get_active_linear_installation(workspace_id)
     except SecretDecryptionError:
         await state.record_proxy_audit(
             {
@@ -83,11 +160,18 @@ async def _linear_installation_or_error(
             }
         )
         return error_response(400, "secret_decryption_failed", "Stored Linear installation token could not be decrypted")
-
-
-def _proxy_token_from_installation(installation: dict[str, Any] | None) -> tuple[str, str]:
-    upstream_token = str((installation or {}).get("access_token") or "").strip()
-    return upstream_token, "installation" if upstream_token else ""
+    if installation is not None:
+        return installation
+    await state.record_proxy_audit(
+        {
+            "runtime_id": runtime["id"],
+            "workspace_id": workspace_id,
+            "allowed": False,
+            "reason": "linear_installation_required",
+            "timestamp": utc_now_iso(),
+        }
+    )
+    return error_response(400, "linear_installation_required", "An active Linear installation is required")
 
 
 async def _validate_proxy_token(
@@ -96,10 +180,9 @@ async def _validate_proxy_token(
     workspace_id: str,
     payload: dict[str, Any],
     installation: dict[str, Any] | None,
-    token: tuple[str, str],
+    upstream_token: str,
     error_response: ErrorResponse,
 ) -> JSONResponse | None:
-    upstream_token, _token_source = token
     if not linear_payload_is_mutation(payload) or not upstream_token:
         return None
     if linear_installation_actor_is_app(installation):
@@ -121,31 +204,32 @@ async def _validate_proxy_token(
     )
 
 
-def _proxy_upstream_token(token: tuple[str, str]) -> tuple[str, str]:
-    upstream_token, token_source = token
-    if upstream_token:
-        return upstream_token, token_source
-    upstream_token = os.environ.get("PODIUM_LINEAR_APP_ACCESS_TOKEN", "").strip()
-    return upstream_token, "app_environment" if upstream_token else ""
-
-
-async def _record_proxy_token_missing(
-    state: Any, runtime: dict[str, Any], payload: dict[str, Any], workspace_id: str
-) -> None:
+async def _linear_token_error(
+    state: Any,
+    runtime: dict[str, Any],
+    workspace_id: str,
+    error: LinearTokenUnavailable,
+    error_response: ErrorResponse,
+) -> JSONResponse:
     await state.record_proxy_audit(
         {
             "runtime_id": runtime["id"],
             "allowed": False,
-            "reason": "linear_app_token_required",
-            "operation_name": payload.get("operationName"),
+            "reason": error.code,
             "workspace_id": workspace_id,
             "timestamp": utc_now_iso(),
         }
     )
+    return error_response(401, error.code, error.reason)
 
 
 async def _record_proxy_allowed(
-    state: Any, runtime: dict[str, Any], payload: dict[str, Any], workspace_id: str, token_source: str
+    state: Any,
+    runtime: dict[str, Any],
+    binding: dict[str, Any],
+    payload: dict[str, Any],
+    workspace_id: str,
+    token_source: str,
 ) -> None:
     await state.record_proxy_audit(
         {
@@ -153,6 +237,8 @@ async def _record_proxy_allowed(
             "allowed": True,
             "operation_name": payload.get("operationName"),
             "workspace_id": workspace_id,
+            "project_binding_id": binding.get("id"),
+            "linear_project_id": binding.get("linear_project_id"),
             "token_source": token_source,
             "timestamp": utc_now_iso(),
         }
@@ -170,7 +256,7 @@ async def _forward_linear_graphql(
         upstream = await client.post(
             upstream_endpoint,
             json=payload,
-            headers={"Authorization": upstream_token, "Content-Type": "application/json"},
+            headers={"Authorization": f"Bearer {upstream_token}", "Content-Type": "application/json"},
         )
     try:
         upstream_payload = upstream.json()

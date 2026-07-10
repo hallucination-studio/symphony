@@ -39,7 +39,7 @@ function bootstrap(overrides: Partial<Bootstrap> = {}): Bootstrap {
 describe("HomePage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mockApi.managedRuns.mockResolvedValue({ runtime_group_id: "group-1", policy_revision: 1, managed_runs: { runs: [] } });
+    mockApi.managedRuns.mockResolvedValue({ conductors: [] });
     mockApi.smokeCheckResult.mockRejectedValue(new Error("404"));
   });
 

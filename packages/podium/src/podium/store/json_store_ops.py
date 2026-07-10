@@ -21,43 +21,23 @@ class JsonStoreOpsMixin:
         rows[user_id] = dict(result)
         self._write("smoke_results.json", rows)
 
+    async def compare_and_save_smoke_result(
+        self,
+        user_id: str,
+        expected_revision: int,
+        result: dict[str, Any],
+    ) -> bool:
+        rows = self._load_map("smoke_results.json")
+        current = rows.get(user_id) if isinstance(rows.get(user_id), dict) else {}
+        if int(current.get("revision") or 0) != expected_revision:
+            return False
+        rows[user_id] = dict(result)
+        self._write("smoke_results.json", rows)
+        return True
+
     async def get_smoke_result(self, user_id: str) -> dict[str, Any] | None:
         row = self._load_map("smoke_results.json").get(user_id)
         return dict(row) if isinstance(row, dict) else None
-
-    async def save_linear_installation(self, workspace_id: str, installation: dict[str, Any]) -> None:
-        rows = self._load_map("linear_installations.json")
-        rows[workspace_id] = dict(installation)
-        self._write("linear_installations.json", rows)
-
-    async def get_linear_installation(self, workspace_id: str) -> dict[str, Any] | None:
-        row = self._load_map("linear_installations.json").get(workspace_id)
-        return dict(row) if isinstance(row, dict) else None
-
-    async def save_linear_poll_state(self, binding_id: str, state: dict[str, Any]) -> None:
-        rows = self._load_map("linear_poll_state.json")
-        rows[binding_id] = {"binding_id": binding_id, **dict(state)}
-        self._write("linear_poll_state.json", rows)
-
-    async def get_linear_poll_state(self, binding_id: str) -> dict[str, Any] | None:
-        row = self._load_map("linear_poll_state.json").get(binding_id)
-        return dict(row) if isinstance(row, dict) else None
-
-    async def save_oauth_state(self, state: str, *, workspace_id: str, expires_at: str) -> None:
-        rows = self._load_map("oauth_states.json")
-        rows[state] = {"workspace_id": workspace_id, "expires_at": expires_at}
-        self._write("oauth_states.json", rows)
-
-    async def consume_oauth_state(self, state: str) -> str | None:
-        rows = self._load_map("oauth_states.json")
-        row = rows.pop(state, None)
-        self._write("oauth_states.json", rows)
-        if not isinstance(row, dict):
-            return None
-        expires_at = _datetime_from_json(str(row.get("expires_at") or ""))
-        if expires_at is not None and expires_at < datetime.now(timezone.utc):
-            return None
-        return str(row.get("workspace_id") or "") or None
 
     async def set_presence(self, runtime_id: str, *, timestamp: str, expires_at: str) -> None:
         rows = self._load_map("runtime_presence.json")
@@ -128,6 +108,27 @@ class JsonStoreOpsMixin:
         commands = rows.get(runtime_id) if isinstance(rows.get(runtime_id), list) else []
         command_id = len(commands) + 1
         row = {"id": command_id, "runtime_id": runtime_id, "command": dict(command), "created_at": utc_now_iso(), "delivered": False}
+        commands.append(row)
+        rows[runtime_id] = commands
+        self._write("runtime_commands.json", rows)
+        return row
+
+    async def append_runtime_command_once(
+        self, runtime_id: str, dedupe_key: str, command: dict[str, Any]
+    ) -> dict[str, Any]:
+        rows = self._load_map("runtime_commands.json")
+        commands = rows.get(runtime_id) if isinstance(rows.get(runtime_id), list) else []
+        existing = next((row for row in commands if row.get("dedupe_key") == dedupe_key), None)
+        if isinstance(existing, dict):
+            return dict(existing)
+        row = {
+            "id": len(commands) + 1,
+            "runtime_id": runtime_id,
+            "dedupe_key": dedupe_key,
+            "command": dict(command),
+            "created_at": utc_now_iso(),
+            "delivered": False,
+        }
         commands.append(row)
         rows[runtime_id] = commands
         self._write("runtime_commands.json", rows)

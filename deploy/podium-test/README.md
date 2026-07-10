@@ -49,7 +49,8 @@ Required values:
 - `PODIUM_SECRET_KEY`
 - `POSTGRES_PASSWORD`
 
-Linear settings are optional until OAuth/webhook testing is needed.
+Linear settings are optional until OAuth and delegated-issue polling testing is
+needed.
 
 ## Start
 

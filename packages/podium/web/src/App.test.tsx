@@ -29,10 +29,7 @@ describe("App auth gate", () => {
     vi.clearAllMocks();
     vi.unstubAllEnvs();
     mockApi.managedRuns.mockResolvedValue({
-      runtime_group_id: "group-1",
-      policy_revision: 1,
-      profiles: {},
-      managed_runs: { runs: [] },
+      conductors: [],
     });
     mockApi.smokeCheckResult.mockRejectedValue(new Error("404"));
     mockApi.bootstrap.mockResolvedValue({
@@ -86,5 +83,17 @@ describe("App auth gate", () => {
     expect(screen.getByText("Home")).toBeInTheDocument();
     expect(screen.queryByText("Runs")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Sign in" })).not.toBeInTheDocument();
+  });
+
+  it("does not mark the signed-in identity chip active on the Account page", async () => {
+    mockApi.me.mockResolvedValue({
+      user: { id: "user_1", email: "a@b.com" },
+    });
+    renderWithProviders(<App />, { route: "/account" });
+
+    const label = await screen.findByText("Signed in");
+    const chip = label.closest("a");
+    expect(chip).toHaveClass("account-chip");
+    expect(chip).not.toHaveClass("active");
   });
 });

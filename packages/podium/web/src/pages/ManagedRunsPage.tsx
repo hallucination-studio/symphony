@@ -3,14 +3,13 @@ import { Card } from "../components/Card";
 import { EmptyState } from "../components/EmptyState";
 import { PageHeader, QueryState } from "../components/PageState";
 import { StatusBadge } from "../components/StatusBadge";
-import type { ManagedRun, ManagedRunWorkItem } from "../api/types";
+import type { ManagedRun, ManagedRunsConductorReport, ManagedRunWorkItem } from "../api/types";
 import { useI18n } from "../i18n";
 
 export default function ManagedRunsPage() {
   const { data, isLoading, error } = useManagedRuns();
   const { t } = useI18n();
-  const managedRuns = data?.managed_runs ?? {};
-  const runs = managedRuns.runs ?? [];
+  const conductors = data?.conductors ?? [];
 
   return (
     <>
@@ -19,7 +18,7 @@ export default function ManagedRunsPage() {
         description={t("Linear-native agent runs, work items, verification, and blocked state.")}
       />
       <QueryState isLoading={isLoading} error={error}>
-        {!data || runs.length === 0 ? (
+        {!data || conductors.length === 0 ? (
           <Card>
             <EmptyState
               icon="..."
@@ -29,21 +28,59 @@ export default function ManagedRunsPage() {
           </Card>
         ) : (
           <div className="managed-run-stack">
-            <Card>
-              <div className="managed-run-revisions">
-                <Revision label={t("Runtime group")} value={data.runtime_group_id} mono />
-                <Revision label={t("Policy revision")} value={data.policy_revision} />
-                <Revision label={t("Runs")} value={runs.length} />
-              </div>
-            </Card>
-
-            {runs.map((run) => (
-              <RunCard key={run.run_id} run={run} />
+            {conductors.map((report) => (
+              <ConductorRuns key={report.conductor.id} report={report} />
             ))}
           </div>
         )}
       </QueryState>
     </>
+  );
+}
+
+function ConductorRuns({ report }: { report: ManagedRunsConductorReport }) {
+  const { t } = useI18n();
+  const runs = report.managed_runs.runs ?? [];
+  const identity = `${report.conductor.name}-${report.conductor.public_id}`;
+  const healthy = report.conductor.online && report.binding.state === "ready";
+  return (
+    <section className="managed-conductor-section" aria-labelledby={`project-${report.project.id}`}>
+      <Card>
+        <div className="managed-run-head">
+          <div>
+            <h2 className="managed-conductor-title" id={`project-${report.project.id}`}>
+              {report.project.name}
+            </h2>
+            <div className="runtime-sub">
+              <span>{report.project.slug}</span>
+              <span aria-hidden="true"> / </span>
+              <span>{identity}</span>
+            </div>
+          </div>
+          <StatusBadge
+            status={healthy ? "healthy" : report.conductor.online ? "pending" : "offline"}
+            label={t(healthy ? "ready" : report.conductor.online ? report.binding.state : "offline")}
+          />
+        </div>
+        <div className="managed-run-revisions">
+          <Revision label={t("Runtime group")} value={report.runtime_group_id} mono />
+          <Revision label={t("Policy revision")} value={report.policy_revision} />
+          <Revision label={t("Runs")} value={runs.length} />
+        </div>
+        {report.binding.sanitized_reason ? (
+          <p className="managed-run-blocked">{report.binding.sanitized_reason}</p>
+        ) : null}
+        {runs.length === 0 ? (
+          <EmptyState
+            title={t("No managed run report yet")}
+            description={t("Managed run state appears after a Conductor posts its next runtime report.")}
+          />
+        ) : null}
+      </Card>
+      {runs.map((run) => (
+        <RunCard key={`${report.conductor.id}:${run.run_id}`} run={run} />
+      ))}
+    </section>
   );
 }
 

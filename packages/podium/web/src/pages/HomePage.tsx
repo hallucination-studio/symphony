@@ -115,10 +115,12 @@ function SystemHealthCard({ complete, linearState, runtimeState, smoke }: { comp
 
 function ManagedRunsCard({ managedRuns, managedRunsLoading }: { managedRuns: ManagedRunsReport | null; managedRunsLoading: boolean }) {
   const { t } = useI18n();
+  const reports = managedRuns?.conductors ?? [];
+  const runCount = reports.reduce((total, report) => total + (report.managed_runs.runs?.length ?? 0), 0);
   return (
     <Card className="span-2" title={t("Managed Runs")} actions={<LinkButton to="/managed-runs" variant="ghost">{t("View managed runs")}</LinkButton>}>
       <QueryState isLoading={managedRunsLoading} error={null}>
-        {!managedRuns?.managed_runs?.runs?.length ? <EmptyState title={t("No managed run report yet")} description={t("Managed run state appears after a Conductor posts its next runtime report.")} /> : <ManagedRunsMetrics managedRuns={managedRuns} />}
+        {managedRuns === null || runCount === 0 ? <EmptyState title={t("No managed run report yet")} description={t("Managed run state appears after a Conductor posts its next runtime report.")} /> : <ManagedRunsMetrics managedRuns={managedRuns} />}
       </QueryState>
     </Card>
   );
@@ -126,17 +128,18 @@ function ManagedRunsCard({ managedRuns, managedRunsLoading }: { managedRuns: Man
 
 function ManagedRunsMetrics({ managedRuns }: { managedRuns: ManagedRunsReport }) {
   const { t } = useI18n();
-  const runs = managedRuns.managed_runs.runs ?? [];
+  const reports = managedRuns.conductors;
+  const runs = reports.flatMap((report) => report.managed_runs.runs ?? []);
   const workItems = runs.flatMap((run) => run.work_items ?? []);
   const blocked = workItems.filter((item) => item.state === "blocked").length;
   const done = workItems.filter((item) => ["done", "verified"].includes(item.state)).length;
   return (
     <div className="managed-run-revisions">
       <Metric label={t("Runs")} value={runs.length} />
+      <Metric label={t("Conductors")} value={reports.length} />
       <Metric label={t("Work items")} value={workItems.length} />
       <Metric label={t("Blocked")} value={blocked} />
       <Metric label={t("Done")} value={done} />
-      <Metric label={t("Policy revision")} value={managedRuns.policy_revision} />
     </div>
   );
 }

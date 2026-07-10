@@ -5,7 +5,8 @@ import type {
   EnrollmentStatus,
   EnrollmentToken,
   InstanceLogs,
-  LinearAppConfig,
+  LinearApplication,
+  LinearInstallations,
   LinearScope,
   OnboardingProgress,
   ManagedRunsReport,
@@ -97,20 +98,27 @@ export const api = {
     return request("/api/v1/auth/me");
   },
 
-  // ===== Account / Linear application =====
-  setLinearApp(input: {
+  // ===== Linear application and installation =====
+  linearApplication(): Promise<{ application: LinearApplication }> {
+    return request("/api/v1/linear/application");
+  },
+
+  saveLinearApplication(input: {
     client_id: string;
     client_secret: string;
-    redirect_uri?: string;
-  }): Promise<{ linear_app: LinearAppConfig }> {
-    return request("/api/v1/account/linear-app", {
+  }): Promise<{ application: LinearApplication }> {
+    return request("/api/v1/linear/application", {
       method: "PUT",
       body: JSON.stringify(input),
     });
   },
 
-  clearLinearApp(): Promise<{ ok: boolean; linear_app: null }> {
-    return request("/api/v1/account/linear-app", { method: "DELETE" });
+  selectDefaultLinearApplication(): Promise<{ application: LinearApplication }> {
+    return request("/api/v1/linear/application/default", { method: "POST" });
+  },
+
+  linearInstallations(): Promise<LinearInstallations> {
+    return request("/api/v1/linear/installations");
   },
 
   // ===== Onboarding / workspace =====
@@ -118,8 +126,8 @@ export const api = {
     return request<Bootstrap>("/api/v1/bootstrap");
   },
 
-  startLinear(): Promise<{ authorization_url: string; workspace_id: string }> {
-    return request("/api/v1/onboarding/linear/start", { method: "POST" });
+  startLinear(): Promise<{ authorization_url: string }> {
+    return request("/api/v1/linear/installations/oauth", { method: "POST" });
   },
 
   linearScope(): Promise<LinearScope> {

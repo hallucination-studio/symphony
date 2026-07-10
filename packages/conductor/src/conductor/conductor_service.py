@@ -20,6 +20,7 @@ from .conductor_runtime import LogQuery
 from .conductor_managed_run_coordinator import ConductorManagedRunCoordinator
 from .conductor_managed_run_store import ConductorManagedRunStore
 from .conductor_store import ConductorStore
+from .conductor_smoke_store import ConductorSmokeCheckStore
 from .conductor_podium_sync import ConductorPodiumSyncMixin
 from .conductor_service_views import ConductorServiceViewsMixin
 from .conductor_service_helpers import (
@@ -46,7 +47,9 @@ class ConductorService(ConductorPodiumSyncMixin, ConductorServiceViewsMixin):
         self.runtime_manager = runtime_manager or ConductorRuntimeManager()
         self.managed_run_store = ConductorManagedRunStore(data_root / "managed_run")
         self.managed_run_coordinator = ConductorManagedRunCoordinator(store=self.managed_run_store)
+        self.smoke_check_store = ConductorSmokeCheckStore(store)
         self._managed_run_runtime_config: dict[str, Any] = {}
+        self._smoke_check_lock = asyncio.Lock()
         self._startup_locks: dict[str, asyncio.Lock] = {}
         self.repository_handoff_tracker_factory = self._repository_handoff_tracker
         self.project_label_proxy_factory = self._project_label_proxy

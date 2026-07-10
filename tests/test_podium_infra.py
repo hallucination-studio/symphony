@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import ast
+import inspect
+import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -10,12 +13,22 @@ import pytest
 from fastapi.testclient import TestClient
 
 from podium.app import create_app
+from podium.cli import secure_cookies_from_env
 from podium.config import PodiumConfig
 from podium.podium_shared import dispatch_public
+from podium.store._postgres_dispatch import PgDispatchMixin, _binding_values
 from podium.store.postgres import PgMigrator
 from podium.store import PodiumStore
 
 APP_PATH = Path("packages/podium/src/podium/app.py")
+
+
+def test_cli_cookies_are_secure_by_default_and_require_explicit_local_override(monkeypatch) -> None:
+    monkeypatch.delenv("PODIUM_SECURE_COOKIES", raising=False)
+    assert secure_cookies_from_env() is True
+
+    monkeypatch.setenv("PODIUM_SECURE_COOKIES", "0")
+    assert secure_cookies_from_env() is False
 
 
 def test_config_reads_podium_database_url(monkeypatch) -> None:
@@ -29,21 +42,25 @@ def test_config_reads_podium_database_url(monkeypatch) -> None:
     assert config.turnstile_secret_key == ""
 
 
-def test_config_requires_explicit_linear_application_id_env(monkeypatch) -> None:
-    monkeypatch.setenv("LINEAR_AGENT_APP_USER_ID", "legacy-agent-user")
-    monkeypatch.delenv("PODIUM_LINEAR_APPLICATION_ID", raising=False)
+def test_config_does_not_read_removed_global_linear_actor_env(monkeypatch) -> None:
+    monkeypatch.setenv("PODIUM_LINEAR_APPLICATION_ID", "removed-app-id")
+    monkeypatch.setenv("PODIUM_LINEAR_APP_ACCESS_TOKEN", "removed-app-token")
+    monkeypatch.delenv("LINEAR_CLIENT_ID", raising=False)
 
     config = PodiumConfig.from_env()
 
-    assert config.linear_application_id == ""
+    assert config.linear_client_id == ""
+    assert not hasattr(config, "linear_application_id")
+    assert not hasattr(config, "linear_app_access_token")
 
 
-def test_config_defaults_linear_poll_initial_lookback_to_no_backfill(monkeypatch) -> None:
-    monkeypatch.delenv("PODIUM_LINEAR_POLL_INITIAL_LOOKBACK_SECONDS", raising=False)
+def test_config_has_no_linear_reconciliation_lookback(monkeypatch) -> None:
+    monkeypatch.setenv("PODIUM_LINEAR_RECONCILIATION_INITIAL_LOOKBACK_SECONDS", "86400")
 
     config = PodiumConfig.from_env()
 
-    assert config.linear_poll_initial_lookback_seconds == 0
+    assert not hasattr(config, "linear_reconciliation_initial_lookback_seconds")
+    assert not hasattr(config, "linear_poll_initial_lookback_seconds")
 
 
 def test_config_reads_turnstile_disable_flags(monkeypatch) -> None:
@@ -109,11 +126,18 @@ def test_pg_migrator_exposes_phase_0_schema() -> None:
     sql = "\n".join(PgMigrator().statements())
 
     assert "CREATE TABLE IF NOT EXISTS users" in sql
-    assert "CREATE TABLE IF NOT EXISTS linear_installations" in sql
-    assert "actor TEXT NOT NULL DEFAULT ''" in sql
-    assert "ALTER TABLE linear_installations ADD COLUMN IF NOT EXISTS actor TEXT NOT NULL DEFAULT ''" in sql
+    assert "CREATE TABLE IF NOT EXISTS linear_application_configs" in sql
+    assert "CREATE TABLE IF NOT EXISTS linear_application_preferences" in sql
+    assert "CREATE TABLE IF NOT EXISTS linear_workspace_installations" in sql
+    assert "linear_workspace_installations_active_unique" in sql
+    assert "application_config_id TEXT NOT NULL" in sql
+    assert "application_config_version BIGINT NOT NULL" in sql
     assert "CREATE TABLE IF NOT EXISTS conductors" in sql
     assert "CREATE TABLE IF NOT EXISTS project_bindings" in sql
+    assert "replacement_conductor_id TEXT NOT NULL DEFAULT ''" in sql
+    assert "replacement_repo_source JSONB NOT NULL DEFAULT '{}'::jsonb" in sql
+    assert "replacement_state TEXT NOT NULL DEFAULT ''" in sql
+    assert "replacement_binding_id TEXT NOT NULL DEFAULT ''" in sql
     assert "CREATE TABLE IF NOT EXISTS dispatches" in sql
     assert "agent_app_user_id TEXT NOT NULL DEFAULT ''" in sql
     assert "issue_delegate_id TEXT NOT NULL DEFAULT ''" in sql
@@ -122,11 +146,8 @@ def test_pg_migrator_exposes_phase_0_schema() -> None:
     assert "CREATE TABLE IF NOT EXISTS onboarding_state" in sql
     assert "CREATE TABLE IF NOT EXISTS proxy_audit_events" in sql
     assert "fencing_token BIGINT NOT NULL DEFAULT 0" in sql
-    assert "UNIQUE(project_binding_id, agent_session_id)" not in sql
-    assert "dispatches_binding_session_unique" in sql
-    assert "WHERE agent_session_id <> ''" in sql
-    assert "dispatches_binding_issue_empty_session_unique" in sql
-    assert "WHERE agent_session_id = ''" in sql
+    assert "dispatches_binding_intake_unique" in sql
+    assert "DROP COLUMN IF EXISTS agent_session_id" in sql
     assert "managed_run_profile TEXT NOT NULL DEFAULT 'default'" in sql
     assert "workflow_profile" not in sql
     assert "CREATE TABLE IF NOT EXISTS sessions" in sql
@@ -135,6 +156,59 @@ def test_pg_migrator_exposes_phase_0_schema() -> None:
     assert "CREATE TABLE IF NOT EXISTS runtime_configs" in sql
     assert "CREATE TABLE IF NOT EXISTS managed_run_views" in sql
     assert "CREATE TABLE IF NOT EXISTS runtime_commands" in sql
+    assert "runtime_commands_dedupe_unique" in sql
+    assert "WHERE dedupe_key <> ''" in sql
+
+
+@pytest.mark.asyncio
+async def test_json_store_runtime_command_dedupe_key_is_durable() -> None:
+    store = PodiumStore()
+
+    first = await store.append_runtime_command_once("runtime-1", "smoke:one", {"type": "smoke.check"})
+    repeated = await store.append_runtime_command_once("runtime-1", "smoke:one", {"type": "different"})
+    second = await store.append_runtime_command_once("runtime-1", "smoke:two", {"type": "smoke.check"})
+
+    assert repeated == first
+    assert repeated["command"] == {"type": "smoke.check"}
+    assert second["id"] == first["id"] + 1
+
+
+@pytest.mark.asyncio
+async def test_json_store_smoke_result_compare_and_save_rejects_stale_revision() -> None:
+    store = PodiumStore()
+
+    created = await store.compare_and_save_smoke_result("user-1", 0, {"revision": 1, "status": "running"})
+    stale = await store.compare_and_save_smoke_result("user-1", 0, {"revision": 1, "status": "failed"})
+    updated = await store.compare_and_save_smoke_result("user-1", 1, {"revision": 2, "status": "passed"})
+
+    assert created is True
+    assert stale is False
+    assert updated is True
+    assert await store.get_smoke_result("user-1") == {"revision": 2, "status": "passed"}
+
+
+def test_pg_project_binding_upsert_values_match_replacement_schema() -> None:
+    values = _binding_values(
+        {
+            "id": "binding-old",
+            "conductor_id": "conductor-old",
+            "user_id": "user-1",
+            "instance_id": "instance-old",
+            "replacement_conductor_id": "conductor-new",
+            "replacement_repo_source": {"type": "local_path", "value": "/repo/new"},
+            "replacement_state": "pending_ack",
+            "replacement_binding_id": "binding-new",
+            "updated_at": "2026-07-10T00:00:00Z",
+        }
+    )
+    source = inspect.getsource(PgDispatchMixin.upsert_project_binding)
+    placeholders = [int(value) for value in re.findall(r"\$(\d+)", source)]
+
+    assert len(values) == max(placeholders) == 32
+    assert "instance_id = EXCLUDED.instance_id" in source
+    assert values[25] == "conductor-new"
+    assert json.loads(values[26]) == {"type": "local_path", "value": "/repo/new"}
+    assert values[27:29] == ("pending_ack", "binding-new")
 
 
 def test_pg_store_dispatch_lease_uses_atomic_skip_locked_query() -> None:
@@ -179,43 +253,70 @@ async def test_json_store_persists_session_and_does_not_revive_revoked_token(tmp
 async def test_json_store_consumes_enrollment_token_once(tmp_path) -> None:
     store = PodiumStore(tmp_path)
     await store.upsert_runtime_group({"id": "group_1", "linear_workspace_id": "user_1"})
-    await store.save_enrollment_token("token-hash", runtime_group_id="group_1", expires_at="2099-01-01T00:00:00Z")
+    await store.save_enrollment_token(
+        "token-hash",
+        runtime_group_id="group_1",
+        conductor_id="conductor_1",
+        expires_at="2099-01-01T00:00:00Z",
+    )
 
-    assert (await store.consume_enrollment_token("token-hash"))[0]["runtime_group_id"] == "group_1"
+    consumed = (await store.consume_enrollment_token("token-hash"))[0]
+    assert consumed["runtime_group_id"] == "group_1"
+    assert consumed["conductor_id"] == "conductor_1"
     assert await store.consume_enrollment_token("token-hash") == (None, "enrollment_token_used")
 
 
-async def test_runtime_enrollment_token_creates_workspace_user_for_durable_fk(tmp_path) -> None:
+async def test_onboarding_enrollment_token_reserves_conductor_for_authenticated_user(tmp_path) -> None:
     store = PodiumStore(tmp_path)
-    app = create_app(store=store, secret_key="test-secret", secure_cookies=False)
+    app = create_app(
+        store=store,
+        secret_key="test-secret",
+        secure_cookies=False,
+        turnstile_verifier=lambda token, _ip: token == "turnstile-ok",
+    )
 
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
-        created = await client.post(
-            "/api/v1/runtime/enrollment-tokens",
+        registered = await client.post(
+            "/api/v1/auth/register",
             json={
-                "runtime_group_id": "group-real-workspace",
-                "linear_workspace_id": "real-workspace-1",
-                "project_slug": "ALPHA",
-                "linear_agent_app_user_id": "agent-app-1",
+                "email": "runtime-owner@example.com",
+                "password": "correct-horse",
+                "turnstile_token": "turnstile-ok",
             },
         )
+        created = await client.post(
+            "/api/v1/onboarding/runtime/enrollment-token",
+            json={"name": "Mahler"},
+        )
 
+    user_id = registered.json()["user"]["id"]
     assert created.status_code == 200
-    assert await store.get_user("real-workspace-1") is not None
+    conductor = await store.get_runtime(created.json()["conductor"]["id"])
+    assert conductor["user_id"] == user_id
+    assert conductor["name"] == "Mahler"
 
 
 async def test_runtime_enrollment_token_rejects_legacy_managed_run_profile_field(tmp_path) -> None:
     store = PodiumStore(tmp_path)
-    app = create_app(store=store, secret_key="test-secret", secure_cookies=False)
+    app = create_app(
+        store=store,
+        secret_key="test-secret",
+        secure_cookies=False,
+        turnstile_verifier=lambda token, _ip: token == "turnstile-ok",
+    )
 
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
-        response = await client.post(
-            "/api/v1/runtime/enrollment-tokens",
+        await client.post(
+            "/api/v1/auth/register",
             json={
-                "runtime_group_id": "group-real-workspace",
-                "linear_workspace_id": "real-workspace-1",
-                "managed_run_profile": "gated-task",
+                "email": "legacy-profile@example.com",
+                "password": "correct-horse",
+                "turnstile_token": "turnstile-ok",
             },
+        )
+        response = await client.post(
+            "/api/v1/onboarding/runtime/enrollment-token",
+            json={"managed_run_profile": "gated-task"},
         )
 
     assert response.status_code == 400

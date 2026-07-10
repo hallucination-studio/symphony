@@ -49,7 +49,9 @@ async def test_enrollment_token_shape_and_install_command() -> None:
         resp = await client.post("/api/v1/onboarding/runtime/enrollment-token")
         assert resp.status_code == 200
         body = resp.json()
-        assert set(body) == {"enrollment_token", "install_command", "expires_at"}
+        assert set(body) == {"enrollment_token", "install_command", "expires_at", "conductor"}
+        assert body["conductor"]["enrollment_state"] == "pending"
+        assert body["conductor"]["binding"] is None
         token = body["enrollment_token"]
         assert token
         assert PODIUM_BASE_URL in body["install_command"]
@@ -74,6 +76,9 @@ async def test_install_script_exists_and_uses_enrollment_token() -> None:
     assert 'token = os.environ.get("PODIUM_ENROLLMENT_TOKEN", "")' in script
     assert '"$ENROLLMENT_TOKEN" <<' not in script
     assert "token = sys.argv[2]" not in script
+    assert 'ENROLLMENT_RESULT_PATH="${PODIUM_ENROLLMENT_RESULT_PATH:-}"' in script
+    assert 'umask 077' in script
+    assert 'chmod 600 "$ENROLLMENT_RESULT_PATH"' in script
     assert "/api/v1/runtime/enroll" in script
     assert "/api/settings" in script
 

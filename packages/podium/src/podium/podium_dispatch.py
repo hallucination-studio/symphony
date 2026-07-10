@@ -12,52 +12,65 @@ class PodiumDispatchMixin:
         queued = 0
         groups = await self._runtime_groups_for_dispatch_event(event)
         for group in groups:
-            project_binding_id = str(group.get("project_binding_id") or group["id"])
-            dispatch_id = f"dispatch_{secrets.token_urlsafe(18)}"
-            dispatch = {
-                "dispatch_id": dispatch_id,
-                "runtime_group_id": group["id"],
-                "project_binding_id": project_binding_id,
-                "user_id": str(group.get("linear_workspace_id") or event["workspace_id"]),
-                "issue_id": event["issue_id"],
-                "issue_identifier": event["issue_identifier"],
-                "issue_title": event.get("issue_title") or "",
-                "issue_description": event.get("issue_description") or "",
-                "linear_workspace_id": event["workspace_id"],
-                "project_slug": event["project_slug"],
-                "agent_session_id": str(event.get("agent_session_id") or ""),
-                "agent_app_user_id": event.get("agent_app_user_id") or "",
-                "routing_rule_id": group["id"],
-                "managed_run_profile": group.get("managed_run_profile") or "default",
-                "blocked_by": list(event.get("blocked_by") or []),
-                "parent_issue_id": event.get("parent_issue_id") or "",
-                "managed_run_intent": dict(event.get("managed_run_intent") or {}),
-                "status": "queued",
-                "reason": "",
-                "run_id": "",
-                "parent_issue_id": event.get("parent_issue_id") or "",
-                "active_work_item_id": "",
-                "managed_run_state": "",
-                "plan_version": 0,
-                "backend_session_id": "",
-                "leased_runtime_id": None,
-                "leased_until": None,
-                "fencing_token": 0,
-                "created_at": utc_now_iso(),
-                "updated_at": utc_now_iso(),
-            }
+            binding = await self._binding_for_group(group)
+            dispatch = self._dispatch_from_event(event, group)
             inserted = await self.store.upsert_dispatch(dispatch)
             if not inserted:
                 continue
-            binding = await self._binding_for_group(group)
-            conductor_id = str((binding or {}).get("conductor_id") or "")
-            if conductor_id:
-                await self.enqueue_runtime_command(
-                    conductor_id,
-                    {"type": "dispatch.available", "project_binding_id": project_binding_id, "instance_id": (binding or {}).get("instance_id")},
-                )
+            await self.notify_reconciled_dispatches(binding, 1)
             queued += 1
         return queued
+
+    def reconciliation_dispatch(self, event: dict[str, Any], binding: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_from_event(event, self._runtime_group_from_project_binding(binding))
+
+    async def notify_reconciled_dispatches(self, binding: dict[str, Any] | None, count: int) -> None:
+        conductor_id = str((binding or {}).get("conductor_id") or "")
+        if not conductor_id or count <= 0:
+            return
+        await self.enqueue_runtime_command(
+            conductor_id,
+            {
+                "type": "dispatch.available",
+                "project_binding_id": str((binding or {}).get("id") or ""),
+                "instance_id": (binding or {}).get("instance_id"),
+            },
+        )
+
+    def _dispatch_from_event(self, event: dict[str, Any], group: dict[str, Any]) -> dict[str, Any]:
+        project_binding_id = str(group.get("project_binding_id") or group["id"])
+        now = utc_now_iso()
+        return {
+            "dispatch_id": f"dispatch_{secrets.token_urlsafe(18)}",
+            "runtime_group_id": group["id"],
+            "project_binding_id": project_binding_id,
+            "user_id": str(group.get("linear_workspace_id") or event["workspace_id"]),
+            "issue_id": event["issue_id"],
+            "issue_identifier": event["issue_identifier"],
+            "issue_title": event.get("issue_title") or "",
+            "issue_description": event.get("issue_description") or "",
+            "linear_workspace_id": event["workspace_id"],
+            "project_slug": event["project_slug"],
+            "agent_app_user_id": event.get("agent_app_user_id") or "",
+            "routing_rule_id": group["id"],
+            "managed_run_profile": group.get("managed_run_profile") or "default",
+            "blocked_by": list(event.get("blocked_by") or []),
+            "parent_issue_id": event.get("parent_issue_id") or "",
+            "managed_run_intent": dict(event.get("managed_run_intent") or {}),
+            "intake_key": str(event.get("intake_key") or f"linear-issue:{event['issue_id']}"),
+            "status": "queued",
+            "reason": "",
+            "run_id": "",
+            "active_work_item_id": "",
+            "managed_run_state": "",
+            "plan_version": 0,
+            "backend_session_id": "",
+            "leased_runtime_id": None,
+            "leased_until": None,
+            "fencing_token": 0,
+            "created_at": now,
+            "updated_at": now,
+        }
 
     async def _runtime_groups_for_dispatch_event(self, event: dict[str, Any]) -> list[dict[str, Any]]:
         agent_ids = [str(event.get("agent_app_user_id") or ""), str(event.get("issue_delegate_id") or "")]
@@ -77,17 +90,14 @@ class PodiumDispatchMixin:
             "linear_agent_app_user_id": str(binding.get("agent_app_user_id") or ""),
             "managed_run_profile": str(binding.get("managed_run_profile") or "default"),
             "project_binding_id": binding_id,
+            "instance_id": str(binding.get("instance_id") or ""),
         }
 
     async def _binding_for_group(self, group: dict[str, Any]) -> dict[str, Any] | None:
         binding_id = str(group.get("project_binding_id") or "")
         if not binding_id:
             return None
-        conductor_id = binding_id.split(":", 1)[0] if ":" in binding_id else ""
-        for binding in await self.store.list_project_bindings_for_conductor(conductor_id):
-            if str(binding.get("id") or "") == binding_id:
-                return binding
-        return None
+        return await self.store.get_project_binding(binding_id)
 
     async def lease_dispatch(self, runtime_id: str) -> dict[str, Any] | None:
         runtime = await self.store.get_runtime(runtime_id)
@@ -105,6 +115,7 @@ class PodiumDispatchMixin:
         )
         if leased is not None:
             group = await self.store.get_runtime_group(str(leased.get("project_binding_id") or "")) or {}
+            binding = await self.store.get_project_binding(str(leased.get("project_binding_id") or ""))
             leased.update(
                 {
                     "runtime_group_id": str(group.get("id") or leased.get("project_binding_id") or ""),
@@ -112,6 +123,7 @@ class PodiumDispatchMixin:
                     "managed_run_profile": str(group.get("managed_run_profile") or "default"),
                     "blocked_by": list(leased.get("blocked_by") or []),
                     "parent_issue_id": str(leased.get("parent_issue_id") or ""),
+                    "instance_id": str((binding or {}).get("instance_id") or ""),
                 }
             )
         return leased

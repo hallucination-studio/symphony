@@ -30,13 +30,13 @@ typography:
     fontSize: 26px
     fontWeight: "700"
     lineHeight: 32px
-    letterSpacing: -0.02em
+    letterSpacing: 0
   h1:
     fontFamily: system-ui
     fontSize: 22px
     fontWeight: "600"
     lineHeight: 28px
-    letterSpacing: -0.01em
+    letterSpacing: 0
   title:
     fontFamily: system-ui
     fontSize: 15px

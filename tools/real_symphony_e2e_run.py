@@ -94,14 +94,9 @@ from real_symphony_e2e_run_orchestrator import run
 from real_symphony_e2e_wait import wait_for_run
 
 
-LINEAR_AGENT_OAUTH_SCOPE = "read,write,app:assignable,app:mentionable"
+LINEAR_AGENT_OAUTH_SCOPE = "read,write,app:assignable"
 
 # Source-level invariants preserved for tests and reviewers:
-# os.environ.get("PODIUM_LINEAR_APP_ACCESS_TOKEN"
-# Linear app actor token is required
-# PODIUM_LINEAR_APPLICATION_ID
-# PODIUM_LINEAR_POLL_INTERVAL_SECONDS
-# PODIUM_LINEAR_POLL_INITIAL_LOOKBACK_SECONDS"] = "0"
 # build_runtime_config_payload
 # "/api/v1/runtime/config"
 # runtime-config:podium-pushed
@@ -113,7 +108,6 @@ LINEAR_AGENT_OAUTH_SCOPE = "read,write,app:assignable,app:mentionable"
 # asyncpg.connect
 # await start_e2e_postgres_if_needed
 # linear_project = await resolve_project(token, args.project_slug)
-# "/api/v1/runtime/enrollment-tokens"
 # "runtime_group_id": f"group-{run_id}"
 # "project_slug": linear_project["slugId"]
 # build_instance_payload excludes managed_run_profile

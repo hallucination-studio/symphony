@@ -55,7 +55,6 @@ class PodiumDispatchMixin:
             "issue_id": issue_id or None,
             "issue_identifier": issue_identifier or None,
             "instance_id": instance.id,
-            "agent_session_id": event.get("agent_session_id") or None,
             "agent_app_user_id": agent_app_user_id,
             "run_id": accepted.run_id,
             "parent_issue_id": accepted.parent_issue_id,

@@ -10,20 +10,17 @@ from cryptography.fernet import Fernet
 
 def dispatch_public(dispatch: dict[str, Any]) -> dict[str, Any]:
     project_binding_id = str(dispatch.get("project_binding_id") or dispatch.get("runtime_group_id") or "")
-    agent_session_id = str(dispatch.get("agent_session_id") or "")
-    if agent_session_id.startswith("empty-session:"):
-        agent_session_id = ""
     payload = {
         "dispatch_id": dispatch["dispatch_id"],
         "project_binding_id": project_binding_id,
-        "instance_id": project_binding_id.split(":", 1)[1] if ":" in project_binding_id else "",
+        "instance_id": str(dispatch.get("instance_id") or "")
+        or (project_binding_id.split(":", 1)[1] if ":" in project_binding_id else ""),
         "issue_id": dispatch["issue_id"],
         "issue_identifier": dispatch["issue_identifier"],
         "issue_title": dispatch.get("issue_title") or "",
         "issue_description": dispatch.get("issue_description") or "",
         "linear_workspace_id": dispatch["linear_workspace_id"],
         "project_slug": dispatch["project_slug"],
-        "agent_session_id": agent_session_id,
         "agent_app_user_id": dispatch.get("agent_app_user_id") or "",
         "routing_rule_id": dispatch.get("routing_rule_id") or project_binding_id,
         "managed_run_profile": dispatch.get("managed_run_profile") or "default",

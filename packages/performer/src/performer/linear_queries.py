@@ -43,16 +43,6 @@ mutation PerformerUpdateComment($commentId: String!, $body: String!) {
 """
 
 
-AGENT_ACTIVITY_CREATE_MUTATION = """
-mutation PerformerAgentActivity($input: AgentActivityCreateInput!) {
-  agentActivityCreate(input: $input) {
-    success
-    agentActivity { id }
-  }
-}
-"""
-
-
 ISSUE_COMMENTS_QUERY = """
 query PerformerIssueComments($issueId: String!, $first: Int!) {
   issue(id: $issueId) {

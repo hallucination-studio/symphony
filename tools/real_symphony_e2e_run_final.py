@@ -8,23 +8,21 @@ from real_symphony_e2e_acceptance import (
     _check_appendix_overall_acceptance,
     _check_pipeline_scenario_acceptance,
     _permission_probe_block_cleared,
-    _pipeline_linear_issue_tree_finalized,
     _pipeline_live_refresh_evidence,
     _pipeline_node_requires_gate,
     _pipeline_projection_matches_current_revision,
     _should_run_final_pipeline_stage_checks,
     _wait_for_final_pipeline_view,
-    _wait_for_pipeline_linear_issue_tree_finalized,
 )
 from real_symphony_e2e_analysis import (
     audit_expected_failure_run,
     pipeline_integrations_terminal,
     pipeline_nodes_terminal,
 )
-from real_symphony_e2e_artifacts import _archive_managed_run_artifacts
-from real_symphony_e2e_common import api_url, http_json, make_fixture_repo, start_process, wait_for_http_ready
+from real_symphony_e2e_common import api_url, http_json, start_process, wait_for_http_ready
 from real_symphony_e2e_linear import fetch_linear_issue_tree
 from real_symphony_e2e_linear_audit import record_managed_run_linear_tree_audit
+from real_symphony_e2e_podium import managed_runtime_env
 from real_symphony_e2e_run_state import E2ERunState
 
 
@@ -273,22 +271,6 @@ def _linear_projection_passed(view: dict[str, Any], projections: list[dict[str, 
     )
 
 
-async def archive_tree_and_runtime_artifacts(state: E2ERunState) -> None:
-    tree_path = state.root / "final-issue-tree.json"
-    final_states: dict[str, Any] | None = None
-    if state.args.pipeline_gates and state.args.expected_failure == "none" and not state.permission_approval_probe and state.pipeline_scenario == "replan":
-        tree, final_states = await _wait_for_pipeline_linear_issue_tree_finalized(token=state.token, issue_id=state.linear["issue"]["id"], timeout_seconds=min(max(state.args.stage_timeout, 10), 120))
-        tree_path.write_text(json.dumps(tree, indent=2, sort_keys=True), encoding="utf-8")
-        state.evidence.artifact("final_issue_tree", tree_path)
-    elif not tree_path.exists():
-        tree = await fetch_linear_issue_tree(state.token, state.linear["issue"]["id"])
-        tree_path.write_text(json.dumps(tree, indent=2, sort_keys=True), encoding="utf-8")
-        state.evidence.artifact("final_issue_tree", tree_path)
-    if final_states is not None:
-        state.evidence.check("stage:managed-run-linear-final-states", bool(final_states.get("passed")), **{key: value for key, value in final_states.items() if key != "passed"})
-    _archive_managed_run_artifacts(evidence=state.evidence, root=state.root, data_root=state.data_root, instance_id=state.instance_id)
-
-
 async def run_service_recovery_and_cleanup_checks(state: E2ERunState) -> None:
     _check_remaining_and_removed_conductor_routes(state)
     if state.pipeline_scenario == "overall-dod":
@@ -297,7 +279,6 @@ async def run_service_recovery_and_cleanup_checks(state: E2ERunState) -> None:
         await _check_restart_recovers_completed_one_shot(state)
     status, _body = http_json("POST", api_url(state.conductor_port, f"/api/instances/{state.instance_id}/stop"), {})
     state.evidence.check("conductor-api:POST /api/instances/{id}/stop", status == 200, status=status)
-    _check_disposable_instance_delete(state)
 
 
 def _check_remaining_and_removed_conductor_routes(state: E2ERunState) -> None:
@@ -330,20 +311,9 @@ async def _check_restart_recovers_completed_one_shot(state: E2ERunState) -> None
     conductor = state.processes[-1]
     conductor.stop()
     state.processes.remove(conductor)
-    conductor = start_process("conductor", [str(state.bin_dir / "conductor"), "--port", str(state.conductor_port), "--data-root", str(state.data_root)], env=state.env, stdout_path=state.root / "conductor-live-recovered.log")
+    conductor = start_process("conductor", [str(state.bin_dir / "conductor"), "--port", str(state.conductor_port), "--data-root", str(state.data_root)], env=managed_runtime_env(state.env), stdout_path=state.root / "conductor-live-recovered.log")
     state.processes.append(conductor)
     await wait_for_http_ready(api_url(state.conductor_port, "/"))
     status, body = http_json("GET", api_url(state.conductor_port, f"/api/instances/{state.instance_id}"))
     recovered = body.get("instance", {}) if isinstance(body, dict) else {}
     state.evidence.check("conductor-daemon:restart-recovers-completed-one-shot", status == 200 and recovered.get("process_status") in {"exited", "stopped"}, status=status, process_status=recovered.get("process_status"), pid=recovered.get("pid"))
-
-
-def _check_disposable_instance_delete(state: E2ERunState) -> None:
-    disposable_fixture = make_fixture_repo(state.root / "fixture-repo-disposable")
-    payload = {"name": f"Disposable {state.run_id}", "repo_source_type": "local_path", "repo_source_value": str(disposable_fixture), "linear_project": state.linear["project"]["slugId"], "linear_filters": {"linear_agent_app_user_id": state.agent_app_user_id}}
-    status, body = http_json("POST", api_url(state.conductor_port, "/api/instances"), payload)
-    disposable_id = body.get("instance", {}).get("id") if status == 201 else None
-    state.evidence.check("conductor-api:POST /api/instances disposable", status == 201, status=status, body=body)
-    if disposable_id:
-        status, _body = http_json("DELETE", api_url(state.conductor_port, f"/api/instances/{disposable_id}"))
-        state.evidence.check("conductor-api:DELETE /api/instances/{id}", status == 200, status=status)

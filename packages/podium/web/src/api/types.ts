@@ -28,15 +28,63 @@ export interface OnboardingProgress {
 export type LinearConnectionState =
   | "not_connected"
   | "connected"
+  | "reauthorization_required"
   | "expired"
   | "error";
 
 export interface LinearStatus {
   workspace_id: string;
   state: LinearConnectionState;
-  scope?: string | null;
+  scope?: string | string[] | null;
   app_user_id?: string | null;
   expires_at?: string | null;
+  linear_organization_id?: string | null;
+  health?: string | null;
+}
+
+export type LinearApplicationSource = "default" | "custom";
+
+export interface LinearApplication {
+  id: string;
+  source: LinearApplicationSource;
+  version: number;
+  client_id: string;
+  callback_url: string;
+}
+
+export interface LinearInstallation {
+  id: string;
+  application_config_id?: string;
+  application_config_version?: number;
+  application_source: LinearApplicationSource;
+  state: string;
+  actor: string;
+  linear_organization_id?: string;
+  organization_url_key?: string;
+  organization_name?: string;
+  app_user_id?: string;
+  scope: string[];
+  expires_at?: string | null;
+  project_count?: number;
+  error_code?: string;
+  sanitized_reason?: string;
+  retryable?: boolean;
+  action_required?: string;
+  next_action?: string;
+  created_at?: string;
+  updated_at?: string;
+  reconciliation_state?: string;
+  last_reconciliation_at?: string | null;
+  reconciliation_error_code?: string;
+  reconciliation_error?: string;
+  reconciliation_retry_count?: number;
+  reconciliation_next_retry_at?: string | null;
+}
+
+export interface LinearInstallations {
+  active: LinearInstallation | null;
+  candidate: LinearInstallation | null;
+  revocation: LinearInstallation | null;
 }
 
 export interface Bootstrap {
@@ -73,18 +121,52 @@ export interface RepositoryMapping {
   validation_message?: string | null;
 }
 
-export type SmokeCheckStatus = "pending" | "running" | "passed" | "failed";
+export type SmokeCheckStatus = "running" | "passed" | "failed";
 
 export interface SmokeCheckItem {
   name: string;
   passed: boolean;
 }
 
+export type SmokeConductorStatus = "blocked" | "running" | "passed" | "failed";
+
+export interface SmokeConductorResult {
+  runtime_id: string;
+  runtime_group_id: string;
+  instance_id: string;
+  binding_id: string;
+  linear_project_id: string;
+  project_slug: string;
+  binding_config_version: number;
+  runtime_config_version: number;
+  repository: { mode: RepositoryMode; value: string };
+  expected_label: { id: string; name: string };
+  status: SmokeConductorStatus;
+  checks: SmokeCheckItem[];
+  error_code: string;
+  sanitized_reason: string;
+  retryable: boolean;
+  action_required: string;
+  next_action: string;
+  completed_at: string | null;
+}
+
 export interface SmokeCheckResult {
+  smoke_check_id: string;
+  workspace_id: string;
+  revision: number;
   status: SmokeCheckStatus;
   checks: SmokeCheckItem[];
+  conductors: SmokeConductorResult[];
   recommendations: string[];
+  error_code: string;
+  sanitized_reason: string;
+  retryable: boolean;
+  action_required: string;
+  next_action: string;
   timestamp: string;
+  completed_at: string | null;
+  expires_at: string;
 }
 
 export interface RuntimeRecord {
@@ -186,11 +268,33 @@ export interface ManagedRunsView {
   runs: ManagedRun[];
 }
 
-export interface ManagedRunsReport {
+export interface ManagedRunsConductorReport {
+  conductor: {
+    id: string;
+    name: string;
+    public_id: string;
+    online: boolean;
+  };
+  project: {
+    id: string;
+    slug: string;
+    name: string;
+  };
+  binding: {
+    id: string;
+    instance_id: string;
+    state: string;
+    error_code: string;
+    sanitized_reason: string;
+  };
   runtime_group_id: string;
   policy_revision: number;
   profiles: Record<string, unknown>;
   managed_runs: Partial<ManagedRunsView>;
+}
+
+export interface ManagedRunsReport {
+  conductors: ManagedRunsConductorReport[];
 }
 
 export interface EnrollmentStatus {
@@ -201,18 +305,11 @@ export interface EnrollmentStatus {
   enrolled: boolean;
 }
 
-// Main's auth user shape: `{id, email, linear_app?}`. The UI derives a
-// workspace id from `user.id` (V1 = one workspace per user).
+// Main's auth user shape. The UI derives a workspace id from `user.id`
+// (V1 = one workspace per user).
 export interface AuthUser {
   id: string;
   email: string;
-  linear_app?: LinearAppConfig | null;
-}
-
-export interface LinearAppConfig {
-  client_id: string;
-  redirect_uri?: string | null;
-  configured: boolean;
 }
 
 export interface EnrollmentToken {

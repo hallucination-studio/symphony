@@ -20,7 +20,7 @@ Podium is the SaaS boundary and public HTTPS surface. It owns:
 - user authentication and Podium Web APIs;
 - default and customer-owned Linear application configuration;
 - versioned Linear OAuth installation state and callback acceptance;
-- signed webhook intake and reconciliation polling;
+- refreshable installation credentials and reliable delegated-issue polling;
 - selected projects, single-project Conductor bindings, and routing rules;
 - runtime enrollment, dispatch queues, and runtime configuration;
 - the scoped Linear GraphQL proxy;
@@ -67,8 +67,8 @@ projection models, and registration DTOs.
 6. After the Conductor is online, the user binds one selected project and its
    repository; Podium verifies configuration and adds the managed project label.
 7. A Linear issue is delegated to the installed app actor.
-8. A signed AgentSession webhook queues work immediately; reconciliation
-   polling covers missed deliveries without creating duplicate dispatches.
+8. Full baseline and incremental polling discovers delegated issues with
+   transactional checkpoints and queues one dispatch per delegation epoch.
 9. The project Conductor leases the dispatch and commits or resumes one durable
    managed run.
 10. Performer runs fenced plan and work-item turns under per-role profiles.

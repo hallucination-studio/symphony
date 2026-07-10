@@ -14,9 +14,10 @@ product paths.
 ## Intake
 
 1. A Linear issue is delegated to the Symphony custom agent.
-2. A signed AgentSession webhook delivers the work to Podium immediately.
-3. Installation- and project-scoped reconciliation polling covers missed or
-   delayed webhook delivery using the same durable event identity.
+2. Podium's installation- and project-scoped poller discovers the issue through
+   a full baseline or incremental scan.
+3. Full cursor pagination transactionally records issue observations, delegation
+   epochs, idempotency, dispatch rows, and resumable checkpoints.
 4. Podium matches the active installation, Linear organization, stable project
    id, app user, selected scope, single-project Conductor binding, active state,
    blockers, and Managed Runs capacity.
@@ -25,8 +26,9 @@ product paths.
    authentication.
 7. Conductor commits or resumes one durable managed run for the delegated issue.
 
-Webhook and reconciliation intake cannot create duplicate dispatches. Dispatch
-routing never uses project labels or human assignee as scheduler truth.
+Repeated polls cannot create duplicate dispatches, and a new dispatch for the
+same issue requires a durably observed redelegation. Dispatch routing never uses
+project labels or human assignee as scheduler truth.
 
 ## Project Runtime Boundary
 
@@ -36,10 +38,11 @@ on the same host for different projects. Podium creates and owns the project
 binding; the Conductor durably acknowledges the versioned project config before
 dispatch is enabled.
 
-Application replacement drains Managed Runs and dispatches, prepares every
-bound Conductor with the candidate app user identity, then atomically switches
-the workspace installation. Active work never silently changes application
-identity mid-run.
+Same-identity OAuth reauthorization rotates credentials without draining.
+Different-identity application replacement drains Managed Runs and dispatches,
+prepares every bound Conductor with the candidate app user identity, then
+atomically switches the workspace installation. Active work never silently
+changes application identity mid-run.
 
 ## Managed-Run Turns
 

@@ -11,6 +11,7 @@ INSTALL_SCRIPT = r'''#!/usr/bin/env bash
 set -euo pipefail
 
 ENROLLMENT_TOKEN="${PODIUM_ENROLLMENT_TOKEN:-}"
+ENROLLMENT_RESULT_PATH="${PODIUM_ENROLLMENT_RESULT_PATH:-}"
 PODIUM_URL="${PODIUM_URL:-}"
 DATA_ROOT="${PODIUM_CONDUCTOR_DATA_ROOT:-${HOME}/.podium-conductor}"
 CONDUCTOR_COMMAND="${PODIUM_CONDUCTOR_COMMAND:-conductor}"
@@ -97,6 +98,12 @@ with urllib.request.urlopen(request, timeout=30) as response:
 PY
 )"
 
+if [ -n "$ENROLLMENT_RESULT_PATH" ]; then
+  umask 077
+  printf '%s' "$ENROLLED_JSON" > "$ENROLLMENT_RESULT_PATH"
+  chmod 600 "$ENROLLMENT_RESULT_PATH"
+fi
+
 RUNTIME_ID="$(python3 -c 'import json,sys; print(json.loads(sys.stdin.read())["runtime_id"])' <<<"$ENROLLED_JSON")"
 RUNTIME_TOKEN="$(python3 -c 'import json,sys; print(json.loads(sys.stdin.read())["runtime_token"])' <<<"$ENROLLED_JSON")"
 PROXY_TOKEN="$(python3 -c 'import json,sys; print(json.loads(sys.stdin.read())["proxy_token"])' <<<"$ENROLLED_JSON")"
@@ -174,4 +181,3 @@ echo "Conductor API: http://127.0.0.1:${CONDUCTOR_PORT}"
 
 def render_install_script() -> str:
     return INSTALL_SCRIPT + "    "
-

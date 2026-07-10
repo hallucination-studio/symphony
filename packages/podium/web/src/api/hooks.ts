@@ -31,6 +31,22 @@ export function useLinearScope(enabled = true) {
   });
 }
 
+export function useLinearApplication() {
+  return useQuery({
+    queryKey: ["linear", "application"],
+    queryFn: () => api.linearApplication(),
+    retry: false,
+  });
+}
+
+export function useLinearInstallations() {
+  return useQuery({
+    queryKey: ["linear", "installations"],
+    queryFn: () => api.linearInstallations(),
+    retry: false,
+  });
+}
+
 export function useRuntimes() {
   return useQuery({
     queryKey: ["runtimes"],
@@ -70,6 +86,8 @@ export function useSmokeCheckResult() {
     queryKey: ["smoke-check"],
     queryFn: () => api.smokeCheckResult(),
     retry: false,
+    refetchInterval: (query) =>
+      query.state.data?.status === "running" ? 1000 : false,
   });
 }
 
@@ -131,9 +149,9 @@ export function useRunSmokeCheck() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: () => api.runSmokeCheck(),
-    onSuccess: () => {
+    onSuccess: (result) => {
+      qc.setQueryData(["smoke-check"], result);
       invalidate();
-      qc.invalidateQueries({ queryKey: ["smoke-check"] });
     },
   });
 }

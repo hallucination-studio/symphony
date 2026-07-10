@@ -2,12 +2,10 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
-import time
+import secrets
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
 
 from real_symphony_e2e_acceptance import (
     _effective_permission_approval_probe,
@@ -16,7 +14,6 @@ from real_symphony_e2e_acceptance import (
     _prepare_pipeline_scenario_fixture,
     _run_appendix_pytest_hardening_probes,
 )
-from real_symphony_e2e_analysis import build_instance_payload
 from real_symphony_e2e_artifacts import _checkpoint_and_block_after_stage, _stages_after
 from real_symphony_e2e_common import (
     Evidence,
@@ -29,13 +26,31 @@ from real_symphony_e2e_common import (
     utc_now,
     wait_for_http_ready,
 )
-from real_symphony_e2e_errors import E2EConfigurationError
 from real_symphony_e2e_linear import (
     create_linear_issue,
     delegate_linear_issue,
-    fetch_linear_viewer,
-    resolve_project,
     wait_for_linear_delegate_visible,
+)
+from real_symphony_e2e_linear_fixture import verify_linear_fixture_access
+from real_symphony_e2e_podium import (
+    PodiumSession,
+    authorize_default_application,
+    managed_runtime_env,
+    podium_managed_env,
+    podium_runtime_from_env,
+    require_local_port_available,
+    select_linear_project,
+)
+from real_symphony_e2e_podium_denial import verify_denied_authorization
+from real_symphony_e2e_podium_evidence import archive_and_validate_podium_bootstrap
+from real_symphony_e2e_podium_runtime import (
+    bind_conductor,
+    execute_install_command,
+    reserve_conductor,
+    validate_enrollment_result,
+    validate_unbound_conductor,
+    verify_second_binding_rejected,
+    wait_for_runtime_online,
 )
 from real_symphony_e2e_preflight import (
     _codex_settings_from_args,
@@ -47,43 +62,11 @@ from real_symphony_e2e_preflight import (
     stage_e2e_codex_home_seed,
     start_e2e_postgres_if_needed,
 )
+from real_symphony_e2e_run_environment import (
+    linear_fixture_token as _linear_fixture_token,
+    runtime_env as _runtime_env,
+)
 from real_symphony_e2e_run_state import E2ERunState
-
-
-def _runtime_env() -> dict[str, str]:
-    env = os.environ.copy()
-    env["PYTHONPATH"] = os.pathsep.join(
-        [
-            str(Path.cwd() / "packages" / "performer-api" / "src"),
-            str(Path.cwd() / "packages" / "performer" / "src"),
-            str(Path.cwd() / "packages" / "conductor" / "src"),
-            str(Path.cwd() / "packages" / "podium" / "src"),
-            env.get("PYTHONPATH", ""),
-        ]
-    )
-    return env
-
-
-def _linear_token_and_agent() -> tuple[str, str]:
-    token = os.environ.get("PODIUM_LINEAR_APP_ACCESS_TOKEN", "").strip()
-    if not token:
-        raise E2EConfigurationError(
-            failure_class="environment_failure",
-            error_code="linear_app_access_token_required",
-            sanitized_reason="Linear app actor token is required.",
-            retryable=False,
-            next_action="set_podium_linear_app_access_token",
-        )
-    agent_app_user_id = os.environ.get("PODIUM_LINEAR_APPLICATION_ID", "").strip()
-    if not agent_app_user_id:
-        raise E2EConfigurationError(
-            failure_class="environment_failure",
-            error_code="linear_application_id_required",
-            sanitized_reason="PODIUM_LINEAR_APPLICATION_ID is required for the Linear custom-agent app user.",
-            retryable=False,
-            next_action="set_podium_linear_application_id",
-        )
-    return token, agent_app_user_id
 
 
 def _record_codex_home_source(state: E2ERunState) -> None:
@@ -104,7 +87,9 @@ def _record_codex_home_source(state: E2ERunState) -> None:
 
 
 async def build_initial_state(args: argparse.Namespace) -> E2ERunState:
-    token, agent_app_user_id = _linear_token_and_agent()
+    token = _linear_fixture_token()
+    runtime_env = _runtime_env()
+    podium_base_url, podium_port = podium_runtime_from_env(runtime_env)
     root = args.out.resolve()
     root.mkdir(parents=True, exist_ok=True)
     run_id = "symphony-e2e-matrix-" + datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S") + "-" + uuid.uuid4().hex[:6]
@@ -113,17 +98,18 @@ async def build_initial_state(args: argparse.Namespace) -> E2ERunState:
         state = E2ERunState(
             args=args,
             token=token,
-            agent_app_user_id=agent_app_user_id,
+            agent_app_user_id="",
             root=root,
             evidence=Evidence(root / "real-symphony-e2e-report.json"),
-            env=_runtime_env(),
+            env=runtime_env,
             bin_dir=Path.cwd() / ".venv" / "bin",
             run_id=run_id,
             pipeline_scenario=_pipeline_scenario(args),
             permission_approval_probe=_effective_permission_approval_probe(args),
-            workspace_id=f"real-workspace-{run_id}",
+            workspace_id="",
             fixture=root / "fixture-repo",
-            podium_port=allocate_port(),
+            podium_port=podium_port,
+            podium_base_url=podium_base_url,
             conductor_port=allocate_port(),
             data_root=root / "conductor-data",
             staged_codex_home=staged_codex_home,
@@ -139,6 +125,20 @@ async def build_initial_state(args: argparse.Namespace) -> E2ERunState:
 
 
 async def run_connectivity_preflight(state: E2ERunState) -> bool:
+    if not await verify_linear_fixture_access(
+        state.token,
+        state.args.project_slug,
+        state.evidence,
+    ):
+        _checkpoint_and_block_after_stage(
+            state.evidence,
+            "02-connectivity",
+            reason="linear_fixture_preflight_failed",
+            blocked_stages=_stages_after("02-connectivity"),
+        )
+        state.evidence.data["completed_at"] = utc_now()
+        state.evidence.write()
+        return False
     probes = [
         ("codex_connectivity_probe", run_codex_connectivity_probe, "codex_connectivity_probe_failed"),
         ("codex_planner_shaped_probe", run_codex_planner_shaped_probe, "codex_planner_shaped_probe_failed"),
@@ -190,12 +190,14 @@ def prepare_fixture_and_cli(state: E2ERunState) -> None:
 
 
 async def start_podium_and_enroll(state: E2ERunState) -> None:
+    require_local_port_available(state.podium_port)
     state.postgres_container = await start_e2e_postgres_if_needed(state.root, state.env, state.evidence)
-    podium_env = dict(state.env)
-    podium_env["PODIUM_LINEAR_APPLICATION_ID"] = state.agent_app_user_id
-    podium_env["PODIUM_LINEAR_APP_ACCESS_TOKEN"] = state.token
-    podium_env["PODIUM_LINEAR_POLL_INTERVAL_SECONDS"] = "1"
-    podium_env["PODIUM_LINEAR_POLL_INITIAL_LOOKBACK_SECONDS"] = "0"
+    podium_env = podium_managed_env(
+        state.env,
+        database_url=str(state.env.get("PODIUM_DATABASE_URL") or ""),
+        podium_base_url=state.podium_base_url,
+        secret_key=secrets.token_urlsafe(32),
+    )
     podium = start_process(
         "podium",
         [str(state.bin_dir / "podium"), "api", "--host", "127.0.0.1", "--port", str(state.podium_port)],
@@ -207,69 +209,97 @@ async def start_podium_and_enroll(state: E2ERunState) -> None:
     state.evidence.check("podium-api:/", status == 200, status=status, body=body)
     status, body = http_json("GET", api_url(state.podium_port, "/api/v1/health"))
     state.evidence.check("podium-api:/api/v1/health", status == 200, status=status, body=body)
-    await _enroll_runtime(state)
-
-
-async def _enroll_runtime(state: E2ERunState) -> None:
-    viewer = await fetch_linear_viewer(state.token)
-    linear_project = await resolve_project(state.token, state.args.project_slug)
-    state.evidence.data["linear_project"] = {"requested": state.args.project_slug, "slugId": linear_project["slugId"], "name": linear_project.get("name")}
-    state.evidence.data["linear_agent_app_user_id"] = state.agent_app_user_id
-    state.evidence.check("linear-agent:app-user-selected", bool(state.agent_app_user_id), source="PODIUM_LINEAR_APPLICATION_ID", viewer={key: viewer.get(key) for key in ["id", "name", "email"]})
-    status, body = http_json(
-        "POST",
-        api_url(state.podium_port, "/api/v1/runtime/enrollment-tokens"),
-        build_enrollment_token_payload(
-            run_id=state.run_id,
-            workspace_id=state.workspace_id,
-            project_slug_id=linear_project["slugId"],
-            agent_app_user_id=state.agent_app_user_id,
-        ),
+    state.podium_session = PodiumSession(f"http://127.0.0.1:{state.podium_port}")
+    user, installation = await authorize_default_application(
+        state.podium_session,
+        root=state.root,
+        evidence=state.evidence,
+        timeout_seconds=int(getattr(state.args, "oauth_timeout", 300)),
     )
-    state.evidence.check("podium-api:/api/v1/runtime/enrollment-tokens", status == 200, status=status, body=body)
-    status, enrolled = http_json("POST", api_url(state.podium_port, "/api/v1/runtime/enroll"), {"enrollment_token": body.get("enrollment_token") if isinstance(body, dict) else ""})
-    state.enrolled_runtime = enrolled
-    state.evidence.check("podium-api:/api/v1/runtime/enroll", status == 200 and bool(enrolled.get("runtime_id")) and bool(enrolled.get("runtime_token")) and bool(enrolled.get("proxy_token")), status=status, body={key: bool(enrolled.get(key)) for key in ["runtime_id", "runtime_token", "proxy_token"]})
-
-
-def build_enrollment_token_payload(
-    *,
-    run_id: str,
-    workspace_id: str,
-    project_slug_id: str,
-    agent_app_user_id: str,
-) -> dict[str, str]:
-    return {
-        "runtime_group_id": f"group-{run_id}",
-        "linear_workspace_id": workspace_id,
-        "project_slug": project_slug_id,
-        "linear_agent_app_user_id": agent_app_user_id,
-    }
+    state.workspace_id = str(user["id"])
+    state.installation = installation
+    state.agent_app_user_id = str(installation.get("app_user_id") or "")
+    await verify_denied_authorization(
+        state.podium_session,
+        active_installation_id=str(installation["id"]),
+        root=state.root,
+        evidence=state.evidence,
+        timeout_seconds=int(getattr(state.args, "oauth_timeout", 300)),
+    )
+    state.linear_project = await select_linear_project(
+        state.podium_session,
+        state.args.project_slug,
+        state.evidence,
+    )
+    state.evidence.data["linear_project"] = dict(state.linear_project)
+    state.evidence.data["linear_agent_app_user_id"] = state.agent_app_user_id
+    state.enrollment_reservation = await reserve_conductor(state.podium_session, state.evidence)
 
 
 async def start_conductor_and_configure(state: E2ERunState) -> None:
+    conductor_env = managed_runtime_env(state.env)
     conductor = start_process(
         "conductor",
         [str(state.bin_dir / "conductor"), "--port", str(state.conductor_port), "--data-root", str(state.data_root)],
-        env=state.env,
+        env=conductor_env,
         stdout_path=state.root / "conductor.log",
     )
     state.processes.append(conductor)
     status, body = await wait_for_http_ready(api_url(state.conductor_port, "/"))
     state.evidence.check("conductor-api:/", status == 200, status=status, body=body)
-    payload = {
-        "podium_url": f"http://127.0.0.1:{state.podium_port}",
-        "podium_runtime_id": state.enrolled_runtime["runtime_id"],
-        "podium_runtime_token": state.enrolled_runtime["runtime_token"],
-        "podium_proxy_token": state.enrolled_runtime["proxy_token"],
-        "podium_ws_url": state.enrolled_runtime["websocket_url"],
-        "runtime_group_id": state.enrolled_runtime["runtime_group_id"],
-        "managed_mode": True,
-    }
-    status, body = http_json("PATCH", api_url(state.conductor_port, "/api/settings"), payload)
+    state.enrolled_runtime = await execute_install_command(
+        state.enrollment_reservation,
+        env=conductor_env,
+        conductor_port=state.conductor_port,
+        root=state.root,
+    )
+    conductor_id = str((state.enrollment_reservation.get("conductor") or {}).get("id") or "")
+    state.evidence.check(
+        "conductor-enrollment:generated-command-completed",
+        conductor_id == str(state.enrolled_runtime.get("runtime_id") or ""),
+        conductor_id=conductor_id,
+        runtime_id=state.enrolled_runtime.get("runtime_id"),
+    )
+    validate_enrollment_result(state.enrollment_reservation, state.enrolled_runtime)
+    unbound = await wait_for_runtime_online(state.podium_session, conductor_id, state.args.stage_timeout)
+    validate_unbound_conductor(unbound, conductor_id)
+    state.evidence.check(
+        "conductor-enrollment:online-and-unbound",
+        True,
+        conductor_id=conductor_id,
+        online=unbound.get("online"),
+    )
+    state.binding = await bind_conductor(
+        state.podium_session,
+        conductor_id=conductor_id,
+        project_id=str(state.linear_project["id"]),
+        repository=state.fixture,
+        evidence=state.evidence,
+        timeout_seconds=state.args.stage_timeout,
+    )
+    await verify_second_binding_rejected(
+        state.podium_session,
+        conductor_id=conductor_id,
+        project_id=str(state.linear_project["id"]),
+        repository=state.fixture,
+        evidence=state.evidence,
+    )
+    state.instance_id = str(state.binding.get("instance_id") or "")
+    status, body = http_json("GET", api_url(state.conductor_port, "/api/settings"))
     settings = body.get("settings", {}) if isinstance(body, dict) else {}
-    state.evidence.check("conductor-api:/api/settings PATCH", status == 200 and settings.get("linear_application_connected") and settings.get("podium_runtime_token_configured") and settings.get("podium_proxy_token_configured") and settings.get("managed_mode"), status=status, body=settings)
+    state.evidence.check("conductor-api:/api/settings", status == 200 and settings.get("linear_application_connected") and settings.get("podium_runtime_token_configured") and settings.get("podium_proxy_token_configured") and settings.get("managed_mode"), status=status, body=settings)
+    status, instance_body = http_json("GET", api_url(state.conductor_port, f"/api/instances/{state.instance_id}"))
+    state.instance = instance_body.get("instance", {}) if isinstance(instance_body, dict) else {}
+    state.evidence.check("conductor-binding:instance-created", status == 200 and state.instance.get("id") == state.instance_id, status=status, instance_id=state.instance_id)
     _smoke_conductor_api(state)
+    await archive_and_validate_podium_bootstrap(
+        state.podium_session,
+        root=state.root,
+        evidence=state.evidence,
+        installation_id=str(state.installation["id"]),
+        project_id=str(state.linear_project["id"]),
+        conductor_id=conductor_id,
+    )
 
 
 def _smoke_conductor_api(state: E2ERunState) -> None:
@@ -291,9 +321,10 @@ def _smoke_conductor_api(state: E2ERunState) -> None:
 
 
 async def create_issue_and_instance(state: E2ERunState) -> None:
+    project_slug = str(state.linear_project.get("slug_id") or state.args.project_slug)
     state.linear = await create_linear_issue(
         state.token,
-        state.args.project_slug,
+        project_slug,
         state.run_id,
         delegate_id=state.agent_app_user_id,
         description=_pipeline_scenario_issue_description(state.pipeline_scenario, state.run_id),
@@ -305,17 +336,6 @@ async def create_issue_and_instance(state: E2ERunState) -> None:
     state.evidence.artifact("business_issue", issue_path)
     state.evidence.check("linear-agent:issue-left-human-assignee-unchanged", ((state.linear["issue"].get("assignee") or {}).get("id")) != state.agent_app_user_id, expected_agent_app_user_id=state.agent_app_user_id, actual_assignee=state.linear["issue"].get("assignee"))
     state.evidence.check("linear-agent:issue-delegated-to-custom-agent", ((state.linear["issue"].get("delegate") or {}).get("id") == state.agent_app_user_id), expected_agent_app_user_id=state.agent_app_user_id, actual_delegate=state.linear["issue"].get("delegate"))
-    await _create_conductor_instance(state)
-
-
-async def _create_conductor_instance(state: E2ERunState) -> None:
-    payload = build_instance_payload(run_id=state.run_id, fixture=state.fixture, project_slug=state.linear["project"]["slugId"], agent_app_user_id=state.agent_app_user_id, pipeline_gates=state.args.pipeline_gates)
-    status, body = http_json("POST", api_url(state.conductor_port, "/api/instances"), payload)
-    state.evidence.check("conductor-api:POST /api/instances", status == 201, status=status, body=body)
-    if status != 201 or not isinstance(body, dict) or not isinstance(body.get("instance"), dict):
-        raise RuntimeError("conductor instance creation failed")
-    state.instance = body["instance"]
-    state.instance_id = state.instance["id"]
     for method, path in [("GET", f"/api/instances/{state.instance_id}"), ("GET", f"/api/instances/{state.instance_id}/runtime"), ("GET", f"/api/instances/{state.instance_id}/logs"), ("GET", f"/api/instances/{state.instance_id}/logs?tail=5&order=desc")]:
         status, _body = http_json(method, api_url(state.conductor_port, path), None)
         state.evidence.check(f"conductor-api:{method} {path}", status == 200, status=status)

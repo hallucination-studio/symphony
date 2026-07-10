@@ -2216,7 +2216,7 @@ async def test_real_symphony_e2e_linear_app_user_scope_failure_is_immediate_and_
     assert error.value.failure_class == "credential_or_config_failure"
     assert error.value.error_code == "linear_app_user_scope_invalid"
     assert error.value.retryable is False
-    assert error.value.next_action == "refresh_linear_app_access_token_with_app_assignable_and_mentionable_scopes"
+    assert error.value.next_action == "refresh_linear_app_access_token_with_app_assignable_scope"
 
 
 def test_real_symphony_e2e_records_external_failure_classification(tmp_path: Path) -> None:

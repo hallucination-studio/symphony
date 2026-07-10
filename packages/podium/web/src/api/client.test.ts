@@ -52,12 +52,33 @@ describe("api client", () => {
     expect(result.turnstile.enabled).toBe(false);
   });
 
-  it("managedRuns requests the runtime group managed runs view", async () => {
+  it("starts Linear OAuth through the installation lifecycle endpoint", async () => {
     const fetchMock = mockFetch(200, {
-      runtime_group_id: "group-1",
-      policy_revision: 2,
-      profiles: {},
-      managed_runs: { runs: [{ run_id: "run-1", work_items: [] }] },
+      authorization_url: "https://linear.app/oauth/authorize",
+    });
+    global.fetch = fetchMock;
+
+    await api.startLinear();
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/linear/installations/oauth",
+      expect.objectContaining({ method: "POST", credentials: "include" }),
+    );
+  });
+
+  it("managedRuns requests every project Conductor managed runs view", async () => {
+    const fetchMock = mockFetch(200, {
+      conductors: [
+        {
+          conductor: { id: "conductor-1", name: "Bach", public_id: "k7m3p2", online: true },
+          project: { id: "project-1", slug: "LIN", name: "Linear Platform" },
+          binding: { id: "binding-1", instance_id: "inst-1", state: "ready", error_code: "", sanitized_reason: "" },
+          runtime_group_id: "group-1",
+          policy_revision: 2,
+          profiles: {},
+          managed_runs: { runs: [{ run_id: "run-1", work_items: [] }] },
+        },
+      ],
     });
     global.fetch = fetchMock;
 
@@ -67,7 +88,7 @@ describe("api client", () => {
       "/api/v1/managed-runs",
       expect.objectContaining({ credentials: "include" }),
     );
-    expect(result.managed_runs.runs?.[0]?.run_id).toBe("run-1");
+    expect(result.conductors[0].managed_runs.runs?.[0]?.run_id).toBe("run-1");
   });
 
   it("saveRepository POSTs a JSON body without workspace_id", async () => {
@@ -124,21 +145,41 @@ describe("api client", () => {
     });
   });
 
-  it("setLinearApp PUTs the credentials", async () => {
+  it("saveLinearApplication PUTs only customer credentials", async () => {
     const fetchMock = mockFetch(200, {
-      linear_app: { client_id: "cid", redirect_uri: null, configured: true },
+      application: {
+        id: "app-custom",
+        source: "custom",
+        version: 1,
+        client_id: "cid",
+        callback_url: "https://podium.example/api/v1/linear/oauth/callback",
+      },
     });
     global.fetch = fetchMock;
 
-    await api.setLinearApp({ client_id: "cid", client_secret: "sec" });
+    await api.saveLinearApplication({ client_id: "cid", client_secret: "sec" });
 
     const [path, init] = fetchMock.mock.calls[0];
-    expect(path).toBe("/api/v1/account/linear-app");
+    expect(path).toBe("/api/v1/linear/application");
     expect(init.method).toBe("PUT");
     expect(JSON.parse(init.body)).toEqual({
       client_id: "cid",
       client_secret: "sec",
     });
+  });
+
+  it("selectDefaultLinearApplication uses the dedicated selection endpoint", async () => {
+    const fetchMock = mockFetch(200, {
+      application: { id: "app-default", source: "default", version: 1 },
+    });
+    global.fetch = fetchMock;
+
+    await api.selectDefaultLinearApplication();
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/linear/application/default",
+      expect.objectContaining({ method: "POST", credentials: "include" }),
+    );
   });
 
   it("throws ApiError with the backend error code on failure", async () => {

@@ -34,6 +34,11 @@ class ConductorServiceViewsMixin:
         return refreshed
 
     def create_instance(self, request: InstanceCreateRequest) -> InstanceRecord:
+        if self.store.list_instances():
+            raise ConductorServiceError(
+                "single_project_conductor",
+                "A Conductor may manage exactly one project instance",
+            )
         instance = self._build_instance_candidate(request)
         self._materialize_instance(instance)
         self._initialize_workspace(instance)

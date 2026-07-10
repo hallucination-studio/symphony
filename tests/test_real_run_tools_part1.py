@@ -371,7 +371,6 @@ async def test_real_symphony_e2e_create_issue_accepts_parent_id(monkeypatch) -> 
                         "state": {"name": "Todo", "type": "unstarted"},
                         "assignee": None,
                         "delegate": None,
-                        "agentSessions": {"nodes": []},
                         "labels": {"nodes": []},
                         "parent": {"id": "parent-1", "identifier": "HELL-0"},
                     }
@@ -616,10 +615,13 @@ def test_real_symphony_e2e_overall_dod_combines_required_probes() -> None:
     assert {"step": "pytest tests/test_smoke.py -q", "source": "acceptance_appendix"} in intent["required_gate_steps"]
     assert 'pipeline_scenario == "overall-dod"' in source
     assert "appendix:s0a-crashed-worker-lease-reclaimed" in source
-    assert "PODIUM_LINEAR_APP_ACCESS_TOKEN" in source
-    assert "Linear app actor token is required" in source
+    setup_source = (ROOT / "tools" / "real_symphony_e2e_run_setup.py").read_text(encoding="utf-8")
+    environment_source = (ROOT / "tools" / "real_symphony_e2e_run_environment.py").read_text(encoding="utf-8")
+    assert "SYMPHONY_E2E_LINEAR_FIXTURE_TOKEN" in environment_source
+    assert "PODIUM_LINEAR_APP_ACCESS_TOKEN" not in source + setup_source + environment_source
+    assert "external E2E issue setup" in environment_source
     assert "app:assignable" in source
-    assert "app:mentionable" in source
+    assert "app:mentionable" not in source
     assert "asyncpg.connect" in source
     assert "await start_e2e_postgres_if_needed" in source
 
@@ -728,15 +730,15 @@ def test_real_symphony_e2e_run_does_not_default_to_user_codex_home() -> None:
     assert "args.codex_home_source" not in source
 
 
-def test_real_symphony_e2e_missing_linear_token_is_configuration_failure(monkeypatch) -> None:
-    tool = load_tool("real_symphony_e2e_run_setup")
-    monkeypatch.delenv("PODIUM_LINEAR_APP_ACCESS_TOKEN", raising=False)
+def test_real_symphony_e2e_missing_linear_fixture_token_is_configuration_failure(monkeypatch) -> None:
+    tool = load_tool("real_symphony_e2e_run_environment")
+    monkeypatch.delenv("SYMPHONY_E2E_LINEAR_FIXTURE_TOKEN", raising=False)
 
     with pytest.raises(tool.E2EConfigurationError) as error:
-        tool._linear_token_and_agent()
+        tool.linear_fixture_token()
 
     assert error.value.failure_class == "environment_failure"
-    assert error.value.error_code == "linear_app_access_token_required"
+    assert error.value.error_code == "linear_fixture_token_required"
     assert error.value.retryable is False
 
 
@@ -777,7 +779,8 @@ async def test_real_symphony_e2e_stages_codex_home_outside_evidence_root(tmp_pat
     source.mkdir()
     (source / "config.toml").write_text("model = 'gpt-5.3-codex'\n", encoding="utf-8")
     (source / "auth.json").write_text('{"token":"secret-token"}\n', encoding="utf-8")
-    monkeypatch.setattr(tool, "_linear_token_and_agent", lambda: ("linear-token", "agent-id"))
+    monkeypatch.setattr(tool, "_linear_fixture_token", lambda: "linear-token")
+    monkeypatch.setattr(tool, "podium_runtime_from_env", lambda _env: ("http://127.0.0.1:8090", 8090))
     monkeypatch.setattr(tool, "e2e_codex_home_seed_source", lambda: source)
 
     state = await tool.build_initial_state(
@@ -1026,17 +1029,36 @@ def test_real_symphony_e2e_common_has_no_workflow_patch_helpers() -> None:
     assert not hasattr(tool, "patch_workflow")
     assert not hasattr(tool, "patch_e2e_gate_mode")
 
-def test_real_symphony_e2e_run_uses_app_token_and_poller_not_user_token_or_webhook() -> None:
-    source = (ROOT / "tools" / "real_symphony_e2e_run.py").read_text(encoding="utf-8")
+def test_real_symphony_e2e_keeps_fixture_credentials_out_of_managed_runtime() -> None:
+    tool = load_tool("real_symphony_e2e_podium")
+    managed = tool.podium_managed_env(
+        {
+            "SYMPHONY_E2E_LINEAR_FIXTURE_TOKEN": "fixture-token",
+            "PODIUM_LINEAR_APP_ACCESS_TOKEN": "removed-token",
+            "PODIUM_LINEAR_APPLICATION_ID": "removed-app-user",
+            "PODIUM_LINEAR_ACCESS_TOKEN": "removed-operator-token",
+            "LINEAR_API_KEY": "removed-human-token",
+            "LINEAR_CLIENT_ID": "client-id",
+            "LINEAR_CLIENT_SECRET": "client-secret",
+            "LINEAR_REDIRECT_URI": "http://127.0.0.1:8090/api/v1/linear/oauth/callback",
+        },
+        database_url="postgresql://podium.test/podium",
+        podium_base_url="http://127.0.0.1:8090",
+        secret_key="run-secret",
+    )
 
-    assert 'os.environ.get("PODIUM_LINEAR_APP_ACCESS_TOKEN"' in source
-    assert "PODIUM_LINEAR_APPLICATION_ID" in source
-    assert "PODIUM_LINEAR_POLL_INTERVAL_SECONDS" in source
-    assert "PODIUM_LINEAR_ACCESS_TOKEN" not in source
-    assert "LINEAR_API_KEY" not in source
-    assert "LINEAR_WEBHOOK_SECRET" not in source
-    assert "/api/v1/linear/webhooks/agent-session" not in source
-    assert 'PODIUM_LINEAR_POLL_INITIAL_LOOKBACK_SECONDS"] = "0"' in source
+    assert managed["LINEAR_CLIENT_ID"] == "client-id"
+    assert managed["LINEAR_CLIENT_SECRET"] == "client-secret"
+    assert managed["LINEAR_REDIRECT_URI"].endswith("/api/v1/linear/oauth/callback")
+    assert managed["PODIUM_DATABASE_URL"] == "postgresql://podium.test/podium"
+    assert managed["PODIUM_BASE_URL"] == "http://127.0.0.1:8090"
+    assert managed["PODIUM_DEBUG_AUTH"] == "1"
+    assert managed["PODIUM_SECURE_COOKIES"] == "0"
+    assert "SYMPHONY_E2E_LINEAR_FIXTURE_TOKEN" not in managed
+    assert "PODIUM_LINEAR_APP_ACCESS_TOKEN" not in managed
+    assert "PODIUM_LINEAR_APPLICATION_ID" not in managed
+    assert "PODIUM_LINEAR_ACCESS_TOKEN" not in managed
+    assert "LINEAR_API_KEY" not in managed
 
 
 def test_real_symphony_e2e_wait_uses_poller_stage_name_not_webhook() -> None:
@@ -1107,45 +1129,86 @@ def test_real_symphony_e2e_run_uses_managed_runs_view_not_legacy_runs_or_gate_ch
     assert "performer:type/evidence" not in source
 
 
-def test_real_symphony_e2e_enrolls_runtime_with_resolved_project_slug() -> None:
-    source = (ROOT / "tools" / "real_symphony_e2e_run.py").read_text(encoding="utf-8")
-
-    resolve_index = source.index("linear_project = await resolve_project")
-    enrollment_index = source.index('"/api/v1/runtime/enrollment-tokens"')
-    enrollment_payload_start = source.index('"runtime_group_id": f"group-{run_id}"')
-    enrollment_payload_end = source.index("build_instance_payload excludes managed_run_profile")
-    enrollment_payload = source[enrollment_payload_start:enrollment_payload_end]
-
-    assert resolve_index < enrollment_index
-    assert '"project_slug": linear_project["slugId"]' in enrollment_payload
-    assert '"project_slug": args.project_slug' not in enrollment_payload
-    assert '"managed_run_profile"' not in enrollment_payload
-    assert "performer:gate/passed" not in source
-
-
-def test_real_symphony_e2e_enrollment_token_payload_excludes_instance_profile() -> None:
-    setup = load_tool("real_symphony_e2e_run_setup")
-
-    payload = setup.build_enrollment_token_payload(
-        run_id="run-1",
-        workspace_id="workspace-1",
-        project_slug_id="project-slug-id",
-        agent_app_user_id="agent-1",
+def test_real_symphony_e2e_bootstrap_uses_installation_and_binding_apis() -> None:
+    source = "\n".join(
+        (ROOT / "tools" / name).read_text(encoding="utf-8")
+        for name in ("real_symphony_e2e_podium.py", "real_symphony_e2e_podium_runtime.py")
     )
 
+    for route in [
+        "/api/v1/linear/installations/oauth",
+        "/api/v1/linear/installations",
+        "/api/v1/linear/projects",
+        "/api/v1/onboarding/runtime/enrollment-token",
+        "/api/v1/conductors/{conductor_id}/binding",
+    ]:
+        assert route in source
+    assert "/api/v1/runtime/enrollment-tokens" not in source
+    assert 'get("PODIUM_LINEAR_APP_ACCESS_TOKEN"' not in source
+    assert '["PODIUM_LINEAR_APP_ACCESS_TOKEN"] =' not in source
+
+
+def test_real_symphony_e2e_queries_and_restarts_have_no_agent_session_or_fixture_leak() -> None:
+    linear_sources = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in (ROOT / "tools").glob("real_symphony_e2e_linear*.py")
+    )
+    restart_sources = "\n".join(
+        (ROOT / "tools" / name).read_text(encoding="utf-8")
+        for name in ("real_symphony_e2e_run_runtime.py", "real_symphony_e2e_run_final.py")
+    )
+
+    assert "agentSessions" not in linear_sources
+    assert "AgentSession" not in linear_sources
+    assert "env=state.env" not in restart_sources
+    assert restart_sources.count("managed_runtime_env(state.env)") >= 2
+
+
+def test_real_symphony_e2e_binding_payload_is_single_project_and_repository() -> None:
+    tool = load_tool("real_symphony_e2e_podium_runtime")
+
+    payload = tool.build_project_binding_payload("project-1", Path("/tmp/fixture"))
+
     assert payload == {
-        "runtime_group_id": "group-run-1",
-        "linear_workspace_id": "workspace-1",
-        "project_slug": "project-slug-id",
-        "linear_agent_app_user_id": "agent-1",
+        "linear_project_id": "project-1",
+        "repository": {"mode": "local_path", "value": "/tmp/fixture"},
     }
     assert "managed_run_profile" not in payload
+
+
+def test_real_symphony_e2e_uses_the_registered_oauth_callback_origin() -> None:
+    tool = load_tool("real_symphony_e2e_podium")
+
+    origin, port = tool.podium_runtime_from_env(
+        {
+            "LINEAR_CLIENT_ID": "client-id",
+            "LINEAR_CLIENT_SECRET": "client-secret",
+            "LINEAR_REDIRECT_URI": "http://127.0.0.1:8090/api/v1/linear/oauth/callback",
+        }
+    )
+
+    assert origin == "http://127.0.0.1:8090"
+    assert port == 8090
+
+
+def test_real_symphony_e2e_resolves_the_selected_project_from_installation_discovery() -> None:
+    tool = load_tool("real_symphony_e2e_podium")
+
+    project = tool.resolve_installation_project(
+        [
+            {"id": "project-1", "name": "First", "slug_id": "FIRST"},
+            {"id": "project-2", "name": "Hell", "slug_id": "HELL"},
+        ],
+        "hell",
+    )
+
+    assert project["id"] == "project-2"
 
 async def test_real_symphony_e2e_waits_for_delegate_visibility_before_poller_dispatch(monkeypatch) -> None:
     tool = load_tool("real_symphony_e2e")
     seen = [
-        {"id": "issue-1", "delegate": None, "agentSessions": {"nodes": []}},
-        {"id": "issue-1", "delegate": {"id": "agent-1"}, "agentSessions": {"nodes": []}},
+        {"id": "issue-1", "delegate": None},
+        {"id": "issue-1", "delegate": {"id": "agent-1"}},
     ]
 
     async def fake_fetch(_token: str, _issue_id: str) -> dict[str, object]:

@@ -19,7 +19,11 @@ class PodiumReportMixin:
         managed_run_metrics = _managed_run_report_metrics(managed_runs_view)
         managed_run_queue = _managed_run_report_queue(managed_runs_view)
         instances = self.store.list_instances()
+        unbound: dict[str, Any] = {}
         for instance in instances:
+            unbound = _unbound_binding_report(instance)
+            if unbound:
+                continue
             agent_app_user_id = _linear_agent_app_user_id(instance.linear_filters)
             bindings.append(
                 {
@@ -27,6 +31,12 @@ class PodiumReportMixin:
                     "name": instance.name,
                     "linear_project": instance.linear_project,
                     "project_slug": instance.linear_project,
+                    "linear_project_id": str(instance.linear_filters.get("linear_project_id") or ""),
+                    "binding_config_version": int(instance.linear_filters.get("binding_config_version") or 0),
+                    "prepared_installation_id": str(instance.linear_filters.get("pending_installation_id") or ""),
+                    "prepared_binding_config_version": int(
+                        instance.linear_filters.get("pending_binding_config_version") or 0
+                    ),
                     "agent_app_user_id": agent_app_user_id,
                     "process_status": instance.process_status,
                     "constraint_labels": _desired_project_labels(instance),
@@ -48,7 +58,7 @@ class PodiumReportMixin:
                 "offset_end": logs.get("offset_end", 0),
                 "lines": logs.get("lines") or [],
             }
-        return {
+        report = {
             "conductor_id": settings.conductor_id,
             "hostname": _hostname(),
             "label": "",
@@ -59,6 +69,8 @@ class PodiumReportMixin:
             "log_tail": log_tail,
             "managed_runs": managed_runs_view,
         }
+        report.update(unbound)
+        return report
 
     async def post_podium_report(
         self,
@@ -105,6 +117,16 @@ class PodiumReportMixin:
             return False
         self._managed_run_runtime_config = envelope.to_dict()
         return True
+
+
+def _unbound_binding_report(instance: Any) -> dict[str, Any]:
+    binding_id = str(instance.linear_filters.get("unbound_binding_id") or "")
+    if not binding_id:
+        return {}
+    return {
+        "unbound_binding_id": binding_id,
+        "unbound_config_version": int(instance.linear_filters.get("unbound_config_version") or 0),
+    }
 
 
 def _managed_run_report_metrics(view: dict[str, Any]) -> dict[str, Any]:

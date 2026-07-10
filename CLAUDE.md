@@ -43,7 +43,7 @@ Symphony is **one product** split into four Python packages under `packages/`, e
 - **`performer-api`** — shared contracts: managed-run DTOs, plan/work-item state, runtime config, ops projections/models, and registration DTOs. The other three depend on it; it depends on none of them.
 - **`performer`** — the execution worker. It only runs fenced managed-run turns from JSON request/result paths under isolated per-role runtime profiles.
 - **`conductor`** — customer-side local daemon. One Conductor binds exactly one Linear project and one repository, owns that project's durable managed-run state, leases Podium dispatches, starts Performer turns, and connects outbound to Podium as an enrolled runtime. Multiple isolated Conductors may run on one host for different projects.
-- **`podium`** — SaaS control plane + BFF/static host. Owns auth, default and customer-owned Linear application configuration, versioned OAuth installations, selected projects, one-to-one Conductor bindings, dispatch queueing, signed webhooks, reconciliation polling, and the Linear proxy.
+- **`podium`** — SaaS control plane + BFF/static host. Owns auth, default and customer-owned Linear application configuration, versioned OAuth installations, selected projects, one-to-one Conductor bindings, dispatch queueing, reliable polling, token refresh, and the Linear proxy.
 
 ### Import-boundary invariant (enforced by tests)
 
@@ -57,7 +57,7 @@ Conductor is the only local process manager for Performer, and it launches it vi
 
 ### Managed dispatch flow
 
-The runtime path is webhook-first with durable reconciliation: a Linear issue is delegated to the installed Symphony app user → a signed AgentSession webhook reaches Podium immediately, while installation/project-scoped polling covers missed deliveries with the same idempotency key → Podium matches the active installation and unique project/Conductor binding → that Conductor leases the dispatch → Conductor commits or resumes one durable managed run → Performer runs one fenced managed-run turn. Dispatch routing is by organization, project binding, app user, active state, blockers, work-item dependencies, and runtime capacity, never project labels or human assignee.
+The runtime path is polling-only: a Linear issue is delegated to the installed Symphony app user → installation/project-scoped baseline or incremental polling discovers it through full cursor pagination → Podium transactionally records the issue, delegation epoch, dispatch, and checkpoint → Podium matches the active installation and unique project/Conductor binding → that Conductor leases the dispatch → Conductor commits or resumes one durable managed run → Performer runs one fenced managed-run turn. Dispatch routing is by organization, project binding, app user, active state, blockers, work-item dependencies, and runtime capacity, never project labels or human assignee.
 
 ### Podium web frontend
 

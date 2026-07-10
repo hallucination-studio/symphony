@@ -4,6 +4,7 @@ from .json_store_auth import JsonStoreAuthMixin
 from .json_store_base import JsonStoreBase
 from .json_store_dispatch import JsonStoreDispatchMixin
 from .json_store_legacy import JsonStoreLegacyMixin
+from .json_store_linear import JsonStoreLinearMixin
 from .json_store_ops import JsonStoreOpsMixin
 from .json_store_runtime import JsonStoreRuntimeMixin
 
@@ -11,6 +12,7 @@ from .json_store_runtime import JsonStoreRuntimeMixin
 class PodiumStore(
     JsonStoreLegacyMixin,
     JsonStoreAuthMixin,
+    JsonStoreLinearMixin,
     JsonStoreRuntimeMixin,
     JsonStoreDispatchMixin,
     JsonStoreOpsMixin,

@@ -8,6 +8,7 @@ from typing import Any
 from real_symphony_e2e_artifacts import _archive_managed_run_artifacts
 from real_symphony_e2e_common import api_url, http_json, redact_evidence_value
 from real_symphony_e2e_linear import fetch_linear_issue_tree
+from real_symphony_e2e_podium_evidence import archive_podium_api_snapshots
 
 
 async def archive_early_exit_artifacts(state: Any) -> None:
@@ -18,8 +19,38 @@ async def archive_early_exit_artifacts(state: Any) -> None:
         instance_id=state.instance_id,
     )
     state.evidence.artifact("managed_run_e2e_report", state.evidence.out)
+    await _archive_podium_snapshots(state)
     _archive_conductor_snapshots(state)
     await _archive_linear_tree(state)
+
+
+async def _archive_podium_snapshots(state: Any) -> None:
+    session = getattr(state, "podium_session", None)
+    podium_running = any(
+        process.name == "podium" and process.process.poll() is None
+        for process in getattr(state, "processes", [])
+    )
+    if session is None or not podium_running:
+        return
+    try:
+        await archive_podium_api_snapshots(
+            session,
+            root=Path(state.root),
+            evidence=state.evidence,
+            prefix="early-exit",
+            tolerate_endpoint_errors=True,
+        )
+    except Exception as exc:
+        state.evidence.check(
+            "real-e2e:early-exit-podium-snapshots",
+            False,
+            error_type=type(exc).__name__,
+            error_code=str(getattr(exc, "error_code", "podium_snapshot_archive_failed")),
+            sanitized_reason=_sanitize_exception(exc),
+            action_required="inspect_podium_log",
+            retryable=True,
+            next_action="retry_podium_snapshots",
+        )
 
 
 def record_unhandled_e2e_exception(evidence: Any, exc: Exception) -> None:

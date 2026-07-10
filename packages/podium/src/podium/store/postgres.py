@@ -7,6 +7,9 @@ import asyncpg
 from ._postgres_auth import PgAuthMixin
 from ._postgres_dispatch import PgDispatchMixin
 from ._postgres_linear import PgLinearMixin
+from ._postgres_linear_cutover import PgLinearCutoverMixin
+from ._postgres_linear_reconciliation import PgLinearReconciliationMixin
+from ._postgres_linear_tokens import PgLinearTokensMixin
 from ._postgres_migrations import PgMigrator
 from ._postgres_ops import PgOpsMixin
 from ._postgres_runtime import PgRuntimeMixin
@@ -18,6 +21,9 @@ from ._postgres_runtime import PgRuntimeMixin
 class PgStore(
     PgAuthMixin,
     PgRuntimeMixin,
+    PgLinearTokensMixin,
+    PgLinearReconciliationMixin,
+    PgLinearCutoverMixin,
     PgLinearMixin,
     PgDispatchMixin,
     PgOpsMixin,

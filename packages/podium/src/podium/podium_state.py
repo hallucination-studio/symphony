@@ -19,8 +19,8 @@ LINEAR_GRAPHQL_URL = "https://api.linear.app/graphql"
 ONBOARDING_STEPS = [
     "linear_connect",
     "scope_selection",
-    "repository_mapping",
     "runtime_enrollment",
+    "repository_mapping",
     "smoke_check",
 ]
 
@@ -57,18 +57,17 @@ class PodiumStateBaseMixin:
     async def onboarding_progress(self, workspace_id: str) -> dict[str, Any]:
         row = await self.load_onboarding_state(workspace_id)
         completed = list(row.get("completed_steps") or [])
-        group_id = f"group_{workspace_id}"
         conductors = await self.store.list_conductors_for_user(workspace_id)
-        has_runtime = bool(conductors)
         online_runtime = False
         for conductor in conductors:
-            if await self.is_runtime_online(str(conductor["id"])):
+            if (
+                conductor.get("enrollment_state") == "enrolled"
+                and await self.is_runtime_online(str(conductor["id"]))
+            ):
                 online_runtime = True
                 break
-        if (has_runtime or online_runtime) and "runtime_enrollment" not in completed:
+        if online_runtime and "runtime_enrollment" not in completed:
             completed.append("runtime_enrollment")
-        if await self.store.get_runtime_group(group_id) is None:
-            await self.ensure_workspace_runtime_group(workspace_id)
         ordered = [step for step in ONBOARDING_STEPS if step in completed]
         current_step = "complete"
         for step in ONBOARDING_STEPS:
@@ -105,32 +104,35 @@ class PodiumStateBaseMixin:
         await self._mark_onboarding(workspace_id, "runtime_enrollment")
         return await self.onboarding_progress(workspace_id)
 
-    async def set_smoke_result(self, workspace_id: str, result: dict[str, Any]) -> dict[str, Any]:
-        await self.store.save_smoke_result(workspace_id, result)
-        await self._mark_onboarding(workspace_id, "smoke_check")
+    async def sync_smoke_onboarding(self, workspace_id: str) -> dict[str, Any]:
+        result = await self.store.get_smoke_result(workspace_id) or {}
+        row = await self.load_onboarding_state(workspace_id)
+        completed = row.setdefault("completed_steps", [])
+        if result.get("status") == "passed" and "smoke_check" not in completed:
+            completed.append("smoke_check")
+        elif result.get("status") != "passed" and "smoke_check" in completed:
+            completed.remove("smoke_check")
+        await self.persist_onboarding_state(workspace_id, row)
         return await self.onboarding_progress(workspace_id)
 
     async def get_smoke_result(self, workspace_id: str) -> dict[str, Any] | None:
-        return await self.store.get_smoke_result(workspace_id)
+        result = await self.store.get_smoke_result(workspace_id)
+        if not isinstance(result, dict):
+            return None
+        return await self.expire_smoke_check(workspace_id, result)
 
-    async def ensure_workspace_runtime_group(self, workspace_id: str) -> str:
-        group_id = f"group_{workspace_id}"
-        await self.store.upsert_runtime_group(
-            {
-                "id": group_id,
-                "linear_workspace_id": workspace_id,
-                "project_slug": "",
-                "linear_agent_app_user_id": "",
-                "managed_run_profile": "default",
-                "project_binding_id": "",
-            }
-        )
-        return group_id
-
-    async def save_enrollment_token(self, token_hash: str, *, runtime_group_id: str, expires_at: datetime) -> None:
+    async def save_enrollment_token(
+        self,
+        token_hash: str,
+        *,
+        runtime_group_id: str,
+        conductor_id: str,
+        expires_at: datetime,
+    ) -> None:
         await self.store.save_enrollment_token(
             token_hash,
             runtime_group_id=runtime_group_id,
+            conductor_id=conductor_id,
             expires_at=expires_at.isoformat().replace("+00:00", "Z"),
         )
 
@@ -187,38 +189,24 @@ class PodiumStateBaseMixin:
         except (InvalidToken, ValueError) as exc:
             raise SecretDecryptionError("secret_decryption_failed") from exc
 
-    def _installation_to_disk(self, installation: dict[str, Any]) -> dict[str, Any]:
-        access_token = str(installation.get("access_token") or "")
-        return {
-            "workspace_id": str(installation.get("workspace_id") or ""),
-            "access_token_encrypted": self.encrypt_secret(access_token),
-            "scope": installation.get("scope"),
-            "actor": installation.get("actor"),
-            "expires_at": installation.get("expires_at"),
-        }
-
-    def _installation_from_disk(self, installation: dict[str, Any]) -> dict[str, Any]:
-        encrypted = str(installation.get("access_token_encrypted") or installation.get("access_token") or "")
-        return {
-            "workspace_id": str(installation.get("workspace_id") or ""),
-            "access_token": self.decrypt_secret(encrypted) if encrypted else "",
-            "scope": installation.get("scope"),
-            "actor": installation.get("actor"),
-            "expires_at": installation.get("expires_at"),
-        }
-
-    async def get_linear_installation(self, workspace_id: str) -> dict[str, Any] | None:
-        installation = await self.store.get_linear_installation(workspace_id)
-        return self._installation_from_disk(dict(installation)) if installation is not None else None
-
-    async def save_linear_installation(self, workspace_id: str, installation: dict[str, Any]) -> None:
-        await self.store.save_linear_installation(workspace_id, self._installation_to_disk(installation))
-
     async def linear_status(self, workspace_id: str) -> dict[str, Any]:
-        installation = await self.get_linear_installation(workspace_id)
+        installation = await self.get_active_linear_installation(workspace_id)
         if not installation:
             return {"workspace_id": workspace_id, "state": "not_connected"}
-        return {"workspace_id": workspace_id, "state": "connected", "scope": installation.get("scope"), "expires_at": installation.get("expires_at")}
+        connection_state = (
+            "reauthorization_required"
+            if installation.get("state") == "reauthorization_required"
+            else "connected"
+        )
+        return {
+            "workspace_id": workspace_id,
+            "state": connection_state,
+            "scope": installation.get("scope"),
+            "expires_at": installation.get("expires_at"),
+            "app_user_id": installation.get("app_user_id"),
+            "linear_organization_id": installation.get("linear_organization_id"),
+            "health": installation.get("state"),
+        }
 
     async def verify_turnstile(self, token: str, ip: str | None) -> bool:
         if not self.turnstile_enabled:
@@ -253,9 +241,6 @@ class PodiumStateBaseMixin:
     async def user_by_email(self, email: str) -> dict[str, Any] | None:
         user = await self.store.get_user_by_email(email)
         return _clean_user(user) if user is not None else None
-
-    async def set_user_linear_app(self, user_id: str, linear_app: dict[str, Any] | None) -> None:
-        await self.store.set_user_linear_app(user_id, linear_app)
 
     async def ensure_debug_user(self) -> dict[str, Any]:
         user = await self.user_by_id("debug")
@@ -296,7 +281,4 @@ class PodiumStateBaseMixin:
 
 
 def _clean_user(user: dict[str, Any]) -> dict[str, Any]:
-    cleaned = dict(user)
-    if cleaned.get("linear_app") is None:
-        cleaned.pop("linear_app", None)
-    return cleaned
+    return dict(user)

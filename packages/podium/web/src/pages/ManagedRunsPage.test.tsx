@@ -16,40 +16,49 @@ describe("ManagedRunsPage", () => {
 
   it("renders managed runs and work items", async () => {
     mockApi.managedRuns.mockResolvedValue({
-      runtime_group_id: "group-1",
-      policy_revision: 2,
-      profiles: {},
-      managed_runs: {
-        runs: [
-          {
-            run_id: "run-1",
-            parent_issue_id: "issue-parent",
-            issue_identifier: "LIN-123",
-            state: "executing",
-            active_work_item_id: "wi-1",
-            plan_version: 3,
-            backend_session_id: "thread-1",
-            work_items: [
+      conductors: [
+        {
+          conductor: { id: "conductor-1", name: "Bach", public_id: "k7m3p2", online: true },
+          project: { id: "project-1", slug: "LIN", name: "Linear Platform" },
+          binding: { id: "binding-1", instance_id: "inst-1", state: "ready", error_code: "", sanitized_reason: "" },
+          runtime_group_id: "group-1",
+          policy_revision: 2,
+          profiles: {},
+          managed_runs: {
+            runs: [
               {
-                work_item_id: "wi-1",
-                state: "in_progress",
-                gate_status: "red passing",
-                payload: {
-                  title: "Implement managed runs",
-                  objective: "Switch runtime reporting to managed run state",
-                  files_likely_touched: ["packages/podium/src/podium/podium_routes_runtime_ops.py"],
-                },
+                run_id: "run-1",
+                parent_issue_id: "issue-parent",
+                issue_identifier: "LIN-123",
+                state: "executing",
+                active_work_item_id: "wi-1",
+                plan_version: 3,
+                backend_session_id: "thread-1",
+                work_items: [
+                  {
+                    work_item_id: "wi-1",
+                    state: "in_progress",
+                    gate_status: "red passing",
+                    payload: {
+                      title: "Implement managed runs",
+                      objective: "Switch runtime reporting to managed run state",
+                      files_likely_touched: ["packages/podium/src/podium/podium_routes_runtime_ops.py"],
+                    },
+                  },
+                ],
               },
             ],
           },
-        ],
-      },
+        },
+      ],
     });
 
     renderWithProviders(<ManagedRunsPage />);
 
     expect(await screen.findByText("Managed Runs")).toBeInTheDocument();
     expect(screen.getByText("group-1")).toBeInTheDocument();
+    expect(screen.getByText("Linear Platform")).toBeInTheDocument();
+    expect(screen.getByText("Bach-k7m3p2")).toBeInTheDocument();
     expect(screen.getByText("LIN-123")).toBeInTheDocument();
     expect(screen.getByText("Implement managed runs")).toBeInTheDocument();
     expect(screen.getByText("red passing")).toBeInTheDocument();
@@ -57,10 +66,7 @@ describe("ManagedRunsPage", () => {
 
   it("renders an empty state when no managed run report exists", async () => {
     mockApi.managedRuns.mockResolvedValue({
-      runtime_group_id: "group-1",
-      policy_revision: 2,
-      profiles: {},
-      managed_runs: { runs: [] },
+      conductors: [],
     });
 
     renderWithProviders(<ManagedRunsPage />);

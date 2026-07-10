@@ -10,7 +10,6 @@ import uvicorn
 from .app import create_app
 from .auth_service import AuthService
 from .config import PodiumConfig
-from .linear_service import LinearCredentials, LinearService
 from .runtime_service import RuntimeService
 from .store import PodiumStore
 
@@ -26,6 +25,7 @@ class PodiumServer:
         linear_client_id: str = "",
         linear_client_secret: str = "",
         linear_redirect_uri: str = "",
+        linear_application_version: int = 1,
         linear_graphql_transport: Callable[..., Any] | None = None,
         podium_base_url: str = "https://podium.example",
         store: Any | None = None,
@@ -37,6 +37,7 @@ class PodiumServer:
         self.linear_client_id = linear_client_id
         self.linear_client_secret = linear_client_secret
         self.linear_redirect_uri = linear_redirect_uri
+        self.linear_application_version = linear_application_version
         self.linear_graphql_transport = linear_graphql_transport
         self.podium_base_url = podium_base_url
         self.state_store = store or PodiumStore(data_dir=data_dir)
@@ -46,50 +47,27 @@ class PodiumServer:
         self.store = self.state_store
         self.auth_service = AuthService(self.store, secret_key) if secret_key.strip() else None
         self.runtime_service = RuntimeService(self.store)
-        self.linear_service = LinearService(
-            resolve_credentials=self._resolve_linear_credentials,
-            client_id=linear_client_id,
-            redirect_uri=linear_redirect_uri,
-        )
         self.app = None
         self._server: uvicorn.Server | None = None
         self._task: asyncio.Task[Any] | None = None
 
     async def start(self, *, port: int = 0, host: str = "127.0.0.1") -> None:
-        if self.auth_service is None:
-            self.app = create_app(
-                turnstile_verifier=lambda _token, _ip: True,
-                secure_cookies=False,
-                static_dir=None,
-                data_dir=self.data_dir,
-                secret_key="",
-                linear_client_id=self.linear_client_id,
-                linear_client_secret=self.linear_client_secret,
-                linear_redirect_uri=self.linear_redirect_uri,
-                linear_scope_fetch=None,
-                linear_graphql_transport=self.linear_graphql_transport,
-                podium_base_url=self.podium_base_url,
-                store=self.state_store,
-                config=self.config,
-                debug_auth=self.debug_auth,
-            )
-        else:
-            self.app = create_app(
-                turnstile_verifier=lambda _token, _ip: True,
-                secure_cookies=False,
-                static_dir=None,
-                data_dir=self.data_dir,
-                secret_key=self.secret_key,
-                linear_client_id=self.linear_client_id,
-                linear_client_secret=self.linear_client_secret,
-                linear_redirect_uri=self.linear_redirect_uri,
-                linear_scope_fetch=None,
-                linear_graphql_transport=self.linear_graphql_transport,
-                podium_base_url=self.podium_base_url,
-                store=self.state_store,
-                config=self.config,
-                debug_auth=self.debug_auth,
-            )
+        self.app = create_app(
+            turnstile_verifier=lambda _token, _ip: True,
+            secure_cookies=False,
+            static_dir=None,
+            data_dir=self.data_dir,
+            secret_key=self.secret_key if self.auth_service is not None else "",
+            linear_client_id=self.linear_client_id,
+            linear_client_secret=self.linear_client_secret,
+            linear_redirect_uri=self.linear_redirect_uri,
+            linear_application_version=self.linear_application_version,
+            linear_graphql_transport=self.linear_graphql_transport,
+            podium_base_url=self.podium_base_url,
+            store=self.state_store,
+            config=self.config,
+            debug_auth=self.debug_auth,
+        )
         self.app.state.podium.server_wrapper = self
         if self.auth_service is not None:
             self.app.state.podium.session_ttl = self.auth_service.session_ttl
@@ -117,22 +95,3 @@ class PodiumServer:
                 await asyncio.wait_for(self._task, timeout=5)
         self._task = None
         self._server = None
-
-    def _resolve_linear_credentials(self, workspace_id: str) -> LinearCredentials:
-        user = None
-        if isinstance(self.state_store, PodiumStore):
-            user = self.state_store._load_map("users.json").get(workspace_id)
-        custom = user.get("linear_app") if isinstance(user, dict) else None
-        if custom:
-            if self.auth_service is None:
-                raise RuntimeError("auth_unavailable")
-            return LinearCredentials(
-                client_id=str(custom.get("client_id") or ""),
-                client_secret=self.auth_service.decrypt_secret(str(custom.get("client_secret_encrypted") or "")),
-                redirect_uri=str(custom.get("redirect_uri") or "") or self.linear_redirect_uri,
-            )
-        return LinearCredentials(
-            client_id=self.linear_client_id,
-            client_secret=self.linear_client_secret,
-            redirect_uri=self.linear_redirect_uri,
-        )
