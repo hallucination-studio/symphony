@@ -138,6 +138,74 @@ def test_managed_run_plan_validator_rejects_too_many_work_items() -> None:
     assert ManagedRunPlanValidatorError.TOO_MANY_WORK_ITEMS in errors
 
 
+@pytest.mark.parametrize(
+    ("plan", "error"),
+    [
+        (ManagedRunPlan.from_dict({**_plan().to_dict(), "summary": ""}), ManagedRunPlanValidatorError.MISSING_PLAN_SUMMARY),
+        (ManagedRunPlan.from_dict({**_plan().to_dict(), "architecture_decisions": []}), ManagedRunPlanValidatorError.MISSING_ARCHITECTURE_DECISIONS),
+        (ManagedRunPlan.from_dict({**_plan().to_dict(), "work_items": []}), ManagedRunPlanValidatorError.MISSING_WORK_ITEMS),
+        (ManagedRunPlan.from_dict({**_plan().to_dict(), "work_items": [{**_work_item().to_dict(), "id": ""}]}), ManagedRunPlanValidatorError.MISSING_WORK_ITEM_ID),
+        (ManagedRunPlan.from_dict({**_plan().to_dict(), "work_items": [{**_work_item().to_dict(), "objective": ""}]}), ManagedRunPlanValidatorError.MISSING_OBJECTIVE),
+        (ManagedRunPlan.from_dict({**_plan().to_dict(), "work_items": [{**_work_item().to_dict(), "acceptance_criteria": []}]}), ManagedRunPlanValidatorError.MISSING_ACCEPTANCE_CRITERIA),
+        (
+            ManagedRunPlan.from_dict(
+                {
+                    **_plan().to_dict(),
+                    "work_items": [
+                        {
+                            **_work_item().to_dict(),
+                            "verification": {"red_command": "Confirm result exists", "green_commands": ["Confirm result exists"], "runtime_checks": []},
+                        }
+                    ],
+                }
+            ),
+            ManagedRunPlanValidatorError.INVALID_VERIFICATION_COMMAND,
+        ),
+        (
+            ManagedRunPlan.from_dict(
+                {
+                    **_plan().to_dict(),
+                    "work_items": [{**_work_item().to_dict(), "parallelization": {"safe_to_parallelize": False, "reason": ""}}],
+                }
+            ),
+            ManagedRunPlanValidatorError.MISSING_PARALLELIZATION_REASON,
+        ),
+    ],
+)
+def test_managed_run_plan_validator_requires_complete_executable_work_item_contract(
+    plan: ManagedRunPlan,
+    error: ManagedRunPlanValidatorError,
+) -> None:
+    errors = ManagedRunPlanValidator().validate(plan)
+
+    assert error in errors
+
+
+def test_managed_run_plan_validator_rejects_invalid_checkpoint_target() -> None:
+    plan = ManagedRunPlan.from_dict(
+        {**_plan().to_dict(), "checkpoints": [Checkpoint(after=["missing"], verify=["pytest -q"]).to_dict()]}
+    )
+
+    errors = ManagedRunPlanValidator().validate(plan)
+
+    assert ManagedRunPlanValidatorError.INVALID_CHECKPOINT_TARGET in errors
+
+
+def test_managed_run_plan_validator_rejects_parallel_file_scope_conflicts() -> None:
+    parallel = ParallelizationPolicy(
+        safe_to_parallelize=True,
+        parallel_group="shared-group",
+        reason="independent work items",
+        shared_contracts=["result contract"],
+    )
+    first = _work_item(id="wi-1", files_likely_touched=["src/shared.py"], parallelization=parallel)
+    second = _work_item(id="wi-2", title="Implement second contract", files_likely_touched=["src/shared.py"], parallelization=parallel)
+
+    errors = ManagedRunPlanValidator().validate(_plan(first, second))
+
+    assert ManagedRunPlanValidatorError.UNSAFE_PARALLELIZATION in errors
+
+
 def test_managed_run_plan_validator_rejects_validation_only_followup_work_item() -> None:
     create_marker = _work_item(
         id="wi-1",

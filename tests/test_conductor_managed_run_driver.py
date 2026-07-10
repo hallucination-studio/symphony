@@ -307,6 +307,53 @@ async def test_managed_run_driver_rejects_result_for_a_different_work_item(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_managed_run_driver_blocks_when_execute_attempt_gate_hash_is_missing(tmp_path: Path) -> None:
+    store = ConductorManagedRunStore(tmp_path / "managed_run")
+    coordinator = ConductorManagedRunCoordinator(store=store)
+    runtime_manager = FakeRuntimeManager()
+    instance = _instance(tmp_path)
+    instances = {instance.id: instance}
+    accepted = coordinator.accept_dispatch(
+        {"issue_id": "issue-1", "issue_identifier": "HELL-1", "description": "Create result"},
+        instance_id=instance.id,
+    )
+    driver = ConductorManagedRunDriver(
+        store=store,
+        coordinator=coordinator,
+        runtime_manager=runtime_manager,
+        instance_lookup=instances.get,
+        instance_update=lambda updated: instances.__setitem__(updated.id, updated),
+        runtime_config=_runtime_config(),
+    )
+
+    await driver.drive_once()
+    plan_attempt = store.get_run(accepted.run_id)["payload"]["active_attempt"]
+    _write_result(plan_attempt["result_path"], {"turn_kind": "plan", "thread_id": "thread-1", "plan": _plan().to_dict()})
+    await driver.drive_once()
+    await driver.drive_once()
+    work_attempt = store.get_run(accepted.run_id)["payload"]["active_attempt"]
+    result = _work_item_result()
+    _materialize_result_files(Path(work_attempt["workspace_path"]), result)
+    _write_result(work_attempt["result_path"], {"turn_kind": "work_item", "thread_id": "thread-1", "result": result.to_dict()})
+    await driver.drive_once()
+    run = store.get_run(accepted.run_id) or {}
+    attempts = [
+        {**attempt, "gate_snapshot_hash": ""} if attempt["attempt_id"] == work_attempt["attempt_id"] else attempt
+        for attempt in run["payload"]["completed_attempts"]
+    ]
+    store.merge_run_payload(accepted.run_id, {"completed_attempts": attempts})
+
+    verified = await driver.drive_once()
+
+    final = store.get_run(accepted.run_id) or {}
+    item = store.list_work_items(accepted.run_id)[0]
+    assert verified["failed"] == 1
+    assert final["state"] == ManagedRunState.BLOCKED.value
+    assert item["state"] == WorkItemState.BLOCKED.value
+    assert item["gate_status"] == "gate_snapshot_missing:execute_attempt_gate_hash_missing"
+
+
+@pytest.mark.asyncio
 async def test_managed_run_driver_waits_for_plan_approval_before_work_item_turn(tmp_path: Path) -> None:
     store = ConductorManagedRunStore(tmp_path / "managed_run")
     coordinator = ConductorManagedRunCoordinator(store=store)

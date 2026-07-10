@@ -9,6 +9,12 @@ class ManagedRunPlanValidator:
 
     def validate(self, plan: ManagedRunPlan) -> list[ManagedRunPlanValidatorError]:
         errors: list[ManagedRunPlanValidatorError] = []
+        if not plan.summary.strip():
+            errors.append(ManagedRunPlanValidatorError.MISSING_PLAN_SUMMARY)
+        if not plan.architecture_decisions:
+            errors.append(ManagedRunPlanValidatorError.MISSING_ARCHITECTURE_DECISIONS)
+        if not plan.work_items:
+            errors.append(ManagedRunPlanValidatorError.MISSING_WORK_ITEMS)
         if not plan.verification_rubric.is_complete():
             errors.append(ManagedRunPlanValidatorError.INCOMPLETE_RUBRIC)
         if len(plan.work_items) > self.MAX_WORK_ITEMS:
@@ -28,15 +34,24 @@ class ManagedRunPlanValidator:
                     errors.append(ManagedRunPlanValidatorError.MISSING_DEPENDENCY)
                 edges.append((dependency, item.id))
         for checkpoint in plan.checkpoints:
+            if not checkpoint.after or any(work_item_id not in id_set for work_item_id in checkpoint.after):
+                errors.append(ManagedRunPlanValidatorError.INVALID_CHECKPOINT_TARGET)
+            if not checkpoint.verify:
+                errors.append(ManagedRunPlanValidatorError.INVALID_CHECKPOINT_COMMAND)
             for command in checkpoint.verify:
                 if not _looks_like_shell_command(command):
                     errors.append(ManagedRunPlanValidatorError.INVALID_CHECKPOINT_COMMAND)
         if _has_cycle(id_set, edges):
             errors.append(ManagedRunPlanValidatorError.CYCLE_DETECTED)
+        errors.extend(_parallel_safety_errors(plan.work_items, items_by_id))
         return _dedupe_errors(errors)
 
     def _validate_item(self, item: WorkItem) -> list[ManagedRunPlanValidatorError]:
         errors: list[ManagedRunPlanValidatorError] = []
+        if not item.id.strip():
+            errors.append(ManagedRunPlanValidatorError.MISSING_WORK_ITEM_ID)
+        if not item.objective.strip():
+            errors.append(ManagedRunPlanValidatorError.MISSING_OBJECTIVE)
         scope = item.estimated_scope.upper()
         if scope in {"L", "XL"}:
             errors.append(ManagedRunPlanValidatorError.WORK_ITEM_TOO_LARGE)
@@ -44,6 +59,8 @@ class ManagedRunPlanValidator:
             errors.append(ManagedRunPlanValidatorError.INVALID_SCOPE)
         if len(item.acceptance_criteria) > 3:
             errors.append(ManagedRunPlanValidatorError.TOO_MANY_ACCEPTANCE_CRITERIA)
+        if not any(criterion.strip() for criterion in item.acceptance_criteria):
+            errors.append(ManagedRunPlanValidatorError.MISSING_ACCEPTANCE_CRITERIA)
         if " and " in item.title.lower():
             errors.append(ManagedRunPlanValidatorError.TITLE_HAS_AND)
         if not _title_starts_with_action_verb(item.title):
@@ -52,11 +69,14 @@ class ManagedRunPlanValidator:
             errors.append(ManagedRunPlanValidatorError.MISSING_RED_COMMAND)
         if not item.verification.green_commands:
             errors.append(ManagedRunPlanValidatorError.MISSING_GREEN_COMMANDS)
+        commands = [item.verification.red_command, *item.verification.green_commands, *item.verification.runtime_checks]
+        if any(not _looks_like_shell_command(command) for command in commands):
+            errors.append(ManagedRunPlanValidatorError.INVALID_VERIFICATION_COMMAND)
         if not item.files_likely_touched:
             errors.append(ManagedRunPlanValidatorError.EMPTY_FILE_SCOPE)
-        if item.parallelization.safe_to_parallelize and not (
-            item.parallelization.shared_contracts or item.parallelization.parallel_group
-        ):
+        if not item.parallelization.reason.strip():
+            errors.append(ManagedRunPlanValidatorError.MISSING_PARALLELIZATION_REASON)
+        if item.parallelization.safe_to_parallelize and not item.parallelization.parallel_group:
             errors.append(ManagedRunPlanValidatorError.UNSAFE_PARALLELIZATION)
         return errors
 
@@ -137,6 +157,47 @@ def _is_validation_only_followup(item: WorkItem, items_by_id: dict[str, WorkItem
         if dependency_item is not None:
             dependency_files.update(dependency_item.files_likely_touched)
     return bool(item.files_likely_touched) and set(item.files_likely_touched).issubset(dependency_files)
+
+
+def _parallel_safety_errors(items: list[WorkItem], items_by_id: dict[str, WorkItem]) -> list[ManagedRunPlanValidatorError]:
+    parallel_items = [item for item in items if item.parallelization.safe_to_parallelize and item.parallelization.parallel_group]
+    for index, item in enumerate(parallel_items):
+        for candidate in parallel_items[index + 1 :]:
+            if item.parallelization.parallel_group != candidate.parallelization.parallel_group:
+                continue
+            if _depends_on(item, candidate.id, items_by_id) or _depends_on(candidate, item.id, items_by_id):
+                continue
+            if _file_scopes_overlap(item.files_likely_touched, candidate.files_likely_touched):
+                return [ManagedRunPlanValidatorError.UNSAFE_PARALLELIZATION]
+    return []
+
+
+def _depends_on(item: WorkItem, target_id: str, items_by_id: dict[str, WorkItem]) -> bool:
+    pending = list(item.dependencies)
+    seen: set[str] = set()
+    while pending:
+        dependency = pending.pop()
+        if dependency == target_id:
+            return True
+        if dependency in seen:
+            continue
+        seen.add(dependency)
+        parent = items_by_id.get(dependency)
+        if parent is not None:
+            pending.extend(parent.dependencies)
+    return False
+
+
+def _file_scopes_overlap(first: list[str], second: list[str]) -> bool:
+    for left in (_normalized_path(path) for path in first):
+        for right in (_normalized_path(path) for path in second):
+            if left and right and (left == right or left.startswith(right + "/") or right.startswith(left + "/")):
+                return True
+    return False
+
+
+def _normalized_path(path: str) -> str:
+    return str(path or "").replace("\\", "/").strip("/")
 
 
 def _normalized_command(command: str) -> str:

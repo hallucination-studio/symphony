@@ -129,33 +129,39 @@ class ConductorManagedRunWorkItemMixin(ConductorManagedRunAttemptCollectionMixin
                 return {"failed": 1}
             handoff = ExecutionHandoff.from_dict(handoff_payload)
             verify_attempt = _attempt_payload(_attempt_paths(instance, self.store.get_run(str(run["run_id"])) or run, "verify", str(item["work_item_id"])), "verify", work_item_id=str(item["work_item_id"]))
-            gate_payload = next(
-                (snapshot for snapshot in self.store.list_gate_snapshots(str(run["run_id"])) if snapshot.get("work_item_id") == item["work_item_id"]),
-                {},
-            )
-            gate = GateSnapshot.from_dict(gate_payload)
-            try:
-                outcome = run_local_verifier(
-                    gate,
-                    result,
-                    source_workspace=Path(instance.resolved_repo_path),
-                    state_root=Path(instance.instance_dir) / "state",
-                    verify_attempt_id=str(verify_attempt["attempt_id"]),
-                    execute_commit_sha=handoff.commit_sha,
-                    artifact_hashes=handoff.artifact_hashes,
-                )
-                status = outcome.gate_status
-                evidence = outcome.evidence
-                passed = outcome.passed
-            except Exception as exc:
-                status = f"verification_runner_failed:{_sanitize(exc)}"
-                evidence = {}
+            execute_attempt = _completed_attempt_for_work_item(run, str(item["work_item_id"]))
+            gate_hash = str(execute_attempt.get("gate_snapshot_hash") or "")
+            gate_payload = self.store.get_gate_snapshot(gate_hash) if gate_hash else None
+            score = 0
+            if gate_payload is None:
+                status = f"gate_snapshot_missing:{gate_hash or 'execute_attempt_gate_hash_missing'}"
+                evidence = {"execute_attempt_id": str(execute_attempt.get("attempt_id") or ""), "gate_snapshot_hash": gate_hash}
                 passed = False
+            else:
+                gate = GateSnapshot.from_dict(gate_payload)
+                try:
+                    outcome = run_local_verifier(
+                        gate,
+                        result,
+                        source_workspace=Path(instance.resolved_repo_path),
+                        state_root=Path(instance.instance_dir) / "state",
+                        verify_attempt_id=str(verify_attempt["attempt_id"]),
+                        execute_commit_sha=handoff.commit_sha,
+                        artifact_hashes=handoff.artifact_hashes,
+                    )
+                    status = outcome.gate_status
+                    evidence = outcome.evidence
+                    passed = outcome.passed
+                    score = outcome.score if passed else 0
+                except Exception as exc:
+                    status = f"verification_runner_failed:{_sanitize(exc)}"
+                    evidence = {}
+                    passed = False
             completed = _complete_attempt(
                 {
                     **verify_attempt,
-                    "gate_snapshot_hash": gate.content_hash,
-                    "verify_score": outcome.score if passed else 0,
+                    "gate_snapshot_hash": gate_hash,
+                    "verify_score": score,
                     "verification_evidence": evidence,
                     "sanitized_error": "" if passed else status,
                 },
@@ -165,14 +171,19 @@ class ConductorManagedRunWorkItemMixin(ConductorManagedRunAttemptCollectionMixin
             if not passed:
                 self.coordinator.verify_work_item(str(run["run_id"]), str(item["work_item_id"]), gate_status=status, passed=False)
                 return {"failed": 1}
-            self.coordinator.verify_work_item(str(run["run_id"]), str(item["work_item_id"]), gate_status="verification passed")
+            self.coordinator.verify_work_item(
+                str(run["run_id"]),
+                str(item["work_item_id"]),
+                gate_status="verification passed",
+                score=score,
+            )
             self._record_successful_verification(
                 run,
                 item,
                 result,
                 handoff,
                 verify_attempt=completed,
-                score=outcome.score,
+                score=score,
             )
             applied += 1
         checkpoint = self._run_pending_checkpoint(self.store.get_run(str(run["run_id"])) or run, instance)

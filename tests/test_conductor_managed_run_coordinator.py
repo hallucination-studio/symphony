@@ -203,6 +203,23 @@ def test_managed_run_coordinator_advances_work_item_through_review_to_done(tmp_p
     assert coordinator.next_ready_work_item(accepted.run_id)["work_item_id"] == "wi-2"
 
 
+def test_managed_run_coordinator_blocks_verification_score_below_global_threshold(tmp_path) -> None:
+    coordinator = ConductorManagedRunCoordinator(store=ConductorManagedRunStore(tmp_path))
+    accepted = coordinator.accept_dispatch({"issue_id": "root-1", "issue_identifier": "HELL-1"}, instance_id="instance-1")
+    coordinator.apply_plan(accepted.run_id, _plan(), backend_session_id="thread-1")
+    coordinator.start_work_item(accepted.run_id, "wi-1")
+    coordinator.submit_work_item_result(accepted.run_id, _result("wi-1"))
+
+    item = coordinator.verify_work_item(accepted.run_id, "wi-1", gate_status="verification passed", passed=True, score=2)
+
+    run = coordinator.store.get_run(accepted.run_id)
+    assert run is not None
+    assert run["state"] == ManagedRunState.BLOCKED.value
+    assert run["latest_reason"] == "verification_score_below_threshold:2"
+    assert item["state"] == WorkItemState.BLOCKED.value
+    assert item["gate_status"] == "verification_score_below_threshold:2"
+
+
 def test_managed_run_coordinator_does_not_parallelize_unmarked_independent_work_items(tmp_path) -> None:
     independent = ManagedRunPlan.from_dict(
         {

@@ -242,10 +242,24 @@ class ConductorManagedRunCoordinator(ConductorManagedRunCheckpointMixin):
         )
         return self._work_item(run_id, result.work_item_id)
 
-    def verify_work_item(self, run_id: str, work_item_id: str, *, gate_status: str, passed: bool = True) -> dict[str, Any]:
+    def verify_work_item(
+        self,
+        run_id: str,
+        work_item_id: str,
+        *,
+        gate_status: str,
+        passed: bool = True,
+        score: int = 3,
+    ) -> dict[str, Any]:
         current = self._work_item(run_id, work_item_id)
         if current["state"] != WorkItemState.IN_REVIEW.value:
             raise ValueError(f"work item is not in review: {work_item_id}")
+        if passed and score < 3:
+            gate_status = f"verification_score_below_threshold:{score}"
+            passed = False
+        elif passed and score > 4:
+            gate_status = f"verification_score_out_of_range:{score}"
+            passed = False
         if not passed:
             reason = gate_status or "verification_failed"
             self.store.update_run_state(run_id, ManagedRunState.BLOCKED, active_work_item_id=work_item_id, reason=reason)
