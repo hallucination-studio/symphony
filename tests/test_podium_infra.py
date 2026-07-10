@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import ast
+import inspect
+import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -12,6 +15,7 @@ from fastapi.testclient import TestClient
 from podium.app import create_app
 from podium.config import PodiumConfig
 from podium.podium_shared import dispatch_public
+from podium.store._postgres_dispatch import PgDispatchMixin, _binding_values
 from podium.store.postgres import PgMigrator
 from podium.store import PodiumStore
 
@@ -122,6 +126,10 @@ def test_pg_migrator_exposes_phase_0_schema() -> None:
     assert "application_config_version BIGINT NOT NULL" in sql
     assert "CREATE TABLE IF NOT EXISTS conductors" in sql
     assert "CREATE TABLE IF NOT EXISTS project_bindings" in sql
+    assert "replacement_conductor_id TEXT NOT NULL DEFAULT ''" in sql
+    assert "replacement_repo_source JSONB NOT NULL DEFAULT '{}'::jsonb" in sql
+    assert "replacement_state TEXT NOT NULL DEFAULT ''" in sql
+    assert "replacement_binding_id TEXT NOT NULL DEFAULT ''" in sql
     assert "CREATE TABLE IF NOT EXISTS dispatches" in sql
     assert "agent_app_user_id TEXT NOT NULL DEFAULT ''" in sql
     assert "issue_delegate_id TEXT NOT NULL DEFAULT ''" in sql
@@ -143,6 +151,30 @@ def test_pg_migrator_exposes_phase_0_schema() -> None:
     assert "CREATE TABLE IF NOT EXISTS runtime_configs" in sql
     assert "CREATE TABLE IF NOT EXISTS managed_run_views" in sql
     assert "CREATE TABLE IF NOT EXISTS runtime_commands" in sql
+
+
+def test_pg_project_binding_upsert_values_match_replacement_schema() -> None:
+    values = _binding_values(
+        {
+            "id": "binding-old",
+            "conductor_id": "conductor-old",
+            "user_id": "user-1",
+            "instance_id": "instance-old",
+            "replacement_conductor_id": "conductor-new",
+            "replacement_repo_source": {"type": "local_path", "value": "/repo/new"},
+            "replacement_state": "pending_ack",
+            "replacement_binding_id": "binding-new",
+            "updated_at": "2026-07-10T00:00:00Z",
+        }
+    )
+    source = inspect.getsource(PgDispatchMixin.upsert_project_binding)
+    placeholders = [int(value) for value in re.findall(r"\$(\d+)", source)]
+
+    assert len(values) == max(placeholders) == 32
+    assert "instance_id = EXCLUDED.instance_id" in source
+    assert values[25] == "conductor-new"
+    assert json.loads(values[26]) == {"type": "local_path", "value": "/repo/new"}
+    assert values[27:29] == ("pending_ack", "binding-new")
 
 
 def test_pg_store_dispatch_lease_uses_atomic_skip_locked_query() -> None:

@@ -15,11 +15,13 @@ class PgDispatchMixin:
               managed_run_profile, process_status,
               constraint_labels, repo_source, state, active, config_version, acknowledged_config_version,
               candidate_installation_id, candidate_agent_app_user_id, candidate_config_version,
-              candidate_acknowledged_config_version, label_id, label_name, error_code,
-              sanitized_reason, updated_at
+              candidate_acknowledged_config_version, label_id, label_name,
+              replacement_conductor_id, replacement_repo_source, replacement_state,
+              replacement_binding_id, error_code, sanitized_reason, updated_at
             )
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14::jsonb,$15::jsonb,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28::timestamptz)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14::jsonb,$15::jsonb,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27::jsonb,$28,$29,$30,$31,$32::timestamptz)
             ON CONFLICT (id) DO UPDATE SET
+              instance_id = EXCLUDED.instance_id,
               name = EXCLUDED.name,
               linear_project = EXCLUDED.linear_project,
               project_slug = EXCLUDED.project_slug,
@@ -41,6 +43,10 @@ class PgDispatchMixin:
               candidate_acknowledged_config_version = EXCLUDED.candidate_acknowledged_config_version,
               label_id = EXCLUDED.label_id,
               label_name = EXCLUDED.label_name,
+              replacement_conductor_id = EXCLUDED.replacement_conductor_id,
+              replacement_repo_source = EXCLUDED.replacement_repo_source,
+              replacement_state = EXCLUDED.replacement_state,
+              replacement_binding_id = EXCLUDED.replacement_binding_id,
               error_code = EXCLUDED.error_code,
               sanitized_reason = EXCLUDED.sanitized_reason,
               updated_at = EXCLUDED.updated_at
@@ -51,14 +57,15 @@ class PgDispatchMixin:
             "SELECT runtime_group_id FROM conductors WHERE id = $1",
             str(binding["conductor_id"]),
         )
+        active = bool(binding.get("active", True))
         await self.upsert_runtime_group(
             {
                 "id": str(runtime_group_id or binding["id"]),
                 "linear_workspace_id": str(binding["user_id"]),
-                "project_slug": str(binding.get("project_slug") or ""),
-                "linear_agent_app_user_id": str(binding.get("agent_app_user_id") or ""),
+                "project_slug": str(binding.get("project_slug") or "") if active else "",
+                "linear_agent_app_user_id": str(binding.get("agent_app_user_id") or "") if active else "",
                 "managed_run_profile": str(binding.get("managed_run_profile") or "default"),
-                "project_binding_id": str(binding["id"]),
+                "project_binding_id": str(binding["id"]) if active else "",
             }
         )
 
@@ -68,6 +75,32 @@ class PgDispatchMixin:
 
     async def get_project_binding(self, binding_id: str) -> dict[str, Any] | None:
         row = await self.pool.fetchrow("SELECT * FROM project_bindings WHERE id = $1", binding_id)
+        return _record_to_project_binding(row) if row is not None else None
+
+    async def get_project_binding_replacement_for_conductor(
+        self,
+        user_id: str,
+        conductor_id: str,
+    ) -> dict[str, Any] | None:
+        row = await self.pool.fetchrow(
+            """
+            SELECT * FROM project_bindings
+            WHERE user_id = $1 AND replacement_conductor_id = $2
+            ORDER BY updated_at DESC LIMIT 1
+            """,
+            user_id,
+            conductor_id,
+        )
+        return _record_to_project_binding(row) if row is not None else None
+
+    async def get_project_binding_replacement_for_new_binding(
+        self,
+        binding_id: str,
+    ) -> dict[str, Any] | None:
+        row = await self.pool.fetchrow(
+            "SELECT * FROM project_bindings WHERE replacement_binding_id = $1 LIMIT 1",
+            binding_id,
+        )
         return _record_to_project_binding(row) if row is not None else None
 
     async def list_project_bindings_for_user(self, user_id: str) -> list[dict[str, Any]]:
@@ -272,6 +305,8 @@ def _binding_values(binding: dict[str, Any]) -> tuple[Any, ...]:
         str(binding.get("candidate_installation_id") or ""),
         str(binding.get("candidate_agent_app_user_id") or ""), int(binding.get("candidate_config_version") or 0),
         int(binding.get("candidate_acknowledged_config_version") or 0), str(binding.get("label_id") or ""),
-        str(binding.get("label_name") or ""), str(binding.get("error_code") or ""),
+        str(binding.get("label_name") or ""), str(binding.get("replacement_conductor_id") or ""),
+        _pg_json(binding.get("replacement_repo_source") or {}), str(binding.get("replacement_state") or ""),
+        str(binding.get("replacement_binding_id") or ""), str(binding.get("error_code") or ""),
         str(binding.get("sanitized_reason") or ""), _pg_datetime(binding.get("updated_at")),
     )

@@ -7,6 +7,7 @@ from fastapi.responses import JSONResponse
 
 from .podium_conductors import ConductorIdentityError
 from .podium_project_bindings import ProjectBindingError
+from .podium_project_replacements import ProjectReplacementError, replacement_public
 from .podium_state import SecretDecryptionError
 
 RequireUser = Callable[[Request], Awaitable[dict[str, Any] | None]]
@@ -33,6 +34,12 @@ def register_conductor_binding_routes(
         error_response=error_response,
     )
     _register_conductor_unbind_route(
+        app,
+        state=state,
+        require_user=require_user,
+        error_response=error_response,
+    )
+    _register_conductor_replacement_routes(
         app,
         state=state,
         require_user=require_user,
@@ -124,3 +131,48 @@ def _register_conductor_unbind_route(
             return error_response(statuses.get(exc.code, 409), exc.code, exc.reason)
         status_code = 202 if active else 200
         return JSONResponse({"binding": state.binding_public(binding)}, status_code=status_code)
+
+
+def _register_conductor_replacement_routes(
+    app: FastAPI,
+    *,
+    state: Any,
+    require_user: RequireUser,
+    error_response: ErrorResponse,
+) -> None:
+    @app.post("/api/v1/conductors/{conductor_id}/binding-replacement")
+    async def replace_conductor_binding(conductor_id: str, request: Request) -> JSONResponse:
+        user = await require_user(request)
+        if user is None:
+            return error_response(401, "unauthorized", "Unauthorized")
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            return error_response(400, "invalid_binding_replacement", "Replacement body is required")
+        try:
+            replacement = await state.start_project_replacement(
+                str(user["id"]),
+                conductor_id,
+                old_conductor_id=str(payload.get("replace_conductor_id") or ""),
+                linear_project_id=str(payload.get("linear_project_id") or ""),
+                repository=payload.get("repository") if isinstance(payload.get("repository"), dict) else {},
+            )
+        except (ProjectReplacementError, ProjectBindingError) as exc:
+            statuses = {
+                "conductor_not_found": 404,
+                "replacement_binding_not_found": 404,
+                "managed_runs_active": 409,
+            }
+            return error_response(statuses.get(exc.code, 409), exc.code, exc.reason)
+        return JSONResponse({"replacement": replacement_public(replacement)}, status_code=202)
+
+    @app.get("/api/v1/conductors/{conductor_id}/binding-replacement")
+    async def get_conductor_replacement(conductor_id: str, request: Request) -> JSONResponse:
+        user = await require_user(request)
+        if user is None:
+            return error_response(401, "unauthorized", "Unauthorized")
+        if await state.conductor_for_user(conductor_id, str(user["id"])) is None:
+            return error_response(404, "conductor_not_found", "Conductor not found")
+        replacement = await state.project_replacement_for_conductor(str(user["id"]), conductor_id)
+        if replacement is None:
+            return error_response(404, "binding_replacement_not_found", "Binding replacement not found")
+        return JSONResponse({"replacement": replacement})

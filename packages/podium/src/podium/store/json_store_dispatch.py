@@ -13,14 +13,15 @@ class JsonStoreDispatchMixin:
         self._write("project_bindings.json", rows)
         conductor = self._load_map("conductors.json").get(str(binding.get("conductor_id") or ""))
         runtime_group_id = str((conductor or {}).get("runtime_group_id") or "")
+        active = bool(binding.get("active", True))
         await self.upsert_runtime_group(
             {
                 "id": runtime_group_id or str(binding["id"]),
                 "linear_workspace_id": str(binding.get("user_id") or ""),
-                "project_slug": str(binding.get("project_slug") or ""),
-                "linear_agent_app_user_id": str(binding.get("agent_app_user_id") or ""),
+                "project_slug": str(binding.get("project_slug") or "") if active else "",
+                "linear_agent_app_user_id": str(binding.get("agent_app_user_id") or "") if active else "",
                 "managed_run_profile": str(binding.get("managed_run_profile") or "default"),
-                "project_binding_id": str(binding["id"]),
+                "project_binding_id": str(binding["id"]) if active else "",
             }
         )
 
@@ -35,6 +36,30 @@ class JsonStoreDispatchMixin:
     async def get_project_binding(self, binding_id: str) -> dict[str, Any] | None:
         row = self._load_map("project_bindings.json").get(binding_id)
         return dict(row) if isinstance(row, dict) else None
+
+    async def get_project_binding_replacement_for_conductor(
+        self,
+        user_id: str,
+        conductor_id: str,
+    ) -> dict[str, Any] | None:
+        rows = [
+            dict(row)
+            for row in self._load_map("project_bindings.json").values()
+            if isinstance(row, dict)
+            and str(row.get("user_id") or "") == user_id
+            and str(row.get("replacement_conductor_id") or "") == conductor_id
+        ]
+        rows.sort(key=lambda row: str(row.get("updated_at") or ""), reverse=True)
+        return rows[0] if rows else None
+
+    async def get_project_binding_replacement_for_new_binding(
+        self,
+        binding_id: str,
+    ) -> dict[str, Any] | None:
+        for row in self._load_map("project_bindings.json").values():
+            if isinstance(row, dict) and str(row.get("replacement_binding_id") or "") == binding_id:
+                return dict(row)
+        return None
 
     async def list_project_bindings_for_user(self, user_id: str) -> list[dict[str, Any]]:
         return [

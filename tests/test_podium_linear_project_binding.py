@@ -523,3 +523,481 @@ async def test_unbind_label_failure_remains_unroutable_and_visible(caplog: pytes
     assert binding["error_code"] == "linear_project_label_remove_failed"
     assert binding["sanitized_reason"] == "Linear project label removal failed"
     assert "event=linear_project_label_remove_failed" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_binding_replacement_moves_project_to_new_conductor_after_both_acks(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level("INFO", logger="podium.podium_project_replacements")
+    transport = ProjectLabelTransport()
+    app = make_app(linear_graphql_transport=transport)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
+        user_id = await _prepare_workspace(client, app)
+        old = await _enroll(client, await _issue_enrollment(client, name="Bach"))
+        new = await _enroll(client, await _issue_enrollment(client, name="Mozart"))
+        _, old_binding = await bind_and_ack_conductor(app, client, user_id, old)
+        await app.state.podium.set_presence(new["runtime_id"])
+
+        started = await client.post(
+            f"/api/v1/conductors/{new['runtime_id']}/binding-replacement",
+            json={
+                "replace_conductor_id": old["runtime_id"],
+                "linear_project_id": "project-alpha",
+                "repository": {"mode": "local_path", "value": "/repo/a"},
+            },
+        )
+        repeated_start = await client.post(
+            f"/api/v1/conductors/{new['runtime_id']}/binding-replacement",
+            json={
+                "replace_conductor_id": old["runtime_id"],
+                "linear_project_id": "project-alpha",
+                "repository": {"mode": "local_path", "value": "/repo/a"},
+            },
+        )
+        old_commands = app.state.podium.store._load_map("runtime_commands.json")[old["runtime_id"]]
+        old_ack = await client.post(
+            "/api/v1/runtime/report",
+            headers={"Authorization": f"Bearer {old['runtime_token']}"},
+            json={
+                "bindings": [],
+                "unbound_binding_id": old_binding["id"],
+                "unbound_config_version": old_binding["config_version"] + 1,
+            },
+        )
+        old_after = await app.state.podium.store.get_project_binding(old_binding["id"])
+        new_binding = await app.state.podium.store.get_project_binding(old_after["replacement_binding_id"])
+        new_command = app.state.podium.store._load_map("runtime_commands.json")[new["runtime_id"]][-1]["command"]
+        new_ack = await client.post(
+            "/api/v1/runtime/report",
+            headers={"Authorization": f"Bearer {new['runtime_token']}"},
+            json={
+                "bindings": [
+                    {
+                        "instance_id": "replacement-instance",
+                        "linear_project_id": "project-alpha",
+                        "project_slug": "ALPHA",
+                        "agent_app_user_id": "agent-alpha",
+                        "binding_config_version": new_binding["config_version"],
+                        "repo_source": {"type": "local_path", "value": "/repo/a"},
+                        "process_status": "stopped",
+                    }
+                ]
+            },
+        )
+        replacement = await client.get(
+            f"/api/v1/conductors/{new['runtime_id']}/binding-replacement"
+        )
+        queued = await queue_agent_session(
+            app,
+            agent_session_payload(
+                workspace_id=user_id,
+                project_slug="ALPHA",
+                delegate_id="agent-alpha",
+            ),
+        )
+        old_lease = await client.post(
+            "/api/v1/runtime/dispatches/lease",
+            headers={"Authorization": f"Bearer {old['runtime_token']}"},
+        )
+        new_lease = await client.post(
+            "/api/v1/runtime/dispatches/lease",
+            headers={"Authorization": f"Bearer {new['runtime_token']}"},
+        )
+
+    assert started.status_code == 202
+    assert started.json()["replacement"]["state"] == "pending_unbind"
+    assert repeated_start.status_code == 202
+    assert sum(row["command"]["type"] == "project.unconfigure" for row in old_commands) == 1
+    assert old_ack.status_code == 200
+    assert old_after["replacement_state"] == "pending_ack"
+    assert new_command["type"] == "project.configure"
+    assert new_command["linear_project_id"] == "project-alpha"
+    assert new_ack.status_code == 200
+    assert replacement.status_code == 200
+    assert replacement.json()["replacement"]["state"] == "ready"
+    assert queued.json()["queued"] == 1
+    assert old_lease.json()["dispatch"] is None
+    assert new_lease.json()["dispatch"]["project_binding_id"] == new_binding["id"]
+    assert "event=project_replacement_started" in caplog.text
+    assert "event=project_replacement_completed" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_binding_replacement_rejects_active_managed_run_dispatch() -> None:
+    app = make_app()
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
+        user_id = await _prepare_workspace(client, app)
+        old = await _enroll(client, await _issue_enrollment(client, name="Bach"))
+        new = await _enroll(client, await _issue_enrollment(client, name="Mozart"))
+        await bind_and_ack_conductor(app, client, user_id, old)
+        await app.state.podium.set_presence(new["runtime_id"])
+        await queue_agent_session(
+            app,
+            agent_session_payload(
+                workspace_id=user_id,
+                project_slug="ALPHA",
+                delegate_id="agent-alpha",
+            ),
+        )
+
+        rejected = await client.post(
+            f"/api/v1/conductors/{new['runtime_id']}/binding-replacement",
+            json={
+                "replace_conductor_id": old["runtime_id"],
+                "linear_project_id": "project-alpha",
+                "repository": {"mode": "local_path", "value": "/repo/a"},
+            },
+        )
+
+    assert rejected.status_code == 409
+    assert rejected.json()["error"]["code"] == "managed_runs_active"
+
+
+@pytest.mark.asyncio
+async def test_binding_replacement_rejects_competing_target_conductor() -> None:
+    app = make_app()
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
+        user_id = await _prepare_workspace(client, app)
+        old = await _enroll(client, await _issue_enrollment(client, name="Bach"))
+        first_target = await _enroll(client, await _issue_enrollment(client, name="Mozart"))
+        second_target = await _enroll(client, await _issue_enrollment(client, name="Ravel"))
+        await bind_and_ack_conductor(app, client, user_id, old)
+        await app.state.podium.set_presence(first_target["runtime_id"])
+        await app.state.podium.set_presence(second_target["runtime_id"])
+        payload = {
+            "replace_conductor_id": old["runtime_id"],
+            "linear_project_id": "project-alpha",
+            "repository": {"mode": "local_path", "value": "/repo/a"},
+        }
+
+        first = await client.post(
+            f"/api/v1/conductors/{first_target['runtime_id']}/binding-replacement",
+            json=payload,
+        )
+        competing = await client.post(
+            f"/api/v1/conductors/{second_target['runtime_id']}/binding-replacement",
+            json=payload,
+        )
+
+    assert first.status_code == 202
+    assert competing.status_code == 409
+    assert competing.json()["error"]["code"] == "replacement_in_progress"
+
+
+@pytest.mark.asyncio
+async def test_binding_replacement_recovers_when_target_returns_online(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level("INFO", logger="podium.podium_project_replacements")
+    app = make_app()
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
+        user_id = await _prepare_workspace(client, app)
+        old = await _enroll(client, await _issue_enrollment(client, name="Bach"))
+        new = await _enroll(client, await _issue_enrollment(client, name="Mozart"))
+        _, old_binding = await bind_and_ack_conductor(app, client, user_id, old)
+        await app.state.podium.set_presence(new["runtime_id"])
+        started = await client.post(
+            f"/api/v1/conductors/{new['runtime_id']}/binding-replacement",
+            json={
+                "replace_conductor_id": old["runtime_id"],
+                "linear_project_id": "project-alpha",
+                "repository": {"mode": "local_path", "value": "/repo/new"},
+            },
+        )
+        await app.state.podium.clear_presence(new["runtime_id"])
+        repeated_start = await client.post(
+            f"/api/v1/conductors/{new['runtime_id']}/binding-replacement",
+            json={
+                "replace_conductor_id": old["runtime_id"],
+                "linear_project_id": "project-alpha",
+                "repository": {"mode": "local_path", "value": "/repo/new"},
+            },
+        )
+        report = {
+            "bindings": [],
+            "unbound_binding_id": old_binding["id"],
+            "unbound_config_version": old_binding["config_version"] + 1,
+        }
+
+        failed_ack = await client.post(
+            "/api/v1/runtime/report",
+            headers={"Authorization": f"Bearer {old['runtime_token']}"},
+            json=report,
+        )
+        failed_status = await client.get(
+            f"/api/v1/conductors/{new['runtime_id']}/binding-replacement"
+        )
+        failed_binding = await app.state.podium.store.get_project_binding(old_binding["id"])
+
+        await app.state.podium.set_presence(new["runtime_id"])
+        recovered_ack = await client.post(
+            "/api/v1/runtime/report",
+            headers={"Authorization": f"Bearer {old['runtime_token']}"},
+            json=report,
+        )
+        recovered_status = await client.get(
+            f"/api/v1/conductors/{new['runtime_id']}/binding-replacement"
+        )
+        recovered_old = await app.state.podium.store.get_project_binding(old_binding["id"])
+        new_binding = await app.state.podium.store.get_project_binding(recovered_old["replacement_binding_id"])
+        ready_ack = await client.post(
+            "/api/v1/runtime/report",
+            headers={"Authorization": f"Bearer {new['runtime_token']}"},
+            json={
+                "bindings": [
+                    {
+                        "instance_id": "replacement-instance",
+                        "linear_project_id": "project-alpha",
+                        "project_slug": "ALPHA",
+                        "agent_app_user_id": "agent-alpha",
+                        "binding_config_version": new_binding["config_version"],
+                        "repo_source": {"type": "local_path", "value": "/repo/new"},
+                        "process_status": "stopped",
+                    }
+                ]
+            },
+        )
+        ready_status = await client.get(
+            f"/api/v1/conductors/{new['runtime_id']}/binding-replacement"
+        )
+
+    assert started.status_code == 202
+    assert repeated_start.status_code == 202
+    assert repeated_start.json()["replacement"]["state"] == "pending_unbind"
+    assert failed_ack.status_code == 409
+    assert failed_ack.json()["error"]["code"] == "conductor_offline"
+    assert failed_status.json()["replacement"] == {
+        "state": "failed",
+        "old_binding_id": old_binding["id"],
+        "old_conductor_id": old["runtime_id"],
+        "new_conductor_id": new["runtime_id"],
+        "linear_project_id": "project-alpha",
+        "new_binding_id": "",
+        "error_code": "conductor_offline",
+        "sanitized_reason": "Conductor must be online before binding",
+    }
+    assert failed_binding["active"] is False
+    assert failed_binding["state"] == "unbound"
+    assert failed_binding["replacement_state"] == "failed"
+    assert "event=project_replacement_failed" in caplog.text
+    assert "error_code=conductor_offline" in caplog.text
+    assert recovered_ack.status_code == 200
+    assert recovered_status.json()["replacement"]["state"] == "pending_ack"
+    assert new_binding["repo_source"] == {"type": "local_path", "value": "/repo/new"}
+    assert ready_ack.status_code == 200
+    assert ready_status.json()["replacement"]["state"] == "ready"
+
+
+@pytest.mark.asyncio
+async def test_binding_replacement_exposes_target_binding_race(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level("INFO", logger="podium.podium_project_replacements")
+    app = make_app()
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
+        user_id = await register(client, "replacement-race@example.com")
+        await activate_linear_installation(
+            app,
+            user_id,
+            projects=[
+                {"id": "project-alpha", "name": "Alpha", "slug_id": "ALPHA"},
+                {"id": "project-beta", "name": "Beta", "slug_id": "BETA"},
+            ],
+        )
+        await app.state.podium.select_linear_projects(user_id, ["project-alpha", "project-beta"])
+        old = await _enroll(client, await _issue_enrollment(client, name="Bach"))
+        new = await _enroll(client, await _issue_enrollment(client, name="Mozart"))
+        _, old_binding = await bind_and_ack_conductor(app, client, user_id, old)
+        await app.state.podium.set_presence(new["runtime_id"])
+        started = await client.post(
+            f"/api/v1/conductors/{new['runtime_id']}/binding-replacement",
+            json={
+                "replace_conductor_id": old["runtime_id"],
+                "linear_project_id": "project-alpha",
+                "repository": {"mode": "local_path", "value": "/repo/new"},
+            },
+        )
+        target_report, target_binding = await bind_and_ack_conductor(
+            app,
+            client,
+            user_id,
+            new,
+            project_id="project-beta",
+            project_slug="BETA",
+            instance_id="target-instance",
+            repository="/repo/beta",
+        )
+
+        failed_ack = await client.post(
+            "/api/v1/runtime/report",
+            headers={"Authorization": f"Bearer {old['runtime_token']}"},
+            json={
+                "bindings": [],
+                "unbound_binding_id": old_binding["id"],
+                "unbound_config_version": old_binding["config_version"] + 1,
+            },
+        )
+        status = await client.get(f"/api/v1/conductors/{new['runtime_id']}/binding-replacement")
+        persisted_target = await app.state.podium.store.get_project_binding(target_binding["id"])
+
+    assert started.status_code == 202
+    assert target_report.status_code == 200
+    assert failed_ack.status_code == 409
+    assert failed_ack.json()["error"]["code"] == "conductor_already_bound"
+    assert status.json()["replacement"]["state"] == "failed"
+    assert status.json()["replacement"]["error_code"] == "conductor_already_bound"
+    assert persisted_target["active"] is True
+    assert persisted_target["linear_project_id"] == "project-beta"
+    assert "event=project_replacement_failed" in caplog.text
+    assert "error_code=conductor_already_bound" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_binding_replacement_surfaces_target_ack_failure_and_recovers(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level("INFO", logger="podium.podium_project_replacements")
+    transport = ProjectLabelTransport()
+    app = make_app(linear_graphql_transport=transport)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
+        user_id = await _prepare_workspace(client, app)
+        old = await _enroll(client, await _issue_enrollment(client, name="Bach"))
+        new = await _enroll(client, await _issue_enrollment(client, name="Mozart"))
+        _, old_binding = await bind_and_ack_conductor(app, client, user_id, old)
+        await app.state.podium.set_presence(new["runtime_id"])
+        await client.post(
+            f"/api/v1/conductors/{new['runtime_id']}/binding-replacement",
+            json={
+                "replace_conductor_id": old["runtime_id"],
+                "linear_project_id": "project-alpha",
+                "repository": {"mode": "local_path", "value": "/repo/new"},
+            },
+        )
+        await client.post(
+            "/api/v1/runtime/report",
+            headers={"Authorization": f"Bearer {old['runtime_token']}"},
+            json={
+                "bindings": [],
+                "unbound_binding_id": old_binding["id"],
+                "unbound_config_version": old_binding["config_version"] + 1,
+            },
+        )
+        replacement = await client.get(f"/api/v1/conductors/{new['runtime_id']}/binding-replacement")
+        new_binding = await app.state.podium.store.get_project_binding(
+            replacement.json()["replacement"]["new_binding_id"]
+        )
+        report = {
+            "bindings": [
+                {
+                    "instance_id": "replacement-instance",
+                    "linear_project_id": "project-alpha",
+                    "project_slug": "ALPHA",
+                    "agent_app_user_id": "agent-alpha",
+                    "binding_config_version": new_binding["config_version"],
+                    "repo_source": {"type": "local_path", "value": "/repo/new"},
+                    "process_status": "stopped",
+                }
+            ]
+        }
+        transport.fail_operation = "ManagedProjectLabelCreate"
+
+        failed_ack = await client.post(
+            "/api/v1/runtime/report",
+            headers={"Authorization": f"Bearer {new['runtime_token']}"},
+            json=report,
+        )
+        failed_status = await client.get(
+            f"/api/v1/conductors/{new['runtime_id']}/binding-replacement"
+        )
+        failed_binding = await app.state.podium.store.get_project_binding(new_binding["id"])
+
+        transport.fail_operation = ""
+        recovered_ack = await client.post(
+            "/api/v1/runtime/report",
+            headers={"Authorization": f"Bearer {new['runtime_token']}"},
+            json=report,
+        )
+        ready_status = await client.get(
+            f"/api/v1/conductors/{new['runtime_id']}/binding-replacement"
+        )
+        stale_ack = await client.post(
+            "/api/v1/runtime/report",
+            headers={"Authorization": f"Bearer {new['runtime_token']}"},
+            json={
+                "bindings": [
+                    {
+                        **report["bindings"][0],
+                        "agent_app_user_id": "stale-agent",
+                    }
+                ]
+            },
+        )
+        terminal_status = await client.get(
+            f"/api/v1/conductors/{new['runtime_id']}/binding-replacement"
+        )
+
+    assert failed_ack.status_code == 409
+    assert failed_ack.json()["error"]["code"] == "linear_project_label_sync_failed"
+    assert failed_binding["state"] == "failed"
+    assert failed_binding["error_code"] == "linear_project_label_sync_failed"
+    assert failed_status.json()["replacement"]["state"] == "failed"
+    assert failed_status.json()["replacement"]["error_code"] == "linear_project_label_sync_failed"
+    assert "event=project_replacement_failed" in caplog.text
+    assert "error_code=linear_project_label_sync_failed" in caplog.text
+    assert recovered_ack.status_code == 200
+    assert ready_status.json()["replacement"]["state"] == "ready"
+    assert stale_ack.status_code == 409
+    assert terminal_status.json()["replacement"]["state"] == "ready"
+
+
+@pytest.mark.asyncio
+async def test_binding_replacement_recovers_interrupted_binding_linkage() -> None:
+    app = make_app()
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
+        user_id = await _prepare_workspace(client, app)
+        old = await _enroll(client, await _issue_enrollment(client, name="Bach"))
+        new = await _enroll(client, await _issue_enrollment(client, name="Mozart"))
+        _, old_binding = await bind_and_ack_conductor(app, client, user_id, old)
+        await app.state.podium.set_presence(new["runtime_id"])
+        await client.post(
+            f"/api/v1/conductors/{new['runtime_id']}/binding-replacement",
+            json={
+                "replace_conductor_id": old["runtime_id"],
+                "linear_project_id": "project-alpha",
+                "repository": {"mode": "local_path", "value": "/repo/new"},
+            },
+        )
+        report = {
+            "bindings": [],
+            "unbound_binding_id": old_binding["id"],
+            "unbound_config_version": old_binding["config_version"] + 1,
+        }
+        first_ack = await client.post(
+            "/api/v1/runtime/report",
+            headers={"Authorization": f"Bearer {old['runtime_token']}"},
+            json=report,
+        )
+        linked_old = await app.state.podium.store.get_project_binding(old_binding["id"])
+        new_binding_id = linked_old["replacement_binding_id"]
+        await app.state.podium.store.upsert_project_binding(
+            {
+                **linked_old,
+                "replacement_state": "pending_unbind",
+                "replacement_binding_id": "",
+            }
+        )
+
+        recovered_ack = await client.post(
+            "/api/v1/runtime/report",
+            headers={"Authorization": f"Bearer {old['runtime_token']}"},
+            json=report,
+        )
+        recovered = await client.get(f"/api/v1/conductors/{new['runtime_id']}/binding-replacement")
+        commands = app.state.podium.store._load_map("runtime_commands.json")[new["runtime_id"]]
+
+    assert first_ack.status_code == 200
+    assert recovered_ack.status_code == 200
+    assert recovered.json()["replacement"]["state"] == "pending_ack"
+    assert recovered.json()["replacement"]["new_binding_id"] == new_binding_id
+    assert sum(row["command"]["type"] == "project.configure" for row in commands) == 1

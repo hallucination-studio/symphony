@@ -79,6 +79,10 @@ class PodiumProjectBindingsMixin:
             "candidate_acknowledged_config_version": 0,
             "label_id": "",
             "label_name": "",
+            "replacement_conductor_id": "",
+            "replacement_repo_source": {},
+            "replacement_state": "",
+            "replacement_binding_id": "",
             "error_code": "",
             "sanitized_reason": "",
             "updated_at": utc_now_iso(),
@@ -91,6 +95,7 @@ class PodiumProjectBindingsMixin:
         self,
         user_id: str,
         conductor_id: str,
+        replacement: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any], bool]:
         conductor = await self.conductor_for_user(conductor_id, user_id)
         if conductor is None:
@@ -117,6 +122,7 @@ class PodiumProjectBindingsMixin:
             raise ProjectBindingError("managed_runs_active", "Managed Runs must finish before unbinding")
         pending = {
             **active,
+            **(replacement or {}),
             "state": "pending_unbind",
             "config_version": int(active.get("config_version") or 0) + 1,
             "error_code": "",
@@ -154,6 +160,7 @@ class PodiumProjectBindingsMixin:
         if binding is None or str(binding.get("conductor_id") or "") != conductor_id:
             raise ProjectBindingError("project_unbind_mismatch", "Runtime unbind does not match its Conductor")
         if not binding.get("active", True) and str(binding.get("state") or "") == "unbound":
+            await self.advance_project_replacement(binding)
             return binding
         if str(binding.get("state") or "") != "pending_unbind" or version != int(binding.get("config_version") or 0):
             raise ProjectBindingError("project_unbind_version_mismatch", "Runtime unbind config version is stale")
@@ -183,6 +190,7 @@ class PodiumProjectBindingsMixin:
         }
         await self.store.upsert_project_binding(unbound)
         await self._clear_runtime_group_binding(conductor_id)
+        await self.advance_project_replacement(unbound)
         LOGGER.info(
             "event=project_unbound conductor_id=%s instance_id=%s linear_project_id=%s config_version=%s",
             conductor_id,
@@ -258,6 +266,7 @@ class PodiumProjectBindingsMixin:
                 "Linear project label operation failed",
             ) from exc
         await self.store.upsert_project_binding(ready)
+        await self.complete_project_replacement(ready)
         await self._mark_onboarding(str(binding.get("user_id") or ""), "repository_mapping")
         return ready
 
@@ -298,15 +307,25 @@ class PodiumProjectBindingsMixin:
         bindings = await self.store.list_project_bindings_for_conductor(conductor_id)
         if not bindings:
             return
-        await self.store.upsert_project_binding(
-            {
-                **bindings[0],
-                "state": "failed",
-                "error_code": error.code,
-                "sanitized_reason": error.reason,
-                "updated_at": utc_now_iso(),
-            }
+        failed = {
+            **bindings[0],
+            "state": "failed",
+            "error_code": error.code,
+            "sanitized_reason": error.reason,
+            "updated_at": utc_now_iso(),
+        }
+        await self.store.upsert_project_binding(failed)
+        LOGGER.error(
+            "event=project_binding_failed conductor_id=%s instance_id=%s linear_project_id=%s "
+            "error_type=ProjectBindingError error_code=%s sanitized_reason=%s action_required=retry "
+            "retryable=true next_action=retry_project_binding_report",
+            conductor_id,
+            failed.get("instance_id"),
+            failed.get("linear_project_id"),
+            error.code,
+            error.reason,
         )
+        await self.fail_project_replacement_for_binding(failed, error.code, error.reason)
 
 
 def _repository(raw: dict[str, Any]) -> tuple[str, str]:
