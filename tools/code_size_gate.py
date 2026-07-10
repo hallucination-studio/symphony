@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import ast
 import re
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -35,20 +34,25 @@ class Finding:
         return f"{location} {self.kind}{name} has {self.lines} lines, limit {self.limit}"
 
 
-def tracked_business_files(repo: Path) -> list[Path]:
-    output = subprocess.check_output(["git", "ls-files", *BUSINESS_ROOTS], cwd=repo, text=True)
+def business_source_files(repo: Path) -> list[Path]:
     paths: list[Path] = []
-    for raw in output.splitlines():
-        path = Path(raw)
-        text_path = str(path)
-        if path.suffix not in EXTENSIONS:
+    for root_name in BUSINESS_ROOTS:
+        root = repo / root_name
+        if not root.is_dir():
             continue
-        if any(part in EXCLUDED_PARTS for part in path.parts):
-            continue
-        if text_path.endswith(EXCLUDED_SUFFIXES):
-            continue
-        paths.append(path)
-    return paths
+        for source in root.rglob("*"):
+            if not source.is_file():
+                continue
+            path = source.relative_to(repo)
+            text_path = str(path)
+            if path.suffix not in EXTENSIONS:
+                continue
+            if any(part in EXCLUDED_PARTS for part in path.parts):
+                continue
+            if text_path.endswith(EXCLUDED_SUFFIXES):
+                continue
+            paths.append(path)
+    return sorted(paths)
 
 
 def file_findings(repo: Path, path: Path) -> list[Finding]:
@@ -92,7 +96,7 @@ def ts_findings(repo: Path, path: Path) -> list[Finding]:
 
 def collect_findings(repo: Path) -> list[Finding]:
     findings: list[Finding] = []
-    for path in tracked_business_files(repo):
+    for path in business_source_files(repo):
         findings.extend(file_findings(repo, path))
         if path.suffix == ".py":
             findings.extend(python_findings(repo, path))

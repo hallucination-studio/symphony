@@ -260,6 +260,87 @@ def test_real_symphony_e2e_linear_tree_audit_matches_durable_work_item_contract(
     assert result["work_item_count"] == 1
 
 
+def test_real_symphony_e2e_linear_tree_audit_requires_state_and_attempt_comment_parity() -> None:
+    tool = load_tool("real_symphony_e2e_linear_audit")
+    description = "\n".join(
+        [
+            "Managed Run Type: work-item",
+            "Managed Run Work Item: wi-1",
+            "",
+            "Objective: Create result",
+            "",
+            "Acceptance Criteria:",
+            "- result exists",
+            "",
+            "Likely Files:",
+            "- `result.txt`",
+            "",
+            "Verification:",
+            "- RED: test -f result.txt",
+            "- GREEN: test -f result.txt",
+            "",
+            "Managed Run State:",
+            "- state: done",
+            "- gate: verification passed",
+        ]
+    )
+    view = {
+        "runs": [
+            {
+                "run_id": "run-1",
+                "parent_issue_id": "root-1",
+                "state": "done",
+                "attempt_integrity": {"passed": True, "errors": []},
+                "payload": {
+                    "attempt_comment_projections": {
+                        "plan-1": {"linear_issue_id": "root-1", "linear_comment_id": "comment-plan"},
+                        "execute-1": {"linear_issue_id": "child-1", "linear_comment_id": "comment-execute"},
+                        "verify-1": {"linear_issue_id": "child-1", "linear_comment_id": "comment-verify"},
+                    }
+                },
+                "attempts": [
+                    {"attempt_id": "plan-1", "state": "succeeded", "work_item_id": ""},
+                    {"attempt_id": "execute-1", "state": "succeeded", "work_item_id": "wi-1"},
+                    {"attempt_id": "verify-1", "state": "succeeded", "work_item_id": "wi-1"},
+                ],
+                "work_items": [{"work_item_id": "wi-1", "state": "done", "payload": {"dependencies": []}}],
+            }
+        ]
+    }
+    tree = {
+        "id": "root-1",
+        "identifier": "HELL-1",
+        "description": "<!-- symphony:run-summary:start -->",
+        "state": {"name": "In Progress", "type": "started"},
+        "labels": {"nodes": []},
+        "comments": {"nodes": [{"id": "comment-plan", "body": "attempt_id: plan-1"}]},
+        "children": {
+            "nodes": [
+                {
+                    "id": "child-1",
+                    "identifier": "HELL-2",
+                    "title": "Create result",
+                    "description": description,
+                    "parent": {"id": "root-1", "identifier": "HELL-1"},
+                    "state": {"name": "In Progress", "type": "started"},
+                    "labels": {"nodes": []},
+                    "comments": {"nodes": [{"id": "comment-execute", "body": "attempt_id: execute-1"}]},
+                    "children": {"nodes": []},
+                    "inverseRelations": {"nodes": []},
+                }
+            ]
+        },
+        "inverseRelations": {"nodes": []},
+    }
+
+    result = tool.audit_managed_run_linear_tree(view, tree)
+
+    assert result["pass"] is False
+    assert "parent_state_mismatch:expected_completed:actual_started" in result["failures"]
+    assert "work_item_state_mismatch:wi-1:expected_completed:actual_started" in result["failures"]
+    assert "attempt_comment_missing:verify-1:comment-verify" in result["failures"]
+
+
 def test_real_symphony_e2e_has_optional_codex_connectivity_probe() -> None:
     tool = load_tool("real_symphony_e2e")
     run_tool = load_tool("real_symphony_e2e_run")
@@ -1224,6 +1305,39 @@ def test_real_symphony_e2e_gate_normalization_acceptance_requires_gate_step_sour
     assert evidence.data["failures"][-1]["name"] == "scenario:gate-normalization-provenance"
 
 
+def test_real_symphony_e2e_failed_plan_artifact_lookup_uses_managed_run_turn_paths(tmp_path: Path) -> None:
+    tool = load_tool("real_symphony_e2e_artifacts")
+    attempt_dir = tmp_path / "data" / "instances" / "inst-1" / "state" / "managed_run" / "plan-run-1-plan-1"
+    request_path = attempt_dir / "turn-request.json"
+    result_path = attempt_dir / "turn-result.json"
+    request_path.parent.mkdir(parents=True)
+    request_path.write_text(json.dumps({"turn_kind": "plan", "issue_description": "Create a result"}), encoding="utf-8")
+    result_path.write_text(json.dumps({"error": "managed_codex_home_required"}), encoding="utf-8")
+
+    paths = tool._failed_plan_attempt_paths(
+        data_root=tmp_path / "data",
+        instance_id="inst-1",
+        failure={"failure": {"attempts": [{"attempt_id": "plan-run-1-plan-1", "mode": "plan"}]}},
+    )
+
+    assert paths == {"request": request_path, "result": result_path}
+
+
+def test_real_symphony_e2e_archives_managed_run_view_and_linear_audit(tmp_path: Path) -> None:
+    tool = load_tool("real_symphony_e2e_artifacts")
+    root = tmp_path / "e2e"
+    data_root = tmp_path / "data"
+    root.mkdir()
+    (root / "final-managed-runs-view.json").write_text("{}", encoding="utf-8")
+    (root / "final-linear-tree-audit.json").write_text("{}", encoding="utf-8")
+    evidence = tool.Evidence(root / "report.json")
+
+    tool._archive_managed_run_artifacts(evidence=evidence, root=root, data_root=data_root, instance_id="inst-1")
+
+    assert evidence.data["artifacts"]["final_managed_runs_view"] == str(root / "final-managed-runs-view.json")
+    assert evidence.data["artifacts"]["final_linear_tree_audit"] == str(root / "final-linear-tree-audit.json")
+
+
 def test_real_symphony_e2e_human_answered_push_accepts_completed_child_required_guard() -> None:
     tool = load_tool("real_symphony_e2e_wait")
 
@@ -1512,6 +1626,19 @@ def test_real_symphony_e2e_surfaces_immediate_managed_run_failures() -> None:
     }
 
 
+def test_real_symphony_e2e_allows_retryable_plan_validation_attempt() -> None:
+    tool = load_tool("real_symphony_e2e_wait")
+
+    failure = tool.immediate_pipeline_failure(
+        {
+            "managed_run_attempts": [{"attempt_id": "plan-1", "state": "failed", "retryable": True}],
+            "managed_run_runs": [{"run_id": "run-1", "state": "planning"}],
+        }
+    )
+
+    assert failure is None
+
+
 def test_real_symphony_e2e_expected_failure_mode_keeps_waiting_for_failure_audit() -> None:
     tool = load_tool("real_symphony_e2e")
 
@@ -1604,6 +1731,46 @@ def test_real_symphony_e2e_immediate_failure_detects_failed_managed_run_without_
     }
 
 
+def test_real_symphony_e2e_immediate_failure_detects_unexpected_blocked_basic_run() -> None:
+    tool = load_tool("real_symphony_e2e_wait")
+
+    failure = tool.immediate_pipeline_failure(
+        {
+            "managed_run_runs": [{"run_id": "run-1", "state": "blocked", "latest_reason": "gate_failed"}],
+            "managed_run_work_items": [{"node_id": "wi-1", "state": "need_human", "gate_status": "gate_failed"}],
+            "managed_run_attempts": [],
+            "managed_run_human_actions": [],
+        },
+        pipeline_scenario="basic",
+    )
+
+    assert failure == {
+        "kind": "managed_run_blocked",
+        "runs": [{"run_id": "run-1", "state": "blocked", "latest_reason": "gate_failed"}],
+    }
+
+
+def test_real_symphony_e2e_allows_expected_runtime_wait_before_resuming() -> None:
+    tool = load_tool("real_symphony_e2e_wait")
+    wait = {
+        "wait_id": "wait-1",
+        "reason": "approval_requested",
+        "details": {"wait_kind": "approval_requested"},
+    }
+
+    assert (
+        tool.immediate_pipeline_failure(
+            {
+                "managed_run_runs": [{"run_id": "run-1", "state": "blocked"}],
+                "managed_run_work_items": [{"node_id": "wi-1", "state": "need_human"}],
+                "managed_run_human_actions": [wait],
+            },
+            pipeline_scenario="runtime-wait",
+        )
+        is None
+    )
+
+
 def test_real_symphony_e2e_summary_includes_failure_details() -> None:
     tool = load_tool("real_symphony_e2e")
 
@@ -1611,7 +1778,7 @@ def test_real_symphony_e2e_summary_includes_failure_details() -> None:
         {
             "failures": [
                 {
-                    "name": "pipeline-runtime-error:visible",
+                    "name": "managed-run-runtime-error:visible",
                     "failure": {
                         "kind": "attempt_failed",
                         "attempts": [{"attempt_id": "plan-1", "error": "managed_codex_home_required"}],
@@ -1625,7 +1792,7 @@ def test_real_symphony_e2e_summary_includes_failure_details() -> None:
     assert summary["failures"] == 1
     assert summary["failure_summaries"] == [
         {
-            "name": "pipeline-runtime-error:visible",
+            "name": "managed-run-runtime-error:visible",
             "failure": {
                 "kind": "attempt_failed",
                 "attempts": [{"attempt_id": "plan-1", "error": "managed_codex_home_required"}],
@@ -1642,7 +1809,7 @@ def test_real_symphony_e2e_evidence_records_blocked_stages_and_checkpoints(tmp_p
         "06-graph-shape",
         blocked_by="04-dispatch-and-plan",
         reason="plan_commit_failed",
-        upstream_check="pipeline-runtime-error:visible",
+        upstream_check="managed-run-runtime-error:visible",
     )
     checkpoint_path = evidence.checkpoint(
         "04-dispatch-and-plan",
@@ -1656,8 +1823,8 @@ def test_real_symphony_e2e_evidence_records_blocked_stages_and_checkpoints(tmp_p
             "name": "06-graph-shape",
             "blocked_by": "04-dispatch-and-plan",
             "reason": "plan_commit_failed",
-            "details": {"upstream_check": "pipeline-runtime-error:visible"},
-            "upstream_check": "pipeline-runtime-error:visible",
+            "details": {"upstream_check": "managed-run-runtime-error:visible"},
+            "upstream_check": "managed-run-runtime-error:visible",
         }
     ]
     assert evidence.data["stages"][-1]["stage"] == "04-dispatch-and-plan"
@@ -1672,7 +1839,7 @@ def test_real_symphony_e2e_summary_includes_blocked_and_first_blocker() -> None:
         {
             "failures": [
                 {
-                    "name": "pipeline-runtime-error:visible",
+                    "name": "managed-run-runtime-error:visible",
                     "reason": "plan_commit_failed",
                 }
             ],
@@ -1696,7 +1863,7 @@ def test_real_symphony_e2e_summary_includes_blocked_and_first_blocker() -> None:
     assert summary["failures"] == 1
     assert summary["blocked"] == 1
     assert summary["first_blocker"] == {
-        "name": "pipeline-runtime-error:visible",
+        "name": "managed-run-runtime-error:visible",
         "reason": "plan_commit_failed",
     }
     assert summary["blocked_summaries"] == [

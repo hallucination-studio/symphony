@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 from typing import Any
 
-from real_symphony_e2e_artifacts import _handle_pipeline_runtime_blocker
+from real_symphony_e2e_artifacts import _handle_managed_run_runtime_blocker
 from real_symphony_e2e_common import utc_now
 from real_symphony_e2e_preflight import stop_e2e_postgres
 from real_symphony_e2e_run_final import (
@@ -33,7 +33,7 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
         await create_issue_and_instance(state)
         await restart_conductor_and_push_runtime_config(state)
         await wait_for_dispatch_and_run(state)
-        if _handle_pipeline_runtime_blocker(
+        if _handle_managed_run_runtime_blocker(
             evidence=state.evidence,
             root=state.root,
             data_root=state.data_root,

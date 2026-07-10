@@ -32,24 +32,29 @@ DEPENDENT_RUNTIME_STAGES_AFTER_PLAN = (
     "11-final-acceptance",
 )
 
-def _archive_pipeline_artifacts(*, evidence: Evidence, root: Path, data_root: Path, instance_id: str) -> None:
+def _archive_managed_run_artifacts(*, evidence: Evidence, root: Path, data_root: Path, instance_id: str) -> None:
     for name, path in {
         "podium_log": root / "podium.log",
         "conductor_log": root / "conductor.log",
         "conductor_restarted_log": root / "conductor-restarted.log",
-        "pipeline_db": data_root / "pipeline.db",
+        "managed_run_db": data_root / "managed_run.db",
+        "instance_state": data_root / "instances" / instance_id / "state" / "performer.json",
+        "instance_ops": data_root / "instances" / instance_id / "state" / "ops.json",
+        "instance_log": data_root / "instances" / instance_id / "logs" / "performer.log",
+        "final_managed_runs_view": root / "final-managed-runs-view.json",
+        "final_linear_tree_audit": root / "final-linear-tree-audit.json",
+        "final_issue_tree": root / "final-issue-tree.json",
     }.items():
         if path.exists():
             evidence.artifact(name, path)
-    attempt_root = data_root / "instances" / instance_id / "state" / "pipeline"
+    attempt_root = data_root / "instances" / instance_id / "state" / "managed_run"
     if not attempt_root.exists():
         return
     for attempt_dir in sorted(path for path in attempt_root.iterdir() if path.is_dir()):
         safe_attempt = attempt_dir.name.replace("/", "_")
         for filename, suffix in [
-            ("attempt-request.json", "request"),
-            ("attempt-result.json", "result"),
-            ("attempt-result.json.applied", "result_applied"),
+            ("turn-request.json", "request"),
+            ("turn-result.json", "result"),
             ("attempt.log", "log"),
         ]:
             path = attempt_dir / filename
@@ -57,7 +62,7 @@ def _archive_pipeline_artifacts(*, evidence: Evidence, root: Path, data_root: Pa
                 evidence.artifact(f"attempt_{safe_attempt}_{suffix}", path)
 
 
-def _handle_pipeline_runtime_blocker(
+def _handle_managed_run_runtime_blocker(
     *,
     evidence: Evidence,
     root: Path,
@@ -65,10 +70,10 @@ def _handle_pipeline_runtime_blocker(
     instance_id: str,
     run_result: dict[str, Any],
 ) -> bool:
-    failure = _latest_pipeline_runtime_failure(evidence)
+    failure = _latest_managed_run_runtime_failure(evidence)
     if failure is None:
         return False
-    _archive_pipeline_artifacts(evidence=evidence, root=root, data_root=data_root, instance_id=instance_id)
+    _archive_managed_run_artifacts(evidence=evidence, root=root, data_root=data_root, instance_id=instance_id)
     if "checkpoint:04-dispatch-and-plan" not in evidence.data.get("artifacts", {}):
         evidence.checkpoint(
             "04-dispatch-and-plan",
@@ -114,8 +119,8 @@ def _handle_pipeline_runtime_blocker(
         evidence.blocked(
             stage,
             blocked_by="04-dispatch-and-plan",
-            reason=str(failure.get("reason") or "pipeline_runtime_error"),
-            upstream_check=str(failure.get("name") or "pipeline-runtime-error:visible"),
+            reason=str(failure.get("reason") or "managed_run_runtime_error"),
+            upstream_check=str(failure.get("name") or "managed-run-runtime-error:visible"),
         )
     evidence.write()
     return True
@@ -149,18 +154,18 @@ def _stages_after(stage: str) -> tuple[str, ...]:
     return E2E_STAGE_ORDER[index + 1 :]
 
 
-def _latest_pipeline_runtime_failure(evidence: Evidence) -> dict[str, Any] | None:
+def _latest_managed_run_runtime_failure(evidence: Evidence) -> dict[str, Any] | None:
     failures = [failure for failure in evidence.data.get("failures", []) if isinstance(failure, dict)]
     for failure in reversed(failures):
-        if failure.get("name") == "pipeline-runtime-error:visible":
+        if failure.get("name") == "managed-run-runtime-error:visible":
             if "reason" not in failure:
                 failure = dict(failure)
-                failure["reason"] = _pipeline_runtime_failure_reason(failure)
+                failure["reason"] = _managed_run_runtime_failure_reason(failure)
             return failure
     return None
 
 
-def _pipeline_runtime_failure_reason(failure: dict[str, Any]) -> str:
+def _managed_run_runtime_failure_reason(failure: dict[str, Any]) -> str:
     payload = failure.get("failure")
     if isinstance(payload, dict):
         kind = str(payload.get("kind") or "")
@@ -171,7 +176,7 @@ def _pipeline_runtime_failure_reason(failure: dict[str, Any]) -> str:
                 return error
         if kind:
             return kind
-    return str(failure.get("error") or failure.get("status") or "pipeline_runtime_error")
+    return str(failure.get("error") or failure.get("status") or "managed_run_runtime_error")
 
 
 def _failed_plan_attempt_paths(
@@ -181,7 +186,7 @@ def _failed_plan_attempt_paths(
     failure: dict[str, Any],
 ) -> dict[str, Path | None]:
     attempt_id = _failed_plan_attempt_id(failure)
-    attempt_root = data_root / "instances" / instance_id / "state" / "pipeline"
+    attempt_root = data_root / "instances" / instance_id / "state" / "managed_run"
     candidate_dirs: list[Path] = []
     if attempt_id:
         candidate_dirs.append(attempt_root / attempt_id)
@@ -192,10 +197,10 @@ def _failed_plan_attempt_paths(
         if attempt_dir in seen:
             continue
         seen.add(attempt_dir)
-        request_path = attempt_dir / "attempt-request.json"
-        result_path = attempt_dir / "attempt-result.json"
+        request_path = attempt_dir / "turn-request.json"
+        result_path = attempt_dir / "turn-result.json"
         if not result_path.exists():
-            result_path = attempt_dir / "attempt-result.json.applied"
+            result_path = attempt_dir / "turn-result.json.applied"
         request = _read_json_file(request_path)
         if request and str(request.get("attempt_id") or attempt_dir.name) != attempt_dir.name and attempt_id:
             continue

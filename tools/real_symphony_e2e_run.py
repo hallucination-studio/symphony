@@ -44,15 +44,14 @@ from real_symphony_e2e_analysis import (
 from real_symphony_e2e_artifacts import (
     DEPENDENT_RUNTIME_STAGES_AFTER_PLAN,
     E2E_STAGE_ORDER,
-    _archive_pipeline_artifacts,
+    _archive_managed_run_artifacts,
     _checkpoint_and_block_after_stage,
     _dispatch_context_for_plan_attempt,
     _failed_plan_attempt_id,
     _failed_plan_attempt_paths,
-    _handle_pipeline_runtime_blocker,
-    _latest_pipeline_runtime_failure,
+    _handle_managed_run_runtime_blocker,
+    _latest_managed_run_runtime_failure,
     _looks_like_plan_request,
-    _pipeline_runtime_failure_reason,
     _read_json_file,
     _stages_after,
 )

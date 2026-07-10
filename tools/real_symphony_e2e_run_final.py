@@ -21,7 +21,7 @@ from real_symphony_e2e_analysis import (
     pipeline_integrations_terminal,
     pipeline_nodes_terminal,
 )
-from real_symphony_e2e_artifacts import _archive_pipeline_artifacts
+from real_symphony_e2e_artifacts import _archive_managed_run_artifacts
 from real_symphony_e2e_common import api_url, http_json, make_fixture_repo, start_process, wait_for_http_ready
 from real_symphony_e2e_linear import fetch_linear_issue_tree
 from real_symphony_e2e_linear_audit import record_managed_run_linear_tree_audit
@@ -286,7 +286,7 @@ async def archive_tree_and_runtime_artifacts(state: E2ERunState) -> None:
         state.evidence.artifact("final_issue_tree", tree_path)
     if final_states is not None:
         state.evidence.check("stage:managed-run-linear-final-states", bool(final_states.get("passed")), **{key: value for key, value in final_states.items() if key != "passed"})
-    _archive_pipeline_artifacts(evidence=state.evidence, root=state.root, data_root=state.data_root, instance_id=state.instance_id)
+    _archive_managed_run_artifacts(evidence=state.evidence, root=state.root, data_root=state.data_root, instance_id=state.instance_id)
 
 
 async def run_service_recovery_and_cleanup_checks(state: E2ERunState) -> None:

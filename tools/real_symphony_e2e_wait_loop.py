@@ -17,7 +17,6 @@ from real_symphony_e2e_analysis import (
     parent_comment_negative_control_body,
     managed_run_work_items_terminal,
     should_complete_conductor_human_action,
-    write_wait_artifacts,
 )
 from real_symphony_e2e_common import Evidence, api_url, http_json, utc_now
 from real_symphony_e2e_linear import comment_linear_issue, fetch_linear_issue
@@ -31,6 +30,7 @@ from real_symphony_e2e_wait_helpers import (
     _wait_resolved_before_managed_run_resume,
     immediate_pipeline_failure,
 )
+from real_symphony_e2e_wait_finalize import write_wait_state_artifacts
 
 
 @dataclass
@@ -47,6 +47,7 @@ class WaitState:
     crash_after_policy_revision: int | None
     continue_after_human_resume: bool
     expected_failure: str
+    pipeline_scenario: str
     instance_root: Path = field(init=False)
     state_path: Path = field(init=False)
     ops_path: Path = field(init=False)
@@ -92,7 +93,7 @@ async def wait_for_run(**kwargs: Any) -> dict[str, Any]:
         await asyncio.sleep(2 if state.crash_recovery_probe and not state.crash_lease_reclaimed else 5)
     state.final_issue = state.final_issue or await fetch_linear_issue(state.token, state.issue_id)
     _record_crash_coverage(state)
-    return _write_artifacts(state)
+    return write_wait_state_artifacts(state)
 
 
 async def _sample_runtime(state: WaitState) -> dict[str, Any] | None:
@@ -189,7 +190,12 @@ async def _handle_sample(state: WaitState, sample: dict[str, Any]) -> str | dict
 
 
 def _handle_immediate_failure(state: WaitState, sample: dict[str, Any]) -> dict[str, Any] | None:
-    failure = immediate_pipeline_failure(sample, expected_failure=state.expected_failure, permission_approval_probe=state.permission_approval_probe)
+    failure = immediate_pipeline_failure(
+        sample,
+        expected_failure=state.expected_failure,
+        permission_approval_probe=state.permission_approval_probe,
+        pipeline_scenario=state.pipeline_scenario,
+    )
     if failure is None:
         return None
     if state.crash_recovery_probe and state.crash_killed and _immediate_failure_matches_attempt(failure, state.crash_attempt_id):
@@ -198,7 +204,7 @@ def _handle_immediate_failure(state: WaitState, sample: dict[str, Any]) -> dict[
     if failure is None:
         return None
     state.evidence.check("managed-run-runtime-error:visible", False, failure=failure, process_status=sample.get("process_status"))
-    return _write_artifacts(state)
+    return write_wait_state_artifacts(state)
 
 
 async def _handle_crash_probe(state: WaitState, managed_run_payload: dict[str, Any], sample: dict[str, Any]) -> None:
@@ -278,7 +284,7 @@ def _repeated_wait_after_resume(state: WaitState, action: dict[str, Any]) -> dic
     child_issue_id = str(action.get("child_issue_id") or "")
     if wait_id in state.completed_waits and child_issue_id not in state.completed_actions:
         state.evidence.check("human-action:repeat-awaiting-human-after-resume", not state.permission_approval_probe, action=action, reason="same Conductor run requested another human action after automatic resume")
-        return _write_artifacts(state) if state.permission_approval_probe else None
+        return write_wait_state_artifacts(state) if state.permission_approval_probe else None
     return None
 
 
@@ -332,19 +338,3 @@ def _record_crash_coverage(state: WaitState) -> None:
         return
     check_names = {check.get("name") for check in state.evidence.data.get("checks", []) if check.get("passed")}
     state.evidence.check("crash-recovery:covered", {"crash-recovery:performer-killed", "crash-recovery:failure-visible", "crash-recovery:lease-reclaimed"}.issubset(check_names), killed=state.crash_killed, attempt_id=state.crash_attempt_id, lease_id=state.crash_lease_id, pid=state.crash_pid, passed_checks=sorted(name for name in check_names if str(name).startswith("crash-recovery:")))
-
-
-def _write_artifacts(state: WaitState) -> dict[str, Any]:
-    return write_wait_artifacts(
-        evidence=state.evidence,
-        samples=state.samples,
-        result_path=state.result_path,
-        final_issue=state.final_issue or {},
-        state_path=state.state_path,
-        last_state={},
-        ops_path=state.ops_path,
-        last_ops={},
-        log_path=state.log_path,
-        stages=state.stages,
-        stage_timeout_seconds=state.stage_timeout_seconds,
-    )

@@ -154,7 +154,7 @@ async def run_connectivity_preflight(state: E2ERunState) -> bool:
 def prepare_fixture_and_cli(state: E2ERunState) -> None:
     state.evidence.check(
         "managed-run-scenario:selected",
-        state.pipeline_scenario in {"basic", "parallel", "replan", "integration-conflict", "runtime-wait", "overall-dod"},
+        state.pipeline_scenario in {"basic", "parallel", "replan", "integration-conflict", "runtime-wait", "gate-normalization", "overall-dod"},
         scenario=state.pipeline_scenario,
         permission_approval_probe=state.permission_approval_probe,
     )

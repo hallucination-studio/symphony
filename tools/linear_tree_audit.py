@@ -25,6 +25,7 @@ async def fetch_issue_tree(issue_id: str) -> dict[str, Any]:
             description
             state { name type }
             labels { nodes { name } }
+            comments(first: 100) { nodes { id body } }
             parent { id identifier }
             children(first: 100) {
               nodes {
@@ -36,6 +37,7 @@ async def fetch_issue_tree(issue_id: str) -> dict[str, Any]:
                 parent { id identifier }
                 state { name type }
                 labels { nodes { name } }
+                comments(first: 100) { nodes { id body } }
                 inverseRelations {
                   nodes {
                     id

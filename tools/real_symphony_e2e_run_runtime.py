@@ -6,7 +6,7 @@ import time
 from typing import Any
 
 from real_symphony_e2e_acceptance import _lower_policy_during_parallel_execute_probe
-from real_symphony_e2e_artifacts import _latest_pipeline_runtime_failure
+from real_symphony_e2e_artifacts import _latest_managed_run_runtime_failure
 from real_symphony_e2e_common import api_url, http_json
 from real_symphony_e2e_preflight import _codex_settings_from_args, build_runtime_config_payload
 from real_symphony_e2e_run_state import E2ERunState
@@ -150,6 +150,7 @@ async def wait_for_dispatch_and_run(state: E2ERunState) -> None:
         else None,
         continue_after_human_resume=state.pipeline_scenario == "overall-dod",
         expected_failure=state.args.expected_failure,
+        pipeline_scenario=state.pipeline_scenario,
     )
     _checkpoint_dispatch_and_plan(state)
 
@@ -190,14 +191,14 @@ def _checkpoint_dispatch_and_plan(state: E2ERunState) -> None:
         if isinstance(check, dict)
         and (
             str(check.get("name") or "").startswith("stage:")
-            or str(check.get("name") or "").startswith("pipeline-runtime-error:")
+            or str(check.get("name") or "").startswith("managed-run-runtime-error:")
             or str(check.get("name") or "").startswith("human-action:")
         )
     ]
     state.evidence.checkpoint(
         "04-dispatch-and-plan",
         {
-            "status": "completed" if _latest_pipeline_runtime_failure(state.evidence) is None else "failed",
+            "status": "completed" if _latest_managed_run_runtime_failure(state.evidence) is None else "failed",
             "checks": checks,
             "failures": [failure for failure in state.evidence.data.get("failures", []) if isinstance(failure, dict)],
             "samples": (state.run_result.get("samples") or [])[-3:],

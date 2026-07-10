@@ -10,6 +10,7 @@ def immediate_pipeline_failure(
     *,
     expected_failure: str = "none",
     permission_approval_probe: bool = False,
+    pipeline_scenario: str = "basic",
 ) -> dict[str, Any] | None:
     if expected_failure != "none":
         return None
@@ -19,6 +20,7 @@ def immediate_pipeline_failure(
         attempt
         for attempt in attempts
         if str(attempt.get("state") or "").lower() in {"failed", "timed_out", "cancelled"}
+        and attempt.get("retryable") is not True
     ]
     if failed_attempts:
         return {"kind": "attempt_failed", "attempts": failed_attempts}
@@ -48,8 +50,20 @@ def immediate_pipeline_failure(
     ]
     if runtime_waits and permission_approval_probe:
         return None
+    if runtime_waits and pipeline_scenario in {"integration-conflict", "runtime-wait"}:
+        return None
     if runtime_waits:
         return {"kind": "runtime_human_wait", "actions": runtime_waits}
+    blocked_runs = [run for run in runs if str(run.get("state") or "").lower() == "blocked"]
+    if blocked_runs:
+        return {"kind": "managed_run_blocked", "runs": blocked_runs}
+    blocked_nodes = [
+        node
+        for node in nodes
+        if str(node.get("state") or "").lower() in {"blocked", "need_human"}
+    ]
+    if blocked_nodes:
+        return {"kind": "work_item_blocked", "nodes": blocked_nodes}
     return None
 
 def _pipeline_integrated(pipeline_payload: dict[str, Any]) -> bool:

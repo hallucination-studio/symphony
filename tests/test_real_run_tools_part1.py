@@ -495,13 +495,25 @@ def test_real_symphony_e2e_runtime_config_carries_codex_execution_settings() -> 
 def test_real_symphony_e2e_cli_accepts_managed_run_scenarios() -> None:
     tool = load_tool("real_symphony_e2e")
 
-    for scenario in ["basic", "parallel", "replan", "integration-conflict", "runtime-wait", "overall-dod"]:
+    for scenario in ["basic", "parallel", "replan", "integration-conflict", "runtime-wait", "gate-normalization", "overall-dod"]:
         args = tool.parser().parse_args(["--managed-run-scenario", scenario])
 
         assert args.pipeline_scenario == scenario
 
     with pytest.raises(SystemExit):
         tool.parser().parse_args(["--pipeline-scenario", "basic"])
+
+
+def test_real_symphony_e2e_gate_normalization_scenario_has_executable_intent() -> None:
+    tool = load_tool("real_symphony_e2e_run")
+
+    description = tool._pipeline_scenario_issue_description("gate-normalization", "run-1")
+    intent = tool._pipeline_scenario_intent("gate-normalization")
+
+    assert "SYMPHONY_CONFLICT_SHARED.md" in description
+    assert "gate provenance" in description
+    assert {"step": "pytest tests/test_smoke.py -q", "source": "acceptance_appendix"} in intent["required_gate_steps"]
+    assert {"step": "test -f SYMPHONY_CONFLICT_SHARED.md", "source": "acceptance_appendix"} in intent["required_gate_steps"]
 
 
 def test_real_symphony_e2e_appendix_hardening_probes_reference_existing_tests() -> None:
