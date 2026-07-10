@@ -29,10 +29,7 @@ describe("App auth gate", () => {
     vi.clearAllMocks();
     vi.unstubAllEnvs();
     mockApi.managedRuns.mockResolvedValue({
-      runtime_group_id: "group-1",
-      policy_revision: 1,
-      profiles: {},
-      managed_runs: { runs: [] },
+      conductors: [],
     });
     mockApi.smokeCheckResult.mockRejectedValue(new Error("404"));
     mockApi.bootstrap.mockResolvedValue({

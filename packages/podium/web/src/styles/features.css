@@ -55,7 +55,7 @@
 .progress-count {
   font-size: 26px;
   font-weight: 700;
-  letter-spacing: -0.02em;
+  letter-spacing: 0;
 }
 
 .progress-bar {
@@ -478,6 +478,25 @@
   gap: var(--space-4);
 }
 
+.managed-conductor-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding-bottom: var(--space-4);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.managed-conductor-section:last-child {
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+
+.managed-conductor-title {
+  font-size: var(--font-size-title);
+  line-height: var(--line-height-title);
+  letter-spacing: 0;
+}
+
 .managed-run-revisions,
 .managed-run-metrics {
   display: grid;
@@ -486,6 +505,7 @@
 
 .managed-run-revisions {
   grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  margin-top: var(--space-4);
 }
 
 .managed-run-revision {
@@ -567,6 +587,31 @@
   .managed-run-revisions,
   .managed-run-metrics {
     grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 760px) {
+  .managed-run-head,
+  .managed-run-work-row {
+    align-items: flex-start;
+  }
+
+  .managed-run-work-row {
+    flex-direction: column;
+  }
+
+  .managed-run-file-strip {
+    width: 100%;
+    margin-top: 0;
+  }
+
+  .managed-run-file-strip .code {
+    overflow-wrap: anywhere;
+  }
+
+  .managed-run-work-title .code {
+    flex-shrink: 0;
+    white-space: nowrap;
   }
 }
 

@@ -52,12 +52,19 @@ describe("api client", () => {
     expect(result.turnstile.enabled).toBe(false);
   });
 
-  it("managedRuns requests the runtime group managed runs view", async () => {
+  it("managedRuns requests every project Conductor managed runs view", async () => {
     const fetchMock = mockFetch(200, {
-      runtime_group_id: "group-1",
-      policy_revision: 2,
-      profiles: {},
-      managed_runs: { runs: [{ run_id: "run-1", work_items: [] }] },
+      conductors: [
+        {
+          conductor: { id: "conductor-1", name: "Bach", public_id: "k7m3p2", online: true },
+          project: { id: "project-1", slug: "LIN", name: "Linear Platform" },
+          binding: { id: "binding-1", instance_id: "inst-1", state: "ready", error_code: "", sanitized_reason: "" },
+          runtime_group_id: "group-1",
+          policy_revision: 2,
+          profiles: {},
+          managed_runs: { runs: [{ run_id: "run-1", work_items: [] }] },
+        },
+      ],
     });
     global.fetch = fetchMock;
 
@@ -67,7 +74,7 @@ describe("api client", () => {
       "/api/v1/managed-runs",
       expect.objectContaining({ credentials: "include" }),
     );
-    expect(result.managed_runs.runs?.[0]?.run_id).toBe("run-1");
+    expect(result.conductors[0].managed_runs.runs?.[0]?.run_id).toBe("run-1");
   });
 
   it("saveRepository POSTs a JSON body without workspace_id", async () => {

@@ -129,6 +129,8 @@ function LanguageSwitch() {
     <label className="language-switch">
       <span>{t("Language")}</span>
       <select
+        id="podium-language"
+        name="language"
         value={locale}
         aria-label={t("Language")}
         onChange={(e) => setLocale(e.target.value as Locale)}

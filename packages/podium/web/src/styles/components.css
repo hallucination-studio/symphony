@@ -141,40 +141,53 @@
 .badge {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding: 2px 10px;
-  border-radius: 999px;
-  font-size: 12px;
-  font-weight: 600;
+  gap: var(--space-1);
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-pill);
+  color: var(--color-text);
+  font-size: var(--font-size-label);
+  line-height: var(--line-height-label);
+  font-weight: var(--font-weight-label);
   white-space: nowrap;
 }
 
 .badge-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 999px;
-  background: currentColor;
+  width: var(--size-status-dot);
+  height: var(--size-status-dot);
+  border-radius: var(--radius-pill);
   flex-shrink: 0;
 }
 
 .badge[data-tone="positive"] {
-  color: var(--status-completed);
   background: var(--status-completed-bg);
 }
 
+.badge[data-tone="positive"] .badge-dot {
+  background: var(--status-completed);
+}
+
 .badge[data-tone="progress"] {
-  color: var(--status-in-progress);
   background: var(--status-in-progress-bg);
 }
 
+.badge[data-tone="progress"] .badge-dot {
+  background: var(--status-in-progress);
+}
+
 .badge[data-tone="negative"] {
-  color: var(--status-blocked);
   background: var(--status-blocked-bg);
 }
 
+.badge[data-tone="negative"] .badge-dot {
+  background: var(--status-blocked);
+}
+
 .badge[data-tone="neutral"] {
-  color: var(--status-not-started);
   background: var(--status-not-started-bg);
+}
+
+.badge[data-tone="neutral"] .badge-dot {
+  background: var(--status-not-started);
 }
 
 /* State messages */

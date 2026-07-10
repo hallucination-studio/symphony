@@ -186,11 +186,33 @@ export interface ManagedRunsView {
   runs: ManagedRun[];
 }
 
-export interface ManagedRunsReport {
+export interface ManagedRunsConductorReport {
+  conductor: {
+    id: string;
+    name: string;
+    public_id: string;
+    online: boolean;
+  };
+  project: {
+    id: string;
+    slug: string;
+    name: string;
+  };
+  binding: {
+    id: string;
+    instance_id: string;
+    state: string;
+    error_code: string;
+    sanitized_reason: string;
+  };
   runtime_group_id: string;
   policy_revision: number;
   profiles: Record<string, unknown>;
   managed_runs: Partial<ManagedRunsView>;
+}
+
+export interface ManagedRunsReport {
+  conductors: ManagedRunsConductorReport[];
 }
 
 export interface EnrollmentStatus {

@@ -652,7 +652,7 @@ async def test_direct_dispatch_queue_is_idempotent_by_binding_and_agent_session(
     assert second.json()["queued"] == 0
     assert managed_runs.status_code == 200
     assert removed_managed_run.status_code == 404
-    assert "managed_runs" in managed_runs.json()
+    assert "managed_runs" in managed_runs.json()["conductors"][0]
     assert old_pipeline.status_code == 404
 
 async def test_injected_postgres_empty_agent_session_id_dedupes_by_issue_not_binding_only() -> None:
