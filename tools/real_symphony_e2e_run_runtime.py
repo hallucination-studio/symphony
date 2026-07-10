@@ -9,6 +9,7 @@ from real_symphony_e2e_acceptance import _lower_policy_during_parallel_execute_p
 from real_symphony_e2e_artifacts import _latest_managed_run_runtime_failure
 from real_symphony_e2e_common import api_url, http_json
 from real_symphony_e2e_preflight import _codex_settings_from_args, build_runtime_config_payload
+from real_symphony_e2e_podium import managed_runtime_env
 from real_symphony_e2e_run_state import E2ERunState
 from real_symphony_e2e_wait import wait_for_run
 
@@ -47,7 +48,7 @@ async def _restart_conductor_after_instance_create(state: E2ERunState) -> None:
     conductor = start_process(
         "conductor",
         [str(state.bin_dir / "conductor"), "--port", str(state.conductor_port), "--data-root", str(state.data_root)],
-        env=state.env,
+        env=managed_runtime_env(state.env),
         stdout_path=state.root / "conductor-restarted.log",
     )
     state.processes.append(conductor)

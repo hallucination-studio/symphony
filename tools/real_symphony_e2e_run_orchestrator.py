@@ -16,8 +16,8 @@ from real_symphony_e2e_preflight import (
     scrub_e2e_runtime_credentials,
     stop_e2e_postgres,
 )
+from real_symphony_e2e_run_archive import archive_tree_and_runtime_artifacts
 from real_symphony_e2e_run_final import (
-    archive_tree_and_runtime_artifacts,
     run_post_wait_checks,
     run_service_recovery_and_cleanup_checks,
 )
@@ -70,11 +70,18 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
                 retryable=False,
                 exc=exc,
             )
+        await _close_podium_session(state)
         _stop_processes(state)
         _stop_e2e_postgres(state)
         _cleanup_staged_codex_home(state)
         _scrub_runtime_credentials(state)
     return _finish(state)
+
+
+async def _close_podium_session(state: Any) -> None:
+    session = getattr(state, "podium_session", None)
+    if session is not None:
+        await session.close()
 
 
 def _finish_bootstrap_failure(args: argparse.Namespace, exc: Exception) -> dict[str, Any]:

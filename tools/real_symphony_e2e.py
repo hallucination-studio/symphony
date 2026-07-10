@@ -119,6 +119,7 @@ def parser() -> argparse.ArgumentParser:
     )
     arg_parser.add_argument("--e2e-gate-mode", choices=["smoke", "strict"], default="smoke")
     arg_parser.add_argument("--stage-timeout", type=int, default=120)
+    arg_parser.add_argument("--oauth-timeout", type=int, default=300)
     arg_parser.add_argument("--permission-approval-probe", action="store_true")
     arg_parser.add_argument("--crash-recovery-probe", action="store_true")
     arg_parser.add_argument("--sdk-codex-bin")
