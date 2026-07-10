@@ -251,6 +251,115 @@
   margin-top: var(--space-4);
 }
 
+.linear-application-setup {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.application-source-control {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-1);
+  padding: var(--space-1);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg);
+}
+
+.application-source-option {
+  min-width: 0;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-muted);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.application-source-option[data-selected="true"] {
+  border-color: var(--color-border-strong);
+  background: var(--color-surface);
+  color: var(--color-text);
+}
+
+.application-source-option:focus-visible {
+  outline: none;
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 var(--space-1) var(--color-accent-soft);
+}
+
+.application-source-option:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
+.application-mode-panel {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-4);
+}
+
+.application-mode-panel .field {
+  width: 100%;
+  margin-bottom: 0;
+}
+
+.application-mode-summary {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-3) 0;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.application-mode-title {
+  font-size: var(--font-size-title);
+  line-height: var(--line-height-title);
+  font-weight: 600;
+}
+
+.application-mode-description {
+  margin-top: var(--space-1);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-caption);
+  line-height: var(--line-height-caption);
+}
+
+.readonly-input {
+  background: var(--color-bg);
+  color: var(--color-text-muted);
+}
+
+.linear-installation-status {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--color-border);
+}
+
+.installation-detail {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+@media (max-width: 520px) {
+  .application-source-control {
+    grid-template-columns: 1fr;
+  }
+
+  .application-mode-summary {
+    align-items: flex-start;
+  }
+}
+
 .choice-group {
   display: grid;
   gap: var(--space-3);

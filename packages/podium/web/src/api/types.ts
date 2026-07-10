@@ -28,15 +28,63 @@ export interface OnboardingProgress {
 export type LinearConnectionState =
   | "not_connected"
   | "connected"
+  | "reauthorization_required"
   | "expired"
   | "error";
 
 export interface LinearStatus {
   workspace_id: string;
   state: LinearConnectionState;
-  scope?: string | null;
+  scope?: string | string[] | null;
   app_user_id?: string | null;
   expires_at?: string | null;
+  linear_organization_id?: string | null;
+  health?: string | null;
+}
+
+export type LinearApplicationSource = "default" | "custom";
+
+export interface LinearApplication {
+  id: string;
+  source: LinearApplicationSource;
+  version: number;
+  client_id: string;
+  callback_url: string;
+}
+
+export interface LinearInstallation {
+  id: string;
+  application_config_id?: string;
+  application_config_version?: number;
+  application_source: LinearApplicationSource;
+  state: string;
+  actor: string;
+  linear_organization_id?: string;
+  organization_url_key?: string;
+  organization_name?: string;
+  app_user_id?: string;
+  scope: string[];
+  expires_at?: string | null;
+  project_count?: number;
+  error_code?: string;
+  sanitized_reason?: string;
+  retryable?: boolean;
+  action_required?: string;
+  next_action?: string;
+  created_at?: string;
+  updated_at?: string;
+  reconciliation_state?: string;
+  last_reconciliation_at?: string | null;
+  reconciliation_error_code?: string;
+  reconciliation_error?: string;
+  reconciliation_retry_count?: number;
+  reconciliation_next_retry_at?: string | null;
+}
+
+export interface LinearInstallations {
+  active: LinearInstallation | null;
+  candidate: LinearInstallation | null;
+  revocation: LinearInstallation | null;
 }
 
 export interface Bootstrap {
@@ -257,18 +305,11 @@ export interface EnrollmentStatus {
   enrolled: boolean;
 }
 
-// Main's auth user shape: `{id, email, linear_app?}`. The UI derives a
-// workspace id from `user.id` (V1 = one workspace per user).
+// Main's auth user shape. The UI derives a workspace id from `user.id`
+// (V1 = one workspace per user).
 export interface AuthUser {
   id: string;
   email: string;
-  linear_app?: LinearAppConfig | null;
-}
-
-export interface LinearAppConfig {
-  client_id: string;
-  redirect_uri?: string | null;
-  configured: boolean;
 }
 
 export interface EnrollmentToken {

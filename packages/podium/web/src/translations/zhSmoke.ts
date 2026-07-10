@@ -3,6 +3,7 @@ export const ZH_SMOKE_TRANSLATIONS: Record<string, string> = {
   "Bind each selected project to an online Conductor.": "将每个已选项目绑定到在线的 Conductor。",
   "Binding identity": "绑定身份",
   "Conductor connectivity": "Conductor 连接状态",
+  "Delegation polling": "委派轮询",
   "Fix the bound repository path or Git checkout.": "修复已绑定的仓库路径或 Git 检出。",
   "Linear proxy access": "Linear 代理访问",
   "Next action": "下一步操作",
@@ -17,7 +18,7 @@ export const ZH_SMOKE_TRANSLATIONS: Record<string, string> = {
   "Repository readiness": "仓库就绪状态",
   "Restore the Conductor Linear proxy connection.": "恢复 Conductor 的 Linear 代理连接。",
   "Restore the managed project label on this project.": "恢复此项目上的托管项目标签。",
-  "Restore webhook delivery or reconciliation polling.": "恢复 webhook 投递或对账轮询。",
+  "Restore installation access and reconciliation polling.": "恢复应用安装访问与对账轮询。",
   "Review selected projects and application access.": "检查已选项目和应用访问权限。",
   "Runtime configuration": "运行时配置",
   "Selected project access": "已选项目访问权限",
@@ -26,5 +27,4 @@ export const ZH_SMOKE_TRANSLATIONS: Record<string, string> = {
   "Start the bound Conductor and wait for its report.": "启动已绑定的 Conductor 并等待其报告。",
   "Waiting for Conductor checks to complete.": "正在等待 Conductor 完成检查。",
   "Waiting for Conductor result.": "正在等待 Conductor 结果。",
-  "Webhook or polling intake": "Webhook 或轮询接入",
 };

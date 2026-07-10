@@ -21,8 +21,8 @@ const CHECK_META: Record<string, { title: string; action: string }> = {
     action: "Review selected projects and application access.",
   },
   intake_health: {
-    title: "Webhook or polling intake",
-    action: "Restore webhook delivery or reconciliation polling.",
+    title: "Delegation polling",
+    action: "Restore installation access and reconciliation polling.",
   },
   ready_bindings: {
     title: "Project bindings ready",

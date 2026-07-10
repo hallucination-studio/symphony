@@ -47,6 +47,7 @@ describe("SmokeCheckList", () => {
       status: "failed",
       checks: [
         { name: "callback_acceptance", passed: true },
+        { name: "intake_health", passed: false },
         { name: "selected_project_access", passed: false },
         { name: "runtime_connectivity", passed: false },
       ],
@@ -63,6 +64,9 @@ describe("SmokeCheckList", () => {
     expect(
       screen.getByText(/Start the bound Conductor and wait for its report/i),
     ).toBeInTheDocument();
+    expect(screen.getByText("Delegation polling")).toBeInTheDocument();
+    expect(screen.getByText(/Restore installation access and reconciliation polling/i)).toBeInTheDocument();
+    expect(screen.queryByText(/webhook/i)).not.toBeInTheDocument();
   });
 
   it("shows a running Conductor while its checks are pending", () => {

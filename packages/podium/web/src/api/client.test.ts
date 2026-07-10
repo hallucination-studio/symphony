@@ -145,21 +145,41 @@ describe("api client", () => {
     });
   });
 
-  it("setLinearApp PUTs the credentials", async () => {
+  it("saveLinearApplication PUTs only customer credentials", async () => {
     const fetchMock = mockFetch(200, {
-      linear_app: { client_id: "cid", redirect_uri: null, configured: true },
+      application: {
+        id: "app-custom",
+        source: "custom",
+        version: 1,
+        client_id: "cid",
+        callback_url: "https://podium.example/api/v1/linear/oauth/callback",
+      },
     });
     global.fetch = fetchMock;
 
-    await api.setLinearApp({ client_id: "cid", client_secret: "sec" });
+    await api.saveLinearApplication({ client_id: "cid", client_secret: "sec" });
 
     const [path, init] = fetchMock.mock.calls[0];
-    expect(path).toBe("/api/v1/account/linear-app");
+    expect(path).toBe("/api/v1/linear/application");
     expect(init.method).toBe("PUT");
     expect(JSON.parse(init.body)).toEqual({
       client_id: "cid",
       client_secret: "sec",
     });
+  });
+
+  it("selectDefaultLinearApplication uses the dedicated selection endpoint", async () => {
+    const fetchMock = mockFetch(200, {
+      application: { id: "app-default", source: "default", version: 1 },
+    });
+    global.fetch = fetchMock;
+
+    await api.selectDefaultLinearApplication();
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/linear/application/default",
+      expect.objectContaining({ method: "POST", credentials: "include" }),
+    );
   });
 
   it("throws ApiError with the backend error code on failure", async () => {

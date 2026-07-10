@@ -31,6 +31,22 @@ export function useLinearScope(enabled = true) {
   });
 }
 
+export function useLinearApplication() {
+  return useQuery({
+    queryKey: ["linear", "application"],
+    queryFn: () => api.linearApplication(),
+    retry: false,
+  });
+}
+
+export function useLinearInstallations() {
+  return useQuery({
+    queryKey: ["linear", "installations"],
+    queryFn: () => api.linearInstallations(),
+    retry: false,
+  });
+}
+
 export function useRuntimes() {
   return useQuery({
     queryKey: ["runtimes"],

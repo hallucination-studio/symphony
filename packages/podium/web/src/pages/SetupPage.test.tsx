@@ -13,6 +13,10 @@ vi.mock("../api/client", async (importOriginal) => {
     api: {
       bootstrap: vi.fn(),
       startLinear: vi.fn(),
+      linearApplication: vi.fn(),
+      linearInstallations: vi.fn(),
+      saveLinearApplication: vi.fn(),
+      selectDefaultLinearApplication: vi.fn(),
       linearScope: vi.fn(),
       saveScope: vi.fn(),
       saveRepository: vi.fn(),
@@ -225,6 +229,16 @@ describe("SetupPage runtime step", () => {
 describe("SetupPage linear step", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockApi.linearApplication.mockResolvedValue({
+      application: {
+        id: "app-default",
+        source: "default",
+        version: 1,
+        client_id: "default-client",
+        callback_url: "https://podium.example/api/v1/linear/oauth/callback",
+      },
+    });
+    mockApi.linearInstallations.mockResolvedValue({ active: null, candidate: null, revocation: null });
   });
 
   it("shows connected state when Linear is connected", async () => {
@@ -232,7 +246,7 @@ describe("SetupPage linear step", () => {
       bootstrap("scope_selection", ["linear_connect"]),
     );
     renderWithProviders(<SetupPage />, { route: "/setup/linear", path: "/setup/:step" });
-    expect(await screen.findByText("Linear connected")).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Reauthorize Linear" })).toBeInTheDocument();
   });
 
   it("offers to connect when not connected", async () => {
@@ -253,10 +267,7 @@ describe("SetupPage linear step", () => {
 
     renderWithProviders(<SetupPage />, { route: "/setup/linear", path: "/setup/:step" });
 
-    const connectButtons = await screen.findAllByRole("button", {
-      name: /connect linear/i,
-    });
-    fireEvent.click(connectButtons[connectButtons.length - 1]);
+    fireEvent.click(await screen.findByRole("button", { name: "Authorize Linear" }));
 
     await waitFor(() => expect(mockApi.startLinear).toHaveBeenCalled());
     expect(assign).toHaveBeenCalledWith("https://linear.example/oauth");
