@@ -5,6 +5,55 @@ from typing import Any
 from ._postgres_records import _pg_datetime, _pg_json, _record_to_dispatch, _record_to_project_binding, _row_count
 
 
+DISPATCH_INSERT_SQL = """
+INSERT INTO dispatches (
+  id, project_binding_id, user_id, issue_id, issue_identifier, issue_title, issue_description,
+  managed_run_intent, intake_key, workspace_id, project_slug, status, reason,
+  agent_app_user_id, issue_delegate_id, leased_conductor_id, leased_until, fencing_token,
+  run_id, parent_issue_id, active_work_item_id, managed_run_state, plan_version, backend_session_id,
+  created_at, updated_at, completed_at
+)
+VALUES (
+  $1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12,$13,$14,$15,$16,$17::timestamptz,$18,
+  $19,$20,$21,$22,$23,$24,$25::timestamptz,$26::timestamptz,$27::timestamptz
+)
+ON CONFLICT DO NOTHING
+RETURNING id
+"""
+
+
+def _dispatch_values(dispatch: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        str(dispatch["dispatch_id"]),
+        str(dispatch["project_binding_id"]),
+        str(dispatch["user_id"]),
+        str(dispatch["issue_id"]),
+        str(dispatch.get("issue_identifier") or ""),
+        str(dispatch.get("issue_title") or ""),
+        str(dispatch.get("issue_description") or ""),
+        _pg_json(dispatch.get("managed_run_intent") or {}),
+        str(dispatch.get("intake_key") or ""),
+        str(dispatch.get("linear_workspace_id") or dispatch.get("workspace_id") or ""),
+        str(dispatch.get("project_slug") or ""),
+        str(dispatch.get("status") or "queued"),
+        str(dispatch.get("reason") or ""),
+        str(dispatch.get("agent_app_user_id") or ""),
+        str(dispatch.get("issue_delegate_id") or ""),
+        dispatch.get("leased_runtime_id") or dispatch.get("leased_conductor_id"),
+        _pg_datetime(dispatch.get("leased_until")),
+        int(dispatch.get("fencing_token") or 0),
+        str(dispatch.get("run_id") or ""),
+        str(dispatch.get("parent_issue_id") or ""),
+        str(dispatch.get("active_work_item_id") or ""),
+        str(dispatch.get("managed_run_state") or ""),
+        int(dispatch.get("plan_version") or 0),
+        str(dispatch.get("backend_session_id") or ""),
+        _pg_datetime(dispatch.get("created_at")),
+        _pg_datetime(dispatch.get("updated_at") or dispatch.get("created_at")),
+        _pg_datetime(dispatch.get("completed_at")),
+    )
+
+
 class PgDispatchMixin:
     async def upsert_project_binding(self, binding: dict[str, Any]) -> None:
         await self.pool.execute(
@@ -161,50 +210,7 @@ class PgDispatchMixin:
         return [_record_to_project_binding(row) for row in rows]
 
     async def upsert_dispatch(self, dispatch: dict[str, Any]) -> bool:
-        row = await self.pool.fetchrow(
-            """
-            INSERT INTO dispatches (
-              id, project_binding_id, user_id, issue_id, issue_identifier, issue_title, issue_description,
-              managed_run_intent, intake_key, workspace_id, project_slug, status, reason,
-              agent_app_user_id, issue_delegate_id, leased_conductor_id, leased_until, fencing_token,
-              run_id, parent_issue_id, active_work_item_id, managed_run_state, plan_version, backend_session_id,
-              created_at, updated_at, completed_at
-            )
-            VALUES (
-              $1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12,$13,$14,$15,$16,$17::timestamptz,$18,
-              $19,$20,$21,$22,$23,$24,$25::timestamptz,$26::timestamptz,$27::timestamptz
-            )
-            ON CONFLICT DO NOTHING
-            RETURNING id
-            """,
-            str(dispatch["dispatch_id"]),
-            str(dispatch["project_binding_id"]),
-            str(dispatch["user_id"]),
-            str(dispatch["issue_id"]),
-            str(dispatch.get("issue_identifier") or ""),
-            str(dispatch.get("issue_title") or ""),
-            str(dispatch.get("issue_description") or ""),
-            _pg_json(dispatch.get("managed_run_intent") or {}),
-            str(dispatch.get("intake_key") or ""),
-            str(dispatch.get("linear_workspace_id") or dispatch.get("workspace_id") or ""),
-            str(dispatch.get("project_slug") or ""),
-            str(dispatch.get("status") or "queued"),
-            str(dispatch.get("reason") or ""),
-            str(dispatch.get("agent_app_user_id") or ""),
-            str(dispatch.get("issue_delegate_id") or ""),
-            dispatch.get("leased_runtime_id") or dispatch.get("leased_conductor_id"),
-            _pg_datetime(dispatch.get("leased_until")),
-            int(dispatch.get("fencing_token") or 0),
-            str(dispatch.get("run_id") or ""),
-            str(dispatch.get("parent_issue_id") or ""),
-            str(dispatch.get("active_work_item_id") or ""),
-            str(dispatch.get("managed_run_state") or ""),
-            int(dispatch.get("plan_version") or 0),
-            str(dispatch.get("backend_session_id") or ""),
-            _pg_datetime(dispatch.get("created_at")),
-            _pg_datetime(dispatch.get("updated_at") or dispatch.get("created_at")),
-            _pg_datetime(dispatch.get("completed_at")),
-        )
+        row = await self.pool.fetchrow(DISPATCH_INSERT_SQL, *_dispatch_values(dispatch))
         return row is not None
 
     async def lease_dispatch(self, conductor_id: str, *, binding_ids: list[str], lease_until: str) -> dict[str, Any] | None:

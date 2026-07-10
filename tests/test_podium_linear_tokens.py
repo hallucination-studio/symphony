@@ -74,6 +74,34 @@ async def test_proactive_refresh_is_single_flight_and_rotates_both_tokens() -> N
 
 
 @pytest.mark.asyncio
+async def test_reconciliation_health_update_does_not_overwrite_rotated_tokens() -> None:
+    app = _app()
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
+        user_id = await register(client, "health-token-race@example.com")
+        await activate_linear_installation(app, user_id, access_token="access-old")
+        stale = await app.state.podium.get_active_linear_installation(user_id)
+        assert stale is not None
+        await app.state.podium.save_linear_installation_record(
+            {**stale, "access_token": "access-rotated", "refresh_token": "refresh-rotated"}
+        )
+        await app.state.podium.update_linear_reconciliation_health(
+            stale,
+            reconciliation_state="healthy",
+            last_reconciliation_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            reconciliation_error_code="",
+            reconciliation_error="",
+            reconciliation_retry_count=0,
+            reconciliation_next_retry_at=None,
+        )
+
+    stored = await app.state.podium.get_active_linear_installation(user_id)
+    assert stored is not None
+    assert stored["access_token"] == "access-rotated"
+    assert stored["refresh_token"] == "refresh-rotated"
+    assert stored["reconciliation_state"] == "healthy"
+
+
+@pytest.mark.asyncio
 async def test_refresh_failure_requires_reauthorization_and_is_public() -> None:
     async def refresh(_refresh_token: str, _application: dict[str, Any]) -> dict[str, Any]:
         raise RuntimeError("upstream returned token=must-not-leak")

@@ -252,10 +252,7 @@ POSTGRES_MIGRATION_STATEMENTS: Iterable[str] = (
             """
             CREATE TABLE IF NOT EXISTS linear_reconciliation_state (
                 binding_id TEXT PRIMARY KEY,
-                cursor_text TEXT NOT NULL DEFAULT '',
-                last_success_at TIMESTAMPTZ,
-                last_error TEXT NOT NULL DEFAULT '',
-                last_issue_count BIGINT NOT NULL DEFAULT 0,
+                state_json JSONB NOT NULL DEFAULT '{}'::jsonb,
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
             )
             """,

@@ -64,6 +64,21 @@ class JsonStoreLinearMixin:
         rows[str(installation["id"])] = dict(installation)
         self._write("linear_workspace_installations.json", rows)
 
+    async def update_workspace_installation_reconciliation(
+        self,
+        user_id: str,
+        installation_id: str,
+        changes: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        rows = self._load_map("linear_workspace_installations.json")
+        current = rows.get(installation_id)
+        if not isinstance(current, dict) or current.get("user_id") != user_id or not current.get("active"):
+            return None
+        updated = {**current, **changes}
+        rows[installation_id] = updated
+        self._write("linear_workspace_installations.json", rows)
+        return dict(updated)
+
     async def list_workspace_installations(self, user_id: str) -> list[dict[str, Any]]:
         rows = self._load_map("linear_workspace_installations.json").values()
         result = [dict(row) for row in rows if isinstance(row, dict) and str(row.get("user_id") or "") == user_id]
@@ -130,6 +145,49 @@ class JsonStoreLinearMixin:
         row = self._load_map("linear_reconciliation_state.json").get(binding_id)
         return dict(row) if isinstance(row, dict) else None
 
+    async def get_linear_issue_observation(self, binding_id: str, issue_id: str) -> dict[str, Any] | None:
+        key = f"{binding_id}:{issue_id}"
+        row = self._load_map("linear_issue_observations.json").get(key)
+        return dict(row) if isinstance(row, dict) else None
+
+    async def get_linear_issue_observations(
+        self,
+        binding_id: str,
+        issue_ids: list[str],
+    ) -> dict[str, dict[str, Any]]:
+        rows = self._load_map("linear_issue_observations.json")
+        return {
+            issue_id: dict(row)
+            for issue_id in issue_ids
+            if isinstance((row := rows.get(f"{binding_id}:{issue_id}")), dict)
+        }
+
+    async def commit_linear_reconciliation_page(
+        self,
+        binding_id: str,
+        *,
+        state: dict[str, Any],
+        observations: list[dict[str, Any]],
+        dispatches: list[dict[str, Any]],
+    ) -> int:
+        observation_rows = self._load_map("linear_issue_observations.json")
+        dispatch_rows = self._load_map("dispatches.json")
+        inserted = 0
+        for observation in observations:
+            key = f"{binding_id}:{observation['issue_id']}"
+            observation_rows[key] = dict(observation)
+        for dispatch in dispatches:
+            if _dispatch_exists(dispatch_rows, dispatch):
+                continue
+            dispatch_rows[str(dispatch["dispatch_id"])] = dict(dispatch)
+            inserted += 1
+        states = self._load_map("linear_reconciliation_state.json")
+        states[binding_id] = {**state, "binding_id": binding_id}
+        self._write("linear_issue_observations.json", observation_rows)
+        self._write("dispatches.json", dispatch_rows)
+        self._write("linear_reconciliation_state.json", states)
+        return inserted
+
     async def switch_workspace_installation(
         self,
         user_id: str,
@@ -187,3 +245,12 @@ class JsonStoreLinearMixin:
             if isinstance(row, dict) and str(row.get("user_id") or "") == user_id
         ]
         return sorted(selected, key=lambda row: str(row.get("linear_project_id") or ""))
+
+
+def _dispatch_exists(rows: dict[str, Any], dispatch: dict[str, Any]) -> bool:
+    return any(
+        isinstance(row, dict)
+        and row.get("project_binding_id") == dispatch.get("project_binding_id")
+        and row.get("intake_key") == dispatch.get("intake_key")
+        for row in rows.values()
+    )

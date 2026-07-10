@@ -151,6 +151,20 @@ class PodiumLinearInstallationsMixin:
         await self.save_linear_installation_record(updated)
         return updated
 
+    async def update_linear_reconciliation_health(
+        self,
+        installation: dict[str, Any],
+        **changes: Any,
+    ) -> dict[str, Any]:
+        row = await self.store.update_workspace_installation_reconciliation(
+            str(installation.get("user_id") or ""),
+            str(installation.get("id") or ""),
+            {**changes, "updated_at": utc_now_iso()},
+        )
+        if row is None:
+            return installation
+        return self._workspace_installation_from_disk(row)
+
     async def activate_linear_installation(self, user_id: str, installation_id: str) -> None:
         await self.store.activate_workspace_installation(user_id, installation_id)
 
@@ -174,7 +188,8 @@ class PodiumLinearInstallationsMixin:
                 "app_user_id", "expires_at", "error_code",
                 "sanitized_reason", "retryable", "action_required", "next_action", "created_at", "updated_at",
                 "reconciliation_state", "last_reconciliation_at",
-                "reconciliation_error", "reconciliation_retry_count",
+                "reconciliation_error_code", "reconciliation_error", "reconciliation_retry_count",
+                "reconciliation_next_retry_at",
             )
         } | {"scope": list(row.get("scope") or []), "project_count": len(row.get("projects") or [])}
 

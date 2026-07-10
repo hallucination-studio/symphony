@@ -46,8 +46,10 @@ LINEAR_INSTALLATION_STATEMENTS: Iterable[str] = (
         projects_json JSONB NOT NULL DEFAULT '[]'::jsonb,
         reconciliation_state TEXT NOT NULL DEFAULT 'pending',
         last_reconciliation_at TIMESTAMPTZ,
+        reconciliation_error_code TEXT NOT NULL DEFAULT '',
         reconciliation_error TEXT NOT NULL DEFAULT '',
         reconciliation_retry_count BIGINT NOT NULL DEFAULT 0,
+        reconciliation_next_retry_at TIMESTAMPTZ,
         error_code TEXT NOT NULL DEFAULT '',
         sanitized_reason TEXT NOT NULL DEFAULT '',
         retryable BOOLEAN NOT NULL DEFAULT FALSE,
@@ -60,8 +62,10 @@ LINEAR_INSTALLATION_STATEMENTS: Iterable[str] = (
     "ALTER TABLE linear_workspace_installations ADD COLUMN IF NOT EXISTS actor TEXT NOT NULL DEFAULT ''",
     "ALTER TABLE linear_workspace_installations ADD COLUMN IF NOT EXISTS reconciliation_state TEXT NOT NULL DEFAULT 'pending'",
     "ALTER TABLE linear_workspace_installations ADD COLUMN IF NOT EXISTS last_reconciliation_at TIMESTAMPTZ",
+    "ALTER TABLE linear_workspace_installations ADD COLUMN IF NOT EXISTS reconciliation_error_code TEXT NOT NULL DEFAULT ''",
     "ALTER TABLE linear_workspace_installations ADD COLUMN IF NOT EXISTS reconciliation_error TEXT NOT NULL DEFAULT ''",
     "ALTER TABLE linear_workspace_installations ADD COLUMN IF NOT EXISTS reconciliation_retry_count BIGINT NOT NULL DEFAULT 0",
+    "ALTER TABLE linear_workspace_installations ADD COLUMN IF NOT EXISTS reconciliation_next_retry_at TIMESTAMPTZ",
     """
     CREATE TABLE IF NOT EXISTS linear_selected_projects (
         user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,

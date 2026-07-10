@@ -60,12 +60,14 @@ class PgLinearMixin:
               id, user_id, application_config_id, application_config_version, application_source,
               state, active, access_token_enc, refresh_token_enc, token_type, actor, scope, expires_at,
               linear_organization_id, organization_url_key, organization_name, app_user_id, projects_json,
-              reconciliation_state, last_reconciliation_at, reconciliation_error,
-              reconciliation_retry_count, error_code, sanitized_reason, retryable,
+              reconciliation_state, last_reconciliation_at, reconciliation_error_code,
+              reconciliation_error, reconciliation_retry_count, reconciliation_next_retry_at,
+              error_code, sanitized_reason, retryable,
               action_required, next_action, created_at, updated_at
             ) VALUES (
               $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13::timestamptz,$14,$15,$16,$17,
-              $18::jsonb,$19,$20::timestamptz,$21,$22,$23,$24,$25,$26,$27,$28::timestamptz,$29::timestamptz
+              $18::jsonb,$19,$20::timestamptz,$21,$22,$23,$24::timestamptz,$25,$26,$27,$28,$29,
+              $30::timestamptz,$31::timestamptz
             )
             ON CONFLICT (id) DO UPDATE SET
               application_config_id = EXCLUDED.application_config_id,
@@ -85,12 +87,45 @@ class PgLinearMixin:
               action_required = EXCLUDED.action_required, next_action = EXCLUDED.next_action,
               reconciliation_state = EXCLUDED.reconciliation_state,
               last_reconciliation_at = EXCLUDED.last_reconciliation_at,
+              reconciliation_error_code = EXCLUDED.reconciliation_error_code,
               reconciliation_error = EXCLUDED.reconciliation_error,
               reconciliation_retry_count = EXCLUDED.reconciliation_retry_count,
+              reconciliation_next_retry_at = EXCLUDED.reconciliation_next_retry_at,
               updated_at = EXCLUDED.updated_at
             """,
             *_installation_values(installation),
         )
+
+    async def update_workspace_installation_reconciliation(
+        self,
+        user_id: str,
+        installation_id: str,
+        changes: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        row = await self.pool.fetchrow(
+            """
+            UPDATE linear_workspace_installations SET
+              reconciliation_state = $3,
+              last_reconciliation_at = $4::timestamptz,
+              reconciliation_error_code = $5,
+              reconciliation_error = $6,
+              reconciliation_retry_count = $7,
+              reconciliation_next_retry_at = $8::timestamptz,
+              updated_at = $9::timestamptz
+            WHERE user_id = $1 AND id = $2 AND active = TRUE
+            RETURNING *
+            """,
+            user_id,
+            installation_id,
+            str(changes.get("reconciliation_state") or "pending"),
+            _pg_datetime(changes.get("last_reconciliation_at")),
+            str(changes.get("reconciliation_error_code") or ""),
+            str(changes.get("reconciliation_error") or ""),
+            int(changes.get("reconciliation_retry_count") or 0),
+            _pg_datetime(changes.get("reconciliation_next_retry_at")),
+            _pg_datetime(changes.get("updated_at")),
+        )
+        return _workspace_installation(row) if row is not None else None
 
     async def list_workspace_installations(self, user_id: str) -> list[dict[str, Any]]:
         rows = await self.pool.fetch(
@@ -180,39 +215,6 @@ class PgLinearMixin:
             for row in rows
         ]
 
-    async def save_linear_reconciliation_state(self, binding_id: str, state: dict[str, Any]) -> None:
-        await self.pool.execute(
-            """
-            INSERT INTO linear_reconciliation_state (
-              binding_id, cursor_text, last_success_at, last_error, last_issue_count, updated_at
-            )
-            VALUES ($1,$2,$3::timestamptz,$4,$5,now())
-            ON CONFLICT (binding_id) DO UPDATE SET
-              cursor_text = EXCLUDED.cursor_text,
-              last_success_at = EXCLUDED.last_success_at,
-              last_error = EXCLUDED.last_error,
-              last_issue_count = EXCLUDED.last_issue_count,
-              updated_at = now()
-            """,
-            binding_id,
-            str(state.get("cursor") or state.get("cursor_text") or ""),
-            _pg_datetime(state.get("last_success_at")),
-            str(state.get("last_error") or ""),
-            int(state.get("last_issue_count") or 0),
-        )
-
-    async def get_linear_reconciliation_state(self, binding_id: str) -> dict[str, Any] | None:
-        row = await self.pool.fetchrow("SELECT * FROM linear_reconciliation_state WHERE binding_id = $1", binding_id)
-        if row is None:
-            return None
-        return {
-            "binding_id": str(row["binding_id"]),
-            "cursor": str(row["cursor_text"] or ""),
-            "last_success_at": row["last_success_at"].isoformat() if row["last_success_at"] is not None else None,
-            "last_error": str(row["last_error"] or ""),
-            "last_issue_count": int(row["last_issue_count"] or 0),
-        }
-
     async def save_oauth_state(self, state: str, record: dict[str, Any]) -> None:
         await self.pool.execute(
             """
@@ -296,7 +298,8 @@ def _installation_values(row: dict[str, Any]) -> tuple[Any, ...]:
         str(row.get("organization_name") or ""), str(row.get("app_user_id") or ""),
         _pg_json(row.get("projects") or []),
         str(row.get("reconciliation_state") or "pending"), _pg_datetime(row.get("last_reconciliation_at")),
-        str(row.get("reconciliation_error") or ""), int(row.get("reconciliation_retry_count") or 0),
+        str(row.get("reconciliation_error_code") or ""), str(row.get("reconciliation_error") or ""),
+        int(row.get("reconciliation_retry_count") or 0), _pg_datetime(row.get("reconciliation_next_retry_at")),
         str(row.get("error_code") or ""), str(row.get("sanitized_reason") or ""), bool(row.get("retryable")),
         str(row.get("action_required") or ""), str(row.get("next_action") or ""),
         _pg_datetime(row.get("created_at")), _pg_datetime(row.get("updated_at")),
@@ -322,8 +325,13 @@ def _workspace_installation(row: Any) -> dict[str, Any]:
         "last_reconciliation_at": (
             row["last_reconciliation_at"].isoformat() if row["last_reconciliation_at"] is not None else None
         ),
+        "reconciliation_error_code": str(row["reconciliation_error_code"]),
         "reconciliation_error": str(row["reconciliation_error"]),
         "reconciliation_retry_count": int(row["reconciliation_retry_count"]),
+        "reconciliation_next_retry_at": (
+            row["reconciliation_next_retry_at"].isoformat()
+            if row["reconciliation_next_retry_at"] is not None else None
+        ),
         "error_code": str(row["error_code"]),
         "sanitized_reason": str(row["sanitized_reason"]), "retryable": bool(row["retryable"]),
         "action_required": str(row["action_required"]), "next_action": str(row["next_action"]),
