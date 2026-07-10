@@ -32,6 +32,13 @@ def register_linear_oauth_routes(
     linear_graphql_transport: Callable[[httpx.Request], httpx.Response] | None,
     error_response: ErrorResponse,
 ) -> None:
+    _register_installation_status_route(
+        app,
+        state=state,
+        require_user=require_user,
+        error_response=error_response,
+    )
+
     @app.post("/api/v1/linear/installations/oauth")
     async def start_linear_installation(request: Request) -> JSONResponse:
         user = await require_user(request)
@@ -65,15 +72,20 @@ def register_linear_oauth_routes(
         state_record = await state.consume_linear_oauth_state(callback_state)
         if state_record is None:
             return error_response(400, "invalid_state", "Invalid or expired state parameter")
-        denied = str(request.query_params.get("error") or "")
-        if denied:
-            return _setup_redirect("denied", _safe_oauth_code(denied))
-        code = str(request.query_params.get("code") or "")
-        if not code:
-            return _setup_redirect("error", "missing_code")
         config = await state.get_linear_application_config(str(state_record["application_config_id"]))
         if not _state_matches_config(state_record, config):
             return error_response(400, "stale_application_config", "OAuth application configuration changed")
+        denied = str(request.query_params.get("error") or "")
+        if denied:
+            await _record_denied_callback(
+                state,
+                user_id=str(state_record["workspace_id"]),
+                config=config,
+            )
+            return _setup_redirect("denied", "linear_oauth_denied")
+        code = str(request.query_params.get("code") or "")
+        if not code:
+            return _setup_redirect("error", "missing_code")
         return await _complete_callback(
             state=state,
             user_id=str(state_record["workspace_id"]),
@@ -86,6 +98,14 @@ def register_linear_oauth_routes(
             error_response=error_response,
         )
 
+
+def _register_installation_status_route(
+    app: FastAPI,
+    *,
+    state: Any,
+    require_user: RequireUser,
+    error_response: ErrorResponse,
+) -> None:
     @app.get("/api/v1/linear/installations")
     async def linear_installations(request: Request) -> JSONResponse:
         user = await require_user(request)
@@ -102,6 +122,26 @@ def register_linear_oauth_routes(
                 "revocation": state.linear_installation_public(revocation),
             }
         )
+
+
+async def _record_denied_callback(
+    state: Any,
+    *,
+    user_id: str,
+    config: dict[str, Any],
+) -> None:
+    rejection = LinearInstallationRejected(
+        "linear_oauth_denied",
+        "Linear authorization was not approved",
+    )
+    record = rejected_installation(
+        user_id=user_id,
+        application=config,
+        installation_id=f"linear_installation_{secrets.token_urlsafe(12)}",
+        rejection=rejection,
+    )
+    await state.save_linear_installation_record(record)
+
 
 async def _complete_callback(
     *,
@@ -218,8 +258,3 @@ def _setup_redirect(status: str, code: str = "") -> RedirectResponse:
     if code:
         query["code"] = code
     return RedirectResponse(f"/setup/linear?{urllib.parse.urlencode(query)}", status_code=303)
-
-
-def _safe_oauth_code(value: str) -> str:
-    normalized = "".join(character for character in value.lower() if character.isalnum() or character == "_")
-    return normalized[:64] or "oauth_denied"

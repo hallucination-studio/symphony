@@ -137,7 +137,7 @@ async def test_oauth_state_is_hashed_one_time_and_callback_redirects(tmp_path: P
 
 
 @pytest.mark.asyncio
-async def test_denied_consent_consumes_state_and_redirects_with_visible_status(tmp_path: Path) -> None:
+async def test_denied_consent_is_durable_sanitized_and_consumes_state(tmp_path: Path) -> None:
     client, _app, _store = _client(tmp_path)
     async with client:
         await _register(client)
@@ -152,10 +152,17 @@ async def test_denied_consent_consumes_state_and_redirects_with_visible_status(t
             params={"error": "access_denied", "state": params["state"]},
             follow_redirects=False,
         )
+        installations = await client.get("/api/v1/linear/installations")
 
     assert denied.status_code == 303
     query = dict(urllib.parse.parse_qsl(urllib.parse.urlparse(denied.headers["location"]).query))
-    assert query == {"linear": "denied", "code": "access_denied"}
+    assert query == {"linear": "denied", "code": "linear_oauth_denied"}
+    candidate = installations.json()["candidate"]
+    assert candidate["state"] == "failed"
+    assert candidate["error_code"] == "linear_oauth_denied"
+    assert candidate["sanitized_reason"] == "Linear authorization was not approved"
+    assert candidate["next_action"] == "reauthorize"
+    assert "User denied access" not in installations.text
     assert replay.status_code == 400
 
 
