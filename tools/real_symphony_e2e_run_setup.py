@@ -31,6 +31,7 @@ from real_symphony_e2e_linear import (
     delegate_linear_issue,
     wait_for_linear_delegate_visible,
 )
+from real_symphony_e2e_linear_fixture import verify_linear_fixture_access
 from real_symphony_e2e_podium import (
     PodiumSession,
     authorize_default_application,
@@ -124,6 +125,20 @@ async def build_initial_state(args: argparse.Namespace) -> E2ERunState:
 
 
 async def run_connectivity_preflight(state: E2ERunState) -> bool:
+    if not await verify_linear_fixture_access(
+        state.token,
+        state.args.project_slug,
+        state.evidence,
+    ):
+        _checkpoint_and_block_after_stage(
+            state.evidence,
+            "02-connectivity",
+            reason="linear_fixture_preflight_failed",
+            blocked_stages=_stages_after("02-connectivity"),
+        )
+        state.evidence.data["completed_at"] = utc_now()
+        state.evidence.write()
+        return False
     probes = [
         ("codex_connectivity_probe", run_codex_connectivity_probe, "codex_connectivity_probe_failed"),
         ("codex_planner_shaped_probe", run_codex_planner_shaped_probe, "codex_planner_shaped_probe_failed"),

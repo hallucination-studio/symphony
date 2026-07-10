@@ -299,6 +299,32 @@ async def test_podium_api_snapshots_are_session_backed_and_redacted(tmp_path) ->
         assert "hidden" not in text
 
 
+async def test_linear_fixture_preflight_fails_immediately_with_sanitized_auth_classification(tmp_path) -> None:
+    tool = load_tool("real_symphony_e2e_linear_fixture")
+
+    async def rejected(_token: str, _project: str) -> dict[str, object]:
+        raise tool.E2EFailure(
+            failure_class="credential_or_config_failure",
+            error_code="linear_authentication_failed",
+            sanitized_reason="Linear authentication failed",
+            retryable=False,
+            next_action="refresh_linear_app_access_token",
+        )
+
+    evidence = tool.Evidence(tmp_path / "evidence.json")
+    accessible = await tool.verify_linear_fixture_access(
+        "secret-fixture-token",
+        "HELL",
+        evidence,
+        resolver=rejected,
+    )
+
+    assert accessible is False
+    assert evidence.data["failures"][-1]["error_code"] == "linear_authentication_failed"
+    assert evidence.data["failures"][-1]["next_action"] == "refresh_linear_fixture_token"
+    assert "secret-fixture-token" not in evidence.out.read_text(encoding="utf-8")
+
+
 async def test_early_podium_snapshots_archive_unavailable_endpoints_without_masking_primary_failure(tmp_path) -> None:
     tool = load_tool("real_symphony_e2e_podium_evidence")
 

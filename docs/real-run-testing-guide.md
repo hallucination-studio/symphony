@@ -27,6 +27,14 @@ token or a deployment-global app actor access token into the managed path.
 Podium must obtain and store each workspace installation token through the real
 OAuth callback.
 
+The runner also requires `SYMPHONY_E2E_LINEAR_FIXTURE_TOKEN` for test-side issue
+creation, delegation, and independent Linear audits. This is a separate fixture
+credential, not a Podium installation token or a managed-runtime fallback. It
+must be able to read and write the selected test project and delegate issues to
+the installed app user. The runner validates project access before Codex or
+OAuth work and never forwards this credential into Podium, Conductor, or
+Performer.
+
 Use the canonical `PYTHONPATH` when invoking focused tools:
 
 ```bash
