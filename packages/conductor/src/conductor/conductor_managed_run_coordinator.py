@@ -19,10 +19,11 @@ from .conductor_managed_run_coordinator_helpers import (
     _parallel_compatible,
     _review_relevant_file,
 )
+from .conductor_managed_run_coordinator_human import ConductorManagedRunHumanActionMixin
 from .conductor_managed_run_store import ConductorManagedRunStore, ManagedRunDispatchAccepted
 
 
-class ConductorManagedRunCoordinator(ConductorManagedRunCheckpointMixin):
+class ConductorManagedRunCoordinator(ConductorManagedRunHumanActionMixin, ConductorManagedRunCheckpointMixin):
     def __init__(
         self,
         *,
@@ -93,52 +94,6 @@ class ConductorManagedRunCoordinator(ConductorManagedRunCheckpointMixin):
         self.store.update_run_state(run_id, ManagedRunState.READY)
         return version
 
-    def approve_plan(self, run_id: str, *, approval_id: str = "") -> None:
-        run = self.store.get_run(run_id)
-        if run is None:
-            raise KeyError(run_id)
-        if run.get("state") != ManagedRunState.AWAITING_APPROVAL.value or run.get("latest_reason") != "plan_approval_required":
-            raise ValueError("run is not awaiting plan approval")
-        marker = approval_id or "approved"
-        self.store.update_run_state(run_id, ManagedRunState.READY, reason=f"plan_approved:{marker}")
-
-    def approve_plan_revision(
-        self,
-        run_id: str,
-        plan: ManagedRunPlan,
-        *,
-        backend_session_id: str = "",
-        approval_id: str = "",
-    ) -> int:
-        run = self.store.get_run(run_id)
-        if run is None:
-            raise KeyError(run_id)
-        active_work_item_id = str(run.get("active_work_item_id") or "")
-        if run.get("state") != ManagedRunState.BLOCKED.value or run.get("latest_reason") != "plan_revision_requested":
-            raise ValueError("run is not awaiting an approved plan revision")
-        current = self._work_item(run_id, active_work_item_id)
-        result = current.get("result") if isinstance(current.get("result"), dict) else {}
-        if result.get("status_claimed") != WorkItemResultStatus.PLAN_REVISION_REQUESTED.value:
-            raise ValueError("active work item did not request a plan revision")
-        errors = ManagedRunPlanValidator().validate(plan)
-        if errors:
-            reason = ",".join(error.value for error in errors)
-            self.store.update_run_state(run_id, ManagedRunState.BLOCKED, active_work_item_id=active_work_item_id, reason=reason)
-            self.store.update_work_item_state(run_id, active_work_item_id, WorkItemState.BLOCKED, gate_status=reason)
-            _log_blocked(run_id=run_id, work_item_id=active_work_item_id, error_code="invalid_plan_revision", reason=reason, action_required="revise_plan")
-            return 0
-        self.store.update_run_state(run_id, ManagedRunState.PROJECTING_PLAN, active_work_item_id=active_work_item_id)
-        version = self.store.save_plan(run_id, plan, backend_session_id=backend_session_id)
-        approval_marker = approval_id or "approved"
-        self.store.update_work_item_state(
-            run_id,
-            active_work_item_id,
-            WorkItemState.TODO,
-            gate_status=f"plan_revision_approved:{approval_marker}",
-        )
-        self.store.update_run_state(run_id, ManagedRunState.READY, reason=f"plan_revision_approved:{approval_marker}")
-        return version
-
     def next_ready_work_item(self, run_id: str) -> dict[str, Any] | None:
         run = self.store.get_run(run_id)
         if run is None:
@@ -172,20 +127,6 @@ class ConductorManagedRunCoordinator(ConductorManagedRunCheckpointMixin):
         self.store.update_work_item_state(run_id, work_item_id, WorkItemState.IN_PROGRESS, gate_status="turn started")
         updated = self._work_item(run_id, work_item_id)
         return updated
-
-    def approve_work_item(self, run_id: str, work_item_id: str, *, approval_id: str = "") -> dict[str, Any]:
-        current = self._work_item(run_id, work_item_id)
-        if current["state"] != WorkItemState.BLOCKED.value or current.get("gate_status") != "human_approval_required":
-            raise ValueError(f"work item is not awaiting human approval: {work_item_id}")
-        marker = approval_id or "approved"
-        self.store.update_work_item_state(
-            run_id,
-            work_item_id,
-            WorkItemState.TODO,
-            gate_status=f"human_approval_approved:{marker}",
-        )
-        self.store.update_run_state(run_id, ManagedRunState.READY, active_work_item_id=work_item_id, reason=f"human_approval_approved:{marker}")
-        return self._work_item(run_id, work_item_id)
 
     def submit_work_item_result(self, run_id: str, result: WorkItemResult) -> dict[str, Any]:
         current = self._work_item(run_id, result.work_item_id)

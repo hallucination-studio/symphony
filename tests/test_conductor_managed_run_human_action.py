@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from conductor.conductor_managed_run_coordinator import ConductorManagedRunCoordinator
@@ -7,10 +8,13 @@ from conductor.conductor_managed_run_human_action import ingest_managed_run_huma
 from conductor.conductor_managed_run_projection import ManagedRunLinearProjector
 from conductor.conductor_managed_run_store import ConductorManagedRunStore
 from performer_api.managed_runs import (
+    ManagedRunState,
     ManagedRunPlan,
     ParallelizationPolicy,
     VerificationRubric,
     WorkItem,
+    WorkItemResult,
+    WorkItemResultStatus,
     WorkItemSliceType,
     WorkItemState,
     WorkItemVerification,
@@ -24,9 +28,18 @@ class Tracker:
         self.updated_comments: list[tuple[str, str]] = []
         self.description_blocks: list[tuple[str, str, str]] = []
         self.transitions: list[tuple[str, list[str], str]] = []
+        self.root_issue = {"id": "root-1", "state": "Todo", "state_type": "unstarted"}
 
     async def fetch_child_issues(self, parent_issue_id: str, *, label_name: str | None = None) -> list[dict[str, object]]:
         return [child for child in self.children if child.get("parent_issue_id") == parent_issue_id]
+
+    async def fetch_issue(self, issue_id: str) -> dict[str, object]:
+        if issue_id == self.root_issue["id"]:
+            return dict(self.root_issue)
+        for child in self.children:
+            if child.get("id") == issue_id:
+                return dict(child)
+        return {}
 
     async def create_child_issue_for(
         self,
@@ -43,6 +56,8 @@ class Tracker:
             "title": title,
             "description": description,
             "labels": list(label_names),
+            "state": "Todo",
+            "state_type": "unstarted",
         }
         self.children.append(child)
         return child
@@ -53,6 +68,13 @@ class Tracker:
 
     async def transition_issue_by_state_target(self, issue_id: str, *, names: list[str], state_type: str) -> dict[str, object]:
         self.transitions.append((issue_id, list(names), state_type))
+        target = names[0]
+        if issue_id == self.root_issue["id"]:
+            self.root_issue.update({"state": target, "state_type": state_type})
+        else:
+            for child in self.children:
+                if child.get("id") == issue_id:
+                    child.update({"state": target, "state_type": state_type})
         return {"success": True}
 
     async def comment_issue(self, issue_id: str, body: str) -> dict[str, object]:
@@ -109,6 +131,158 @@ async def test_managed_run_human_action_instruction_is_idempotent_and_state_flip
     assert resumed == {"applied": True, "reason": "state_flip_resumed"}
     assert item["state"] == WorkItemState.TODO.value
     assert item["gate_status"] == "human_approval_approved:state-flip-1"
+
+
+async def test_managed_run_plan_approval_projects_root_instruction_and_ingests_state_flip(tmp_path) -> None:
+    store = ConductorManagedRunStore(tmp_path)
+    coordinator = ConductorManagedRunCoordinator(store=store)
+    accepted = coordinator.accept_dispatch({"issue_id": "root-1", "issue_identifier": "HELL-1"}, instance_id="instance-1")
+    coordinator.apply_plan(accepted.run_id, _plan_requiring_approval(), backend_session_id="thread-1")
+    tracker = Tracker()
+    projector = ManagedRunLinearProjector(store=store, tracker=tracker, root_issue_id="root-1")
+
+    await projector.reconcile_once(accepted.run_id)
+
+    assert len(tracker.comments) == 1
+    assert "structured_reason: plan_approval_required" in tracker.comments[0][1]
+    assert "work_item_id: parent" in tracker.comments[0][1]
+    run = store.get_run(accepted.run_id) or {}
+    wait = run["payload"]["human_action_instructions"]["managed-run:plan:plan_approval_required"]
+    assert wait["linear_issue_id"] == "root-1"
+    assert run["state"] == "awaiting_approval"
+
+    tracker.root_issue.update({"state": "In Progress", "state_type": "started"})
+    await projector.reconcile_once(accepted.run_id)
+
+    not_resumed = store.get_run(accepted.run_id) or {}
+    assert not_resumed["state"] == "awaiting_approval"
+    assert wait["expected_blocked_style"] is False
+
+    await projector.reconcile_once(accepted.run_id)
+    observed = store.get_run(accepted.run_id) or {}
+    observed_wait = observed["payload"]["human_action_instructions"]["managed-run:plan:plan_approval_required"]
+    assert observed_wait["expected_blocked_style"] is True
+
+    tracker.root_issue.update({"state": "In Progress", "state_type": "started"})
+    await projector.reconcile_once(accepted.run_id)
+
+    resumed = store.get_run(accepted.run_id) or {}
+    assert resumed["state"] == "ready"
+    assert resumed["latest_reason"].startswith("plan_approved:linear_state_flip:")
+    assert len(tracker.comments) == 1
+
+
+async def test_managed_run_generic_blocked_work_item_projects_instruction_and_reopens_only_on_state_flip(tmp_path) -> None:
+    store = ConductorManagedRunStore(tmp_path)
+    coordinator = ConductorManagedRunCoordinator(store=store)
+    accepted = coordinator.accept_dispatch({"issue_id": "root-1", "issue_identifier": "HELL-1"}, instance_id="instance-1")
+    coordinator.apply_plan(accepted.run_id, _plan_without_work_item_approval(), backend_session_id="thread-1")
+    store.update_run_state(
+        accepted.run_id,
+        ManagedRunState.BLOCKED,
+        active_work_item_id="wi-1",
+        reason="verification_failed:smoke",
+    )
+    store.update_work_item_state(accepted.run_id, "wi-1", WorkItemState.BLOCKED, gate_status="verification_failed:smoke")
+    tracker = Tracker()
+    projector = ManagedRunLinearProjector(store=store, tracker=tracker, root_issue_id="root-1")
+
+    await projector.reconcile_once(accepted.run_id)
+
+    assert len(tracker.comments) == 1
+    assert tracker.comments[0][0] == "child-1"
+    assert "structured_reason: verification_failed:smoke" in tracker.comments[0][1]
+    assert "required_action: correct the blocked work item, then flip this issue out of the blocked state" in tracker.comments[0][1]
+    waiting = store.list_work_items(accepted.run_id)[0]
+    assert waiting["state"] == WorkItemState.BLOCKED.value
+
+    await projector.reconcile_once(accepted.run_id)
+    tracker.children[0].update({"state": "In Progress", "state_type": "started"})
+    await projector.reconcile_once(accepted.run_id)
+
+    reopened = store.list_work_items(accepted.run_id)[0]
+    run = store.get_run(accepted.run_id) or {}
+    assert reopened["state"] == WorkItemState.TODO.value
+    assert reopened["gate_status"].startswith("operator_reopened:linear_state_flip:")
+    assert run["state"] == "ready"
+    assert run["latest_reason"].startswith("operator_reopened:linear_state_flip:")
+
+
+async def test_managed_run_generic_parent_block_retries_only_after_root_state_flip(tmp_path) -> None:
+    store = ConductorManagedRunStore(tmp_path)
+    coordinator = ConductorManagedRunCoordinator(store=store)
+    accepted = coordinator.accept_dispatch({"issue_id": "root-1", "issue_identifier": "HELL-1"}, instance_id="instance-1")
+    store.update_run_state(
+        accepted.run_id,
+        ManagedRunState.BLOCKED,
+        reason="plan_validation_retries_exhausted:missing_green_commands",
+    )
+    tracker = Tracker()
+    projector = ManagedRunLinearProjector(store=store, tracker=tracker, root_issue_id="root-1")
+
+    await projector.reconcile_once(accepted.run_id)
+
+    assert len(tracker.comments) == 1
+    assert tracker.comments[0][0] == "root-1"
+    assert "structured_reason: plan_validation_retries_exhausted:missing_green_commands" in tracker.comments[0][1]
+
+    await projector.reconcile_once(accepted.run_id)
+    tracker.root_issue.update({"state": "In Progress", "state_type": "started"})
+    await projector.reconcile_once(accepted.run_id)
+
+    reopened = store.get_run(accepted.run_id) or {}
+    assert reopened["state"] == "planning"
+    assert reopened["latest_reason"].startswith("operator_reopened:linear_state_flip:")
+
+
+async def test_plan_revision_state_flip_stays_blocked_and_logs_required_resolution(tmp_path, caplog) -> None:
+    store = ConductorManagedRunStore(tmp_path)
+    coordinator = ConductorManagedRunCoordinator(store=store)
+    accepted = coordinator.accept_dispatch({"issue_id": "root-1", "issue_identifier": "HELL-1"}, instance_id="instance-1")
+    coordinator.apply_plan(accepted.run_id, _plan_without_work_item_approval(), backend_session_id="thread-1")
+    coordinator.start_work_item(accepted.run_id, "wi-1")
+    coordinator.submit_work_item_result(
+        accepted.run_id,
+        WorkItemResult(
+            work_item_id="wi-1",
+            status_claimed=WorkItemResultStatus.PLAN_REVISION_REQUESTED,
+            changed_files=[],
+            undeclared_files=[],
+            tests={},
+            acceptance_results=[],
+            blocked_reason=None,
+            plan_revision={"reason": "need a new work item"},
+            notes="request revision",
+        ),
+    )
+    tracker = Tracker()
+    projector = ManagedRunLinearProjector(store=store, tracker=tracker, root_issue_id="root-1")
+
+    await projector.reconcile_once(accepted.run_id)
+    await projector.reconcile_once(accepted.run_id)
+    tracker.children[0].update({"state": "In Progress", "state_type": "started"})
+    with caplog.at_level(logging.WARNING):
+        await projector.reconcile_once(accepted.run_id)
+
+    item = store.list_work_items(accepted.run_id)[0]
+    run = store.get_run(accepted.run_id) or {}
+    wait = run["payload"]["human_action_instructions"]["managed-run:wi-1:plan_revision_requested"]
+    assert item["state"] == WorkItemState.BLOCKED.value
+    assert run["state"] == ManagedRunState.BLOCKED.value
+    assert wait["last_state_flip"]["reason"] == "plan_revision_requires_approved_plan"
+    assert "event=managed_run_human_action_state_flip_ignored" in caplog.text
+    assert "run_id=" + accepted.run_id in caplog.text
+    assert "error_code=plan_revision_requires_approved_plan" in caplog.text
+
+
+def _plan_requiring_approval() -> ManagedRunPlan:
+    return ManagedRunPlan.from_dict({**_approval_plan().to_dict(), "approval_required": True})
+
+
+def _plan_without_work_item_approval() -> ManagedRunPlan:
+    plan = _approval_plan().to_dict()
+    item = {**plan["work_items"][0], "needs_human_approval": False}
+    return ManagedRunPlan.from_dict({**plan, "work_items": [item]})
 
 
 def _approval_plan() -> ManagedRunPlan:

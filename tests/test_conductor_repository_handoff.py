@@ -268,6 +268,36 @@ async def test_conductor_linear_proxy_updates_comment_by_id() -> None:
     assert request["json"]["variables"] == {"commentId": "comment-1", "body": "updated"}
 
 
+async def test_conductor_linear_proxy_fetches_root_issue_state_for_human_action_ingestion() -> None:
+    transport = RecordingTransport(
+        [
+            {
+                "data": {
+                    "issue": {
+                        "id": "issue-1",
+                        "identifier": "ENG-1",
+                        "title": "Approve plan",
+                        "description": "Managed Run",
+                        "state": {"name": "In Progress", "type": "started"},
+                        "parent": None,
+                        "labels": {"nodes": []},
+                    }
+                }
+            }
+        ]
+    )
+    proxy = RepositoryHandoffLinearProxy(endpoint="https://linear.test/graphql", api_key="token", transport=transport)  # type: ignore[arg-type]
+
+    issue = await proxy.fetch_issue("issue-1")
+
+    assert issue["id"] == "issue-1"
+    assert issue["identifier"] == "ENG-1"
+    assert issue["state"] == "In Progress"
+    assert issue["state_type"] == "started"
+    assert transport.requests[0]["json"]["variables"] == {"issueId": "issue-1"}
+    assert "state { name type }" in transport.requests[0]["json"]["query"]
+
+
 async def test_transition_issue_by_state_target_falls_back_to_state_type() -> None:
     # Team has no "In Progress" state; resolver must fall back to the first
     # started-type state ("Doing") since none of the candidate names match.

@@ -22,8 +22,12 @@ from .conductor_managed_run_projection_helpers import (
     rubric_results,
     summary_text,
 )
+from .conductor_managed_run_coordinator import ConductorManagedRunCoordinator
+from .conductor_managed_run_human_action_projection import (
+    ingest_linear_human_action_state_flips,
+    project_human_action_instructions,
+)
 from .conductor_managed_run_store import ConductorManagedRunStore
-from .conductor_managed_run_human_action import human_action_instruction_body, human_action_wait_id
 
 
 WORK_ITEM_LABEL = "symphony:type/work-item"
@@ -48,12 +52,24 @@ class ManagedRunLinearProjector:
         if run is None:
             return 0
         projected = 0
-        projected += await self._project_parent_summary(run_id, run)
-        projected += await self._project_attempt_comments(run_id, run, "", self.root_issue_id)
         existing = await self._existing_child_issues()
         existing_by_work_item = self._existing_by_work_item(run_id, existing)
         issue_by_work_item = dict(existing_by_work_item)
         work_items = self.store.list_work_items(run_id)
+        root_issue = await self._existing_root_issue()
+        projected += await ingest_linear_human_action_state_flips(
+            store=self.store,
+            coordinator=ConductorManagedRunCoordinator(store=self.store),
+            run_id=run_id,
+            root_issue_id=self.root_issue_id,
+            root_issue=root_issue,
+            work_items=work_items,
+            issues_by_work_item=issue_by_work_item,
+        )
+        run = self.store.get_run(run_id) or run
+        work_items = self.store.list_work_items(run_id)
+        projected += await self._project_parent_summary(run_id, run)
+        projected += await self._project_attempt_comments(run_id, run, "", self.root_issue_id)
         for item in work_items:
             work_item_id = str(item["work_item_id"])
             issue = issue_by_work_item.get(work_item_id)
@@ -84,9 +100,17 @@ class ManagedRunLinearProjector:
                 linear_issue_id=issue_id,
                 metadata=self._projection_metadata(run_id, run, item, issue),
             )
-            projected += await self._project_human_action_instruction(run_id, item, issue_id)
             projected += await self._project_attempt_comments(run_id, run, work_item_id, issue_id)
         projected += await self._project_dependency_blocks(work_items, issue_by_work_item)
+        projected += await project_human_action_instructions(
+            store=self.store,
+            tracker=self.tracker,
+            run_id=run_id,
+            root_issue_id=self.root_issue_id,
+            run=run,
+            work_items=work_items,
+            issues_by_work_item=issue_by_work_item,
+        )
         if run.get("state") == ManagedRunState.VERIFIED.value:
             report = self._current_report(run_id, run)
             self.store.merge_run_payload(run_id, {"final_completion_report": report.to_dict()})
@@ -148,6 +172,13 @@ class ManagedRunLinearProjector:
             return []
         loaded = await fetch(self.root_issue_id, label_name=None)
         return [dict(item) for item in loaded if isinstance(item, dict)]
+
+    async def _existing_root_issue(self) -> dict[str, Any]:
+        fetch = getattr(self.tracker, "fetch_issue", None)
+        if not callable(fetch):
+            return {}
+        loaded = await fetch(self.root_issue_id)
+        return dict(loaded) if isinstance(loaded, dict) else {}
 
     def _existing_by_work_item(self, run_id: str, existing: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
         by_issue_id = {str(issue.get("id") or ""): issue for issue in existing}
@@ -228,29 +259,6 @@ class ManagedRunLinearProjector:
         if projected:
             self.store.merge_run_payload(run_id, {"attempt_comment_projections": mappings})
         return projected
-
-    async def _project_human_action_instruction(self, run_id: str, item: dict[str, Any], issue_id: str) -> int:
-        if item.get("state") != "blocked" or item.get("gate_status") != "human_approval_required":
-            return 0
-        comment_issue = getattr(self.tracker, "comment_issue", None)
-        update_comment = getattr(self.tracker, "update_issue_comment", None)
-        if not callable(comment_issue):
-            return 0
-        wait_id = human_action_wait_id(str(item["work_item_id"]), str(item.get("gate_status") or ""))
-        body = human_action_instruction_body(run_id=run_id, work_item_id=str(item["work_item_id"]), reason=str(item.get("gate_status") or ""))
-        run = self.store.get_run(run_id) or {}
-        payload = run.get("payload") if isinstance(run.get("payload"), dict) else {}
-        waits = payload.get("human_action_instructions") if isinstance(payload.get("human_action_instructions"), dict) else {}
-        mappings = {str(key): dict(value) for key, value in waits.items() if isinstance(value, dict)}
-        current = mappings.get(wait_id) or {}
-        comment_id = str(current.get("linear_comment_id") or "")
-        result = await update_comment(comment_id, body) if comment_id and callable(update_comment) else await comment_issue(issue_id, body)
-        saved_comment_id = str(result.get("comment_id") or comment_id)
-        if not saved_comment_id:
-            raise RuntimeError(f"managed_run_human_action_comment_missing_id run_id={run_id} wait_id={wait_id}")
-        mappings[wait_id] = {"wait_id": wait_id, "work_item_id": str(item["work_item_id"]), "linear_issue_id": issue_id, "linear_comment_id": saved_comment_id}
-        self.store.merge_run_payload(run_id, {"human_action_instructions": mappings})
-        return 1
 
     async def _project_dependency_blocks(self, work_items: list[dict[str, Any]], issue_by_work_item: dict[str, dict[str, Any]]) -> int:
         ensure_relation = getattr(self.tracker, "ensure_issue_relation", None)
