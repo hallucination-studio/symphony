@@ -54,7 +54,17 @@ async def test_reconciliation_uses_active_installation_token_and_stable_project_
     def transport(request: httpx.Request) -> httpx.Response:
         seen["authorization"] = request.headers.get("Authorization")
         seen["variables"] = json.loads(request.content)["variables"]
-        return httpx.Response(200, json={"data": {"issues": {"nodes": [issue]}}})
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    "issues": {
+                        "nodes": [issue],
+                        "pageInfo": {"hasNextPage": False, "endCursor": None},
+                    }
+                }
+            },
+        )
 
     app = make_app()
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
@@ -71,7 +81,9 @@ async def test_reconciliation_uses_active_installation_token_and_stable_project_
     assert seen["variables"]["delegateId"] == "agent-alpha"
     assert lease.json()["dispatch"]["issue_id"] == "issue-1"
     state = await app.state.podium.store.get_linear_reconciliation_state(binding_id)
-    assert state["cursor"] == issue["updatedAt"]
+    assert state["baseline_complete"] is True
+    assert state["checkpoint_updated_at"]
+    assert state["checkpoint_issue_id"] == ""
     assert state["last_error"] == ""
 
 
@@ -85,19 +97,28 @@ async def test_reconciliation_failure_preserves_cursor_and_is_visible() -> None:
         _user_id, _enrolled, binding_id = await _ready(client, app)
         await app.state.podium.store.save_linear_reconciliation_state(
             binding_id,
-            {"binding_id": binding_id, "cursor": "2026-07-10T09:00:00Z"},
+            {
+                "binding_id": binding_id,
+                "baseline_complete": True,
+                "checkpoint_updated_at": "2026-07-10T09:00:00Z",
+                "checkpoint_issue_id": "issue-0",
+            },
         )
         result = await LinearReconciler(state=app.state.podium, transport=transport).reconcile_once()
         installations = await client.get("/api/v1/linear/installations")
 
     assert result["errors"] == 1
     state = await app.state.podium.store.get_linear_reconciliation_state(binding_id)
-    assert state["cursor"] == "2026-07-10T09:00:00Z"
-    assert "linear_reconciliation_failed" in state["last_error"]
+    assert state["checkpoint_updated_at"] == "2026-07-10T09:00:00Z"
+    assert state["checkpoint_issue_id"] == "issue-0"
+    assert state["last_error_code"] == "linear_reconciliation_unavailable"
+    assert state["last_error"] == "Linear reconciliation is unavailable"
     active = installations.json()["active"]
     assert active["reconciliation_state"] == "degraded"
     assert active["reconciliation_retry_count"] == 1
-    assert "linear_reconciliation_failed" in active["reconciliation_error"]
+    assert active["reconciliation_error_code"] == "linear_reconciliation_unavailable"
+    assert active["reconciliation_error"] == "Linear reconciliation is unavailable"
+    assert active["reconciliation_next_retry_at"]
 
 
 @pytest.mark.asyncio
@@ -113,7 +134,14 @@ async def test_reconciliation_ignores_symphony_projection_issues(title: str, des
     def transport(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
-            json={"data": {"issues": {"nodes": [_issue(title=title, description=description)]}}},
+            json={
+                "data": {
+                    "issues": {
+                        "nodes": [_issue(title=title, description=description)],
+                        "pageInfo": {"hasNextPage": False, "endCursor": None},
+                    }
+                }
+            },
         )
 
     app = make_app()

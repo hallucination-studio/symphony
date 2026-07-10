@@ -45,13 +45,12 @@ def test_config_does_not_read_removed_global_linear_actor_env(monkeypatch) -> No
     assert not hasattr(config, "linear_app_access_token")
 
 
-def test_config_defaults_linear_reconciliation_initial_lookback_to_no_backfill(monkeypatch) -> None:
-    monkeypatch.setenv("PODIUM_LINEAR_POLL_INITIAL_LOOKBACK_SECONDS", "86400")
-    monkeypatch.delenv("PODIUM_LINEAR_RECONCILIATION_INITIAL_LOOKBACK_SECONDS", raising=False)
+def test_config_has_no_linear_reconciliation_lookback(monkeypatch) -> None:
+    monkeypatch.setenv("PODIUM_LINEAR_RECONCILIATION_INITIAL_LOOKBACK_SECONDS", "86400")
 
     config = PodiumConfig.from_env()
 
-    assert config.linear_reconciliation_initial_lookback_seconds == 0
+    assert not hasattr(config, "linear_reconciliation_initial_lookback_seconds")
     assert not hasattr(config, "linear_poll_initial_lookback_seconds")
 
 

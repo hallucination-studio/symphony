@@ -244,9 +244,6 @@ def _start_linear_reconciliation(
         state=state,
         transport=linear_graphql_transport,
         page_size=int(getattr(config, "linear_reconciliation_page_size", 50) or 50),
-        initial_lookback_seconds=int(
-            getattr(config, "linear_reconciliation_initial_lookback_seconds", 0)
-        ),
     )
     return asyncio.create_task(
         run_linear_reconciliation_loop(
