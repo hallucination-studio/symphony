@@ -38,9 +38,17 @@ ENTRYPOINT_DOCS = [
     Path("docs.md"),
 ]
 
+LINEAR_INSTALLATION_ADR = Path(
+    "docs/decisions/0001-linear-installations-and-single-project-conductors.md"
+)
+
 
 def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
+
+
+def _prose(path: Path) -> str:
+    return " ".join(_read(path).split())
 
 
 def test_product_docs_are_current_focused_set() -> None:
@@ -61,6 +69,122 @@ def test_product_readme_links_to_source_of_truth_docs() -> None:
     for doc in PRODUCT_DOCS - {"README.md"}:
         assert f"./{doc}" in text or f"../{doc}" in text
     assert "../real-run-testing-guide.md" in text
+
+
+def test_linear_installation_adr_is_linked_and_source_grounded() -> None:
+    assert LINEAR_INSTALLATION_ADR.exists()
+    readme = _read(Path("docs/product/README.md"))
+    decision = _read(LINEAR_INSTALLATION_ADR)
+
+    assert f"../decisions/{LINEAR_INSTALLATION_ADR.name}" in readme
+    for source in [
+        "https://linear.app/developers/oauth-actor-authorization",
+        "https://linear.app/developers/oauth-2-0-authentication",
+        "https://linear.app/developers/agents",
+        "https://linear.app/developers/webhooks",
+    ]:
+        assert source in decision
+
+
+def test_linear_apps_share_one_callback_acceptance_lifecycle() -> None:
+    text = _prose(Path("docs/product/linear-integration.md"))
+
+    for phrase in [
+        "one default Linear OAuth application",
+        "customer-owned application",
+        "same installation record",
+        "https://<podium-host>/api/v1/linear/oauth/callback",
+        "Podium does not accept an operator-supplied callback URL",
+        "actor=app",
+        "one-time OAuth state",
+        "configuration-stale",
+        "valid access token and refresh metadata",
+        "all required scopes",
+        "viewer.app=true",
+        "supportsAgentSessions=true",
+        "real Linear organization id",
+        "workspace-specific app user id",
+        "project discovery and access",
+        "A failed candidate never replaces the active installation",
+        "prepares every bound Conductor",
+        "switches atomically",
+        "There is no global application-id/token fallback",
+    ]:
+        assert phrase in text
+
+
+def test_linear_project_scope_is_not_project_membership() -> None:
+    text = _prose(Path("docs/product/linear-integration.md"))
+
+    assert "does not mutate `ProjectUpdateInput.memberIds`" in text
+    assert "Each selected project may have at most one active Conductor" in text
+    assert "Each Conductor may bind exactly one selected project" in text
+    assert "one repository mapping" in text
+    assert "Multiple independent Conductors may run on the same host" in text
+
+
+def test_linear_intake_requires_webhook_reconciliation_deduplication() -> None:
+    text = _prose(Path("docs/product/linear-integration.md"))
+
+    for phrase in [
+        "AgentSession webhooks are the low-latency intake path",
+        "verifies the HMAC over the raw body",
+        "checks the timestamp window",
+        "Installation- and project-scoped reconciliation polling",
+        "deduplicates `Linear-Delivery`",
+        "share one durable dispatch idempotency key",
+        "can queue only once",
+    ]:
+        assert phrase in text
+
+
+def test_real_acceptance_covers_installation_and_project_binding() -> None:
+    text = _prose(Path("docs/real-run-testing-guide.md"))
+
+    for phrase in [
+        "complete OAuth as a Linear workspace admin",
+        "callback acceptance records the real organization",
+        "without changing `ProjectUpdateInput.memberIds`",
+        "duplicate project or second project binding is rejected",
+        "symphony:conductor/<Name>-<public-id>",
+        "signed AgentSession webhook queues one dispatch",
+        "suppress one webhook",
+        "without duplicating dispatch",
+        "authorize a second test app",
+        "old installation remains active",
+    ]:
+        assert phrase in text
+
+
+def test_conductor_label_and_naming_contract_is_explicit() -> None:
+    text = _prose(Path("docs/product/runtime-installation.md"))
+
+    for phrase in [
+        "immutable six-character non-secret public id",
+        "single ASCII word of at most 16 characters",
+        "historical musician surname",
+        "shortest available numeric suffix",
+        "symphony:conductor/Beethoven-k7m3p2",
+        "never routing truth",
+    ]:
+        assert phrase in text
+
+
+def test_docs_do_not_publish_removed_linear_installation_paths() -> None:
+    forbidden = [
+        "PODIUM_LINEAR_APPLICATION_ID",
+        "PODIUM_LINEAR_APP_ACCESS_TOKEN",
+        "No customer-created Linear OAuth application",
+        "multiple Performer instances",
+        "event-driven, not polling",
+        "delegate poller",
+    ]
+    docs = list(Path("docs").rglob("*.md")) + ENTRYPOINT_DOCS
+
+    for path in docs:
+        text = _read(path)
+        for phrase in forbidden:
+            assert phrase not in text, f"{path} still publishes {phrase!r}"
 
 
 def test_entrypoints_reference_new_runtime_docs() -> None:

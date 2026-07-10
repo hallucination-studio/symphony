@@ -6,9 +6,14 @@ This file captures repo-specific commands, product boundaries, coding standards,
 
 Symphony is one product, not four unrelated projects. The repository remains `symphony` because the system is the full orchestra:
 
-- `podium` is the SaaS-facing web boundary. In this refactor it is a small HTTP service for Conductor registration and health checks.
-- `conductor` is the local daemon, reporting hub, and operator API. It owns durable managed-run state, starts/stops Performer managed-run turns, and reports state/events upward to Podium.
-- `performer` is the execution worker. A Conductor may operate multiple Performer instances, and each Performer runs exactly one fenced managed-run turn from request/result JSON paths.
+- `podium` is the SaaS-facing web boundary. It owns authentication, Linear
+  installations, selected projects, Conductor enrollment/binding, dispatch,
+  runtime configuration, the Linear proxy, and operator views.
+- `conductor` is the customer-side daemon. One Conductor binds exactly one
+  Linear project and one repository, owns that project's durable managed-run
+  state, starts Performer turns, and reports state/events upward to Podium.
+- `performer` is the execution worker. Each short-lived Performer runs exactly
+  one fenced managed-run turn from request/result JSON paths.
 - `performer_api` is the shared contract package: managed-run DTOs, plan/work-item state, ops projections, runtime config, and registration DTOs.
 
 Package boundaries are runtime boundaries, not product boundaries. Keep user-facing language anchored in Symphony as the whole system, with Podium, Conductor, and Performer as roles inside that system.
@@ -267,23 +272,46 @@ changes, mock-only tests are not enough.
 
 A real run must:
 
-1. Use `.env` with Podium's Linear application id and app actor token.
-2. Start a Conductor instance first.
-3. Create a real Linear business issue after Conductor is running.
-4. Let Conductor operate Performer so Performer creates gates, dispatches Codex, verifies completion, creates evidence, and transitions states.
-5. Use real `codex app-server` when the scenario says real Codex.
-6. Record Linear tree, runtime state, ops snapshot, logs, and cleanup evidence.
-7. Archive/audit the test project before and after the scenario.
+1. Use `.env` with the default Linear application's client credentials and
+   Podium's fixed callback/webhook configuration; never inject a human or
+   deployment-global access token into the managed path.
+2. Complete the real OAuth callback and record the accepted organization,
+   workspace-specific app user, scopes, token health, and selected project.
+3. Start and bind one isolated Conductor to that project and the real fixture
+   repository before creating the business issue.
+4. Create a real Linear business issue after the project binding is ready.
+5. Let webhook-first intake with reconciliation fallback dispatch the issue to
+   Conductor, then let Conductor operate Performer through gates, Codex,
+   verification, evidence, and state transitions.
+6. Use real `codex app-server` when the scenario says real Codex.
+7. Record installation, project binding, webhook/reconciliation, Linear tree,
+   runtime state, ops snapshot, logs, cleanup, and deduplication evidence.
+8. Archive/audit the test project before and after the scenario.
 
 For Podium-managed flows, the real run must additionally follow `docs/real-run-testing-guide.md#podium-web-to-linear-acceptance`:
 
-1. Start Podium with `PODIUM_LINEAR_APPLICATION_ID` and `PODIUM_LINEAR_APP_ACCESS_TOKEN` set to an `actor=app` Linear OAuth token; that token must include the agent scopes `app:assignable` and `app:mentionable`. Do not set a human/operator `LINEAR_API_KEY` or `PODIUM_LINEAR_ACCESS_TOKEN` for the managed path.
-2. Start Podium Web and verify onboarding/runtime/managed-run with Chrome MCP or an equivalent real browser.
-3. Create the Conductor enrollment token from Podium and run the generated install command locally.
-4. Verify the installed Conductor reports managed mode, Podium runtime/proxy tokens, and the Podium WebSocket URL.
-5. Create a real git fixture repo and a real Linear issue delegated to `$PODIUM_LINEAR_APPLICATION_ID`.
-6. Let Podium's delegate poller discover the issue, then let Conductor and Performer complete the work.
-7. Verify Podium `/api/v1/managed-runs`, Linear managed-run projection, Performer turn logs, fixture repo contents, and smoke tests.
+1. Start Podium with the default Linear application's client credentials,
+   Podium's fixed OAuth callback and webhook URLs, and a public HTTPS origin.
+   Do not inject a human token or deployment-global app actor access token into
+   the managed path.
+2. In a real browser, authorize the default or staged customer application with
+   `actor=app`; verify callback acceptance for actor, scopes, organization,
+   workspace-specific app user, AgentSession support, token metadata, and
+   project access.
+3. Select the real test project without mutating project `memberIds`.
+4. Create a named Conductor enrollment token, run the generated install command,
+   and verify the isolated runtime enrolls online but unbound.
+5. Bind that Conductor to exactly one selected project and one real fixture
+   repository; verify a second project binding and duplicate active Conductor
+   for the project are rejected.
+6. Verify the exact `symphony:conductor/<Name>-<public-id>` project label, while
+   confirming routing uses the durable project binding rather than that label.
+7. Delegate a real Linear issue to the installed workspace app user. Verify a
+   signed AgentSession webhook queues one dispatch, then prove reconciliation
+   polling recovers a missed delivery without a duplicate dispatch.
+8. Let Conductor and Performer complete the work, then verify Podium
+   `/api/v1/managed-runs`, Linear projection, turn logs, repository contents,
+   installation/binding health, and smoke tests.
 
 Focused regression files for this path include:
 
@@ -308,6 +336,8 @@ Managed runs may create the initial issue and observe state. They must not manua
 For the Linear-native managed runs:
 
 - Conductor's durable managed-run store is the source of truth.
+- One Conductor binds exactly one selected Linear project and one repository;
+  one project has at most one active Conductor.
 - One delegated Linear parent issue maps to one managed run.
 - The accepted plan creates bounded work items with file scope, dependencies,
   RED/GREEN commands, and a Definition-of-Done rubric.

@@ -14,14 +14,32 @@ product paths.
 ## Intake
 
 1. A Linear issue is delegated to the Symphony custom agent.
-2. Podium accepts the delegated work through its Linear integration.
-3. Podium matches workspace, project scope, custom-agent delegate, routing rule,
-   runtime group, active state, blockers, and managed-run capacity.
-4. Podium queues a dispatch.
-5. Conductor leases the dispatch over outbound runtime authentication.
-6. Conductor commits or resumes one durable managed run for the delegated issue.
+2. A signed AgentSession webhook delivers the work to Podium immediately.
+3. Installation- and project-scoped reconciliation polling covers missed or
+   delayed webhook delivery using the same durable event identity.
+4. Podium matches the active installation, Linear organization, stable project
+   id, app user, selected scope, single-project Conductor binding, active state,
+   blockers, and Managed Runs capacity.
+5. Podium idempotently queues one dispatch.
+6. The project's Conductor leases the dispatch over outbound runtime
+   authentication.
+7. Conductor commits or resumes one durable managed run for the delegated issue.
 
-Dispatch routing never uses labels or human assignee as scheduler truth.
+Webhook and reconciliation intake cannot create duplicate dispatches. Dispatch
+routing never uses project labels or human assignee as scheduler truth.
+
+## Project Runtime Boundary
+
+One Conductor binds exactly one selected Linear project and one repository. A
+project has at most one active Conductor. Multiple isolated Conductors may run
+on the same host for different projects. Podium creates and owns the project
+binding; the Conductor durably acknowledges the versioned project config before
+dispatch is enabled.
+
+Application replacement drains Managed Runs and dispatches, prepares every
+bound Conductor with the candidate app user identity, then atomically switches
+the workspace installation. Active work never silently changes application
+identity mid-run.
 
 ## Managed-Run Turns
 

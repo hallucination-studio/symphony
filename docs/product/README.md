@@ -30,6 +30,9 @@ not historical plans, RFC trackers, or implementation scorecards.
   enrollment/update safety.
 - [Real Run Testing Guide](../real-run-testing-guide.md) owns the managed
   acceptance procedure and required evidence.
+- [ADR-0001](../decisions/0001-linear-installations-and-single-project-conductors.md)
+  records why Linear installations are unified and Conductors are
+  single-project runtimes.
 
 ## Doc Rules
 

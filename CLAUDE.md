@@ -42,8 +42,8 @@ Symphony is **one product** split into four Python packages under `packages/`, e
 
 - **`performer-api`** — shared contracts: managed-run DTOs, plan/work-item state, runtime config, ops projections/models, and registration DTOs. The other three depend on it; it depends on none of them.
 - **`performer`** — the execution worker. It only runs fenced managed-run turns from JSON request/result paths under isolated per-role runtime profiles.
-- **`conductor`** — customer-side local daemon. Manages multiple Performer instances (`.conductor/instances/<id>/`), owns durable managed-run state, leases Podium dispatches, starts/stops Performer managed-run turns, and connects outbound to Podium as an enrolled runtime (`conductor_service.py`, `conductor_runtime.py`, `conductor_api.py`, `conductor_managed_run_store.py`).
-- **`podium`** — SaaS control plane + BFF/static host. Owns auth, Linear OAuth/app state, runtime enrollment, dispatch queueing, webhooks, and the Linear proxy. `server.py` is a thin asyncio orchestrator over `auth_service.py`, `linear_service.py`, `runtime_service.py`, `onboarding_service.py`, and `store.py`.
+- **`conductor`** — customer-side local daemon. One Conductor binds exactly one Linear project and one repository, owns that project's durable managed-run state, leases Podium dispatches, starts Performer turns, and connects outbound to Podium as an enrolled runtime. Multiple isolated Conductors may run on one host for different projects.
+- **`podium`** — SaaS control plane + BFF/static host. Owns auth, default and customer-owned Linear application configuration, versioned OAuth installations, selected projects, one-to-one Conductor bindings, dispatch queueing, signed webhooks, reconciliation polling, and the Linear proxy.
 
 ### Import-boundary invariant (enforced by tests)
 
@@ -57,7 +57,7 @@ Conductor is the only local process manager for Performer, and it launches it vi
 
 ### Managed dispatch flow
 
-The runtime path is event-driven, not polling: a Linear issue is delegated to the Symphony custom agent → Linear sends an AgentSession webhook to Podium → Podium matches agent/project/runtime-group and queues a dispatch → Conductor leases it over outbound runtime auth → Conductor commits or resumes one durable managed run → Performer runs one fenced managed-run turn. Dispatch routing is by custom-agent delegate, project scope, active state, blockers, work-item dependencies, and runtime capacity — never labels or human assignee.
+The runtime path is webhook-first with durable reconciliation: a Linear issue is delegated to the installed Symphony app user → a signed AgentSession webhook reaches Podium immediately, while installation/project-scoped polling covers missed deliveries with the same idempotency key → Podium matches the active installation and unique project/Conductor binding → that Conductor leases the dispatch → Conductor commits or resumes one durable managed run → Performer runs one fenced managed-run turn. Dispatch routing is by organization, project binding, app user, active state, blockers, work-item dependencies, and runtime capacity, never project labels or human assignee.
 
 ### Podium web frontend
 

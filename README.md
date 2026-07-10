@@ -7,8 +7,9 @@ Symphony is one orchestration system for running coding agents as an
   state, runtime enrollment, dispatch queueing, runtime config, Podium Web, and
   the Linear proxy.
 - **Conductor** is the customer-side daemon. It connects outbound to Podium,
-  leases dispatches, owns durable managed-run state, starts Performers, and reports
-  local state.
+  binds one Linear project and repository, leases dispatches, owns durable
+  Managed Runs state, starts Performer turns, and reports local state. Multiple
+  isolated Conductors may run on the same host for different projects.
 - **Performer** is the execution worker. It runs one fenced managed-run turn from
   Conductor-owned request/result JSON paths.
 - **performer-api** contains the shared contracts that let those roles exchange
@@ -39,17 +40,20 @@ of truth is split by concern:
 Managed execution is a Conductor-owned Linear-native managed run:
 
 1. A Linear issue is delegated to the Symphony custom agent.
-2. Podium receives or discovers the delegated issue and applies routing.
-3. Podium queues a dispatch for an eligible runtime group.
-4. Conductor leases the dispatch over outbound runtime auth.
+2. Podium receives a signed AgentSession webhook; project-scoped reconciliation
+   polling covers missed deliveries with the same idempotency key.
+3. Podium routes by the active installation and the project's unique Conductor
+   binding, then queues one dispatch.
+4. The project Conductor leases the dispatch over outbound runtime auth.
 5. Conductor commits or resumes one durable managed run for the parent issue.
-6. Performer runs plan or work-item turns under the managed-run contract.
+6. Performer runs plan or work-item turns under the Managed Runs contract.
 7. Conductor verifies work-item results, records checkpoints, and
    projects sanitized state to Podium and Linear.
 
-Dispatch routing is based on custom-agent delegate, project scope, active state,
-blockers, work-item dependencies, and runtime capacity. Labels and human
-assignee are not managed-run truth.
+Dispatch routing is based on Linear organization, stable project id, installed
+app user, selected scope, single-project Conductor binding, active state,
+blockers, work-item dependencies, and runtime capacity. Project labels and
+human assignee are not Managed Runs truth.
 
 ## Install
 

@@ -20,6 +20,13 @@ talk to Linear:
 set -a && source .env && set +a
 ```
 
+The default Linear application uses `LINEAR_CLIENT_ID`,
+`LINEAR_CLIENT_SECRET`, `LINEAR_REDIRECT_URI`, and
+`LINEAR_WEBHOOK_SECRET`. `PODIUM_BASE_URL` must be a public HTTPS origin for
+real webhook acceptance. Do not inject a human Linear token or a deployment-
+global app actor access token into the managed path. Podium must obtain and
+store each workspace installation token through the real OAuth callback.
+
 Use the canonical `PYTHONPATH` when invoking focused tools:
 
 ```bash
@@ -70,33 +77,55 @@ A complete managed report includes:
 - task output manifests and integration/conflict state;
 - Linear projection evidence, including issue topology, `blocks`, comments,
   `need_human` states, supersede links, and runtime wait child issues when used;
+- Linear installation evidence: application source/config version, callback
+  acceptance, organization id, app user id, scopes, token health, and cutover
+  state, without raw secrets;
+- selected project and single-project Conductor binding evidence, including the
+  repository mapping and `symphony:conductor/<Name>-<public-id>` label;
+- signed webhook delivery, delivery-id dedupe, reconciliation cursor, degraded
+  polling health, and proof that webhook plus polling queued one dispatch;
 - failed checks with `error_code`, `sanitized_reason`, `action_required`,
   retryability, and next action.
 
 No report with failures but without linked runtime logs is complete evidence.
 Linear 401 or 403 must fail on the first request as a non-retryable
 `credential_or_config_failure`, preserve its `error_code` and `next_action` in
-the report, and direct the operator to refresh the Linear app access token.
+the report, and direct the operator to reauthorize or repair the active Linear
+installation. A failed candidate must not replace a working active
+installation.
 
-## Managed Acceptance Flow
+## Podium Web To Linear Acceptance
 
 1. Start Podium with a clean test database and logs redirected to the evidence
-   directory.
-2. Connect or validate Linear OAuth/app state in Podium.
-3. Create a runtime group, routing rule, scheduler policy, and per-mode runtime
-   profiles.
-4. Install or start Conductor with a staged runtime config and fixed data root.
-5. Confirm Conductor is enrolled, online, and using the expected policy version.
-6. Delegate a Linear issue to the Symphony custom agent.
-7. Confirm Podium queues one dispatch for the intended runtime group.
-8. Confirm Conductor leases the dispatch and commits or resumes one graph.
-9. Observe `plan -> execute -> verify` attempts, request/result files, and
+   directory and a public HTTPS callback/webhook origin.
+2. In a real browser, choose the default or test customer-owned application and
+   complete OAuth as a Linear workspace admin.
+3. Verify callback acceptance records the real organization, workspace-specific
+   app user, actor, required scopes, project discovery, and sanitized health.
+4. Select the test project and verify Podium reads and writes it without
+   changing `ProjectUpdateInput.memberIds`.
+5. Generate a named Conductor enrollment command, run it, and verify the
+   isolated service is online but initially unbound.
+6. Bind that Conductor to exactly one selected project and one staged test
+   repository; verify a duplicate project or second project binding is rejected.
+7. Verify Conductor config acknowledgement and the exact
+   `symphony:conductor/<Name>-<public-id>` project label.
+8. Delegate a real Linear issue to the installed workspace app user.
+9. Verify a signed AgentSession webhook queues one dispatch for the bound
+   Conductor. Then suppress one webhook and prove reconciliation polling queues
+   the missed issue once without duplicating dispatch.
+10. Confirm Conductor leases the dispatch and commits or resumes one managed run.
+11. Observe `plan -> work_item -> verify` attempts, request/result files, and
    correlated logs.
-10. Confirm downstream nodes dispatch only after blockers verify-pass at score
+12. Confirm downstream work items dispatch only after blockers verify-pass at score
     `>= 3`.
-11. Confirm Podium and Linear projection show attempts, waits, failures,
+13. Confirm Podium and Linear projection show attempts, waits, failures,
     manifests, and final aggregate state.
-12. Archive all evidence and clean up test issues or labels.
+14. For application replacement, authorize a second test app, prove the old
+    installation remains active until drain/config acknowledgement, then verify
+    atomic cutover or a visible blocker.
+15. Archive all evidence and remove test issues, managed project labels,
+    temporary Conductors, repositories, and installation artifacts.
 
 ## Human And Runtime Waits
 
@@ -113,7 +142,16 @@ diagnostic comments must not look like business instructions.
 
 Stop and diagnose immediately when evidence shows:
 
-- Podium accepted a webhook or delegate poll but did not queue a dispatch;
+- Podium accepted a webhook or reconciliation result but did not queue a
+  dispatch;
+- webhook and reconciliation intake queued duplicate dispatches;
+- callback acceptance marked an installation ready despite invalid actor,
+  missing scope, unknown organization, or inaccessible selected project;
+- a failed candidate replaced the active Linear installation;
+- a Conductor reported zero or multiple project bindings;
+- two active Conductors claimed the same Linear project;
+- project binding rewrote project members or used the managed label as routing
+  truth;
 - Conductor leased a dispatch but did not create graph state;
 - a non-terminal node has no live driver;
 - no heartbeat, backend progress event, result collection event, or durable
