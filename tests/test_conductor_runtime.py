@@ -10,7 +10,7 @@ from typing import Any
 import pytest
 
 from conductor.conductor_models import InstanceRecord
-from conductor.conductor_runtime import ConductorRuntimeManager, LogQuery, RuntimeHandle
+from conductor.conductor_runtime import ConductorRuntimeManager, LogQuery, RuntimeHandle, _CompletedLogTask
 
 
 class FakeStream:
@@ -198,6 +198,24 @@ async def test_parallel_attempts_for_same_instance_start_distinct_performer_proc
     assert stopped.process_status == "stopped"
     assert all(process.returncode == 0 for process in started_processes)
     assert manager._handles == {}
+
+
+@pytest.mark.asyncio
+async def test_stop_attempts_stops_only_named_parallel_attempts(tmp_path: Path) -> None:
+    manager = ConductorRuntimeManager(command="performer")
+    instance = make_instance(tmp_path).with_updates(process_status="running", pid=5002)
+    first = PendingProcess(5001)
+    second = PendingProcess(5002)
+    manager._handles[(instance.id, "exec-1")] = RuntimeHandle(process=first, log_task=_CompletedLogTask(), process_status="running", attempt_id="exec-1")
+    manager._handles[(instance.id, "exec-2")] = RuntimeHandle(process=second, log_task=_CompletedLogTask(), process_status="running", attempt_id="exec-2")
+
+    stopped = await manager.stop_attempts(instance, ["exec-1"])
+
+    assert first.returncode == 0
+    assert second.returncode is None
+    assert set(manager._handles) == {("inst-1", "exec-2")}
+    assert stopped.process_status == "running"
+    assert stopped.pid == 5002
 
 
 @pytest.mark.asyncio

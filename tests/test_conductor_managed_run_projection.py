@@ -118,13 +118,14 @@ async def test_managed_run_projector_creates_child_issue_and_parent_summary(tmp_
 
     projected = await ManagedRunLinearProjector(store=store, tracker=tracker, root_issue_id="root-1").reconcile_once(accepted.run_id)
 
-    assert projected == 3
+    assert projected == 4
     assert tracker.children[0]["parent_issue_id"] == "root-1"
     assert "Objective: Project one work item" in str(tracker.children[0]["description"])
     assert "Managed Run Work Item: wi-1" in str(tracker.children[0]["description"])
     assert "Managed Run State:" in str(tracker.children[0]["description"])
     assert "ManagedRun State:" not in str(tracker.children[0]["description"])
     assert ("child-1", ["Todo"], "unstarted") in tracker.transitions
+    assert ("root-1", ["In Progress"], "started") in tracker.transitions
     assert any(issue_id == "root-1" and marker == "SYMPHONY RUN SUMMARY" for issue_id, marker, _ in tracker.description_blocks)
     assert store.list_linear_projections(accepted.run_id)[0]["linear_issue_id"] == "child-1"
 
@@ -328,6 +329,20 @@ async def test_managed_run_projector_finalizes_verified_run_after_parent_summary
         marker == "SYMPHONY RUN SUMMARY" and "| correctness | passed |" in block
         for _, marker, block in tracker.description_blocks
     )
+    assert ("root-1", ["Done"], "completed") in tracker.transitions
+
+
+async def test_managed_run_projector_projects_blocked_parent_state(tmp_path) -> None:
+    store = ConductorManagedRunStore(tmp_path)
+    coordinator = ConductorManagedRunCoordinator(store=store)
+    accepted = coordinator.accept_dispatch({"issue_id": "root-1", "issue_identifier": "HELL-1"}, instance_id="instance-1")
+    coordinator.apply_plan(accepted.run_id, _plan(), backend_session_id="thread-1")
+    store.update_run_state(accepted.run_id, ManagedRunState.BLOCKED, reason="gate_failed")
+    tracker = Tracker()
+
+    await ManagedRunLinearProjector(store=store, tracker=tracker, root_issue_id="root-1").reconcile_once(accepted.run_id)
+
+    assert ("root-1", ["Blocked", "Needs More"], "unstarted") in tracker.transitions
 
 
 async def test_managed_run_projector_projects_attempt_comment_by_durable_comment_id(tmp_path) -> None:
@@ -405,6 +420,28 @@ async def test_managed_run_projector_projects_plan_execute_and_verify_attempt_co
     assert len(tracker.updated_comments) == 3
     mappings = (store.get_run(accepted.run_id) or {})["payload"]["attempt_comment_projections"]
     assert sorted(mappings) == ["attempt-execute", "attempt-plan", "attempt-verify"]
+
+
+async def test_managed_run_projector_does_not_duplicate_comment_for_terminal_attempt_left_active(tmp_path) -> None:
+    store = ConductorManagedRunStore(tmp_path)
+    coordinator = ConductorManagedRunCoordinator(store=store)
+    accepted = coordinator.accept_dispatch({"issue_id": "root-1", "issue_identifier": "HELL-1"}, instance_id="instance-1")
+    coordinator.apply_plan(accepted.run_id, _plan(), backend_session_id="thread-1")
+    duplicate = {"attempt_id": "attempt-execute", "kind": "work_item", "mode": "execute", "work_item_id": "wi-1"}
+    store.merge_run_payload(
+        accepted.run_id,
+        {
+            "completed_attempts": [{**duplicate, "state": "succeeded"}],
+            "active_attempts": [{**duplicate, "state": "running"}],
+        },
+    )
+    tracker = Tracker()
+    projector = ManagedRunLinearProjector(store=store, tracker=tracker, root_issue_id="root-1")
+
+    await projector.reconcile_once(accepted.run_id)
+
+    assert len(tracker.comments) == 1
+    assert "attempt_state: succeeded" in tracker.comments[0][1]
 
 
 async def test_managed_run_projector_projects_approved_plan_revision_shape(tmp_path) -> None:

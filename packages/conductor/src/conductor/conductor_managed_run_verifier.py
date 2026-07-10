@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from performer_api.managed_runs import WorkItem, WorkItemResult
+from performer_api.managed_runs import GateSnapshot, GateStepSource, WorkItemResult
 
 
 @dataclass(frozen=True)
@@ -15,108 +15,61 @@ class LocalVerifierOutcome:
     passed: bool
     gate_status: str
     evidence: dict[str, Any] = field(default_factory=dict)
+    score: int = 0
 
 
 def run_local_verifier(
-    work_item: WorkItem,
+    gate_snapshot: GateSnapshot,
     result: WorkItemResult,
     *,
     source_workspace: Path,
     state_root: Path,
     verify_attempt_id: str,
+    execute_commit_sha: str,
+    artifact_hashes: list[dict[str, Any]],
 ) -> LocalVerifierOutcome:
-    workspace_result = _detached_worktree(source_workspace, state_root, verify_attempt_id)
+    workspace_result = _detached_worktree(source_workspace, state_root, verify_attempt_id, execute_commit_sha)
     if not workspace_result.passed:
         return workspace_result
-    workspace = Path(str(workspace_result.evidence["workspace_path"]))
-    materialize_error = _materialize_declared_changes(result, source_workspace, workspace)
-    if materialize_error:
-        return LocalVerifierOutcome(False, materialize_error, workspace_result.evidence)
-    baseline_error = _commit_verification_baseline(workspace)
-    if baseline_error:
-        return LocalVerifierOutcome(False, baseline_error, workspace_result.evidence)
-    hash_error = _artifact_hash_error(result, workspace)
+    evidence = {**workspace_result.evidence, "gate_snapshot_hash": gate_snapshot.content_hash}
+    gate_errors = gate_snapshot.validation_errors()
+    if gate_snapshot.work_item_id != result.work_item_id:
+        gate_errors.append("work_item_id_mismatch")
+    if gate_errors:
+        return LocalVerifierOutcome(False, f"gate_snapshot_invalid:{','.join(gate_errors)}", evidence)
+    workspace = Path(str(evidence["workspace_path"]))
+    hash_error = _artifact_hash_error(artifact_hashes, workspace)
     if hash_error:
-        return LocalVerifierOutcome(False, hash_error, workspace_result.evidence)
-    for command in work_item.verification.green_commands:
-        if command not in result.tests.get("green_commands_run", []):
-            return LocalVerifierOutcome(False, f"verification missing:{command}", workspace_result.evidence)
-        failure = _run_command(command, workspace)
+        return LocalVerifierOutcome(False, hash_error, evidence)
+    advisory_failures: list[str] = []
+    for step in gate_snapshot.verification_procedure:
+        failure = _run_command(step.command, workspace)
         if failure:
-            return LocalVerifierOutcome(False, failure, workspace_result.evidence)
+            if step.source is GateStepSource.PLANNER_INFERRED:
+                advisory_failures.append(failure)
+                continue
+            return LocalVerifierOutcome(False, failure, evidence)
     mutation = _mutation_status(workspace)
     if mutation:
-        return LocalVerifierOutcome(False, f"verification_workspace_mutated:{'|'.join(mutation)}", workspace_result.evidence)
-    return LocalVerifierOutcome(True, "verification passed", workspace_result.evidence)
+        return LocalVerifierOutcome(False, f"verification_workspace_mutated:{'|'.join(mutation)}", evidence)
+    if advisory_failures:
+        evidence["advisory_failures"] = advisory_failures
+    return LocalVerifierOutcome(True, "verification passed", evidence, score=3)
 
 
-def _detached_worktree(source_workspace: Path, state_root: Path, verify_attempt_id: str) -> LocalVerifierOutcome:
+def _detached_worktree(source_workspace: Path, state_root: Path, verify_attempt_id: str, execute_commit_sha: str) -> LocalVerifierOutcome:
     workspace = state_root / "local-verifier-worktrees" / _safe_id(verify_attempt_id)
     _remove_worktree(source_workspace, workspace)
-    commit = _git_text(source_workspace, "rev-parse", "HEAD")
+    commit = _git_text(source_workspace, "rev-parse", "--verify", f"{execute_commit_sha}^{{commit}}")
     if not commit:
-        return LocalVerifierOutcome(False, "verification_git_repo_required", {"workspace_path": str(workspace)})
+        return LocalVerifierOutcome(False, "verification_execute_commit_missing", {"workspace_path": str(workspace)})
     result = _git(source_workspace, "worktree", "add", "--detach", str(workspace), commit, check=False)
     if result.returncode != 0:
         return LocalVerifierOutcome(False, f"verification_worktree_create_failed:{_tail(result.stderr)}", {"workspace_path": str(workspace)})
     return LocalVerifierOutcome(True, "workspace ready", {"workspace_path": str(workspace), "commit_sha": commit})
 
 
-def _materialize_declared_changes(result: WorkItemResult, source_workspace: Path, verifier_workspace: Path) -> str:
-    for changed in result.changed_files:
-        relative = _safe_relative_path(changed.path)
-        if relative is None:
-            return f"verification_declared_path_invalid:{changed.path}"
-        source = source_workspace / relative
-        target = verifier_workspace / relative
-        action = changed.action.lower()
-        if action in {"deleted", "removed", "delete", "remove"}:
-            if target.exists():
-                if target.is_dir():
-                    shutil.rmtree(target)
-                else:
-                    target.unlink()
-            continue
-        if not source.is_file():
-            return f"verification_declared_file_missing:{changed.path}"
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, target)
-    return ""
-
-
-def _commit_verification_baseline(workspace: Path) -> str:
-    if not _mutation_status(workspace):
-        return ""
-    add = _git(workspace, "add", "-A", check=False)
-    if add.returncode != 0:
-        return f"verification_baseline_add_failed:{_tail(add.stderr)}"
-    commit = subprocess.run(
-        [
-            "git",
-            "-C",
-            str(workspace),
-            "-c",
-            "user.email=verifier@example.invalid",
-            "-c",
-            "user.name=Managed Run Verifier",
-            "commit",
-            "-m",
-            "managed-run verification baseline",
-        ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        check=False,
-    )
-    if commit.returncode != 0:
-        return f"verification_baseline_commit_failed:{_tail(commit.stderr)}"
-    return ""
-
-
-def _artifact_hash_error(result: WorkItemResult, workspace: Path) -> str:
-    expected = result.tests.get("artifact_hashes") if isinstance(result.tests, dict) else []
-    if not isinstance(expected, list):
-        return ""
+def _artifact_hash_error(expected: list[dict[str, Any]], workspace: Path) -> str:
     for artifact in expected:
         if not isinstance(artifact, dict):
             continue
@@ -175,13 +128,6 @@ def _sha256(path: Path) -> str:
 
 def _safe_command(command: str) -> str:
     return str(command or "").replace("\n", " ").replace("\r", " ").strip()[:200]
-
-
-def _safe_relative_path(value: str) -> Path | None:
-    path = Path(str(value or ""))
-    if path.is_absolute() or any(part == ".." for part in path.parts):
-        return None
-    return path if str(path) not in {"", "."} else None
 
 
 def _tail(value: str) -> str:

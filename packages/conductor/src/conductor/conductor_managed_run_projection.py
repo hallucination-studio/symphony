@@ -16,6 +16,7 @@ from .conductor_managed_run_projection_helpers import (
     last_synced_comment_ids,
     linear_state_target,
     operator_wait_kind,
+    parent_linear_state_target,
     projection_health_lines,
     residual_risks,
     rubric_results,
@@ -107,7 +108,12 @@ class ManagedRunLinearProjector:
             return 0
         report = self._current_report(run_id, run)
         await update_description(self.root_issue_id, "SYMPHONY RUN SUMMARY", render_run_summary_block(report))
-        return 1
+        transition = getattr(self.tracker, "transition_issue_by_state_target", None)
+        if transition is None:
+            return 1
+        names, state_type = parent_linear_state_target(str(run.get("state") or ""))
+        await transition(self.root_issue_id, names=names, state_type=state_type)
+        return 2
 
     def _current_report(self, run_id: str, run: dict[str, Any]) -> ThreadCompletionReport:
         items = self.store.list_work_items(run_id)

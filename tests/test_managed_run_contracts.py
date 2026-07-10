@@ -123,6 +123,21 @@ def test_managed_run_plan_validator_rejects_dependency_cycles() -> None:
     assert ManagedRunPlanValidatorError.CYCLE_DETECTED in errors
 
 
+def test_managed_run_plan_validator_rejects_too_many_work_items() -> None:
+    items = [
+        _work_item(
+            id=f"wi-{index}",
+            title=f"Implement contract {index}",
+            files_likely_touched=[f"packages/performer-api/src/performer_api/contract_{index}.py"],
+        )
+        for index in range(ManagedRunPlanValidator.MAX_WORK_ITEMS + 1)
+    ]
+
+    errors = ManagedRunPlanValidator().validate(_plan(*items))
+
+    assert ManagedRunPlanValidatorError.TOO_MANY_WORK_ITEMS in errors
+
+
 def test_managed_run_plan_validator_rejects_validation_only_followup_work_item() -> None:
     create_marker = _work_item(
         id="wi-1",

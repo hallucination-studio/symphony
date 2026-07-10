@@ -115,3 +115,4 @@ class ManagedRunPlanValidatorError(StrEnum):
     MISSING_DEPENDENCY = "missing_dependency"
     INVALID_CHECKPOINT_COMMAND = "invalid_checkpoint_command"
     VALIDATION_ONLY_WORK_ITEM = "validation_only_work_item"
+    TOO_MANY_WORK_ITEMS = "too_many_work_items"

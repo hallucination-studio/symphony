@@ -52,6 +52,40 @@ class ConductorManagedRunStoreArtifactsMixin:
         payload = self._payload_for_run(run_id)
         return [dict(item) for item in payload.get("verification_inputs") or [] if isinstance(item, dict)]
 
+    def record_execution_handoff(
+        self,
+        run_id: str,
+        *,
+        work_item_id: str,
+        execute_attempt_id: str,
+        handoff: dict[str, Any],
+    ) -> dict[str, Any]:
+        payload = self._payload_for_run(run_id)
+        handoffs = [
+            dict(item)
+            for item in payload.get("execution_handoffs") or []
+            if isinstance(item, dict) and item.get("execute_attempt_id") != execute_attempt_id
+        ]
+        recorded = {
+            "work_item_id": work_item_id,
+            "execute_attempt_id": execute_attempt_id,
+            **dict(handoff),
+        }
+        handoffs.append(recorded)
+        self.merge_run_payload(run_id, {"execution_handoffs": handoffs})
+        return recorded
+
+    def get_execution_handoff(self, run_id: str, work_item_id: str) -> dict[str, Any] | None:
+        payload = self._payload_for_run(run_id)
+        for handoff in reversed(payload.get("execution_handoffs") or []):
+            if isinstance(handoff, dict) and handoff.get("work_item_id") == work_item_id:
+                return dict(handoff)
+        return None
+
+    def list_execution_handoffs(self, run_id: str) -> list[dict[str, Any]]:
+        payload = self._payload_for_run(run_id)
+        return [dict(item) for item in payload.get("execution_handoffs") or [] if isinstance(item, dict)]
+
     def publish_task_output_manifest(self, run_id: str, manifest: TaskOutputManifest) -> dict[str, Any]:
         errors = manifest.validation_errors()
         if errors:

@@ -23,7 +23,13 @@ async def test_conductor_exposes_managed_run_api_without_pipeline_compatibility(
     assert not hasattr(service, "pipeline_store")
     assert not hasattr(service, "pipeline_coordinator")
     assert managed_status == 200
-    assert managed_body == {"managed_runs": {"attempts": [], "runs": []}}
+    assert managed_body == {
+        "managed_runs": {
+            "attempts": [],
+            "runs": [],
+            "attempt_integrity": {"passed": True, "errors": []},
+        }
+    }
     assert managed_run_status == 404
     assert managed_run_body["error"]["code"] == "not_found"
     assert pipeline_status == 404

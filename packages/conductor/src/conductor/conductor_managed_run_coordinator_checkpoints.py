@@ -65,6 +65,10 @@ class ConductorManagedRunCheckpointMixin:
         reason = " && ".join(checkpoint.verify) if checkpoint.verify else "checkpoint passed"
         self.record_checkpoint_result(run_id, after_work_item_id=checkpoint.after[0], passed=True, reason=reason)
         return self.store.list_checkpoint_results(run_id)[-1]
+
+    def pending_checkpoint(self, run_id: str) -> Checkpoint | None:
+        return self._pending_checkpoint(run_id)
+
     def _checkpoint_for_after(self, run_id: str, after_work_item_id: str) -> Checkpoint | None:
         plan = self.store.get_plan(run_id)
         if plan is None:
@@ -100,5 +104,4 @@ class ConductorManagedRunCheckpointMixin:
             item["state"] in {WorkItemState.DONE.value, WorkItemState.CANCELLED.value}
             for item in items
         )
-
 

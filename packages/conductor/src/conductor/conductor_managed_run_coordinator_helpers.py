@@ -3,6 +3,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from .conductor_managed_run_attempts import active_attempt_records
+
 LOGGER = logging.getLogger("conductor.conductor_managed_run_coordinator")
 
 
@@ -42,7 +44,7 @@ def _review_relevant_file(path: str) -> bool:
 
 def _active_work_item_ids(run: dict[str, Any]) -> set[str]:
     payload = run.get("payload") if isinstance(run.get("payload"), dict) else {}
-    attempts = payload.get("active_attempts") if isinstance(payload.get("active_attempts"), list) else []
+    attempts = active_attempt_records(payload, kind="work_item")
     ids = {
         str(attempt.get("work_item_id") or "")
         for attempt in attempts
@@ -74,4 +76,3 @@ def _to_text(value: Any) -> str:
     if isinstance(value, bytes):
         return value.decode(errors="replace")
     return str(value or "")
-

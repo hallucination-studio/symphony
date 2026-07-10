@@ -157,7 +157,7 @@ async def test_projection_sync_success_marks_managed_run_projection_healthy(tmp_
 
     projected = await service.reconcile_linear_managed_run_projections_once()
 
-    assert projected == 3
+    assert projected == 4
     run = service.managed_run_store.get_run(accepted.run_id)
     assert run is not None
     assert run["payload"]["projection_healthy"] is True

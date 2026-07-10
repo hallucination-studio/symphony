@@ -37,7 +37,14 @@ class ConductorManagedRunCoordinator(ConductorManagedRunCheckpointMixin):
         self.store.update_run_state(accepted.run_id, ManagedRunState.PLANNING)
         return accepted
 
-    def apply_plan(self, run_id: str, plan: ManagedRunPlan, *, backend_session_id: str = "") -> int:
+    def apply_plan(
+        self,
+        run_id: str,
+        plan: ManagedRunPlan,
+        *,
+        backend_session_id: str = "",
+        creator_attempt_id: str = "",
+    ) -> int:
         run = self.store.get_run(run_id)
         if run is None:
             raise KeyError(run_id)
@@ -48,22 +55,33 @@ class ConductorManagedRunCoordinator(ConductorManagedRunCheckpointMixin):
             reason = ",".join(error.value for error in errors)
             failure_count = self.store.record_plan_validation_failure(run_id, reason=reason)
             exhausted = failure_count > self.plan_validation_retry_limit
-            visible_reason = f"plan_validation_retries_exhausted:{reason}" if exhausted else reason
-            self.store.update_run_state(
-                run_id,
-                ManagedRunState.BLOCKED,
-                reason=visible_reason,
-            )
-            _log_blocked(
-                run_id=run_id,
-                work_item_id="",
-                error_code="plan_validation_retries_exhausted" if exhausted else "invalid_plan",
-                reason=visible_reason,
-                action_required="revise_plan",
-            )
+            if exhausted:
+                visible_reason = f"plan_validation_retries_exhausted:{reason}"
+                self.store.update_run_state(run_id, ManagedRunState.BLOCKED, reason=visible_reason)
+                _log_blocked(
+                    run_id=run_id,
+                    work_item_id="",
+                    error_code="plan_validation_retries_exhausted",
+                    reason=visible_reason,
+                    action_required="revise_plan",
+                )
+            else:
+                visible_reason = f"plan_validation_retry:{failure_count}/{self.plan_validation_retry_limit}:{reason}"
+                self.store.update_run_state(run_id, ManagedRunState.PLANNING, reason=visible_reason)
+                LOGGER.warning(
+                    "event=managed_run_plan_validation_retry run_id=%s error_code=invalid_plan sanitized_reason=%s retryable=true attempt_number=%s next_action=retry_plan",
+                    run_id,
+                    visible_reason,
+                    failure_count,
+                )
             return 0
         self.store.update_run_state(run_id, ManagedRunState.PROJECTING_PLAN)
-        version = self.store.save_plan(run_id, plan, backend_session_id=backend_session_id)
+        version = self.store.save_plan(
+            run_id,
+            plan,
+            backend_session_id=backend_session_id,
+            creator_attempt_id=creator_attempt_id,
+        )
         if plan.approval_required:
             self.store.update_run_state(run_id, ManagedRunState.AWAITING_APPROVAL, reason="plan_approval_required")
             LOGGER.info(

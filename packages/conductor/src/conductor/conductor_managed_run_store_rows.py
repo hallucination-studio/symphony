@@ -7,6 +7,8 @@ from typing import Any
 
 from performer_api.managed_runs import Checkpoint
 
+from .conductor_managed_run_attempts import canonical_attempt_records
+
 
 def init_managed_run_db(connection: sqlite3.Connection) -> None:
     connection.executescript(
@@ -123,14 +125,10 @@ def _checkpoint_result_from_row(row: sqlite3.Row) -> dict[str, Any]:
 
 
 def _run_attempts_for_view(run_id: str, payload: dict[str, Any]) -> list[dict[str, Any]]:
-    attempts: list[dict[str, Any]] = []
-    for attempt in payload.get("completed_attempts") or []:
-        if isinstance(attempt, dict):
-            attempts.append({"run_id": run_id, **attempt})
-    for attempt in payload.get("active_attempts") or []:
-        if isinstance(attempt, dict):
-            attempts.append({"run_id": run_id, **attempt, "state": attempt.get("state") or "running"})
-    return attempts
+    return [
+        {"run_id": run_id, **attempt, "state": attempt.get("state") or "running"}
+        for attempt in canonical_attempt_records(payload)
+    ]
 
 
 def checkpoint_key_for(checkpoint: Checkpoint) -> str:

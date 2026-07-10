@@ -136,7 +136,7 @@ def test_managed_run_coordinator_rejects_unapproved_replacement_plan_after_accep
     assert run["plan_version"] == 1
 
 
-def test_managed_run_coordinator_rejects_invalid_plan_to_blocked_state(tmp_path) -> None:
+def test_managed_run_coordinator_keeps_retryable_invalid_plan_in_planning(tmp_path) -> None:
     coordinator = ConductorManagedRunCoordinator(store=ConductorManagedRunStore(tmp_path), plan_validation_retry_limit=1)
     accepted = coordinator.accept_dispatch({"issue_id": "root-1", "issue_identifier": "HELL-1"}, instance_id="instance-1")
     bad_item = _item("wi-1")
@@ -148,8 +148,8 @@ def test_managed_run_coordinator_rejects_invalid_plan_to_blocked_state(tmp_path)
     run = coordinator.store.get_run(accepted.run_id)
     assert result == 0
     assert run is not None
-    assert run["state"] == ManagedRunState.BLOCKED.value
-    assert "work_item_too_large" in run["latest_reason"]
+    assert run["state"] == ManagedRunState.PLANNING.value
+    assert run["latest_reason"] == "plan_validation_retry:1/1:work_item_too_large"
 
 
 def test_managed_run_coordinator_exhausts_bounded_plan_validation_retries(tmp_path) -> None:
@@ -178,12 +178,13 @@ def test_managed_run_coordinator_logs_blocked_failures(tmp_path, caplog) -> None
     bad = ManagedRunPlan.from_dict({**_plan().to_dict(), "work_items": [bad_item.to_dict()]})
 
     coordinator.apply_plan(accepted.run_id, bad, backend_session_id="thread-1")
+    coordinator.apply_plan(accepted.run_id, bad, backend_session_id="thread-1")
 
     message = caplog.records[-1].getMessage()
     assert "event=managed_run_blocked" in message
     assert f"run_id={accepted.run_id}" in message
-    assert "error_code=invalid_plan" in message
-    assert "sanitized_reason=work_item_too_large" in message
+    assert "error_code=plan_validation_retries_exhausted" in message
+    assert "sanitized_reason=plan_validation_retries_exhausted:work_item_too_large" in message
     assert "retryable=false" in message
 
 

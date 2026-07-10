@@ -249,3 +249,22 @@ def test_managed_run_view_uses_run_and_work_item_language(tmp_path) -> None:
     assert view["runs"][0]["run_id"] == run.run_id
     assert "graph_revision" not in view
     assert view["runs"][0]["work_items"][0]["state"] == WorkItemState.TODO.value
+
+
+def test_managed_run_view_reports_duplicate_attempt_as_integrity_error_without_duplicate_rows(tmp_path) -> None:
+    store = ConductorManagedRunStore(tmp_path)
+    run = store.accept_dispatch({"issue_id": "root-1", "issue_identifier": "HELL-7"}, instance_id="instance-1")
+    duplicate = {"attempt_id": "work-item-1", "kind": "work_item", "work_item_id": "wi-1"}
+    store.merge_run_payload(
+        run.run_id,
+        {
+            "completed_attempts": [{**duplicate, "state": "succeeded", "completed_at": "2026-07-10T00:00:01Z"}],
+            "active_attempts": [{**duplicate, "state": "running"}],
+        },
+    )
+
+    view = store.managed_run_view()
+
+    assert [attempt["state"] for attempt in view["attempts"]] == ["succeeded"]
+    assert view["runs"][0]["attempt_integrity"] == {"passed": False, "errors": ["active_attempt_already_terminal:work-item-1"]}
+    assert view["attempt_integrity"]["passed"] is False

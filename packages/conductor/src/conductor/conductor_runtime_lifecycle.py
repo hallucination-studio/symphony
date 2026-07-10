@@ -98,21 +98,15 @@ class RuntimeLifecycleMixin:
             return instance.with_updates(process_status="running", pid=getattr(process, "pid", None), log_path=str(log_path))
 
     async def stop(self, instance: InstanceRecord) -> InstanceRecord:
-        keys = self._handle_keys_for_instance(instance.id)
-        for key in keys:
-            handle = self._handles.pop(key, None)
-            if handle is None:
-                continue
-            if getattr(handle.process, "returncode", None) is None:
-                handle.process.terminate()
-            try:
-                await asyncio.wait_for(handle.process.wait(), timeout=5)
-            except asyncio.TimeoutError:
-                handle.process.kill()
-                await handle.process.wait()
-            await self._finish_log_task(handle.log_task)
+        await self._stop_handles(self._handle_keys_for_instance(instance.id))
         self._clear_exited_attempts(instance.id)
         return instance.with_updates(process_status="stopped", pid=None)
+
+    async def stop_attempts(self, instance: InstanceRecord, attempt_ids: list[str]) -> InstanceRecord:
+        wanted = {str(attempt_id) for attempt_id in attempt_ids if str(attempt_id)}
+        keys = [key for key in self._handle_keys_for_instance(instance.id) if key[1] in wanted]
+        await self._stop_handles(keys)
+        return self.refresh(instance)
 
     async def restart(self, instance: InstanceRecord, *, env: dict[str, str] | None = None) -> InstanceRecord:
         stopped = await self.stop(instance)
@@ -155,6 +149,20 @@ class RuntimeLifecycleMixin:
                 continue
             snapshots.append(dict(self._exited_attempts.pop(key)))
         return snapshots
+
+    async def _stop_handles(self, keys: list[tuple[str, str]]) -> None:
+        for key in keys:
+            handle = self._handles.pop(key, None)
+            if handle is None:
+                continue
+            if getattr(handle.process, "returncode", None) is None:
+                handle.process.terminate()
+            try:
+                await asyncio.wait_for(handle.process.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                handle.process.kill()
+                await handle.process.wait()
+            await self._finish_log_task(handle.log_task)
 
     def runtime_snapshot(self, instance: InstanceRecord) -> dict[str, object]:
         process_status = instance.process_status

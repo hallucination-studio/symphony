@@ -5,10 +5,14 @@ from performer_api.managed_runs_plan import ManagedRunPlan, WorkItem
 
 
 class ManagedRunPlanValidator:
+    MAX_WORK_ITEMS = 12
+
     def validate(self, plan: ManagedRunPlan) -> list[ManagedRunPlanValidatorError]:
         errors: list[ManagedRunPlanValidatorError] = []
         if not plan.verification_rubric.is_complete():
             errors.append(ManagedRunPlanValidatorError.INCOMPLETE_RUBRIC)
+        if len(plan.work_items) > self.MAX_WORK_ITEMS:
+            errors.append(ManagedRunPlanValidatorError.TOO_MANY_WORK_ITEMS)
         ids = [item.id for item in plan.work_items]
         id_set = set(ids)
         if len(ids) != len(id_set):

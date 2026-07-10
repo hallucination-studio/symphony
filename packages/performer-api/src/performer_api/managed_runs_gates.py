@@ -129,7 +129,9 @@ class GateSnapshot:
         if any(score < 0 or score > 4 for score in self.rubric_scores.values()):
             errors.append("rubric_score_out_of_range")
         expected_hash = _content_hash(self._canonical_payload())
-        if self.content_hash and self.content_hash != expected_hash:
+        if not self.content_hash:
+            errors.append("content_hash_required")
+        elif self.content_hash != expected_hash:
             errors.append("content_hash_mismatch")
         return errors
 

@@ -3,9 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from performer_api.managed_runs import ManagedRunPlan, ManagedRunState, ManagedRunRuntimeRole, RuntimeConfigEnvelope, WorkItem, WorkItemResult
+from performer_api.managed_runs import ManagedRunPlan, ManagedRunState, ManagedRunRuntimeRole, RuntimeConfigEnvelope
 
-from .conductor_managed_run_branch_join import prepare_verified_dependency_workspace
 from .conductor_managed_run_coordinator import ConductorManagedRunCoordinator
 from .conductor_managed_run_driver_helpers import (
     _active_attempt,
@@ -13,24 +12,21 @@ from .conductor_managed_run_driver_helpers import (
     _attempt_paths,
     _attempt_payload,
     _complete_attempt,
-    _completed_attempt_for_work_item,
     _completed_attempts,
     _events_from_payload,
     _issue_description,
     _read_json,
-    _role_capacity,
     _sanitize,
-    _task_output_manifest,
-    _verification_input_snapshot,
     _write_json,
 )
+from .conductor_managed_run_driver_work_items import ConductorManagedRunWorkItemMixin
+from .conductor_managed_run_execution import prepare_execution_worktree
 from .conductor_managed_run_store import ConductorManagedRunStore
-from .conductor_managed_run_verifier import run_local_verifier
 from .conductor_models import InstanceRecord
 from .runtime_backends import prepare_backend_environment
 
 
-class ConductorManagedRunDriver:
+class ConductorManagedRunDriver(ConductorManagedRunWorkItemMixin):
     def __init__(
         self,
         *,
@@ -70,7 +66,7 @@ class ConductorManagedRunDriver:
         self.instance_update(instance)
         self._cache_exited_attempts(instance)
         if state in {ManagedRunState.READY.value, ManagedRunState.REVIEWING.value} and _active_attempts(run, kind="work_item"):
-            return self._collect_work_item_turn(run)
+            return await self._collect_work_item_turn(run, instance)
         if state == ManagedRunState.QUEUED.value:
             return await self._start_plan_turn(run, instance)
         if state == ManagedRunState.PLANNING.value:
@@ -80,7 +76,7 @@ class ConductorManagedRunDriver:
         if state == ManagedRunState.READY.value:
             return await self._start_or_checkpoint_next_work_item(run, instance)
         if state == ManagedRunState.EXECUTING.value:
-            return self._collect_work_item_turn(run)
+            return await self._collect_work_item_turn(run, instance)
         if state == ManagedRunState.REVIEWING.value:
             return self._verify_active_work_item(run, instance)
         return {}
@@ -93,14 +89,24 @@ class ConductorManagedRunDriver:
         envelope = self._runtime_config_or_fail(str(run["run_id"]))
         if envelope is None:
             return {"failed": 1}
-        attempt = _attempt_paths(instance, str(run["run_id"]), "plan", "plan")
+        attempt = _attempt_paths(instance, run, "plan", "plan")
         if attempt["result_path"].exists():
             attempt["result_path"].unlink()
+        try:
+            workspace = prepare_execution_worktree(
+                Path(instance.resolved_repo_path),
+                state_root=Path(instance.instance_dir) / "state",
+                run_id=str(run["run_id"]),
+                work_item_id=f"plan-{attempt['attempt_id']}",
+            )
+        except Exception as exc:
+            self.store.update_run_state(str(run["run_id"]), ManagedRunState.FAILED, reason=f"plan_workspace_prepare_failed:{_sanitize(exc)}")
+            return {"failed": 1}
         _write_json(
             attempt["request_path"],
             {
                 "turn_kind": "plan",
-                "workspace_path": instance.resolved_repo_path,
+                "workspace_path": str(workspace.workspace_path),
                 "issue_description": _issue_description(run),
                 "thread_id": run.get("backend_session_id") or None,
             },
@@ -108,7 +114,7 @@ class ConductorManagedRunDriver:
         env = prepare_backend_environment(
             Path(instance.instance_dir) / "state",
             envelope.profiles.get(ManagedRunRuntimeRole.PLAN),
-            workspace_path=instance.resolved_repo_path,
+            workspace_path=str(workspace.workspace_path),
             home_scope=attempt["attempt_id"],
         )
         started = await self.runtime_manager.start(
@@ -122,7 +128,17 @@ class ConductorManagedRunDriver:
         )
         self.instance_update(started)
         self.store.update_run_state(str(run["run_id"]), ManagedRunState.PLANNING, reason="plan turn started")
-        self.store.merge_run_payload(str(run["run_id"]), {"active_attempt": _attempt_payload(attempt, "plan")})
+        self.store.merge_run_payload(
+            str(run["run_id"]),
+            {
+                "active_attempt": {
+                    **_attempt_payload(attempt, "plan"),
+                    "workspace_path": str(workspace.workspace_path),
+                    "base_revision": workspace.base_revision,
+                    "branch_name": workspace.branch_name,
+                }
+            },
+        )
         return {"started": 1}
 
     def _collect_plan_turn(self, run: dict[str, Any]) -> dict[str, int]:
@@ -137,6 +153,7 @@ class ConductorManagedRunDriver:
                 self._fail_missing_turn_result(str(run["run_id"]), attempt, exited, "plan")
                 return {"failed": 1}
             return {}
+        payload: dict[str, Any] = {}
         try:
             payload = _read_json(result_path)
             plan_payload = payload.get("plan")
@@ -146,10 +163,25 @@ class ConductorManagedRunDriver:
                 str(run["run_id"]),
                 ManagedRunPlan.from_dict(plan_payload),
                 backend_session_id=str(payload.get("thread_id") or ""),
+                creator_attempt_id=str(attempt.get("attempt_id") or ""),
             )
         except Exception as exc:
-            self.store.update_run_state(str(run["run_id"]), ManagedRunState.FAILED, reason=f"plan_result_failed:{_sanitize(exc)}")
+            reason = f"plan_result_failed:{_sanitize(exc)}"
+            self.store.update_run_state(str(run["run_id"]), ManagedRunState.FAILED, reason=reason)
+            self._complete_plan_attempt(run, attempt, state="failed", reason=reason, payload=payload)
             return {"failed": 1}
+        latest = self.store.get_run(str(run["run_id"])) or run
+        if version == 0:
+            retryable = latest.get("state") == ManagedRunState.PLANNING.value
+            self._complete_plan_attempt(
+                run,
+                attempt,
+                state="failed",
+                reason=str(latest.get("latest_reason") or "plan_validation_failed"),
+                payload=payload,
+                retryable=retryable,
+            )
+            return {"applied": 1} if retryable else {"failed": 1}
         completed = _completed_attempts(run)
         self.store.merge_run_payload(
             str(run["run_id"]),
@@ -166,150 +198,31 @@ class ConductorManagedRunDriver:
         )
         return {"applied": 1}
 
-    async def _start_or_checkpoint_next_work_item(self, run: dict[str, Any], instance: InstanceRecord) -> dict[str, int]:
-        checkpoint = self.coordinator.run_pending_checkpoint(str(run["run_id"]), workspace_path=Path(instance.resolved_repo_path))
-        if checkpoint is not None and not checkpoint.get("passed"):
-            return {"failed": 1}
-        envelope = self._runtime_config_or_fail(str(run["run_id"]))
-        if envelope is None:
-            return {"failed": 1}
-        limit = _role_capacity(envelope, ManagedRunRuntimeRole.WORK_ITEM)
-        started = 0
-        while started < limit:
-            item = self.coordinator.next_ready_work_item(str(run["run_id"]))
-            if item is None:
-                break
-            join = prepare_verified_dependency_workspace(self.store, Path(instance.resolved_repo_path), run=run, item=item)
-            if join.failed:
-                return {"started": started, "failed": 1} if started else {"failed": 1}
-            await self._start_work_item_turn(run, instance, item, envelope=envelope, workspace_path=join.workspace_path or Path(instance.resolved_repo_path))
-            started += 1
-            refreshed = self.store.get_run(str(run["run_id"]))
-            if refreshed is not None:
-                run = refreshed
-        return {"started": started} if started else {}
-
-    async def _start_work_item_turn(
+    def _complete_plan_attempt(
         self,
         run: dict[str, Any],
-        instance: InstanceRecord,
-        item: dict[str, Any],
+        attempt: dict[str, Any],
         *,
-        envelope: RuntimeConfigEnvelope,
-        workspace_path: Path,
-    ) -> dict[str, int]:
-        started_item = self.coordinator.start_work_item(str(run["run_id"]), str(item["work_item_id"]))
-        attempt = _attempt_paths(instance, str(run["run_id"]), "work-item", str(item["work_item_id"]))
-        if attempt["result_path"].exists():
-            attempt["result_path"].unlink()
-        _write_json(
-            attempt["request_path"],
-            {
-                "turn_kind": "work_item",
-                "workspace_path": str(workspace_path),
-                "thread_id": run.get("backend_session_id") or "",
-                "work_item": started_item.get("payload") or item.get("payload") or {},
-            },
-        )
-        env = prepare_backend_environment(
-            Path(instance.instance_dir) / "state",
-            envelope.profiles.get(ManagedRunRuntimeRole.WORK_ITEM),
-            workspace_path=str(workspace_path),
-            home_scope=attempt["attempt_id"],
-        )
-        started = await self.runtime_manager.start(
-            instance,
-            env=env,
-            mode="execute",
-            attempt_id=attempt["attempt_id"],
-            attempt_request_path=str(attempt["request_path"]),
-            attempt_result_path=str(attempt["result_path"]),
-            lease_id=attempt["attempt_id"],
-        )
-        self.instance_update(started)
-        attempt_payload = _attempt_payload(attempt, "work_item", work_item_id=str(item["work_item_id"]))
-        active_attempts = _active_attempts(self.store.get_run(str(run["run_id"])) or run)
-        self.store.merge_run_payload(str(run["run_id"]), {"active_attempt": attempt_payload, "active_attempts": [*active_attempts, attempt_payload]})
-        return {"started": 1}
-
-    def _collect_work_item_turn(self, run: dict[str, Any]) -> dict[str, int]:
-        attempts = _active_attempts(run, kind="work_item")
-        if not attempts:
-            self.store.update_run_state(str(run["run_id"]), ManagedRunState.FAILED, reason="work_item_attempt_missing")
-            return {"failed": 1}
-        applied = 0
-        remaining: list[dict[str, Any]] = []
-        completed = _completed_attempts(run)
-        for attempt in attempts:
-            result_path = Path(str(attempt.get("result_path") or ""))
-            if not result_path.exists():
-                exited = self._active_attempt_exit(run, attempt)
-                if exited is not None:
-                    self._fail_missing_turn_result(str(run["run_id"]), attempt, exited, "work_item")
-                    return {"failed": 1}
-                remaining.append(attempt)
-                continue
-            try:
-                payload = _read_json(result_path)
-                result_payload = payload.get("result")
-                if not isinstance(result_payload, dict):
-                    raise ValueError("work_item_result_missing")
-                submitted = self.coordinator.submit_work_item_result(str(run["run_id"]), WorkItemResult.from_dict(result_payload))
-            except Exception as exc:
-                self.store.update_run_state(str(run["run_id"]), ManagedRunState.FAILED, reason=f"work_item_result_failed:{_sanitize(exc)}")
-                return {"failed": 1}
-            applied += 1
-            completed.append(_complete_attempt(attempt, state="succeeded", events=_events_from_payload(payload), thread_id=str(payload.get("thread_id") or "")))
-            if submitted.get("state") == "blocked":
-                self.store.merge_run_payload(str(run["run_id"]), {"completed_attempts": completed, "last_work_item_attempt": attempt})
-                return {"applied": applied, "failed": 1}
+        state: str,
+        reason: str,
+        payload: dict[str, Any],
+        retryable: bool = False,
+    ) -> None:
+        current = self.store.get_run(str(run["run_id"])) or run
+        completed = _completed_attempts(current)
+        attempt_id = str(attempt.get("attempt_id") or "")
+        if not any(str(candidate.get("attempt_id") or "") == attempt_id for candidate in completed):
+            completed.append(
+                _complete_attempt(
+                    {**attempt, "sanitized_error": reason, "retryable": retryable},
+                    state=state,
+                    events=_events_from_payload(payload),
+                    thread_id=str(payload.get("thread_id") or ""),
+                )
+            )
         self.store.merge_run_payload(
             str(run["run_id"]),
-            {
-                "active_attempt": remaining[-1] if remaining else {},
-                "active_attempts": remaining,
-                "completed_attempts": completed,
-                "last_work_item_attempt": attempts[-1],
-            },
-        )
-        return {"applied": applied} if applied else {}
-
-    def _verify_active_work_item(self, run: dict[str, Any], instance: InstanceRecord) -> dict[str, int]:
-        items = [row for row in self.store.list_work_items(str(run["run_id"])) if row["state"] == "in_review" and isinstance(row.get("result"), dict)]
-        if not items:
-            return {}
-        applied = 0
-        for item in items:
-            result = WorkItemResult.from_dict(item["result"])
-            outcome = run_local_verifier(
-                WorkItem.from_dict(item["payload"]),
-                result,
-                source_workspace=Path(instance.resolved_repo_path),
-                state_root=Path(instance.instance_dir) / "state",
-                verify_attempt_id=f"verify-{str(item['work_item_id'])}",
-            )
-            if not outcome.passed:
-                self.coordinator.verify_work_item(str(run["run_id"]), str(item["work_item_id"]), gate_status=outcome.gate_status, passed=False)
-                return {"failed": 1}
-            self.coordinator.verify_work_item(str(run["run_id"]), str(item["work_item_id"]), gate_status="verification passed")
-            self._record_successful_verification(run, item, result, instance)
-            applied += 1
-        self.coordinator.run_pending_checkpoint(str(run["run_id"]), workspace_path=Path(instance.resolved_repo_path))
-        return {"applied": applied}
-
-    def _record_successful_verification(self, run: dict[str, Any], item: dict[str, Any], result: WorkItemResult, instance: InstanceRecord) -> None:
-        run_id = str(run["run_id"])
-        work_item_id = str(item["work_item_id"])
-        attempt = _completed_attempt_for_work_item(run, work_item_id)
-        gate = next((snapshot for snapshot in self.store.list_gate_snapshots(run_id) if snapshot.get("work_item_id") == work_item_id), {})
-        gate_hash = str(gate.get("content_hash") or "")
-        self.store.record_verification_input(
-            run_id,
-            _verification_input_snapshot(item, result, instance, attempt=attempt, gate_snapshot_hash=gate_hash),
-        )
-        self.store.publish_task_output_manifest(
-            run_id,
-            _task_output_manifest(item, result, instance, attempt=attempt, plan_version=int(run.get("plan_version") or 0)),
+            {"active_attempt": {}, "active_attempts": [], "completed_attempts": completed, "last_plan_attempt": attempt},
         )
 
     def _runtime_config_or_fail(self, run_id: str) -> RuntimeConfigEnvelope | None:
@@ -345,6 +258,20 @@ class ConductorManagedRunDriver:
         exit_code = exited.get("exit_code")
         reason = f"{kind}_result_missing_after_process_exit:attempt_id={attempt.get('attempt_id')} exit_code={exit_code}"
         self.store.update_run_state(run_id, ManagedRunState.FAILED, reason=reason)
-        self.store.merge_run_payload(run_id, {"last_failed_attempt": {**attempt, "exit": exited, "reason": reason}})
+        current = self.store.get_run(run_id) or {}
+        attempt_id = str(attempt.get("attempt_id") or "")
+        completed = _completed_attempts(current)
+        if not any(str(candidate.get("attempt_id") or "") == attempt_id for candidate in completed):
+            completed.append(_complete_attempt({**attempt, "exit": exited, "sanitized_error": reason}, state="failed"))
+        active = [candidate for candidate in _active_attempts(current) if str(candidate.get("attempt_id") or "") != attempt_id]
+        self.store.merge_run_payload(
+            run_id,
+            {
+                "active_attempt": active[-1] if active else {},
+                "active_attempts": active,
+                "completed_attempts": completed,
+                "last_failed_attempt": {**attempt, "exit": exited, "reason": reason},
+            },
+        )
 
 __all__ = ["ConductorManagedRunDriver"]

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from performer_api.managed_runs import WorkItemState
+from performer_api.managed_runs import ManagedRunState, WorkItemState
+
+from .conductor_managed_run_attempts import canonical_attempt_records
 
 
 def linear_state_target(state: str) -> tuple[list[str], str]:
@@ -19,6 +21,14 @@ def linear_state_target(state: str) -> tuple[list[str], str]:
     if state == WorkItemState.CANCELLED.value:
         return ["Canceled", "Cancelled"], "canceled"
     return ["Todo"], "unstarted"
+
+
+def parent_linear_state_target(run_state: str) -> tuple[list[str], str]:
+    if run_state in {ManagedRunState.VERIFIED.value, ManagedRunState.DONE.value}:
+        return ["Done"], "completed"
+    if run_state in {ManagedRunState.AWAITING_APPROVAL.value, ManagedRunState.BLOCKED.value, ManagedRunState.FAILED.value}:
+        return ["Blocked", "Needs More"], "unstarted"
+    return ["In Progress"], "started"
 
 
 def rubric_results(plan: Any, items: list[dict[str, Any]], *, checkpoint_evidence: list[str] | None = None, complete: bool) -> list[dict[str, Any]]:
@@ -75,12 +85,7 @@ def projection_health_lines(payload: dict[str, Any]) -> list[str]:
 
 
 def attempts_for_work_item(payload: dict[str, Any], work_item_id: str) -> list[dict[str, Any]]:
-    attempts: list[dict[str, Any]] = []
-    for key in ("completed_attempts", "active_attempts"):
-        raw = payload.get(key)
-        if isinstance(raw, list):
-            attempts.extend(dict(item) for item in raw if isinstance(item, dict) and str(item.get("work_item_id") or "") == work_item_id)
-    return attempts
+    return [attempt for attempt in canonical_attempt_records(payload) if str(attempt.get("work_item_id") or "") == work_item_id]
 
 
 def attempt_ids_for_work_item(payload: dict[str, Any], work_item_id: str) -> list[str]:
@@ -144,6 +149,7 @@ __all__ = [
     "last_synced_comment_ids",
     "linear_state_target",
     "operator_wait_kind",
+    "parent_linear_state_target",
     "projection_health_lines",
     "residual_risks",
     "rubric_results",

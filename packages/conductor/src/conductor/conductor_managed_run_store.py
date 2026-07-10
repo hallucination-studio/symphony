@@ -84,7 +84,7 @@ class ConductorManagedRunStore(ConductorManagedRunStoreViewMixin, ConductorManag
             )
         return ManagedRunDispatchAccepted(run_id=run_id, parent_issue_id=parent_issue_id or issue_identifier, issue_identifier=issue_identifier or parent_issue_id)
 
-    def save_plan(self, run_id: str, plan: ManagedRunPlan, *, backend_session_id: str = "") -> int:
+    def save_plan(self, run_id: str, plan: ManagedRunPlan, *, backend_session_id: str = "", creator_attempt_id: str = "") -> int:
         now = _now()
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -139,7 +139,7 @@ class ConductorManagedRunStore(ConductorManagedRunStoreViewMixin, ConductorManag
                         removed_id,
                     ),
                 )
-            payload = self._plan_payload_for_save(connection, run_id, plan, version, backend_session_id, now)
+            payload = self._plan_payload_for_save(connection, run_id, plan, version, creator_attempt_id or f"plan-{version}", now)
             connection.execute(
                 """
                 UPDATE managed_run_runs
@@ -306,7 +306,7 @@ class ConductorManagedRunStore(ConductorManagedRunStoreViewMixin, ConductorManag
         run_id: str,
         plan: ManagedRunPlan,
         version: int,
-        backend_session_id: str,
+        creator_attempt_id: str,
         now: str,
     ) -> dict[str, Any]:
         return {
@@ -315,7 +315,7 @@ class ConductorManagedRunStore(ConductorManagedRunStoreViewMixin, ConductorManag
                 run_id=run_id,
                 plan=plan,
                 plan_version=version,
-                creator_attempt_id=backend_session_id or f"plan-{version}",
+                creator_attempt_id=creator_attempt_id,
                 created_at=now,
             ),
             "plan_validation_failures": 0,
