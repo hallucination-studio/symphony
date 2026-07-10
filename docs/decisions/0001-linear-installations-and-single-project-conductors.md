@@ -10,101 +10,107 @@ Accepted
 
 ## Context
 
-The existing design mixed two unrelated credential paths. Podium could build an
-OAuth URL from either deployment credentials or customer-provided credentials,
-but delegated issue intake still depended on one global application id and app
-actor token. Project selection was onboarding metadata only, and Conductor
-project bindings appeared later through runtime reports. As a result, a custom
-application did not actually replace the default application after OAuth, and a
-successful onboarding flow did not establish a routable project runtime.
+The earlier design mixed deployment and customer credential paths. OAuth could
+start with either application, but delegated issue intake still depended on a
+global app identity. Project selection was onboarding metadata rather than
+routing authority, so a customer application did not fully replace the default
+application and onboarding did not produce a uniquely routable runtime.
 
-Linear's current agent model installs an app actor at workspace scope with
-`actor=app`. The installed app has a workspace-specific app user id. Linear does
-not expose a separate project-application authorization mutation. The
-`app:assignable` scope permits delegation and project membership, but Symphony
-does not need to mutate project members to define its routing scope.
+Linear installs an app actor at workspace scope with `actor=app` and gives it a
+workspace-specific app user id. Linear exposes no separate project-application
+authorization mutation. The `app:assignable` scope permits delegation, while
+Symphony does not need to rewrite project membership to establish routing scope.
 
 Official references:
 
 - https://linear.app/developers/oauth-actor-authorization
 - https://linear.app/developers/oauth-2-0-authentication
 - https://linear.app/developers/agents
-- https://linear.app/developers/webhooks
 
 ## Decision
 
 Podium owns one active Linear installation per Podium workspace. Deployment
-credentials provide the default application. A customer may stage a custom
-application, but both sources enter one versioned OAuth installation lifecycle.
-Every callback validates actor, scopes, app identity, organization identity,
-project access, and token metadata before activation.
+credentials provide the default application; a customer may instead provide a
+client id and client secret. Both enter one versioned OAuth lifecycle using
+Podium's fixed callback, `actor=app`, `read write app:assignable`, short-lived
+one-time state, PKCE, and identical acceptance.
 
-AgentSession webhooks are the immediate intake path. Installation- and
-project-scoped reconciliation polling continuously covers missed deliveries and
-keeps the product operational with explicit degraded health when webhook
-delivery is unavailable. Both paths share durable cursors and dispatch
-idempotency.
+The callback records denied consent and returns to `/setup/linear`. Acceptance
+validates token metadata, exact scopes, app-capable viewer, organization,
+workspace app user, and fully paginated project access. The first valid install
+activates immediately. Same-identity reauthorization rotates credentials
+without draining. A different app identity in the same organization uses a
+candidate, drain, Conductor acknowledgement, atomic switch, and retirement. An
+organization change requires explicit reset or migration.
 
-Project selection is Podium authorization state, not a Linear project-member
-mutation. Each selected project has one repository mapping and at most one
-active Conductor. Each Conductor binds exactly one project. Multiple independent
-Conductors may run on the same host through isolated service identities, data
-roots, ports, credentials, and logs.
+All Linear access goes through a central installation-token service. It refreshes
+proactively, serializes refresh per installation, atomically stores rotating
+refresh credentials, retries once after `401`, exposes reauthorization-required
+state, and revokes disconnected or retired credentials. Managed traffic never
+uses a human or deployment-global access token.
 
-The project displays `symphony:conductor/<Name>-<public-id>`. The name is a
-workspace-unique single English word chosen by the operator or allocated from a
-historical musician surname list. The public id is short, immutable, and
-non-secret. The label is operator context only and never routing truth.
+Reliable installation- and project-scoped polling is the sole delegated-issue
+intake. Project discovery, baseline issue discovery, and incremental scans use
+full cursor pagination. Durable observations, idempotent dispatch rows, and page
+checkpoints commit transactionally; a stable update-time/issue-id order and
+boundary overlap prevent skips. Repeated observations reuse one delegation
+epoch, and only an observed delegation transition can open a later epoch.
 
-Application replacement is staged. The active installation continues serving
-until the candidate passes acceptance, current Managed Runs drain, and all
-project Conductors acknowledge the new app identity. Podium then switches the
-installation generation atomically and retires the previous token.
+Project selection is Podium routing state, not a Linear project-member mutation.
+Each selected project has one repository mapping and at most one active
+Conductor. Each Conductor binds exactly one project. Multiple independent
+Conductors may run on one host through isolated identities, data roots, ports,
+credentials, and logs.
+
+The project displays `symphony:conductor/<Name>-<public-id>` as operator context.
+The label is additive and idempotent; it never authorizes or routes work.
 
 ## Alternatives Considered
 
-### Keep A Global App Actor Token For Intake
+### Keep A Global App Actor Token
 
-Rejected because it creates split-brain behavior: OAuth and proxy traffic may
-use a customer application while intake still observes the default application.
-It also prevents per-workspace token health and clean application replacement.
+Rejected because OAuth and proxy traffic could use a customer application while
+intake still observed the default identity. It also prevents workspace-specific
+token health, refresh, revocation, and clean application replacement.
 
 ### Install Or Authorize The App Separately For Every Project
 
 Rejected because Linear's app actor installation is workspace scoped and the
-public API has no project-application authorization mutation. Project access is
-validated against the active installation and constrained in Podium.
+public API has no project-application authorization mutation. Podium validates
+project access and constrains routing after OAuth.
 
 ### Add The App User To Every Selected Project
 
-Rejected as a default behavior. `projectUpdate(memberIds)` is a general project
-membership mutation, not the authorization mechanism. Symphony must not rewrite
-customer project membership merely to establish its own routing scope.
+Rejected because `projectUpdate(memberIds)` is a general membership mutation,
+not application authorization. Symphony must not rewrite customer project
+membership merely to define its own routing scope.
+
+### Use Multiple Intake Paths
+
+Rejected because two independently delivered representations require identity
+normalization and deduplication while still leaving polling necessary for
+durability. One reliable polling state machine has a single checkpoint,
+idempotency, retry, and evidence model.
 
 ### Let One Conductor Serve Multiple Projects
 
-Rejected for this product version. It reduces process count but couples project
-repositories, credentials, labels, queues, capacity, and failure domains. A
-single-project Conductor makes routing and rollback auditable and allows strict
-one-project ownership.
-
-### Block When Webhooks Are Unhealthy
-
-Rejected because webhook delivery is an external dependency that can fail
-temporarily. Durable reconciliation preserves work intake while making the
-degraded state and required webhook repair visible.
+Rejected for this product version. It couples repositories, credentials, labels,
+queues, capacity, and failure domains. A single-project Conductor keeps routing,
+rollback, and ownership auditable.
 
 ## Consequences
 
-- The deployment-global application-id and app-actor-token path is removed.
-- Custom application setup requires Podium's fixed callback and webhook URLs
-  plus a webhook signing secret.
-- OAuth state must bind an immutable application configuration version.
-- Real Linear organization, project, and app user ids become first-class
-  routing identifiers; Podium account ids cannot stand in for them.
-- Conductor enrollment and project assignment become separate steps.
-- Repository mapping moves from workspace scope to project binding scope.
-- Same-host multi-project operation uses multiple isolated Conductors.
-- Project labels become additive, idempotent operator metadata.
-- Tests and real acceptance must prove both webhook delivery and polling
-  recovery without duplicate dispatches.
+- Customer application setup needs only client id, client secret, and Podium's
+  fixed callback URL.
+- OAuth state binds the Podium workspace and immutable application config
+  version; callback and refresh failures are durable operator-visible states.
+- Organization, project, app user, installation generation, and delegation epoch
+  are first-class routing and idempotency identifiers.
+- Every list and issue scan must paginate to completion and commit resumable
+  checkpoints before advancing its high-water mark.
+- Conductor enrollment and project assignment remain separate steps; repository
+  mapping belongs to the one-project binding.
+- Project labels remain operator metadata only.
+- Tests and real acceptance must prove callback return behavior, token rotation,
+  polling completeness, crash recovery, deduplication, redelegation, cutover,
+  and visible failure state.

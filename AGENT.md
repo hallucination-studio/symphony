@@ -273,31 +273,32 @@ changes, mock-only tests are not enough.
 A real run must:
 
 1. Use `.env` with the default Linear application's client credentials and
-   Podium's fixed callback/webhook configuration; never inject a human or
-   deployment-global access token into the managed path.
+   Podium's fixed callback configuration; never inject a human or deployment-
+   global access token into the managed path.
 2. Complete the real OAuth callback and record the accepted organization,
    workspace-specific app user, scopes, token health, and selected project.
 3. Start and bind one isolated Conductor to that project and the real fixture
    repository before creating the business issue.
 4. Create a real Linear business issue after the project binding is ready.
-5. Let webhook-first intake with reconciliation fallback dispatch the issue to
-   Conductor, then let Conductor operate Performer through gates, Codex,
-   verification, evidence, and state transitions.
+5. Let fully paginated baseline/incremental polling dispatch the issue exactly
+   once for its delegation epoch, then let Conductor operate Performer through
+   gates, Codex, verification, evidence, and state transitions.
 6. Use real `codex app-server` when the scenario says real Codex.
-7. Record installation, project binding, webhook/reconciliation, Linear tree,
-   runtime state, ops snapshot, logs, cleanup, and deduplication evidence.
+7. Record installation, project binding, polling checkpoints/delegation epoch,
+   Linear tree, runtime state, ops snapshot, logs, cleanup, and deduplication
+   evidence.
 8. Archive/audit the test project before and after the scenario.
 
 For Podium-managed flows, the real run must additionally follow `docs/real-run-testing-guide.md#podium-web-to-linear-acceptance`:
 
 1. Start Podium with the default Linear application's client credentials,
-   Podium's fixed OAuth callback and webhook URLs, and a public HTTPS origin.
+   Podium's fixed OAuth callback URL, and a public HTTPS origin.
    Do not inject a human token or deployment-global app actor access token into
    the managed path.
 2. In a real browser, authorize the default or staged customer application with
    `actor=app`; verify callback acceptance for actor, scopes, organization,
-   workspace-specific app user, AgentSession support, token metadata, and
-   project access.
+   workspace-specific app user, token metadata, and fully paginated project
+   access. Verify success and denied consent return to `/setup/linear`.
 3. Select the real test project without mutating project `memberIds`.
 4. Create a named Conductor enrollment token, run the generated install command,
    and verify the isolated runtime enrolls online but unbound.
@@ -307,8 +308,9 @@ For Podium-managed flows, the real run must additionally follow `docs/real-run-t
 6. Verify the exact `symphony:conductor/<Name>-<public-id>` project label, while
    confirming routing uses the durable project binding rather than that label.
 7. Delegate a real Linear issue to the installed workspace app user. Verify a
-   signed AgentSession webhook queues one dispatch, then prove reconciliation
-   polling recovers a missed delivery without a duplicate dispatch.
+   full baseline or incremental poll queues one dispatch, then prove restart,
+   repeated observations, and redelegation preserve checkpoint and epoch
+   semantics without a skipped or duplicate dispatch.
 8. Let Conductor and Performer complete the work, then verify Podium
    `/api/v1/managed-runs`, Linear projection, turn logs, repository contents,
    installation/binding health, and smoke tests.

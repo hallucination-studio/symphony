@@ -81,34 +81,60 @@ def test_linear_installation_adr_is_linked_and_source_grounded() -> None:
         "https://linear.app/developers/oauth-actor-authorization",
         "https://linear.app/developers/oauth-2-0-authentication",
         "https://linear.app/developers/agents",
-        "https://linear.app/developers/webhooks",
     ]:
         assert source in decision
 
 
-def test_linear_apps_share_one_callback_acceptance_lifecycle() -> None:
+def test_linear_apps_share_one_versioned_oauth_lifecycle() -> None:
     text = _prose(Path("docs/product/linear-integration.md"))
 
     for phrase in [
         "one default Linear OAuth application",
         "customer-owned application",
-        "same installation record",
+        "only its client id and client secret",
+        "one versioned OAuth installation lifecycle",
         "https://<podium-host>/api/v1/linear/oauth/callback",
         "Podium does not accept an operator-supplied callback URL",
         "actor=app",
-        "one-time OAuth state",
+        "exact required scopes are `read`, `write`, and `app:assignable`",
+        "one-time, short-lived OAuth state",
+        "`S256` PKCE",
         "configuration-stale",
+        "`303 See Other`",
+        "`/setup/linear`",
+        "denied consent",
         "valid access token and refresh metadata",
-        "all required scopes",
         "viewer.app=true",
-        "supportsAgentSessions=true",
         "real Linear organization id",
         "workspace-specific app user id",
         "project discovery and access",
+        "First installation activates immediately",
+        "same application, organization, and app-user identity",
+        "atomically rotates credentials without draining",
+        "Different app identity",
         "A failed candidate never replaces the active installation",
         "prepares every bound Conductor",
         "switches atomically",
+        "Different Linear organization",
+        "explicit reset or migration",
         "There is no global application-id/token fallback",
+    ]:
+        assert phrase in text
+
+
+def test_linear_token_lifecycle_is_refreshable_and_fail_closed() -> None:
+    text = _prose(Path("docs/product/linear-integration.md"))
+
+    for phrase in [
+        "access tokens expire after 24 hours",
+        "refresh tokens rotate",
+        "central token service",
+        "proactive refresh",
+        "per-installation single-flight lock",
+        "one refresh-and-retry after a Linear `401`",
+        "atomically persists the new access token and rotated refresh token",
+        "`reauthorization_required`",
+        "revokes credentials on disconnect or retirement",
     ]:
         assert phrase in text
 
@@ -121,21 +147,50 @@ def test_linear_project_scope_is_not_project_membership() -> None:
     assert "Each Conductor may bind exactly one selected project" in text
     assert "one repository mapping" in text
     assert "Multiple independent Conductors may run on the same host" in text
+    assert "Labels are never dispatch filters" in text
 
 
-def test_linear_intake_requires_webhook_reconciliation_deduplication() -> None:
+def test_linear_intake_is_reliable_polling_only() -> None:
     text = _prose(Path("docs/product/linear-integration.md"))
 
     for phrase in [
-        "AgentSession webhooks are the low-latency intake path",
-        "verifies the HMAC over the raw body",
-        "checks the timestamp window",
-        "Installation- and project-scoped reconciliation polling",
-        "deduplicates `Linear-Delivery`",
-        "share one durable dispatch idempotency key",
-        "can queue only once",
+        "Reliable polling is the only delegated-issue intake path",
+        "full cursor pagination",
+        "full baseline scan",
+        "Incremental scans include delegated and no-longer-delegated issues",
+        "`(updatedAt, issue_id)`",
+        "transactional page checkpoint",
+        "high-water mark advances only after the final page commits",
+        "durable exponential backoff",
+        "continuously observed delegation epoch",
+        "durably observed non-delegated transition",
+        "one Managed Run per delegation epoch",
     ]:
         assert phrase in text
+
+
+def test_linear_project_discovery_is_fully_paginated() -> None:
+    text = _prose(Path("docs/product/linear-integration.md"))
+
+    assert "Project discovery follows `pageInfo.hasNextPage` and `endCursor`" in text
+    assert "never truncates a workspace at a fixed first page" in text
+
+
+def test_linear_removed_paths_are_absent_from_documentation() -> None:
+    forbidden = [
+        "webhook",
+        "AgentSession",
+        "supportsAgentSessions",
+        "app:mentionable",
+    ]
+    docs = list(Path("docs").rglob("*.md")) + ENTRYPOINT_DOCS + [
+        Path("deploy/podium-test/README.md")
+    ]
+
+    for path in docs:
+        text = _read(path).lower()
+        for phrase in forbidden:
+            assert phrase.lower() not in text, f"{path} still publishes {phrase!r}"
 
 
 def test_real_acceptance_covers_installation_and_project_binding() -> None:
@@ -144,14 +199,33 @@ def test_real_acceptance_covers_installation_and_project_binding() -> None:
     for phrase in [
         "complete OAuth as a Linear workspace admin",
         "callback acceptance records the real organization",
+        "returns `303 See Other` to `/setup/linear`",
+        "denied consent",
         "without changing `ProjectUpdateInput.memberIds`",
         "duplicate project or second project binding is rejected",
         "symphony:conductor/<Name>-<public-id>",
-        "signed AgentSession webhook queues one dispatch",
-        "suppress one webhook",
-        "without duplicating dispatch",
+        "full baseline and incremental polling",
+        "without duplicate dispatch or skipped issue",
+        "same-identity reauthorization",
         "authorize a second test app",
         "old installation remains active",
+        "organization mismatch requires explicit reset or migration",
+    ]:
+        assert phrase in text
+
+
+def test_podium_web_application_choice_is_explicit_and_clean() -> None:
+    text = _prose(Path("docs/product/podium-web.md"))
+
+    for phrase in [
+        "Default application is selected initially",
+        "does not render customer-owned application fields",
+        "Bring your own application",
+        "client id and client secret fields",
+        "Podium-owned callback URL",
+        "There is no callback URL input",
+        "returns `303 See Other` to `/setup/linear`",
+        "denied consent",
     ]:
         assert phrase in text
 

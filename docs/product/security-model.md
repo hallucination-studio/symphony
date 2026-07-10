@@ -8,49 +8,49 @@ endpoints, authenticates users and runtimes, and turns privileged integration
 access into project-scoped runtime operations.
 
 Customer runtimes execute code in the customer's environment but never receive
-Linear OAuth access tokens, refresh tokens, client secrets, or webhook signing
-secrets.
+Linear OAuth access tokens, refresh tokens, or client secrets.
 
 ## Linear Secret Ownership
 
 Deployment configuration provides the default application's client id, client
-secret, fixed callback URL, and webhook signing secret. A customer-owned
-application stores the same fields as an encrypted versioned configuration in
-Podium. There is no deployment-global app actor access token used for intake or
-proxy fallback.
+secret, and fixed callback URL. A customer-owned application stores only its
+client id and encrypted client secret as a versioned configuration in Podium;
+the callback remains Podium-owned. There is no deployment-global app actor
+access token used for intake or proxy fallback.
 
 Every authorized workspace has its own encrypted installation access and
 refresh token, real Linear organization id, workspace-specific app user id,
 scope set, configuration version, and health state. A candidate installation
 cannot replace the active installation until acceptance and drain gates pass.
 
-Browser responses may show non-secret client ids, callback/webhook URLs,
-organization metadata, app user ids, scopes, health, timestamps, and sanitized
-errors. They never include secret values.
+Browser responses may show non-secret client ids, the callback URL, organization
+metadata, app user ids, scopes, health, timestamps, and sanitized errors. They
+never include secret values.
 
 ## OAuth And Callback Safety
 
-OAuth uses one-time state with expiry, consumption, application config id, and
-config version. The callback rejects state replay or configuration drift and
-validates the token response as untrusted input.
+OAuth uses hashed one-time state with a short expiry, Podium workspace binding,
+application config id/version, and `S256` PKCE. The callback rejects replay or
+configuration drift and validates the token response as untrusted input.
 
-Acceptance requires an app actor, required scopes, app-capable viewer, Agent
-Session support, real organization identity, workspace-specific app user id,
-and project access. Failed candidates retain durable diagnostics and cannot
-affect the active installation.
+Acceptance requires an app actor, the exact `read write app:assignable` scopes,
+an app-capable viewer, real organization identity, workspace-specific app user
+id, and fully paginated project access. Failed candidates retain durable
+diagnostics and cannot affect the active installation. Callback success and
+denial both return to the setup surface without exposing credentials.
 
-## Webhook Safety
+## Polling And Token Safety
 
-Podium verifies `Linear-Signature` over the raw body using HMAC-SHA256 and the
-matching application signing secret. It validates the Linear timestamp within a
-bounded replay window and deduplicates `Linear-Delivery` before processing.
-Organization or application ids parsed before signature verification are only
-lookup hints and are never trusted until a secret validates the request.
+Polling is the only delegated-issue intake and is installation- and
+project-scoped. Baseline and incremental scans paginate to completion. Issue
+observations, delegation epochs, idempotency rows, dispatches, and page
+checkpoints commit transactionally before the high-water mark advances.
 
-Webhook and reconciliation intake use the same durable event identity.
-Polling is installation- and project-scoped and may not use a human token or a
-global app token. Degraded webhook health, poll failures, retry counts, and
-last cursors are durable and operator visible.
+The central token service serializes refresh per installation, rotates access
+and refresh tokens atomically, refreshes proactively, and retries once after an
+authenticated `401`. Refresh rejection fails closed as
+`reauthorization_required`. Poll failures retain the last safe checkpoint,
+retry count, sanitized reason, and bounded backoff state for operators.
 
 ## Project And Runtime Scope
 
@@ -101,6 +101,6 @@ drain-aware, and auditable.
 ## Acceptable First-Version Risk
 
 Scoped bearer runtime tokens over HTTPS are acceptable when revocable and
-sanitized from logs. HMAC webhook secrets and OAuth client secrets remain
-shared secrets; later key-managed signing or mTLS can strengthen these
-boundaries without changing the installation and project authority model.
+sanitized from logs. OAuth client secrets remain shared secrets; later
+key-managed signing or mTLS can strengthen runtime boundaries without changing
+the installation and project authority model.

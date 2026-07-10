@@ -40,10 +40,10 @@ of truth is split by concern:
 Managed execution is a Conductor-owned Linear-native managed run:
 
 1. A Linear issue is delegated to the Symphony custom agent.
-2. Podium receives a signed AgentSession webhook; project-scoped reconciliation
-   polling covers missed deliveries with the same idempotency key.
+2. Podium's project-scoped poller discovers delegation through fully paginated
+   baseline and incremental scans with transactional checkpoints.
 3. Podium routes by the active installation and the project's unique Conductor
-   binding, then queues one dispatch.
+   binding, then queues one dispatch per delegation epoch.
 4. The project Conductor leases the dispatch over outbound runtime auth.
 5. Conductor commits or resumes one durable managed run for the parent issue.
 6. Performer runs plan or work-item turns under the Managed Runs contract.
