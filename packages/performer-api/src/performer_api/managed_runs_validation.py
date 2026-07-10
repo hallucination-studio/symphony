@@ -13,9 +13,12 @@ class ManagedRunPlanValidator:
         id_set = set(ids)
         if len(ids) != len(id_set):
             errors.append(ManagedRunPlanValidatorError.DUPLICATE_WORK_ITEM_ID)
+        items_by_id = {item.id: item for item in plan.work_items}
         edges: list[tuple[str, str]] = []
         for item in plan.work_items:
             errors.extend(self._validate_item(item))
+            if _is_validation_only_followup(item, items_by_id):
+                errors.append(ManagedRunPlanValidatorError.VALIDATION_ONLY_WORK_ITEM)
             for dependency in item.dependencies:
                 if dependency not in id_set:
                     errors.append(ManagedRunPlanValidatorError.MISSING_DEPENDENCY)
@@ -55,8 +58,7 @@ class ManagedRunPlanValidator:
 
 
 def _title_starts_with_action_verb(title: str) -> bool:
-    first = str(title or "").strip().split(" ", 1)[0].lower().strip(":-")
-    return first in {
+    return _first_title_word(title) in {
         "add",
         "audit",
         "build",
@@ -89,6 +91,10 @@ def _title_starts_with_action_verb(title: str) -> bool:
     }
 
 
+def _first_title_word(title: str) -> str:
+    return str(title or "").strip().split(" ", 1)[0].lower().strip(":-")
+
+
 def _looks_like_shell_command(command: str) -> bool:
     first = str(command or "").strip().split(" ", 1)[0].lower()
     basename = first.rsplit("/", 1)[-1]
@@ -112,6 +118,26 @@ def _looks_like_shell_command(command: str) -> bool:
         "uv",
         "yarn",
     }
+
+
+def _is_validation_only_followup(item: WorkItem, items_by_id: dict[str, WorkItem]) -> bool:
+    if not item.dependencies or _first_title_word(item.title) not in {"test", "validate", "verify"}:
+        return False
+    red = _normalized_command(item.verification.red_command)
+    greens = {_normalized_command(command) for command in item.verification.green_commands}
+    if not red or red not in greens:
+        return False
+    dependency_files: set[str] = set()
+    for dependency in item.dependencies:
+        dependency_item = items_by_id.get(dependency)
+        if dependency_item is not None:
+            dependency_files.update(dependency_item.files_likely_touched)
+    return bool(item.files_likely_touched) and set(item.files_likely_touched).issubset(dependency_files)
+
+
+def _normalized_command(command: str) -> str:
+    return " ".join(str(command or "").split())
+
 
 def _has_cycle(node_ids: set[str], edges: list[tuple[str, str]]) -> bool:
     adjacency: dict[str, list[str]] = {node_id: [] for node_id in node_ids}

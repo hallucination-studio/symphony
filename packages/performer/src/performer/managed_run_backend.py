@@ -122,6 +122,7 @@ def _plan_contract_instructions() -> str:
         "- Work item titles must not contain the word 'and'; split combined work instead.\n"
         "- Each work item may have at most 3 acceptance_criteria.\n"
         "- Every work item needs red_command, at least one green_commands entry, and a non-empty files_likely_touched list.\n"
+        "- Do not create a work item only to rerun validation for a dependency; put those commands in checkpoints after the producing work item.\n"
         "- If safe_to_parallelize is true, include parallel_group or shared_contracts.\n"
         "- Each checkpoint verify entry must be an executable shell command such as pytest tests/test_smoke.py -q; do not write prose checks.\n"
         "- Each risk object must contain risk and mitigation strings."

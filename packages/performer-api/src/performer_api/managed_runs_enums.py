@@ -114,4 +114,4 @@ class ManagedRunPlanValidatorError(StrEnum):
     DUPLICATE_WORK_ITEM_ID = "duplicate_work_item_id"
     MISSING_DEPENDENCY = "missing_dependency"
     INVALID_CHECKPOINT_COMMAND = "invalid_checkpoint_command"
-
+    VALIDATION_ONLY_WORK_ITEM = "validation_only_work_item"

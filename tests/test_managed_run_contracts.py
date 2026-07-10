@@ -123,6 +123,32 @@ def test_managed_run_plan_validator_rejects_dependency_cycles() -> None:
     assert ManagedRunPlanValidatorError.CYCLE_DETECTED in errors
 
 
+def test_managed_run_plan_validator_rejects_validation_only_followup_work_item() -> None:
+    create_marker = _work_item(
+        id="wi-1",
+        title="Create result marker",
+        files_likely_touched=["SYMPHONY_REAL_E2E_RESULT.md"],
+        verification=WorkItemVerification(
+            red_command="test -f SYMPHONY_REAL_E2E_RESULT.md",
+            green_commands=["test -f SYMPHONY_REAL_E2E_RESULT.md"],
+        ),
+    )
+    validate_smoke = _work_item(
+        id="wi-2",
+        title="Validate smoke test",
+        dependencies=["wi-1"],
+        files_likely_touched=["SYMPHONY_REAL_E2E_RESULT.md"],
+        verification=WorkItemVerification(
+            red_command="pytest tests/test_smoke.py -q",
+            green_commands=["pytest tests/test_smoke.py -q"],
+        ),
+    )
+
+    errors = ManagedRunPlanValidator().validate(_plan(create_marker, validate_smoke))
+
+    assert ManagedRunPlanValidatorError.VALIDATION_ONLY_WORK_ITEM in errors
+
+
 def test_managed_run_plan_validator_requires_full_definition_of_done_rubric() -> None:
     errors = ManagedRunPlanValidator().validate(_plan(rubric=VerificationRubric(correctness=["ok"])))
 

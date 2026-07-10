@@ -6,8 +6,9 @@ from pathlib import Path
 
 import pytest
 
-from performer.managed_run_backend import CodexManagedRunBackend, MANAGED_RUN_PLAN_SCHEMA, WORK_ITEM_RESULT_SCHEMA, ManagedRunBackendError, execute_work_item_prompt
+from performer.managed_run_backend import CodexManagedRunBackend, MANAGED_RUN_PLAN_SCHEMA, WORK_ITEM_RESULT_SCHEMA, ManagedRunBackendError, execute_work_item_prompt, plan_prompt
 from performer_api.managed_runs import (
+    Checkpoint,
     ManagedRunPlan,
     ParallelizationPolicy,
     VerificationRubric,
@@ -109,6 +110,35 @@ async def test_codex_managed_run_backend_repairs_invalid_plan_before_returning(t
 
 
 @pytest.mark.asyncio
+async def test_codex_managed_run_backend_repairs_validation_only_work_into_checkpoint(tmp_path) -> None:
+    producer = _work_item()
+    validation_only = WorkItem.from_dict(
+        {
+            **producer.to_dict(),
+            "id": "wi-2",
+            "title": "Validate backend tests",
+            "slice_type": "test-only",
+            "dependencies": ["wi-1"],
+        }
+    )
+    invalid = {**_plan_payload(), "work_items": [producer.to_dict(), validation_only.to_dict()]}
+    repaired = ManagedRunPlan.from_dict(
+        {
+            **_plan_payload(),
+            "checkpoints": [Checkpoint(after=["wi-1"], verify=["pytest tests/test_performer_managed_run_backend.py -q"]).to_dict()],
+        }
+    ).to_dict()
+    client = FakeCodexClient([invalid, repaired])
+    backend = CodexManagedRunBackend(client)
+
+    result = await backend.plan_turn(tmp_path, "Build the managed run")
+
+    assert [item.id for item in result.plan.work_items] == ["wi-1"]
+    assert result.plan.checkpoints[0].after == ["wi-1"]
+    assert "validation_only_work_item" in client.calls[1]["prompt"]
+
+
+@pytest.mark.asyncio
 async def test_codex_managed_run_backend_rejects_plan_turn_file_changes(tmp_path) -> None:
     subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
     client = FakeCodexClient(_plan_payload(), write_file="planner-output.txt")
@@ -163,6 +193,13 @@ def test_execute_work_item_prompt_includes_scope_and_tdd_rules() -> None:
     assert "touch only" in prompt
     assert "RED" in prompt
     assert "packages/performer/src/performer/managed_run_backend.py" in prompt
+
+
+def test_plan_prompt_requires_validation_only_work_in_checkpoints() -> None:
+    prompt = plan_prompt("Create marker and run smoke tests")
+
+    assert "Do not create a work item only to rerun validation" in prompt
+    assert "checkpoints after the producing work item" in prompt
 
 
 def test_managed_run_backend_output_schemas_close_every_object() -> None:
