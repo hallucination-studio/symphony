@@ -67,9 +67,9 @@ def _linear_app_user_scope_error() -> LinearE2EError:
     return LinearE2EError(
         failure_class="credential_or_config_failure",
         error_code="linear_app_user_scope_invalid",
-        sanitized_reason="Linear app user delegation requires app:assignable and app:mentionable scopes.",
+        sanitized_reason="Linear app user delegation requires the app:assignable scope.",
         retryable=False,
-        next_action="refresh_linear_app_access_token_with_app_assignable_and_mentionable_scopes",
+        next_action="refresh_linear_app_access_token_with_app_assignable_scope",
     )
 
 

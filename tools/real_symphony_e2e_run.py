@@ -94,7 +94,7 @@ from real_symphony_e2e_run_orchestrator import run
 from real_symphony_e2e_wait import wait_for_run
 
 
-LINEAR_AGENT_OAUTH_SCOPE = "read,write,app:assignable,app:mentionable"
+LINEAR_AGENT_OAUTH_SCOPE = "read,write,app:assignable"
 
 # Source-level invariants preserved for tests and reviewers:
 # os.environ.get("PODIUM_LINEAR_APP_ACCESS_TOKEN"
