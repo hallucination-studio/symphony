@@ -394,6 +394,127 @@ async def test_managed_run_driver_waits_for_plan_approval_before_work_item_turn(
 
 
 @pytest.mark.asyncio
+async def test_managed_run_driver_applies_approved_plan_revision_from_isolated_plan_turn(tmp_path: Path) -> None:
+    store = ConductorManagedRunStore(tmp_path / "managed_run")
+    coordinator = ConductorManagedRunCoordinator(store=store)
+    runtime_manager = FakeRuntimeManager()
+    instance = _instance(tmp_path)
+    instances = {instance.id: instance}
+    accepted = coordinator.accept_dispatch(
+        {"issue_id": "issue-1", "issue_identifier": "HELL-1", "description": "Create result"},
+        instance_id=instance.id,
+    )
+    coordinator.apply_plan(accepted.run_id, _plan(), backend_session_id="thread-1")
+    coordinator.start_work_item(accepted.run_id, "wi-1")
+    coordinator.submit_work_item_result(
+        accepted.run_id,
+        WorkItemResult.from_dict(
+            {
+                **_work_item_result().to_dict(),
+                "status_claimed": WorkItemResultStatus.PLAN_REVISION_REQUESTED.value,
+                "plan_revision": {"reason": "add revised scope", "files_likely_touched": ["REVISED_RESULT.md"]},
+            }
+        ),
+    )
+    coordinator.approve_plan_revision_request(accepted.run_id, "wi-1", approval_id="linear-state-flip-1")
+    driver = ConductorManagedRunDriver(
+        store=store,
+        coordinator=coordinator,
+        runtime_manager=runtime_manager,
+        instance_lookup=instances.get,
+        instance_update=lambda updated: instances.__setitem__(updated.id, updated),
+        runtime_config=_runtime_config(),
+    )
+
+    started = await driver.drive_once()
+    revision_attempt = store.get_run(accepted.run_id)["payload"]["active_attempt"]
+    request = json.loads(Path(revision_attempt["request_path"]).read_text(encoding="utf-8"))
+    revised_item = WorkItem.from_dict(
+        {
+            **_plan().work_items[0].to_dict(),
+            "files_likely_touched": ["SYMPHONY_REAL_E2E_RESULT.md", "REVISED_RESULT.md"],
+        }
+    )
+    revised_plan = ManagedRunPlan.from_dict({**_plan().to_dict(), "work_items": [revised_item.to_dict()]})
+    _write_result(revision_attempt["result_path"], {"turn_kind": "plan", "thread_id": "thread-2", "plan": revised_plan.to_dict()})
+
+    applied = await driver.drive_once()
+    run = store.get_run(accepted.run_id) or {}
+    item = store.list_work_items(accepted.run_id)[0]
+    completed = run["payload"]["completed_attempts"][-1]
+
+    assert started["started"] == 1
+    assert request["turn_kind"] == "plan"
+    assert request["plan_mode"] == "revision"
+    assert request["plan_revision"]["work_item_id"] == "wi-1"
+    assert "Managed Run Revision Request" in request["issue_description"]
+    assert applied["applied"] == 1
+    assert run["state"] == ManagedRunState.READY.value
+    assert run["plan_version"] == 2
+    assert item["state"] == WorkItemState.TODO.value
+    assert item["gate_status"] == "plan_revision_approved:linear-state-flip-1"
+    assert run["payload"]["approved_plan_revision"] == {}
+    assert completed["mode"] == "plan_revision"
+    assert completed["work_item_id"] == "wi-1"
+    assert store.list_gate_snapshots(accepted.run_id)[0]["creator_attempt_id"] == revision_attempt["attempt_id"]
+
+
+@pytest.mark.asyncio
+async def test_managed_run_driver_blocks_invalid_revision_plan_and_allows_another_approved_revision_turn(tmp_path: Path) -> None:
+    store = ConductorManagedRunStore(tmp_path / "managed_run")
+    coordinator = ConductorManagedRunCoordinator(store=store)
+    runtime_manager = FakeRuntimeManager()
+    instance = _instance(tmp_path)
+    instances = {instance.id: instance}
+    accepted = coordinator.accept_dispatch(
+        {"issue_id": "issue-1", "issue_identifier": "HELL-1", "description": "Create result"},
+        instance_id=instance.id,
+    )
+    coordinator.apply_plan(accepted.run_id, _plan(), backend_session_id="thread-1")
+    coordinator.start_work_item(accepted.run_id, "wi-1")
+    coordinator.submit_work_item_result(
+        accepted.run_id,
+        WorkItemResult.from_dict(
+            {
+                **_work_item_result().to_dict(),
+                "status_claimed": WorkItemResultStatus.PLAN_REVISION_REQUESTED.value,
+                "plan_revision": {"reason": "add revised scope", "files_likely_touched": ["REVISED_RESULT.md"]},
+            }
+        ),
+    )
+    coordinator.approve_plan_revision_request(accepted.run_id, "wi-1", approval_id="approval-1")
+    driver = ConductorManagedRunDriver(
+        store=store,
+        coordinator=coordinator,
+        runtime_manager=runtime_manager,
+        instance_lookup=instances.get,
+        instance_update=lambda updated: instances.__setitem__(updated.id, updated),
+        runtime_config=_runtime_config(),
+    )
+
+    await driver.drive_once()
+    revision_attempt = store.get_run(accepted.run_id)["payload"]["active_attempt"]
+    invalid_item = WorkItem.from_dict({**_plan().work_items[0].to_dict(), "estimated_scope": "L"})
+    invalid_plan = ManagedRunPlan.from_dict({**_plan().to_dict(), "work_items": [invalid_item.to_dict()]})
+    _write_result(revision_attempt["result_path"], {"turn_kind": "plan", "thread_id": "thread-2", "plan": invalid_plan.to_dict()})
+
+    blocked = await driver.drive_once()
+    blocked_run = store.get_run(accepted.run_id) or {}
+    blocked_item = store.list_work_items(accepted.run_id)[0]
+    coordinator.approve_plan_revision_request(accepted.run_id, "wi-1", approval_id="approval-2")
+    retried = store.get_run(accepted.run_id) or {}
+
+    assert blocked["failed"] == 1
+    assert blocked_run["state"] == ManagedRunState.BLOCKED.value
+    assert blocked_run["plan_version"] == 1
+    assert blocked_item["gate_status"].startswith("plan_revision_invalid:work_item_too_large")
+    assert blocked_run["payload"]["approved_plan_revision"]["state"] == "invalid"
+    assert retried["state"] == ManagedRunState.PLANNING.value
+    assert retried["plan_version"] == 1
+    assert retried["payload"]["approved_plan_revision"]["approval_id"] == "approval-2"
+
+
+@pytest.mark.asyncio
 async def test_managed_run_driver_records_sanitized_backend_events_in_attempt_view(tmp_path: Path) -> None:
     store = ConductorManagedRunStore(tmp_path / "managed_run")
     coordinator = ConductorManagedRunCoordinator(store=store)

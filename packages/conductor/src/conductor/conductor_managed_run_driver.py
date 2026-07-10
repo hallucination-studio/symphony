@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -89,7 +90,9 @@ class ConductorManagedRunDriver(ConductorManagedRunWorkItemMixin):
         envelope = self._runtime_config_or_fail(str(run["run_id"]))
         if envelope is None:
             return {"failed": 1}
-        attempt = _attempt_paths(instance, run, "plan", "plan")
+        revision = _approved_plan_revision(run)
+        attempt_item = f"revision-{revision['work_item_id']}" if revision else "plan"
+        attempt = _attempt_paths(instance, run, "plan", attempt_item)
         if attempt["result_path"].exists():
             attempt["result_path"].unlink()
         try:
@@ -102,15 +105,15 @@ class ConductorManagedRunDriver(ConductorManagedRunWorkItemMixin):
         except Exception as exc:
             self.store.update_run_state(str(run["run_id"]), ManagedRunState.FAILED, reason=f"plan_workspace_prepare_failed:{_sanitize(exc)}")
             return {"failed": 1}
-        _write_json(
-            attempt["request_path"],
-            {
-                "turn_kind": "plan",
-                "workspace_path": str(workspace.workspace_path),
-                "issue_description": _issue_description(run),
-                "thread_id": run.get("backend_session_id") or None,
-            },
-        )
+        request = {
+            "turn_kind": "plan",
+            "workspace_path": str(workspace.workspace_path),
+            "issue_description": _plan_turn_description(self.store, run, revision),
+            "thread_id": run.get("backend_session_id") or None,
+        }
+        if revision:
+            request.update({"plan_mode": "revision", "plan_revision": revision})
+        _write_json(attempt["request_path"], request)
         env = prepare_backend_environment(
             Path(instance.instance_dir) / "state",
             envelope.profiles.get(ManagedRunRuntimeRole.PLAN),
@@ -127,16 +130,32 @@ class ConductorManagedRunDriver(ConductorManagedRunWorkItemMixin):
             lease_id=attempt["attempt_id"],
         )
         self.instance_update(started)
-        self.store.update_run_state(str(run["run_id"]), ManagedRunState.PLANNING, reason="plan turn started")
+        self.store.update_run_state(
+            str(run["run_id"]),
+            ManagedRunState.PLANNING,
+            active_work_item_id=str(run.get("active_work_item_id") or ""),
+            reason="plan turn started",
+        )
+        attempt_payload = {
+            **_attempt_payload(attempt, "plan"),
+            "workspace_path": str(workspace.workspace_path),
+            "base_revision": workspace.base_revision,
+            "branch_name": workspace.branch_name,
+        }
+        if revision:
+            attempt_payload.update(
+                {
+                    "mode": "plan_revision",
+                    "work_item_id": str(revision["work_item_id"]),
+                    "node_id": str(revision["work_item_id"]),
+                    "plan_revision_approval_id": str(revision.get("approval_id") or ""),
+                }
+            )
         self.store.merge_run_payload(
             str(run["run_id"]),
             {
-                "active_attempt": {
-                    **_attempt_payload(attempt, "plan"),
-                    "workspace_path": str(workspace.workspace_path),
-                    "base_revision": workspace.base_revision,
-                    "branch_name": workspace.branch_name,
-                }
+                "active_attempt": attempt_payload,
+                "active_attempts": [attempt_payload],
             },
         )
         return {"started": 1}
@@ -159,12 +178,23 @@ class ConductorManagedRunDriver(ConductorManagedRunWorkItemMixin):
             plan_payload = payload.get("plan")
             if not isinstance(plan_payload, dict):
                 raise ValueError("plan_result_missing")
-            version = self.coordinator.apply_plan(
-                str(run["run_id"]),
-                ManagedRunPlan.from_dict(plan_payload),
-                backend_session_id=str(payload.get("thread_id") or ""),
-                creator_attempt_id=str(attempt.get("attempt_id") or ""),
-            )
+            plan = ManagedRunPlan.from_dict(plan_payload)
+            revision = _approved_plan_revision(run)
+            if revision:
+                version = self.coordinator.approve_plan_revision(
+                    str(run["run_id"]),
+                    plan,
+                    backend_session_id=str(payload.get("thread_id") or ""),
+                    approval_id=str(revision.get("approval_id") or ""),
+                    creator_attempt_id=str(attempt.get("attempt_id") or ""),
+                )
+            else:
+                version = self.coordinator.apply_plan(
+                    str(run["run_id"]),
+                    plan,
+                    backend_session_id=str(payload.get("thread_id") or ""),
+                    creator_attempt_id=str(attempt.get("attempt_id") or ""),
+                )
         except Exception as exc:
             reason = f"plan_result_failed:{_sanitize(exc)}"
             self.store.update_run_state(str(run["run_id"]), ManagedRunState.FAILED, reason=reason)
@@ -273,5 +303,28 @@ class ConductorManagedRunDriver(ConductorManagedRunWorkItemMixin):
                 "last_failed_attempt": {**attempt, "exit": exited, "reason": reason},
             },
         )
+
+
+def _approved_plan_revision(run: dict[str, Any]) -> dict[str, Any]:
+    payload = run.get("payload") if isinstance(run.get("payload"), dict) else {}
+    revision = payload.get("approved_plan_revision") if isinstance(payload.get("approved_plan_revision"), dict) else {}
+    if revision.get("state") != "planning" or not revision.get("work_item_id"):
+        return {}
+    return dict(revision)
+
+
+def _plan_turn_description(store: ConductorManagedRunStore, run: dict[str, Any], revision: dict[str, Any]) -> str:
+    issue_description = _issue_description(run)
+    if not revision:
+        return issue_description
+    plan = store.get_plan(str(run["run_id"]), int(run.get("plan_version") or 0))
+    context = {
+        "approval_id": revision.get("approval_id"),
+        "request": revision.get("request"),
+        "work_item_id": revision.get("work_item_id"),
+        "accepted_plan": plan.to_dict() if plan is not None else {},
+    }
+    return f"{issue_description}\n\nManaged Run Revision Request:\n{json.dumps(context, sort_keys=True)}"
+
 
 __all__ = ["ConductorManagedRunDriver"]

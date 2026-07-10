@@ -73,6 +73,8 @@ def ingest_managed_run_human_action_event(
 def _work_item_target(item: dict[str, Any]) -> dict[str, str] | None:
     work_item_id = str(item.get("work_item_id") or "")
     reason = str(item.get("gate_status") or "")
+    if reason.startswith("plan_revision_planning:"):
+        return None
     return _target("work_item", work_item_id, reason) if work_item_id and reason else None
 
 
@@ -92,8 +94,8 @@ def _required_action(reason: str, work_item_id: str) -> str:
         return "review the accepted plan, then flip this issue out of the blocked state to approve it"
     if reason == "human_approval_required":
         return "provide the approval or decision requested by this blocked work item"
-    if reason == "plan_revision_requested":
-        return "provide an approved plan revision through the managed run, then flip this issue out of the blocked state"
+    if reason == "plan_revision_requested" or reason.startswith("plan_revision_invalid:"):
+        return "review the proposed revision, then flip this issue out of the blocked state to start controlled replanning"
     if work_item_id:
         return "correct the blocked work item, then flip this issue out of the blocked state"
     return "resolve the blocked managed run, then flip this issue out of the blocked state"
@@ -113,8 +115,9 @@ def _resume_work_item(
     if reason == "human_approval_required":
         coordinator.approve_work_item(run_id, work_item_id, approval_id=marker)
         return {"applied": True, "reason": "state_flip_resumed"}
-    if reason == "plan_revision_requested":
-        return {"applied": False, "reason": "plan_revision_requires_approved_plan"}
+    if reason == "plan_revision_requested" or reason.startswith("plan_revision_invalid:"):
+        coordinator.approve_plan_revision_request(run_id, work_item_id, approval_id=marker)
+        return {"applied": True, "reason": "state_flip_resumed"}
     coordinator.reopen_blocked_work_item(run_id, work_item_id, action_id=marker)
     return {"applied": True, "reason": "state_flip_resumed"}
 

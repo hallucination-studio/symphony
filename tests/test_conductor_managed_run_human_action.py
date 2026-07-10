@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 from typing import Any
 
 from conductor.conductor_managed_run_coordinator import ConductorManagedRunCoordinator
@@ -235,7 +234,7 @@ async def test_managed_run_generic_parent_block_retries_only_after_root_state_fl
     assert reopened["latest_reason"].startswith("operator_reopened:linear_state_flip:")
 
 
-async def test_plan_revision_state_flip_stays_blocked_and_logs_required_resolution(tmp_path, caplog) -> None:
+async def test_plan_revision_state_flip_starts_isolated_revision_planning(tmp_path) -> None:
     store = ConductorManagedRunStore(tmp_path)
     coordinator = ConductorManagedRunCoordinator(store=store)
     accepted = coordinator.accept_dispatch({"issue_id": "root-1", "issue_identifier": "HELL-1"}, instance_id="instance-1")
@@ -261,18 +260,18 @@ async def test_plan_revision_state_flip_stays_blocked_and_logs_required_resoluti
     await projector.reconcile_once(accepted.run_id)
     await projector.reconcile_once(accepted.run_id)
     tracker.children[0].update({"state": "In Progress", "state_type": "started"})
-    with caplog.at_level(logging.WARNING):
-        await projector.reconcile_once(accepted.run_id)
+    await projector.reconcile_once(accepted.run_id)
 
     item = store.list_work_items(accepted.run_id)[0]
     run = store.get_run(accepted.run_id) or {}
     wait = run["payload"]["human_action_instructions"]["managed-run:wi-1:plan_revision_requested"]
     assert item["state"] == WorkItemState.BLOCKED.value
-    assert run["state"] == ManagedRunState.BLOCKED.value
-    assert wait["last_state_flip"]["reason"] == "plan_revision_requires_approved_plan"
-    assert "event=managed_run_human_action_state_flip_ignored" in caplog.text
-    assert "run_id=" + accepted.run_id in caplog.text
-    assert "error_code=plan_revision_requires_approved_plan" in caplog.text
+    assert item["gate_status"].startswith("plan_revision_planning:linear_state_flip:")
+    assert run["state"] == ManagedRunState.PLANNING.value
+    assert run["plan_version"] == 1
+    assert wait["last_state_flip"]["applied"] is True
+    assert wait["last_state_flip"]["reason"] == "state_flip_resumed"
+    assert run["payload"]["approved_plan_revision"]["work_item_id"] == "wi-1"
 
 
 def _plan_requiring_approval() -> ManagedRunPlan:
