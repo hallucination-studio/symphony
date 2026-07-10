@@ -151,7 +151,10 @@ async def test_dispatch_ack_reconcile_has_no_phase_drift_findings() -> None:
 async def test_linear_proxy_requires_proxy_token_and_audits_requests() -> None:
     seen_authorization: list[str] = []
 
-    def linear_transport(request: httpx.Request) -> httpx.Response:
+    async def linear_transport(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        if str(payload.get("operationName") or "").startswith("ManagedProject"):
+            return await successful_project_label_transport(request)
         seen_authorization.append(request.headers["Authorization"])
         return httpx.Response(200, json={"data": {"viewer": {"id": "viewer-1"}}})
 
@@ -161,13 +164,19 @@ async def test_linear_proxy_requires_proxy_token_and_audits_requests() -> None:
         enrolled = await enroll_conductor(client)
 
         unauthorized = await client.post("/api/v1/linear/graphql", json={"query": "{ viewer { id } }"})
-        missing_installation = await client.post(
+        unbound = await client.post(
             "/api/v1/linear/graphql",
             json={"operationName": "Viewer", "query": "{ viewer { id } }"},
             headers={"Authorization": f"Bearer {enrolled['proxy_token']}"},
         )
 
         await activate_linear_installation(app, user_id)
+        still_unbound = await client.post(
+            "/api/v1/linear/graphql",
+            json={"operationName": "Viewer", "query": "{ viewer { id } }"},
+            headers={"Authorization": f"Bearer {enrolled['proxy_token']}"},
+        )
+        await bind_and_ack_conductor(app, client, user_id, enrolled)
         allowed = await client.post(
             "/api/v1/linear/graphql",
             json={"operationName": "Viewer", "query": "{ viewer { id } }"},
@@ -175,8 +184,10 @@ async def test_linear_proxy_requires_proxy_token_and_audits_requests() -> None:
         )
 
     assert unauthorized.status_code == 401
-    assert missing_installation.status_code == 400
-    assert missing_installation.json()["error"]["code"] == "linear_installation_required"
+    assert unbound.status_code == 409
+    assert unbound.json()["error"]["code"] == "linear_project_binding_required"
+    assert still_unbound.status_code == 409
+    assert still_unbound.json()["error"]["code"] == "linear_project_binding_required"
     assert allowed.status_code == 200
     assert allowed.json() == {"data": {"viewer": {"id": "viewer-1"}}}
     assert seen_authorization == ["oauth-installation-token"]
@@ -186,7 +197,10 @@ async def test_linear_proxy_persists_audit_event_when_postgres_is_injected() -> 
 
     store = PodiumStore()
 
-    def linear_transport(request: httpx.Request) -> httpx.Response:
+    async def linear_transport(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        if str(payload.get("operationName") or "").startswith("ManagedProject"):
+            return await successful_project_label_transport(request)
         return httpx.Response(200, json={"data": {"viewer": {"id": "viewer-1"}}})
 
     app = create_app(
@@ -200,6 +214,7 @@ async def test_linear_proxy_persists_audit_event_when_postgres_is_injected() -> 
         user_id = await register(client, "pg-audit@example.com")
         enrolled = await enroll_conductor(client)
         await activate_linear_installation(app, user_id)
+        await bind_and_ack_conductor(app, client, user_id, enrolled)
         proxied = await client.post(
             "/api/v1/linear/graphql",
             json={"operationName": "Viewer", "query": "query Viewer { viewer { id } }"},
@@ -213,11 +228,44 @@ async def test_linear_proxy_persists_audit_event_when_postgres_is_injected() -> 
             "allowed": True,
             "operation_name": "Viewer",
             "workspace_id": user_id,
+            "project_binding_id": f"binding_{enrolled['runtime_id']}",
+            "linear_project_id": "project-alpha",
             "token_source": "installation",
             "timestamp": store._load_list("proxy_audit_events.json")[0]["timestamp"],
         }
     ]
     assert "oauth-installation-token" not in json.dumps(store._load_list("proxy_audit_events.json"))
+
+
+async def test_linear_proxy_rejects_runtime_group_binding_mismatch() -> None:
+    forwarded = False
+
+    async def linear_transport(request: httpx.Request) -> httpx.Response:
+        nonlocal forwarded
+        payload = json.loads(request.content)
+        if str(payload.get("operationName") or "").startswith("ManagedProject"):
+            return await successful_project_label_transport(request)
+        forwarded = True
+        return httpx.Response(200, json={"data": {"viewer": {"id": "viewer-1"}}})
+
+    app = make_app(linear_graphql_transport=linear_transport)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
+        user_id = await register(client, "proxy-binding-mismatch@example.com")
+        enrolled = await enroll_conductor(client)
+        await activate_linear_installation(app, user_id)
+        await bind_and_ack_conductor(app, client, user_id, enrolled)
+        group = await app.state.podium.store.get_runtime_group(enrolled["runtime_group_id"])
+        await app.state.podium.store.upsert_runtime_group({**group, "project_binding_id": "binding-other"})
+
+        response = await client.post(
+            "/api/v1/linear/graphql",
+            json={"operationName": "Viewer", "query": "query Viewer { viewer { id } }"},
+            headers={"Authorization": f"Bearer {enrolled['proxy_token']}"},
+        )
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "runtime_project_binding_mismatch"
+    assert forwarded is False
 
 async def test_linear_proxy_returns_structured_error_for_corrupt_stored_token() -> None:
     from podium.store import PodiumStore
@@ -228,6 +276,7 @@ async def test_linear_proxy_returns_structured_error_for_corrupt_stored_token() 
         user_id = await register(client, "proxy-secret-error@example.com")
         enrolled = await enroll_conductor(client)
         installation_id = await activate_linear_installation(app, user_id)
+        await bind_and_ack_conductor(app, client, user_id, enrolled)
         installations = store._load_map("linear_workspace_installations.json")
         installations[installation_id]["access_token_enc"] = "not-a-fernet-token"
         store._write("linear_workspace_installations.json", installations)
@@ -262,8 +311,8 @@ async def test_linear_proxy_ignores_removed_environment_app_token(
             headers={"Authorization": f"Bearer {enrolled['proxy_token']}"},
         )
 
-    assert proxied.status_code == 400
-    assert proxied.json()["error"]["code"] == "linear_installation_required"
+    assert proxied.status_code == 409
+    assert proxied.json()["error"]["code"] == "linear_project_binding_required"
     assert captured == {}
 
 
@@ -288,8 +337,8 @@ async def test_linear_proxy_rejects_query_when_only_operator_environment_token_e
             headers={"Authorization": f"Bearer {enrolled['proxy_token']}"},
         )
 
-    assert proxied.status_code == 400
-    assert proxied.json()["error"]["code"] == "linear_installation_required"
+    assert proxied.status_code == 409
+    assert proxied.json()["error"]["code"] == "linear_project_binding_required"
     assert called is False
 
 def test_runtime_ws_presence_dispatch_wakeup_and_log_fetch_roundtrip() -> None:

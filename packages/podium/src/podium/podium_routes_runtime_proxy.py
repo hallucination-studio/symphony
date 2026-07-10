@@ -44,12 +44,16 @@ async def linear_graphql_response(
         await _audit_runtime_proxy_denial(state, runtime, "runtime_disabled")
         return error_response(401, "runtime_disabled", "Runtime is disabled")
     payload = await request.json()
-    group_id = str(runtime.get("runtime_group_id") or "")
-    group = await state.store.get_runtime_group(group_id) or {}
-    workspace_id = str(group.get("linear_workspace_id") or "")
+    binding = await _ready_proxy_binding_or_error(state, runtime, error_response)
+    if isinstance(binding, JSONResponse):
+        return binding
+    workspace_id = str(binding.get("user_id") or "")
     installation = await _linear_installation_or_error(state, runtime, workspace_id, error_response)
     if isinstance(installation, JSONResponse):
         return installation
+    if str(installation.get("id") or "") != str(binding.get("installation_id") or ""):
+        await _audit_proxy_context_denial(state, runtime, binding, "runtime_installation_mismatch")
+        return error_response(409, "runtime_installation_mismatch", "Runtime binding installation is not active")
     token = _proxy_token_from_installation(installation)
     token_error = await _validate_proxy_token(state, runtime, workspace_id, payload, installation, token, error_response)
     if token_error is not None:
@@ -58,13 +62,66 @@ async def linear_graphql_response(
     if not upstream_token:
         await _record_proxy_token_missing(state, runtime, payload, workspace_id)
         return error_response(400, "linear_installation_required", "An active Linear installation is required")
-    await _record_proxy_allowed(state, runtime, payload, workspace_id, token_source)
+    await _record_proxy_allowed(state, runtime, binding, payload, workspace_id, token_source)
     return await _forward_linear_graphql(payload, upstream_token, linear_graphql_transport)
+
+
+async def _ready_proxy_binding_or_error(
+    state: Any,
+    runtime: dict[str, Any],
+    error_response: ErrorResponse,
+) -> dict[str, Any] | JSONResponse:
+    runtime_id = str(runtime.get("id") or "")
+    bindings = [
+        row
+        for row in await state.store.list_project_bindings_for_conductor(runtime_id)
+        if row.get("active", True)
+    ]
+    if not bindings:
+        await _audit_runtime_proxy_denial(state, runtime, "linear_project_binding_required")
+        return error_response(409, "linear_project_binding_required", "A ready project binding is required")
+    if len(bindings) != 1 or str(bindings[0].get("state") or "") != "ready":
+        binding = bindings[0]
+        await _audit_proxy_context_denial(state, runtime, binding, "linear_project_binding_not_ready")
+        return error_response(409, "linear_project_binding_not_ready", "Project binding is not ready")
+    binding = bindings[0]
+    group = await state.store.get_runtime_group(str(runtime.get("runtime_group_id") or "")) or {}
+    if (
+        str(group.get("project_binding_id") or "") != str(binding.get("id") or "")
+        or str(group.get("linear_workspace_id") or "") != str(binding.get("user_id") or "")
+    ):
+        await _audit_proxy_context_denial(state, runtime, binding, "runtime_project_binding_mismatch")
+        return error_response(409, "runtime_project_binding_mismatch", "Runtime project binding does not match")
+    selected = await state.store.list_selected_linear_projects(str(binding.get("user_id") or ""))
+    if str(binding.get("linear_project_id") or "") not in {
+        str(row.get("linear_project_id") or "") for row in selected
+    }:
+        await _audit_proxy_context_denial(state, runtime, binding, "linear_project_scope_mismatch")
+        return error_response(409, "linear_project_scope_mismatch", "Runtime project is outside selected scope")
+    return binding
 
 
 async def _audit_runtime_proxy_denial(state: Any, runtime: dict[str, Any], reason: str) -> None:
     await state.record_proxy_audit(
         {"runtime_id": runtime["id"], "allowed": False, "reason": reason, "timestamp": utc_now_iso()}
+    )
+
+
+async def _audit_proxy_context_denial(
+    state: Any,
+    runtime: dict[str, Any],
+    binding: dict[str, Any],
+    reason: str,
+) -> None:
+    await state.record_proxy_audit(
+        {
+            "runtime_id": runtime["id"],
+            "project_binding_id": binding.get("id"),
+            "linear_project_id": binding.get("linear_project_id"),
+            "allowed": False,
+            "reason": reason,
+            "timestamp": utc_now_iso(),
+        }
     )
 
 
@@ -149,7 +206,12 @@ async def _record_proxy_token_missing(
 
 
 async def _record_proxy_allowed(
-    state: Any, runtime: dict[str, Any], payload: dict[str, Any], workspace_id: str, token_source: str
+    state: Any,
+    runtime: dict[str, Any],
+    binding: dict[str, Any],
+    payload: dict[str, Any],
+    workspace_id: str,
+    token_source: str,
 ) -> None:
     await state.record_proxy_audit(
         {
@@ -157,6 +219,8 @@ async def _record_proxy_allowed(
             "allowed": True,
             "operation_name": payload.get("operationName"),
             "workspace_id": workspace_id,
+            "project_binding_id": binding.get("id"),
+            "linear_project_id": binding.get("linear_project_id"),
             "token_source": token_source,
             "timestamp": utc_now_iso(),
         }
