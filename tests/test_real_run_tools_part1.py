@@ -1053,6 +1053,7 @@ def test_real_symphony_e2e_keeps_fixture_credentials_out_of_managed_runtime() ->
     assert managed["PODIUM_DATABASE_URL"] == "postgresql://podium.test/podium"
     assert managed["PODIUM_BASE_URL"] == "http://127.0.0.1:8090"
     assert managed["PODIUM_DEBUG_AUTH"] == "1"
+    assert managed["PODIUM_SECURE_COOKIES"] == "0"
     assert "SYMPHONY_E2E_LINEAR_FIXTURE_TOKEN" not in managed
     assert "PODIUM_LINEAR_APP_ACCESS_TOKEN" not in managed
     assert "PODIUM_LINEAR_APPLICATION_ID" not in managed

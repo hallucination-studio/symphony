@@ -42,6 +42,7 @@ def podium_managed_env(
             "PODIUM_BASE_URL": podium_base_url,
             "PODIUM_SECRET_KEY": secret_key,
             "PODIUM_DEBUG_AUTH": "1",
+            "PODIUM_SECURE_COOKIES": "0",
             "PODIUM_DISABLE_TURNSTILE": "1",
             "PODIUM_LINEAR_RECONCILIATION_INTERVAL_SECONDS": "1",
         }

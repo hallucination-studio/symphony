@@ -13,6 +13,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from podium.app import create_app
+from podium.cli import secure_cookies_from_env
 from podium.config import PodiumConfig
 from podium.podium_shared import dispatch_public
 from podium.store._postgres_dispatch import PgDispatchMixin, _binding_values
@@ -20,6 +21,14 @@ from podium.store.postgres import PgMigrator
 from podium.store import PodiumStore
 
 APP_PATH = Path("packages/podium/src/podium/app.py")
+
+
+def test_cli_cookies_are_secure_by_default_and_require_explicit_local_override(monkeypatch) -> None:
+    monkeypatch.delenv("PODIUM_SECURE_COOKIES", raising=False)
+    assert secure_cookies_from_env() is True
+
+    monkeypatch.setenv("PODIUM_SECURE_COOKIES", "0")
+    assert secure_cookies_from_env() is False
 
 
 def test_config_reads_podium_database_url(monkeypatch) -> None:
