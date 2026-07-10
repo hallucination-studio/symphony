@@ -251,6 +251,26 @@ def test_managed_run_view_uses_run_and_work_item_language(tmp_path) -> None:
     assert view["runs"][0]["work_items"][0]["state"] == WorkItemState.TODO.value
 
 
+def test_managed_run_view_exposes_durable_runtime_waits(tmp_path) -> None:
+    store = ConductorManagedRunStore(tmp_path)
+    run = store.accept_dispatch({"issue_id": "root-1", "issue_identifier": "HELL-8"}, instance_id="instance-1")
+    wait = {
+        "wait_id": "runtime-wait-1",
+        "work_item_id": "wi-1",
+        "attempt_id": "attempt-1",
+        "lease_id": "lease-1",
+        "wait_kind": "approval_requested",
+        "status": "waiting",
+        "sanitized_message": "Approve the runtime action.",
+    }
+    store.merge_run_payload(run.run_id, {"runtime_waits": [wait]})
+
+    view = store.managed_run_view()
+
+    assert view["runs"][0]["runtime_waits"] == [{"run_id": run.run_id, **wait}]
+    assert view["runtime_waits"] == [{"run_id": run.run_id, **wait}]
+
+
 def test_managed_run_view_reports_duplicate_attempt_as_integrity_error_without_duplicate_rows(tmp_path) -> None:
     store = ConductorManagedRunStore(tmp_path)
     run = store.accept_dispatch({"issue_id": "root-1", "issue_identifier": "HELL-7"}, instance_id="instance-1")

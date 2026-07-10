@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+import conductor.conductor_managed_run_driver as managed_run_driver
+import conductor.conductor_managed_run_driver_work_items as managed_run_driver_work_items
+from conductor.conductor_managed_run_branch_join import JoinWorkspace
 from conductor.conductor_managed_run_coordinator import ConductorManagedRunCoordinator
 from conductor.conductor_managed_run_driver import ConductorManagedRunDriver
 from conductor.conductor_managed_run_store import ConductorManagedRunStore
@@ -264,6 +268,311 @@ async def test_managed_run_driver_runs_plan_work_item_and_verify(tmp_path: Path)
     assert view["verification_inputs"][0]["commit_sha"] == handoff["commit_sha"]
     assert view["manifests"][0]["commit_sha"] == handoff["commit_sha"]
     assert view["manifests"][0]["artifacts"] == handoff["artifact_hashes"]
+
+
+@pytest.mark.asyncio
+async def test_managed_run_driver_carries_and_rejects_fenced_turn_context(tmp_path: Path, caplog) -> None:
+    store = ConductorManagedRunStore(tmp_path / "managed_run")
+    coordinator = ConductorManagedRunCoordinator(store=store)
+    runtime_manager = FakeRuntimeManager()
+    instance = _instance(tmp_path)
+    instances = {instance.id: instance}
+    accepted = coordinator.accept_dispatch(
+        {"issue_id": "issue-1", "issue_identifier": "HELL-1", "description": "Create result"},
+        instance_id=instance.id,
+    )
+    driver = ConductorManagedRunDriver(
+        store=store,
+        coordinator=coordinator,
+        runtime_manager=runtime_manager,
+        instance_lookup=instances.get,
+        instance_update=lambda updated: instances.__setitem__(updated.id, updated),
+        runtime_config=_runtime_config(),
+    )
+
+    await driver.drive_once()
+    plan_attempt = store.get_run(accepted.run_id)["payload"]["active_attempt"]
+    plan_request = json.loads(Path(plan_attempt["request_path"]).read_text(encoding="utf-8"))
+    _write_result(
+        plan_attempt["result_path"],
+        {"turn_kind": "plan", "context": plan_request["context"], "thread_id": "thread-1", "plan": _plan().to_dict()},
+    )
+    await driver.drive_once()
+    await driver.drive_once()
+    work_attempt = store.get_run(accepted.run_id)["payload"]["active_attempt"]
+    work_request = json.loads(Path(work_attempt["request_path"]).read_text(encoding="utf-8"))
+    result = _work_item_result()
+    _materialize_result_files(Path(work_request["workspace_path"]), result)
+    _write_result(
+        work_attempt["result_path"],
+        {
+            "turn_kind": "work_item",
+            "context": {**work_request["context"], "fencing_token": "stale-fence"},
+            "thread_id": "thread-1",
+            "result": result.to_dict(),
+        },
+    )
+
+    with caplog.at_level(logging.ERROR):
+        rejected = await driver.drive_once()
+    run = store.get_run(accepted.run_id) or {}
+    item = store.list_work_items(accepted.run_id)[0]
+    completed = run["payload"]["completed_attempts"][-1]
+
+    assert plan_request["context"]["run_id"] == accepted.run_id
+    assert plan_request["context"]["work_item_id"] == ""
+    assert plan_request["context"]["policy_revision"] == 1
+    assert plan_request["context"]["plan_version"] == 0
+    assert plan_request["context"]["lease_id"] == plan_attempt["lease_id"]
+    assert plan_request["context"]["fencing_token"] == plan_attempt["fencing_token"]
+    assert plan_request["context"]["turn_id"] == plan_attempt["attempt_id"]
+    assert work_request["context"]["work_item_id"] == "wi-1"
+    assert work_request["context"]["plan_version"] == 1
+    assert rejected["failed"] == 1
+    assert run["latest_reason"] == "work_item_result_failed:stale_fencing_token"
+    assert item["state"] == WorkItemState.IN_PROGRESS.value
+    assert completed["state"] == "failed"
+    assert "event=managed_run_result_rejected" in caplog.text
+    assert "error_code=stale_fencing_token" in caplog.text
+    assert "run_id=" + accepted.run_id in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_managed_run_driver_logs_sanitized_plan_worktree_failure(tmp_path: Path, caplog, monkeypatch) -> None:
+    store = ConductorManagedRunStore(tmp_path / "managed_run")
+    coordinator = ConductorManagedRunCoordinator(store=store)
+    runtime_manager = FakeRuntimeManager()
+    instance = _instance(tmp_path)
+    accepted = coordinator.accept_dispatch(
+        {"issue_id": "issue-1", "issue_identifier": "HELL-1", "description": "Create result"},
+        instance_id=instance.id,
+    )
+    driver = ConductorManagedRunDriver(
+        store=store,
+        coordinator=coordinator,
+        runtime_manager=runtime_manager,
+        instance_lookup={instance.id: instance}.get,
+        instance_update=lambda updated: None,
+        runtime_config=_runtime_config(),
+    )
+
+    def fail_worktree(*_args, **_kwargs):
+        raise RuntimeError("Authorization: Bearer secret-value")
+
+    monkeypatch.setattr(managed_run_driver, "prepare_execution_worktree", fail_worktree)
+    with caplog.at_level(logging.ERROR, logger="conductor.managed_run_workspace"):
+        result = await driver.drive_once()
+
+    run = store.get_run(accepted.run_id) or {}
+    assert result["failed"] == 1
+    assert run["state"] == ManagedRunState.FAILED.value
+    assert "secret-value" not in run["latest_reason"]
+    assert "event=managed_run_workspace_failed" in caplog.text
+    assert f"run_id={accepted.run_id}" in caplog.text
+    assert "instance_id=inst-1" in caplog.text
+    assert "error_code=plan_workspace_prepare_failed" in caplog.text
+    assert "secret-value" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_managed_run_driver_logs_dependency_branch_workspace_failure(tmp_path: Path, caplog, monkeypatch) -> None:
+    store = ConductorManagedRunStore(tmp_path / "managed_run")
+    coordinator = ConductorManagedRunCoordinator(store=store)
+    runtime_manager = FakeRuntimeManager()
+    instance = _instance(tmp_path)
+    accepted = coordinator.accept_dispatch(
+        {"issue_id": "issue-1", "issue_identifier": "HELL-1", "description": "Create result"},
+        instance_id=instance.id,
+    )
+    driver = ConductorManagedRunDriver(
+        store=store,
+        coordinator=coordinator,
+        runtime_manager=runtime_manager,
+        instance_lookup={instance.id: instance}.get,
+        instance_update=lambda updated: None,
+        runtime_config=_runtime_config(),
+    )
+    await driver.drive_once()
+    plan_attempt = store.get_run(accepted.run_id)["payload"]["active_attempt"]
+    _write_result(plan_attempt["result_path"], {"turn_kind": "plan", "thread_id": "thread-1", "plan": _plan().to_dict()})
+    await driver.drive_once()
+
+    monkeypatch.setattr(
+        managed_run_driver_work_items,
+        "prepare_execution_workspace",
+        lambda *_args, **_kwargs: JoinWorkspace(None, failed=True, reason="verified_branch_join_conflict:README.md"),
+    )
+    with caplog.at_level(logging.ERROR, logger="conductor.managed_run_workspace"):
+        result = await driver.drive_once()
+
+    assert result["failed"] == 1
+    assert "event=managed_run_workspace_failed" in caplog.text
+    assert f"run_id={accepted.run_id}" in caplog.text
+    assert "work_item_id=wi-1" in caplog.text
+    assert "error_code=verified_branch_join_conflict" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_managed_run_driver_records_fenced_runtime_wait(tmp_path: Path) -> None:
+    store = ConductorManagedRunStore(tmp_path / "managed_run")
+    coordinator = ConductorManagedRunCoordinator(store=store)
+    runtime_manager = FakeRuntimeManager()
+    instance = _instance(tmp_path)
+    instances = {instance.id: instance}
+    accepted = coordinator.accept_dispatch(
+        {"issue_id": "issue-1", "issue_identifier": "HELL-1", "description": "Create result"},
+        instance_id=instance.id,
+    )
+    driver = ConductorManagedRunDriver(
+        store=store,
+        coordinator=coordinator,
+        runtime_manager=runtime_manager,
+        instance_lookup=instances.get,
+        instance_update=lambda updated: instances.__setitem__(updated.id, updated),
+        runtime_config=_runtime_config(),
+    )
+
+    await driver.drive_once()
+    plan_attempt = store.get_run(accepted.run_id)["payload"]["active_attempt"]
+    _write_result(
+        plan_attempt["result_path"],
+        {"turn_kind": "plan", "thread_id": "thread-1", "plan": _plan().to_dict()},
+    )
+    await driver.drive_once()
+    await driver.drive_once()
+    work_attempt = store.get_run(accepted.run_id)["payload"]["active_attempt"]
+    _write_result(
+        work_attempt["result_path"],
+        {
+            "turn_kind": "work_item",
+            "thread_id": "thread-1",
+            "runtime_wait": {
+                "wait_kind": "approval_requested",
+                "message": "Authorization: Bearer raw-runtime-wait-token",
+            },
+        },
+    )
+
+    applied = await driver.drive_once()
+    run = store.get_run(accepted.run_id) or {}
+    item = store.list_work_items(accepted.run_id)[0]
+    wait = run["payload"]["runtime_waits"][0]
+    completed = run["payload"]["completed_attempts"][-1]
+
+    assert applied["applied"] == 1
+    assert wait["work_item_id"] == "wi-1"
+    assert wait["attempt_id"] == work_attempt["attempt_id"]
+    assert wait["lease_id"] == work_attempt["lease_id"]
+    assert wait["wait_kind"] == "approval_requested"
+    assert wait["status"] == "waiting"
+    assert "raw-runtime-wait-token" not in json.dumps(run)
+    assert run["state"] == ManagedRunState.BLOCKED.value
+    assert run["latest_reason"] == f"runtime_wait:{wait['wait_id']}"
+    assert item["state"] == WorkItemState.BLOCKED.value
+    assert item["gate_status"] == f"runtime_wait:{wait['wait_id']}"
+    assert completed["state"] == "blocked"
+
+
+@pytest.mark.asyncio
+async def test_managed_run_driver_records_and_resumes_a_plan_runtime_wait(tmp_path: Path) -> None:
+    store = ConductorManagedRunStore(tmp_path / "managed_run")
+    coordinator = ConductorManagedRunCoordinator(store=store)
+    runtime_manager = FakeRuntimeManager()
+    instance = _instance(tmp_path)
+    instances = {instance.id: instance}
+    accepted = coordinator.accept_dispatch(
+        {"issue_id": "issue-1", "issue_identifier": "HELL-1", "description": "Create result"},
+        instance_id=instance.id,
+    )
+    driver = ConductorManagedRunDriver(
+        store=store,
+        coordinator=coordinator,
+        runtime_manager=runtime_manager,
+        instance_lookup=instances.get,
+        instance_update=lambda updated: instances.__setitem__(updated.id, updated),
+        runtime_config=_runtime_config(),
+    )
+
+    await driver.drive_once()
+    plan_attempt = store.get_run(accepted.run_id)["payload"]["active_attempt"]
+    _write_result(
+        plan_attempt["result_path"],
+        {
+            "turn_kind": "plan",
+            "thread_id": "thread-1",
+            "runtime_wait": {"wait_kind": "permission_required", "message": "Grant plan runtime permission."},
+        },
+    )
+
+    applied = await driver.drive_once()
+    waiting = store.get_run(accepted.run_id) or {}
+    wait = waiting["payload"]["runtime_waits"][0]
+    completed = waiting["payload"]["completed_attempts"][-1]
+
+    assert applied["applied"] == 1
+    assert wait["work_item_id"] == ""
+    assert wait["turn_kind"] == "plan"
+    assert waiting["state"] == ManagedRunState.BLOCKED.value
+    assert completed["state"] == "blocked"
+    assert coordinator.resolve_runtime_wait(accepted.run_id, wait["wait_id"]) is True
+
+    resumed = store.get_run(accepted.run_id) or {}
+    restarted = await driver.drive_once()
+
+    assert resumed["state"] == ManagedRunState.PLANNING.value
+    assert restarted["started"] == 1
+
+
+@pytest.mark.asyncio
+async def test_managed_run_driver_requests_runtime_wait_probe_only_before_a_wait_exists(tmp_path: Path) -> None:
+    store = ConductorManagedRunStore(tmp_path / "managed_run")
+    coordinator = ConductorManagedRunCoordinator(store=store)
+    runtime_manager = FakeRuntimeManager()
+    instance = _instance(tmp_path)
+    instances = {instance.id: instance}
+    config = _runtime_config()
+    config["profiles"]["work_item"]["settings"] = {"emit_runtime_wait_probe": True}
+    accepted = coordinator.accept_dispatch(
+        {"issue_id": "issue-1", "issue_identifier": "HELL-1", "description": "Create result"},
+        instance_id=instance.id,
+    )
+    driver = ConductorManagedRunDriver(
+        store=store,
+        coordinator=coordinator,
+        runtime_manager=runtime_manager,
+        instance_lookup=instances.get,
+        instance_update=lambda updated: instances.__setitem__(updated.id, updated),
+        runtime_config=config,
+    )
+
+    await driver.drive_once()
+    plan_attempt = store.get_run(accepted.run_id)["payload"]["active_attempt"]
+    _write_result(plan_attempt["result_path"], {"turn_kind": "plan", "thread_id": "thread-1", "plan": _plan().to_dict()})
+    await driver.drive_once()
+    await driver.drive_once()
+    work_attempt = store.get_run(accepted.run_id)["payload"]["active_attempt"]
+    first_request = json.loads(Path(work_attempt["request_path"]).read_text(encoding="utf-8"))
+
+    assert first_request["runtime_wait_probe"] is True
+
+    _write_result(
+        work_attempt["result_path"],
+        {
+            "turn_kind": "work_item",
+            "thread_id": "thread-1",
+            "runtime_wait": {"wait_kind": "approval_requested", "message": "Approve the probe."},
+        },
+    )
+    await driver.drive_once()
+    wait = (store.get_run(accepted.run_id) or {})["payload"]["runtime_waits"][0]
+    assert coordinator.resolve_runtime_wait(accepted.run_id, wait["wait_id"]) is True
+
+    await driver.drive_once()
+    retry_attempt = (store.get_run(accepted.run_id) or {})["payload"]["active_attempt"]
+    retry_request = json.loads(Path(retry_attempt["request_path"]).read_text(encoding="utf-8"))
+
+    assert retry_attempt["attempt_id"] != work_attempt["attempt_id"]
+    assert retry_request["runtime_wait_probe"] is False
 
 
 @pytest.mark.asyncio
@@ -993,6 +1302,11 @@ async def test_managed_run_driver_retries_invalid_plan_before_terminal_block(tmp
 def _write_result(path: str, payload: dict[str, Any]) -> None:
     result_path = Path(path)
     result_path.parent.mkdir(parents=True, exist_ok=True)
+    request_path = result_path.with_name("turn-request.json")
+    if "context" not in payload and request_path.is_file():
+        request = json.loads(request_path.read_text(encoding="utf-8"))
+        if isinstance(request.get("context"), dict):
+            payload = {**payload, "context": request["context"]}
     result_path.write_text(json.dumps(payload), encoding="utf-8")
 
 

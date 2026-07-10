@@ -19,9 +19,12 @@ from .conductor_managed_run_driver_helpers import (
     _verification_input_snapshot,
     _write_json,
 )
+from .conductor_managed_run_fencing import attempt_fencing_fields, build_turn_context
+from .conductor_managed_run_runtime_waits import runtime_wait_probe_requested
 from .conductor_managed_run_driver_attempt_collection import ConductorManagedRunAttemptCollectionMixin
 from .conductor_managed_run_execution import ExecutionHandoff
 from .conductor_managed_run_verifier import run_local_verifier
+from .conductor_managed_run_workspace_events import log_workspace_failure
 from .conductor_models import InstanceRecord
 from .runtime_backends import prepare_backend_environment
 
@@ -48,8 +51,16 @@ class ConductorManagedRunWorkItemMixin(ConductorManagedRunAttemptCollectionMixin
                 state_root=Path(instance.instance_dir) / "state",
             )
             if workspace.failed or workspace.workspace_path is None:
+                reason = workspace.reason or "execution_workspace_missing"
                 if not workspace.failed:
-                    self.store.update_run_state(str(run["run_id"]), ManagedRunState.FAILED, reason="execution_workspace_missing")
+                    self.store.update_run_state(str(run["run_id"]), ManagedRunState.FAILED, reason=reason)
+                log_workspace_failure(
+                    run,
+                    instance,
+                    work_item_id=str(item.get("work_item_id") or ""),
+                    reason=reason,
+                    branch_name=workspace.branch_name,
+                )
                 return {"started": started, "failed": 1} if started else {"failed": 1}
             await self._start_work_item_turn(
                 run,
@@ -79,6 +90,12 @@ class ConductorManagedRunWorkItemMixin(ConductorManagedRunAttemptCollectionMixin
     ) -> dict[str, int]:
         started_item = self.coordinator.start_work_item(str(run["run_id"]), str(item["work_item_id"]))
         attempt = _attempt_paths(instance, run, "work_item", str(item["work_item_id"]))
+        context = build_turn_context(
+            run,
+            attempt,
+            work_item_id=str(item["work_item_id"]),
+            policy_revision=envelope.managed_run_policy.version,
+        )
         if attempt["result_path"].exists():
             attempt["result_path"].unlink()
         _write_json(
@@ -88,6 +105,12 @@ class ConductorManagedRunWorkItemMixin(ConductorManagedRunAttemptCollectionMixin
                 "workspace_path": str(workspace_path),
                 "thread_id": run.get("backend_session_id") or "",
                 "work_item": started_item.get("payload") or item.get("payload") or {},
+                "context": context.to_dict(),
+                "runtime_wait_probe": runtime_wait_probe_requested(
+                    run.get("payload") if isinstance(run.get("payload"), dict) else {},
+                    str(item["work_item_id"]),
+                    (envelope.profiles.get(ManagedRunRuntimeRole.WORK_ITEM).settings or {}).get("emit_runtime_wait_probe"),
+                ),
             },
         )
         env = prepare_backend_environment(
@@ -103,7 +126,7 @@ class ConductorManagedRunWorkItemMixin(ConductorManagedRunAttemptCollectionMixin
             attempt_id=attempt["attempt_id"],
             attempt_request_path=str(attempt["request_path"]),
             attempt_result_path=str(attempt["result_path"]),
-            lease_id=attempt["attempt_id"],
+            lease_id=context.lease_id,
         )
         self.instance_update(started)
         attempt_payload = {
@@ -111,9 +134,18 @@ class ConductorManagedRunWorkItemMixin(ConductorManagedRunAttemptCollectionMixin
             "workspace_path": str(workspace_path),
             "base_revision": base_revision,
             "branch_name": branch_name,
+            **attempt_fencing_fields(context),
         }
         active_attempts = _active_attempts(self.store.get_run(str(run["run_id"])) or run)
-        self.store.merge_run_payload(str(run["run_id"]), {"active_attempt": attempt_payload, "active_attempts": [*active_attempts, attempt_payload]})
+        self.store.merge_run_payload(
+            str(run["run_id"]),
+            {
+                "active_attempt": attempt_payload,
+                "active_attempts": [*active_attempts, attempt_payload],
+                "last_managed_run_policy_id": envelope.managed_run_policy.policy_id,
+                "last_managed_run_policy_version": envelope.managed_run_policy.version,
+            },
+        )
         return {"started": 1}
 
     def _verify_active_work_item(self, run: dict[str, Any], instance: InstanceRecord) -> dict[str, int]:
@@ -245,6 +277,13 @@ class ConductorManagedRunWorkItemMixin(ConductorManagedRunAttemptCollectionMixin
         )
         if workspace.failed or workspace.workspace_path is None:
             reason = workspace.reason or "checkpoint_workspace_missing"
+            log_workspace_failure(
+                run,
+                instance,
+                work_item_id=f"checkpoint:{'-'.join(checkpoint.after)}",
+                reason=reason,
+                branch_name=workspace.branch_name,
+            )
             self.coordinator.record_checkpoint_result(run_id, after_work_item_id=checkpoint.after[0], passed=False, reason=reason)
             return {"passed": False, "reason": reason}
         return self.coordinator.run_pending_checkpoint(run_id, workspace_path=workspace.workspace_path)

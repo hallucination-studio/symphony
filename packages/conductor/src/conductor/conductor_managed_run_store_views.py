@@ -5,6 +5,7 @@ from typing import Any
 from performer_api.managed_runs import Checkpoint, WorkItemState
 
 from conductor.conductor_managed_run_attempts import attempt_integrity_errors
+from conductor.conductor_managed_run_runtime_waits import runtime_waits as durable_runtime_waits
 from conductor.conductor_managed_run_store_rows import (
     _checkpoint_result_from_row,
     _json_dumps,
@@ -128,9 +129,11 @@ class ConductorManagedRunStoreViewMixin:
     def managed_run_view(self) -> dict[str, Any]:
         runs = []
         attempts: list[dict[str, Any]] = []
+        runtime_waits: list[dict[str, Any]] = []
         attempt_integrity: list[dict[str, Any]] = []
         for run in self.list_runs():
             payload = run.get("payload") if isinstance(run.get("payload"), dict) else {}
+            run_runtime_waits = [{"run_id": str(run["run_id"]), **wait} for wait in durable_runtime_waits(payload)]
             run_attempts = _run_attempts_for_view(str(run["run_id"]), payload)
             attempt_errors = attempt_integrity_errors(payload)
             checkpoints = self.list_checkpoint_results(str(run["run_id"]))
@@ -139,6 +142,7 @@ class ConductorManagedRunStoreViewMixin:
             execution_handoffs = self.list_execution_handoffs(str(run["run_id"]))
             manifests = self.list_task_output_manifests(str(run["run_id"]))
             attempts.extend(run_attempts)
+            runtime_waits.extend(run_runtime_waits)
             if attempt_errors:
                 attempt_integrity.append({"run_id": str(run["run_id"]), "errors": attempt_errors})
             runs.append(
@@ -152,12 +156,18 @@ class ConductorManagedRunStoreViewMixin:
                     "execution_handoffs": execution_handoffs,
                     "manifests": manifests,
                     "branch_joins": _branch_joins(payload),
+                    "runtime_waits": run_runtime_waits,
                     "evidence_bundle": _evidence_bundle(payload, gate_snapshots, verification_inputs, execution_handoffs, manifests, checkpoints),
                     "attempts": run_attempts,
                     "attempt_integrity": {"passed": not attempt_errors, "errors": attempt_errors},
                 }
             )
-        return {"runs": runs, "attempts": attempts, "attempt_integrity": {"passed": not attempt_integrity, "errors": attempt_integrity}}
+        return {
+            "runs": runs,
+            "attempts": attempts,
+            "runtime_waits": runtime_waits,
+            "attempt_integrity": {"passed": not attempt_integrity, "errors": attempt_integrity},
+        }
 
 
 def _evidence_bundle(

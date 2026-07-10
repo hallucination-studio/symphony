@@ -508,6 +508,23 @@ async def test_managed_run_projector_projects_dependency_blocks_and_operator_met
     store.merge_run_payload(
         accepted.run_id,
         {
+            "completed_attempts": [
+                {"attempt_id": "attempt-plan", "kind": "plan", "state": "succeeded"},
+                {
+                    "attempt_id": "attempt-execute",
+                    "kind": "work_item",
+                    "mode": "execute",
+                    "work_item_id": "wi-2",
+                    "state": "succeeded",
+                },
+                {
+                    "attempt_id": "attempt-verify",
+                    "kind": "verify",
+                    "mode": "verify",
+                    "work_item_id": "wi-2",
+                    "state": "succeeded",
+                },
+            ],
             "active_attempts": [
                 {
                     "attempt_id": "attempt-wi-2",
@@ -518,6 +535,7 @@ async def test_managed_run_projector_projects_dependency_blocks_and_operator_met
             ],
             "last_managed_run_policy_id": "policy-group-1",
             "last_managed_run_policy_version": 4,
+            "runtime_wait_id": "runtime-wait-wi-2",
         },
     )
     tracker = Tracker()
@@ -532,5 +550,9 @@ async def test_managed_run_projector_projects_dependency_blocks_and_operator_met
     assert metadata["active_policy_id"] == "policy-group-1"
     assert metadata["active_policy_version"] == 4
     assert metadata["operator_status"] == "todo"
-    assert metadata["work_item_attempt_ids"] == ["attempt-wi-2"]
+    assert metadata["plan_attempt_id"] == "attempt-plan"
+    assert metadata["work_item_attempt_id"] == "attempt-wi-2"
+    assert metadata["verification_attempt_id"] == "attempt-verify"
+    assert metadata["runtime_wait_id"] == "runtime-wait-wi-2"
+    assert metadata["work_item_attempt_ids"] == ["attempt-execute", "attempt-verify", "attempt-wi-2"]
     assert metadata["linear_projection_id"] == projection["projection_id"]

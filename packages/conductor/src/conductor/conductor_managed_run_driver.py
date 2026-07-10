@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from performer_api.managed_runs import ManagedRunPlan, ManagedRunState, ManagedRunRuntimeRole, RuntimeConfigEnvelope
+from performer_api.managed_runs import ManagedRunState, ManagedRunRuntimeRole, RuntimeConfigEnvelope
 
 from .conductor_managed_run_coordinator import ConductorManagedRunCoordinator
 from .conductor_managed_run_driver_helpers import (
@@ -14,20 +14,21 @@ from .conductor_managed_run_driver_helpers import (
     _attempt_payload,
     _complete_attempt,
     _completed_attempts,
-    _events_from_payload,
     _issue_description,
-    _read_json,
     _sanitize,
     _write_json,
 )
+from .conductor_managed_run_fencing import attempt_fencing_fields, build_turn_context, plan_turn_request
+from .conductor_managed_run_driver_plan_collection import ConductorManagedRunPlanCollectionMixin
 from .conductor_managed_run_driver_work_items import ConductorManagedRunWorkItemMixin
 from .conductor_managed_run_execution import prepare_execution_worktree
 from .conductor_managed_run_store import ConductorManagedRunStore
+from .conductor_managed_run_workspace_events import log_workspace_failure
 from .conductor_models import InstanceRecord
 from .runtime_backends import prepare_backend_environment
 
 
-class ConductorManagedRunDriver(ConductorManagedRunWorkItemMixin):
+class ConductorManagedRunDriver(ConductorManagedRunPlanCollectionMixin, ConductorManagedRunWorkItemMixin):
     def __init__(
         self,
         *,
@@ -71,7 +72,7 @@ class ConductorManagedRunDriver(ConductorManagedRunWorkItemMixin):
         if state == ManagedRunState.QUEUED.value:
             return await self._start_plan_turn(run, instance)
         if state == ManagedRunState.PLANNING.value:
-            if not _active_attempt(run):
+            if not _active_attempts(run):
                 return await self._start_plan_turn(run, instance)
             return self._collect_plan_turn(run)
         if state == ManagedRunState.READY.value:
@@ -90,30 +91,26 @@ class ConductorManagedRunDriver(ConductorManagedRunWorkItemMixin):
         envelope = self._runtime_config_or_fail(str(run["run_id"]))
         if envelope is None:
             return {"failed": 1}
-        revision = _approved_plan_revision(run)
-        attempt_item = f"revision-{revision['work_item_id']}" if revision else "plan"
+        revision = self._approved_plan_revision(run)
+        work_item_id = str(revision.get("work_item_id") or "")
+        attempt_item = f"revision-{work_item_id}" if revision else "plan"
         attempt = _attempt_paths(instance, run, "plan", attempt_item)
+        context = build_turn_context(run, attempt, work_item_id=work_item_id, policy_revision=envelope.managed_run_policy.version)
         if attempt["result_path"].exists():
             attempt["result_path"].unlink()
-        try:
-            workspace = prepare_execution_worktree(
-                Path(instance.resolved_repo_path),
-                state_root=Path(instance.instance_dir) / "state",
-                run_id=str(run["run_id"]),
-                work_item_id=f"plan-{attempt['attempt_id']}",
-            )
-        except Exception as exc:
-            self.store.update_run_state(str(run["run_id"]), ManagedRunState.FAILED, reason=f"plan_workspace_prepare_failed:{_sanitize(exc)}")
+        workspace = self._prepare_plan_workspace(run, instance, attempt, context, work_item_id)
+        if workspace is None:
             return {"failed": 1}
-        request = {
-            "turn_kind": "plan",
-            "workspace_path": str(workspace.workspace_path),
-            "issue_description": _plan_turn_description(self.store, run, revision),
-            "thread_id": run.get("backend_session_id") or None,
-        }
-        if revision:
-            request.update({"plan_mode": "revision", "plan_revision": revision})
-        _write_json(attempt["request_path"], request)
+        _write_json(
+            attempt["request_path"],
+            plan_turn_request(
+                workspace_path=str(workspace.workspace_path),
+                issue_description=_plan_turn_description(self.store, run, revision),
+                thread_id=run.get("backend_session_id") or None,
+                context=context,
+                revision=revision,
+            ),
+        )
         env = prepare_backend_environment(
             Path(instance.instance_dir) / "state",
             envelope.profiles.get(ManagedRunRuntimeRole.PLAN),
@@ -127,7 +124,7 @@ class ConductorManagedRunDriver(ConductorManagedRunWorkItemMixin):
             attempt_id=attempt["attempt_id"],
             attempt_request_path=str(attempt["request_path"]),
             attempt_result_path=str(attempt["result_path"]),
-            lease_id=attempt["attempt_id"],
+            lease_id=context.lease_id,
         )
         self.instance_update(started)
         self.store.update_run_state(
@@ -151,109 +148,44 @@ class ConductorManagedRunDriver(ConductorManagedRunWorkItemMixin):
                     "plan_revision_approval_id": str(revision.get("approval_id") or ""),
                 }
             )
+        attempt_payload.update(attempt_fencing_fields(context))
         self.store.merge_run_payload(
             str(run["run_id"]),
             {
                 "active_attempt": attempt_payload,
                 "active_attempts": [attempt_payload],
+                "last_managed_run_policy_id": envelope.managed_run_policy.policy_id,
+                "last_managed_run_policy_version": envelope.managed_run_policy.version,
             },
         )
         return {"started": 1}
 
-    def _collect_plan_turn(self, run: dict[str, Any]) -> dict[str, int]:
-        attempt = _active_attempt(run)
-        if not attempt:
-            self.store.update_run_state(str(run["run_id"]), ManagedRunState.FAILED, reason="plan_attempt_missing")
-            return {"failed": 1}
-        result_path = Path(str(attempt.get("result_path") or ""))
-        if not result_path.exists():
-            exited = self._active_attempt_exit(run)
-            if exited is not None:
-                self._fail_missing_turn_result(str(run["run_id"]), attempt, exited, "plan")
-                return {"failed": 1}
-            return {}
-        payload: dict[str, Any] = {}
-        try:
-            payload = _read_json(result_path)
-            plan_payload = payload.get("plan")
-            if not isinstance(plan_payload, dict):
-                raise ValueError("plan_result_missing")
-            plan = ManagedRunPlan.from_dict(plan_payload)
-            revision = _approved_plan_revision(run)
-            if revision:
-                version = self.coordinator.approve_plan_revision(
-                    str(run["run_id"]),
-                    plan,
-                    backend_session_id=str(payload.get("thread_id") or ""),
-                    approval_id=str(revision.get("approval_id") or ""),
-                    creator_attempt_id=str(attempt.get("attempt_id") or ""),
-                )
-            else:
-                version = self.coordinator.apply_plan(
-                    str(run["run_id"]),
-                    plan,
-                    backend_session_id=str(payload.get("thread_id") or ""),
-                    creator_attempt_id=str(attempt.get("attempt_id") or ""),
-                )
-        except Exception as exc:
-            reason = f"plan_result_failed:{_sanitize(exc)}"
-            self.store.update_run_state(str(run["run_id"]), ManagedRunState.FAILED, reason=reason)
-            self._complete_plan_attempt(run, attempt, state="failed", reason=reason, payload=payload)
-            return {"failed": 1}
-        latest = self.store.get_run(str(run["run_id"])) or run
-        if version == 0:
-            retryable = latest.get("state") == ManagedRunState.PLANNING.value
-            self._complete_plan_attempt(
-                run,
-                attempt,
-                state="failed",
-                reason=str(latest.get("latest_reason") or "plan_validation_failed"),
-                payload=payload,
-                retryable=retryable,
-            )
-            return {"applied": 1} if retryable else {"failed": 1}
-        completed = _completed_attempts(run)
-        self.store.merge_run_payload(
-            str(run["run_id"]),
-            {
-                "active_attempt": {},
-                "active_attempts": [],
-                "completed_attempts": [
-                    *completed,
-                    _complete_attempt(attempt, state="succeeded", events=_events_from_payload(payload), thread_id=str(payload.get("thread_id") or "")),
-                ],
-                "last_plan_attempt": attempt,
-                "last_plan_version": version,
-            },
-        )
-        return {"applied": 1}
-
-    def _complete_plan_attempt(
+    def _prepare_plan_workspace(
         self,
         run: dict[str, Any],
+        instance: InstanceRecord,
         attempt: dict[str, Any],
-        *,
-        state: str,
-        reason: str,
-        payload: dict[str, Any],
-        retryable: bool = False,
-    ) -> None:
-        current = self.store.get_run(str(run["run_id"])) or run
-        completed = _completed_attempts(current)
-        attempt_id = str(attempt.get("attempt_id") or "")
-        if not any(str(candidate.get("attempt_id") or "") == attempt_id for candidate in completed):
-            completed.append(
-                _complete_attempt(
-                    {**attempt, "sanitized_error": reason, "retryable": retryable},
-                    state=state,
-                    events=_events_from_payload(payload),
-                    thread_id=str(payload.get("thread_id") or ""),
-                )
+        context: Any,
+        work_item_id: str,
+    ) -> Any | None:
+        try:
+            return prepare_execution_worktree(
+                Path(instance.resolved_repo_path),
+                state_root=Path(instance.instance_dir) / "state",
+                run_id=str(run["run_id"]),
+                work_item_id=f"plan-{attempt['attempt_id']}",
             )
-        self.store.merge_run_payload(
-            str(run["run_id"]),
-            {"active_attempt": {}, "active_attempts": [], "completed_attempts": completed, "last_plan_attempt": attempt},
-        )
+        except Exception as exc:
+            reason = f"plan_workspace_prepare_failed:{_sanitize(exc)}"
+            self.store.update_run_state(str(run["run_id"]), ManagedRunState.FAILED, reason=reason)
+            log_workspace_failure(
+                run,
+                instance,
+                work_item_id=work_item_id or "plan",
+                reason=reason,
+                attempt={**attempt, "turn_context": context.to_dict()},
+            )
+            return None
 
     def _runtime_config_or_fail(self, run_id: str) -> RuntimeConfigEnvelope | None:
         try:
@@ -303,14 +235,6 @@ class ConductorManagedRunDriver(ConductorManagedRunWorkItemMixin):
                 "last_failed_attempt": {**attempt, "exit": exited, "reason": reason},
             },
         )
-
-
-def _approved_plan_revision(run: dict[str, Any]) -> dict[str, Any]:
-    payload = run.get("payload") if isinstance(run.get("payload"), dict) else {}
-    revision = payload.get("approved_plan_revision") if isinstance(payload.get("approved_plan_revision"), dict) else {}
-    if revision.get("state") != "planning" or not revision.get("work_item_id"):
-        return {}
-    return dict(revision)
 
 
 def _plan_turn_description(store: ConductorManagedRunStore, run: dict[str, Any], revision: dict[str, Any]) -> str:

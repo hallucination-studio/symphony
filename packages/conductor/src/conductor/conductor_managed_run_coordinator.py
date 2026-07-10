@@ -20,10 +20,15 @@ from .conductor_managed_run_coordinator_helpers import (
     _review_relevant_file,
 )
 from .conductor_managed_run_coordinator_human import ConductorManagedRunHumanActionMixin
+from .conductor_managed_run_coordinator_runtime_waits import ConductorManagedRunRuntimeWaitMixin
 from .conductor_managed_run_store import ConductorManagedRunStore, ManagedRunDispatchAccepted
 
 
-class ConductorManagedRunCoordinator(ConductorManagedRunHumanActionMixin, ConductorManagedRunCheckpointMixin):
+class ConductorManagedRunCoordinator(
+    ConductorManagedRunRuntimeWaitMixin,
+    ConductorManagedRunHumanActionMixin,
+    ConductorManagedRunCheckpointMixin,
+):
     def __init__(
         self,
         *,

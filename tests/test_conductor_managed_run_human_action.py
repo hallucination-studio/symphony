@@ -234,6 +234,62 @@ async def test_managed_run_generic_parent_block_retries_only_after_root_state_fl
     assert reopened["latest_reason"].startswith("operator_reopened:linear_state_flip:")
 
 
+async def test_runtime_wait_projects_child_issue_and_resumes_only_after_child_completion(tmp_path) -> None:
+    store = ConductorManagedRunStore(tmp_path)
+    coordinator = ConductorManagedRunCoordinator(store=store)
+    accepted = coordinator.accept_dispatch({"issue_id": "root-1", "issue_identifier": "HELL-1"}, instance_id="instance-1")
+    coordinator.apply_plan(accepted.run_id, _plan_without_work_item_approval(), backend_session_id="thread-1")
+    wait_id = "runtime-wait-1"
+    store.merge_run_payload(
+        accepted.run_id,
+        {
+            "runtime_waits": [
+                {
+                    "wait_id": wait_id,
+                    "run_id": accepted.run_id,
+                    "work_item_id": "wi-1",
+                    "attempt_id": "attempt-1",
+                    "lease_id": "lease-1",
+                    "turn_id": "turn-1",
+                    "wait_kind": "approval_requested",
+                    "sanitized_message": "Approve the requested runtime action.",
+                    "status": "waiting",
+                }
+            ]
+        },
+    )
+    store.update_run_state(accepted.run_id, ManagedRunState.BLOCKED, active_work_item_id="wi-1", reason=f"runtime_wait:{wait_id}")
+    store.update_work_item_state(accepted.run_id, "wi-1", WorkItemState.BLOCKED, gate_status=f"runtime_wait:{wait_id}")
+    tracker = Tracker()
+    projector = ManagedRunLinearProjector(store=store, tracker=tracker, root_issue_id="root-1")
+
+    await projector.reconcile_once(accepted.run_id)
+
+    run = store.get_run(accepted.run_id) or {}
+    projection = store.list_linear_projections(accepted.run_id)[0]["metadata"]
+    wait = run["payload"]["runtime_waits"][0]
+    assert len(tracker.children) == 2
+    assert tracker.children[1]["title"] == "[Human Action] Runtime wait: approval_requested"
+    assert any(marker == "SYMPHONY RUNTIME WAIT" and issue_id == "child-2" for issue_id, marker, _ in tracker.description_blocks)
+    assert tracker.comments == []
+    assert wait["child_issue_id"] == "child-2"
+    assert projection["operator_status"] == "waiting_for_runtime_input"
+    assert projection["operator_wait_kind"] == "approval_requested"
+    assert projection["runtime_wait_id"] == wait_id
+
+    tracker.children[1].update({"state": "Done", "state_type": "completed"})
+    await projector.reconcile_once(accepted.run_id)
+
+    resumed = store.get_run(accepted.run_id) or {}
+    item = store.list_work_items(accepted.run_id)[0]
+    resolved_wait = resumed["payload"]["runtime_waits"][0]
+    assert resolved_wait["status"] == "resolved"
+    assert resolved_wait["resolution"] == "child_completed"
+    assert item["state"] == WorkItemState.TODO.value
+    assert item["gate_status"] == f"runtime_wait_resolved:{wait_id}"
+    assert resumed["state"] == ManagedRunState.READY.value
+
+
 async def test_plan_revision_state_flip_starts_isolated_revision_planning(tmp_path) -> None:
     store = ConductorManagedRunStore(tmp_path)
     coordinator = ConductorManagedRunCoordinator(store=store)

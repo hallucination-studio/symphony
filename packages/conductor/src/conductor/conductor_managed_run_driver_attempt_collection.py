@@ -14,6 +14,9 @@ from .conductor_managed_run_driver_helpers import (
     _sanitize,
 )
 from .conductor_managed_run_execution import freeze_execution_handoff
+from .conductor_managed_run_fencing import log_result_rejection, result_context_error
+from .conductor_managed_run_runtime_waits import build_runtime_wait_record, runtime_wait_from_turn_payload
+from .conductor_managed_run_workspace_events import log_workspace_failure
 from .conductor_models import InstanceRecord
 
 
@@ -33,6 +36,8 @@ class ConductorManagedRunAttemptCollectionMixin:
             if outcome == "waiting":
                 remaining.append(attempt)
                 continue
+            if outcome == "runtime_wait":
+                return {"applied": applied + count}
             applied += count
         self.store.merge_run_payload(
             str(run["run_id"]),
@@ -63,6 +68,13 @@ class ConductorManagedRunAttemptCollectionMixin:
             return "failed", 0
         try:
             payload = _read_json(result_path)
+            context_error = result_context_error(run, attempt, payload)
+            if context_error:
+                log_result_rejection(run, attempt, context_error)
+                raise ValueError(context_error)
+            runtime_wait = runtime_wait_from_turn_payload(payload)
+            if runtime_wait is not None:
+                return await self._collect_runtime_wait(run, instance, attempts, attempt, completed, runtime_wait, payload)
             result_payload = payload.get("result")
             if not isinstance(result_payload, dict):
                 raise ValueError("work_item_result_missing")
@@ -94,11 +106,7 @@ class ConductorManagedRunAttemptCollectionMixin:
                 expected_branch_name=str(attempt.get("branch_name") or ""),
             )
         except Exception as exc:
-            reason = f"execution_handoff_failed:{_sanitize(exc)}"
-            self.coordinator.verify_work_item(str(run["run_id"]), str(result.work_item_id), gate_status=reason, passed=False)
-            self._complete_work_item_attempt(run, attempt, completed, state="failed", reason=reason, payload=payload)
-            await self._cancel_parallel_work_item_attempts(run, instance, attempts, attempt, f"peer_work_item_failed:{attempt.get('work_item_id') or 'unknown'}")
-            return "failed", 1
+            return await self._fail_execution_handoff(run, instance, attempts, attempt, completed, result, payload, exc)
         recorded = self.store.record_execution_handoff(
             str(run["run_id"]),
             work_item_id=str(result.work_item_id),
@@ -118,6 +126,48 @@ class ConductorManagedRunAttemptCollectionMixin:
             )
         )
         return "applied", 1
+
+    async def _fail_execution_handoff(
+        self,
+        run: dict[str, Any],
+        instance: InstanceRecord,
+        attempts: list[dict[str, Any]],
+        attempt: dict[str, Any],
+        completed: list[dict[str, Any]],
+        result: WorkItemResult,
+        payload: dict[str, Any],
+        exc: Exception,
+    ) -> tuple[str, int]:
+        reason = f"execution_handoff_failed:{_sanitize(exc)}"
+        log_workspace_failure(
+            run,
+            instance,
+            work_item_id=str(result.work_item_id),
+            reason=reason,
+            attempt=attempt,
+            branch_name=str(attempt.get("branch_name") or ""),
+        )
+        self.coordinator.verify_work_item(str(run["run_id"]), str(result.work_item_id), gate_status=reason, passed=False)
+        self._complete_work_item_attempt(run, attempt, completed, state="failed", reason=reason, payload=payload)
+        await self._cancel_parallel_work_item_attempts(run, instance, attempts, attempt, f"peer_work_item_failed:{attempt.get('work_item_id') or 'unknown'}")
+        return "failed", 1
+
+    async def _collect_runtime_wait(
+        self,
+        run: dict[str, Any],
+        instance: InstanceRecord,
+        attempts: list[dict[str, Any]],
+        attempt: dict[str, Any],
+        completed: list[dict[str, Any]],
+        runtime_wait: Any,
+        payload: dict[str, Any],
+    ) -> tuple[str, int]:
+        record = build_runtime_wait_record(run, attempt, runtime_wait)
+        self.coordinator.record_runtime_wait(str(run["run_id"]), record)
+        reason = f"runtime_wait:{record['wait_id']}"
+        self._complete_work_item_attempt(run, attempt, completed, state="blocked", reason=reason, payload=payload)
+        await self._pause_parallel_work_item_attempts_for_runtime_wait(run, instance, attempts, attempt, record["wait_id"])
+        return "runtime_wait", 1
 
     def _complete_work_item_attempt(
         self,
@@ -169,6 +219,39 @@ class ConductorManagedRunAttemptCollectionMixin:
                     WorkItemState.BLOCKED,
                     gate_status=reason,
                 )
+        self.store.merge_run_payload(str(run["run_id"]), {"active_attempt": {}, "active_attempts": [], "completed_attempts": completed})
+
+    async def _pause_parallel_work_item_attempts_for_runtime_wait(
+        self,
+        run: dict[str, Any],
+        instance: InstanceRecord,
+        attempts: list[dict[str, Any]],
+        waiting_attempt: dict[str, Any],
+        wait_id: str,
+    ) -> None:
+        waiting_attempt_id = str(waiting_attempt.get("attempt_id") or "")
+        peer_ids = [
+            str(attempt.get("attempt_id") or "")
+            for attempt in attempts
+            if str(attempt.get("attempt_id") or "") and str(attempt.get("attempt_id") or "") != waiting_attempt_id
+        ]
+        stop_attempts = getattr(self.runtime_manager, "stop_attempts", None)
+        if callable(stop_attempts) and peer_ids:
+            self.instance_update(await stop_attempts(instance, peer_ids))
+        current = self.store.get_run(str(run["run_id"])) or run
+        completed = _completed_attempts(current)
+        completed_ids = {str(attempt.get("attempt_id") or "") for attempt in completed}
+        for attempt in _active_attempts(current, kind="work_item"):
+            attempt_id = str(attempt.get("attempt_id") or "")
+            if not attempt_id or attempt_id == waiting_attempt_id or attempt_id in completed_ids:
+                continue
+            completed.append(_complete_attempt({**attempt, "sanitized_error": f"runtime_wait:{wait_id}"}, state="cancelled"))
+            self.store.update_work_item_state(
+                str(run["run_id"]),
+                str(attempt.get("work_item_id") or ""),
+                WorkItemState.TODO,
+                gate_status=f"runtime_wait_pending:{wait_id}",
+            )
         self.store.merge_run_payload(str(run["run_id"]), {"active_attempt": {}, "active_attempts": [], "completed_attempts": completed})
 
 

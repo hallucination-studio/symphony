@@ -14,6 +14,7 @@ from .conductor_managed_run_projection_helpers import (
     attempts_for_work_item,
     checkpoint_evidence,
     last_synced_comment_ids,
+    latest_attempt_id,
     linear_state_target,
     operator_wait_kind,
     parent_linear_state_target,
@@ -23,10 +24,10 @@ from .conductor_managed_run_projection_helpers import (
     summary_text,
 )
 from .conductor_managed_run_coordinator import ConductorManagedRunCoordinator
-from .conductor_managed_run_human_action_projection import (
-    ingest_linear_human_action_state_flips,
-    project_human_action_instructions,
-)
+from .conductor_managed_run_human_action_projection import project_human_action_instructions
+from .conductor_managed_run_operator_events import ingest_managed_run_operator_events
+from .conductor_managed_run_runtime_wait_projection import project_runtime_waits
+from .conductor_managed_run_runtime_waits import waiting_runtime_wait
 from .conductor_managed_run_store import ConductorManagedRunStore
 
 
@@ -57,17 +58,17 @@ class ManagedRunLinearProjector:
         issue_by_work_item = dict(existing_by_work_item)
         work_items = self.store.list_work_items(run_id)
         root_issue = await self._existing_root_issue()
-        projected += await ingest_linear_human_action_state_flips(
+        ingested, run, work_items = await ingest_managed_run_operator_events(
             store=self.store,
-            coordinator=ConductorManagedRunCoordinator(store=self.store),
+            tracker=self.tracker,
             run_id=run_id,
             root_issue_id=self.root_issue_id,
-            root_issue=root_issue,
+            run=run,
             work_items=work_items,
+            root_issue=root_issue,
             issues_by_work_item=issue_by_work_item,
         )
-        run = self.store.get_run(run_id) or run
-        work_items = self.store.list_work_items(run_id)
+        projected += ingested
         projected += await self._project_parent_summary(run_id, run)
         projected += await self._project_attempt_comments(run_id, run, "", self.root_issue_id)
         for item in work_items:
@@ -77,7 +78,7 @@ class ManagedRunLinearProjector:
                 issue = await self.tracker.create_child_issue_for(
                     parent_issue_id=self.root_issue_id,
                     title=str(item["payload"].get("title") or work_item_id),
-                    description=self._work_item_description(item),
+                    description=self._work_item_description(item, wait=waiting_runtime_wait(run.get("payload") or {}, work_item_id)),
                     label_names=[],
                     delegate_id=self.delegate_id,
                 )
@@ -88,7 +89,11 @@ class ManagedRunLinearProjector:
             issue_by_work_item[work_item_id] = issue
             update_description = getattr(self.tracker, "update_issue_description_marker_block", None)
             if update_description is not None:
-                await update_description(issue_id, "SYMPHONY WORK ITEM", self._work_item_description(item))
+                await update_description(
+                    issue_id,
+                    "SYMPHONY WORK ITEM",
+                    self._work_item_description(item, wait=waiting_runtime_wait(run.get("payload") or {}, work_item_id)),
+                )
             transition = getattr(self.tracker, "transition_issue_by_state_target", None)
             if transition is not None:
                 names, state_type = linear_state_target(str(item["state"]))
@@ -102,6 +107,12 @@ class ManagedRunLinearProjector:
             )
             projected += await self._project_attempt_comments(run_id, run, work_item_id, issue_id)
         projected += await self._project_dependency_blocks(work_items, issue_by_work_item)
+        projected += await project_runtime_waits(
+            store=self.store,
+            tracker=self.tracker,
+            run_id=run_id,
+            root_issue_id=self.root_issue_id,
+        )
         projected += await project_human_action_instructions(
             store=self.store,
             tracker=self.tracker,
@@ -189,7 +200,7 @@ class ManagedRunLinearProjector:
                 mapped[str(projection.get("work_item_id") or "")] = issue
         return mapped
 
-    def _work_item_description(self, item: dict[str, Any]) -> str:
+    def _work_item_description(self, item: dict[str, Any], *, wait: dict[str, Any] | None = None) -> str:
         payload = item["payload"] if isinstance(item.get("payload"), dict) else {}
         parallel = payload.get("parallelization") if isinstance(payload.get("parallelization"), dict) else {}
         lines = [
@@ -220,6 +231,17 @@ class ManagedRunLinearProjector:
             f"- state: {item.get('state')}",
             f"- gate: {item.get('gate_status') or 'pending'}",
         ]
+        if wait:
+            lines.extend(
+                [
+                    "",
+                    "Runtime Wait:",
+                    f"- wait_id: {wait.get('wait_id') or ''}",
+                    f"- wait_kind: {wait.get('wait_kind') or ''}",
+                    f"- status: {wait.get('status') or ''}",
+                    f"- message: {wait.get('sanitized_message') or ''}",
+                ]
+            )
         return "\n".join(lines)
 
     async def _project_attempt_comments(self, run_id: str, run: dict[str, Any], work_item_id: str, issue_id: str) -> int:
@@ -278,6 +300,7 @@ class ManagedRunLinearProjector:
     def _projection_metadata(self, run_id: str, run: dict[str, Any], item: dict[str, Any], issue: dict[str, Any] | None = None) -> dict[str, Any]:
         work_item_id = str(item["work_item_id"])
         payload = run.get("payload") if isinstance(run.get("payload"), dict) else {}
+        runtime_wait = waiting_runtime_wait(payload, work_item_id)
         skipped_label_names = []
         if isinstance(issue, dict):
             skipped_label_names = [str(name) for name in issue.get("skipped_label_names") or [] if str(name)]
@@ -288,9 +311,12 @@ class ManagedRunLinearProjector:
             "plan_version": int(run.get("plan_version") or 0),
             "active_policy_id": str(payload.get("last_managed_run_policy_id") or ""),
             "active_policy_version": int(payload.get("last_managed_run_policy_version") or 0),
-            "operator_status": str(item.get("state") or ""),
-            "operator_wait_kind": operator_wait_kind(item),
-            "runtime_wait_id": str(payload.get("runtime_wait_id") or ""),
+            "operator_status": "waiting_for_runtime_input" if runtime_wait else str(item.get("state") or ""),
+            "operator_wait_kind": str(runtime_wait.get("wait_kind") or "") if runtime_wait else operator_wait_kind(item),
+            "runtime_wait_id": str(runtime_wait.get("wait_id") or payload.get("runtime_wait_id") or "") if runtime_wait else str(payload.get("runtime_wait_id") or ""),
+            "plan_attempt_id": latest_attempt_id(payload, kind="plan"),
+            "work_item_attempt_id": latest_attempt_id(payload, kind="work_item", work_item_id=work_item_id),
+            "verification_attempt_id": latest_attempt_id(payload, kind="verify", work_item_id=work_item_id),
             "linear_projection_id": f"{run_id}:{work_item_id}",
             "last_synced_comment_ids": last_synced_comment_ids(payload, work_item_id),
             "work_item_attempt_ids": attempt_ids_for_work_item(payload, work_item_id),

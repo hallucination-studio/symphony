@@ -27,6 +27,7 @@ async def test_conductor_exposes_managed_run_api_without_pipeline_compatibility(
         "managed_runs": {
             "attempts": [],
             "runs": [],
+            "runtime_waits": [],
             "attempt_integrity": {"passed": True, "errors": []},
         }
     }
@@ -60,6 +61,32 @@ def test_runtime_snapshot_uses_managed_run_source_name(tmp_path) -> None:
     snapshot = managed_run_runtime_snapshot(service.managed_run_store)
 
     assert snapshot["source"] == "managed_run"
+
+
+def test_runtime_snapshot_exposes_managed_run_runtime_waits(tmp_path) -> None:
+    service = ConductorService(
+        store=ConductorStore(tmp_path / "conductor-data"),
+        data_root=tmp_path / "conductor-data",
+    )
+    run = service.managed_run_store.accept_dispatch({"issue_id": "root-1", "issue_identifier": "HELL-1"}, instance_id="instance-1")
+    service.managed_run_store.merge_run_payload(
+        run.run_id,
+        {
+            "runtime_waits": [
+                {
+                    "wait_id": "runtime-wait-1",
+                    "work_item_id": "wi-1",
+                    "wait_kind": "approval_requested",
+                    "status": "waiting",
+                }
+            ]
+        },
+    )
+
+    snapshot = managed_run_runtime_snapshot(service.managed_run_store)
+
+    assert snapshot["counts"]["runtime_waiting"] == 1
+    assert snapshot["runtime_waits"][0]["wait_id"] == "runtime-wait-1"
 
 
 @pytest.mark.asyncio

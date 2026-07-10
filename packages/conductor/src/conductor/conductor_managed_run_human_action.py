@@ -5,6 +5,7 @@ from typing import Any
 from performer_api.managed_runs import ManagedRunState, WorkItemState
 
 from .conductor_managed_run_coordinator import ConductorManagedRunCoordinator
+from .conductor_managed_run_runtime_waits import is_runtime_wait_gate_status
 
 
 BLOCKED_STYLE_NAMES = frozenset({"blocked", "needs more"})
@@ -42,6 +43,8 @@ def human_action_targets(run: dict[str, Any], work_items: list[dict[str, Any]]) 
     targets = [target for target in targets if target is not None]
     if targets:
         return targets
+    if any(is_runtime_wait_gate_status(str(item.get("gate_status") or "")) for item in work_items):
+        return []
     state = str(run.get("state") or "")
     reason = str(run.get("latest_reason") or "")
     if state == ManagedRunState.AWAITING_APPROVAL.value and reason == "plan_approval_required":
@@ -73,7 +76,7 @@ def ingest_managed_run_human_action_event(
 def _work_item_target(item: dict[str, Any]) -> dict[str, str] | None:
     work_item_id = str(item.get("work_item_id") or "")
     reason = str(item.get("gate_status") or "")
-    if reason.startswith("plan_revision_planning:"):
+    if reason.startswith("plan_revision_planning:") or is_runtime_wait_gate_status(reason):
         return None
     return _target("work_item", work_item_id, reason) if work_item_id and reason else None
 

@@ -174,7 +174,7 @@ def _safe_id(value: str) -> str:
 
 
 def _sanitize(exc: Exception) -> str:
-    return str(exc).replace("\n", " ")[:500] or exc.__class__.__name__
+    return _redact_secret_text(str(exc).replace("\n", " "))[:500] or exc.__class__.__name__
 
 
 _SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (

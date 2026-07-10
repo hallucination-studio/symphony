@@ -92,6 +92,18 @@ def attempt_ids_for_work_item(payload: dict[str, Any], work_item_id: str) -> lis
     return [str(attempt.get("attempt_id") or "") for attempt in attempts_for_work_item(payload, work_item_id) if attempt.get("attempt_id")]
 
 
+def latest_attempt_id(payload: dict[str, Any], *, kind: str, work_item_id: str | None = None) -> str:
+    for attempt in reversed(canonical_attempt_records(payload)):
+        if str(attempt.get("kind") or "") != kind:
+            continue
+        if work_item_id is not None and str(attempt.get("work_item_id") or "") != work_item_id:
+            continue
+        attempt_id = str(attempt.get("attempt_id") or "")
+        if attempt_id:
+            return attempt_id
+    return ""
+
+
 def last_synced_comment_ids(payload: dict[str, Any], work_item_id: str) -> list[str]:
     mappings = payload.get("attempt_comment_projections") if isinstance(payload.get("attempt_comment_projections"), dict) else {}
     return [
@@ -147,6 +159,7 @@ __all__ = [
     "attempts_for_work_item",
     "checkpoint_evidence",
     "last_synced_comment_ids",
+    "latest_attempt_id",
     "linear_state_target",
     "operator_wait_kind",
     "parent_linear_state_target",
