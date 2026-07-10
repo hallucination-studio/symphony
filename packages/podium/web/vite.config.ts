@@ -4,10 +4,10 @@ import react from "@vitejs/plugin-react";
 import { fileURLToPath } from "node:url";
 
 // Build emits static assets into the Podium package's served static dir.
-// `base` is relative so assets resolve regardless of the served mount path.
+// Podium owns the origin root, so SPA deep links must resolve assets from it.
 export default defineConfig({
   plugins: [react()],
-  base: "./",
+  base: "/",
   build: {
     outDir: fileURLToPath(new URL("../src/podium/static", import.meta.url)),
     emptyOutDir: true,

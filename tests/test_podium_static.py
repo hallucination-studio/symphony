@@ -1,9 +1,26 @@
+from html.parser import HTMLParser
 from pathlib import Path
+from urllib.parse import urljoin, urlsplit
 
 import httpx
 import pytest
 
 from podium.app import create_app
+
+
+class _AssetParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.assets: list[tuple[str, str]] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        values = dict(attrs)
+        if tag == "script" and values.get("src"):
+            self.assets.append((values["src"], "javascript"))
+        if tag == "link" and values.get("rel") == "stylesheet" and values.get("href"):
+            self.assets.append((values["href"], "text/css"))
+        if tag == "link" and values.get("rel") == "icon" and values.get("href"):
+            self.assets.append((values["href"], "image/svg+xml"))
 
 
 def _client(app):
@@ -30,6 +47,23 @@ async def test_serves_index_and_spa_fallback(tmp_path: Path) -> None:
         missing = await client.get("/api/v1/does-not-exist")
         assert missing.status_code == 404
         assert missing.headers["content-type"].startswith("application/json")
+
+
+@pytest.mark.asyncio
+async def test_built_spa_deep_link_resolves_root_assets() -> None:
+    static = Path(__file__).parents[1] / "packages" / "podium" / "src" / "podium" / "static"
+    app = create_app(turnstile_verifier=lambda t, ip: True, secure_cookies=False, static_dir=str(static))
+
+    async with _client(app) as client:
+        spa = await client.get("/setup/linear")
+        parser = _AssetParser()
+        parser.feed(spa.text)
+        assert parser.assets
+        for reference, expected_type in parser.assets:
+            path = urlsplit(urljoin(str(spa.url), reference)).path
+            asset = await client.get(path)
+            assert asset.status_code == 200
+            assert expected_type in asset.headers["content-type"]
 
 
 @pytest.mark.asyncio
