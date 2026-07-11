@@ -3,20 +3,17 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-import httpx
-
-from .conductor_managed_run_driver_service import drive_managed_run_runs_once
 from .conductor_service_types import CoordinationResult
+from .workflow_driver import WorkflowDriver
 
 
 class PodiumBackgroundMixin:
     async def coordinate_background_once(self) -> CoordinationResult:
         self._managed_run_reconcile_findings: list[dict[str, Any]] = []
-        dispatches_drained = await self._drain_podium_dispatch_queue()
-        managed_run_driver = await drive_managed_run_runs_once(self)
+        managed_run_driver = await WorkflowDriver(self).drive_once()
         remediations: dict[str, Any] = {}
-        managed_run_projections = await self.reconcile_linear_managed_run_projections_once()
-        dispatch_acks = dispatches_drained
+        managed_run_projections = 0
+        dispatch_acks = {"acked": 0, "failed": 0, "skipped": 0}
         project_labels_synced = 0
         crash_restarts = 0
         crash_loops = 0
@@ -49,10 +46,3 @@ class PodiumBackgroundMixin:
             return 0
         self.coordination_cadence.mark_project_labels(now)
         return await self.sync_project_labels_once()
-
-    async def ack_completed_podium_dispatches(
-        self,
-        *,
-        transport: httpx.AsyncBaseTransport | None = None,
-    ) -> dict[str, Any]:
-        return {"acked": 0, "failed": 0, "skipped": 0}

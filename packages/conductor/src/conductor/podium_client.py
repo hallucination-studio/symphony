@@ -1,38 +1,16 @@
 from __future__ import annotations
 
-from typing import Any, Awaitable, Callable
+from typing import Any
 
 import httpx
-import websockets
 
 from .conductor_service import ConductorService
 from .conductor_smoke_protocol import safe_code, sanitize_reason
 
 
-LogChunkPoster = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
-
-
 class PodiumRuntimeClient:
     def __init__(self, service: ConductorService) -> None:
         self.service = service
-
-    async def post_log_chunk(self, payload: dict[str, Any], *, transport: httpx.AsyncBaseTransport | None = None) -> dict[str, Any]:
-        settings = self.service.store.get_settings()
-        podium_url = settings.podium_url.strip().rstrip("/")
-        runtime_token = settings.podium_runtime_token.strip()
-        if not podium_url or not runtime_token:
-            return {"status": "skipped", "reason": "runtime_not_configured"}
-        async with httpx.AsyncClient(timeout=10, trust_env=False, transport=transport) as client:
-            response = await client.post(
-                f"{podium_url}/api/v1/runtime/log-chunks",
-                headers={"Authorization": f"Bearer {runtime_token}"},
-                json=payload,
-            )
-        if response.status_code == 401:
-            return {"status": "skipped", "reason": "runtime_unauthorized"}
-        response.raise_for_status()
-        body = response.json()
-        return body if isinstance(body, dict) else {"status": "accepted"}
 
     async def post_smoke_result(
         self,
@@ -67,18 +45,53 @@ class PodiumRuntimeClient:
             sanitize_reason(error.get("message") or f"Podium returned HTTP {response.status_code}"),
         )
 
-    async def handle_command(self, command: dict[str, Any], *, transport: httpx.AsyncBaseTransport | None = None) -> dict[str, Any]:
-        async def poster(payload: dict[str, Any]) -> dict[str, Any]:
-            return await self.post_log_chunk(payload, transport=transport)
-
+    async def poll_command_once(
+        self,
+        *,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> dict[str, Any]:
+        settings = self.service.store.get_settings()
+        podium_url = settings.podium_url.strip().rstrip("/")
+        runtime_token = settings.podium_runtime_token.strip()
+        if not podium_url or not runtime_token:
+            return {"status": "skipped", "reason": "runtime_not_configured"}
+        headers = {"Authorization": f"Bearer {runtime_token}"}
         async def smoke_poster(payload: dict[str, Any]) -> dict[str, Any]:
             return await self.post_smoke_result(payload, transport=transport)
-
-        return await self.service.handle_podium_ws_command(
-            command,
-            post_log_chunk=poster,
-            post_smoke_result=smoke_poster,
-        )
+        async with httpx.AsyncClient(timeout=10, trust_env=False, transport=transport) as client:
+            lease_response = await client.post(f"{podium_url}/api/v1/runtime/commands/lease", headers=headers)
+            if lease_response.status_code == 401:
+                return {"status": "skipped", "reason": "runtime_unauthorized"}
+            lease_response.raise_for_status()
+            command = lease_response.json().get("command")
+            if not command:
+                return {"status": "idle"}
+            try:
+                result = await self.service.handle_podium_command(command, post_smoke_result=smoke_poster)
+                ack_status = "failed" if result.get("status") in {"failed", "rejected", "error"} else "completed"
+            except Exception as exc:
+                result = {
+                    "status": "failed",
+                    "error_code": "runtime_command_failed",
+                    "sanitized_reason": sanitize_reason(exc),
+                }
+                ack_status = "failed"
+            ack_response = await client.post(
+                f"{podium_url}/api/v1/runtime/commands/ack",
+                headers=headers,
+                json={
+                    "command_id": command.get("id"),
+                    "fencing_token": command.get("fencing_token"),
+                    "status": ack_status,
+                    "result": result,
+                },
+            )
+            if ack_response.status_code == 401:
+                return {"status": "skipped", "reason": "runtime_unauthorized"}
+            if ack_response.status_code == 409:
+                return {"status": "stale", "reason": "stale_runtime_command_lease"}
+            ack_response.raise_for_status()
+        return {"status": "handled", "command": command, "result": result}
 
     async def flush_pending_smoke_results(
         self,
@@ -93,32 +106,6 @@ class PodiumRuntimeClient:
             return await self.post_smoke_result(payload, transport=transport)
 
         return await retry(poster)
-
-    async def run_ws_once(self, *, connect: Callable[..., Any] | None = None) -> dict[str, Any]:
-        settings = self.service.store.get_settings()
-        ws_url = settings.podium_ws_url.strip()
-        runtime_token = settings.podium_runtime_token.strip()
-        if not ws_url or not runtime_token:
-            return {"status": "skipped", "reason": "runtime_not_configured"}
-        connector = connect or websockets.connect
-        handled = 0
-        async with connector(ws_url, additional_headers={"Authorization": f"Bearer {runtime_token}"}) as websocket:
-            await websocket.send('{"type":"hello"}')
-            while True:
-                raw = await websocket.recv()
-                if raw is None:
-                    break
-                import json
-
-                command = json.loads(raw if isinstance(raw, str) else raw.decode())
-                if command.get("type") == "ping":
-                    continue
-                await self.handle_command(command)
-                handled += 1
-                if command.get("type") in {"log.fetch", "dispatch.available"}:
-                    break
-        return {"status": "ok", "handled": handled}
-
 
 def _smoke_post_error(status_code: int, code: str, reason: str) -> dict[str, Any]:
     retryable = status_code == 0 or status_code == 429 or status_code >= 500

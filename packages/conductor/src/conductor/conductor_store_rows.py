@@ -37,7 +37,6 @@ def settings_values(settings: ConductorSettings) -> tuple[Any, ...]:
         settings.podium_runtime_id,
         settings.podium_runtime_token,
         settings.podium_proxy_token,
-        settings.podium_ws_url,
         settings.runtime_group_id,
         1 if settings.managed_mode else 0,
         settings.conductor_id,

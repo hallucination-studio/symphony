@@ -164,13 +164,6 @@ class PodiumStateBaseMixin:
                 snapshot[runtime_id] = str(row.get("last_seen_at") or utc_now_iso())
         return snapshot
 
-    async def save_log_fetch_result(self, request_id: str, result: dict[str, Any]) -> None:
-        if request_id:
-            await self.store.save_log_fetch_result(request_id, result)
-
-    async def get_log_fetch_result(self, request_id: str) -> dict[str, Any] | None:
-        return await self.store.get_log_fetch_result(request_id)
-
     async def record_proxy_audit(self, event: dict[str, Any]) -> None:
         await self.store.insert_proxy_audit_event(event)
 

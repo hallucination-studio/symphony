@@ -44,12 +44,6 @@ class PgProjectUnbindMixin:
                     conductor_id,
                     pending,
                 )
-        if command_id is not None:
-            await self.pool.execute(
-                "SELECT pg_notify($1, $2)",
-                f"runtime_commands_{conductor_id}",
-                str(command_id),
-            )
         return pending, command_id is not None
 
     async def complete_project_unbind(

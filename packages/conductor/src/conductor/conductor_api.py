@@ -27,7 +27,6 @@ class ConductorApiServer:
         self.service = service
         self._server: asyncio.AbstractServer | None = None
         self._podium_poll_task: asyncio.Task[None] | None = None
-        self._podium_ws_task: asyncio.Task[None] | None = None
         self._report_tick = 0
         self.port: int | None = None
 
@@ -36,16 +35,8 @@ class ConductorApiServer:
         socket = self._server.sockets[0]
         self.port = int(socket.getsockname()[1])
         self._podium_poll_task = asyncio.create_task(self._poll_podium_dispatches())
-        self._podium_ws_task = asyncio.create_task(self._run_podium_ws())
 
     async def stop(self) -> None:
-        if self._podium_ws_task is not None:
-            self._podium_ws_task.cancel()
-            try:
-                await self._podium_ws_task
-            except asyncio.CancelledError:
-                pass
-            self._podium_ws_task = None
         if self._podium_poll_task is not None:
             self._podium_poll_task.cancel()
             try:
@@ -70,6 +61,11 @@ class ConductorApiServer:
                     self.service.update_podium_connection("poll", status="unauthorized", error="runtime_unauthorized")
                     await asyncio.sleep(60)
                     continue
+                command_result = await PodiumRuntimeClient(self.service).poll_command_once()
+                if command_result.get("reason") == "runtime_unauthorized":
+                    self.service.update_podium_connection("commands", status="unauthorized", error="runtime_unauthorized")
+                else:
+                    self.service.update_podium_connection("commands", status="connected", error=None)
                 self.service.update_podium_connection("poll", status="connected", error=None)
                 await self.service.coordinate_background_once()
                 self._report_tick += 1
@@ -79,23 +75,6 @@ class ConductorApiServer:
                 delay = 1.0
             except Exception as exc:
                 self.service.update_podium_connection("poll", status="error", error=str(exc))
-                delay = min(max(delay * 2, 5), 60)
-            await asyncio.sleep(_jitter(delay))
-
-    async def _run_podium_ws(self) -> None:
-        client = PodiumRuntimeClient(self.service)
-        delay = 5.0
-        while True:
-            try:
-                result = await client.run_ws_once()
-                if result.get("reason") == "runtime_unauthorized":
-                    self.service.update_podium_connection("ws", status="unauthorized", error="runtime_unauthorized")
-                    return
-                status = "connected" if result.get("status") == "ok" else str(result.get("status") or "idle")
-                self.service.update_podium_connection("ws", status=status, error=None)
-                delay = 5.0
-            except Exception as exc:
-                self.service.update_podium_connection("ws", status="error", error=str(exc))
                 delay = min(max(delay * 2, 5), 60)
             await asyncio.sleep(_jitter(delay))
 
@@ -147,7 +126,7 @@ class ConductorApiServer:
             if method == "GET" and path == "/":
                 return 200, {"service": "conductor", "status": "ok"}
             if method == "GET" and path == "/api/managed-runs":
-                return 200, {"managed_runs": self.service.managed_run_store.managed_run_view()}
+                return 200, {"managed_runs": self.service.managed_run_view()}
             if method == "GET" and path == "/api/smoke-checks":
                 return 200, {"smoke_checks": self.service.list_smoke_checks()}
             if method == "GET" and path == "/api/instances":

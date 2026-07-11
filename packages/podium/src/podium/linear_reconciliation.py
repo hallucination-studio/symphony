@@ -184,7 +184,6 @@ class LinearReconciler:
                 expected_state = page.state
                 state = page.state
                 queued += page.inserted
-                await self.state.notify_reconciled_dispatches(binding, page.inserted)
             except Exception as exc:
                 raise BindingReconciliationFailed(
                     exc, queued, expected_state=expected_state, state_loaded=True

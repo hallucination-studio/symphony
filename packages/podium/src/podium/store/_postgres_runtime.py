@@ -206,12 +206,12 @@ class PgRuntimeMixin:
             """
             INSERT INTO runtime_commands (runtime_id, command_json, created_at)
             VALUES ($1,$2::jsonb,now())
-            RETURNING id, runtime_id, command_json, created_at
+            RETURNING id, runtime_id, command_json, created_at, status, lease_expires_at,
+                      fencing_token, completed_at, result_json
             """,
             runtime_id,
             _pg_json(command),
         )
-        await self.pool.execute("SELECT pg_notify($1, $2)", f"runtime_commands_{runtime_id}", str(row["id"]))
         return _record_to_runtime_command(row)
 
     async def append_runtime_command_once(
@@ -222,7 +222,8 @@ class PgRuntimeMixin:
             INSERT INTO runtime_commands (runtime_id, dedupe_key, command_json, created_at)
             VALUES ($1,$2,$3::jsonb,now())
             ON CONFLICT (runtime_id, dedupe_key) WHERE dedupe_key <> '' DO NOTHING
-            RETURNING id, runtime_id, command_json, created_at
+            RETURNING id, runtime_id, command_json, created_at, status, lease_expires_at,
+                      fencing_token, completed_at, result_json
             """,
             runtime_id,
             dedupe_key,
@@ -231,19 +232,104 @@ class PgRuntimeMixin:
         if row is None:
             row = await self.pool.fetchrow(
                 """
-                SELECT id, runtime_id, command_json, created_at FROM runtime_commands
+                SELECT id, runtime_id, command_json, created_at, status, lease_expires_at,
+                       fencing_token, completed_at, result_json
+                FROM runtime_commands
                 WHERE runtime_id = $1 AND dedupe_key = $2
                 """,
                 runtime_id,
                 dedupe_key,
             )
             return _record_to_runtime_command(row)
-        await self.pool.execute("SELECT pg_notify($1, $2)", f"runtime_commands_{runtime_id}", str(row["id"]))
         return _record_to_runtime_command(row)
 
+    async def lease_runtime_command(self, runtime_id: str) -> dict[str, Any] | None:
+        """Lease one queued command using a short-lived fencing token."""
+        async with self.pool.acquire() as connection:
+            async with connection.transaction():
+                row = await connection.fetchrow(
+                    """
+                    SELECT id, runtime_id, command_json, created_at, status, lease_expires_at,
+                           fencing_token, completed_at, result_json
+                    FROM runtime_commands
+                    WHERE runtime_id = $1
+                      AND (status = 'queued' OR (status = 'leased' AND lease_expires_at < now()))
+                    ORDER BY id
+                    FOR UPDATE SKIP LOCKED
+                    LIMIT 1
+                    """,
+                    runtime_id,
+                )
+                if row is None:
+                    return None
+                next_token = int(row["fencing_token"] or 0) + 1
+                leased = await connection.fetchrow(
+                    """
+                    UPDATE runtime_commands
+                    SET status = 'leased', lease_expires_at = now() + interval '5 minutes',
+                        fencing_token = $2, completed_at = NULL
+                    WHERE id = $1
+                    RETURNING id, runtime_id, command_json, created_at, status, lease_expires_at,
+                              fencing_token, completed_at, result_json
+                    """,
+                    int(row["id"]),
+                    next_token,
+                )
+        return _record_to_runtime_command(leased) if leased is not None else None
+
+    async def ack_runtime_command(
+        self,
+        runtime_id: str,
+        command_id: int,
+        fencing_token: int,
+        *,
+        status: str,
+        result: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        if status not in {"completed", "failed"}:
+            raise ValueError("invalid_runtime_command_status")
+        async with self.pool.acquire() as connection:
+            async with connection.transaction():
+                row = await connection.fetchrow(
+                    """
+                    SELECT id, runtime_id, command_json, created_at, status, lease_expires_at,
+                           fencing_token, completed_at, result_json
+                    FROM runtime_commands
+                    WHERE id = $1 AND runtime_id = $2
+                    FOR UPDATE
+                    """,
+                    command_id,
+                    runtime_id,
+                )
+                if row is None:
+                    return None
+                if row["status"] != "leased" or int(row["fencing_token"] or 0) != fencing_token:
+                    return {**_record_to_runtime_command(row), "_ack_error": "stale_runtime_command_lease"}
+                updated = await connection.fetchrow(
+                    """
+                    UPDATE runtime_commands
+                    SET status = $2, lease_expires_at = NULL, completed_at = now(), result_json = $3::jsonb
+                    WHERE id = $1
+                    RETURNING id, runtime_id, command_json, created_at, status, lease_expires_at,
+                              fencing_token, completed_at, result_json
+                    """,
+                    command_id,
+                    status,
+                    _pg_json(result or {}),
+                )
+        return _record_to_runtime_command(updated) if updated is not None else None
+
     async def next_runtime_command(self, runtime_id: str, *, after_id: int = 0) -> dict[str, Any] | None:
+        """Compatibility read for diagnostics; execution uses lease_runtime_command."""
         row = await self.pool.fetchrow(
-            "SELECT id, runtime_id, command_json, created_at FROM runtime_commands WHERE runtime_id = $1 AND id > $2 ORDER BY id LIMIT 1",
+            """
+            SELECT id, runtime_id, command_json, created_at, status, lease_expires_at,
+                   fencing_token, completed_at, result_json
+            FROM runtime_commands
+            WHERE runtime_id = $1 AND id > $2
+            ORDER BY id
+            LIMIT 1
+            """,
             runtime_id,
             after_id,
         )

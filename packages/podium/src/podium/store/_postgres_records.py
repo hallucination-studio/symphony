@@ -146,6 +146,11 @@ def _record_to_runtime_command(row: Any) -> dict[str, Any]:
         "runtime_id": str(row["runtime_id"]),
         "command": dict(_pg_json_value(row["command_json"], {})),
         "created_at": row["created_at"].isoformat() if row["created_at"] is not None else "",
+        "status": str(row["status"] or "queued"),
+        "lease_expires_at": row["lease_expires_at"].isoformat() if row["lease_expires_at"] is not None else None,
+        "fencing_token": int(row["fencing_token"] or 0),
+        "completed_at": row["completed_at"].isoformat() if row["completed_at"] is not None else None,
+        "result": dict(_pg_json_value(row["result_json"], {})),
     }
 
 

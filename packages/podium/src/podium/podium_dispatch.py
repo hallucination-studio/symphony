@@ -11,19 +11,6 @@ class PodiumDispatchMixin:
     def reconciliation_dispatch(self, event: dict[str, Any], binding: dict[str, Any]) -> dict[str, Any]:
         return self._dispatch_from_event(event, self._runtime_group_from_project_binding(binding))
 
-    async def notify_reconciled_dispatches(self, binding: dict[str, Any] | None, count: int) -> None:
-        conductor_id = str((binding or {}).get("conductor_id") or "")
-        if not conductor_id or count <= 0:
-            return
-        await self.enqueue_runtime_command(
-            conductor_id,
-            {
-                "type": "dispatch.available",
-                "project_binding_id": str((binding or {}).get("id") or ""),
-                "instance_id": (binding or {}).get("instance_id"),
-            },
-        )
-
     def _dispatch_from_event(self, event: dict[str, Any], group: dict[str, Any]) -> dict[str, Any]:
         project_binding_id = str(group.get("project_binding_id") or group["id"])
         now = utc_now_iso()

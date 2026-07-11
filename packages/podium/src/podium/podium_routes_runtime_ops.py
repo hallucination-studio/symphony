@@ -2,15 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import json
-import secrets
 from typing import Any, Awaitable, Callable
 
 from fastapi import FastAPI, Header, Request
 from fastapi.responses import JSONResponse
-from performer_api.managed_runs import RuntimeConfigEnvelope
+from performer_api.runtime import RuntimeConfigEnvelope
 
 from .podium_routes_runtime_helpers import managed_run_ack_payload
-from .podium_shared import dispatch_public, optional_int, query_bool, sanitize_runtime_config
+from .podium_shared import dispatch_public, optional_int, sanitize_runtime_config
 
 RequireUser = Callable[[Request], Awaitable[dict[str, Any] | None]]
 ErrorResponse = Callable[[int, str, str], JSONResponse]
@@ -20,6 +19,7 @@ def register_runtime_ops_routes(
     app: FastAPI, *, state: Any, require_user: RequireUser, error_response: ErrorResponse
 ) -> None:
     _register_runtime_dispatch_routes(app, state=state, error_response=error_response)
+    _register_runtime_command_routes(app, state=state, error_response=error_response)
     _register_runtime_report_endpoint(app, state=state, error_response=error_response)
     _register_runtime_config_endpoints(app, state=state, error_response=error_response)
     _register_managed_run_view_endpoint(app, state=state, require_user=require_user, error_response=error_response)
@@ -36,6 +36,7 @@ def _register_runtime_dispatch_routes(app: FastAPI, *, state: Any, error_respons
         if dispatch is None:
             return JSONResponse({"dispatch": None})
         return JSONResponse({"dispatch": dispatch_public(dispatch)})
+
 
     @app.post("/api/v1/runtime/dispatches/ack")
     async def ack_dispatch(request: Request, authorization: str | None = Header(default=None)) -> JSONResponse:
@@ -59,6 +60,45 @@ def _register_runtime_dispatch_routes(app: FastAPI, *, state: Any, error_respons
         if dispatch.get("_ack_error") == "stale_dispatch_lease":
             return error_response(409, "stale_dispatch_lease", "Dispatch lease fencing token is stale")
         return JSONResponse({"dispatch": dispatch_public(dispatch)})
+
+
+def _register_runtime_command_routes(app: FastAPI, *, state: Any, error_response: ErrorResponse) -> None:
+    @app.post("/api/v1/runtime/commands/lease")
+    async def lease_runtime_command(authorization: str | None = Header(default=None)) -> JSONResponse:
+        runtime = await state.runtime_for_bearer(authorization or "")
+        if runtime is None:
+            return error_response(401, "unauthorized", "Unauthorized")
+        command = await state.lease_runtime_command(str(runtime["id"]))
+        return JSONResponse({"command": command})
+
+    @app.post("/api/v1/runtime/commands/ack")
+    async def ack_runtime_command(request: Request, authorization: str | None = Header(default=None)) -> JSONResponse:
+        runtime = await state.runtime_for_bearer(authorization or "")
+        if runtime is None:
+            return error_response(401, "unauthorized", "Unauthorized")
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            return error_response(400, "invalid_command_ack", "Command acknowledgement must be a JSON object")
+        command_id, command_error = _required_int(payload.get("command_id"))
+        fencing_token, fencing_error = _required_int(payload.get("fencing_token"))
+        if command_error or fencing_error:
+            return error_response(400, "invalid_command_ack", "command_id and fencing_token must be integers")
+        status = str(payload.get("status") or "")
+        if status not in {"completed", "failed"}:
+            return error_response(400, "invalid_command_status", "status must be completed or failed")
+        result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
+        command = await state.ack_runtime_command(
+            str(runtime["id"]),
+            command_id,
+            fencing_token,
+            status=status,
+            result=result,
+        )
+        if command is None:
+            return error_response(404, "runtime_command_not_found", "Runtime command not found")
+        if command.get("_ack_error") == "stale_runtime_command_lease":
+            return error_response(409, "stale_runtime_command_lease", "Runtime command lease fencing token is stale")
+        return JSONResponse({"command": command})
 
 
 def _register_runtime_report_endpoint(app: FastAPI, *, state: Any, error_response: ErrorResponse) -> None:
@@ -216,61 +256,32 @@ def _register_runtime_log_routes(
         if not await state.conductor_belongs_to_user(conductor_id, str(user["id"])):
             return error_response(404, "not_found", "Conductor not found")
         tail = optional_int(request.query_params.get("tail"), 200)
-        previous = query_bool(request.query_params.get("previous"))
         order = request.query_params.get("order") or "desc"
-        return await _runtime_instance_logs_response(state, conductor_id, instance_id, tail, previous, order)
-
-    @app.post("/api/v1/runtime/log-chunks")
-    async def runtime_log_chunks(request: Request, authorization: str | None = Header(default=None)) -> JSONResponse:
-        runtime = await state.runtime_for_bearer(authorization or "")
-        if runtime is None:
-            return error_response(401, "unauthorized", "Unauthorized")
-        payload = await request.json()
-        result = await state.apply_log_chunk(str(runtime["id"]), payload if isinstance(payload, dict) else {})
-        return JSONResponse({"status": "accepted", "request_id": result.get("request_id")})
-
-    @app.get("/api/v1/runtime/log-fetches/{request_id}")
-    async def runtime_log_fetch_result(request_id: str) -> JSONResponse:
-        result = await state.get_log_fetch_result(request_id)
-        if result is None:
-            return error_response(404, "log_fetch_not_found", "Log fetch result not found")
-        return JSONResponse({"logs": result})
+        return await _runtime_instance_logs_response(state, conductor_id, instance_id, tail, order)
 
 
 async def _runtime_instance_logs_response(
-    state: Any, conductor_id: str, instance_id: str, tail: int | None, previous: bool, order: str
+    state: Any, conductor_id: str, instance_id: str, tail: int | None, order: str
 ) -> JSONResponse:
-    if not previous:
-        tail_row = await state.store.get_instance_log_tail(conductor_id, instance_id)
-        if tail_row is not None:
-            lines = list(tail_row.get("lines") or [])
-            if tail is not None:
-                lines = lines[:tail]
-            return JSONResponse(
-                {
-                    "logs": {
-                        "conductor_id": conductor_id,
-                        "instance_id": instance_id,
-                        "generation": tail_row.get("generation"),
-                        "order": order,
-                        "lines": lines,
-                        "cursor": tail_row.get("offset_end", 0),
-                        "offset_end": tail_row.get("offset_end", 0),
-                    }
-                }
-            )
-    command = await state.enqueue_runtime_command(
-        conductor_id,
+    tail_row = await state.store.get_instance_log_tail(conductor_id, instance_id)
+    if tail_row is None:
+        return JSONResponse({"logs": None}, status_code=404)
+    lines = list(tail_row.get("lines") or [])
+    if tail is not None:
+        lines = lines[:tail]
+    return JSONResponse(
         {
-            "type": "log.fetch",
-            "request_id": secrets.token_urlsafe(12),
-            "instance_id": instance_id,
-            "tail": tail,
-            "previous": previous,
-            "order": order,
-        },
+            "logs": {
+                "conductor_id": conductor_id,
+                "instance_id": instance_id,
+                "generation": tail_row.get("generation"),
+                "order": order,
+                "lines": lines,
+                "cursor": tail_row.get("offset_end", 0),
+                "offset_end": tail_row.get("offset_end", 0),
+            }
+        }
     )
-    return JSONResponse({"status": "pending", "request_id": command["request_id"]}, status_code=202)
 
 
 def _fencing_token_from_payload(payload: dict[str, Any]) -> tuple[int | None, str | None]:
@@ -279,3 +290,10 @@ def _fencing_token_from_payload(payload: dict[str, Any]) -> tuple[int | None, st
         return int(raw_fencing_token) if raw_fencing_token not in {None, ""} else None, None
     except (TypeError, ValueError):
         return None, "invalid_fencing_token"
+
+
+def _required_int(value: Any) -> tuple[int | None, str | None]:
+    try:
+        return int(value), None
+    except (TypeError, ValueError):
+        return None, "invalid_integer"

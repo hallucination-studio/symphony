@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-import asyncio
 from typing import Any
 
 import httpx
 
-from .conductor_podium_sync_failure import _sanitize_error
 from .conductor_service_types import ConductorServiceError
 
 
@@ -48,20 +46,32 @@ class PodiumDispatchMixin:
                 "issue_identifier": issue_identifier or None,
                 "reason": "no_matching_instance",
             }
-        accepted = self.managed_run_coordinator.accept_dispatch(event, instance_id=instance.id)
-        run = self.managed_run_store.get_run(accepted.run_id) or {}
+        accepted = self.workflow.accept_parent(
+            issue_id or issue_identifier,
+            issue_identifier or issue_id,
+            instance_id=instance.id,
+        )
+        self.workflow_store.update_run_payload(
+            str(accepted["run_id"]),
+            {
+                "issue_title": str(event.get("issue_title") or ""),
+                "issue_description": str(event.get("issue_description") or ""),
+                "agent_app_user_id": agent_app_user_id,
+            },
+        )
+        run = self.workflow_store.get_run(str(accepted["run_id"])) or {}
         return {
             "status": "accepted",
             "issue_id": issue_id or None,
             "issue_identifier": issue_identifier or None,
             "instance_id": instance.id,
             "agent_app_user_id": agent_app_user_id,
-            "run_id": accepted.run_id,
-            "parent_issue_id": accepted.parent_issue_id,
+            "run_id": accepted["run_id"],
+            "parent_issue_id": accepted["parent_issue_id"],
             "active_work_item_id": run.get("active_work_item_id") or "",
             "managed_run_state": run.get("state") or "planning",
             "plan_version": run.get("plan_version") or 0,
-            "backend_session_id": run.get("backend_session_id") or "",
+            "backend_session_id": str((run.get("payload") or {}).get("thread_id") or ""),
         }
 
     def _record_dispatch_skip_finding(
@@ -123,34 +133,3 @@ class PodiumDispatchMixin:
                 },
             )
             return {"status": "leased", "dispatch": leased, "result": result}
-
-    async def _drain_podium_dispatch_queue(self) -> dict[str, int]:
-        received = 0
-        failed = 0
-        skipped = 0
-        while True:
-            try:
-                event = self._podium_dispatch_queue.get_nowait()
-            except asyncio.QueueEmpty:
-                break
-            try:
-                if event.get("_lease_dispatch"):
-                    result = await self.poll_podium_dispatch_once()
-                else:
-                    result = await self.dispatch_podium_event(event)
-            except Exception as exc:
-                self._record_managed_run_sync_failure(
-                    "podium_dispatch_drain_failed",
-                    None,
-                    exc,
-                    action_required="retry_dispatch_drain",
-                    extra={"issue_id": event.get("issue_id"), "issue_identifier": event.get("issue_identifier")},
-                )
-                result = {"status": "failed", "reason": _sanitize_error(exc)}
-            if result.get("status") in {"accepted", "leased"}:
-                received += 1
-            elif result.get("status") == "failed":
-                failed += 1
-            elif result.get("status") == "skipped":
-                skipped += 1
-        return {"acked": received, "failed": failed, "skipped": skipped}

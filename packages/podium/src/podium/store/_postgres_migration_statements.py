@@ -218,13 +218,6 @@ POSTGRES_MIGRATION_STATEMENTS: Iterable[str] = (
             )
             """,
             """
-            CREATE TABLE IF NOT EXISTS log_fetch_results (
-                request_id TEXT PRIMARY KEY,
-                result_json JSONB NOT NULL,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-            )
-            """,
-            """
             CREATE TABLE IF NOT EXISTS runtime_configs (
                 runtime_group_id TEXT PRIMARY KEY,
                 config_json JSONB NOT NULL,
@@ -244,11 +237,22 @@ POSTGRES_MIGRATION_STATEMENTS: Iterable[str] = (
                 runtime_id TEXT NOT NULL REFERENCES conductors(id) ON DELETE CASCADE,
                 dedupe_key TEXT NOT NULL DEFAULT '',
                 command_json JSONB NOT NULL,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                status TEXT NOT NULL DEFAULT 'queued',
+                lease_expires_at TIMESTAMPTZ,
+                fencing_token BIGINT NOT NULL DEFAULT 0,
+                completed_at TIMESTAMPTZ,
+                result_json JSONB NOT NULL DEFAULT '{}'::jsonb
             )
             """,
             "ALTER TABLE runtime_commands ADD COLUMN IF NOT EXISTS dedupe_key TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE runtime_commands ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'queued'",
+            "ALTER TABLE runtime_commands ADD COLUMN IF NOT EXISTS lease_expires_at TIMESTAMPTZ",
+            "ALTER TABLE runtime_commands ADD COLUMN IF NOT EXISTS fencing_token BIGINT NOT NULL DEFAULT 0",
+            "ALTER TABLE runtime_commands ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ",
+            "ALTER TABLE runtime_commands ADD COLUMN IF NOT EXISTS result_json JSONB NOT NULL DEFAULT '{}'::jsonb",
             "CREATE UNIQUE INDEX IF NOT EXISTS runtime_commands_dedupe_unique ON runtime_commands (runtime_id, dedupe_key) WHERE dedupe_key <> ''",
+            "CREATE INDEX IF NOT EXISTS runtime_commands_poll_index ON runtime_commands (runtime_id, status, id)",
             """
             CREATE TABLE IF NOT EXISTS linear_reconciliation_state (
                 binding_id TEXT PRIMARY KEY,

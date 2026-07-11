@@ -204,14 +204,12 @@ def _register_runtime_enrollment_routes(app: FastAPI, *, state: Any, error_respo
             hash_secret(proxy_token),
             payload,
         )
-        websocket_url = str(request.base_url).rstrip("/").replace("http://", "ws://").replace("https://", "wss://")
         return JSONResponse(
             {
                 "runtime_id": runtime_id,
                 "runtime_token": runtime_token,
                 "proxy_token": proxy_token,
                 "runtime_group_id": runtime_group_id,
-                "websocket_url": f"{websocket_url}/api/v1/runtime/ws",
                 "conductor": await state.conductor_public(saved),
             }
         )

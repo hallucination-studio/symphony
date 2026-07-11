@@ -25,6 +25,8 @@ class PodiumRuntimeMixin:
         runtime = await self.store.get_runtime(runtime_id)
         if runtime is None:
             return {"status": "unknown_runtime", "bindings_upserted": 0}
+        # HTTP reports are the liveness signal now that the runtime channel is polling-only.
+        await self.set_presence(runtime_id)
         conductor = await self._runtime_report_conductor(runtime_id, runtime, payload)
         await self.store.upsert_conductor(conductor)
         bindings = payload.get("bindings") if isinstance(payload.get("bindings"), list) else []
@@ -181,16 +183,8 @@ class PodiumRuntimeMixin:
     async def conductor_belongs_to_user(self, conductor_id: str, user_id: str) -> bool:
         return any(str(row.get("id") or "") == conductor_id for row in await self.store.list_conductors_for_user(user_id))
 
-    async def attach_runtime_ws(self, runtime_id: str) -> int:
-        await self.set_presence(runtime_id)
-        return 0
-
-    async def detach_runtime_ws(self, runtime_id: str) -> None:
-        await self.clear_presence(runtime_id)
-
     async def enqueue_runtime_command(self, runtime_id: str, command: dict[str, Any]) -> dict[str, Any]:
-        await self.store.append_runtime_command(runtime_id, command)
-        return command
+        return await self.store.append_runtime_command(runtime_id, command)
 
     async def enqueue_runtime_command_once(
         self,
@@ -198,35 +192,27 @@ class PodiumRuntimeMixin:
         dedupe_key: str,
         command: dict[str, Any],
     ) -> dict[str, Any]:
-        await self.store.append_runtime_command_once(runtime_id, dedupe_key, command)
-        return command
+        return await self.store.append_runtime_command_once(runtime_id, dedupe_key, command)
 
-    async def apply_log_chunk(self, runtime_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-        request_id = str(payload.get("request_id") or "")
-        instance_id = str(payload.get("instance_id") or "")
-        result = {
-            "request_id": request_id,
-            "conductor_id": runtime_id,
-            "instance_id": instance_id,
-            "generation": payload.get("generation"),
-            "offset_start": int(payload.get("offset_start") or 0),
-            "offset_end": int(payload.get("offset_end") or 0),
-            "cursor": int(payload.get("offset_end") or 0),
-            "order": str(payload.get("order") or "desc"),
-            "lines": list(payload.get("lines") or []),
-        }
-        await self.save_log_fetch_result(request_id, result)
-        await self.store.upsert_instance_log_tail(
+    async def lease_runtime_command(self, runtime_id: str) -> dict[str, Any] | None:
+        return await self.store.lease_runtime_command(runtime_id)
+
+    async def ack_runtime_command(
+        self,
+        runtime_id: str,
+        command_id: int,
+        fencing_token: int,
+        *,
+        status: str,
+        result: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        return await self.store.ack_runtime_command(
             runtime_id,
-            instance_id,
-            {
-                "generation": result["generation"],
-                "offset_end": result["offset_end"],
-                "updated_at": utc_now_iso(),
-                "lines": result["lines"],
-            },
+            command_id,
+            fencing_token,
+            status=status,
+            result=result,
         )
-        return result
 
     async def runtime_for_bearer(self, authorization: str) -> dict[str, Any] | None:
         token = bearer_token(authorization)

@@ -58,7 +58,6 @@ class ConductorStore:
                   podium_runtime_id,
                   podium_runtime_token,
                   podium_proxy_token,
-                  podium_ws_url,
                   runtime_group_id,
                   managed_mode,
                   conductor_id
@@ -76,13 +75,12 @@ class ConductorStore:
                       podium_runtime_id,
                       podium_runtime_token,
                       podium_proxy_token,
-                      podium_ws_url,
                       runtime_group_id,
                       managed_mode,
                       conductor_id,
                       updated_at
                     )
-                    VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     settings_values(settings),
                 )
@@ -99,19 +97,17 @@ class ConductorStore:
                   podium_runtime_id,
                   podium_runtime_token,
                   podium_proxy_token,
-                  podium_ws_url,
                   runtime_group_id,
                   managed_mode,
                   conductor_id,
                   updated_at
                 )
-                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                   podium_url = excluded.podium_url,
                   podium_runtime_id = excluded.podium_runtime_id,
                   podium_runtime_token = excluded.podium_runtime_token,
                   podium_proxy_token = excluded.podium_proxy_token,
-                  podium_ws_url = excluded.podium_ws_url,
                   runtime_group_id = excluded.runtime_group_id,
                   managed_mode = excluded.managed_mode,
                   conductor_id = excluded.conductor_id,
@@ -243,7 +239,6 @@ class ConductorStore:
                   podium_runtime_id TEXT NOT NULL DEFAULT '',
                   podium_runtime_token TEXT NOT NULL DEFAULT '',
                   podium_proxy_token TEXT NOT NULL DEFAULT '',
-                  podium_ws_url TEXT NOT NULL DEFAULT '',
                   runtime_group_id TEXT NOT NULL DEFAULT '',
                   managed_mode INTEGER NOT NULL DEFAULT 0,
                   conductor_id TEXT NOT NULL,

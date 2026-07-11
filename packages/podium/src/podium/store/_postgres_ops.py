@@ -109,21 +109,6 @@ class PgOpsMixin:
         row = await self.pool.fetchrow("SELECT tail_json FROM instance_log_tails WHERE conductor_id = $1 AND instance_id = $2", conductor_id, instance_id)
         return dict(_pg_json_value(row["tail_json"], {})) if row is not None else None
 
-    async def save_log_fetch_result(self, request_id: str, result: dict[str, Any]) -> None:
-        await self.pool.execute(
-            """
-            INSERT INTO log_fetch_results (request_id, result_json, created_at)
-            VALUES ($1,$2::jsonb,now())
-            ON CONFLICT (request_id) DO UPDATE SET result_json = EXCLUDED.result_json, created_at = now()
-            """,
-            request_id,
-            _pg_json(result),
-        )
-
-    async def get_log_fetch_result(self, request_id: str) -> dict[str, Any] | None:
-        row = await self.pool.fetchrow("SELECT result_json FROM log_fetch_results WHERE request_id = $1", request_id)
-        return dict(_pg_json_value(row["result_json"], {})) if row is not None else None
-
     async def save_managed_run_view(self, runtime_group_id: str, view: dict[str, Any]) -> None:
         await self.pool.execute(
             """

@@ -16,9 +16,9 @@ from .conductor_models import (
 )
 from .conductor_runtime import ConductorRuntimeManager
 from .conductor_runtime import LogQuery
-from .conductor_managed_run_coordinator import ConductorManagedRunCoordinator
-from .conductor_managed_run_store import ConductorManagedRunStore
 from .conductor_store import ConductorStore
+from .gate import AcceptanceGate
+from .runtime import PerformerRuntime
 from .conductor_smoke_store import ConductorSmokeCheckStore
 from .conductor_podium_sync import ConductorPodiumSyncMixin
 from .conductor_service_views import ConductorServiceViewsMixin
@@ -29,6 +29,8 @@ from .conductor_service_helpers import (
 )
 from .conductor_service_types import ConductorServiceError, CoordinationCadence, CoordinationResult
 from .conductor_linear_direct import ManagedRunLinearProxy, ProjectLabelLinearProxy
+from .store import ConductorStore as WorkflowStore
+from .workflow import Workflow
 
 class ConductorService(ConductorPodiumSyncMixin, ConductorServiceViewsMixin):
     def __init__(
@@ -41,8 +43,10 @@ class ConductorService(ConductorPodiumSyncMixin, ConductorServiceViewsMixin):
         self.store = store
         self.data_root = data_root
         self.runtime_manager = runtime_manager or ConductorRuntimeManager()
-        self.managed_run_store = ConductorManagedRunStore(data_root / "managed_run")
-        self.managed_run_coordinator = ConductorManagedRunCoordinator(store=self.managed_run_store)
+        self.workflow_store = WorkflowStore(data_root / "workflow.db")
+        self.workflow = Workflow(self.workflow_store)
+        self.performer_runtime = PerformerRuntime()
+        self.acceptance_gate = AcceptanceGate()
         self.smoke_check_store = ConductorSmokeCheckStore(store)
         self._managed_run_runtime_config: dict[str, Any] = {}
         self._smoke_check_lock = asyncio.Lock()
@@ -54,7 +58,6 @@ class ConductorService(ConductorPodiumSyncMixin, ConductorServiceViewsMixin):
             "poll": {"status": "idle", "last_error": None, "updated_at": None},
             "ws": {"status": "idle", "last_error": None, "updated_at": None},
         }
-        self._podium_dispatch_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         # instance_id -> last-synced desired-label signature, so the background
         # loop only calls Linear when an instance's scope actually changes.
         self._project_label_signatures: dict[str, str] = {}

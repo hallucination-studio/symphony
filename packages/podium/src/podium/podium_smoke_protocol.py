@@ -4,7 +4,7 @@ import re
 from datetime import datetime, timezone
 from typing import Any
 
-from performer_api.managed_runs import RuntimeConfigEnvelope
+from performer_api.runtime import RuntimeConfigEnvelope
 
 from .podium_shared import utc_now_iso
 
