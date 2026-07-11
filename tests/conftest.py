@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from performer_api.workflow import Task
+from performer_api.workflow import Plan, Task
 
 
 def _task_payload() -> dict[str, object]:
@@ -27,6 +27,25 @@ def task_payload() -> dict[str, object]:
 @pytest.fixture
 def minimal_task() -> Task:
     return Task.from_dict(_task_payload())
+
+
+@pytest.fixture
+def minimal_plan(minimal_task: Task) -> Plan:
+    return Plan(summary="Implement the feature", tasks=[minimal_task])
+
+
+@pytest.fixture
+def two_task_plan() -> Plan:
+    first = Task.from_dict(_task_payload())
+    second = Task(
+        id="task-2",
+        title="Add the test",
+        objective="Cover the endpoint",
+        acceptance_criteria=["The endpoint has a regression test"],
+        verification_commands=["pytest -q tests/test_endpoint.py"],
+        files_likely_touched=["tests/test_endpoint.py"],
+    )
+    return Plan(summary="Implement the feature", tasks=[first, second])
 
 
 class FakeCodexClient:
