@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 import httpx
+import re
 
 from .conductor_service_helpers import _desired_project_labels, _hostname, _linear_agent_app_user_id
 from performer_api.runtime import RuntimeConfigEnvelope
@@ -15,7 +16,7 @@ class PodiumReportMixin:
         metrics: dict[str, dict[str, Any]] = {}
         queue: dict[str, dict[str, Any]] = {}
         log_tail: dict[str, dict[str, Any]] = {}
-        managed_runs_view = self.managed_run_view()
+        managed_runs_view = _sanitize_managed_runs_view(self.managed_run_view())
         managed_run_metrics = _managed_run_report_metrics(managed_runs_view)
         managed_run_queue = _managed_run_report_queue(managed_runs_view)
         instances = self.store.list_instances()
@@ -144,3 +145,16 @@ def _managed_run_report_queue(view: dict[str, Any]) -> dict[str, int]:
         "queued": sum(1 for run in runs if isinstance(run, dict) and run.get("state") in {"queued", "planning", "ready"}),
         "leased": sum(1 for run in runs if isinstance(run, dict) and run.get("state") in {"executing", "reviewing"}),
     }
+
+
+def _sanitize_managed_runs_view(value: Any, *, key: str = "") -> Any:
+    if isinstance(value, dict):
+        return {str(name): _sanitize_managed_runs_view(item, key=str(name)) for name, item in value.items()}
+    if isinstance(value, list):
+        return [_sanitize_managed_runs_view(item, key=key) for item in value]
+    if not isinstance(value, str):
+        return value
+    if any(marker in key.lower() for marker in ("token", "secret", "password", "authorization", "cookie")):
+        return "[REDACTED]"
+    redacted = re.sub(r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]+", r"\1 [REDACTED]", value)
+    return redacted[:4000]

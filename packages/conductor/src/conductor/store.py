@@ -338,6 +338,13 @@ class ConductorStore:
             ).fetchall()
         return [{key: row[key] for key in row.keys()} for row in rows]
 
+    def attach_wait_issue(self, wait_id: str, *, issue_id: str, identifier: str = "") -> None:
+        with self.connect() as connection:
+            connection.execute(
+                "UPDATE runtime_waits SET linear_issue_id = ?, linear_identifier = ? WHERE wait_id = ?",
+                (issue_id, identifier, wait_id),
+            )
+
     def resume_runtime_wait(self, run_id: str) -> bool:
         now = _now()
         with self.connect() as connection:
@@ -355,17 +362,12 @@ class ConductorStore:
                 )
                 connection.execute(
                     "UPDATE attempts SET state = ?, updated_at = ? WHERE run_id = ? AND task_id = ? AND state = 'waiting'",
-                    (AttemptState.RUNNING.value, now, run_id, wait["task_id"]),
+                    (AttemptState.STALE.value, now, run_id, wait["task_id"]),
                 )
                 if wait["task_id"]:
-                    gate_wait = connection.execute(
-                        "SELECT 1 FROM attempts WHERE run_id = ? AND task_id = ? AND kind = 'gate' AND state = 'running' LIMIT 1",
-                        (run_id, wait["task_id"]),
-                    ).fetchone()
-                    state = TaskState.IN_REVIEW.value if gate_wait else TaskState.IN_PROGRESS.value
                     connection.execute(
                         "UPDATE tasks SET state = ?, updated_at = ? WHERE run_id = ? AND task_id = ?",
-                        (state, now, run_id, wait["task_id"]),
+                        (TaskState.IN_PROGRESS.value, now, run_id, wait["task_id"]),
                     )
             run = connection.execute("SELECT plan_version FROM runs WHERE run_id = ?", (run_id,)).fetchone()
             next_state = RunState.PLANNING.value if not run or int(run["plan_version"] or 0) == 0 else RunState.EXECUTING.value
@@ -601,6 +603,8 @@ class ConductorStore:
                   kind TEXT NOT NULL,
                   reason TEXT NOT NULL,
                   state TEXT NOT NULL,
+                  linear_issue_id TEXT NOT NULL DEFAULT '',
+                  linear_identifier TEXT NOT NULL DEFAULT '',
                   created_at TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS acceptance_catalog (
@@ -632,6 +636,12 @@ class ConductorStore:
                 );
                 """
             )
+            for column in ("linear_issue_id", "linear_identifier"):
+                try:
+                    connection.execute(f"ALTER TABLE runtime_waits ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
+                except sqlite3.OperationalError as exc:
+                    if "duplicate column name" not in str(exc).lower():
+                        raise
             for column in ("linear_issue_id", "linear_identifier", "linear_state"):
                 try:
                     connection.execute(f"ALTER TABLE tasks ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")

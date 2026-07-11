@@ -127,3 +127,30 @@ async def test_workflow_driver_creates_subissues_and_runs_sequential_gate(tmp_pa
     assert [task["state"] for task in tasks] == ["done", "todo"]
     assert len(service.linear.children) == 2
     assert service.linear.transitions[0] == ("child-1", "In Progress")
+
+
+@pytest.mark.anyio
+async def test_workflow_driver_projects_runtime_wait_as_human_action_child(tmp_path: Path, minimal_plan) -> None:
+    service = FakeService(tmp_path)
+    run = service.workflow.accept_parent("parent-1", "SYM-1", instance_id="instance-1")
+    driver = WorkflowDriver(service)
+    bodies = [
+        {"context": {}, "runtime_wait": {"kind": "approval_requested", "reason": "Approve command"}},
+        {"context": {}, "plan": minimal_plan.to_dict(), "thread_id": "thread-1"},
+    ]
+
+    async def fake_run_turn(_run: dict[str, Any], _instance: Any, context: Any, _request: dict[str, Any], *, role: str) -> dict[str, Any]:
+        body = dict(bodies.pop(0))
+        body["context"] = context.to_dict()
+        body["turn_kind"] = role
+        return body
+
+    driver._run_turn = fake_run_turn  # type: ignore[method-assign]
+
+    assert (await driver.drive_once())["applied"] == 0
+    wait = service.workflow_store.list_runtime_waits(run["run_id"])[0]
+    assert wait["linear_issue_id"] == "child-1"
+    assert service.workflow_store.get_run(run["run_id"])["state"] == "blocked"
+
+    assert (await driver.drive_once())["applied"] == 1
+    assert service.workflow_store.get_run(run["run_id"])["plan_version"] == 1

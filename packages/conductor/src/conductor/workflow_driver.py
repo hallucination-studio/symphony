@@ -78,16 +78,7 @@ class WorkflowDriver:
             role="plan",
         )
         if "runtime_wait" in body:
-            wait = body["runtime_wait"]
-            self.workflow.record_runtime_wait(
-                run_id,
-                context.attempt_id,
-                context.fencing_token,
-                kind=str(wait.get("kind") or "approval_requested"),
-                reason=str(wait.get("reason") or "Codex runtime wait"),
-            )
-            await self._comment_parent(run, instance, f"Codex runtime wait: {wait.get('reason') or 'approval required'}")
-            return {"applied": 0}
+            return await self._record_wait(run, instance, context, body["runtime_wait"], {})
         plan = Plan.from_dict(body.get("plan") if isinstance(body.get("plan"), dict) else {})
         version = self.workflow.record_plan(
             run_id,
@@ -187,6 +178,21 @@ class WorkflowDriver:
             threshold=evaluated.threshold,
             evidence=evidence,
         )
+        command_count = len(command_results)
+        passed_commands = sum(1 for result in command_results if result.passed)
+        gate_note = ""
+        if not evaluated.passed:
+            gate_note = " One automatic rework remains." if updated["state"] == "in_progress" else " A second failure blocks this task."
+        await self._comment_task(
+            run,
+            instance,
+            updated,
+            (
+                f"Codex Gate {'passed' if evaluated.passed else 'failed'} "
+                f"({evaluated.score}/{evaluated.threshold}); "
+                f"verification commands {passed_commands}/{command_count} passed.{gate_note}"
+            ),
+        )
         await self._project_task_state(run, instance, updated, "done" if updated["state"] == "done" else "in_progress" if updated["state"] == "in_progress" else "blocked")
         if updated["state"] == "done":
             latest = self.store.get_run(run_id) or run
@@ -194,7 +200,6 @@ class WorkflowDriver:
                 await self._comment_parent(run, instance, "All Sub Issues passed the verification commands and Codex Gate.")
                 await self._transition(parent_id=str(run["parent_issue_id"]), instance=instance, names=["Done", "Completed"], state_type="completed")
             return {"applied": 1}
-        await self._comment_task(run, instance, updated, f"Codex Gate failed ({evaluated.score}/{evaluated.threshold}); one rework is allowed.")
         return {"applied": 1}
 
     async def _record_wait(self, run: dict[str, Any], instance: Any, context: TurnContext, wait: Any, task: dict[str, Any]) -> dict[str, int]:
@@ -205,6 +210,22 @@ class WorkflowDriver:
             context.fencing_token,
             kind=str(wait.get("kind") or "approval_requested"),
             reason=reason,
+        )
+        wait = self.store.list_runtime_waits(str(run["run_id"]))[-1]
+        scope_issue_id = str(task.get("linear_issue_id") or run["parent_issue_id"])
+        wait_issue = await self.service._managed_run_tracker(instance).create_child_issue_for(
+            parent_issue_id=scope_issue_id,
+            title=f"[Human Action] Runtime wait: {str(wait.get('kind') or 'approval')}",
+            description=(
+                "Complete this Linear issue after resolving the Codex runtime wait. "
+                f"The next poll resumes the fenced task.\n\nReason: {reason}"
+            ),
+            label_names=[],
+        )
+        self.store.attach_wait_issue(
+            str(wait["wait_id"]),
+            issue_id=str(wait_issue.get("id") or ""),
+            identifier=str(wait_issue.get("identifier") or ""),
         )
         await self._project_task_state(run, instance, task, "blocked")
         await self._comment_task(run, instance, task, f"Codex runtime wait: {reason}")
@@ -297,7 +318,10 @@ class WorkflowDriver:
         wait = waits[-1]
         issue_id = str(run["parent_issue_id"])
         task_id = str(wait.get("task_id") or "")
-        if task_id:
+        wait_issue_id = str(wait.get("linear_issue_id") or "")
+        if wait_issue_id:
+            issue_id = wait_issue_id
+        elif task_id:
             task = self.store.get_task(str(run["run_id"]), task_id) or {}
             issue_id = str(task.get("linear_issue_id") or issue_id)
         issue = await self.service._managed_run_tracker(instance).fetch_issue(issue_id)
