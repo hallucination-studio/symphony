@@ -11,11 +11,11 @@ Statuses: `[ ]` pending, `[~]` in progress, `[x]` complete, `[-]` deferred.
 - [ ] Approve strict sequential execution; no DAG, parallel scheduling, branches, or joins.
 - [ ] Approve the boolean gate: verification commands plus read-only Codex gate turn.
 - [ ] Approve one automatic gate rework, then visible blocking.
-- [ ] Approve retaining plan revisions, approval, risks, architecture decisions,
+- [x] Retain plan revisions, approval, risks, architecture decisions,
       open questions, manifests, artifacts, and acceptance-catalog evidence.
-- [ ] Approve retaining score/rubric/threshold/weight/provenance verifier data
+- [x] Retain score/rubric/threshold/weight/provenance verifier data
       under one Codex Gate; no cross-model reviewer or second scheduler.
-- [ ] Confirm checkpoint groups are deleted; Linear polling checkpoints remain.
+- [x] Delete checkpoint groups; Linear polling checkpoints remain.
 - [ ] Approve archiving old local Conductor run state instead of migrating it.
 - [ ] Approve removing historical full-log fetch while retaining the current Web cached tail.
 - [ ] Confirm Podium customer/OAuth/project/Conductor/binding data must migrate in place.
@@ -79,10 +79,13 @@ Repeat for every non-trivial task:
 - [ ] `C3.8` Add runtime-wait `[Human Action]`, exact-task resume, transient retry, and stale-result rejection.
 - [ ] `C3.9` Build one service tick and retain the local API plus current Web report shape.
 - [ ] `C3.10` Switch the CLI composition root to the new modules.
-- [ ] `C3.11` Delete every duplicated coordinator/driver/projection/store/
-      artifact/verifier/join/checkpoint/human/service/runtime fragment outside
-      the retained workflow/evidence owners.
-- [ ] `C3.12` Verify failure parity across SQLite, structured logs, Linear, and Podium.
+- [ ] `C3.11` Remove the `Checkpoint` contract, checkpoint coordinator/result
+      table, checkpoint workspace, and branch-join helpers; retain revision,
+      approval, catalog, rubric, manifest, artifact, and verifier semantics.
+- [ ] `C3.12` Delete every duplicated coordinator/driver/projection/store/
+      artifact/verifier/human/service/runtime fragment outside the retained
+      workflow/evidence owners.
+- [ ] `C3.13` Verify failure parity across SQLite, structured logs, Linear, and Podium.
 - [ ] Milestone `C3`: module/LOC budget re-estimated for retained revisions,
       catalog, verifier, manifest, and evidence; workflow/recovery tests green.
 

@@ -36,6 +36,24 @@ The current coordinator/driver/projection/store/artifact/verifier/join/
 checkpoint/human-action mixin graph is replaced, not wrapped. Necessary logic
 moves once into the owner above; old files and compatibility facades disappear.
 
+## Current implementation disposition
+
+The existing code already contains semantics that the new design must preserve:
+
+| Existing capability | Retain as | Remove only |
+|---|---|---|
+| `ManagedRunPlan` architecture decisions, risks, open questions, approval | `workflow.py` plan revisions | parallel/dependency fields |
+| `conductor_managed_run_coordinator_human.py` | `workflow.py` approval/revision transitions | duplicate human-action mixins |
+| `conductor_managed_run_gates.py` snapshots, rubric scores, manifests | `gate.py` and `store.py` evidence | branch/checkpoint coupling |
+| `conductor_managed_run_verifier.py` artifact/hash verification | `gate.py` verifier | generic verifier wrappers |
+| `conductor_managed_run_store_artifacts.py` | `store.py` artifact/evidence records | duplicate row/view mixins |
+| Linear projection and managed-runs summary | `linear.py`/`api.py` report | projection helper fan-out |
+
+The checkpoint domain is the explicit deletion: remove the `Checkpoint` plan
+field, `conductor_managed_run_coordinator_checkpoints.py`, checkpoint workspace
+and branch-join helpers, `managed_run_checkpoint_results`, and checkpoint-only
+projection fields. Linear polling checkpoints in Podium are unrelated and stay.
+
 ## Canonical workflow
 
 ```text
@@ -117,8 +135,9 @@ single-line structured events with run/task/attempt/fence correlation.
 2. Add restart, idempotency, child-parent, revision/approval, gate/rework,
    score/rubric/evidence, parent completion, runtime-wait, and stale-result tests.
 3. Build the eleven owners and switch the CLI composition root.
-4. Delete the old module family, unused tables, migrations, exports, and
-   compatibility paths.
+4. Delete only checkpoint/branch-join code and duplicate wrappers; migrate the
+   retained revision, approval, catalog, rubric, manifest, artifact, and
+   verifier semantics into the target owners.
 
 The baseline is complete when one Conductor tick can be followed end-to-end in
 `service.py`, every child is a real Linear sub-issue, the single gate is scored

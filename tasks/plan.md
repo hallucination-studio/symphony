@@ -377,7 +377,10 @@ Gate: `test_performer_turn.py` green and one real isolated turn succeeds.
    and durable/log/Linear/API failure parity.
 6. Rewrite service/api composition to one tick and current report shape.
 7. Switch the entrypoint to the new composition root.
-8. Delete every old Conductor module not in the target tree; verify no import or
+8. Remove the `Checkpoint` contract, checkpoint coordinator/result table,
+   checkpoint workspace and branch-join helpers; retain and consolidate the
+   revision/approval/catalog/rubric/manifest/artifact/verifier semantics.
+9. Delete every old Conductor module not in the target tree; verify no import or
    compatibility residue.
 
 Gate: workflow/recovery/product-flow tests green; target module and LOC budgets
