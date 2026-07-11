@@ -8,10 +8,78 @@ from pathlib import Path
 from typing import Any
 
 from performer_api.managed_runs import ManagedRunRuntimeWait, ManagedRunTurnContext, WorkItem, WorkItemResultStatus
+from performer_api.turns import TurnContext
+from performer_api.workflow import Task
 
+from .backend import TurnBackend
 from .codex_client import CodexSdkClient
 from .codex_config import CodexConfig
 from .managed_run_backend import CodexManagedRunBackend
+
+
+async def run_turn(
+    turn_request_path: Path,
+    turn_result_path: Path,
+    *,
+    codex_client: Any | None = None,
+) -> dict[str, object]:
+    payload = _read_json_object(turn_request_path, "turn request")
+    context_payload = payload.get("context") if isinstance(payload.get("context"), dict) else {}
+    context = TurnContext.from_dict(context_payload)
+    errors = context.validation_errors()
+    if errors:
+        raise RuntimeError("turn_context_invalid:" + ",".join(errors))
+
+    workspace_path = Path(str(payload.get("workspace_path") or "")).expanduser().resolve()
+    backend = TurnBackend(codex_client or _managed_codex_backend())
+    thread_id = str(payload.get("thread_id") or "")
+    if context.turn_kind == "plan":
+        result = await backend.plan(workspace_path, str(payload.get("issue_description") or ""), thread_id=thread_id)
+        body: dict[str, object] = {
+            "turn_kind": "plan",
+            "context": context.to_dict(),
+            "thread_id": result.thread_id,
+            "plan": result.plan.to_dict(),
+            "events": result.events,
+        }
+    else:
+        task_payload = payload.get("task")
+        if not isinstance(task_payload, dict):
+            raise RuntimeError(f"{context.turn_kind} turn requires task payload")
+        task = Task.from_dict(task_payload)
+        if task.id != context.task_id:
+            raise RuntimeError("turn_context_task_id_mismatch")
+        if context.turn_kind == "execute":
+            result = await backend.execute(workspace_path, task, thread_id=thread_id)
+            body = {
+                "turn_kind": "execute",
+                "context": context.to_dict(),
+                "thread_id": result.thread_id,
+                "result": result.result.to_dict(),
+                "events": result.events,
+            }
+        else:
+            evidence = payload.get("evidence") if isinstance(payload.get("evidence"), dict) else {}
+            result = await backend.gate(workspace_path, task, evidence, thread_id=thread_id)
+            body = {
+                "turn_kind": "gate",
+                "context": context.to_dict(),
+                "thread_id": result.thread_id,
+                "gate_result": result.result.to_dict(),
+                "events": result.events,
+            }
+    _write_json_atomic(turn_result_path, body)
+    return body
+
+
+def _read_json_object(path: Path, label: str) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"could not read {label}: {path}") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"{label} must be a JSON object: {path}")
+    return payload
 
 
 async def run_managed_run_turn(
