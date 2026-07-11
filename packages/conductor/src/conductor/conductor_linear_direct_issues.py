@@ -6,11 +6,11 @@ from .conductor_linear_direct_base import LinearDirectProxyError
 from .conductor_linear_direct_helpers import _normalize_linear_issue_dict
 
 
-class RepositoryHandoffIssueMixin:
+class ManagedRunIssueMixin:
     async def fetch_issue(self, issue_id: str) -> dict[str, Any]:
         payload = await self.graphql(
             """
-query RepositoryHandoffIssue($issueId: String!) {
+query ManagedRunIssue($issueId: String!) {
   issue(id: $issueId) {
     id
     identifier
@@ -32,7 +32,7 @@ query RepositoryHandoffIssue($issueId: String!) {
     async def fetch_child_issues(self, parent_issue_id: str, *, label_name: str | None = None) -> list[dict[str, Any]]:
         payload = await self.graphql(
             """
-query RepositoryHandoffChildren($issueId: String!) {
+query ManagedRunChildren($issueId: String!) {
   issue(id: $issueId) {
     children(first: 100) {
         nodes {
@@ -88,7 +88,7 @@ query RepositoryHandoffChildren($issueId: String!) {
                 skipped_label_names.append(name)
         payload = await self.graphql(
             """
-mutation RepositoryHandoffCreateChild(
+mutation ManagedRunCreateChild(
   $teamId: String!,
   $projectId: String!,
   $stateId: String!,
@@ -144,7 +144,7 @@ mutation RepositoryHandoffCreateChild(
     async def transition_issue(self, issue_id: str, state_id: str) -> dict[str, Any]:
         payload = await self.graphql(
             """
-mutation RepositoryHandoffTransitionIssue($issueId: String!, $stateId: String!) {
+mutation ManagedRunTransitionIssue($issueId: String!, $stateId: String!) {
   issueUpdate(id: $issueId, input: { stateId: $stateId }) {
     success
     issue { id identifier state { name } }

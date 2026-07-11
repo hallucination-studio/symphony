@@ -18,6 +18,8 @@ from .config import PodiumConfig
 from .linear_reconciliation import LinearReconciler, run_linear_reconciliation_loop
 from .linear_token_service import PodiumLinearTokenMixin
 from .podium_dispatch import PodiumDispatchMixin
+from .podium_health import dispatch_lease_reaper_loop as _dispatch_lease_reaper_loop
+from .podium_health import health_response, mark_linear_reconciliation_starting
 from .podium_conductors import PodiumConductorsMixin
 from .podium_install import render_install_script
 from .podium_linear_installations import PodiumLinearInstallationsMixin
@@ -32,7 +34,6 @@ from .podium_runtime import PodiumRuntimeMixin
 from .podium_smoke_checks import PodiumSmokeChecksMixin
 from .podium_shared import utc_now_iso
 from .podium_state import PodiumStateBaseMixin
-from .store import PodiumStore
 
 
 TurnstileVerifier = Callable[[str, str | None], bool]
@@ -43,7 +44,6 @@ def create_app(
     secure_cookies: bool = True,
     session_cookie_name: str = "podium_session",
     static_dir: str | Path | None = None,
-    data_dir: str | Path | None = None,
     secret_key: str = "",
     linear_client_id: str = "",
     linear_client_secret: str = "",
@@ -55,7 +55,7 @@ def create_app(
     linear_token_revoke: Callable[..., Any] | None = None,
     linear_graphql_transport: Callable[[httpx.Request], Any] | None = None,
     podium_base_url: str = "https://podium.example",
-    store: Any | None = None,
+    store: Any,
     config: PodiumConfig | None = None,
     debug_auth: bool = False,
 ) -> FastAPI:
@@ -74,8 +74,7 @@ def create_app(
             else linear_application_version
         ),
         podium_base_url=podium_base_url,
-        data_dir=data_dir,
-        store=store or PodiumStore(data_dir=data_dir),
+        store=store,
         config=resolved_config,
         debug_auth=debug_auth,
         linear_graphql_transport=linear_graphql_transport,
@@ -129,7 +128,6 @@ def _create_state(
     linear_redirect_uri: str,
     linear_application_version: int,
     podium_base_url: str,
-    data_dir: str | Path | None,
     store: Any,
     config: PodiumConfig,
     debug_auth: bool,
@@ -147,7 +145,6 @@ def _create_state(
         linear_redirect_uri=linear_redirect_uri,
         linear_application_version=linear_application_version,
         podium_base_url=podium_base_url,
-        data_dir=data_dir,
         store=store,
         config=config,
         debug_auth=debug_auth,
@@ -203,8 +200,8 @@ def _register_base_routes(
         return JSONResponse({"service": "Podium"})
 
     @app.get("/api/v1/health")
-    async def health() -> dict[str, str]:
-        return {"status": "ok"}
+    async def health() -> JSONResponse:
+        return await health_response(state.store)
 
     @app.get("/api/v1/config")
     async def public_config() -> dict[str, Any]:
@@ -240,6 +237,7 @@ def _start_linear_reconciliation(
     linear_graphql_transport: Callable[[httpx.Request], Any] | None,
 ) -> asyncio.Task[Any]:
     config = state.config
+    mark_linear_reconciliation_starting(state.store)
     reconciler = LinearReconciler(
         state=state,
         transport=linear_graphql_transport,
@@ -273,15 +271,14 @@ class ManagedPodiumState(
     turnstile_verifier: TurnstileVerifier
     session_cookie_name: str
     secure_cookies: bool
+    store: Any
     secret_key: str = ""
-    data_dir: str | Path | None = None
     linear_client_id: str = ""
     linear_client_secret: str = ""
     linear_redirect_uri: str = ""
     linear_application_version: int = 1
     podium_base_url: str = "https://podium.example"
     password_hasher: PasswordHasher = field(default_factory=PasswordHasher)
-    store: Any | None = None
     config: PodiumConfig = field(default_factory=PodiumConfig.from_env)
     debug_auth: bool = False
     linear_graphql_transport: Callable[[httpx.Request], Any] | None = None
@@ -303,16 +300,6 @@ async def verify_turnstile_with_cloudflare(token: str, ip: str | None) -> bool:
     except json.JSONDecodeError:
         return False
     return bool(payload.get("success"))
-
-
-async def _dispatch_lease_reaper_loop(app: FastAPI) -> None:
-    while True:
-        state = app.state.podium
-        try:
-            await state.reap_expired_dispatch_leases()
-        except Exception:
-            pass
-        await asyncio.sleep(30)
 
 
 def error_response(status: int, code: str, message: str) -> JSONResponse:

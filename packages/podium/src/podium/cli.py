@@ -57,7 +57,6 @@ async def async_main(argv: list[str] | None = None) -> int:
         secure_cookies=secure_cookies_from_env(),
         session_cookie_name=os.environ.get("PODIUM_SESSION_COOKIE_NAME", "podium_session"),
         static_dir=str(default_static) if default_static.exists() else None,
-        data_dir=os.environ.get("PODIUM_DATA_DIR"),
         secret_key=os.environ.get("PODIUM_SECRET_KEY", ""),
         linear_client_id=os.environ.get("LINEAR_CLIENT_ID", ""),
         linear_client_secret=os.environ.get("LINEAR_CLIENT_SECRET", ""),

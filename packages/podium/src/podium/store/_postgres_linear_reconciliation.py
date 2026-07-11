@@ -27,9 +27,6 @@ ON CONFLICT (binding_id, issue_id) DO UPDATE SET
 
 
 class PgLinearReconciliationMixin:
-    async def save_linear_reconciliation_state(self, binding_id: str, state: dict[str, Any]) -> None:
-        await self.pool.execute(STATE_UPSERT_SQL, binding_id, _pg_json({**state, "binding_id": binding_id}))
-
     async def get_linear_reconciliation_state(self, binding_id: str) -> dict[str, Any] | None:
         row = await self.pool.fetchrow(
             "SELECT state_json FROM linear_reconciliation_state WHERE binding_id = $1",
@@ -66,13 +63,30 @@ class PgLinearReconciliationMixin:
         self,
         binding_id: str,
         *,
+        expected_state: dict[str, Any] | None,
+        expected_installation_id: str,
+        expected_agent_app_user_id: str,
         state: dict[str, Any],
         observations: list[dict[str, Any]],
         dispatches: list[dict[str, Any]],
-    ) -> int:
+    ) -> int | None:
         inserted = 0
         async with self.pool.acquire() as connection:
             async with connection.transaction():
+                await connection.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))",
+                    binding_id,
+                )
+                if not await _locked_binding_matches(
+                    connection,
+                    binding_id,
+                    expected_installation_id=expected_installation_id,
+                    expected_agent_app_user_id=expected_agent_app_user_id,
+                ):
+                    return None
+                current = await _locked_reconciliation_state(connection, binding_id)
+                if current != expected_state:
+                    return None
                 for observation in observations:
                     await connection.execute(OBSERVATION_UPSERT_SQL, *_observation_values(observation))
                 for dispatch in dispatches:
@@ -85,6 +99,44 @@ class PgLinearReconciliationMixin:
                     _pg_json({**state, "binding_id": binding_id}),
                 )
         return inserted
+
+
+async def _locked_binding_matches(
+    connection: Any,
+    binding_id: str,
+    *,
+    expected_installation_id: str,
+    expected_agent_app_user_id: str,
+) -> bool:
+    row = await connection.fetchrow(
+        """
+        SELECT active, state, installation_id, agent_app_user_id
+        FROM project_bindings
+        WHERE id = $1
+        FOR UPDATE
+        """,
+        binding_id,
+    )
+    return bool(
+        row is not None
+        and row["active"]
+        and str(row["state"]) == "ready"
+        and expected_installation_id
+        and str(row["installation_id"]) == expected_installation_id
+        and expected_agent_app_user_id
+        and str(row["agent_app_user_id"]) == expected_agent_app_user_id
+    )
+
+
+async def _locked_reconciliation_state(connection: Any, binding_id: str) -> dict[str, Any] | None:
+    row = await connection.fetchrow(
+        "SELECT state_json FROM linear_reconciliation_state WHERE binding_id = $1 FOR UPDATE",
+        binding_id,
+    )
+    if row is None:
+        return None
+    state = _pg_json_value(row["state_json"], {})
+    return dict(state) if isinstance(state, dict) else None
 
 
 def _observation_record(row: Any) -> dict[str, Any]:

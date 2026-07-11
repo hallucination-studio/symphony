@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+from typing import Any
+from unittest.mock import AsyncMock
+
 import httpx
 import pytest
 
@@ -8,24 +12,18 @@ from podium.app import create_app
 PODIUM_BASE_URL = "https://podium.test-config.example"
 
 
-def _make_app() -> httpx.AsyncClient:
+def _make_app(*, store: Any = None) -> httpx.AsyncClient:
+    selected_store = store or SimpleNamespace(get_session=AsyncMock(return_value=None))
     app = create_app(
         turnstile_verifier=lambda token, _ip: token == "turnstile-ok",
         secure_cookies=False,
         podium_base_url=PODIUM_BASE_URL,
+        store=selected_store,
     )
     transport = httpx.ASGITransport(app=app)
     client = httpx.AsyncClient(transport=transport, base_url="http://podium.test")
     client._podium_app = app  # type: ignore[attr-defined]
     return client
-
-
-async def _register(client: httpx.AsyncClient) -> None:
-    resp = await client.post(
-        "/api/v1/auth/register",
-        json={"email": "user@example.com", "password": "correct-horse", "turnstile_token": "turnstile-ok"},
-    )
-    assert resp.status_code == 200
 
 
 @pytest.mark.asyncio
@@ -44,8 +42,21 @@ async def test_runtime_status_requires_auth() -> None:
 
 @pytest.mark.asyncio
 async def test_enrollment_token_shape_and_install_command() -> None:
-    async with _make_app() as client:
-        await _register(client)
+    store = SimpleNamespace(
+        list_conductors_for_user=AsyncMock(return_value=[]),
+        list_runtime_groups=AsyncMock(return_value=[]),
+        list_all_conductors=AsyncMock(return_value=[]),
+        upsert_runtime_group=AsyncMock(),
+        upsert_conductor=AsyncMock(),
+        save_enrollment_token=AsyncMock(),
+        list_project_bindings_for_conductor=AsyncMock(return_value=[]),
+        get_presence=AsyncMock(return_value=None),
+    )
+    async with _make_app(store=store) as client:
+        app = client._podium_app  # type: ignore[attr-defined]
+        app.state.podium.user_for_session = AsyncMock(
+            return_value={"id": "user-1", "email": "user@example.com"}
+        )
         resp = await client.post("/api/v1/onboarding/runtime/enrollment-token")
         assert resp.status_code == 200
         body = resp.json()
@@ -59,6 +70,7 @@ async def test_enrollment_token_shape_and_install_command() -> None:
         assert f"--enrollment-token {token}" not in body["install_command"]
         assert "PODIUM_ENROLLMENT_TOKEN=" in body["install_command"]
         assert body["expires_at"].endswith("Z")
+        store.save_enrollment_token.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -84,46 +96,36 @@ async def test_install_script_exists_and_uses_enrollment_token() -> None:
 
 
 @pytest.mark.asyncio
-async def test_status_before_and_after_enrollment() -> None:
-    async with _make_app() as client:
-        await _register(client)
-
-        before = await client.get("/api/v1/onboarding/runtime/status")
-        assert before.status_code == 200
-        assert before.json()["runtime_count"] == 0
-        assert before.json()["online_count"] == 0
-        assert before.json()["token_pending"] is False
-
-        token_resp = await client.post("/api/v1/onboarding/runtime/enrollment-token")
-        token = token_resp.json()["enrollment_token"]
-
-        pending = await client.get("/api/v1/onboarding/runtime/status")
-        assert pending.json()["token_pending"] is True
-        assert pending.json()["runtime_count"] == 0
-        assert pending.json()["enrolled"] is False
-
-        # Machine-facing enroll route works unchanged.
-        enroll = await client.post(
-            "/api/v1/runtime/enroll",
-            json={"enrollment_token": token},
-        )
-        assert enroll.status_code == 200
-        enroll_body = enroll.json()
-        runtime_id = enroll_body["runtime_id"]
-
-        after = await client.get("/api/v1/onboarding/runtime/status")
-        assert after.status_code == 200
-        assert after.json()["runtime_count"] == 1
-        assert after.json()["enrolled"] is True
-        assert after.json()["online_count"] == 0
-        assert after.json()["token_pending"] is False
-
-        # Seed persisted presence -> online_count reflects it and onboarding step completes.
+async def test_runtime_status_projects_persisted_enrollment_and_presence() -> None:
+    conductor = {
+        "id": "runtime-1",
+        "runtime_group_id": "group-1",
+        "enrollment_state": "enrolled",
+    }
+    store = SimpleNamespace(
+        list_conductors_for_user=AsyncMock(return_value=[conductor]),
+        get_presence=AsyncMock(
+            return_value={
+                "runtime_id": "runtime-1",
+                "last_seen_at": "2026-07-11T00:00:00Z",
+            }
+        ),
+        has_pending_enrollment=AsyncMock(return_value=False),
+    )
+    async with _make_app(store=store) as client:
         app = client._podium_app  # type: ignore[attr-defined]
-        await app.state.podium.set_presence(runtime_id)
+        app.state.podium.user_for_session = AsyncMock(
+            return_value={"id": "user-1", "email": "user@example.com"}
+        )
+        app.state.podium.mark_runtime_enrolled = AsyncMock()
+        response = await client.get("/api/v1/onboarding/runtime/status")
 
-        online = await client.get("/api/v1/onboarding/runtime/status")
-        assert online.json()["online_count"] == 1
-
-        onboarding_status = await client.get("/api/v1/onboarding/status")
-        assert "runtime_enrollment" in onboarding_status.json()["completed_steps"]
+    assert response.status_code == 200
+    assert response.json() == {
+        "workspace_id": "user-1",
+        "token_pending": False,
+        "runtime_count": 1,
+        "online_count": 1,
+        "enrolled": True,
+    }
+    app.state.podium.mark_runtime_enrolled.assert_awaited_once_with("user-1")

@@ -6,9 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from performer_api.managed_runs import ManagedRunState, WorkItemState
-
 from .conductor_managed_run_execution import prepare_execution_worktree
+from .conductor_managed_run_state import ManagedRunState, WorkItemState
 
 
 @dataclass(frozen=True)

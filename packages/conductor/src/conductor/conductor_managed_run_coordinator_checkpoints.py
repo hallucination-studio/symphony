@@ -4,9 +4,10 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from performer_api.managed_runs import Checkpoint, ManagedRunState, WorkItemState
+from performer_api.managed_runs import Checkpoint
 
 from conductor.conductor_managed_run_coordinator_helpers import _log_blocked, _output_tail
+from conductor.conductor_managed_run_state import ManagedRunState, WorkItemState
 from conductor.conductor_managed_run_store_rows import checkpoint_key_for
 
 
@@ -104,4 +105,3 @@ class ConductorManagedRunCheckpointMixin:
             item["state"] in {WorkItemState.DONE.value, WorkItemState.CANCELLED.value}
             for item in items
         )
-

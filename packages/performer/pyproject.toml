@@ -5,11 +5,9 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "performer"
 version = "0.1.0"
-description = "Symphony Performer worker for Linear scheduling and Codex execution."
+description = "Symphony Performer worker for fenced managed-run Codex turns."
 requires-python = ">=3.12"
 dependencies = [
-  "httpx>=0.27",
-  "Jinja2>=3.1",
   "openai-codex==0.1.0b3",
   "performer-api==0.1.0",
 ]

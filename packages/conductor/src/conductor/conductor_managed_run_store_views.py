@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from performer_api.managed_runs import Checkpoint, WorkItemState
+from performer_api.managed_runs import Checkpoint
 
 from conductor.conductor_managed_run_attempts import attempt_integrity_errors
 from conductor.conductor_managed_run_runtime_waits import runtime_waits as durable_runtime_waits
+from conductor.conductor_managed_run_state import WorkItemState
 from conductor.conductor_managed_run_store_rows import (
     _checkpoint_result_from_row,
     _json_dumps,

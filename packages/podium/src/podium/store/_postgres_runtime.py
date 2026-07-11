@@ -73,14 +73,15 @@ class PgRuntimeMixin:
 
     async def consume_enrollment_token(self, token_hash: str) -> tuple[dict[str, Any] | None, str | None]:
         async with self.pool.acquire() as connection:
-            row = await connection.fetchrow("SELECT runtime_group_id, conductor_id, used, expires_at FROM enrollment_tokens WHERE token_hash = $1 FOR UPDATE", token_hash)
-            if row is None:
-                return None, "invalid_enrollment_token"
-            if bool(row["used"]):
-                return None, "enrollment_token_used"
-            if row["expires_at"] < datetime.now(row["expires_at"].tzinfo):
-                return None, "enrollment_token_expired"
-            await connection.execute("UPDATE enrollment_tokens SET used = TRUE WHERE token_hash = $1", token_hash)
+            async with connection.transaction():
+                row = await connection.fetchrow("SELECT runtime_group_id, conductor_id, used, expires_at FROM enrollment_tokens WHERE token_hash = $1 FOR UPDATE", token_hash)
+                if row is None:
+                    return None, "invalid_enrollment_token"
+                if bool(row["used"]):
+                    return None, "enrollment_token_used"
+                if row["expires_at"] < datetime.now(row["expires_at"].tzinfo):
+                    return None, "enrollment_token_expired"
+                await connection.execute("UPDATE enrollment_tokens SET used = TRUE WHERE token_hash = $1", token_hash)
         return {
             "runtime_group_id": str(row["runtime_group_id"]),
             "conductor_id": str(row["conductor_id"]),

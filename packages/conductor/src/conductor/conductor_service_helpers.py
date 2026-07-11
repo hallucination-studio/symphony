@@ -7,9 +7,8 @@ from pathlib import Path
 from typing import Any
 
 from .conductor_models import InstanceRecord
-from .conductor_service_repository_helpers import *  # noqa: F403
 from .conductor_service_types import PROJECT_LABEL_PREFIX
-from performer_api.ops_models import OpsSnapshot, TraceEvent
+
 
 def json_stable(payload: dict[str, Any]) -> str:
     import json
@@ -54,14 +53,6 @@ def _replace_marker_block(current: str, marker_name: str, block: str) -> str:
 def _run_due(run) -> bool:
     next_run_at = _parse_iso(run.next_run_at)
     return next_run_at is None or datetime.now(timezone.utc) >= next_run_at
-
-
-def _latest_ops_run_id_for_issue(snapshot: OpsSnapshot, issue_id: str) -> str | None:
-    candidates = [run for run in snapshot.runs.values() if run.issue_id == issue_id]
-    if not candidates:
-        return None
-    candidates.sort(key=lambda run: run.last_activity_at or run.completed_at or run.started_at or "", reverse=True)
-    return candidates[0].run_id
 
 
 def _runtime_metrics(performer: dict[str, Any]) -> dict[str, Any]:

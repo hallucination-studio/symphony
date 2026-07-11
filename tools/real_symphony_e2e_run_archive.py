@@ -4,7 +4,6 @@ import json
 from typing import Any
 
 from real_symphony_e2e_acceptance import _wait_for_pipeline_linear_issue_tree_finalized
-from real_symphony_e2e_artifacts import _archive_managed_run_artifacts
 from real_symphony_e2e_linear import fetch_linear_issue_tree
 from real_symphony_e2e_podium_evidence import (
     archive_podium_api_snapshots,
@@ -12,6 +11,8 @@ from real_symphony_e2e_podium_evidence import (
     wait_for_podium_managed_run,
 )
 from real_symphony_e2e_run_state import E2ERunState
+from real_symphony_e2e_runtime_artifacts import archive_managed_run_artifacts
+from runtime_evidence_files import sanitize_evidence_value
 
 
 async def archive_tree_and_runtime_artifacts(state: E2ERunState) -> None:
@@ -24,11 +25,11 @@ async def archive_tree_and_runtime_artifacts(state: E2ERunState) -> None:
             issue_id=state.linear["issue"]["id"],
             timeout_seconds=min(max(state.args.stage_timeout, 10), 120),
         )
-        tree_path.write_text(json.dumps(tree, indent=2, sort_keys=True), encoding="utf-8")
+        tree_path.write_text(json.dumps(sanitize_evidence_value(tree), indent=2, sort_keys=True), encoding="utf-8")
         state.evidence.artifact("final_issue_tree", tree_path)
     elif not tree_path.exists():
         tree = await fetch_linear_issue_tree(state.token, state.linear["issue"]["id"])
-        tree_path.write_text(json.dumps(tree, indent=2, sort_keys=True), encoding="utf-8")
+        tree_path.write_text(json.dumps(sanitize_evidence_value(tree), indent=2, sort_keys=True), encoding="utf-8")
         state.evidence.artifact("final_issue_tree", tree_path)
     if final_states is not None:
         state.evidence.check(
@@ -36,7 +37,7 @@ async def archive_tree_and_runtime_artifacts(state: E2ERunState) -> None:
             bool(final_states.get("passed")),
             **{key: value for key, value in final_states.items() if key != "passed"},
         )
-    _archive_managed_run_artifacts(
+    archive_managed_run_artifacts(
         evidence=state.evidence,
         root=state.root,
         data_root=state.data_root,

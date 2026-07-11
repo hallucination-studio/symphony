@@ -1,55 +1,338 @@
 from test_real_run_tools_support import *  # noqa: F401,F403
+import hashlib
 import shutil
+import sqlite3
 import subprocess
 
-def test_runtime_claims_audit_flags_errorless_retry_and_claim_stall() -> None:
+
+def _managed_turn_fixture(
+    run_id: str,
+    attempt_id: str = "plan-1",
+    *,
+    kind: str = "plan",
+    work_item_id: str = "",
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    context = {
+        "run_id": run_id,
+        "work_item_id": work_item_id,
+        "policy_revision": 1,
+        "plan_version": 0,
+        "lease_id": f"lease-{attempt_id}",
+        "fencing_token": f"fence-{attempt_id}",
+        "turn_id": attempt_id,
+    }
+    attempt = {
+        "attempt_id": attempt_id,
+        "kind": kind,
+        "mode": "execute" if kind == "work_item" else kind,
+        "state": "succeeded",
+        "turn_context": context,
+    }
+    request = {"turn_kind": kind, "workspace_path": "/tmp/workspace", "context": context}
+    result = {"turn_kind": kind, "context": context, "plan": {}} if kind == "plan" else {"turn_kind": kind, "context": context, "result": {}}
+    return attempt, request, result
+
+
+def _write_managed_turn_artifacts(instance_root: Path, attempt: dict[str, Any], request: dict[str, Any], result: dict[str, Any]) -> None:
+    attempt_id = str(attempt["attempt_id"])
+    context = attempt["turn_context"]
+    generation_log = instance_root / "logs" / "performer-000001.log"
+    generation_log.parent.mkdir(parents=True, exist_ok=True)
+    generation_log.write_text(
+        f"event=managed_run_turn_started run_id={context['run_id']} attempt_id={attempt_id} "
+        f"lease_id={context['lease_id']} fencing_token={context['fencing_token']}\n",
+        encoding="utf-8",
+    )
+    attempt_root = instance_root / "state" / "managed_run" / attempt_id
+    attempt_root.mkdir(parents=True, exist_ok=True)
+    (attempt_root / "turn-request.json").write_text(json.dumps(request), encoding="utf-8")
+    (attempt_root / "turn-result.json").write_text(json.dumps(result), encoding="utf-8")
+    (attempt_root / "attempt.log").write_text(
+        f"event=performer_stream attempt_id={attempt_id} lease_id={context['lease_id']}\n",
+        encoding="utf-8",
+    )
+
+
+def test_runtime_claims_audit_rejects_missing_managed_run_db(tmp_path: Path) -> None:
     tool = load_tool("runtime_claims_audit")
 
-    result = tool.audit_runtime_state(
-        {
-            "sessions": [],
-            "retry_attempts": [
-                {
-                    "issue_id": "issue-1",
-                    "identifier": "HELL-1",
-                    "attempt": 2,
-                    "error": None,
-                    "status_label": "symphony:managed-run/verified",
-                }
-            ],
-            "continuations": [],
-        },
-        "performer_dispatch_summary dispatched=0 skipped=1 running=0 claimed=1",
-    )
+    result = tool.audit_managed_run_db(tmp_path / "missing.db", instance_id="inst-1")
 
     assert result["pass"] is False
-    assert "retry_without_error:HELL-1" in result["failures"]
-    assert "log_repeated_running_0_claimed_positive" in result["failures"]
+    assert "managed_run_db_missing" in result["failures"]
 
-def test_runtime_claims_audit_allows_blocked_human_approval_state() -> None:
+
+def test_runtime_claims_audit_reads_authoritative_managed_run_db(tmp_path: Path) -> None:
     tool = load_tool("runtime_claims_audit")
+    from conductor.conductor_managed_run_store import ConductorManagedRunStore
 
-    result = tool.audit_runtime_state(
-        {
-            "sessions": [],
-            "retry_attempts": [],
-            "continuations": [],
-            "blocked": [
-                {
-                    "issue_id": "issue-1",
-                    "identifier": "HELL-1",
-                    "attempt": 2,
-                    "error": "runtime_permission_blocked: writing outside of the project",
-                    "status_label": "symphony:managed-run/need-human",
-                }
-            ],
-        },
-        "performer_dispatch_summary dispatched=0 skipped=1 running=0 claimed=1",
+    store = ConductorManagedRunStore(tmp_path / "managed_run")
+    accepted = store.accept_dispatch(
+        {"issue_id": "issue-1", "issue_identifier": "HELL-1", "issue_title": "Evidence"},
+        instance_id="inst-1",
     )
+    result = tool.audit_managed_run_db(store.db_path, instance_id="inst-1")
 
     assert result["pass"] is True
-    assert result["counts"]["blocked"] == 1
-    assert result["blocked"][0]["identifier"] == "HELL-1"
+    assert result["counts"]["runs"] == 1
+    assert result["runs"] == [
+        {
+            "run_id": accepted.run_id,
+            "issue_identifier": "HELL-1",
+            "instance_id": "inst-1",
+            "state": "queued",
+            "plan_version": 0,
+            "latest_reason": "",
+        }
+    ]
+
+
+def test_runtime_claims_audit_sanitizes_durable_failure_reason(tmp_path: Path) -> None:
+    tool = load_tool("runtime_claims_audit")
+    from conductor.conductor_managed_run_state import ManagedRunState
+    from conductor.conductor_managed_run_store import ConductorManagedRunStore
+
+    store = ConductorManagedRunStore(tmp_path / "managed_run")
+    accepted = store.accept_dispatch(
+        {"issue_id": "issue-1", "issue_identifier": "HELL-1"},
+        instance_id="inst-1",
+    )
+    store.update_run_state(accepted.run_id, ManagedRunState.FAILED, reason="token=secret-value backend setup failed")
+
+    result = tool.audit_managed_run_db(store.db_path, instance_id="inst-1")
+    rendered = json.dumps(result, sort_keys=True)
+
+    assert result["pass"] is True
+    assert "secret-value" not in rendered
+    assert "token=[REDACTED]" in rendered
+
+
+def test_runtime_claims_audit_requires_artifacts_for_each_durable_attempt(tmp_path: Path) -> None:
+    tool = load_tool("runtime_claims_audit")
+    from conductor.conductor_managed_run_store import ConductorManagedRunStore
+
+    data_root = tmp_path / "data"
+    store = ConductorManagedRunStore(data_root / "managed_run")
+    accepted = store.accept_dispatch(
+        {"issue_id": "issue-1", "issue_identifier": "HELL-1"},
+        instance_id="inst-1",
+    )
+    plan_attempt, plan_request, plan_result = _managed_turn_fixture(accepted.run_id)
+    store.merge_run_payload(
+        accepted.run_id,
+        {
+            "completed_attempts": [
+                plan_attempt,
+                {"attempt_id": "execute-1", "state": "succeeded"},
+                {"attempt_id": "verify-1", "state": "succeeded"},
+            ]
+        },
+    )
+    instance_root = data_root / "instances" / "inst-1"
+    _write_managed_turn_artifacts(instance_root, plan_attempt, plan_request, plan_result)
+    execute_root = instance_root / "state" / "managed_run" / "execute-1"
+    execute_root.mkdir(parents=True)
+    (execute_root / "attempt.log").write_text("event=performer_stream\n", encoding="utf-8")
+
+    result = tool.audit_runtime_evidence(data_root, instance_id="inst-1")
+
+    assert result["pass"] is False
+    assert {
+        "turn_request_missing:execute-1",
+        "turn_result_missing:execute-1",
+        "attempt_artifacts_missing:verify-1",
+    } <= set(result["failures"])
+
+
+def test_runtime_claims_audit_rejects_empty_attempt_artifacts(tmp_path: Path) -> None:
+    tool = load_tool("runtime_claims_audit")
+    from conductor.conductor_managed_run_store import ConductorManagedRunStore
+
+    data_root = tmp_path / "data"
+    store = ConductorManagedRunStore(data_root / "managed_run")
+    accepted = store.accept_dispatch(
+        {"issue_id": "issue-1", "issue_identifier": "HELL-1"},
+        instance_id="inst-1",
+    )
+    attempt, _request, _result = _managed_turn_fixture(accepted.run_id)
+    store.merge_run_payload(accepted.run_id, {"completed_attempts": [attempt]})
+    instance_root = data_root / "instances" / "inst-1"
+    for path in (
+        instance_root / "logs" / "performer-000001.log",
+        instance_root / "state" / "managed_run" / "plan-1" / "turn-request.json",
+        instance_root / "state" / "managed_run" / "plan-1" / "turn-result.json",
+        instance_root / "state" / "managed_run" / "plan-1" / "attempt.log",
+    ):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"")
+
+    result = tool.audit_runtime_evidence(data_root, instance_id="inst-1")
+
+    assert result["pass"] is False
+    assert {
+        "generation_log_empty:performer-000001.log",
+        "turn_request_empty:plan-1",
+        "turn_result_empty:plan-1",
+        "attempt_log_empty:plan-1",
+    } <= set(result["failures"])
+
+
+def test_runtime_claims_audit_rejects_durable_attempt_without_id(tmp_path: Path) -> None:
+    tool = load_tool("runtime_claims_audit")
+    from conductor.conductor_managed_run_store import ConductorManagedRunStore
+
+    data_root = tmp_path / "data"
+    store = ConductorManagedRunStore(data_root / "managed_run")
+    accepted = store.accept_dispatch(
+        {"issue_id": "issue-1", "issue_identifier": "HELL-1"},
+        instance_id="inst-1",
+    )
+    attempt, request, result_payload = _managed_turn_fixture(accepted.run_id)
+    store.merge_run_payload(
+        accepted.run_id,
+        {"completed_attempts": [attempt, {"kind": "plan", "state": "succeeded"}]},
+    )
+    _write_managed_turn_artifacts(
+        data_root / "instances" / "inst-1",
+        attempt,
+        request,
+        result_payload,
+    )
+
+    result = tool.audit_runtime_evidence(data_root, instance_id="inst-1")
+
+    assert result["pass"] is False
+    assert f"managed_run_attempt_integrity:{accepted.run_id}:completed_attempt_id_missing" in result["failures"]
+
+
+def test_runtime_claims_audit_validates_local_verify_attempt_without_performer_files(tmp_path: Path) -> None:
+    tool = load_tool("runtime_claims_audit")
+    from conductor.conductor_managed_run_store import ConductorManagedRunStore
+
+    data_root = tmp_path / "data"
+    store = ConductorManagedRunStore(data_root / "managed_run")
+    accepted = store.accept_dispatch(
+        {"issue_id": "issue-1", "issue_identifier": "HELL-1"},
+        instance_id="inst-1",
+    )
+    plan, plan_request, plan_result = _managed_turn_fixture(accepted.run_id)
+    work, work_request, work_result = _managed_turn_fixture(
+        accepted.run_id,
+        "work_item-run-1-wi-1-1",
+        kind="work_item",
+        work_item_id="wi-1",
+    )
+    verify = {
+        "attempt_id": "verify-run-1-wi-1-1",
+        "attempt_number": "1",
+        "kind": "verify",
+        "mode": "verify",
+        "work_item_id": "wi-1",
+        "state": "succeeded",
+        "gate_snapshot_hash": "gate-hash-1",
+        "verification_evidence": {"commands": [{"command": "pytest", "passed": True}]},
+        "sanitized_error": "",
+    }
+    store.merge_run_payload(accepted.run_id, {"completed_attempts": [plan, work, verify]})
+    instance_root = data_root / "instances" / "inst-1"
+    _write_managed_turn_artifacts(instance_root, plan, plan_request, plan_result)
+    _write_managed_turn_artifacts(instance_root, work, work_request, work_result)
+
+    result = tool.audit_runtime_evidence(data_root, instance_id="inst-1")
+
+    assert result["pass"] is True
+    assert result["counts"]["attempts"] == 3
+    assert set(result["attempt_ids"]) == {
+        "plan-1",
+        "work_item-run-1-wi-1-1",
+        "verify-run-1-wi-1-1",
+    }
+
+
+def test_runtime_claims_audit_sanitizes_jsonl_secret_fields(tmp_path: Path) -> None:
+    tool = load_tool("runtime_claims_audit")
+    source = tmp_path / "runtime-samples.jsonl"
+    target = tmp_path / "bundle" / "runtime-samples.jsonl"
+    source.write_text('{"event":"sample","token":"secret-value","message":"api_key=other-secret"}\n', encoding="utf-8")
+
+    tool.copy_sanitized_file(source, target)
+    rendered = target.read_text(encoding="utf-8")
+
+    assert "secret-value" not in rendered
+    assert "other-secret" not in rendered
+    assert "[REDACTED]" in rendered
+
+    payload = tool.sanitize_evidence_value({"token_health": "healthy", "access_token": "secret-value"})
+    assert payload == {"token_health": "healthy", "access_token": "<redacted>"}
+
+
+def test_runtime_claims_audit_sanitizes_camel_case_keys_and_complete_cookie_headers() -> None:
+    tool = load_tool("runtime_claims_audit")
+
+    payload = tool.sanitize_evidence_value(
+        {
+            "refreshToken": "refresh-secret",
+            "apiKey": "api-secret",
+            "fencing_token": "fence-plan-1",
+            "token_usage": {"input_tokens": 10, "output_tokens": 5},
+            "message": "Cookie: first=abc; second=def",
+        }
+    )
+
+    assert payload == {
+        "refreshToken": "<redacted>",
+        "apiKey": "<redacted>",
+        "fencing_token": "fence-plan-1",
+        "token_usage": {"input_tokens": 10, "output_tokens": 5},
+        "message": "Cookie: [REDACTED]",
+    }
+
+
+def test_runtime_claims_audit_sqlite_snapshot_removes_deleted_secret_bytes(tmp_path: Path) -> None:
+    tool = load_tool("runtime_claims_audit")
+    source = tmp_path / "source.db"
+    secret = "deleted-secret-value-" * 100
+    with sqlite3.connect(source) as connection:
+        connection.execute("PRAGMA secure_delete = OFF")
+        connection.execute("CREATE TABLE evidence (value TEXT NOT NULL)")
+        connection.execute("INSERT INTO evidence (value) VALUES (?)", (secret,))
+        connection.commit()
+        connection.execute("DELETE FROM evidence")
+        connection.commit()
+    assert secret.encode() in source.read_bytes()
+
+    target = tmp_path / "archive" / "managed_run.db"
+    tool.snapshot_sqlite(source, target)
+
+    assert secret.encode() not in target.read_bytes()
+
+
+def test_runtime_claims_audit_cli_writes_failure_and_exits_nonzero_for_missing_db(tmp_path: Path) -> None:
+    out = tmp_path / "runtime-audit.json"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "tools" / "runtime_claims_audit.py"),
+            "--data-root",
+            str(tmp_path / "data"),
+            "--instance-id",
+            "inst-1",
+            "--out",
+            str(out),
+        ],
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 1
+    assert set(json.loads(out.read_text(encoding="utf-8"))["failures"]) == {
+        "managed_run_db_missing",
+        "generation_logs_missing",
+        "attempt_logs_missing",
+        "turn_requests_missing",
+        "turn_results_missing",
+    }
 
 def test_linear_tree_audit_requires_work_item_contract_projection() -> None:
     tool = load_tool("linear_tree_audit")
@@ -1013,6 +1296,184 @@ def test_real_run_observer_diagnoses_missing_pipeline_metadata() -> None:
 
     assert findings == ["linear_tree:missing_pipeline_metadata"]
 
+
+async def test_real_run_observer_exposes_missing_runtime_evidence_after_linear_terminal(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    observer = load_tool("real_run_observer")
+
+    async def fetch_tree(_issue: str) -> dict[str, Any]:
+        return {}
+
+    monkeypatch.setattr(observer, "fetch_issue_tree", fetch_tree)
+    monkeypatch.setattr(
+        observer,
+        "audit_tree",
+        lambda _tree: {
+            "business_issue": {"state": "Done", "state_type": "completed", "labels": []},
+            "failures": [],
+        },
+    )
+    monkeypatch.setattr(
+        observer,
+        "audit_runtime_evidence",
+        lambda _data_root, *, instance_id: {
+            "pass": False,
+            "failures": ["managed_run_db_missing", "generation_logs_missing"],
+        },
+    )
+    monkeypatch.setattr(observer, "runtime_log_tail", lambda _instance_root: ([], []))
+
+    row = await observer.sample("HELL-1", tmp_path / "data" / "instances" / "inst-1")
+
+    assert row["diagnosis"] == [
+        "runtime:managed_run_db_missing",
+        "runtime:generation_logs_missing",
+    ]
+
+
+async def test_real_run_observer_distinguishes_known_missing_db_from_pending_result(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    observer = load_tool("real_run_observer")
+    runtime = {
+        "pass": False,
+        "failures": ["managed_run_db_missing"],
+        "counts": {
+            "runs": 0,
+            "attempts": 0,
+            "generation_logs": 1,
+            "attempt_logs": 1,
+            "turn_requests": 1,
+            "turn_results": 0,
+        },
+        "runs": [],
+    }
+
+    async def fetch_tree(_issue: str) -> dict[str, Any]:
+        return {}
+
+    monkeypatch.setattr(observer, "fetch_issue_tree", fetch_tree)
+    monkeypatch.setattr(
+        observer,
+        "audit_tree",
+        lambda _tree: {
+            "business_issue": {"state": "In Progress", "state_type": "started", "labels": []},
+            "failures": [],
+        },
+    )
+    monkeypatch.setattr(observer, "audit_runtime_evidence", lambda _data_root, *, instance_id: runtime)
+    monkeypatch.setattr(observer, "runtime_log_tail", lambda _instance_root: ([], []))
+    instance_root = tmp_path / "data" / "instances" / "inst-1"
+
+    missing_db = await observer.sample("HELL-1", instance_root)
+    runtime.update(
+        {
+            "failures": ["turn_result_missing:plan-1", "turn_results_missing"],
+            "counts": {**runtime["counts"], "runs": 1, "attempts": 1},
+            "runs": [{"run_id": "run-1", "state": "planning"}],
+        }
+    )
+    active_attempt = await observer.sample("HELL-1", instance_root)
+
+    assert missing_db["diagnosis"] == ["runtime:managed_run_db_missing"]
+    assert active_attempt["diagnosis"] == []
+
+
+def test_real_run_observer_uses_metadata_from_real_tree_audit() -> None:
+    observer = load_tool("real_run_observer")
+    tree_audit = load_tool("linear_tree_audit")
+    audited = tree_audit.audit_tree(
+        {
+            "id": "issue-1",
+            "identifier": "HELL-1",
+            "title": "Business",
+            "description": (
+                "graph_id: graph-1\nnode_id: root\ngate_snapshot_hash: hash-1\n"
+                "conductor_revision: rev-1\nManaged Run State:\n- run_id: run-1\n"
+            ),
+            "state": {"name": "In Progress", "type": "started"},
+            "labels": {"nodes": [{"name": "performer:type/task"}]},
+            "children": {"nodes": []},
+            "inverseRelations": {"nodes": []},
+        }
+    )
+
+    findings = observer.diagnose(audited, {"failures": []})
+
+    assert "linear_tree:missing_pipeline_metadata" not in findings
+
+
+async def test_real_run_observer_does_not_pass_nonterminal_business_issue(tmp_path: Path, monkeypatch) -> None:
+    observer = load_tool("real_run_observer")
+
+    async def nonterminal_sample(_issue: str, _instance_root: Path) -> dict[str, Any]:
+        return {
+            "linear_tree": {
+                "business_issue": {"state": "In Progress", "state_type": "started"},
+                "failures": [],
+            },
+            "linear_tree_error": None,
+            "runtime": {"pass": True, "failures": [], "runs": [{"run_id": "run-1", "state": "done"}]},
+            "diagnosis": [],
+            "pending_diagnosis": [],
+        }
+
+    monkeypatch.setattr(observer, "sample", nonterminal_sample)
+    result = await observer.observe(
+        SimpleNamespace(
+            issue="HELL-1",
+            instance_root=tmp_path / "data" / "instances" / "inst-1",
+            interval=0,
+            timeout=0,
+            pending_grace=0,
+            single_sample=True,
+            stop_on_diagnosis=True,
+            jsonl=None,
+            out=None,
+        )
+    )
+
+    assert result["pass"] is False
+    assert "observer:business_issue_not_successful" in result["failures"]
+
+
+async def test_real_run_observer_promotes_pending_runtime_failure_at_deadline(tmp_path: Path, monkeypatch) -> None:
+    observer = load_tool("real_run_observer")
+
+    async def stalled_sample(_issue: str, _instance_root: Path) -> dict[str, Any]:
+        return {
+            "linear_tree": {
+                "business_issue": {"state": "In Progress", "state_type": "started"},
+                "failures": [],
+            },
+            "linear_tree_error": None,
+            "runtime": {"pass": False, "failures": ["managed_run_db_missing"], "runs": [], "counts": {}},
+            "diagnosis": [],
+            "pending_diagnosis": ["runtime:managed_run_db_missing"],
+        }
+
+    monkeypatch.setattr(observer, "sample", stalled_sample)
+    result = await observer.observe(
+        SimpleNamespace(
+            issue="HELL-1",
+            instance_root=tmp_path / "data" / "instances" / "inst-1",
+            interval=0,
+            timeout=0,
+            pending_grace=60,
+            single_sample=False,
+            stop_on_diagnosis=True,
+            jsonl=None,
+            out=None,
+        )
+    )
+
+    assert result["pass"] is False
+    assert "runtime:managed_run_db_missing" in result["failures"]
+
+
 def test_real_run_observer_cli_uses_pipeline_sample_flag() -> None:
     observer = load_tool("real_run_observer")
     parser = observer.parser()
@@ -1022,6 +1483,29 @@ def test_real_run_observer_cli_uses_pipeline_sample_flag() -> None:
     assert args.single_sample is True
     with pytest.raises(SystemExit):
         parser.parse_args(["--issue", "HELL-1", "--instance-root", "/tmp/inst", "--once"])
+
+
+def test_real_run_observer_reads_only_current_generation_and_attempt_logs(tmp_path: Path) -> None:
+    observer = load_tool("real_run_observer")
+    instance_root = tmp_path / "data" / "instances" / "inst-1"
+    legacy_log = instance_root / "logs" / "performer.log"
+    generation_log = instance_root / "logs" / "performer-000001.log"
+    attempt_log = instance_root / "state" / "managed_run" / "execute-1" / "attempt.log"
+    legacy_log.parent.mkdir(parents=True)
+    legacy_log.write_text("legacy-only\n", encoding="utf-8")
+    generation_log.write_text("event=generation token=secret-value\n", encoding="utf-8")
+    attempt_log.parent.mkdir(parents=True)
+    attempt_log.write_text("event=attempt authorization: Bearer secret-value\n", encoding="utf-8")
+
+    sources, lines = observer.runtime_log_tail(instance_root)
+    rendered = "\n".join(lines)
+
+    assert sources == [
+        "logs/performer-000001.log",
+        "state/managed_run/execute-1/attempt.log",
+    ]
+    assert "legacy-only" not in rendered
+    assert "secret-value" not in rendered
 
 def test_real_symphony_e2e_common_has_no_workflow_patch_helpers() -> None:
     tool = load_tool("real_symphony_e2e")
@@ -1276,11 +1760,18 @@ def test_real_symphony_e2e_evidence_redacts_tokens(tmp_path: Path) -> None:
 
 def test_real_run_evidence_bundle_copies_codex_overload_probe(tmp_path: Path) -> None:
     tool = load_tool("real_run_evidence_bundle")
-    instance_root = tmp_path / "instances" / "inst-1"
-    (instance_root / "state").mkdir(parents=True)
-    (instance_root / "logs").mkdir(parents=True)
-    (instance_root / "state" / "performer.json").write_text("{}", encoding="utf-8")
-    (instance_root / "logs" / "performer.log").write_text("", encoding="utf-8")
+    from conductor.conductor_managed_run_store import ConductorManagedRunStore
+
+    data_root = tmp_path / "data"
+    instance_root = data_root / "instances" / "inst-1"
+    store = ConductorManagedRunStore(data_root / "managed_run")
+    accepted = store.accept_dispatch(
+        {"issue_id": "issue-1", "issue_identifier": "HELL-1"},
+        instance_id="inst-1",
+    )
+    attempt, request, result = _managed_turn_fixture(accepted.run_id)
+    store.merge_run_payload(accepted.run_id, {"completed_attempts": [attempt]})
+    _write_managed_turn_artifacts(instance_root, attempt, request, result)
     probe = tmp_path / "codex-overload-probe.json"
     probe.write_text('{"pass": true, "overload_retry_count": 1}', encoding="utf-8")
 
@@ -1302,7 +1793,108 @@ def test_real_run_evidence_bundle_copies_codex_overload_probe(tmp_path: Path) ->
     )
 
     assert manifest["copied"]["codex_overload_probe"] is True
+    assert manifest["runtime_artifacts_pass"] is True
+    assert manifest["bundle_valid"] is False
+    assert manifest["pass"] is False
+    assert manifest["supplied"]["business_issue"]["status"] == "missing"
+    assert manifest["supplied"]["linear_tree"]["status"] == "missing"
+    assert str(instance_root) not in json.dumps(manifest, sort_keys=True)
     assert "codex-overload-probe.json" in manifest["files"]
+    assert "managed_run/managed_run.db" in manifest["files"]
+    assert "instances/inst-1/logs/performer-000001.log" in manifest["files"]
+    assert "instances/inst-1/state/managed_run/plan-1/attempt.log" in manifest["files"]
+
+
+def test_real_run_evidence_bundle_publishes_fresh_hashed_complete_archive(tmp_path: Path) -> None:
+    tool = load_tool("real_run_evidence_bundle")
+    from conductor.conductor_managed_run_store import ConductorManagedRunStore
+
+    data_root = tmp_path / "data"
+    instance_root = data_root / "instances" / "inst-1"
+    store = ConductorManagedRunStore(data_root / "managed_run")
+    accepted = store.accept_dispatch(
+        {"issue_id": "issue-1", "issue_identifier": "HELL-1"},
+        instance_id="inst-1",
+    )
+    attempt, request, result = _managed_turn_fixture(accepted.run_id)
+    store.merge_run_payload(accepted.run_id, {"completed_attempts": [attempt]})
+    _write_managed_turn_artifacts(instance_root, attempt, request, result)
+    supplied: dict[str, Path] = {}
+    for name in ("business_issue", "linear_tree", "cleanup_before", "cleanup_after"):
+        path = tmp_path / f"{name}.json"
+        path.write_text('{"pass":true}', encoding="utf-8")
+        supplied[name] = path
+    observer = tmp_path / "observer.jsonl"
+    observer.write_text('{"event":"sample"}\n', encoding="utf-8")
+    supplied["observer"] = observer
+    out = tmp_path / "bundle"
+    out.mkdir()
+    (out / "stale.txt").write_text("stale", encoding="utf-8")
+
+    manifest = tool.bundle(
+        SimpleNamespace(
+            instance_root=instance_root,
+            out=out,
+            codex_overload_probe=None,
+            **supplied,
+        )
+    )
+
+    assert manifest["pass"] is True
+    assert manifest["bundle_valid"] is True
+    assert manifest["runtime_artifacts_pass"] is True
+    assert not (out / "stale.txt").exists()
+    assert set(manifest["sha256"]) == set(manifest["files"]) - {"manifest.json"}
+    for relative, expected in manifest["sha256"].items():
+        assert hashlib.sha256((out / relative).read_bytes()).hexdigest() == expected
+
+
+def test_real_run_evidence_bundle_rejects_empty_instance_root(tmp_path: Path) -> None:
+    tool = load_tool("real_run_evidence_bundle")
+    instance_root = tmp_path / "data" / "instances" / "inst-1"
+
+    manifest = tool.bundle(
+        SimpleNamespace(
+            instance_root=instance_root,
+            out=tmp_path / "bundle",
+            business_issue=None,
+            linear_tree=None,
+            observer=None,
+            cleanup_before=None,
+            cleanup_after=None,
+            codex_overload_probe=None,
+        )
+    )
+
+    assert manifest["pass"] is False
+    assert manifest["runtime_audit_pass"] is False
+    assert set(manifest["failures"]) >= {
+        "managed_run_db_missing",
+        "generation_logs_missing",
+        "attempt_logs_missing",
+    }
+
+
+def test_real_run_evidence_bundle_cli_exits_nonzero_with_manifest_when_required_evidence_is_missing(tmp_path: Path) -> None:
+    out = tmp_path / "bundle"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "tools" / "real_run_evidence_bundle.py"),
+            "--instance-root",
+            str(tmp_path / "data" / "instances" / "inst-1"),
+            "--out",
+            str(out),
+        ],
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 1
+    manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["pass"] is False
+    assert "managed_run_db_missing" in manifest["failures"]
 
 
 def test_real_symphony_e2e_run_does_not_call_removed_workflow_api_routes() -> None:

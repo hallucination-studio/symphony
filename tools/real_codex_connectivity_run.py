@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from performer.codex_client import CodexError, CodexSdkClient
-from performer_api.config import CodexConfig
+from performer.codex_config import CodexConfig
 from real_codex_connectivity_core import (
     _planner_shape_valid,
     classify_connectivity,
@@ -50,7 +50,6 @@ def _codex_config(args: argparse.Namespace, config_overrides: tuple[str, ...]) -
         sandbox=args.sandbox,
         config_overrides=config_overrides,
         read_timeout_ms=args.timeout_ms,
-        turn_timeout_ms=args.timeout_ms,
         hard_turn_timeout_ms=args.timeout_ms,
         init_max_attempts=args.init_max_attempts,
         init_backoff_ms=args.init_backoff_ms,

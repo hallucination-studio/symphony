@@ -204,7 +204,7 @@ class _CodexSdkRuntimeMixin:
             from openai_codex import AsyncCodex  # type: ignore
             from openai_codex import CodexConfig as SdkCodexConfig  # type: ignore
         except ImportError as exc:
-            raise CodexError("codex_sdk_not_installed", "Install openai-codex to use codex.backend=sdk") from exc
+            raise CodexError("codex_sdk_not_installed", "Install openai-codex to run Performer Codex turns") from exc
         return AsyncCodex(config=self._sdk_config(SdkCodexConfig))
 
     def _sdk_config(self, sdk_config_cls: Any) -> Any | None:

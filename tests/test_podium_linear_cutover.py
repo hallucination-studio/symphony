@@ -1,176 +1,273 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
 
-from test_podium_conductor_channels_support import (
-    activate_linear_installation,
-    bind_and_ack_conductor,
-    enroll_conductor,
-    make_app,
-    register,
-)
+from podium.app import create_app
+from podium.podium_shared import hash_secret
+from podium.store import PgStore
 
 
-async def _candidate(app: Any, user_id: str) -> str:
-    now = datetime.now(timezone.utc)
-    application = await app.state.podium.stage_custom_linear_application(
-        user_id,
-        client_id="replacement-client",
-        client_secret="replacement-secret",
+def _installation(
+    installation_id: str,
+    *,
+    state: str,
+    active: bool,
+    app_user_id: str,
+) -> dict[str, Any]:
+    return {
+        "id": installation_id,
+        "user_id": "user-1",
+        "state": state,
+        "active": active,
+        "app_user_id": app_user_id,
+        "access_token": f"{installation_id}-access-token",
+        "refresh_token": f"{installation_id}-refresh-token",
+    }
+
+
+def _app(store: object, **overrides: Any) -> Any:
+    return create_app(
+        secure_cookies=False,
+        secret_key="test-secret",
+        store=store,
+        **overrides,
     )
-    installation_id = f"candidate-{user_id}"
-    await app.state.podium.save_linear_installation_record(
-        {
-            "id": installation_id,
-            "user_id": user_id,
-            "application_config_id": application["id"],
-            "application_config_version": application["version"],
-            "application_source": "custom",
-            "state": "draining",
-            "active": False,
-            "access_token": "replacement-access-token",
-            "refresh_token": "replacement-refresh-token",
-            "token_type": "Bearer",
-            "actor": "app",
-            "scope": ["read", "write", "app:assignable"],
-            "expires_at": (now + timedelta(hours=1)).isoformat().replace("+00:00", "Z"),
-            "linear_organization_id": f"org-{user_id}",
-            "organization_url_key": "acme",
-            "organization_name": "Acme",
-            "app_user_id": "agent-beta",
-            "projects": [{"id": "project-alpha", "name": "Alpha", "slug_id": "ALPHA"}],
-            "reconciliation_state": "pending",
-            "last_reconciliation_at": None,
-            "reconciliation_error": "",
-            "reconciliation_retry_count": 0,
-            "error_code": "",
-            "sanitized_reason": "",
-            "retryable": False,
-            "action_required": "wait",
-            "next_action": "drain_managed_runs",
-            "created_at": now.isoformat().replace("+00:00", "Z"),
-            "updated_at": now.isoformat().replace("+00:00", "Z"),
-        }
-    )
-    return installation_id
-
-
-async def _ready(client: httpx.AsyncClient, app: Any) -> tuple[str, dict[str, Any], dict[str, Any]]:
-    user_id = await register(client, "cutover-owner@example.com")
-    await activate_linear_installation(app, user_id)
-    await app.state.podium.select_linear_projects(user_id, ["project-alpha"])
-    enrolled = await enroll_conductor(client)
-    report, binding = await bind_and_ack_conductor(app, client, user_id, enrolled)
-    assert report.status_code == 200
-    return user_id, enrolled, binding
 
 
 @pytest.mark.asyncio
 async def test_candidate_stays_draining_while_dispatch_is_open() -> None:
-    app = make_app()
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
-        user_id, _enrolled, _binding = await _ready(client, app)
-        candidate_id = await _candidate(app, user_id)
-        queued = await app.state.podium.queue_dispatches(
-            {
-                "workspace_id": user_id,
-                "linear_project_id": "project-alpha",
-                "project_slug": "ALPHA",
-                "issue_id": "issue-open",
-                "issue_identifier": "ALPHA-1",
-                "agent_session_id": "session-open",
-                "agent_app_user_id": "agent-alpha",
-                "issue_delegate_id": "agent-alpha",
-            }
-        )
-        cutover = await client.post("/api/v1/linear/installations/cutover")
+    active = _installation(
+        "installation-active",
+        state="ready",
+        active=True,
+        app_user_id="agent-alpha",
+    )
+    candidate = _installation(
+        "installation-candidate",
+        state="draining",
+        active=False,
+        app_user_id="agent-beta",
+    )
+    store = SimpleNamespace(
+        count_open_dispatches_for_user=AsyncMock(return_value=1),
+    )
+    app = _app(store)
+    app.state.podium.user_for_session = AsyncMock(return_value={"id": "user-1"})
+    app.state.podium.get_active_linear_installation = AsyncMock(return_value=active)
+    app.state.podium.get_candidate_linear_installation = AsyncMock(return_value=candidate)
+    app.state.podium.enqueue_runtime_command = AsyncMock()
 
-    assert queued == 1
-    assert cutover.status_code == 200
-    assert cutover.json()["candidate"]["id"] == candidate_id
-    assert cutover.json()["candidate"]["state"] == "draining"
-    assert cutover.json()["cutover_state"] == "waiting_for_drain"
-    assert app.state.podium.store._load_map("runtime_commands.json")
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://podium.test",
+    ) as client:
+        response = await client.post("/api/v1/linear/installations/cutover")
+
+    assert response.status_code == 200
+    assert response.json()["candidate"]["id"] == candidate["id"]
+    assert response.json()["candidate"]["state"] == "draining"
+    assert response.json()["cutover_state"] == "waiting_for_drain"
+    store.count_open_dispatches_for_user.assert_awaited_once_with("user-1")
+    app.state.podium.enqueue_runtime_command.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_candidate_switches_only_after_every_binding_is_prepared() -> None:
+async def test_cutover_requires_prepare_and_activate_runtime_reports_before_binding_is_ready(
+    postgres_database_url: str,
+) -> None:
+    runtime_token = "runtime-token"
     revoked: list[tuple[str, str]] = []
 
     async def revoke(token: str, token_type_hint: str) -> None:
         revoked.append((token, token_type_hint))
 
-    app = make_app(linear_token_revoke=revoke)
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
-        user_id, enrolled, binding = await _ready(client, app)
-        old_installation = await app.state.podium.get_active_linear_installation(user_id)
-        candidate_id = await _candidate(app, user_id)
-
-        preparing = await client.post("/api/v1/linear/installations/cutover")
-        prepared_binding = (await app.state.podium.store.list_project_bindings_for_conductor(enrolled["runtime_id"]))[0]
-        prepared_report = await client.post(
-            "/api/v1/runtime/report",
-            headers={"Authorization": f"Bearer {enrolled['runtime_token']}"},
-            json={
-                "bindings": [
-                    {
-                        "instance_id": "inst-a",
-                        "linear_project_id": "project-alpha",
-                        "project_slug": "ALPHA",
-                        "agent_app_user_id": "agent-alpha",
-                        "binding_config_version": binding["config_version"],
-                        "prepared_installation_id": candidate_id,
-                        "prepared_binding_config_version": prepared_binding["candidate_config_version"],
-                        "repo_source": {"type": "local_path", "value": "/repo/a"},
-                    }
-                ]
-            },
+    store = await PgStore.connect(postgres_database_url)
+    try:
+        await store.migrate()
+        await store.create_user(
+            "user-1",
+            email="operator@example.com",
+            password_hash="password-hash",
+            created_at="2026-07-11T00:00:00Z",
         )
-        switched = await client.post("/api/v1/linear/installations/cutover")
-        switched_binding = (await app.state.podium.store.list_project_bindings_for_conductor(enrolled["runtime_id"]))[0]
-        activated_report = await client.post(
-            "/api/v1/runtime/report",
-            headers={"Authorization": f"Bearer {enrolled['runtime_token']}"},
-            json={
-                "bindings": [
-                    {
-                        "instance_id": "inst-a",
-                        "linear_project_id": "project-alpha",
-                        "project_slug": "ALPHA",
-                        "agent_app_user_id": "agent-beta",
-                        "binding_config_version": switched_binding["config_version"],
-                        "repo_source": {"type": "local_path", "value": "/repo/a"},
-                    }
-                ]
-            },
+        await store.upsert_runtime_group({"id": "group-1"})
+        await store.upsert_conductor(
+            {
+                "id": "runtime-1",
+                "user_id": "user-1",
+                "runtime_group_id": "group-1",
+                "name": "Bach",
+                "public_id": "abc123",
+                "enrollment_state": "enrolled",
+                "runtime_token_hash": hash_secret(runtime_token),
+                "proxy_token_hash": "proxy-token-hash",
+                "created_at": "2026-07-11T00:00:00Z",
+            }
         )
-        installations = await client.get("/api/v1/linear/installations")
+        app = _app(store, linear_token_revoke=revoke)
+        app.state.podium.user_for_session = AsyncMock(return_value={"id": "user-1"})
+        application = await app.state.podium.stage_custom_linear_application(
+            "user-1",
+            client_id="linear-client",
+            client_secret="linear-secret",
+        )
+        installation = {
+            "user_id": "user-1",
+            "application_config_id": application["id"],
+            "application_config_version": application["version"],
+            "application_source": application["source"],
+            "access_token": "installation-access-token",
+            "refresh_token": "installation-refresh-token",
+            "token_type": "Bearer",
+            "actor": "app",
+            "scope": ["read", "write", "app:assignable"],
+            "linear_organization_id": "organization-1",
+            "projects": [{"id": "project-alpha", "name": "Alpha", "slug_id": "ALPHA"}],
+            "created_at": "2026-07-11T00:00:00Z",
+            "updated_at": "2026-07-11T00:00:00Z",
+        }
+        await app.state.podium.save_linear_installation_record(
+            {
+                **installation,
+                "id": "installation-active",
+                "state": "ready",
+                "active": True,
+                "app_user_id": "agent-alpha",
+            }
+        )
+        await app.state.podium.save_linear_installation_record(
+            {
+                **installation,
+                "id": "installation-candidate",
+                "state": "draining",
+                "active": False,
+                "app_user_id": "agent-beta",
+                "access_token": "candidate-access-token",
+                "refresh_token": "candidate-refresh-token",
+                "updated_at": "2026-07-11T01:00:00Z",
+            }
+        )
+        await store.upsert_project_binding(
+            {
+                "id": "binding-1",
+                "user_id": "user-1",
+                "conductor_id": "runtime-1",
+                "instance_id": "instance-1",
+                "linear_project_id": "project-alpha",
+                "project_slug": "ALPHA",
+                "project_name": "Alpha",
+                "installation_id": "installation-active",
+                "agent_app_user_id": "agent-alpha",
+                "repo_source": {"type": "local_path", "value": "/repo/a"},
+                "config_version": 3,
+                "acknowledged_config_version": 3,
+                "state": "ready",
+                "active": True,
+                "label_id": "label-1",
+                "label_name": "symphony:conductor/Bach-abc123",
+                "updated_at": "2026-07-11T00:00:00Z",
+            }
+        )
 
+        headers = {"Authorization": f"Bearer {runtime_token}"}
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://podium.test",
+        ) as client:
+            preparing = await client.post("/api/v1/linear/installations/cutover")
+            prepared_binding = await store.get_project_binding("binding-1")
+            assert prepared_binding is not None
+            prepare_command = await store.next_runtime_command("runtime-1", after_id=0)
+            assert prepare_command is not None
+            still_waiting = await client.post("/api/v1/linear/installations/cutover")
+
+            prepare_report = await client.post(
+                "/api/v1/runtime/report",
+                headers=headers,
+                json={
+                    "bindings": [
+                        {
+                            "instance_id": "instance-1",
+                            "linear_project_id": "project-alpha",
+                            "project_slug": "ALPHA",
+                            "agent_app_user_id": "agent-alpha",
+                            "binding_config_version": 3,
+                            "repo_source": {"type": "local_path", "value": "/repo/a"},
+                            "process_status": "running",
+                            "prepared_installation_id": "installation-candidate",
+                            "prepared_binding_config_version": prepared_binding[
+                                "candidate_config_version"
+                            ],
+                        }
+                    ]
+                },
+            )
+            switched = await client.post("/api/v1/linear/installations/cutover")
+            switching_binding = await store.get_project_binding("binding-1")
+            assert switching_binding is not None
+            activate_command = await store.next_runtime_command(
+                "runtime-1",
+                after_id=int(prepare_command["id"]),
+            )
+            assert activate_command is not None
+            activate_report = await client.post(
+                "/api/v1/runtime/report",
+                headers=headers,
+                json={
+                    "bindings": [
+                        {
+                            "instance_id": "instance-1",
+                            "linear_project_id": "project-alpha",
+                            "project_slug": "ALPHA",
+                            "agent_app_user_id": "agent-beta",
+                            "binding_config_version": prepared_binding[
+                                "candidate_config_version"
+                            ],
+                            "repo_source": {"type": "local_path", "value": "/repo/a"},
+                            "process_status": "running",
+                        }
+                    ]
+                },
+            )
+
+        installations = {
+            row["id"]: row for row in await store.list_workspace_installations("user-1")
+        }
+        ready_binding = await store.get_project_binding("binding-1")
+    finally:
+        await store.close()
+
+    assert preparing.status_code == 200
     assert preparing.json()["cutover_state"] == "waiting_for_conductors"
-    assert preparing.json()["candidate"]["state"] == "preparing"
-    assert prepared_report.status_code == 200
+    assert still_waiting.status_code == 200
+    assert still_waiting.json()["cutover_state"] == "waiting_for_conductors"
+    assert prepare_report.status_code == 200
+    assert switched.status_code == 200
     assert switched.json()["cutover_state"] == "switched"
-    assert switched.json()["active"]["id"] == candidate_id
-    assert switched_binding["state"] == "switching"
-    assert switched_binding["agent_app_user_id"] == "agent-beta"
-    commands = app.state.podium.store._load_map("runtime_commands.json")[enrolled["runtime_id"]]
-    assert [row["command"]["type"] for row in commands][-2:] == [
+    assert switched.json()["active"]["id"] == "installation-candidate"
+    assert switching_binding["state"] == "switching"
+    assert switching_binding["acknowledged_config_version"] == 3
+    assert activate_report.status_code == 200
+    assert activate_report.json()["binding_state"] == "ready"
+    assert [prepare_command["command"]["type"], activate_command["command"]["type"]] == [
         "project.prepare_installation",
         "project.activate_installation",
     ]
-    assert activated_report.status_code == 200
-    assert activated_report.json()["binding_state"] == "ready"
-    final_binding = (await app.state.podium.store.list_project_bindings_for_conductor(enrolled["runtime_id"]))[0]
-    assert final_binding["state"] == "ready"
-    assert installations.json()["active"]["id"] == candidate_id
-    old_row = app.state.podium.store._load_map("linear_workspace_installations.json")[old_installation["id"]]
-    assert old_row["state"] == "retired"
-    assert old_row["active"] is False
+    assert ready_binding is not None
+    assert (
+        ready_binding["state"],
+        ready_binding["installation_id"],
+        ready_binding["agent_app_user_id"],
+        ready_binding["acknowledged_config_version"],
+    ) == ("ready", "installation-candidate", "agent-beta", 4)
+    assert installations["installation-active"]["state"] == "retired"
+    assert installations["installation-active"]["active"] is False
     assert revoked == [
-        ("oauth-refresh-token", "refresh_token"),
-        ("oauth-installation-token", "access_token"),
+        ("installation-refresh-token", "refresh_token"),
+        ("installation-access-token", "access_token"),
     ]

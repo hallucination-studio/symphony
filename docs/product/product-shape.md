@@ -51,9 +51,10 @@ receive Linear OAuth tokens.
 
 ### performer-api
 
-`performer-api` is the shared contract package. It owns Managed Runs DTOs,
-runtime policy and profile DTOs, plan/work-item state, verification evidence,
-projection models, and registration DTOs.
+`performer-api` is limited to shared Managed Run wire contracts. It owns plan,
+work-item/result, turn-context, runtime-policy/profile, verification-evidence,
+and validation DTOs. Durable state, ops, projections, and registration remain
+owned by their runtime roles.
 
 ## Managed Journey
 

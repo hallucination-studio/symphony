@@ -268,7 +268,15 @@ def _issue_row(issue: dict[str, Any]) -> dict[str, Any]:
         "state_type": state.get("type"),
         "labels": labels(issue),
         "parent": issue.get("parent"),
+        "managed_run_metadata_present": _managed_run_metadata_present(str(issue.get("description") or "")),
     }
+
+
+def _managed_run_metadata_present(description: str) -> bool:
+    return all(
+        marker in description
+        for marker in ("graph_id:", "node_id:", "gate_snapshot_hash:", "conductor_revision:")
+    )
 
 
 async def run(args: argparse.Namespace) -> dict[str, Any]:

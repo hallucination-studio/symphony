@@ -7,10 +7,10 @@ import os
 from pathlib import Path
 from typing import Any
 
-from performer_api.config import CodexConfig
 from performer_api.managed_runs import ManagedRunRuntimeWait, ManagedRunTurnContext, WorkItem, WorkItemResultStatus
 
 from .codex_client import CodexSdkClient
+from .codex_config import CodexConfig
 from .managed_run_backend import CodexManagedRunBackend
 
 

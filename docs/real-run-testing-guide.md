@@ -59,17 +59,26 @@ Audit or archive active Linear test-project issues:
 .venv/bin/python tools/linear_project_issues.py archive --project HELL --out .test-real-flow/evidence/hell-archive.json
 ```
 
-Audit a delegated issue tree and persisted runtime state:
+Audit a delegated issue tree and authoritative Managed Run evidence:
 
 ```bash
 .venv/bin/python tools/linear_tree_audit.py HELL-123 --out .test-real-flow/evidence/linear-tree-audit.json
-.venv/bin/python tools/runtime_claims_audit.py --state /path/to/state/performer.json --log /path/to/logs/performer.log --out .test-real-flow/evidence/runtime-claims-audit.json
+.venv/bin/python tools/runtime_claims_audit.py --data-root /path/to/conductor-data --instance-id inst-1 --out .test-real-flow/evidence/runtime-claims-audit.json
 ```
 
 Observe a run without mutating Linear:
 
 ```bash
-.venv/bin/python tools/real_run_observer.py --issue HELL-123 --instance-root /path/to/instance --interval 10 --timeout 300 --stop-on-diagnosis --jsonl .test-real-flow/evidence/runtime-samples.jsonl
+.venv/bin/python tools/real_run_observer.py --issue HELL-123 --instance-root /path/to/conductor-data/instances/inst-1 --interval 10 --timeout 300 --stop-on-diagnosis --jsonl .test-real-flow/evidence/runtime-samples.jsonl
+```
+
+Bundle the final evidence. The audit and bundle exit nonzero when the Managed
+Run database, generation logs, attempt logs, or turn request/result artifacts
+are absent; a generated manifest with missing files is failure evidence, not a
+passing report.
+
+```bash
+.venv/bin/python tools/real_run_evidence_bundle.py --instance-root /path/to/conductor-data/instances/inst-1 --out .test-real-flow/evidence/run-bundle
 ```
 
 ## Required Evidence
@@ -77,7 +86,9 @@ Observe a run without mutating Linear:
 A complete managed report includes:
 
 - Podium log and Conductor log;
-- per-instance Performer stdout/stderr logs with attempt correlation;
+- the authoritative `managed_run/managed_run.db` SQLite snapshot;
+- every per-instance `performer-NNNNNN.log` generation and per-attempt
+  `attempt.log`, with stdout/stderr and attempt correlation;
 - Managed Run view/report JSON;
 - graph, node, attempt, lease, policy, and runtime profile snapshots;
 - attempt request/result JSON;
@@ -125,7 +136,8 @@ failed candidate must not replace a working active installation.
    full baseline and incremental polling traverses every page without duplicate
    dispatch or skipped issue and advances only committed checkpoints.
 10. Repeat polls, restart mid-page, observe an undelegation, and redelegate the
-    same issue. Verify one Managed Run per delegation epoch and crash-safe resume.
+    same issue. Verify one dispatch per delegation epoch, one durable Managed
+    Run for the issue, and crash-safe resume.
 11. Confirm Conductor leases each dispatch and commits or resumes one managed run.
 12. Observe `plan -> work_item -> verify` attempts, request/result files, and
    correlated logs.

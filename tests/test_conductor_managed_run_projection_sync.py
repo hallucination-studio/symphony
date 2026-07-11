@@ -120,7 +120,7 @@ async def test_projection_sync_failure_is_visible_in_managed_run_state_and_api(t
         instance_id=instance.id,
     )
     service.managed_run_coordinator.apply_plan(accepted.run_id, _plan(), backend_session_id="thread-1")
-    service.repository_handoff_tracker_factory = lambda _instance: FailingTracker()
+    service.managed_run_tracker_factory = lambda _instance: FailingTracker()
 
     projected = await service.reconcile_linear_managed_run_projections_once()
 
@@ -153,7 +153,7 @@ async def test_projection_sync_success_marks_managed_run_projection_healthy(tmp_
     )
     service.managed_run_coordinator.apply_plan(accepted.run_id, _plan(), backend_session_id="thread-1")
     tracker = SuccessfulTracker()
-    service.repository_handoff_tracker_factory = lambda _instance: tracker
+    service.managed_run_tracker_factory = lambda _instance: tracker
 
     projected = await service.reconcile_linear_managed_run_projections_once()
 

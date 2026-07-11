@@ -6,14 +6,99 @@ import socket
 import stat
 import urllib.parse
 from pathlib import Path
+from typing import Any
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
 
 from podium.app import create_app
-from podium.store import PodiumStore
 from test_real_run_tools_support import load_tool
 
+
+class _OAuthAcceptanceStore:
+    def __init__(self) -> None:
+        self.users: dict[str, dict[str, Any]] = {}
+        self.sessions: dict[str, dict[str, Any]] = {}
+        self.applications: dict[str, dict[str, Any]] = {}
+        self.application_preferences: dict[str, str] = {}
+        self.oauth_states: dict[str, dict[str, Any]] = {}
+        self.installations: dict[str, dict[str, Any]] = {}
+
+    async def get_user(self, user_id: str) -> dict[str, Any] | None:
+        return self.users.get(user_id)
+
+    async def create_user(self, user_id: str, **values: Any) -> dict[str, Any]:
+        user = {"id": user_id, **values}
+        self.users[user_id] = user
+        return dict(user)
+
+    async def save_session(self, token_hash: str, **values: Any) -> None:
+        self.sessions[token_hash] = {**values, "revoked": False}
+
+    async def get_session(self, token_hash: str) -> dict[str, Any] | None:
+        return self.sessions.get(token_hash)
+
+    async def list_linear_application_configs(self, user_id: str) -> list[dict[str, Any]]:
+        return [
+            dict(row)
+            for row in self.applications.values()
+            if row.get("user_id") == user_id
+        ]
+
+    async def save_linear_application_config(self, row: dict[str, Any]) -> None:
+        self.applications[str(row["id"])] = dict(row)
+
+    async def set_linear_application_preference(self, user_id: str, config_id: str) -> None:
+        self.application_preferences[user_id] = config_id
+
+    async def get_linear_application_preference(self, user_id: str) -> str | None:
+        return self.application_preferences.get(user_id)
+
+    async def get_linear_application_config(self, config_id: str) -> dict[str, Any] | None:
+        return self.applications.get(config_id)
+
+    async def save_oauth_state(self, token_hash: str, row: dict[str, Any]) -> None:
+        self.oauth_states[token_hash] = dict(row)
+
+    async def consume_oauth_state(self, token_hash: str) -> dict[str, Any] | None:
+        return self.oauth_states.pop(token_hash, None)
+
+    async def save_workspace_installation(self, row: dict[str, Any]) -> None:
+        self.installations[str(row["id"])] = dict(row)
+
+    async def activate_workspace_installation(self, user_id: str, installation_id: str) -> None:
+        for row in self.installations.values():
+            if row.get("user_id") == user_id:
+                row["active"] = str(row["id"]) == installation_id
+        self.installations[installation_id]["state"] = "ready"
+
+    async def get_active_workspace_installation(self, user_id: str) -> dict[str, Any] | None:
+        return next(
+            (
+                dict(row)
+                for row in self.installations.values()
+                if row.get("user_id") == user_id and row.get("active")
+            ),
+            None,
+        )
+
+    async def get_candidate_workspace_installation(self, user_id: str) -> dict[str, Any] | None:
+        return next(
+            (
+                dict(row)
+                for row in reversed(list(self.installations.values()))
+                if row.get("user_id") == user_id and not row.get("active")
+            ),
+            None,
+        )
+
+    async def list_workspace_installations(self, user_id: str) -> list[dict[str, Any]]:
+        return [
+            dict(row)
+            for row in self.installations.values()
+            if row.get("user_id") == user_id
+        ]
 
 async def test_oauth_bootstrap_uses_real_session_callback_and_active_installation(tmp_path) -> None:
     tool = load_tool("real_symphony_e2e_podium")
@@ -21,7 +106,7 @@ async def test_oauth_bootstrap_uses_real_session_callback_and_active_installatio
         debug_auth=True,
         secure_cookies=False,
         secret_key="test-secret",
-        store=PodiumStore(data_dir=tmp_path / "store"),
+        store=_OAuthAcceptanceStore(),
         linear_client_id="default-client",
         linear_client_secret="default-secret",
         linear_redirect_uri="http://podium.test/api/v1/linear/oauth/callback",
@@ -39,6 +124,8 @@ async def test_oauth_bootstrap_uses_real_session_callback_and_active_installatio
             "projects": [{"id": "project-1", "name": "Hell", "slugId": "HELL"}],
         },
     )
+    app.state.podium.validate_candidate_project_access = AsyncMock()
+    app.state.podium.mark_linear_connected = AsyncMock()
     transport = httpx.ASGITransport(app=app)
     session = tool.PodiumSession("http://podium.test", transport=transport)
     evidence = tool.Evidence(tmp_path / "evidence.json")
@@ -215,7 +302,7 @@ async def test_denied_oauth_is_durable_and_preserves_active_installation(tmp_pat
         debug_auth=True,
         secure_cookies=False,
         secret_key="test-secret",
-        store=PodiumStore(data_dir=tmp_path / "store"),
+        store=_OAuthAcceptanceStore(),
         linear_client_id="default-client",
         linear_client_secret="default-secret",
         linear_redirect_uri="http://podium.test/api/v1/linear/oauth/callback",
@@ -233,6 +320,8 @@ async def test_denied_oauth_is_durable_and_preserves_active_installation(tmp_pat
             "projects": [{"id": "project-1", "name": "Hell", "slugId": "HELL"}],
         },
     )
+    app.state.podium.validate_candidate_project_access = AsyncMock()
+    app.state.podium.mark_linear_connected = AsyncMock()
     transport = httpx.ASGITransport(app=app)
     session = tool.PodiumSession("http://podium.test", transport=transport)
     evidence = tool.Evidence(tmp_path / "evidence.json")

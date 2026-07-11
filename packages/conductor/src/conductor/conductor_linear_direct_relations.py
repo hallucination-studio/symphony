@@ -6,7 +6,7 @@ from .conductor_linear_direct_base import LinearDirectProxyError
 from .conductor_linear_direct_helpers import _relation_matches
 
 
-class RepositoryHandoffRelationMixin:
+class ManagedRunRelationMixin:
     async def create_issue_relation(
         self,
         *,

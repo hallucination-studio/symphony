@@ -2,10 +2,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from performer_api.managed_runs import ManagedRunState, WorkItemState
-
 from .conductor_managed_run_coordinator import ConductorManagedRunCoordinator
 from .conductor_managed_run_runtime_waits import is_runtime_wait_gate_status
+from .conductor_managed_run_state import ManagedRunState, WorkItemState
 
 
 BLOCKED_STYLE_NAMES = frozenset({"blocked", "needs more"})

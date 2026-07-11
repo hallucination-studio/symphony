@@ -7,7 +7,6 @@ from typing import Any
 import shutil
 import subprocess
 import socket
-import httpx
 
 from .conductor_models import (
     ConductorSettings,
@@ -29,10 +28,7 @@ from .conductor_service_helpers import (
     _merge_project_labels,
 )
 from .conductor_service_types import ConductorServiceError, CoordinationCadence, CoordinationResult
-from .conductor_linear_direct import ProjectLabelLinearProxy, RepositoryHandoffLinearProxy
-from .conductor_repository_handoff import (
-    RepositoryHandoffCoordinator,
-)
+from .conductor_linear_direct import ManagedRunLinearProxy, ProjectLabelLinearProxy
 
 class ConductorService(ConductorPodiumSyncMixin, ConductorServiceViewsMixin):
     def __init__(
@@ -51,7 +47,7 @@ class ConductorService(ConductorPodiumSyncMixin, ConductorServiceViewsMixin):
         self._managed_run_runtime_config: dict[str, Any] = {}
         self._smoke_check_lock = asyncio.Lock()
         self._startup_locks: dict[str, asyncio.Lock] = {}
-        self.repository_handoff_tracker_factory = self._repository_handoff_tracker
+        self.managed_run_tracker_factory = self._managed_run_tracker
         self.project_label_proxy_factory = self._project_label_proxy
         self.coordination_cadence = CoordinationCadence()
         self._podium_connection: dict[str, Any] = {
@@ -82,28 +78,16 @@ class ConductorService(ConductorPodiumSyncMixin, ConductorServiceViewsMixin):
     async def get_instance_coordinated(self, instance_id: str) -> InstanceRecord | None:
         return self.get_instance(instance_id)
 
-    async def coordinate_repository_handoff_closeouts(self, *, instance_id: str | None = None) -> dict[str, Any]:
-        return await RepositoryHandoffCoordinator(
-            ops_rows=self._ops_stores,
-            tracker_factory=self.repository_handoff_tracker_factory,
-        ).coordinate(instance_id=instance_id)
-
-    def _repository_handoff_tracker(
-        self,
-        instance: InstanceRecord,
-        *,
-        transport: httpx.AsyncBaseTransport | None = None,
-    ) -> Any:
+    def _managed_run_tracker(self, instance: InstanceRecord) -> Any:
         settings = self.store.get_settings()
         endpoint_base = settings.podium_url.strip().rstrip("/")
         endpoint = f"{endpoint_base}/api/v1/linear/graphql" if endpoint_base else "https://api.linear.app/graphql"
         api_key = settings.podium_proxy_token.strip()
-        return RepositoryHandoffLinearProxy(
+        return ManagedRunLinearProxy(
             endpoint=endpoint,
             api_key=api_key,
             project_slug=instance.linear_project,
             required_delegate_id=_linear_agent_app_user_id(instance.linear_filters) or None,
-            transport=transport,
         )
 
     def _project_label_proxy(self, instance: InstanceRecord) -> Any:

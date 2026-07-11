@@ -119,8 +119,9 @@ from the last committed page without losing or duplicating work.
 Repeated observations belong to one continuously observed delegation epoch and
 reuse its dispatch idempotency key. Podium closes that epoch only after a
 durably observed non-delegated transition. A later delegation starts a new epoch,
-allowing exactly one Managed Run per delegation epoch. Parent/projection issues
-are excluded before dispatch.
+allowing exactly one dispatch per delegation epoch. Every epoch for the same
+Linear issue still commits or resumes that issue's one durable Managed Run.
+Parent/projection issues are excluded before dispatch.
 
 Poll failures retain the last safe checkpoint, error code, sanitized reason,
 retry count, and next attempt. The scheduler uses durable exponential backoff

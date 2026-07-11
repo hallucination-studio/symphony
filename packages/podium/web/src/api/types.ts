@@ -1,6 +1,5 @@
 // Shared types mirroring the Podium BFF JSON contracts.
 //
-// These mirror the dataclasses in packages/podium/src/podium/models.py.
 // The onboarding progress the backend returns is intentionally flat
 // (current_step + completed_steps + next_action); the rich, per-step view
 // the UI renders is derived client-side in ../lib/onboarding.ts.

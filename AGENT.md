@@ -14,7 +14,8 @@ Symphony is one product, not four unrelated projects. The repository remains `sy
   state, starts Performer turns, and reports state/events upward to Podium.
 - `performer` is the execution worker. Each short-lived Performer runs exactly
   one fenced managed-run turn from request/result JSON paths.
-- `performer_api` is the shared contract package: managed-run DTOs, plan/work-item state, ops projections, runtime config, and registration DTOs.
+- `performer_api` is limited to shared Managed Run wire contracts: plans,
+  work items/results, turn contexts, runtime policy/profiles, and validation.
 
 Package boundaries are runtime boundaries, not product boundaries. Keep user-facing language anchored in Symphony as the whole system, with Podium, Conductor, and Performer as roles inside that system.
 
@@ -23,7 +24,9 @@ Current hard renames:
 - no Python package or CLI named `symphony`;
 - the worker CLI is `performer`;
 - runtime labels use `performer:*`;
-- managed state/log defaults are `state/performer.json` and `logs/performer.log`;
+- durable Managed Run state is `managed_run/managed_run.db`; Performer output is
+  retained in per-instance `performer-NNNNNN.log` generations and per-attempt
+  `attempt.log` files;
 - Conductor data defaults to `.conductor`;
 - Conductor and Performer do not ship a local web console in this build. Conductor exposes the local daemon/API; Podium is the SaaS web boundary.
 
@@ -35,7 +38,7 @@ Current hard renames:
   - `performer`, `conductor`, and `podium` must not directly import each other.
 - Keep Conductor as the only local process manager for Performer. Conductor should start Performer through the installed `performer` command or the existing repo-local fallback, not by importing Performer internals.
 - Keep shared schemas and parsing in `performer_api` when more than one role needs the contract. Keep runtime adapters, subprocess management, tracker clients, and daemon logic in their owning role package.
-- Do not reintroduce Performer HTTP status/web UI or Conductor static web UI unless the product direction explicitly changes. Runtime status should flow through persisted state/ops and Conductor APIs.
+- Do not reintroduce Performer HTTP status/web UI or Conductor static web UI unless the product direction explicitly changes. Runtime status should flow through durable Managed Run state, Conductor APIs, reports, and correlated logs.
 - Avoid compatibility shims for old `symphony` imports, commands, labels, files, or logs unless explicitly requested. This refactor is a hard break.
 - Do not print secrets. Settings such as `linear_api_key`, `podium_token`, and environment-resolved tokens may be validated or passed through, but final responses, logs, and API responses must not echo secret values.
 - Keep runtime behavior aligned with `docs/product/runtime-pipeline.md`,
@@ -44,9 +47,41 @@ Current hard renames:
   `docs/product/linear-projection.md`, and
   `docs/product/runtime-profiles-backends.md`. Do not add legacy scheduling or
   `WORKFLOW.md` execution paths.
-- Prefer small focused modules over large cross-role files. When adding behavior, put lifecycle, repo materialization, ops/retention reads, registration/reporting, tracker integration, and Codex process handling in clearly owned modules.
-- Use structured models and parsers already in the codebase instead of ad hoc string manipulation for workflow config, persisted state, ops snapshots, registration payloads, and Linear data.
+- Prefer small focused modules over large cross-role files. When adding behavior, put lifecycle, repo materialization, Managed Run reads, registration/reporting, tracker integration, and Codex process handling in clearly owned modules.
+- Use structured models and parsers already in the codebase instead of ad hoc string manipulation for workflow config, durable state, API/report snapshots, registration payloads, and Linear data.
 - Tests should cover both the role-local behavior and the cross-role contract. Add or update import-boundary tests when package relationships change.
+
+## Scope Authority And No-Inference Rule
+
+Do not expand product behavior from an agent's guess about what would be useful,
+complete, conventional, or future-proof. Product scope may come only from an
+explicit user request, an accepted product/architecture document, an existing
+observable behavior being deliberately preserved, or a named defect/invariant
+that the requested work explicitly covers.
+
+- Default to the smallest behavior-preserving implementation that satisfies the
+  authorized outcome. Do not add a new actor, customer workflow, state or
+  transition, API/DTO field, database fact, configuration option, feature flag,
+  retry/fallback policy, integration, UI surface, compatibility path, log
+  contract, or acceptance scenario merely because it seems helpful.
+- A necessary internal consequence may proceed without separate approval only
+  when it is directly required by the authorized outcome, reversible, and does
+  not create new customer-visible behavior or a new public/durable/external
+  contract. Record the consequence in the slice's scope ledger.
+- If an assumption would change customer-visible behavior, public interfaces,
+  durable state semantics, external permissions or cost, security posture,
+  workflow branching, supported compatibility, or product vocabulary, stop and
+  obtain explicit user approval before implementation.
+- Discoveries outside scope are reported as deferred candidates, not implemented
+  opportunistically. Tests must prove authorized behavior or an existing named
+  invariant; a new test must not turn an imagined feature into a requirement.
+- Every non-trivial slice starts with a scope ledger containing `authorized`,
+  `required_consequences`, `out_of_scope`, `assumptions_requiring_approval`, and
+  `deferred_ideas`. `assumptions_requiring_approval` must be empty before
+  production changes begin.
+- Review must trace every new production behavior and persistent/public contract
+  to one authorized source. Untraceable behavior is `UNAPPROVED_SCOPE_EXPANSION`
+  and blocks completion.
 
 ## Podium UI / Design System
 
@@ -227,13 +262,13 @@ PYTHONPATH=$(pwd)/packages/performer-api/src:$(pwd)/packages/performer/src:$(pwd
   --out .test-real-flow/evidence/linear-tree-audit.json
 ```
 
-Audit persisted runtime state:
+Audit durable Managed Run state and its required runtime artifacts:
 
 ```bash
 PYTHONPATH=$(pwd)/packages/performer-api/src:$(pwd)/packages/performer/src:$(pwd)/packages/conductor/src:$(pwd)/packages/podium/src:tools \
   .venv/bin/python tools/runtime_claims_audit.py \
-  --state /path/to/instances/inst-1/state/performer.json \
-  --log /path/to/instances/inst-1/logs/performer.log \
+  --data-root /path/to/conductor-data \
+  --instance-id inst-1 \
   --out .test-real-flow/evidence/runtime-claims-audit.json
 ```
 
@@ -243,7 +278,7 @@ Observe a running real scenario without mutating Linear:
 PYTHONPATH=$(pwd)/packages/performer-api/src:$(pwd)/packages/performer/src:$(pwd)/packages/conductor/src:$(pwd)/packages/podium/src:tools \
   .venv/bin/python tools/real_run_observer.py \
   --issue HELL-123 \
-  --instance-root /path/to/instances/inst-1 \
+  --instance-root /path/to/conductor-data/instances/inst-1 \
   --interval 10 \
   --timeout 300 \
   --stop-on-diagnosis \
@@ -256,7 +291,7 @@ Bundle real-run evidence:
 ```bash
 PYTHONPATH=$(pwd)/packages/performer-api/src:$(pwd)/packages/performer/src:$(pwd)/packages/conductor/src:$(pwd)/packages/podium/src:tools \
   .venv/bin/python tools/real_run_evidence_bundle.py \
-  --instance-root /path/to/instances/inst-1 \
+  --instance-root /path/to/conductor-data/instances/inst-1 \
   --business-issue .test-real-flow/evidence/business-issue.json \
   --linear-tree .test-real-flow/evidence/linear-tree-audit.json \
   --observer .test-real-flow/evidence/runtime-samples.jsonl \
@@ -285,8 +320,8 @@ A real run must:
    gates, Codex, verification, evidence, and state transitions.
 6. Use real `codex app-server` when the scenario says real Codex.
 7. Record installation, project binding, polling checkpoints/delegation epoch,
-   Linear tree, runtime state, ops snapshot, logs, cleanup, and deduplication
-   evidence.
+   Linear tree, durable Managed Run database/API/report state, generation and
+   attempt logs, cleanup, and deduplication evidence.
 8. Archive/audit the test project before and after the scenario.
 
 For Podium-managed flows, the real run must additionally follow `docs/real-run-testing-guide.md#podium-web-to-linear-acceptance`:

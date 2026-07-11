@@ -31,6 +31,7 @@ from real_symphony_e2e_wait_helpers import (
     immediate_pipeline_failure,
 )
 from real_symphony_e2e_wait_finalize import write_wait_state_artifacts
+from runtime_claims_audit import latest_generation_log, sanitize_evidence_value, sanitize_text
 
 
 @dataclass
@@ -49,8 +50,6 @@ class WaitState:
     expected_failure: str
     pipeline_scenario: str
     instance_root: Path = field(init=False)
-    state_path: Path = field(init=False)
-    ops_path: Path = field(init=False)
     result_path: Path = field(init=False)
     fallback_result_path: Path = field(init=False)
     log_path: Path = field(init=False)
@@ -69,11 +68,9 @@ class WaitState:
 
     def __post_init__(self) -> None:
         self.instance_root = Path(self.instance["instance_dir"])
-        self.state_path = Path(self.instance["persistence_path"])
-        self.ops_path = self.state_path.parent / "ops.json"
         self.fallback_result_path = Path(self.instance["workspace_root"]) / "SYMPHONY_REAL_E2E_RESULT.md"
         self.result_path = self.fallback_result_path
-        self.log_path = Path(self.instance["log_path"])
+        self.log_path = latest_generation_log(self.instance_root) or self.instance_root / "logs" / "performer-000001.log"
         self.instance_id = str(self.instance["id"])
 
 
@@ -97,14 +94,13 @@ async def wait_for_run(**kwargs: Any) -> dict[str, Any]:
 
 
 async def _sample_runtime(state: WaitState) -> dict[str, Any] | None:
-    if not state.log_path.exists():
-        generated = sorted((state.instance_root / "logs").glob("performer-*.log"))
-        if generated:
-            state.log_path = generated[-1]
+    current_log = latest_generation_log(state.instance_root)
+    if current_log is not None:
+        state.log_path = current_log
     try:
         state.final_issue = await fetch_linear_issue(state.token, state.issue_id)
     except RuntimeError as exc:
-        state.samples.append({"at": utc_now(), "issue_state": "unknown", "process_status": "unknown", "linear_fetch_error": str(exc)})
+        state.samples.append({"at": utc_now(), "issue_state": "unknown", "process_status": "unknown", "linear_fetch_error": sanitize_text(str(exc))})
         return None
     process_status, managed_run_payload = _runtime_and_managed_run_payload(state)
     managed_run_work_items = conductor_managed_run_work_items(managed_run_payload)
@@ -172,7 +168,7 @@ def _print_progress(
         "active_leases": len(leases),
         "human_waits": [{"wait_id": action.get("wait_id"), "node_id": action.get("node_id"), "reason": action.get("reason"), "status": action.get("status")} for action in actions],
     }
-    print(json.dumps(payload, sort_keys=True), flush=True)
+    print(json.dumps(sanitize_evidence_value(payload), sort_keys=True), flush=True)
 
 
 async def _handle_sample(state: WaitState, sample: dict[str, Any]) -> str | dict[str, Any] | None:
@@ -203,7 +199,12 @@ def _handle_immediate_failure(state: WaitState, sample: dict[str, Any]) -> dict[
         failure = _immediate_failure_without_attempt(failure, state.crash_attempt_id)
     if failure is None:
         return None
-    state.evidence.check("managed-run-runtime-error:visible", False, failure=failure, process_status=sample.get("process_status"))
+    state.evidence.check(
+        "managed-run-runtime-error:visible",
+        False,
+        failure=sanitize_evidence_value(failure),
+        process_status=sample.get("process_status"),
+    )
     return write_wait_state_artifacts(state)
 
 
@@ -312,7 +313,7 @@ async def _complete_and_push_human_action(state: WaitState, action: dict[str, An
     try:
         completion = await complete_conductor_human_action(state.token, action, response=response)
     except Exception as exc:
-        state.evidence.check("human-action:linear-child-complete", False, child_issue_id=child_issue_id, error=str(exc))
+        state.evidence.check("human-action:linear-child-complete", False, child_issue_id=child_issue_id, error=sanitize_text(str(exc)))
         return
     state.completed_actions.add(child_issue_id)
     state.completed_waits.add(wait_id)

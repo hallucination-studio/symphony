@@ -20,18 +20,26 @@ expresses the managed-run plan. Linear `blocks` relations may mirror work-item
 dependencies for operator readability, but dependency satisfaction comes only
 from Conductor work-item state: dependencies must be Done.
 
-## Ingestion
+## Dependency Observation Gap
 
-Linear ingestion is union-only and idempotent:
+Inbound human-created `blocks` relations do not currently change execution
+readiness. The former direct-unit implementation was never connected to the
+installed Conductor path and rewrote accepted work-item payloads, so it is not a
+supported ingestion contract or acceptance proof.
 
-- start from the accepted plan's work-item dependencies;
-- add new human-created `blocks` edges;
-- drop edges touching canceled work items;
-- validate the merged dependency set before commit;
-- commit nothing when topology is unchanged.
+C1.2 and C3.1 will close this gap with typed Linear observations and a versioned
+immutable `DependencyOverlay`. The target behavior will:
 
-A lagging Linear read must not delete a live local edge. Deleting or rewiring
-dependencies requires a validated topology change.
+- preserve the accepted plan and its dependency hash;
+- append validated human-created `blocks` edges in an overlay;
+- reject cycles, stale versions, partial observations, and changes to started
+  targets;
+- derive effective readiness from plan dependencies union the active overlay;
+- commit nothing when the effective topology is unchanged.
+
+A lagging or partial Linear read must not delete a live overlay edge. Until that
+contract is implemented and accepted, inbound dependency changes remain an
+explicit product gap.
 
 ## Attempt Comments
 

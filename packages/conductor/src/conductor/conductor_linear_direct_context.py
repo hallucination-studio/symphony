@@ -6,7 +6,7 @@ class LinearDirectContextMixin:
     async def _issue_label_context(self, issue_id: str) -> dict[str, Any]:
         payload = await self.graphql(
             """
-query ProjectIssuePhaseContext($issueId: String!) {
+query ManagedRunIssueContext($issueId: String!) {
   issue(id: $issueId) {
     id
     team { id }
@@ -30,7 +30,7 @@ query ProjectIssuePhaseContext($issueId: String!) {
     async def _state_id_by_name(self, team_id: str, state_name: str) -> str | None:
         payload = await self.graphql(
             """
-query ProjectIssuePhaseStateByName($teamId: ID!, $stateName: String!) {
+query ManagedRunStateByName($teamId: ID!, $stateName: String!) {
   workflowStates(first: 20, filter: { team: { id: { eq: $teamId } }, name: { eq: $stateName } }) {
     nodes { id name }
   }
@@ -47,7 +47,7 @@ query ProjectIssuePhaseStateByName($teamId: ID!, $stateName: String!) {
     async def _creation_context(self, issue_id: str) -> dict[str, str]:
         payload = await self.graphql(
             """
-query RepositoryHandoffCreationContext($issueId: String!) {
+query ManagedRunCreationContext($issueId: String!) {
   issue(id: $issueId) {
     team { id }
     project { id }
@@ -66,7 +66,7 @@ query RepositoryHandoffCreationContext($issueId: String!) {
     async def _existing_label_id(self, team_id: str, label_name: str) -> str | None:
         payload = await self.graphql(
             """
-query RepositoryHandoffLabelByName($name: String!, $teamId: ID!) {
+query ManagedRunLabelByName($name: String!, $teamId: ID!) {
   issueLabels(first: 20, filter: { name: { eq: $name }, team: { id: { eq: $teamId } } }) {
     nodes { id name }
   }

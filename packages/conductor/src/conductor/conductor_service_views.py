@@ -10,8 +10,9 @@ from .conductor_runtime import LogQuery
 from .conductor_service_helpers import *  # noqa: F403
 from .conductor_service_runtime_view import managed_run_runtime_snapshot
 from .conductor_service_types import *  # noqa: F403
-from performer_api.models import utc_now
-from performer_api.ops_store import OpsStore
+from .conductor_time import utc_now
+
+
 class ConductorServiceViewsMixin:
     def update_podium_connection(self, channel: str, *, status: str, error: str | None = None) -> None:
         sanitized = _sanitize_connection_error(error)
@@ -302,11 +303,3 @@ class ConductorServiceViewsMixin:
 
     def _managed_mode_enabled(self) -> bool:
         return self.store.get_settings().managed_mode
-
-    def _ops_stores(self) -> list[tuple[InstanceRecord, OpsStore, OpsSnapshot]]:
-        rows: list[tuple[InstanceRecord, OpsStore, OpsSnapshot]] = []
-        for instance in self.store.list_instances():
-            store = OpsStore(Path(instance.persistence_path).parent / "ops.json")
-            snapshot = store.load()
-            rows.append((instance, store, snapshot))
-        return rows

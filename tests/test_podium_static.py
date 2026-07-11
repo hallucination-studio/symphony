@@ -34,7 +34,12 @@ async def test_serves_index_and_spa_fallback(tmp_path: Path) -> None:
     (static / "index.html").write_text("<!doctype html><title>Podium</title>", encoding="utf-8")
     (static / "assets" / "app.js").write_text("console.log('hi')", encoding="utf-8")
 
-    app = create_app(turnstile_verifier=lambda t, ip: True, secure_cookies=False, static_dir=str(static))
+    app = create_app(
+        turnstile_verifier=lambda t, ip: True,
+        secure_cookies=False,
+        static_dir=str(static),
+        store=object(),
+    )
     async with _client(app) as client:
         asset = await client.get("/assets/app.js")
         assert asset.status_code == 200
@@ -52,7 +57,12 @@ async def test_serves_index_and_spa_fallback(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_built_spa_deep_link_resolves_root_assets() -> None:
     static = Path(__file__).parents[1] / "packages" / "podium" / "src" / "podium" / "static"
-    app = create_app(turnstile_verifier=lambda t, ip: True, secure_cookies=False, static_dir=str(static))
+    app = create_app(
+        turnstile_verifier=lambda t, ip: True,
+        secure_cookies=False,
+        static_dir=str(static),
+        store=object(),
+    )
 
     async with _client(app) as client:
         spa = await client.get("/setup/linear")
@@ -68,7 +78,18 @@ async def test_built_spa_deep_link_resolves_root_assets() -> None:
 
 @pytest.mark.asyncio
 async def test_health_and_service_root_unaffected_without_static() -> None:
-    app = create_app(turnstile_verifier=lambda t, ip: True, secure_cookies=False)
+    class HealthyStore:
+        async def probe_background_job_failure_store(self) -> None:
+            return None
+
+        async def get_background_job_failure(self, _job_name: str) -> None:
+            return None
+
+    app = create_app(
+        turnstile_verifier=lambda t, ip: True,
+        secure_cookies=False,
+        store=HealthyStore(),
+    )
     async with _client(app) as client:
         health = await client.get("/api/v1/health")
         assert health.json() == {"status": "ok"}

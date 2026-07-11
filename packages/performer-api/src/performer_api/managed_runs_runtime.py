@@ -4,7 +4,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any
 
 from performer_api.managed_runs_enums import MANAGED_RUN_BACKENDS_BY_ROLE, ManagedRunRuntimeRole
-from performer_api.managed_runs_utils import _dict, _int, _jsonable_dict, _optional_int, _runtime_role, sanitize_profile_settings
+from performer_api.managed_runs_utils import _dict, _int, _jsonable_dict, _optional_int, _runtime_role
 
 
 @dataclass(frozen=True)
@@ -30,10 +30,6 @@ class RuntimeProfile:
             role=_runtime_role(payload.get("role")),
             settings=_dict(payload.get("settings")),
         )
-
-    def sanitized(self) -> RuntimeProfile:
-        return replace(self, settings=sanitize_profile_settings(self.settings))
-
 
 @dataclass(frozen=True)
 class ManagedRunCapacity:
@@ -144,9 +140,6 @@ class RuntimeConfigEnvelope:
             managed_run_policy=ManagedRunPolicy.from_dict(_dict(payload.get("managed_run_policy"))),
             profiles=profiles,
         )
-
-    def sanitized(self) -> RuntimeConfigEnvelope:
-        return replace(self, profiles={role: profile.sanitized() for role, profile in self.profiles.items()})
 
     def validation_errors(self) -> list[str]:
         errors: list[str] = []

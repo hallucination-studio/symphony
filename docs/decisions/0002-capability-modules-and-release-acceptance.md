@@ -22,13 +22,13 @@ Release acceptance will be organized around an explicit catalog of current
 customer jobs, composed customer journeys, and named acceptance facts. One
 canonical `customer_onboarding_to_completed_managed_run` journey will exercise
 the real customer path through a browser, Linear OAuth, project selection,
-Conductor installation and binding, webhook dispatch, a real Performer and
-Codex run, verification, Linear customer-experience review, evidence archival,
-and cleanup. It is mandatory for core or major changes and selectable on demand
-for localized changes. Focused recovery and edge scenarios prove one additional
-risk each. Full-function acceptance is the aggregate coverage of the
-risk-selected suite, not one scenario that forces every branch to occur in a
-single run.
+Conductor installation and binding, fully paginated polling dispatch, a real
+Performer and Codex run, verification, Linear customer-experience review,
+evidence archival, and cleanup. It is mandatory for core or major changes and
+selectable on demand for localized changes. Focused recovery and edge scenarios
+prove one additional risk each. Full-function acceptance is the aggregate
+coverage of the risk-selected suite, not one scenario that forces every branch
+to occur in a single run.
 
 Implementation will be parallel-first. A small contract and dependency
 foundation is sequential; after that gate, role-owned workstreams proceed in
@@ -72,9 +72,9 @@ Read-only repository analysis found the following structural signals:
   the package. Those modules appear to belong to an older runtime boundary and
   duplicate responsibilities now owned by Conductor and Podium. Reachability
   and external-consumer checks are required before removal.
-- JSON and PostgreSQL storage implementations duplicate behavior legitimately
-  as adapters, but there is no typed storage port defining their required
-  parity.
+- Podium's installed composition uses PostgreSQL as its only persistence
+  adapter. The former JSON test mirror duplicated that behavior without a
+  production consumer or a capability-scoped storage port.
 - Python BFF payloads and TypeScript browser types are hand-maintained. This is
   legitimate boundary duplication, but state fields often degrade to `string`,
   so drift is difficult to detect.
@@ -91,11 +91,12 @@ The current real-run tooling has also become a second orchestration system:
   and completion rules are reimplemented by the runner, observer, audit, and
   acceptance layers.
 - The documented acceptance journey requires real browser OAuth, an initially
-  unbound named Conductor, Podium-owned project binding, signed AgentSession
-  webhook intake, reconciliation recovery, and external cleanup. The current
-  runner instead requires a pre-supplied app access token and application id,
-  directly enrolls a runtime, patches Conductor settings, and protects a
-  polling-only path in source-level tests.
+  unbound named Conductor, Podium-owned project binding, full baseline and
+  incremental cursor pagination, transactional polling checkpoints,
+  delegation-epoch idempotency, restart and redelegation recovery, and external
+  cleanup. The current runner instead requires a pre-supplied app access token
+  and application id, directly enrolls a runtime, patches Conductor settings,
+  and does not execute or preserve evidence for that polling path end to end.
 - The `overall-dod` scenario combines parallel execution, forced integration
   conflict, replan, runtime wait, crash recovery, and live policy changes. Its
   failures are causally ambiguous, and several requested outcomes are mutually
@@ -218,7 +219,7 @@ design introduces structured concepts for:
 
 ### Ports At External Boundaries
 
-Linear, PostgreSQL/JSON storage, Git, subprocesses, Codex, clocks, and browser
+Linear, PostgreSQL storage, Git, subprocesses, Codex, clocks, and browser
 automation are adapters behind narrow ports. Domain code does not import route
 modules or concrete adapters.
 
@@ -261,7 +262,7 @@ short sequential steps that unlock wider parallel execution.
 | Linear Installation | Podium | Default/custom app config, OAuth state/callback, candidate/active/cutover/revoke, token health | Installation identity, actor, scopes, organization, app user, token health |
 | Project Selection and Binding Intent | Podium | Project selection, named runtime, enrollment, online-unbound state, desired project/repo binding, label intent | Selected project, unique desired binding, exact label intent |
 | Runtime Config and Repository Health | Conductor | Validate staged project/repo config, persist acknowledged config revision, report repository readiness | Acknowledged config and repository health match Podium's desired binding |
-| Intake and Routing | Podium | Signed webhook, reconciliation cursor, dedupe, organization/project/app-user/binding/blocker/capacity eligibility | One normalized intake creates at most one eligible dispatch |
+| Intake and Routing | Podium | Full baseline/incremental cursor pagination, normalized observations, delegation epochs, transactional page checkpoints, idempotent dispatch, organization/project/app-user/binding/blocker/capacity eligibility | One delegation epoch creates at most one eligible dispatch without a skipped issue |
 | Dispatch Queue and Lease | Podium | Queue, wakeup, durable lease, fencing generation, heartbeat, ack, expiry, reclaim | Correlated queue/lease/ack with no duplicate ownership |
 | Managed Run | Conductor | One parent to one run, plan versions, work-item graph, readiness, checkpoints, run/work-item transitions | Durable run and work items match the accepted plan |
 | Attempt and Turn Lifecycle | Conductor | Accept dispatch lease, create attempt, materialize runtime profile, launch/monitor Performer, accept or reject fenced result | Local attempt and accepted outcome match the current lease and aggregate revision |
@@ -270,6 +271,32 @@ short sequential steps that unlock wider parallel execution.
 | Projection and Operator Interaction | Conductor | Publish Managed Runs reports and Linear projection intent; own managed/runtime wait resume transitions | Authority, Podium API, Linear, and logs show the same sanitized truth |
 | Release Evidence Verdict | Acceptance runner | Collect typed snapshots, run pure oracles, archive artifacts, score requirements, clean resources | Complete hashed evidence and cleanup-before/after parity |
 
+### Reliable Polling Intake
+
+Reliable polling is the only delegated-issue intake path. Podium performs a
+full baseline scan for a newly selected project and fully paginated incremental
+scans thereafter. Both scan modes follow every cursor page. Incremental scans
+observe delegated and no-longer-delegated issues using a stable
+`(updatedAt, issue_id)` high-water order so an issue is neither skipped nor
+silently kept delegated.
+
+Each page is one transactional unit of work. Podium normalizes every issue
+observation, opens or closes its delegation epoch, evaluates routing, creates
+an idempotent dispatch when eligible, and advances the page checkpoint in the
+same commit. A failed page rolls back all of those writes. The scan high-water
+mark advances only after the final page commits, and retryable failures retain
+their sanitized reason, attempt count, next action, and durable exponential
+backoff.
+
+The dispatch idempotency key includes installation, project, issue, and
+delegation epoch. Repeated observations and process restarts resume from the
+last committed page and cannot create another dispatch for the same epoch. A
+continuously observed delegation remains in one epoch; a durably observed
+non-delegated transition closes it; a later redelegation opens the next epoch
+and may create exactly one new dispatch. Acceptance evidence must show cursors,
+page commits, epoch transitions, idempotency keys, dispatch ids, and explicit
+recovery outcomes rather than infer correctness from a final run count.
+
 ## Authority Rules
 
 | Fact | Authority | Derived representations |
@@ -277,6 +304,7 @@ short sequential steps that unlock wider parallel execution.
 | Active Linear installation | Podium installation aggregate | Browser health view, proxy resolution, acceptance snapshot |
 | Selected project and desired binding | Podium topology aggregate | Conductor staged config, Linear managed label intent, project UI |
 | Acknowledged config revision and repository health | Conductor instance aggregate | Podium binding health, runtime detail view, logs |
+| Polling checkpoint, normalized issue observation, and delegation epoch | Podium intake aggregate | Polling health, dispatch idempotency, acceptance snapshot, logs |
 | Dispatch availability, durable lease, and lease fencing generation | Podium dispatch aggregate | Conductor lease client view, Podium operator view, logs |
 | Managed Run, plan, work-item state | Conductor Managed Run aggregate | Podium Managed Runs report, Linear projection, acceptance snapshot |
 | Performer result claim | Performer result file | Conductor result collector input, Performer log |
@@ -347,29 +375,29 @@ and dependency directions are normative.
 
 ```text
 packages/performer-api/src/performer_api/
-  managed_runs/
-    state.py          # shared enums and serialized state contracts
-    plan.py           # plan/work-item/checkpoint contracts
-    turns.py          # fenced request/result and runtime-wait contracts
-    results.py        # canonical turn result and event contracts
-    gates.py          # gate, verification, manifest contracts
-    runtime.py        # role profiles, policy, capacity, config envelope
-  ops/
-    models.py
-    projection.py
-    retention.py
-  config/
-    codex.py
-    sanitization.py
+  managed_runs.py             # supported shared wire-contract facade
+  managed_runs_enums.py       # serialized role/result/validation values
+  managed_runs_plan.py        # plan/work-item/checkpoint request contracts
+  managed_runs_turns.py       # fenced turn context and runtime-wait claims
+  managed_runs_results.py     # canonical claimed work-item result
+  managed_runs_runtime.py     # cross-role policy/profile/config envelope
+  managed_runs_validation.py  # validation for shared plan wire contracts
+  managed_runs_utils.py       # wire parsing helpers owned by those contracts
 ```
 
 Rules:
 
-- It may contain stable serialization and validation shared by multiple roles.
+- It contains only stable serialization and validation used by more than one
+  runtime role. Its supported facade exports the deliberately small wire
+  surface; file layout remains an implementation detail.
+- Conductor-owned durable run/work-item state, legal transitions, gate
+  snapshots, verification manifests, ops projections, and retention policy do
+  not belong here. Performer-owned Codex config loading and sanitization also
+  remain in Performer.
 - It must not contain Podium-only installation or authentication domain logic.
 - It must not import any runtime role.
-- A facade may expose the supported public contract, but wildcard re-export
-  chains are prohibited.
+- Wildcard re-export chains and role-local compatibility exports are
+  prohibited.
 
 ### performer
 
@@ -478,7 +506,6 @@ packages/podium/src/podium/
   infrastructure/
     unit_of_work.py
     postgres/
-    json/
   app.py
   composition.py
   cli.py
@@ -493,12 +520,14 @@ Rules:
 
 - One production state/service path replaces the current shadow service
   generation.
-- Every capability owns its narrow repository protocol. JSON and PostgreSQL
-  adapters implement those protocols and run the same capability-level
-  contract suites. A unit of work composes repositories only when one use case
-  requires an atomic multi-capability transaction.
-- Webhook and reconciliation intake call one normalization, routing, and
-  idempotency service.
+- Every capability owns its narrow repository protocol. PostgreSQL implements
+  those protocols and runs capability-level persistence and concurrency
+  contracts; higher layers use narrow fakes only at their owned boundary. A
+  unit of work composes repositories only when one use case requires an atomic
+  multi-capability transaction.
+- Baseline and incremental polling call one normalization, delegation-epoch,
+  routing, and idempotency service. Page observations, dispatches, and the page
+  checkpoint commit atomically before polling advances.
 - Background jobs run under a supervisor that records correlated sanitized
   failures in logs and durable health state. `except Exception: pass` is
   prohibited.
@@ -616,8 +645,8 @@ Test levels are:
   or subprocess behavior and controlled external adapters.
 - **System:** real local Podium/Conductor/Performer processes with deterministic
   external adapters or fault injection.
-- **Live acceptance:** real browser, OAuth, Linear, webhook origin, Conductor,
-  Performer, and Codex where required by the scenario.
+- **Live acceptance:** real browser, OAuth, Linear, fully paginated polling,
+  Conductor, Performer, and Codex where required by the scenario.
 
 The default `make test` remains free of live external dependencies. Proposed
 target commands, which do not exist until implementation, are:
@@ -655,34 +684,37 @@ reported as if they were businesses:
 BusinessScenarioSpec(
     id="B13_delegated_issue_to_verified_delivery",
     actor="project_member",
-    customer_job="Delegate a real business issue and receive verified delivery.",
-    start_state="routing_ready_project_with_delegated_issue",
-    accepted_outcome="verified_change_and_completed_managed_run",
-    visible_artifacts=("linear_issue_tree", "podium_managed_run", "repository_result"),
+    customer_job="Delegate real work and receive a verified repository delivery.",
+    start_state="routing_ready_delegated_issue",
+    accepted_outcome="verified_delivery_ref_and_done_run",
+    visible_artifacts=("linear_issue_tree", "podium_managed_run", "delivery_ref", "delivery_record"),
 )
 
 AcceptanceScenarioSpec(
     id="delegated_issue_to_verified_delivery",
-    proves="One delegated issue produces one verified, observable delivery.",
+    proves="One delegated issue produces one exact verified repository delivery ref.",
     business_scenarios=("B13_delegated_issue_to_verified_delivery",),
     minimum_level="system",
     real_boundaries=(),
-    authoritative_oracles=("dispatch", "managed_run", "repository"),
+    authoritative_oracles=("dispatch", "managed_run", "delivery", "repository"),
     operator_oracles=("podium", "linear", "logs"),
-    required_evidence=("turns", "linear_tree", "repository", "cleanup"),
+    required_evidence=("turns", "delivery_attempt", "delivery_record", "delivery_ref", "final_verification", "repository", "cleanup"),
+    cleanup=("resource_ledger",),
     trigger_tags=("managed_delivery", "manual"),
 )
 
 JourneySpec(
     id="customer_onboarding_to_completed_managed_run",
-    proves="A new customer can reach a verified Managed Run through the supported journey.",
+    proves="A new customer reaches one exact verified repository delivery and completed Managed Run.",
     business_scenarios=("B01a_register_workspace_account", "B01c_sign_out_workspace_session", "B02_authorize_default_linear_app", "B06a_select_managed_project", "B07_install_named_conductor", "B08_bind_project_repository", "B13_delegated_issue_to_verified_delivery", "B14_understand_managed_delivery"),
-    preconditions=("clean_database", "fresh_podium_account", "default_linear_app", "real_linear_project", "staged_codex_seed"),
-    real_boundaries=("browser", "linear", "podium", "conductor", "performer", "codex"),
-    authoritative_oracles=("installation", "binding", "dispatch", "managed_run"),
+    preconditions=("clean_postgresql", "fresh_podium_account", "default_linear_app", "real_linear_project", "staged_codex_seed"),
+    minimum_level="live",
+    real_boundaries=("browser", "linear", "podium", "conductor", "performer", "codex", "repository"),
+    authoritative_oracles=("installation", "binding", "polling", "dispatch", "managed_run", "delivery", "repository"),
     operator_oracles=("podium", "linear", "logs", "linear_customer_experience"),
-    required_evidence=("installation", "runtime", "turns", "linear_tree", "linear_experience_review", "cleanup"),
-    trigger_policy=("core_change", "major_change", "manual"),
+    required_evidence=("installation", "runtime", "page_checkpoints", "normalized_observations", "delegation_epochs", "idempotency_keys", "dispatches", "turns", "delivery_attempt", "delivery_record", "delivery_ref", "final_verification", "repository", "linear_tree", "linear_experience_review", "cleanup"),
+    cleanup=("resource_ledger", "credential_scrub", "cleanup_parity"),
+    trigger_tags=("core_change", "major_change", "manual"),
 )
 ```
 
@@ -714,8 +746,8 @@ allowed only when the customer action and terminal outcome remain the same.
 | `B01a_register_workspace_account`: create a workspace account | No account -> authenticated usable account | Podium registration, account, and bootstrap | Canonical journey |
 | `B01b_sign_in_existing_workspace`: return and sign in | Existing account without a session -> authenticated usable account | Podium login, account, and bootstrap | `workspace_account_access`; current canonical gap |
 | `B01c_sign_out_workspace_session`: end the current session | Authenticated session -> cookie invalid and protected bootstrap rejected | Podium logout and signed-out state | Canonical journey |
-| `B02_authorize_default_linear_app`: authorize the default app | No active installation -> healthy workspace app installation | Podium actor/scopes/org/app-user/token/webhook health; Linear app actor | Canonical journey |
-| `B03_activate_customer_owned_linear_app`: configure a custom app for the first time | No custom installation -> accepted active installation | Podium fixed callback/webhook URLs and candidate health; Linear app identity | `customer_owned_app_activation`; current live gap |
+| `B02_authorize_default_linear_app`: authorize the default app | No active installation -> healthy workspace app installation | Podium actor/scopes/org/app-user/token/polling health; Linear app actor | Canonical journey |
+| `B03_activate_customer_owned_linear_app`: configure a custom app for the first time | No custom installation -> accepted active installation | Podium fixed callback URL, polling configuration, and candidate health; Linear app identity | `customer_owned_app_activation`; current live gap |
 | `B04_replace_active_linear_app`: replace an app without disrupting work | Old app active -> new app active only after drain and runtime acknowledgement | Podium active/candidate/cutover/retired generations | `oauth_candidate_cutover` |
 | `B05a_reconnect_linear_installation`: repair a broken integration | Unhealthy installation -> healthy active installation | Podium actionable error, reconnect, and recovered health | `linear_installation_reconnect`; current full-journey gap |
 | `B05b_revoke_linear_installation`: disconnect an installation | Active unwanted installation -> revoked and unroutable | Podium revoke result and disabled routing state | `linear_installation_revoke`; current full-journey gap |
@@ -862,8 +894,8 @@ feedback loop without weakening fail-closed product behavior.
 The risk-selected suite contains one fully real customer journey when the
 change policy requires it or an operator requests it:
 
-1. Start Podium against a clean PostgreSQL database with a public HTTPS
-   callback/webhook origin and logs directed to the evidence root.
+1. Start Podium against a clean PostgreSQL database with a public HTTPS OAuth
+   callback origin and logs directed to the evidence root.
 2. In a real browser, register a fresh Podium account and verify the new
    session/bootstrap state.
 3. Choose the deployment-owned default Linear application and complete real
@@ -879,14 +911,20 @@ change policy requires it or an operator requests it:
    Conductor validation and durable config acknowledgement, one-project/one-
    Conductor constraints, and the exact managed project label.
 8. Run the real onboarding smoke check over installation, project, runtime,
-   repository, proxy, config, and webhook health.
+   repository, proxy, config, and polling health.
 9. Materialize the exact natural-language issue from the selected immutable
    `BusinessFixtureSpec` revision and delegate it to the installed workspace app
    user.
-10. Verify one signed AgentSession webhook creates exactly one eligible
-    dispatch for the bound Conductor.
-11. Verify the Conductor leases and acknowledges that dispatch and creates or
-    resumes exactly one durable Managed Run.
+10. Verify fully paginated baseline or incremental polling discovers the issue,
+    normalizes its observation, opens one continuously observed delegation
+    epoch, and atomically commits the page observations, one eligible dispatch,
+    and page checkpoint. Verify the scan high-water mark advances only after
+    the final page commits.
+11. Restart polling from the durable checkpoint and repeat the issue
+    observation before the Conductor leases it. Verify the same delegation
+    epoch and idempotency key produce no duplicate dispatch or skipped issue;
+    then verify the Conductor leases and acknowledges the dispatch and creates
+    or resumes exactly one durable Managed Run.
 12. Let real Performer turns and real Codex complete plan, work-item execution,
     independent verification, manifest publication, checkpoint, and final
     projection.
@@ -1123,7 +1161,7 @@ they can evaluate a release candidate.
 | `project_deselection` | Deselect removes Symphony scope without mutating Linear membership | Contract + selected real browser/Linear check | Bound or inaccessible project case |
 | `delegated_issue_to_verified_delivery` | Daily delegated work produces one verified, observable result without repeating onboarding | Deterministic system; canonical journey supplies full live proof | No injected fault |
 | `managed_run_observability` | Active, blocked, failed, and done runs explain state, evidence, and next action | System snapshots plus reviewer; selected real Linear/Podium captures | One visible blocked or failed state |
-| `webhook_recovery_dedupe` | A missed webhook is recovered without a duplicate dispatch | Integration + real Linear/Podium; no source-changing Codex turn | Suppress one delivery |
+| `polling_restart_redelegation` | Restart resumes from the last committed page without skips or duplicates, and redelegation creates exactly one dispatch in a new epoch | Integration + real Linear/Podium; no source-changing Codex turn | Restart between pages, then record one non-delegated transition and redelegate |
 | `routing_guards` | Wrong org/project/app user, blockers, capacity, or duplicate binding cannot route | Deterministic contract/system plus selected boundary checks | One ineligible input per separately reported case |
 | `deferred_dispatch_recovery` | Work rejected for a temporary blocker or capacity starts exactly once after recovery | Deterministic system; selected real Linear/Podium | Release one temporary blocker |
 | `linear_dependency_ingestion` | A customer-added `blocks` edge is unioned, validated, and changes readiness | Integration; real Linear when projection/ingestion changes | One invalid edge case |
@@ -1152,7 +1190,7 @@ Every executable entry stores its business mapping in
 | `project_deselection` | B06b; B06a is canonical-only |
 | `delegated_issue_to_verified_delivery` | B13 |
 | `managed_run_observability` | B14 |
-| `webhook_recovery_dedupe` | B13, B14 |
+| `polling_restart_redelegation` | B13, B14 |
 | `routing_guards`, `deferred_dispatch_recovery` | B08/B15 and B15 respectively |
 | `linear_dependency_ingestion` | B16 |
 | `plan_approval`, `work_item_approval`, `managed_information_wait`, `runtime_wait` | B17a, B17b, B18, B19 respectively |
@@ -1222,7 +1260,7 @@ Risk classification uses the first matching precedence:
 
 | Risk class | Non-negotiable triggers |
 |---|---|
-| `core` | Shared runtime contracts; auth/session/OAuth/installations; project selection, enrollment, binding, or config acknowledgement; webhook/reconciliation/routing/dispatch/lease/fencing; Managed Run transitions, planning, readiness, retry, rework, revision, gates, verification, integration, waits, or Linear projection; Performer turn/Codex/runtime-profile protocol; security, credential, sanitization, or acceptance oracle/evidence/reviewer behavior |
+| `core` | Shared runtime contracts; auth/session/OAuth/installations; project selection, enrollment, binding, or config acknowledgement; polling/intake/delegation-epoch/routing/dispatch/lease/fencing; Managed Run transitions, planning, readiness, retry, rework, revision, gates, verification, integration, waits, or Linear projection; Performer turn/Codex/runtime-profile protocol; security, credential, sanitization, or acceptance oracle/evidence/reviewer behavior |
 | `major` | Two or more runtime roles or business capabilities; public API/BFF contract plus consumers; durable schema or migration; replacement of a production composition path; or a broad executable change presumptively reaching 12 production files or 500 non-generated executable lines, excluding pure moves |
 | `localized` | One non-core capability, stable public and persistence contracts, no customer-flow semantic change, and below the major breadth threshold |
 
@@ -1282,7 +1320,7 @@ retirement; routine runs follow the trigger column.
 | Project deselection removes scope without mutating membership | Contract + selected live | `project_deselection` | Project scope affected/manual | Podium topology + Linear project | Deselected/routing state, membership audit |
 | Named enrollment is single-use, isolated, online, and initially unbound | Integration + live | Canonical journey | Core/major/manual | Podium topology + runtime presence | Enrollment record, install command, service/data-root identity |
 | Project/repository binding is unique and acknowledged | System + live | Canonical journey, `routing_guards` | Binding affected; canonical on core/major/manual | Podium desired binding + Conductor acknowledged config | Binding ids, rejected duplicates, repo health, label |
-| Onboarding smoke reflects real dependency health | Integration + live | Canonical journey | Core/major/manual | Capability health authorities + browser | Installation/project/runtime/repo/proxy/webhook results |
+| Onboarding smoke reflects real dependency health | Integration + live | Canonical journey | Core/major/manual | Capability health authorities + browser | Installation/project/runtime/repo/proxy/polling results |
 | Same-host runtimes remain isolated | Affected platform live | `runtime_same_host_isolation` | Runtime layout/platform affected | Podium topology + Conductor services | Runtime ids, service/data roots, ports, credentials, labels |
 | Runtime rename preserves identity, health, and label parity | Affected platform live | `runtime_rename` | Rename/label affected | Podium topology + Conductor service + Linear label | Prior/new name, runtime id, health, label |
 | Runtime replacement transfers ownership only after drain | Affected platform live | `runtime_replacement` | Replacement affected | Podium topology + Conductor services + Linear label | Drain, prior/new runtime and binding, label |
@@ -1294,8 +1332,9 @@ retirement; routine runs follow the trigger column.
 | Routing suspension drains and prevents new dispatch | Integration + affected platform | `runtime_routing_suspension` | Routing control affected | Podium routing authority + runtime | Drain, disabled state, no new lease |
 | Routing resume restores dispatch only after health checks | Integration + affected platform | `runtime_routing_resume` | Routing control affected | Podium routing authority + runtime | Health/config checks, enabled state, eligible lease |
 | Runtime logs and audit are scoped, sanitized, and useful | Integration + affected platform | `runtime_log_audit_access` | Log/audit surface affected | Podium audit/log authority + runtime | Scoped events, correlation ids, leak scan, next action |
-| Signed webhook happy-path intake queues exactly one dispatch | Contract + live | Canonical journey | Core/major/manual | Podium intake/dispatch + Linear delivery | Signature/timestamp/delivery id, normalized event, dispatch |
-| Reconciliation recovers a missed webhook without duplication | Integration + selected live | `webhook_recovery_dedupe` | Intake/reconciliation affected/manual | Podium intake/dispatch | Suppressed delivery, cursor, idempotency key, one dispatch |
+| Full baseline or incremental cursor pagination queues exactly one dispatch for a delegation epoch | Contract + live | Canonical journey | Core/major/manual | Podium intake/dispatch + Linear observation | Page cursors, normalized observations, epoch, idempotency key, dispatch, final high-water mark |
+| Polling restart resumes at the transactional page checkpoint without a skipped or duplicate dispatch | Integration + selected live | `polling_restart_redelegation` | Intake/checkpoint/recovery affected/manual | Podium intake/dispatch | Pre/post-restart checkpoint, repeated observation, same epoch/key, one dispatch |
+| A durable non-delegated observation closes an epoch and redelegation opens exactly one new epoch | Integration + selected live | `polling_restart_redelegation` | Intake/delegation lifecycle affected/manual | Podium intake/dispatch + Linear issue | Non-delegated transition, prior/new epoch, prior/new dispatch ids |
 | Organization/project/app-user/blocker/capacity guards fail closed visibly | Contract + system | `routing_guards` | Routing affected | Podium routing authority | One explicit skip reason per ineligible input |
 | Temporary blocker or capacity release starts exactly one run | System + selected live | `deferred_dispatch_recovery` | Routing/readiness/capacity affected | Podium routing + Conductor run mapping | Before/after eligibility, dispatch/run ids, no duplicate |
 | Queue, lease, fencing, heartbeat, ack, expiry, and reclaim are coherent | Contract + system + live | Canonical journey, `attempt_retry_restart` | Dispatch/attempt affected; canonical on core/major/manual | Podium dispatch + Conductor attempt | Lease/fence ids, heartbeats, reclaim, ack, ownership |
@@ -1370,7 +1409,7 @@ tools/symphony_acceptance/
     linear_project.py
     codex_seed.py
   faults/
-    webhook.py
+    polling.py
     performer.py
     verifier.py
     integration.py
@@ -1411,7 +1450,7 @@ tools/symphony_acceptance/
     project_deselection.py
     delegated_issue_to_verified_delivery.py
     managed_run_observability.py
-    webhook_recovery_dedupe.py
+    polling_restart_redelegation.py
     oauth_candidate_cutover.py
     routing_guards.py
     deferred_dispatch_recovery.py
@@ -1459,7 +1498,8 @@ Initial slices are:
   health without secrets;
 - `TopologySnapshot`: desired binding, acknowledged config, repository health,
   runtime presence, and capacity;
-- `DispatchSnapshot`: normalized intake, idempotency, queue, lease, fencing,
+- `DispatchSnapshot`: scan mode, page cursors/checkpoints, normalized issue
+  observations, delegation epochs, idempotency keys, queue, lease, fencing,
   heartbeat, and acknowledgement;
 - `ManagedRunSnapshot`: plans, work items, attempts, waits, gates, manifests,
   and integrations;
@@ -1621,7 +1661,7 @@ Must remain sequential:
 - legacy-path deletion before the replacement production composition path has
   passed its integration gate;
 - live `customer_onboarding_to_completed_managed_run` acceptance before
-  webhook, binding, smoke, fixed business fixture, evidence, read-only Linear
+  polling, binding, smoke, fixed business fixture, evidence, read-only Linear
   capture, reviewer calibration, and cleanup prerequisites are implemented.
 
 Needs explicit coordination:
@@ -1690,8 +1730,8 @@ contract, migration, and test slice into separate non-working changes.
 **G1 - Contracts and local composition**
 
 - shared contracts pass consumer/provider tests;
-- each capability's JSON/PostgreSQL adapters pass that capability's repository
-  and concurrency contract suite;
+- each capability's PostgreSQL adapter passes that capability's repository and
+  concurrency contract suite;
 - internal import boundaries pass;
 - no role imports another role;
 - each migrated capability uses the production composition path.
@@ -1711,7 +1751,7 @@ contract, migration, and test slice into separate non-working changes.
 - the gate runs whenever the impact decision is `core` or `major`, when an
   operator selects it, and once unconditionally during this migration;
 - the fixed business fixture passes through real
-  browser/OAuth/Linear/webhook/Podium/Conductor/Performer/Codex boundaries;
+  browser/OAuth/Linear/polling/Podium/Conductor/Performer/Codex boundaries;
 - the Linear manifest is stable and complete, deterministic hard checks pass,
   every fragment is covered exactly once, every required semantic score is at
   least 3, and the independent reviewer verdict passes;
@@ -1775,8 +1815,8 @@ After the shared shapes are accepted, the role workstreams proceed in parallel.
 ### Phase 2: Parallel Role Capability Slices
 
 - Podium: converge auth/installation/onboarding services, then topology,
-  webhook/reconciliation intake, dispatch, smoke health, and background-job
-  supervision.
+  fully paginated polling intake, delegation epochs, transactional checkpoints,
+  dispatch, smoke health, and background-job supervision.
 - Conductor: introduce the Managed Run aggregate/transition owner, then migrate
   planning, execution, verification, integration, waits, projection, and
   Podium reporting one vertical slice at a time.
@@ -1792,8 +1832,8 @@ After the shared shapes are accepted, the role workstreams proceed in parallel.
 
 1. Pass deterministic local system flows.
 2. Implement the missing real customer-path prerequisites: supported OAuth
-   journey, installer/enrollment/binding, signed webhook intake, real smoke
-   health, complete evidence, and resource cleanup.
+   journey, installer/enrollment/binding, full baseline/incremental polling,
+   real smoke health, complete evidence, and resource cleanup.
 3. Pass canonical `customer_onboarding_to_completed_managed_run` with every
    real boundary, complete Linear artifact coverage, and a passing independent
    customer-experience review.
@@ -1847,8 +1887,7 @@ After the shared shapes are accepted, the role workstreams proceed in parallel.
 ### Never
 
 - Import runtime packages into each other.
-- Move Linear OAuth access/refresh tokens, client secrets, or webhook signing
-  secrets outside Podium.
+- Move Linear OAuth access/refresh tokens or client secrets outside Podium.
 - Put any secret value in browser responses, logs, reports, evidence, artifact
   paths, or Linear projections.
 - Use `~/.codex` directly as a real-run input or archive a directory containing
@@ -1885,9 +1924,9 @@ The refactor is complete only when all of the following are true:
 6. Confirmed unreachable Performer legacy responsibilities are removed, and
    the installed CLI contains only the one-turn execution boundary and its
    dependencies.
-7. Each capability's JSON and PostgreSQL repositories implement its narrow
-   protocol and pass the same concurrency/parity suite, or JSON is explicitly
-   retired for that capability.
+7. Each capability's PostgreSQL repository implements its narrow protocol and
+   passes its concurrency and persistence contracts; unit tests use narrow
+   fakes instead of a second production persistence implementation.
 8. Internal dependency tests enforce the target module directions without
    introducing role-package cycles.
 9. Every current customer job has one immutable business-catalog entry with
@@ -1903,16 +1942,16 @@ The refactor is complete only when all of the following are true:
     snapshot envelope, capability slices, and pure oracle implementation for
     each fact.
 13. The required `customer_onboarding_to_completed_managed_run` journey passes
-    its fixed business fixture through a real browser, OAuth, Linear, webhook,
+    its fixed business fixture through a real browser, OAuth, Linear, polling,
     Podium, Conductor, Performer, and Codex.
 14. The canonical journey's Linear manifest reconciles every issue, fragment,
     and comment version against API, browser, durable mappings, and the resource
     ledger with 100 percent coverage; all hard checks and required artifact and
     journey scores pass at 3 or higher.
-15. Webhook recovery, OAuth lifecycle, project/runtime lifecycle, routing,
-    waits, retry, rework, revision, dependency ingestion, parallel join, and
-    conflict resolution have separately causal focused evidence at the mapped
-    level and trigger.
+15. Polling checkpoint/restart/redelegation recovery, OAuth lifecycle,
+    project/runtime lifecycle, routing, waits, retry, rework, revision,
+    dependency ingestion, parallel join, and conflict resolution have
+    separately causal focused evidence at the mapped level and trigger.
 16. The work-conserving scheduler overlaps compatible preflights and scenario
     branches up to validated resource capacity; one report returns every
     independently discoverable root cause with `passed`, `failed`, `blocked`,
@@ -1944,9 +1983,9 @@ the same change radius under different paths.
 
 ### Keep The Current Runner And Add A Browser Wrapper
 
-Rejected. The current runner bypasses OAuth, installer/binding behavior, signed
-webhook intake, and complete external cleanup. A browser wrapper would hide,
-not close, those gaps.
+Rejected. The current runner bypasses OAuth, installer/binding behavior, fully
+paginated polling intake, and complete external cleanup. A browser wrapper would
+hide, not close, those gaps.
 
 ### Use One `overall-dod` Release Scenario
 
@@ -2004,7 +2043,7 @@ Costs and risks:
 - temporary merge pressure will concentrate around shared DTOs, composition
   roots, and storage migrations;
 - deleting shadow or legacy paths requires consumer and packaging audits;
-- a real browser/OAuth/webhook acceptance environment requires release
+- a real browser/OAuth/polling acceptance environment requires release
   operations, public HTTPS, stable test workspace administration, and cleanup
   discipline;
 - model-based experience review adds cost and variability, requiring frozen
@@ -2022,18 +2061,16 @@ Costs and risks:
    authorization UI?
 2. What measured service limits should tune the default four-branch concurrency
    and total runtime budgets for routine risk-selected and one-time G4 runs?
-3. Is JSON storage retained as a supported local adapter or reduced to a test
-   adapter after PostgreSQL parity is established?
-4. Are any current Performer Linear/tracker/workspace modules consumed outside
+3. Are any current Performer Linear/tracker/workspace modules consumed outside
    this repository or imported as a supported library surface?
-5. Which fault scenarios, beyond the canonical customer journey, are required
+4. Which fault scenarios, beyond the canonical customer journey, are required
    to use real Codex
    despite the reproducibility trade-off?
-6. Is `symphony_acceptance` the accepted package/CLI vocabulary, or should the
+5. Is `symphony_acceptance` the accepted package/CLI vocabulary, or should the
    runner retain an `e2e` name while still separating test levels?
-7. Which reviewer model snapshot and profile become the initial calibrated
+6. Which reviewer model snapshot and profile become the initial calibrated
    `linear_customer_experience` revision?
-8. After historical-diff calibration, should the presumptive major-change
+7. After historical-diff calibration, should the presumptive major-change
    thresholds remain 12 production files and 500 executable lines?
 
 ## Approval Gate

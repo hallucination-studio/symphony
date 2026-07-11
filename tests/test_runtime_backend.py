@@ -5,20 +5,7 @@ from pathlib import Path
 import pytest
 
 from conductor.runtime_backends import prepare_backend_environment
-from performer.agent_backend import BackendCapability, CodexRuntimeBackend, RoleRequirement
 from performer_api.managed_runs import ManagedRunRuntimeRole, RuntimeProfile
-
-
-def test_codex_backend_is_eligible_for_managed_run_roles_with_required_capabilities() -> None:
-    backend = CodexRuntimeBackend()
-
-    assert backend.is_eligible(ManagedRunRuntimeRole.PLAN)
-    assert backend.is_eligible(ManagedRunRuntimeRole.WORK_ITEM)
-    assert backend.is_eligible(ManagedRunRuntimeRole.VERIFY)
-    assert RoleRequirement.for_role(ManagedRunRuntimeRole.PLAN).requires_structured_output is True
-    assert RoleRequirement.for_role(ManagedRunRuntimeRole.WORK_ITEM).can_write_patch is True
-    assert RoleRequirement.for_role(ManagedRunRuntimeRole.VERIFY).can_write_patch is False
-    assert BackendCapability.SHELL in backend.capabilities
 
 
 def test_prepare_backend_environment_materializes_isolated_codex_home(tmp_path: Path) -> None:

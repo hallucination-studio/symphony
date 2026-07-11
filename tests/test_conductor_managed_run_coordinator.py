@@ -7,19 +7,18 @@ import sys
 import pytest
 
 from conductor.conductor_managed_run_coordinator import ConductorManagedRunCoordinator
+from conductor.conductor_managed_run_state import ManagedRunState, WorkItemState
 from conductor.conductor_managed_run_store import ConductorManagedRunStore
 from performer_api.managed_runs import (
     ChangedFile,
     Checkpoint,
     ManagedRunPlan,
-    ManagedRunState,
     ParallelizationPolicy,
     VerificationRubric,
     WorkItem,
     WorkItemResult,
     WorkItemResultStatus,
     WorkItemSliceType,
-    WorkItemState,
     WorkItemVerification,
 )
 

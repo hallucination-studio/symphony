@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from performer_api.managed_runs import ManagedRunState, WorkItemState
-
 from .conductor_managed_run_coordinator_helpers import LOGGER
 from .conductor_managed_run_runtime_waits import (
     RUNTIME_WAIT_GATE_PREFIX,
@@ -12,6 +10,7 @@ from .conductor_managed_run_runtime_waits import (
     merge_runtime_wait,
     runtime_waits,
 )
+from .conductor_managed_run_state import ManagedRunState, WorkItemState
 
 
 class ConductorManagedRunRuntimeWaitMixin:

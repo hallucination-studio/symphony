@@ -1,12 +1,10 @@
 from __future__ import annotations
 
 import asyncio
-import ast
-import inspect
 import json
-import re
 from datetime import datetime, timezone
-from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -16,11 +14,7 @@ from podium.app import create_app
 from podium.cli import secure_cookies_from_env
 from podium.config import PodiumConfig
 from podium.podium_shared import dispatch_public
-from podium.store._postgres_dispatch import PgDispatchMixin, _binding_values
 from podium.store.postgres import PgMigrator
-from podium.store import PodiumStore
-
-APP_PATH = Path("packages/podium/src/podium/app.py")
 
 
 def test_cli_cookies_are_secure_by_default_and_require_explicit_local_override(monkeypatch) -> None:
@@ -77,6 +71,7 @@ def test_public_config_reports_turnstile_disabled_without_site_key() -> None:
     app = create_app(
         config=PodiumConfig(turnstile_site_key="", turnstile_secret_key="secret-key"),
         secure_cookies=False,
+        store=object(),
     )
 
     config = app.state.podium.public_config()
@@ -86,7 +81,11 @@ def test_public_config_reports_turnstile_disabled_without_site_key() -> None:
 
 
 def test_public_config_reports_turnstile_disabled_without_secret_key() -> None:
-    app = create_app(config=PodiumConfig(turnstile_site_key="site-key"), secure_cookies=False)
+    app = create_app(
+        config=PodiumConfig(turnstile_site_key="site-key"),
+        secure_cookies=False,
+        store=object(),
+    )
 
     config = app.state.podium.public_config()
 
@@ -98,6 +97,7 @@ def test_public_config_reports_turnstile_enabled_with_site_and_secret_key() -> N
     app = create_app(
         config=PodiumConfig(turnstile_site_key="site-key", turnstile_secret_key="secret-key"),
         secure_cookies=False,
+        store=object(),
     )
 
     config = app.state.podium.public_config()
@@ -114,6 +114,7 @@ def test_public_config_reports_turnstile_disabled_by_debug_flag() -> None:
             turnstile_disabled=True,
         ),
         secure_cookies=False,
+        store=object(),
     )
 
     config = app.state.podium.public_config()
@@ -160,64 +161,6 @@ def test_pg_migrator_exposes_phase_0_schema() -> None:
     assert "WHERE dedupe_key <> ''" in sql
 
 
-@pytest.mark.asyncio
-async def test_json_store_runtime_command_dedupe_key_is_durable() -> None:
-    store = PodiumStore()
-
-    first = await store.append_runtime_command_once("runtime-1", "smoke:one", {"type": "smoke.check"})
-    repeated = await store.append_runtime_command_once("runtime-1", "smoke:one", {"type": "different"})
-    second = await store.append_runtime_command_once("runtime-1", "smoke:two", {"type": "smoke.check"})
-
-    assert repeated == first
-    assert repeated["command"] == {"type": "smoke.check"}
-    assert second["id"] == first["id"] + 1
-
-
-@pytest.mark.asyncio
-async def test_json_store_smoke_result_compare_and_save_rejects_stale_revision() -> None:
-    store = PodiumStore()
-
-    created = await store.compare_and_save_smoke_result("user-1", 0, {"revision": 1, "status": "running"})
-    stale = await store.compare_and_save_smoke_result("user-1", 0, {"revision": 1, "status": "failed"})
-    updated = await store.compare_and_save_smoke_result("user-1", 1, {"revision": 2, "status": "passed"})
-
-    assert created is True
-    assert stale is False
-    assert updated is True
-    assert await store.get_smoke_result("user-1") == {"revision": 2, "status": "passed"}
-
-
-def test_pg_project_binding_upsert_values_match_replacement_schema() -> None:
-    values = _binding_values(
-        {
-            "id": "binding-old",
-            "conductor_id": "conductor-old",
-            "user_id": "user-1",
-            "instance_id": "instance-old",
-            "replacement_conductor_id": "conductor-new",
-            "replacement_repo_source": {"type": "local_path", "value": "/repo/new"},
-            "replacement_state": "pending_ack",
-            "replacement_binding_id": "binding-new",
-            "updated_at": "2026-07-10T00:00:00Z",
-        }
-    )
-    source = inspect.getsource(PgDispatchMixin.upsert_project_binding)
-    placeholders = [int(value) for value in re.findall(r"\$(\d+)", source)]
-
-    assert len(values) == max(placeholders) == 32
-    assert "instance_id = EXCLUDED.instance_id" in source
-    assert values[25] == "conductor-new"
-    assert json.loads(values[26]) == {"type": "local_path", "value": "/repo/new"}
-    assert values[27:29] == ("pending_ack", "binding-new")
-
-
-def test_pg_store_dispatch_lease_uses_atomic_skip_locked_query() -> None:
-    source = Path("packages/podium/src/podium/store/postgres.py").read_text(encoding="utf-8")
-
-    assert "FOR UPDATE SKIP LOCKED" in source
-    assert "fencing_token = dispatches.fencing_token + 1" in source
-
-
 def test_dispatch_public_tolerates_pg_ack_record_without_route_fields() -> None:
     payload = dispatch_public(
         {
@@ -236,84 +179,53 @@ def test_dispatch_public_tolerates_pg_ack_record_without_route_fields() -> None:
     assert payload["managed_run_profile"] == "default"
 
 
-async def test_json_store_persists_session_and_does_not_revive_revoked_token(tmp_path) -> None:
-    store = PodiumStore(tmp_path)
-
-    await store.save_session("token-hash", user_id="user_1", expires_at="2099-01-01T00:00:00Z")
-    await store.revoke_session("token-hash")
-    await store.save_session("token-hash", user_id="user_1", expires_at="2099-01-01T00:00:00Z")
-
-    assert await store.get_session("token-hash") == {
-        "user_id": "user_1",
-        "expires_at": "2099-01-01T00:00:00Z",
-        "revoked": True,
-    }
-
-
-async def test_json_store_consumes_enrollment_token_once(tmp_path) -> None:
-    store = PodiumStore(tmp_path)
-    await store.upsert_runtime_group({"id": "group_1", "linear_workspace_id": "user_1"})
-    await store.save_enrollment_token(
-        "token-hash",
-        runtime_group_id="group_1",
-        conductor_id="conductor_1",
-        expires_at="2099-01-01T00:00:00Z",
+async def test_onboarding_enrollment_token_reserves_conductor_for_authenticated_user() -> None:
+    store = SimpleNamespace(
+        list_conductors_for_user=AsyncMock(return_value=[]),
+        list_runtime_groups=AsyncMock(return_value=[]),
+        list_all_conductors=AsyncMock(return_value=[]),
+        upsert_runtime_group=AsyncMock(),
+        upsert_conductor=AsyncMock(),
+        save_enrollment_token=AsyncMock(),
+        list_project_bindings_for_conductor=AsyncMock(return_value=[]),
+        get_presence=AsyncMock(return_value=None),
     )
-
-    consumed = (await store.consume_enrollment_token("token-hash"))[0]
-    assert consumed["runtime_group_id"] == "group_1"
-    assert consumed["conductor_id"] == "conductor_1"
-    assert await store.consume_enrollment_token("token-hash") == (None, "enrollment_token_used")
-
-
-async def test_onboarding_enrollment_token_reserves_conductor_for_authenticated_user(tmp_path) -> None:
-    store = PodiumStore(tmp_path)
     app = create_app(
         store=store,
         secret_key="test-secret",
         secure_cookies=False,
         turnstile_verifier=lambda token, _ip: token == "turnstile-ok",
     )
+    app.state.podium.user_for_session = AsyncMock(
+        return_value={"id": "user-1", "email": "runtime-owner@example.com"}
+    )
 
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
-        registered = await client.post(
-            "/api/v1/auth/register",
-            json={
-                "email": "runtime-owner@example.com",
-                "password": "correct-horse",
-                "turnstile_token": "turnstile-ok",
-            },
-        )
         created = await client.post(
             "/api/v1/onboarding/runtime/enrollment-token",
             json={"name": "Mahler"},
         )
 
-    user_id = registered.json()["user"]["id"]
     assert created.status_code == 200
-    conductor = await store.get_runtime(created.json()["conductor"]["id"])
-    assert conductor["user_id"] == user_id
+    conductor = store.upsert_conductor.await_args.args[0]
+    assert conductor["user_id"] == "user-1"
     assert conductor["name"] == "Mahler"
+    store.save_enrollment_token.assert_awaited_once()
 
 
-async def test_runtime_enrollment_token_rejects_legacy_managed_run_profile_field(tmp_path) -> None:
-    store = PodiumStore(tmp_path)
+async def test_runtime_enrollment_token_rejects_legacy_managed_run_profile_field() -> None:
+    store = object()
     app = create_app(
         store=store,
         secret_key="test-secret",
         secure_cookies=False,
         turnstile_verifier=lambda token, _ip: token == "turnstile-ok",
     )
+    app.state.podium.user_for_session = AsyncMock(
+        return_value={"id": "user-1", "email": "legacy-profile@example.com"}
+    )
 
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
-        await client.post(
-            "/api/v1/auth/register",
-            json={
-                "email": "legacy-profile@example.com",
-                "password": "correct-horse",
-                "turnstile_token": "turnstile-ok",
-            },
-        )
         response = await client.post(
             "/api/v1/onboarding/runtime/enrollment-token",
             json={"managed_run_profile": "gated-task"},
@@ -321,17 +233,6 @@ async def test_runtime_enrollment_token_rejects_legacy_managed_run_profile_field
 
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "legacy_runtime_profile_field"
-
-
-async def test_json_store_persists_presence_and_log_fetch_result(tmp_path) -> None:
-    store = PodiumStore(tmp_path)
-    result = {"request_id": "req_1", "lines": ["a", "b"]}
-
-    await store.set_presence("conductor_1", timestamp="2026-01-01T00:00:00Z", expires_at="2099-01-01T00:00:00Z")
-    await store.save_log_fetch_result("req_1", result)
-
-    assert (await store.get_presence("conductor_1"))["last_seen_at"] == "2026-01-01T00:00:00Z"
-    assert await store.get_log_fetch_result("req_1") == result
 
 
 def test_create_app_exposes_injected_infra() -> None:
@@ -344,8 +245,27 @@ def test_create_app_exposes_injected_infra() -> None:
     assert app.state.podium.config is config
 
 
-async def test_auth_uses_injected_state_store_for_users_and_sessions(tmp_path) -> None:
-    store = PodiumStore(tmp_path)
+async def test_auth_uses_injected_state_store_for_users_and_sessions() -> None:
+    user = {
+        "id": "user_1",
+        "email": "sql-user@example.com",
+        "password_hash": "password-hash",
+        "created_at": "2026-01-01T00:00:00Z",
+    }
+    store = SimpleNamespace(
+        next_user_id=AsyncMock(return_value="user_1"),
+        get_user_by_email=AsyncMock(return_value=None),
+        create_user=AsyncMock(return_value=user),
+        save_session=AsyncMock(),
+        get_session=AsyncMock(
+            return_value={
+                "user_id": "user_1",
+                "expires_at": "2099-01-01T00:00:00Z",
+                "revoked": False,
+            }
+        ),
+        get_user=AsyncMock(return_value=user),
+    )
     app = create_app(
         store=store,
         secret_key="test-secret",
@@ -362,14 +282,29 @@ async def test_auth_uses_injected_state_store_for_users_and_sessions(tmp_path) -
 
     assert register.status_code == 200
     assert me.status_code == 200
-    assert await store.get_user("user_1") is not None
-    assert store._load_map("sessions.json")
+    store.create_user.assert_awaited_once()
+    store.save_session.assert_awaited_once()
+    store.get_session.assert_awaited_once()
 
 
 @pytest.mark.asyncio
-async def test_register_uses_store_allocated_user_id(tmp_path) -> None:
-    store = PodiumStore(tmp_path)
-    await store.create_user("user_1", email="existing@example.com", password_hash="x", created_at="2026-01-01T00:00:00Z")
+async def test_register_uses_store_allocated_user_id() -> None:
+    async def create_user(
+        user_id: str, *, email: str, password_hash: str, created_at: str
+    ) -> dict[str, str]:
+        return {
+            "id": user_id,
+            "email": email,
+            "password_hash": password_hash,
+            "created_at": created_at,
+        }
+
+    store = SimpleNamespace(
+        next_user_id=AsyncMock(return_value="user_2"),
+        get_user_by_email=AsyncMock(return_value=None),
+        create_user=AsyncMock(side_effect=create_user),
+        save_session=AsyncMock(),
+    )
     app = create_app(
         store=store,
         secret_key="test-secret",
@@ -388,6 +323,10 @@ async def test_register_uses_store_allocated_user_id(tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_app_lifespan_runs_dispatch_lease_reaper() -> None:
+    class EmptyInstallationStore:
+        async def list_active_workspace_installations(self) -> list[dict[str, object]]:
+            return []
+
     class ReapingState:
         def __init__(self) -> None:
             self.calls = 0
@@ -396,7 +335,11 @@ async def test_app_lifespan_runs_dispatch_lease_reaper() -> None:
             self.calls += 1
             return 0
 
-    app = create_app(secret_key="test-secret", secure_cookies=False)
+    app = create_app(
+        secret_key="test-secret",
+        secure_cookies=False,
+        store=EmptyInstallationStore(),
+    )
     state = ReapingState()
     app.state.podium = state
 
@@ -407,30 +350,3 @@ async def test_app_lifespan_runs_dispatch_lease_reaper() -> None:
             await asyncio.sleep(0.01)
 
     assert state.calls >= 1
-
-
-def test_managed_podium_state_does_not_declare_business_collections() -> None:
-    tree = ast.parse(APP_PATH.read_text(encoding="utf-8"))
-    state_class = next(
-        node
-        for node in tree.body
-        if isinstance(node, ast.ClassDef) and node.name == "ManagedPodiumState"
-    )
-
-    offenders: list[str] = []
-    for node in state_class.body:
-        if not isinstance(node, ast.AnnAssign) or not isinstance(node.annotation, ast.Subscript):
-            continue
-        name = node.target.id if isinstance(node.target, ast.Name) else "<unknown>"
-        annotation = ast.unparse(node.annotation)
-        if annotation.startswith(("dict[", "list[")):
-            offenders.append(name)
-
-    assert offenders == []
-
-
-def test_podium_app_no_longer_uses_legacy_onboarding_store() -> None:
-    source = APP_PATH.read_text(encoding="utf-8")
-
-    assert "from .onboarding import OnboardingStore" not in source
-    assert "app.state.onboarding" not in source

@@ -6,9 +6,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from performer_api.managed_runs import ManagedRunRuntimeRole, RuntimeConfigEnvelope, TaskOutputManifest, VerificationInputSnapshot, WorkItemResult
+from performer_api.managed_runs import ManagedRunRuntimeRole, RuntimeConfigEnvelope, WorkItemResult
 
 from .conductor_managed_run_attempts import active_attempt_records, completed_attempt_records, next_attempt_number
+from .conductor_managed_run_gates import TaskOutputManifest, VerificationInputSnapshot
 from .conductor_models import InstanceRecord
 from .conductor_managed_run_execution import ExecutionHandoff
 

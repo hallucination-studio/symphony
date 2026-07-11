@@ -8,13 +8,7 @@ import httpx
 import pytest
 
 from podium.linear_reconciliation import LinearReconciler
-from test_podium_conductor_channels_support import (
-    activate_linear_installation,
-    bind_and_ack_conductor,
-    enroll_conductor,
-    make_app,
-    register,
-)
+from test_podium_linear_reconciliation import _app
 
 
 def _timestamp(offset_seconds: int) -> str:
@@ -63,16 +57,6 @@ def _page(
     )
 
 
-async def _ready(app: Any, client: httpx.AsyncClient) -> tuple[str, str]:
-    user_id = await register(client, "reconciliation-pages@example.com")
-    await activate_linear_installation(app, user_id)
-    await app.state.podium.select_linear_projects(user_id, ["project-alpha"])
-    enrolled = await enroll_conductor(client)
-    report, binding = await bind_and_ack_conductor(app, client, user_id, enrolled)
-    assert report.status_code == 200
-    return user_id, str(binding["id"])
-
-
 @pytest.mark.asyncio
 async def test_baseline_scan_paginates_and_commits_one_epoch_per_issue() -> None:
     calls: list[dict[str, Any]] = []
@@ -89,28 +73,31 @@ async def test_baseline_scan_paginates_and_commits_one_epoch_per_issue() -> None
             )
         return _page([_issue("issue-3", updated_at=updated)])
 
-    app = make_app()
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
-        _user_id, binding_id = await _ready(app, client)
-        result = await LinearReconciler(state=app.state.podium, transport=transport, page_size=2).reconcile_once()
+    app = _app()
+    result = await LinearReconciler(
+        state=app.state.podium,
+        transport=transport,
+        page_size=2,
+    ).reconcile_once()
+    store = app.state.podium.store
 
     assert result == {"installations": 1, "bindings": 1, "queued": 3, "errors": 0}
     assert [call["variables"]["after"] for call in calls] == [None, "page-1"]
     assert all("delegate: { id: { eq: $delegateId } }" in call["query"] for call in calls)
     assert all("updatedAfter" not in call["variables"] for call in calls)
     assert all("$updatedAfter" not in call["query"] for call in calls)
-    state = await app.state.podium.store.get_linear_reconciliation_state(binding_id)
+    state = await store.get_linear_reconciliation_state("binding-1")
+    assert state is not None
     assert state["baseline_complete"] is True
     assert state["page_cursor"] == ""
     assert state["checkpoint_updated_at"]
     assert state["checkpoint_issue_id"] == ""
     observations = [
-        await app.state.podium.store.get_linear_issue_observation(binding_id, f"issue-{index}")
+        await store.get_linear_issue_observation("binding-1", f"issue-{index}")
         for index in range(1, 4)
     ]
     assert all(row and row["delegated"] is True and row["delegation_epoch"] == 1 for row in observations)
-    dispatches = app.state.podium.store._load_map("dispatches.json").values()
-    assert {row["intake_key"] for row in dispatches} == {
+    assert {row["intake_key"] for row in store.dispatches} == {
         "linear-issue:issue-1:epoch:1",
         "linear-issue:issue-2:epoch:1",
         "linear-issue:issue-3:epoch:1",
@@ -134,22 +121,21 @@ async def test_incremental_scan_opens_new_epoch_only_after_observed_undelegation
             return _page([_issue("issue-1", updated_at=undelegated_updated, delegated=False)])
         return _page([_issue("issue-1", updated_at=redelegated_updated)])
 
-    app = make_app()
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
-        _user_id, binding_id = await _ready(app, client)
-        reconciler = LinearReconciler(state=app.state.podium, transport=transport)
-        first = await reconciler.reconcile_once()
-        phase = "undelegated"
-        second = await reconciler.reconcile_once()
-        phase = "redelegated"
-        third = await reconciler.reconcile_once()
+    app = _app()
+    reconciler = LinearReconciler(state=app.state.podium, transport=transport)
+    first = await reconciler.reconcile_once()
+    phase = "undelegated"
+    second = await reconciler.reconcile_once()
+    phase = "redelegated"
+    third = await reconciler.reconcile_once()
+    store = app.state.podium.store
 
     assert [first["queued"], second["queued"], third["queued"]] == [1, 0, 1]
-    observation = await app.state.podium.store.get_linear_issue_observation(binding_id, "issue-1")
+    observation = await store.get_linear_issue_observation("binding-1", "issue-1")
+    assert observation is not None
     assert observation["delegated"] is True
     assert observation["delegation_epoch"] == 2
-    dispatches = app.state.podium.store._load_map("dispatches.json").values()
-    assert {row["intake_key"] for row in dispatches} == {
+    assert {row["intake_key"] for row in store.dispatches} == {
         "linear-issue:issue-1:epoch:1",
         "linear-issue:issue-1:epoch:2",
     }
@@ -160,7 +146,7 @@ async def test_incremental_scan_replays_timestamp_boundary_without_duplicate_dis
     shared_time = _timestamp(1)
     earlier_time = _timestamp(-10)
     phase = "first"
-    app = make_app()
+    app = _app()
 
     def transport(_request: httpx.Request) -> httpx.Response:
         issues = [_issue("issue-a", updated_at=shared_time), _issue("issue-b", updated_at=shared_time)]
@@ -168,31 +154,31 @@ async def test_incremental_scan_replays_timestamp_boundary_without_duplicate_dis
             issues.append(_issue("issue-0", updated_at=shared_time))
         return _page(issues)
 
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
-        _user_id, binding_id = await _ready(app, client)
-        await app.state.podium.store.save_linear_reconciliation_state(
-            binding_id,
-            {
-                "binding_id": binding_id,
-                "baseline_complete": True,
-                "checkpoint_updated_at": earlier_time,
-                "checkpoint_issue_id": "",
-                "page_cursor": "",
-                "retry_count": 0,
-                "next_retry_at": None,
-            },
-        )
-        reconciler = LinearReconciler(state=app.state.podium, transport=transport)
-        first = await reconciler.reconcile_once()
-        phase = "boundary-overlap"
-        second = await reconciler.reconcile_once()
+    store = app.state.podium.store
+    await store.save_linear_reconciliation_state(
+        "binding-1",
+        {
+            "binding_id": "binding-1",
+            "baseline_complete": True,
+            "checkpoint_updated_at": earlier_time,
+            "checkpoint_issue_id": "",
+            "page_cursor": "",
+            "retry_count": 0,
+            "next_retry_at": None,
+        },
+    )
+    reconciler = LinearReconciler(state=app.state.podium, transport=transport)
+    first = await reconciler.reconcile_once()
+    phase = "boundary-overlap"
+    second = await reconciler.reconcile_once()
 
     assert first["queued"] == 2
     assert second["queued"] == 1
-    assert await app.state.podium.store.get_linear_issue_observation(binding_id, "issue-0") is not None
-    state = await app.state.podium.store.get_linear_reconciliation_state(binding_id)
+    assert await store.get_linear_issue_observation("binding-1", "issue-0") is not None
+    state = await store.get_linear_reconciliation_state("binding-1")
+    assert state is not None
     assert (state["checkpoint_updated_at"], state["checkpoint_issue_id"]) == (shared_time, "issue-b")
-    assert len(app.state.podium.store._load_map("dispatches.json")) == 3
+    assert len(store.dispatches) == 3
 
 
 @pytest.mark.asyncio
@@ -209,19 +195,19 @@ async def test_failed_second_page_resumes_committed_cursor_after_durable_backoff
             return httpx.Response(503, json={"errors": [{"message": "unavailable"}]})
         return _page([_issue("issue-2", updated_at=_timestamp(-20))])
 
-    app = make_app()
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://podium.test") as client:
-        _user_id, binding_id = await _ready(app, client)
-        reconciler = LinearReconciler(state=app.state.podium, transport=transport)
-        failed = await reconciler.reconcile_once()
-        deferred = await reconciler.reconcile_once()
-        state = await app.state.podium.store.get_linear_reconciliation_state(binding_id)
-        await app.state.podium.store.save_linear_reconciliation_state(
-            binding_id,
-            {**state, "next_retry_at": _timestamp(-1)},
-        )
-        fail_second_page = False
-        resumed = await reconciler.reconcile_once()
+    app = _app()
+    store = app.state.podium.store
+    reconciler = LinearReconciler(state=app.state.podium, transport=transport)
+    failed = await reconciler.reconcile_once()
+    deferred = await reconciler.reconcile_once()
+    state = await store.get_linear_reconciliation_state("binding-1")
+    assert state is not None
+    await store.save_linear_reconciliation_state(
+        "binding-1",
+        {**state, "next_retry_at": _timestamp(-1)},
+    )
+    fail_second_page = False
+    resumed = await reconciler.reconcile_once()
 
     assert failed["errors"] == 1
     assert deferred["errors"] == 0
@@ -233,8 +219,9 @@ async def test_failed_second_page_resumes_committed_cursor_after_durable_backoff
     assert failed_state["next_retry_at"]
     assert failed_state["last_error_code"] == "linear_reconciliation_unavailable"
     assert resumed["queued"] == 1
-    final_state = await app.state.podium.store.get_linear_reconciliation_state(binding_id)
+    final_state = await store.get_linear_reconciliation_state("binding-1")
+    assert final_state is not None
     assert final_state["baseline_complete"] is True
     assert final_state["page_cursor"] == ""
     assert final_state["retry_count"] == 0
-    assert len(app.state.podium.store._load_map("dispatches.json")) == 2
+    assert len(store.dispatches) == 2

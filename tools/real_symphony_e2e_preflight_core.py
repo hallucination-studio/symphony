@@ -7,7 +7,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from performer_api.config import sanitize_codex_config_template
+from conductor.conductor_runtime_config import sanitize_codex_config_template
 from real_symphony_e2e_common import utc_now
 from real_symphony_e2e_errors import E2EConfigurationError
 

@@ -1,18 +1,18 @@
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 from typing import Any
 
-from real_symphony_e2e_artifacts import _archive_managed_run_artifacts
 from real_symphony_e2e_common import api_url, http_json, redact_evidence_value
 from real_symphony_e2e_linear import fetch_linear_issue_tree
 from real_symphony_e2e_podium_evidence import archive_podium_api_snapshots
+from real_symphony_e2e_runtime_artifacts import archive_managed_run_artifacts
+from runtime_claims_audit import sanitize_text
 
 
 async def archive_early_exit_artifacts(state: Any) -> None:
-    _archive_managed_run_artifacts(
+    archive_managed_run_artifacts(
         evidence=state.evidence,
         root=state.root,
         data_root=state.data_root,
@@ -133,17 +133,8 @@ async def _archive_linear_tree(state: Any) -> None:
 
 
 def _sanitize_exception(exc: Exception) -> str:
-    text = str(exc).replace("\r", " ").replace("\n", " ")
-    for pattern, replacement in _SECRET_PATTERNS:
-        text = pattern.sub(replacement, text)
+    text = sanitize_text(str(exc).replace("\r", " ").replace("\n", " "))
     return f"{type(exc).__name__}:{text[:300]}"
-
-
-_SECRET_PATTERNS = (
-    (re.compile(r"(?i)(authorization:\s*)(bearer|basic)\s+[^\s,;]+"), r"\1[REDACTED]"),
-    (re.compile(r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]+"), r"\1 [REDACTED]"),
-    (re.compile(r"(?i)\b(token|password|secret|api[_-]?key)=([^\s,;]+)"), r"\1=[REDACTED]"),
-)
 
 
 __all__ = ["archive_early_exit_artifacts", "record_e2e_exception", "record_unhandled_e2e_exception"]

@@ -3,18 +3,17 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from .podium_project_binding_creation import (
+    ProjectBindingError,
+    build_project_binding,
+    project_binding_conflict,
+    repository_public as _repository_public,
+)
 from .podium_project_labels import LinearProjectLabelError
 from .podium_shared import utc_now_iso
 
 
 LOGGER = logging.getLogger(__name__)
-
-
-class ProjectBindingError(RuntimeError):
-    def __init__(self, code: str, reason: str) -> None:
-        super().__init__(reason)
-        self.code = code
-        self.reason = reason
 
 
 class PodiumProjectBindingsMixin:
@@ -25,6 +24,7 @@ class PodiumProjectBindingsMixin:
         *,
         linear_project_id: str,
         repository: dict[str, Any],
+        replacement_owner_binding_id: str = "",
     ) -> dict[str, Any]:
         conductor = await self.conductor_for_user(conductor_id, user_id)
         if conductor is None:
@@ -46,48 +46,24 @@ class PodiumProjectBindingsMixin:
         existing = await self.store.get_active_project_binding_for_project(user_id, linear_project_id)
         if existing is not None:
             raise ProjectBindingError("linear_project_already_bound", "Linear project already has an active Conductor")
-        repository_mode, repository_value = _repository(repository)
         installation = await self.get_active_linear_installation(user_id)
         if installation is None:
             raise ProjectBindingError("linear_installation_required", "An active Linear installation is required")
-        binding = {
-            "id": f"binding_{conductor_id}",
-            "conductor_id": conductor_id,
-            "user_id": user_id,
-            "instance_id": "",
-            "name": str(project.get("project_name") or ""),
-            "linear_project": str(project.get("project_slug") or ""),
-            "linear_project_id": linear_project_id,
-            "project_name": str(project.get("project_name") or ""),
-            "project_slug": str(project.get("project_slug") or ""),
-            "agent_app_user_id": str(installation.get("app_user_id") or ""),
-            "installation_id": str(installation.get("id") or ""),
-            "managed_run_profile": "default",
-            "process_status": "",
-            "constraint_labels": [],
-            "repo_source": {
-                "type": "git" if repository_mode == "git_url" else "local_path",
-                "value": repository_value,
-            },
-            "state": "pending_ack",
-            "active": True,
-            "config_version": max((int(row.get("config_version") or 0) for row in prior_bindings), default=0) + 1,
-            "acknowledged_config_version": 0,
-            "candidate_installation_id": "",
-            "candidate_agent_app_user_id": "",
-            "candidate_config_version": 0,
-            "candidate_acknowledged_config_version": 0,
-            "label_id": "",
-            "label_name": "",
-            "replacement_conductor_id": "",
-            "replacement_repo_source": {},
-            "replacement_state": "",
-            "replacement_binding_id": "",
-            "error_code": "",
-            "sanitized_reason": "",
-            "updated_at": utc_now_iso(),
-        }
-        await self.store.upsert_project_binding(binding)
+        binding = build_project_binding(
+            user_id,
+            conductor_id,
+            project=project,
+            installation=installation,
+            repository=repository,
+            prior_bindings=prior_bindings,
+        )
+        created, conflict = await self.store.create_project_binding(
+            binding,
+            replacement_owner_binding_id=replacement_owner_binding_id,
+        )
+        if created is None:
+            raise project_binding_conflict(conflict)
+        binding = created
         await self.enqueue_runtime_command(conductor_id, self.project_binding_command(binding))
         return binding
 
@@ -107,46 +83,50 @@ class PodiumProjectBindingsMixin:
             if previous is None:
                 raise ProjectBindingError("project_binding_not_found", "Conductor has no project binding")
             return previous, False
-        if str(active.get("state") or "") == "pending_unbind":
-            return active, True
-        if await self.store.count_open_dispatches_for_binding(str(active["id"])):
+        replacement = replacement or {}
+        replacement_repo_source = replacement.get("replacement_repo_source")
+        pending, command_created = await self.store.claim_project_unbind(
+            str(active["id"]),
+            user_id,
+            conductor_id,
+            replacement_conductor_id=str(replacement.get("replacement_conductor_id") or ""),
+            replacement_repo_source=(replacement_repo_source if isinstance(replacement_repo_source, dict) else {}),
+            updated_at=utc_now_iso(),
+        )
+        if pending is None:
+            raise ProjectBindingError("project_binding_not_found", "Conductor has no project binding")
+        if not pending.get("active", True):
+            return pending, False
+        if str(pending.get("state") or "") != "pending_unbind":
+            replacement_target = str(replacement.get("replacement_conductor_id") or "")
+            if replacement_target:
+                target_bindings = await self.store.list_project_bindings_for_conductor(
+                    replacement_target
+                )
+                if any(row.get("active", True) for row in target_bindings):
+                    raise ProjectBindingError(
+                        "replacement_conductor_already_bound",
+                        "Replacement Conductor is already bound",
+                    )
             LOGGER.warning(
                 "event=project_unbind_blocked conductor_id=%s instance_id=%s linear_project_id=%s "
                 "error_code=managed_runs_active sanitized_reason=%s action_required=drain retryable=true "
                 "next_action=wait_for_managed_runs",
                 conductor_id,
-                active.get("instance_id"),
-                active.get("linear_project_id"),
+                pending.get("instance_id"),
+                pending.get("linear_project_id"),
                 "Managed Runs must finish before unbinding",
             )
             raise ProjectBindingError("managed_runs_active", "Managed Runs must finish before unbinding")
-        pending = {
-            **active,
-            **(replacement or {}),
-            "state": "pending_unbind",
-            "config_version": int(active.get("config_version") or 0) + 1,
-            "error_code": "",
-            "sanitized_reason": "",
-            "updated_at": utc_now_iso(),
-        }
-        await self.store.upsert_project_binding(pending)
-        await self.enqueue_runtime_command(
-            conductor_id,
-            {
-                "type": "project.unconfigure",
-                "binding_id": str(pending["id"]),
-                "config_version": int(pending["config_version"]),
-                "delete_repository": False,
-            },
-        )
-        LOGGER.info(
-            "event=project_unbind_requested conductor_id=%s instance_id=%s linear_project_id=%s "
-            "config_version=%s",
-            conductor_id,
-            pending.get("instance_id"),
-            pending.get("linear_project_id"),
-            pending.get("config_version"),
-        )
+        if command_created:
+            LOGGER.info(
+                "event=project_unbind_requested conductor_id=%s instance_id=%s linear_project_id=%s "
+                "config_version=%s",
+                conductor_id,
+                pending.get("instance_id"),
+                pending.get("linear_project_id"),
+                pending.get("config_version"),
+            )
         return pending, True
 
     async def acknowledge_project_unbind(
@@ -167,28 +147,37 @@ class PodiumProjectBindingsMixin:
         try:
             await self.remove_managed_project_label(binding)
         except LinearProjectLabelError as exc:
-            failed = {
-                **binding,
-                "error_code": "linear_project_label_remove_failed",
-                "sanitized_reason": "Linear project label removal failed",
-                "updated_at": utc_now_iso(),
-            }
-            await self.store.upsert_project_binding(failed)
+            failed = await self.store.record_project_unbind_error(
+                binding_id,
+                conductor_id=conductor_id,
+                expected_state="pending_unbind",
+                expected_config_version=version,
+                error_code="linear_project_label_remove_failed",
+                sanitized_reason="Linear project label removal failed",
+                updated_at=utc_now_iso(),
+            )
+            if failed is None:
+                raise ProjectBindingError(
+                    "project_unbind_version_mismatch",
+                    "Runtime unbind config version is stale",
+                ) from exc
             raise ProjectBindingError(
                 "linear_project_label_remove_failed",
                 "Linear project label removal failed",
             ) from exc
-        unbound = {
-            **binding,
-            "state": "unbound",
-            "active": False,
-            "acknowledged_config_version": version,
-            "process_status": "",
-            "error_code": "",
-            "sanitized_reason": "",
-            "updated_at": utc_now_iso(),
-        }
-        await self.store.upsert_project_binding(unbound)
+        unbound = await self.store.complete_project_unbind(
+            binding_id,
+            conductor_id=conductor_id,
+            expected_state="pending_unbind",
+            expected_config_version=version,
+            acknowledged_config_version=version,
+            updated_at=utc_now_iso(),
+        )
+        if unbound is None:
+            raise ProjectBindingError(
+                "project_unbind_version_mismatch",
+                "Runtime unbind config version is stale",
+            )
         await self._clear_runtime_group_binding(conductor_id)
         await self.advance_project_replacement(unbound)
         LOGGER.info(
@@ -326,22 +315,3 @@ class PodiumProjectBindingsMixin:
             error.reason,
         )
         await self.fail_project_replacement_for_binding(failed, error.code, error.reason)
-
-
-def _repository(raw: dict[str, Any]) -> tuple[str, str]:
-    mode = str(raw.get("mode") or "") if isinstance(raw, dict) else ""
-    value = str(raw.get("value") or "").strip() if isinstance(raw, dict) else ""
-    if mode not in {"local_path", "git_url"} or not value:
-        raise ProjectBindingError("invalid_repository", "Repository mode and value are required")
-    if mode == "git_url" and not value.startswith(("https://", "git@")):
-        raise ProjectBindingError("invalid_repository", "Git repository URL is invalid")
-    return mode, value
-
-
-def _repository_public(raw: Any) -> dict[str, str]:
-    source = raw if isinstance(raw, dict) else {}
-    source_type = str(source.get("type") or source.get("mode") or "")
-    return {
-        "mode": "git_url" if source_type == "git" else source_type,
-        "value": str(source.get("value") or ""),
-    }

@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from performer_api.managed_runs import ManagedRunState, WorkItemResult, WorkItemState
+from performer_api.managed_runs import WorkItemResult
 
 from .conductor_managed_run_driver_helpers import (
     _active_attempts,
@@ -16,6 +16,7 @@ from .conductor_managed_run_driver_helpers import (
 from .conductor_managed_run_execution import freeze_execution_handoff
 from .conductor_managed_run_fencing import log_result_rejection, result_context_error
 from .conductor_managed_run_runtime_waits import build_runtime_wait_record, runtime_wait_from_turn_payload
+from .conductor_managed_run_state import ManagedRunState, WorkItemState
 from .conductor_managed_run_workspace_events import log_workspace_failure
 from .conductor_models import InstanceRecord
 

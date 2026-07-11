@@ -5,6 +5,8 @@ from pathlib import Path
 from typing import Any
 
 from real_symphony_e2e_common import Evidence
+from runtime_claims_audit import copy_sanitized_file, sanitize_evidence_value
+
 
 def write_wait_artifacts(
     *,
@@ -12,37 +14,35 @@ def write_wait_artifacts(
     samples: list[dict[str, Any]],
     result_path: Path,
     final_issue: dict[str, Any],
-    state_path: Path,
-    last_state: dict[str, Any],
-    ops_path: Path,
-    last_ops: dict[str, Any],
     log_path: Path,
     stages: dict[str, str],
     stage_timeout_seconds: int,
 ) -> dict[str, Any]:
+    safe_samples = sanitize_evidence_value(samples)
+    safe_final_issue = sanitize_evidence_value(final_issue)
     samples_path = evidence.out.parent / "runtime-samples.json"
-    samples_path.write_text(json.dumps(samples, indent=2, sort_keys=True), encoding="utf-8")
+    samples_path.write_text(json.dumps(safe_samples, indent=2, sort_keys=True), encoding="utf-8")
     evidence.artifact("runtime_samples", samples_path)
     if result_path.exists():
         result_copy = evidence.out.parent / "workspace-result.txt"
-        result_copy.write_text(result_path.read_text(encoding="utf-8", errors="replace"), encoding="utf-8")
+        copy_sanitized_file(result_path, result_copy)
         evidence.artifact("workspace_result", result_copy)
     final_issue_path = evidence.out.parent / "final-issue.json"
-    final_issue_path.write_text(json.dumps(final_issue, indent=2, sort_keys=True), encoding="utf-8")
+    final_issue_path.write_text(json.dumps(safe_final_issue, indent=2, sort_keys=True), encoding="utf-8")
     evidence.artifact("final_issue", final_issue_path)
     stage_snapshot = {
         "observed": stages,
         "stage_timeout_seconds": stage_timeout_seconds,
-        "last_sample": samples[-1] if samples else None,
+        "last_sample": safe_samples[-1] if safe_samples else None,
     }
     stage_snapshot_path = evidence.out.parent / "stage-snapshot.json"
     stage_snapshot_path.write_text(json.dumps(stage_snapshot, indent=2, sort_keys=True), encoding="utf-8")
     evidence.artifact("stage_snapshot", stage_snapshot_path)
     return {
-        "issue": final_issue,
+        "issue": safe_final_issue,
         "result_path": str(result_path),
         "log_path": str(log_path),
-        "samples": samples,
+        "samples": safe_samples,
     }
 
 

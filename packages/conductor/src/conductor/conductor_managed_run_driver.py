@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from performer_api.managed_runs import ManagedRunState, ManagedRunRuntimeRole, RuntimeConfigEnvelope
+from performer_api.managed_runs import ManagedRunRuntimeRole, RuntimeConfigEnvelope
 
 from .conductor_managed_run_coordinator import ConductorManagedRunCoordinator
 from .conductor_managed_run_driver_helpers import (
@@ -22,6 +22,7 @@ from .conductor_managed_run_fencing import attempt_fencing_fields, build_turn_co
 from .conductor_managed_run_driver_plan_collection import ConductorManagedRunPlanCollectionMixin
 from .conductor_managed_run_driver_work_items import ConductorManagedRunWorkItemMixin
 from .conductor_managed_run_execution import prepare_execution_worktree
+from .conductor_managed_run_state import ManagedRunState
 from .conductor_managed_run_store import ConductorManagedRunStore
 from .conductor_managed_run_workspace_events import log_workspace_failure
 from .conductor_models import InstanceRecord

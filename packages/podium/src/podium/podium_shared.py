@@ -162,19 +162,3 @@ def query_bool(value: Any) -> bool:
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-
-
-def _datetime_to_json(value: Any) -> Any:
-    if isinstance(value, datetime):
-        return value.isoformat().replace("+00:00", "Z")
-    return value
-
-
-def _datetime_from_json(value: Any) -> Any:
-    if not isinstance(value, str):
-        return value
-    try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return value
-    return parsed

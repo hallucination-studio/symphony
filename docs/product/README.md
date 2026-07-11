@@ -21,6 +21,8 @@ not historical plans, RFC trackers, or implementation scorecards.
   runs, work-item state, managed-run verification, and Linear-native projection.
 - [Managed Runs Acceptance Matrix](./managed-runs-acceptance-matrix.md) maps
   design requirements to blocking tests and external E2E failure classes.
+- [Acceptance Catalog](./acceptance-catalog.md) is the generated view of the
+  executable customer jobs, focused scenarios, and canonical journeys.
 - [Linear Integration](./linear-integration.md) owns OAuth/app setup, delegated
   issue intake, routing, and the GraphQL proxy.
 - [Podium Web](./podium-web.md) owns onboarding and operator UI surfaces.

@@ -7,8 +7,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
-from performer_api.config import sanitize_codex_config_template
 from performer_api.managed_runs import ManagedRunRuntimeRole, RuntimeProfile
+
+from .conductor_runtime_config import sanitize_codex_config_template
 
 
 @dataclass(frozen=True)

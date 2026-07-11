@@ -14,9 +14,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from runtime_evidence_files import sanitize_evidence_value
+
 LINEAR_ENDPOINT = "https://api.linear.app/graphql"
 DEFAULT_PROJECT_SLUG = "8ab43179fb54"
-SENSITIVE_EVIDENCE_KEY_PARTS = ("secret", "password", "cookie", "authorization")
 
 
 @dataclass
@@ -111,18 +112,7 @@ class Evidence:
 
 
 def redact_evidence_value(value: Any, *, key: str | None = None) -> Any:
-    if isinstance(value, dict):
-        return {item_key: redact_evidence_value(item_value, key=str(item_key)) for item_key, item_value in value.items()}
-    if isinstance(value, list):
-        return [redact_evidence_value(item) for item in value]
-    if isinstance(value, str) and key is not None and _is_sensitive_evidence_key(key):
-        return "<redacted>"
-    return value
-
-
-def _is_sensitive_evidence_key(key: str) -> bool:
-    normalized = key.lower()
-    return normalized.endswith("_token") or any(part in normalized for part in SENSITIVE_EVIDENCE_KEY_PARTS)
+    return sanitize_evidence_value(value, key=key or "")
 
 
 def utc_now() -> str:

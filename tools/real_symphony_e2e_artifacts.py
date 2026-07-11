@@ -7,6 +7,8 @@ from typing import Any
 
 from real_symphony_e2e_analysis import analyze_plan_artifacts
 from real_symphony_e2e_common import Evidence
+from real_symphony_e2e_runtime_artifacts import archive_managed_run_artifacts
+from runtime_evidence_files import sanitize_evidence_value
 
 
 E2E_STAGE_ORDER = (
@@ -32,36 +34,6 @@ DEPENDENT_RUNTIME_STAGES_AFTER_PLAN = (
     "11-final-acceptance",
 )
 
-def _archive_managed_run_artifacts(*, evidence: Evidence, root: Path, data_root: Path, instance_id: str) -> None:
-    for name, path in {
-        "podium_log": root / "podium.log",
-        "conductor_log": root / "conductor.log",
-        "conductor_restarted_log": root / "conductor-restarted.log",
-        "managed_run_db": data_root / "managed_run.db",
-        "instance_state": data_root / "instances" / instance_id / "state" / "performer.json",
-        "instance_ops": data_root / "instances" / instance_id / "state" / "ops.json",
-        "instance_log": data_root / "instances" / instance_id / "logs" / "performer.log",
-        "final_managed_runs_view": root / "final-managed-runs-view.json",
-        "final_linear_tree_audit": root / "final-linear-tree-audit.json",
-        "final_issue_tree": root / "final-issue-tree.json",
-    }.items():
-        if path.exists():
-            evidence.artifact(name, path)
-    attempt_root = data_root / "instances" / instance_id / "state" / "managed_run"
-    if not attempt_root.exists():
-        return
-    for attempt_dir in sorted(path for path in attempt_root.iterdir() if path.is_dir()):
-        safe_attempt = attempt_dir.name.replace("/", "_")
-        for filename, suffix in [
-            ("turn-request.json", "request"),
-            ("turn-result.json", "result"),
-            ("attempt.log", "log"),
-        ]:
-            path = attempt_dir / filename
-            if path.exists():
-                evidence.artifact(f"attempt_{safe_attempt}_{suffix}", path)
-
-
 def _handle_managed_run_runtime_blocker(
     *,
     evidence: Evidence,
@@ -73,7 +45,7 @@ def _handle_managed_run_runtime_blocker(
     failure = _latest_managed_run_runtime_failure(evidence)
     if failure is None:
         return False
-    _archive_managed_run_artifacts(evidence=evidence, root=root, data_root=data_root, instance_id=instance_id)
+    archive_managed_run_artifacts(evidence=evidence, root=root, data_root=data_root, instance_id=instance_id)
     if "checkpoint:04-dispatch-and-plan" not in evidence.data.get("artifacts", {}):
         evidence.checkpoint(
             "04-dispatch-and-plan",
@@ -91,7 +63,10 @@ def _handle_managed_run_runtime_blocker(
         dispatch_context=_dispatch_context_for_plan_attempt(data_root=data_root, plan_paths=plan_paths),
     )
     analysis_path = root / "plan-offline-analysis.json"
-    analysis_path.write_text(json.dumps(analysis_report, indent=2, sort_keys=True), encoding="utf-8")
+    analysis_path.write_text(
+        json.dumps(sanitize_evidence_value(analysis_report), indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
     evidence.artifact("plan_offline_analysis", analysis_path)
     evidence.checkpoint(
         "05-plan-offline-analysis",
@@ -199,8 +174,6 @@ def _failed_plan_attempt_paths(
         seen.add(attempt_dir)
         request_path = attempt_dir / "turn-request.json"
         result_path = attempt_dir / "turn-result.json"
-        if not result_path.exists():
-            result_path = attempt_dir / "turn-result.json.applied"
         request = _read_json_file(request_path)
         if request and str(request.get("attempt_id") or attempt_dir.name) != attempt_dir.name and attempt_id:
             continue

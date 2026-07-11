@@ -44,7 +44,6 @@ from real_symphony_e2e_analysis import (
 from real_symphony_e2e_artifacts import (
     DEPENDENT_RUNTIME_STAGES_AFTER_PLAN,
     E2E_STAGE_ORDER,
-    _archive_managed_run_artifacts,
     _checkpoint_and_block_after_stage,
     _dispatch_context_for_plan_attempt,
     _failed_plan_attempt_id,

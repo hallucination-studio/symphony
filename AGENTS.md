@@ -40,7 +40,9 @@ Real Linear E2E is skipped by default; it needs a sourced `.env` — see the "Re
 
 Symphony is **one product** split into four Python packages under `packages/`, each a role in the "orchestra". Package boundaries are runtime boundaries, not product boundaries — keep user-facing language anchored on Symphony as the whole system.
 
-- **`performer-api`** — shared contracts: managed-run DTOs, plan/work-item state, runtime config, ops projections/models, and registration DTOs. The other three depend on it; it depends on none of them.
+- **`performer-api`** — shared Managed Run wire contracts: plans, work
+  items/results, turn contexts, runtime policy/profiles, and validation. The
+  other three depend on it; it depends on none of them.
 - **`performer`** — the execution worker. It only runs fenced managed-run turns from JSON request/result paths under isolated per-role runtime profiles.
 - **`conductor`** — customer-side local daemon. One Conductor binds exactly one Linear project and one repository, owns that project's durable managed-run state, leases Podium dispatches, starts Performer turns, and connects outbound to Podium as an enrolled runtime. Multiple isolated Conductors may run on one host for different projects.
 - **`podium`** — SaaS control plane + BFF/static host. Owns auth, default and customer-owned Linear application configuration, versioned OAuth installations, selected projects, one-to-one Conductor bindings, dispatch queueing, reliable polling, token refresh, and the Linear proxy.
@@ -109,6 +111,8 @@ npm run design:lint  # lint DESIGN.md against the @google/design.md spec
 ## Conventions
 
 - This is a hard break from the old `symphony` package/CLI — do not add compatibility shims for old `symphony` imports, commands, labels, or state/log files unless explicitly asked.
+- Do not infer or expand product scope from what seems useful, conventional, or future-proof. Default to the smallest behavior-preserving change. Any assumption that would add or change customer-visible behavior, workflow branches, public/API contracts, durable state, configuration, integrations, permissions/cost, compatibility, or product vocabulary requires explicit user approval before implementation.
+- For every non-trivial slice, record a scope ledger with `authorized`, `required_consequences`, `out_of_scope`, `assumptions_requiring_approval`, and `deferred_ideas`. Production work may start only when `assumptions_requiring_approval` is empty; untraceable behavior is `UNAPPROVED_SCOPE_EXPANSION` and blocks completion.
 - The runtime architecture source of truth is split across `docs/product/runtime-pipeline.md`, `docs/product/pipeline-state.md`, `docs/product/gates-verification-integration.md`, `docs/product/linear-projection.md`, and `docs/product/runtime-profiles-backends.md`. Do not add legacy scheduling or `WORKFLOW.md` execution instructions.
 - Runtime approval, permission, and tool-input waits must be projected to Linear as runtime wait state and as node metadata (`operator_status: waiting_for_runtime_input`, `operator_wait_kind`, and a Runtime Wait block), including `[Human Action]` child issues when that wait flow uses them. Local stdout/logs alone are not an acceptable operator signal.
 - Secrets flow through `$VAR` indirection (e.g. `$PODIUM_PROXY_TOKEN`); values are validated but never printed in responses, logs, or API output.

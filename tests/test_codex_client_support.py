@@ -11,7 +11,7 @@ import pytest
 
 import performer.codex_client as codex_client
 from performer.codex_client import CodexError, CodexSdkClient
-from performer_api.config import CodexConfig
+from performer.codex_config import CodexConfig
 
 openai_errors = pytest.importorskip("openai_codex.errors")
 

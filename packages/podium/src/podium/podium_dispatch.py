@@ -8,19 +8,6 @@ from .podium_shared import utc_now_iso
 
 
 class PodiumDispatchMixin:
-    async def queue_dispatches(self, event: dict[str, Any]) -> int:
-        queued = 0
-        groups = await self._runtime_groups_for_dispatch_event(event)
-        for group in groups:
-            binding = await self._binding_for_group(group)
-            dispatch = self._dispatch_from_event(event, group)
-            inserted = await self.store.upsert_dispatch(dispatch)
-            if not inserted:
-                continue
-            await self.notify_reconciled_dispatches(binding, 1)
-            queued += 1
-        return queued
-
     def reconciliation_dispatch(self, event: dict[str, Any], binding: dict[str, Any]) -> dict[str, Any]:
         return self._dispatch_from_event(event, self._runtime_group_from_project_binding(binding))
 
@@ -72,15 +59,6 @@ class PodiumDispatchMixin:
             "updated_at": now,
         }
 
-    async def _runtime_groups_for_dispatch_event(self, event: dict[str, Any]) -> list[dict[str, Any]]:
-        agent_ids = [str(event.get("agent_app_user_id") or ""), str(event.get("issue_delegate_id") or "")]
-        loaded = await self.store.list_project_bindings_for_route(
-            user_id=str(event.get("workspace_id") or ""),
-            project_slug=str(event.get("project_slug") or ""),
-            agent_app_user_ids=[agent_id for agent_id in agent_ids if agent_id],
-        )
-        return [self._runtime_group_from_project_binding(binding) for binding in loaded]
-
     def _runtime_group_from_project_binding(self, binding: dict[str, Any]) -> dict[str, Any]:
         binding_id = str(binding.get("id") or "")
         return {
@@ -92,12 +70,6 @@ class PodiumDispatchMixin:
             "project_binding_id": binding_id,
             "instance_id": str(binding.get("instance_id") or ""),
         }
-
-    async def _binding_for_group(self, group: dict[str, Any]) -> dict[str, Any] | None:
-        binding_id = str(group.get("project_binding_id") or "")
-        if not binding_id:
-            return None
-        return await self.store.get_project_binding(binding_id)
 
     async def lease_dispatch(self, runtime_id: str) -> dict[str, Any] | None:
         runtime = await self.store.get_runtime(runtime_id)
@@ -157,10 +129,6 @@ class PodiumDispatchMixin:
         if saved is None:
             return {"dispatch_id": dispatch_id, "_ack_error": "stale_dispatch_lease"}
         return saved
-
-    def reconcile_dispatch_acks(self) -> list[dict[str, Any]]:
-        return []
-
 
 def _sanitize_managed_run_ack(payload: dict[str, Any]) -> dict[str, Any]:
     sanitized: dict[str, Any] = {}

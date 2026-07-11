@@ -2,9 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from performer_api.managed_runs import ManagedRunState, WorkItemState
-
 from .conductor_managed_run_attempts import canonical_attempt_records
+from .conductor_managed_run_state import ManagedRunState, WorkItemState
 
 
 def linear_state_target(state: str) -> tuple[list[str], str]:

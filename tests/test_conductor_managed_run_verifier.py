@@ -6,10 +6,10 @@ from pathlib import Path
 import pytest
 
 from conductor.conductor_managed_run_execution import ManagedRunExecutionError, freeze_execution_handoff
+from conductor.conductor_managed_run_gates import GateSnapshot
 from conductor.conductor_managed_run_verifier import run_local_verifier
 from performer_api.managed_runs import (
     ChangedFile,
-    GateSnapshot,
     ParallelizationPolicy,
     WorkItem,
     WorkItemResult,

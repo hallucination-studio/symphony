@@ -39,7 +39,6 @@ if ! grep -q "^/swapfile " /etc/fstab; then
   echo "/swapfile none swap sw 0 0" >> /etc/fstab
 fi
 cat >/etc/sysctl.d/99-symphony-test.conf <<'EOF'
-vm.overcommit_memory=1
 vm.swappiness=10
 EOF
 sysctl -p /etc/sysctl.d/99-symphony-test.conf

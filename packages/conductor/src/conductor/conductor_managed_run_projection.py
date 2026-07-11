@@ -2,12 +2,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from performer_api.managed_runs import (
-    ManagedRunState,
-    ThreadCompletionReport,
-    render_run_summary_block,
-)
-
 from .conductor_managed_run_projection_helpers import (
     attempt_comment_body,
     attempt_ids_for_work_item,
@@ -23,6 +17,8 @@ from .conductor_managed_run_projection_helpers import (
     rubric_results,
     summary_text,
 )
+from .conductor_managed_run_state import ManagedRunState
+from .conductor_managed_run_summary import ThreadCompletionReport, render_run_summary_block
 from .conductor_managed_run_coordinator import ConductorManagedRunCoordinator
 from .conductor_managed_run_human_action_projection import project_human_action_instructions
 from .conductor_managed_run_operator_events import ingest_managed_run_operator_events

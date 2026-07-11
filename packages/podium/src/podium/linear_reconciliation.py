@@ -1,14 +1,13 @@
 from __future__ import annotations
 
-import asyncio
 import logging
+from dataclasses import dataclass
 from typing import Any, Callable
 
 import httpx
 
 from .linear_reconciliation_model import (
     after_checkpoint,
-    failure_state,
     initial_reconciliation_state,
     issue_order_key,
     observation_and_event,
@@ -16,18 +15,33 @@ from .linear_reconciliation_model import (
     reconciliation_deferred,
 )
 from .linear_reconciliation_queries import LinearReconciliationClient, LinearReconciliationError
+from .linear_reconciliation_health import (
+    BindingReconciliationFailed,
+    record_binding_error,
+    update_installation_health,
+)
+from .linear_reconciliation_supervisor import run_linear_reconciliation_loop
 from .podium_shared import utc_now_iso
 
 
 LOGGER = logging.getLogger(__name__)
 Transport = Callable[[httpx.Request], httpx.Response]
+MAX_PAGE_CAS_ATTEMPTS = 3
 
 
-class BindingReconciliationFailed(RuntimeError):
-    def __init__(self, cause: Exception, queued: int) -> None:
-        super().__init__(str(cause))
-        self.cause = cause
-        self.queued = queued
+@dataclass(frozen=True)
+class PageCommitResult:
+    inserted: int | None
+    state: dict[str, Any]
+    has_next_page: bool
+    page_cursor: str
+
+
+@dataclass(frozen=True)
+class BindingScanResult:
+    queued: int
+    complete: bool
+    expected_state: dict[str, Any] | None
 
 
 class LinearReconciler:
@@ -66,11 +80,13 @@ class LinearReconciler:
         deferred = False
         user_id = str(installation["user_id"])
         for project in await self.state.list_selected_linear_projects(user_id):
-            binding = await self.state.store.get_active_project_binding_for_project(
+            binding = await self.state.store.get_ready_project_binding_for_installation(
                 user_id,
                 str(project["linear_project_id"]),
+                installation_id=str(installation.get("id") or ""),
+                agent_app_user_id=str(installation.get("app_user_id") or ""),
             )
-            if binding is None or binding.get("state") != "ready":
+            if binding is None:
                 continue
             result["bindings"] += 1
             try:
@@ -81,10 +97,16 @@ class LinearReconciler:
                     result["queued"] += queued
             except BindingReconciliationFailed as failure:
                 result["queued"] += failure.queued
-                result["errors"] += 1
-                await self._record_binding_error(installation, binding, failure.cause)
+                recorded = await record_binding_error(
+                    self.state,
+                    installation,
+                    binding,
+                    failure,
+                )
+                result["errors"] += int(recorded)
         if result["bindings"] and result["errors"] == 0 and not deferred:
-            await self.state.update_linear_reconciliation_health(
+            await update_installation_health(
+                self.state,
                 installation,
                 reconciliation_state="healthy",
                 last_reconciliation_at=utc_now_iso(),
@@ -102,59 +124,134 @@ class LinearReconciler:
         binding: dict[str, Any],
     ) -> int | None:
         binding_id = str(binding["id"])
-        state = await self.state.store.get_linear_reconciliation_state(binding_id)
-        state = {**initial_reconciliation_state(binding_id), **(state or {})}
-        if reconciliation_deferred(state):
-            return None
         queued = 0
-        try:
-            mode = "incremental" if state.get("baseline_complete") else "baseline"
-            scan_started_at = str(state.get("scan_started_at") or utc_now_iso())
-            after = str(state.get("page_cursor") or "") or None
-            while True:
-                page = await self.client.fetch_page(
-                    installation,
-                    project,
-                    mode=mode,
-                    updated_after=(str(state.get("checkpoint_updated_at") or "") or None),
-                    after=after,
+        for stale_attempt in range(1, MAX_PAGE_CAS_ATTEMPTS + 1):
+            try:
+                persisted_state = await self.state.store.get_linear_reconciliation_state(binding_id)
+            except Exception as exc:
+                raise BindingReconciliationFailed(
+                    exc,
+                    queued,
+                    expected_state=None,
+                    state_loaded=False,
+                ) from exc
+            state = {**initial_reconciliation_state(binding_id), **(persisted_state or {})}
+            if reconciliation_deferred(state):
+                return None
+            scan = await self._scan_binding_pages(
+                installation, project, binding, persisted_state, state, queued
+            )
+            queued = scan.queued
+            if scan.complete:
+                return queued
+            self._log_stale_page(binding_id, stale_attempt)
+            if not await self._binding_still_routes(installation, project, binding_id):
+                self._log_retired_route(installation, binding_id)
+                return queued
+            if stale_attempt == MAX_PAGE_CAS_ATTEMPTS:
+                error = LinearReconciliationError(
+                    "linear_reconciliation_contention",
+                    "Linear reconciliation page contention exceeded the retry limit",
                 )
-                if page.has_next_page and (not page.end_cursor or page.end_cursor == after):
-                    raise LinearReconciliationError(
-                        "linear_reconciliation_pagination_invalid",
-                        "Linear reconciliation cursor did not advance",
-                    )
-                issues = sorted(page.issues, key=issue_order_key)
-                observations, dispatches = await self._page_changes(
-                    installation,
-                    project,
-                    binding,
-                    state,
-                    mode,
-                    issues,
+                raise BindingReconciliationFailed(
+                    error,
+                    queued,
+                    expected_state=scan.expected_state,
+                    state_loaded=True,
+                ) from error
+        raise AssertionError("bounded reconciliation retry loop exhausted unexpectedly")
+
+    async def _scan_binding_pages(
+        self,
+        installation: dict[str, Any],
+        project: dict[str, Any],
+        binding: dict[str, Any],
+        expected_state: dict[str, Any] | None,
+        state: dict[str, Any],
+        queued: int,
+    ) -> BindingScanResult:
+        mode = "incremental" if state.get("baseline_complete") else "baseline"
+        scan_started_at = str(state.get("scan_started_at") or utc_now_iso())
+        page_cursor = str(state.get("page_cursor") or "") or None
+        while True:
+            try:
+                page = await self._commit_next_page(
+                    installation, project, binding, expected_state, state,
+                    mode, scan_started_at, page_cursor,
                 )
-                next_state = page_state(
-                    state,
-                    mode=mode,
-                    scan_started_at=scan_started_at,
-                    page_cursor=page.end_cursor,
-                    issues=issues,
-                    final_page=not page.has_next_page,
-                )
-                inserted = await self.state.store.commit_linear_reconciliation_page(
-                    binding_id,
-                    state=next_state,
-                    observations=observations,
-                    dispatches=dispatches,
-                )
-                await self.state.notify_reconciled_dispatches(binding, inserted)
-                queued += inserted
-                state = next_state
-                if not page.has_next_page:
-                    return queued
-                after = page.end_cursor
-        except Exception as exc:
-            raise BindingReconciliationFailed(exc, queued) from exc
+                if page.inserted is None:
+                    return BindingScanResult(queued, False, expected_state)
+                expected_state = page.state
+                state = page.state
+                queued += page.inserted
+                await self.state.notify_reconciled_dispatches(binding, page.inserted)
+            except Exception as exc:
+                raise BindingReconciliationFailed(
+                    exc, queued, expected_state=expected_state, state_loaded=True
+                ) from exc
+            if not page.has_next_page:
+                return BindingScanResult(queued, True, expected_state)
+            page_cursor = page.page_cursor
+
+    async def _commit_next_page(
+        self,
+        installation: dict[str, Any],
+        project: dict[str, Any],
+        binding: dict[str, Any],
+        expected_state: dict[str, Any] | None,
+        state: dict[str, Any],
+        mode: str,
+        scan_started_at: str,
+        page_cursor: str | None,
+    ) -> PageCommitResult:
+        page = await self.client.fetch_page(
+            installation,
+            project,
+            mode=mode,
+            updated_after=str(state.get("checkpoint_updated_at") or "") or None,
+            after=page_cursor,
+        )
+        if page.has_next_page and (not page.end_cursor or page.end_cursor == page_cursor):
+            raise LinearReconciliationError(
+                "linear_reconciliation_pagination_invalid",
+                "Linear reconciliation cursor did not advance",
+            )
+        issues = sorted(page.issues, key=issue_order_key)
+        observations, dispatches = await self._page_changes(
+            installation, project, binding, state, mode, issues
+        )
+        next_state = page_state(
+            state,
+            mode=mode,
+            scan_started_at=scan_started_at,
+            page_cursor=page.end_cursor,
+            issues=issues,
+            final_page=not page.has_next_page,
+        )
+        inserted = await self.state.store.commit_linear_reconciliation_page(
+            str(binding["id"]),
+            expected_state=expected_state,
+            expected_installation_id=str(installation.get("id") or ""),
+            expected_agent_app_user_id=str(installation.get("app_user_id") or ""),
+            state=next_state,
+            observations=observations,
+            dispatches=dispatches,
+        )
+        return PageCommitResult(inserted, next_state, page.has_next_page, page.end_cursor)
+
+    async def _binding_still_routes(
+        self,
+        installation: dict[str, Any],
+        project: dict[str, Any],
+        binding_id: str,
+    ) -> bool:
+        current = await self.state.store.get_ready_project_binding_for_installation(
+            str(installation.get("user_id") or ""),
+            str(project.get("linear_project_id") or ""),
+            installation_id=str(installation.get("id") or ""),
+            agent_app_user_id=str(installation.get("app_user_id") or ""),
+        )
+        return current is not None and str(current.get("id") or "") == binding_id
 
     async def _page_changes(
         self,
@@ -187,48 +284,26 @@ class LinearReconciler:
                 dispatches.append(self.state.reconciliation_dispatch(event, binding))
         return observations, dispatches
 
-    async def _record_binding_error(
+    def _log_stale_page(self, binding_id: str, attempt: int) -> None:
+        LOGGER.warning(
+            "event=linear_reconciliation_page_stale binding_id=%s "
+            "error_type=StaleReconciliationPage "
+            "error_code=linear_reconciliation_page_stale "
+            "sanitized_reason=stale_binding_snapshot action_required=none "
+            "retryable=true attempt_number=%s next_action=reload_binding_state",
+            binding_id,
+            attempt,
+        )
+
+    def _log_retired_route(
         self,
         installation: dict[str, Any],
-        binding: dict[str, Any],
-        error: Exception,
+        binding_id: str,
     ) -> None:
-        binding_id = str(binding["id"])
-        current = await self.state.store.get_linear_reconciliation_state(binding_id)
-        code, reason = _visible_error(error)
-        failed = failure_state(current or initial_reconciliation_state(binding_id), binding_id, code, reason)
-        await self.state.store.save_linear_reconciliation_state(binding_id, failed)
-        await self.state.update_linear_reconciliation_health(
-            installation,
-            reconciliation_state="degraded",
-            reconciliation_error_code=code,
-            reconciliation_error=reason,
-            reconciliation_retry_count=int(failed["retry_count"]),
-            reconciliation_next_retry_at=failed["next_retry_at"],
-        )
-        LOGGER.warning(
-            "event=linear_reconciliation_failed installation_id=%s binding_id=%s error_type=%s error_code=%s "
-            "sanitized_reason=%s action_required=retry retryable=true next_action=retry_reconciliation",
+        LOGGER.info(
+            "event=linear_reconciliation_route_retired "
+            "installation_id=%s binding_id=%s action_required=none "
+            "retryable=false next_action=stop_stale_reconciliation",
             installation.get("id"),
             binding_id,
-            type(error).__name__,
-            code,
-            reason,
         )
-
-
-async def run_linear_reconciliation_loop(
-    reconciler: LinearReconciler,
-    *,
-    interval_seconds: float,
-) -> None:
-    interval = max(1.0, float(interval_seconds or 1.0))
-    while True:
-        await reconciler.reconcile_once()
-        await asyncio.sleep(interval)
-
-
-def _visible_error(error: Exception) -> tuple[str, str]:
-    code = str(getattr(error, "code", "linear_reconciliation_failed"))
-    reason = str(getattr(error, "reason", "") or f"Linear reconciliation failed ({type(error).__name__})")
-    return code[:64], reason.replace("\n", " ").replace("\r", " ")[:300]

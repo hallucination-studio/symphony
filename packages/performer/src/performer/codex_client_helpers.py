@@ -9,9 +9,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from performer_api.config import CodexConfig
 from .codex_client_helper_adapter import _ThreadRunAdapter
 from .codex_client_helper_async import _maybe_await
+from .codex_config import CodexConfig
 
 logger = logging.getLogger(__name__)
 

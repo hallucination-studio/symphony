@@ -3,9 +3,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from performer_api.managed_runs import GateSnapshot, ManagedRunRuntimeRole, ManagedRunState, RuntimeConfigEnvelope, WorkItemResult
+from performer_api.managed_runs import ManagedRunRuntimeRole, RuntimeConfigEnvelope, WorkItemResult
 
 from .conductor_managed_run_branch_join import prepare_checkpoint_workspace, prepare_execution_workspace
+from .conductor_managed_run_gates import GateSnapshot
 from .conductor_managed_run_driver_helpers import (
     _active_attempts,
     _attempt_paths,
@@ -21,6 +22,7 @@ from .conductor_managed_run_driver_helpers import (
 )
 from .conductor_managed_run_fencing import attempt_fencing_fields, build_turn_context
 from .conductor_managed_run_runtime_waits import runtime_wait_probe_requested
+from .conductor_managed_run_state import ManagedRunState
 from .conductor_managed_run_driver_attempt_collection import ConductorManagedRunAttemptCollectionMixin
 from .conductor_managed_run_execution import ExecutionHandoff
 from .conductor_managed_run_verifier import run_local_verifier

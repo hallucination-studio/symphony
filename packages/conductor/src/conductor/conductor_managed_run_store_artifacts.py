@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from performer_api.managed_runs import GateSnapshot, ManagedRunPlan, TaskOutputManifest, VerificationInputSnapshot
+from performer_api.managed_runs import ManagedRunPlan
+
+from .conductor_managed_run_gates import GateSnapshot, TaskOutputManifest, VerificationInputSnapshot
 
 
 def gate_snapshots_for_plan(

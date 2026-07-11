@@ -5,9 +5,9 @@ from typing import Any
 from conductor.conductor_managed_run_coordinator import ConductorManagedRunCoordinator
 from conductor.conductor_managed_run_human_action import ingest_managed_run_human_action_event
 from conductor.conductor_managed_run_projection import ManagedRunLinearProjector
+from conductor.conductor_managed_run_state import ManagedRunState, WorkItemState
 from conductor.conductor_managed_run_store import ConductorManagedRunStore
 from performer_api.managed_runs import (
-    ManagedRunState,
     ManagedRunPlan,
     ParallelizationPolicy,
     VerificationRubric,
@@ -15,7 +15,6 @@ from performer_api.managed_runs import (
     WorkItemResult,
     WorkItemResultStatus,
     WorkItemSliceType,
-    WorkItemState,
     WorkItemVerification,
 )
 

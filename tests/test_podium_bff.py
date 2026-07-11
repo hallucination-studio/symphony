@@ -1,624 +1,255 @@
 from __future__ import annotations
 
-import asyncio
 import json
-from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+from typing import Any
+from unittest.mock import AsyncMock
+from urllib.parse import parse_qsl, urlparse
 
+import httpx
 import pytest
+from fastapi import FastAPI
 
-from podium.server import PodiumServer
+from podium.app import create_app
 
 
-async def request(
-    port: int,
-    method: str,
-    path: str,
-    body: object | bytes | None = None,
-    headers: dict[str, str] | None = None,
-) -> tuple[int, dict[str, str], bytes]:
-    reader, writer = await asyncio.open_connection("127.0.0.1", port)
-    if isinstance(body, bytes):
-        raw = body
-    elif body is None:
-        raw = b""
-    else:
-        if path in {"/api/v1/auth/register", "/api/v1/auth/login"} and isinstance(body, dict):
-            body = {**body, "turnstile_token": "test-turnstile"}
-        raw = json.dumps(body).encode()
-    request_headers = {"Host": "127.0.0.1", "Content-Length": str(len(raw))}
-    if body is not None and not isinstance(body, bytes):
-        request_headers["Content-Type"] = "application/json"
-    if headers:
-        request_headers.update(headers)
-    writer.write(
-        f"{method} {path} HTTP/1.1\r\n".encode()
-        + b"".join(f"{key}: {value}\r\n".encode() for key, value in request_headers.items())
-        + b"\r\n"
-        + raw
+USER = {"id": "user-1", "email": "operator@example.com"}
+
+
+def _app(*, user: dict[str, str] | None = USER, store: Any = None, **overrides: Any) -> FastAPI:
+    app = create_app(
+        turnstile_verifier=lambda _token, _ip: True,
+        secure_cookies=False,
+        static_dir=None,
+        secret_key="test-secret",
+        store=store if store is not None else object(),
+        **overrides,
     )
-    await writer.drain()
-    status_line = await reader.readline()
-    status = int(status_line.decode().split(" ")[1])
-    response_headers: dict[str, str] = {}
-    while True:
-        line = await reader.readline()
-        if line in {b"\r\n", b"\n", b""}:
-            break
-        key, value = line.decode().split(":", 1)
-        response_headers[key.strip().lower()] = value.strip()
-    response_body = await reader.readexactly(int(response_headers.get("content-length", "0")))
-    writer.close()
-    await writer.wait_closed()
-    return status, response_headers, response_body
+    app.state.podium.user_for_session = AsyncMock(return_value=user)
+    return app
 
 
-def _server() -> PodiumServer:
-    return PodiumServer(secret_key="test-secret")
-
-
-async def _auth(server: PodiumServer, *, linear_token: str | None = "secret-linear-token") -> tuple[str, str]:
-    """Register a user over HTTP, seed a Linear installation for their
-    workspace, and return (workspace_id, cookie)."""
-    _, headers, body = await request(
-        server.port, "POST", "/api/v1/auth/register",
-        {"email": f"u{id(server)}@example.com", "password": "password123"},
+def _client(app: FastAPI) -> httpx.AsyncClient:
+    return httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://podium.test",
     )
-    cookie = (headers.get("set-cookie") or "").split(";", 1)[0]
-    workspace_id = json.loads(body)["user"]["id"]
-    if linear_token is not None:
-        now = datetime.now(timezone.utc)
-        await server.app.state.podium.save_linear_installation_record(
-            {
-                "id": f"installation-{workspace_id}",
-                "user_id": workspace_id,
-                "application_config_id": "test-config",
-                "application_config_version": 1,
-                "application_source": "default",
-                "state": "accepted",
-                "active": False,
-                "access_token": linear_token,
-                "refresh_token": "test-refresh-token",
-                "token_type": "Bearer",
-                "scope": ["read", "write", "app:assignable"],
-                "expires_at": (now + timedelta(hours=1)).isoformat().replace("+00:00", "Z"),
-                "linear_organization_id": "linear-org-1",
-                "organization_url_key": "acme",
-                "organization_name": "Acme",
-                "app_user_id": "app-1",
-                "projects": [{"id": "proj-1", "name": "Podium", "slug_id": "podium"}],
-                "error_code": "",
-                "sanitized_reason": "",
-                "retryable": False,
-                "action_required": "",
-                "next_action": "",
-                "created_at": now.isoformat().replace("+00:00", "Z"),
-                "updated_at": now.isoformat().replace("+00:00", "Z"),
-            }
-        )
-        await server.app.state.podium.activate_linear_installation(workspace_id, f"installation-{workspace_id}")
-    return workspace_id, cookie
-
-
-# ===== Bootstrap =====
 
 
 @pytest.mark.asyncio
 async def test_bootstrap_requires_auth() -> None:
-    server = _server()
-    await server.start(port=0)
-    try:
-        status, _, body = await request(server.port, "GET", "/api/v1/bootstrap")
-    finally:
-        await server.stop()
+    app = _app(user=None)
+    async with _client(app) as client:
+        response = await client.get("/api/v1/bootstrap")
 
-    assert status == 401
-    assert json.loads(body)["error"]["code"] == "unauthorized"
+    assert response.status_code == 401
+    assert response.json()["error"]["code"] == "unauthorized"
 
 
 @pytest.mark.asyncio
-async def test_bootstrap_returns_session_and_onboarding_state() -> None:
-    server = _server()
-    await server.start(port=0)
-    try:
-        ws, cookie = await _auth(server)
-        status, _, body = await request(
-            server.port, "GET", "/api/v1/bootstrap", headers={"Cookie": cookie}
-        )
-    finally:
-        await server.stop()
-
-    assert status == 200
-    payload = json.loads(body)
-    assert payload["session"]["workspace_id"] == ws
-    assert payload["session"]["user_id"] == ws
-    assert payload["onboarding"]["current_step"]
-    assert "next_action" in payload["onboarding"]
-    for leak in (b"secret-linear-token", b"token", b"password_hash", b"runtime_token", b"proxy_token"):
-        assert leak not in body
-
-
-@pytest.mark.asyncio
-async def test_bootstrap_reports_linear_connection_status() -> None:
-    server = _server()
-    await server.start(port=0)
-    try:
-        ws, cookie = await _auth(server)
-        status, _, body = await request(
-            server.port, "GET", "/api/v1/bootstrap", headers={"Cookie": cookie}
-        )
-    finally:
-        await server.stop()
-
-    payload = json.loads(body)
-    assert payload["linear"]["state"] == "connected"
-    assert payload["linear"]["workspace_id"] == ws
-    assert b"secret-linear-token" not in body
-
-
-# ===== Onboarding status =====
-
-
-@pytest.mark.asyncio
-async def test_onboarding_status_returns_progress() -> None:
-    server = _server()
-    await server.start(port=0)
-    try:
-        ws, cookie = await _auth(server)
-        status, _, body = await request(
-            server.port, "GET", "/api/v1/onboarding/status", headers={"Cookie": cookie}
-        )
-    finally:
-        await server.stop()
-
-    assert status == 200
-    payload = json.loads(body)
-    assert "current_step" in payload
-    assert "completed_steps" in payload
-
-
-# ===== Linear onboarding =====
-
-
-@pytest.mark.asyncio
-async def test_onboarding_linear_start_returns_authorization_url() -> None:
-    server = PodiumServer(
-        secret_key="test-secret",
-        linear_client_id="client-1",
-        linear_client_secret="client-secret",
-        linear_redirect_uri="https://podium.example/api/v1/linear/oauth/callback",
+async def test_bootstrap_returns_sanitized_session_onboarding_and_linear_state() -> None:
+    app = _app()
+    app.state.podium.get_active_linear_installation = AsyncMock(return_value=None)
+    app.state.podium.onboarding_progress = AsyncMock(
+        return_value={
+            "current_step": "runtime_enrollment",
+            "completed_steps": ["linear_connect", "scope_selection"],
+            "next_action": "runtime_enrollment",
+        }
     )
-    await server.start(port=0)
-    try:
-        ws, cookie = await _auth(server, linear_token=None)
-        status, _, body = await request(
-            server.port,
-            "POST",
-            "/api/v1/linear/installations/oauth",
-            {},
-            headers={"Cookie": cookie},
-        )
-    finally:
-        await server.stop()
+    app.state.podium.linear_status = AsyncMock(
+        return_value={
+            "workspace_id": "user-1",
+            "state": "connected",
+            "app_user_id": "linear-app-user",
+        }
+    )
 
-    assert status == 200
-    payload = json.loads(body)
-    assert payload["authorization_url"].startswith("https://linear.app/oauth/authorize")
+    async with _client(app) as client:
+        response = await client.get("/api/v1/bootstrap")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "session": {
+            "workspace_id": "user-1",
+            "user_id": "user-1",
+            "email": "operator@example.com",
+        },
+        "onboarding": {
+            "current_step": "runtime_enrollment",
+            "completed_steps": ["linear_connect", "scope_selection"],
+            "next_action": "runtime_enrollment",
+        },
+        "linear": {
+            "workspace_id": "user-1",
+            "state": "connected",
+            "app_user_id": "linear-app-user",
+        },
+    }
+    for secret_field in (
+        "access_token",
+        "refresh_token",
+        "password_hash",
+        "runtime_token",
+        "proxy_token",
+    ):
+        assert secret_field not in response.text
 
 
 @pytest.mark.asyncio
-async def test_onboarding_scope_saves_selection() -> None:
-    server = _server()
-    await server.start(port=0)
-    try:
-        ws, cookie = await _auth(server)
-        status, _, body = await request(
-            server.port,
-            "POST",
+async def test_linear_oauth_start_returns_app_actor_authorization_url() -> None:
+    app = _app()
+    app.state.podium.selected_linear_application = AsyncMock(
+        return_value={
+            "id": "application-1",
+            "version": 7,
+            "client_id": "client-1",
+            "callback_url": "https://podium.example/api/v1/linear/oauth/callback",
+        }
+    )
+    app.state.podium.create_linear_oauth_state = AsyncMock(
+        return_value={"state": "state-1", "code_challenge": "challenge-1"}
+    )
+
+    async with _client(app) as client:
+        response = await client.post("/api/v1/linear/installations/oauth", json={})
+
+    query = dict(parse_qsl(urlparse(response.json()["authorization_url"]).query))
+    assert response.status_code == 200
+    assert query["actor"] == "app"
+    assert query["state"] == "state-1"
+    assert query["code_challenge_method"] == "S256"
+
+
+@pytest.mark.asyncio
+async def test_onboarding_scope_and_repository_routes_validate_and_delegate() -> None:
+    progress = {
+        "current_step": "runtime_enrollment",
+        "completed_steps": ["scope_selection", "repository_mapping"],
+        "next_action": "runtime_enrollment",
+    }
+    app = _app()
+    app.state.podium.save_onboarding_scope = AsyncMock(return_value=progress)
+    app.state.podium.save_onboarding_repository = AsyncMock(return_value=progress)
+
+    async with _client(app) as client:
+        scope = await client.post(
             "/api/v1/onboarding/scope",
-            {"teams": ["team-1"], "projects": ["proj-1"]},
-            headers={"Cookie": cookie},
+            json={"teams": ["team-1"], "projects": ["project-1"]},
         )
-    finally:
-        await server.stop()
-
-    assert status == 200
-    payload = json.loads(body)
-    assert payload["onboarding"]["current_step"]
-
-
-# ===== Repository =====
-
-
-@pytest.mark.asyncio
-async def test_onboarding_repository_saves_git_url_mapping() -> None:
-    server = _server()
-    await server.start(port=0)
-    try:
-        ws, cookie = await _auth(server)
-        status, _, body = await request(
-            server.port,
-            "POST",
+        valid = await client.post(
             "/api/v1/onboarding/repository",
-            {"mode": "git_url", "value": "https://github.com/acme/repo.git"},
-            headers={"Cookie": cookie},
+            json={"mode": "git_url", "value": "https://github.com/acme/repo.git"},
         )
-    finally:
-        await server.stop()
-
-    assert status == 200
-    payload = json.loads(body)
-    assert payload["repository"]["validation_state"] == "valid"
-
-
-@pytest.mark.asyncio
-async def test_onboarding_repository_rejects_invalid_git_url() -> None:
-    server = _server()
-    await server.start(port=0)
-    try:
-        ws, cookie = await _auth(server)
-        status, _, body = await request(
-            server.port,
-            "POST",
+        invalid = await client.post(
             "/api/v1/onboarding/repository",
-            {"mode": "git_url", "value": "not-a-url"},
-            headers={"Cookie": cookie},
+            json={"mode": "git_url", "value": "not-a-url"},
         )
-    finally:
-        await server.stop()
-
-    assert status == 200
-    payload = json.loads(body)
-    assert payload["repository"]["validation_state"] == "invalid"
-
-
-@pytest.mark.asyncio
-async def test_onboarding_repository_rejects_unknown_mode() -> None:
-    server = _server()
-    await server.start(port=0)
-    try:
-        ws, cookie = await _auth(server)
-        status, _, body = await request(
-            server.port,
-            "POST",
+        unknown = await client.post(
             "/api/v1/onboarding/repository",
-            {"mode": "nope", "value": "x"},
-            headers={"Cookie": cookie},
+            json={"mode": "unknown", "value": "repo"},
         )
-    finally:
-        await server.stop()
 
-    assert status == 400
-    assert json.loads(body)["error"]["code"] == "invalid_mode"
-
-
-# ===== Runtime enrollment =====
-
-
-@pytest.mark.asyncio
-async def test_onboarding_enrollment_token_returns_install_command() -> None:
-    server = PodiumServer(
-        secret_key="test-secret",
-        podium_base_url="https://podium.test",
+    assert scope.status_code == 200
+    assert valid.json()["repository"]["validation_state"] == "valid"
+    assert invalid.json()["repository"]["validation_state"] == "invalid"
+    assert unknown.status_code == 400
+    assert unknown.json()["error"]["code"] == "invalid_mode"
+    app.state.podium.save_onboarding_scope.assert_awaited_once_with(
+        "user-1", ["team-1"], ["project-1"]
     )
-    await server.start(port=0)
-    try:
-        ws, cookie = await _auth(server, linear_token="t")
-        status, _, body = await request(
-            server.port,
-            "POST",
-            "/api/v1/onboarding/runtime/enrollment-token",
-            {},
-            headers={"Cookie": cookie},
-        )
-    finally:
-        await server.stop()
+    assert app.state.podium.save_onboarding_repository.await_count == 2
 
-    assert status == 200
-    payload = json.loads(body)
-    token = payload["enrollment_token"]
-    assert len(token) > 20
-    assert payload["install_command"] == (
-        f"PODIUM_ENROLLMENT_TOKEN={token} "
-        f"curl -fsSL https://podium.test/install.sh | "
-        f"PODIUM_ENROLLMENT_TOKEN={token} "
-        f"bash -s -- --podium-url https://podium.test"
+
+@pytest.mark.asyncio
+async def test_runtime_enroll_surfaces_invalid_persisted_token() -> None:
+    app = _app(user=None)
+    app.state.podium.consume_enrollment_token = AsyncMock(
+        return_value=(None, "invalid_enrollment_token")
     )
-    assert f"--enrollment-token {token}" not in payload["install_command"]
-    assert payload["expires_at"]
-    # No hardcoded frontend host leaks into the backend-composed command.
-    assert "get.podium.dev" not in payload["install_command"]
 
-
-# ===== Runtime enrollment over HTTP (closes the onboarding loop) =====
-
-
-@pytest.mark.asyncio
-async def test_runtime_enroll_over_http_brings_runtime_online() -> None:
-    server = _server()
-    await server.start(port=0)
-    try:
-        ws, cookie = await _auth(server)
-        _, _, token_body = await request(
-            server.port,
-            "POST",
-            "/api/v1/onboarding/runtime/enrollment-token",
-            {},
-            headers={"Cookie": cookie},
-        )
-        token = json.loads(token_body)["enrollment_token"]
-
-        status, _, body = await request(
-            server.port,
-            "POST",
+    async with _client(app) as client:
+        response = await client.post(
             "/api/v1/runtime/enroll",
-            {"enrollment_token": token, "hostname": "host-1", "version": "1.2.3"},
+            json={"enrollment_token": "never-issued"},
         )
-        assert status == 200
-        enrolled = json.loads(body)
-        runtime_id = enrolled["runtime_id"]
-        assert runtime_id
 
-        runtime = await server.app.state.podium.store.get_runtime(runtime_id)
-        conductor_rows = server.app.state.podium.store._load_map("conductors.json")
-        conductor_rows[runtime_id]["version"] = "1.2.3"
-        server.app.state.podium.store._write("conductors.json", conductor_rows)
-        assert runtime is not None
-        await server.app.state.podium.set_presence(runtime_id)
-        # The workspace now reports an online runtime once presence is observed.
-        status, _, status_body = await request(
-            server.port,
-            "GET",
-            "/api/v1/onboarding/runtime/status",
-            headers={"Cookie": cookie},
-        )
-        assert json.loads(status_body)["online_count"] == 1
-
-        # The enrolled runtime is visible in the listing.
-        _, _, list_body = await request(
-            server.port, "GET", "/api/v1/runtimes", headers={"Cookie": cookie}
-        )
-        assert any(r["runtime_id"] == runtime_id and r["online"] for r in json.loads(list_body)["runtimes"])
-        detail_status, _, detail_body = await request(
-            server.port,
-            "GET",
-            f"/api/v1/runtimes/{runtime_id}",
-            headers={"Cookie": cookie},
-        )
-    finally:
-        await server.stop()
-
-    assert detail_status == 200
-    detail = json.loads(detail_body)
-    assert detail["runtime_id"] == runtime_id
-    assert detail["online"] is True
-    assert detail["last_heartbeat"] is not None
-    assert detail["version"] == "1.2.3"
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "invalid_enrollment_token"
 
 
 @pytest.mark.asyncio
-async def test_runtime_enroll_rejects_unknown_token() -> None:
-    server = _server()
-    await server.start(port=0)
-    try:
-        status, _, body = await request(
-            server.port,
-            "POST",
-            "/api/v1/runtime/enroll",
-            {"enrollment_token": "never-issued"},
-        )
-    finally:
-        await server.stop()
+async def test_runtime_listing_projects_presence_from_store_results() -> None:
+    runtime = {
+        "id": "runtime-1",
+        "user_id": "user-1",
+        "version": "1.2.3",
+        "metadata": {"hostname": "build-host"},
+    }
+    store = SimpleNamespace(
+        list_conductors_for_user=AsyncMock(return_value=[runtime]),
+        get_runtime=AsyncMock(return_value=runtime),
+    )
+    app = _app(store=store)
+    app.state.podium.list_conductors_for_user = AsyncMock(
+        return_value=[
+            {
+                "id": "runtime-1",
+                "runtime_id": "runtime-1",
+                "online": True,
+                "bindings": [],
+            }
+        ]
+    )
+    app.state.podium.runtime_presence_snapshot = AsyncMock(
+        return_value={"runtime-1": "2026-07-11T00:00:00Z"}
+    )
 
-    assert status == 400
-    assert json.loads(body)["error"]["code"] == "invalid_enrollment_token"
+    async with _client(app) as client:
+        response = await client.get("/api/v1/runtimes")
 
-
-@pytest.mark.asyncio
-async def test_runtime_enroll_token_is_single_use() -> None:
-    server = _server()
-    await server.start(port=0)
-    try:
-        ws, cookie = await _auth(server)
-        _, _, token_body = await request(
-            server.port,
-            "POST",
-            "/api/v1/onboarding/runtime/enrollment-token",
-            {},
-            headers={"Cookie": cookie},
-        )
-        token = json.loads(token_body)["enrollment_token"]
-        first, _, _ = await request(
-            server.port, "POST", "/api/v1/runtime/enroll", {"enrollment_token": token}
-        )
-        second, _, body = await request(
-            server.port, "POST", "/api/v1/runtime/enroll", {"enrollment_token": token}
-        )
-    finally:
-        await server.stop()
-
-    assert first == 200
-    assert second == 400
-    assert json.loads(body)["error"]["code"] == "enrollment_token_used"
+    assert response.status_code == 200
+    assert response.json()["runtimes"] == [
+        {
+            "runtime_id": "runtime-1",
+            "online": True,
+            "last_heartbeat": "2026-07-11T00:00:00Z",
+            "version": "1.2.3",
+            "metadata": {"hostname": "build-host"},
+        }
+    ]
 
 
 @pytest.mark.asyncio
-async def test_runtime_heartbeat_unknown_runtime_returns_404() -> None:
-    server = _server()
-    await server.start(port=0)
-    try:
-        ws, cookie = await _auth(server)
-        status, _, body = await request(
-            server.port,
-            "GET",
-            "/api/v1/runtimes/does-not-exist",
-            headers={"Cookie": cookie},
-        )
-    finally:
-        await server.stop()
+async def test_runtime_detail_returns_not_found_for_unknown_persisted_runtime() -> None:
+    store = SimpleNamespace(get_runtime=AsyncMock(return_value=None))
+    app = _app(store=store)
 
-    assert status == 404
-    assert json.loads(body)["error"]["code"] == "not_found"
+    async with _client(app) as client:
+        response = await client.get("/api/v1/runtimes/missing")
+
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "not_found"
 
 
 @pytest.mark.asyncio
-async def test_onboarding_runtime_status_reports_enrollment() -> None:
-    server = _server()
-    await server.start(port=0)
-    try:
-        ws, cookie = await _auth(server)
-        status, _, body = await request(
-            server.port,
-            "GET",
-            "/api/v1/onboarding/runtime/status",
-            headers={"Cookie": cookie},
-        )
-    finally:
-        await server.stop()
+async def test_smoke_routes_return_capability_results_and_legacy_runs_stay_removed() -> None:
+    result = {
+        "smoke_check_id": "smoke-1",
+        "status": "passed",
+        "checks": [{"id": "runtime", "status": "passed"}],
+    }
+    app = _app()
+    app.state.podium.start_smoke_check = AsyncMock(return_value=result)
+    app.state.podium.get_smoke_result = AsyncMock(return_value=result)
 
-    assert status == 200
-    payload = json.loads(body)
-    assert "enrolled" in payload
-    assert "online_count" in payload
+    async with _client(app) as client:
+        started = await client.post("/api/v1/onboarding/smoke-check", json={})
+        loaded = await client.get("/api/v1/onboarding/smoke-check/result")
+        recent = await client.get("/api/v1/runs/recent")
+        detail = await client.get("/api/v1/runs/run-1")
 
-
-# ===== Smoke check =====
-
-
-@pytest.mark.asyncio
-async def test_onboarding_smoke_check_triggers_and_returns_result() -> None:
-    server = _server()
-    await server.start(port=0)
-    try:
-        ws, cookie = await _auth(server)
-        status, _, body = await request(
-            server.port,
-            "POST",
-            "/api/v1/onboarding/smoke-check",
-            {},
-            headers={"Cookie": cookie},
-        )
-    finally:
-        await server.stop()
-
-    assert status == 200
-    payload = json.loads(body)
-    assert payload["status"] in {"passed", "failed"}
-    assert "checks" in payload
-
-
-@pytest.mark.asyncio
-async def test_onboarding_smoke_check_result_returns_latest() -> None:
-    server = _server()
-    await server.start(port=0)
-    try:
-        ws, cookie = await _auth(server)
-        await request(
-            server.port,
-            "POST",
-            "/api/v1/onboarding/smoke-check",
-            {},
-            headers={"Cookie": cookie},
-        )
-        status, _, body = await request(
-            server.port,
-            "GET",
-            "/api/v1/onboarding/smoke-check/result",
-            headers={"Cookie": cookie},
-        )
-    finally:
-        await server.stop()
-
-    assert status == 200
-    payload = json.loads(body)
-    assert payload["status"] in {"passed", "failed"}
-
-
-# ===== Runtimes =====
-
-
-@pytest.mark.asyncio
-async def test_runtimes_list_returns_online_status() -> None:
-    server = _server()
-    await server.start(port=0)
-    try:
-        ws, cookie = await _auth(server)
-        group_id = f"group_{ws}"
-        await server.app.state.podium.store.upsert_runtime_group(
-            {"id": group_id, "linear_workspace_id": ws, "managed_run_profile": "default"}
-        )
-        await server.app.state.podium.store.upsert_conductor({
-            "id": "rt-1",
-            "conductor_id": "rt-1",
-            "user_id": ws,
-            "runtime_group_id": group_id,
-            "runtime_token_hash": "",
-            "proxy_token_hash": "",
-            "disabled": False,
-            "revoked": False,
-            "created_at": "2026-01-01T00:00:00Z",
-        })
-        await server.app.state.podium.store.upsert_project_binding({
-            "id": "rt-1:inst-1",
-            "conductor_id": "rt-1",
-            "user_id": ws,
-            "instance_id": "inst-1",
-            "name": "Performer",
-            "linear_project": "ALPHA",
-            "project_slug": "ALPHA",
-            "agent_app_user_id": "agent-app-1",
-            "managed_run_profile": "default",
-            "process_status": "running",
-            "constraint_labels": [],
-            "repo_source": {},
-            "updated_at": "2026-01-01T00:00:00Z",
-        })
-        await server.app.state.podium.set_presence("rt-1")
-        status, _, body = await request(
-            server.port, "GET", "/api/v1/runtimes", headers={"Cookie": cookie}
-        )
-    finally:
-        await server.stop()
-
-    assert status == 200
-    payload = json.loads(body)
-    assert any(r["runtime_id"] == "rt-1" and r["online"] for r in payload["runtimes"])
-    binding = payload["conductors"][0]["bindings"][0]
-    assert binding["managed_run_profile"] == "default"
-
-
-@pytest.mark.asyncio
-async def test_runtime_detail_404_for_unknown() -> None:
-    server = _server()
-    await server.start(port=0)
-    try:
-        ws, cookie = await _auth(server)
-        status, _, body = await request(
-            server.port, "GET", "/api/v1/runtimes/nope", headers={"Cookie": cookie}
-        )
-    finally:
-        await server.stop()
-
-    assert status == 404
-    assert json.loads(body)["error"]["code"] == "not_found"
-
-
-# ===== Managed Runs Runtime Surface =====
-
-
-@pytest.mark.asyncio
-async def test_legacy_runs_api_is_not_exposed() -> None:
-    server = _server()
-    await server.start(port=0)
-    try:
-        ws, cookie = await _auth(server)
-        recent_status, _, _recent_body = await request(
-            server.port, "GET", "/api/v1/runs/recent", headers={"Cookie": cookie}
-        )
-        detail_status, _, _detail_body = await request(
-            server.port, "GET", "/api/v1/runs/run-1", headers={"Cookie": cookie}
-        )
-    finally:
-        await server.stop()
-
-    assert recent_status == 404
-    assert detail_status == 404
+    assert started.status_code == 200
+    assert loaded.status_code == 200
+    assert json.loads(loaded.content) == result
+    assert (recent.status_code, detail.status_code) == (404, 404)

@@ -34,7 +34,6 @@ class CoordinationResult(dict[str, Any]):
     def __init__(
         self,
         *,
-        repository_handoff: dict[str, Any],
         dispatch_acks: dict[str, Any],
         project_labels_synced: int,
         managed_run_turns_started: int = 0,
@@ -58,7 +57,6 @@ class CoordinationResult(dict[str, Any]):
         crash_loops: int = 0,
     ):
         super().__init__(
-            repository_handoff=repository_handoff,
             dispatch_acks=dispatch_acks,
             project_labels_synced=project_labels_synced,
             managed_run_turns_started=managed_run_turns_started,
@@ -94,19 +92,11 @@ class CoordinationResult(dict[str, Any]):
 
 @dataclass
 class CoordinationCadence:
-    repository_handoff_seconds: float = 30
     project_labels_seconds: float = 300
-    last_repository_handoff_at: datetime | None = None
     last_project_labels_at: datetime | None = None
-
-    def repository_handoff_due(self, now: datetime) -> bool:
-        return self._due(self.last_repository_handoff_at, self.repository_handoff_seconds, now)
 
     def project_labels_due(self, now: datetime) -> bool:
         return self._due(self.last_project_labels_at, self.project_labels_seconds, now)
-
-    def mark_repository_handoff(self, now: datetime) -> None:
-        self.last_repository_handoff_at = now
 
     def mark_project_labels(self, now: datetime) -> None:
         self.last_project_labels_at = now

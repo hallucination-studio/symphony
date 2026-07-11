@@ -5,7 +5,7 @@ from typing import Any
 from .conductor_linear_direct_helpers import _replace_marker_block
 
 
-class RepositoryHandoffCommentMixin:
+class ManagedRunCommentMixin:
     async def update_issue_description_marker_block(
         self,
         issue_id: str,
@@ -14,7 +14,7 @@ class RepositoryHandoffCommentMixin:
     ) -> dict[str, Any]:
         payload = await self.graphql(
             """
-query RepositoryHandoffDescription($issueId: String!) {
+query ManagedRunDescription($issueId: String!) {
   issue(id: $issueId) { id identifier description }
 }
 """,
@@ -25,7 +25,7 @@ query RepositoryHandoffDescription($issueId: String!) {
         description = _replace_marker_block(current, marker_name, block)
         payload = await self.graphql(
             """
-mutation RepositoryHandoffUpdateDescription($issueId: String!, $description: String!) {
+mutation ManagedRunUpdateDescription($issueId: String!, $description: String!) {
   issueUpdate(id: $issueId, input: { description: $description }) {
     success
     issue { id identifier description }
@@ -40,7 +40,7 @@ mutation RepositoryHandoffUpdateDescription($issueId: String!, $description: Str
     async def comment_issue(self, issue_id: str, body: str) -> dict[str, Any]:
         payload = await self.graphql(
             """
-mutation RepositoryHandoffComment($issueId: String!, $body: String!) {
+mutation ManagedRunComment($issueId: String!, $body: String!) {
   commentCreate(input: { issueId: $issueId, body: $body }) {
     success
     comment { id }
@@ -56,7 +56,7 @@ mutation RepositoryHandoffComment($issueId: String!, $body: String!) {
     async def update_issue_comment(self, comment_id: str, body: str) -> dict[str, Any]:
         payload = await self.graphql(
             """
-mutation RepositoryHandoffCommentUpdate($commentId: String!, $body: String!) {
+mutation ManagedRunCommentUpdate($commentId: String!, $body: String!) {
   commentUpdate(id: $commentId, input: { body: $body }) {
     success
     comment { id body }
@@ -76,7 +76,7 @@ mutation RepositoryHandoffCommentUpdate($commentId: String!, $body: String!) {
     async def fetch_issue_comments(self, issue_id: str, *, first: int = 50) -> list[dict[str, Any]]:
         payload = await self.graphql(
             """
-query RepositoryHandoffComments($issueId: String!, $first: Int!) {
+query ManagedRunComments($issueId: String!, $first: Int!) {
   issue(id: $issueId) {
     comments(first: $first) {
       nodes { id body createdAt user { id name } }
@@ -115,7 +115,7 @@ query RepositoryHandoffComments($issueId: String!, $first: Int!) {
         if existing and existing.get("id"):
             payload = await self.graphql(
                 """
-mutation RepositoryHandoffCommentUpdate($commentId: String!, $body: String!) {
+mutation ManagedRunCommentUpdate($commentId: String!, $body: String!) {
   commentUpdate(id: $commentId, input: { body: $body }) {
     success
     comment { id body }

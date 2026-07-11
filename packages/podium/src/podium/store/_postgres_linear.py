@@ -113,6 +113,7 @@ class PgLinearMixin:
               reconciliation_next_retry_at = $8::timestamptz,
               updated_at = $9::timestamptz
             WHERE user_id = $1 AND id = $2 AND active = TRUE
+              AND ($10::timestamptz IS NULL OR updated_at = $10::timestamptz)
             RETURNING *
             """,
             user_id,
@@ -124,6 +125,7 @@ class PgLinearMixin:
             int(changes.get("reconciliation_retry_count") or 0),
             _pg_datetime(changes.get("reconciliation_next_retry_at")),
             _pg_datetime(changes.get("updated_at")),
+            _pg_datetime(changes.get("expected_updated_at")),
         )
         return _workspace_installation(row) if row is not None else None
 

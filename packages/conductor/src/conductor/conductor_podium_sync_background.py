@@ -12,7 +12,6 @@ from .conductor_service_types import CoordinationResult
 class PodiumBackgroundMixin:
     async def coordinate_background_once(self) -> CoordinationResult:
         self._managed_run_reconcile_findings: list[dict[str, Any]] = []
-        closeout = {"closed_out": 0, "failed": 0, "skipped": 0}
         dispatches_drained = await self._drain_podium_dispatch_queue()
         managed_run_driver = await drive_managed_run_runs_once(self)
         remediations: dict[str, Any] = {}
@@ -22,7 +21,6 @@ class PodiumBackgroundMixin:
         crash_restarts = 0
         crash_loops = 0
         return CoordinationResult(
-            repository_handoff=closeout,
             dispatch_acks=dispatch_acks,
             project_labels_synced=project_labels_synced,
             managed_run_turns_started=managed_run_driver.get("started", 0),
@@ -45,12 +43,6 @@ class PodiumBackgroundMixin:
             crash_restarts=crash_restarts,
             crash_loops=crash_loops,
         )
-
-    async def _run_repository_handoff_closeouts_if_due(self, now: datetime) -> dict[str, Any]:
-        if not self.coordination_cadence.repository_handoff_due(now):
-            return {"closed_out": 0, "failed": 0, "skipped": 1}
-        self.coordination_cadence.mark_repository_handoff(now)
-        return await self.coordinate_repository_handoff_closeouts()
 
     async def _sync_project_labels_if_due(self, now: datetime) -> int:
         if not self.coordination_cadence.project_labels_due(now):

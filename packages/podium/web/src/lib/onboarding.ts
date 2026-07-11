@@ -27,8 +27,7 @@ interface StepDef {
   path: string;
 }
 
-// Ordered to match STEP_ORDER in onboarding_service.py (minus the terminal
-// "complete" pseudo-step, which is not something the user acts on).
+// The terminal "complete" pseudo-step is omitted because users do not act on it.
 export const STEP_DEFS: StepDef[] = [
   {
     key: "linear_connect",

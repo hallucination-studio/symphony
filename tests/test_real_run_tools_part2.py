@@ -1,4 +1,49 @@
 from test_real_run_tools_support import *  # noqa: F401,F403
+import sqlite3
+
+
+def _managed_turn_fixture(run_id: str, attempt_id: str = "plan-1") -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    context = {
+        "run_id": run_id,
+        "work_item_id": "",
+        "policy_revision": 1,
+        "plan_version": 0,
+        "lease_id": f"lease-{attempt_id}",
+        "fencing_token": f"fence-{attempt_id}",
+        "turn_id": attempt_id,
+    }
+    return (
+        {
+            "attempt_id": attempt_id,
+            "kind": "plan",
+            "mode": "plan",
+            "state": "succeeded",
+            "turn_context": context,
+        },
+        {"turn_kind": "plan", "workspace_path": "/tmp/workspace", "context": context},
+        {"turn_kind": "plan", "context": context, "plan": {}},
+    )
+
+
+def _write_managed_turn_artifacts(instance_root: Path, attempt: dict[str, Any], request: dict[str, Any], result: dict[str, Any]) -> None:
+    attempt_id = str(attempt["attempt_id"])
+    context = attempt["turn_context"]
+    generation_log = instance_root / "logs" / "performer-000001.log"
+    generation_log.parent.mkdir(parents=True, exist_ok=True)
+    generation_log.write_text(
+        f"event=managed_run_turn_started run_id={context['run_id']} attempt_id={attempt_id} "
+        f"lease_id={context['lease_id']} fencing_token={context['fencing_token']}\n",
+        encoding="utf-8",
+    )
+    attempt_root = instance_root / "state" / "managed_run" / attempt_id
+    attempt_root.mkdir(parents=True, exist_ok=True)
+    (attempt_root / "turn-request.json").write_text(json.dumps(request), encoding="utf-8")
+    (attempt_root / "turn-result.json").write_text(json.dumps(result), encoding="utf-8")
+    (attempt_root / "attempt.log").write_text(
+        f"event=performer_stream attempt_id={attempt_id} lease_id={context['lease_id']}\n",
+        encoding="utf-8",
+    )
+
 
 def test_real_codex_connectivity_probe_classifies_upstream_and_auth_failures() -> None:
     tool = load_tool("real_codex_connectivity_probe")
@@ -1067,7 +1112,7 @@ def test_real_symphony_e2e_no_global_codex_home_rejects_home_path() -> None:
                     "plan": {"settings": {"codex_home_source": "$SYMPHONY_E2E_CODEX_HOME_SOURCE"}},
                 }
             },
-            "runtime_waits": [{"log_path": "/tmp/symphony/performer.log"}],
+            "runtime_waits": [{"log_path": "/tmp/symphony/performer-000001.log"}],
         }
     )
     assert not tool._managed_run_avoids_global_codex_home(
@@ -1371,7 +1416,7 @@ def test_real_symphony_e2e_failed_plan_artifact_lookup_uses_managed_run_turn_pat
 
 
 def test_real_symphony_e2e_archives_managed_run_view_and_linear_audit(tmp_path: Path) -> None:
-    tool = load_tool("real_symphony_e2e_artifacts")
+    tool = load_tool("real_symphony_e2e_runtime_artifacts")
     root = tmp_path / "e2e"
     data_root = tmp_path / "data"
     root.mkdir()
@@ -1379,10 +1424,164 @@ def test_real_symphony_e2e_archives_managed_run_view_and_linear_audit(tmp_path: 
     (root / "final-linear-tree-audit.json").write_text("{}", encoding="utf-8")
     evidence = tool.Evidence(root / "report.json")
 
-    tool._archive_managed_run_artifacts(evidence=evidence, root=root, data_root=data_root, instance_id="inst-1")
+    tool.archive_managed_run_artifacts(evidence=evidence, root=root, data_root=data_root, instance_id="inst-1")
 
     assert evidence.data["artifacts"]["final_managed_runs_view"] == str(root / "final-managed-runs-view.json")
     assert evidence.data["artifacts"]["final_linear_tree_audit"] == str(root / "final-linear-tree-audit.json")
+
+
+def test_real_symphony_e2e_archives_current_managed_db_and_runtime_logs(tmp_path: Path) -> None:
+    tool = load_tool("real_symphony_e2e_runtime_artifacts")
+    from conductor.conductor_managed_run_store import ConductorManagedRunStore
+
+    root = tmp_path / "e2e"
+    data_root = tmp_path / "data"
+    store = ConductorManagedRunStore(data_root / "managed_run")
+    accepted = store.accept_dispatch(
+        {"issue_id": "issue-1", "issue_identifier": "HELL-1"},
+        instance_id="inst-1",
+    )
+    attempt, request, result = _managed_turn_fixture(accepted.run_id)
+    store.merge_run_payload(accepted.run_id, {"completed_attempts": [attempt]})
+    root.mkdir()
+    (root / "podium.log").write_text("event=podium_started\n", encoding="utf-8")
+    (root / "conductor.log").write_text("event=conductor_started\n", encoding="utf-8")
+    instance_root = data_root / "instances" / "inst-1"
+    _write_managed_turn_artifacts(instance_root, attempt, request, result)
+    generation_log = instance_root / "logs" / "performer-000001.log"
+    attempt_log = instance_root / "state" / "managed_run" / "plan-1" / "attempt.log"
+    generation_log.write_text(generation_log.read_text(encoding="utf-8") + "message=token=secret-value\n", encoding="utf-8")
+    attempt_log.write_text(attempt_log.read_text(encoding="utf-8") + "authorization: Bearer secret-value\n", encoding="utf-8")
+    evidence = tool.Evidence(root / "report.json")
+
+    tool.archive_managed_run_artifacts(evidence=evidence, root=root, data_root=data_root, instance_id="inst-1")
+
+    archived_db = Path(evidence.data["artifacts"]["managed_run_db"])
+    archived_generation = Path(evidence.data["artifacts"]["instance_log_generation_000001"])
+    archived_attempt = Path(evidence.data["artifacts"]["attempt_plan-1_log"])
+    assert archived_db == root / "runtime-artifacts" / "managed_run" / "managed_run.db"
+    assert archived_db.is_file()
+    assert "secret-value" not in archived_generation.read_text(encoding="utf-8")
+    assert "secret-value" not in archived_attempt.read_text(encoding="utf-8")
+    passed_checks = {check["name"] for check in evidence.data["checks"] if check["passed"]}
+    assert {
+        "runtime-artifacts:managed-run-db",
+        "runtime-artifacts:generation-logs",
+        "runtime-artifacts:attempt-logs",
+        "runtime-artifacts:audit",
+    } <= passed_checks
+    assert Path(evidence.data["artifacts"]["runtime_claims_audit"]).is_file()
+
+
+def test_real_symphony_e2e_archive_refuses_managed_db_with_secret(tmp_path: Path) -> None:
+    tool = load_tool("real_symphony_e2e_runtime_artifacts")
+    from conductor.conductor_managed_run_state import ManagedRunState
+    from conductor.conductor_managed_run_store import ConductorManagedRunStore
+
+    root = tmp_path / "e2e"
+    data_root = tmp_path / "data"
+    store = ConductorManagedRunStore(data_root / "managed_run")
+    accepted = store.accept_dispatch(
+        {"issue_id": "issue-1", "issue_identifier": "HELL-1"},
+        instance_id="inst-1",
+    )
+    attempt, request, result = _managed_turn_fixture(accepted.run_id)
+    store.merge_run_payload(accepted.run_id, {"completed_attempts": [attempt]})
+    store.update_run_state(accepted.run_id, ManagedRunState.FAILED, reason="token=db-secret")
+    _write_managed_turn_artifacts(data_root / "instances" / "inst-1", attempt, request, result)
+    root.mkdir()
+    (root / "podium.log").write_text("event=podium_started\n", encoding="utf-8")
+    (root / "conductor.log").write_text("event=conductor_started\n", encoding="utf-8")
+    evidence = tool.Evidence(root / "report.json")
+
+    tool.archive_managed_run_artifacts(
+        evidence=evidence,
+        root=root,
+        data_root=data_root,
+        instance_id="inst-1",
+    )
+
+    assert "managed_run_db" not in evidence.data["artifacts"]
+    assert not (root / "runtime-artifacts" / "managed_run" / "managed_run.db").exists()
+    failure = next(check for check in evidence.data["failures"] if check["name"] == "runtime-artifacts:managed-run-db:archive")
+    assert failure["error_code"] == "runtime_artifact_contains_secret"
+
+
+def test_real_symphony_e2e_archive_rejects_wrong_managed_run_database(tmp_path: Path) -> None:
+    tool = load_tool("real_symphony_e2e_runtime_artifacts")
+    root = tmp_path / "e2e"
+    data_root = tmp_path / "data"
+    root.mkdir()
+    (root / "podium.log").write_text("event=podium_started\n", encoding="utf-8")
+    (root / "conductor.log").write_text("event=conductor_started\n", encoding="utf-8")
+    db_path = data_root / "managed_run" / "managed_run.db"
+    db_path.parent.mkdir(parents=True)
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("CREATE TABLE evidence_probe (id TEXT PRIMARY KEY)")
+    generation_log = data_root / "instances" / "inst-1" / "logs" / "performer-000001.log"
+    generation_log.parent.mkdir(parents=True)
+    generation_log.write_text("event=managed_run_turn_started\n", encoding="utf-8")
+    attempt_root = data_root / "instances" / "inst-1" / "state" / "managed_run" / "plan-1"
+    attempt_root.mkdir(parents=True)
+    (attempt_root / "attempt.log").write_text("event=performer_stream\n", encoding="utf-8")
+    (attempt_root / "turn-request.json").write_text("{}", encoding="utf-8")
+    (attempt_root / "turn-result.json").write_text("{}", encoding="utf-8")
+    evidence = tool.Evidence(root / "report.json")
+
+    tool.archive_managed_run_artifacts(
+        evidence=evidence,
+        root=root,
+        data_root=data_root,
+        instance_id="inst-1",
+    )
+
+    failure = next(
+        check
+        for check in evidence.data["checks"]
+        if check["name"] == "runtime-artifacts:audit"
+    )
+    assert failure["passed"] is False
+    assert failure["error_code"] == "runtime_evidence_audit_failed"
+    audit = json.loads(Path(evidence.data["artifacts"]["runtime_claims_audit"]).read_text(encoding="utf-8"))
+    assert any(item.startswith("managed_run_table_missing:") for item in audit["failures"])
+
+
+def test_real_symphony_e2e_records_missing_required_runtime_artifacts(tmp_path: Path) -> None:
+    tool = load_tool("real_symphony_e2e_runtime_artifacts")
+    root = tmp_path / "e2e"
+    evidence = tool.Evidence(root / "report.json")
+
+    tool.archive_managed_run_artifacts(
+        evidence=evidence,
+        root=root,
+        data_root=tmp_path / "data",
+        instance_id="inst-1",
+    )
+
+    failures = {
+        check["name"]: check
+        for check in evidence.data["checks"]
+        if not check["passed"]
+    }
+    assert {
+        "runtime-artifacts:managed-run-db",
+        "runtime-artifacts:generation-logs",
+        "runtime-artifacts:attempt-logs",
+        "runtime-artifacts:turn-requests",
+        "runtime-artifacts:turn-results",
+    } <= failures.keys()
+    missing_checks = {
+        name: failures[name]
+        for name in (
+            "runtime-artifacts:managed-run-db",
+            "runtime-artifacts:generation-logs",
+            "runtime-artifacts:attempt-logs",
+            "runtime-artifacts:turn-requests",
+            "runtime-artifacts:turn-results",
+        )
+    }
+    assert all(check["error_code"] == "required_runtime_artifact_missing" for check in missing_checks.values())
+    assert failures["runtime-artifacts:audit"]["error_code"] == "runtime_evidence_audit_failed"
 
 
 def test_real_symphony_e2e_human_answered_push_accepts_completed_child_required_guard() -> None:
@@ -1778,6 +1977,61 @@ def test_real_symphony_e2e_immediate_failure_detects_failed_managed_run_without_
     }
 
 
+def test_real_symphony_e2e_immediate_failure_sanitizes_nested_error_details(tmp_path: Path, monkeypatch) -> None:
+    tool = load_tool("real_symphony_e2e_wait_loop")
+    evidence = load_tool("real_symphony_e2e").Evidence(tmp_path / "report.json")
+    state = SimpleNamespace(
+        expected_failure="none",
+        permission_approval_probe=False,
+        pipeline_scenario="basic",
+        crash_recovery_probe=False,
+        crash_killed=False,
+        crash_attempt_id=None,
+        evidence=evidence,
+    )
+    monkeypatch.setattr(tool, "write_wait_state_artifacts", lambda _state: {})
+
+    tool._handle_immediate_failure(
+        state,
+        {
+            "process_status": "exited",
+            "managed_run_attempts": [
+                {
+                    "attempt_id": "plan-1",
+                    "state": "failed",
+                    "retryable": False,
+                    "error": "token=secret-value backend setup failed",
+                }
+            ],
+            "managed_run_runs": [],
+            "managed_run_work_items": [],
+            "managed_run_human_actions": [],
+        },
+    )
+
+    rendered = json.dumps(evidence.data, sort_keys=True)
+    assert "secret-value" not in rendered
+    assert "token=[REDACTED] backend setup failed" in rendered
+
+
+def test_real_symphony_e2e_progress_output_sanitizes_latest_reason(capsys) -> None:
+    tool = load_tool("real_symphony_e2e_wait_loop")
+
+    tool._print_progress(
+        {"at": "2026-07-11T00:00:00Z", "issue_state": "In Progress", "result_exists": False},
+        "running",
+        [{"run_id": "run-1", "state": "failed", "latest_reason": "clientSecret=stdout-secret"}],
+        [],
+        [],
+        [],
+        [],
+    )
+
+    output = capsys.readouterr().out
+    assert "stdout-secret" not in output
+    assert "clientSecret=[REDACTED]" in output
+
+
 def test_real_symphony_e2e_immediate_failure_detects_unexpected_blocked_basic_run() -> None:
     tool = load_tool("real_symphony_e2e_wait")
 
@@ -1932,21 +2186,12 @@ def test_real_symphony_e2e_wait_artifacts_are_written_on_early_exit(tmp_path: Pa
     tool = load_tool("real_symphony_e2e")
     evidence = tool.Evidence(tmp_path / "report.json")
     result_path = tmp_path / "missing-result.md"
-    state_path = tmp_path / "performer.json"
-    ops_path = tmp_path / "ops.json"
-    state_path.write_text('{"sessions": []}', encoding="utf-8")
-    ops_path.write_text('{"runs": {}}', encoding="utf-8")
-
     result = tool.write_wait_artifacts(
         evidence=evidence,
         samples=[{"at": "2026-07-04T00:00:00Z", "phase": "need_human"}],
         result_path=result_path,
         final_issue={"id": "issue-1", "identifier": "HELL-1", "state": {"name": "In Progress"}},
-        state_path=state_path,
-        last_state={},
-        ops_path=ops_path,
-        last_ops={},
-        log_path=tmp_path / "performer.log",
+        log_path=tmp_path / "performer-000001.log",
         stages={"poller_queued": "2026-07-04T00:00:00Z"},
         stage_timeout_seconds=60,
     )
@@ -1958,6 +2203,30 @@ def test_real_symphony_e2e_wait_artifacts_are_written_on_early_exit(tmp_path: Pa
     assert "ops" not in result
 
 
+def test_real_symphony_e2e_wait_artifacts_are_sanitized(tmp_path: Path) -> None:
+    tool = load_tool("real_symphony_e2e")
+    evidence = tool.Evidence(tmp_path / "report.json")
+    result_path = tmp_path / "workspace-result.md"
+    result_path.write_text("token=workspace-secret\n", encoding="utf-8")
+
+    result = tool.write_wait_artifacts(
+        evidence=evidence,
+        samples=[{"error": "api_key=sample-secret"}],
+        result_path=result_path,
+        final_issue={"id": "issue-1", "description": "password=issue-secret"},
+        log_path=tmp_path / "performer-000001.log",
+        stages={"poller_queued": "2026-07-04T00:00:00Z"},
+        stage_timeout_seconds=60,
+    )
+
+    artifacts = [Path(path) for path in evidence.data["artifacts"].values()]
+    rendered = "\n".join(path.read_text(encoding="utf-8", errors="replace") for path in artifacts)
+    assert "workspace-secret" not in rendered
+    assert "sample-secret" not in rendered
+    assert "issue-secret" not in rendered
+    assert "sample-secret" not in json.dumps(result, sort_keys=True)
+
+
 async def test_real_symphony_e2e_early_exit_archives_available_runtime_evidence(tmp_path: Path, monkeypatch) -> None:
     tool = load_tool("real_symphony_e2e_early_exit")
     root = tmp_path / "e2e"
@@ -1967,9 +2236,14 @@ async def test_real_symphony_e2e_early_exit_archives_available_runtime_evidence(
     (instance_root / "logs").mkdir()
     (root / "podium.log").write_text("podium event\n", encoding="utf-8")
     (root / "conductor.log").write_text("conductor event\n", encoding="utf-8")
-    (instance_root / "state" / "performer.json").write_text("{}", encoding="utf-8")
-    (instance_root / "state" / "ops.json").write_text("{}", encoding="utf-8")
-    (instance_root / "logs" / "performer.log").write_text("performer event\n", encoding="utf-8")
+    db_path = data_root / "managed_run" / "managed_run.db"
+    db_path.parent.mkdir(parents=True)
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("CREATE TABLE evidence_probe (id TEXT PRIMARY KEY)")
+    (instance_root / "logs" / "performer-000001.log").write_text("performer event\n", encoding="utf-8")
+    attempt_log = instance_root / "state" / "managed_run" / "plan-1" / "attempt.log"
+    attempt_log.parent.mkdir(parents=True)
+    attempt_log.write_text("attempt event\n", encoding="utf-8")
     evidence = load_tool("real_symphony_e2e").Evidence(root / "report.json")
     state = SimpleNamespace(
         evidence=evidence,
@@ -1986,7 +2260,9 @@ async def test_real_symphony_e2e_early_exit_archives_available_runtime_evidence(
 
     assert Path(evidence.data["artifacts"]["podium_log"]).exists()
     assert Path(evidence.data["artifacts"]["conductor_log"]).exists()
-    assert Path(evidence.data["artifacts"]["instance_log"]).exists()
+    assert Path(evidence.data["artifacts"]["instance_log_generation_000001"]).exists()
+    assert Path(evidence.data["artifacts"]["managed_run_db"]).exists()
+    assert Path(evidence.data["artifacts"]["attempt_plan-1_log"]).exists()
     snapshot = Path(evidence.data["artifacts"]["early_managed_runs_view"])
     assert json.loads(snapshot.read_text(encoding="utf-8"))["status"] == 503
     assert evidence.data["artifacts"]["managed_run_e2e_report"] == str(root / "report.json")
@@ -2102,6 +2378,20 @@ async def test_real_symphony_e2e_records_bootstrap_failure(tmp_path: Path, monke
     assert failure["error_code"] == "linear_authentication_failed"
     assert failure["next_action"] == "refresh_linear_app_access_token"
     assert (tmp_path / "real-symphony-e2e-report.json").is_file()
+
+
+def test_real_symphony_e2e_early_exit_sanitizes_client_secret(tmp_path: Path) -> None:
+    tool = load_tool("real_symphony_e2e_early_exit")
+    evidence = load_tool("real_symphony_e2e").Evidence(tmp_path / "report.json")
+
+    tool.record_unhandled_e2e_exception(
+        evidence,
+        RuntimeError("client_secret=secret-value callback failed"),
+    )
+
+    rendered = json.dumps(evidence.data, sort_keys=True)
+    assert "secret-value" not in rendered
+    assert "client_secret=[REDACTED] callback failed" in rendered
 
 
 async def test_real_symphony_e2e_records_archive_failure_and_still_stops_processes(tmp_path: Path, monkeypatch) -> None:

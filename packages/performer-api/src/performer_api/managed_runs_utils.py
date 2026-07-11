@@ -4,7 +4,7 @@ import json
 from enum import StrEnum
 from typing import Any
 
-from performer_api.managed_runs_enums import ManagedRunRuntimeRole, SECRET_SETTING_KEYS
+from performer_api.managed_runs_enums import ManagedRunRuntimeRole
 
 
 def _str_list(value: Any) -> list[str]:
@@ -61,13 +61,4 @@ def _runtime_role(value: Any) -> ManagedRunRuntimeRole:
         return ManagedRunRuntimeRole(str(value))
     except ValueError:
         return ManagedRunRuntimeRole.PLAN
-
-
-def sanitize_profile_settings(settings: dict[str, Any]) -> dict[str, Any]:
-    sanitized = _jsonable_dict(settings)
-    for key in list(sanitized):
-        lowered = str(key).lower()
-        if lowered in SECRET_SETTING_KEYS or any(marker in lowered for marker in ("token", "secret", "password", "cookie", "api_key", "apikey")):
-            sanitized[key] = "$REDACTED"
-    return sanitized
 

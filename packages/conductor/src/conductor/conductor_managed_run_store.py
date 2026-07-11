@@ -6,9 +6,10 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from performer_api.managed_runs import ManagedRunPlan, ManagedRunState, WorkItemState
+from performer_api.managed_runs import ManagedRunPlan
 
 from conductor.conductor_managed_run_store_artifacts import ConductorManagedRunStoreArtifactsMixin, gate_snapshots_for_plan
+from conductor.conductor_managed_run_state import ManagedRunState, WorkItemState
 from conductor.conductor_managed_run_store_rows import (
     _json_dumps,
     _json_loads,
@@ -268,17 +269,6 @@ class ConductorManagedRunStore(ConductorManagedRunStoreViewMixin, ConductorManag
                         work_item_id,
                     ),
                 )
-
-    def update_work_item_payload(self, run_id: str, work_item_id: str, payload: dict[str, Any]) -> None:
-        with self.connect() as connection:
-            connection.execute(
-                """
-                UPDATE managed_run_work_items
-                SET payload_json = ?, updated_at = ?
-                WHERE run_id = ? AND work_item_id = ?
-                """,
-                (_json_dumps(payload), _now(), run_id, work_item_id),
-            )
 
     def _existing_run(self, *, parent_issue_id: str, issue_identifier: str) -> dict[str, Any] | None:
         with self.connect() as connection:

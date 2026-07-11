@@ -5,7 +5,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from performer_api.config import CodexConfig
 from .codex_client_helpers import (
     CodexError,
     _classify_sdk_exception,
@@ -16,6 +15,7 @@ from .codex_client_helpers import (
     _string_attr,
     _timeout_seconds,
 )
+from .codex_config import CodexConfig
 from .codex_client_sdk_runtime import _CodexSdkRuntimeMixin
 
 

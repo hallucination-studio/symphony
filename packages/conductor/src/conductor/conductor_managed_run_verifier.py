@@ -7,7 +7,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from performer_api.managed_runs import GateSnapshot, GateStepSource, WorkItemResult
+from performer_api.managed_runs import WorkItemResult
+
+from .conductor_managed_run_gates import GateSnapshot, GateStepSource
 
 
 @dataclass(frozen=True)

@@ -12,7 +12,7 @@ Current test environment:
 The intended flow is:
 
 1. GitHub Actions publishes `ghcr.io/hallucination-studio/symphony-podium:latest`, `:beta`, and `:<git-sha>` on every `main` push.
-2. The Lightsail host runs Docker Compose with Nginx, Podium, PostgreSQL, Redis, and Watchtower.
+2. The Lightsail host runs Docker Compose with Nginx, Podium, PostgreSQL, and Watchtower.
 3. Watchtower watches only labeled containers and updates the Podium container when the `beta` image digest changes.
 4. Cloudflare terminates TLS. The origin exposes Podium over HTTP.
 
@@ -31,7 +31,7 @@ curl -fsSL https://raw.githubusercontent.com/hallucination-studio/symphony/main/
 ```
 
 The script installs Git, Docker Engine, the Docker Compose plugin, creates a `dev`
-user, creates a 2GB swap file, applies Redis-friendly kernel settings, opens
+user, creates a 2GB swap file, configures conservative swap behavior, opens
 port `80/tcp`, and copies the Compose files into `/opt/podium`.
 
 ## Configure

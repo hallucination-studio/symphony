@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from performer_api.managed_runs import ManagedRunPlan, ManagedRunPlanValidator, ManagedRunState, WorkItemResultStatus, WorkItemState
+from performer_api.managed_runs import ManagedRunPlan, ManagedRunPlanValidator, WorkItemResultStatus
 
 from .conductor_managed_run_coordinator_helpers import LOGGER, _log_blocked
+from .conductor_managed_run_state import ManagedRunState, WorkItemState
 
 
 class ConductorManagedRunHumanActionMixin:

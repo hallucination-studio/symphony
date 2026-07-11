@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from performer.codex_client import CodexError, CodexSdkClient
-from performer_api.config import CodexConfig
+from performer.codex_config import CodexConfig
 
 
 def probe_prompt(message: str) -> str:
@@ -55,7 +55,6 @@ async def run_probe(args: argparse.Namespace) -> dict[str, Any]:
             sandbox=args.sandbox,
             config_overrides=config_overrides,
             read_timeout_ms=args.read_timeout_ms,
-            turn_timeout_ms=args.turn_timeout_ms,
             hard_turn_timeout_ms=args.turn_timeout_ms,
             overload_max_attempts=args.overload_max_attempts,
             overload_initial_delay_ms=args.overload_initial_delay_ms,

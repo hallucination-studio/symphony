@@ -3,11 +3,12 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from performer_api.managed_runs import ManagedRunPlan, ManagedRunState
+from performer_api.managed_runs import ManagedRunPlan
 
 from .conductor_managed_run_driver_helpers import _active_attempt, _complete_attempt, _completed_attempts, _events_from_payload, _read_json, _sanitize
 from .conductor_managed_run_fencing import log_result_rejection, result_context_error
 from .conductor_managed_run_runtime_waits import build_runtime_wait_record, runtime_wait_from_turn_payload
+from .conductor_managed_run_state import ManagedRunState
 
 
 class ConductorManagedRunPlanCollectionMixin:

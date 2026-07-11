@@ -14,6 +14,7 @@ PRODUCT_DOCS = {
     "runtime-profiles-backends.md",
     "linear-native-managed-runs.md",
     "managed-runs-acceptance-matrix.md",
+    "acceptance-catalog.md",
     "linear-integration.md",
     "podium-web.md",
     "runtime-installation.md",
@@ -164,7 +165,8 @@ def test_linear_intake_is_reliable_polling_only() -> None:
         "durable exponential backoff",
         "continuously observed delegation epoch",
         "durably observed non-delegated transition",
-        "one Managed Run per delegation epoch",
+        "one dispatch per delegation epoch",
+        "one durable Managed Run",
     ]:
         assert phrase in text
 

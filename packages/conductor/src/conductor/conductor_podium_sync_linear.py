@@ -16,7 +16,7 @@ class PodiumLinearReconcileMixin:
                 continue
             for instance in self.store.list_instances():
                 try:
-                    tracker = self.repository_handoff_tracker_factory(instance)
+                    tracker = self.managed_run_tracker_factory(instance)
                     projector = ManagedRunLinearProjector(
                         store=self.managed_run_store,
                         tracker=tracker,
