@@ -85,6 +85,16 @@ class FakeService:
         return self.linear
 
 
+def _queue_turns(driver: WorkflowDriver, bodies: list[dict[str, Any]]) -> None:
+    async def fake_run_turn(_run: dict[str, Any], _instance: Any, context: Any, _request: dict[str, Any], *, role: str) -> dict[str, Any]:
+        body = dict(bodies.pop(0))
+        body["context"] = context.to_dict()
+        body["turn_kind"] = role
+        return body
+
+    driver._run_turn = fake_run_turn  # type: ignore[method-assign]
+
+
 @pytest.mark.anyio
 async def test_workflow_driver_creates_subissues_and_runs_sequential_gate(tmp_path: Path, two_task_plan) -> None:
     service = FakeService(tmp_path)
@@ -112,13 +122,7 @@ async def test_workflow_driver_creates_subissues_and_runs_sequential_gate(tmp_pa
         },
     ]
 
-    async def fake_run_turn(_run: dict[str, Any], _instance: Any, context: Any, _request: dict[str, Any], *, role: str) -> dict[str, Any]:
-        body = dict(bodies.pop(0))
-        body["context"] = context.to_dict()
-        body["turn_kind"] = role if role != "execute" else "execute"
-        return body
-
-    driver._run_turn = fake_run_turn  # type: ignore[method-assign]
+    _queue_turns(driver, bodies)
 
     assert (await driver.drive_once())["applied"] == 1
     assert (await driver.drive_once())["applied"] == 1
@@ -139,13 +143,7 @@ async def test_workflow_driver_projects_runtime_wait_as_human_action_child(tmp_p
         {"context": {}, "plan": minimal_plan.to_dict(), "thread_id": "thread-1"},
     ]
 
-    async def fake_run_turn(_run: dict[str, Any], _instance: Any, context: Any, _request: dict[str, Any], *, role: str) -> dict[str, Any]:
-        body = dict(bodies.pop(0))
-        body["context"] = context.to_dict()
-        body["turn_kind"] = role
-        return body
-
-    driver._run_turn = fake_run_turn  # type: ignore[method-assign]
+    _queue_turns(driver, bodies)
 
     assert (await driver.drive_once())["applied"] == 0
     wait = service.workflow_store.list_runtime_waits(run["run_id"])[0]
