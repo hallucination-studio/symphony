@@ -1,0 +1,353 @@
+# Spec: Minimal Polling Workflow
+
+Status: proposed for approval as of 2026-07-11. This specification replaces the
+expanded Managed Run design. It does not authorize production edits until the
+user approves the assumptions called out below.
+
+## Objective
+
+Symphony has one job: turn a delegated Linear parent issue into a sequence of
+Linear sub-issues, let Codex implement them, require an acceptance gate for each
+sub-issue, and complete the parent only after every gate passes.
+
+Podium remains the customer-facing control plane and Web application. Podium
+owns Linear OAuth, project selection, Conductor enrollment/binding, Linear
+polling, dispatch, project labels, proxying, and operator views. Conductor owns
+one bound repository, the sequential workflow, Performer processes, gates,
+durable recovery, Linear sub-issue projection, and visible failures. Performer
+runs one fenced Codex turn from a JSON request file to a JSON result file.
+
+The design is deliberately not a general workflow engine, DAG scheduler,
+multi-backend platform, release-acceptance framework, or compatibility layer.
+
+## Assumptions Requiring Approval
+
+1. Work sub-issues execute strictly in plan order. There is no dependency DAG,
+   parallel group, capacity scheduler, per-task branch, or branch join.
+2. One acceptance gate has two boolean requirements: every declared command
+   exits successfully and a separate read-only Codex gate turn returns
+   `passed=true`. There is no score, rubric, provenance, threshold, manifest,
+   or checkpoint layer.
+3. One failed gate receives at most one automatic rework attempt. A second
+   failure blocks the sub-issue and parent with a concrete next action.
+4. Existing local Conductor Managed Run databases are archived and the new
+   workflow database starts clean. Podium user, OAuth installation, selected
+   project, Conductor, and binding data must be migrated in place and retained.
+5. The current Web business experience is retained. Historical full-log fetch
+   infrastructure that the Web does not call is removed; the current cached log
+   tail remains available.
+
+If any of these assumptions is rejected, revise this spec before implementation.
+
+## Canonical Product Flow
+
+```text
+Podium polls Linear
+  -> records one delegation epoch and one dispatch
+  -> Conductor leases the dispatch over HTTP
+  -> Conductor starts/resumes one durable run
+  -> Performer asks Codex for one ordered plan without changing files
+  -> Conductor validates the small plan and creates Linear sub-issues
+  -> Conductor executes the first unfinished sub-issue through Performer/Codex
+  -> Conductor runs the sub-issue acceptance commands
+  -> Performer runs one read-only Codex gate turn
+  -> gate pass marks the sub-issue Done
+  -> gate failure reworks once, then blocks visibly
+  -> repeat sequentially
+  -> all sub-issues Done marks the parent Done
+```
+
+Repeated Linear polls, Podium dispatch retries, Conductor restarts, and stale
+Performer results must converge on the same run and must not duplicate a
+sub-issue or repeat a completed task.
+
+## Required Product Surfaces
+
+### Linear
+
+Keep unchanged:
+
+- default and customer-owned application OAuth, PKCE/state, app actor and scope
+  validation, refresh, reconnect, revoke, and cutover;
+- selected projects, full cursor pagination, polling checkpoints, delegation
+  epochs, dispatch deduplication, blockers, and project binding routing;
+- Podium-owned `symphony:conductor/<Name>-<public-id>` project labels;
+- parent issue, ordered work sub-issues, state projection, comments, gate
+  evidence, sanitized failures, and `[Human Action]` runtime-wait issues;
+- explicit parent relationship checks through `parent { id identifier }`.
+
+Remove Linear dependency relations, plan-revision flows, plan/work-item approval
+flows, integration-conflict children, gate/evidence-only issue trees, and
+arbitrary comment commands. Delegating the parent authorizes the ordered plan.
+
+### Podium Web
+
+Keep the current routes, authentication, onboarding, Linear application choice,
+project and repository selection, runtime enrollment/binding, smoke action,
+runtime/operator pages, managed-runs page, error states, translations, design
+tokens, cookies, redirects, and secret boundary.
+
+The managed-runs response keeps the fields the current Web reads:
+
+- conductor, project, binding, runtime group, policy revision, and profiles;
+- run id, issue identifier, state, active work item, latest reason,
+  `plan_version`, thread id, and work items;
+- work-item id, title, objective, likely files, state, and `gate_status`.
+
+`policy_revision` and `plan_version` are `1` for the minimal workflow;
+`profiles` may be empty. These values are presentation compatibility, not new
+versioned policy systems.
+
+### Error Visibility
+
+Every blocking or terminal failure stores and exposes:
+
+```text
+error_code
+sanitized_reason
+action_required
+retryable
+next_action
+```
+
+The same failure must be visible in durable state, correlated single-line logs,
+the relevant Linear parent/sub-issue, and the Podium managed-runs response.
+Secrets, tokens, cookies, passwords, client secrets, raw Codex credentials, and
+authorization headers never enter browser responses, Linear, or logs.
+
+## Runtime Transport: HTTP Polling Only
+
+There is no WebSocket endpoint, client, setting, install response field,
+presence state, compatibility response, or dependency.
+
+Keep these authenticated HTTP operations:
+
+```text
+POST /api/v1/runtime/dispatches/lease
+POST /api/v1/runtime/dispatches/ack
+POST /api/v1/runtime/commands/lease
+POST /api/v1/runtime/commands/ack
+POST /api/v1/runtime/report
+```
+
+The runtime report carries the current sanitized log tail and the small local
+Codex configuration summary needed by Podium views. There is no separate log
+chunk/fetch channel or Podium-owned runtime-config endpoint/table.
+
+Runtime commands use `queued | leased | completed | failed`, a five-minute
+lease, and an integer fencing token. Lease selects the oldest queued or expired
+command transactionally. Ack with a stale fence returns `409` and changes
+nothing.
+
+Commands are limited to the current Web-required control operations:
+
+```text
+project.configure
+project.unconfigure
+project.prepare_installation
+project.activate_installation
+smoke.check
+```
+
+`dispatch.available`, `human.answered`, and `log.fetch` are removed. The Web
+reads the cached log tail already sent in runtime reports. Configure/cutover
+command delivery is acknowledged immediately; the next runtime report remains
+authoritative for observed binding state.
+
+One Conductor polling loop performs, in order:
+
+1. send the runtime report when due;
+2. lease, handle, and ack at most one control command;
+3. lease, handle, and ack at most one dispatch;
+4. advance the local workflow once;
+5. wait with bounded backoff and jitter.
+
+Any authenticated lease, ack, or report refreshes the Conductor presence TTL.
+
+## Minimal Workflow Contract
+
+### Plan
+
+```json
+{
+  "summary": "string",
+  "tasks": [
+    {
+      "id": "task-1",
+      "title": "string",
+      "objective": "string",
+      "acceptance_criteria": ["string"],
+      "verification_commands": ["string"],
+      "files_likely_touched": ["path"]
+    }
+  ]
+}
+```
+
+Validation requires 1-10 tasks, unique ids, non-empty titles/objectives,
+1-5 acceptance criteria, at least one verification command, and non-empty file
+scope. Array order is execution order. No dependency, parallelization,
+checkpoint, architecture-decision, risk, rubric, approval, or open-question
+fields exist.
+
+### Turn Context
+
+```json
+{
+  "run_id": "string",
+  "task_id": "string-or-empty-for-plan",
+  "attempt_id": "string",
+  "fencing_token": 1,
+  "turn_kind": "plan|execute|gate"
+}
+```
+
+`attempt_id` is the lease identity; do not retain separate lease, turn, and
+session fence concepts. Performer validates and echoes the exact context.
+Conductor rejects missing, stale, or mismatched results before any state change.
+
+### Execute Result
+
+```json
+{
+  "status": "ready_for_gate|blocked|failed",
+  "summary": "string",
+  "changed_files": ["path"],
+  "acceptance_evidence": [
+    {"criterion": "string", "evidence": "string"}
+  ],
+  "blocked_reason": "string-or-null"
+}
+```
+
+### Gate Result
+
+```json
+{
+  "passed": true,
+  "summary": "string",
+  "findings": ["string"]
+}
+```
+
+Conductor supplies the diff, accepted criteria, and actual command outputs to
+the read-only gate turn. A gate turn changing files fails closed.
+
+## Minimal State Model
+
+```text
+run:     planning -> executing -> blocked | failed | done
+task:    todo -> in_progress -> in_review -> blocked | done
+attempt: running -> waiting | succeeded | failed | stale
+```
+
+- `in_review` means acceptance gate execution.
+- A runtime approval/tool-input wait changes the active attempt to `waiting`,
+  blocks the run/task, records the wait, and creates one `[Human Action]` child.
+  Completing that exact child resumes the same task/thread under a fresh fenced
+  attempt.
+- A transient process failure may retry once under a fresh attempt/fence.
+- A gate failure returns the task to `in_progress` once with gate findings;
+  the second failure leaves task/run `blocked`.
+- Parent Done requires every planned work sub-issue Done and a current parent
+  summary. There is no separate `verified`, `ready`, `projecting_plan`,
+  `awaiting_approval`, or integration state.
+
+## Persistence
+
+Conductor uses one SQLite database with only:
+
+```text
+settings
+instance
+runs
+tasks
+attempts
+runtime_waits
+```
+
+An optional `smoke_results` table is allowed only if command ack cannot carry
+all durable smoke evidence. There are no plan-version, projection-version,
+checkpoint, gate-snapshot, verification-input, execution-handoff, manifest,
+branch-join, integration-queue, remediation, or runtime-action tables.
+
+Podium keeps PostgreSQL authority for users, sessions, Linear applications and
+installations, selected projects, Conductors, bindings, polling observations,
+checkpoints, delegation epochs, dispatches, commands, reports, and cached log
+tails. Delete `runtime_groups`; keep `runtime_group_id` as a stable field on the
+Conductor record so the Web response does not change.
+
+## Target Source Shape
+
+```text
+performer_api/      <= 5 modules, 350-500 LOC
+performer/          <= 6 modules, 900-1,100 LOC
+conductor/          about 11 modules, 3,000-3,600 LOC
+podium/             about 40-50 modules, 8,000-9,000 LOC
+podium/web/src/     current business source retained
+```
+
+These are review budgets, not automated line-count gates.
+
+## Testing Strategy
+
+Delete the current Python and Web tests instead of migrating them. Rebuild only
+behavior tests for this spec:
+
+- at most 30 Python tests in seven files, no more than about 2,500 LOC;
+- at most 15 Web tests in six files, no more than about 750 LOC;
+- one real product-flow runner and one Linear fixture helper, no scenario
+  registry, observer, auditor, appendix, score system, or E2E self-test suite.
+
+Budgets are not CI line-count gates. Tests must cover the canonical flow,
+idempotency/recovery, stale fencing, Linear pagination/checkpoints/epochs,
+sub-issue relationships, boolean gates, visible sanitized failures, HTTP command
+polling, preserved Web flows, and browser secret boundaries.
+
+## Commands
+
+```bash
+make install
+make test
+cd packages/podium/web && npm run test
+cd packages/podium/web && npm run lint
+cd packages/podium/web && npm run build
+cd packages/podium/web && npm run design:lint
+```
+
+The rebuilt real flow is:
+
+```bash
+PYTHONPATH=$(pwd)/packages/performer-api/src:$(pwd)/packages/performer/src:$(pwd)/packages/conductor/src:$(pwd)/packages/podium/src \
+  .venv/bin/python tools/real_flow.py
+```
+
+## Never Rebuild
+
+- WebSockets or a second runtime transport;
+- dependency DAGs, parallel scheduling, capacity policies, branches, branch
+  joins, manifests, checkpoint groups, plan revisions, or integration queues;
+- generic Engine/command/effect/repository abstractions or one-implementation
+  Protocols/registries;
+- score `0-4`, `pass_threshold`, provenance, DoD rubrics, acceptance catalogs,
+  change-impact classifiers, or acceptance schedulers;
+- backward-compatibility shims for removed WS, workflow, test, or tool surfaces;
+- code-size, exact-module, tombstone, source-string, phrase, or documentation
+  length tests.
+
+## Success Criteria
+
+1. A real delegated Linear parent produces ordered sub-issues.
+2. Conductor executes one task at a time through fenced Performer/Codex turns.
+3. A sub-issue reaches Done only when commands and the read-only Codex gate pass.
+4. A failed gate stays non-Done with the same sanitized reason in SQLite, logs,
+   Linear, and Podium.
+5. The parent reaches Done only after every work sub-issue is Done.
+6. Restart/replay creates no duplicate run, task, sub-issue, attempt, or dispatch.
+7. No production code, package dependency, response, install command, setting,
+   test, tool, or active document references WebSockets.
+8. Existing Podium Web business flows and browser-visible behavior still work.
+9. Linear OAuth, polling, project selection, dispatch, binding, labels, and
+   proxy behavior still work.
+10. The old test/tool/document architecture is absent and the new small suite
+    plus one real flow is green.
