@@ -33,10 +33,15 @@ def analyze_plan_artifacts(
             report["attempt_status"] = result_payload.get("status")
         return report
     try:
-        from performer_api.managed_runs import ManagedRunPlan, ManagedRunPlanValidator
+        from performer_api.validation import ContractValidationError, validate_plan
+        from performer_api.workflow import Plan
 
-        plan = ManagedRunPlan.from_dict(plan_payload)
-        errors = sorted(error.value for error in ManagedRunPlanValidator().validate(plan))
+        plan = Plan.from_dict(plan_payload)
+        try:
+            validate_plan(plan.to_dict())
+            errors: list[str] = []
+        except ContractValidationError as error:
+            errors = [str(error)]
         report.update(
             {
                 "status": "analyzed",
@@ -106,25 +111,24 @@ def _plan_proposal_shape(plan_payload: dict[str, Any] | Any) -> dict[str, Any]:
     if not isinstance(plan_payload, dict):
         return _managed_run_plan_shape(plan_payload)
     try:
-        from performer_api.managed_runs import ManagedRunPlan
+        from performer_api.workflow import Plan
 
-        return _managed_run_plan_shape(ManagedRunPlan.from_dict(plan_payload))
+        return _managed_run_plan_shape(Plan.from_dict(plan_payload))
     except Exception:
-        work_items = plan_payload.get("work_items") if isinstance(plan_payload.get("work_items"), list) else []
-        checkpoints = plan_payload.get("checkpoints") if isinstance(plan_payload.get("checkpoints"), list) else []
+        work_items = plan_payload.get("tasks") if isinstance(plan_payload.get("tasks"), list) else []
         return {
             "work_item_count": len(work_items),
-            "checkpoint_count": len(checkpoints),
+            "checkpoint_count": 0,
             "approval_required": bool(plan_payload.get("approval_required")),
             "work_item_ids": [str(item.get("id") or "") for item in work_items if isinstance(item, dict)],
         }
 
 
 def _managed_run_plan_shape(plan: Any) -> dict[str, Any]:
-    work_items = list(getattr(plan, "work_items", []) or [])
+    work_items = list(getattr(plan, "tasks", []) or [])
     return {
         "work_item_count": len(work_items),
-        "checkpoint_count": len(list(getattr(plan, "checkpoints", []) or [])),
+        "checkpoint_count": 0,
         "approval_required": bool(getattr(plan, "approval_required", False)),
         "work_item_ids": [str(getattr(item, "id", "")) for item in work_items],
     }

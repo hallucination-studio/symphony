@@ -14,36 +14,10 @@ from real_symphony_e2e_common import Evidence, api_url, http_json
 from real_symphony_e2e_linear import fetch_linear_issue_tree
 
 APPENDIX_PYTEST_HARDENING_PROBES: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("appendix:s1-terminal-attempt-immutable", ("tests/test_conductor_managed_run_coordinator.py::test_managed_run_coordinator_rejects_unapproved_replacement_plan_after_acceptance",)),
-    ("appendix:s1-superseded-revision-refused", ("tests/test_conductor_managed_run_coordinator.py::test_managed_run_coordinator_cancels_removed_work_items_on_approved_revision",)),
-    (
-        "appendix:s2-malformed-proposal-refused",
-        (
-            "tests/test_managed_run_contracts.py::test_managed_run_plan_validator_rejects_invalid_work_items",
-            "tests/test_managed_run_contracts.py::test_managed_run_plan_validator_rejects_dependency_cycles",
-            "tests/test_managed_run_contracts.py::test_managed_run_plan_validator_requires_full_definition_of_done_rubric",
-        ),
-    ),
-    (
-        "appendix:s2-gate-post-freeze-immutable",
-        (
-            "tests/test_conductor_managed_run_coordinator.py::test_managed_run_coordinator_waits_for_checkpoint_before_next_work_item",
-            "tests/test_conductor_managed_run_coordinator.py::test_managed_run_coordinator_requires_final_checkpoint_before_done",
-        ),
-    ),
-    ("appendix:s2-linear-idempotent-rerun", ("tests/test_conductor_managed_run_store.py::test_managed_run_store_records_linear_projection_idempotently",)),
-    (
-        "appendix:s3-verifier-mutation-detection",
-        (
-            "tests/test_performer_managed_run_backend.py::test_codex_managed_run_backend_rejects_plan_turn_file_changes",
-            "tests/test_conductor_managed_run_coordinator.py::test_managed_run_coordinator_blocks_unplanned_file_changes_before_review",
-        ),
-    ),
-    ("appendix:s3-applied-tree-mismatch-rejected", ("tests/test_conductor_managed_run_coordinator.py::test_managed_run_coordinator_blocks_unplanned_file_changes_before_review",)),
-    ("appendix:s3-expired-fencing-refused", ("tests/test_conductor_managed_run_coordinator.py::test_managed_run_coordinator_keeps_failed_verification_out_of_done",)),
-    ("appendix:s4-superseded-revision-fenced", ("tests/test_conductor_managed_run_coordinator.py::test_managed_run_coordinator_approves_plan_revision_as_new_version",)),
-    ("appendix:s4-invalid-replan-escalates", ("tests/test_conductor_managed_run_coordinator.py::test_managed_run_coordinator_exhausts_bounded_plan_validation_retries",)),
-    ("appendix:linear-legitimate-blocks-edits-ingested", ("tests/test_real_run_tools_part1.py::test_linear_tree_audit_summarizes_children_and_blocks_relations",)),
+    ("workflow:contracts", ("tests/test_minimal_performer_api.py",)),
+    ("workflow:conductor", ("tests/test_conductor_workflow.py", "tests/test_workflow_driver.py")),
+    ("workflow:runtime", ("tests/test_conductor_runtime.py", "tests/test_runtime_contract.py")),
+    ("workflow:podium", ("tests/test_podium_runtime_polling.py",)),
 )
 def _run_appendix_pytest_hardening_probes(evidence: Evidence, *, env: dict[str, str]) -> None:
     python = str(Path.cwd() / ".venv" / "bin" / "python")
@@ -125,7 +99,7 @@ async def _observe_lowered_policy_no_preempt(conductor_port: int, lowered_versio
 
 def _pipeline_scenario(args: argparse.Namespace) -> str:
     scenario = str(getattr(args, "pipeline_scenario", "basic") or "basic")
-    allowed = {"basic", "parallel", "replan", "integration-conflict", "runtime-wait", "gate-normalization", "overall-dod"}
+    allowed = {"basic", "runtime-wait", "gate-failure"}
     return scenario if scenario in allowed else "basic"
 
 
@@ -142,7 +116,8 @@ def _pipeline_scenario_issue_description(scenario: str, run_id: str) -> str:
         "parallel": f"Real Symphony parallel pipeline e2e task for run {run_id}. Use node_ids hell-parallel-a, hell-parallel-b, and hell-downstream-integration. Create two independent deliverables with no dependency between them: SYMPHONY_PARALLEL_A.md and SYMPHONY_PARALLEL_B.md. Each file must include this Linear issue identifier and the words parallel execute. Also create SYMPHONY_REAL_E2E_RESULT.md and run pytest tests/test_smoke.py -q.",
         "replan": f"Real Symphony replan pipeline e2e task for run {run_id}. Create SYMPHONY_REAL_E2E_RESULT.md with the Linear issue identifier and the words replan recovery. If verification reports a missing or incorrect result, decompose the replacement work into a fresh subtask graph and run pytest tests/test_smoke.py -q.",
         "integration-conflict": f"Real Symphony integration conflict e2e task for run {run_id}. Use node_ids hell-parallel-a, hell-parallel-b, and hell-downstream-integration. Planner must create two independent parallel subtasks and must not add a blocks dependency between them. Each subtask must modify the already tracked file SYMPHONY_CONFLICT_SHARED.md with different content, so their verified patches overlap and the integration queue must surface the conflict through a [Human Action] child issue. At least one subtask must create SYMPHONY_REAL_E2E_RESULT.md with the Linear issue identifier and the words integration conflict. Run pytest tests/test_smoke.py -q.",
-        "runtime-wait": f"Real Symphony runtime wait e2e task for run {run_id}. Create SYMPHONY_REAL_E2E_RESULT.md with the Linear issue identifier and the words runtime wait. If the runtime asks for tool approval or operator input, Symphony must project that Runtime Wait to a [Human Action] child issue before resuming. Run pytest tests/test_smoke.py -q.",
+        "runtime-wait": f"Real Symphony runtime wait e2e task for run {run_id}. Create SYMPHONY_REAL_E2E_RESULT.md with the Linear issue identifier and the words runtime wait. If the runtime asks for tool approval or operator input, keep the run blocked until the Linear wait state is reopened. Run pytest tests/test_smoke.py -q.",
+        "gate-failure": f"Real Symphony gate failure e2e task for run {run_id}. Create SYMPHONY_REAL_E2E_RESULT.md with the Linear issue identifier and the words gate failure. The first failed Gate may rework once; a second failure must block the Sub Issue and parent. Run pytest tests/test_smoke.py -q.",
         "gate-normalization": f"Real Symphony gate normalization e2e task for run {run_id}. Create SYMPHONY_CONFLICT_SHARED.md and SYMPHONY_REAL_E2E_RESULT.md with this Linear issue identifier and the words gate provenance. Preserve the requested smoke verification and ensure the plan keeps authoritative gate provenance for the required checks. Run pytest tests/test_smoke.py -q.",
         "overall-dod": f"Real Symphony Appendix overall DoD e2e task for run {run_id}. Use node_ids hell-parallel-a, hell-parallel-b, and hell-downstream-integration. Planner must create two independent parallel subtasks and must not add a blocks dependency between them. Each parallel subtask must modify the already tracked file SYMPHONY_CONFLICT_SHARED.md with different content so their verified patches overlap and Symphony must surface the integration result without a silent last-writer-wins merge. At least one downstream subtask must depend on both parallel subtasks' verified upstream output. Create SYMPHONY_REAL_E2E_RESULT.md with the Linear issue identifier and the words overall dod. If verification fails, replan with a replacement subgraph that preserves the requested files and smoke test. If the runtime asks for tool approval or operator input, Symphony must project that Runtime Wait to a [Human Action] child issue before resuming. Run pytest tests/test_smoke.py -q.",
     }

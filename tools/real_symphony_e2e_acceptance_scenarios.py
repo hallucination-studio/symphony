@@ -18,6 +18,8 @@ def _check_pipeline_scenario_acceptance(evidence: Evidence, scenario: str, pipel
         _check_integration_conflict_acceptance(evidence, pipeline_view)
     elif scenario == "runtime-wait":
         _check_runtime_wait_acceptance(evidence, pipeline_view)
+    elif scenario == "gate-failure":
+        _check_gate_failure_acceptance(evidence, pipeline_view)
     elif scenario == "gate-normalization":
         _check_gate_normalization_acceptance(evidence, pipeline_view)
     elif scenario == "overall-dod":
@@ -106,6 +108,16 @@ def _check_runtime_wait_acceptance(evidence: Evidence, pipeline_view: dict[str, 
         bool(waits) and (any((projection.get("metadata") or {}).get("operator_wait_kind") for projection in projections) or resolved_wait_visible),
         runtime_waits=waits,
         projections=projections,
+    )
+
+
+def _check_gate_failure_acceptance(evidence: Evidence, pipeline_view: dict[str, Any]) -> None:
+    tasks = [task for task in pipeline_view.get("tasks", pipeline_view.get("managed_run_tasks", [])) if isinstance(task, dict)]
+    blocked = [task for task in tasks if task.get("state") == "blocked" or str(task.get("gate_status") or "").startswith("gate_failed")]
+    evidence.check(
+        "scenario:gate-failure-blocks-after-one-rework",
+        bool(blocked) and all(int(task.get("rework_count") or 0) >= 1 for task in blocked),
+        blocked_tasks=blocked,
     )
 
 

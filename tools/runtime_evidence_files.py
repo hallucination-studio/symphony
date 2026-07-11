@@ -48,14 +48,15 @@ class AttemptArtifacts:
 
 
 def managed_run_db_path(data_root: Path) -> Path:
-    return data_root / "managed_run" / "managed_run.db"
+    return data_root / "workflow.db"
 
 
 def generation_log_paths(instance_root: Path) -> list[Path]:
     logs_dir = instance_root / "logs"
     return sorted(
-        (path for path in logs_dir.glob("performer-[0-9][0-9][0-9][0-9][0-9][0-9].log") if path.is_file()),
-        key=lambda path: path.name,
+        [path for path in logs_dir.glob("performer*.log") if path.is_file()]
+        + [path for path in (instance_root / "state" / "workflow-runs").glob("*/*/performer.log") if path.is_file()],
+        key=lambda path: str(path),
     )
 
 
@@ -65,18 +66,22 @@ def latest_generation_log(instance_root: Path) -> Path | None:
 
 
 def attempt_artifacts(instance_root: Path) -> list[AttemptArtifacts]:
-    attempts_root = instance_root / "state" / "managed_run"
+    attempts_root = instance_root / "state" / "workflow-runs"
     if not attempts_root.is_dir():
         return []
-    return [
-        AttemptArtifacts(
-            attempt_id=attempt_dir.name,
-            request=_file_or_none(attempt_dir / "turn-request.json"),
-            result=_file_or_none(attempt_dir / "turn-result.json"),
-            log=_file_or_none(attempt_dir / "attempt.log"),
+    artifacts: list[AttemptArtifacts] = []
+    for attempt_dir in sorted(attempts_root.glob("*/*")):
+        if not attempt_dir.is_dir():
+            continue
+        artifacts.append(
+            AttemptArtifacts(
+                attempt_id=attempt_dir.name,
+                request=_file_or_none(attempt_dir / "turn-request.json"),
+                result=_file_or_none(attempt_dir / "turn-result.json"),
+                log=_file_or_none(attempt_dir / "performer.log"),
+            )
         )
-        for attempt_dir in sorted(path for path in attempts_root.iterdir() if path.is_dir())
-    ]
+    return artifacts
 
 
 def sanitize_text(text: str) -> str:

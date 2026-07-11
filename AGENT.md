@@ -120,7 +120,7 @@ Run focused managed-run checks:
 
 ```bash
 PYTHONPATH=$(pwd)/packages/performer-api/src:$(pwd)/packages/performer/src:$(pwd)/packages/conductor/src:$(pwd)/packages/podium/src \
-  .venv/bin/python -m pytest tests/test_managed_run_contracts.py tests/test_conductor_managed_run_store.py tests/test_conductor_managed_run_coordinator.py tests/test_podium_managed_runs.py -q
+  .venv/bin/python -m pytest tests/test_minimal_performer_api.py tests/test_conductor_workflow.py tests/test_podium_runtime_polling.py -q
 ```
 
 Install all editable packages:

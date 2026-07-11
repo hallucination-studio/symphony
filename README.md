@@ -80,7 +80,7 @@ Focused tests need all package `src/` paths on `PYTHONPATH`:
 
 ```bash
 PYTHONPATH=$(pwd)/packages/performer-api/src:$(pwd)/packages/performer/src:$(pwd)/packages/conductor/src:$(pwd)/packages/podium/src \
-  .venv/bin/python -m pytest tests/test_product_docs_pipeline.py -q
+  .venv/bin/python -m pytest tests/test_minimal_performer_api.py tests/test_conductor_workflow.py tests/test_podium_runtime_polling.py -q
 ```
 
 Real Linear integration runs also pin repo source roots:

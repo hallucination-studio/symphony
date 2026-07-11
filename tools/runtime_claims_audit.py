@@ -7,8 +7,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-from conductor.conductor_managed_run_attempts import attempt_integrity_errors, canonical_attempt_records
-from performer_api.managed_runs import ManagedRunTurnContext
+from performer_api.turns import TurnContext
 from runtime_evidence_files import (
     AttemptArtifacts,
     attempt_artifacts,
@@ -22,107 +21,79 @@ from runtime_evidence_files import (
 )
 
 
-REQUIRED_TABLES = (
-    "managed_run_runs",
-    "managed_run_plan_versions",
-    "managed_run_work_items",
-    "managed_run_linear_projections",
-    "managed_run_checkpoint_results",
-)
+REQUIRED_TABLES = ("runs", "plan_revisions", "tasks", "attempts", "gate_evidence", "artifacts")
 
 
 def audit_managed_run_db(db_path: Path, *, instance_id: str | None = None) -> dict[str, Any]:
     failures: list[str] = []
     if not db_path.is_file():
-        return _db_audit_result(db_path, failures=["managed_run_db_missing"])
+        return _db_result(db_path, ["workflow_db_missing"])
     try:
         with closing(sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True)) as connection:
             connection.row_factory = sqlite3.Row
             integrity = str(connection.execute("PRAGMA quick_check").fetchone()[0])
-            tables = {
-                str(row[0])
-                for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
-            }
-            missing_tables = [table for table in REQUIRED_TABLES if table not in tables]
-            failures.extend(f"managed_run_table_missing:{table}" for table in missing_tables)
+            tables = {str(row[0]) for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+            missing = [name for name in REQUIRED_TABLES if name not in tables]
+            failures.extend(f"workflow_table_missing:{name}" for name in missing)
             if integrity != "ok":
-                failures.append("managed_run_db_integrity_failed")
-            if missing_tables:
-                return _db_audit_result(db_path, failures=failures, integrity=integrity)
-            query = (
-                "SELECT run_id, issue_identifier, instance_id, state, plan_version, "
-                "latest_reason, payload_json FROM managed_run_runs"
-            )
-            parameters: tuple[str, ...] = ()
-            if instance_id:
-                query += " WHERE instance_id = ?"
-                parameters = (instance_id,)
-            query += " ORDER BY created_at, run_id"
-            rows = connection.execute(query, parameters).fetchall()
-            runs, run_ids, attempts = _safe_run_rows(rows, failures)
-            if not runs:
-                failures.append(f"managed_run_instance_missing:{instance_id}" if instance_id else "managed_run_runs_missing")
+                failures.append("workflow_db_integrity_failed")
+            runs: list[dict[str, Any]] = []
+            attempts: list[dict[str, Any]] = []
+            if not missing:
+                query = "SELECT run_id, issue_identifier, instance_id, state, plan_version, latest_reason FROM runs"
+                parameters: tuple[str, ...] = ()
+                if instance_id:
+                    query += " WHERE instance_id = ?"
+                    parameters = (instance_id,)
+                rows = connection.execute(query + " ORDER BY created_at, run_id", parameters).fetchall()
+                for row in rows:
+                    reason = sanitize_text(str(row["latest_reason"] or ""))
+                    if str(row["state"]) in {"blocked", "failed"} and not reason:
+                        failures.append(f"workflow_failure_reason_missing:{row['run_id']}")
+                    runs.append(
+                        {
+                            "run_id": str(row["run_id"]),
+                            "issue_identifier": str(row["issue_identifier"]),
+                            "instance_id": str(row["instance_id"]),
+                            "state": str(row["state"]),
+                            "plan_version": int(row["plan_version"] or 0),
+                            "latest_reason": reason,
+                        }
+                    )
+                run_ids = [run["run_id"] for run in runs]
+                if not runs:
+                    failures.append(f"workflow_runs_missing:{instance_id}" if instance_id else "workflow_runs_empty")
+                attempts = _attempt_rows(connection, run_ids)
             counts = {
                 "runs": len(runs),
-                "plan_versions": _count_for_runs(connection, "managed_run_plan_versions", run_ids),
-                "work_items": _count_for_runs(connection, "managed_run_work_items", run_ids),
-                "linear_projections": _count_for_runs(connection, "managed_run_linear_projections", run_ids),
-                "checkpoint_results": _count_for_runs(connection, "managed_run_checkpoint_results", run_ids),
+                "plan_revisions": _count_for_runs(connection, "plan_revisions", [run["run_id"] for run in runs]) if not missing else 0,
+                "tasks": _count_for_runs(connection, "tasks", [run["run_id"] for run in runs]) if not missing else 0,
+                "gate_evidence": _count_for_runs(connection, "gate_evidence", [run["run_id"] for run in runs]) if not missing else 0,
+                "artifacts": _count_for_runs(connection, "artifacts", [run["run_id"] for run in runs]) if not missing else 0,
                 "attempts": len(attempts),
             }
     except (OSError, sqlite3.Error) as exc:
-        failures.append(f"managed_run_db_unreadable:{type(exc).__name__}")
-        return _db_audit_result(db_path, failures=failures)
-    return _db_audit_result(
-        db_path,
-        failures=failures,
-        integrity=integrity,
-        counts=counts,
-        runs=runs,
-        attempts=attempts,
-    )
+        failures.append(f"workflow_db_unreadable:{type(exc).__name__}")
+        return _db_result(db_path, failures)
+    return _db_result(db_path, failures, integrity=integrity, counts=counts, runs=runs, attempts=attempts)
 
 
 def audit_runtime_evidence(data_root: Path, *, instance_id: str) -> dict[str, Any]:
     instance_root = data_root / "instances" / instance_id
     db_audit = audit_managed_run_db(managed_run_db_path(data_root), instance_id=instance_id)
-    generations = generation_log_paths(instance_root)
     attempts = attempt_artifacts(instance_root)
-    attempts_by_id = {entry.attempt_id: entry for entry in attempts}
-    attempt_logs = [entry.log for entry in attempts if entry.log is not None]
-    requests = [entry.request for entry in attempts if entry.request is not None]
-    results = [entry.result for entry in attempts if entry.result is not None]
+    by_id = {entry.attempt_id: entry for entry in attempts}
     failures = list(db_audit["failures"])
-    durable_attempts = {
-        str(attempt["attempt_id"]): attempt
-        for attempt in db_audit["attempts"]
-        if isinstance(attempt, dict) and attempt.get("attempt_id")
-    }
-    expected_attempts = {
-        attempt_id: attempt
-        for attempt_id, attempt in durable_attempts.items()
-        if attempt.get("kind") in {"plan", "work_item"}
-    }
-    expected_attempt_ids = set(expected_attempts)
-    for attempt_id in sorted(expected_attempt_ids - attempts_by_id.keys()):
+    durable = {str(row["attempt_id"]): row for row in db_audit["attempts"] if row.get("attempt_id")}
+    for attempt_id in sorted(set(durable) - set(by_id)):
         failures.append(f"attempt_artifacts_missing:{attempt_id}")
-    for attempt_id in sorted(attempts_by_id.keys() - durable_attempts.keys()):
-        failures.append(f"attempt_not_durable:{attempt_id}")
-    for attempt_id, expected in expected_attempts.items():
-        artifacts = attempts_by_id.get(attempt_id)
-        if artifacts is not None:
-            failures.extend(attempt_artifact_failures(expected, artifacts))
-    for generation in generations:
-        if file_empty(generation):
-            failures.append(f"generation_log_empty:{generation.name}")
-    for paths, missing_code in (
-        (generations, "generation_logs_missing"),
-        (attempt_logs, "attempt_logs_missing"),
-        (requests, "turn_requests_missing"),
-        (results, "turn_results_missing"),
-    ):
-        if not paths:
-            failures.append(missing_code)
+    for attempt_id, entry in by_id.items():
+        if attempt_id not in durable:
+            failures.append(f"attempt_not_durable:{attempt_id}")
+        failures.extend(attempt_artifact_failures(entry))
+    logs = generation_log_paths(instance_root)
+    if not logs and not any(entry.log for entry in attempts):
+        failures.append("performer_logs_missing")
     return {
         **db_audit,
         "pass": not failures,
@@ -130,13 +101,11 @@ def audit_runtime_evidence(data_root: Path, *, instance_id: str) -> dict[str, An
         "instance_id": instance_id,
         "counts": {
             **db_audit["counts"],
-            "generation_logs": len(generations),
-            "attempt_logs": len(attempt_logs),
-            "turn_requests": len(requests),
-            "turn_results": len(results),
+            "logs": len(logs),
+            "attempt_artifacts": len(attempts),
         },
         "runtime_artifacts": {
-            "generation_logs": [_file_row(path) for path in generations],
+            "logs": [_file_row(path) for path in logs],
             "attempts": [
                 {
                     "attempt_id": entry.attempt_id,
@@ -150,58 +119,34 @@ def audit_runtime_evidence(data_root: Path, *, instance_id: str) -> dict[str, An
     }
 
 
-def attempt_artifact_failures(expected: dict[str, Any], artifacts: AttemptArtifacts) -> list[str]:
-    attempt_id = artifacts.attempt_id
+def attempt_artifact_failures(entry: AttemptArtifacts) -> list[str]:
     failures: list[str] = []
     for path, missing, empty in (
-        (artifacts.request, "turn_request_missing", "turn_request_empty"),
-        (artifacts.result, "turn_result_missing", "turn_result_empty"),
-        (artifacts.log, "attempt_log_missing", "attempt_log_empty"),
+        (entry.request, "turn_request_missing", "turn_request_empty"),
+        (entry.result, "turn_result_missing", "turn_result_empty"),
+        (entry.log, "attempt_log_missing", "attempt_log_empty"),
     ):
         if path is None:
-            failures.append(f"{missing}:{attempt_id}")
+            failures.append(f"{missing}:{entry.attempt_id}")
         elif file_empty(path):
-            failures.append(f"{empty}:{attempt_id}")
-    if artifacts.request is None or artifacts.result is None or file_empty(artifacts.request) or file_empty(artifacts.result):
+            failures.append(f"{empty}:{entry.attempt_id}")
+    if entry.request is None or entry.result is None or file_empty(entry.request) or file_empty(entry.result):
         return failures
-    request = _read_json_object(artifacts.request, "turn_request", attempt_id, failures)
-    result = _read_json_object(artifacts.result, "turn_result", attempt_id, failures)
+    request = _read_json(entry.request)
+    result = _read_json(entry.result)
     if request is None or result is None:
+        failures.append(f"turn_json_invalid:{entry.attempt_id}")
         return failures
-    request_context = _validated_context(request, "turn_request", attempt_id, failures)
-    result_context = _validated_context(result, "turn_result", attempt_id, failures)
-    expected_context = ManagedRunTurnContext.from_dict(
-        expected.get("turn_context") if isinstance(expected.get("turn_context"), dict) else {}
-    )
-    if request_context is not None:
-        if request_context.turn_id != attempt_id:
-            failures.append(f"turn_request_attempt_mismatch:{attempt_id}")
-        if request_context.run_id != str(expected.get("run_id") or ""):
-            failures.append(f"turn_request_run_mismatch:{attempt_id}")
-        expected_errors = expected_context.validation_errors()
-        if expected_errors:
-            failures.append(f"durable_turn_context_invalid:{attempt_id}:{expected_errors[0]}")
-        else:
-            mismatch = expected_context.mismatch_reason(request_context)
-            if mismatch:
-                failures.append(f"turn_request_context_mismatch:{attempt_id}:{mismatch}")
-    if request_context is not None and result_context is not None:
+    request_context = _context(request, entry.attempt_id, failures, "turn_request")
+    result_context = _context(result, entry.attempt_id, failures, "turn_result")
+    if request_context and result_context:
         mismatch = request_context.mismatch_reason(result_context)
         if mismatch:
-            failures.append(f"turn_result_context_mismatch:{attempt_id}:{mismatch}")
-    request_kind = str(request.get("turn_kind") or "")
-    result_kind = str(result.get("turn_kind") or "")
-    if request_kind not in {"plan", "work_item"}:
-        failures.append(f"turn_request_kind_invalid:{attempt_id}")
-    if result_kind != request_kind:
-        failures.append(f"turn_result_kind_mismatch:{attempt_id}")
-    if artifacts.log is not None and not file_empty(artifacts.log):
-        log_text = artifacts.log.read_text(encoding="utf-8", errors="replace")
-        if f"attempt_id={attempt_id}" not in log_text:
-            failures.append(f"attempt_log_correlation_missing:{attempt_id}:attempt_id")
-        lease_id = request_context.lease_id if request_context is not None else expected_context.lease_id
-        if lease_id and f"lease_id={lease_id}" not in log_text:
-            failures.append(f"attempt_log_correlation_missing:{attempt_id}:lease_id")
+            failures.append(f"turn_context_mismatch:{entry.attempt_id}:{mismatch}")
+    if str(request.get("turn_kind") or "") not in {"plan", "execute", "gate"}:
+        failures.append(f"turn_request_kind_invalid:{entry.attempt_id}")
+    if str(result.get("turn_kind") or "") != str(request.get("turn_kind") or ""):
+        failures.append(f"turn_result_kind_mismatch:{entry.attempt_id}")
     return failures
 
 
@@ -212,108 +157,32 @@ def file_empty(path: Path) -> bool:
         return True
 
 
-def _read_json_object(path: Path, kind: str, attempt_id: str, failures: list[str]) -> dict[str, Any] | None:
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        failures.append(f"{kind}_invalid_json:{attempt_id}")
-        return None
-    if not isinstance(payload, dict):
-        failures.append(f"{kind}_not_object:{attempt_id}")
-        return None
-    return payload
-
-
-def _validated_context(
-    payload: dict[str, Any],
-    kind: str,
-    attempt_id: str,
-    failures: list[str],
-) -> ManagedRunTurnContext | None:
-    context = ManagedRunTurnContext.from_dict(
-        payload.get("context") if isinstance(payload.get("context"), dict) else {}
-    )
-    errors = context.validation_errors()
-    if errors:
-        failures.append(f"{kind}_context_invalid:{attempt_id}:{errors[0]}")
-        return None
-    return context
-
-
-def _safe_run_rows(
-    rows: list[sqlite3.Row],
-    failures: list[str],
-) -> tuple[list[dict[str, Any]], list[str], list[dict[str, Any]]]:
-    runs: list[dict[str, Any]] = []
-    run_ids: list[str] = []
-    attempts: list[dict[str, Any]] = []
+def _attempt_rows(connection: sqlite3.Connection, run_ids: list[str]) -> list[dict[str, Any]]:
+    if not run_ids:
+        return []
+    placeholders = ",".join("?" for _ in run_ids)
+    rows = connection.execute(
+        f"SELECT attempt_id, run_id, task_id, kind, state, fencing_token, result_json FROM attempts WHERE run_id IN ({placeholders})",
+        run_ids,
+    ).fetchall()
+    result: list[dict[str, Any]] = []
     for row in rows:
-        run_id = str(row["run_id"])
         try:
-            payload = json.loads(str(row["payload_json"]))
+            payload = json.loads(str(row["result_json"]))
         except json.JSONDecodeError:
             payload = {}
-            failures.append(f"managed_run_payload_invalid:{run_id}")
-        if not isinstance(payload, dict):
-            payload = {}
-            failures.append(f"managed_run_payload_not_object:{run_id}")
-        failures.extend(
-            f"managed_run_attempt_integrity:{run_id}:{error}"
-            for error in attempt_integrity_errors(payload)
-        )
-        for attempt in canonical_attempt_records(payload):
-            if not attempt.get("attempt_id"):
-                continue
-            failures.extend(
-                f"managed_run_verify_attempt_invalid:{run_id}:{error}"
-                for error in _verify_attempt_errors(attempt)
-            )
-            attempts.append(_evidence_attempt_row(run_id, attempt))
-        state = str(row["state"])
-        latest_reason = sanitize_text(str(row["latest_reason"]))
-        if state in {"blocked", "failed"} and not latest_reason:
-            failures.append(f"managed_run_failure_reason_missing:{run_id}")
-        run_ids.append(run_id)
-        runs.append(
+        result.append(
             {
-                "run_id": run_id,
-                "issue_identifier": str(row["issue_identifier"]),
-                "instance_id": str(row["instance_id"]),
-                "state": state,
-                "plan_version": int(row["plan_version"]),
-                "latest_reason": latest_reason,
+                "attempt_id": str(row["attempt_id"]),
+                "run_id": str(row["run_id"]),
+                "task_id": str(row["task_id"]),
+                "kind": str(row["kind"]),
+                "state": str(row["state"]),
+                "fencing_token": int(row["fencing_token"] or 0),
+                "result": sanitize_evidence_value(payload),
             }
         )
-    return runs, run_ids, attempts
-
-
-def _evidence_attempt_row(run_id: str, attempt: dict[str, Any]) -> dict[str, Any]:
-    context = attempt.get("turn_context") if isinstance(attempt.get("turn_context"), dict) else {}
-    return {
-        "attempt_id": str(attempt.get("attempt_id") or ""),
-        "run_id": run_id,
-        "kind": str(attempt.get("kind") or ""),
-        "state": str(attempt.get("state") or ""),
-        "turn_context": sanitize_evidence_value(context),
-        "gate_snapshot_hash": str(attempt.get("gate_snapshot_hash") or ""),
-        "verification_evidence_present": isinstance(attempt.get("verification_evidence"), dict),
-    }
-
-
-def _verify_attempt_errors(attempt: dict[str, Any]) -> list[str]:
-    if str(attempt.get("kind") or "") != "verify":
-        return []
-    errors: list[str] = []
-    state = str(attempt.get("state") or "")
-    gate_hash = attempt.get("gate_snapshot_hash")
-    evidence = attempt.get("verification_evidence")
-    if not isinstance(gate_hash, str) or (state == "succeeded" and not gate_hash):
-        errors.append(f"gate_snapshot_hash_missing:{attempt.get('attempt_id') or 'missing'}")
-    if not isinstance(evidence, dict) or (state == "succeeded" and not evidence):
-        errors.append(f"verification_evidence_missing:{attempt.get('attempt_id') or 'missing'}")
-    if state != "succeeded" and not str(attempt.get("sanitized_error") or ""):
-        errors.append(f"failure_reason_missing:{attempt.get('attempt_id') or 'missing'}")
-    return errors
+    return result
 
 
 def _count_for_runs(connection: sqlite3.Connection, table: str, run_ids: list[str]) -> int:
@@ -321,29 +190,26 @@ def _count_for_runs(connection: sqlite3.Connection, table: str, run_ids: list[st
         return 0
     placeholders = ",".join("?" for _ in run_ids)
     row = connection.execute(f"SELECT COUNT(*) FROM {table} WHERE run_id IN ({placeholders})", run_ids).fetchone()
-    return int(row[0]) if row is not None else 0
+    return int(row[0]) if row else 0
 
 
-def _db_audit_result(
-    db_path: Path,
-    *,
-    failures: list[str],
-    integrity: str | None = None,
-    counts: dict[str, int] | None = None,
-    runs: list[dict[str, Any]] | None = None,
-    attempts: list[dict[str, Any]] | None = None,
-) -> dict[str, Any]:
-    attempt_rows = attempts or []
-    return {
-        "pass": not failures,
-        "managed_run_db": str(db_path),
-        "integrity": integrity,
-        "counts": counts or {name: 0 for name in ("runs", "plan_versions", "work_items", "linear_projections", "checkpoint_results", "attempts")},
-        "runs": runs or [],
-        "attempt_ids": [str(attempt["attempt_id"]) for attempt in attempt_rows],
-        "attempts": attempt_rows,
-        "failures": failures,
-    }
+def _context(payload: dict[str, Any], attempt_id: str, failures: list[str], kind: str) -> TurnContext | None:
+    context = TurnContext.from_dict(payload.get("context") if isinstance(payload.get("context"), dict) else {})
+    errors = context.validation_errors()
+    if errors:
+        failures.append(f"{kind}_context_invalid:{attempt_id}:{errors[0]}")
+        return None
+    if context.attempt_id != attempt_id:
+        failures.append(f"{kind}_attempt_mismatch:{attempt_id}")
+    return context
+
+
+def _read_json(path: Path) -> dict[str, Any] | None:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
 
 
 def _file_row(path: Path) -> dict[str, Any]:
@@ -354,12 +220,33 @@ def _file_row(path: Path) -> dict[str, Any]:
     return {"name": path.name, "size_bytes": size}
 
 
+def _db_result(
+    db_path: Path,
+    failures: list[str],
+    *,
+    integrity: str | None = None,
+    counts: dict[str, int] | None = None,
+    runs: list[dict[str, Any]] | None = None,
+    attempts: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    return {
+        "pass": not failures,
+        "workflow_db": str(db_path),
+        "integrity": integrity,
+        "counts": counts or {"runs": 0, "plan_revisions": 0, "tasks": 0, "gate_evidence": 0, "artifacts": 0, "attempts": 0},
+        "runs": runs or [],
+        "attempt_ids": [str(item["attempt_id"]) for item in attempts or []],
+        "attempts": attempts or [],
+        "failures": failures,
+    }
+
+
 def parser() -> argparse.ArgumentParser:
-    arg_parser = argparse.ArgumentParser(description="Audit authoritative Managed Run state and runtime artifacts.")
-    arg_parser.add_argument("--data-root", type=Path, required=True, help="Conductor data root containing managed_run/ and instances/.")
-    arg_parser.add_argument("--instance-id", required=True, help="Conductor instance id to audit.")
-    arg_parser.add_argument("--out", type=Path, help="Write JSON evidence to this path.")
-    return arg_parser
+    parser = argparse.ArgumentParser(description="Audit compact workflow state and runtime artifacts.")
+    parser.add_argument("--data-root", type=Path, required=True)
+    parser.add_argument("--instance-id", required=True)
+    parser.add_argument("--out", type=Path)
+    return parser
 
 
 def main() -> None:

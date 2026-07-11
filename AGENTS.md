@@ -21,7 +21,7 @@ make stop           # kill Makefile-launched Conductor/Performer processes
 
 ```bash
 PYTHONPATH=$(pwd)/packages/performer-api/src:$(pwd)/packages/performer/src:$(pwd)/packages/conductor/src:$(pwd)/packages/podium/src \
-  .venv/bin/python -m pytest tests/test_conductor_managed_run_store.py tests/test_conductor_managed_run_coordinator.py tests/test_conductor_managed_run_projection.py -q
+  .venv/bin/python -m pytest tests/test_conductor_workflow.py tests/test_workflow_driver.py tests/test_podium_runtime_polling.py -q
 # single case:
 PYTHONPATH=... .venv/bin/python -m pytest tests/test_podium_auth.py::test_login -q
 ```

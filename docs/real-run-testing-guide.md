@@ -86,9 +86,8 @@ passing report.
 A complete managed report includes:
 
 - Podium log and Conductor log;
-- the authoritative `managed_run/managed_run.db` SQLite snapshot;
-- every per-instance `performer-NNNNNN.log` generation and per-attempt
-  `attempt.log`, with stdout/stderr and attempt correlation;
+- the authoritative `workflow.db` SQLite snapshot;
+- every per-attempt `performer.log`, with stdout/stderr and attempt correlation;
 - Managed Run view/report JSON;
 - graph, node, attempt, lease, policy, and runtime profile snapshots;
 - attempt request/result JSON;
@@ -200,7 +199,7 @@ canonical full suite when feasible:
 
 ```bash
 PYTHONPATH=$(pwd)/packages/performer-api/src:$(pwd)/packages/performer/src:$(pwd)/packages/conductor/src:$(pwd)/packages/podium/src \
-  .venv/bin/python -m pytest tests/test_product_docs_pipeline.py -q
+  .venv/bin/python -m pytest tests/test_minimal_performer_api.py tests/test_conductor_workflow.py tests/test_podium_runtime_polling.py -q
 make test
 ```
 
