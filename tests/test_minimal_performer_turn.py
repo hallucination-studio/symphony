@@ -94,3 +94,32 @@ async def test_gate_turn_is_read_only_and_keeps_rubric_evidence(tmp_path: Path, 
     assert body["gate_result"]["passed"] is True
     assert body["gate_result"]["rubric"]["correctness"]["weight"] == 2
     assert "Do not change files" in client.calls[0]["prompt"]
+
+
+@pytest.mark.asyncio
+async def test_execute_turn_surfaces_actual_codex_runtime_wait(tmp_path: Path, task_payload, fake_codex_client) -> None:
+    client = fake_codex_client(
+        {},
+        events=[
+            {
+                "event": "sdk_item_autoApprovalReview_started",
+                "payload": {
+                    "type": "item/autoApprovalReview/started",
+                    "reviewId": "review-1",
+                    "action": {"type": "requestPermissions", "reason": "Need workspace permission."},
+                },
+            }
+        ],
+    )
+
+    body = await run_request(
+        tmp_path,
+        {
+            "context": {"run_id": "run-1", "task_id": "task-1", "attempt_id": "attempt-1", "fencing_token": 4, "turn_kind": "execute"},
+            "task": task_payload,
+        },
+        client,
+    )
+
+    assert body["runtime_wait"] == {"kind": "permission_required", "reason": "Need workspace permission."}
+    assert "result" not in body

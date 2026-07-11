@@ -30,13 +30,14 @@ def minimal_task() -> Task:
 
 
 class FakeCodexClient:
-    def __init__(self, structured_result: dict[str, object]) -> None:
+    def __init__(self, structured_result: dict[str, object], events: list[dict[str, object]] | None = None) -> None:
         self.structured_result = structured_result
+        self.events = events or []
         self.calls: list[dict[str, object]] = []
 
     async def run_session(self, workspace: Path, prompt: str, title: str, **kwargs: object) -> SimpleNamespace:
         self.calls.append({"workspace": workspace, "prompt": prompt, "title": title, **kwargs})
-        return SimpleNamespace(thread_id="thread-1", structured_result=self.structured_result, events=[])
+        return SimpleNamespace(thread_id="thread-1", structured_result=self.structured_result, events=self.events)
 
 
 @pytest.fixture
