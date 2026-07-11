@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
-from performer_api.managed_runs import RuntimeConfigEnvelope
+from performer_api.runtime import RuntimeConfigEnvelope
 
 from .conductor_models import utc_now_iso
 from .conductor_smoke_protocol import (

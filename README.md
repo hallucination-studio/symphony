@@ -46,9 +46,11 @@ Managed execution is a Conductor-owned Linear-native managed run:
    binding, then queues one dispatch per delegation epoch.
 4. The project Conductor leases the dispatch over outbound runtime auth.
 5. Conductor commits or resumes one durable managed run for the parent issue.
-6. Performer runs plan or work-item turns under the Managed Runs contract.
-7. Conductor verifies work-item results, records checkpoints, and
-   projects sanitized state to Podium and Linear.
+6. Performer runs one plan, execute, or read-only gate turn under the compact
+   workflow contract.
+7. Conductor creates Linear Sub Issues, executes them strictly in order, runs
+   verification commands plus one Codex Gate per task, and projects sanitized
+   evidence to Podium and Linear.
 
 Dispatch routing is based on Linear organization, stable project id, installed
 app user, selected scope, single-project Conductor binding, active state,
@@ -132,9 +134,11 @@ Managed Podium endpoints include:
 - `GET /api/v1/auth/me`
 - `POST /api/v1/runtime/enrollment-tokens`
 - `POST /api/v1/runtime/enroll`
-- `GET /api/v1/runtime/ws`
 - `POST /api/v1/runtime/dispatches/lease`
 - `POST /api/v1/runtime/dispatches/ack`
+- `POST /api/v1/runtime/commands/lease`
+- `POST /api/v1/runtime/commands/ack`
+- `POST /api/v1/runtime/report`
 - `POST /api/v1/runtime/config`
 - `GET /api/v1/runtime/config`
 - `GET /api/v1/managed-runs`
@@ -165,10 +169,10 @@ Podium pushes versioned managed-run policy and per-role runtime profiles to
 Conductor. Conductor materializes isolated runtime homes under managed instance
 state and fails closed if a required role profile is missing.
 
-Codex-backed profiles receive isolated `CODEX_HOME` directories. The default
-`verify` profile may use `local-verifier`, which runs frozen gate commands in a
-disposable worktree with mutation detection after gate execution. That is not
-OS-level read-only enforcement.
+Codex-backed profiles receive isolated `CODEX_HOME` directories. The execute
+profile changes the prepared workspace; the gate profile is read-only and
+cannot modify files. Verification commands run before the Codex Gate and their
+evidence is stored with the task result.
 
 Secrets flow through `$VAR` indirection such as `$PODIUM_PROXY_TOKEN`. Values are
 validated but never printed in responses, logs, result payloads, or browser API

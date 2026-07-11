@@ -68,6 +68,42 @@ class ConductorStore:
             row = connection.execute("SELECT * FROM runs WHERE run_id = ?", (run_id,)).fetchone()
         return _run(row) if row is not None else None
 
+    def list_runs(self) -> list[dict[str, Any]]:
+        with self.connect() as connection:
+            rows = connection.execute("SELECT * FROM runs ORDER BY created_at, run_id").fetchall()
+        return [_run(row) for row in rows]
+
+    def update_run_payload(self, run_id: str, updates: dict[str, Any]) -> None:
+        current = self.get_run(run_id) or {}
+        payload = dict(current.get("payload") or {})
+        payload.update(updates)
+        with self.connect() as connection:
+            connection.execute(
+                "UPDATE runs SET payload_json = ?, updated_at = ? WHERE run_id = ?",
+                (_dump(payload), _now(), run_id),
+            )
+
+    def fail_run(self, run_id: str, reason: str) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                "UPDATE runs SET state = ?, latest_reason = ?, updated_at = ? WHERE run_id = ?",
+                (RunState.FAILED.value, reason, _now(), run_id),
+            )
+
+    def managed_run_view(self) -> dict[str, Any]:
+        runs: list[dict[str, Any]] = []
+        for run in self.list_runs():
+            run_id = str(run["run_id"])
+            runs.append(
+                {
+                    **run,
+                    "tasks": self.list_tasks(run_id),
+                    "plan": self.get_plan(run_id),
+                    "runtime_waits": self.list_runtime_waits(run_id),
+                }
+            )
+        return {"runs": runs}
+
     def list_tasks(self, run_id: str) -> list[dict[str, Any]]:
         with self.connect() as connection:
             rows = connection.execute(
@@ -84,16 +120,43 @@ class ConductorStore:
             ).fetchone()
         return _task(row) if row is not None else None
 
+    def attach_task_issue(
+        self,
+        run_id: str,
+        task_id: str,
+        *,
+        issue_id: str,
+        identifier: str = "",
+        state: str = "",
+    ) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                """
+                UPDATE tasks
+                SET linear_issue_id = ?, linear_identifier = ?, linear_state = ?, updated_at = ?
+                WHERE run_id = ? AND task_id = ?
+                """,
+                (issue_id, identifier, state, _now(), run_id, task_id),
+            )
+
+    def update_task_linear_state(self, run_id: str, task_id: str, state: str) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                "UPDATE tasks SET linear_state = ?, updated_at = ? WHERE run_id = ? AND task_id = ?",
+                (state, _now(), run_id, task_id),
+            )
+
     def save_plan(
         self,
         run_id: str,
         plan: Plan,
         *,
         policy_revision: int = 1,
-        approval_required: bool = False,
+        approval_required: bool | None = None,
         reason: str = "initial plan",
         manifest_refs: list[str] | None = None,
     ) -> int:
+        approval_required = plan.approval_required if approval_required is None else approval_required
         now = _now()
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -121,9 +184,10 @@ class ConductorStore:
                 connection.execute(
                     """
                     INSERT INTO tasks (
-                      run_id, task_id, parent_issue_id, position, state, gate_status,
-                      rework_count, task_json, result_json, updated_at
-                    ) VALUES (?, ?, (SELECT parent_issue_id FROM runs WHERE run_id = ?), ?, ?, '', 0, ?, '{}', ?)
+                    run_id, task_id, parent_issue_id, position, state, gate_status,
+                      rework_count, linear_issue_id, linear_identifier, linear_state,
+                      task_json, result_json, updated_at
+                    ) VALUES (?, ?, (SELECT parent_issue_id FROM runs WHERE run_id = ?), ?, ?, '', 0, '', '', '', ?, '{}', ?)
                     ON CONFLICT(run_id, task_id) DO UPDATE SET
                       position = excluded.position,
                       task_json = excluded.task_json,
@@ -137,6 +201,26 @@ class ConductorStore:
                 (state, version, policy_revision, "plan_approval_required" if approval_required else "", now, run_id),
             )
         return version
+
+    def get_plan(self, run_id: str, version: int | None = None) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            if version is None:
+                row = connection.execute(
+                    "SELECT plan_json FROM plan_revisions WHERE run_id = ? ORDER BY version DESC LIMIT 1",
+                    (run_id,),
+                ).fetchone()
+            else:
+                row = connection.execute(
+                    "SELECT plan_json FROM plan_revisions WHERE run_id = ? AND version = ?",
+                    (run_id, version),
+                ).fetchone()
+        if row is None:
+            return None
+        try:
+            payload = json.loads(row["plan_json"])
+        except json.JSONDecodeError:
+            return None
+        return payload if isinstance(payload, dict) else None
 
     def approve_plan(self, run_id: str, version: int, *, approval_id: str) -> None:
         now = _now()
@@ -162,10 +246,97 @@ class ConductorStore:
         for task in tasks:
             if task["state"] == TaskState.DONE.value:
                 continue
-            if task["state"] in {TaskState.TODO.value, TaskState.IN_PROGRESS.value}:
+            if task["state"] == TaskState.TODO.value:
                 return task
+            if task["state"] == TaskState.IN_PROGRESS.value:
+                with self.connect() as connection:
+                    active = connection.execute(
+                        "SELECT 1 FROM attempts WHERE run_id = ? AND task_id = ? AND state IN ('running', 'waiting') LIMIT 1",
+                        (run_id, task["task_id"]),
+                    ).fetchone()
+                if active is None:
+                    return task
             return None
         return None
+
+    def start_plan(self, run_id: str) -> dict[str, Any]:
+        now = _now()
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                "SELECT * FROM attempts WHERE run_id = ? AND kind = 'plan' AND state IN ('running', 'waiting') ORDER BY created_at DESC LIMIT 1",
+                (run_id,),
+            ).fetchone()
+            if existing is not None:
+                return _attempt_dict(existing)
+            previous = connection.execute(
+                "SELECT COALESCE(MAX(fencing_token), 0) AS token FROM attempts WHERE run_id = ? AND kind = 'plan'",
+                (run_id,),
+            ).fetchone()
+            token = int(previous["token"] if previous is not None else 0) + 1
+            attempt_id = f"attempt-{uuid4().hex}"
+            connection.execute(
+                "INSERT INTO attempts (attempt_id, run_id, task_id, kind, state, fencing_token, result_json, created_at, updated_at) VALUES (?, ?, '', 'plan', ?, ?, '{}', ?, ?)",
+                (attempt_id, run_id, AttemptState.RUNNING.value, token, now, now),
+            )
+            connection.execute(
+                "UPDATE runs SET state = ?, updated_at = ? WHERE run_id = ?",
+                (RunState.PLANNING.value, now, run_id),
+            )
+            row = connection.execute("SELECT * FROM attempts WHERE attempt_id = ?", (attempt_id,)).fetchone()
+        return _attempt_dict(row) if row is not None else {}
+
+    def record_plan(
+        self,
+        run_id: str,
+        attempt_id: str,
+        fencing_token: int,
+        plan: Plan,
+        *,
+        policy_revision: int = 1,
+        manifest_refs: list[str] | None = None,
+    ) -> int:
+        attempt = self._attempt(run_id, attempt_id, fencing_token)
+        version = self.save_plan(
+            run_id,
+            plan,
+            policy_revision=policy_revision,
+            approval_required=plan.approval_required,
+            manifest_refs=manifest_refs,
+        )
+        now = _now()
+        with self.connect() as connection:
+            connection.execute(
+                "UPDATE attempts SET state = ?, result_json = ?, updated_at = ? WHERE attempt_id = ?",
+                (AttemptState.SUCCEEDED.value, _dump(plan.to_dict()), now, attempt["attempt_id"]),
+            )
+        return version
+
+    def record_runtime_wait(self, run_id: str, attempt_id: str, fencing_token: int, *, kind: str, reason: str) -> None:
+        attempt = self._attempt(run_id, attempt_id, fencing_token)
+        now = _now()
+        wait_id = f"wait-{uuid4().hex}"
+        with self.connect() as connection:
+            connection.execute(
+                "INSERT INTO runtime_waits (wait_id, run_id, task_id, kind, reason, state, created_at) VALUES (?, ?, ?, ?, ?, 'open', ?)",
+                (wait_id, run_id, attempt.get("task_id") or "", kind, reason, now),
+            )
+            connection.execute(
+                "UPDATE attempts SET state = ?, result_json = ?, updated_at = ? WHERE attempt_id = ?",
+                (AttemptState.WAITING.value, _dump({"kind": kind, "reason": reason}), now, attempt_id),
+            )
+            connection.execute(
+                "UPDATE runs SET state = ?, latest_reason = ?, updated_at = ? WHERE run_id = ?",
+                (RunState.BLOCKED.value, f"runtime_wait:{kind}", now, run_id),
+            )
+
+    def list_runtime_waits(self, run_id: str) -> list[dict[str, Any]]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM runtime_waits WHERE run_id = ? ORDER BY created_at",
+                (run_id,),
+            ).fetchall()
+        return [{key: row[key] for key in row.keys()} for row in rows]
 
     def start_task(self, run_id: str, task_id: str) -> dict[str, Any]:
         now = _now()
@@ -196,6 +367,39 @@ class ConductorStore:
                 (RunState.EXECUTING.value, task_id, now, run_id),
             )
         return {"attempt_id": attempt_id, "fencing_token": token, "task_id": task_id}
+
+    def start_gate(self, run_id: str, task_id: str) -> dict[str, Any]:
+        now = _now()
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            task = connection.execute(
+                "SELECT * FROM tasks WHERE run_id = ? AND task_id = ?",
+                (run_id, task_id),
+            ).fetchone()
+            if task is None or task["state"] != TaskState.IN_REVIEW.value:
+                raise ValueError(f"task is not ready for gate: {task_id}")
+            active = connection.execute(
+                "SELECT * FROM attempts WHERE run_id = ? AND task_id = ? AND kind = 'gate' AND state IN ('running', 'waiting') ORDER BY created_at DESC LIMIT 1",
+                (run_id, task_id),
+            ).fetchone()
+            if active is not None:
+                return _attempt_dict(active)
+            previous = connection.execute(
+                "SELECT COALESCE(MAX(fencing_token), 0) AS token FROM attempts WHERE run_id = ? AND task_id = ?",
+                (run_id, task_id),
+            ).fetchone()
+            token = int(previous["token"] if previous is not None else 0) + 1
+            attempt_id = f"attempt-{uuid4().hex}"
+            connection.execute(
+                "INSERT INTO attempts (attempt_id, run_id, task_id, kind, state, fencing_token, result_json, created_at, updated_at) VALUES (?, ?, ?, 'gate', ?, ?, '{}', ?, ?)",
+                (attempt_id, run_id, task_id, AttemptState.RUNNING.value, token, now, now),
+            )
+            connection.execute(
+                "UPDATE tasks SET gate_status = 'gate_started', updated_at = ? WHERE run_id = ? AND task_id = ?",
+                (now, run_id, task_id),
+            )
+            row = connection.execute("SELECT * FROM attempts WHERE attempt_id = ?", (attempt_id,)).fetchone()
+        return _attempt_dict(row) if row is not None else {}
 
     def record_execute(self, run_id: str, attempt_id: str, fencing_token: int, *, ready_for_gate: bool, result: dict[str, Any] | None = None) -> dict[str, Any]:
         attempt = self._attempt(run_id, attempt_id, fencing_token)
@@ -239,9 +443,15 @@ class ConductorStore:
                 "INSERT OR REPLACE INTO gate_evidence (run_id, task_id, attempt_id, passed, score, threshold, evidence_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (run_id, attempt["task_id"], attempt_id, 1 if effective_passed else 0, score, threshold, _dump(evidence or {}), now),
             )
+            artifact_refs = evidence.get("artifact_refs", []) if isinstance(evidence, dict) else []
+            for artifact_ref in artifact_refs:
+                connection.execute(
+                    "INSERT OR REPLACE INTO artifacts (run_id, task_id, attempt_id, artifact_ref, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                    (run_id, attempt["task_id"], attempt_id, str(artifact_ref), _dump(evidence), now),
+                )
             connection.execute(
                 "UPDATE attempts SET state = ?, result_json = ?, updated_at = ? WHERE attempt_id = ?",
-                (AttemptState.SUCCEEDED.value if passed else AttemptState.FAILED.value, _dump(evidence or {}), now, attempt_id),
+                (AttemptState.SUCCEEDED.value if effective_passed else AttemptState.FAILED.value, _dump(evidence or {}), now, attempt_id),
             )
             task = connection.execute(
                 "SELECT * FROM tasks WHERE run_id = ? AND task_id = ?",
@@ -326,6 +536,9 @@ class ConductorStore:
                   state TEXT NOT NULL,
                   gate_status TEXT NOT NULL,
                   rework_count INTEGER NOT NULL,
+                  linear_issue_id TEXT NOT NULL DEFAULT '',
+                  linear_identifier TEXT NOT NULL DEFAULT '',
+                  linear_state TEXT NOT NULL DEFAULT '',
                   task_json TEXT NOT NULL,
                   result_json TEXT NOT NULL,
                   updated_at TEXT NOT NULL,
@@ -380,6 +593,12 @@ class ConductorStore:
                 );
                 """
             )
+            for column in ("linear_issue_id", "linear_identifier", "linear_state"):
+                try:
+                    connection.execute(f"ALTER TABLE tasks ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
+                except sqlite3.OperationalError as exc:
+                    if "duplicate column name" not in str(exc).lower():
+                        raise
 
 
 def _run(row: sqlite3.Row) -> dict[str, Any]:
@@ -391,6 +610,10 @@ def _task(row: sqlite3.Row) -> dict[str, Any]:
         "task": _load(row["task_json"]),
         "result": _load(row["result_json"]),
     }
+
+
+def _attempt_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return {key: row[key] for key in row.keys()} | {"result": _load(row["result_json"])}
 
 
 __all__ = ["ConductorStore", "StaleAttemptError"]

@@ -37,8 +37,10 @@ class AcceptanceGate:
         task: Task,
         workspace: Path,
         codex_result: GateResult,
+        *,
+        command_results: list[CommandResult] | None = None,
     ) -> tuple[GateResult, dict[str, Any]]:
-        commands = self.run_commands(task, workspace)
+        commands = command_results if command_results is not None else self.run_commands(task, workspace)
         commands_passed = all(result.passed for result in commands)
         passed = commands_passed and codex_result.passed and codex_result.score >= codex_result.threshold
         findings = list(codex_result.findings)

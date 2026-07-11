@@ -63,10 +63,10 @@ when available. Foreground/container modes preserve the same isolation.
 
 1. Installer downloads and verifies the runtime package.
 2. Installer exchanges the one-time token for runtime identity, scoped runtime
-   and proxy credentials, WebSocket URL, name, and public id.
+   and proxy credentials, name, and public id.
 3. Installer writes bootstrap configuration before process start.
 4. Installer registers and starts the isolated Conductor service.
-5. Conductor opens outbound heartbeat, config, report, and dispatch channels.
+5. Conductor polls outbound command/config/report/dispatch endpoints over HTTP.
 6. Podium marks the Conductor online but unbound.
 7. The operator selects one unoccupied project and supplies that project's
    repository mapping.

@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
-from performer_api.managed_runs import ManagedRunRuntimeRole, RuntimeProfile
+from performer_api.runtime import RuntimeProfile
 
 from .conductor_runtime_config import sanitize_codex_config_template
 
@@ -87,8 +87,6 @@ class CodexRuntimeBackendProvider:
             "overload_max_attempts",
             "overload_initial_delay_ms",
             "overload_max_delay_ms",
-            "emit_runtime_wait_probe",
-            "runtime_wait_probe_seconds",
         ):
             value = profile.settings.get(key)
             if value is not None:
@@ -99,31 +97,8 @@ class CodexRuntimeBackendProvider:
         return env
 
 
-class LocalVerifierRuntimeBackendProvider:
-    name = "local-verifier"
-
-    def prepare_environment(self, context: BackendEnvironmentContext) -> dict[str, str]:
-        profile = context.profile
-        if profile.role is not ManagedRunRuntimeRole.VERIFY:
-            raise ValueError(f"unsupported runtime backend for {profile.role.value}: {profile.backend}")
-        verifier_home = _runtime_home_root(context, "local-verifier")
-        try:
-            verifier_home.mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
-            raise ValueError(f"isolated local verifier home could not be materialized: {verifier_home}") from exc
-        if not verifier_home.is_dir():
-            raise ValueError(f"isolated local verifier home could not be materialized: {verifier_home}")
-        env = {"SYMPHONY_LOCAL_VERIFIER_HOME": str(verifier_home)}
-        if profile.settings.get("force_first_verify_failure_for_replan") is True:
-            probe_home = _runtime_mode_home_root(context) / "local-verifier"
-            probe_home.mkdir(parents=True, exist_ok=True)
-            env["SYMPHONY_FORCE_FIRST_VERIFY_FAILURE_FOR_REPLAN"] = "1"
-            env["SYMPHONY_LOCAL_VERIFIER_PROBE_HOME"] = str(probe_home)
-        return env
-
-
 def default_runtime_backend_registry() -> RuntimeBackendRegistry:
-    return RuntimeBackendRegistry([CodexRuntimeBackendProvider(), LocalVerifierRuntimeBackendProvider()])
+    return RuntimeBackendRegistry([CodexRuntimeBackendProvider()])
 
 
 def prepare_backend_environment(

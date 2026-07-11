@@ -14,6 +14,7 @@ _PLAN_FIELDS = {
     "architecture_decisions",
     "open_questions",
     "acceptance_catalog",
+    "approval_required",
 }
 _TASK_FIELDS = {
     "id",

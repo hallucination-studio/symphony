@@ -124,7 +124,7 @@ def _plan_prompt(issue_description: str) -> str:
     return (
         "Create an ordered plan for this delegated Linear issue. Do not change files. "
         "Return only the requested JSON plan. Each task needs an objective, 1-5 acceptance criteria, "
-        "one verification command, and a non-empty file scope.\n\n"
+        "one verification command, a non-empty file scope, and set approval_required when human approval is needed.\n\n"
         f"Issue:\n{issue_description}"
     )
 

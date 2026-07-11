@@ -12,6 +12,7 @@ PLAN_SCHEMA: dict[str, Any] = {
         "architecture_decisions": {"type": "array", "items": {"type": "string"}},
         "open_questions": {"type": "array", "items": {"type": "string"}},
         "acceptance_catalog": {"type": ["object", "null"]},
+        "approval_required": {"type": "boolean"},
     },
     "required": ["summary", "tasks"],
     "additionalProperties": False,

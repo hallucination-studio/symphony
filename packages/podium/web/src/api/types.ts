@@ -223,8 +223,8 @@ export interface ConductorRecord {
   bindings: ConductorBinding[];
 }
 
-// A single line from a Performer's log tail. The runtime report sends plain
-// strings; the WS log-fetch path can attach a timestamp — accept both.
+// A single line from a Performer's cached log tail. Reports may include a
+// timestamped structured line as well as plain text.
 export type InstanceLogLine =
   | string
   | { text?: string; message?: string; line?: string; timestamp?: string | null };

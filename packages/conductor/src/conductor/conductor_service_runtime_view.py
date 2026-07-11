@@ -9,6 +9,14 @@ def managed_run_runtime_snapshot(managed_run_store) -> dict[str, Any]:
     view = managed_run_store.managed_run_view()
     runs = view.get("runs") if isinstance(view.get("runs"), list) else []
     runtime_waits = view.get("runtime_waits") if isinstance(view.get("runtime_waits"), list) else []
+    if not runtime_waits:
+        runtime_waits = [
+            {"run_id": run.get("run_id"), **wait}
+            for run in runs
+            if isinstance(run, dict)
+            for wait in (run.get("runtime_waits") or [])
+            if isinstance(wait, dict)
+        ]
     running = _running_runs(runs)
     blocked = _blocked_runs(runs)
     pending_human = _human_attention_runs(runs)

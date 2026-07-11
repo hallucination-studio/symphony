@@ -132,7 +132,10 @@ class ConductorServiceViewsMixin:
         return runtime
 
     def _managed_run_runtime_snapshot(self) -> dict[str, Any]:
-        return managed_run_runtime_snapshot(self.managed_run_store)
+        return managed_run_runtime_snapshot(self.workflow_store)
+
+    def managed_run_view(self) -> dict[str, Any]:
+        return self.workflow_store.managed_run_view()
 
     def query_instance_logs(
         self,

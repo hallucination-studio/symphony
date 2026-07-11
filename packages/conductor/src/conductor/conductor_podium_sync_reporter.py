@@ -5,7 +5,7 @@ from typing import Any
 import httpx
 
 from .conductor_service_helpers import _desired_project_labels, _hostname, _linear_agent_app_user_id
-from performer_api.managed_runs import RuntimeConfigEnvelope
+from performer_api.runtime import RuntimeConfigEnvelope
 
 
 class PodiumReportMixin:
@@ -15,7 +15,7 @@ class PodiumReportMixin:
         metrics: dict[str, dict[str, Any]] = {}
         queue: dict[str, dict[str, Any]] = {}
         log_tail: dict[str, dict[str, Any]] = {}
-        managed_runs_view = self.managed_run_store.managed_run_view()
+        managed_runs_view = self.managed_run_view()
         managed_run_metrics = _managed_run_report_metrics(managed_runs_view)
         managed_run_queue = _managed_run_report_queue(managed_runs_view)
         instances = self.store.list_instances()

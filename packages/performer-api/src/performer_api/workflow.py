@@ -66,6 +66,7 @@ class Plan:
     architecture_decisions: list[str] = field(default_factory=list)
     open_questions: list[str] = field(default_factory=list)
     acceptance_catalog: AcceptanceCatalog | None = None
+    approval_required: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -74,6 +75,7 @@ class Plan:
             "risks": list(self.risks),
             "architecture_decisions": list(self.architecture_decisions),
             "open_questions": list(self.open_questions),
+            "approval_required": self.approval_required,
         }
         if self.acceptance_catalog is not None:
             payload["acceptance_catalog"] = self.acceptance_catalog.to_dict()
@@ -88,6 +90,7 @@ class Plan:
             architecture_decisions=_strings(payload.get("architecture_decisions")),
             open_questions=_strings(payload.get("open_questions")),
             acceptance_catalog=AcceptanceCatalog.from_dict(payload.get("acceptance_catalog")),
+            approval_required=bool(payload.get("approval_required")),
         )
 
 
