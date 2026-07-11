@@ -4,24 +4,13 @@ import pytest
 
 from performer_api.turns import GateResult, RuntimeWait, TurnContext
 from performer_api.validation import ContractValidationError, validate_plan
-from performer_api.workflow import AcceptanceCatalog, Plan, PlanRevision, Task
+from performer_api.workflow import AcceptanceCatalog, Plan, PlanRevision
 
 
-def sample_task() -> Task:
-    return Task(
-        id="task-1",
-        title="Implement the endpoint",
-        objective="Add the requested endpoint",
-        acceptance_criteria=["The endpoint returns 200"],
-        verification_commands=["pytest -q tests/test_endpoint.py"],
-        files_likely_touched=["src/api.py"],
-    )
-
-
-def test_plan_round_trips_ordered_tasks_and_retained_metadata() -> None:
+def test_plan_round_trips_ordered_tasks_and_retained_metadata(minimal_task) -> None:
     plan = Plan(
         summary="Implement the feature",
-        tasks=[sample_task()],
+        tasks=[minimal_task],
         risks=["The external API may be unavailable"],
         architecture_decisions=["Use the existing HTTP client"],
         open_questions=["Which timeout should the proxy use?"],
@@ -38,13 +27,13 @@ def test_plan_round_trips_ordered_tasks_and_retained_metadata() -> None:
     assert restored.acceptance_catalog.rubric["correctness"]["weight"] == 2
 
 
-def test_plan_revision_keeps_approval_and_manifest_provenance() -> None:
+def test_plan_revision_keeps_approval_and_manifest_provenance(minimal_task) -> None:
     revision = PlanRevision(
         version=2,
         reason="Address review findings",
         status="approved",
         policy_revision=4,
-        plan=Plan(summary="Revised plan", tasks=[sample_task()]),
+        plan=Plan(summary="Revised plan", tasks=[minimal_task]),
         approval_id="linear-comment-42",
         manifest_refs=["manifest://run/task-1/2"],
     )
@@ -56,12 +45,12 @@ def test_plan_revision_keeps_approval_and_manifest_provenance() -> None:
     assert restored.manifest_refs == ["manifest://run/task-1/2"]
 
 
-def test_checkpoint_group_is_not_a_plan_field() -> None:
+def test_checkpoint_group_is_not_a_plan_field(minimal_task) -> None:
     with pytest.raises(ContractValidationError, match="checkpoint"):
         validate_plan(
             {
                 "summary": "Invalid",
-                "tasks": [sample_task().to_dict()],
+                "tasks": [minimal_task.to_dict()],
                 "checkpoints": [{"after": ["task-1"]}],
             }
         )

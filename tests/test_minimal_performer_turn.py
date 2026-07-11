@@ -2,33 +2,10 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
 from performer.cli import run_turn
-from performer_api.workflow import Task
-
-
-class FakeCodexClient:
-    def __init__(self, structured_result: dict[str, object]) -> None:
-        self.structured_result = structured_result
-        self.calls: list[dict[str, object]] = []
-
-    async def run_session(self, workspace: Path, prompt: str, title: str, **kwargs: object) -> SimpleNamespace:
-        self.calls.append({"workspace": workspace, "prompt": prompt, "title": title, **kwargs})
-        return SimpleNamespace(thread_id="thread-1", structured_result=self.structured_result, events=[])
-
-
-def task_payload() -> dict[str, object]:
-    return Task(
-        id="task-1",
-        title="Implement the endpoint",
-        objective="Add the requested endpoint",
-        acceptance_criteria=["The endpoint returns 200"],
-        verification_commands=["pytest -q tests/test_endpoint.py"],
-        files_likely_touched=["src/api.py"],
-    ).to_dict()
 
 
 async def run_request(tmp_path: Path, request: dict[str, object], client: FakeCodexClient) -> dict[str, object]:
@@ -43,11 +20,11 @@ async def run_request(tmp_path: Path, request: dict[str, object], client: FakeCo
 
 
 @pytest.mark.asyncio
-async def test_plan_turn_writes_validated_plan(tmp_path: Path) -> None:
-    client = FakeCodexClient(
+async def test_plan_turn_writes_validated_plan(tmp_path: Path, task_payload, fake_codex_client) -> None:
+    client = fake_codex_client(
         {
             "summary": "Implement the feature",
-            "tasks": [task_payload()],
+            "tasks": [task_payload],
         }
     )
 
@@ -66,8 +43,8 @@ async def test_plan_turn_writes_validated_plan(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_execute_turn_uses_the_fenced_task(tmp_path: Path) -> None:
-    client = FakeCodexClient(
+async def test_execute_turn_uses_the_fenced_task(tmp_path: Path, task_payload, fake_codex_client) -> None:
+    client = fake_codex_client(
         {
             "status": "ready_for_gate",
             "summary": "Implemented",
@@ -81,7 +58,7 @@ async def test_execute_turn_uses_the_fenced_task(tmp_path: Path) -> None:
         tmp_path,
         {
             "context": {"run_id": "run-1", "task_id": "task-1", "attempt_id": "attempt-1", "fencing_token": 2, "turn_kind": "execute"},
-            "task": task_payload(),
+            "task": task_payload,
         },
         client,
     )
@@ -91,8 +68,8 @@ async def test_execute_turn_uses_the_fenced_task(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_gate_turn_is_read_only_and_keeps_rubric_evidence(tmp_path: Path) -> None:
-    client = FakeCodexClient(
+async def test_gate_turn_is_read_only_and_keeps_rubric_evidence(tmp_path: Path, task_payload, fake_codex_client) -> None:
+    client = fake_codex_client(
         {
             "passed": True,
             "score": 4,
@@ -108,7 +85,7 @@ async def test_gate_turn_is_read_only_and_keeps_rubric_evidence(tmp_path: Path) 
         tmp_path,
         {
             "context": {"run_id": "run-1", "task_id": "task-1", "attempt_id": "attempt-1", "fencing_token": 3, "turn_kind": "gate"},
-            "task": task_payload(),
+            "task": task_payload,
             "evidence": {"commands": [{"command": "pytest -q", "passed": True}]},
         },
         client,
