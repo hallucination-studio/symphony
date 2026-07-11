@@ -336,7 +336,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     try:
         asyncio.run(
-            run_managed_run_turn(
+            run_turn(
                 Path(args.turn_request_path).resolve(),
                 Path(args.turn_result_path).resolve(),
             )
