@@ -1,6 +1,7 @@
 # Module baseline: verification, tools, and supporting docs
 
-Status: proposed baseline, 2026-07-11.
+Status: implemented baseline, 2026-07-12. Real Linear evidence is still
+environment-dependent.
 
 ## Responsibility
 
@@ -20,18 +21,22 @@ contracts in `tasks/spec.md` and the module baselines are approved.
 
 ## Target Python suite
 
-Recreate seven focused files, about thirty behavior tests and no more than
-2,500 lines:
+The rebuilt Python suite is split by module, with shared setup in one
+`conftest.py` and about thirty behavior tests:
 
 ```text
 tests/
   conftest.py
-  test_performer_turn.py
+  test_minimal_performer_api.py
+  test_minimal_performer_turn.py
+  test_runtime_contract.py
+  test_conductor_gate.py
   test_conductor_workflow.py
   test_conductor_recovery.py
-  test_podium_linear.py
-  test_podium_api.py
-  test_product_flow.py
+  test_conductor_runtime.py
+  test_workflow_driver.py
+  test_podium_runtime_polling.py
+  test_package_boundaries.py
 ```
 
 Coverage must include:
@@ -59,8 +64,8 @@ Recreate only the behavior needed for the existing browser product:
 
 ```text
 packages/podium/web/
-  test/setup.ts
-  test/render.tsx
+  src/test/setup.ts
+  src/test/utils.tsx
   src/App.test.tsx
   src/api/client.test.ts
   src/pages/SetupPage.test.tsx
@@ -103,6 +108,6 @@ their information is either captured here or explicitly rejected.
 ## Exit gate
 
 Verification is complete when the rebuilt suite is green, the one real flow
-produces linked evidence, zero WebSocket references remain in active code/docs,
+produces linked evidence, zero removed socket references remain in active code/docs,
 and no test/tool/doc still asks the implementation to support a removed
 concept.

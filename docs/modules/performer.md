@@ -1,6 +1,6 @@
 # Module baseline: `performer`
 
-Status: proposed baseline, 2026-07-11.
+Status: implemented baseline, 2026-07-12.
 
 ## Responsibility
 
@@ -16,8 +16,8 @@ Podium authentication, scheduling, or repository selection.
 performer/
   __init__.py
   cli.py          # request file -> one turn -> result file
-  config.py       # staged Codex configuration and secret-safe summary
-  codex.py        # direct pinned SDK client
+  codex_client.py # direct pinned SDK client and event capture
+  codex_config.py # staged Codex configuration
   backend.py      # plan, execute, gate prompts and parsing
   schemas.py      # the three output schemas
 ```
@@ -59,7 +59,7 @@ role/backend capability registries, and the split helper/event/runtime files
 that only forward calls. Keep actual Codex approval/tool-input waits; removing
 those would change the product behavior.
 
-Performer must not open HTTP/WebSocket connections or import Conductor/Podium.
+Performer must not open network connections or import Conductor/Podium.
 
 ## Migration and exit gate
 
@@ -70,7 +70,7 @@ Performer must not open HTTP/WebSocket connections or import Conductor/Podium.
    result fencing with a staged runtime home.
 4. Delete old adapter/helper/runtime modules and old options from CLI help.
 
-The baseline is complete when one invocation maps to one request and one result,
-the only turn kinds are `plan|execute|gate`, no compatibility module remains,
-and a new engineer can trace the entire process from `cli.py` to `codex.py`
-without crossing a registry or continuation abstraction.
+The local slice is complete when one invocation maps to one request and one
+result, the only turn kinds are `plan|execute|gate`, and a new engineer can
+trace `cli.py` through the direct client and backend without a registry or
+continuation abstraction.

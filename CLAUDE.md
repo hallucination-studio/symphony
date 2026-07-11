@@ -57,7 +57,7 @@ Conductor is the only local process manager for Performer, and it launches it vi
 
 ### Managed dispatch flow
 
-The runtime path is polling-only: a Linear issue is delegated to the installed Symphony app user → installation/project-scoped baseline or incremental polling discovers it through full cursor pagination → Podium transactionally records the issue, delegation epoch, dispatch, and checkpoint → Podium matches the active installation and unique project/Conductor binding → that Conductor leases the dispatch → Conductor commits or resumes one durable managed run → Performer runs one fenced managed-run turn. Dispatch routing is by organization, project binding, app user, active state, blockers, work-item dependencies, and runtime capacity, never project labels or human assignee.
+The runtime path is polling-only: a Linear issue is delegated to the installed Symphony app user → installation/project-scoped baseline or incremental polling discovers it through full cursor pagination → Podium transactionally records the issue, delegation epoch, dispatch, and checkpoint → Podium matches the active installation and unique project/Conductor binding → that Conductor leases the dispatch → Conductor commits or resumes one durable managed run → Performer runs one fenced managed-run turn. Dispatch routing is by organization, project binding, app user, active state, and blockers, never project labels or human assignee.
 
 ### Podium web frontend
 

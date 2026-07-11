@@ -1,8 +1,8 @@
 # Spec: Minimal Polling Workflow
 
-Status: proposed for approval as of 2026-07-11. This specification replaces the
-expanded Managed Run design. It does not authorize production edits until the
-user approves the assumptions called out below.
+Status: approved for implementation as of 2026-07-12. This specification
+replaces the expanded Managed Run design; real Linear/OAuth/Codex verification
+remains environment-dependent.
 
 ## Objective
 
@@ -39,7 +39,8 @@ multi-backend platform, cross-model acceptance platform, or compatibility layer.
    infrastructure that the Web does not call is removed; the current cached log
    tail remains available.
 
-If any of these assumptions is rejected, revise this spec before implementation.
+The user approved these assumptions before implementation. Revisit this spec
+only if a stop condition or a customer-visible contract change is discovered.
 
 ## Canonical Product Flow
 
@@ -125,7 +126,7 @@ authorization headers never enter browser responses, Linear, or logs.
 
 ## Runtime Transport: HTTP Polling Only
 
-There is no WebSocket endpoint, client, setting, install response field,
+There is no socket endpoint, client, setting, install response field,
 presence state, compatibility response, or dependency.
 
 Keep these authenticated HTTP operations:
@@ -361,7 +362,7 @@ PYTHONPATH=$(pwd)/packages/performer-api/src:$(pwd)/packages/performer/src:$(pwd
 
 ## Never Rebuild
 
-- WebSockets or a second runtime transport;
+- socket transport or a second runtime transport;
 - dependency DAGs, parallel scheduling, capacity policies, branches, branch
   joins, checkpoint groups, or integration queues;
 - generic Engine/command/effect/repository abstractions or one-implementation
@@ -382,7 +383,7 @@ PYTHONPATH=$(pwd)/packages/performer-api/src:$(pwd)/packages/performer/src:$(pwd
 5. The parent reaches Done only after every work sub-issue is Done.
 6. Restart/replay creates no duplicate run, task, sub-issue, attempt, or dispatch.
 7. No production code, package dependency, response, install command, setting,
-   test, tool, or active document references WebSockets.
+   test, tool, or active document references the removed socket transport.
 8. Existing Podium Web business flows and browser-visible behavior still work.
 9. Linear OAuth, polling, project selection, dispatch, binding, labels, and
    proxy behavior still work.

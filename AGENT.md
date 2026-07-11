@@ -45,7 +45,7 @@ Current hard renames:
   `docs/product/gates-verification-integration.md`,
   `docs/product/linear-projection.md`, and
   `docs/product/runtime-profiles-backends.md`. Do not add legacy scheduling or
-  `WORKFLOW.md` execution paths.
+  retired workflow-file execution paths.
 - Prefer small focused modules over large cross-role files. When adding behavior, put lifecycle, repo materialization, Managed Run reads, registration/reporting, tracker integration, and Codex process handling in clearly owned modules.
 - Use structured models and parsers already in the codebase instead of ad hoc string manipulation for workflow config, durable state, API/report snapshots, registration payloads, and Linear data.
 - Tests should cover both the role-local behavior and the cross-role contract. Add or update import-boundary tests when package relationships change.
@@ -166,12 +166,11 @@ The final response must be evidence-backed and specific:
 - list residual risks or explicitly say what could not be verified and why;
 - never treat "cannot verify" as a pass.
 
-For pipeline, Linear, Conductor, Codex, retry, rework, replan, or integration
+For pipeline, Linear, Conductor, Codex, retry, rework, or delegated-work
 behavior, local tests are necessary but not sufficient when the behavior spans
-the running product. Use the real-run tools in this file and
-`docs/real-run-testing-guide.md`.
-
-For Podium onboarding, Podium Web, runtime enrollment, installed Conductor behavior, Podium dispatch routing, or Linear delegated work, use the `Podium Web To Linear Acceptance` scenario in `docs/real-run-testing-guide.md`. That file is the canonical test procedure for the browser -> Podium -> install command -> local Conductor -> Linear issue -> Performer -> Podium run-completion path; keep new lessons and required checks there rather than duplicating the full flow in this file.
+the running product. Use the single `tools/real_flow.py` runner and
+`docs/real-flow.md`; it performs strict preflight and records a sanitized
+report without pretending that a gate passed.
 
 Human intervention must be visible in Linear. Pipeline waits use node-level
 `need_human`: Conductor moves the affected issue to the blocked-style state,
@@ -217,91 +216,23 @@ Residual risk:
 - <remaining gap, or "None identified from the verification above">
 ```
 
-## Linear Test Project Tools
+## Linear real-flow tool
 
-Load `.env` before running tools that talk to Linear:
+Load `.env` before using the real flow, then run the one supported entrypoint:
 
 ```bash
 set -a && source .env && set +a
+PYTHONPATH=tools .venv/bin/python tools/real_flow.py \
+  --project-slug <linear-project-slug> --out .test-real-flow/report.json
 ```
 
-Audit active unarchived HELL issues:
-
-```bash
-PYTHONPATH=$(pwd)/packages/performer-api/src:$(pwd)/packages/performer/src:$(pwd)/packages/conductor/src:$(pwd)/packages/podium/src \
-  .venv/bin/python tools/linear_project_issues.py audit \
-  --project HELL \
-  --out .test-real-flow/evidence/hell-audit.json
-```
-
-Archive active unarchived HELL issues:
-
-```bash
-PYTHONPATH=$(pwd)/packages/performer-api/src:$(pwd)/packages/performer/src:$(pwd)/packages/conductor/src:$(pwd)/packages/podium/src \
-  .venv/bin/python tools/linear_project_issues.py archive \
-  --project HELL \
-  --out .test-real-flow/evidence/hell-archive.json
-```
-
-Archive only a run-label family:
-
-```bash
-PYTHONPATH=$(pwd)/packages/performer-api/src:$(pwd)/packages/performer/src:$(pwd)/packages/conductor/src:$(pwd)/packages/podium/src \
-  .venv/bin/python tools/linear_project_issues.py archive \
-  --project HELL \
-  --label-prefix performer-real-codex- \
-  --out .test-real-flow/evidence/hell-archive-real-codex.json
-```
-
-Audit a business issue gate/evidence tree:
-
-```bash
-PYTHONPATH=$(pwd)/packages/performer-api/src:$(pwd)/packages/performer/src:$(pwd)/packages/conductor/src:$(pwd)/packages/podium/src:tools \
-  .venv/bin/python tools/linear_tree_audit.py HELL-123 \
-  --out .test-real-flow/evidence/linear-tree-audit.json
-```
-
-Audit durable Managed Run state and its required runtime artifacts:
-
-```bash
-PYTHONPATH=$(pwd)/packages/performer-api/src:$(pwd)/packages/performer/src:$(pwd)/packages/conductor/src:$(pwd)/packages/podium/src:tools \
-  .venv/bin/python tools/runtime_claims_audit.py \
-  --data-root /path/to/conductor-data \
-  --instance-id inst-1 \
-  --out .test-real-flow/evidence/runtime-claims-audit.json
-```
-
-Observe a running real scenario without mutating Linear:
-
-```bash
-PYTHONPATH=$(pwd)/packages/performer-api/src:$(pwd)/packages/performer/src:$(pwd)/packages/conductor/src:$(pwd)/packages/podium/src:tools \
-  .venv/bin/python tools/real_run_observer.py \
-  --issue HELL-123 \
-  --instance-root /path/to/conductor-data/instances/inst-1 \
-  --interval 10 \
-  --timeout 300 \
-  --stop-on-diagnosis \
-  --jsonl .test-real-flow/evidence/runtime-samples.jsonl \
-  --out .test-real-flow/evidence/observer-summary.json
-```
-
-Bundle real-run evidence:
-
-```bash
-PYTHONPATH=$(pwd)/packages/performer-api/src:$(pwd)/packages/performer/src:$(pwd)/packages/conductor/src:$(pwd)/packages/podium/src:tools \
-  .venv/bin/python tools/real_run_evidence_bundle.py \
-  --instance-root /path/to/conductor-data/instances/inst-1 \
-  --business-issue .test-real-flow/evidence/business-issue.json \
-  --linear-tree .test-real-flow/evidence/linear-tree-audit.json \
-  --observer .test-real-flow/evidence/runtime-samples.jsonl \
-  --cleanup-before .test-real-flow/evidence/cleanup-before.json \
-  --cleanup-after .test-real-flow/evidence/cleanup-after.json \
-  --out .test-real-flow/evidence/run-bundle
-```
+`tools/linear_fixture.py` is the only helper. It owns project lookup, issue
+reads, child-tree reads, and sanitized GraphQL errors; it does not archive
+arbitrary projects or provide a second acceptance/audit framework.
 
 ## Real Full-Flow Testing Rules
 
-For pipeline, Linear, Conductor, Codex, retry, rework, replan, or integration
+For pipeline, Linear, Conductor, Codex, retry, or rework
 changes, mock-only tests are not enough.
 
 A real run must:
@@ -321,9 +252,11 @@ A real run must:
 7. Record installation, project binding, polling checkpoints/delegation epoch,
    Linear tree, durable Managed Run database/API/report state, generation and
    attempt logs, cleanup, and deduplication evidence.
-8. Archive/audit the test project before and after the scenario.
+8. Write the sanitized report and retain the product-owned logs and state
+   artifacts; cleanup is explicit and never inferred from a timeout.
 
-For Podium-managed flows, the real run must additionally follow `docs/real-run-testing-guide.md#podium-web-to-linear-acceptance`:
+For Podium-managed flows, the real run must additionally follow `docs/real-flow.md`
+and the module baselines:
 
 1. Start Podium with the default Linear application's client credentials,
    Podium's fixed OAuth callback URL, and a public HTTPS origin.
@@ -400,16 +333,16 @@ Do not rely only on nested query shape.
 Use these meanings:
 
 - `retry`: failed or timed-out fenced turn that can be retried under a fresh lease.
-- `rework`: managed-run verification failure that returns the work item to an executable state.
-- `plan revision`: approved change to file scope, dependencies, acceptance criteria, or human decisions.
+- `rework`: managed-run gate failure that returns the task to an executable state.
+- `plan revision`: approved change to file scope, acceptance criteria, or human decisions.
 
 Expected evidence:
 
-- turn records with lease id, fencing token, plan version, and policy revision;
-- work-item transitions through `todo`, `in_progress`, `in_review`, `done`, or `blocked`;
-- verification evidence records RED/GREEN commands, acceptance results, and checkpoint status;
-- failed stale or mismatched fenced results are rejected without mutating current managed-run state;
-- plan revision creates a new immutable plan version and preserves prior versions for audit.
+- turn records with attempt id, fencing token, plan version, and policy revision;
+- task transitions through `todo`, `in_progress`, `in_review`, `done`, or `blocked`;
+- verification evidence records command results, Codex Gate findings, and artifacts;
+- stale or mismatched fenced results are rejected without mutating current state;
+- each plan revision is immutable and prior versions remain readable for provenance.
 
 ## When To Stop Waiting
 

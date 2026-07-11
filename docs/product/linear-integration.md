@@ -133,7 +133,7 @@ state.
 
 Podium routes only when the active installation, selected project, project
 binding, Conductor, repository, app user, issue state, blockers, and runtime
-capacity all match. Human assignee and project labels are excluded from routing
+active state and blockers all match. Human assignee and project labels are excluded from routing
 truth.
 
 Managed runtimes call `POST /api/v1/linear/graphql` with a runtime proxy token.

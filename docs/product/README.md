@@ -1,46 +1,24 @@
-# Product Architecture Docs
+# Product architecture
 
-These documents describe the current Symphony product architecture. They are
-not historical plans, RFC trackers, or implementation scorecards.
+These documents describe the current product, not historical plans. The
+compact module baselines in [`docs/modules`](../modules/README.md) define
+ownership; [`tasks/spec.md`](../../tasks/spec.md) defines the workflow contract.
 
-## Sources Of Truth
+## Sources of truth
 
-- [Product Shape](./product-shape.md) describes the managed product journey and
-  the Podium, Conductor, Performer, and `performer-api` roles.
-- [Managed Run Runtime](./runtime-pipeline.md) describes the end-to-end
-  Linear-native managed-run flow.
-- [Managed Run State](./pipeline-state.md) owns durable managed-run state, leases,
-  capacity, and convergence.
-- [Gates, Verification, And Integration](./gates-verification-integration.md)
-  owns frozen gates, rubrics, verifier handoff, manifests, and integration.
-- [Linear Projection](./linear-projection.md) owns the Linear issue topology,
-  attempt comments, `need_human`, resume semantics, and supersede chains.
-- [Runtime Profiles And Backends](./runtime-profiles-backends.md) owns per-role
-  profiles, backend selection, thread identity, and Codex home isolation.
-- [Linear-Native Managed Runs](./linear-native-managed-runs.md) owns one-issue agent
-  runs, work-item state, managed-run verification, and Linear-native projection.
-- [Managed Runs Acceptance Matrix](./managed-runs-acceptance-matrix.md) maps
-  design requirements to blocking tests and external E2E failure classes.
-- [Acceptance Catalog](./acceptance-catalog.md) is the generated view of the
-  executable customer jobs, focused scenarios, and canonical journeys.
-- [Linear Integration](./linear-integration.md) owns OAuth/app setup, delegated
-  issue intake, routing, and the GraphQL proxy.
-- [Podium Web](./podium-web.md) owns onboarding and operator UI surfaces.
-- [Runtime Installation](./runtime-installation.md) owns installer, enrollment,
-  updates, connectivity, and uninstall behavior.
-- [Security Model](./security-model.md) owns token boundaries, proxy rules, and
-  enrollment/update safety.
-- [Real Run Testing Guide](../real-run-testing-guide.md) owns the managed
-  acceptance procedure and required evidence.
-- [ADR-0001](../decisions/0001-linear-installations-and-single-project-conductors.md)
-  records why Linear installations are unified and Conductors are
-  single-project runtimes.
+- [`product-shape.md`](product-shape.md): roles and customer journey.
+- [`runtime-pipeline.md`](runtime-pipeline.md): Podium -> Conductor -> Performer.
+- [`pipeline-state.md`](pipeline-state.md): durable run/task/attempt state.
+- [`gates-verification-integration.md`](gates-verification-integration.md):
+  command checks and the single Codex Gate.
+- [`linear-projection.md`](linear-projection.md): parent/Sub Issue projection.
+- [`linear-integration.md`](linear-integration.md): OAuth, polling, routing, and
+  the Linear proxy.
+- [`podium-web.md`](podium-web.md): unchanged browser business behavior.
+- [`runtime-installation.md`](runtime-installation.md): enrollment and binding.
+- [`security-model.md`](security-model.md): secret and error boundaries.
+- [`acceptance-catalog.md`](acceptance-catalog.md): retained gate evidence shape.
 
-## Doc Rules
-
-- One document owns one concept. Link to the owner instead of duplicating it.
-- Use present-tense architecture statements: what Symphony does, what is
-  prohibited, and how operators verify the behavior.
-- Do not preserve implemented plans as compatibility pointers.
-- Do not publish legacy workflow-runner or runtime tracker-polling
-  instructions.
+The implementation has no graph scheduler, parallel work model, branch/join
+layer, workflow checkpoint groups, cross-model reviewer, or second acceptance
+scheduler. Linear polling checkpoints remain control-plane cursor state.

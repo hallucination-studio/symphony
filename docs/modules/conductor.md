@@ -1,6 +1,7 @@
 # Module baseline: `conductor`
 
-Status: proposed baseline, 2026-07-11.
+Status: implemented baseline, 2026-07-12. Runtime/Web compatibility owners
+remain separate until their behavior is covered by the real flow.
 
 ## Responsibility
 
@@ -32,9 +33,10 @@ conductor/
   runtime.py      # Performer process, CODEX_HOME, logs, fencing
 ```
 
-The current coordinator/driver/projection/store/artifact/verifier/join/
-checkpoint/human-action mixin graph is replaced, not wrapped. Necessary logic
-moves once into the owner above; old files and compatibility facades disappear.
+The old managed-run coordinator/driver/projection/store/artifact/verifier/join/
+checkpoint graph is removed. The remaining service/runtime and Linear HTTP
+owners exist only for the retained local API, enrollment, logs, labels, and
+Podium Web behavior; they are not workflow authorities.
 
 ## Current implementation disposition
 
@@ -134,10 +136,11 @@ single-line structured events with run/task/attempt/fence correlation.
    their expanded state machine as the new one.
 2. Add restart, idempotency, child-parent, revision/approval, gate/rework,
    score/rubric/evidence, parent completion, runtime-wait, and stale-result tests.
-3. Build the eleven owners and switch the CLI composition root.
-4. Delete only checkpoint/branch-join code and duplicate wrappers; migrate the
-   retained revision, approval, catalog, rubric, manifest, artifact, and
-   verifier semantics into the target owners.
+3. Keep the compact `models.py`, `store.py`, `workflow.py`, `gate.py`, `runtime.py`,
+   and `workflow_driver.py` as the only workflow owners.
+4. Delete checkpoint/branch-join code and duplicate wrappers; retained
+   revision, approval, catalog, rubric, manifest, artifact, and verifier
+   semantics live in the compact owners.
 
 The baseline is complete when one Conductor tick can be followed end-to-end in
 `service.py`, every child is a real Linear sub-issue, the single gate is scored

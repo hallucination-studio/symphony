@@ -101,9 +101,9 @@ identity, version, update channel, project, repository, policy revision, last
 heartbeat, and staged config version. It also supports install, bind, unbind,
 rename, replace, and log inspection actions.
 
-Managed Runs shows parent runs and work items, active policy, capacity, backend
-threads, verification and checkpoint results, file impact, blocked work, human
-and runtime waits, Linear projection links, and sanitized errors.
+Managed Runs shows parent runs and work items, plan/policy revisions, gate
+scores and rubric evidence, file impact, blocked work, human/runtime waits,
+Linear projection links, and sanitized errors.
 
 ## Error Surfaces
 
@@ -119,7 +119,7 @@ Failures become operator actions:
 - runtime offline -> restart or reinstall the named service;
 - repository unavailable -> fix the project repository mapping;
 - proxy denied -> rotate or re-enroll runtime credentials;
-- profile materialization failure -> fix runtime profile secrets.
+- Codex runtime materialization failure -> stage the approved runtime seed.
 
 Errors show category, sanitized reason, retryability, timestamps, and next
 action. They never print secret values.

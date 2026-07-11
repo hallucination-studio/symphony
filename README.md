@@ -33,7 +33,9 @@ of truth is split by concern:
 - [Podium Web](docs/product/podium-web.md)
 - [Runtime Installation](docs/product/runtime-installation.md)
 - [Security Model](docs/product/security-model.md)
-- [Real Run Testing Guide](docs/real-run-testing-guide.md)
+- [Architecture](docs/architecture.md)
+- [Sequential Workflow](docs/workflow.md)
+- [Real Flow](docs/real-flow.md)
 
 ## Runtime Flow
 
@@ -85,7 +87,7 @@ PYTHONPATH=$(pwd)/packages/performer-api/src:$(pwd)/packages/performer/src:$(pwd
 Real Linear integration runs also pin repo source roots:
 
 ```bash
-PYTHONPATH=$(pwd)/packages/performer-api/src:$(pwd)/packages/performer/src:$(pwd)/packages/conductor/src:$(pwd)/packages/podium/src .venv/bin/python tools/real_symphony_e2e.py --project-slug <linear-project-slug> --managed-run-gates --timeout 600
+PYTHONPATH=$(pwd)/tools .venv/bin/python tools/real_flow.py --project-slug <linear-project-slug> --out .test-real-flow/report.json
 ```
 
 ## Run Conductor

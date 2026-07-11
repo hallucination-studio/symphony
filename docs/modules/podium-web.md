@@ -1,6 +1,7 @@
 # Module baseline: `podium-web`
 
-Status: proposed baseline, 2026-07-11.
+Status: implemented baseline, 2026-07-12. Visual/business behavior is held
+constant.
 
 ## Responsibility
 
@@ -37,7 +38,7 @@ scheduler.
 ## API boundary
 
 The client uses authenticated HTTP requests to the existing BFF routes. The
-runtime itself is not a browser concern: Web does not open a WebSocket, display
+runtime itself is not a browser concern: Web does not open a socket, display
 presence heartbeats, issue `dispatch.available`, or fetch historical log chunks.
 Current operator views receive the cached log tail included in the runtime
 report or the retained managed-runs response.
@@ -67,12 +68,12 @@ decision, not an incidental runtime refactor.
 
 1. Snapshot current route, action, response, DOM, secret, and error behavior.
 2. Update only API types/client assumptions required by the retained report.
-3. Rebuild a small browser suite for auth/routes, BFF errors/secrets, setup,
-   and product pages.
+3. Keep the shared test renderer and four module suites for auth/routes,
+   BFF errors/secrets, setup, and product pages.
 4. Run build, lint, design lint, and browser DOM/network/console checks at the
    existing desktop and mobile breakpoints.
 
 The baseline is complete when a user can complete onboarding, bind a project,
 run smoke, view runtime and managed-run status, and see a concrete error exactly
 as before, while browser network inspection shows no token leakage and no
-WebSocket use.
+socket use.

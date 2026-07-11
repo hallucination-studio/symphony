@@ -1,12 +1,12 @@
 # Module Design Baselines
 
-Status: proposed baseline, 2026-07-11.
+Status: implemented baseline, 2026-07-12. Real Linear flow remains an
+external-environment verification step.
 
-These documents define the target ownership model for the hard-cut minimal
-polling workflow. They are design documents, not implementation authorization.
-`tasks/spec.md` is the product contract and `tasks/plan.md` is the ordered
-cutover plan. If a module document conflicts with either file, stop and revise
-the documents before editing production code.
+These documents define the ownership model for the hard-cut minimal polling
+workflow. `tasks/spec.md` is the product contract and `tasks/plan.md` records
+the implementation cutover. A module owns one behavior; compatibility facades
+and duplicate test/tool owners are not part of the baseline.
 
 ## Product path
 
@@ -56,7 +56,7 @@ credentials.
 - Every blocking or terminal error has `error_code`, `sanitized_reason`,
   `action_required`, `retryable`, and `next_action`, and is visible in durable
   state, structured logs, Linear when relevant, and the Podium report.
-- There is no WebSocket endpoint, client, setting, install response field,
+- There is no socket endpoint, client, setting, install response field,
   presence channel, wake command, or compatibility shim.
 - There is no generic workflow engine, dependency graph, parallel scheduler,
   branch/join model, checkpoint-group system, cross-model reviewer, or second
@@ -64,8 +64,8 @@ credentials.
 
 ## Baseline change protocol
 
-Before implementing a module, record its scope ledger in the task checklist and
-prove that approval-requiring assumptions are empty. A module is complete only
-when its owner is singular, its public contract is explicit, its old ownership
-paths are deleted, and the new behavior is covered by the rebuilt product-flow
-suite. Size budgets are planning signals, not source-line gates.
+For each further slice, record its scope ledger in the task checklist and keep
+approval-requiring assumptions empty. A module is complete when its owner is
+singular, its public contract is explicit, old ownership paths are deleted, and
+the behavior is covered by the rebuilt module suite. Size budgets are review
+signals, not source-line gates.

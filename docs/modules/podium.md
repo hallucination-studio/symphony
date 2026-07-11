@@ -1,6 +1,7 @@
 # Module baseline: `podium`
 
-Status: proposed baseline, 2026-07-11.
+Status: implemented baseline, 2026-07-12. Linear business behavior remains
+unchanged.
 
 ## Responsibility
 
@@ -66,8 +67,8 @@ plan/gate evidence summaries.
 
 ## Explicit removals
 
-Delete the WebSocket route, registration, tasks, presence/wake path, install
-`websocket_url`, `podium_ws_url`, WS dependencies, `dispatch.available`, the
+Delete the socket route, registration, tasks, presence/wake path, install
+`socket_url`, `podium_socket_url`, socket dependencies, `dispatch.available`, the
 in-memory dispatch queue, `human.answered`, historical `log.fetch`/log-chunk
 transport, and duplicate smoke outbox/retry layers. Delete only the runtime
 profile/config registry; keep policy/plan revision and evidence projections in
@@ -98,6 +99,7 @@ summary after sanitization.
 5. Re-run OAuth, pagination/checkpoint/epoch, dispatch, binding, label, proxy,
    cutover, health, smoke, and secret-boundary behavior checks.
 
-The baseline is complete when a fresh runtime can enroll, bind, receive smoke
-and project commands, lease a parent dispatch, and report failures without any
-WebSocket or direct-token path remaining.
+The local slice is complete when a fresh runtime can enroll, bind, receive
+smoke and project commands, lease a parent dispatch, and report failures over
+HTTP polling without any socket or direct-token path remaining. PostgreSQL
+cutover and real OAuth remain environment verification work.

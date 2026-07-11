@@ -22,8 +22,8 @@ make stop           # kill Makefile-launched Conductor/Performer processes
 ```bash
 PYTHONPATH=$(pwd)/packages/performer-api/src:$(pwd)/packages/performer/src:$(pwd)/packages/conductor/src:$(pwd)/packages/podium/src \
   .venv/bin/python -m pytest tests/test_conductor_workflow.py tests/test_workflow_driver.py tests/test_podium_runtime_polling.py -q
-# single case:
-PYTHONPATH=... .venv/bin/python -m pytest tests/test_podium_auth.py::test_login -q
+# single case: use the same prefix and a module-owned test, for example
+PYTHONPATH=... .venv/bin/python -m pytest tests/test_conductor_workflow.py::test_parent_done_after_all_tasks -q
 ```
 
 Run the services directly:
@@ -34,7 +34,8 @@ Run the services directly:
 .venv/bin/podium api --host 127.0.0.1 --port 8090
 ```
 
-Real Linear E2E is skipped by default; it needs a sourced `.env` — see the "Real Full-Flow Testing Rules" and Linear tooling in `AGENT.md`.
+Real Linear flow is skipped by default; it needs a staged Codex seed and a
+sourced `.env` — see `docs/real-flow.md` and the real-flow section in `AGENT.md`.
 
 ## Architecture
 
@@ -49,7 +50,7 @@ Symphony is **one product** split into four Python packages under `packages/`, e
 
 ### Import-boundary invariant (enforced by tests)
 
-`tests/test_import_boundaries.py` fails the build if these are violated:
+The package-boundary test fails the build if these are violated:
 
 - `performer_api` must not import `performer`, `conductor`, or `podium`.
 - `performer`, `conductor`, `podium` may import `performer_api`.
@@ -59,7 +60,7 @@ Conductor is the only local process manager for Performer, and it launches it vi
 
 ### Managed dispatch flow
 
-The runtime path is polling-only: a Linear issue is delegated to the installed Symphony app user → installation/project-scoped baseline or incremental polling discovers it through full cursor pagination → Podium transactionally records the issue, delegation epoch, dispatch, and checkpoint → Podium matches the active installation and unique project/Conductor binding → that Conductor leases the dispatch → Conductor commits or resumes one durable managed run → Performer runs one fenced managed-run turn. Dispatch routing is by organization, project binding, app user, active state, blockers, work-item dependencies, and runtime capacity, never project labels or human assignee.
+The runtime path is polling-only: a Linear issue is delegated to the installed Symphony app user → installation/project-scoped baseline or incremental polling discovers it through full cursor pagination → Podium transactionally records the issue, delegation epoch, dispatch, and checkpoint → Podium matches the active installation and unique project/Conductor binding → that Conductor leases the dispatch → Conductor commits or resumes one durable managed run → Performer runs one fenced managed-run turn. Dispatch routing is by organization, project binding, app user, active state, and blockers, never project labels or human assignee.
 
 ### Error visibility invariant
 
@@ -81,7 +82,7 @@ Logs are a product surface for operators and acceptance runs, not a best-effort 
 - Event names are stable API-adjacent vocabulary. Use lower-snake-case names prefixed by subsystem when useful, for example `podium_dispatch_queued`, `conductor_dispatch_leased`, `managed_run_plan_committed`, `managed_run_turn_started`, `performer_backend_invoked`, `managed_run_result_collected`, `managed_run_human_wait_created`, and `linear_projection_updated`.
 - Log lifecycle transitions at `info`: polling page/checkpoint committed, delegation epoch opened/closed, dispatch queued/leased/acked, runtime config accepted/rejected, plan committed/revised, work item became ready, turn requested/started/heartbeat/completed, lease heartbeat/reclaim, result file detected/collected/applied, manifest published, integration queued/completed/conflicted, Linear projection created/updated, human wait created/resolved, and process start/exit.
 - Log progress heartbeats at `info` often enough that a real run never appears dead for more than one minute. A running attempt should show either a fresh lease heartbeat, process heartbeat, backend progress event, result collection event, or durable state transition. If no stdout is expected from a backend, Conductor must still log that the attempt is alive and what it is waiting for.
-- Log recoverable problems at `warning`: stale results, stale fencing tokens, retryable Podium/Linear proxy failures, missing optional artifacts, skipped dispatches with a concrete reason, config version rejection, backend capacity exhaustion, no eligible graph nodes, and ignored human-action signals with a concrete reason.
+- Log recoverable problems at `warning`: stale results, stale fencing tokens, retryable Podium/Linear proxy failures, missing optional artifacts, skipped dispatches with a concrete reason, config version rejection, no eligible ordered task, and ignored human-action signals with a concrete reason.
 - Log terminal or human-action-causing failures at `error`: backend setup failure, missing per-role profile, isolated `CODEX_HOME` materialization failure, Codex invocation failure, invalid managed-run JSON after retries, gate execution failure, verifier artifact/hash mismatch, integration conflict, unrecoverable Podium/Linear proxy failure, and any exception that changes run/work-item/turn state.
 - Standard failure fields are `error_type`, `error_code`, `sanitized_reason`, `action_required`, `retryable`, `attempt_number`, and `next_action`. Do not emit only `failed=true`; the log must explain what failed and what the system did next.
 - Never log secrets or raw credentials. Redact tokens, cookies, passwords, client secrets, raw runtime profile secrets, Authorization headers, and Linear tokens. Sanitization must keep the error category and actionable summary intact; `[REDACTED]` is acceptable for secret values, not for the entire error.
@@ -113,7 +114,7 @@ npm run design:lint  # lint DESIGN.md against the @google/design.md spec
 - This is a hard break from the old `symphony` package/CLI — do not add compatibility shims for old `symphony` imports, commands, labels, or state/log files unless explicitly asked.
 - Do not infer or expand product scope from what seems useful, conventional, or future-proof. Default to the smallest behavior-preserving change. Any assumption that would add or change customer-visible behavior, workflow branches, public/API contracts, durable state, configuration, integrations, permissions/cost, compatibility, or product vocabulary requires explicit user approval before implementation.
 - For every non-trivial slice, record a scope ledger with `authorized`, `required_consequences`, `out_of_scope`, `assumptions_requiring_approval`, and `deferred_ideas`. Production work may start only when `assumptions_requiring_approval` is empty; untraceable behavior is `UNAPPROVED_SCOPE_EXPANSION` and blocks completion.
-- The runtime architecture source of truth is split across `docs/product/runtime-pipeline.md`, `docs/product/pipeline-state.md`, `docs/product/gates-verification-integration.md`, `docs/product/linear-projection.md`, and `docs/product/runtime-profiles-backends.md`. Do not add legacy scheduling or `WORKFLOW.md` execution instructions.
+- The runtime architecture source of truth is split across `docs/product/runtime-pipeline.md`, `docs/product/pipeline-state.md`, `docs/product/gates-verification-integration.md`, `docs/product/linear-projection.md`, and `docs/product/runtime-profiles-backends.md`. Do not add legacy scheduling or retired workflow-file execution instructions.
 - Runtime approval, permission, and tool-input waits must be projected to Linear as runtime wait state and as node metadata (`operator_status: waiting_for_runtime_input`, `operator_wait_kind`, and a Runtime Wait block), including `[Human Action]` child issues when that wait flow uses them. Local stdout/logs alone are not an acceptable operator signal.
 - Secrets flow through `$VAR` indirection (e.g. `$PODIUM_PROXY_TOKEN`); values are validated but never printed in responses, logs, or API output.
 - Prefer small role-owned modules over large cross-role files, and use the existing structured models/parsers instead of ad hoc string manipulation for workflow config, persisted state, ops snapshots, and Linear data.

@@ -30,8 +30,8 @@ Podium is the SaaS boundary and public HTTPS surface. It owns:
 
 Conductor is the customer-side daemon. One Conductor binds exactly one Linear
 project and one repository. It owns that project's local instance metadata,
-durable Managed Runs state, runtime credentials, dispatch leases, per-role
-runtime profile materialization, Performer lifecycle, turn collection, local
+  durable Managed Runs state, runtime credentials, dispatch leases, Codex
+  runtime materialization, Performer lifecycle, turn collection, local
 logs, and reports back to Podium.
 
 Conductor is the only local process manager for Performer. It launches Performer
@@ -52,7 +52,7 @@ receive Linear OAuth tokens.
 ### performer-api
 
 `performer-api` is limited to shared Managed Run wire contracts. It owns plan,
-work-item/result, turn-context, runtime-policy/profile, verification-evidence,
+  plan/task/result, turn-context, runtime policy, gate evidence,
 and validation DTOs. Durable state, ops, projections, and registration remain
 owned by their runtime roles.
 
@@ -72,10 +72,10 @@ owned by their runtime roles.
    transactional checkpoints and queues one dispatch per delegation epoch.
 9. The project Conductor leases the dispatch and commits or resumes one durable
    managed run.
-10. Performer runs fenced plan and work-item turns under per-role profiles.
-11. Podium and Linear show sanitized state: runs, work items, capacity, leases,
-    verification evidence, waits, conflicts, installation health, and runtime
-    health.
+10. Performer runs fenced plan, execute, and read-only gate turns under an
+    isolated Codex home.
+11. Podium and Linear show sanitized runs, tasks, gate evidence, waits,
+    installation health, and runtime health.
 
 ## Product Boundaries
 

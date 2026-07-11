@@ -1,6 +1,6 @@
 # Module baseline: `performer-api`
 
-Status: proposed baseline, 2026-07-11.
+Status: implemented baseline, 2026-07-12.
 
 ## Responsibility
 
@@ -27,7 +27,7 @@ performer_api/
   __init__.py
   workflow.py       # Plan, Task
   turns.py          # TurnContext, TurnRequest, TurnResult, RuntimeWait
-  runtime.py        # versioned Codex runtime policy and profiles
+  runtime.py         # compact versioned Codex runtime policy
   validation.py     # plan and context boundary validation
 ```
 
@@ -90,8 +90,8 @@ model cross-model review or a second scheduler.
 ## Explicit removals
 
 Delete capacity schedulers, dependency/parallelization policy, checkpoint
-groups, compatibility enums, and generic result aliases. Retain versioned
-runtime profiles only as the configuration needed to stage Codex turns. Retain durable plan/policy versions,
+groups, compatibility enums, and generic result aliases. Retain only the
+versioned policy and Codex staging data needed to run turns. Retain durable plan/policy versions,
 revisions, approval, rubric, architecture-decision, risk, open-question,
 manifest, artifact, catalog, and provenance fields. They are data contracts,
 not a generic workflow engine.

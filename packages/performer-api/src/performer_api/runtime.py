@@ -45,7 +45,6 @@ class ManagedRunPolicy:
     version: int
     effective_at: str
     max_rework_attempts: int = 1
-    capacity: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -53,7 +52,6 @@ class ManagedRunPolicy:
             "version": self.version,
             "effective_at": self.effective_at,
             "max_rework_attempts": self.max_rework_attempts,
-            "capacity": dict(self.capacity),
         }
 
     @classmethod
@@ -63,7 +61,6 @@ class ManagedRunPolicy:
             version=int(payload.get("version") or 0),
             effective_at=str(payload.get("effective_at") or ""),
             max_rework_attempts=int(payload.get("max_rework_attempts") or 1),
-            capacity=dict(payload.get("capacity") or {}) if isinstance(payload.get("capacity"), dict) else {},
         )
 
 

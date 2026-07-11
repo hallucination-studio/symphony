@@ -3,16 +3,13 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
 
-from .conductor_models import ConductorSettings, InstanceRecord, utc_now_iso
+from .conductor_models import ConductorSettings, InstanceRecord
 from .conductor_store_rows import (
     INSTANCE_COLUMNS,
     ensure_column,
     instance_from_row,
     instance_values,
-    json_dumps,
-    runtime_action_from_row,
     settings_values,
 )
 
@@ -166,69 +163,6 @@ class ConductorStore:
             port += 1
         return port
 
-    def enqueue_runtime_action(self, *, instance_id: str, action_type: str, payload: dict[str, Any] | None = None) -> str:
-        action_id = uuid4().hex
-        now = utc_now_iso()
-        with self.connect() as connection:
-            connection.execute(
-                """
-                INSERT INTO runtime_actions (
-                  id,
-                  instance_id,
-                  action_type,
-                  payload_json,
-                  status,
-                  attempt,
-                  lease_owner,
-                  lease_expires_at,
-                  last_error,
-                  created_at,
-                  updated_at
-                )
-                VALUES (?, ?, ?, ?, 'queued', 0, NULL, NULL, NULL, ?, ?)
-                """,
-                (action_id, instance_id, action_type, json_dumps(payload or {}), now, now),
-            )
-        return action_id
-
-    def claim_runtime_action(
-        self, action_id: str, *, lease_owner: str, lease_expires_at: str | None = None
-    ) -> dict[str, Any] | None:
-        now = utc_now_iso()
-        with self.connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            cursor = connection.execute(
-                """
-                UPDATE runtime_actions
-                SET status = 'leased',
-                    attempt = attempt + 1,
-                    lease_owner = ?,
-                    lease_expires_at = ?,
-                    updated_at = ?
-                WHERE id = ?
-                  AND status IN ('queued', 'retryable')
-                """,
-                (lease_owner, lease_expires_at, now, action_id),
-            )
-            if cursor.rowcount == 0:
-                return None
-            row = connection.execute(
-                "SELECT * FROM runtime_actions WHERE id = ?",
-                (action_id,),
-            ).fetchone()
-        return runtime_action_from_row(row) if row is not None else None
-
-    def get_runtime_action(self, action_id: str) -> dict[str, Any] | None:
-        with self.connect() as connection:
-            row = connection.execute("SELECT * FROM runtime_actions WHERE id = ?", (action_id,)).fetchone()
-        return runtime_action_from_row(row) if row is not None else None
-
-    def complete_runtime_action(self, action_id: str) -> None:
-        self._set_runtime_action_status(action_id, status="completed")
-
-    def fail_runtime_action(self, action_id: str, error: str, *, retryable: bool = True) -> None:
-        self._set_runtime_action_status(action_id, status="retryable" if retryable else "failed", error=error)
-
     def _init_db(self) -> None:
         with self.connect() as connection:
             connection.executescript(
@@ -272,40 +206,8 @@ class ConductorStore:
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_instances_http_port ON instances(http_port);
                 CREATE INDEX IF NOT EXISTS idx_instances_process_status ON instances(process_status);
 
-                CREATE TABLE IF NOT EXISTS runtime_actions (
-                  id TEXT PRIMARY KEY,
-                  instance_id TEXT NOT NULL,
-                  action_type TEXT NOT NULL,
-                  payload_json TEXT NOT NULL,
-                  status TEXT NOT NULL,
-                  attempt INTEGER NOT NULL DEFAULT 0,
-                  lease_owner TEXT,
-                  lease_expires_at TEXT,
-                  last_error TEXT,
-                  created_at TEXT NOT NULL,
-                  updated_at TEXT NOT NULL,
-                  FOREIGN KEY(instance_id) REFERENCES instances(id) ON DELETE CASCADE
-                );
-
-                CREATE INDEX IF NOT EXISTS idx_runtime_actions_status ON runtime_actions(status, created_at);
-                CREATE INDEX IF NOT EXISTS idx_runtime_actions_instance ON runtime_actions(instance_id);
                 """
             )
             ensure_column(connection, "instances", "restart_count", "INTEGER NOT NULL DEFAULT 0")
             ensure_column(connection, "instances", "restart_window_started_at", "TEXT")
             ensure_column(connection, "instances", "restart_next_at", "TEXT")
-
-    def _set_runtime_action_status(self, action_id: str, *, status: str, error: str | None = None) -> None:
-        with self.connect() as connection:
-            connection.execute(
-                """
-                UPDATE runtime_actions
-                SET status = ?,
-                    lease_owner = NULL,
-                    lease_expires_at = NULL,
-                    last_error = ?,
-                    updated_at = ?
-                WHERE id = ?
-                """,
-                (status, error, utc_now_iso(), action_id),
-            )

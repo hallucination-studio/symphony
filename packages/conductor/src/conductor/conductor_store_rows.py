@@ -96,12 +96,6 @@ def instance_from_row(row: sqlite3.Row) -> InstanceRecord:
     )
 
 
-def runtime_action_from_row(row: sqlite3.Row) -> dict[str, Any]:
-    data = dict(row)
-    data["payload"] = json_loads_dict(data.pop("payload_json"))
-    return data
-
-
 def ensure_column(connection: sqlite3.Connection, table: str, name: str, definition: str) -> None:
     columns = {str(row["name"]) for row in connection.execute(f"PRAGMA table_info({table})").fetchall()}
     if name not in columns:

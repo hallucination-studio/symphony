@@ -45,7 +45,7 @@ commands and the single Codex Gate, with the parent Linear summary recorded.
 
 ## Work-Item State
 
-Work items use the normal Linear lifecycle:
+Tasks use the normal Linear lifecycle:
 
 ```text
 todo
@@ -53,11 +53,10 @@ in_progress
 in_review
 done
 blocked
-cancelled
 ```
 
 Conductor selects exactly one `todo` item at a time. A task can start only when
-its file scope is present and the runtime profile is available.
+its file scope is present and the staged Codex runtime is available.
 
 `blocked` work items stay out of Done and expose their `gate_status` in durable
 state and Linear projection.
@@ -69,9 +68,9 @@ validates scope, verification commands, acceptance criteria, and retained
 rubric metadata before saving plan revision `1`.
 
 Accepted plan versions are immutable. If execution needs a new file scope,
-dependency, acceptance criterion, or human decision, the backend requests a plan
-revision. Conductor saves the new plan version only after approval, resets the
-affected item to Todo, and marks removed work items `cancelled`.
+acceptance criterion, or human decision, the backend requests a plan revision.
+Conductor saves the new plan version only after approval and returns the
+affected task to `todo`.
 
 ## Verification And Gate
 

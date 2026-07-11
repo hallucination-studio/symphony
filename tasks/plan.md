@@ -1,6 +1,7 @@
 # Implementation Plan: Minimal Polling Workflow Rebuild
 
-Status: proposed for approval as of 2026-07-11. This plan supersedes both the
+Status: implementation approved and locally applied as of 2026-07-12. External
+Linear/OAuth/Codex verification remains pending. This plan supersedes both the
 stale capability-refactor plan and the later conservative contraction draft.
 The source of truth for the target product is `tasks/spec.md`.
 
@@ -29,7 +30,7 @@ tools, and expanded runtime docs are deleted and replaced from the new spec.
 - Delete all existing tools and rebuild only one real flow plus one fixture
   helper.
 - Delete the expanded runtime/acceptance documentation and rewrite concise docs.
-- Remove all WebSocket production code, fields, routes, settings, commands,
+- Remove all socket production code, fields, routes, settings, commands,
   dependencies, tests, docs, and compatibility behavior.
 - Replace the current Conductor Managed Run implementation with the sequential
   parent/sub-issue/gate workflow plus the retained plan-revision, approval,
@@ -68,7 +69,8 @@ tools, and expanded runtime docs are deleted and replaced from the new spec.
   the boolean gate definition, one automatic rework, and archive-not-migrate for
   old local Conductor run state.
 
-No production work starts until these assumptions are approved.
+All five assumptions were approved by the user before implementation. Archive
+and real-flow verification are operational follow-ups, not design gates.
 
 ## Baseline And Target
 
@@ -85,9 +87,8 @@ No production work starts until these assumptions are approved.
 | Tests/tools/runtime docs | about 43,034 LOC | about 4,800 | remove about 89% |
 
 These are planning budgets, not automated size gates. Retaining revisions,
-catalogs, verifier scoring, manifests, and evidence invalidates the old small
-Conductor LOC estimate; Phase 0 must re-estimate it before implementation.
-Product behavior decides what remains.
+catalogs, verifier scoring, manifests, and evidence makes the Conductor budget a
+review item. Product behavior decides what remains.
 
 ## Target Module Map
 
@@ -230,7 +231,7 @@ confirm configure/unconfigure/installation cutover state.
 - `podium_routes_runtime_ws.py` and WS registration.
 - `podium_routes_runtime_smoke.py`; smoke result uses command ack.
 - `podium_routes_runtime_helpers.py` after inlining the few remaining helpers.
-- WS attach/detach/presence, `dispatch.available`, websocket URL generation,
+- socket attach/detach/presence, `dispatch.available`, socket URL generation,
   WS install-script parsing, and WS response compatibility.
 - `runtime_groups` table/service model after moving its stable external id onto
   the Conductor record and migrating foreign keys.
@@ -282,8 +283,9 @@ src/pages/ProductPages.test.tsx
 - current `tools/`, including the 41-file real E2E harness, observers,
   auditors, duplicate evidence runners, code-size gate, and architecture
   inventory. Rebuild the retained acceptance catalog and evidence writer.
-- `docs/decisions/`, `docs/product/`, `docs/real-run-testing-guide.md`, legacy
-  workflow files, and obsolete root docs.
+- duplicate decision/runtime guides and legacy workflow files; keep the
+  product source-of-truth docs plus `docs/architecture.md`, `docs/workflow.md`,
+  and `docs/real-flow.md`.
 - duplicate agent guidance after moving the small set of current rules into one
   `AGENTS.md`. Keep `packages/podium/web/DESIGN.md`.
 
@@ -291,12 +293,16 @@ src/pages/ProductPages.test.tsx
 
 ```text
 tests/conftest.py
-tests/test_performer_turn.py
+tests/test_minimal_performer_api.py
+tests/test_minimal_performer_turn.py
+tests/test_runtime_contract.py
+tests/test_conductor_gate.py
 tests/test_conductor_workflow.py
 tests/test_conductor_recovery.py
-tests/test_podium_linear.py
-tests/test_podium_api.py
-tests/test_product_flow.py
+tests/test_conductor_runtime.py
+tests/test_workflow_driver.py
+tests/test_podium_runtime_polling.py
+tests/test_package_boundaries.py
 ```
 
 These approximately 30 tests own only the new product facts: contract/fence,
@@ -402,7 +408,7 @@ remains, while revision/manifest/evidence behavior is covered.
 7. Run OAuth, polling pagination/checkpoint/epoch, dispatch, binding, label,
    proxy, cutover, health, and secret-boundary tests.
 
-Gate: repository-wide `rg -i 'websocket|podium_ws|runtime/ws'` finds no active
+Gate: repository-wide socket search finds no active
 production, dependency, response, setting, test, tool, or doc reference; Web
 business APIs retain their contract.
 
