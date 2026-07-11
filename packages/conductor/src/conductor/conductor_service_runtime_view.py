@@ -5,8 +5,8 @@ from typing import Any
 from .conductor_service_helpers import _runtime_metrics
 
 
-def managed_run_runtime_snapshot(managed_run_store) -> dict[str, Any]:
-    view = managed_run_store.managed_run_view()
+def managed_run_runtime_snapshot(workflow_store) -> dict[str, Any]:
+    view = workflow_store.managed_run_view()
     runs = view.get("runs") if isinstance(view.get("runs"), list) else []
     runtime_waits = view.get("runtime_waits") if isinstance(view.get("runtime_waits"), list) else []
     if not runtime_waits:
@@ -41,8 +41,8 @@ def managed_run_runtime_snapshot(managed_run_store) -> dict[str, Any]:
     }
 
 
-def managed_run_runtime_metrics(managed_run_store) -> dict[str, Any]:
-    return _runtime_metrics(managed_run_runtime_snapshot(managed_run_store))
+def managed_run_runtime_metrics(workflow_store) -> dict[str, Any]:
+    return _runtime_metrics(managed_run_runtime_snapshot(workflow_store))
 
 
 def _running_runs(runs: list[Any]) -> list[dict[str, Any]]:
