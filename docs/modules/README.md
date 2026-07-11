@@ -15,9 +15,10 @@ Linear parent issue
   -> Podium Linear polling and dispatch
   -> Conductor HTTP lease
   -> Performer plan turn
+  -> plan revision and approval
   -> Linear child sub-issues in plan order
   -> Performer execute turn
-  -> command checks + read-only Codex gate
+  -> command checks + one read-only Codex rubric gate
   -> child Done, or one rework then visible block
   -> parent Done only after every child is Done
 ```
@@ -36,7 +37,7 @@ credentials.
 | `conductor` | One bound repository, sequential run state, child issues, gates | Customer OAuth, browser UI, direct Linear tokens |
 | `podium` | Auth, Linear control plane, bindings, dispatch, runtime HTTP API, BFF | Local task execution or Codex process management |
 | `podium-web` | Existing browser routes, actions, presentation, secret-safe API use | Workflow decisions, tokens, runtime sockets |
-| `verification` | Small behavior suite, one real flow, evidence and docs checks | A second acceptance product or score rubric |
+| `verification` | Small behavior suite, one real flow, evidence and docs checks | A second acceptance product or cross-model scheduler |
 
 ## Cross-module invariants
 
@@ -49,14 +50,17 @@ credentials.
 - Podium Web business behavior remains: authentication, onboarding, project and
   repository setup, runtime enrollment/binding, smoke action, operator pages,
   managed-runs views, translations, redirects, cookies, and design tokens.
+- Managed Run plan revisions, approval state, risks, architecture decisions,
+  open questions, acceptance catalogs, score/rubric evidence, manifests,
+  artifacts, and provenance remain owned by the workflow/evidence modules.
 - Every blocking or terminal error has `error_code`, `sanitized_reason`,
   `action_required`, `retryable`, and `next_action`, and is visible in durable
   state, structured logs, Linear when relevant, and the Podium report.
 - There is no WebSocket endpoint, client, setting, install response field,
   presence channel, wake command, or compatibility shim.
 - There is no generic workflow engine, dependency graph, parallel scheduler,
-  branch/join model, score rubric, acceptance catalog, plan revision system, or
-  second backend abstraction.
+  branch/join model, checkpoint-group system, cross-model reviewer, or second
+  acceptance scheduler/backend abstraction.
 
 ## Baseline change protocol
 

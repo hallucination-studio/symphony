@@ -39,7 +39,7 @@ moves once into the owner above; old files and compatibility facades disappear.
 ## Canonical workflow
 
 ```text
-planning -> executing -> blocked | failed | done
+planning -> awaiting_approval -> executing -> blocked | failed | done
 todo -> in_progress -> in_review -> blocked | done
 running -> waiting | succeeded | failed | stale
 ```
@@ -54,11 +54,15 @@ The service tick is bounded and idempotent:
 
 For a new parent, Conductor obtains one ordered plan, validates it, creates one
 real Linear sub-issue per task with an explicit parent relationship, and stores
-the Linear ids. It executes only the first unfinished child. A child is not
-Done until all declared verification commands pass and a separate read-only
-Codex gate returns `passed=true`. One failed gate may trigger one rework attempt;
-the next failure blocks the child and parent with a concrete next action. The
-parent becomes Done only after every child is Done.
+the Linear ids. A plan revision is approved before it becomes the active
+revision; risks, architecture decisions, open questions, acceptance-catalog
+entries, manifests, and artifacts remain linked to that revision. It executes
+only the first unfinished child. A child is not Done until all declared
+verification commands pass and one read-only Codex gate returns `passed=true`
+with its score, rubric, threshold, weights, provenance, and evidence. One failed
+gate may trigger one rework attempt; the next failure blocks the child and
+parent with a concrete next action. The parent becomes Done only after every
+child is Done.
 
 ## Durable store baseline
 
@@ -73,6 +77,10 @@ flow:
 | `tasks` | Ordered child issue id, task contract, state, gate status, rework count |
 | `attempts` | Fenced plan/execute/gate invocation and result metadata |
 | `runtime_waits` | Codex/runtime approval wait and resume key |
+| `plan_revisions` | Immutable plan versions, approval, policy revision, and metadata |
+| `acceptance_catalog` | Per-task criteria, rubric, thresholds, and weights |
+| `gate_evidence` | Command/Codex findings, scores, provenance, and artifact links |
+| `artifacts` | Sanitized manifest and evidence artifact metadata |
 
 Writes that advance a state, accept a result, or create a child are
 transactional and idempotent. A restarted daemon reuses the same run and child
@@ -81,14 +89,17 @@ ids. A stale fencing token changes no current state.
 ## Linear projection baseline
 
 `linear.py` owns only the concrete operations required by the flow: read the
-parent, create/update ordered children, set states, add concise plan/gate/error
-comments, read the project label, and create/resume a `[Human Action]` runtime
-wait issue when Codex requires operator input. It verifies `parent { id
-identifier }` explicitly and never infers hierarchy from title or comments.
+parent, create/update ordered children, project plan revisions and approval,
+set states, add concise plan/gate/error comments, link acceptance-catalog and
+gate/evidence child issues, read the project label, and create/resume a
+`[Human Action]` runtime-wait issue when Codex requires operator input. It
+verifies `parent { id identifier }` explicitly and never infers hierarchy from
+title or comments.
 
-Dependency relations, branch/join metadata, plan revisions, integration
-conflict children, gate/evidence-only issue trees, arbitrary comment commands,
-and graph readiness are removed.
+Dependency relations, branch/join metadata, checkpoint groups, integration
+conflict children, arbitrary comment commands, and graph readiness are removed.
+Plan revisions, approval, acceptance catalogs, gate/evidence issue trees, and
+artifact provenance remain owned by this module.
 
 ## Runtime and failure baseline
 
@@ -103,12 +114,13 @@ single-line structured events with run/task/attempt/fence correlation.
 
 1. Archive existing local Managed Run databases; do not silently reinterpret
    their expanded state machine as the new one.
-2. Add restart, idempotency, child-parent, gate/rework, parent completion,
-   runtime-wait, and stale-result tests.
+2. Add restart, idempotency, child-parent, revision/approval, gate/rework,
+   score/rubric/evidence, parent completion, runtime-wait, and stale-result tests.
 3. Build the eleven owners and switch the CLI composition root.
 4. Delete the old module family, unused tables, migrations, exports, and
    compatibility paths.
 
 The baseline is complete when one Conductor tick can be followed end-to-end in
-`service.py`, every child is a real Linear sub-issue, gates are boolean and
-fenced, and no DAG/parallel/branch/join concept is present in code or schema.
+`service.py`, every child is a real Linear sub-issue, the single gate is scored
+and fenced with durable evidence, and no DAG/parallel/branch/join/checkpoint-
+group concept is present in code or schema.

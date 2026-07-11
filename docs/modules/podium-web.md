@@ -22,14 +22,17 @@ The managed-runs client continues to consume the existing report concepts:
 ```text
 conductor, project, binding, runtime group, policy revision, profiles
 run id, issue identifier, run state, active task, latest reason,
-plan version, thread id, work items
-task id, title, objective, likely files, task state, gate status
+plan version/revision, approval status, thread id, work items
+task id, title, objective, likely files, task state, gate status,
+score/rubric summary, threshold, provenance, acceptance-catalog and artifact refs
 ```
 
-The minimal backend may send `policy_revision: 1`, `plan_version: 1`, and
-`profiles: {}`. These values keep the current view shape; Web must not grow
-controls for policy versions, profile registries, DAGs, branch joins, scores,
-or acceptance catalogs.
+The backend sends durable `policy_revision`/`plan_version` values and may send
+`profiles: {}` when no runtime profile registry is needed. Web preserves
+sanitized revision, approval, catalog, score, rubric, provenance, and artifact
+summaries already present in the response. It must not grow controls for DAGs,
+branch joins, checkpoint groups, cross-model reviewers, or a second acceptance
+scheduler.
 
 ## API boundary
 

@@ -31,10 +31,11 @@ tools, and expanded runtime docs are deleted and replaced from the new spec.
 - Delete the expanded runtime/acceptance documentation and rewrite concise docs.
 - Remove all WebSocket production code, fields, routes, settings, commands,
   dependencies, tests, docs, and compatibility behavior.
-- Replace the current Conductor Managed Run implementation with the minimal
-  sequential parent/sub-issue/gate workflow in `tasks/spec.md`.
+- Replace the current Conductor Managed Run implementation with the sequential
+  parent/sub-issue/gate workflow plus the retained plan-revision, approval,
+  rubric, catalog, manifest, and evidence semantics in `tasks/spec.md`.
 - Hard-delete unneeded shared contracts, states, tables, abstractions, backends,
-  branches, manifests, checkpoints, revisions, and compatibility surfaces.
+  branches, checkpoint groups, and compatibility surfaces.
 
 ### required consequences
 
@@ -45,14 +46,17 @@ tools, and expanded runtime docs are deleted and replaced from the new spec.
   projection, and visible failures.
 - Preserve one-shot Performer process isolation, request/result files, staged
   `CODEX_HOME`, fencing, retries, logs, and sanitized errors.
+- Preserve plan revisions, approval state, risks, architecture decisions, open
+  questions, acceptance catalogs, score/rubric/threshold/weight/provenance,
+  manifests, artifacts, and gate/evidence Linear projections.
 - Preserve PostgreSQL customer/account/Linear/project/Conductor/binding data.
 - Keep the four package import boundary and installed CLI entrypoints.
 
 ### out_of_scope
 
 - Parallel execution, dependencies, capacity scheduling, branches, joins,
-  manifests, checkpoint groups, plan revision, integration queues, score
-  rubrics, acceptance catalogs, or multiple planning/execution backends.
+  checkpoint groups, integration queues, cross-model acceptance, a second
+  acceptance scheduler, or multiple planning/execution backends.
 - Visual redesign or removal of a Podium Web business flow.
 - Direct Linear tokens in Conductor or the browser. Conductor continues through
   Podium runtime authentication and the Podium Linear proxy.
@@ -72,7 +76,7 @@ No production work starts until these assumptions are approved.
 |---|---:|---:|---:|
 | `performer-api` | 9 modules / 953 LOC | <= 5 / 350-500 | remove 45%-63% |
 | `performer` | 11 / 1,707 | <= 6 / 900-1,100 | remove 36%-47% |
-| `conductor` | 71 / 10,323 | about 11 / 3,000-3,600 | remove 65%-71% |
+| `conductor` | 71 / 10,323 | about 11 / re-estimate | retained evidence scope must be budgeted |
 | `podium` Python | 66 / 10,072 | about 40-50 / 8,000-9,000 | remove 11%-21% |
 | Python production total | 23,055 LOC | about 12,250-14,200 | remove 38%-47% |
 | Python tests | 67 files / 25,171 LOC / 691 tests | 7 / <=2,500 / about 30 | remove about 90% |
@@ -80,8 +84,10 @@ No production work starts until these assumptions are approved.
 | Tools | 68 files / 11,824 LOC | 2 / <=850 | remove about 93% |
 | Tests/tools/runtime docs | about 43,034 LOC | about 4,800 | remove about 89% |
 
-These are planning budgets, not automated size gates. Product behavior decides
-what remains.
+These are planning budgets, not automated size gates. Retaining revisions,
+catalogs, verifier scoring, manifests, and evidence invalidates the old small
+Conductor LOC estimate; Phase 0 must re-estimate it before implementation.
+Product behavior decides what remains.
 
 ## Target Module Map
 
@@ -98,9 +104,10 @@ performer_api/
   validation.py   # small plan/context validators
 ```
 
-Delete capacity, per-role profiles, policy revisions, parallelization, slice
-types, checkpoints, rubrics, architecture decisions, risks, approvals, plan
-versions, dependency validation, and their compatibility exports.
+Delete capacity, per-role profiles, parallelization, slice types, checkpoint
+groups, dependency validation, and their compatibility exports. Retain the
+durable plan-revision/policy-version fields, approval state, risks,
+architecture decisions, open questions, rubric and provenance contracts.
 
 The only shared turn kinds are `plan`, `execute`, and `gate`. One `attempt_id`
 plus `fencing_token` replaces separate lease/turn/fence identities.
@@ -140,9 +147,9 @@ conductor/
   store.py        # one SQLite database
   service.py      # composition root and one background tick
   podium.py       # HTTP report/command/dispatch/config/smoke
-  linear.py       # proxy, sub-issues, states, comments, runtime wait
+  linear.py       # proxy, sub-issues, revisions, gates, comments, runtime wait
   workflow.py     # the only sequential state machine
-  gate.py         # acceptance commands and boolean gate input
+  gate.py         # commands, rubric/verifier, score, evidence, and gate input
   runtime.py      # Performer process, CODEX_HOME, logs, fencing
 ```
 
@@ -152,10 +159,12 @@ conductor/
 - HTTP dispatch lease/ack and reporting.
 - concrete Linear GraphQL/proxy operations for parent, child, comment, state,
   project label read, and runtime-wait child.
-- plan turn, ordered task creation, sequential execution, one rework, boolean
-  gate, completion, and current Web report.
-- one SQLite store with `settings`, `instance`, `runs`, `tasks`, `attempts`, and
-  `runtime_waits`.
+- plan turn, ordered task creation, plan approval/revision, sequential
+  execution, one rework, rubric-backed gate, evidence projection, completion,
+  and current Web report.
+- one SQLite store with `settings`, `instance`, `runs`, `tasks`, `attempts`,
+  `runtime_waits`, `plan_revisions`, `acceptance_catalog`, `gate_evidence`, and
+  `artifacts`.
 - Performer launch/result collection, staged runtime home, stdout/stderr logs,
   stale fence rejection, bounded retry, and failure parity.
 
@@ -164,33 +173,36 @@ conductor/
 Delete the current modules for:
 
 - relation/dependency ingestion and DAG readiness;
-- attempts payload overlays and plan/policy version machinery;
-- branch join, execution handoff, manifests, artifacts, checkpoint results,
-  integration state, and workspace-event abstractions;
-- coordinator helper/human/checkpoint/runtime-wait mixins;
+- attempts payload overlays and duplicate plan/policy version machinery outside
+  the single revision owner;
+- branch join, execution handoff, checkpoint results, integration state, and
+  workspace-event abstractions;
+- coordinator helper/checkpoint/runtime-wait mixins that duplicate the retained
+  workflow owners;
 - driver plan/work-item/attempt collection/helper/service fragments;
 - generic human-action and projection helper stacks;
-- Managed Run store/view/artifact/row mixins and verifier scoring;
+- Managed Run store/view/artifact/row mixins and verifier scoring wrappers that
+  duplicate the retained store/evidence owners;
 - Podium sync background/failure/Linear/project-label/WS mixins;
 - runtime backend registry, env-command/lifecycle/log/process/type fragments;
 - service view/type/runtime-view helpers, smoke outbox store, store row helper,
   generic time module, and standalone Podium client.
 
-The necessary pieces from those files move once into the 11 target owners; the
+The necessary pieces from those files move once into the target owners; the
 old source files then disappear. Do not leave facade wrappers or compatibility
 imports.
 
 #### Minimal state
 
 ```text
-run:     planning -> executing -> blocked | failed | done
+run:     planning -> awaiting_approval -> executing -> blocked | failed | done
 task:    todo -> in_progress -> in_review -> blocked | done
 attempt: running -> waiting | succeeded | failed | stale
 ```
 
 `in_review` is the acceptance gate. Podium Web already understands these state
-words. `plan_version` and `policy_revision` are presentation constants, not
-durable version systems.
+words. `plan_version` and `policy_revision` are durable revision values, not
+presentation-only constants; only one plan revision is active at a time.
 
 ### `podium`: preserve business, remove runtime duplication
 
@@ -224,7 +236,8 @@ confirm configure/unconfigure/installation cutover state.
   the Conductor record and migrating foreign keys.
 - Podium-owned Managed Run role profiles/capacity/runtime-config table and its
   `performer_api` dependency. Minimal Codex config is local to Conductor; Web
-  still receives sanitized `policy_revision=1` and `profiles={}`.
+  still receives the current sanitized policy/plan revision and retained
+  evidence summaries; profile registries are not reintroduced.
 - duplicate runtime/enrollment/shared ownership helpers, non-CAS smoke writer,
   historical full-log command/result path, and dead imports.
 - `uvicorn[standard]`; use `uvicorn` without the WS stack.
@@ -266,8 +279,9 @@ src/pages/ProductPages.test.tsx
 
 - `tests/` (then recreate the directory with the seven new files below).
 - every current Web `*.test.ts(x)` and `src/test/` helper.
-- current `tools/`, including 41-file real E2E, acceptance catalog, observers,
-  auditors, evidence frameworks, code-size gate, and architecture inventory.
+- current `tools/`, including the 41-file real E2E harness, observers,
+  auditors, duplicate evidence runners, code-size gate, and architecture
+  inventory. Rebuild the retained acceptance catalog and evidence writer.
 - `docs/decisions/`, `docs/product/`, `docs/real-run-testing-guide.md`, legacy
   workflow files, and obsolete root docs.
 - duplicate agent guidance after moving the small set of current rules into one
@@ -286,9 +300,10 @@ tests/test_product_flow.py
 ```
 
 These approximately 30 tests own only the new product facts: contract/fence,
-ordered sub-issues, boolean gates, parent completion, recovery/idempotency,
-failure visibility, OAuth/pagination/checkpoint/epoch/dispatch, HTTP runtime
-polling, Web/BFF security, and one process-boundary product flow.
+ordered sub-issues, revision/approval, score/rubric gates, catalog/evidence/
+provenance, parent completion, recovery/idempotency, failure visibility,
+OAuth/pagination/checkpoint/epoch/dispatch, HTTP runtime polling, Web/BFF
+security, and one process-boundary product flow.
 
 #### Rebuild tools
 
@@ -297,7 +312,7 @@ tools/real_flow.py       # one real browser/Linear/Codex flow, <=650 LOC
 tools/linear_fixture.py  # create/read/clean test issues, <=200 LOC
 ```
 
-No tool self-test suite or second acceptance system.
+No tool self-test suite, cross-model reviewer, or second acceptance system.
 
 #### Rebuild docs
 
@@ -328,8 +343,8 @@ list.
 1. Delete all current Python/Web tests.
 2. Delete all current tools.
 3. Delete expanded decisions/product/real-run docs and legacy workflow files.
-4. Remove code-size, architecture inventory, acceptance catalog, and their
-   command/docs references.
+4. Remove code-size, architecture inventory, and the obsolete acceptance test
+   harness; rebuild the retained acceptance catalog and evidence references.
 5. Create the empty new test/tool/doc structure and update `make test` to target
    only the rebuilt suite.
 
@@ -351,11 +366,12 @@ Gate: `test_performer_turn.py` green and one real isolated turn succeeds.
 
 ### Phase 3: Rebuild Conductor Core
 
-1. Add RED store tests for the six-table schema, restart, idempotent run/task
-   creation, and stale fencing.
+1. Add RED store tests for the workflow and retained revision/catalog/evidence
+   tables, restart, idempotent run/task creation, and stale fencing.
 2. Build the new `models.py` and single `store.py`; archive old local run state.
-3. Add RED workflow tests for plan -> ordered Linear sub-issues -> execute ->
-   gate -> child Done -> parent Done.
+3. Add RED workflow tests for plan revision/approval -> ordered Linear
+   sub-issues -> execute -> rubric-backed gate/evidence -> child Done -> parent
+   Done.
 4. Build the sequential `workflow.py`, `linear.py`, `gate.py`, and `runtime.py`.
 5. Add one-rework, second-failure block, runtime wait, process retry, restart,
    and durable/log/Linear/API failure parity.
@@ -365,7 +381,8 @@ Gate: `test_performer_turn.py` green and one real isolated turn succeeds.
    compatibility residue.
 
 Gate: workflow/recovery/product-flow tests green; target module and LOC budgets
-audited manually; no branch/DAG/checkpoint/manifest/revision code remains.
+audited manually; no branch/DAG/checkpoint-group/cross-model scheduler code
+remains, while revision/manifest/evidence behavior is covered.
 
 ### Phase 4: Remove WS And Contract Podium Runtime
 
@@ -409,11 +426,13 @@ Gate: the current user journeys and visible states work without WS knowledge.
 4. Fail immediately on a known error and prove the sanitized reason appears in
    durable state, logs, Linear, and Podium.
 5. Delete every remaining orphan module, schema/table, export, test helper,
-   fixture, generated catalog, old doc, and compatibility reference.
+   fixture, obsolete generated harness, old doc, and compatibility reference;
+   keep the rebuilt acceptance catalog and evidence artifacts.
 6. Record final files/LOC/tests/runtime against the target budgets.
 
 Gate: new Python/Web suites, PostgreSQL contracts, build/lint, and the single
-real flow are green. No cross-model review or acceptance is required.
+real flow are green. No cross-model review is required; product acceptance is
+the single retained Conductor gate.
 
 ## Dependency Order
 

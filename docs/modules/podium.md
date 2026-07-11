@@ -25,12 +25,13 @@ managed-run behavior.
   and sanitized browser responses.
 - Managed-runs response fields consumed by the Web: conductor/project/binding/
   runtime group presentation, policy revision, profiles, run id/issue/state,
-  active task, latest reason, plan version, thread id, work items, task state,
-  likely files, and gate status.
+  active task, latest reason, plan version/revision, approval status, thread id,
+  work items, task state, likely files, gate status/score, rubric summary,
+  threshold, provenance, acceptance-catalog links, and artifact references.
 
-`policy_revision=1`, `plan_version=1`, and an empty `profiles` object are
-presentation values for the minimal design, not a return of policy/profile
-registries.
+`policy_revision` and `plan_version` are durable revision values projected from
+Conductor. An empty `profiles` object is allowed when no runtime profile
+registry is needed; it does not erase plan/evidence version history.
 
 ## Runtime HTTP contract
 
@@ -60,17 +61,19 @@ Commands are `queued | leased | completed | failed`, leased for five minutes,
 and fenced by an integer token. Leasing selects the oldest queued or expired
 command transactionally. A stale ack returns `409` and changes nothing. The
 runtime report is authoritative for observed binding state and includes the
-current sanitized log tail and small local Codex configuration summary.
+current sanitized log tail, local Codex configuration summary, and retained
+plan/gate evidence summaries.
 
 ## Explicit removals
 
 Delete the WebSocket route, registration, tasks, presence/wake path, install
 `websocket_url`, `podium_ws_url`, WS dependencies, `dispatch.available`, the
 in-memory dispatch queue, `human.answered`, historical `log.fetch`/log-chunk
-transport, and duplicate smoke outbox/retry layers. Delete the runtime policy,
-profile, and config table once the report can supply the retained presentation
-fields. Remove `runtime_groups` as an independent ownership table; migrate its
-stable id into the Conductor/binding record without dropping customer data.
+transport, and duplicate smoke outbox/retry layers. Delete only the runtime
+profile/config registry; keep policy/plan revision and evidence projections in
+the Conductor-owned report. Remove `runtime_groups` as an independent ownership
+table; migrate its stable id into the Conductor/binding record without dropping
+customer data.
 
 The Web still reads its current routes and report shape. Removing an unused
 transport is not permission to remove a visible Web action or error state.
@@ -89,8 +92,9 @@ summary after sanitization.
 2. Move smoke result validation into command ack and make report state
    authoritative.
 3. Switch Conductor to report -> command -> dispatch polling.
-4. Remove WS/config/log-fetch/runtime-group/policy/profile sources and update
-   generated install output without changing onboarding intent.
+4. Remove WS/config/log-fetch/runtime-group/profile-registry sources and update
+   generated install output without changing onboarding intent; preserve
+   policy/plan revision and evidence fields.
 5. Re-run OAuth, pagination/checkpoint/epoch, dispatch, binding, label, proxy,
    cutover, health, smoke, and secret-boundary behavior checks.
 

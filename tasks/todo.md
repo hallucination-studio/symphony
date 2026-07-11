@@ -11,6 +11,11 @@ Statuses: `[ ]` pending, `[~]` in progress, `[x]` complete, `[-]` deferred.
 - [ ] Approve strict sequential execution; no DAG, parallel scheduling, branches, or joins.
 - [ ] Approve the boolean gate: verification commands plus read-only Codex gate turn.
 - [ ] Approve one automatic gate rework, then visible blocking.
+- [ ] Approve retaining plan revisions, approval, risks, architecture decisions,
+      open questions, manifests, artifacts, and acceptance-catalog evidence.
+- [ ] Approve retaining score/rubric/threshold/weight/provenance verifier data
+      under one Codex Gate; no cross-model reviewer or second scheduler.
+- [ ] Confirm checkpoint groups are deleted; Linear polling checkpoints remain.
 - [ ] Approve archiving old local Conductor run state instead of migrating it.
 - [ ] Approve removing historical full-log fetch while retaining the current Web cached tail.
 - [ ] Confirm Podium customer/OAuth/project/Conductor/binding data must migrate in place.
@@ -40,37 +45,46 @@ Repeat for every non-trivial task:
 - [ ] `D1.3` Delete the current `tools/` tree.
 - [ ] `D1.4` Delete `docs/decisions/`, `docs/product/`, the old real-run guide, and legacy workflow docs.
 - [ ] `D1.5` Consolidate mandatory repository rules into one `AGENTS.md`; keep Web `DESIGN.md`.
-- [ ] `D1.6` Remove code-size, architecture inventory, acceptance catalog, test/tool/doc command, and stale-plan references.
+- [ ] `D1.6` Remove code-size, architecture inventory, obsolete acceptance
+      harness, test/tool/doc command, and stale-plan references; rebuild the
+      retained acceptance catalog.
 - [ ] `D1.7` Create the new test/tool/doc file skeleton and update `make test`.
-- [ ] Checkpoint `D1`: all production packages import/build; no behavioral-completion claim yet.
+- [ ] Milestone `D1`: all production packages import/build; no behavioral-completion claim yet.
 
 ## Phase 2: Minimal Shared Contract And Performer
 
 - [ ] `P2.1` Add RED tests for Plan/Task/ExecuteResult/GateResult serialization and validation.
 - [ ] `P2.2` Add RED tests for TurnContext exact echo, invalid context, and stale fence.
 - [ ] `P2.3` Replace `performer-api` with `workflow.py`, `turns.py`, `runtime.py`, and `validation.py`.
-- [ ] `P2.4` Delete capacity, roles/profiles, policies, dependencies, parallelization, checkpoints, rubrics, revisions, and old exports.
+- [ ] `P2.4` Delete capacity, role/profile registries, dependencies,
+      parallelization, checkpoint groups, and old exports; retain revision,
+      approval, rubric, and provenance contracts.
 - [ ] `P2.5` Add RED process tests for `plan`, `execute`, and `gate` request/result files.
 - [ ] `P2.6` Rebuild Performer CLI, direct pinned-SDK client, backend prompts, and schemas.
 - [ ] `P2.7` Delete compatibility adapter/maybe-await/continuation/default-schema/synthetic-probe/helper fragments.
 - [ ] `P2.8` Prove staged real SDK init, plan, execute, read-only gate, resume/wait, timeout, close, and secret isolation.
-- [ ] Checkpoint `P2`: <=5 performer-api modules, <=6 Performer modules, new turn tests green.
+- [ ] Milestone `P2`: <=5 performer-api modules, <=6 Performer modules, new turn tests green.
 
 ## Phase 3: Rebuild Conductor
 
-- [ ] `C3.1` Add RED tests for six-table schema, restart, idempotent run/task creation, and stale fencing.
+- [ ] `C3.1` Add RED tests for workflow, plan-revision, catalog, evidence, and
+      artifact tables, restart, idempotent run/task creation, and stale fencing.
 - [ ] `C3.2` Build minimal `models.py` and one `store.py`; archive old local run state.
 - [ ] `C3.3` Add RED test: parent dispatch -> ordered plan -> explicit Linear sub-issues.
-- [ ] `C3.4` Add RED test: sequential execute -> commands -> Codex gate -> child Done.
+- [ ] `C3.4` Add RED test: sequential execute -> commands -> single Codex
+      rubric/verifier gate -> evidence projection -> child Done.
 - [ ] `C3.5` Add RED test: failed gate -> one rework -> second failure blocks child and parent visibly.
 - [ ] `C3.6` Add RED test: all children Done -> parent Done; any non-Done child blocks completion.
 - [ ] `C3.7` Build `workflow.py`, `linear.py`, `gate.py`, and `runtime.py` around the minimal state machine.
 - [ ] `C3.8` Add runtime-wait `[Human Action]`, exact-task resume, transient retry, and stale-result rejection.
 - [ ] `C3.9` Build one service tick and retain the local API plus current Web report shape.
 - [ ] `C3.10` Switch the CLI composition root to the new modules.
-- [ ] `C3.11` Delete every old coordinator/driver/projection/store/artifact/verifier/join/checkpoint/human/service/runtime fragment outside the target tree.
+- [ ] `C3.11` Delete every duplicated coordinator/driver/projection/store/
+      artifact/verifier/join/checkpoint/human/service/runtime fragment outside
+      the retained workflow/evidence owners.
 - [ ] `C3.12` Verify failure parity across SQLite, structured logs, Linear, and Podium.
-- [ ] Checkpoint `C3`: about 11 modules / 3,000-3,600 LOC; workflow/recovery tests green.
+- [ ] Milestone `C3`: module/LOC budget re-estimated for retained revisions,
+      catalog, verifier, manifest, and evidence; workflow/recovery tests green.
 
 ## Phase 4: HTTP Polling Only
 
@@ -82,10 +96,12 @@ Repeat for every non-trivial task:
 - [ ] `H4.6` Delete Podium and Conductor WS routes/tasks/handlers/settings/install fields/presence/dependencies.
 - [ ] `H4.7` Delete `dispatch.available`, the in-memory dispatch queue, and duplicate WS wake path.
 - [ ] `H4.8` Remove `runtime_groups`; migrate its stable id/FKs to Conductor/binding data without losing customer data.
-- [ ] `H4.9` Remove Podium runtime policy/profile/config table and `performer_api` dependency; source Web presentation fields from reports.
+- [ ] `H4.9` Remove Podium runtime profile/config registry and unnecessary
+      `performer_api` dependency; preserve durable policy/plan revision and
+      evidence summaries in reports.
 - [ ] `H4.10` Merge audited route, SQL statement, smoke protocol, supervisor, mapping, and logging fragments.
 - [ ] `H4.11` Re-run OAuth, project pagination/checkpoint/epoch, dispatch, binding, label, proxy, cutover, health, and secret tests.
-- [ ] Checkpoint `H4`: no active `websocket`, `podium_ws`, or `/runtime/ws` reference anywhere.
+- [ ] Milestone `H4`: no active `websocket`, `podium_ws`, or `/runtime/ws` reference anywhere.
 
 ## Phase 5: Rebuild Web Tests, Preserve Web
 
@@ -97,7 +113,7 @@ Repeat for every non-trivial task:
 - [ ] `W5.6` Adapt only internal policy/profile types needed by the new report; make no visual redesign.
 - [ ] `W5.7` Run Web test, lint, build, design lint, desktop/mobile browser DOM/network/console/screenshot checks.
 - [ ] `W5.8` Commit rebuilt static assets.
-- [ ] Checkpoint `W5`: <=15 Web tests / <=750 LOC; current business flows unchanged.
+- [ ] Milestone `W5`: <=15 Web tests / <=750 LOC; current business flows unchanged.
 
 ## Phase 6: Minimal Product Tests And One Real Flow
 
@@ -123,4 +139,5 @@ Repeat for every non-trivial task:
 - [ ] Podium Web business flows and secret boundary pass.
 - [ ] Runtime transport is HTTP polling only; zero WS residue.
 - [ ] New Python/Web suites and the one real flow pass.
-- [ ] No cross-model review or acceptance was run or required.
+- [ ] No cross-model review was run or required; product acceptance remains the
+      single Conductor gate.

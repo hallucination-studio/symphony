@@ -4,15 +4,18 @@ Status: proposed baseline, 2026-07-11.
 
 ## Responsibility
 
-Verification is rebuilt around the one product flow instead of preserving the
-old acceptance framework. It proves the retained Linear/Podium business paths,
-the sequential Conductor workflow, Performer fencing, error visibility, and
-the browser secret boundary. It is evidence for the product, not a second
-workflow engine or a scoring product.
+Verification is rebuilt around the one product flow while preserving the
+Managed Run acceptance catalog, rubric, score, threshold, weight, provenance,
+manifest, and artifact evidence semantics. It proves the retained
+Linear/Podium business paths, the sequential Conductor workflow, Performer
+fencing, error visibility, and the browser secret boundary. It is evidence for
+the product, not a second workflow engine, cross-model reviewer, or second
+acceptance scheduler.
 
 The user-authorized hard break permits deleting the current Python tests, Web
-tests, tools, generated acceptance catalog, expanded runtime docs, legacy
-workflow guides, and retired ADR content. Rebuild only after the target
+tests, tools, obsolete generated acceptance harness, expanded runtime docs,
+legacy workflow guides, and retired ADR content. Rebuild the acceptance catalog
+and evidence writer only after the target
 contracts in `tasks/spec.md` and the module baselines are approved.
 
 ## Target Python suite
@@ -33,9 +36,11 @@ tests/
 
 Coverage must include:
 
-- plan/task/result contract validation and exact fencing;
+- plan/task/result contract validation, revision/approval, and exact fencing;
 - parent dispatch -> ordered real child sub-issues;
-- sequential execute -> command checks -> read-only Codex gate;
+- sequential execute -> command checks -> one read-only Codex rubric/verifier gate;
+- acceptance-catalog lookup, score/threshold decisions, provenance, manifests,
+  artifacts, and Linear gate/evidence issue projections;
 - one rework and second gate failure blocking child and parent;
 - all-children-Done parent completion;
 - restart/idempotency and stale result rejection;
@@ -43,9 +48,10 @@ Coverage must include:
 - HTTP command lease/expiry/reclaim/ack/fence behavior;
 - durable/log/Linear/Podium parity for concrete failures.
 
-Do not recreate score rubrics, acceptance catalogs, graph schedulers, branch
-joins, RED/GREEN evidence frameworks, checkpoint groups, or tests that assert
-source-line counts, phrase inventories, or retired identifier tombstones.
+Do not recreate graph schedulers, branch joins, checkpoint groups, cross-model
+reviewers, second acceptance schedulers, RED/GREEN evidence frameworks, or
+tests that assert source-line counts, phrase inventories, or retired identifier
+tombstones.
 
 ## Target Web suite
 
@@ -83,8 +89,8 @@ gate/error-visibility path. It never reads `~/.codex` directly and never
 stores tokens in artifacts.
 
 No cross-model review or separate acceptance scheduler is part of this
-baseline. The product gate is the Conductor boolean gate defined in the
-Conductor document.
+baseline. The product gate is the single Conductor boolean gate with the
+retained score/rubric/evidence model defined in the Conductor document.
 
 ## Documentation baseline
 

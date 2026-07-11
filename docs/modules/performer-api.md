@@ -56,9 +56,10 @@ is a hard break; no aliases for old names, states, or payloads are retained.
 
 Validation requires 1–10 ordered tasks, unique ids, non-empty title and
 objective, 1–5 acceptance criteria, at least one verification command, and a
-non-empty file scope. Order is execution order. There are no dependency,
-parallel, checkpoint, rubric, approval, risk, architecture-decision, or
-revision fields.
+non-empty file scope. Order is execution order. Task contracts have no
+dependency, parallel, or checkpoint-group fields. The enclosing plan revision
+may carry approval state, risks, architecture decisions, open questions, an
+acceptance-catalog reference, and manifest/artifact references.
 
 ### Turn context
 
@@ -80,18 +81,20 @@ mismatched results before changing state.
 
 Execute results are `ready_for_gate`, `blocked`, or `failed`, with a summary,
 changed files, criterion evidence, and an optional blocked reason. Gate results
-are boolean: `passed`, a summary, and criterion evidence. Runtime waits carry a
-sanitized reason, wait kind, and resume key. All result models carry the
-correlation ids needed for logs and durable state.
+are boolean: `passed`, a score, threshold, rubric rows, provenance, a summary,
+and criterion evidence. Runtime waits carry a sanitized reason, wait kind, and
+resume key. All result models carry the correlation ids needed for logs and
+durable state. The gate result is produced by one Codex evaluator; it does not
+model cross-model review or a second scheduler.
 
 ## Explicit removals
 
-Delete capacity and per-role policy/profile models, backend roles, dependency
-and parallelization validation, checkpoints, plan versions, revisions,
-approval/rubric/architecture-decision/risk fields, compatibility enums, and
-generic result aliases. A presentation-level `policy_revision=1` or
-`plan_version=1` may be emitted by Conductor for the existing Web response, but
-it is not a contract or policy subsystem here.
+Delete capacity and per-role policy/profile registries, backend roles,
+dependency and parallelization validation, checkpoint groups, compatibility
+enums, and generic result aliases. Retain durable plan/policy versions,
+revisions, approval, rubric, architecture-decision, risk, open-question,
+manifest, artifact, catalog, and provenance fields. They are data contracts,
+not a generic workflow engine.
 
 ## Boundary rules
 
