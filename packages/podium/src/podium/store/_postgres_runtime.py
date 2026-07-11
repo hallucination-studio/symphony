@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from ._postgres_records import (
@@ -303,7 +303,8 @@ class PgRuntimeMixin:
                 )
                 if row is None:
                     return None
-                if row["status"] != "leased" or int(row["fencing_token"] or 0) != fencing_token:
+                lease_expired = row["lease_expires_at"] is None or row["lease_expires_at"] <= datetime.now(timezone.utc)
+                if row["status"] != "leased" or int(row["fencing_token"] or 0) != fencing_token or lease_expired:
                     return {**_record_to_runtime_command(row), "_ack_error": "stale_runtime_command_lease"}
                 updated = await connection.fetchrow(
                     """

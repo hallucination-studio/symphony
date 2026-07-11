@@ -24,9 +24,8 @@ Current hard renames:
 - no Python package or CLI named `symphony`;
 - the worker CLI is `performer`;
 - runtime labels use `performer:*`;
-- durable Managed Run state is `managed_run/managed_run.db`; Performer output is
-  retained in per-instance `performer-NNNNNN.log` generations and per-attempt
-  `attempt.log` files;
+- durable workflow state is `workflow.db`; Performer output is retained in
+  per-attempt `performer.log` files;
 - Conductor data defaults to `.conductor`;
 - Conductor and Performer do not ship a local web console in this build. Conductor exposes the local daemon/API; Podium is the SaaS web boundary.
 
@@ -352,11 +351,10 @@ For Podium-managed flows, the real run must additionally follow `docs/real-run-t
 
 Focused regression files for this path include:
 
-- `tests/test_podium_runtime_onboarding.py`
-- `tests/test_conductor_podium_channels.py`
-- `tests/test_podium_conductor_channels.py`
-- `tests/test_podium_linear_polling.py`
-- `tests/test_no_podium_memory_state.py`
+- `tests/test_podium_runtime_polling.py`
+- `tests/test_conductor_workflow.py`
+- `tests/test_workflow_driver.py`
+- `tests/test_runtime_contract.py`
 
 Managed runs may create the initial issue and observe state. They must not manually:
 
@@ -368,23 +366,24 @@ Managed runs may create the initial issue and observe state. They must not manua
   paths;
 - claim success from fake Codex when real Codex was requested.
 
-## Managed Runs Acceptance Requirements
+## Workflow Acceptance Requirements
 
 For the Linear-native managed runs:
 
-- Conductor's durable managed-run store is the source of truth.
+- Conductor's durable `workflow.db` store is the source of truth.
 - One Conductor binds exactly one selected Linear project and one repository;
   one project has at most one active Conductor.
 - One delegated Linear parent issue maps to one managed run.
-- The accepted plan creates bounded work items with file scope, dependencies,
-  RED/GREEN commands, and a Definition-of-Done rubric.
-- Performer turns carry run id, work item id when applicable, policy revision,
-  plan version, lease id, and fencing token.
-- Work-item review verifies file impact, RED/GREEN evidence, acceptance
-  criteria, secrets, and checkpoint commands before marking Linear Done.
-- Linear projection includes run id, work item id, plan version, current managed-run
+- The accepted plan creates bounded ordered tasks with file scope, acceptance
+  criteria, and verification commands.
+- Performer turns carry run id, task id when applicable, attempt id, turn kind,
+  and fencing token.
+- Task review runs every declared command and one read-only Codex Gate before
+  marking the Linear Sub Issue Done. One failed Gate may rework once; the next
+  failure blocks the task and parent.
+- Linear projection includes run id, task id, plan version, current workflow
   state, gate status, operator status, and actionable sanitized failure reasons.
-- Managed-run human-action resumes only through recorded managed-run state; runtime
+- Workflow human-action resumes only through recorded workflow state; runtime
   approval/permission/tool-input waits resume through their recorded runtime wait
   channel, including `[Human Action]` child issues when that flow uses them.
 

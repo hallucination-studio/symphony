@@ -54,8 +54,7 @@ Managed execution is a Conductor-owned Linear-native managed run:
 
 Dispatch routing is based on Linear organization, stable project id, installed
 app user, selected scope, single-project Conductor binding, active state,
-blockers, work-item dependencies, and runtime capacity. Project labels and
-human assignee are not Managed Runs truth.
+and blockers. Project labels and human assignee are not workflow routing truth.
 
 ## Install
 

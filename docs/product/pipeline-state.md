@@ -2,10 +2,11 @@
 
 ## Authority
 
-Conductor's durable managed-run store is the execution source of truth. Linear
-is the operator projection and human-event surface. Podium supplies dispatches,
-runtime configuration, and reporting transport, but Conductor owns local run
-state, plan versions, work-item state, checkpoint results, and convergence.
+Conductor's durable `workflow.db` store is the execution source of truth.
+Linear is the operator projection and human-event surface. Podium supplies
+dispatches, runtime configuration, and reporting transport, but Conductor owns
+local run state, plan revisions, Sub Issue state, gate evidence, waits, and
+convergence.
 
 Every delegated Linear parent issue maps to one managed run. The run is resumed
 by `run_id`, parent issue id, or issue identifier; duplicate dispatches reuse
@@ -17,37 +18,30 @@ The store owns these objects:
 
 - `runs`: parent issue mapping, instance id, run state, active work item,
   backend session id, latest sanitized reason, timestamps, and plan version.
-- `plan_versions`: immutable accepted plan payloads.
-- `work_items`: current work-item lifecycle, accepted payload, verification
-  gate status, and latest structured result.
-- `checkpoint_results`: post-group verification command results.
-- `linear_projections`: parent/work-item issue mapping and projection metadata.
+- `plan_revisions`: immutable plan payloads with approval and policy revisions.
+- `tasks`: ordered Sub Issue lifecycle, latest execute result, and gate status.
+- `attempts`: fenced plan, execute, and gate turns.
+- `runtime_waits`: visible approval/permission/tool-input waits.
+- `gate_evidence` and `artifacts`: command evidence, rubric/provenance, and
+  artifact references.
 
 ## Run State
 
 Managed runs use these durable states:
 
 ```text
-queued
 planning
-projecting_plan
 awaiting_approval
-ready
 executing
-reviewing
-verified
 blocked
 failed
 done
 ```
 
-`ready` means Conductor may select the next dependency-ready work item or
-checkpoint. `awaiting_approval` means a planned human approval gate is blocking
-execution. `blocked` always carries `latest_reason` with a sanitized,
-operator-visible cause. `verified` means all active work items are Done or
-canceled by approved revision and all required checkpoints passed. `done` is
-allowed only after final Definition-of-Done evidence, residual risks, and the
-parent Linear summary are recorded.
+`awaiting_approval` means a planned human approval gate is blocking execution.
+`blocked` always carries `latest_reason` with a sanitized, operator-visible
+cause. `done` is allowed only after every ordered task passes its verification
+commands and the single Codex Gate, with the parent Linear summary recorded.
 
 ## Work-Item State
 
@@ -62,14 +56,8 @@ blocked
 cancelled
 ```
 
-Conductor selects one dependency-ready `todo` item at a time unless the accepted
-plan declares safe backend parallelism. A work item can start only when:
-
-- its dependencies are Done;
-- no required checkpoint is pending;
-- its file scope is present;
-- any `needs_human_approval` gate has been approved;
-- runtime capacity allows the turn.
+Conductor selects exactly one `todo` item at a time. A task can start only when
+its file scope is present and the runtime profile is available.
 
 `blocked` work items stay out of Done and expose their `gate_status` in durable
 state and Linear projection.
@@ -77,38 +65,34 @@ state and Linear projection.
 ## Plan Versions
 
 The first turn produces a structured plan and must not modify files. Conductor
-validates scope, dependency shape, RED/GREEN commands, acceptance criteria,
-parallelization policy, and Definition-of-Done rubric coverage before saving
-plan version `1`.
+validates scope, verification commands, acceptance criteria, and retained
+rubric metadata before saving plan revision `1`.
 
 Accepted plan versions are immutable. If execution needs a new file scope,
 dependency, acceptance criterion, or human decision, the backend requests a plan
 revision. Conductor saves the new plan version only after approval, resets the
 affected item to Todo, and marks removed work items `cancelled`.
 
-## Verification And Checkpoints
+## Verification And Gate
 
 Execution results are claims, not verdicts. Conductor verifies:
 
 - changed files are declared and planned;
 - undeclared changes are absent;
-- RED evidence was observed;
-- required GREEN commands ran;
-- acceptance criteria passed;
-- secret checks pass;
-- checkpoint commands pass after configured work-item groups.
+- every declared verification command passes;
+- the read-only Codex Gate returns `passed=true` and meets its threshold.
 
-Verification failure blocks the run with a concrete reason. Checkpoint failure
-blocks the run even when individual work items passed local checks.
+The first Gate failure allows one automatic rework. A second failure blocks the
+task and parent with a concrete reason.
 
 ## Recovery
 
 A restarted Conductor resumes from durable state:
 
-- Done and cancelled work items remain terminal;
-- checkpoint results remain authoritative;
-- the latest backend session id is reused when available;
-- the next non-terminal dependency-ready work item is selected;
+- Done tasks remain terminal;
+- gate evidence and waits remain authoritative;
+- the latest Codex thread id is reused when available;
+- the next non-terminal ordered task is selected;
 - blocked reasons remain visible until a real operator action or approved plan
   revision resolves them.
 

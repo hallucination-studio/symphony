@@ -296,7 +296,7 @@ class ConductorStore:
         policy_revision: int = 1,
         manifest_refs: list[str] | None = None,
     ) -> int:
-        attempt = self._attempt(run_id, attempt_id, fencing_token)
+        attempt = self._attempt(run_id, attempt_id, fencing_token, kind="plan")
         version = self.save_plan(
             run_id,
             plan,
@@ -439,7 +439,7 @@ class ConductorStore:
         return _attempt_dict(row) if row is not None else {}
 
     def record_execute(self, run_id: str, attempt_id: str, fencing_token: int, *, ready_for_gate: bool, result: dict[str, Any] | None = None) -> dict[str, Any]:
-        attempt = self._attempt(run_id, attempt_id, fencing_token)
+        attempt = self._attempt(run_id, attempt_id, fencing_token, kind="execute")
         now = _now()
         state = TaskState.IN_REVIEW.value if ready_for_gate else TaskState.BLOCKED.value
         run_state = RunState.EXECUTING.value if ready_for_gate else RunState.BLOCKED.value
@@ -455,8 +455,8 @@ class ConductorStore:
                 (state, reason, _dump(result or {}), now, run_id, attempt["task_id"]),
             )
             connection.execute(
-                "UPDATE runs SET state = ?, latest_reason = ?, updated_at = ? WHERE run_id = ?",
-                (run_state, reason, now, run_id),
+                "UPDATE runs SET state = ?, active_task_id = ?, latest_reason = ?, updated_at = ? WHERE run_id = ?",
+                (run_state, "" if run_state == RunState.DONE.value else attempt["task_id"], reason, now, run_id),
             )
         return self.get_task(run_id, attempt["task_id"]) or {}
 
@@ -471,7 +471,7 @@ class ConductorStore:
         threshold: int = 3,
         evidence: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        attempt = self._attempt(run_id, attempt_id, fencing_token)
+        attempt = self._attempt(run_id, attempt_id, fencing_token, kind="gate")
         now = _now()
         effective_passed = bool(passed and score >= threshold)
         with self.connect() as connection:
@@ -525,7 +525,7 @@ class ConductorStore:
             )
         return self.get_task(run_id, attempt["task_id"]) or {}
 
-    def _attempt(self, run_id: str, attempt_id: str, fencing_token: int) -> dict[str, Any]:
+    def _attempt(self, run_id: str, attempt_id: str, fencing_token: int, *, kind: str | None = None) -> dict[str, Any]:
         with self.connect() as connection:
             row = connection.execute(
                 "SELECT * FROM attempts WHERE run_id = ? AND attempt_id = ?",
@@ -533,6 +533,8 @@ class ConductorStore:
             ).fetchone()
         if row is None or int(row["fencing_token"]) != int(fencing_token):
             raise StaleAttemptError("stale_fencing_token")
+        if kind is not None and str(row["kind"]) != kind:
+            raise StaleAttemptError("attempt_kind_mismatch")
         return {key: row[key] for key in row.keys()}
 
     def _init_db(self) -> None:

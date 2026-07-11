@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import subprocess
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -68,6 +68,7 @@ class TurnBackend:
         return PlanTurn(str(getattr(result, "thread_id", "") or thread_id), Plan.from_dict(structured), events)
 
     async def execute(self, workspace: Path, task: Task, *, thread_id: str = "") -> ExecuteTurn:
+        before = _workspace_files(workspace)
         result = await self._run(
             workspace,
             prompt=_execute_prompt(task),
@@ -80,6 +81,12 @@ class TurnBackend:
         if wait is not None:
             return ExecuteTurn(str(getattr(result, "thread_id", "") or thread_id), None, events, wait)
         execute_result = ExecuteResult.from_dict(_structured_result(result))
+        changed = sorted(_workspace_files(workspace) - before)
+        undeclared = [path for path in changed if not _within_file_scope(path, task.files_likely_touched)]
+        if undeclared:
+            raise TurnBackendError(f"execute_turn_changed_file_outside_scope:{','.join(undeclared)}")
+        if changed and not execute_result.changed_files:
+            execute_result = replace(execute_result, changed_files=changed)
         return ExecuteTurn(str(getattr(result, "thread_id", "") or thread_id), execute_result, events)
 
     async def gate(
@@ -224,6 +231,15 @@ def _workspace_files(workspace: Path) -> set[str]:
     if completed.returncode != 0:
         return set()
     return {line[3:].strip() for line in completed.stdout.splitlines() if len(line) > 3 and line[3:].strip()}
+
+
+def _within_file_scope(path: str, declared: list[str]) -> bool:
+    normalized = path.strip().lstrip("./")
+    for candidate in declared:
+        scope = str(candidate).strip().lstrip("./").rstrip("/")
+        if normalized == scope or normalized.startswith(f"{scope}/"):
+            return True
+    return False
 
 
 __all__ = ["ExecuteTurn", "GateTurn", "PlanTurn", "TurnBackend", "TurnBackendError", "runtime_wait_from_events"]

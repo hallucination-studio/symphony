@@ -20,11 +20,11 @@ product paths.
    epochs, idempotency, dispatch rows, and resumable checkpoints.
 4. Podium matches the active installation, Linear organization, stable project
    id, app user, selected scope, single-project Conductor binding, active state,
-   blockers, and Managed Runs capacity.
+   and blockers.
 5. Podium idempotently queues one dispatch.
 6. The project's Conductor leases the dispatch over outbound runtime
    authentication.
-7. Conductor commits or resumes one durable managed run for the delegated issue.
+7. Conductor commits or resumes one durable workflow run for the delegated issue.
 
 Repeated polls cannot create duplicate dispatches, and a new dispatch for the
 same issue requires a durably observed redelegation. Dispatch routing never uses
@@ -52,15 +52,15 @@ Performer accepts only one-shot managed-run turns:
 .venv/bin/performer --turn-request-path /path/turn-request.json --turn-result-path /path/turn-result.json
 ```
 
-The turn request names `turn_kind` as `plan` or `work_item`. A plan turn returns
-a structured plan payload and does not change files. A work-item turn executes
-exactly one accepted work item and returns a structured `WorkItemResult`.
+The turn request names `turn_kind` as `plan`, `execute`, or `gate`. A plan turn
+returns a structured plan and does not change files. An execute turn changes
+one ordered task. A gate turn is read-only and returns one `GateResult`.
 
 Every request and result carries the same fenced turn context: `run_id`,
-`work_item_id` when applicable, `policy_revision`, `plan_version`, `lease_id`,
-`fencing_token`, and `turn_id`. Performer rejects an invalid request context and
-echoes the accepted context in its result. Conductor rejects a missing, stale, or
-mismatched result context before applying the result to durable work-item state.
+`task_id` when applicable, `attempt_id`, `fencing_token`, and `turn_kind`.
+Performer rejects an invalid request context and echoes the accepted context in
+its result. Conductor rejects a missing, stale, or mismatched result context
+before applying it to durable task state.
 
 Conductor prepares runtime homes, request files, result files, logs, leases, and
 fencing. Performer never leases dispatches, writes Linear directly, or decides
@@ -68,14 +68,11 @@ terminal managed-run state.
 
 ## Planning
 
-The planner receives the delegated issue, structured project context, current
-managed-run state, policy limits, and acceptance inputs. Its output is a proposal,
-not product fact.
+The planner receives the delegated issue and acceptance inputs. Its output is a
+proposal, not product fact.
 
-Before acceptance, Conductor validates the plan: work items must be bounded,
-acyclic, scoped to likely files, verifiable through RED/GREEN commands, safe in
-their parallelization claims, and covered by a complete Definition-of-Done
-rubric.
+Before acceptance, Conductor validates the plan: tasks must be bounded, ordered,
+scoped to likely files, and verifiable through declared commands.
 
 The accepted plan is immutable for execution. If implementation needs a new file
 scope, dependency, acceptance criterion, or human decision, the backend returns a
@@ -84,30 +81,23 @@ and keeps prior versions for audit.
 
 ## Execution
 
-Conductor selects the next dependency-ready work item. A work item becomes
-ready only when its dependencies are Done, its file scope is present, and
-runtime capacity is available.
+Conductor selects the next ordered task. A task becomes ready when its file
+scope is present and the runtime profile is available.
 
-The executor receives the work item, accepted plan version, likely touched
-files, RED command, GREEN commands, and any verified upstream outputs explicitly
-listed as inputs. It may modify implementation files within scope and report
-evidence. It cannot change plan topology, policy, verification verdicts, Linear
-terminal state, or durable managed-run state directly.
+The executor receives one accepted task, its likely touched files, acceptance
+criteria, and verification commands. It may modify implementation files within
+scope and report evidence. It cannot change plan topology, verification verdicts,
+Linear terminal state, or durable workflow state directly.
 
-Every result includes changed files, planned/unplanned classification,
-undeclared files, RED/GREEN evidence, acceptance results, blocker details, plan
-revision payload when applicable, and notes.
+Every result includes changed files, acceptance evidence, and blocker details.
 
 ## Verification
 
-Conductor independently verifies work-item results before moving a Linear child
-issue to Done. Verification checks file impact, declared scope, RED/GREEN
-evidence, acceptance criteria, secrets, checkpoint commands, and result schema.
+Conductor runs every declared verification command, then invokes one read-only
+Codex Gate before moving the Linear Sub Issue to Done. Gate evidence keeps the
+score, threshold, rubric, provenance, findings, and artifact references.
 
-Command verification uses a disposable worktree with mutation detection after
-gate execution. This is intentionally not OS-level read-only enforcement.
-
-Failed verification leaves the work item out of Done, records a sanitized
+Failed verification leaves the task out of Done, records a sanitized
 reason in durable state, logs it with correlation ids, and updates the relevant
 Linear projection.
 
@@ -123,10 +113,9 @@ projection, including `[Human Action]` child issues where that flow uses them.
 
 ## Completion
 
-A run is complete only when all active work items are Done or explicitly
-canceled by approved revision, checkpoints passed, final Definition-of-Done
-rubric is recorded, changed files and verification evidence are visible,
-residual risks are listed, and the Linear parent summary is current.
+A run is complete only when every ordered task is Done, gate evidence and
+artifacts are visible, residual risks are listed, and the Linear parent summary
+is current.
 
 Failures are handled only when the sanitized reason appears in durable state,
 operator logs, and the relevant Linear projection.
