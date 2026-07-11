@@ -87,3 +87,22 @@ def test_stale_attempt_cannot_change_task_state(tmp_path, minimal_plan) -> None:
         workflow.record_execute(run["run_id"], attempt["attempt_id"], attempt["fencing_token"] - 1, ready_for_gate=True)
 
     assert workflow.store.get_task(run["run_id"], task["task_id"])["state"] == TaskState.IN_PROGRESS.value
+
+
+def test_runtime_wait_is_durable_and_can_resume_once_reopened(tmp_path) -> None:
+    workflow = Workflow(ConductorStore(tmp_path / "workflow.db"))
+    run = workflow.accept_parent("parent-1", "APP-1", instance_id="instance-1")
+    attempt = workflow.start_plan(run["run_id"])
+
+    workflow.record_runtime_wait(
+        run["run_id"],
+        attempt["attempt_id"],
+        attempt["fencing_token"],
+        kind="approval_requested",
+        reason="Approve the tool call",
+    )
+
+    assert workflow.store.get_run(run["run_id"])["state"] == RunState.BLOCKED.value
+    assert workflow.resume_runtime_wait(run["run_id"]) is True
+    assert workflow.store.get_run(run["run_id"])["state"] == RunState.PLANNING.value
+    assert workflow.store.list_runtime_waits(run["run_id"])[0]["state"] == "resolved"

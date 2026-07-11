@@ -46,6 +46,11 @@ class WorkflowDriver:
             raise RuntimeError("managed_run_instance_missing")
         if state == "awaiting_approval":
             return await self._resume_approved_plan(run, instance)
+        if state == "blocked" and str(run.get("latest_reason") or "").startswith("runtime_wait:"):
+            if await self._runtime_wait_reopened(run, instance):
+                refreshed = self.store.get_run(str(run["run_id"])) or run
+                return await self._drive_run(refreshed)
+            return {}
         if int(run.get("plan_version") or 0) == 0:
             return await self._plan(run, instance)
         if state != "executing":
@@ -284,6 +289,29 @@ class WorkflowDriver:
         )
         await proxy.comment_issue(str(run["parent_issue_id"]), "Plan approval observed from Linear; sequential execution resumed.")
         return {"applied": 1}
+
+    async def _runtime_wait_reopened(self, run: dict[str, Any], instance: Any) -> bool:
+        waits = [wait for wait in self.store.list_runtime_waits(str(run["run_id"])) if wait.get("state") == "open"]
+        if not waits:
+            return False
+        wait = waits[-1]
+        issue_id = str(run["parent_issue_id"])
+        task_id = str(wait.get("task_id") or "")
+        if task_id:
+            task = self.store.get_task(str(run["run_id"]), task_id) or {}
+            issue_id = str(task.get("linear_issue_id") or issue_id)
+        issue = await self.service._managed_run_tracker(instance).fetch_issue(issue_id)
+        state = issue.get("state") if isinstance(issue.get("state"), dict) else {}
+        state_name = str(state.get("name") or "").lower()
+        if state_name in {"blocked", "backlog", "canceled", "cancelled"}:
+            return False
+        resumed = self.workflow.resume_runtime_wait(str(run["run_id"]))
+        if resumed:
+            await self.service._managed_run_tracker(instance).comment_issue(
+                issue_id,
+                "Runtime wait reopened from Linear; the fenced turn will resume on the next polling cycle.",
+            )
+        return resumed
 
     async def _project_task_state(self, run: dict[str, Any], instance: Any, task: dict[str, Any], target: str) -> None:
         issue_id = str(task.get("linear_issue_id") or "")

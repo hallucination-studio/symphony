@@ -50,6 +50,9 @@ class Workflow:
     ) -> None:
         self.store.record_runtime_wait(run_id, attempt_id, fencing_token, kind=kind, reason=reason)
 
+    def resume_runtime_wait(self, run_id: str) -> bool:
+        return self.store.resume_runtime_wait(run_id)
+
     def approve_plan(self, run_id: str, version: int, *, approval_id: str) -> None:
         self.store.approve_plan(run_id, version, approval_id=approval_id)
 

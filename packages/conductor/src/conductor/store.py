@@ -338,6 +338,43 @@ class ConductorStore:
             ).fetchall()
         return [{key: row[key] for key in row.keys()} for row in rows]
 
+    def resume_runtime_wait(self, run_id: str) -> bool:
+        now = _now()
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            waits = connection.execute(
+                "SELECT * FROM runtime_waits WHERE run_id = ? AND state = 'open' ORDER BY created_at",
+                (run_id,),
+            ).fetchall()
+            if not waits:
+                return False
+            for wait in waits:
+                connection.execute(
+                    "UPDATE runtime_waits SET state = 'resolved' WHERE wait_id = ?",
+                    (wait["wait_id"],),
+                )
+                connection.execute(
+                    "UPDATE attempts SET state = ?, updated_at = ? WHERE run_id = ? AND task_id = ? AND state = 'waiting'",
+                    (AttemptState.RUNNING.value, now, run_id, wait["task_id"]),
+                )
+                if wait["task_id"]:
+                    gate_wait = connection.execute(
+                        "SELECT 1 FROM attempts WHERE run_id = ? AND task_id = ? AND kind = 'gate' AND state = 'running' LIMIT 1",
+                        (run_id, wait["task_id"]),
+                    ).fetchone()
+                    state = TaskState.IN_REVIEW.value if gate_wait else TaskState.IN_PROGRESS.value
+                    connection.execute(
+                        "UPDATE tasks SET state = ?, updated_at = ? WHERE run_id = ? AND task_id = ?",
+                        (state, now, run_id, wait["task_id"]),
+                    )
+            run = connection.execute("SELECT plan_version FROM runs WHERE run_id = ?", (run_id,)).fetchone()
+            next_state = RunState.PLANNING.value if not run or int(run["plan_version"] or 0) == 0 else RunState.EXECUTING.value
+            connection.execute(
+                "UPDATE runs SET state = ?, latest_reason = 'runtime_wait_resumed', updated_at = ? WHERE run_id = ?",
+                (next_state, now, run_id),
+            )
+        return True
+
     def start_task(self, run_id: str, task_id: str) -> dict[str, Any]:
         now = _now()
         with self.connect() as connection:
