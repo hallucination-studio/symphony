@@ -1,0 +1,99 @@
+# Module baseline: `podium`
+
+Status: proposed baseline, 2026-07-11.
+
+## Responsibility
+
+Podium is the SaaS control plane and BFF. It retains all customer-facing
+Linear, authentication, onboarding, binding, dispatch, proxy, health, and
+operator-view behavior. It is the only service that holds Linear application
+and user tokens, and it injects them server-side into proxy requests.
+
+The simplification is inside the runtime channel and persistence shape. It does
+not remove a Linear business flow or change the Web's visible onboarding and
+managed-run behavior.
+
+## Business behavior that remains fixed
+
+- Session auth, PKCE/state, default and customer-owned Linear applications,
+  actor/scope validation, refresh, reconnect, revoke, and cutover.
+- Selected projects, full cursor pagination, polling checkpoints, delegation
+  epochs, dispatch deduplication, blockers, project-scoped routing, and
+  `symphony:conductor/<Name>-<public-id>` labels.
+- Conductor enrollment, one active binding per project, replacement rules,
+  proxy calls, health, smoke action, PostgreSQL transactions/CAS/advisory locks,
+  and sanitized browser responses.
+- Managed-runs response fields consumed by the Web: conductor/project/binding/
+  runtime group presentation, policy revision, profiles, run id/issue/state,
+  active task, latest reason, plan version, thread id, work items, task state,
+  likely files, and gate status.
+
+`policy_revision=1`, `plan_version=1`, and an empty `profiles` object are
+presentation values for the minimal design, not a return of policy/profile
+registries.
+
+## Runtime HTTP contract
+
+The authenticated runtime API is polling-only:
+
+```text
+POST /api/v1/runtime/dispatches/lease
+POST /api/v1/runtime/dispatches/ack
+POST /api/v1/runtime/commands/lease
+POST /api/v1/runtime/commands/ack
+POST /api/v1/runtime/report
+```
+
+Dispatch lease/ack keeps the existing routing and deduplication semantics.
+Command lease/ack is the single delivery path for the Web-required control
+operations:
+
+```text
+project.configure
+project.unconfigure
+project.prepare_installation
+project.activate_installation
+smoke.check
+```
+
+Commands are `queued | leased | completed | failed`, leased for five minutes,
+and fenced by an integer token. Leasing selects the oldest queued or expired
+command transactionally. A stale ack returns `409` and changes nothing. The
+runtime report is authoritative for observed binding state and includes the
+current sanitized log tail and small local Codex configuration summary.
+
+## Explicit removals
+
+Delete the WebSocket route, registration, tasks, presence/wake path, install
+`websocket_url`, `podium_ws_url`, WS dependencies, `dispatch.available`, the
+in-memory dispatch queue, `human.answered`, historical `log.fetch`/log-chunk
+transport, and duplicate smoke outbox/retry layers. Delete the runtime policy,
+profile, and config table once the report can supply the retained presentation
+fields. Remove `runtime_groups` as an independent ownership table; migrate its
+stable id into the Conductor/binding record without dropping customer data.
+
+The Web still reads its current routes and report shape. Removing an unused
+transport is not permission to remove a visible Web action or error state.
+
+## Data and security baseline
+
+PostgreSQL user, session, Linear installation, selected-project, Conductor, and
+binding data migrates in place. Runtime command rows and dispatch rows have
+transactional lease/fence fields. Secrets never enter reports, logs, Linear,
+browser responses, or install scripts. Errors retain category and actionable
+summary after sanitization.
+
+## Migration and exit gate
+
+1. Add command lease/expiry/reclaim/ack/fence contract coverage.
+2. Move smoke result validation into command ack and make report state
+   authoritative.
+3. Switch Conductor to report -> command -> dispatch polling.
+4. Remove WS/config/log-fetch/runtime-group/policy/profile sources and update
+   generated install output without changing onboarding intent.
+5. Re-run OAuth, pagination/checkpoint/epoch, dispatch, binding, label, proxy,
+   cutover, health, smoke, and secret-boundary behavior checks.
+
+The baseline is complete when a fresh runtime can enroll, bind, receive smoke
+and project commands, lease a parent dispatch, and report failures without any
+WebSocket or direct-token path remaining.

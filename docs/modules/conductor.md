@@ -1,0 +1,114 @@
+# Module baseline: `conductor`
+
+Status: proposed baseline, 2026-07-11.
+
+## Responsibility
+
+Conductor is the customer-side daemon for exactly one Linear project and one
+repository. It leases dispatched parent issues over HTTP, keeps the local
+workflow durable, launches Performer turns, creates and updates Linear child
+issues, runs acceptance gates, and reports a sanitized view to Podium. It is
+the only local process manager for Performer.
+
+Conductor does not own customer OAuth, Linear application credentials, browser
+routes, multi-project scheduling, or a general workflow platform. Linear calls
+go through Podium's authenticated proxy; the daemon never stores a direct
+Linear token.
+
+## Target surface
+
+```text
+conductor/
+  __init__.py
+  cli.py          # installed entrypoint and local process setup
+  api.py          # retained local API surface
+  models.py       # settings, instance, run, task, attempt, wait
+  store.py        # one SQLite database and transactions
+  service.py      # composition root and one bounded background tick
+  podium.py       # HTTP report, command, dispatch, config, smoke calls
+  linear.py       # proxy operations for parent, child, state, comment, wait
+  workflow.py     # the only sequential state machine
+  gate.py         # command checks and boolean gate input
+  runtime.py      # Performer process, CODEX_HOME, logs, fencing
+```
+
+The current coordinator/driver/projection/store/artifact/verifier/join/
+checkpoint/human-action mixin graph is replaced, not wrapped. Necessary logic
+moves once into the owner above; old files and compatibility facades disappear.
+
+## Canonical workflow
+
+```text
+planning -> executing -> blocked | failed | done
+todo -> in_progress -> in_review -> blocked | done
+running -> waiting | succeeded | failed | stale
+```
+
+The service tick is bounded and idempotent:
+
+1. Send a runtime report when due.
+2. Lease and acknowledge at most one Podium control command.
+3. Lease and acknowledge at most one parent dispatch.
+4. Advance the local workflow once.
+5. Sleep with bounded backoff and jitter.
+
+For a new parent, Conductor obtains one ordered plan, validates it, creates one
+real Linear sub-issue per task with an explicit parent relationship, and stores
+the Linear ids. It executes only the first unfinished child. A child is not
+Done until all declared verification commands pass and a separate read-only
+Codex gate returns `passed=true`. One failed gate may trigger one rework attempt;
+the next failure blocks the child and parent with a concrete next action. The
+parent becomes Done only after every child is Done.
+
+## Durable store baseline
+
+The replacement local database contains only the tables needed to recover the
+flow:
+
+| Table | Purpose |
+|---|---|
+| `settings` | Bound project/repository and runtime configuration |
+| `instance` | Conductor identity, lease/presence and current report metadata |
+| `runs` | Parent issue, state, plan summary, current task and latest failure |
+| `tasks` | Ordered child issue id, task contract, state, gate status, rework count |
+| `attempts` | Fenced plan/execute/gate invocation and result metadata |
+| `runtime_waits` | Codex/runtime approval wait and resume key |
+
+Writes that advance a state, accept a result, or create a child are
+transactional and idempotent. A restarted daemon reuses the same run and child
+ids. A stale fencing token changes no current state.
+
+## Linear projection baseline
+
+`linear.py` owns only the concrete operations required by the flow: read the
+parent, create/update ordered children, set states, add concise plan/gate/error
+comments, read the project label, and create/resume a `[Human Action]` runtime
+wait issue when Codex requires operator input. It verifies `parent { id
+identifier }` explicitly and never infers hierarchy from title or comments.
+
+Dependency relations, branch/join metadata, plan revisions, integration
+conflict children, gate/evidence-only issue trees, arbitrary comment commands,
+and graph readiness are removed.
+
+## Runtime and failure baseline
+
+`runtime.py` starts the installed Performer command, stages the isolated runtime
+home, captures stdout/stderr, records heartbeats, and validates the exact
+context/fence on result collection. All failures carry
+`error_code`, `sanitized_reason`, `action_required`, `retryable`, and
+`next_action` in SQLite, logs, Linear, and the Podium report. Logs are
+single-line structured events with run/task/attempt/fence correlation.
+
+## Migration and exit gate
+
+1. Archive existing local Managed Run databases; do not silently reinterpret
+   their expanded state machine as the new one.
+2. Add restart, idempotency, child-parent, gate/rework, parent completion,
+   runtime-wait, and stale-result tests.
+3. Build the eleven owners and switch the CLI composition root.
+4. Delete the old module family, unused tables, migrations, exports, and
+   compatibility paths.
+
+The baseline is complete when one Conductor tick can be followed end-to-end in
+`service.py`, every child is a real Linear sub-issue, gates are boolean and
+fenced, and no DAG/parallel/branch/join concept is present in code or schema.
