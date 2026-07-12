@@ -3,13 +3,18 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import dataclass
+import logging
 import random
 from typing import Any
 from urllib.parse import parse_qs
 
 from .conductor_models import InstanceCreateRequest, InstancePatchRequest, InstanceRecord
 from .conductor_service import ConductorService, ConductorServiceError
+from .conductor_smoke_protocol import sanitize_reason
 from .podium_client import PodiumRuntimeClient
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -54,21 +59,35 @@ class ConductorApiServer:
         delay = 1.0
         while True:
             try:
-                await self.service.post_podium_report()
-                result = await self.service.poll_podium_dispatch_once()
+                result = await self._poll_once()
                 if result.get("reason") == "runtime_unauthorized":
                     await asyncio.sleep(60)
                     continue
-                await PodiumRuntimeClient(self.service).poll_command_once()
-                await self.service.coordinate_background_once()
                 self._report_tick += 1
                 if self._report_tick >= 10:
                     self._report_tick = 0
                     await self.service.post_podium_report()
                 delay = 1.0
-            except Exception:
+            except Exception as exc:
+                LOGGER.error(
+                    "event=conductor_podium_poll_failed error_type=%s error_code=podium_poll_failed "
+                    "sanitized_reason=%s action_required=inspect_conductor_log retryable=true next_action=retry_poll",
+                    exc.__class__.__name__,
+                    sanitize_reason(exc),
+                )
                 delay = min(max(delay * 2, 5), 60)
             await asyncio.sleep(_jitter(delay))
+
+    async def _poll_once(self) -> dict[str, Any]:
+        await self.service.post_podium_report()
+        command = await PodiumRuntimeClient(self.service).poll_command_once()
+        if command.get("reason") == "runtime_unauthorized":
+            return command
+        dispatch = await self.service.poll_podium_dispatch_once()
+        if dispatch.get("reason") == "runtime_unauthorized":
+            return dispatch
+        await self.service.coordinate_background_once()
+        return dispatch
 
     async def _handle_connection(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:

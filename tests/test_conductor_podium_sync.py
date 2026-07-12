@@ -9,6 +9,7 @@ from conductor.conductor_podium_sync import ConductorPodiumSyncMixin
 from conductor.conductor_podium_sync_smoke import PodiumSmokeCheckMixin
 from conductor.conductor_smoke_protocol import normalize_smoke_command
 from conductor.conductor_service_types import CoordinationCadence
+from conductor.conductor_api import ConductorApiServer
 
 
 class _SmokeProxy:
@@ -76,3 +77,37 @@ async def test_background_tick_runs_due_project_label_sync(monkeypatch: pytest.M
 
     assert service.sync_calls == 1
     assert result.project_labels_synced == 1
+
+
+@pytest.mark.anyio
+async def test_podium_tick_reports_then_handles_command_dispatch_and_workflow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    class FakeService:
+        async def post_podium_report(self) -> dict[str, str]:
+            calls.append("report")
+            return {"status": "ok"}
+
+        async def poll_podium_dispatch_once(self) -> dict[str, str]:
+            calls.append("dispatch")
+            return {"status": "idle"}
+
+        async def coordinate_background_once(self) -> dict[str, str]:
+            calls.append("workflow")
+            return {"status": "ok"}
+
+    class FakeClient:
+        def __init__(self, _service: FakeService) -> None:
+            pass
+
+        async def poll_command_once(self) -> dict[str, str]:
+            calls.append("command")
+            return {"status": "idle"}
+
+    monkeypatch.setattr("conductor.conductor_api.PodiumRuntimeClient", FakeClient)
+
+    await ConductorApiServer(FakeService())._poll_once()
+
+    assert calls == ["report", "command", "dispatch", "workflow"]
