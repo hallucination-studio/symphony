@@ -1,5 +1,10 @@
 # Real flow
 
+The agent-facing staged design and acceptance rubric is
+[`real-e2e-design.md`](real-e2e-design.md). It defines the OAuth, Linear,
+Performer, and Overall phases, the existing code/test entrypoints they may
+call, and the evidence required before claiming an MVP pass.
+
 `tools/real_flow.py` is the only supported real-flow entrypoint. It is a small
 preflight/observation runner, not a scenario registry or a second acceptance
 system.
