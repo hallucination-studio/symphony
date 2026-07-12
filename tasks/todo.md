@@ -91,7 +91,7 @@ checklist is the active scope ledger;
 
 ## Verification status
 
-- [x] `make test` — 112 Python tests passed, including the full success closure,
+- [x] `make test` — 113 Python tests passed, including the full success closure,
       Gate rework/block, duplicate/stale result, and runtime redaction cases.
 - [x] `cd packages/podium/web && npm run test && npm run lint && npm run
       design:lint && npm run build` — 27 Web tests passed; lint/build clean
@@ -99,9 +99,10 @@ checklist is the active scope ledger;
 - [x] `tools/real_flow.py --offline` — staged Codex seed preflight passed;
       report: `.test-real-flow/mvp-offline-report.json`.
 - [x] MVP acceptance closure evidence for duplicate/stale result handling and
-      runtime wait/failure/log redaction is covered by the 111-test suite.
-- [ ] Real Linear/OAuth/Codex product flow — blocked by `401 Unauthorized` for
-      both configured Linear credential paths; sanitized report:
+      runtime wait/failure/log redaction is covered by the 113-test suite.
+- [ ] Real Linear/OAuth/Codex product flow — blocked before external mutation
+      because the sourced `.env` has no `SYMPHONY_E2E_PROJECT_SLUG` or
+      `SYMPHONY_E2E_PODIUM_URL`; the sanitized preflight report is
       `.test-real-flow/mvp-real-report.json`.
 
 ## Stop conditions

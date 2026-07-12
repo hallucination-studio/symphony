@@ -47,6 +47,9 @@ class LinearFixture:
             )
             response.raise_for_status()
             payload = response.json()
+        except httpx.HTTPStatusError as exc:
+            status_code = exc.response.status_code if exc.response is not None else 0
+            raise LinearFixtureError(f"linear_request_failed:http_{status_code}") from exc
         except (httpx.HTTPError, ValueError) as exc:
             raise LinearFixtureError(f"linear_request_failed:{type(exc).__name__}") from exc
         if not isinstance(payload, dict):

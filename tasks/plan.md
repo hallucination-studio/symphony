@@ -106,9 +106,10 @@ HTTP API is separate from that transport.
    tree is allowed.
 2. Resolve the Gate threshold rule explicitly before changing its behavior.
 3. Run a scoped real Linear/OAuth/Codex product flow after the local rebuild.
-   The staged Codex preflight passes, but the current environment's Linear
-   credentials return `401 Unauthorized`; `.test-real-flow/mvp-real-report.json`
-   records the sanitized blocker. `tools/real_flow.py` remains a strict
+   The staged Codex preflight passes, but the sourced environment has no
+   project slug or Podium URL; `.test-real-flow/mvp-real-report.json` records
+   the sanitized preflight blocker.
+   `tools/real_flow.py` remains a strict
    preflight/observation tool, not proof of a complete external flow.
 
 ## Verification Rule
