@@ -10,8 +10,12 @@ Prepare a fixed staged Codex seed (never `~/.codex`) and set:
 export SYMPHONY_E2E_CODEX_HOME_SEED=/path/to/staged-seed
 export SYMPHONY_E2E_PROJECT_SLUG=MYPROJECT
 export SYMPHONY_E2E_PODIUM_URL=https://podium.example
-export LINEAR_API_KEY=...
 ```
+
+The read-only project preflight uses `LINEAR_API_KEY` when set, otherwise the
+existing `PODIUM_LINEAR_APP_ACCESS_TOKEN` from the sourced environment. It
+never writes either credential to the report or passes it to the managed
+Conductor/Performer path.
 
 Run offline preflight first:
 

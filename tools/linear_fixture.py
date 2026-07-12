@@ -28,9 +28,9 @@ class LinearFixture:
 
     @classmethod
     def from_environment(cls, *, timeout: float = 20.0) -> "LinearFixture":
-        key = os.environ.get("LINEAR_API_KEY", "").strip()
+        key = (os.environ.get("LINEAR_API_KEY") or os.environ.get("PODIUM_LINEAR_APP_ACCESS_TOKEN", "")).strip()
         if not key:
-            raise LinearFixtureError("LINEAR_API_KEY is required for a real flow")
+            raise LinearFixtureError("LINEAR_API_KEY or PODIUM_LINEAR_APP_ACCESS_TOKEN is required for a real flow")
         return cls(
             key,
             os.environ.get("LINEAR_GRAPHQL_ENDPOINT", DEFAULT_ENDPOINT).strip() or DEFAULT_ENDPOINT,
@@ -65,8 +65,8 @@ class LinearFixture:
     def project(self, slug: str) -> dict[str, Any]:
         data = self.graphql(
             """
-            query($slug: String!) { projects(filter: {slug: {eq: $slug}}, first: 1) {
-              nodes { id name slug team { id } }
+            query($slug: String!) { projects(filter: {slugId: {eq: $slug}}, first: 1) {
+              nodes { id name slugId team { id } }
             } }
             """,
             {"slug": slug},
