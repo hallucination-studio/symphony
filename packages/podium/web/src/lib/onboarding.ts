@@ -89,19 +89,13 @@ export function isOnboardingComplete(progress: OnboardingProgress): boolean {
 export function deriveSteps(progress: OnboardingProgress): DerivedStep[] {
   const completed = new Set(progress.completed_steps);
   const current = progress.current_step;
-  let seenCurrent = false;
 
   return STEP_DEFS.map((def) => {
-    let status: OnboardingStepStatus;
+    let status: OnboardingStepStatus = "not_started";
     if (completed.has(def.key)) {
       status = "completed";
     } else if (def.key === current) {
       status = "in_progress";
-      seenCurrent = true;
-    } else if (!seenCurrent) {
-      status = "not_started";
-    } else {
-      status = "not_started";
     }
     return {
       key: def.key,
