@@ -93,6 +93,7 @@ mutation ManagedRunCreateChild(
       title
       description
       url
+      parent { id identifier }
       delegate { id }
       labels { nodes { name } }
     }
@@ -113,7 +114,10 @@ mutation ManagedRunCreateChild(
         issue = result.get("issue") if isinstance(result, dict) else {}
         if not result.get("success") or not isinstance(issue, dict) or not issue.get("id"):
             raise LinearProxyError("linear_issue_create_failed", "Linear issueCreate returned success=false")
-        return _normalize_issue(issue)
+        child = _normalize_issue(issue)
+        if child.get("parent_issue_id") != parent_issue_id:
+            raise LinearProxyError("linear_child_parent_mismatch", "Linear issueCreate returned a child under another parent")
+        return child
 
     async def transition_issue(self, issue_id: str, state_id: str) -> dict[str, Any]:
         payload = await self.graphql(
