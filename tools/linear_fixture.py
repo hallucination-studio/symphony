@@ -96,6 +96,75 @@ class LinearFixture:
         project["team"] = {"id": str(first_team.get("id"))} if first_team and first_team.get("id") else None
         return project
 
+    def workflow_states(self, team_id: str) -> list[dict[str, str]]:
+        data = self.graphql(
+            """
+            query($teamId: ID!) { workflowStates(first: 100, filter: {team: {id: {eq: $teamId}}}) {
+              nodes { id name type }
+            } }
+            """,
+            {"teamId": team_id},
+        )
+        nodes = ((data.get("workflowStates") or {}).get("nodes") or [])
+        return [
+            {
+                "id": str(node.get("id") or ""),
+                "name": str(node.get("name") or ""),
+                "type": str(node.get("type") or ""),
+            }
+            for node in nodes
+            if isinstance(node, dict) and node.get("id")
+        ]
+
+    def create_parent_issue(
+        self,
+        *,
+        team_id: str,
+        project_id: str,
+        state_id: str,
+        title: str,
+        description: str,
+        delegate_id: str | None = None,
+    ) -> dict[str, Any]:
+        data = self.graphql(
+            """
+            mutation($teamId: String!, $projectId: String!, $stateId: String!,
+              $title: String!, $description: String!, $delegateId: String) {
+              issueCreate(input: {
+                teamId: $teamId,
+                projectId: $projectId,
+                stateId: $stateId,
+                title: $title,
+                description: $description,
+                parentId: null,
+                delegateId: $delegateId
+              }) {
+                success
+                issue {
+                  id identifier title
+                  parent { id identifier }
+                  delegate { id }
+                }
+              }
+            }
+            """,
+            {
+                "teamId": team_id,
+                "projectId": project_id,
+                "stateId": state_id,
+                "title": title,
+                "description": description,
+                "delegateId": delegate_id,
+            },
+        )
+        result = (data.get("issueCreate") or {})
+        issue = result.get("issue") if isinstance(result, dict) else None
+        if not result.get("success") or not isinstance(issue, dict) or not issue.get("id"):
+            raise LinearFixtureError("linear_issue_create_failed")
+        if issue.get("parent") is not None:
+            raise LinearFixtureError("linear_parent_parent_mismatch")
+        return dict(issue)
+
     def issue(self, issue_id: str) -> dict[str, Any]:
         data = self.graphql(
             "query($id: String!) { issue(id: $id) { id identifier title state { name } parent { id identifier } } }",
