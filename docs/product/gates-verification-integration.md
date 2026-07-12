@@ -7,7 +7,8 @@ a second scheduler and it is not a cross-model review.
 
 The gate receives the task contract, actual changed files, acceptance criteria,
 declared verification commands, and the execute result. Conductor runs every
-command exactly once and stores its exit code and sanitized tail. It then sends
+command exactly once and stores its exit code and bounded, sanitized output
+excerpt. It then sends
 that evidence to one read-only Codex Gate turn.
 
 ## Pass rule
@@ -19,8 +20,9 @@ passed = all verification commands passed
 ```
 
 The Codex result keeps the retained score, rubric rows, threshold, weights,
-provenance, findings, acceptance-catalog id, manifest references, and artifact
-references. These are evidence fields on the gate, not a separate verifier
+findings, acceptance-catalog id, manifest references, and artifact references.
+Conductor binds the provenance to its actual Codex Gate attempt. These are
+evidence fields on the gate, not a separate verifier
 framework. A gate turn that changes files fails closed.
 
 ## Rework and failure

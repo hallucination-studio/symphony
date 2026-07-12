@@ -14,7 +14,13 @@ from podium.linear_reconciliation import BindingScanResult, LinearReconciler
 from podium.linear_reconciliation_model import active_blocker_ids
 from podium.podium_dispatch import PodiumDispatchMixin
 from podium.podium_routes_runtime_proxy import _ready_proxy_binding_or_error
-from podium.podium_routes_runtime_ops import _MAX_RUNTIME_REPORT_BYTES, _managed_run_report, register_runtime_ops_routes
+from podium.podium_routes_runtime_ops import (
+    ManagedRunReportError,
+    _MAX_RUNTIME_REPORT_BYTES,
+    _managed_run_report,
+    _normalize_gate_summary,
+    register_runtime_ops_routes,
+)
 from podium.podium_smoke_checks import PodiumSmokeChecksMixin
 from podium.store._postgres_dispatch import DISPATCH_INSERT_SQL, LEASE_DISPATCH_SQL, _dispatch_values
 from podium.store._postgres_schema_statements import POSTGRES_SCHEMA_STATEMENTS
@@ -107,6 +113,34 @@ def runtime_app(runtime_state: FakeRuntimeState) -> FastAPI:
         error_response=error_response,
     )
     return app
+
+
+@pytest.mark.parametrize(
+    "gate",
+    [
+        {"passed": True, "score": 2, "threshold": 3, "commands": {"passed": 1, "total": 1}, "failure_code": ""},
+        {"passed": True, "score": 4, "threshold": 3, "commands": {"passed": 0, "total": 1}, "failure_code": ""},
+        {"passed": True, "score": 4, "threshold": 3, "commands": {"passed": 1, "total": 1}, "failure_code": "codex_gate_failed"},
+        {"passed": False, "score": 4, "threshold": 3, "commands": {"passed": 0, "total": 1}, "failure_code": "codex_gate_failed"},
+        {"passed": False, "score": 4, "threshold": 3, "commands": {"passed": 2, "total": 1}, "failure_code": "verification_command_failed"},
+    ],
+)
+def test_gate_summary_rejects_inconsistent_verdicts(gate: dict[str, Any]) -> None:
+    value = {
+        "passed": False,
+        "score": 2,
+        "threshold": 3,
+        "plan_version": 1,
+        "manifest_count": 0,
+        "commands": {"passed": 0, "total": 1},
+        "rubric": [],
+        "provenance": [],
+        "artifact_count": 0,
+        "failure_code": "verification_command_failed",
+    } | gate
+
+    with pytest.raises(ManagedRunReportError):
+        _normalize_gate_summary(value)
 
 
 @pytest.mark.anyio
@@ -214,12 +248,37 @@ async def test_runtime_report_keeps_only_a_bound_sanitized_managed_run_view(
                             "latest_reason": "authorization: Bearer live-token",
                             "plan_version": 2,
                             "backend_session_id": "thread-1",
+                            "acceptance": {
+                                "catalog": {
+                                    "id": "catalog-1",
+                                    "rubric": [{"id": "correctness", "weight": 2, "threshold": 3, "token": "catalog-secret"}],
+                                },
+                                "manifest_count": 1,
+                                "manifest_refs": ["manifest://run-1/secret-path"],
+                            },
                             "untrusted": {"access_token": "live-token"},
                             "work_items": [
                                 {
                                     "work_item_id": "implement login",
                                     "state": "in_progress",
                                     "gate_status": "execute_started",
+                                    "gate": {
+                                        "passed": True,
+                                        "score": 4,
+                                        "threshold": 3,
+                                        "plan_version": 2,
+                                        "catalog": {
+                                            "id": "catalog-1",
+                                            "rubric": [{"id": "correctness", "weight": 2, "threshold": 3}],
+                                        },
+                                        "manifest_count": 1,
+                                        "commands": {"passed": 1, "total": 1, "output": "output-secret"},
+                                        "rubric": [{"id": "correctness", "score": 4, "weight": 2, "finding": "rubric-secret"}],
+                                        "provenance": [{"source": "codex", "attempt_id": "attempt-1", "token": "provenance-secret"}],
+                                        "artifact_count": 1,
+                                        "failure_code": "",
+                                        "findings": ["finding-secret"],
+                                    },
                                     "payload": {
                                         "title": "Implement endpoint",
                                         "objective": r'{"access_token":"part\"unit-secret","authorization":"Bearer second-secret","accessToken":"third-secret","client-secret":"fourth-secret"}',
@@ -257,6 +316,22 @@ async def test_runtime_report_keeps_only_a_bound_sanitized_managed_run_view(
                                 "work_item_id": "implement login",
                                 "state": "in_progress",
                                 "gate_status": "execute_started",
+                                "gate": {
+                                    "passed": True,
+                                    "score": 4,
+                                    "threshold": 3,
+                                    "plan_version": 2,
+                                    "catalog": {
+                                        "id": "catalog-1",
+                                        "rubric": [{"id": "correctness", "weight": 2, "threshold": 3}],
+                                    },
+                                    "manifest_count": 1,
+                                    "commands": {"passed": 1, "total": 1},
+                                    "rubric": [{"id": "correctness", "score": 4, "weight": 2}],
+                                    "provenance": [{"source": "codex", "attempt_id": "attempt-1"}],
+                                    "artifact_count": 1,
+                                    "failure_code": "",
+                                },
                                 "payload": {
                                     "title": "Implement endpoint",
                                     "objective": "{access_token=[REDACTED],authorization=[REDACTED],accessToken=[REDACTED],client-secret=[REDACTED]}",
@@ -358,7 +433,20 @@ async def test_runtime_report_rejects_nonstring_visible_fields(
                                 {
                                     "work_item_id": "task-1",
                                     "state": "in_progress",
-                                    "payload": {"title": {"secret": "unit-secret"}},
+                                    "gate": {
+                                        "passed": True,
+                                        "score": 4,
+                                        "threshold": 3,
+                                        "plan_version": 1,
+                                        "catalog": {"id": {"secret": "unit-secret"}, "rubric": []},
+                                        "manifest_count": 0,
+                                        "commands": {"passed": 1, "total": 1},
+                                        "rubric": [],
+                                        "provenance": [],
+                                        "artifact_count": 0,
+                                        "failure_code": "",
+                                    },
+                                    "payload": {"title": "Implement endpoint", "files_likely_touched": []},
                                 }
                             ],
                         }
@@ -374,10 +462,75 @@ async def test_runtime_report_rejects_nonstring_visible_fields(
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("provenance_source", "failure_code", "catalog_id"),
+    [
+        ("other-model", "", ""),
+        ("codex", "unexpected_failure", ""),
+        ("codex", "", "sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"),
+    ],
+)
+async def test_runtime_report_rejects_untrusted_gate_identity_fields(
+    runtime_app: FastAPI,
+    runtime_state: FakeRuntimeState,
+    provenance_source: str,
+    failure_code: str,
+    catalog_id: str,
+) -> None:
+    gate = {
+        "passed": False,
+        "score": 2,
+        "threshold": 3,
+        "plan_version": 1,
+        "manifest_count": 0,
+        "commands": {"passed": 0, "total": 1},
+        "rubric": [],
+        "provenance": [{"source": provenance_source, "attempt_id": "attempt-1"}],
+        "artifact_count": 0,
+        "failure_code": failure_code,
+    }
+    if catalog_id:
+        gate["catalog"] = {"id": catalog_id, "rubric": []}
+    transport = httpx.ASGITransport(app=runtime_app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/api/v1/runtime/report",
+            headers={"Authorization": "Bearer runtime-token"},
+            json={
+                "managed_runs": {
+                    "binding_id": "binding-1",
+                    "binding_config_version": 1,
+                    "runs": [
+                        {
+                            "run_id": "run-1",
+                            "parent_issue_id": "parent-1",
+                            "issue_identifier": "APP-1",
+                            "state": "executing",
+                            "work_items": [
+                                {
+                                    "work_item_id": "task-1",
+                                    "state": "in_progress",
+                                    "gate": gate,
+                                    "payload": {"title": "Implement endpoint", "files_likely_touched": []},
+                                }
+                            ],
+                        }
+                    ],
+                }
+            },
+        )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "invalid_managed_run_report"
+    assert runtime_state.managed_run_views == []
+
+
+@pytest.mark.anyio
 async def test_runtime_report_redacts_escaped_and_prefixed_secret_fields(
     runtime_app: FastAPI,
     runtime_state: FakeRuntimeState,
 ) -> None:
+    token_shaped_value = "sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
     transport = httpx.ASGITransport(app=runtime_app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.post(
@@ -395,7 +548,7 @@ async def test_runtime_report_redacts_escaped_and_prefixed_secret_fields(
                             "state": "executing",
                             "latest_reason": (
                                 "Authorization: Token auth-secret, OPENAI_API_KEY=api-secret, "
-                                "GITHUB_TOKEN=github-secret, MY_ACCESS_TOKEN=access-secret"
+                                f"GITHUB_TOKEN=github-secret, MY_ACCESS_TOKEN=access-secret, bare {token_shaped_value}"
                             ),
                             "work_items": [
                                 {
@@ -403,7 +556,10 @@ async def test_runtime_report_redacts_escaped_and_prefixed_secret_fields(
                                     "state": "in_progress",
                                     "payload": {
                                         "title": "Implement endpoint",
-                                        "objective": r'{"access\u005ftoken":"unicode-key-secret","client\u002dsecret":"unicode-client-secret","openai\\u005fapi\\u005fkey":"double-escaped-secret","github\\x5ftoken":"hex-escaped-secret"}',
+                                        "objective": (
+                                            r'{"access\u005ftoken":"unicode-key-secret","client\u002dsecret":"unicode-client-secret","openai\\u005fapi\\u005fkey":"double-escaped-secret","github\\x5ftoken":"hex-escaped-secret"}'
+                                            f" bare {token_shaped_value}"
+                                        ),
                                         "files_likely_touched": [],
                                     },
                                 }
@@ -425,14 +581,16 @@ async def test_runtime_report_redacts_escaped_and_prefixed_secret_fields(
         "unicode-client-secret",
         "double-escaped-secret",
         "hex-escaped-secret",
+        token_shaped_value,
     ):
         assert value not in str(saved_view)
     assert saved_view["runs"][0]["latest_reason"] == (
         "Authorization: [REDACTED], OPENAI_API_KEY=[REDACTED], "
-        "GITHUB_TOKEN=[REDACTED], MY_ACCESS_TOKEN=[REDACTED]"
+        "GITHUB_TOKEN=[REDACTED], MY_ACCESS_TOKEN=[REDACTED], bare [REDACTED]"
     )
     assert saved_view["runs"][0]["work_items"][0]["payload"]["objective"] == (
-        "{access_token=[REDACTED],client-secret=[REDACTED],openai_api_key=[REDACTED],github_token=[REDACTED]}"
+        "{access_token=[REDACTED],client-secret=[REDACTED],openai_api_key=[REDACTED],github_token=[REDACTED]} "
+        "bare [REDACTED]"
     )
 
 

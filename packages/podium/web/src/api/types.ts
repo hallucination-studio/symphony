@@ -188,11 +188,43 @@ export interface ManagedRunWorkItem {
   work_item_id: string;
   state: "todo" | "in_progress" | "in_review" | "done" | "blocked" | "cancelled" | string;
   gate_status?: string;
+  gate?: ManagedRunGateSummary;
   payload?: {
     title?: string;
     objective?: string;
     files_likely_touched?: string[];
   };
+}
+
+export interface ManagedRunRubricRow {
+  id: string;
+  score?: number;
+  weight?: number;
+  threshold?: number;
+}
+
+export interface ManagedRunProvenance {
+  source: string;
+  attempt_id: string;
+}
+
+export interface ManagedRunCatalogSummary {
+  id: string;
+  rubric: ManagedRunRubricRow[];
+}
+
+export interface ManagedRunGateSummary {
+  passed: boolean;
+  score: number;
+  threshold: number;
+  plan_version: number;
+  catalog?: ManagedRunCatalogSummary;
+  manifest_count: number;
+  commands: { passed: number; total: number };
+  rubric: ManagedRunRubricRow[];
+  provenance: ManagedRunProvenance[];
+  artifact_count: number;
+  failure_code: string;
 }
 
 export interface ManagedRun {

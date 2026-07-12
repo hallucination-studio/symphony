@@ -8,6 +8,12 @@ from uuid import uuid4
 
 from performer_api.workflow import Plan
 
+from .acceptance_evidence import (
+    artifact_metadata,
+    canonical_gate_evidence,
+    gate_evidence_projection,
+    gate_number,
+)
 from .models import (
     AttemptState,
     ConductorSettings,
@@ -29,6 +35,14 @@ def _load(value: str) -> dict[str, Any]:
     except json.JSONDecodeError:
         return {}
     return decoded if isinstance(decoded, dict) else {}
+
+
+def _load_list(value: str) -> list[Any]:
+    try:
+        decoded = json.loads(value)
+    except json.JSONDecodeError:
+        return []
+    return decoded if isinstance(decoded, list) else []
 
 
 INSTANCE_COLUMNS = (
@@ -288,19 +302,56 @@ class ConductorStore:
                 (RunState.FAILED.value, reason, utc_now_iso(), run_id),
             )
 
+    def update_run_reason(self, run_id: str, reason: str) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                "UPDATE runs SET latest_reason = ?, updated_at = ? WHERE run_id = ?",
+                (reason, utc_now_iso(), run_id),
+            )
+
     def managed_run_view(self) -> dict[str, Any]:
         runs: list[dict[str, Any]] = []
         for run in self.list_runs():
             run_id = str(run["run_id"])
+            tasks = self.list_tasks(run_id)
+            for task in tasks:
+                summary = self.get_gate_evidence_summary(run_id, str(task["task_id"]))
+                if summary is not None:
+                    task["gate"] = summary
             runs.append(
                 {
                     **run,
-                    "tasks": self.list_tasks(run_id),
+                    "tasks": tasks,
                     "plan": self.get_plan(run_id),
                     "runtime_waits": self.list_runtime_waits(run_id),
                 }
             )
         return {"runs": runs}
+
+    def get_gate_evidence_summary(self, run_id: str, task_id: str) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            run = connection.execute(
+                "SELECT plan_version FROM runs WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+            row = connection.execute(
+                """
+                SELECT attempt_id, evidence_json
+                FROM gate_evidence
+                WHERE run_id = ? AND task_id = ?
+                ORDER BY created_at DESC, rowid DESC
+                LIMIT 1
+                """,
+                (run_id, task_id),
+            ).fetchone()
+        if run is None or row is None:
+            return None
+        current_plan_version = int(run["plan_version"] or 0)
+        summary = gate_evidence_projection(
+            _load(str(row["evidence_json"])),
+            attempt_id=str(row["attempt_id"]),
+        )
+        return summary if summary is not None and summary["plan_version"] == current_plan_version else None
 
     def list_tasks(self, run_id: str) -> list[dict[str, Any]]:
         with self.connect() as connection:
@@ -364,6 +415,11 @@ class ConductorStore:
             ).fetchone()
             version = int(row["version"] if row is not None else 0) + 1
             status = "awaiting_approval" if approval_required else "active"
+            if status == "active":
+                connection.execute(
+                    "UPDATE plan_revisions SET status = 'superseded' WHERE run_id = ? AND status = 'active'",
+                    (run_id,),
+                )
             connection.execute(
                 """
                 INSERT INTO plan_revisions (
@@ -424,16 +480,33 @@ class ConductorStore:
         now = utc_now_iso()
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            run = connection.execute(
+                "SELECT state, plan_version FROM runs WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+            revision = connection.execute(
+                "SELECT status FROM plan_revisions WHERE run_id = ? AND version = ?",
+                (run_id, version),
+            ).fetchone()
+            if revision is None:
+                raise ValueError("plan revision not found")
+            if (
+                run is None
+                or str(run["state"]) != RunState.AWAITING_APPROVAL.value
+                or int(run["plan_version"] or 0) != version
+                or str(revision["status"]) != "awaiting_approval"
+            ):
+                raise ValueError("plan revision is not awaiting approval")
             connection.execute(
                 "UPDATE plan_revisions SET status = 'superseded' WHERE run_id = ? AND status = 'active'",
                 (run_id,),
             )
             changed = connection.execute(
-                "UPDATE plan_revisions SET status = 'active', approval_id = ? WHERE run_id = ? AND version = ?",
+                "UPDATE plan_revisions SET status = 'active', approval_id = ? WHERE run_id = ? AND version = ? AND status = 'awaiting_approval'",
                 (approval_id, run_id, version),
             ).rowcount
             if not changed:
-                raise ValueError("plan revision not found")
+                raise ValueError("plan revision is not awaiting approval")
             connection.execute(
                 "UPDATE runs SET state = ?, latest_reason = '', updated_at = ? WHERE run_id = ?",
                 (RunState.EXECUTING.value, now, run_id),
@@ -627,9 +700,11 @@ class ConductorStore:
             ).fetchone()
             token = int(previous["token"] if previous is not None else 0) + 1
             attempt_id = f"attempt-{uuid4().hex}"
+            run = connection.execute("SELECT plan_version FROM runs WHERE run_id = ?", (run_id,)).fetchone()
+            plan_version = int(run["plan_version"] or 0) if run is not None else 0
             connection.execute(
-                "INSERT INTO attempts (attempt_id, run_id, task_id, kind, state, fencing_token, result_json, created_at, updated_at) VALUES (?, ?, ?, 'gate', ?, ?, '{}', ?, ?)",
-                (attempt_id, run_id, task_id, AttemptState.RUNNING.value, token, now, now),
+                "INSERT INTO attempts (attempt_id, run_id, task_id, kind, state, fencing_token, result_json, created_at, updated_at) VALUES (?, ?, ?, 'gate', ?, ?, ?, ?, ?)",
+                (attempt_id, run_id, task_id, AttemptState.RUNNING.value, token, _dump({"plan_version": plan_version}), now, now),
             )
             connection.execute(
                 "UPDATE tasks SET gate_status = 'gate_started', updated_at = ? WHERE run_id = ? AND task_id = ?",
@@ -669,60 +744,119 @@ class ConductorStore:
         passed: bool,
         score: int,
         threshold: int = 3,
+        command_passed: int,
+        command_total: int,
         evidence: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         attempt = self._attempt(run_id, attempt_id, fencing_token, kind="gate")
+        score = gate_number(score)
+        threshold = gate_number(threshold)
         now = utc_now_iso()
         effective_passed = bool(passed and score >= threshold)
+        stale_reason = ""
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            connection.execute(
-                "INSERT OR REPLACE INTO gate_evidence (run_id, task_id, attempt_id, passed, score, threshold, evidence_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (run_id, attempt["task_id"], attempt_id, 1 if effective_passed else 0, score, threshold, _dump(evidence or {}), now),
-            )
-            artifact_refs = evidence.get("artifact_refs", []) if isinstance(evidence, dict) else []
-            for artifact_ref in artifact_refs:
+            attempt_payload = _load(str(attempt.get("result_json") or "{}"))
+            plan_version = int(attempt_payload.get("plan_version") or 0)
+            run = connection.execute("SELECT plan_version FROM runs WHERE run_id = ?", (run_id,)).fetchone()
+            current_plan_version = int(run["plan_version"] or 0) if run is not None else 0
+            if plan_version <= 0:
+                stale_reason = "missing_gate_plan_version"
+            elif plan_version != current_plan_version:
+                stale_reason = "stale_plan_version"
+            if stale_reason:
                 connection.execute(
-                    "INSERT OR REPLACE INTO artifacts (run_id, task_id, attempt_id, artifact_ref, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-                    (run_id, attempt["task_id"], attempt_id, str(artifact_ref), _dump(evidence), now),
+                    "UPDATE attempts SET state = ?, result_json = ?, updated_at = ? WHERE attempt_id = ?",
+                    (
+                        AttemptState.STALE.value,
+                        _dump(
+                            {
+                                "error_code": stale_reason,
+                                "plan_version": plan_version,
+                                "current_plan_version": current_plan_version,
+                            }
+                        ),
+                        now,
+                        attempt_id,
+                    ),
                 )
-            connection.execute(
-                "UPDATE attempts SET state = ?, result_json = ?, updated_at = ? WHERE attempt_id = ?",
-                (AttemptState.SUCCEEDED.value if effective_passed else AttemptState.FAILED.value, _dump(evidence or {}), now, attempt_id),
-            )
-            task = connection.execute(
-                "SELECT * FROM tasks WHERE run_id = ? AND task_id = ?",
-                (run_id, attempt["task_id"]),
-            ).fetchone()
-            if task is None:
-                raise KeyError(attempt["task_id"])
-            if effective_passed:
                 connection.execute(
                     "UPDATE tasks SET state = ?, gate_status = ?, updated_at = ? WHERE run_id = ? AND task_id = ?",
-                    (TaskState.DONE.value, f"passed:{score}", now, run_id, attempt["task_id"]),
+                    (TaskState.TODO.value, stale_reason, now, run_id, attempt["task_id"]),
                 )
-                remaining = connection.execute(
-                    "SELECT COUNT(*) AS count FROM tasks WHERE run_id = ? AND state != ?",
-                    (run_id, TaskState.DONE.value),
-                ).fetchone()["count"]
-                run_state = RunState.DONE.value if remaining == 0 else RunState.EXECUTING.value
-                reason = "parent_done" if remaining == 0 else "task_done"
-            elif int(task["rework_count"]) < 1:
                 connection.execute(
-                    "UPDATE tasks SET state = ?, rework_count = rework_count + 1, gate_status = ?, updated_at = ? WHERE run_id = ? AND task_id = ?",
-                    (TaskState.IN_PROGRESS.value, f"gate_failed_rework:{score}", now, run_id, attempt["task_id"]),
+                    "UPDATE runs SET state = ?, active_task_id = '', latest_reason = ?, updated_at = ? WHERE run_id = ?",
+                    (RunState.EXECUTING.value, stale_reason, now, run_id),
                 )
-                run_state, reason = RunState.EXECUTING.value, "gate_failed_rework"
             else:
-                connection.execute(
-                    "UPDATE tasks SET state = ?, gate_status = ?, updated_at = ? WHERE run_id = ? AND task_id = ?",
-                    (TaskState.BLOCKED.value, f"gate_failed:{score}", now, run_id, attempt["task_id"]),
+                catalog_row = connection.execute(
+                    "SELECT catalog_json FROM acceptance_catalog WHERE run_id = ? AND version = ?",
+                    (run_id, plan_version),
+                ).fetchone()
+                manifest_row = connection.execute(
+                    "SELECT manifest_json FROM plan_revisions WHERE run_id = ? AND version = ?",
+                    (run_id, plan_version),
+                ).fetchone()
+                stored_evidence = canonical_gate_evidence(
+                    evidence,
+                    passed=effective_passed,
+                    score=score,
+                    threshold=threshold,
+                    attempt_id=attempt_id,
+                    plan_version=plan_version,
+                    catalog=_load(str(catalog_row["catalog_json"])) if catalog_row is not None else None,
+                    manifest_refs=_load_list(str(manifest_row["manifest_json"])) if manifest_row is not None else [],
+                    command_passed=command_passed,
+                    command_total=command_total,
                 )
-                run_state, reason = RunState.BLOCKED.value, "gate_failed"
-            connection.execute(
-                "UPDATE runs SET state = ?, latest_reason = ?, updated_at = ? WHERE run_id = ?",
-                (run_state, reason, now, run_id),
-            )
+                connection.execute(
+                    "INSERT OR REPLACE INTO gate_evidence (run_id, task_id, attempt_id, passed, score, threshold, evidence_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (run_id, attempt["task_id"], attempt_id, 1 if effective_passed else 0, score, threshold, _dump(stored_evidence), now),
+                )
+                for artifact_ref in stored_evidence["artifact_refs"]:
+                    connection.execute(
+                        "INSERT OR REPLACE INTO artifacts (run_id, task_id, attempt_id, artifact_ref, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                        (run_id, attempt["task_id"], attempt_id, artifact_ref, _dump(artifact_metadata(stored_evidence)), now),
+                    )
+                connection.execute(
+                    "UPDATE attempts SET state = ?, result_json = ?, updated_at = ? WHERE attempt_id = ?",
+                    (AttemptState.SUCCEEDED.value if effective_passed else AttemptState.FAILED.value, _dump(stored_evidence), now, attempt_id),
+                )
+                task = connection.execute(
+                    "SELECT * FROM tasks WHERE run_id = ? AND task_id = ?",
+                    (run_id, attempt["task_id"]),
+                ).fetchone()
+                if task is None:
+                    raise KeyError(attempt["task_id"])
+                if effective_passed:
+                    connection.execute(
+                        "UPDATE tasks SET state = ?, gate_status = ?, updated_at = ? WHERE run_id = ? AND task_id = ?",
+                        (TaskState.DONE.value, f"passed:{score}", now, run_id, attempt["task_id"]),
+                    )
+                    remaining = connection.execute(
+                        "SELECT COUNT(*) AS count FROM tasks WHERE run_id = ? AND state != ?",
+                        (run_id, TaskState.DONE.value),
+                    ).fetchone()["count"]
+                    run_state = RunState.DONE.value if remaining == 0 else RunState.EXECUTING.value
+                    reason = "parent_done" if remaining == 0 else "task_done"
+                elif int(task["rework_count"]) < 1:
+                    connection.execute(
+                        "UPDATE tasks SET state = ?, rework_count = rework_count + 1, gate_status = ?, updated_at = ? WHERE run_id = ? AND task_id = ?",
+                        (TaskState.IN_PROGRESS.value, f"gate_failed_rework:{score}", now, run_id, attempt["task_id"]),
+                    )
+                    run_state, reason = RunState.EXECUTING.value, "gate_failed_rework"
+                else:
+                    connection.execute(
+                        "UPDATE tasks SET state = ?, gate_status = ?, updated_at = ? WHERE run_id = ? AND task_id = ?",
+                        (TaskState.BLOCKED.value, f"gate_failed:{score}", now, run_id, attempt["task_id"]),
+                    )
+                    run_state, reason = RunState.BLOCKED.value, "gate_failed"
+                connection.execute(
+                    "UPDATE runs SET state = ?, latest_reason = ?, updated_at = ? WHERE run_id = ?",
+                    (run_state, reason, now, run_id),
+                )
+        if stale_reason:
+            raise StaleAttemptError(stale_reason)
         return self.get_task(run_id, attempt["task_id"]) or {}
 
     def _attempt(self, run_id: str, attempt_id: str, fencing_token: int, *, kind: str | None = None) -> dict[str, Any]:

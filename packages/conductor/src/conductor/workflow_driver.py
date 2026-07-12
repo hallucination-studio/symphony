@@ -8,7 +8,7 @@ from performer_api.workflow import Plan, Task
 
 from .gate import AcceptanceGate
 from .runtime import PerformerRuntime
-from .store import ConductorStore
+from .store import ConductorStore, StaleAttemptError
 
 
 class WorkflowDriver:
@@ -47,6 +47,8 @@ class WorkflowDriver:
                 refreshed = self.store.get_run(str(run["run_id"])) or run
                 return await self._drive_run(refreshed)
             return {}
+        if state == "executing" and str(run.get("latest_reason") or "") == "stale_gate_projection_failed":
+            return await self._retry_stale_gate_todo_projection(run, instance)
         if int(run.get("plan_version") or 0) == 0:
             return await self._plan(run, instance)
         if state != "executing":
@@ -139,6 +141,7 @@ class WorkflowDriver:
             int(gate_attempt["fencing_token"]),
             "gate",
         )
+        captured_plan_version = int((gate_attempt.get("result") or {}).get("plan_version") or 0)
         gate_body = await self._run_turn(
             run,
             instance,
@@ -171,29 +174,100 @@ class WorkflowDriver:
             "provenance": evaluated.provenance,
             "rubric": evaluated.rubric,
         }
-        updated = self.store.record_gate(
-            run_id,
-            gate_context.attempt_id,
-            gate_context.fencing_token,
-            passed=evaluated.passed,
-            score=evaluated.score,
-            threshold=evaluated.threshold,
-            evidence=evidence,
-        )
-        command_count = len(command_results)
-        passed_commands = sum(1 for result in command_results if result.passed)
+        try:
+            updated = self.store.record_gate(
+                run_id,
+                gate_context.attempt_id,
+                gate_context.fencing_token,
+                passed=evaluated.passed,
+                score=evaluated.score,
+                threshold=evaluated.threshold,
+                command_passed=sum(1 for result in command_results if result.passed),
+                command_total=len(command_results),
+                evidence=evidence,
+            )
+        except StaleAttemptError as exc:
+            reason = _reason(exc)
+            if reason not in {"missing_gate_plan_version", "stale_plan_version"}:
+                raise
+            stale_task = self.store.get_task(run_id, task.id) or task_row
+            self._log_gate_event(
+                event="managed_run_gate_result_stale",
+                level="warning",
+                run=run,
+                instance=instance,
+                context=gate_context,
+                captured_plan_version=captured_plan_version,
+                error_type=exc.__class__.__name__,
+                error_code=reason,
+                sanitized_reason=reason,
+                action_required=False,
+                retryable=True,
+                next_action="re_run_current_plan_revision",
+            )
+            await self._comment_task(run, instance, stale_task, f"Gate result discarded: {reason}. Re-running the current plan revision.")
+            try:
+                await self._project_task_state(run, instance, stale_task, "todo")
+            except RuntimeError:
+                self.store.update_run_reason(run_id, "stale_gate_projection_failed")
+                self._log_gate_event(
+                    event="managed_run_gate_stale_projection_failed",
+                    level="error",
+                    run=run,
+                    instance=instance,
+                    context=gate_context,
+                    captured_plan_version=captured_plan_version,
+                    error_type="LinearStateProjectionError",
+                    error_code="linear_state_transition_failed",
+                    sanitized_reason="linear_state_transition_failed",
+                    action_required=False,
+                    retryable=True,
+                    next_action="retry_linear_state_projection",
+                )
+                return {"applied": 0}
+            return {"applied": 1}
+        except ValueError as exc:
+            reason = _reason(exc)
+            self._log_gate_event(
+                event="managed_run_gate_rejected",
+                level="error",
+                run=run,
+                instance=instance,
+                context=gate_context,
+                captured_plan_version=captured_plan_version,
+                error_type=exc.__class__.__name__,
+                error_code=reason,
+                sanitized_reason=reason,
+                action_required=True,
+                retryable=False,
+                next_action="inspect_gate_result",
+            )
+            raise
         gate_note = ""
-        if not evaluated.passed:
+        summary = self.store.get_gate_evidence_summary(run_id, task.id) or {}
+        if not summary.get("passed"):
             gate_note = " One automatic rework remains." if updated["state"] == "in_progress" else " A second failure blocks this task."
+        if updated["state"] == "blocked":
+            failure_code = str(summary.get("failure_code") or "codex_gate_failed")
+            self._log_gate_event(
+                event="managed_run_gate_failed",
+                level="error",
+                run=run,
+                instance=instance,
+                context=gate_context,
+                captured_plan_version=captured_plan_version,
+                error_type="GateFailure",
+                error_code=failure_code,
+                sanitized_reason=failure_code,
+                action_required=True,
+                retryable=False,
+                next_action="request_plan_revision",
+            )
         await self._comment_task(
             run,
             instance,
             updated,
-            (
-                f"Codex Gate {'passed' if evaluated.passed else 'failed'} "
-                f"({evaluated.score}/{evaluated.threshold}); "
-                f"verification commands {passed_commands}/{command_count} passed.{gate_note}"
-            ),
+            _gate_comment(summary, gate_note),
         )
         await self._project_task_state(run, instance, updated, "done" if updated["state"] == "done" else "in_progress" if updated["state"] == "in_progress" else "blocked")
         if updated["state"] == "done":
@@ -202,6 +276,29 @@ class WorkflowDriver:
                 await self._comment_parent(run, instance, "All Sub Issues passed the verification commands and Codex Gate.")
                 await self._transition(parent_id=str(run["parent_issue_id"]), instance=instance, names=["Done", "Completed"], state_type="completed")
             return {"applied": 1}
+        return {"applied": 1}
+
+    async def _retry_stale_gate_todo_projection(self, run: dict[str, Any], instance: Any) -> dict[str, int]:
+        run_id = str(run["run_id"])
+        stale_task = next(
+            (
+                task
+                for task in self.store.list_tasks(run_id)
+                if task.get("state") == "todo"
+                and task.get("gate_status") in {"missing_gate_plan_version", "stale_plan_version"}
+                and task.get("linear_issue_id")
+                and task.get("linear_state") != "todo"
+            ),
+            None,
+        )
+        if stale_task is None:
+            self.store.update_run_reason(run_id, "stale_plan_version")
+            return {}
+        try:
+            await self._project_task_state(run, instance, stale_task, "todo")
+        except RuntimeError:
+            return {}
+        self.store.update_run_reason(run_id, str(stale_task.get("gate_status") or "stale_plan_version"))
         return {"applied": 1}
 
     async def _record_wait(self, run: dict[str, Any], instance: Any, context: TurnContext, wait: Any, task: dict[str, Any]) -> dict[str, int]:
@@ -345,13 +442,52 @@ class WorkflowDriver:
         issue_id = str(task.get("linear_issue_id") or "")
         if not issue_id:
             return
-        names = {
-            "in_progress": ["In Progress", "Started"],
-            "blocked": ["Blocked"],
-            "done": ["Done", "Completed"],
+        names, state_type = {
+            "todo": (["Backlog", "Todo"], "backlog"),
+            "in_progress": (["In Progress", "Started"], "started"),
+            "blocked": (["Blocked"], "backlog"),
+            "done": (["Done", "Completed"], "completed"),
         }[target]
-        await self._transition(parent_id=issue_id, instance=instance, names=names, state_type="completed" if target == "done" else "started" if target == "in_progress" else "backlog")
+        await self._transition(parent_id=issue_id, instance=instance, names=names, state_type=state_type)
         self.store.update_task_linear_state(str(run["run_id"]), str(task["task_id"]), target)
+
+    def _log_gate_event(
+        self,
+        *,
+        event: str,
+        level: str,
+        run: dict[str, Any],
+        instance: Any,
+        context: TurnContext,
+        captured_plan_version: int,
+        error_type: str,
+        error_code: str,
+        sanitized_reason: str,
+        action_required: bool,
+        retryable: bool,
+        next_action: str,
+    ) -> None:
+        current = self.store.get_run(context.run_id) or run
+        fields = (
+            f"event={event}",
+            f"level={level}",
+            f"instance_id={instance.id}",
+            f"run_id={context.run_id}",
+            f"work_item_id={context.task_id}",
+            f"attempt_id={context.attempt_id}",
+            f"fencing_token={context.fencing_token}",
+            "turn_kind=gate",
+            f"plan_version={captured_plan_version}",
+            f"current_plan_version={int(current.get('plan_version') or 0)}",
+            f"policy_revision={int(current.get('policy_revision') or 0)}",
+            f"error_type={error_type}",
+            f"error_code={error_code}",
+            f"sanitized_reason={sanitized_reason.replace(' ', '_')[:500]}",
+            f"action_required={'true' if action_required else 'false'}",
+            f"retryable={'true' if retryable else 'false'}",
+            f"next_action={next_action}",
+        )
+        self.runtime.append_event(Path(instance.log_path), " ".join(fields))
 
     async def _transition(self, *, parent_id: str, instance: Any, names: list[str], state_type: str) -> None:
         proxy = self.service._managed_run_tracker()
@@ -387,6 +523,50 @@ def _task_description(task: Task) -> str:
 def _issue_description(run: dict[str, Any]) -> str:
     payload = run.get("payload") if isinstance(run.get("payload"), dict) else {}
     return str(payload.get("issue_description") or payload.get("issue_title") or run.get("issue_identifier") or "")
+
+
+def _gate_comment(summary: dict[str, Any], note: str) -> str:
+    commands = summary.get("commands") if isinstance(summary.get("commands"), dict) else {}
+    passed = bool(summary.get("passed"))
+    score = int(summary.get("score") or 0)
+    threshold = int(summary.get("threshold") or 0)
+    command_passed = int(commands.get("passed") or 0)
+    command_total = int(commands.get("total") or 0)
+    parts = [
+        f"Codex Gate {'passed' if passed else 'failed'} ({score}/{threshold}); "
+        f"verification commands {command_passed}/{command_total} passed.{note}"
+    ]
+    catalog = summary.get("catalog") if isinstance(summary.get("catalog"), dict) else {}
+    catalog_id = str(catalog.get("id") or "")
+    if catalog_id:
+        parts.append(f"Catalog {catalog_id}.")
+    rubric = summary.get("rubric") if isinstance(summary.get("rubric"), list) else []
+    rubric_rows = [_rubric_comment(row) for row in rubric if isinstance(row, dict)]
+    if rubric_rows:
+        parts.append(f"Rubric {'; '.join(rubric_rows)}.")
+    provenance = summary.get("provenance") if isinstance(summary.get("provenance"), list) else []
+    sources = [str(row.get("source") or "") for row in provenance if isinstance(row, dict) and row.get("source")]
+    if sources:
+        parts.append(f"Provenance {', '.join(dict.fromkeys(sources))}.")
+    parts.append(
+        f"Manifest refs {int(summary.get('manifest_count') or 0)}; "
+        f"artifacts {int(summary.get('artifact_count') or 0)}."
+    )
+    failure_code = str(summary.get("failure_code") or "")
+    if failure_code:
+        parts.append(f"Failure code {failure_code}.")
+    return " ".join(parts)[:1_500]
+
+
+def _rubric_comment(row: dict[str, Any]) -> str:
+    identifier = str(row.get("id") or "")
+    score = int(row.get("score") or 0)
+    details: list[str] = []
+    if "weight" in row:
+        details.append(f"weight {int(row.get('weight') or 0)}")
+    if "threshold" in row:
+        details.append(f"threshold {int(row.get('threshold') or 0)}")
+    return f"{identifier}={score}" + (f" ({'; '.join(details)})" if details else "")
 
 
 def _turn_log_fields(context: TurnContext, role: str, paths: Any) -> str:

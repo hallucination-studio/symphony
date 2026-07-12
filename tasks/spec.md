@@ -103,9 +103,10 @@ The managed-runs response keeps the fields the current Web reads:
   `plan_version`, thread id, and work items;
 - work-item id, title, objective, likely files, state, and `gate_status`.
 
-Detailed approval, catalog, rubric, provenance, manifest, artifact, and raw
-command evidence remain durable Conductor data until an explicit sanitized
-report contract adds them.
+Detailed approval, catalog, rubric, provenance, manifest, artifact, and
+sanitized bounded command evidence remain durable Conductor data. The existing
+managed-runs report may add only the explicit safe summary contract; it never
+returns command text/output, findings, or artifact/manifest locations.
 
 `policy_revision` and `plan_version` are durable run/plan-revision values.
 Runtime profile registries may be removed, but the version history and its
@@ -215,10 +216,13 @@ manifest/artifact references. Only one revision is active; a superseded
 revision remains readable for provenance.
 
 Gate evidence records command results plus the single Codex gate's score,
-rubric rows, threshold, weights, provenance, findings, and artifact references.
-The current projection is a concise parent/task comment or metadata surface;
-it does not create a dedicated evidence child issue. It remains one Conductor
-gate, not a second scheduler or cross-model review.
+rubric rows, threshold, weights, Conductor-generated Codex attempt provenance,
+findings, and artifact references. Conductor stores bounded, sanitized
+command/output excerpts and findings locally,
+then projects only a concise parent/task summary: plan version, catalog/rubric,
+provenance, command counts, score/threshold, manifest/artifact counts, and a
+failure code. It does not create a dedicated evidence child issue. It remains
+one Conductor gate, not a second scheduler or cross-model review.
 
 ### Turn Context
 
@@ -259,8 +263,7 @@ Conductor rejects missing, stale, or mismatched results before any state change.
   "threshold": 0,
   "rubric": [],
   "provenance": [],
-  "artifacts": [],
-  "summary": "string",
+  "artifact_refs": [],
   "findings": ["string"]
 }
 ```

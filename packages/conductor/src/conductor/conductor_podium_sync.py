@@ -21,6 +21,13 @@ _MAX_MANAGED_RUN_SNAPSHOT_BYTES = 480 * 1024
 _MAX_MANAGED_RUN_SNAPSHOT_RUNS = 64
 _MAX_MANAGED_RUN_FILE_HINTS = 3
 _TERMINAL_MANAGED_RUN_STATES = {"done", "failed"}
+_MAX_EVIDENCE_ROWS = 8
+_MAX_GATE_NUMBER = 1_000_000
+_REPORT_IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,79}\Z")
+_GATE_FAILURE_CODES = frozenset({"", "verification_command_failed", "codex_gate_failed"})
+_BARE_SECRET = re.compile(
+    r"(?i)\b(?:sk-[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b"
+)
 
 
 class ConductorPodiumSyncMixin:
@@ -706,7 +713,7 @@ def _managed_runs_report_view(view: Any) -> dict[str, Any]:
 def _managed_run_report(run: dict[str, Any]) -> dict[str, Any]:
     payload = run.get("payload") if isinstance(run.get("payload"), dict) else {}
     tasks = run.get("tasks") if isinstance(run.get("tasks"), list) else []
-    return {
+    report = {
         "run_id": str(run.get("run_id") or ""),
         "parent_issue_id": str(run.get("parent_issue_id") or ""),
         "issue_identifier": str(run.get("issue_identifier") or ""),
@@ -717,12 +724,13 @@ def _managed_run_report(run: dict[str, Any]) -> dict[str, Any]:
         "backend_session_id": _snapshot_text(payload.get("thread_id"), 200),
         "work_items": [_managed_run_work_item(task) for task in tasks if isinstance(task, dict)],
     }
+    return report
 
 
 def _managed_run_work_item(task: dict[str, Any]) -> dict[str, Any]:
     payload = task.get("task") if isinstance(task.get("task"), dict) else {}
     files = payload.get("files_likely_touched") if isinstance(payload.get("files_likely_touched"), list) else []
-    return {
+    item = {
         "work_item_id": str(task.get("task_id") or ""),
         "state": str(task.get("state") or "todo"),
         "gate_status": _snapshot_text(task.get("gate_status"), 120),
@@ -732,10 +740,159 @@ def _managed_run_work_item(task: dict[str, Any]) -> dict[str, Any]:
             "files_likely_touched": [_snapshot_text(path, 240) for path in files[:_MAX_MANAGED_RUN_FILE_HINTS]],
         },
     }
+    gate = _managed_run_gate(task.get("gate"))
+    if gate:
+        item["gate"] = gate
+    return item
 
 
 def _snapshot_text(value: Any, limit: int) -> str:
     return value[:limit] if isinstance(value, str) else ""
+
+
+def _managed_run_gate(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict) or not isinstance(value.get("passed"), bool):
+        return {}
+    commands = value.get("commands")
+    if not isinstance(commands, dict):
+        return {}
+    numbers = {
+        "score": _summary_number(value.get("score")),
+        "threshold": _summary_number(value.get("threshold")),
+        "plan_version": _summary_number(value.get("plan_version")),
+        "manifest_count": _summary_number(value.get("manifest_count")),
+        "command_passed": _summary_number(commands.get("passed")),
+        "command_total": _summary_number(commands.get("total")),
+        "artifact_count": _summary_number(value.get("artifact_count")),
+    }
+    if any(number is None for number in numbers.values()):
+        return {}
+    rubric = _summary_rubric(value.get("rubric"), fields=("score", "weight", "threshold"))
+    provenance = _summary_provenance(value.get("provenance"))
+    if rubric is None or provenance is None:
+        return {}
+    catalog = _summary_catalog(value.get("catalog")) if "catalog" in value else {}
+    if catalog is None:
+        return {}
+    failure_code = _gate_failure_code(value.get("failure_code"))
+    if failure_code is None:
+        return {}
+    passed = bool(value["passed"])
+    command_counts = {"passed": int(numbers["command_passed"]), "total": int(numbers["command_total"])}
+    if not _consistent_gate_summary(
+        passed,
+        int(numbers["score"]),
+        int(numbers["threshold"]),
+        command_counts,
+        failure_code,
+    ):
+        return {}
+    gate = {
+        "passed": passed,
+        "score": int(numbers["score"]),
+        "threshold": int(numbers["threshold"]),
+        "plan_version": int(numbers["plan_version"]),
+        "manifest_count": int(numbers["manifest_count"]),
+        "commands": command_counts,
+        "rubric": rubric,
+        "provenance": provenance,
+        "artifact_count": int(numbers["artifact_count"]),
+        "failure_code": failure_code,
+    }
+    if catalog:
+        gate["catalog"] = catalog
+    return gate
+
+
+def _snapshot_identifier(value: Any) -> str:
+    text = _snapshot_text(value, 80)
+    return text if _REPORT_IDENTIFIER.fullmatch(text) and _BARE_SECRET.search(text) is None else ""
+
+
+def _summary_number(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        number = int(value)
+    except (OverflowError, TypeError, ValueError):
+        return None
+    return number if 0 <= number <= _MAX_GATE_NUMBER else None
+
+
+def _summary_rubric(value: Any, *, fields: tuple[str, ...]) -> list[dict[str, Any]] | None:
+    if not isinstance(value, list) or len(value) > _MAX_EVIDENCE_ROWS:
+        return None
+    rows: list[dict[str, Any]] = []
+    for row in value:
+        if not isinstance(row, dict):
+            return None
+        identifier = _snapshot_identifier(row.get("id"))
+        if not identifier:
+            return None
+        normalized: dict[str, Any] = {"id": identifier}
+        for field in fields:
+            if field not in row:
+                continue
+            number = _summary_number(row[field])
+            if number is None:
+                return None
+            normalized[field] = number
+        rows.append(normalized)
+    return rows
+
+
+def _summary_provenance(value: Any) -> list[dict[str, str]] | None:
+    if not isinstance(value, list) or len(value) > _MAX_EVIDENCE_ROWS:
+        return None
+    rows: list[dict[str, str]] = []
+    for row in value:
+        if not isinstance(row, dict):
+            return None
+        source = _snapshot_identifier(row.get("source"))
+        attempt_id = _snapshot_identifier(row.get("attempt_id"))
+        if source != "codex" or not attempt_id:
+            return None
+        entry = {"source": source, "attempt_id": attempt_id}
+        if entry not in rows:
+            rows.append(entry)
+    return rows
+
+
+def _summary_catalog(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    catalog_id = _snapshot_identifier(value.get("id"))
+    rubric = _summary_rubric(value.get("rubric"), fields=("weight", "threshold"))
+    if not catalog_id or rubric is None:
+        return None
+    return {"id": catalog_id, "rubric": rubric}
+
+
+def _gate_failure_code(value: Any) -> str | None:
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        return None
+    if value == "":
+        return ""
+    code = _snapshot_identifier(value)
+    return code if code in _GATE_FAILURE_CODES else None
+
+
+def _consistent_gate_summary(
+    passed: bool,
+    score: int,
+    threshold: int,
+    commands: dict[str, int],
+    failure_code: str,
+) -> bool:
+    if commands["passed"] > commands["total"]:
+        return False
+    commands_passed = commands["passed"] == commands["total"]
+    if passed:
+        return score >= threshold and commands_passed and not failure_code
+    expected_failure = "verification_command_failed" if not commands_passed else "codex_gate_failed"
+    return failure_code == expected_failure
 
 
 def _sanitize_managed_runs_view(value: Any, *, key: str = "") -> Any:
@@ -747,7 +904,8 @@ def _sanitize_managed_runs_view(value: Any, *, key: str = "") -> Any:
         return value
     if any(marker in key.lower() for marker in ("token", "secret", "password", "authorization", "cookie")):
         return "[REDACTED]"
-    return re.sub(r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]+", r"\1 [REDACTED]", value)[:4000]
+    text = re.sub(r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]+", r"\1 [REDACTED]", value)
+    return _BARE_SECRET.sub("[REDACTED]", text)[:4000]
 
 
 __all__ = ["ConductorPodiumSyncMixin"]

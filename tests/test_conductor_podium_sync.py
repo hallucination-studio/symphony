@@ -5,7 +5,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from conductor.conductor_podium_sync import ConductorPodiumSyncMixin, _managed_runs_report_view, _smoke_runtime_fields
+from conductor.conductor_podium_sync import (
+    ConductorPodiumSyncMixin,
+    _managed_runs_report_view,
+    _sanitize_managed_runs_view,
+    _smoke_runtime_fields,
+)
 from conductor.conductor_smoke_protocol import SmokeCommandError, normalize_smoke_command
 from conductor.conductor_api import ConductorApiServer
 from conductor.conductor_service import ConductorService
@@ -66,6 +71,17 @@ def test_smoke_logs_derive_runtime_group_from_conductor_identity() -> None:
     )
 
     assert fields.startswith("runtime_group_id=group_conductor-1 runtime_id=runtime-1 ")
+
+
+def test_managed_run_snapshot_redacts_bare_token_shapes() -> None:
+    token_shaped_value = "sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+
+    snapshot = _sanitize_managed_runs_view(
+        {"runs": [{"latest_reason": f"failed: {token_shaped_value}"}]}
+    )
+
+    assert token_shaped_value not in str(snapshot)
+    assert snapshot["runs"][0]["latest_reason"] == "failed: [REDACTED]"
 
 
 @pytest.mark.anyio
@@ -244,11 +260,29 @@ def test_podium_report_projects_the_managed_run_shape_consumed_by_web() -> None:
                     "latest_reason": "",
                     "plan_version": 2,
                     "payload": {"thread_id": "thread-1"},
+                    "acceptance": {"raw_manifest_ref": "manifest://run-1/secret-path"},
                     "tasks": [
                         {
                             "task_id": "task-1",
                             "state": "in_progress",
                             "gate_status": "execute_started",
+                            "gate": {
+                                "passed": True,
+                                "score": 4,
+                                "threshold": 3,
+                                "plan_version": 2,
+                                "catalog": {
+                                    "id": "catalog-1",
+                                    "rubric": [{"id": "correctness", "weight": 2, "threshold": 3}],
+                                },
+                                "manifest_count": 1,
+                                "commands": {"passed": 1, "total": 1},
+                                "rubric": [{"id": "correctness", "score": 4, "weight": 2}],
+                                "provenance": [{"source": "codex", "attempt_id": "attempt-1"}],
+                                "artifact_count": 1,
+                                "failure_code": "",
+                                "output": "output-secret",
+                            },
                             "task": {
                                 "title": "Implement endpoint",
                                 "objective": "Add the endpoint",
@@ -268,11 +302,28 @@ def test_podium_report_projects_the_managed_run_shape_consumed_by_web() -> None:
     assert report["managed_runs"]["binding_config_version"] == 2
     assert run["active_work_item_id"] == "task-1"
     assert run["backend_session_id"] == "thread-1"
+    assert "acceptance" not in run
     assert run["work_items"] == [
         {
             "work_item_id": "task-1",
             "state": "in_progress",
             "gate_status": "execute_started",
+            "gate": {
+                "passed": True,
+                "score": 4,
+                "threshold": 3,
+                "plan_version": 2,
+                "catalog": {
+                    "id": "catalog-1",
+                    "rubric": [{"id": "correctness", "weight": 2, "threshold": 3}],
+                },
+                "manifest_count": 1,
+                "commands": {"passed": 1, "total": 1},
+                "rubric": [{"id": "correctness", "score": 4, "weight": 2}],
+                "provenance": [{"source": "codex", "attempt_id": "attempt-1"}],
+                "artifact_count": 1,
+                "failure_code": "",
+            },
             "payload": {
                 "title": "Implement endpoint",
                 "objective": "Add the endpoint",
@@ -281,6 +332,58 @@ def test_podium_report_projects_the_managed_run_shape_consumed_by_web() -> None:
         }
     ]
     assert "tasks" not in run
+
+
+def test_podium_report_drops_an_out_of_range_gate_summary_before_podium_validation() -> None:
+    report = _managed_runs_report_view(
+        {
+            "runs": [
+                {
+                    "run_id": "run-1",
+                    "parent_issue_id": "parent-1",
+                    "issue_identifier": "APP-1",
+                    "state": "executing",
+                    "active_task_id": "task-1",
+                    "latest_reason": "",
+                    "plan_version": 1,
+                    "payload": {},
+                    "tasks": [
+                        {
+                            "task_id": "task-1",
+                            "state": "in_progress",
+                            "gate_status": "gate_started",
+                            "gate": {
+                                "passed": True,
+                                "score": 1_000_001,
+                                "threshold": 3,
+                                "plan_version": 1,
+                                "manifest_count": 0,
+                                "commands": {"passed": 1, "total": 1},
+                                "rubric": [],
+                                "provenance": [],
+                                "artifact_count": 0,
+                                "failure_code": "",
+                            },
+                            "task": {
+                                "title": "Implement endpoint",
+                                "objective": "Add the endpoint",
+                                "files_likely_touched": [],
+                            },
+                        }
+                    ],
+                }
+            ]
+        }
+    )
+
+    accepted = _normalize_managed_run_report(
+        {"binding_id": "binding-1", "binding_config_version": 1, **report},
+        binding_id="binding-1",
+        binding_config_version=1,
+    )
+
+    assert "gate" not in report["runs"][0]["work_items"][0]
+    assert accepted["runs"] == report["runs"]
 
 
 def test_podium_report_bounds_history_and_file_hints_to_its_snapshot_contract() -> None:

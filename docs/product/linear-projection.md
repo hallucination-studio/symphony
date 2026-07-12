@@ -24,14 +24,16 @@ removed Conductor task-dependency graph.
 - Parent description: a concise plan block and lifecycle comments.
 - Sub Issue: task objective, acceptance criteria, verification commands, file
   scope, state transition, and concise Gate result comment.
-- Gate comment: pass/fail, score/threshold, command pass count, and whether
-  one rework remains or the task is blocked.
+- Gate comment: pass/fail, score/threshold, command pass count, safe catalog,
+  rubric/provenance, manifest/artifact counts, failure code, and whether one
+  rework remains or the task is blocked.
 - Runtime wait: sanitized reason and a recorded Linear action surface.
 
 Plan revisions, catalogs, rubric/provenance, manifest/artifact references, and
-full command evidence remain durable Conductor data. They are not currently
-projected as a separate catalog/gate/artifact child-issue tree, nor rendered in
-full by Podium Web.
+sanitized command evidence remain durable Conductor data. Podium and Linear
+receive only their safe summaries, never command text/output, findings, or
+artifact/manifest locations. They are not projected as a separate
+catalog/gate/artifact child-issue tree, nor rendered in full by Podium Web.
 
 ## Recovery and safety
 

@@ -18,8 +18,14 @@ _MAX_RUNTIME_REPORT_BYTES = 4 * 1024 * 1024
 _MAX_RUNS = 64
 _MAX_WORK_ITEMS = 10
 _MAX_FILES = 3
+_MAX_EVIDENCE_ROWS = 8
 _RUN_STATES = {"planning", "awaiting_approval", "executing", "blocked", "failed", "done"}
 _WORK_ITEM_STATES = {"todo", "in_progress", "in_review", "blocked", "done"}
+_SUMMARY_IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,79}\Z")
+_GATE_FAILURE_CODES = frozenset({"", "verification_command_failed", "codex_gate_failed"})
+_BARE_SECRET = re.compile(
+    r"(?i)\b(?:sk-[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b"
+)
 _SENSITIVE_REPORT_KEY = (
     r"(?:[A-Za-z0-9]+[-_])*?"
     r"(?:access[-_]?token|refresh[-_]?token|api[-_]?key|"
@@ -371,9 +377,134 @@ def _normalize_work_item(value: dict[str, Any]) -> dict[str, Any]:
             "files_likely_touched": [_report_text(path, 240) for path in files],
         },
     }
+    if "gate" in value:
+        work_item["gate"] = _normalize_gate_summary(value.get("gate"))
     if not work_item["work_item_id"]:
         raise ManagedRunReportError("invalid_managed_run_report", "Managed-run work item identity is invalid")
     return work_item
+
+
+def _normalize_gate_summary(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict) or not isinstance(value.get("passed"), bool):
+        raise ManagedRunReportError("invalid_managed_run_report", "Managed-run gate summary is invalid")
+    commands = value.get("commands")
+    if not isinstance(commands, dict):
+        raise ManagedRunReportError("invalid_managed_run_report", "Managed-run gate commands are invalid")
+    command_counts = {
+        "passed": _summary_number(commands.get("passed")),
+        "total": _summary_number(commands.get("total")),
+    }
+    passed = value["passed"]
+    score = _summary_number(value.get("score"))
+    threshold = _summary_number(value.get("threshold"))
+    failure_code = _summary_failure_code(value.get("failure_code"))
+    if not _consistent_gate_summary(passed, score, threshold, command_counts, failure_code):
+        raise ManagedRunReportError("invalid_managed_run_report", "Managed-run gate summary is inconsistent")
+    gate = {
+        "passed": passed,
+        "score": score,
+        "threshold": threshold,
+        "plan_version": _summary_number(value.get("plan_version")),
+        "manifest_count": _summary_number(value.get("manifest_count")),
+        "commands": command_counts,
+        "rubric": _summary_rubric(value.get("rubric"), fields=("score", "weight", "threshold")),
+        "provenance": _summary_provenance(value.get("provenance")),
+        "artifact_count": _summary_number(value.get("artifact_count")),
+        "failure_code": failure_code,
+    }
+    if "catalog" in value:
+        gate["catalog"] = _summary_catalog(value.get("catalog"))
+    return gate
+
+
+def _summary_catalog(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ManagedRunReportError("invalid_managed_run_report", "Managed-run gate catalog is invalid")
+    return {
+        "id": _summary_identifier(value.get("id")),
+        "rubric": _summary_rubric(value.get("rubric"), fields=("weight", "threshold")),
+    }
+
+
+def _summary_rubric(value: Any, *, fields: tuple[str, ...]) -> list[dict[str, Any]]:
+    if not isinstance(value, list) or len(value) > _MAX_EVIDENCE_ROWS:
+        raise ManagedRunReportError("invalid_managed_run_report", "Managed-run rubric is invalid")
+    rows: list[dict[str, Any]] = []
+    for row in value:
+        if not isinstance(row, dict):
+            raise ManagedRunReportError("invalid_managed_run_report", "Managed-run rubric is invalid")
+        normalized = {"id": _summary_identifier(row.get("id"))}
+        for field in fields:
+            if field in row:
+                normalized[field] = _summary_number(row[field])
+        rows.append(normalized)
+    return rows
+
+
+def _summary_provenance(value: Any) -> list[dict[str, str]]:
+    if not isinstance(value, list) or len(value) > _MAX_EVIDENCE_ROWS:
+        raise ManagedRunReportError("invalid_managed_run_report", "Managed-run provenance is invalid")
+    rows: list[dict[str, str]] = []
+    for row in value:
+        if not isinstance(row, dict):
+            raise ManagedRunReportError("invalid_managed_run_report", "Managed-run provenance is invalid")
+        entry = {
+            "source": _summary_identifier(row.get("source")),
+            "attempt_id": _summary_identifier(row.get("attempt_id")),
+        }
+        if entry["source"] != "codex":
+            raise ManagedRunReportError("invalid_managed_run_report", "Managed-run provenance is invalid")
+        if entry not in rows:
+            rows.append(entry)
+    return rows
+
+
+def _summary_identifier(value: Any, *, allow_empty: bool = False) -> str:
+    if value is None and allow_empty:
+        return ""
+    if not isinstance(value, str):
+        raise ManagedRunReportError("invalid_managed_run_report", "Managed-run summary identifier is invalid")
+    text = _report_text(value, 80)
+    if not text and allow_empty:
+        return ""
+    if _SUMMARY_IDENTIFIER.fullmatch(text) is None or _BARE_SECRET.search(text) is not None:
+        raise ManagedRunReportError("invalid_managed_run_report", "Managed-run summary identifier is invalid")
+    return text
+
+
+def _summary_failure_code(value: Any) -> str:
+    code = _summary_identifier(value, allow_empty=True)
+    if code not in _GATE_FAILURE_CODES:
+        raise ManagedRunReportError("invalid_managed_run_report", "Managed-run gate failure code is invalid")
+    return code
+
+
+def _consistent_gate_summary(
+    passed: bool,
+    score: int,
+    threshold: int,
+    commands: dict[str, int],
+    failure_code: str,
+) -> bool:
+    if commands["passed"] > commands["total"]:
+        return False
+    commands_passed = commands["passed"] == commands["total"]
+    if passed:
+        return score >= threshold and commands_passed and not failure_code
+    expected_failure = "verification_command_failed" if not commands_passed else "codex_gate_failed"
+    return failure_code == expected_failure
+
+
+def _summary_number(value: Any) -> int:
+    if isinstance(value, bool):
+        raise ManagedRunReportError("invalid_managed_run_report", "Managed-run summary number is invalid")
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        raise ManagedRunReportError("invalid_managed_run_report", "Managed-run summary number is invalid") from None
+    if number < 0 or number > 1_000_000:
+        raise ManagedRunReportError("invalid_managed_run_report", "Managed-run summary number is invalid")
+    return number
 
 
 def _report_int(value: Any) -> int:
@@ -400,7 +531,8 @@ def _report_text(value: Any, limit: int) -> str:
         lambda match: f"{match.group(1)}=[REDACTED]",
         text,
     )
-    return re.sub(r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]+", r"\1 [REDACTED]", text)[:limit]
+    text = re.sub(r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]+", r"\1 [REDACTED]", text)
+    return _BARE_SECRET.sub("[REDACTED]", text)[:limit]
 
 
 def _normalize_report_text(value: str) -> str:

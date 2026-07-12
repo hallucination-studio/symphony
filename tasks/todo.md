@@ -47,17 +47,35 @@ and approved runtime environment. This checklist is the active scope ledger;
   ownership is demonstrably singular.
 - [ ] Audit and remove remaining disconnected tools/docs/legacy planning
   artifacts without changing Linear or Web behavior.
-- [ ] Make retained acceptance evidence readable in the operator report and
+- [x] Make retained acceptance evidence readable in the operator report and
   Linear projection using existing owners; do not create a new evidence runner
   or child-issue tree without explicit approval.
 - [ ] Reconcile the written Gate rule: the spec says commands + Codex
   `passed=true`, while current retained code also applies `score >= threshold`.
   Do not change the product rule until it is explicitly resolved.
 
+## Current evidence-projection slice ledger
+
+- **Authorized:** expose the already-retained acceptance catalog, rubric,
+  provenance, manifest, artifact, and Gate facts through the existing
+  authenticated managed-runs report and existing Linear Gate comment.
+- **Required consequences:** write bounded, sanitized local Gate details after
+  the decision and derive one revision-aware summary; prevent raw command
+  output, findings, secret-like values, and artifact/manifest locations from
+  entering Podium or Linear.
+- **Out of scope:** new endpoints, Web layout changes, new child issues,
+  artifact download, manifest generation, a new verifier, another scheduler,
+  cross-model review, or a Gate-rule change.
+- **Assumptions requiring approval:** none. Existing `score >= threshold`
+  behavior remains unchanged, and absent production manifest refs stay absent.
+- **Deferred ideas:** rendering the optional summary in the current Web page,
+  generating manifests, and allowing task identity changes across plan
+  revisions all belong to separately approved product slices.
+
 ## Verification status
 
-- [x] `make test` — 76 Python tests passed after the bound managed-run snapshot
-  and atomic binding-cutover slice.
+- [x] `make test` — 101 Python tests passed, including the acceptance-evidence
+  projection, stale-revision, numeric-boundary, and error-visibility cases.
 - [x] `cd packages/podium/web && npm run test && npm run lint && npm run
       design:lint && npm run build` — 27 Web tests passed; lint/build clean
       (design lint: 0 errors, 0 warnings).

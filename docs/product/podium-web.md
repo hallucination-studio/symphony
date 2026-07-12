@@ -27,11 +27,12 @@ cookie value, password, or client secret API surface.
 
 ## Evidence boundary
 
-The current managed-run view renders only the summary fields above. Detailed
-plan approval, catalog, rubric, provenance, manifest, artifact, and raw command
-evidence remain Conductor-side durable data until an explicit API/UI contract
-adds a sanitized projection. No separate evidence or gate child-issue tree is
-created by this page.
+The current managed-run view renders only the summary fields above. Its existing
+API response may include an optional safe acceptance/Gate summary, but this SPA
+does not render it yet. Detailed plan approval, catalog, rubric, provenance,
+manifest, artifact, command text/output, and findings remain Conductor-side
+durable data. No separate evidence or gate child-issue tree is created by this
+page.
 
 ## Design and verification
 

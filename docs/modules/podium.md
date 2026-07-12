@@ -80,9 +80,13 @@ or transaction ownership.
 
 Conductor reports are normalized to Web's `work_items`,
 `active_work_item_id`, and `backend_session_id` fields before Web consumes
-them. The public managed-run route currently returns `policy_revision: 1` and
-`profiles: {}`; it does not claim to expose a Codex configuration summary or
-all local evidence fields.
+them. It may additionally carry an optional safe acceptance/Gate summary:
+catalog/rubric, plan version, command counts, score/threshold, provenance,
+manifest/artifact counts, and failure code. Podium independently allowlists
+and bounds that summary; command text/output, findings, and artifact/manifest
+locations remain local. The public managed-run route currently returns
+`policy_revision: 1` and `profiles: {}`; the current Web does not render the
+optional evidence fields.
 
 ## Hard-cut rules
 

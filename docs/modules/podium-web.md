@@ -33,8 +33,9 @@ are normative and must stay synchronized with `src/styles/tokens.css`.
 
 The managed-run pages render run/task/gate status and operator-facing errors.
 They do not currently render all local plan approval, catalog, rubric,
-provenance, manifest, or artifact evidence. Do not document such a projection
-until an API contract and browser behavior exist.
+provenance, manifest, or artifact evidence. The existing API may return an
+optional safe summary, but browser rendering remains deferred; do not expose
+full command/output, findings, or reference locations in this module.
 
 ## Verification
 

@@ -64,8 +64,11 @@ Current Linear projection creates task Sub Issues and runtime-wait
 `[Human Action]` children, projects state/comments, and verifies explicit
 `parent { id identifier }`. It does **not** create a separate catalog,
 gate-evidence, or artifact child-issue tree. Current Podium reports expose run
-and work-item state; detailed evidence is retained locally rather than claimed
-to be rendered by Web.
+and work-item state plus an optional safe Gate summary. Detailed local evidence
+keeps bounded, redacted command/output excerpts and findings; its provenance is
+the real Conductor-created Codex Gate attempt. Podium and Linear
+receive counts, scores, safe rubric/provenance, and catalog/manifest/artifact
+summaries rather than full evidence or locations.
 
 The outbound managed-run report is a bounded current-binding snapshot: it
 prioritizes nonterminal runs, then recent terminal history, and reports the
