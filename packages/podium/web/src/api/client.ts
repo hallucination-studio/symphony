@@ -176,12 +176,6 @@ export const api = {
     return request("/api/v1/runtimes");
   },
 
-  runtime(id: string): Promise<RuntimeRecord> {
-    return request<RuntimeRecord>(
-      `/api/v1/runtimes/${encodeURIComponent(id)}`,
-    );
-  },
-
   // Tail of a Performer's log, as reported by its Conductor. `order=desc`
   // returns newest-first; the backend serves the cached tail synchronously.
   instanceLogs(

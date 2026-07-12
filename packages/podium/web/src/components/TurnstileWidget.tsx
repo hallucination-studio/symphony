@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState, type MutableRefObject, type RefObject } from "react";
 import { useConfig } from "../api/hooks";
-import { getTurnstileToken } from "../lib/turnstile";
 
 const TURNSTILE_SCRIPT_SRC =
   "https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit";
@@ -62,7 +61,7 @@ function useTurnstileReadiness({ enabled, isError, isLoading, onReadyChange, onT
       return;
     }
     if (isError || !enabled) {
-      onToken(getTurnstileToken());
+      onToken("");
       onReadyChange(!isError);
       return;
     }

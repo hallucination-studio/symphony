@@ -324,11 +324,6 @@ export function useI18n(): I18nContextValue {
   return value;
 }
 
-// eslint-disable-next-line react-refresh/only-export-components
-export function translate(locale: Locale, key: string): string {
-  return locale === "zh" ? ZH_TRANSLATIONS[key] ?? key : key;
-}
-
 function initialLocale(): Locale {
   const stored = localStorage.getItem(STORAGE_KEY);
   if (stored === "en" || stored === "zh") return stored;
