@@ -22,7 +22,7 @@ from .conductor_service_helpers import (
     _merge_project_labels,
     _runtime_metrics,
 )
-from .linear import ManagedRunLinearProxy, ProjectLabelLinearProxy
+from .linear import ManagedRunLinearProxy
 from .store import ConductorStore
 
 
@@ -93,7 +93,7 @@ class ConductorService(ConductorPodiumSyncMixin):
     def _project_label_proxy(self, instance: InstanceRecord) -> Any:
         settings = self.store.get_settings()
         endpoint_base = settings.podium_url.strip().rstrip("/") or "https://podium.example"
-        return ProjectLabelLinearProxy(
+        return ManagedRunLinearProxy(
             endpoint=f"{endpoint_base}/api/v1/linear/graphql",
             api_key=settings.podium_proxy_token.strip(),
         )

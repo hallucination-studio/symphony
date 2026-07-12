@@ -271,8 +271,6 @@ query ConductorTeamWorkflowStates($teamId: ID!) {
             if isinstance(node, dict) and node.get("id")
         ]
 
-
-class ProjectLabelLinearProxy(ManagedRunLinearProxy):
     async def find_project_id(self, project_slug: str) -> str | None:
         payload = await self.graphql(
             """
@@ -396,4 +394,4 @@ def _replace_marker_block(current: str, marker_name: str, block: str) -> str:
     return f"{base}\n\n{replacement}".strip() if base else replacement
 
 
-__all__ = ["LinearProxyError", "ManagedRunLinearProxy", "ProjectLabelLinearProxy"]
+__all__ = ["LinearProxyError", "ManagedRunLinearProxy"]
