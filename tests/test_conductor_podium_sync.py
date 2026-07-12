@@ -123,3 +123,57 @@ def test_managed_run_linear_proxy_requires_podium_configuration(tmp_path: Path) 
     with pytest.raises(ConductorServiceError) as error:
         service._managed_run_tracker(instance)
     assert error.value.code == "podium_proxy_not_configured"
+
+
+def test_podium_report_projects_the_managed_run_shape_consumed_by_web() -> None:
+    service = SimpleNamespace(
+        store=SimpleNamespace(
+            get_settings=lambda: SimpleNamespace(conductor_id="conductor-1"),
+            list_instances=lambda: [],
+        ),
+        managed_run_view=lambda: {
+            "runs": [
+                {
+                    "run_id": "run-1",
+                    "parent_issue_id": "parent-1",
+                    "issue_identifier": "APP-1",
+                    "state": "executing",
+                    "active_task_id": "task-1",
+                    "latest_reason": "",
+                    "plan_version": 2,
+                    "payload": {"thread_id": "thread-1"},
+                    "tasks": [
+                        {
+                            "task_id": "task-1",
+                            "state": "in_progress",
+                            "gate_status": "execute_started",
+                            "task": {
+                                "title": "Implement endpoint",
+                                "objective": "Add the endpoint",
+                                "files_likely_touched": ["src/api.py"],
+                            },
+                        }
+                    ],
+                }
+            ]
+        },
+    )
+
+    report = ConductorPodiumSyncMixin.build_podium_report(service)
+    run = report["managed_runs"]["runs"][0]
+
+    assert run["active_work_item_id"] == "task-1"
+    assert run["backend_session_id"] == "thread-1"
+    assert run["work_items"] == [
+        {
+            "work_item_id": "task-1",
+            "state": "in_progress",
+            "gate_status": "execute_started",
+            "payload": {
+                "title": "Implement endpoint",
+                "objective": "Add the endpoint",
+                "files_likely_touched": ["src/api.py"],
+            },
+        }
+    ]
+    assert "tasks" not in run

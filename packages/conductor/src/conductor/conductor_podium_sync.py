@@ -315,7 +315,7 @@ class ConductorPodiumSyncMixin(
             "agent_app_user_id": agent_app_user_id,
             "run_id": accepted["run_id"],
             "parent_issue_id": accepted["parent_issue_id"],
-            "active_work_item_id": run.get("active_work_item_id") or "",
+            "active_work_item_id": run.get("active_task_id") or "",
             "managed_run_state": run.get("state") or "planning",
             "plan_version": run.get("plan_version") or 0,
             "backend_session_id": str((run.get("payload") or {}).get("thread_id") or ""),
@@ -387,7 +387,7 @@ class ConductorPodiumSyncMixin(
         metrics: dict[str, dict[str, Any]] = {}
         queue: dict[str, dict[str, Any]] = {}
         log_tail: dict[str, dict[str, Any]] = {}
-        managed_runs_view = _sanitize_managed_runs_view(self.managed_run_view())
+        managed_runs_view = _sanitize_managed_runs_view(_managed_runs_report_view(self.managed_run_view()))
         managed_run_metrics = _managed_run_report_metrics(managed_runs_view)
         managed_run_queue = _managed_run_report_queue(managed_runs_view)
         unbound: dict[str, Any] = {}
@@ -561,6 +561,42 @@ def _managed_run_report_queue(view: dict[str, Any]) -> dict[str, int]:
             if isinstance(run, dict) and run.get("state") in {"planning", "awaiting_approval"}
         ),
         "leased": sum(1 for run in runs if isinstance(run, dict) and run.get("state") == "executing"),
+    }
+
+
+def _managed_runs_report_view(view: Any) -> dict[str, list[dict[str, Any]]]:
+    runs = view.get("runs") if isinstance(view, dict) else []
+    return {"runs": [_managed_run_report(run) for run in runs if isinstance(run, dict)]}
+
+
+def _managed_run_report(run: dict[str, Any]) -> dict[str, Any]:
+    payload = run.get("payload") if isinstance(run.get("payload"), dict) else {}
+    tasks = run.get("tasks") if isinstance(run.get("tasks"), list) else []
+    return {
+        "run_id": str(run.get("run_id") or ""),
+        "parent_issue_id": str(run.get("parent_issue_id") or ""),
+        "issue_identifier": str(run.get("issue_identifier") or ""),
+        "state": str(run.get("state") or "planning"),
+        "active_work_item_id": str(run.get("active_task_id") or ""),
+        "latest_reason": str(run.get("latest_reason") or ""),
+        "plan_version": int(run.get("plan_version") or 0),
+        "backend_session_id": str(payload.get("thread_id") or ""),
+        "work_items": [_managed_run_work_item(task) for task in tasks if isinstance(task, dict)],
+    }
+
+
+def _managed_run_work_item(task: dict[str, Any]) -> dict[str, Any]:
+    payload = task.get("task") if isinstance(task.get("task"), dict) else {}
+    files = payload.get("files_likely_touched") if isinstance(payload.get("files_likely_touched"), list) else []
+    return {
+        "work_item_id": str(task.get("task_id") or ""),
+        "state": str(task.get("state") or "todo"),
+        "gate_status": str(task.get("gate_status") or ""),
+        "payload": {
+            "title": str(payload.get("title") or ""),
+            "objective": str(payload.get("objective") or ""),
+            "files_likely_touched": [str(path) for path in files],
+        },
     }
 
 
