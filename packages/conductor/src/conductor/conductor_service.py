@@ -63,9 +63,6 @@ class ConductorService(ConductorPodiumSyncMixin):
         merged.update(payload)
         return self.update_settings(ConductorSettings.from_dict(merged))
 
-    async def get_instance_coordinated(self, instance_id: str) -> InstanceRecord | None:
-        return self.get_instance(instance_id)
-
     def _managed_run_tracker(self, instance: InstanceRecord) -> Any:
         settings = self.store.get_settings()
         endpoint_base = settings.podium_url.strip().rstrip("/")

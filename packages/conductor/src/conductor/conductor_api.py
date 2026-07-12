@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-from dataclasses import dataclass
 import logging
 import random
 from typing import Any
@@ -16,16 +15,6 @@ from .conductor_smoke_protocol import sanitize_reason
 
 
 LOGGER = logging.getLogger(__name__)
-
-
-@dataclass(frozen=True)
-class RawResponse:
-    body: bytes
-    content_type: str
-
-    @classmethod
-    def text(cls, content: str, content_type: str) -> RawResponse:
-        return cls(content.encode(), content_type)
 
 
 class ConductorApiServer:
@@ -181,7 +170,7 @@ class ConductorApiServer:
         raw_body: bytes,
         query: dict[str, str] | None = None,
         headers: dict[str, str] | None = None,
-    ) -> tuple[int, dict[str, Any] | RawResponse]:
+    ) -> tuple[int, dict[str, Any]]:
         body = json.loads(raw_body.decode() or "{}") if raw_body else {}
         query = query or {}
         try:
@@ -218,7 +207,7 @@ class ConductorApiServer:
 
     async def _route_instance(
         self, method: str, path: str, body: dict[str, Any], query: dict[str, str] | None = None
-    ) -> tuple[int, dict[str, Any] | RawResponse]:
+    ) -> tuple[int, dict[str, Any]]:
         query = query or {}
         suffix = path.removeprefix("/api/instances/")
         if "/" in suffix:
@@ -226,7 +215,7 @@ class ConductorApiServer:
         else:
             instance_id, action = suffix, ""
         if method == "GET" and not action:
-            instance = await self.service.get_instance_coordinated(instance_id)
+            instance = self.service.get_instance(instance_id)
             if instance is None:
                 return 404, {"error": {"code": "instance_not_found", "message": f"Instance not found: {instance_id}"}}
             return 200, {"instance": _public_instance(instance)}
@@ -265,13 +254,9 @@ class ConductorApiServer:
             return 200, await self.service.approve_runtime_error(instance_id, issue_id=body.get("issue_id"))
         return 404, {"error": {"code": "not_found", "message": f"Route not found: {path}"}}
 
-    def _write_response(self, writer: asyncio.StreamWriter, status: int, payload: dict[str, Any] | RawResponse) -> None:
-        if isinstance(payload, RawResponse):
-            body = payload.body
-            content_type = payload.content_type
-        else:
-            body = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
-            content_type = "application/json; charset=utf-8"
+    def _write_response(self, writer: asyncio.StreamWriter, status: int, payload: dict[str, Any]) -> None:
+        body = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
+        content_type = "application/json; charset=utf-8"
         reason = {
             200: "OK",
             201: "Created",
