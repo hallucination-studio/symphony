@@ -256,33 +256,37 @@ class _CodexSdkRuntimeMixin:
         self,
         turn: Any,
         emit: Callable[[dict[str, Any]], None],
-        *,
-        validate_structured: bool,
     ) -> tuple[str | None, dict[str, Any] | None]:
         stream = getattr(turn, "stream", None)
         if callable(stream):
-            return await self._consume_turn_stream(stream, emit, validate_structured=validate_structured)
+            return await self._consume_turn_stream(stream, emit)
         raise CodexError("sdk_missing_stream", "Codex SDK turn does not support stream")
 
     async def _consume_turn_stream(
         self,
         stream: Callable[[], Any],
         emit: Callable[[dict[str, Any]], None],
-        *,
-        validate_structured: bool,
     ) -> tuple[str | None, dict[str, Any] | None]:
         final_response: str | None = None
+        fallback_response: str | None = None
         structured: dict[str, Any] | None = None
         async for event in stream():
             mapped = _sdk_event_to_dict(event)
             if mapped:
                 emit(mapped)
-            usage = _usage_from_any(event)
+            usage = _usage_from_any(_event_payload(event)) or _usage_from_any(event)
             if usage is not None:
                 emit({"event": "thread_token_usage_updated", "backend": "sdk", "usage": usage, **usage})
-            final_response = _first_string(event, "final_response", "response", "text", default=final_response)
-            structured = _first_dict(event, "structured_result", "output", "parsed", default=structured, validate=validate_structured)
-        return final_response, structured
+            response, is_final = _notification_response(event)
+            if response:
+                if is_final:
+                    final_response = response
+                elif fallback_response is None:
+                    fallback_response = response
+            payload = _event_payload(event)
+            structured = _first_dict(event, "structured_result", "output", "parsed", default=structured)
+            structured = _first_dict(payload, "structured_result", "output", "parsed", default=structured)
+        return final_response or fallback_response, structured
 
 
 def _sdk_event_to_dict(event: Any) -> dict[str, Any] | None:
@@ -290,7 +294,9 @@ def _sdk_event_to_dict(event: Any) -> dict[str, Any] | None:
     name = raw.get("event") or raw.get("type") or raw.get("method")
     if not isinstance(name, str):
         return None
-    params = raw.get("params") if isinstance(raw.get("params"), dict) else raw
+    params = raw.get("params") if isinstance(raw.get("params"), dict) else _event_payload(event)
+    if not params:
+        params = raw
     payload = {**params, "type": name}
     mapped = {"event": f"sdk_{name.replace('.', '_').replace('/', '_')}", "backend": "sdk", "payload": payload}
     for key in ("message", "command", "exit_code", "usage", "turn_id", "thread_id"):
@@ -305,8 +311,44 @@ def _event_model_dict(event: Any) -> dict[str, Any]:
         dumped = model_dump(by_alias=True)
         if isinstance(dumped, dict):
             return dumped
-    return {
+    values = {
         key: getattr(event, key)
         for key in ("method", "params", "type", "event", "message", "command", "exit_code", "usage", "turn_id", "thread_id")
         if hasattr(event, key)
     }
+    payload = _event_payload(event)
+    if payload:
+        values["payload"] = payload
+    return values
+
+
+def _event_payload(event: Any) -> dict[str, Any]:
+    raw = event.get("payload") if isinstance(event, dict) else getattr(event, "payload", None)
+    if isinstance(raw, dict):
+        return raw
+    model_dump = getattr(raw, "model_dump", None)
+    if callable(model_dump):
+        try:
+            dumped = model_dump(by_alias=True, mode="json")
+        except TypeError:
+            dumped = model_dump(by_alias=True)
+        if isinstance(dumped, dict):
+            return dumped
+    return {}
+
+
+def _notification_response(event: Any) -> tuple[str | None, bool]:
+    raw = _event_model_dict(event)
+    direct = _first_string(raw, "final_response", "response", "text")
+    if direct:
+        return direct, True
+    payload = _event_payload(event)
+    item = payload.get("item") if isinstance(payload.get("item"), dict) else {}
+    if str(item.get("type") or "") != "agentMessage":
+        return None, False
+    text = str(item.get("text") or "").strip()
+    if not text:
+        return None, False
+    phase = item.get("phase")
+    phase_value = getattr(phase, "value", phase)
+    return text, str(phase_value or "") == "final_answer"

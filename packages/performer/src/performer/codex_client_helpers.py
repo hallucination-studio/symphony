@@ -47,7 +47,7 @@ class _SdkErrorClassification:
     http_status: int | None = None
 
 
-def _parse_structured_result(value: str | None, *, validate: bool = True) -> dict[str, Any] | None:
+def _parse_structured_result(value: str | None) -> dict[str, Any] | None:
     if not value:
         return None
     try:
@@ -56,21 +56,7 @@ def _parse_structured_result(value: str | None, *, validate: bool = True) -> dic
         return None
     if not isinstance(parsed, dict):
         return None
-    return parsed if not validate or _valid_structured_result(parsed) else None
-
-
-def _valid_structured_result(value: Any) -> bool:
-    if not isinstance(value, dict):
-        return False
-    if value.get("next_action") not in {"ready_for_review", "needs_human", "blocked"}:
-        return False
-    if not isinstance(value.get("summary"), str):
-        return False
-    for key in ("test_commands", "changed_files", "remaining_risks"):
-        raw = value.get(key)
-        if not isinstance(raw, list) or not all(isinstance(item, str) for item in raw):
-            return False
-    return True
+    return parsed
 
 
 def _is_transient_codex_error(code: str) -> bool:
@@ -253,11 +239,10 @@ def _first_dict(
     value: Any,
     *names: str,
     default: dict[str, Any] | None = None,
-    validate: bool = True,
 ) -> dict[str, Any] | None:
     for name in names:
         raw = value.get(name) if isinstance(value, dict) else getattr(value, name, None)
-        if isinstance(raw, dict) and (not validate or _valid_structured_result(raw)):
+        if isinstance(raw, dict):
             return raw
     return default
 

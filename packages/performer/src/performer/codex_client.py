@@ -71,7 +71,6 @@ class CodexSdkClient(_CodexSdkRuntimeMixin):
             emit=emit,
             events=events,
             require_structured=True,
-            validate_structured=True,
         )
         await _close_sdk_client(client)
         emit(
@@ -106,7 +105,6 @@ class CodexSdkClient(_CodexSdkRuntimeMixin):
         emit: EventCallback,
         events: list[dict[str, Any]],
         require_structured: bool,
-        validate_default_shape: bool,
     ) -> tuple[Any, str, str, str | None, dict[str, Any] | None]:
         turn_id = "turn"
         session_id = f"{thread_id}-{turn_id}"
@@ -119,10 +117,9 @@ class CodexSdkClient(_CodexSdkRuntimeMixin):
                     output_schema,
                     thread_id=thread_id,
                     emit=emit,
-                    validate_structured=validate_default_shape,
                 )
                 if structured is None:
-                    structured = _parse_structured_result(final_response, validate=validate_default_shape)
+                    structured = _parse_structured_result(final_response)
                 if require_structured and structured is None:
                     raise CodexError("invalid_structured_output", "Codex SDK turn did not produce the required structured JSON result")
                 return turn, turn_id, session_id, final_response, structured
@@ -178,10 +175,9 @@ class CodexSdkClient(_CodexSdkRuntimeMixin):
         *,
         thread_id: str,
         emit: EventCallback,
-        validate_structured: bool,
     ) -> tuple[Any, str, str, str | None, dict[str, Any] | None]:
         return await asyncio.wait_for(
-            self._run_turn(thread, prompt, output_schema, thread_id=thread_id, emit=emit, validate_structured=validate_structured),
+            self._run_turn(thread, prompt, output_schema, thread_id=thread_id, emit=emit),
             timeout=_timeout_seconds(self.config.hard_turn_timeout_ms),
         )
 
@@ -193,14 +189,13 @@ class CodexSdkClient(_CodexSdkRuntimeMixin):
         *,
         thread_id: str,
         emit: EventCallback,
-        validate_structured: bool,
     ) -> tuple[Any, str, str, str | None, dict[str, Any] | None]:
         async def op() -> tuple[Any, str, str, str | None, dict[str, Any] | None]:
             turn = await self._start_sdk_turn(thread, prompt, output_schema)
             turn_id = _string_attr(turn, "id") or "turn"
             session_id = f"{thread_id}-{turn_id}"
             emit({"event": "turn_started", "backend": "sdk", "thread_id": thread_id, "turn_id": turn_id, "session_id": session_id})
-            final_response, structured = await self._consume_turn(turn, emit, validate_structured=validate_structured)
+            final_response, structured = await self._consume_turn(turn, emit)
             return turn, turn_id, session_id, final_response, structured
 
         return await self._retry_overload(op, emit=emit)
