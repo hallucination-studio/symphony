@@ -10,7 +10,6 @@ from ._postgres_health import PgHealthMixin
 from ._postgres_linear import PgLinearMixin
 from ._postgres_linear_cutover import PgLinearCutoverMixin
 from ._postgres_linear_reconciliation import PgLinearReconciliationMixin
-from ._postgres_linear_tokens import PgLinearTokensMixin
 from ._postgres_schema import PgSchema
 from ._postgres_ops import PgOpsMixin
 from ._postgres_project_replacements import PgProjectReplacementsMixin
@@ -22,7 +21,6 @@ class PgStore(
     PgAuthMixin,
     PgHealthMixin,
     PgRuntimeMixin,
-    PgLinearTokensMixin,
     PgLinearReconciliationMixin,
     PgLinearCutoverMixin,
     PgLinearMixin,
