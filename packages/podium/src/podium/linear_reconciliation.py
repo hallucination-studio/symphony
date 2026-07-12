@@ -143,6 +143,15 @@ class LinearReconciler:
             )
             queued = scan.queued
             if scan.complete:
+                try:
+                    await self.state.refresh_blocked_dispatches(installation, binding)
+                except Exception as exc:
+                    raise BindingReconciliationFailed(
+                        exc,
+                        queued,
+                        expected_state=scan.expected_state,
+                        state_loaded=True,
+                    ) from exc
                 return queued
             self._log_stale_page(binding_id, stale_attempt)
             if not await self._binding_still_routes(installation, project, binding_id):

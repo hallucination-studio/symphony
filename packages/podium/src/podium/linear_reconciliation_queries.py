@@ -16,7 +16,7 @@ ISSUE_FIELDS = """
       delegate { id }
       parent { id identifier }
       inverseRelations(first: 50) {
-        nodes { type issue { id identifier } relatedIssue { id identifier } }
+        nodes { type issue { id state { type } } }
       }
     }
     pageInfo { hasNextPage endCursor }
@@ -52,6 +52,18 @@ query SymphonyDelegatedIssuesIncremental(
 {ISSUE_FIELDS}
   }}
 }}
+"""
+
+
+DISPATCH_BLOCKERS_QUERY = """
+query SymphonyDispatchBlockers($issueId: String!, $after: String) {
+  issue(id: $issueId) {
+    inverseRelations(first: 50, after: $after) {
+      nodes { type issue { id state { type } } }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
+}
 """
 
 

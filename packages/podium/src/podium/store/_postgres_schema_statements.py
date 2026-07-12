@@ -137,6 +137,7 @@ POSTGRES_SCHEMA_STATEMENTS: Iterable[str] = (
                 project_slug TEXT NOT NULL DEFAULT '',
                 agent_app_user_id TEXT NOT NULL DEFAULT '',
                 issue_delegate_id TEXT NOT NULL DEFAULT '',
+                blocked_by JSONB NOT NULL DEFAULT '[]'::jsonb,
                 status TEXT NOT NULL,
                 reason TEXT NOT NULL DEFAULT '',
                 leased_conductor_id TEXT REFERENCES conductors(id) ON DELETE SET NULL,

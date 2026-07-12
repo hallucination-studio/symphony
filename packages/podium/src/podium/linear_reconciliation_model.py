@@ -7,6 +7,9 @@ from typing import Any
 from .podium_shared import utc_now_iso
 
 
+TERMINAL_BLOCKER_STATE_TYPES = frozenset({"completed", "canceled", "duplicate"})
+
+
 def initial_reconciliation_state(binding_id: str) -> dict[str, Any]:
     return {
         "binding_id": binding_id,
@@ -152,7 +155,7 @@ def _event(
         "issue_description": str(issue.get("description") or ""),
         "agent_app_user_id": str(installation.get("app_user_id") or ""),
         "issue_delegate_id": str(delegate.get("id") or ""),
-        "blocked_by": _blocked_by_ids(issue),
+        "blocked_by": active_blocker_ids(issue),
         "parent_issue_id": "",
         "managed_run_intent": {},
         "intake_key": f"linear-issue:{issue_id}:epoch:{epoch}",
@@ -170,16 +173,20 @@ def _delegated_to_installation(
     )
 
 
-def _blocked_by_ids(issue: dict[str, Any]) -> list[str]:
+def active_blocker_ids(issue: dict[str, Any]) -> list[str]:
     relations = issue.get("inverseRelations") if isinstance(issue.get("inverseRelations"), dict) else {}
-    result: list[str] = []
+    result: set[str] = set()
     for relation in relations.get("nodes") or []:
         if not isinstance(relation, dict) or relation.get("type") != "blocks":
             continue
-        blocker = relation.get("issue") if isinstance(relation.get("issue"), dict) else relation.get("relatedIssue")
-        if isinstance(blocker, dict) and blocker.get("id"):
-            result.append(str(blocker["id"]))
-    return result
+        blocker = relation.get("issue")
+        if not isinstance(blocker, dict):
+            continue
+        blocker_id = str(blocker.get("id") or "")
+        state = blocker.get("state") if isinstance(blocker.get("state"), dict) else {}
+        if blocker_id and str(state.get("type") or "") not in TERMINAL_BLOCKER_STATE_TYPES:
+            result.add(blocker_id)
+    return sorted(result)
 
 
 def _parent_issue_id(issue: dict[str, Any]) -> str:

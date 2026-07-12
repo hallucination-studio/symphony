@@ -106,6 +106,7 @@ def _record_to_project_binding(row: Any) -> dict[str, Any]:
 
 
 def _record_to_dispatch(row: Any) -> dict[str, Any]:
+    blocked_by = _pg_json_value(row["blocked_by"], [])
     return {
         "dispatch_id": str(row["id"]),
         "project_binding_id": str(row["project_binding_id"]),
@@ -120,6 +121,7 @@ def _record_to_dispatch(row: Any) -> dict[str, Any]:
         "project_slug": str(row["project_slug"]),
         "agent_app_user_id": str(row["agent_app_user_id"]),
         "issue_delegate_id": str(row["issue_delegate_id"]),
+        "blocked_by": [item for item in blocked_by if isinstance(item, str) and item] if isinstance(blocked_by, list) else [],
         "status": str(row["status"]),
         "reason": str(row["reason"]),
         "leased_runtime_id": row["leased_conductor_id"],

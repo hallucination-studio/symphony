@@ -9,16 +9,39 @@ DISPATCH_INSERT_SQL = """
 INSERT INTO dispatches (
   id, project_binding_id, user_id, issue_id, issue_identifier, issue_title, issue_description,
   managed_run_intent, intake_key, workspace_id, project_slug, status, reason,
-  agent_app_user_id, issue_delegate_id, leased_conductor_id, leased_until, fencing_token,
+  agent_app_user_id, issue_delegate_id, blocked_by, leased_conductor_id, leased_until, fencing_token,
   run_id, parent_issue_id, active_work_item_id, managed_run_state, plan_version, backend_session_id,
   created_at, updated_at, completed_at
 )
 VALUES (
-  $1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12,$13,$14,$15,$16,$17::timestamptz,$18,
-  $19,$20,$21,$22,$23,$24,$25::timestamptz,$26::timestamptz,$27::timestamptz
+  $1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12,$13,$14,$15,$16::jsonb,$17,$18::timestamptz,$19,
+  $20,$21,$22,$23,$24,$25,$26::timestamptz,$27::timestamptz,$28::timestamptz
 )
 ON CONFLICT DO NOTHING
 RETURNING id
+"""
+
+LEASE_DISPATCH_SQL = """
+WITH candidate AS (
+    SELECT id
+    FROM dispatches
+    WHERE project_binding_id = ANY($2::text[])
+    AND COALESCE(jsonb_array_length(blocked_by), 0) = 0
+    AND reason <> 'linear_blocker_check_failed'
+    AND (status = 'queued' OR (status = 'leased' AND leased_until < now()))
+  ORDER BY created_at ASC
+  FOR UPDATE SKIP LOCKED
+  LIMIT 1
+)
+UPDATE dispatches
+SET status = 'leased',
+    leased_conductor_id = $1,
+    leased_until = $3::timestamptz,
+    fencing_token = dispatches.fencing_token + 1,
+    updated_at = now()
+FROM candidate
+WHERE dispatches.id = candidate.id
+RETURNING dispatches.*
 """
 
 PROJECT_BINDING_UPSERT_SQL = """
@@ -98,6 +121,7 @@ def _dispatch_values(dispatch: dict[str, Any]) -> tuple[Any, ...]:
         str(dispatch.get("reason") or ""),
         str(dispatch.get("agent_app_user_id") or ""),
         str(dispatch.get("issue_delegate_id") or ""),
+        _pg_json(_blocker_ids(dispatch.get("blocked_by"))),
         dispatch.get("leased_runtime_id") or dispatch.get("leased_conductor_id"),
         _pg_datetime(dispatch.get("leased_until")),
         int(dispatch.get("fencing_token") or 0),
@@ -196,30 +220,81 @@ class PgDispatchMixin:
     async def lease_dispatch(self, conductor_id: str, *, binding_ids: list[str], lease_until: str) -> dict[str, Any] | None:
         async with self.pool.acquire() as connection:
             row = await connection.fetchrow(
-                """
-                WITH candidate AS (
-                  SELECT id
-                  FROM dispatches
-                  WHERE project_binding_id = ANY($2::text[])
-                    AND (status = 'queued' OR (status = 'leased' AND leased_until < now()))
-                  ORDER BY created_at ASC
-                  FOR UPDATE SKIP LOCKED
-                  LIMIT 1
-                )
-                UPDATE dispatches
-                SET status = 'leased',
-                    leased_conductor_id = $1,
-                    leased_until = $3::timestamptz,
-                    fencing_token = dispatches.fencing_token + 1,
-                    updated_at = now()
-                FROM candidate
-                WHERE dispatches.id = candidate.id
-                RETURNING dispatches.*
-                """,
+                LEASE_DISPATCH_SQL,
                 conductor_id,
                 list(binding_ids),
                 _pg_datetime(lease_until),
             )
+        return _record_to_dispatch(row) if row is not None else None
+
+    async def list_dispatches_requiring_blocker_recheck(self, binding_id: str) -> list[dict[str, Any]]:
+        rows = await self.pool.fetch(
+            """
+            SELECT * FROM dispatches
+            WHERE project_binding_id = $1
+              AND status = 'queued'
+              AND (
+                COALESCE(jsonb_array_length(blocked_by), 0) > 0
+                OR reason = 'linear_blocker_check_failed'
+              )
+            ORDER BY created_at ASC
+            """,
+            binding_id,
+        )
+        return [_record_to_dispatch(row) for row in rows]
+
+    async def update_dispatch_blockers(
+        self,
+        dispatch_id: str,
+        blocker_ids: list[str],
+        *,
+        reason: str,
+    ) -> dict[str, Any] | None:
+        row = await self.pool.fetchrow(
+            """
+            UPDATE dispatches
+            SET blocked_by = $2::jsonb,
+                reason = $3,
+                updated_at = now()
+            WHERE id = $1 AND status = 'queued'
+            RETURNING *
+            """,
+            dispatch_id,
+            _pg_json(_blocker_ids(blocker_ids)),
+            reason,
+        )
+        return _record_to_dispatch(row) if row is not None else None
+
+    async def requeue_dispatch_for_blockers(
+        self,
+        conductor_id: str,
+        dispatch_id: str,
+        fencing_token: int,
+        blocker_ids: list[str],
+        *,
+        reason: str,
+    ) -> dict[str, Any] | None:
+        row = await self.pool.fetchrow(
+            """
+            UPDATE dispatches
+            SET status = 'queued',
+                leased_conductor_id = NULL,
+                leased_until = NULL,
+                blocked_by = $4::jsonb,
+                reason = $5,
+                updated_at = now()
+            WHERE id = $2
+              AND leased_conductor_id = $1
+              AND fencing_token = $3::bigint
+              AND status = 'leased'
+            RETURNING *
+            """,
+            conductor_id,
+            dispatch_id,
+            fencing_token,
+            _pg_json(_blocker_ids(blocker_ids)),
+            reason,
+        )
         return _record_to_dispatch(row) if row is not None else None
 
     async def ack_dispatch(
@@ -295,6 +370,12 @@ def _binding_values(binding: dict[str, Any]) -> tuple[Any, ...]:
         str(binding.get("replacement_binding_id") or ""), str(binding.get("error_code") or ""),
         str(binding.get("sanitized_reason") or ""), _pg_datetime(binding.get("updated_at")),
     )
+
+
+def _blocker_ids(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return sorted({item for item in value if isinstance(item, str) and item})
 
 
 async def _upsert_project_binding_on(
