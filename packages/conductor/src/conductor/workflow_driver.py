@@ -215,7 +215,7 @@ class WorkflowDriver:
         )
         wait = self.store.list_runtime_waits(str(run["run_id"]))[-1]
         scope_issue_id = str(task.get("linear_issue_id") or run["parent_issue_id"])
-        wait_issue = await self.service._managed_run_tracker(instance).create_child_issue_for(
+        wait_issue = await self.service._managed_run_tracker().create_child_issue_for(
             parent_issue_id=scope_issue_id,
             title=f"[Human Action] Runtime wait: {str(wait.get('kind') or 'approval')}",
             description=(
@@ -268,7 +268,7 @@ class WorkflowDriver:
         )
 
     async def _project_plan(self, run: dict[str, Any], instance: Any, plan: Plan) -> None:
-        proxy = self.service._managed_run_tracker(instance)
+        proxy = self.service._managed_run_tracker()
         run_id = str(run["run_id"])
         parent_id = str(run["parent_issue_id"])
         delegate_id = str((run.get("payload") or {}).get("agent_app_user_id") or "") or None
@@ -304,7 +304,7 @@ class WorkflowDriver:
             await proxy.comment_issue(parent_id, "Plan committed and awaiting Linear approval before execution.")
 
     async def _resume_approved_plan(self, run: dict[str, Any], instance: Any) -> dict[str, int]:
-        proxy = self.service._managed_run_tracker(instance)
+        proxy = self.service._managed_run_tracker()
         issue = await proxy.fetch_issue(str(run["parent_issue_id"]))
         state_name = _linear_state_name(issue)
         if state_name in {"blocked", "backlog", "canceled", "cancelled"}:
@@ -330,13 +330,13 @@ class WorkflowDriver:
         elif task_id:
             task = self.store.get_task(str(run["run_id"]), task_id) or {}
             issue_id = str(task.get("linear_issue_id") or issue_id)
-        issue = await self.service._managed_run_tracker(instance).fetch_issue(issue_id)
+        issue = await self.service._managed_run_tracker().fetch_issue(issue_id)
         state_name = _linear_state_name(issue)
         if state_name in {"blocked", "backlog", "canceled", "cancelled"}:
             return False
         resumed = self.store.resume_runtime_wait(str(run["run_id"]))
         if resumed:
-            await self.service._managed_run_tracker(instance).comment_issue(
+            await self.service._managed_run_tracker().comment_issue(
                 issue_id,
                 "Runtime wait reopened from Linear; the fenced turn will resume on the next polling cycle.",
             )
@@ -355,17 +355,17 @@ class WorkflowDriver:
         self.store.update_task_linear_state(str(run["run_id"]), str(task["task_id"]), target)
 
     async def _transition(self, *, parent_id: str, instance: Any, names: list[str], state_type: str) -> None:
-        proxy = self.service._managed_run_tracker(instance)
+        proxy = self.service._managed_run_tracker()
         result = await proxy.transition_issue_by_state_target(parent_id, names=names, state_type=state_type)
         if result.get("success") is False:
             raise RuntimeError(f"linear_state_transition_failed:{result.get('reason') or 'unknown'}")
 
     async def _comment_parent(self, run: dict[str, Any], instance: Any, body: str) -> None:
-        await self.service._managed_run_tracker(instance).comment_issue(str(run["parent_issue_id"]), body)
+        await self.service._managed_run_tracker().comment_issue(str(run["parent_issue_id"]), body)
 
     async def _comment_task(self, run: dict[str, Any], instance: Any, task: dict[str, Any], body: str) -> None:
         issue_id = str(task.get("linear_issue_id") or run["parent_issue_id"])
-        await self.service._managed_run_tracker(instance).comment_issue(issue_id, body)
+        await self.service._managed_run_tracker().comment_issue(issue_id, body)
 
     def _policy_revision(self) -> int:
         return 1

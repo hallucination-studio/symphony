@@ -83,7 +83,7 @@ class FakeService:
         self._managed_run_runtime_config = {"version": 1}
         self.linear = FakeLinear()
 
-    def _managed_run_tracker(self, _instance: FakeInstance) -> FakeLinear:
+    def _managed_run_tracker(self) -> FakeLinear:
         return self.linear
 
 

@@ -75,7 +75,7 @@ class ConductorService(ConductorPodiumSyncMixin):
         merged.update(payload)
         return self.update_settings(ConductorSettings.from_dict(merged))
 
-    def _managed_run_tracker(self, instance: InstanceRecord) -> Any:
+    def _managed_run_tracker(self) -> Any:
         settings = self.store.get_settings()
         endpoint_base = settings.podium_url.strip().rstrip("/")
         if not endpoint_base or not settings.podium_proxy_token.strip():

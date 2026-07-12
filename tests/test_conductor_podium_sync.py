@@ -128,7 +128,7 @@ def test_managed_run_linear_proxy_requires_podium_configuration(tmp_path: Path) 
     instance = SimpleNamespace(linear_project="example", linear_filters={})
 
     with pytest.raises(ConductorServiceError) as error:
-        service._managed_run_tracker(instance)
+        service._managed_run_tracker()
     assert error.value.code == "podium_proxy_not_configured"
 
 
