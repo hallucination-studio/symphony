@@ -140,7 +140,6 @@ class InstanceCreateRequest:
     repo_source_value: str
     linear_project: str
     linear_filters: dict[str, Any]
-    managed_run_profile: str = "default"
     http_port: int | None = None
     instance_dir: str | None = None
     workspace_root: str | None = None
@@ -156,7 +155,6 @@ class InstancePatchRequest:
     name: str | None = None
     linear_project: str | None = None
     linear_filters: dict[str, Any] | None = None
-    managed_run_profile: str | None = None
 
 
 class RunState(StrEnum):
