@@ -51,7 +51,6 @@ def _settings_values(settings: ConductorSettings) -> tuple[Any, ...]:
         settings.podium_runtime_id,
         settings.podium_runtime_token,
         settings.podium_proxy_token,
-        settings.runtime_group_id,
         1 if settings.managed_mode else 0,
         settings.conductor_id,
         utc_now_iso(),
@@ -126,7 +125,6 @@ class ConductorStore:
                   podium_runtime_id,
                   podium_runtime_token,
                   podium_proxy_token,
-                  runtime_group_id,
                   managed_mode,
                   conductor_id
                 FROM settings
@@ -143,12 +141,11 @@ class ConductorStore:
                       podium_runtime_id,
                       podium_runtime_token,
                       podium_proxy_token,
-                      runtime_group_id,
                       managed_mode,
                       conductor_id,
                       updated_at
                     )
-                    VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (1, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     _settings_values(settings),
                 )
@@ -165,18 +162,16 @@ class ConductorStore:
                   podium_runtime_id,
                   podium_runtime_token,
                   podium_proxy_token,
-                  runtime_group_id,
                   managed_mode,
                   conductor_id,
                   updated_at
                 )
-                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (1, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                   podium_url = excluded.podium_url,
                   podium_runtime_id = excluded.podium_runtime_id,
                   podium_runtime_token = excluded.podium_runtime_token,
                   podium_proxy_token = excluded.podium_proxy_token,
-                  runtime_group_id = excluded.runtime_group_id,
                   managed_mode = excluded.managed_mode,
                   conductor_id = excluded.conductor_id,
                   updated_at = excluded.updated_at
@@ -742,7 +737,6 @@ class ConductorStore:
                   podium_runtime_id TEXT NOT NULL DEFAULT '',
                   podium_runtime_token TEXT NOT NULL DEFAULT '',
                   podium_proxy_token TEXT NOT NULL DEFAULT '',
-                  runtime_group_id TEXT NOT NULL DEFAULT '',
                   managed_mode INTEGER NOT NULL DEFAULT 0,
                   conductor_id TEXT NOT NULL,
                   updated_at TEXT NOT NULL

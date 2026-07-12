@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from conductor.conductor_podium_sync import ConductorPodiumSyncMixin
+from conductor.conductor_podium_sync import ConductorPodiumSyncMixin, _smoke_runtime_fields
 from conductor.conductor_smoke_protocol import normalize_smoke_command
 from conductor.conductor_service_types import CoordinationCadence
 from conductor.conductor_api import ConductorApiServer
@@ -20,6 +20,15 @@ class _SmokeProxy:
 
     async def fetch_project_labels(self, _project_id: str) -> list[dict[str, str]]:
         return [{"id": "label-1", "name": "symphony:performer/example"}]
+
+
+def test_smoke_logs_derive_runtime_group_from_conductor_identity() -> None:
+    fields = _smoke_runtime_fields(
+        SimpleNamespace(podium_runtime_id="runtime-1", conductor_id="conductor-1"),
+        None,
+    )
+
+    assert fields.startswith("runtime_group_id=group_conductor-1 runtime_id=runtime-1 ")
 
 
 @pytest.mark.anyio

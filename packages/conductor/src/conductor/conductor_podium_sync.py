@@ -627,9 +627,10 @@ def _smoke_event_fields(event: str, command: dict[str, Any], instance: Any | Non
 
 def _smoke_runtime_fields(settings: Any, instance: Any | None) -> str:
     runtime_id = settings.podium_runtime_id or settings.conductor_id or "-"
+    conductor_id = settings.conductor_id or runtime_id
     return (
-        f"runtime_group_id={settings.runtime_group_id or '-'} runtime_id={runtime_id} "
-        f"conductor_id={settings.conductor_id or runtime_id} "
+        f"runtime_group_id=group_{conductor_id} runtime_id={runtime_id} "
+        f"conductor_id={conductor_id} "
         f"instance_id={getattr(instance, 'id', '-') if instance else '-'}"
     )
 
