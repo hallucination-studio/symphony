@@ -53,6 +53,12 @@ class WorkflowDriver:
             return await self._plan(run, instance)
         if state != "executing":
             return {}
+        if any(not task.get("linear_issue_id") for task in self.store.list_tasks(str(run["run_id"]))):
+            payload = self.store.get_plan(str(run["run_id"]))
+            if payload is None:
+                raise RuntimeError("managed_run_plan_missing")
+            await self._project_plan(run, instance, Plan.from_dict(payload))
+            return {"applied": 1}
         task = self.workflow.next_task(str(run["run_id"]))
         if task is None:
             return {}
@@ -265,9 +271,13 @@ class WorkflowDriver:
 
     async def _project_plan(self, run: dict[str, Any], instance: Any, plan: Plan) -> None:
         proxy = self.service._managed_run_tracker(instance)
+        run_id = str(run["run_id"])
         parent_id = str(run["parent_issue_id"])
         delegate_id = str((run.get("payload") or {}).get("agent_app_user_id") or "") or None
-        for task in plan.tasks:
+        for task_row in self.store.list_tasks(run_id):
+            if task_row.get("linear_issue_id"):
+                continue
+            task = Task.from_dict(task_row.get("task") or {})
             issue = await proxy.create_child_issue_for(
                 parent_issue_id=parent_id,
                 title=task.title,
@@ -275,11 +285,11 @@ class WorkflowDriver:
                 delegate_id=delegate_id,
             )
             self.store.attach_task_issue(
-                str(run["run_id"]),
+                run_id,
                 task.id,
                 issue_id=str(issue.get("id") or ""),
                 identifier=str(issue.get("identifier") or ""),
-                state=str((issue.get("state") or {}).get("name") or "") if isinstance(issue.get("state"), dict) else "",
+                state=str(issue.get("state") or ""),
             )
         plan_block = "\n".join(
             [
@@ -292,13 +302,13 @@ class WorkflowDriver:
         )
         await proxy.update_issue_description_marker_block(parent_id, "SYMPHONY_PLAN", plan_block)
         if plan.approval_required:
+            await self._transition(parent_id=parent_id, instance=instance, names=["Blocked"], state_type="backlog")
             await proxy.comment_issue(parent_id, "Plan committed and awaiting Linear approval before execution.")
 
     async def _resume_approved_plan(self, run: dict[str, Any], instance: Any) -> dict[str, int]:
         proxy = self.service._managed_run_tracker(instance)
         issue = await proxy.fetch_issue(str(run["parent_issue_id"]))
-        state = issue.get("state") if isinstance(issue.get("state"), dict) else {}
-        state_name = str(state.get("name") or "").lower()
+        state_name = _linear_state_name(issue)
         if state_name in {"blocked", "backlog", "canceled", "cancelled"}:
             return {}
         self.workflow.approve_plan(
@@ -323,8 +333,7 @@ class WorkflowDriver:
             task = self.store.get_task(str(run["run_id"]), task_id) or {}
             issue_id = str(task.get("linear_issue_id") or issue_id)
         issue = await self.service._managed_run_tracker(instance).fetch_issue(issue_id)
-        state = issue.get("state") if isinstance(issue.get("state"), dict) else {}
-        state_name = str(state.get("name") or "").lower()
+        state_name = _linear_state_name(issue)
         if state_name in {"blocked", "backlog", "canceled", "cancelled"}:
             return False
         resumed = self.workflow.resume_runtime_wait(str(run["run_id"]))
@@ -400,6 +409,13 @@ def _turn_log_fields(context: TurnContext, role: str, paths: Any) -> str:
 def _reason(error: Exception) -> str:
     text = str(error).strip().replace("\n", " ")
     return text[:500] or error.__class__.__name__
+
+
+def _linear_state_name(issue: dict[str, Any]) -> str:
+    state = issue.get("state")
+    if isinstance(state, dict):
+        state = state.get("name")
+    return str(state or "").strip().lower()
 
 
 __all__ = ["WorkflowDriver"]

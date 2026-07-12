@@ -12,6 +12,7 @@ from conductor.store import ConductorStore
 from conductor.workflow import Workflow
 from conductor.workflow_driver import WorkflowDriver
 from performer_api.turns import GateResult
+from performer_api.workflow import Plan
 
 
 @dataclass
@@ -34,10 +35,12 @@ class FakeLinear:
         self.children: list[dict[str, str]] = []
         self.transitions: list[tuple[str, str]] = []
         self.comments: list[tuple[str, str]] = []
+        self.issue_states: dict[str, str] = {"parent-1": "In Progress"}
 
     async def create_child_issue_for(self, **kwargs: Any) -> dict[str, str]:
         issue = {"id": f"child-{len(self.children) + 1}", "identifier": f"SYM-{len(self.children) + 1}"}
         self.children.append(issue)
+        self.issue_states[issue["id"]] = "Backlog"
         return issue
 
     async def update_issue_description_marker_block(self, *_args: Any, **_kwargs: Any) -> dict[str, bool]:
@@ -45,14 +48,15 @@ class FakeLinear:
 
     async def transition_issue_by_state_target(self, issue_id: str, *, names: list[str], state_type: str) -> dict[str, Any]:
         self.transitions.append((issue_id, names[0]))
+        self.issue_states[issue_id] = names[0]
         return {"success": True, "state": names[0], "state_type": state_type}
 
     async def comment_issue(self, issue_id: str, body: str) -> dict[str, bool]:
         self.comments.append((issue_id, body))
         return {"success": True}
 
-    async def fetch_issue(self, _issue_id: str) -> dict[str, Any]:
-        return {"state": {"name": "In Progress"}}
+    async def fetch_issue(self, issue_id: str) -> dict[str, Any]:
+        return {"state": self.issue_states.get(issue_id, "In Progress")}
 
 
 class FakeGate:
@@ -150,5 +154,55 @@ async def test_workflow_driver_projects_runtime_wait_as_human_action_child(tmp_p
     assert wait["linear_issue_id"] == "child-1"
     assert service.workflow_store.get_run(run["run_id"])["state"] == "blocked"
 
+    assert (await driver.drive_once())["applied"] == 0
+    assert service.workflow_store.get_run(run["run_id"])["plan_version"] == 0
+
+    service.linear.issue_states["child-1"] = "In Progress"
     assert (await driver.drive_once())["applied"] == 1
     assert service.workflow_store.get_run(run["run_id"])["plan_version"] == 1
+
+
+@pytest.mark.anyio
+async def test_workflow_driver_waits_for_parent_approval_state_change(tmp_path: Path, minimal_plan) -> None:
+    service = FakeService(tmp_path)
+    run = service.workflow.accept_parent("parent-1", "SYM-1", instance_id="instance-1")
+    driver = WorkflowDriver(service)
+    approval_plan = Plan(summary=minimal_plan.summary, tasks=minimal_plan.tasks, approval_required=True)
+    _queue_turns(driver, [{"context": {}, "plan": approval_plan.to_dict(), "thread_id": "thread-1"}])
+
+    assert (await driver.drive_once())["applied"] == 1
+    assert service.linear.transitions == [("parent-1", "Blocked")]
+    assert service.workflow_store.get_run(run["run_id"])["state"] == "awaiting_approval"
+
+    assert (await driver.drive_once())["applied"] == 0
+    assert service.workflow_store.get_run(run["run_id"])["state"] == "awaiting_approval"
+
+    service.linear.issue_states["parent-1"] = "In Progress"
+    assert (await driver.drive_once())["applied"] == 1
+    assert service.workflow_store.get_run(run["run_id"])["state"] == "executing"
+
+
+@pytest.mark.anyio
+async def test_workflow_driver_does_not_duplicate_existing_subissues(tmp_path: Path, two_task_plan) -> None:
+    service = FakeService(tmp_path)
+    run = service.workflow.accept_parent("parent-1", "SYM-1", instance_id="instance-1")
+    service.workflow.record_plan(run["run_id"], service.workflow.start_plan(run["run_id"])["attempt_id"], 1, two_task_plan)
+    driver = WorkflowDriver(service)
+    instance = service.store.get_instance("instance-1")
+
+    await driver._project_plan(run, instance, two_task_plan)
+    await driver._project_plan(run, instance, two_task_plan)
+
+    assert len(service.linear.children) == 2
+
+
+@pytest.mark.anyio
+async def test_workflow_driver_repairs_missing_subissue_projection_before_execution(tmp_path: Path, two_task_plan) -> None:
+    service = FakeService(tmp_path)
+    run = service.workflow.accept_parent("parent-1", "SYM-1", instance_id="instance-1")
+    service.workflow.commit_plan(run["run_id"], two_task_plan)
+    driver = WorkflowDriver(service)
+
+    assert (await driver.drive_once())["applied"] == 1
+    assert len(service.linear.children) == 2
+    assert service.workflow_store.get_run(run["run_id"])["state"] == "executing"
