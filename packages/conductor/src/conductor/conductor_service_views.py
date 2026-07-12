@@ -8,20 +8,10 @@ from typing import Any
 from .conductor_models import InstanceCreateRequest, InstancePatchRequest, InstanceRecord
 from .conductor_runtime import LogQuery
 from .conductor_service_helpers import *  # noqa: F403
-from .conductor_service_runtime_view import managed_run_runtime_snapshot
 from .conductor_service_types import *  # noqa: F403
-from .conductor_time import utc_now
 
 
 class ConductorServiceViewsMixin:
-    def update_podium_connection(self, channel: str, *, status: str, error: str | None = None) -> None:
-        sanitized = _sanitize_connection_error(error)
-        self._podium_connection[channel] = {
-            "status": status,
-            "last_error": sanitized,
-            "updated_at": utc_now().isoformat().replace("+00:00", "Z"),
-        }
-
     def get_instance(self, instance_id: str) -> InstanceRecord | None:
         instance = self.store.get_instance(instance_id)
         if instance is None:
@@ -132,7 +122,68 @@ class ConductorServiceViewsMixin:
         return runtime
 
     def _managed_run_runtime_snapshot(self) -> dict[str, Any]:
-        return managed_run_runtime_snapshot(self.workflow_store)
+        view = self.workflow_store.managed_run_view()
+        runs = view.get("runs") if isinstance(view.get("runs"), list) else []
+        runtime_waits = view.get("runtime_waits") if isinstance(view.get("runtime_waits"), list) else []
+        if not runtime_waits:
+            runtime_waits = [
+                {"run_id": run.get("run_id"), **wait}
+                for run in runs
+                if isinstance(run, dict)
+                for wait in (run.get("runtime_waits") or [])
+                if isinstance(wait, dict)
+            ]
+        running = [
+            {
+                "run_id": run.get("run_id"),
+                "issue_id": run.get("parent_issue_id"),
+                "issue_identifier": run.get("issue_identifier"),
+                "state": run.get("state"),
+                "active_work_item_id": run.get("active_work_item_id"),
+            }
+            for run in runs
+            if isinstance(run, dict)
+            and str(run.get("state") or "") in {"planning", "projecting_plan", "ready", "executing", "reviewing"}
+        ]
+        blocked = [
+            {
+                "run_id": run.get("run_id"),
+                "issue_id": run.get("parent_issue_id"),
+                "issue_identifier": run.get("issue_identifier"),
+                "reason": run.get("latest_reason") or "blocked",
+            }
+            for run in runs
+            if isinstance(run, dict) and str(run.get("state") or "") in {"blocked", "failed"}
+        ]
+        pending_human = [
+            {
+                "run_id": run.get("run_id"),
+                "issue_id": run.get("parent_issue_id"),
+                "issue_identifier": run.get("issue_identifier"),
+                "reason": run.get("latest_reason") or "human attention required",
+            }
+            for run in runs
+            if isinstance(run, dict) and str(run.get("state") or "") == "blocked"
+        ]
+        return {
+            "source": "managed_run",
+            "runs_total": len(runs),
+            "counts": {
+                "running": len(running),
+                "retrying": 0,
+                "continuing": 0,
+                "blocked": len(blocked),
+                "pending_human": len(pending_human),
+                "runtime_waiting": sum(1 for wait in runtime_waits if wait.get("status") == "waiting"),
+            },
+            "running": running,
+            "retrying": [],
+            "continuing": [],
+            "blocked": blocked,
+            "human_interventions": pending_human,
+            "runtime_waits": runtime_waits,
+            "issues": running + blocked + pending_human,
+        }
 
     def managed_run_view(self) -> dict[str, Any]:
         return self.workflow_store.managed_run_view()

@@ -1,17 +1,60 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 from typing import Any
 
-from .conductor_models import ConductorSettings, InstanceRecord
-from .conductor_store_rows import (
-    INSTANCE_COLUMNS,
-    ensure_column,
-    instance_from_row,
-    instance_values,
-    settings_values,
+from .conductor_models import ConductorSettings, InstanceRecord, utc_now_iso
+
+
+INSTANCE_COLUMNS = (
+    "id", "name", "repo_source_type", "repo_source_value", "resolved_repo_path",
+    "instance_dir", "workspace_root", "persistence_path", "log_path", "http_port",
+    "linear_project", "linear_filters_json", "process_status", "pid", "last_exit_code",
+    "last_error", "restart_count", "restart_window_started_at", "restart_next_at",
+    "created_at", "updated_at",
 )
+
+
+def _settings_values(settings: ConductorSettings) -> tuple[Any, ...]:
+    return (
+        settings.podium_url,
+        settings.podium_runtime_id,
+        settings.podium_runtime_token,
+        settings.podium_proxy_token,
+        settings.runtime_group_id,
+        1 if settings.managed_mode else 0,
+        settings.conductor_id,
+        utc_now_iso(),
+    )
+
+
+def _instance_values(instance: InstanceRecord) -> tuple[Any, ...]:
+    return (
+        instance.id, instance.name, instance.repo_source_type, instance.repo_source_value,
+        instance.resolved_repo_path, instance.instance_dir, instance.workspace_root,
+        instance.persistence_path, instance.log_path, instance.http_port, instance.linear_project,
+        json.dumps(instance.linear_filters, separators=(",", ":"), sort_keys=True),
+        instance.process_status, instance.pid, instance.last_exit_code, instance.last_error,
+        instance.restart_count, instance.restart_window_started_at, instance.restart_next_at,
+        instance.created_at, instance.updated_at,
+    )
+
+
+def _instance_from_row(row: sqlite3.Row) -> InstanceRecord:
+    filters = json.loads(str(row["linear_filters_json"])) if row["linear_filters_json"] else {}
+    return InstanceRecord(
+        id=str(row["id"]), name=str(row["name"]), repo_source_type=row["repo_source_type"],
+        repo_source_value=str(row["repo_source_value"]), resolved_repo_path=str(row["resolved_repo_path"]),
+        instance_dir=str(row["instance_dir"]), workspace_root=str(row["workspace_root"]),
+        persistence_path=str(row["persistence_path"]), log_path=str(row["log_path"]),
+        http_port=int(row["http_port"]), linear_project=str(row["linear_project"]),
+        linear_filters=filters if isinstance(filters, dict) else {}, process_status=row["process_status"],
+        pid=row["pid"], last_exit_code=row["last_exit_code"], last_error=row["last_error"],
+        restart_count=int(row["restart_count"] or 0), restart_window_started_at=row["restart_window_started_at"],
+        restart_next_at=row["restart_next_at"], created_at=str(row["created_at"]), updated_at=str(row["updated_at"]),
+    )
 
 
 class ConductorStore:
@@ -36,7 +79,7 @@ class ConductorStore:
             rows = connection.execute(
                 f"SELECT {', '.join(INSTANCE_COLUMNS)} FROM instances ORDER BY created_at, id"
             ).fetchall()
-        return [instance_from_row(row) for row in rows]
+        return [_instance_from_row(row) for row in rows]
 
     def get_instance(self, instance_id: str) -> InstanceRecord | None:
         with self.connect() as connection:
@@ -44,7 +87,7 @@ class ConductorStore:
                 f"SELECT {', '.join(INSTANCE_COLUMNS)} FROM instances WHERE id = ?",
                 (instance_id,),
             ).fetchone()
-        return instance_from_row(row) if row is not None else None
+        return _instance_from_row(row) if row is not None else None
 
     def get_settings(self) -> ConductorSettings:
         with self.connect() as connection:
@@ -79,7 +122,7 @@ class ConductorStore:
                     )
                     VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
-                    settings_values(settings),
+                    _settings_values(settings),
                 )
                 return settings
         return ConductorSettings.from_dict(dict(row))
@@ -110,7 +153,7 @@ class ConductorStore:
                   conductor_id = excluded.conductor_id,
                   updated_at = excluded.updated_at
                 """,
-                settings_values(settings),
+                _settings_values(settings),
             )
 
     def save_instance(self, instance: InstanceRecord) -> None:
@@ -130,7 +173,7 @@ class ConductorStore:
                     INSERT INTO instances ({', '.join(INSTANCE_COLUMNS)})
                     VALUES ({', '.join('?' for _ in INSTANCE_COLUMNS)})
                     """,
-                    instance_values(instance),
+                    _instance_values(instance),
                 )
             except sqlite3.IntegrityError as exc:
                 raise FileExistsError(f"Metadata already exists for {instance.id}") from exc
@@ -139,7 +182,7 @@ class ConductorStore:
         assignments = ", ".join(f"{column} = ?" for column in INSTANCE_COLUMNS if column != "id")
         values = [
             value
-            for column, value in zip(INSTANCE_COLUMNS, instance_values(instance), strict=True)
+            for column, value in zip(INSTANCE_COLUMNS, _instance_values(instance), strict=True)
             if column != "id"
         ]
         with self.connect() as connection:
@@ -208,6 +251,3 @@ class ConductorStore:
 
                 """
             )
-            ensure_column(connection, "instances", "restart_count", "INTEGER NOT NULL DEFAULT 0")
-            ensure_column(connection, "instances", "restart_window_started_at", "TEXT")
-            ensure_column(connection, "instances", "restart_next_at", "TEXT")

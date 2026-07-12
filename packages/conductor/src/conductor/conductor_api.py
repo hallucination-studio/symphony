@@ -58,23 +58,16 @@ class ConductorApiServer:
                 await PodiumRuntimeClient(self.service).flush_pending_smoke_results()
                 result = await self.service.poll_podium_dispatch_once()
                 if result.get("reason") == "runtime_unauthorized":
-                    self.service.update_podium_connection("poll", status="unauthorized", error="runtime_unauthorized")
                     await asyncio.sleep(60)
                     continue
-                command_result = await PodiumRuntimeClient(self.service).poll_command_once()
-                if command_result.get("reason") == "runtime_unauthorized":
-                    self.service.update_podium_connection("commands", status="unauthorized", error="runtime_unauthorized")
-                else:
-                    self.service.update_podium_connection("commands", status="connected", error=None)
-                self.service.update_podium_connection("poll", status="connected", error=None)
+                await PodiumRuntimeClient(self.service).poll_command_once()
                 await self.service.coordinate_background_once()
                 self._report_tick += 1
                 if self._report_tick >= 10:
                     self._report_tick = 0
                     await self.service.post_podium_report()
                 delay = 1.0
-            except Exception as exc:
-                self.service.update_podium_connection("poll", status="error", error=str(exc))
+            except Exception:
                 delay = min(max(delay * 2, 5), 60)
             await asyncio.sleep(_jitter(delay))
 

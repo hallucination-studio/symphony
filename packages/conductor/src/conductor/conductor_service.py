@@ -6,7 +6,6 @@ from pathlib import Path
 from typing import Any
 import shutil
 import subprocess
-import socket
 
 from .conductor_models import (
     ConductorSettings,
@@ -54,10 +53,6 @@ class ConductorService(ConductorPodiumSyncMixin, ConductorServiceViewsMixin):
         self.managed_run_tracker_factory = self._managed_run_tracker
         self.project_label_proxy_factory = self._project_label_proxy
         self.coordination_cadence = CoordinationCadence()
-        self._podium_connection: dict[str, Any] = {
-            "poll": {"status": "idle", "last_error": None, "updated_at": None},
-            "ws": {"status": "idle", "last_error": None, "updated_at": None},
-        }
         # instance_id -> last-synced desired-label signature, so the background
         # loop only calls Linear when an instance's scope actually changes.
         self._project_label_signatures: dict[str, str] = {}
