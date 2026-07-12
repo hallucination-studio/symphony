@@ -1,113 +1,41 @@
-# Runtime Installation
+# Runtime installation
 
-## Purpose
+## Current installer contract
 
-Customers install Symphony with one Podium-generated command. They do not clone
-this repository, manage editable packages manually, or copy Linear tokens to a
-runtime.
+Podium serves `/install.sh` for a machine that already has the `conductor`
+command available. The script accepts a one-time enrollment token and Podium
+URL, creates the selected data root, exchanges the token at
+`/api/v1/runtime/enroll`, and writes the enrolled runtime and proxy credentials
+to the local Conductor settings API.
 
-One Conductor binds one Linear project and one repository. Multiple isolated
-Conductors may run on the same host for different projects.
+By default it starts the installed `conductor` command as a detached local
+process on port `8091`, waits for its local HTTP health response, and writes
+its stdout/stderr to `/tmp/podium-conductor-<runtime-id>.log`. `--no-start`
+leaves process startup to the operator.
 
-## Identity And Naming
+The generated command can set the data root, Conductor command, and local port.
+The fresh local `workflow.db` and isolated Codex homes live under that data
+root; separate Conductors should use separate roots.
 
-Podium assigns every Conductor an immutable six-character non-secret public id.
-The operator supplies a single ASCII word of at most 16 characters or lets
-Podium allocate an unused historical musician surname. Names are
-case-insensitively unique within the Podium workspace. When the base list is
-exhausted, Podium appends the shortest available numeric suffix.
+## What the current installer does not do
 
-The public project label is:
+It does not download or verify a runtime package, register `systemd` or
+`launchd`, manage update channels, install a service manager unit, or retain a
+rollback image. Those behaviors must not be documented or relied on until they
+exist in the installer.
 
-```text
-symphony:conductor/Beethoven-k7m3p2
-```
+## Binding after enrollment
 
-The label is operator metadata and never routing truth.
+Enrollment gives Podium an authenticated runtime identity. Podium then sends a
+versioned project configuration through HTTP command polling. Conductor accepts
+one project/repository instance, validates the local repository, acknowledges
+the binding, and thereafter leases dispatches and reports state over HTTP.
+Linear access remains server-side through Podium's proxy; Linear OAuth tokens
+never enter installer output or Conductor configuration.
 
-## Install Command
+## Secret handling
 
-Podium creates a short-lived enrollment token for the named but unbound
-Conductor and displays:
-
-```bash
-curl -fsSL https://<podium-host>/install.sh | bash -s -- \
-  --enrollment-token <one-time-token>
-```
-
-The token is scoped to account, Conductor identity, OS/architecture, expiry,
-and optional install profile. It is single-use and stored hashed in Podium.
-Project and repository are assigned only after enrollment.
-
-## Isolated Layout
-
-Every installed Conductor has independent state:
-
-```text
-~/.symphony/
-  bin/
-  conductors/
-    <runtime-id>/
-      config/
-      state/
-      logs/
-      versions/
-```
-
-Its service name, data root, local port, credentials, logs, update state, and
-Performer artifacts cannot collide with another Conductor on the same host.
-macOS uses a named `launchd` service and Linux uses a named `systemd` service
-when available. Foreground/container modes preserve the same isolation.
-
-## Enrollment And Binding
-
-1. Installer downloads and verifies the runtime package.
-2. Installer exchanges the one-time token for runtime identity, scoped runtime
-   and proxy credentials, name, and public id.
-3. Installer writes bootstrap configuration before process start.
-4. Installer registers and starts the isolated Conductor service.
-5. Conductor polls outbound command/config/report/dispatch endpoints over HTTP.
-6. Podium marks the Conductor online but unbound.
-7. The operator selects one unoccupied project and supplies that project's
-   repository mapping.
-8. Podium reserves the one-to-one binding and sends versioned project config.
-9. Conductor validates the repository, creates its single project Performer
-   binding, and durably acknowledges the config.
-10. Podium verifies the report, adds the Linear project label, and enables
-    dispatch.
-
-Binding or rename failure preserves the prior working state and records a
-sanitized, retryable operation with a concrete next action. Unbinding drains
-Managed Runs, disables dispatch, removes the managed project label, and clears
-project configuration without deleting the repository unless explicitly
-requested.
-
-## Connectivity
-
-Conductor uses outbound connectivity to Podium for heartbeat, configuration,
-commands, reports, log retrieval, and dispatch leasing. Customer machines do
-not require public inbound callbacks. Linear access continues through Podium's
-scoped proxy.
-
-## Updates
-
-Runtime updates are assigned by Podium channel: `stable`, `beta`, or `dev`.
-Conductor downloads a version into its isolated directory, verifies checksum
-and signature, switches its service target, restarts, and reports health. The
-previous version remains available until the new version passes health checks;
-rollback is explicit and project scoped.
-
-## Install Profiles
-
-- `local-dev`: foreground or user service with easy logs;
-- `workstation`: isolated user daemon with auto-update;
-- `server`: isolated system daemon with stricter restart/log behavior;
-- `container`: foreground process without a service manager.
-
-## Verification
-
-Acceptance evidence must show token invalidation, unique name/public id,
-isolated same-host services, credential storage, heartbeat, single-project and
-single-repository binding, Conductor acknowledgement, project label, active
-config version, updates, logs, unbind behavior, and absence of Linear OAuth
-tokens from runtime files.
+Enrollment and proxy tokens are transient setup inputs. The installer must not
+print them; its optional enrollment-result file is created with mode `0600`.
+Operator logs and browser responses expose only sanitized status and identity
+metadata.

@@ -38,6 +38,8 @@ and approved runtime environment. This checklist is the active scope ledger;
 - [x] Remove the `Workflow` forwarding facade; `ConductorStore` is the sole
   durable workflow-transition owner.
 - [x] Remove unlinked duplicate workflow/acceptance and agent-guidance docs.
+- [x] Replace obsolete Web, installer, security, and Linear-projection claims
+  with the current module-owned baseline.
 
 ## Remaining code slices
 

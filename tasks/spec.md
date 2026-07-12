@@ -82,10 +82,12 @@ Keep unchanged:
   sanitized failures, and `[Human Action]` runtime-wait issues;
 - explicit parent relationship checks through `parent { id identifier }`.
 
-Remove Linear dependency relations, integration-conflict children, checkpoint
-group projections, and arbitrary comment commands. Plan revisions, plan/work-
-item approval, and gate/evidence issue trees remain part of the retained
-workflow; a parent may require approval before a revision becomes active.
+Remove Conductor workflow dependency relations, integration-conflict children,
+checkpoint-group projections, and arbitrary comment commands. Podium's active
+Linear blocker check remains retained intake behavior. Plan revisions and
+plan/work-item approval remain part of the retained workflow; Gate/evidence is
+projected as concise metadata or comments on existing parent/task issues, not
+as a dedicated child-issue tree.
 
 ### Podium Web
 
@@ -98,11 +100,12 @@ The managed-runs response keeps the fields the current Web reads:
 
 - conductor, project, binding, runtime group, policy revision, and profiles;
 - run id, issue identifier, state, active work item, latest reason,
-  `plan_version`, `plan_revision`, approval status, thread id, and work items;
-- work-item id, title, objective, likely files, state, `gate_status`, gate
-  score/rubric summary, threshold, provenance, and artifact references;
-- sanitized risk, architecture-decision, open-question, acceptance-catalog,
-  and gate-evidence summaries.
+  `plan_version`, thread id, and work items;
+- work-item id, title, objective, likely files, state, and `gate_status`.
+
+Detailed approval, catalog, rubric, provenance, manifest, artifact, and raw
+command evidence remain durable Conductor data until an explicit sanitized
+report contract adds them.
 
 `policy_revision` and `plan_version` are durable run/plan-revision values.
 Runtime profile registries may be removed, but the version history and its
@@ -128,8 +131,9 @@ authorization headers never enter browser responses, Linear, or logs.
 ## Runtime Transport: HTTP Polling Only
 
 There is no WebSocket endpoint, client, setting, install response field,
-presence state, compatibility response, or dependency. Conductor keeps its
-local HTTP listener for the existing local API.
+WebSocket presence state, compatibility response, or dependency. Conductor
+keeps its local HTTP listener for the existing local API. HTTP runtime reports
+continue to refresh the retained heartbeat/presence TTL used by Podium Web.
 
 Keep these authenticated HTTP operations:
 
@@ -212,8 +216,9 @@ revision remains readable for provenance.
 
 Gate evidence records command results plus the single Codex gate's score,
 rubric rows, threshold, weights, provenance, findings, and artifact references.
-The evidence may be projected to dedicated Linear child issues, but it is still
-one Conductor gate and not a second scheduler or cross-model review.
+The current projection is a concise parent/task comment or metadata surface;
+it does not create a dedicated evidence child issue. It remains one Conductor
+gate, not a second scheduler or cross-model review.
 
 ### Turn Context
 
