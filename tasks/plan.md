@@ -93,16 +93,19 @@ HTTP API is separate from that transport.
 - Bound managed-run snapshots to the current binding/configuration, bounded and
   sanitized their browser projection, and made unbind/rebind discard old local
   workflow state atomically.
+- Inlined the single-owner Conductor runtime-metrics projection and retained
+  behavior with a public `instance_runtime()` regression test.
+- Audited tracked tools and planning/module docs; the only real-flow tools are
+  the supported `real_flow.py` runner and its `linear_fixture.py` helper, and
+  removed-behavior docs are intentional product constraints.
 
 ## Remaining Work
 
-1. Finish any remaining demonstrated single-owner simplifications, keeping
-   Linear and Web behavior fixed.
-2. Keep the sanitized evidence projection contract covered by the existing
+1. Keep the sanitized evidence projection contract covered by the existing
    operator and Linear surfaces. No new runner, endpoint, or evidence child-issue
    tree is allowed.
-3. Resolve the Gate threshold rule explicitly before changing its behavior.
-4. Run a scoped real Linear/OAuth/Codex product flow after the local rebuild.
+2. Resolve the Gate threshold rule explicitly before changing its behavior.
+3. Run a scoped real Linear/OAuth/Codex product flow after the local rebuild.
    The staged Codex preflight passes, but the current environment's Linear
    credentials return `401 Unauthorized`; `.test-real-flow/mvp-real-report.json`
    records the sanitized blocker. `tools/real_flow.py` remains a strict

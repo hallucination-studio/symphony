@@ -43,10 +43,11 @@ checklist is the active scope ledger;
 
 ## Remaining code slices
 
-- [ ] Simplify remaining one-use Conductor service/view helpers where behavior
+- [x] Simplify remaining one-use Conductor service/view helpers where behavior
   ownership is demonstrably singular.
-- [ ] Audit and remove remaining disconnected tools/docs/legacy planning
-  artifacts without changing Linear or Web behavior.
+- [x] Audit remaining tools/docs/legacy planning artifacts without changing
+  Linear or Web behavior; no tracked disconnected artifact was found that is
+  safe to remove.
 - [x] Make retained acceptance evidence readable in the operator report and
   Linear projection using existing owners; do not create a new evidence runner
   or child-issue tree without explicit approval.
@@ -90,7 +91,7 @@ checklist is the active scope ledger;
 
 ## Verification status
 
-- [x] `make test` — 111 Python tests passed, including the full success closure,
+- [x] `make test` — 112 Python tests passed, including the full success closure,
       Gate rework/block, duplicate/stale result, and runtime redaction cases.
 - [x] `cd packages/podium/web && npm run test && npm run lint && npm run
       design:lint && npm run build` — 27 Web tests passed; lint/build clean
