@@ -12,7 +12,6 @@ from .codex_client_helpers import (
     _classify_sdk_exception,
     _close_sdk_client,
     _codex_sdk_env,
-    _first_string,
     _init_backoff_ms,
     _is_terminal_init_error,
     _is_transient_codex_error,
@@ -447,7 +446,7 @@ class CodexSdkClient:
             mapped = _sdk_event_to_dict(event)
             if mapped:
                 emit(mapped)
-            usage = _usage_from_any(_event_payload(event)) or _usage_from_any(event)
+            usage = _usage_from_any(_event_payload(event))
             if usage is not None:
                 emit({"event": "thread_token_usage_updated", "backend": "sdk", "usage": usage, **usage})
             response, is_final = _notification_response(event)
@@ -460,14 +459,10 @@ class CodexSdkClient:
 
 
 def _sdk_event_to_dict(event: Any) -> dict[str, Any] | None:
-    raw = event if isinstance(event, dict) else _event_model_dict(event)
-    name = raw.get("event") or raw.get("type") or raw.get("method")
+    name = getattr(event, "method", None)
     if not isinstance(name, str):
         return None
-    params = raw.get("params") if isinstance(raw.get("params"), dict) else _event_payload(event)
-    if not params:
-        params = raw
-    payload = {**params, "type": name}
+    payload = {**_event_payload(event), "type": name}
     mapped = {
         "event": f"sdk_{name.replace('.', '_').replace('/', '_')}",
         "backend": "sdk",
@@ -479,27 +474,11 @@ def _sdk_event_to_dict(event: Any) -> dict[str, Any] | None:
     return mapped
 
 
-def _event_model_dict(event: Any) -> dict[str, Any]:
-    model_dump = getattr(event, "model_dump", None)
-    if callable(model_dump):
-        dumped = model_dump(by_alias=True)
-        if isinstance(dumped, dict):
-            return dumped
-    values = {
-        key: getattr(event, key)
-        for key in ("method", "params", "type", "event", "message", "command", "exit_code", "usage", "turn_id", "thread_id")
-        if hasattr(event, key)
-    }
-    payload = _event_payload(event)
-    if payload:
-        values["payload"] = payload
-    return values
-
-
 def _event_payload(event: Any) -> dict[str, Any]:
-    raw = event.get("payload") if isinstance(event, dict) else getattr(event, "payload", None)
-    if isinstance(raw, dict):
-        return raw
+    raw = getattr(event, "payload", None)
+    params = getattr(raw, "params", None)
+    if isinstance(params, dict):
+        return params
     model_dump = getattr(raw, "model_dump", None)
     if callable(model_dump):
         try:
@@ -512,10 +491,6 @@ def _event_payload(event: Any) -> dict[str, Any]:
 
 
 def _notification_response(event: Any) -> tuple[str | None, bool]:
-    raw = _event_model_dict(event)
-    direct = _first_string(raw, "final_response", "response", "text")
-    if direct:
-        return direct, True
     payload = _event_payload(event)
     item = payload.get("item") if isinstance(payload.get("item"), dict) else {}
     if str(item.get("type") or "") != "agentMessage":

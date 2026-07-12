@@ -227,14 +227,6 @@ def _string_attr(value: Any, name: str) -> str | None:
     return raw if isinstance(raw, str) and raw else None
 
 
-def _first_string(value: Any, *names: str, default: str | None = None) -> str | None:
-    for name in names:
-        raw = value.get(name) if isinstance(value, dict) else getattr(value, name, None)
-        if isinstance(raw, str) and raw:
-            return raw
-    return default
-
-
 def _usage_from_any(value: Any) -> dict[str, int] | None:
     raw: Any = None
     if isinstance(value, dict):

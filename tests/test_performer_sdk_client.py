@@ -1,23 +1,16 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import pytest
 from openai_codex.generated.v2_all import ItemCompletedNotification, ThreadItem
-from openai_codex.models import Notification as SdkNotification
+from openai_codex.models import Notification as SdkNotification, UnknownNotification
 
 from performer.backend import runtime_wait_from_events
 from performer.codex_client import CodexSdkClient
 from performer.codex_config import CodexConfig
-
-
-@dataclass
-class FakeNotification:
-    method: str
-    payload: dict[str, Any]
 
 
 class FakeTurn:
@@ -60,12 +53,14 @@ async def test_sdk_client_reads_schema_json_and_notification_payload(tmp_path: P
     structured = {"summary": "Plan", "tasks": []}
     thread = FakeThread(
         [
-            FakeNotification(
+            SdkNotification(
                 "item/autoApprovalReview/started",
-                {
-                    "reviewId": "review-1",
-                    "action": {"type": "requestPermissions", "reason": "Need workspace permission."},
-                },
+                UnknownNotification(
+                    {
+                        "reviewId": "review-1",
+                        "action": {"type": "requestPermissions", "reason": "Need workspace permission."},
+                    }
+                ),
             ),
             SdkNotification(
                 "item/completed",
