@@ -37,6 +37,7 @@ and approved runtime environment. This checklist is the active scope ledger;
   `conductor_service.py`.
 - [x] Remove the `Workflow` forwarding facade; `ConductorStore` is the sole
   durable workflow-transition owner.
+- [x] Remove unlinked duplicate workflow/acceptance and agent-guidance docs.
 
 ## Remaining code slices
 
