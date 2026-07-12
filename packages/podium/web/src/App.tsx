@@ -34,13 +34,6 @@ export default function App() {
   }
 
   if (!isAuthenticated) {
-    if (debugAuthEnabled()) {
-      return (
-        <div className="auth-layout">
-          <div className="state-message">{t("Debug sign-in enabled. Waiting for session…")}</div>
-        </div>
-      );
-    }
     return (
       <Routes>
         <Route path="/login" element={<LoginPage />} />
@@ -99,10 +92,6 @@ function AppShell({ user }: { user: AuthUser }) {
       </main>
     </div>
   );
-}
-
-function debugAuthEnabled(): boolean {
-  return import.meta.env.VITE_PODIUM_DEBUG_AUTH === "true";
 }
 
 function AccountChip({ user }: { user: AuthUser }) {

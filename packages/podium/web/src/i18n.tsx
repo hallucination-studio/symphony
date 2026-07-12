@@ -68,7 +68,6 @@ const ZH_TRANSLATIONS: Record<string, string> = {
   "Create account": "创建账号",
   "Create one": "创建一个",
   "Create your account": "创建账号",
-  "Debug sign-in enabled. Waiting for session…": "Debug 登录已启用，正在等待会话…",
   "Don't have an account?": "还没有账号？",
   "Default": "默认",
   "Default scopes": "默认范围",

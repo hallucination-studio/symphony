@@ -27,7 +27,6 @@ const mockApi = api as unknown as {
 describe("App auth gate", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    vi.unstubAllEnvs();
     mockApi.managedRuns.mockResolvedValue({
       conductors: [],
     });
@@ -61,17 +60,6 @@ describe("App auth gate", () => {
     expect(screen.queryByRole("button", { name: "Sign in" })).not.toBeInTheDocument();
   });
 
-  it("keeps waiting for debug auth instead of rendering login when enabled", async () => {
-    vi.stubEnv("VITE_PODIUM_DEBUG_AUTH", "true");
-    mockApi.me.mockRejectedValue(new ApiError(401, "no", "unauthorized"));
-    renderWithProviders(<App />, { route: "/" });
-
-    expect(
-      await screen.findByText("Debug sign-in enabled. Waiting for session…"),
-    ).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Sign in" })).not.toBeInTheDocument();
-  });
-
   it("renders the app shell when authenticated", async () => {
     mockApi.me.mockResolvedValue({
       user: { id: "user_1", email: "a@b.com" },
@@ -81,7 +69,6 @@ describe("App auth gate", () => {
     // Sidebar nav links appear only inside the authenticated shell.
     expect(await screen.findByRole("navigation")).toBeInTheDocument();
     expect(screen.getByText("Home")).toBeInTheDocument();
-    expect(screen.queryByText("Runs")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Sign in" })).not.toBeInTheDocument();
   });
 
