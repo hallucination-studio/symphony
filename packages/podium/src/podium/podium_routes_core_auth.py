@@ -5,11 +5,14 @@ from typing import Any, Awaitable, Callable
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 
-from .podium_routes_core_helpers import public_user
 from .podium_shared import utc_now_iso
 
 RequireUser = Callable[[Request], Awaitable[dict[str, Any] | None]]
 ErrorResponse = Callable[[int, str, str], JSONResponse]
+
+
+def _public_user(user: dict[str, Any]) -> dict[str, Any]:
+    return {"id": str(user["id"]), "email": str(user["email"])}
 
 
 def register_auth_routes(app: FastAPI, *, state: Any, error_response: ErrorResponse) -> None:
@@ -38,7 +41,7 @@ def _register_auth_credential_routes(app: FastAPI, *, state: Any, error_response
             created_at=utc_now_iso(),
         )
         session_token = await state.create_session(user_id)
-        json_response = JSONResponse({"user": public_user(user)})
+        json_response = JSONResponse({"user": _public_user(user)})
         state.set_session_cookie(json_response, session_token)
         return json_response
 
@@ -60,7 +63,7 @@ def _register_auth_credential_routes(app: FastAPI, *, state: Any, error_response
         if not ok:
             return error_response(401, "invalid_login", "Invalid email or password")
         session_token = await state.create_session(str(user["id"]))
-        json_response = JSONResponse({"user": public_user(user)})
+        json_response = JSONResponse({"user": _public_user(user)})
         state.set_session_cookie(json_response, session_token)
         return json_response
 
@@ -82,8 +85,8 @@ def _register_auth_session_routes(app: FastAPI, *, state: Any, error_response: E
             if state.debug_auth:
                 user = await state.ensure_debug_user()
                 session_token = await state.create_session(str(user["id"]))
-                json_response = JSONResponse({"user": public_user(user)})
+                json_response = JSONResponse({"user": _public_user(user)})
                 state.set_session_cookie(json_response, session_token)
                 return json_response
             return error_response(401, "unauthorized", "Unauthorized")
-        return JSONResponse({"user": public_user(user)})
+        return JSONResponse({"user": _public_user(user)})

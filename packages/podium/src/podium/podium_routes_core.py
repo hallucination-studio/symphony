@@ -7,7 +7,6 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from .podium_routes_core_auth import register_auth_routes
-from .podium_routes_core_helpers import public_user
 from .podium_routes_core_linear import LINEAR_AUTHORIZE_URL, LINEAR_DEFAULT_SCOPE, register_linear_routes
 from .podium_routes_core_onboarding import register_onboarding_routes
 
