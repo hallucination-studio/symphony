@@ -225,10 +225,14 @@ call their private SQL or mutate their tables.
 
 ### 3.3 Conductor and Performer surfaces
 
-- `ConductorPodiumSync.coordinate_background_once()` runs the required polling
-  order; `handle_podium_command()` applies `project.configure` and other
-  control commands; `poll_podium_dispatch_once()` leases and dispatches work;
-  `build_podium_report()` produces the sanitized runtime report.
+- `ConductorService` inherits `ConductorPodiumSyncMixin`.
+  `ConductorPodiumSyncMixin.coordinate_background_once()` runs the workflow
+  tick; `ConductorPodiumSyncMixin.handle_podium_command()` applies
+  `project.configure` and other control commands;
+  `ConductorPodiumSyncMixin.poll_podium_dispatch_once()` leases and dispatches
+  work; `ConductorPodiumSyncMixin.build_podium_report()` produces the
+  sanitized runtime report. The external Conductor API server invokes these
+  methods from its polling loop.
 - `WorkflowDriver.drive_once()` advances one durable run. Its existing flow is
   `_plan()`, `_execute_task()`, `start_gate()`, command execution through
   `AcceptanceGate.run_commands()`, gate evaluation through
@@ -553,7 +557,9 @@ event in the real batch.
    installation and selected project. Use a fresh Conductor `workflow.db` and
    disposable repository for this run.
 2. Enroll/reuse exactly one conductor and apply the existing
-   `project.configure` command through `ConductorPodiumSync.handle_podium_command()`.
+   `project.configure` command through
+   `ConductorService.handle_podium_command()` (the inherited
+   `ConductorPodiumSyncMixin` implementation).
    Verify generation/hash and the next `build_podium_report()` before dispatch.
 3. Create a fresh delegated parent issue after binding is ready. Do not move it
    manually to `In Review` or `Done`.
