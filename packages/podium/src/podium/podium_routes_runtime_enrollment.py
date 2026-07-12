@@ -9,7 +9,7 @@ from fastapi.responses import JSONResponse
 
 from .podium_conductors import ConductorIdentityError
 from .podium_install import shlex_quote
-from .podium_shared import hash_secret, runtime_public, utc_now_iso
+from .podium_shared import hash_secret, runtime_public
 
 RequireUser = Callable[[Request], Awaitable[dict[str, Any] | None]]
 ErrorResponse = Callable[[int, str, str], JSONResponse]
@@ -221,36 +221,6 @@ async def runtime_records_for_user(state: Any, workspace_id: str) -> list[dict[s
         if runtime is not None:
             records.append(runtime)
     return records
-
-
-async def runtime_group_from_payload(state: Any, payload: dict[str, Any]) -> str:
-    existing = await state.store.list_runtime_groups()
-    runtime_group_id = str(payload.get("runtime_group_id") or f"group_{len(existing) + 1}")
-    workspace_id = str(payload.get("linear_workspace_id") or "")
-    if workspace_id:
-        await ensure_workspace_user(state, workspace_id)
-    await state.store.upsert_runtime_group(
-        {
-            "id": runtime_group_id,
-            "linear_workspace_id": workspace_id,
-            "project_slug": str(payload.get("project_slug") or ""),
-            "linear_agent_app_user_id": str(payload.get("linear_agent_app_user_id") or payload.get("agent_app_user_id") or ""),
-            "managed_run_profile": str(payload.get("managed_run_profile") or "default"),
-            "project_binding_id": "",
-        }
-    )
-    return runtime_group_id
-
-
-async def ensure_workspace_user(state: Any, workspace_id: str) -> None:
-    if not workspace_id or await state.store.get_user(workspace_id) is not None:
-        return
-    await state.store.create_user(
-        workspace_id,
-        email=f"{workspace_id}@runtime.local",
-        password_hash="runtime-enrollment-placeholder",
-        created_at=utc_now_iso(),
-    )
 
 
 async def save_runtime_record(

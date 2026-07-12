@@ -27,7 +27,6 @@ class PodiumDispatchMixin:
             "project_slug": event["project_slug"],
             "agent_app_user_id": event.get("agent_app_user_id") or "",
             "routing_rule_id": group["id"],
-            "managed_run_profile": group.get("managed_run_profile") or "default",
             "blocked_by": list(event.get("blocked_by") or []),
             "parent_issue_id": event.get("parent_issue_id") or "",
             "managed_run_intent": dict(event.get("managed_run_intent") or {}),
@@ -53,7 +52,6 @@ class PodiumDispatchMixin:
             "linear_workspace_id": str(binding.get("user_id") or ""),
             "project_slug": str(binding.get("project_slug") or ""),
             "linear_agent_app_user_id": str(binding.get("agent_app_user_id") or ""),
-            "managed_run_profile": str(binding.get("managed_run_profile") or "default"),
             "project_binding_id": binding_id,
             "instance_id": str(binding.get("instance_id") or ""),
         }
@@ -79,7 +77,6 @@ class PodiumDispatchMixin:
                 {
                     "runtime_group_id": str(group.get("id") or leased.get("project_binding_id") or ""),
                     "routing_rule_id": str(group.get("id") or leased.get("project_binding_id") or ""),
-                    "managed_run_profile": str(group.get("managed_run_profile") or "default"),
                     "blocked_by": list(leased.get("blocked_by") or []),
                     "parent_issue_id": str(leased.get("parent_issue_id") or ""),
                     "instance_id": str((binding or {}).get("instance_id") or ""),

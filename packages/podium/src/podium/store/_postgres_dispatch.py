@@ -25,14 +25,14 @@ PROJECT_BINDING_UPSERT_SQL = """
 INSERT INTO project_bindings (
   id, conductor_id, user_id, instance_id, name, linear_project, project_slug,
   linear_project_id, project_name, agent_app_user_id, installation_id,
-  managed_run_profile, process_status,
+  process_status,
   constraint_labels, repo_source, state, active, config_version, acknowledged_config_version,
   candidate_installation_id, candidate_agent_app_user_id, candidate_config_version,
   candidate_acknowledged_config_version, label_id, label_name,
   replacement_conductor_id, replacement_repo_source, replacement_state,
   replacement_binding_id, error_code, sanitized_reason, updated_at
 )
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14::jsonb,$15::jsonb,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27::jsonb,$28,$29,$30,$31,$32::timestamptz)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb,$14::jsonb,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26::jsonb,$27,$28,$29,$30,$31::timestamptz)
 ON CONFLICT (id) DO UPDATE SET
   instance_id = EXCLUDED.instance_id,
   name = EXCLUDED.name,
@@ -42,7 +42,6 @@ ON CONFLICT (id) DO UPDATE SET
   project_name = EXCLUDED.project_name,
   agent_app_user_id = EXCLUDED.agent_app_user_id,
   installation_id = EXCLUDED.installation_id,
-  managed_run_profile = EXCLUDED.managed_run_profile,
   process_status = EXCLUDED.process_status,
   constraint_labels = EXCLUDED.constraint_labels,
   repo_source = EXCLUDED.repo_source,
@@ -63,21 +62,20 @@ ON CONFLICT (id) DO UPDATE SET
   error_code = EXCLUDED.error_code,
   sanitized_reason = EXCLUDED.sanitized_reason,
   updated_at = EXCLUDED.updated_at
-WHERE NOT $33::boolean OR project_bindings.active = FALSE
+WHERE NOT $32::boolean OR project_bindings.active = FALSE
 RETURNING *
 """
 
 RUNTIME_GROUP_BINDING_UPSERT_SQL = """
 INSERT INTO runtime_groups (
   id, linear_workspace_id, project_slug, linear_agent_app_user_id,
-  managed_run_profile, project_binding_id, updated_at
+  project_binding_id, updated_at
 )
-VALUES ($1,$2,$3,$4,$5,$6,now())
+VALUES ($1,$2,$3,$4,$5,now())
 ON CONFLICT (id) DO UPDATE SET
   linear_workspace_id = EXCLUDED.linear_workspace_id,
   project_slug = EXCLUDED.project_slug,
   linear_agent_app_user_id = EXCLUDED.linear_agent_app_user_id,
-  managed_run_profile = EXCLUDED.managed_run_profile,
   project_binding_id = EXCLUDED.project_binding_id,
   updated_at = now()
 """
@@ -285,7 +283,7 @@ def _binding_values(binding: dict[str, Any]) -> tuple[Any, ...]:
         str(binding.get("linear_project") or ""), str(binding.get("project_slug") or ""),
         str(binding.get("linear_project_id") or ""), str(binding.get("project_name") or ""),
         str(binding.get("agent_app_user_id") or ""), str(binding.get("installation_id") or ""),
-        str(binding.get("managed_run_profile") or "default"), str(binding.get("process_status") or ""),
+        str(binding.get("process_status") or ""),
         _pg_json(binding.get("constraint_labels") or []), _pg_json(binding.get("repo_source") or {}),
         str(binding.get("state") or "pending_ack"), bool(binding.get("active", True)),
         int(binding.get("config_version") or 0), int(binding.get("acknowledged_config_version") or 0),
@@ -323,7 +321,6 @@ async def _upsert_project_binding_on(
         str(binding["user_id"]),
         str(binding.get("project_slug") or "") if active else "",
         str(binding.get("agent_app_user_id") or "") if active else "",
-        str(binding.get("managed_run_profile") or "default"),
         str(binding["id"]) if active else "",
     )
     return _record_to_project_binding(row)

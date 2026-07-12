@@ -20,7 +20,6 @@ def _record_to_runtime_group(row: Any) -> dict[str, Any]:
         "linear_workspace_id": str(row["linear_workspace_id"]),
         "project_slug": str(row["project_slug"]),
         "linear_agent_app_user_id": str(row["linear_agent_app_user_id"]),
-        "managed_run_profile": str(row["managed_run_profile"]),
         "project_binding_id": str(row["project_binding_id"]),
     }
 
@@ -83,7 +82,6 @@ def _record_to_project_binding(row: Any) -> dict[str, Any]:
         "project_slug": str(row["project_slug"]),
         "agent_app_user_id": str(row["agent_app_user_id"]),
         "installation_id": str(row["installation_id"]),
-        "managed_run_profile": str(row["managed_run_profile"]),
         "process_status": str(row["process_status"]),
         "constraint_labels": list(_pg_json_value(row["constraint_labels"], [])),
         "repo_source": _pg_json_value(row["repo_source"], {}),

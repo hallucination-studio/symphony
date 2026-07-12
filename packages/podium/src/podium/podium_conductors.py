@@ -79,7 +79,6 @@ class PodiumConductorsMixin:
                 "linear_workspace_id": user_id,
                 "project_slug": "",
                 "linear_agent_app_user_id": "",
-                "managed_run_profile": "default",
                 "project_binding_id": "",
             }
         )

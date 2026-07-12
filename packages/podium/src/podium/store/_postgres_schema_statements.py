@@ -28,7 +28,6 @@ POSTGRES_SCHEMA_STATEMENTS: Iterable[str] = (
                 linear_workspace_id TEXT NOT NULL DEFAULT '',
                 project_slug TEXT NOT NULL DEFAULT '',
                 linear_agent_app_user_id TEXT NOT NULL DEFAULT '',
-                managed_run_profile TEXT NOT NULL DEFAULT 'default',
                 project_binding_id TEXT NOT NULL DEFAULT '',
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
             )
@@ -98,7 +97,6 @@ POSTGRES_SCHEMA_STATEMENTS: Iterable[str] = (
                 project_slug TEXT NOT NULL DEFAULT '',
                 agent_app_user_id TEXT NOT NULL DEFAULT '',
                 installation_id TEXT NOT NULL DEFAULT '',
-                managed_run_profile TEXT NOT NULL DEFAULT 'default',
                 process_status TEXT NOT NULL DEFAULT '',
                 constraint_labels JSONB NOT NULL DEFAULT '[]'::jsonb,
                 repo_source JSONB,

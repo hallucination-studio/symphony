@@ -170,7 +170,7 @@ class PodiumRuntimeMixin:
 
     def binding_public(self, binding: dict[str, Any]) -> dict[str, Any]:
         payload = dict(binding)
-        payload["managed_run_profile"] = str(payload.get("managed_run_profile") or "default")
+        payload["managed_run_profile"] = "default"
         source = payload.pop("repo_source", {})
         source = source if isinstance(source, dict) else {}
         source_type = str(source.get("type") or "")

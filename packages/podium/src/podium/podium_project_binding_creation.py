@@ -34,7 +34,6 @@ def build_project_binding(
         "project_slug": str(project.get("project_slug") or ""),
         "agent_app_user_id": str(installation.get("app_user_id") or ""),
         "installation_id": str(installation.get("id") or ""),
-        "managed_run_profile": "default",
         "process_status": "",
         "constraint_labels": [],
         "repo_source": {

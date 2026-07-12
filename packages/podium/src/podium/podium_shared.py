@@ -23,7 +23,6 @@ def dispatch_public(dispatch: dict[str, Any]) -> dict[str, Any]:
         "project_slug": dispatch["project_slug"],
         "agent_app_user_id": dispatch.get("agent_app_user_id") or "",
         "routing_rule_id": dispatch.get("routing_rule_id") or project_binding_id,
-        "managed_run_profile": dispatch.get("managed_run_profile") or "default",
         "blocked_by": list(dispatch.get("blocked_by") or []),
         "parent_issue_id": dispatch.get("parent_issue_id") or "",
         "status": dispatch["status"],

@@ -19,14 +19,13 @@ class PgRuntimeMixin:
         await self.pool.execute(
             """
             INSERT INTO runtime_groups (
-              id, linear_workspace_id, project_slug, linear_agent_app_user_id, managed_run_profile, project_binding_id, updated_at
+              id, linear_workspace_id, project_slug, linear_agent_app_user_id, project_binding_id, updated_at
             )
-            VALUES ($1,$2,$3,$4,$5,$6,now())
+            VALUES ($1,$2,$3,$4,$5,now())
             ON CONFLICT (id) DO UPDATE SET
               linear_workspace_id = EXCLUDED.linear_workspace_id,
               project_slug = EXCLUDED.project_slug,
               linear_agent_app_user_id = EXCLUDED.linear_agent_app_user_id,
-              managed_run_profile = EXCLUDED.managed_run_profile,
               project_binding_id = EXCLUDED.project_binding_id,
               updated_at = now()
             """,
@@ -34,7 +33,6 @@ class PgRuntimeMixin:
             str(group.get("linear_workspace_id") or ""),
             str(group.get("project_slug") or ""),
             str(group.get("linear_agent_app_user_id") or ""),
-            str(group.get("managed_run_profile") or "default"),
             str(group.get("project_binding_id") or ""),
         )
 
