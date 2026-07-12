@@ -53,7 +53,6 @@ _CODEX_CONFIG_ALLOWED_SECTION_PREFIXES = (
 
 @dataclass(frozen=True)
 class RuntimePaths:
-    root: Path
     request: Path
     result: Path
     log: Path
@@ -153,7 +152,7 @@ class PerformerRuntime:
 
     def paths(self, run_root: Path) -> RuntimePaths:
         run_root.mkdir(parents=True, exist_ok=True)
-        return RuntimePaths(run_root, run_root / "turn-request.json", run_root / "turn-result.json", run_root / "performer.log")
+        return RuntimePaths(run_root / "turn-request.json", run_root / "turn-result.json", run_root / "performer.log")
 
     def write_request(self, paths: RuntimePaths, payload: dict[str, Any]) -> None:
         paths.request.write_text(json.dumps(payload, sort_keys=True, separators=(",", ":")), encoding="utf-8")
