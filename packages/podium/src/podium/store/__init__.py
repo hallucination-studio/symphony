@@ -1,5 +1,5 @@
 from __future__ import annotations
 
-from .postgres import PgMigrator, PgStore
+from .postgres import PgStore
 
-__all__ = ["PgMigrator", "PgStore"]
+__all__ = ["PgStore"]

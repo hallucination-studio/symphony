@@ -11,7 +11,7 @@ from ._postgres_linear import PgLinearMixin
 from ._postgres_linear_cutover import PgLinearCutoverMixin
 from ._postgres_linear_reconciliation import PgLinearReconciliationMixin
 from ._postgres_linear_tokens import PgLinearTokensMixin
-from ._postgres_migrations import PgMigrator
+from ._postgres_schema import PgSchema
 from ._postgres_ops import PgOpsMixin
 from ._postgres_project_replacements import PgProjectReplacementsMixin
 from ._postgres_project_unbind import PgProjectUnbindMixin
@@ -43,9 +43,9 @@ class PgStore(
         store._owns_pool = True
         return store
 
-    async def migrate(self, migrator: PgMigrator | None = None) -> None:
+    async def ensure_schema(self, schema: PgSchema | None = None) -> None:
         async with self.pool.acquire() as connection:
-            for statement in (migrator or PgMigrator()).statements():
+            for statement in (schema or PgSchema()).statements():
                 await connection.execute(statement)
 
     async def close(self) -> None:

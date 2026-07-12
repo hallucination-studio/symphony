@@ -18,14 +18,4 @@ BACKGROUND_HEALTH_STATEMENTS: Iterable[str] = (
         updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
     )
     """,
-    "ALTER TABLE background_job_failures ADD COLUMN IF NOT EXISTS failure_id TEXT",
-    """
-    UPDATE background_job_failures
-    SET failure_id = 'migrated-' || md5(
-        job_name || ':' || attempt_number::text || ':' || updated_at::text
-    )
-    WHERE failure_id IS NULL OR failure_id = ''
-    """,
-    "ALTER TABLE background_job_failures ALTER COLUMN failure_id SET NOT NULL",
-    "ALTER TABLE background_job_failures ALTER COLUMN failure_id DROP DEFAULT",
 )

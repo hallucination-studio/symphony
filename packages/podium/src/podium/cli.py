@@ -51,7 +51,7 @@ async def async_main(argv: list[str] | None = None) -> int:
     if not config.database_url:
         raise RuntimeError("podium_database_url_required")
     store = await PgStore.connect(config.database_url)
-    await store.migrate()
+    await store.ensure_schema()
     default_static = Path(__file__).resolve().parent / "static"
     app = create_app(
         secure_cookies=secure_cookies_from_env(),

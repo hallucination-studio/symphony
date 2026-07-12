@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 
 
-POSTGRES_MIGRATION_STATEMENTS: Iterable[str] = (
+POSTGRES_SCHEMA_STATEMENTS: Iterable[str] = (
             """
             CREATE TABLE IF NOT EXISTS users (
                 id TEXT PRIMARY KEY,
@@ -12,7 +12,6 @@ POSTGRES_MIGRATION_STATEMENTS: Iterable[str] = (
                 created_at TIMESTAMPTZ NOT NULL
             )
             """,
-            "ALTER TABLE users DROP COLUMN IF EXISTS linear_app_json",
             "CREATE SEQUENCE IF NOT EXISTS podium_user_id_seq",
             """
             CREATE TABLE IF NOT EXISTS sessions (
@@ -64,6 +63,11 @@ POSTGRES_MIGRATION_STATEMENTS: Iterable[str] = (
                 version TEXT NOT NULL DEFAULT '',
                 conductor_id TEXT NOT NULL DEFAULT '',
                 runtime_group_id TEXT NOT NULL DEFAULT '',
+                name TEXT NOT NULL DEFAULT '',
+                public_id TEXT NOT NULL DEFAULT '',
+                enrollment_state TEXT NOT NULL DEFAULT 'pending',
+                service_identity TEXT NOT NULL DEFAULT '',
+                data_root TEXT NOT NULL DEFAULT '',
                 runtime_token_hash TEXT NOT NULL,
                 proxy_token_hash TEXT NOT NULL,
                 disabled BOOLEAN NOT NULL DEFAULT FALSE,
@@ -72,15 +76,8 @@ POSTGRES_MIGRATION_STATEMENTS: Iterable[str] = (
                 last_report_at TIMESTAMPTZ
             )
             """,
-            "ALTER TABLE conductors ADD COLUMN IF NOT EXISTS runtime_group_id TEXT NOT NULL DEFAULT ''",
-            "ALTER TABLE conductors ADD COLUMN IF NOT EXISTS name TEXT NOT NULL DEFAULT ''",
-            "ALTER TABLE conductors ADD COLUMN IF NOT EXISTS public_id TEXT NOT NULL DEFAULT ''",
-            "ALTER TABLE conductors ADD COLUMN IF NOT EXISTS enrollment_state TEXT NOT NULL DEFAULT 'pending'",
-            "ALTER TABLE conductors ADD COLUMN IF NOT EXISTS service_identity TEXT NOT NULL DEFAULT ''",
-            "ALTER TABLE conductors ADD COLUMN IF NOT EXISTS data_root TEXT NOT NULL DEFAULT ''",
             "CREATE UNIQUE INDEX IF NOT EXISTS conductors_public_id_unique ON conductors (public_id) WHERE public_id <> ''",
             "CREATE UNIQUE INDEX IF NOT EXISTS conductors_user_name_unique ON conductors (user_id, lower(name)) WHERE name <> ''",
-            "ALTER TABLE enrollment_tokens ADD COLUMN IF NOT EXISTS conductor_id TEXT NOT NULL DEFAULT ''",
             """
             CREATE TABLE IF NOT EXISTS runtime_presence (
                 runtime_id TEXT PRIMARY KEY REFERENCES conductors(id) ON DELETE CASCADE,
@@ -125,26 +122,6 @@ POSTGRES_MIGRATION_STATEMENTS: Iterable[str] = (
                 UNIQUE(conductor_id)
             )
             """,
-            "ALTER TABLE project_bindings ADD COLUMN IF NOT EXISTS constraint_labels JSONB NOT NULL DEFAULT '[]'::jsonb",
-            "ALTER TABLE project_bindings ADD COLUMN IF NOT EXISTS linear_project_id TEXT NOT NULL DEFAULT ''",
-            "ALTER TABLE project_bindings ADD COLUMN IF NOT EXISTS project_name TEXT NOT NULL DEFAULT ''",
-            "ALTER TABLE project_bindings ADD COLUMN IF NOT EXISTS installation_id TEXT NOT NULL DEFAULT ''",
-            "ALTER TABLE project_bindings ADD COLUMN IF NOT EXISTS state TEXT NOT NULL DEFAULT 'pending_ack'",
-            "ALTER TABLE project_bindings ADD COLUMN IF NOT EXISTS active BOOLEAN NOT NULL DEFAULT TRUE",
-            "ALTER TABLE project_bindings ADD COLUMN IF NOT EXISTS config_version BIGINT NOT NULL DEFAULT 0",
-            "ALTER TABLE project_bindings ADD COLUMN IF NOT EXISTS acknowledged_config_version BIGINT NOT NULL DEFAULT 0",
-            "ALTER TABLE project_bindings ADD COLUMN IF NOT EXISTS candidate_installation_id TEXT NOT NULL DEFAULT ''",
-            "ALTER TABLE project_bindings ADD COLUMN IF NOT EXISTS candidate_agent_app_user_id TEXT NOT NULL DEFAULT ''",
-            "ALTER TABLE project_bindings ADD COLUMN IF NOT EXISTS candidate_config_version BIGINT NOT NULL DEFAULT 0",
-            "ALTER TABLE project_bindings ADD COLUMN IF NOT EXISTS candidate_acknowledged_config_version BIGINT NOT NULL DEFAULT 0",
-            "ALTER TABLE project_bindings ADD COLUMN IF NOT EXISTS label_id TEXT NOT NULL DEFAULT ''",
-            "ALTER TABLE project_bindings ADD COLUMN IF NOT EXISTS label_name TEXT NOT NULL DEFAULT ''",
-            "ALTER TABLE project_bindings ADD COLUMN IF NOT EXISTS replacement_conductor_id TEXT NOT NULL DEFAULT ''",
-            "ALTER TABLE project_bindings ADD COLUMN IF NOT EXISTS replacement_repo_source JSONB NOT NULL DEFAULT '{}'::jsonb",
-            "ALTER TABLE project_bindings ADD COLUMN IF NOT EXISTS replacement_state TEXT NOT NULL DEFAULT ''",
-            "ALTER TABLE project_bindings ADD COLUMN IF NOT EXISTS replacement_binding_id TEXT NOT NULL DEFAULT ''",
-            "ALTER TABLE project_bindings ADD COLUMN IF NOT EXISTS error_code TEXT NOT NULL DEFAULT ''",
-            "ALTER TABLE project_bindings ADD COLUMN IF NOT EXISTS sanitized_reason TEXT NOT NULL DEFAULT ''",
             "CREATE UNIQUE INDEX IF NOT EXISTS project_bindings_conductor_unique ON project_bindings (conductor_id) WHERE active = TRUE",
             "CREATE UNIQUE INDEX IF NOT EXISTS project_bindings_project_unique ON project_bindings (user_id, linear_project_id) WHERE active = TRUE",
             """
@@ -178,27 +155,11 @@ POSTGRES_MIGRATION_STATEMENTS: Iterable[str] = (
                 completed_at TIMESTAMPTZ
             )
             """,
-            "ALTER TABLE dispatches ADD COLUMN IF NOT EXISTS fencing_token BIGINT NOT NULL DEFAULT 0",
-            "ALTER TABLE dispatches ADD COLUMN IF NOT EXISTS issue_title TEXT NOT NULL DEFAULT ''",
-            "ALTER TABLE dispatches ADD COLUMN IF NOT EXISTS issue_description TEXT NOT NULL DEFAULT ''",
-            "ALTER TABLE dispatches ADD COLUMN IF NOT EXISTS managed_run_intent JSONB NOT NULL DEFAULT '{}'::jsonb",
-            "ALTER TABLE dispatches ADD COLUMN IF NOT EXISTS intake_key TEXT NOT NULL DEFAULT ''",
-            "ALTER TABLE dispatches ADD COLUMN IF NOT EXISTS agent_app_user_id TEXT NOT NULL DEFAULT ''",
-            "ALTER TABLE dispatches ADD COLUMN IF NOT EXISTS issue_delegate_id TEXT NOT NULL DEFAULT ''",
-            "ALTER TABLE dispatches ADD COLUMN IF NOT EXISTS run_id TEXT NOT NULL DEFAULT ''",
-            "ALTER TABLE dispatches ADD COLUMN IF NOT EXISTS parent_issue_id TEXT NOT NULL DEFAULT ''",
-            "ALTER TABLE dispatches ADD COLUMN IF NOT EXISTS active_work_item_id TEXT NOT NULL DEFAULT ''",
-            "ALTER TABLE dispatches ADD COLUMN IF NOT EXISTS managed_run_state TEXT NOT NULL DEFAULT ''",
-            "ALTER TABLE dispatches ADD COLUMN IF NOT EXISTS plan_version BIGINT NOT NULL DEFAULT 0",
-            "ALTER TABLE dispatches ADD COLUMN IF NOT EXISTS backend_session_id TEXT NOT NULL DEFAULT ''",
             """
             CREATE UNIQUE INDEX IF NOT EXISTS dispatches_binding_intake_unique
             ON dispatches (project_binding_id, intake_key)
             WHERE intake_key <> ''
             """,
-            "DROP INDEX IF EXISTS dispatches_binding_session_unique",
-            "DROP INDEX IF EXISTS dispatches_binding_issue_empty_session_unique",
-            "ALTER TABLE dispatches DROP COLUMN IF EXISTS agent_session_id",
             """
             CREATE TABLE IF NOT EXISTS metrics_snapshots (
                 conductor_id TEXT NOT NULL REFERENCES conductors(id) ON DELETE CASCADE,
@@ -245,12 +206,6 @@ POSTGRES_MIGRATION_STATEMENTS: Iterable[str] = (
                 result_json JSONB NOT NULL DEFAULT '{}'::jsonb
             )
             """,
-            "ALTER TABLE runtime_commands ADD COLUMN IF NOT EXISTS dedupe_key TEXT NOT NULL DEFAULT ''",
-            "ALTER TABLE runtime_commands ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'queued'",
-            "ALTER TABLE runtime_commands ADD COLUMN IF NOT EXISTS lease_expires_at TIMESTAMPTZ",
-            "ALTER TABLE runtime_commands ADD COLUMN IF NOT EXISTS fencing_token BIGINT NOT NULL DEFAULT 0",
-            "ALTER TABLE runtime_commands ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ",
-            "ALTER TABLE runtime_commands ADD COLUMN IF NOT EXISTS result_json JSONB NOT NULL DEFAULT '{}'::jsonb",
             "CREATE UNIQUE INDEX IF NOT EXISTS runtime_commands_dedupe_unique ON runtime_commands (runtime_id, dedupe_key) WHERE dedupe_key <> ''",
             "CREATE INDEX IF NOT EXISTS runtime_commands_poll_index ON runtime_commands (runtime_id, status, id)",
             """
@@ -260,7 +215,6 @@ POSTGRES_MIGRATION_STATEMENTS: Iterable[str] = (
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
             )
             """,
-            "DROP TABLE IF EXISTS linear_poll_state",
             """
             CREATE TABLE IF NOT EXISTS onboarding_state (
                 user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,

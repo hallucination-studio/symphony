@@ -59,13 +59,6 @@ LINEAR_INSTALLATION_STATEMENTS: Iterable[str] = (
         updated_at TIMESTAMPTZ NOT NULL
     )
     """,
-    "ALTER TABLE linear_workspace_installations ADD COLUMN IF NOT EXISTS actor TEXT NOT NULL DEFAULT ''",
-    "ALTER TABLE linear_workspace_installations ADD COLUMN IF NOT EXISTS reconciliation_state TEXT NOT NULL DEFAULT 'pending'",
-    "ALTER TABLE linear_workspace_installations ADD COLUMN IF NOT EXISTS last_reconciliation_at TIMESTAMPTZ",
-    "ALTER TABLE linear_workspace_installations ADD COLUMN IF NOT EXISTS reconciliation_error_code TEXT NOT NULL DEFAULT ''",
-    "ALTER TABLE linear_workspace_installations ADD COLUMN IF NOT EXISTS reconciliation_error TEXT NOT NULL DEFAULT ''",
-    "ALTER TABLE linear_workspace_installations ADD COLUMN IF NOT EXISTS reconciliation_retry_count BIGINT NOT NULL DEFAULT 0",
-    "ALTER TABLE linear_workspace_installations ADD COLUMN IF NOT EXISTS reconciliation_next_retry_at TIMESTAMPTZ",
     """
     CREATE TABLE IF NOT EXISTS linear_selected_projects (
         user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -78,18 +71,9 @@ LINEAR_INSTALLATION_STATEMENTS: Iterable[str] = (
         PRIMARY KEY(user_id, linear_project_id)
     )
     """,
-    "ALTER TABLE linear_application_configs DROP COLUMN IF EXISTS webhook_secret_enc",
-    "ALTER TABLE linear_application_configs DROP COLUMN IF EXISTS webhook_url",
-    "ALTER TABLE linear_workspace_installations DROP COLUMN IF EXISTS supports_agent_sessions",
-    "ALTER TABLE linear_workspace_installations DROP COLUMN IF EXISTS webhook_state",
-    "ALTER TABLE linear_workspace_installations DROP COLUMN IF EXISTS last_webhook_at",
-    "DROP TABLE IF EXISTS linear_webhook_deliveries",
     """
     CREATE UNIQUE INDEX IF NOT EXISTS linear_workspace_installations_active_unique
     ON linear_workspace_installations (user_id)
     WHERE active = TRUE
     """,
-    "ALTER TABLE oauth_states ADD COLUMN IF NOT EXISTS application_config_id TEXT NOT NULL DEFAULT ''",
-    "ALTER TABLE oauth_states ADD COLUMN IF NOT EXISTS application_config_version BIGINT NOT NULL DEFAULT 0",
-    "ALTER TABLE oauth_states ADD COLUMN IF NOT EXISTS code_verifier_enc TEXT NOT NULL DEFAULT ''",
 )
