@@ -29,7 +29,10 @@ from .podium_project_bindings import PodiumProjectBindingsMixin
 from .podium_project_labels import PodiumProjectLabelsMixin
 from .podium_project_replacements import PodiumProjectReplacementsMixin
 from .podium_routes_core import register_core_routes
-from .podium_routes_runtime import register_runtime_routes
+from .podium_routes_conductor_bindings import register_conductor_binding_routes
+from .podium_routes_runtime_enrollment import register_runtime_identity_routes
+from .podium_routes_runtime_ops import register_runtime_ops_routes
+from .podium_routes_runtime_proxy import register_linear_proxy_route
 from .podium_runtime import PodiumRuntimeMixin
 from .podium_smoke_checks import PodiumSmokeChecksMixin
 from .podium_shared import utc_now_iso
@@ -105,11 +108,18 @@ def create_app(
         linear_graphql_transport=linear_graphql_transport,
         error_response=error_response,
     )
-    register_runtime_routes(
+    register_runtime_identity_routes(
         app,
         state=state,
         require_user=require_user,
         podium_base_url=podium_base_url,
+        error_response=error_response,
+    )
+    register_conductor_binding_routes(app, state=state, require_user=require_user, error_response=error_response)
+    register_runtime_ops_routes(app, state=state, require_user=require_user, error_response=error_response)
+    register_linear_proxy_route(
+        app,
+        state=state,
         linear_graphql_transport=linear_graphql_transport,
         error_response=error_response,
     )
