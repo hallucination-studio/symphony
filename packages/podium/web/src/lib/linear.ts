@@ -1,7 +1,3 @@
-import { useStartLinear } from "../api/hooks";
-import { useToast } from "../components/Toast";
-import { useI18n } from "../i18n";
-import { assignLocation } from "./navigation";
 import type { LinearStatus } from "../api/types";
 import type { GlobalStatus } from "./format";
 import type { ActionTone } from "../components/ActionPanel";
@@ -85,25 +81,5 @@ export function linearHealth(linear: LinearStatus): LinearHealth {
     actionLabel: "Connect Linear",
     hint: "Not connected",
     description: "Authorize Podium to read issues from your Linear workspace.",
-  };
-}
-
-export function useConnectLinear() {
-  const start = useStartLinear();
-  const { notify } = useToast();
-  const { t } = useI18n();
-
-  async function connect() {
-    try {
-      const { authorization_url } = await start.mutateAsync();
-      assignLocation(authorization_url);
-    } catch {
-      notify(t("Couldn't start Linear connection. Try again."), "error");
-    }
-  }
-
-  return {
-    connect,
-    isPending: start.isPending,
   };
 }
