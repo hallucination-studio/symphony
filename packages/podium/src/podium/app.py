@@ -30,8 +30,12 @@ from .podium_project_labels import PodiumProjectLabelsMixin
 from .podium_project_replacements import PodiumProjectReplacementsMixin
 from .podium_routes_conductor_bindings import register_conductor_binding_routes
 from .podium_routes_core_auth import register_auth_routes
-from .podium_routes_core_linear import register_linear_routes
 from .podium_routes_core_onboarding import register_onboarding_routes
+from .podium_routes_linear_application import register_linear_application_routes
+from .podium_routes_linear_cutover import register_linear_cutover_route
+from .podium_routes_linear_disconnect import register_linear_disconnect_route
+from .podium_routes_linear_oauth import register_linear_oauth_routes
+from .podium_routes_linear_projects import register_linear_project_routes
 from .podium_routes_runtime_enrollment import register_runtime_identity_routes
 from .podium_routes_runtime_ops import register_runtime_ops_routes
 from .podium_routes_runtime_proxy import register_linear_proxy_route
@@ -108,13 +112,37 @@ def create_app(
         require_user=require_user,
         error_response=error_response,
     )
-    register_linear_routes(
+    register_linear_application_routes(
+        app,
+        state=state,
+        require_user=require_user,
+        error_response=error_response,
+    )
+    register_linear_oauth_routes(
         app,
         state=state,
         require_user=require_user,
         linear_token_exchange=linear_token_exchange,
         linear_installation_fetch=linear_installation_fetch,
         linear_graphql_transport=linear_graphql_transport,
+        error_response=error_response,
+    )
+    register_linear_project_routes(
+        app,
+        state=state,
+        require_user=require_user,
+        error_response=error_response,
+    )
+    register_linear_disconnect_route(
+        app,
+        state=state,
+        require_user=require_user,
+        error_response=error_response,
+    )
+    register_linear_cutover_route(
+        app,
+        state=state,
+        require_user=require_user,
         error_response=error_response,
     )
     register_runtime_identity_routes(
