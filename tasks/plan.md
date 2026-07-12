@@ -139,7 +139,7 @@ errors.
 
 ### `conductor`: rebuild, not refactor
 
-Target approximately 11 modules:
+Target approximately 10 modules:
 
 ```text
 conductor/
@@ -147,11 +147,10 @@ conductor/
   cli.py          # installed entrypoint
   api.py          # existing local API surface
   models.py       # settings, instance, run, task, attempt, wait
-  store.py        # one SQLite database
+  store.py        # SQLite state plus sequential durable transitions and fencing
   service.py      # composition root and one background tick
   podium.py       # HTTP report/command/dispatch/config/smoke
   linear.py       # proxy, sub-issues, revisions, gates, comments, runtime wait
-  workflow.py     # the only sequential state machine
   gate.py         # commands, rubric/verifier, score, evidence, and gate input
   runtime.py      # Performer process, CODEX_HOME, logs, fencing
 ```
@@ -381,7 +380,7 @@ Gate: `test_performer_turn.py` green and one real isolated turn succeeds.
 3. Add RED workflow tests for plan revision/approval -> ordered Linear
    sub-issues -> execute -> rubric-backed gate/evidence -> child Done -> parent
    Done.
-4. Build the sequential `workflow.py`, `linear.py`, `gate.py`, and `runtime.py`.
+4. Build sequential Store transitions plus `linear.py`, `gate.py`, and `runtime.py`.
 5. Add one-rework, second-failure block, runtime wait, process retry, restart,
    and durable/log/Linear/API failure parity.
 6. Rewrite service/api composition to one tick and current report shape.

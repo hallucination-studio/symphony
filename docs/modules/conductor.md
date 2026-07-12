@@ -20,8 +20,7 @@ The code has more than the eventual compact target, but ownership is explicit:
 
 | Owner | Responsibility |
 |---|---|
-| `models.py`, `store.py` | SQLite settings, instances, runs, tasks, attempts, waits, revisions, and evidence rows |
-| `workflow.py` | Durable state transitions and fencing calls into the store |
+| `models.py`, `store.py` | SQLite settings, instances, runs, tasks, attempts, waits, revisions, evidence rows, and all durable state transitions/fencing |
 | `workflow_driver.py` | One bounded plan/execute/gate progression and Linear projection |
 | `runtime.py` | Request/result files, isolated `CODEX_HOME`, process logs, result fencing |
 | `gate.py` | Declared verification commands and the single Codex Gate combination |

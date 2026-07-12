@@ -35,6 +35,8 @@ and approved runtime environment. This checklist is the active scope ledger;
 - [x] Record one baseline document per module under `docs/modules/`.
 - [x] Merge the one-consumer Conductor service-view mixin into
   `conductor_service.py`.
+- [x] Remove the `Workflow` forwarding facade; `ConductorStore` is the sole
+  durable workflow-transition owner.
 
 ## Remaining code slices
 
