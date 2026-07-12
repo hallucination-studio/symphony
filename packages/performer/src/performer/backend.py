@@ -49,7 +49,6 @@ class TurnBackend:
         result = await self._run(
             workspace,
             prompt=_plan_prompt(issue_description),
-            title="Plan delegated Linear issue",
             thread_id=thread_id,
             schema=PLAN_SCHEMA,
         )
@@ -72,7 +71,6 @@ class TurnBackend:
         result = await self._run(
             workspace,
             prompt=_execute_prompt(task),
-            title=f"Execute {task.id}",
             thread_id=thread_id,
             schema=EXECUTE_SCHEMA,
         )
@@ -101,7 +99,6 @@ class TurnBackend:
         result = await self._run(
             workspace,
             prompt=_gate_prompt(task, evidence),
-            title=f"Gate {task.id}",
             thread_id=thread_id,
             schema=GATE_SCHEMA,
         )
@@ -114,12 +111,11 @@ class TurnBackend:
             raise TurnBackendError(f"gate_turn_changed_files:{','.join(changed)}")
         return GateTurn(str(getattr(result, "thread_id", "") or thread_id), GateResult.from_dict(_structured_result(result)), events)
 
-    async def _run(self, workspace: Path, *, prompt: str, title: str, thread_id: str, schema: dict[str, Any]) -> Any:
+    async def _run(self, workspace: Path, *, prompt: str, thread_id: str, schema: dict[str, Any]) -> Any:
         try:
             return await self.codex_client.run_session(
                 workspace,
                 prompt,
-                title,
                 existing_thread_id=thread_id or None,
                 output_schema=schema,
             )

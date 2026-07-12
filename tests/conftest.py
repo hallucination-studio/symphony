@@ -54,8 +54,8 @@ class FakeCodexClient:
         self.events = events or []
         self.calls: list[dict[str, object]] = []
 
-    async def run_session(self, workspace: Path, prompt: str, title: str, **kwargs: object) -> SimpleNamespace:
-        self.calls.append({"workspace": workspace, "prompt": prompt, "title": title, **kwargs})
+    async def run_session(self, workspace: Path, prompt: str, **kwargs: object) -> SimpleNamespace:
+        self.calls.append({"workspace": workspace, "prompt": prompt, **kwargs})
         return SimpleNamespace(thread_id="thread-1", structured_result=self.structured_result, events=self.events)
 
 

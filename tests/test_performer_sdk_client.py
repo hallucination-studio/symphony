@@ -89,7 +89,7 @@ async def test_sdk_client_reads_schema_json_and_notification_payload(tmp_path: P
     schema = {"type": "object", "required": ["summary", "tasks"]}
     client = CodexSdkClient(CodexConfig(), sdk_factory=lambda _config: sdk)
 
-    result = await client.run_session(tmp_path, "Plan the work", "ignored", output_schema=schema)
+    result = await client.run_session(tmp_path, "Plan the work", output_schema=schema)
 
     assert result.structured_result == structured
     assert thread.output_schema == schema

@@ -50,13 +50,11 @@ class CodexSdkClient:
         self,
         workspace_path: Path,
         prompt: str,
-        title: str,
         *,
         on_event: EventCallback | None = None,
         existing_thread_id: str | None = None,
         output_schema: dict[str, Any],
     ) -> CodexTurnResult:
-        _ = title
         if not workspace_path.exists() or not workspace_path.is_dir():
             raise CodexError("invalid_workspace_cwd", f"Workspace path is not a directory: {workspace_path}")
         events: list[dict[str, Any]] = []
