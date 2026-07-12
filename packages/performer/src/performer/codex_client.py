@@ -12,7 +12,6 @@ from .codex_client_helpers import (
     _classify_sdk_exception,
     _close_sdk_client,
     _codex_sdk_env,
-    _first_dict,
     _first_string,
     _init_backoff_ms,
     _is_terminal_init_error,
@@ -445,7 +444,6 @@ class CodexSdkClient:
     ) -> tuple[str | None, dict[str, Any] | None]:
         final_response: str | None = None
         fallback_response: str | None = None
-        structured: dict[str, Any] | None = None
         async for event in stream():
             mapped = _sdk_event_to_dict(event)
             if mapped:
@@ -459,10 +457,7 @@ class CodexSdkClient:
                     final_response = response
                 elif fallback_response is None:
                     fallback_response = response
-            payload = _event_payload(event)
-            structured = _first_dict(event, "structured_result", "output", "parsed", default=structured)
-            structured = _first_dict(payload, "structured_result", "output", "parsed", default=structured)
-        return final_response or fallback_response, structured
+        return final_response or fallback_response, None
 
 
 def _sdk_event_to_dict(event: Any) -> dict[str, Any] | None:

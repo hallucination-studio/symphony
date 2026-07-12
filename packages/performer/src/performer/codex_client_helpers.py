@@ -235,18 +235,6 @@ def _first_string(value: Any, *names: str, default: str | None = None) -> str | 
     return default
 
 
-def _first_dict(
-    value: Any,
-    *names: str,
-    default: dict[str, Any] | None = None,
-) -> dict[str, Any] | None:
-    for name in names:
-        raw = value.get(name) if isinstance(value, dict) else getattr(value, name, None)
-        if isinstance(raw, dict):
-            return raw
-    return default
-
-
 def _usage_from_any(value: Any) -> dict[str, int] | None:
     raw: Any = None
     if isinstance(value, dict):
