@@ -13,6 +13,7 @@ from ._postgres_schema_statements import POSTGRES_SCHEMA_STATEMENTS
 from ._postgres_ops import PgOpsMixin
 from ._postgres_project_replacements import PgProjectReplacementsMixin
 from ._postgres_project_unbind import PgProjectUnbindMixin
+from ._postgres_profiles import PgProfilesMixin
 from ._postgres_runtime import PgRuntimeMixin
 
 
@@ -25,6 +26,7 @@ class PgStore(
     PgDispatchMixin,
     PgProjectUnbindMixin,
     PgProjectReplacementsMixin,
+    PgProfilesMixin,
     PgOpsMixin,
 ):
     def __init__(self, pool: asyncpg.Pool[Any], *, database_url: str = "") -> None:

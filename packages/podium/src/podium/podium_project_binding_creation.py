@@ -51,6 +51,7 @@ def build_project_binding(
         "candidate_agent_app_user_id": "",
         "candidate_config_version": 0,
         "candidate_acknowledged_config_version": 0,
+        "performer_binding_id": "",
         "label_id": "",
         "label_name": "",
         "replacement_conductor_id": "",

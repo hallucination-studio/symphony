@@ -94,6 +94,7 @@ def _record_to_project_binding(row: Any) -> dict[str, Any]:
         "replacement_binding_id": str(row["replacement_binding_id"]),
         "error_code": str(row["error_code"]),
         "sanitized_reason": str(row["sanitized_reason"]),
+        "performer_binding_id": str(row["performer_binding_id"] or ""),
         "updated_at": row["updated_at"].isoformat() if row["updated_at"] is not None else "",
     }
 

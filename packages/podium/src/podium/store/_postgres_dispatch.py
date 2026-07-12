@@ -53,9 +53,9 @@ INSERT INTO project_bindings (
   candidate_installation_id, candidate_agent_app_user_id, candidate_config_version,
   candidate_acknowledged_config_version, label_id, label_name,
   replacement_conductor_id, replacement_repo_source, replacement_state,
-  replacement_binding_id, error_code, sanitized_reason, updated_at
+  replacement_binding_id, error_code, sanitized_reason, performer_binding_id, updated_at
 )
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb,$14::jsonb,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26::jsonb,$27,$28,$29,$30,$31::timestamptz)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb,$14::jsonb,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26::jsonb,$27,$28,$29,$30,$31,$32::timestamptz)
 ON CONFLICT (id) DO UPDATE SET
   instance_id = EXCLUDED.instance_id,
   name = EXCLUDED.name,
@@ -84,8 +84,9 @@ ON CONFLICT (id) DO UPDATE SET
   replacement_binding_id = EXCLUDED.replacement_binding_id,
   error_code = EXCLUDED.error_code,
   sanitized_reason = EXCLUDED.sanitized_reason,
+  performer_binding_id = EXCLUDED.performer_binding_id,
   updated_at = EXCLUDED.updated_at
-WHERE NOT $32::boolean OR project_bindings.active = FALSE
+WHERE NOT $33::boolean OR project_bindings.active = FALSE
 RETURNING *
 """
 
@@ -342,7 +343,8 @@ def _binding_values(binding: dict[str, Any]) -> tuple[Any, ...]:
         str(binding.get("label_name") or ""), str(binding.get("replacement_conductor_id") or ""),
         _pg_json(binding.get("replacement_repo_source") or {}), str(binding.get("replacement_state") or ""),
         str(binding.get("replacement_binding_id") or ""), str(binding.get("error_code") or ""),
-        str(binding.get("sanitized_reason") or ""), _pg_datetime(binding.get("updated_at")),
+        str(binding.get("sanitized_reason") or ""), binding.get("performer_binding_id") or None,
+        _pg_datetime(binding.get("updated_at")),
     )
 
 

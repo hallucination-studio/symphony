@@ -73,6 +73,54 @@ POSTGRES_SCHEMA_STATEMENTS: Iterable[str] = (
             )
             """,
             """
+            CREATE TABLE IF NOT EXISTS runtime_profiles (
+                id TEXT PRIMARY KEY,
+                workspace_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                name TEXT NOT NULL,
+                runtime_kind TEXT NOT NULL,
+                config_format TEXT NOT NULL,
+                config_document TEXT NOT NULL,
+                config_sha256 TEXT NOT NULL,
+                state TEXT NOT NULL DEFAULT 'active',
+                created_by TEXT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+                created_at TIMESTAMPTZ NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL,
+                UNIQUE(workspace_id, name)
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS performer_profiles (
+                id TEXT PRIMARY KEY,
+                workspace_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                name TEXT NOT NULL,
+                performer_kind TEXT NOT NULL,
+                runtime_profile_id TEXT NOT NULL REFERENCES runtime_profiles(id) ON DELETE RESTRICT,
+                turn_policy JSONB NOT NULL DEFAULT '{}'::jsonb,
+                policy_sha256 TEXT NOT NULL,
+                state TEXT NOT NULL DEFAULT 'active',
+                created_by TEXT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+                created_at TIMESTAMPTZ NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL,
+                UNIQUE(workspace_id, name)
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS performer_credentials (
+                id TEXT PRIMARY KEY,
+                workspace_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                name TEXT NOT NULL,
+                performer_kind TEXT NOT NULL,
+                auth_method TEXT NOT NULL,
+                account_hint TEXT NOT NULL DEFAULT '',
+                local_ref TEXT NOT NULL,
+                state TEXT NOT NULL DEFAULT 'active',
+                created_by TEXT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+                created_at TIMESTAMPTZ NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL,
+                UNIQUE(workspace_id, name)
+            )
+            """,
+            """
             CREATE TABLE IF NOT EXISTS project_bindings (
                 id TEXT PRIMARY KEY,
                 conductor_id TEXT NOT NULL REFERENCES conductors(id) ON DELETE CASCADE,
@@ -92,6 +140,7 @@ POSTGRES_SCHEMA_STATEMENTS: Iterable[str] = (
                 active BOOLEAN NOT NULL DEFAULT TRUE,
                 config_version BIGINT NOT NULL DEFAULT 0,
                 acknowledged_config_version BIGINT NOT NULL DEFAULT 0,
+                performer_binding_id TEXT,
                 candidate_installation_id TEXT NOT NULL DEFAULT '',
                 candidate_agent_app_user_id TEXT NOT NULL DEFAULT '',
                 candidate_config_version BIGINT NOT NULL DEFAULT 0,
@@ -110,6 +159,32 @@ POSTGRES_SCHEMA_STATEMENTS: Iterable[str] = (
             """,
             "CREATE UNIQUE INDEX IF NOT EXISTS project_bindings_conductor_unique ON project_bindings (conductor_id) WHERE active = TRUE",
             "CREATE UNIQUE INDEX IF NOT EXISTS project_bindings_project_unique ON project_bindings (user_id, linear_project_id) WHERE active = TRUE",
+            """
+            CREATE TABLE IF NOT EXISTS performer_bindings (
+                id TEXT PRIMARY KEY,
+                workspace_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                project_binding_id TEXT NOT NULL UNIQUE REFERENCES project_bindings(id) ON DELETE CASCADE,
+                performer_profile_id TEXT NOT NULL REFERENCES performer_profiles(id) ON DELETE RESTRICT,
+                credential_id TEXT NOT NULL REFERENCES performer_credentials(id) ON DELETE RESTRICT,
+                generation BIGINT NOT NULL DEFAULT 1,
+                state TEXT NOT NULL DEFAULT 'pending',
+                error_code TEXT NOT NULL DEFAULT '',
+                sanitized_reason TEXT NOT NULL DEFAULT '',
+                updated_at TIMESTAMPTZ NOT NULL
+            )
+            """,
+            """
+            DO $$
+            BEGIN
+                ALTER TABLE project_bindings
+                  ADD CONSTRAINT project_bindings_performer_binding_fk
+                  FOREIGN KEY (performer_binding_id) REFERENCES performer_bindings(id) ON DELETE SET NULL;
+            EXCEPTION WHEN duplicate_object THEN NULL;
+            END $$
+            """,
+            "CREATE INDEX IF NOT EXISTS performer_profiles_runtime_index ON performer_profiles (runtime_profile_id)",
+            "CREATE INDEX IF NOT EXISTS performer_bindings_profile_index ON performer_bindings (performer_profile_id)",
+            "CREATE INDEX IF NOT EXISTS performer_bindings_credential_index ON performer_bindings (credential_id)",
             """
             CREATE TABLE IF NOT EXISTS dispatches (
                 id TEXT PRIMARY KEY,
