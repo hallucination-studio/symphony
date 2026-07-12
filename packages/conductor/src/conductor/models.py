@@ -169,8 +169,16 @@ class StaleAttemptError(RuntimeError):
     pass
 
 
+class ConductorServiceError(Exception):
+    def __init__(self, code: str, message: str, *, diagnostics: list[str] | None = None):
+        super().__init__(message)
+        self.code = code
+        self.diagnostics = diagnostics or []
+
+
 __all__ = [
     "AttemptState",
+    "ConductorServiceError",
     "ConductorSettings",
     "InstanceCreateRequest",
     "InstancePatchRequest",

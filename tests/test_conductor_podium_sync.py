@@ -7,10 +7,9 @@ import pytest
 
 from conductor.conductor_podium_sync import ConductorPodiumSyncMixin, _smoke_runtime_fields
 from conductor.conductor_smoke_protocol import normalize_smoke_command
-from conductor.conductor_service_types import CoordinationCadence
 from conductor.conductor_api import ConductorApiServer
 from conductor.conductor_service import ConductorService
-from conductor.conductor_service_types import ConductorServiceError
+from conductor.models import ConductorServiceError
 from conductor.store import ConductorStore
 
 
@@ -72,10 +71,9 @@ async def test_background_tick_runs_due_project_label_sync(monkeypatch: pytest.M
             return {"started": 0, "applied": 0}
 
     class FakeSync(ConductorPodiumSyncMixin):
-        coordination_cadence = CoordinationCadence()
-
         def __init__(self) -> None:
             self.sync_calls = 0
+            self._project_labels_last_synced_at = None
 
         async def sync_project_labels_once(self) -> int:
             self.sync_calls += 1
@@ -88,6 +86,11 @@ async def test_background_tick_runs_due_project_label_sync(monkeypatch: pytest.M
 
     assert service.sync_calls == 1
     assert result["project_labels_synced"] == 1
+
+    result = await ConductorPodiumSyncMixin.coordinate_background_once(service)
+
+    assert service.sync_calls == 1
+    assert result["project_labels_synced"] == 0
 
 
 @pytest.mark.anyio

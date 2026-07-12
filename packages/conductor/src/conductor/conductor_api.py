@@ -9,8 +9,8 @@ from urllib.parse import parse_qs
 
 import httpx
 
-from .models import InstanceCreateRequest, InstancePatchRequest, InstanceRecord
-from .conductor_service import ConductorService, ConductorServiceError
+from .models import ConductorServiceError, InstanceCreateRequest, InstancePatchRequest, InstanceRecord
+from .conductor_service import ConductorService
 from .conductor_smoke_protocol import sanitize_reason
 
 

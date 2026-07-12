@@ -9,10 +9,9 @@ from typing import Any
 
 import httpx
 
-from .models import InstanceCreateRequest, InstancePatchRequest
+from .models import ConductorServiceError, InstanceCreateRequest, InstancePatchRequest
 from .conductor_smoke_protocol import SmokeCommandError, normalize_smoke_command, sanitize_reason, smoke_result
 from .conductor_service_helpers import _desired_project_labels, _hostname, _linear_agent_app_user_id, _optional_int
-from .conductor_service_types import ConductorServiceError
 from .workflow_driver import WorkflowDriver
 
 
@@ -32,9 +31,10 @@ class ConductorPodiumSyncMixin:
         }
 
     async def _sync_project_labels_if_due(self, now: datetime) -> int:
-        if not self.coordination_cadence.project_labels_due(now):
+        last_synced_at = getattr(self, "_project_labels_last_synced_at", None)
+        if last_synced_at is not None and (now - last_synced_at).total_seconds() < 300:
             return 0
-        self.coordination_cadence.mark_project_labels(now)
+        self._project_labels_last_synced_at = now
         return await self.sync_project_labels_once()
 
     async def sync_project_labels_once(self) -> int:

@@ -4,7 +4,9 @@ import socket
 from typing import Any
 
 from .models import InstanceRecord
-from .conductor_service_types import PROJECT_LABEL_PREFIX
+
+
+PROJECT_LABEL_PREFIX = "symphony:"
 
 
 def _runtime_metrics(performer: dict[str, Any]) -> dict[str, Any]:

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .models import (
+    ConductorServiceError,
     ConductorSettings,
     InstanceCreateRequest,
     InstancePatchRequest,
@@ -21,13 +22,24 @@ from .conductor_service_helpers import (
     _merge_project_labels,
     _runtime_metrics,
 )
-from .conductor_service_types import (
-    WORKSPACE_INIT_EXCLUDES,
-    ConductorServiceError,
-    CoordinationCadence,
-)
 from .linear import ManagedRunLinearProxy, ProjectLabelLinearProxy
 from .store import ConductorStore
+
+
+WORKSPACE_INIT_EXCLUDES = {
+    ".conductor",
+    "conductor-data",
+    ".venv",
+    "workspaces",
+    ".codex-runtime",
+    ".test-real-flow",
+    ".tmp-real-linear-flow",
+    ".pytest_cache",
+    "__pycache__",
+    "node_modules",
+    "target",
+}
+
 
 class ConductorService(ConductorPodiumSyncMixin):
     def __init__(
@@ -42,7 +54,7 @@ class ConductorService(ConductorPodiumSyncMixin):
         self.acceptance_gate = AcceptanceGate()
         self._smoke_check_lock = asyncio.Lock()
         self.project_label_proxy_factory = self._project_label_proxy
-        self.coordination_cadence = CoordinationCadence()
+        self._project_labels_last_synced_at = None
         # instance_id -> last-synced desired-label signature, so the background
         # loop only calls Linear when an instance's scope actually changes.
         self._project_label_signatures: dict[str, str] = {}
