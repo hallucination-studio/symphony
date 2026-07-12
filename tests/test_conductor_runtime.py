@@ -66,6 +66,21 @@ def test_runtime_fails_closed_when_selected_credential_slot_is_missing(tmp_path)
         )
 
 
+def test_runtime_resolves_performer_from_python_environment_when_path_is_missing(tmp_path, monkeypatch) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    python = bin_dir / "python"
+    performer = bin_dir / "performer"
+    python.write_text("", encoding="utf-8")
+    performer.write_text("", encoding="utf-8")
+    performer.chmod(0o755)
+
+    monkeypatch.setattr("conductor.runtime.shutil.which", lambda _name: None)
+    monkeypatch.setattr("conductor.runtime.sys.executable", str(python))
+
+    assert PerformerRuntime().performer_command == (str(performer),)
+
+
 def test_runtime_provisions_selected_slot_only_from_explicit_staged_seed(tmp_path, monkeypatch) -> None:
     seed = tmp_path / "staged-seed"
     seed.mkdir()

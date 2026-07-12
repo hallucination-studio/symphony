@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
@@ -62,8 +63,8 @@ class RuntimePaths:
 class PerformerRuntime:
     ALLOWED_CODEX_SEED_FILES = ("config.toml", "auth.json", "version.json", "models_cache.json")
 
-    def __init__(self, performer_command: Sequence[str] = ("performer",)) -> None:
-        self.performer_command = tuple(performer_command)
+    def __init__(self, performer_command: Sequence[str] | None = None) -> None:
+        self.performer_command = tuple(performer_command or _default_performer_command())
 
     def prepare_environment(
         self,
@@ -239,6 +240,16 @@ def _codex_seed_from_environment() -> Path | None:
     if not source.is_dir():
         raise ValueError(f"Codex seed is not a directory: {source}")
     return source
+
+
+def _default_performer_command() -> tuple[str, ...]:
+    installed = shutil.which("performer")
+    if installed:
+        return (installed,)
+    sibling = Path(sys.executable).with_name("performer")
+    if sibling.is_file() and os.access(sibling, os.X_OK):
+        return (str(sibling),)
+    return ("performer",)
 
 
 def _trust_codex_project(config_path: Path, workspace_path: Path) -> None:
