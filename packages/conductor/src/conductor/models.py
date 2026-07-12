@@ -116,19 +116,8 @@ class InstanceRecord:
             changes["updated_at"] = utc_now_iso()
         return replace(self, **changes)
 
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
-
     def to_public_dict(self) -> dict[str, Any]:
         return asdict(self)
-
-    @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> InstanceRecord:
-        payload = dict(payload)
-        payload.setdefault("restart_count", 0)
-        payload.setdefault("restart_window_started_at", None)
-        payload.setdefault("restart_next_at", None)
-        return cls(**payload)
 
 
 @dataclass(frozen=True)
@@ -143,10 +132,6 @@ class InstanceCreateRequest:
     workspace_root: str | None = None
     persistence_path: str | None = None
     log_path: str | None = None
-
-    def with_overrides(self, **changes: Any) -> InstanceCreateRequest:
-        return replace(self, **changes)
-
 
 @dataclass(frozen=True)
 class InstancePatchRequest:

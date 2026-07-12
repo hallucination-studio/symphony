@@ -179,15 +179,6 @@ class ConductorStore:
                 _settings_values(settings),
             )
 
-    def save_instance(self, instance: InstanceRecord) -> None:
-        current = self.get_instance(instance.id)
-        if current is None:
-            self.create_instance(instance)
-            return
-        if current.created_at == instance.created_at and current.updated_at == instance.updated_at:
-            raise FileExistsError(f"Metadata already exists for {instance.id}")
-        self.update_instance(instance)
-
     def create_instance(self, instance: InstanceRecord) -> None:
         with self.connect() as connection:
             try:
