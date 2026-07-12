@@ -61,7 +61,7 @@ class ConductorStore:
     def __init__(self, data_root: Path):
         self.data_root = data_root
         self.instances_root = data_root / "instances"
-        self.db_path = data_root / "conductor.db"
+        self.db_path = data_root / "workflow.db"
         self.data_root.mkdir(parents=True, exist_ok=True)
         self.instances_root.mkdir(parents=True, exist_ok=True)
         self._init_db()
