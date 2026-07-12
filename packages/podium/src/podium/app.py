@@ -28,8 +28,10 @@ from .podium_linear_projects import PodiumLinearProjectsMixin
 from .podium_project_bindings import PodiumProjectBindingsMixin
 from .podium_project_labels import PodiumProjectLabelsMixin
 from .podium_project_replacements import PodiumProjectReplacementsMixin
-from .podium_routes_core import register_core_routes
 from .podium_routes_conductor_bindings import register_conductor_binding_routes
+from .podium_routes_core_auth import register_auth_routes
+from .podium_routes_core_linear import register_linear_routes
+from .podium_routes_core_onboarding import register_onboarding_routes
 from .podium_routes_runtime_enrollment import register_runtime_identity_routes
 from .podium_routes_runtime_ops import register_runtime_ops_routes
 from .podium_routes_runtime_proxy import register_linear_proxy_route
@@ -99,7 +101,14 @@ def create_app(
         return await state.user_for_session(podium_session or "")
 
     _register_base_routes(app, state=state, static_root=static_root, index_file=index_file)
-    register_core_routes(
+    register_auth_routes(app, state=state, error_response=error_response)
+    register_onboarding_routes(
+        app,
+        state=state,
+        require_user=require_user,
+        error_response=error_response,
+    )
+    register_linear_routes(
         app,
         state=state,
         require_user=require_user,
