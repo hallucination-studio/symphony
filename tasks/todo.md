@@ -51,9 +51,10 @@ checklist is the active scope ledger;
 - [x] Make retained acceptance evidence readable in the operator report and
   Linear projection using existing owners; do not create a new evidence runner
   or child-issue tree without explicit approval.
-- [ ] Reconcile the written Gate rule: the spec says commands + Codex
-  `passed=true`, while current retained code also applies `score >= threshold`.
-  Do not change the product rule until it is explicitly resolved.
+- [x] Reconcile the written Gate rule with the retained product contract:
+  commands must pass, Codex must return `passed=true`, and the score must meet
+  the threshold. No Gate behavior was changed; the existing threshold test
+  remains the regression guard.
 
 ## MVP acceptance closure slice
 

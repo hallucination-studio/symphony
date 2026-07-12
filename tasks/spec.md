@@ -24,11 +24,12 @@ multi-backend platform, cross-model acceptance platform, or compatibility layer.
 
 1. Work sub-issues execute strictly in plan order. There is no dependency DAG,
    parallel group, capacity scheduler, per-task branch, or branch join.
-2. One acceptance gate has two hard requirements: every declared command exits
-   successfully and a separate read-only Codex gate turn returns `passed=true`.
-   The gate retains the existing score, rubric, threshold, weight, provenance,
-   manifest, artifact, and acceptance-catalog evidence model, but it has one
-   Codex evaluator only. There is no cross-model reviewer or second acceptance
+2. One acceptance gate has three hard requirements: every declared command
+   exits successfully, a separate read-only Codex gate turn returns
+   `passed=true`, and its score meets the retained threshold. The gate retains
+   the existing score, rubric, threshold, weight, provenance, manifest,
+   artifact, and acceptance-catalog evidence model, but it has one Codex
+   evaluator only. There is no cross-model reviewer or second acceptance
    scheduler, and there is no checkpoint-group layer.
 3. One failed gate receives at most one automatic rework attempt. A second
    failure blocks the sub-issue and parent with a concrete next action.

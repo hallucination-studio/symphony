@@ -58,10 +58,9 @@ HTTP API is separate from that transport.
 
 - Strict task order, one automatic rework, hard state cutover, no old-data
   migration, and no cross-model/second acceptance scheduler are approved.
-- The remaining Gate-rule wording conflict is intentionally unresolved:
-  `spec.md` says commands plus `passed=true`; current code also enforces
-  `score >= threshold`. No behavior change may resolve it without an explicit
-  product decision.
+- The Gate rule is documented consistently with the retained implementation:
+  commands pass, Codex returns `passed=true`, and score meets threshold. This
+  documentation reconciliation does not change Gate behavior.
 
 ## Current Module Baselines
 
@@ -104,8 +103,7 @@ HTTP API is separate from that transport.
 1. Keep the sanitized evidence projection contract covered by the existing
    operator and Linear surfaces. No new runner, endpoint, or evidence child-issue
    tree is allowed.
-2. Resolve the Gate threshold rule explicitly before changing its behavior.
-3. Run a scoped real Linear/OAuth/Codex product flow after the local rebuild.
+2. Run a scoped real Linear/OAuth/Codex product flow after the local rebuild.
    The staged Codex preflight passes, but the sourced environment has no
    project slug or Podium URL; `.test-real-flow/mvp-real-report.json` records
    the sanitized preflight blocker.
