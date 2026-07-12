@@ -147,7 +147,7 @@ async def test_smoke_check_requires_one_label_matching_id_and_name(tmp_path: Pat
 
 
 @pytest.mark.anyio
-async def test_podium_tick_reports_then_handles_command_dispatch_and_workflow(
+async def test_podium_tick_applies_command_before_reporting_dispatch_and_workflow(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[str] = []
@@ -173,7 +173,7 @@ async def test_podium_tick_reports_then_handles_command_dispatch_and_workflow(
 
     await ConductorApiServer(FakeService())._poll_once()
 
-    assert calls == ["report", "command", "dispatch", "workflow"]
+    assert calls == ["command", "report", "dispatch", "workflow"]
 
 
 def test_managed_run_linear_proxy_requires_podium_configuration(tmp_path: Path) -> None:

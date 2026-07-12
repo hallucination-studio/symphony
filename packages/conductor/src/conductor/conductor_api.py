@@ -69,10 +69,13 @@ class ConductorApiServer:
             await asyncio.sleep(_jitter(delay))
 
     async def _poll_once(self) -> dict[str, Any]:
-        await self.service.post_podium_report()
         command = await self._poll_command_once()
         if command.get("reason") == "runtime_unauthorized":
             return command
+        # Apply Podium configuration before reporting the local binding. This lets a
+        # Conductor refresh an older binding that Podium will reject until its
+        # current profile has been applied.
+        await self.service.post_podium_report()
         dispatch = await self.service.poll_podium_dispatch_once()
         if dispatch.get("reason") == "runtime_unauthorized":
             return dispatch
