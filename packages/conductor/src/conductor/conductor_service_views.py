@@ -134,11 +134,11 @@ class ConductorServiceViewsMixin:
                 "issue_id": run.get("parent_issue_id"),
                 "issue_identifier": run.get("issue_identifier"),
                 "state": run.get("state"),
-                "active_work_item_id": run.get("active_work_item_id"),
+                "active_work_item_id": run.get("active_task_id"),
             }
             for run in runs
             if isinstance(run, dict)
-            and str(run.get("state") or "") in {"planning", "projecting_plan", "ready", "executing", "reviewing"}
+            and str(run.get("state") or "") in {"planning", "awaiting_approval", "executing"}
         ]
         blocked = [
             {
@@ -169,7 +169,7 @@ class ConductorServiceViewsMixin:
                 "continuing": 0,
                 "blocked": len(blocked),
                 "pending_human": len(pending_human),
-                "runtime_waiting": sum(1 for wait in runtime_waits if wait.get("status") == "waiting"),
+                "runtime_waiting": sum(1 for wait in runtime_waits if wait.get("state") == "open"),
             },
             "running": running,
             "retrying": [],

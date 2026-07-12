@@ -555,8 +555,12 @@ def _managed_run_report_metrics(view: dict[str, Any]) -> dict[str, Any]:
 def _managed_run_report_queue(view: dict[str, Any]) -> dict[str, int]:
     runs = view.get("runs") if isinstance(view.get("runs"), list) else []
     return {
-        "queued": sum(1 for run in runs if isinstance(run, dict) and run.get("state") in {"queued", "planning", "ready"}),
-        "leased": sum(1 for run in runs if isinstance(run, dict) and run.get("state") in {"executing", "reviewing"}),
+        "queued": sum(
+            1
+            for run in runs
+            if isinstance(run, dict) and run.get("state") in {"planning", "awaiting_approval"}
+        ),
+        "leased": sum(1 for run in runs if isinstance(run, dict) and run.get("state") == "executing"),
     }
 
 
