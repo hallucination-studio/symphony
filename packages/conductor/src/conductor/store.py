@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -18,10 +17,6 @@ from .models import (
     TaskState,
     utc_now_iso,
 )
-
-
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _dump(value: Any) -> str:
@@ -229,7 +224,7 @@ class ConductorStore:
             if existing is not None:
                 return _run(existing)
             run_id = f"run-{uuid4().hex}"
-            now = _now()
+            now = utc_now_iso()
             connection.execute(
                 """
                 INSERT INTO runs (
@@ -259,14 +254,14 @@ class ConductorStore:
         with self.connect() as connection:
             connection.execute(
                 "UPDATE runs SET payload_json = ?, updated_at = ? WHERE run_id = ?",
-                (_dump(payload), _now(), run_id),
+                (_dump(payload), utc_now_iso(), run_id),
             )
 
     def fail_run(self, run_id: str, reason: str) -> None:
         with self.connect() as connection:
             connection.execute(
                 "UPDATE runs SET state = ?, latest_reason = ?, updated_at = ? WHERE run_id = ?",
-                (RunState.FAILED.value, reason, _now(), run_id),
+                (RunState.FAILED.value, reason, utc_now_iso(), run_id),
             )
 
     def managed_run_view(self) -> dict[str, Any]:
@@ -315,14 +310,14 @@ class ConductorStore:
                 SET linear_issue_id = ?, linear_identifier = ?, linear_state = ?, updated_at = ?
                 WHERE run_id = ? AND task_id = ?
                 """,
-                (issue_id, identifier, state, _now(), run_id, task_id),
+                (issue_id, identifier, state, utc_now_iso(), run_id, task_id),
             )
 
     def update_task_linear_state(self, run_id: str, task_id: str, state: str) -> None:
         with self.connect() as connection:
             connection.execute(
                 "UPDATE tasks SET linear_state = ?, updated_at = ? WHERE run_id = ? AND task_id = ?",
-                (state, _now(), run_id, task_id),
+                (state, utc_now_iso(), run_id, task_id),
             )
 
     def save_plan(
@@ -336,7 +331,7 @@ class ConductorStore:
         manifest_refs: list[str] | None = None,
     ) -> int:
         approval_required = plan.approval_required if approval_required is None else approval_required
-        now = _now()
+        now = utc_now_iso()
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
@@ -402,7 +397,7 @@ class ConductorStore:
         return payload if isinstance(payload, dict) else None
 
     def approve_plan(self, run_id: str, version: int, *, approval_id: str) -> None:
-        now = _now()
+        now = utc_now_iso()
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             connection.execute(
@@ -439,7 +434,7 @@ class ConductorStore:
         return None
 
     def start_plan(self, run_id: str) -> dict[str, Any]:
-        now = _now()
+        now = utc_now_iso()
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             existing = connection.execute(
@@ -483,7 +478,7 @@ class ConductorStore:
             approval_required=plan.approval_required,
             manifest_refs=manifest_refs,
         )
-        now = _now()
+        now = utc_now_iso()
         with self.connect() as connection:
             connection.execute(
                 "UPDATE attempts SET state = ?, result_json = ?, updated_at = ? WHERE attempt_id = ?",
@@ -493,7 +488,7 @@ class ConductorStore:
 
     def record_runtime_wait(self, run_id: str, attempt_id: str, fencing_token: int, *, kind: str, reason: str) -> None:
         attempt = self._attempt(run_id, attempt_id, fencing_token)
-        now = _now()
+        now = utc_now_iso()
         wait_id = f"wait-{uuid4().hex}"
         with self.connect() as connection:
             connection.execute(
@@ -525,7 +520,7 @@ class ConductorStore:
             )
 
     def resume_runtime_wait(self, run_id: str) -> bool:
-        now = _now()
+        now = utc_now_iso()
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             waits = connection.execute(
@@ -557,7 +552,7 @@ class ConductorStore:
         return True
 
     def start_task(self, run_id: str, task_id: str) -> dict[str, Any]:
-        now = _now()
+        now = utc_now_iso()
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
@@ -587,7 +582,7 @@ class ConductorStore:
         return {"attempt_id": attempt_id, "fencing_token": token, "task_id": task_id}
 
     def start_gate(self, run_id: str, task_id: str) -> dict[str, Any]:
-        now = _now()
+        now = utc_now_iso()
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             task = connection.execute(
@@ -621,7 +616,7 @@ class ConductorStore:
 
     def record_execute(self, run_id: str, attempt_id: str, fencing_token: int, *, ready_for_gate: bool, result: dict[str, Any] | None = None) -> dict[str, Any]:
         attempt = self._attempt(run_id, attempt_id, fencing_token, kind="execute")
-        now = _now()
+        now = utc_now_iso()
         state = TaskState.IN_REVIEW.value if ready_for_gate else TaskState.BLOCKED.value
         run_state = RunState.EXECUTING.value if ready_for_gate else RunState.BLOCKED.value
         reason = "ready_for_gate" if ready_for_gate else "execute_failed"
@@ -653,7 +648,7 @@ class ConductorStore:
         evidence: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         attempt = self._attempt(run_id, attempt_id, fencing_token, kind="gate")
-        now = _now()
+        now = utc_now_iso()
         effective_passed = bool(passed and score >= threshold)
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
