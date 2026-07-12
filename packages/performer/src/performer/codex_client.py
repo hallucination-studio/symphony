@@ -101,15 +101,14 @@ class CodexSdkClient:
         turn_prompt = prompt
         for attempt in range(1, 3):
             try:
-                turn_id, session_id, final_response, structured = await self._run_turn_with_timeout(
+                turn_id, session_id, final_response = await self._run_turn_with_timeout(
                     thread,
                     turn_prompt,
                     output_schema,
                     thread_id=thread_id,
                     emit=emit,
                 )
-                if structured is None:
-                    structured = _parse_structured_result(final_response)
+                structured = _parse_structured_result(final_response)
                 if structured is None:
                     raise CodexError("invalid_structured_output", "Codex SDK turn did not produce the required structured JSON result")
                 return turn_id, session_id, final_response, structured
@@ -165,7 +164,7 @@ class CodexSdkClient:
         *,
         thread_id: str,
         emit: EventCallback,
-    ) -> tuple[str, str, str | None, dict[str, Any] | None]:
+    ) -> tuple[str, str, str | None]:
         return await asyncio.wait_for(
             self._run_turn(thread, prompt, output_schema, thread_id=thread_id, emit=emit),
             timeout=_timeout_seconds(self.config.hard_turn_timeout_ms),
@@ -179,14 +178,14 @@ class CodexSdkClient:
         *,
         thread_id: str,
         emit: EventCallback,
-    ) -> tuple[str, str, str | None, dict[str, Any] | None]:
-        async def op() -> tuple[str, str, str | None, dict[str, Any] | None]:
+    ) -> tuple[str, str, str | None]:
+        async def op() -> tuple[str, str, str | None]:
             turn = await self._start_sdk_turn(thread, prompt, output_schema)
             turn_id = _string_attr(turn, "id") or "turn"
             session_id = f"{thread_id}-{turn_id}"
             emit({"event": "turn_started", "backend": "sdk", "thread_id": thread_id, "turn_id": turn_id, "session_id": session_id})
-            final_response, structured = await self._consume_turn(turn, emit)
-            return turn_id, session_id, final_response, structured
+            final_response = await self._consume_turn(turn, emit)
+            return turn_id, session_id, final_response
 
         return await self._retry_overload(op, emit=emit)
 
@@ -431,7 +430,7 @@ class CodexSdkClient:
             return await turn(prompt, output_schema=output_schema)
         raise CodexError("sdk_missing_turn", "Codex SDK thread does not support turn")
 
-    async def _consume_turn(self, turn: Any, emit: EventCallback) -> tuple[str | None, dict[str, Any] | None]:
+    async def _consume_turn(self, turn: Any, emit: EventCallback) -> str | None:
         stream = getattr(turn, "stream", None)
         if callable(stream):
             return await self._consume_turn_stream(stream, emit)
@@ -441,7 +440,7 @@ class CodexSdkClient:
         self,
         stream: Callable[[], Any],
         emit: EventCallback,
-    ) -> tuple[str | None, dict[str, Any] | None]:
+    ) -> str | None:
         final_response: str | None = None
         fallback_response: str | None = None
         async for event in stream():
@@ -457,7 +456,7 @@ class CodexSdkClient:
                     final_response = response
                 elif fallback_response is None:
                     fallback_response = response
-        return final_response or fallback_response, None
+        return final_response or fallback_response
 
 
 def _sdk_event_to_dict(event: Any) -> dict[str, Any] | None:
