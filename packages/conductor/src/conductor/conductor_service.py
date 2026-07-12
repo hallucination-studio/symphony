@@ -69,7 +69,12 @@ class ConductorService(ConductorPodiumSyncMixin, ConductorServiceViewsMixin):
     def _managed_run_tracker(self, instance: InstanceRecord) -> Any:
         settings = self.store.get_settings()
         endpoint_base = settings.podium_url.strip().rstrip("/")
-        endpoint = f"{endpoint_base}/api/v1/linear/graphql" if endpoint_base else "https://api.linear.app/graphql"
+        if not endpoint_base or not settings.podium_proxy_token.strip():
+            raise ConductorServiceError(
+                "podium_proxy_not_configured",
+                "Conductor requires the configured Podium Linear proxy",
+            )
+        endpoint = f"{endpoint_base}/api/v1/linear/graphql"
         api_key = settings.podium_proxy_token.strip()
         return ManagedRunLinearProxy(
             endpoint=endpoint,
