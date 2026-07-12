@@ -32,7 +32,7 @@ function bootstrap(overrides: Partial<Bootstrap> = {}): Bootstrap {
       completed_steps: ["linear_connect"],
       next_action: "Select the teams and projects to route",
     },
-    linear: { workspace_id: "default", state: "connected" },
+    linear: { state: "connected" },
     ...overrides,
   };
 }
@@ -43,10 +43,9 @@ function managedRunsPayload() {
       {
         conductor: { id: "conductor-1", name: "Bach", public_id: "k7m3p2", online: true },
         project: { id: "project-1", slug: "LIN", name: "Linear Platform" },
-        binding: { id: "binding-1", instance_id: "inst-1", state: "ready", error_code: "", sanitized_reason: "" },
+        binding: { state: "ready", sanitized_reason: "" },
         runtime_group_id: "group-1",
         policy_revision: 2,
-        profiles: {},
         managed_runs: {
           runs: [
             {

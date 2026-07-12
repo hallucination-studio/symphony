@@ -42,7 +42,6 @@ function bootstrap(
       next_action: "",
     },
     linear: {
-      workspace_id: "default",
       state: completed.includes("linear_connect")
         ? "connected"
         : "not_connected",
@@ -64,7 +63,6 @@ describe("SetupPage repository step", () => {
     );
     mockApi.enrollmentToken.mockResolvedValue({
       enrollment_token: "tok",
-      workspace_id: "default",
       install_command:
         "curl -fsSL https://podium.example/install.sh | bash -s -- --enrollment-token tok",
       expires_at: "2026-07-02T12:00:00Z",
@@ -172,7 +170,6 @@ describe("SetupPage runtime step", () => {
     mockApi.runtimeStatus.mockResolvedValue({ online_count: 0 });
     mockApi.enrollmentToken.mockResolvedValue({
       enrollment_token: "tok",
-      workspace_id: "default",
       install_command:
         "curl -fsSL https://podium.example/install.sh | bash -s -- --enrollment-token tok",
       expires_at: "2026-07-02T12:00:00Z",
@@ -199,13 +196,11 @@ describe("SetupPage runtime step", () => {
     mockApi.enrollmentToken
       .mockResolvedValueOnce({
         enrollment_token: "tok-1",
-        workspace_id: "default",
         install_command: "install --token tok-1",
         expires_at: "2026-07-02T12:00:00Z",
       })
       .mockResolvedValueOnce({
         enrollment_token: "tok-2",
-        workspace_id: "default",
         install_command: "install --token tok-2",
         expires_at: "2026-07-02T13:00:00Z",
       });
@@ -230,9 +225,7 @@ describe("SetupPage linear step", () => {
     vi.clearAllMocks();
     mockApi.linearApplication.mockResolvedValue({
       application: {
-        id: "app-default",
         source: "default",
-        version: 1,
         client_id: "default-client",
         callback_url: "https://podium.example/api/v1/linear/oauth/callback",
       },
@@ -258,7 +251,6 @@ describe("SetupPage linear step", () => {
     mockApi.bootstrap.mockResolvedValue(bootstrap("linear_connect", []));
     mockApi.startLinear.mockResolvedValue({
       authorization_url: "https://linear.example/oauth",
-      workspace_id: "default",
     });
     const assign = vi
       .spyOn(navigation, "assignLocation")

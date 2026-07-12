@@ -38,7 +38,7 @@ describe("App auth gate", () => {
         completed_steps: [],
         next_action: "Connect Linear",
       },
-      linear: { workspace_id: "ws_abc", state: "not_connected" },
+      linear: { state: "not_connected" },
     });
   });
 
