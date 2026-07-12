@@ -27,9 +27,9 @@ is the active scope ledger;
 ## Implemented simplification slices
 
 - [x] Consolidate Conductor persistence into one fresh `workflow.db`.
-- [ ] Replace the removed profile compatibility value with normalized Podium
-  runtime profiles/revisions plus a runtime-binding reference; do not widen
-  `project_bindings` with TOML or credential fields.
+- [ ] Replace the removed profile compatibility value with layered Podium
+  Performer profiles -> runtime profiles/revisions plus a Performer binding
+  reference; do not widen `project_bindings` with TOML or credential fields.
 - [x] Remove persisted runtime-group ownership; retain the deterministic public
   alias `group_{conductor_id}`.
 - [x] Collapse Conductor smoke/command wrappers into their unique owners.
@@ -79,19 +79,21 @@ is the active scope ledger;
 
 ## Podium-managed Codex configuration/local-login slice ledger (design pending)
 
-- **Authorized:** design a reusable Podium runtime-profile/revision model,
-  separate credential metadata/reference records, and Conductor-local selected
-  OAuth/API-key slots for isolated Performer attempts. Official `codex login`
-  ChatGPT OAuth without an API token is supported.
-- **Required consequences:** four normalized facts (profile, immutable
-  revision, credential metadata, runtime binding); strict TOML/secret
-  validation; durable revision/hash/policy; idempotent/stale command handling;
-  isolated attempt materialization; sanitized readiness/failure fields; local
-  credentials kept outside Podium; focused tests and real-flow evidence.
+- **Authorized:** design a reusable Podium Performer-profile wrapper that
+  references runtime profiles/revisions, separate credential metadata/reference
+  records, and Conductor-local selected OAuth/API-key slots for isolated
+  Performer attempts. Official `codex login` ChatGPT OAuth without an API token
+  is supported.
+- **Required consequences:** layered Performer/runtime profile facts,
+  immutable revisions, credential metadata, and Performer binding; strict
+  TOML/secret validation; durable revision/hash/policy; idempotent/stale
+  command handling; isolated attempt materialization; sanitized
+  readiness/failure fields; local credentials kept outside Podium; focused
+  tests and real-flow evidence.
 - **Out of scope:** sending `auth.json`, keyring exports, API keys, or access
   tokens through Podium; a Podium credential vault; a second runtime transport;
   a new scheduler; or detailed credential rendering in Web/Linear.
-- **Assumptions requiring approval:** the ADR-0004 four-table shape, local-only
+- **Assumptions requiring approval:** the ADR-0004 layered table shape, local-only
   credentials, and file/directory profile provisioning listed in its approval
   questions. No production implementation may start before approval.
 - **Deferred ideas:** KMS-backed Podium API-key storage, browser editing UI,

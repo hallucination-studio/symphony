@@ -92,8 +92,8 @@ detailed profile contents in this slice.
 ## Hard-cut rules
 
 - New PostgreSQL schema only: no old runtime-group rows are read or migrated;
-  runtime profiles/revisions/credential references use the normalized schema in
-  ADR-0004.
+  Performer profiles, runtime profiles/revisions, and credential references use
+  the layered normalized schema in ADR-0004.
 - Keep Linear OAuth/tokens and browser secret boundaries unchanged.
 - Do not add a generic runtime protocol, outbox framework, WebSocket path,
   cross-model acceptance, or a second scheduler.

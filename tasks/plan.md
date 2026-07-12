@@ -110,9 +110,9 @@ HTTP API is separate from that transport.
 
 ## Remaining Work
 
-1. Await approval of the normalized runtime profile/revision/credential/runtime
-   binding design in ADR-0004; do not implement the previous single-table
-   sketch.
+1. Await approval of the layered Performer profile/runtime profile/revision/
+   credential/binding design in ADR-0004; do not implement the previous
+   single-table sketch.
 2. After approval, implement and verify the profile revision carried by
    `project.configure`, local credential selection, and isolated attempt
    materialization.

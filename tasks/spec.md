@@ -149,12 +149,13 @@ POST /api/v1/runtime/report
 
 The runtime report carries the current sanitized log tail and a small Codex
 configuration/readiness summary. Podium owns reusable runtime profiles and
-immutable non-secret Codex config revisions. A project binding selects one
-runtime binding, which points to one profile revision and one local credential
-reference. The selected revision's file content travels through the existing
-`project.configure` command; there is no credential upload and no separate log
-chunk/fetch channel. Podium may expose only ids, revision/hash, policy, auth
-method, and sanitized readiness through the existing managed-runs response.
+immutable non-secret adapter config revisions. A project binding selects one
+Performer binding, which points to one Performer profile revision; that revision
+references one runtime profile revision and one local credential reference. The
+selected runtime document travels through the existing `project.configure`
+command; there is no credential upload and no separate log chunk/fetch channel.
+Podium may expose only ids, revision/hash, policy, auth method, and sanitized
+readiness through the existing managed-runs response.
 
 Runtime commands use `queued | leased | completed | failed`, a five-minute
 lease, and an integer fencing token. Lease selects the oldest queued or expired
@@ -324,8 +325,9 @@ provenance model, not a second workflow engine.
 
 Podium keeps PostgreSQL authority for users, sessions, Linear applications and
 installations, selected projects, Conductors, project bindings, normalized
-runtime profiles, immutable profile revisions, credential metadata/references,
-runtime bindings, polling observations, checkpoints, delegation epochs,
+runtime profiles, immutable runtime profile revisions, Performer profiles and
+revisions, credential metadata/references, Performer bindings, polling
+observations, checkpoints, delegation epochs,
 dispatches, commands, reports, and cached log tails. Delete `runtime_groups`;
 derive `runtime_group_id` as a stable presentation alias from the Conductor id
 so the Web response does not change. Raw `auth.json`, API keys, and access

@@ -1,16 +1,18 @@
 # Codex runtime
 
-Performer is Codex-only. Podium owns reusable Codex runtime profiles with
-immutable non-secret `config.toml` revisions. A project binding selects one
-profile revision and one local credential reference; it does not store the
-TOML or credential fields itself. Podium delivers the selected revision through
-the existing idempotent `project.configure` command over authenticated runtime
-polling. Reports and Web views expose only ids, revision/hash, policy revision,
-and sanitized credential readiness.
+Performer is the Symphony-owned agent layer. A `performer_profile` selects the
+agent/SDK kind, turn policy, one immutable `runtime_profile` revision, and one
+local credential reference. Codex is the first runtime adapter; future SDK
+agents use the same Performer wrapper without changing project bindings.
+Podium delivers the selected runtime revision through the existing idempotent
+`project.configure` command over authenticated runtime polling. Reports and Web
+views expose only ids, revision/hash, policy revision, and sanitized credential
+readiness.
 
-The profile registry is reusable configuration metadata, not a backend
-scheduler. It never contains `auth.json`, API keys, ChatGPT access tokens,
-keyring exports, or credential-bearing environment values.
+Performer/runtime profiles are reusable configuration metadata, not a backend
+scheduler or generic plugin registry. They never contain `auth.json`, API keys,
+ChatGPT access tokens, keyring exports, or credential-bearing environment
+values.
 
 ## Isolation
 
