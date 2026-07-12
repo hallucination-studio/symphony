@@ -6,23 +6,13 @@ from pathlib import Path
 from typing import Any
 
 from .conductor_models import InstanceCreateRequest, InstancePatchRequest, InstanceRecord
-from .conductor_runtime import LogQuery
 from .conductor_service_helpers import *  # noqa: F403
 from .conductor_service_types import *  # noqa: F403
 
 
 class ConductorServiceViewsMixin:
     def get_instance(self, instance_id: str) -> InstanceRecord | None:
-        instance = self.store.get_instance(instance_id)
-        if instance is None:
-            return None
-        refresh = getattr(self.runtime_manager, "refresh", None)
-        if not callable(refresh):
-            return instance
-        refreshed = refresh(instance)
-        if refreshed != instance:
-            self.store.update_instance(refreshed)
-        return refreshed
+        return self.store.get_instance(instance_id)
 
     def create_instance(self, request: InstanceCreateRequest) -> InstanceRecord:
         if self.store.list_instances():
@@ -87,13 +77,12 @@ class ConductorServiceViewsMixin:
 
     async def stop_instance(self, instance_id: str) -> InstanceRecord:
         current = self._require_instance(instance_id)
-        stopped = await self.runtime_manager.stop(current)
+        stopped = current.with_updates(process_status="stopped", pid=None)
         self.store.update_instance(stopped)
         return stopped
 
     async def restart_instance(self, instance_id: str) -> InstanceRecord:
         current = self._require_instance(instance_id)
-        await self.runtime_manager.stop(current)
         restarted = current.with_updates(process_status="running", pid=None)
         self.store.update_instance(restarted)
         return restarted
@@ -107,7 +96,13 @@ class ConductorServiceViewsMixin:
 
     def instance_runtime(self, instance_id: str) -> dict[str, object]:
         current = self._require_instance(instance_id)
-        runtime = dict(self.runtime_manager.runtime_snapshot(current))
+        runtime: dict[str, object] = {
+            "instance_id": current.id,
+            "process_status": current.process_status,
+            "pid": current.pid,
+            "http_port": current.http_port,
+            "log_path": current.log_path,
+        }
         performer = self._managed_run_runtime_snapshot()
         runtime["workspace"] = {
             "root": current.workspace_root,
@@ -200,32 +195,22 @@ class ConductorServiceViewsMixin:
         prefix: bool = False,
     ) -> dict[str, Any]:
         current = self._require_instance(instance_id)
-        result = self.runtime_manager.query_logs(
-            current,
-            LogQuery(
-                tail=tail,
-                limit_bytes=limit_bytes,
-                previous=previous,
-                order=order,
-                timestamps=timestamps,
-                prefix=prefix,
-            ),
+        _ = timestamps, prefix
+        result = self.performer_runtime.read_log(
+            Path(current.log_path),
+            tail=tail,
+            limit_bytes=limit_bytes,
+            previous=previous,
+            order=order,
         )
         return {
-            "instance_id": result.instance_id,
-            "generation": result.generation,
-            "path": result.path,
-            "order": result.order,
-            "lines": result.lines,
-            "logs": result.text(),
-            "offset_start": result.offset_start,
-            "offset_end": result.offset_end,
-            "warnings": result.warnings,
+            "instance_id": current.id,
+            **result,
         }
 
     def instance_logs(self, instance_id: str) -> str:
         current = self._require_instance(instance_id)
-        return self.runtime_manager.read_logs(current)
+        return str(self.performer_runtime.read_log(Path(current.log_path), order="asc")["logs"])
 
     def inspect_repo(self, repo_source_type: str, repo_source_value: str) -> dict[str, Any]:
         resolved = self._resolve_repo(repo_source_type, repo_source_value)

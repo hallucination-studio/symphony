@@ -12,8 +12,6 @@ from .conductor_models import (
     InstancePatchRequest,
     InstanceRecord,
 )
-from .conductor_runtime import ConductorRuntimeManager
-from .conductor_runtime import LogQuery
 from .conductor_store import ConductorStore
 from .gate import AcceptanceGate
 from .runtime import PerformerRuntime
@@ -35,11 +33,9 @@ class ConductorService(ConductorPodiumSyncMixin, ConductorServiceViewsMixin):
         *,
         store: ConductorStore,
         data_root: Path,
-        runtime_manager: ConductorRuntimeManager | None = None,
     ):
         self.store = store
         self.data_root = data_root
-        self.runtime_manager = runtime_manager or ConductorRuntimeManager()
         self.workflow_store = WorkflowStore(data_root / "workflow.db")
         self.workflow = Workflow(self.workflow_store)
         self.performer_runtime = PerformerRuntime()
