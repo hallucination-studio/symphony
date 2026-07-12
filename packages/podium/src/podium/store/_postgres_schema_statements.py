@@ -157,6 +157,7 @@ POSTGRES_SCHEMA_STATEMENTS: Iterable[str] = (
                 UNIQUE(conductor_id)
             )
             """,
+            "ALTER TABLE project_bindings ADD COLUMN IF NOT EXISTS performer_binding_id TEXT",
             "CREATE UNIQUE INDEX IF NOT EXISTS project_bindings_conductor_unique ON project_bindings (conductor_id) WHERE active = TRUE",
             "CREATE UNIQUE INDEX IF NOT EXISTS project_bindings_project_unique ON project_bindings (user_id, linear_project_id) WHERE active = TRUE",
             """
