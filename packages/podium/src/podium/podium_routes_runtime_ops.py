@@ -7,6 +7,7 @@ from fastapi import FastAPI, Header, Request
 from fastapi.responses import JSONResponse
 from .podium_routes_runtime_helpers import managed_run_ack_payload
 from .podium_shared import dispatch_public, optional_int
+from .podium_smoke_protocol import SmokeCheckError
 
 RequireUser = Callable[[Request], Awaitable[dict[str, Any] | None]]
 ErrorResponse = Callable[[int, str, str], JSONResponse]
@@ -83,6 +84,22 @@ def _register_runtime_command_routes(app: FastAPI, *, state: Any, error_response
         if status not in {"completed", "failed"}:
             return error_response(400, "invalid_command_status", "status must be completed or failed")
         result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
+        if result.get("command_type") == "smoke.check" and status == "completed":
+            try:
+                smoke_result = await state.submit_smoke_check_result(
+                    runtime,
+                    result.get("result") if isinstance(result.get("result"), dict) else {},
+                )
+                result = {**result, "podium_smoke": smoke_result}
+            except SmokeCheckError as exc:
+                status = "failed"
+                result = {
+                    **result,
+                    "error_code": exc.code,
+                    "sanitized_reason": exc.reason,
+                    "action_required": "rerun_smoke_check",
+                    "retryable": False,
+                }
         command = await state.ack_runtime_command(
             str(runtime["id"]),
             command_id,

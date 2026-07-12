@@ -18,7 +18,6 @@ from .conductor_runtime import LogQuery
 from .conductor_store import ConductorStore
 from .gate import AcceptanceGate
 from .runtime import PerformerRuntime
-from .conductor_smoke_store import ConductorSmokeCheckStore
 from .conductor_podium_sync import ConductorPodiumSyncMixin
 from .conductor_service_views import ConductorServiceViewsMixin
 from .conductor_service_helpers import (
@@ -46,7 +45,6 @@ class ConductorService(ConductorPodiumSyncMixin, ConductorServiceViewsMixin):
         self.workflow = Workflow(self.workflow_store)
         self.performer_runtime = PerformerRuntime()
         self.acceptance_gate = AcceptanceGate()
-        self.smoke_check_store = ConductorSmokeCheckStore(store)
         self._smoke_check_lock = asyncio.Lock()
         self._startup_locks: dict[str, asyncio.Lock] = {}
         self.managed_run_tracker_factory = self._managed_run_tracker

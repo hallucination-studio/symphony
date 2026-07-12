@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import re
 from typing import Any
 
@@ -50,10 +49,6 @@ def normalize_smoke_command(payload: dict[str, Any]) -> dict[str, Any]:
     return command
 
 
-def command_fingerprint(command: dict[str, Any]) -> str:
-    return json.dumps(command, separators=(",", ":"), sort_keys=True)
-
-
 def smoke_result(
     command: dict[str, Any],
     checks: dict[str, bool],
@@ -92,11 +87,6 @@ def sanitize_reason(value: Any) -> str:
         text,
     )
     return text[:500] or "runtime_error"
-
-
-def safe_code(value: Any, fallback: str) -> str:
-    code = str(value or "").strip()
-    return code if re.fullmatch(r"[a-z][a-z0-9_]{0,63}", code) else fallback
 
 
 def _identifier(value: Any) -> str:

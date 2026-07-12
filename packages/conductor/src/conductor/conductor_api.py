@@ -55,7 +55,6 @@ class ConductorApiServer:
         while True:
             try:
                 await self.service.post_podium_report()
-                await PodiumRuntimeClient(self.service).flush_pending_smoke_results()
                 result = await self.service.poll_podium_dispatch_once()
                 if result.get("reason") == "runtime_unauthorized":
                     await asyncio.sleep(60)
@@ -120,8 +119,6 @@ class ConductorApiServer:
                 return 200, {"service": "conductor", "status": "ok"}
             if method == "GET" and path == "/api/managed-runs":
                 return 200, {"managed_runs": self.service.managed_run_view()}
-            if method == "GET" and path == "/api/smoke-checks":
-                return 200, {"smoke_checks": self.service.list_smoke_checks()}
             if method == "GET" and path == "/api/instances":
                 return 200, {
                     "instances": [_public_instance(instance) for instance in self.service.list_instances()]
