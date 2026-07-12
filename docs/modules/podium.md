@@ -49,6 +49,18 @@ direct runtime-to-binding-to-workspace checks. API responses retain
 `runtime_group_id` as the deterministic presentation alias
 `group_{conductor_id}`. It is not a stored owner or routing key.
 
+Each managed-run snapshot also carries the active binding id and configuration
+version. Podium normalizes the incoming allowlisted fields, rejects stale
+binding reports, and hides a snapshot whose binding no longer matches before
+using it for an operator view or installation cutover decision.
+
+The report boundary accepts only a bounded current-project snapshot. Conductor
+reports nonterminal runs before retained terminal history and includes the
+total active-run count, so installation cutover remains conservative even when
+the operator snapshot is truncated. Every visible text field is type-checked,
+bounded, and redacted after escape normalization before persistence or browser
+projection.
+
 ## Current module groups
 
 | Area | Primary owners |

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
 from pathlib import Path
@@ -15,6 +16,11 @@ from .workflow_driver import WorkflowDriver
 
 
 LOGGER = logging.getLogger(__name__)
+
+_MAX_MANAGED_RUN_SNAPSHOT_BYTES = 480 * 1024
+_MAX_MANAGED_RUN_SNAPSHOT_RUNS = 64
+_MAX_MANAGED_RUN_FILE_HINTS = 3
+_TERMINAL_MANAGED_RUN_STATES = {"done", "failed"}
 
 
 class ConductorPodiumSyncMixin:
@@ -179,7 +185,7 @@ class ConductorPodiumSyncMixin:
         expected_type = "git" if mode == "git_url" else "local_path"
         if instance.repo_source_type != expected_type or instance.repo_source_value != value:
             return {"status": "rejected", "reason": "repository_change_requires_rebind"}
-        updated = self.update_instance(
+        updated = self._replace_instance_binding_and_clear_managed_runs(
             instance.id,
             InstancePatchRequest(
                 name=str(command.get("project_name") or command.get("project_slug") or project_id),
@@ -209,7 +215,7 @@ class ConductorPodiumSyncMixin:
             return {"status": "rejected", "reason": "stale_project_config", "current_version": current_version}
         if instance.process_status in {"running", "starting"}:
             return {"status": "rejected", "reason": "instance_running"}
-        self.update_instance(
+        self._replace_instance_binding_and_clear_managed_runs(
             instance.id,
             InstancePatchRequest(
                 linear_project="",
@@ -396,14 +402,17 @@ class ConductorPodiumSyncMixin:
         metrics: dict[str, dict[str, Any]] = {}
         queue: dict[str, dict[str, Any]] = {}
         log_tail: dict[str, dict[str, Any]] = {}
-        managed_runs_view = _sanitize_managed_runs_view(_managed_runs_report_view(self.managed_run_view()))
-        managed_run_metrics = _managed_run_report_metrics(managed_runs_view)
-        managed_run_queue = _managed_run_report_queue(managed_runs_view)
+        managed_runs = self.managed_run_view()
+        managed_runs_view = _sanitize_managed_runs_view(_managed_runs_report_view(managed_runs))
+        managed_runs_binding: dict[str, Any] = {}
+        managed_run_metrics = _managed_run_report_metrics(managed_runs)
+        managed_run_queue = _managed_run_report_queue(managed_runs)
         unbound: dict[str, Any] = {}
         for instance in self.store.list_instances():
             unbound = _unbound_binding_report(instance)
             if unbound:
                 continue
+            managed_runs_binding = _managed_runs_binding(instance)
             bindings.append(
                 {
                     "instance_id": instance.id,
@@ -442,7 +451,7 @@ class ConductorPodiumSyncMixin:
             "metrics": metrics,
             "queue": queue,
             "log_tail": log_tail,
-            "managed_runs": managed_runs_view,
+            "managed_runs": {**managed_runs_binding, **managed_runs_view} if managed_runs_binding else {},
         }
         report.update(unbound)
         return report
@@ -635,6 +644,14 @@ def _unbound_binding_report(instance: Any) -> dict[str, Any]:
     }
 
 
+def _managed_runs_binding(instance: Any) -> dict[str, Any]:
+    binding_id = str(instance.linear_filters.get("binding_id") or "")
+    config_version = int(instance.linear_filters.get("binding_config_version") or 0)
+    if not binding_id or config_version <= 0:
+        return {}
+    return {"binding_id": binding_id, "binding_config_version": config_version}
+
+
 def _managed_run_report_metrics(view: dict[str, Any]) -> dict[str, Any]:
     runs = view.get("runs") if isinstance(view.get("runs"), list) else []
     return {
@@ -656,9 +673,34 @@ def _managed_run_report_queue(view: dict[str, Any]) -> dict[str, int]:
     }
 
 
-def _managed_runs_report_view(view: Any) -> dict[str, list[dict[str, Any]]]:
-    runs = view.get("runs") if isinstance(view, dict) else []
-    return {"runs": [_managed_run_report(run) for run in runs if isinstance(run, dict)]}
+def _managed_runs_report_view(view: Any) -> dict[str, Any]:
+    runs = view.get("runs") if isinstance(view, dict) and isinstance(view.get("runs"), list) else []
+    active = [
+        (index, run)
+        for index, run in enumerate(runs)
+        if isinstance(run, dict) and str(run.get("state") or "") not in _TERMINAL_MANAGED_RUN_STATES
+    ]
+    terminal = [
+        (index, run)
+        for index, run in enumerate(runs)
+        if isinstance(run, dict) and str(run.get("state") or "") in _TERMINAL_MANAGED_RUN_STATES
+    ]
+    snapshot: list[tuple[int, dict[str, Any]]] = []
+    active_indexes = {index for index, _ in active}
+    for index, run in [*active, *reversed(terminal)]:
+        if not isinstance(run, dict):
+            continue
+        if len(snapshot) == _MAX_MANAGED_RUN_SNAPSHOT_RUNS:
+            break
+        projected = _sanitize_managed_runs_view(_managed_run_report(run))
+        candidate = {"active_runs_total": len(active), "runs": [projected, *(row for _, row in snapshot)]}
+        if len(json.dumps(candidate, separators=(",", ":")).encode()) > _MAX_MANAGED_RUN_SNAPSHOT_BYTES:
+            if index in active_indexes:
+                continue
+            break
+        snapshot.append((index, projected))
+    snapshot.sort(key=lambda row: row[0])
+    return {"active_runs_total": len(active), "runs": [row for _, row in snapshot]}
 
 
 def _managed_run_report(run: dict[str, Any]) -> dict[str, Any]:
@@ -670,9 +712,9 @@ def _managed_run_report(run: dict[str, Any]) -> dict[str, Any]:
         "issue_identifier": str(run.get("issue_identifier") or ""),
         "state": str(run.get("state") or "planning"),
         "active_work_item_id": str(run.get("active_task_id") or ""),
-        "latest_reason": str(run.get("latest_reason") or ""),
+        "latest_reason": _snapshot_text(run.get("latest_reason"), 500),
         "plan_version": int(run.get("plan_version") or 0),
-        "backend_session_id": str(payload.get("thread_id") or ""),
+        "backend_session_id": _snapshot_text(payload.get("thread_id"), 200),
         "work_items": [_managed_run_work_item(task) for task in tasks if isinstance(task, dict)],
     }
 
@@ -683,13 +725,17 @@ def _managed_run_work_item(task: dict[str, Any]) -> dict[str, Any]:
     return {
         "work_item_id": str(task.get("task_id") or ""),
         "state": str(task.get("state") or "todo"),
-        "gate_status": str(task.get("gate_status") or ""),
+        "gate_status": _snapshot_text(task.get("gate_status"), 120),
         "payload": {
-            "title": str(payload.get("title") or ""),
-            "objective": str(payload.get("objective") or ""),
-            "files_likely_touched": [str(path) for path in files],
+            "title": _snapshot_text(payload.get("title"), 300),
+            "objective": _snapshot_text(payload.get("objective"), 1000),
+            "files_likely_touched": [_snapshot_text(path, 240) for path in files[:_MAX_MANAGED_RUN_FILE_HINTS]],
         },
     }
+
+
+def _snapshot_text(value: Any, limit: int) -> str:
+    return value[:limit] if isinstance(value, str) else ""
 
 
 def _sanitize_managed_runs_view(value: Any, *, key: str = "") -> Any:

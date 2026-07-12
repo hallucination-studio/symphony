@@ -49,6 +49,16 @@ def dispatch_public(dispatch: dict[str, Any]) -> dict[str, Any]:
 def runtime_group_alias(conductor_id: str) -> str:
     return f"group_{conductor_id}"
 
+def managed_run_view_matches_binding(view: Any, binding: dict[str, Any]) -> bool:
+    if not isinstance(view, dict):
+        return False
+    if str(view.get("binding_id") or "") != str(binding.get("id") or ""):
+        return False
+    try:
+        return int(view.get("binding_config_version") or 0) == int(binding.get("config_version") or 0)
+    except (TypeError, ValueError):
+        return False
+
 def runtime_public(runtime: dict[str, Any], presence: dict[str, str]) -> dict[str, Any]:
     runtime_id = str(runtime["id"])
     metadata = runtime.get("metadata")

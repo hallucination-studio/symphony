@@ -133,13 +133,27 @@ class ConductorService(ConductorPodiumSyncMixin):
 
     def update_instance(self, instance_id: str, patch: InstancePatchRequest) -> InstanceRecord:
         current = self._require_instance(instance_id)
-        updated = current.with_updates(
+        updated = self._patched_instance(current, patch)
+        self.store.update_instance(updated)
+        return updated
+
+    def _replace_instance_binding_and_clear_managed_runs(
+        self,
+        instance_id: str,
+        patch: InstancePatchRequest,
+    ) -> InstanceRecord:
+        current = self._require_instance(instance_id)
+        updated = self._patched_instance(current, patch)
+        self.store.replace_instance_and_clear_managed_runs(updated)
+        return updated
+
+    @staticmethod
+    def _patched_instance(current: InstanceRecord, patch: InstancePatchRequest) -> InstanceRecord:
+        return current.with_updates(
             name=patch.name if patch.name is not None else current.name,
             linear_project=patch.linear_project if patch.linear_project is not None else current.linear_project,
             linear_filters=patch.linear_filters if patch.linear_filters is not None else current.linear_filters,
         )
-        self.store.update_instance(updated)
-        return updated
 
     def delete_instance(self, instance_id: str) -> None:
         instance = self._require_instance(instance_id)

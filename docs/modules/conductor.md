@@ -67,6 +67,11 @@ gate-evidence, or artifact child-issue tree. Current Podium reports expose run
 and work-item state; detailed evidence is retained locally rather than claimed
 to be rendered by Web.
 
+The outbound managed-run report is a bounded current-binding snapshot: it
+prioritizes nonterminal runs, then recent terminal history, and reports the
+total number of active runs so Podium can keep installation cutover fail-closed
+when history is compacted.
+
 ## Runtime and error rules
 
 `runtime.py` stages isolated Codex homes, captures Performer stdout/stderr, and
@@ -78,6 +83,9 @@ primary durable summary is `latest_reason`.
 ## Hard-cut rules
 
 - Start a fresh `workflow.db`; never read or migrate old local runtime data.
+- A successful project unbind or rebind atomically replaces the binding and
+  clears old runs, tasks, attempts, revisions, waits, catalogs, evidence, and
+  artifacts before the new binding can report work.
 - Do not add DAG, parallel, branch/join, checkpoint-group, integration-queue,
   cross-model, or second acceptance-scheduler behavior.
 - Preserve one automatic gate rework, runtime waits controlled by Linear state,

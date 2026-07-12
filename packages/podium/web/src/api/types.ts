@@ -225,7 +225,12 @@ export interface ManagedRunsConductorReport {
   };
   runtime_group_id: string;
   policy_revision: number;
-  managed_runs: { runs?: ManagedRun[] };
+  managed_runs: {
+    binding_id?: string;
+    binding_config_version?: number;
+    active_runs_total?: number;
+    runs?: ManagedRun[];
+  };
 }
 
 export interface ManagedRunsReport {

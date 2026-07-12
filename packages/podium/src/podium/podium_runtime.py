@@ -60,7 +60,13 @@ class PodiumRuntimeMixin:
                 "bindings_upserted": 0,
             }
         await self._store_binding_report(runtime_id, conductor, binding, metrics, queue, log_tail)
-        return {"status": "ok", "bindings_upserted": 1, "binding_state": binding["state"]}
+        return {
+            "status": "ok",
+            "bindings_upserted": 1,
+            "binding_state": binding["state"],
+            "binding_id": str(binding.get("id") or ""),
+            "binding_config_version": int(binding.get("config_version") or 0),
+        }
 
     async def _runtime_report_conductor(
         self,

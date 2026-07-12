@@ -56,10 +56,11 @@ and approved runtime environment. This checklist is the active scope ledger;
 
 ## Verification status
 
-- [x] `make test` — 63 Python tests passed after the current SDK/runtime-group
-  slices.
-- [ ] `cd packages/podium/web && npm run test && npm run lint && npm run build`
-      after backend-contract/doc changes settle.
+- [x] `make test` — 76 Python tests passed after the bound managed-run snapshot
+  and atomic binding-cutover slice.
+- [x] `cd packages/podium/web && npm run test && npm run lint && npm run
+      design:lint && npm run build` — 27 Web tests passed; lint/build clean
+      (design lint: 0 errors, 0 warnings).
 - [ ] `tools/real_flow.py` preflight and a scoped real product flow. The current
       tool is preflight only and cannot prove the full managed-run path.
 

@@ -1,15 +1,51 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import re
 from typing import Any, Awaitable, Callable
 
 from fastapi import FastAPI, Header, Request
 from fastapi.responses import JSONResponse
-from .podium_shared import dispatch_public, optional_int, runtime_group_alias
+from .podium_shared import dispatch_public, managed_run_view_matches_binding, optional_int, runtime_group_alias
 from .podium_smoke_checks import SmokeCheckError
 
 RequireUser = Callable[[Request], Awaitable[dict[str, Any] | None]]
 ErrorResponse = Callable[[int, str, str], JSONResponse]
+
+_MAX_MANAGED_RUN_REPORT_BYTES = 512 * 1024
+_MAX_RUNTIME_REPORT_BYTES = 4 * 1024 * 1024
+_MAX_RUNS = 64
+_MAX_WORK_ITEMS = 10
+_MAX_FILES = 3
+_RUN_STATES = {"planning", "awaiting_approval", "executing", "blocked", "failed", "done"}
+_WORK_ITEM_STATES = {"todo", "in_progress", "in_review", "blocked", "done"}
+_SENSITIVE_REPORT_KEY = (
+    r"(?:[A-Za-z0-9]+[-_])*?"
+    r"(?:access[-_]?token|refresh[-_]?token|api[-_]?key|"
+    r"client[-_]?secret|authorization|token|password|cookie|secret)"
+    r"(?:[-_][A-Za-z0-9]+)*"
+)
+_QUOTED_REPORT_SECRET = re.compile(
+    r"""(?i)(?P<quote>[\"'])(?P<key>"""
+    + _SENSITIVE_REPORT_KEY
+    + r""")(?P=quote)\s*[:=]\s*(?:\"(?:\\.|[^\"])*\"|'(?:\\.|[^'])*'|[^\s,;}\]]+)"""
+)
+_AUTHORIZATION_REPORT_KEY = r"(?:[A-Za-z0-9]+[-_])*?authorization(?:[-_][A-Za-z0-9]+)*"
+_AUTHORIZATION_REPORT_SECRET = re.compile(
+    r"(?i)(?<![A-Za-z0-9_-])(" + _AUTHORIZATION_REPORT_KEY + r")(\s*[:=]\s*)(?!\[REDACTED\])[^\r\n,;}\]]+"
+)
+_UNQUOTED_REPORT_SECRET = re.compile(
+    r"(?i)(?<![A-Za-z0-9_-])(" + _SENSITIVE_REPORT_KEY + r")\s*[:=]\s*(?!\[REDACTED\])[^\s,;}\]]+"
+)
+_REPORT_HEX_ESCAPE = re.compile(r"\\+(?:u([0-9A-Fa-f]{4})|x([0-9A-Fa-f]{2}))")
+
+
+class ManagedRunReportError(ValueError):
+    def __init__(self, code: str, reason: str) -> None:
+        super().__init__(reason)
+        self.code = code
+        self.reason = reason
 
 
 def register_runtime_ops_routes(
@@ -129,17 +165,30 @@ def _register_runtime_report_endpoint(app: FastAPI, *, state: Any, error_respons
         runtime = await state.runtime_for_bearer(authorization or "")
         if runtime is None:
             return error_response(401, "unauthorized", "Unauthorized")
-        payload = await request.json()
-        result = await state.apply_runtime_report(str(runtime["id"]), payload if isinstance(payload, dict) else {})
+        try:
+            payload = await _bounded_runtime_report_payload(request)
+        except ManagedRunReportError as exc:
+            return error_response(_managed_run_report_error_status(exc), exc.code, exc.reason)
+        result = await state.apply_runtime_report(str(runtime["id"]), payload)
         if result.get("status") == "rejected":
             return error_response(
                 409,
                 str(result.get("error_code") or "runtime_report_rejected"),
                 str(result.get("sanitized_reason") or "Runtime report was rejected"),
             )
-        managed_runs = payload.get("managed_runs") if isinstance(payload, dict) else None
-        if isinstance(managed_runs, dict):
-            await state.store.save_managed_run_view(str(runtime["id"]), managed_runs)
+        managed_runs = payload.get("managed_runs")
+        if managed_runs is not None and not isinstance(managed_runs, dict):
+            return error_response(400, "invalid_managed_run_report", "Managed-run report must be an object")
+        if managed_runs:
+            try:
+                view = _normalize_managed_run_report(
+                    managed_runs,
+                    binding_id=str(result.get("binding_id") or ""),
+                    binding_config_version=int(result.get("binding_config_version") or 0),
+                )
+            except ManagedRunReportError as exc:
+                return error_response(_managed_run_report_error_status(exc), exc.code, exc.reason)
+            await state.store.save_managed_run_view(str(runtime["id"]), view)
         if isinstance(result, dict):
             result = {**result, "config": {"version": 1, "profiles": {}}}
         return JSONResponse(result)
@@ -188,6 +237,8 @@ async def _managed_run_report(
         state.store.get_managed_run_view(conductor_id),
         state.is_runtime_online(conductor_id),
     )
+    if not managed_run_view_matches_binding(view, binding):
+        view = {}
     return {
         "conductor": {
             "id": conductor_id,
@@ -212,6 +263,153 @@ async def _managed_run_report(
         "profiles": {},
         "managed_runs": view or {},
     }
+
+
+def _normalize_managed_run_report(
+    value: dict[str, Any],
+    *,
+    binding_id: str,
+    binding_config_version: int,
+) -> dict[str, Any]:
+    if not binding_id or binding_config_version <= 0:
+        raise ManagedRunReportError("invalid_managed_run_binding", "Managed-run report has no active binding")
+    reported_binding_id = value.get("binding_id")
+    if not isinstance(reported_binding_id, str) or _report_int(value.get("binding_config_version")) != binding_config_version:
+        raise ManagedRunReportError("invalid_managed_run_report", "Managed-run report binding is invalid")
+    if reported_binding_id != binding_id:
+        raise ManagedRunReportError("stale_managed_run_binding", "Managed-run report binding is stale")
+    runs = value.get("runs")
+    if not isinstance(runs, list):
+        raise ManagedRunReportError("invalid_managed_run_report", "Managed-run report runs must be a list")
+    if len(runs) > _MAX_RUNS:
+        raise ManagedRunReportError("managed_run_report_too_large", "Managed-run report has too many runs")
+    report = {
+        "binding_id": binding_id,
+        "binding_config_version": binding_config_version,
+        "runs": [_normalize_managed_run(run) for run in runs if isinstance(run, dict)],
+    }
+    if len(report["runs"]) != len(runs) or len(json.dumps(report, separators=(",", ":"), ensure_ascii=False).encode()) > _MAX_MANAGED_RUN_REPORT_BYTES:
+        raise ManagedRunReportError("managed_run_report_too_large", "Managed-run report is invalid or too large")
+    observed_active_runs = sum(1 for run in report["runs"] if run["state"] not in {"done", "failed"})
+    report["active_runs_total"] = max(_report_int(value.get("active_runs_total")), observed_active_runs)
+    return report
+
+
+async def _bounded_runtime_report_payload(request: Request) -> dict[str, Any]:
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            length = int(content_length)
+        except ValueError:
+            raise ManagedRunReportError("invalid_runtime_report", "Runtime report content length is invalid") from None
+        if length > _MAX_RUNTIME_REPORT_BYTES:
+            raise ManagedRunReportError("runtime_report_too_large", "Runtime report is too large")
+    body = bytearray()
+    async for chunk in request.stream():
+        body.extend(chunk)
+        if len(body) > _MAX_RUNTIME_REPORT_BYTES:
+            raise ManagedRunReportError("runtime_report_too_large", "Runtime report is too large")
+    try:
+        payload = json.loads(body)
+    except (TypeError, ValueError):
+        raise ManagedRunReportError("invalid_runtime_report", "Runtime report must be valid JSON") from None
+    return payload if isinstance(payload, dict) else {}
+
+
+def _managed_run_report_error_status(error: ManagedRunReportError) -> int:
+    if error.code in {"managed_run_report_too_large", "runtime_report_too_large"}:
+        return 413
+    if error.code == "stale_managed_run_binding":
+        return 409
+    return 400
+
+
+def _normalize_managed_run(value: dict[str, Any]) -> dict[str, Any]:
+    work_items = value.get("work_items")
+    if not isinstance(work_items, list):
+        raise ManagedRunReportError("invalid_managed_run_report", "Managed-run work items must be a list")
+    if len(work_items) > _MAX_WORK_ITEMS:
+        raise ManagedRunReportError("managed_run_report_too_large", "Managed-run report has invalid work items")
+    state = str(value.get("state") or "")
+    if state not in _RUN_STATES:
+        raise ManagedRunReportError("invalid_managed_run_report", "Managed-run state is invalid")
+    run = {
+        "run_id": _report_text(value.get("run_id"), 200),
+        "parent_issue_id": _report_text(value.get("parent_issue_id"), 200),
+        "issue_identifier": _report_text(value.get("issue_identifier"), 200),
+        "state": state,
+        "active_work_item_id": _report_text(value.get("active_work_item_id"), 200),
+        "latest_reason": _report_text(value.get("latest_reason"), 500),
+        "plan_version": _report_int(value.get("plan_version")),
+        "backend_session_id": _report_text(value.get("backend_session_id"), 200),
+        "work_items": [_normalize_work_item(item) for item in work_items if isinstance(item, dict)],
+    }
+    if not run["run_id"] or not run["parent_issue_id"] or not run["issue_identifier"]:
+        raise ManagedRunReportError("invalid_managed_run_report", "Managed-run identity is invalid")
+    if len(run["work_items"]) != len(work_items):
+        raise ManagedRunReportError("invalid_managed_run_report", "Managed-run work item is invalid")
+    return run
+
+
+def _normalize_work_item(value: dict[str, Any]) -> dict[str, Any]:
+    state = str(value.get("state") or "")
+    payload = value.get("payload")
+    if not isinstance(payload, dict) or state not in _WORK_ITEM_STATES:
+        raise ManagedRunReportError("invalid_managed_run_report", "Managed-run work item is invalid")
+    files = payload.get("files_likely_touched")
+    if not isinstance(files, list) or any(not isinstance(path, str) for path in files):
+        raise ManagedRunReportError("invalid_managed_run_report", "Managed-run work item is invalid")
+    if len(files) > _MAX_FILES:
+        raise ManagedRunReportError("managed_run_report_too_large", "Managed-run work item has too many files")
+    work_item = {
+        "work_item_id": _report_text(value.get("work_item_id"), 200),
+        "state": state,
+        "gate_status": _report_text(value.get("gate_status"), 120),
+        "payload": {
+            "title": _report_text(payload.get("title"), 300),
+            "objective": _report_text(payload.get("objective"), 1000),
+            "files_likely_touched": [_report_text(path, 240) for path in files],
+        },
+    }
+    if not work_item["work_item_id"]:
+        raise ManagedRunReportError("invalid_managed_run_report", "Managed-run work item identity is invalid")
+    return work_item
+
+
+def _report_int(value: Any) -> int:
+    if isinstance(value, bool):
+        return 0
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _report_text(value: Any, limit: int) -> str:
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise ManagedRunReportError("invalid_managed_run_report", "Managed-run text field is invalid")
+    text = _normalize_report_text(value)
+    text = _QUOTED_REPORT_SECRET.sub(lambda match: f"{match.group('key')}=[REDACTED]", text)
+    text = _AUTHORIZATION_REPORT_SECRET.sub(
+        lambda match: f"{match.group(1)}{match.group(2)}[REDACTED]",
+        text,
+    )
+    text = _UNQUOTED_REPORT_SECRET.sub(
+        lambda match: f"{match.group(1)}=[REDACTED]",
+        text,
+    )
+    return re.sub(r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]+", r"\1 [REDACTED]", text)[:limit]
+
+
+def _normalize_report_text(value: str) -> str:
+    text = _REPORT_HEX_ESCAPE.sub(_decode_report_escape, value)
+    return text.replace("\r", " ").replace("\n", " ").replace("\x00", " ").strip()
+
+
+def _decode_report_escape(match: re.Match[str]) -> str:
+    return chr(int(match.group(1) or match.group(2), 16))
 
 
 def _register_runtime_log_routes(

@@ -90,6 +90,9 @@ HTTP API is separate from that transport.
 - Removed unused Podium Web seams and co-located one-use UI helpers with their
   owners without changing routes or visible behavior.
 - Replaced duplicate/obsolete product guidance with concise module baselines.
+- Bound managed-run snapshots to the current binding/configuration, bounded and
+  sanitized their browser projection, and made unbind/rebind discard old local
+  workflow state atomically.
 
 ## Remaining Work
 

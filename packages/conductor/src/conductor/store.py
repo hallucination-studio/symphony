@@ -188,19 +188,29 @@ class ConductorStore:
                 raise FileExistsError(f"Metadata already exists for {instance.id}") from exc
 
     def update_instance(self, instance: InstanceRecord) -> None:
+        with self.connect() as connection:
+            self._update_instance(connection, instance)
+
+    def replace_instance_and_clear_managed_runs(self, instance: InstanceRecord) -> None:
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._update_instance(connection, instance)
+            self._clear_managed_runs(connection)
+
+    @staticmethod
+    def _update_instance(connection: sqlite3.Connection, instance: InstanceRecord) -> None:
         assignments = ", ".join(f"{column} = ?" for column in INSTANCE_COLUMNS if column != "id")
         values = [
             value
             for column, value in zip(INSTANCE_COLUMNS, _instance_values(instance), strict=True)
             if column != "id"
         ]
-        with self.connect() as connection:
-            cursor = connection.execute(
-                f"UPDATE instances SET {assignments} WHERE id = ?",
-                (*values, instance.id),
-            )
-            if cursor.rowcount == 0:
-                raise FileNotFoundError(f"Metadata does not exist for {instance.id}")
+        cursor = connection.execute(
+            f"UPDATE instances SET {assignments} WHERE id = ?",
+            (*values, instance.id),
+        )
+        if cursor.rowcount == 0:
+            raise FileNotFoundError(f"Metadata does not exist for {instance.id}")
 
     def delete_instance(self, instance_id: str) -> None:
         with self.connect() as connection:
@@ -246,6 +256,20 @@ class ConductorStore:
         with self.connect() as connection:
             rows = connection.execute("SELECT * FROM runs ORDER BY created_at, run_id").fetchall()
         return [_run(row) for row in rows]
+
+    @staticmethod
+    def _clear_managed_runs(connection: sqlite3.Connection) -> None:
+        for table in (
+            "artifacts",
+            "gate_evidence",
+            "acceptance_catalog",
+            "runtime_waits",
+            "attempts",
+            "tasks",
+            "plan_revisions",
+            "runs",
+        ):
+            connection.execute(f"DELETE FROM {table}")
 
     def update_run_payload(self, run_id: str, updates: dict[str, Any]) -> None:
         current = self.get_run(run_id) or {}

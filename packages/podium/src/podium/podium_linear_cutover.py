@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from .linear_token_service import LinearTokenUnavailable
-from .podium_shared import utc_now_iso
+from .podium_shared import managed_run_view_matches_binding, utc_now_iso
 
 
 class LinearCutoverError(RuntimeError):
@@ -116,10 +116,24 @@ class PodiumLinearCutoverMixin:
         terminal = {"done", "failed", "cancelled", "canceled"}
         for binding in await self.store.list_project_bindings_for_user(user_id):
             view = await self.store.get_managed_run_view(str(binding["conductor_id"])) or {}
+            if not managed_run_view_matches_binding(view, binding):
+                continue
+            if _active_runs_total(view) > 0:
+                return True
             for run in view.get("runs") or []:
                 if isinstance(run, dict) and str(run.get("state") or "") not in terminal:
                     return True
         return False
+
+
+def _active_runs_total(view: dict[str, Any]) -> int:
+    value = view.get("active_runs_total")
+    if value is None:
+        return 0
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 1
 
 
 def _binding_prepared(binding: dict[str, Any], candidate: dict[str, Any]) -> bool:

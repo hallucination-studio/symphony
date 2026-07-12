@@ -14,7 +14,7 @@ from podium.linear_reconciliation import BindingScanResult, LinearReconciler
 from podium.linear_reconciliation_model import active_blocker_ids
 from podium.podium_dispatch import PodiumDispatchMixin
 from podium.podium_routes_runtime_proxy import _ready_proxy_binding_or_error
-from podium.podium_routes_runtime_ops import register_runtime_ops_routes
+from podium.podium_routes_runtime_ops import _MAX_RUNTIME_REPORT_BYTES, _managed_run_report, register_runtime_ops_routes
 from podium.podium_smoke_checks import PodiumSmokeChecksMixin
 from podium.store._postgres_dispatch import DISPATCH_INSERT_SQL, LEASE_DISPATCH_SQL, _dispatch_values
 from podium.store._postgres_schema_statements import POSTGRES_SCHEMA_STATEMENTS
@@ -31,10 +31,24 @@ class FakeRuntimeState:
         }
         self.acks: list[dict[str, Any]] = []
         self.smoke_results: list[dict[str, Any]] = []
-        self.store = SimpleNamespace()
+        self.managed_run_views: list[tuple[str, dict[str, Any]]] = []
+        self.report_payloads: list[dict[str, Any]] = []
+        self.store = SimpleNamespace(save_managed_run_view=self.save_managed_run_view)
 
     async def runtime_for_bearer(self, authorization: str) -> dict[str, Any] | None:
         return self.runtime if authorization == "Bearer runtime-token" else None
+
+    async def apply_runtime_report(self, _runtime_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        self.report_payloads.append(payload)
+        return {
+            "status": "ok",
+            "bindings_upserted": 1,
+            "binding_id": "binding-1",
+            "binding_config_version": 1,
+        }
+
+    async def save_managed_run_view(self, runtime_id: str, view: dict[str, Any]) -> None:
+        self.managed_run_views.append((runtime_id, view))
 
     async def lease_runtime_command(self, runtime_id: str) -> dict[str, Any] | None:
         if runtime_id != self.runtime["id"]:
@@ -174,6 +188,303 @@ async def test_runtime_command_ack_records_a_failed_smoke_result(
         "status": "failed",
         "smoke_check_id": "smoke-1",
     }
+
+
+@pytest.mark.anyio
+async def test_runtime_report_keeps_only_a_bound_sanitized_managed_run_view(
+    runtime_app: FastAPI,
+    runtime_state: FakeRuntimeState,
+) -> None:
+    transport = httpx.ASGITransport(app=runtime_app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/api/v1/runtime/report",
+            headers={"Authorization": "Bearer runtime-token"},
+            json={
+                "managed_runs": {
+                    "binding_id": "binding-1",
+                    "binding_config_version": 1,
+                    "runs": [
+                        {
+                            "run_id": "run-1",
+                            "parent_issue_id": "parent-1",
+                            "issue_identifier": "APP-1",
+                            "state": "executing",
+                            "active_work_item_id": "implement login",
+                            "latest_reason": "authorization: Bearer live-token",
+                            "plan_version": 2,
+                            "backend_session_id": "thread-1",
+                            "untrusted": {"access_token": "live-token"},
+                            "work_items": [
+                                {
+                                    "work_item_id": "implement login",
+                                    "state": "in_progress",
+                                    "gate_status": "execute_started",
+                                    "payload": {
+                                        "title": "Implement endpoint",
+                                        "objective": r'{"access_token":"part\"unit-secret","authorization":"Bearer second-secret","accessToken":"third-secret","client-secret":"fourth-secret"}',
+                                        "files_likely_touched": ["src/api.py"],
+                                        "secret": "live-token",
+                                    },
+                                }
+                            ],
+                        }
+                    ],
+                }
+            },
+        )
+
+    assert response.status_code == 200
+    assert runtime_state.managed_run_views == [
+        (
+            "runtime-1",
+            {
+                "binding_id": "binding-1",
+                "binding_config_version": 1,
+                "active_runs_total": 1,
+                "runs": [
+                    {
+                        "run_id": "run-1",
+                        "parent_issue_id": "parent-1",
+                        "issue_identifier": "APP-1",
+                        "state": "executing",
+                        "active_work_item_id": "implement login",
+                        "latest_reason": "authorization: [REDACTED]",
+                        "plan_version": 2,
+                        "backend_session_id": "thread-1",
+                        "work_items": [
+                            {
+                                "work_item_id": "implement login",
+                                "state": "in_progress",
+                                "gate_status": "execute_started",
+                                "payload": {
+                                    "title": "Implement endpoint",
+                                    "objective": "{access_token=[REDACTED],authorization=[REDACTED],accessToken=[REDACTED],client-secret=[REDACTED]}",
+                                    "files_likely_touched": ["src/api.py"],
+                                },
+                            }
+                        ],
+                    }
+                ],
+            },
+        )
+    ]
+
+
+@pytest.mark.anyio
+async def test_runtime_report_rejects_a_stale_managed_run_binding(
+    runtime_app: FastAPI,
+    runtime_state: FakeRuntimeState,
+) -> None:
+    transport = httpx.ASGITransport(app=runtime_app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/api/v1/runtime/report",
+            headers={"Authorization": "Bearer runtime-token"},
+            json={
+                "managed_runs": {
+                    "binding_id": "binding-previous",
+                    "binding_config_version": 1,
+                    "runs": [],
+                }
+            },
+        )
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "stale_managed_run_binding"
+    assert runtime_state.managed_run_views == []
+
+
+@pytest.mark.anyio
+async def test_runtime_report_accepts_an_empty_managed_run_view_while_unbound(
+    runtime_app: FastAPI,
+    runtime_state: FakeRuntimeState,
+) -> None:
+    async def unbound_report(_runtime_id: str, _payload: dict[str, Any]) -> dict[str, Any]:
+        return {"status": "ok", "bindings_upserted": 0, "binding_state": "unbound"}
+
+    runtime_state.apply_runtime_report = unbound_report  # type: ignore[method-assign]
+    transport = httpx.ASGITransport(app=runtime_app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/api/v1/runtime/report",
+            headers={"Authorization": "Bearer runtime-token"},
+            json={"managed_runs": {}},
+        )
+
+    assert response.status_code == 200
+    assert runtime_state.managed_run_views == []
+
+
+@pytest.mark.anyio
+async def test_runtime_report_rejects_a_nonobject_managed_run_view(
+    runtime_app: FastAPI,
+    runtime_state: FakeRuntimeState,
+) -> None:
+    transport = httpx.ASGITransport(app=runtime_app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/api/v1/runtime/report",
+            headers={"Authorization": "Bearer runtime-token"},
+            json={"managed_runs": []},
+        )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "invalid_managed_run_report"
+    assert runtime_state.managed_run_views == []
+
+
+@pytest.mark.anyio
+async def test_runtime_report_rejects_nonstring_visible_fields(
+    runtime_app: FastAPI,
+    runtime_state: FakeRuntimeState,
+) -> None:
+    transport = httpx.ASGITransport(app=runtime_app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/api/v1/runtime/report",
+            headers={"Authorization": "Bearer runtime-token"},
+            json={
+                "managed_runs": {
+                    "binding_id": "binding-1",
+                    "binding_config_version": 1,
+                    "runs": [
+                        {
+                            "run_id": "run-1",
+                            "parent_issue_id": "parent-1",
+                            "issue_identifier": "APP-1",
+                            "state": "executing",
+                            "work_items": [
+                                {
+                                    "work_item_id": "task-1",
+                                    "state": "in_progress",
+                                    "payload": {"title": {"secret": "unit-secret"}},
+                                }
+                            ],
+                        }
+                    ],
+                }
+            },
+        )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "invalid_managed_run_report"
+    assert "unit-secret" not in response.text
+    assert runtime_state.managed_run_views == []
+
+
+@pytest.mark.anyio
+async def test_runtime_report_redacts_escaped_and_prefixed_secret_fields(
+    runtime_app: FastAPI,
+    runtime_state: FakeRuntimeState,
+) -> None:
+    transport = httpx.ASGITransport(app=runtime_app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/api/v1/runtime/report",
+            headers={"Authorization": "Bearer runtime-token"},
+            json={
+                "managed_runs": {
+                    "binding_id": "binding-1",
+                    "binding_config_version": 1,
+                    "runs": [
+                        {
+                            "run_id": "run-1",
+                            "parent_issue_id": "parent-1",
+                            "issue_identifier": "APP-1",
+                            "state": "executing",
+                            "latest_reason": (
+                                "Authorization: Token auth-secret, OPENAI_API_KEY=api-secret, "
+                                "GITHUB_TOKEN=github-secret, MY_ACCESS_TOKEN=access-secret"
+                            ),
+                            "work_items": [
+                                {
+                                    "work_item_id": "task-1",
+                                    "state": "in_progress",
+                                    "payload": {
+                                        "title": "Implement endpoint",
+                                        "objective": r'{"access\u005ftoken":"unicode-key-secret","client\u002dsecret":"unicode-client-secret","openai\\u005fapi\\u005fkey":"double-escaped-secret","github\\x5ftoken":"hex-escaped-secret"}',
+                                        "files_likely_touched": [],
+                                    },
+                                }
+                            ],
+                        }
+                    ],
+                }
+            },
+        )
+
+    assert response.status_code == 200
+    saved_view = runtime_state.managed_run_views[0][1]
+    for value in (
+        "auth-secret",
+        "api-secret",
+        "github-secret",
+        "access-secret",
+        "unicode-key-secret",
+        "unicode-client-secret",
+        "double-escaped-secret",
+        "hex-escaped-secret",
+    ):
+        assert value not in str(saved_view)
+    assert saved_view["runs"][0]["latest_reason"] == (
+        "Authorization: [REDACTED], OPENAI_API_KEY=[REDACTED], "
+        "GITHUB_TOKEN=[REDACTED], MY_ACCESS_TOKEN=[REDACTED]"
+    )
+    assert saved_view["runs"][0]["work_items"][0]["payload"]["objective"] == (
+        "{access_token=[REDACTED],client-secret=[REDACTED],openai_api_key=[REDACTED],github_token=[REDACTED]}"
+    )
+
+
+@pytest.mark.anyio
+async def test_runtime_report_rejects_a_body_above_its_input_limit(
+    runtime_app: FastAPI,
+    runtime_state: FakeRuntimeState,
+) -> None:
+    transport = httpx.ASGITransport(app=runtime_app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/api/v1/runtime/report",
+            headers={"Authorization": "Bearer runtime-token"},
+            json={"untrusted": "x" * _MAX_RUNTIME_REPORT_BYTES},
+        )
+
+    assert response.status_code == 413
+    assert response.json()["error"]["code"] == "runtime_report_too_large"
+    assert runtime_state.report_payloads == []
+
+
+@pytest.mark.anyio
+async def test_managed_runs_view_hides_a_snapshot_from_a_previous_binding() -> None:
+    class Store:
+        async def get_managed_run_view(self, _runtime_id: str) -> dict[str, Any]:
+            return {
+                "binding_id": "binding-previous",
+                "binding_config_version": 1,
+                "runs": [{"run_id": "run-previous", "state": "executing"}],
+            }
+
+    class State:
+        store = Store()
+
+        async def is_runtime_online(self, _runtime_id: str) -> bool:
+            return True
+
+    report = await _managed_run_report(
+        State(),
+        {"id": "runtime-1", "name": "Bach", "public_id": "abc123"},
+        {
+            "id": "binding-current",
+            "config_version": 2,
+            "linear_project_id": "project-1",
+            "project_slug": "APP",
+            "project_name": "App",
+            "instance_id": "instance-1",
+            "state": "ready",
+        },
+    )
+
+    assert report["managed_runs"] == {}
 
 
 class FakePodiumService:

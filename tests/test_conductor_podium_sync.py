@@ -5,12 +5,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from conductor.conductor_podium_sync import ConductorPodiumSyncMixin, _smoke_runtime_fields
+from conductor.conductor_podium_sync import ConductorPodiumSyncMixin, _managed_runs_report_view, _smoke_runtime_fields
 from conductor.conductor_smoke_protocol import SmokeCommandError, normalize_smoke_command
 from conductor.conductor_api import ConductorApiServer
 from conductor.conductor_service import ConductorService
-from conductor.models import ConductorServiceError
+from conductor.models import ConductorServiceError, InstanceRecord
 from conductor.store import ConductorStore
+from podium.podium_routes_runtime_ops import _normalize_managed_run_report
 
 
 class _SmokeProxy:
@@ -36,6 +37,26 @@ def _smoke_command_payload(workspace: Path, label_name: str = "symphony:conducto
         "expected_label": {"id": "label-1", "name": label_name},
         "runtime_config_version": 1,
     }
+
+
+def _bound_instance(workspace: Path) -> InstanceRecord:
+    return InstanceRecord.create(
+        name="App",
+        repo_source_type="local_path",
+        repo_source_value=str(workspace),
+        resolved_repo_path=str(workspace),
+        instance_dir=str(workspace / "instance"),
+        workspace_root=str(workspace),
+        persistence_path=str(workspace / "workflow.db"),
+        log_path=str(workspace / "instance.log"),
+        http_port=8081,
+        linear_project="APP",
+        linear_filters={
+            "binding_id": "binding-old",
+            "binding_config_version": 1,
+            "linear_project_id": "project-old",
+        },
+    )
 
 
 def test_smoke_logs_derive_runtime_group_from_conductor_identity() -> None:
@@ -146,12 +167,72 @@ def test_managed_run_linear_proxy_requires_podium_configuration(tmp_path: Path) 
     assert error.value.code == "podium_proxy_not_configured"
 
 
+def test_unbind_and_rebind_hard_cut_old_managed_runs(tmp_path: Path) -> None:
+    store = ConductorStore(tmp_path)
+    instance = _bound_instance(tmp_path)
+    store.create_instance(instance)
+    store.create_run("parent-old", "OLD-1", instance_id=instance.id)
+    service = ConductorService(store=store, data_root=tmp_path)
+
+    unbound = service._handle_project_unconfigure({"binding_id": "binding-old", "config_version": 2})
+
+    assert unbound["status"] == "unbound"
+    assert store.list_runs() == []
+
+    store.create_run("parent-stale", "STALE-1", instance_id=instance.id)
+    rebound = service._handle_project_configure(
+        {
+            "linear_project_id": "project-new",
+            "project_slug": "NEW",
+            "project_name": "New",
+            "binding_id": "binding-new",
+            "config_version": 3,
+            "repository": {"mode": "local_path", "value": str(tmp_path)},
+        }
+    )
+
+    assert rebound["status"] == "applied"
+    assert store.managed_run_view() == {"runs": []}
+
+
+def test_binding_hard_cut_keeps_old_state_when_instance_write_fails(tmp_path: Path) -> None:
+    store = ConductorStore(tmp_path)
+    instance = _bound_instance(tmp_path)
+    store.create_instance(instance)
+    run = store.create_run("parent-old", "OLD-1", instance_id=instance.id)
+
+    with pytest.raises(FileNotFoundError):
+        store.replace_instance_and_clear_managed_runs(
+            instance.with_updates(id="missing-instance", linear_project="NEW", linear_filters={"binding_id": "binding-new"})
+        )
+
+    current = store.get_instance(instance.id)
+    assert current is not None
+    assert current.linear_project == "APP"
+    assert current.linear_filters == instance.linear_filters
+    assert store.list_runs() == [run]
+
+
 def test_podium_report_projects_the_managed_run_shape_consumed_by_web() -> None:
+    instance = SimpleNamespace(
+        id="instance-1",
+        name="App",
+        linear_project="APP",
+        linear_filters={
+            "binding_id": "binding-1",
+            "binding_config_version": 2,
+            "linear_project_id": "project-1",
+        },
+        process_status="running",
+        repo_source_type="local_path",
+        repo_source_value="/repo",
+    )
     service = SimpleNamespace(
         store=SimpleNamespace(
             get_settings=lambda: SimpleNamespace(conductor_id="conductor-1"),
-            list_instances=lambda: [],
+            list_instances=lambda: [instance],
         ),
+        query_instance_logs=lambda *_args, **_kwargs: {"generation": 1, "offset_end": 0, "lines": []},
         managed_run_view=lambda: {
             "runs": [
                 {
@@ -183,6 +264,8 @@ def test_podium_report_projects_the_managed_run_shape_consumed_by_web() -> None:
     report = ConductorPodiumSyncMixin.build_podium_report(service)
     run = report["managed_runs"]["runs"][0]
 
+    assert report["managed_runs"]["binding_id"] == "binding-1"
+    assert report["managed_runs"]["binding_config_version"] == 2
     assert run["active_work_item_id"] == "task-1"
     assert run["backend_session_id"] == "thread-1"
     assert run["work_items"] == [
@@ -198,3 +281,45 @@ def test_podium_report_projects_the_managed_run_shape_consumed_by_web() -> None:
         }
     ]
     assert "tasks" not in run
+
+
+def test_podium_report_bounds_history_and_file_hints_to_its_snapshot_contract() -> None:
+    def stored_run(index: int) -> dict[str, object]:
+        return {
+            "run_id": f"run-{index}",
+            "parent_issue_id": f"parent-{index}",
+            "issue_identifier": f"APP-{index}",
+            "state": "blocked" if index == 1 else "done",
+            "active_task_id": "",
+            "latest_reason": "",
+            "plan_version": 1,
+            "payload": {"thread_id": f"thread-{index}"},
+            "tasks": [
+                {
+                    "task_id": "task-1",
+                    "state": "done",
+                    "gate_status": "passed:4",
+                    "task": {
+                        "title": "Implement endpoint",
+                        "objective": "Add the endpoint",
+                        "files_likely_touched": [f"src/{number}.py" for number in range(17)],
+                    },
+                }
+            ],
+        }
+
+    report = _managed_runs_report_view({"runs": [stored_run(index) for index in range(1, 66)]})
+    accepted = _normalize_managed_run_report(
+        {"binding_id": "binding-1", "binding_config_version": 1, **report},
+        binding_id="binding-1",
+        binding_config_version=1,
+    )
+
+    assert report["active_runs_total"] == 1
+    assert [run["run_id"] for run in report["runs"]] == ["run-1", *[f"run-{index}" for index in range(3, 66)]]
+    assert accepted["runs"] == report["runs"]
+    assert report["runs"][-1]["work_items"][0]["payload"]["files_likely_touched"] == [
+        "src/0.py",
+        "src/1.py",
+        "src/2.py",
+    ]
