@@ -1,6 +1,7 @@
+import { useCallback } from "react";
 import { Button } from "./Button";
 import { StatusBadge } from "./StatusBadge";
-import { useCopy } from "../lib/useCopy";
+import { useToast } from "./Toast";
 import { useI18n } from "../i18n";
 
 export type EnrollmentPhase = "idle" | "waiting" | "online";
@@ -81,4 +82,38 @@ export function InstallCommandCard({
       </div>
     </div>
   );
+}
+
+function useCopy() {
+  const { notify } = useToast();
+
+  return useCallback(
+    async (text: string, confirmation = "Copied to clipboard") => {
+      try {
+        if (navigator.clipboard?.writeText) {
+          await navigator.clipboard.writeText(text);
+        } else {
+          legacyCopy(text);
+        }
+        notify(confirmation, "success");
+        return true;
+      } catch {
+        notify("Couldn't copy. Select the text and copy manually.", "error");
+        return false;
+      }
+    },
+    [notify],
+  );
+}
+
+function legacyCopy(text: string): void {
+  const el = document.createElement("textarea");
+  el.value = text;
+  el.setAttribute("readonly", "");
+  el.style.position = "absolute";
+  el.style.left = "-9999px";
+  document.body.appendChild(el);
+  el.select();
+  document.execCommand("copy");
+  document.body.removeChild(el);
 }
