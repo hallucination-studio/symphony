@@ -3,7 +3,6 @@ from __future__ import annotations
 from conductor.store import ConductorStore
 from conductor.workflow import Workflow
 from conductor.conductor_service import ConductorService
-from conductor.conductor_service_views import ConductorServiceViewsMixin
 
 
 def test_restart_reuses_parent_run_and_children(tmp_path, minimal_plan) -> None:
@@ -46,7 +45,7 @@ def test_runtime_snapshot_uses_current_workflow_state_fields() -> None:
 
     service = type("SnapshotService", (), {"store": FakeWorkflowStore()})()
 
-    snapshot = ConductorServiceViewsMixin._managed_run_runtime_snapshot(service)
+    snapshot = ConductorService._managed_run_runtime_snapshot(service)
 
     assert snapshot["running"] == [
         {"run_id": "run-1", "issue_id": "parent-1", "issue_identifier": "APP-1", "state": "executing", "active_work_item_id": "task-1"}
