@@ -62,14 +62,13 @@ class CodexSdkClient:
         )
         client, thread, thread_id = await self._init_thread(workspace_path, existing_thread_id, emit=emit)
         emit({"event": "session_started", "backend": "sdk", "thread_id": thread_id, "session_id": f"{thread_id}-", "cwd": str(workspace_path)})
-        _turn, turn_id, session_id, final_response, structured = await self._run_structured_turn(
+        turn_id, session_id, final_response, structured = await self._run_structured_turn(
             thread,
             prompt,
             output_schema,
             thread_id=thread_id,
             emit=emit,
             events=events,
-            require_structured=True,
         )
         await _close_sdk_client(client)
         emit(
@@ -97,14 +96,13 @@ class CodexSdkClient:
         thread_id: str,
         emit: EventCallback,
         events: list[dict[str, Any]],
-        require_structured: bool,
-    ) -> tuple[Any, str, str, str | None, dict[str, Any] | None]:
+    ) -> tuple[str, str, str | None, dict[str, Any]]:
         turn_id = "turn"
         session_id = f"{thread_id}-{turn_id}"
         turn_prompt = prompt
         for attempt in range(1, 3):
             try:
-                turn, turn_id, session_id, final_response, structured = await self._run_turn_with_timeout(
+                turn_id, session_id, final_response, structured = await self._run_turn_with_timeout(
                     thread,
                     turn_prompt,
                     output_schema,
@@ -113,9 +111,9 @@ class CodexSdkClient:
                 )
                 if structured is None:
                     structured = _parse_structured_result(final_response)
-                if require_structured and structured is None:
+                if structured is None:
                     raise CodexError("invalid_structured_output", "Codex SDK turn did not produce the required structured JSON result")
-                return turn, turn_id, session_id, final_response, structured
+                return turn_id, session_id, final_response, structured
             except (asyncio.TimeoutError, TimeoutError) as exc:
                 timeout_turn_id, timeout_session_id = _latest_turn_identity(
                     events,
@@ -168,7 +166,7 @@ class CodexSdkClient:
         *,
         thread_id: str,
         emit: EventCallback,
-    ) -> tuple[Any, str, str, str | None, dict[str, Any] | None]:
+    ) -> tuple[str, str, str | None, dict[str, Any] | None]:
         return await asyncio.wait_for(
             self._run_turn(thread, prompt, output_schema, thread_id=thread_id, emit=emit),
             timeout=_timeout_seconds(self.config.hard_turn_timeout_ms),
@@ -182,14 +180,14 @@ class CodexSdkClient:
         *,
         thread_id: str,
         emit: EventCallback,
-    ) -> tuple[Any, str, str, str | None, dict[str, Any] | None]:
-        async def op() -> tuple[Any, str, str, str | None, dict[str, Any] | None]:
+    ) -> tuple[str, str, str | None, dict[str, Any] | None]:
+        async def op() -> tuple[str, str, str | None, dict[str, Any] | None]:
             turn = await self._start_sdk_turn(thread, prompt, output_schema)
             turn_id = _string_attr(turn, "id") or "turn"
             session_id = f"{thread_id}-{turn_id}"
             emit({"event": "turn_started", "backend": "sdk", "thread_id": thread_id, "turn_id": turn_id, "session_id": session_id})
             final_response, structured = await self._consume_turn(turn, emit)
-            return turn, turn_id, session_id, final_response, structured
+            return turn_id, session_id, final_response, structured
 
         return await self._retry_overload(op, emit=emit)
 
