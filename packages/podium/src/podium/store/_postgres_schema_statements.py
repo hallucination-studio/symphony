@@ -23,26 +23,6 @@ POSTGRES_SCHEMA_STATEMENTS: Iterable[str] = (
             )
             """,
             """
-            CREATE TABLE IF NOT EXISTS runtime_groups (
-                id TEXT PRIMARY KEY,
-                linear_workspace_id TEXT NOT NULL DEFAULT '',
-                project_slug TEXT NOT NULL DEFAULT '',
-                linear_agent_app_user_id TEXT NOT NULL DEFAULT '',
-                project_binding_id TEXT NOT NULL DEFAULT '',
-                updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-            )
-            """,
-            """
-            CREATE TABLE IF NOT EXISTS enrollment_tokens (
-                token_hash TEXT PRIMARY KEY,
-                runtime_group_id TEXT NOT NULL REFERENCES runtime_groups(id) ON DELETE CASCADE,
-                conductor_id TEXT NOT NULL DEFAULT '',
-                used BOOLEAN NOT NULL DEFAULT FALSE,
-                expires_at TIMESTAMPTZ NOT NULL,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-            )
-            """,
-            """
             CREATE TABLE IF NOT EXISTS oauth_states (
                 state TEXT PRIMARY KEY,
                 workspace_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -61,7 +41,6 @@ POSTGRES_SCHEMA_STATEMENTS: Iterable[str] = (
                 label TEXT NOT NULL DEFAULT '',
                 version TEXT NOT NULL DEFAULT '',
                 conductor_id TEXT NOT NULL DEFAULT '',
-                runtime_group_id TEXT NOT NULL DEFAULT '',
                 name TEXT NOT NULL DEFAULT '',
                 public_id TEXT NOT NULL DEFAULT '',
                 enrollment_state TEXT NOT NULL DEFAULT 'pending',
@@ -77,6 +56,15 @@ POSTGRES_SCHEMA_STATEMENTS: Iterable[str] = (
             """,
             "CREATE UNIQUE INDEX IF NOT EXISTS conductors_public_id_unique ON conductors (public_id) WHERE public_id <> ''",
             "CREATE UNIQUE INDEX IF NOT EXISTS conductors_user_name_unique ON conductors (user_id, lower(name)) WHERE name <> ''",
+            """
+            CREATE TABLE IF NOT EXISTS enrollment_tokens (
+                token_hash TEXT PRIMARY KEY,
+                conductor_id TEXT NOT NULL REFERENCES conductors(id) ON DELETE CASCADE,
+                used BOOLEAN NOT NULL DEFAULT FALSE,
+                expires_at TIMESTAMPTZ NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+            """,
             """
             CREATE TABLE IF NOT EXISTS runtime_presence (
                 runtime_id TEXT PRIMARY KEY REFERENCES conductors(id) ON DELETE CASCADE,
@@ -179,7 +167,7 @@ POSTGRES_SCHEMA_STATEMENTS: Iterable[str] = (
             """,
             """
             CREATE TABLE IF NOT EXISTS managed_run_views (
-                runtime_group_id TEXT PRIMARY KEY,
+                conductor_id TEXT PRIMARY KEY REFERENCES conductors(id) ON DELETE CASCADE,
                 view_json JSONB NOT NULL,
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
             )

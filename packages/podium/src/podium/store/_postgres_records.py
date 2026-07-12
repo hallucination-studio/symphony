@@ -4,6 +4,7 @@ from datetime import datetime
 import json
 from typing import Any
 
+from ..podium_shared import runtime_group_alias
 
 def _record_to_user(row: Any) -> dict[str, Any]:
     return {
@@ -14,21 +15,12 @@ def _record_to_user(row: Any) -> dict[str, Any]:
     }
 
 
-def _record_to_runtime_group(row: Any) -> dict[str, Any]:
-    return {
-        "id": str(row["id"]),
-        "linear_workspace_id": str(row["linear_workspace_id"]),
-        "project_slug": str(row["project_slug"]),
-        "linear_agent_app_user_id": str(row["linear_agent_app_user_id"]),
-        "project_binding_id": str(row["project_binding_id"]),
-    }
-
-
 def _record_to_runtime(row: Any) -> dict[str, Any]:
     user_id = str(row["user_id"])
+    conductor_id = str(row["id"])
     return {
-        "id": str(row["id"]),
-        "runtime_group_id": str(row["runtime_group_id"] or f"group_{user_id}"),
+        "id": conductor_id,
+        "runtime_group_id": runtime_group_alias(conductor_id),
         "user_id": user_id,
         "runtime_token_hash": str(row["runtime_token_hash"]),
         "proxy_token_hash": str(row["proxy_token_hash"]),
@@ -47,14 +39,15 @@ def _record_to_runtime(row: Any) -> dict[str, Any]:
 
 
 def _record_to_conductor(row: Any) -> dict[str, Any]:
+    conductor_id = str(row["id"])
     return {
-        "id": str(row["id"]),
+        "id": conductor_id,
         "user_id": str(row["user_id"]),
         "hostname": str(row["hostname"]),
         "label": str(row["label"]),
         "version": str(row["version"]),
         "conductor_id": str(row["conductor_id"]),
-        "runtime_group_id": str(row["runtime_group_id"] or f"group_{row['user_id']}"),
+        "runtime_group_id": runtime_group_alias(conductor_id),
         "name": str(row["name"]),
         "public_id": str(row["public_id"]),
         "enrollment_state": str(row["enrollment_state"]),

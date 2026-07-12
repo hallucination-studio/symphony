@@ -9,8 +9,6 @@ from .podium_shared import bearer_token, hash_secret, utc_now_iso
 
 class PodiumRuntimeMixin:
     async def ensure_conductor_record(self, runtime_id: str) -> dict[str, Any] | None:
-        conductors = await self.store.list_runtime_groups()
-        _ = conductors
         runtime = await self.store.get_runtime(runtime_id)
         if runtime is None:
             return None
@@ -88,7 +86,6 @@ class PodiumRuntimeMixin:
             "id": runtime_id,
             "conductor_id": runtime_id,
             "user_id": str(runtime.get("user_id") or conductor.get("user_id") or ""),
-            "runtime_group_id": str(runtime.get("runtime_group_id") or conductor.get("runtime_group_id") or ""),
             "runtime_token_hash": str(runtime.get("runtime_token_hash") or conductor.get("runtime_token_hash") or ""),
             "proxy_token_hash": str(runtime.get("proxy_token_hash") or conductor.get("proxy_token_hash") or ""),
             "disabled": bool(runtime.get("disabled") or conductor.get("disabled")),

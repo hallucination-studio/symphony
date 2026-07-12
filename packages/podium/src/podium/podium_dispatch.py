@@ -7,7 +7,7 @@ from typing import Any
 
 from .linear_reconciliation_model import active_blocker_ids
 from .linear_reconciliation_queries import DISPATCH_BLOCKERS_QUERY
-from .podium_shared import utc_now_iso
+from .podium_shared import runtime_group_alias, utc_now_iso
 
 
 LOGGER = logging.getLogger(__name__)
@@ -24,17 +24,16 @@ class LinearBlockerCheckError(RuntimeError):
 
 class PodiumDispatchMixin:
     def reconciliation_dispatch(self, event: dict[str, Any], binding: dict[str, Any]) -> dict[str, Any]:
-        return self._dispatch_from_event(event, self._runtime_group_from_project_binding(binding))
+        return self._dispatch_from_event(event, binding)
 
-    def _dispatch_from_event(self, event: dict[str, Any], group: dict[str, Any]) -> dict[str, Any]:
-        project_binding_id = str(group.get("project_binding_id") or group["id"])
+    def _dispatch_from_event(self, event: dict[str, Any], binding: dict[str, Any]) -> dict[str, Any]:
+        project_binding_id = str(binding["id"])
         now = utc_now_iso()
         blockers = list(event.get("blocked_by") or [])
         return {
             "dispatch_id": f"dispatch_{secrets.token_urlsafe(18)}",
-            "runtime_group_id": group["id"],
             "project_binding_id": project_binding_id,
-            "user_id": str(group.get("linear_workspace_id") or event["workspace_id"]),
+            "user_id": str(binding.get("user_id") or event["workspace_id"]),
             "issue_id": event["issue_id"],
             "issue_identifier": event["issue_identifier"],
             "issue_title": event.get("issue_title") or "",
@@ -42,7 +41,7 @@ class PodiumDispatchMixin:
             "linear_workspace_id": event["workspace_id"],
             "project_slug": event["project_slug"],
             "agent_app_user_id": event.get("agent_app_user_id") or "",
-            "routing_rule_id": group["id"],
+            "routing_rule_id": project_binding_id,
             "blocked_by": blockers,
             "parent_issue_id": event.get("parent_issue_id") or "",
             "managed_run_intent": dict(event.get("managed_run_intent") or {}),
@@ -59,17 +58,6 @@ class PodiumDispatchMixin:
             "fencing_token": 0,
             "created_at": now,
             "updated_at": now,
-        }
-
-    def _runtime_group_from_project_binding(self, binding: dict[str, Any]) -> dict[str, Any]:
-        binding_id = str(binding.get("id") or "")
-        return {
-            "id": binding_id,
-            "linear_workspace_id": str(binding.get("user_id") or ""),
-            "project_slug": str(binding.get("project_slug") or ""),
-            "linear_agent_app_user_id": str(binding.get("agent_app_user_id") or ""),
-            "project_binding_id": binding_id,
-            "instance_id": str(binding.get("instance_id") or ""),
         }
 
     async def lease_dispatch(self, runtime_id: str) -> dict[str, Any] | None:
@@ -118,11 +106,10 @@ class PodiumDispatchMixin:
                 len(blockers),
             )
             return None
-        group = await self.store.get_runtime_group(str(leased.get("project_binding_id") or "")) or {}
         leased.update(
             {
-                "runtime_group_id": str(group.get("id") or leased.get("project_binding_id") or ""),
-                "routing_rule_id": str(group.get("id") or leased.get("project_binding_id") or ""),
+                "runtime_group_id": runtime_group_alias(runtime_id),
+                "routing_rule_id": str(leased.get("project_binding_id") or ""),
                 "blocked_by": [],
                 "parent_issue_id": str(leased.get("parent_issue_id") or ""),
                 "instance_id": str((binding or {}).get("instance_id") or ""),

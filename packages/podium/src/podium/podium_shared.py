@@ -9,7 +9,7 @@ from typing import Any
 from cryptography.fernet import Fernet
 
 def dispatch_public(dispatch: dict[str, Any]) -> dict[str, Any]:
-    project_binding_id = str(dispatch.get("project_binding_id") or dispatch.get("runtime_group_id") or "")
+    project_binding_id = str(dispatch.get("project_binding_id") or "")
     payload = {
         "dispatch_id": dispatch["dispatch_id"],
         "project_binding_id": project_binding_id,
@@ -46,25 +46,8 @@ def dispatch_public(dispatch: dict[str, Any]) -> dict[str, Any]:
         payload["managed_run_state"] = managed_run_state
     return payload
 
-def runtime_belongs_to_workspace(
-    runtime: dict[str, Any],
-    workspace_id: str,
-    runtime_groups: dict[str, dict[str, Any]],
-) -> bool:
-    group_id = str(runtime.get("runtime_group_id") or "")
-    return group_id == f"group_{workspace_id}" or str(
-        runtime_groups.get(group_id, {}).get("linear_workspace_id") or ""
-    ) == workspace_id
-
-def dispatch_belongs_to_workspace(
-    dispatch: dict[str, Any],
-    workspace_id: str,
-    runtime_groups: dict[str, dict[str, Any]],
-) -> bool:
-    group_id = str(dispatch.get("runtime_group_id") or "")
-    return group_id == f"group_{workspace_id}" or str(
-        runtime_groups.get(group_id, {}).get("linear_workspace_id") or ""
-    ) == workspace_id
+def runtime_group_alias(conductor_id: str) -> str:
+    return f"group_{conductor_id}"
 
 def runtime_public(runtime: dict[str, Any], presence: dict[str, str]) -> dict[str, Any]:
     runtime_id = str(runtime["id"])

@@ -178,7 +178,6 @@ class PodiumProjectBindingsMixin:
                 "project_unbind_version_mismatch",
                 "Runtime unbind config version is stale",
             )
-        await self._clear_runtime_group_binding(conductor_id)
         await self.advance_project_replacement(unbound)
         LOGGER.info(
             "event=project_unbound conductor_id=%s instance_id=%s linear_project_id=%s config_version=%s",
@@ -188,21 +187,6 @@ class PodiumProjectBindingsMixin:
             version,
         )
         return unbound
-
-    async def _clear_runtime_group_binding(self, conductor_id: str) -> None:
-        conductor = await self.store.get_runtime(conductor_id)
-        group_id = str((conductor or {}).get("runtime_group_id") or "")
-        group = await self.store.get_runtime_group(group_id)
-        if group is None:
-            return
-        await self.store.upsert_runtime_group(
-            {
-                **group,
-                "project_slug": "",
-                "linear_agent_app_user_id": "",
-                "project_binding_id": "",
-            }
-        )
 
     def project_binding_command(self, binding: dict[str, Any]) -> dict[str, Any]:
         return {

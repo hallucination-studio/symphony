@@ -13,14 +13,16 @@ from conductor.conductor_api import ConductorApiServer
 from podium.linear_reconciliation import BindingScanResult, LinearReconciler
 from podium.linear_reconciliation_model import active_blocker_ids
 from podium.podium_dispatch import PodiumDispatchMixin
+from podium.podium_routes_runtime_proxy import _ready_proxy_binding_or_error
 from podium.podium_routes_runtime_ops import register_runtime_ops_routes
+from podium.podium_smoke_checks import PodiumSmokeChecksMixin
 from podium.store._postgres_dispatch import DISPATCH_INSERT_SQL, LEASE_DISPATCH_SQL, _dispatch_values
 from podium.store._postgres_schema import PgSchema
 
 
 class FakeRuntimeState:
     def __init__(self) -> None:
-        self.runtime = {"id": "runtime-1", "runtime_group_id": "group-1"}
+        self.runtime = {"id": "runtime-1"}
         self.command = {
             "id": 7,
             "runtime_id": "runtime-1",
@@ -295,9 +297,6 @@ class FakeBlockerStore:
         )
         return dict(self.dispatch)
 
-    async def get_runtime_group(self, _binding_id: str) -> dict[str, str]:
-        return {"id": "group-1"}
-
     async def get_project_binding(self, binding_id: str) -> dict[str, Any] | None:
         return self.binding if binding_id == self.binding["id"] else None
 
@@ -515,3 +514,89 @@ def test_dispatch_blocker_ids_have_a_fresh_schema_and_insert_contract() -> None:
     assert len(values) == 28
     assert json.loads(values[15]) == ["blocker-1"]
     assert "jsonb_array_length(blocked_by)" in LEASE_DISPATCH_SQL
+
+
+@pytest.mark.anyio
+async def test_proxy_authorizes_the_runtime_owning_its_ready_binding_without_a_group_table() -> None:
+    binding = {
+        "id": "binding-1",
+        "conductor_id": "runtime-1",
+        "user_id": "user-1",
+        "state": "ready",
+        "active": True,
+        "linear_project_id": "project-1",
+    }
+
+    class Store:
+        async def list_project_bindings_for_conductor(self, conductor_id: str) -> list[dict[str, Any]]:
+            return [binding] if conductor_id == "runtime-1" else []
+
+        async def list_selected_linear_projects(self, workspace_id: str) -> list[dict[str, str]]:
+            return [{"linear_project_id": "project-1"}] if workspace_id == "user-1" else []
+
+    class State:
+        store = Store()
+
+        async def record_proxy_audit(self, _event: dict[str, Any]) -> None:
+            return None
+
+    def error_response(status: int, code: str, message: str) -> JSONResponse:
+        return JSONResponse({"error": {"code": code, "message": message}}, status_code=status)
+
+    result = await _ready_proxy_binding_or_error(
+        State(),
+        {"id": "runtime-1", "user_id": "user-1"},
+        error_response,
+    )
+
+    assert result == binding
+    denied = await _ready_proxy_binding_or_error(
+        State(),
+        {"id": "runtime-1", "user_id": "other-workspace"},
+        error_response,
+    )
+    assert isinstance(denied, JSONResponse)
+    assert denied.status_code == 409
+    assert json.loads(denied.body)["error"]["code"] == "runtime_project_binding_mismatch"
+
+
+@pytest.mark.anyio
+async def test_smoke_context_derives_the_group_alias_from_its_conductor() -> None:
+    binding = {
+        "id": "binding-1",
+        "conductor_id": "conductor-1",
+        "user_id": "user-1",
+        "state": "ready",
+        "active": True,
+        "config_version": 1,
+        "acknowledged_config_version": 1,
+        "installation_id": "installation-1",
+        "agent_app_user_id": "agent-1",
+        "repo_source": {"type": "local_path", "value": "/repo"},
+        "label_id": "label-1",
+        "label_name": "symphony:performer/example",
+        "instance_id": "instance-1",
+        "linear_project_id": "project-1",
+        "project_slug": "example",
+    }
+
+    class Store:
+        async def get_runtime(self, runtime_id: str) -> dict[str, str] | None:
+            if runtime_id == "conductor-1":
+                return {"id": runtime_id, "user_id": "user-1", "enrollment_state": "enrolled"}
+            return None
+
+    class State:
+        store = Store()
+
+        async def is_runtime_online(self, runtime_id: str) -> bool:
+            return runtime_id == "conductor-1"
+
+    context = await PodiumSmokeChecksMixin._smoke_binding_context(
+        State(),
+        binding,
+        {"id": "installation-1", "app_user_id": "agent-1"},
+    )
+
+    assert context["runtime_group_id"] == "group_conductor-1"
+    assert context["_binding_ready"] is True

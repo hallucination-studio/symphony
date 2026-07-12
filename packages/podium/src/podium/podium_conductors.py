@@ -6,7 +6,7 @@ import string
 from typing import Any
 
 from .podium_project_labels import LinearProjectLabelError
-from .podium_shared import utc_now_iso
+from .podium_shared import runtime_group_alias, utc_now_iso
 
 
 MUSICIAN_NAMES = (
@@ -52,12 +52,10 @@ class PodiumConductorsMixin:
             raise ConductorIdentityError("conductor_name_taken", "Conductor name is already in use")
         public_id = await self._allocate_conductor_public_id()
         conductor_id = f"conductor_{secrets.token_urlsafe(12)}"
-        runtime_group_id = f"group_{conductor_id}"
         conductor = {
             "id": conductor_id,
             "conductor_id": conductor_id,
             "user_id": user_id,
-            "runtime_group_id": runtime_group_id,
             "name": name,
             "public_id": public_id,
             "enrollment_state": "pending",
@@ -73,17 +71,8 @@ class PodiumConductorsMixin:
             "created_at": utc_now_iso(),
             "last_report_at": None,
         }
-        await self.store.upsert_runtime_group(
-            {
-                "id": runtime_group_id,
-                "linear_workspace_id": user_id,
-                "project_slug": "",
-                "linear_agent_app_user_id": "",
-                "project_binding_id": "",
-            }
-        )
         await self.store.upsert_conductor(conductor)
-        return conductor
+        return {**conductor, "runtime_group_id": runtime_group_alias(conductor_id)}
 
     async def rename_conductor(self, user_id: str, conductor_id: str, requested_name: str) -> dict[str, Any]:
         conductor = await self.conductor_for_user(conductor_id, user_id)
@@ -176,13 +165,7 @@ class PodiumConductorsMixin:
             suffix += 1
 
     async def _allocate_conductor_public_id(self) -> str:
-        used = {
-            str(row.get("public_id") or "")
-            for row in await self.store.list_runtime_groups()
-            if isinstance(row, dict)
-        }
-        for conductor in await self.store.list_all_conductors():
-            used.add(str(conductor.get("public_id") or ""))
+        used = {str(conductor.get("public_id") or "") for conductor in await self.store.list_all_conductors()}
         while True:
             candidate = "".join(secrets.choice(PUBLIC_ID_ALPHABET) for _ in range(6))
             if candidate not in used:

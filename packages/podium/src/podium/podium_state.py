@@ -125,13 +125,11 @@ class PodiumStateBaseMixin:
         self,
         token_hash: str,
         *,
-        runtime_group_id: str,
         conductor_id: str,
         expires_at: datetime,
     ) -> None:
         await self.store.save_enrollment_token(
             token_hash,
-            runtime_group_id=runtime_group_id,
             conductor_id=conductor_id,
             expires_at=expires_at.isoformat().replace("+00:00", "Z"),
         )
@@ -139,8 +137,8 @@ class PodiumStateBaseMixin:
     async def consume_enrollment_token(self, token: str) -> tuple[dict[str, Any] | None, str | None]:
         return await self.store.consume_enrollment_token(hash_secret(token))
 
-    async def has_pending_enrollment(self, runtime_group_id: str) -> bool:
-        return bool(await self.store.has_pending_enrollment(runtime_group_id))
+    async def has_pending_enrollment(self, conductor_id: str) -> bool:
+        return bool(await self.store.has_pending_enrollment(conductor_id))
 
     async def set_presence(self, runtime_id: str) -> None:
         now = datetime.now(timezone.utc)

@@ -105,10 +105,9 @@ async def _ready_proxy_binding_or_error(
         await _audit_proxy_context_denial(state, runtime, binding, "linear_project_binding_not_ready")
         return error_response(409, "linear_project_binding_not_ready", "Project binding is not ready")
     binding = bindings[0]
-    group = await state.store.get_runtime_group(str(runtime.get("runtime_group_id") or "")) or {}
     if (
-        str(group.get("project_binding_id") or "") != str(binding.get("id") or "")
-        or str(group.get("linear_workspace_id") or "") != str(binding.get("user_id") or "")
+        runtime_id != str(binding.get("conductor_id") or "")
+        or str(runtime.get("user_id") or "") != str(binding.get("user_id") or "")
     ):
         await _audit_proxy_context_denial(state, runtime, binding, "runtime_project_binding_mismatch")
         return error_response(409, "runtime_project_binding_mismatch", "Runtime project binding does not match")

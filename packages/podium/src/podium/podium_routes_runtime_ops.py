@@ -6,7 +6,7 @@ from typing import Any, Awaitable, Callable
 from fastapi import FastAPI, Header, Request
 from fastapi.responses import JSONResponse
 from .podium_routes_runtime_helpers import managed_run_ack_payload
-from .podium_shared import dispatch_public, optional_int
+from .podium_shared import dispatch_public, optional_int, runtime_group_alias
 from .podium_smoke_protocol import SmokeCheckError
 
 RequireUser = Callable[[Request], Awaitable[dict[str, Any] | None]]
@@ -129,9 +129,8 @@ def _register_runtime_report_endpoint(app: FastAPI, *, state: Any, error_respons
                 str(result.get("sanitized_reason") or "Runtime report was rejected"),
             )
         managed_runs = payload.get("managed_runs") if isinstance(payload, dict) else None
-        group_id = str(runtime.get("runtime_group_id") or "")
         if isinstance(managed_runs, dict):
-            await state.store.save_managed_run_view(group_id, managed_runs)
+            await state.store.save_managed_run_view(str(runtime["id"]), managed_runs)
         if isinstance(result, dict):
             result = {**result, "config": {"version": 1, "profiles": {}}}
         return JSONResponse(result)
@@ -176,9 +175,8 @@ async def _managed_run_report(
     binding: dict[str, Any],
 ) -> dict[str, Any]:
     conductor_id = str(conductor.get("id") or "")
-    group_id = str(conductor.get("runtime_group_id") or "")
     view, online = await asyncio.gather(
-        state.store.get_managed_run_view(group_id),
+        state.store.get_managed_run_view(conductor_id),
         state.is_runtime_online(conductor_id),
     )
     return {
@@ -200,7 +198,7 @@ async def _managed_run_report(
             "error_code": str(binding.get("error_code") or ""),
             "sanitized_reason": str(binding.get("sanitized_reason") or ""),
         },
-        "runtime_group_id": group_id,
+        "runtime_group_id": runtime_group_alias(conductor_id),
         "policy_revision": 1,
         "profiles": {},
         "managed_runs": view or {},

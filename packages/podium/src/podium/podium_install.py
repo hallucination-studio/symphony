@@ -107,8 +107,6 @@ fi
 RUNTIME_ID="$(python3 -c 'import json,sys; print(json.loads(sys.stdin.read())["runtime_id"])' <<<"$ENROLLED_JSON")"
 RUNTIME_TOKEN="$(python3 -c 'import json,sys; print(json.loads(sys.stdin.read())["runtime_token"])' <<<"$ENROLLED_JSON")"
 PROXY_TOKEN="$(python3 -c 'import json,sys; print(json.loads(sys.stdin.read())["proxy_token"])' <<<"$ENROLLED_JSON")"
-RUNTIME_GROUP_ID="$(python3 -c 'import json,sys; print(json.loads(sys.stdin.read()).get("runtime_group_id", ""))' <<<"$ENROLLED_JSON")"
-
 if [ "$START_CONDUCTOR" = "1" ]; then
   CONDUCTOR_LOG="/tmp/podium-conductor-${RUNTIME_ID}.log"
   CONDUCTOR_PID="$(python3 - "$CONDUCTOR_COMMAND" "$CONDUCTOR_PORT" "$DATA_ROOT" "$CONDUCTOR_LOG" <<'PY'
@@ -148,18 +146,17 @@ PY
   done
 fi
 
-python3 - "$CONDUCTOR_PORT" "$PODIUM_URL" "$RUNTIME_ID" "$RUNTIME_TOKEN" "$PROXY_TOKEN" "$RUNTIME_GROUP_ID" <<'PY'
+python3 - "$CONDUCTOR_PORT" "$PODIUM_URL" "$RUNTIME_ID" "$RUNTIME_TOKEN" "$PROXY_TOKEN" <<'PY'
 import json
 import sys
 import urllib.request
 
-port, podium_url, runtime_id, runtime_token, proxy_token, runtime_group_id = sys.argv[1:]
+port, podium_url, runtime_id, runtime_token, proxy_token = sys.argv[1:]
 body = json.dumps({
     "podium_url": podium_url.rstrip("/"),
     "podium_runtime_id": runtime_id,
     "podium_runtime_token": runtime_token,
     "podium_proxy_token": proxy_token,
-    "runtime_group_id": runtime_group_id,
     "managed_mode": True,
 }).encode()
 request = urllib.request.Request(

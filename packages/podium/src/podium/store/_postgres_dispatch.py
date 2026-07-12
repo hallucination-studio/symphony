@@ -89,21 +89,6 @@ WHERE NOT $32::boolean OR project_bindings.active = FALSE
 RETURNING *
 """
 
-RUNTIME_GROUP_BINDING_UPSERT_SQL = """
-INSERT INTO runtime_groups (
-  id, linear_workspace_id, project_slug, linear_agent_app_user_id,
-  project_binding_id, updated_at
-)
-VALUES ($1,$2,$3,$4,$5,now())
-ON CONFLICT (id) DO UPDATE SET
-  linear_workspace_id = EXCLUDED.linear_workspace_id,
-  project_slug = EXCLUDED.project_slug,
-  linear_agent_app_user_id = EXCLUDED.linear_agent_app_user_id,
-  project_binding_id = EXCLUDED.project_binding_id,
-  updated_at = now()
-"""
-
-
 def _dispatch_values(dispatch: dict[str, Any]) -> tuple[Any, ...]:
     return (
         str(dispatch["dispatch_id"]),
@@ -391,17 +376,4 @@ async def _upsert_project_binding_on(
     )
     if row is None:
         return None
-    runtime_group_id = await connection.fetchval(
-        "SELECT runtime_group_id FROM conductors WHERE id = $1",
-        str(binding["conductor_id"]),
-    )
-    active = bool(binding.get("active", True))
-    await connection.execute(
-        RUNTIME_GROUP_BINDING_UPSERT_SQL,
-        str(runtime_group_id or binding["id"]),
-        str(binding["user_id"]),
-        str(binding.get("project_slug") or "") if active else "",
-        str(binding.get("agent_app_user_id") or "") if active else "",
-        str(binding["id"]) if active else "",
-    )
     return _record_to_project_binding(row)

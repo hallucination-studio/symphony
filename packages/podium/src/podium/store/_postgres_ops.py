@@ -109,17 +109,17 @@ class PgOpsMixin:
         row = await self.pool.fetchrow("SELECT tail_json FROM instance_log_tails WHERE conductor_id = $1 AND instance_id = $2", conductor_id, instance_id)
         return dict(_pg_json_value(row["tail_json"], {})) if row is not None else None
 
-    async def save_managed_run_view(self, runtime_group_id: str, view: dict[str, Any]) -> None:
+    async def save_managed_run_view(self, conductor_id: str, view: dict[str, Any]) -> None:
         await self.pool.execute(
             """
-            INSERT INTO managed_run_views (runtime_group_id, view_json, updated_at)
+            INSERT INTO managed_run_views (conductor_id, view_json, updated_at)
             VALUES ($1,$2::jsonb,now())
-            ON CONFLICT (runtime_group_id) DO UPDATE SET view_json = EXCLUDED.view_json, updated_at = now()
+            ON CONFLICT (conductor_id) DO UPDATE SET view_json = EXCLUDED.view_json, updated_at = now()
             """,
-            runtime_group_id,
+            conductor_id,
             _pg_json(view),
         )
 
-    async def get_managed_run_view(self, runtime_group_id: str) -> dict[str, Any] | None:
-        row = await self.pool.fetchrow("SELECT view_json FROM managed_run_views WHERE runtime_group_id = $1", runtime_group_id)
+    async def get_managed_run_view(self, conductor_id: str) -> dict[str, Any] | None:
+        row = await self.pool.fetchrow("SELECT view_json FROM managed_run_views WHERE conductor_id = $1", conductor_id)
         return dict(_pg_json_value(row["view_json"], {})) if row is not None else None

@@ -10,9 +10,9 @@ from podium.podium_runtime import PodiumRuntimeMixin
 from podium.podium_shared import dispatch_public
 from podium.store._postgres_dispatch import (
     PROJECT_BINDING_UPSERT_SQL,
-    RUNTIME_GROUP_BINDING_UPSERT_SQL,
     _binding_values,
 )
+from podium.store._postgres_ops import PgOpsMixin
 from podium.store._postgres_runtime import PgRuntimeMixin
 from podium.store._postgres_schema_statements import POSTGRES_SCHEMA_STATEMENTS
 
@@ -65,16 +65,16 @@ def test_binding_public_keeps_the_web_profile_constant() -> None:
     assert public["managed_run_profile"] == "default"
 
 
-def test_fresh_schema_and_binding_upsert_do_not_store_a_profile() -> None:
+def test_fresh_schema_keeps_runtime_group_as_a_derived_alias() -> None:
     schema = "\n".join(POSTGRES_SCHEMA_STATEMENTS)
 
     assert "managed_run_profile" not in schema
+    assert "runtime_groups" not in schema
+    assert "runtime_group_id TEXT" not in schema
     assert "managed_run_profile" not in PROJECT_BINDING_UPSERT_SQL
     assert _placeholder_numbers(PROJECT_BINDING_UPSERT_SQL) == list(
         range(1, len(_binding_values(_binding())) + 2)
     )
-    assert "managed_run_profile" not in RUNTIME_GROUP_BINDING_UPSERT_SQL
-    assert _placeholder_numbers(RUNTIME_GROUP_BINDING_UPSERT_SQL) == [1, 2, 3, 4, 5]
 
 
 def test_dispatch_dto_does_not_carry_a_profile() -> None:
@@ -101,21 +101,54 @@ class _RecordingPool:
 
 
 @pytest.mark.anyio
-async def test_runtime_group_upsert_has_one_value_per_placeholder() -> None:
+async def test_enrollment_token_is_owned_by_conductor() -> None:
     pool = _RecordingPool()
     store = SimpleNamespace(pool=pool)
 
-    await PgRuntimeMixin.upsert_runtime_group(
+    await PgRuntimeMixin.save_enrollment_token(
+        store,
+        "token-hash",
+        conductor_id="conductor-1",
+        expires_at="2026-07-12T00:00:00+00:00",
+    )
+
+    statement, args = pool.calls[0]
+    assert "runtime_group_id" not in statement
+    assert "conductor_id" in statement
+    assert _placeholder_numbers(statement) == list(range(1, len(args) + 1))
+
+
+@pytest.mark.anyio
+async def test_managed_run_view_is_owned_by_conductor() -> None:
+    pool = _RecordingPool()
+    store = SimpleNamespace(pool=pool)
+
+    await PgOpsMixin.save_managed_run_view(store, "conductor-1", {"runs": []})
+
+    statement, args = pool.calls[0]
+    assert "conductor_id" in statement
+    assert "runtime_group_id" not in statement
+    assert args[0] == "conductor-1"
+
+
+@pytest.mark.anyio
+async def test_conductor_record_does_not_persist_its_runtime_group_alias() -> None:
+    pool = _RecordingPool()
+    store = SimpleNamespace(pool=pool)
+
+    await PgRuntimeMixin.upsert_conductor(
         store,
         {
-            "id": "group-1",
-            "linear_workspace_id": "user-1",
-            "project_slug": "example",
-            "linear_agent_app_user_id": "agent-1",
-            "project_binding_id": "binding-1",
+            "id": "conductor-1",
+            "user_id": "user-1",
+            "conductor_id": "conductor-1",
+            "runtime_group_id": "group_conductor-1",
+            "runtime_token_hash": "runtime-hash",
+            "proxy_token_hash": "proxy-hash",
+            "created_at": "2026-07-12T00:00:00+00:00",
         },
     )
 
     statement, args = pool.calls[0]
-    assert "managed_run_profile" not in statement
+    assert "runtime_group_id" not in statement
     assert _placeholder_numbers(statement) == list(range(1, len(args) + 1))

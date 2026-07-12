@@ -9,7 +9,7 @@ from fastapi.responses import JSONResponse
 
 from .podium_conductors import ConductorIdentityError
 from .podium_install import shlex_quote
-from .podium_shared import hash_secret, runtime_public
+from .podium_shared import hash_secret, runtime_group_alias, runtime_public
 
 RequireUser = Callable[[Request], Awaitable[dict[str, Any] | None]]
 ErrorResponse = Callable[[int, str, str], JSONResponse]
@@ -89,7 +89,6 @@ def _register_onboarding_enrollment_route(
         expires_at = datetime.now(timezone.utc) + timedelta(hours=1)
         await state.save_enrollment_token(
             token_hash,
-            runtime_group_id=str(conductor["runtime_group_id"]),
             conductor_id=str(conductor["id"]),
             expires_at=expires_at,
         )
@@ -128,7 +127,7 @@ def _register_onboarding_runtime_status_route(
         online = [row for row in enrolled if row["id"] in presence]
         token_pending = False
         for row in conductors:
-            if await state.has_pending_enrollment(str(row.get("runtime_group_id") or "")):
+            if await state.has_pending_enrollment(str(row.get("id") or "")):
                 token_pending = True
                 break
         if online:
@@ -195,11 +194,10 @@ def _register_runtime_enrollment_routes(app: FastAPI, *, state: Any, error_respo
             return error_response(400, "invalid_enrollment_identity", "Enrollment identity is invalid")
         runtime_token = secrets.token_urlsafe(32)
         proxy_token = secrets.token_urlsafe(32)
-        runtime_group_id = str(token_row["runtime_group_id"])
+        runtime_group_id = runtime_group_alias(runtime_id)
         saved = await save_runtime_record(
             state,
             runtime_id,
-            runtime_group_id,
             hash_secret(runtime_token),
             hash_secret(proxy_token),
             payload,
@@ -226,7 +224,6 @@ async def runtime_records_for_user(state: Any, workspace_id: str) -> list[dict[s
 async def save_runtime_record(
     state: Any,
     runtime_id: str,
-    runtime_group_id: str,
     runtime_token_hash: str,
     proxy_token_hash: str,
     payload: dict[str, Any] | None = None,

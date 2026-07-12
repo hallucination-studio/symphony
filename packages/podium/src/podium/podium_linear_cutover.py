@@ -115,10 +115,7 @@ class PodiumLinearCutoverMixin:
             return True
         terminal = {"done", "failed", "cancelled", "canceled"}
         for binding in await self.store.list_project_bindings_for_user(user_id):
-            conductor = await self.store.get_runtime(str(binding["conductor_id"]))
-            if conductor is None:
-                continue
-            view = await self.store.get_managed_run_view(str(conductor.get("runtime_group_id") or "")) or {}
+            view = await self.store.get_managed_run_view(str(binding["conductor_id"])) or {}
             for run in view.get("runs") or []:
                 if isinstance(run, dict) and str(run.get("state") or "") not in terminal:
                     return True

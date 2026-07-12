@@ -5,7 +5,7 @@ import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from .podium_shared import utc_now_iso
+from .podium_shared import runtime_group_alias, utc_now_iso
 from .podium_smoke_protocol import (
     SmokeCheckError,
     aggregate_smoke_result,
@@ -190,8 +190,7 @@ class PodiumSmokeChecksMixin:
     ) -> dict[str, Any]:
         runtime_id = str(binding.get("conductor_id") or "")
         runtime = await self.store.get_runtime(runtime_id)
-        group_id = str((runtime or {}).get("runtime_group_id") or "")
-        group = await self.store.get_runtime_group(group_id)
+        group_id = runtime_group_alias(runtime_id)
         repository = repository_public(binding.get("repo_source"))
         binding_ready = bool(
             runtime
@@ -206,10 +205,8 @@ class PodiumSmokeChecksMixin:
             and repository["value"]
             and binding.get("label_id")
             and binding.get("label_name")
-            and str((group or {}).get("project_binding_id") or "") == str(binding.get("id") or "")
-            and str((group or {}).get("linear_workspace_id") or "") == str(binding.get("user_id") or "")
-            and str((group or {}).get("project_slug") or "") == str(binding.get("project_slug") or "")
-            and str((group or {}).get("linear_agent_app_user_id") or "") == str(binding.get("agent_app_user_id") or "")
+            and str((runtime or {}).get("id") or "") == runtime_id
+            and str((runtime or {}).get("user_id") or "") == str(binding.get("user_id") or "")
         )
         return {
             "runtime_id": runtime_id,
