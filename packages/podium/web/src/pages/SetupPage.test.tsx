@@ -193,7 +193,6 @@ describe("SetupPage runtime step", () => {
       "curl -fsSL https://podium.example/install.sh | bash -s -- --enrollment-token tok",
     );
     expect(command).toBeInTheDocument();
-    expect(command.textContent).not.toContain("get.podium.dev");
   });
 
   it("updates the install command when regenerated", async () => {

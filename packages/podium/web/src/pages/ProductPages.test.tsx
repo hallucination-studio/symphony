@@ -65,7 +65,7 @@ function managedRunsPayload() {
                   payload: {
                     title: "Implement workflow",
                     objective: "Run the ordered Linear workflow",
-                    files_likely_touched: ["packages/conductor/src/conductor/workflow.py"],
+                    files_likely_touched: ["packages/conductor/src/conductor/workflow_driver.py"],
                   },
                 },
               ],
