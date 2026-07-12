@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 import inspect
 import os
 from pathlib import Path
@@ -28,15 +28,9 @@ from .codex_config import CodexConfig
 
 @dataclass(frozen=True)
 class CodexTurnResult:
-    success: bool
     thread_id: str
-    turn_id: str
-    session_id: str
-    turn_count: int = 1
-    backend: str = "sdk"
-    final_response: str | None = None
-    structured_result: dict[str, Any] | None = None
-    events: list[dict[str, Any]] = field(default_factory=list)
+    structured_result: dict[str, Any]
+    events: list[dict[str, Any]]
 
 
 EventCallback = Callable[[dict[str, Any]], None]
@@ -89,13 +83,7 @@ class CodexSdkClient:
             }
         )
         return CodexTurnResult(
-            True,
-            thread_id,
-            turn_id,
-            session_id,
-            1,
-            backend="sdk",
-            final_response=final_response,
+            thread_id=thread_id,
             structured_result=structured,
             events=events,
         )
