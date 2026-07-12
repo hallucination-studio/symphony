@@ -97,6 +97,8 @@ HTTP API is separate from that transport.
 - Audited tracked tools and planning/module docs; the only real-flow tools are
   the supported `real_flow.py` runner and its `linear_fixture.py` helper, and
   removed-behavior docs are intentional product constraints.
+- Updated the real-flow fixture for OAuth Bearer headers, current Linear
+  `Project.teams` schema, bounded HTTP status errors, and regression coverage.
 
 ## Remaining Work
 
@@ -104,9 +106,10 @@ HTTP API is separate from that transport.
    operator and Linear surfaces. No new runner, endpoint, or evidence child-issue
    tree is allowed.
 2. Run a scoped real Linear/OAuth/Codex product flow after the local rebuild.
-   The staged Codex preflight passes, but the sourced environment has no
-   project slug or Podium URL; `.test-real-flow/mvp-real-report.json` records
-   the sanitized preflight blocker.
+   The fixture now reaches the current Linear API; the configured project probe
+   records a sanitized `http_401` credential failure in
+   `.test-real-flow/mvp-real-probe.json`. Missing project/Podium variables still
+   fail closed in `.test-real-flow/mvp-real-report.json`.
    `tools/real_flow.py` remains a strict
    preflight/observation tool, not proof of a complete external flow.
 
