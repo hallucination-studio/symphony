@@ -84,7 +84,7 @@ def _register_runtime_command_routes(app: FastAPI, *, state: Any, error_response
         if status not in {"completed", "failed"}:
             return error_response(400, "invalid_command_status", "status must be completed or failed")
         result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
-        if result.get("command_type") == "smoke.check" and status == "completed":
+        if result.get("command_type") == "smoke.check":
             try:
                 smoke_result = await state.submit_smoke_check_result(
                     runtime,

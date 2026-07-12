@@ -55,7 +55,13 @@ class PodiumSmokeCheckMixin:
                 proxy_ready = project_id == command["linear_project_id"]
                 if proxy_ready:
                     labels = await proxy.fetch_project_labels(str(project_id))
-                    label_ready = command["expected_label"] in labels
+                    expected = command["expected_label"]
+                    label_ready = any(
+                        str(label.get("id") or "") == expected["id"]
+                        or str(label.get("name") or "") == expected["name"]
+                        for label in labels
+                        if isinstance(label, dict)
+                    )
                 else:
                     proxy_reason = "Linear proxy returned a different project identity"
             except Exception as exc:

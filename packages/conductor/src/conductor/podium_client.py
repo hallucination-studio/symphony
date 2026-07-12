@@ -32,8 +32,11 @@ class PodiumRuntimeClient:
             if not command:
                 return {"status": "idle"}
             try:
-                result = await self.service.handle_podium_command(command, post_smoke_result=None)
-                result = {**result, "command_type": str((command.get("command") or {}).get("type") or "")}
+                payload = command.get("command") if isinstance(command.get("command"), dict) else None
+                if payload is None:
+                    raise ValueError("runtime_command_payload_invalid")
+                result = await self.service.handle_podium_command(payload, post_smoke_result=None)
+                result = {**result, "command_type": str(payload.get("type") or "")}
                 ack_status = "failed" if result.get("status") in {"failed", "rejected", "error"} else "completed"
             except Exception as exc:
                 result = {

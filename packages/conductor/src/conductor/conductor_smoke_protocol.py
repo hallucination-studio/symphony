@@ -44,7 +44,7 @@ def normalize_smoke_command(payload: dict[str, Any]) -> dict[str, Any]:
         raise SmokeCommandError("invalid_smoke_command", "Smoke command identity is incomplete")
     if command["repository"]["mode"] not in {"local_path", "git_url"} or not command["repository"]["value"]:
         raise SmokeCommandError("invalid_smoke_command", "Smoke command repository is invalid")
-    if not command["expected_label"]["name"].startswith("symphony:conductor/"):
+    if not command["expected_label"]["name"].startswith("symphony:performer/"):
         raise SmokeCommandError("invalid_smoke_command", "Smoke command project label is invalid")
     return command
 

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from .conductor_podium_sync_dispatch import PodiumDispatchMixin
@@ -23,9 +23,10 @@ class ConductorPodiumSyncMixin(
     async def coordinate_background_once(self) -> CoordinationResult:
         self._managed_run_reconcile_findings: list[dict[str, Any]] = []
         managed_run_driver = await WorkflowDriver(self).drive_once()
+        project_labels_synced = await self._sync_project_labels_if_due(datetime.now(timezone.utc))
         return CoordinationResult(
             dispatch_acks={"acked": 0, "failed": 0, "skipped": 0},
-            project_labels_synced=0,
+            project_labels_synced=project_labels_synced,
             managed_run_turns_started=managed_run_driver.get("started", 0),
             managed_run_results_applied=managed_run_driver.get("applied", 0),
             managed_run_integrations_processed=0,

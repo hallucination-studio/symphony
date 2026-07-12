@@ -23,6 +23,7 @@ class FakeRuntimeState:
             "fencing_token": 3,
         }
         self.acks: list[dict[str, Any]] = []
+        self.smoke_results: list[dict[str, Any]] = []
         self.store = SimpleNamespace()
 
     async def runtime_for_bearer(self, authorization: str) -> dict[str, Any] | None:
@@ -53,6 +54,14 @@ class FakeRuntimeState:
             }
         )
         return {"id": command_id, "status": status, "result": result or {}}
+
+    async def submit_smoke_check_result(
+        self,
+        runtime: dict[str, Any],
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        self.smoke_results.append({"runtime": runtime, "payload": payload})
+        return {"status": payload["status"], "smoke_check_id": payload["smoke_check_id"]}
 
 
 @pytest.fixture
@@ -129,6 +138,37 @@ async def test_runtime_command_ack_rejects_invalid_fence(runtime_app: FastAPI, r
     assert response.json()["error"]["code"] == "stale_runtime_command_lease"
 
 
+@pytest.mark.anyio
+async def test_runtime_command_ack_records_a_failed_smoke_result(
+    runtime_app: FastAPI,
+    runtime_state: FakeRuntimeState,
+) -> None:
+    smoke_result = {
+        "smoke_check_id": "smoke-1",
+        "binding_id": "binding-1",
+        "status": "failed",
+        "checks": [],
+    }
+    transport = httpx.ASGITransport(app=runtime_app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/api/v1/runtime/commands/ack",
+            headers={"Authorization": "Bearer runtime-token"},
+            json={
+                "command_id": 7,
+                "fencing_token": 3,
+                "status": "failed",
+                "result": {"command_type": "smoke.check", "result": smoke_result},
+            },
+        )
+    assert response.status_code == 200
+    assert runtime_state.smoke_results == [{"runtime": runtime_state.runtime, "payload": smoke_result}]
+    assert runtime_state.acks[-1]["result"]["podium_smoke"] == {
+        "status": "failed",
+        "smoke_check_id": "smoke-1",
+    }
+
+
 class FakePodiumService:
     def __init__(self) -> None:
         self.store = SimpleNamespace(
@@ -147,6 +187,7 @@ class FakePodiumService:
 @pytest.mark.anyio
 async def test_runtime_client_polls_and_acks_one_command() -> None:
     service = FakePodiumService()
+    ack_payload: dict[str, Any] = {}
 
     async def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/commands/lease"):
@@ -162,9 +203,11 @@ async def test_runtime_client_polls_and_acks_one_command() -> None:
             )
         assert request.url.path.endswith("/commands/ack")
         assert request.headers["authorization"] == "Bearer runtime-token"
-        assert json.loads(request.content)["status"] == "completed"
+        ack_payload.update(json.loads(request.content))
+        assert ack_payload["status"] == "completed"
         return httpx.Response(200, json={"command": {"id": 9, "status": "completed"}})
 
     result = await PodiumRuntimeClient(service).poll_command_once(transport=httpx.MockTransport(handler))
     assert result["status"] == "handled"
-    assert service.commands[0]["command"]["type"] == "project.configure"
+    assert service.commands == [{"type": "project.configure"}]
+    assert ack_payload["result"]["command_type"] == "project.configure"
