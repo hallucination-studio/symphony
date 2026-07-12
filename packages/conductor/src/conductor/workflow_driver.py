@@ -218,7 +218,6 @@ class WorkflowDriver:
                 "Complete this Linear issue after resolving the Codex runtime wait. "
                 f"The next poll resumes the fenced task.\n\nReason: {reason}"
             ),
-            label_names=[],
         )
         self.store.attach_wait_issue(
             str(wait["wait_id"]),
@@ -273,7 +272,6 @@ class WorkflowDriver:
                 parent_issue_id=parent_id,
                 title=task.title,
                 description=_task_description(task),
-                label_names=[],
                 delegate_id=delegate_id,
             )
             self.store.attach_task_issue(

@@ -23,7 +23,7 @@ from .conductor_service_helpers import (
     _merge_project_labels,
 )
 from .conductor_service_types import ConductorServiceError, CoordinationCadence
-from .conductor_linear_direct import ManagedRunLinearProxy, ProjectLabelLinearProxy
+from .linear import ManagedRunLinearProxy, ProjectLabelLinearProxy
 from .store import ConductorStore as WorkflowStore
 from .workflow import Workflow
 
@@ -79,8 +79,6 @@ class ConductorService(ConductorPodiumSyncMixin, ConductorServiceViewsMixin):
         return ManagedRunLinearProxy(
             endpoint=endpoint,
             api_key=api_key,
-            project_slug=instance.linear_project,
-            required_delegate_id=_linear_agent_app_user_id(instance.linear_filters) or None,
         )
 
     def _project_label_proxy(self, instance: InstanceRecord) -> Any:
