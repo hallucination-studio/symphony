@@ -6,7 +6,7 @@ from typing import Any, Awaitable, Callable
 from fastapi import FastAPI, Header, Request
 from fastapi.responses import JSONResponse
 from .podium_shared import dispatch_public, optional_int, runtime_group_alias
-from .podium_smoke_protocol import SmokeCheckError
+from .podium_smoke_checks import SmokeCheckError
 
 RequireUser = Callable[[Request], Awaitable[dict[str, Any] | None]]
 ErrorResponse = Callable[[int, str, str], JSONResponse]
