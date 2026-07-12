@@ -12,7 +12,7 @@ import httpx
 from .models import InstanceCreateRequest, InstancePatchRequest
 from .conductor_smoke_protocol import SmokeCommandError, normalize_smoke_command, sanitize_reason, smoke_result
 from .conductor_service_helpers import _desired_project_labels, _hostname, _linear_agent_app_user_id, _optional_int
-from .conductor_service_types import ConductorServiceError, CoordinationResult
+from .conductor_service_types import ConductorServiceError
 from .workflow_driver import WorkflowDriver
 
 
@@ -20,33 +20,16 @@ LOGGER = logging.getLogger(__name__)
 
 
 class ConductorPodiumSyncMixin:
-    async def coordinate_background_once(self) -> CoordinationResult:
+    async def coordinate_background_once(self) -> dict[str, Any]:
         self._managed_run_reconcile_findings: list[dict[str, Any]] = []
         managed_run_driver = await WorkflowDriver(self).drive_once()
         project_labels_synced = await self._sync_project_labels_if_due(datetime.now(timezone.utc))
-        return CoordinationResult(
-            dispatch_acks={"acked": 0, "failed": 0, "skipped": 0},
-            project_labels_synced=project_labels_synced,
-            managed_run_turns_started=managed_run_driver.get("started", 0),
-            managed_run_results_applied=managed_run_driver.get("applied", 0),
-            managed_run_integrations_processed=0,
-            managed_run_timeouts=0,
-            managed_run_crash_retries=0,
-            managed_run_crash_failures=0,
-            managed_run_human_actions_created=0,
-            managed_run_human_actions_completed=0,
-            managed_run_human_actions_missing_response=0,
-            managed_run_human_actions_failed=0,
-            managed_run_runtime_waits_observed=0,
-            linear_managed_run_ingestions=0,
-            linear_managed_run_projections=0,
-            dispatchable=0,
-            blocked_waiting=0,
-            reconcile_findings=getattr(self, "_managed_run_reconcile_findings", []),
-            remediations={},
-            crash_restarts=0,
-            crash_loops=0,
-        )
+        return {
+            "project_labels_synced": project_labels_synced,
+            "managed_run_turns_started": managed_run_driver.get("started", 0),
+            "managed_run_results_applied": managed_run_driver.get("applied", 0),
+            "reconcile_findings": getattr(self, "_managed_run_reconcile_findings", []),
+        }
 
     async def _sync_project_labels_if_due(self, now: datetime) -> int:
         if not self.coordination_cadence.project_labels_due(now):

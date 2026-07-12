@@ -87,7 +87,7 @@ async def test_background_tick_runs_due_project_label_sync(monkeypatch: pytest.M
     result = await ConductorPodiumSyncMixin.coordinate_background_once(service)
 
     assert service.sync_calls == 1
-    assert result.project_labels_synced == 1
+    assert result["project_labels_synced"] == 1
 
 
 @pytest.mark.anyio
