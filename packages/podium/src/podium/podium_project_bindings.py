@@ -3,6 +3,9 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from performer_api.codex_runtime import CodexRuntimeConfigError, PerformerProfileConfig
+
+from .performer_profiles import PerformerProfileLoadError
 from .podium_project_binding_creation import (
     ProjectBindingError,
     build_project_binding,
@@ -64,7 +67,20 @@ class PodiumProjectBindingsMixin:
         if created is None:
             raise project_binding_conflict(conflict)
         binding = created
-        await self.enqueue_runtime_command(conductor_id, self.project_binding_command(binding))
+        try:
+            binding = await self.ensure_performer_binding(binding)
+            command = await self.project_binding_command(binding)
+        except PerformerProfileLoadError as exc:
+            failed = {
+                **binding,
+                "state": "failed",
+                "error_code": exc.code,
+                "sanitized_reason": exc.reason,
+                "updated_at": utc_now_iso(),
+            }
+            await self.store.upsert_project_binding(failed)
+            raise ProjectBindingError(exc.code, exc.reason) from exc
+        await self.enqueue_runtime_command(conductor_id, command)
         return binding
 
     async def begin_project_unbind(
@@ -188,17 +204,50 @@ class PodiumProjectBindingsMixin:
         )
         return unbound
 
-    def project_binding_command(self, binding: dict[str, Any]) -> dict[str, Any]:
-        return {
+    async def project_binding_command(self, binding: dict[str, Any]) -> dict[str, Any]:
+        profile = await self.store.get_performer_binding_for_project_binding(str(binding["id"]))
+        if profile is None:
+            raise ProjectBindingError("performer_profile_required", "A current Performer profile binding is required")
+        try:
+            selected = PerformerProfileConfig.from_dict(
+                {
+                    "binding_id": str(binding["id"]),
+                    "binding_config_version": int(binding.get("config_version") or 0),
+                    "performer_binding_id": str(profile["id"]),
+                    "performer_profile_id": str(profile["performer_profile_id"]),
+                    "runtime_profile_id": str(profile["runtime_profile_id"]),
+                    "performer_kind": str(profile["performer_kind"]),
+                    "runtime_kind": str(profile["runtime_kind"]),
+                    "turn_policy": profile.get("turn_policy") if isinstance(profile.get("turn_policy"), dict) else {},
+                    "policy_sha256": str(profile["policy_sha256"]),
+                    "config_format": str(profile["config_format"]),
+                    "config_document": str(profile["config_document"]),
+                    "config_sha256": str(profile["config_sha256"]),
+                    "credential_id": str(profile["credential_id"]),
+                    "credential_ref": str(profile["credential_ref"]),
+                }
+            )
+        except (CodexRuntimeConfigError, KeyError, TypeError, ValueError) as exc:
+            raise ProjectBindingError("performer_profile_invalid", "Current Performer profile is invalid") from exc
+        command = {
             "type": "project.configure",
             "binding_id": str(binding["id"]),
             "config_version": int(binding.get("config_version") or 0),
+            **selected.to_dict(),
             "linear_project_id": str(binding.get("linear_project_id") or ""),
             "project_slug": str(binding.get("project_slug") or ""),
             "project_name": str(binding.get("project_name") or ""),
             "agent_app_user_id": str(binding.get("agent_app_user_id") or ""),
             "repository": _repository_public(binding.get("repo_source")),
         }
+        command.update(
+            {
+                "auth_method": str(profile.get("auth_method") or ""),
+                "account_hint": str(profile.get("account_hint") or ""),
+                "performer_binding_generation": int(profile.get("generation") or 1),
+            }
+        )
+        return command
 
     async def acknowledge_project_binding(
         self,

@@ -20,6 +20,8 @@ class PodiumConfig:
     linear_application_version: int = 1
     linear_reconciliation_interval_seconds: int = 15
     linear_reconciliation_page_size: int = 50
+    performer_profile_dir: str = ""
+    performer_profile_name: str = "default"
 
     @classmethod
     def from_env(cls) -> PodiumConfig:
@@ -41,6 +43,8 @@ class PodiumConfig:
                 15,
             ),
             linear_reconciliation_page_size=_env_int("PODIUM_LINEAR_RECONCILIATION_PAGE_SIZE", 50),
+            performer_profile_dir=os.environ.get("PODIUM_PERFORMER_PROFILE_DIR", "").strip(),
+            performer_profile_name=os.environ.get("PODIUM_PERFORMER_PROFILE_NAME", "default").strip() or "default",
         )
 
 

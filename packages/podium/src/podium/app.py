@@ -26,6 +26,7 @@ from .podium_linear_installations import PodiumLinearInstallationsMixin
 from .podium_linear_cutover import PodiumLinearCutoverMixin
 from .podium_linear_projects import PodiumLinearProjectsMixin
 from .podium_project_bindings import PodiumProjectBindingsMixin
+from .podium_performer_profiles import PodiumPerformerProfilesMixin
 from .podium_project_labels import PodiumProjectLabelsMixin
 from .podium_project_replacements import PodiumProjectReplacementsMixin
 from .podium_routes_conductor_bindings import register_conductor_binding_routes
@@ -273,6 +274,7 @@ class ManagedPodiumState(
     PodiumConductorsMixin,
     PodiumProjectLabelsMixin,
     PodiumProjectBindingsMixin,
+    PodiumPerformerProfilesMixin,
     PodiumProjectReplacementsMixin,
     PodiumRuntimeMixin,
     PodiumSmokeChecksMixin,
