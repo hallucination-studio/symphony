@@ -9,7 +9,6 @@ from fastapi import FastAPI, Header, Request
 from fastapi.responses import JSONResponse
 
 from .linear_token_service import LinearTokenUnavailable
-from .podium_routes_runtime_helpers import linear_installation_actor_is_app, linear_payload_is_mutation
 from .podium_shared import utc_now_iso
 from .podium_state import SecretDecryptionError
 
@@ -182,9 +181,11 @@ async def _validate_proxy_token(
     upstream_token: str,
     error_response: ErrorResponse,
 ) -> JSONResponse | None:
-    if not linear_payload_is_mutation(payload) or not upstream_token:
+    query = str(payload.get("query") or "").lstrip().lower()
+    if not (query.startswith("mutation") or "\nmutation" in query) or not upstream_token:
         return None
-    if linear_installation_actor_is_app(installation):
+    actor = str((installation or {}).get("actor") or (installation or {}).get("token_actor") or "").strip().lower()
+    if actor in {"app", "application"}:
         return None
     await state.record_proxy_audit(
         {

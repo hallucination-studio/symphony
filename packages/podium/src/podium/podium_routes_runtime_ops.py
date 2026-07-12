@@ -5,7 +5,6 @@ from typing import Any, Awaitable, Callable
 
 from fastapi import FastAPI, Header, Request
 from fastapi.responses import JSONResponse
-from .podium_routes_runtime_helpers import managed_run_ack_payload
 from .podium_shared import dispatch_public, optional_int, runtime_group_alias
 from .podium_smoke_protocol import SmokeCheckError
 
@@ -50,7 +49,17 @@ def _register_runtime_dispatch_routes(app: FastAPI, *, state: Any, error_respons
             str(payload.get("status") or "accepted"),
             fencing_token=fencing_token,
             reason=payload.get("reason") if isinstance(payload.get("reason"), str) else None,
-            managed_run=managed_run_ack_payload(payload),
+            managed_run={
+                key: payload.get(key)
+                for key in (
+                    "run_id",
+                    "parent_issue_id",
+                    "active_work_item_id",
+                    "managed_run_state",
+                    "plan_version",
+                    "backend_session_id",
+                )
+            },
         )
         if dispatch is None:
             return error_response(404, "dispatch_not_found", "Dispatch not found")
