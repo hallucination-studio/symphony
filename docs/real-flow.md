@@ -12,6 +12,20 @@ export SYMPHONY_E2E_PROJECT_SLUG=MYPROJECT
 export SYMPHONY_E2E_PODIUM_URL=https://podium.example
 ```
 
+The seed may be created from an official ChatGPT login without an API token:
+
+```bash
+mkdir -p /path/to/staged-seed
+CODEX_HOME=/path/to/staged-seed codex login
+```
+
+For deterministic managed runs, set `cli_auth_credentials_store = "file"` in
+that staged home's `config.toml` and verify that it contains the approved
+`auth.json`. The runner copies approved seed files into each isolated attempt;
+it never reads `~/.codex`, uploads `auth.json`, or places a token in Podium.
+Codex refreshes ChatGPT OAuth credentials during use; any refresh remains on
+the Conductor machine.
+
 The read-only project preflight uses `LINEAR_API_KEY` when set, otherwise the
 existing `PODIUM_LINEAR_APP_ACCESS_TOKEN` from the sourced environment. It
 never writes either credential to the report or passes it to the managed

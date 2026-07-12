@@ -6,6 +6,11 @@ contraction plans. [`spec.md`](spec.md) is the product contract;
 [`todo.md`](todo.md) is the current work checklist; [`docs/modules`](../docs/modules/README.md)
 records one design baseline per module.
 
+The approved Codex configuration slice additionally follows
+[`ADR-0003`](../docs/decisions/0003-podium-managed-codex-config-and-local-login.md):
+Podium manages only non-secret config, while official `codex login` credentials
+stay local to Conductor.
+
 ## Outcome
 
 ```text
@@ -61,6 +66,9 @@ HTTP API is separate from that transport.
 - The Gate rule is documented consistently with the retained implementation:
   commands pass, Codex returns `passed=true`, and score meets threshold. This
   documentation reconciliation does not change Gate behavior.
+- Managed Codex authentication may be ChatGPT OAuth from `codex login` without
+  an API token. The deterministic E2E path uses a fixed local staged seed;
+  credentials remain outside the Podium command payload.
 
 ## Current Module Baselines
 
@@ -102,10 +110,13 @@ HTTP API is separate from that transport.
 
 ## Remaining Work
 
-1. Keep the sanitized evidence projection contract covered by the existing
+1. Implement and verify the Podium-managed, versioned non-secret Codex config
+   file carried by `project.configure`. Conductor must persist and materialize
+   the config per attempt while leaving local login credentials untouched.
+2. Keep the sanitized evidence projection contract covered by the existing
    operator and Linear surfaces. No new runner, endpoint, or evidence child-issue
    tree is allowed.
-2. Run a scoped real Linear/OAuth/Codex product flow after the local rebuild.
+3. Run a scoped real Linear/OAuth/Codex product flow after the local rebuild.
    The fixture now reaches the current Linear API; the configured project probe
    records a sanitized `http_401` credential failure in
    `.test-real-flow/mvp-real-probe.json`. Missing project/Podium variables still

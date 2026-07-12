@@ -34,10 +34,18 @@ does not fall back to a deployment-wide Linear token.
 
 ## Local Codex isolation
 
-Conductor stages an isolated `CODEX_HOME` per managed turn and captures
-sanitized Performer output. Secret configuration uses `$VAR` indirection;
-values are validated but not returned in reports, Linear comments, or logs.
-Missing or invalid setup fails visibly with a sanitized actionable reason.
+Podium owns only a validated non-secret Codex `config.toml`, delivered with a
+version/hash and policy revision. Conductor stages an isolated `CODEX_HOME` per
+managed turn and captures sanitized Performer output. `codex login` ChatGPT
+OAuth credentials remain a local Conductor concern: approved local Codex seed
+files are copied only from a fixed staged seed. The ambient `~/.codex` home is
+rejected.
+
+Codex performs OAuth refresh during use; credentials never enter Podium
+PostgreSQL, runtime commands, browser responses, Linear comments, logs, or
+managed-run reports. Secret configuration uses `$VAR` indirection; values are
+validated but not returned in reports, Linear comments, or logs. Missing or
+invalid config/auth setup fails closed with a sanitized actionable reason.
 
 ## Error visibility
 

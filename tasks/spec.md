@@ -147,9 +147,14 @@ POST /api/v1/runtime/commands/ack
 POST /api/v1/runtime/report
 ```
 
-The runtime report carries the current sanitized log tail and the small local
-Codex configuration summary needed by Podium views. There is no separate log
-chunk/fetch channel or Podium-owned runtime-config endpoint/table.
+The runtime report carries the current sanitized log tail and a small Codex
+configuration/readiness summary. Podium owns the binding-scoped, non-secret
+Codex `config.toml`, its version/hash, and policy revision. It sends that file
+content through the existing `project.configure` command; there is no
+credential upload and no separate log chunk/fetch channel. Podium may expose
+the safe config summary through the existing authenticated managed-runs
+response, but never returns config contents, `auth.json`, API keys, or access
+tokens.
 
 Runtime commands use `queued | leased | completed | failed`, a five-minute
 lease, and an integer fencing token. Lease selects the oldest queued or expired

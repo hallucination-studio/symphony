@@ -1,8 +1,9 @@
 # Minimal Polling Workflow Checklist
 
-Status: local MVP acceptance closure is complete; external Linear/OAuth/Codex
-verification is blocked by invalid credentials in the current environment. This
-checklist is the active scope ledger;
+Status: local MVP acceptance closure is complete; the approved Podium-managed
+Codex configuration/local-login slice is in progress. External
+Linear/OAuth/Codex verification remains blocked until the staged credentials
+and services are exercised. This checklist is the active scope ledger;
 `tasks/spec.md` remains the product contract.
 
 ## Fixed product decisions
@@ -24,7 +25,8 @@ checklist is the active scope ledger;
 ## Implemented simplification slices
 
 - [x] Consolidate Conductor persistence into one fresh `workflow.db`.
-- [x] Remove Podium runtime profile registry and Conductor profile input.
+- [ ] Replace the removed profile compatibility value with a Podium-owned,
+  binding-scoped non-secret Codex config version/hash and policy revision.
 - [x] Remove persisted runtime-group ownership; retain the deterministic public
   alias `group_{conductor_id}`.
 - [x] Collapse Conductor smoke/command wrappers into their unique owners.
@@ -71,6 +73,25 @@ checklist is the active scope ledger;
 - **Assumptions requiring approval:** none.
 - **Deferred ideas:** richer real-flow orchestration automation and optional Web
   rendering of detailed evidence remain outside this closure slice.
+
+## Podium-managed Codex configuration/local-login slice ledger
+
+- **Authorized:** Podium manages a versioned non-secret Codex `config.toml`,
+  delivers it through the existing runtime command polling, and Conductor
+  applies it to isolated Performer attempts. Official `codex login` ChatGPT
+  OAuth without an API token is a supported local credential source.
+- **Required consequences:** strict TOML/secret validation; durable version,
+  policy revision, and SHA-256; idempotent/stale command handling; isolated
+  attempt materialization; sanitized config/readiness and failure fields; local
+  OAuth credentials kept outside the command payload; focused tests and
+  real-flow evidence.
+- **Out of scope:** sending `auth.json`, keyring exports, API keys, or access
+  tokens through Podium; a Podium credential vault; a second runtime transport;
+  a new scheduler; or detailed credential rendering in Web/Linear.
+- **Assumptions requiring approval:** none; this slice is explicitly approved
+  by the user on 2026-07-12.
+- **Deferred ideas:** browser editing UI, managed credential brokerage, and
+  multi-Conductor shared auth rotation require a separate product decision.
 
 ## Current evidence-projection slice ledger
 

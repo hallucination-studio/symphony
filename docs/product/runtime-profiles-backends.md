@@ -1,16 +1,32 @@
 # Codex runtime
 
-Performer is Codex-only. Runtime configuration carries a version and policy
-revision for plan, execute, and gate turns. Any role-labelled profile keys in a
-Podium response are sanitized presentation data; they are not a backend
-registry or scheduling decision.
+Performer is Codex-only. Podium owns one binding-scoped, versioned non-secret
+`config.toml` and policy revision for plan, execute, and gate turns. Podium
+delivers it as an idempotent `runtime.config.apply` command over the existing
+authenticated runtime polling transport. Reports and Web views expose only the
+config version, SHA-256, policy revision, and sanitized credential readiness.
+
+This is a configuration document, not a backend/profile registry. It never
+contains `auth.json`, API keys, ChatGPT access tokens, keyring exports, or
+credential-bearing environment values.
 
 ## Isolation
 
-Conductor stages an approved seed into an isolated per-attempt `CODEX_HOME`.
-Only `config.toml`, `auth.json`, `version.json`, and `models_cache.json` may be
-copied. The default user home is rejected. A seed is supplied through a fixed
-environment variable and never printed in a report or log.
+Conductor materializes the accepted Podium config and a local credential source
+into an isolated per-attempt `CODEX_HOME`. Only `config.toml`, `auth.json`,
+`version.json`, and `models_cache.json` may be copied from a fixed staged seed;
+the default user home is rejected. The seed is supplied through an explicit
+local configuration and never printed in a report or log.
+
+Official `codex login` with ChatGPT OAuth is supported without an API token. The
+real-flow path uses a dedicated locally staged Codex home (and its approved
+`auth.json` when file-backed) and never reads the operator's ambient `~/.codex`.
+Codex owns login refresh; credentials remain local and are not uploaded to
+Podium.
+
+Missing or inaccessible local auth fails closed with a concrete sanitized
+reason such as `managed_codex_auth_required`, while an invalid Podium config
+fails with `managed_codex_config_invalid`.
 
 Every request/result carries `run_id`, `task_id` when applicable, `attempt_id`,
 `fencing_token`, and `turn_kind`. Performer echoes the exact context; Conductor
