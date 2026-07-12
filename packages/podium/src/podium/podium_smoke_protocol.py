@@ -4,8 +4,6 @@ import re
 from datetime import datetime, timezone
 from typing import Any
 
-from performer_api.runtime import RuntimeConfigEnvelope
-
 from .podium_shared import utc_now_iso
 
 
@@ -83,15 +81,6 @@ def aggregate_smoke_result(result: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def valid_runtime_config_version(config: Any, group_id: str) -> int:
-    try:
-        envelope = RuntimeConfigEnvelope.from_dict(config if isinstance(config, dict) else {})
-        envelope.validate()
-    except Exception:
-        return 0
-    return int(envelope.version) if envelope.runtime_group_id == group_id else 0
-
-
 def intake_ready(installation: dict[str, Any] | None) -> bool:
     if not installation:
         return False
@@ -136,7 +125,7 @@ def recommendation(name: str) -> str:
         "intake_health": "Restore healthy Linear reconciliation",
         "ready_bindings": "Bind every selected project to a ready Conductor",
         "runtime_connectivity": "Bring every bound Conductor online",
-        "runtime_config_validity": "Publish a valid runtime configuration",
+        "runtime_config_validity": "Verify the local Codex runtime",
     }[name]
 
 

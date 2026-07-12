@@ -3,13 +3,12 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from performer_api.runtime import RuntimeProfile, RuntimeRole
 from performer_api.turns import ExecuteResult, GateResult, TurnContext
 from performer_api.workflow import Plan, Task
 
 from .gate import AcceptanceGate
 from .runtime import PerformerRuntime
-from .runtime_backends import prepare_backend_environment
+from .runtime_backends import prepare_codex_environment
 from .store import ConductorStore
 from .workflow import Workflow
 
@@ -248,18 +247,9 @@ class WorkflowDriver:
         return self.runtime.accept_result(context, payload)
 
     def _runtime_environment(self, instance: Any, role: str, workspace: Path, attempt_id: str) -> dict[str, str]:
-        profiles = self.service._managed_run_runtime_config.get("profiles")
-        if not isinstance(profiles, dict):
-            raise RuntimeError("runtime_profiles_required")
-        profile_key = {"execute": "work_item", "gate": "plan"}.get(role, role)
-        raw = profiles.get(profile_key) or profiles.get(role)
-        if not isinstance(raw, dict):
-            raise RuntimeError(f"runtime_profile_missing:{profile_key}")
-        role_value = RuntimeRole.PLAN if profile_key == "plan" else RuntimeRole.EXECUTE
-        profile = RuntimeProfile.from_dict({**raw, "role": role_value.value})
-        return prepare_backend_environment(
+        _ = role
+        return prepare_codex_environment(
             Path(instance.instance_dir) / "state",
-            profile,
             workspace_path=workspace,
             home_scope=attempt_id,
         )
@@ -363,8 +353,7 @@ class WorkflowDriver:
         await self.service._managed_run_tracker(instance).comment_issue(issue_id, body)
 
     def _policy_revision(self) -> int:
-        raw = self.service._managed_run_runtime_config.get("version")
-        return int(raw or 1)
+        return 1
 
 
 def _task_description(task: Task) -> str:

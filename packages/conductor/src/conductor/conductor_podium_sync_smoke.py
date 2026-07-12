@@ -5,8 +5,6 @@ import os
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
-from performer_api.runtime import RuntimeConfigEnvelope
-
 from .conductor_models import utc_now_iso
 from .conductor_smoke_protocol import (
     SmokeCommandError,
@@ -67,11 +65,10 @@ class PodiumSmokeCheckMixin:
     async def _execute_smoke_check(self, command: dict[str, Any], instance: Any | None) -> dict[str, Any]:
         binding_ready = _binding_matches(instance, command)
         repository_ready = _repository_ready(instance, command)
-        config_ready = _runtime_config_ready(
-            self._managed_run_runtime_config,
-            self.store.get_settings().runtime_group_id,
-            int(command["runtime_config_version"]),
-        )
+        # Runtime configuration is local to this Conductor. Podium only checks
+        # that the enrolled runtime is alive; it no longer stores a profile
+        # registry that the worker must fetch.
+        config_ready = bool(instance is not None)
         proxy_ready = False
         label_ready = False
         proxy_reason = "Project binding identity did not match the smoke command"
@@ -189,20 +186,11 @@ def _repository_ready(instance: Any | None, command: dict[str, Any]) -> bool:
     )
 
 
-def _runtime_config_ready(raw: Any, runtime_group_id: str, expected_version: int) -> bool:
-    try:
-        config = RuntimeConfigEnvelope.from_dict(raw if isinstance(raw, dict) else {})
-        config.validate()
-    except Exception:
-        return False
-    return config.runtime_group_id == runtime_group_id and int(config.version) == expected_version
-
-
 def _first_failure(checks: dict[str, bool], proxy_reason: str) -> tuple[str, str, str, bool] | None:
     failures = (
         ("binding_identity", "smoke_binding_mismatch", "Conductor binding does not match Podium", "rebind_project"),
         ("repository_readiness", "repository_not_ready", "Bound repository is not ready", "fix_repository"),
-        ("runtime_config_validity", "runtime_config_not_applied", "Runtime config is not applied", "sync_runtime_config"),
+        ("runtime_config_validity", "runtime_runtime_unavailable", "Conductor runtime is unavailable", "restore_conductor"),
         ("linear_proxy_access", "linear_proxy_check_failed", proxy_reason, "restore_linear_proxy"),
         ("project_label_state", "managed_project_label_mismatch", "Managed project label is missing", "restore_project_label"),
     )

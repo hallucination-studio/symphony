@@ -179,13 +179,6 @@ POSTGRES_SCHEMA_STATEMENTS: Iterable[str] = (
             )
             """,
             """
-            CREATE TABLE IF NOT EXISTS runtime_configs (
-                runtime_group_id TEXT PRIMARY KEY,
-                config_json JSONB NOT NULL,
-                updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-            )
-            """,
-            """
             CREATE TABLE IF NOT EXISTS managed_run_views (
                 runtime_group_id TEXT PRIMARY KEY,
                 view_json JSONB NOT NULL,

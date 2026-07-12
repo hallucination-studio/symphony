@@ -47,36 +47,6 @@ def dispatch_public(dispatch: dict[str, Any]) -> dict[str, Any]:
         payload["managed_run_state"] = managed_run_state
     return payload
 
-def sanitize_runtime_config(value: Any, *, hide_runtime_sources: bool = False) -> dict[str, Any]:
-    if not isinstance(value, dict):
-        return {}
-    payload = dict(value)
-    profiles = payload.get("profiles")
-    if isinstance(profiles, dict):
-        payload["profiles"] = {
-            str(role): {
-                **(profile if isinstance(profile, dict) else {}),
-                "role": str((profile or {}).get("role") or role) if isinstance(profile, dict) else str(role),
-                "settings": _sanitize_profile_settings(
-                    profile.get("settings") if isinstance(profile, dict) and isinstance(profile.get("settings"), dict) else {},
-                    hide_runtime_sources=hide_runtime_sources,
-                ),
-            }
-            for role, profile in profiles.items()
-        }
-    return payload
-
-def _sanitize_profile_settings(settings: dict[str, Any], *, hide_runtime_sources: bool = False) -> dict[str, Any]:
-    sanitized: dict[str, Any] = {}
-    for key, value in settings.items():
-        lowered = str(key).lower()
-        if hide_runtime_sources and lowered in {"codex_home_source"}:
-            continue
-        if any(marker in lowered for marker in ("token", "secret", "password", "cookie", "api_key", "apikey")):
-            continue
-        sanitized[str(key)] = value
-    return sanitized
-
 def runtime_belongs_to_workspace(
     runtime: dict[str, Any],
     workspace_id: str,

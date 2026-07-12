@@ -1,15 +1,12 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from typing import Any, Awaitable, Callable
 
 from fastapi import FastAPI, Header, Request
 from fastapi.responses import JSONResponse
-from performer_api.runtime import RuntimeConfigEnvelope
-
 from .podium_routes_runtime_helpers import managed_run_ack_payload
-from .podium_shared import dispatch_public, optional_int, sanitize_runtime_config
+from .podium_shared import dispatch_public, optional_int
 
 RequireUser = Callable[[Request], Awaitable[dict[str, Any] | None]]
 ErrorResponse = Callable[[int, str, str], JSONResponse]
@@ -21,7 +18,6 @@ def register_runtime_ops_routes(
     _register_runtime_dispatch_routes(app, state=state, error_response=error_response)
     _register_runtime_command_routes(app, state=state, error_response=error_response)
     _register_runtime_report_endpoint(app, state=state, error_response=error_response)
-    _register_runtime_config_endpoints(app, state=state, error_response=error_response)
     _register_managed_run_view_endpoint(app, state=state, require_user=require_user, error_response=error_response)
     _register_runtime_log_routes(app, state=state, require_user=require_user, error_response=error_response)
 
@@ -118,53 +114,10 @@ def _register_runtime_report_endpoint(app: FastAPI, *, state: Any, error_respons
         managed_runs = payload.get("managed_runs") if isinstance(payload, dict) else None
         group_id = str(runtime.get("runtime_group_id") or "")
         if isinstance(managed_runs, dict):
-            await state.store.save_managed_run_view(group_id, sanitize_runtime_config(managed_runs))
-        config = await state.store.get_runtime_config(group_id) or {}
+            await state.store.save_managed_run_view(group_id, managed_runs)
         if isinstance(result, dict):
-            result = {**result, "config": config}
+            result = {**result, "config": {"version": 1, "profiles": {}}}
         return JSONResponse(result)
-
-
-def _register_runtime_config_endpoints(app: FastAPI, *, state: Any, error_response: ErrorResponse) -> None:
-    @app.post("/api/v1/runtime/config")
-    async def runtime_config_push(request: Request, authorization: str | None = Header(default=None)) -> JSONResponse:
-        runtime = await state.runtime_for_bearer(authorization or "")
-        if runtime is None:
-            return error_response(401, "unauthorized", "Unauthorized")
-        payload = await request.json()
-        if not isinstance(payload, dict):
-            return error_response(400, "invalid_config", "Runtime config must be a JSON object")
-        return await _save_runtime_config(state, runtime, payload, error_response)
-
-    @app.get("/api/v1/runtime/config")
-    async def runtime_config_read(authorization: str | None = Header(default=None)) -> JSONResponse:
-        runtime = await state.runtime_for_bearer(authorization or "")
-        if runtime is None:
-            return error_response(401, "unauthorized", "Unauthorized")
-        group_id = str(runtime.get("runtime_group_id") or "")
-        return JSONResponse({"config": await state.store.get_runtime_config(group_id) or {}})
-
-
-async def _save_runtime_config(
-    state: Any, runtime: dict[str, Any], payload: dict[str, Any], error_response: ErrorResponse
-) -> JSONResponse:
-    group_id = str(runtime.get("runtime_group_id") or "")
-    config = {"runtime_group_id": group_id, **payload}
-    try:
-        RuntimeConfigEnvelope.from_dict(config).validate()
-    except Exception as exc:
-        response = error_response(400, "invalid_runtime_config", "Runtime config failed managed-run validation")
-        body = json.loads(response.body.decode("utf-8"))
-        body["error"]["details"] = str(exc)
-        return JSONResponse(body, status_code=400)
-    sanitized = sanitize_runtime_config(config)
-    version = optional_int(sanitized.get("version"), 0) or 0
-    current = await state.store.get_runtime_config(group_id)
-    current_version = optional_int((current or {}).get("version"), 0) or 0
-    if version <= current_version:
-        return error_response(409, "stale_runtime_config", "Runtime config version must increase")
-    await state.store.save_runtime_config(group_id, sanitized)
-    return JSONResponse({"accepted": True, "config": sanitized})
 
 
 def _register_managed_run_view_endpoint(
@@ -207,15 +160,10 @@ async def _managed_run_report(
 ) -> dict[str, Any]:
     conductor_id = str(conductor.get("id") or "")
     group_id = str(conductor.get("runtime_group_id") or "")
-    config, view, online = await asyncio.gather(
-        state.store.get_runtime_config(group_id),
+    view, online = await asyncio.gather(
         state.store.get_managed_run_view(group_id),
         state.is_runtime_online(conductor_id),
     )
-    config = config or {}
-    browser_config = sanitize_runtime_config(config, hide_runtime_sources=True)
-    policy = browser_config.get("managed_run_policy")
-    managed_run_policy = policy if isinstance(policy, dict) else {}
     return {
         "conductor": {
             "id": conductor_id,
@@ -236,11 +184,8 @@ async def _managed_run_report(
             "sanitized_reason": str(binding.get("sanitized_reason") or ""),
         },
         "runtime_group_id": group_id,
-        "policy_revision": optional_int(
-            managed_run_policy.get("version"),
-            optional_int(browser_config.get("version"), 0),
-        ) or 0,
-        "profiles": browser_config.get("profiles") if isinstance(browser_config.get("profiles"), dict) else {},
+        "policy_revision": 1,
+        "profiles": {},
         "managed_runs": view or {},
     }
 

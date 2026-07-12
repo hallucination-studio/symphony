@@ -186,21 +186,6 @@ class PgRuntimeMixin:
             return None
         return {"runtime_id": str(row["runtime_id"]), "last_seen_at": row["last_seen_at"].isoformat(), "expires_at": row["expires_at"].isoformat()}
 
-    async def save_runtime_config(self, runtime_group_id: str, config: dict[str, Any]) -> None:
-        await self.pool.execute(
-            """
-            INSERT INTO runtime_configs (runtime_group_id, config_json, updated_at)
-            VALUES ($1,$2::jsonb,now())
-            ON CONFLICT (runtime_group_id) DO UPDATE SET config_json = EXCLUDED.config_json, updated_at = now()
-            """,
-            runtime_group_id,
-            _pg_json(config),
-        )
-
-    async def get_runtime_config(self, runtime_group_id: str) -> dict[str, Any] | None:
-        row = await self.pool.fetchrow("SELECT config_json FROM runtime_configs WHERE runtime_group_id = $1", runtime_group_id)
-        return dict(_pg_json_value(row["config_json"], {})) if row is not None else None
-
     async def append_runtime_command(self, runtime_id: str, command: dict[str, Any]) -> dict[str, Any]:
         row = await self.pool.fetchrow(
             """

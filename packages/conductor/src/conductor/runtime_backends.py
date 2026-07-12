@@ -3,153 +3,74 @@ from __future__ import annotations
 import json
 import os
 import shutil
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol
-
-from performer_api.runtime import RuntimeProfile
+from typing import Any
 
 from .conductor_runtime_config import sanitize_codex_config_template
 
 
-@dataclass(frozen=True)
-class BackendEnvironmentContext:
-    instance_state_root: Path
-    profile: RuntimeProfile
-    workspace_path: Path | None = None
-    home_scope: str | None = None
+_CODEX_ENV_KEYS = (
+    "CODEX_MODEL",
+    "CODEX_SDK_CODEX_BIN",
+    "CODEX_SANDBOX",
+    "CODEX_CONFIG_OVERRIDES",
+    "CODEX_HARD_TURN_TIMEOUT_MS",
+    "CODEX_READ_TIMEOUT_MS",
+    "CODEX_INIT_MAX_ATTEMPTS",
+    "CODEX_INIT_BACKOFF_MS",
+    "CODEX_INIT_BACKOFF_MAX_MS",
+    "CODEX_OVERLOAD_MAX_ATTEMPTS",
+    "CODEX_OVERLOAD_INITIAL_DELAY_MS",
+    "CODEX_OVERLOAD_MAX_DELAY_MS",
+)
 
 
-class RuntimeBackendProvider(Protocol):
-    name: str
-
-    def prepare_environment(self, context: BackendEnvironmentContext) -> dict[str, str]:
-        ...
-
-
-class RuntimeBackendRegistry:
-    def __init__(self, providers: list[RuntimeBackendProvider]):
-        self._providers = {provider.name: provider for provider in providers}
-
-    def prepare_environment(
-        self,
-        instance_state_root: Path,
-        profile: RuntimeProfile | None,
-        *,
-        workspace_path: Path | str | None = None,
-        home_scope: str | None = None,
-    ) -> dict[str, str]:
-        if profile is None:
-            raise ValueError("runtime profile is required for managed mode attempts")
-        provider = self._providers.get(profile.backend)
-        if provider is None:
-            raise ValueError(f"unsupported runtime backend for {profile.role.value}: {profile.backend}")
-        workspace = Path(workspace_path) if workspace_path is not None else None
-        return provider.prepare_environment(
-            BackendEnvironmentContext(
-                instance_state_root=instance_state_root,
-                profile=profile,
-                workspace_path=workspace,
-                home_scope=home_scope,
-            )
-        )
-
-
-class CodexRuntimeBackendProvider:
-    name = "codex"
-
-    def prepare_environment(self, context: BackendEnvironmentContext) -> dict[str, str]:
-        profile = context.profile
-        codex_home = _runtime_home_root(context, "codex")
-        try:
-            codex_home.mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
-            raise ValueError(f"isolated CODEX_HOME could not be materialized: {codex_home}") from exc
-        if not codex_home.is_dir():
-            raise ValueError(f"isolated CODEX_HOME could not be materialized: {codex_home}")
-        source = _resolve_codex_home_source(profile.settings.get("codex_home_source"))
-        if source is not None:
-            _copy_codex_home_seed(source, codex_home)
-        if context.workspace_path is not None:
-            _trust_codex_project(codex_home / "config.toml", context.workspace_path)
-        env = {"CODEX_HOME": str(codex_home)}
-        model = profile.settings.get("model")
-        if model is not None:
-            env["CODEX_MODEL"] = str(model)
-        for key in (
-            "sdk_codex_bin",
-            "sandbox",
-            "hard_turn_timeout_ms",
-            "read_timeout_ms",
-            "init_max_attempts",
-            "init_backoff_ms",
-            "init_backoff_max_ms",
-            "overload_max_attempts",
-            "overload_initial_delay_ms",
-            "overload_max_delay_ms",
-        ):
-            value = profile.settings.get(key)
-            if value is not None:
-                env[f"CODEX_{key.upper()}"] = str(value)
-        config_overrides = profile.settings.get("config_overrides")
-        if isinstance(config_overrides, list):
-            env["CODEX_CONFIG_OVERRIDES"] = json.dumps([str(item) for item in config_overrides])
-        return env
-
-
-def default_runtime_backend_registry() -> RuntimeBackendRegistry:
-    return RuntimeBackendRegistry([CodexRuntimeBackendProvider()])
-
-
-def prepare_backend_environment(
+def prepare_codex_environment(
     instance_state_root: Path,
-    profile: RuntimeProfile | None,
     *,
     workspace_path: Path | str | None = None,
     home_scope: str | None = None,
 ) -> dict[str, str]:
-    return default_runtime_backend_registry().prepare_environment(
-        instance_state_root,
-        profile,
-        workspace_path=workspace_path,
-        home_scope=home_scope,
-    )
+    """Create one isolated Codex home for a single fenced attempt.
+
+    The seed is deliberately supplied by the Conductor environment. It is never
+    discovered from the user's default ``~/.codex`` directory.
+    """
+    codex_home = instance_state_root / "runtime-homes" / _safe_scope(home_scope or "attempt") / "codex"
+    try:
+        codex_home.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise ValueError(f"isolated CODEX_HOME could not be materialized: {codex_home}") from exc
+    if not codex_home.is_dir():
+        raise ValueError(f"isolated CODEX_HOME could not be materialized: {codex_home}")
+
+    source = _codex_seed_from_environment()
+    if source is not None:
+        _copy_codex_home_seed(source, codex_home)
+    if workspace_path is not None:
+        _trust_codex_project(codex_home / "config.toml", Path(workspace_path))
+
+    env = {"CODEX_HOME": str(codex_home)}
+    for key in _CODEX_ENV_KEYS:
+        value = os.environ.get(key)
+        if value:
+            env[key] = value
+    return env
 
 
-def _runtime_home_root(context: BackendEnvironmentContext, backend_name: str) -> Path:
-    base = _runtime_mode_home_root(context)
-    if context.home_scope:
-        return base / _safe_home_scope(context.home_scope) / backend_name
-    return base / backend_name
-
-
-def _runtime_mode_home_root(context: BackendEnvironmentContext) -> Path:
-    return context.instance_state_root / "runtime-homes" / context.profile.role.value
-
-
-def _safe_home_scope(value: str) -> str:
-    return "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in value)[:160] or "attempt"
-
-
-def _resolve_codex_home_source(value: Any) -> Path | None:
-    if value is None:
-        return None
-    raw = str(value).strip()
+def _codex_seed_from_environment() -> Path | None:
+    raw = (os.environ.get("SYMPHONY_E2E_CODEX_HOME_SEED") or os.environ.get("CODEX_HOME_SOURCE") or "").strip()
     if not raw:
         return None
-    if not raw.startswith("$"):
-        raise ValueError("codex_home_source must be injected through an environment variable")
-    env_name = raw[1:]
-    if not env_name:
-        raise ValueError("codex_home_source environment variable name is empty")
-    raw = os.environ.get(env_name, "").strip()
+    if raw.startswith("$"):
+        raw = os.environ.get(raw[1:], "").strip()
     if not raw:
-        raise ValueError(f"codex_home_source environment variable is not set: {env_name}")
+        return None
     source = Path(raw).expanduser().resolve()
     if source.name == ".codex":
-        raise ValueError("codex_home_source must point to a fixed copied seed, not the default user .codex directory")
+        raise ValueError("Codex seed must be a fixed copied directory, not ~/.codex")
     if not source.is_dir():
-        raise ValueError(f"codex_home_source is not a directory: {source}")
+        raise ValueError(f"Codex seed is not a directory: {source}")
     return source
 
 
@@ -178,3 +99,10 @@ def _trust_codex_project(config_path: Path, workspace_path: Path) -> None:
         return
     suffix = "" if not existing or existing.endswith("\n") else "\n"
     config_path.write_text(f"{existing}{suffix}\n{header}\ntrust_level = \"trusted\"\n", encoding="utf-8")
+
+
+def _safe_scope(value: Any) -> str:
+    return "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in str(value))[:160] or "attempt"
+
+
+__all__ = ["prepare_codex_environment"]

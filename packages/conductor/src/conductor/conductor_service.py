@@ -47,7 +47,6 @@ class ConductorService(ConductorPodiumSyncMixin, ConductorServiceViewsMixin):
         self.performer_runtime = PerformerRuntime()
         self.acceptance_gate = AcceptanceGate()
         self.smoke_check_store = ConductorSmokeCheckStore(store)
-        self._managed_run_runtime_config: dict[str, Any] = {}
         self._smoke_check_lock = asyncio.Lock()
         self._startup_locks: dict[str, asyncio.Lock] = {}
         self.managed_run_tracker_factory = self._managed_run_tracker

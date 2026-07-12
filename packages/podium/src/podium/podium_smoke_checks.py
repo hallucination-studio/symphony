@@ -15,7 +15,6 @@ from .podium_smoke_protocol import (
     recommendation,
     repository_public,
     result_fingerprint,
-    valid_runtime_config_version,
     validate_runtime_result,
 )
 
@@ -193,9 +192,7 @@ class PodiumSmokeChecksMixin:
         runtime = await self.store.get_runtime(runtime_id)
         group_id = str((runtime or {}).get("runtime_group_id") or "")
         group = await self.store.get_runtime_group(group_id)
-        config = await self.store.get_runtime_config(group_id)
         repository = repository_public(binding.get("repo_source"))
-        config_version = valid_runtime_config_version(config, group_id)
         binding_ready = bool(
             runtime
             and runtime.get("enrollment_state") == "enrolled"
@@ -222,7 +219,7 @@ class PodiumSmokeChecksMixin:
             "linear_project_id": str(binding.get("linear_project_id") or ""),
             "project_slug": str(binding.get("project_slug") or ""),
             "binding_config_version": int(binding.get("config_version") or 0),
-            "runtime_config_version": config_version,
+            "runtime_config_version": int(binding.get("config_version") or 0),
             "repository": repository,
             "expected_label": {
                 "id": str(binding.get("label_id") or ""),
@@ -236,7 +233,7 @@ class PodiumSmokeChecksMixin:
             "next_action": "",
             "_binding_ready": binding_ready,
             "_runtime_ready": bool(runtime_id and await self.is_runtime_online(runtime_id)),
-            "_config_ready": config_version > 0,
+            "_config_ready": bool(runtime_id),
         }
 
     async def _enqueue_smoke_commands(self, result: dict[str, Any]) -> None:

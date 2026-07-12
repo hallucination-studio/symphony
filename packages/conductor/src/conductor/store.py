@@ -636,18 +636,6 @@ class ConductorStore:
                 );
                 """
             )
-            for column in ("linear_issue_id", "linear_identifier"):
-                try:
-                    connection.execute(f"ALTER TABLE runtime_waits ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
-                except sqlite3.OperationalError as exc:
-                    if "duplicate column name" not in str(exc).lower():
-                        raise
-            for column in ("linear_issue_id", "linear_identifier", "linear_state"):
-                try:
-                    connection.execute(f"ALTER TABLE tasks ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
-                except sqlite3.OperationalError as exc:
-                    if "duplicate column name" not in str(exc).lower():
-                        raise
 
 
 def _run(row: sqlite3.Row) -> dict[str, Any]:

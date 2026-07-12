@@ -6,7 +6,6 @@ import httpx
 import re
 
 from .conductor_service_helpers import _desired_project_labels, _hostname, _linear_agent_app_user_id
-from performer_api.runtime import RuntimeConfigEnvelope
 
 
 class PodiumReportMixin:
@@ -94,30 +93,7 @@ class PodiumReportMixin:
             return {"status": "skipped", "reason": "runtime_unauthorized"}
         response.raise_for_status()
         payload = response.json()
-        if isinstance(payload, dict):
-            self._apply_runtime_config_payload(payload.get("config"))
         return payload if isinstance(payload, dict) else {"status": "ok"}
-
-    def _apply_runtime_config_payload(self, payload: Any) -> bool:
-        if not isinstance(payload, dict) or not payload:
-            return False
-        try:
-            envelope = RuntimeConfigEnvelope.from_dict(payload)
-            envelope.validate()
-        except Exception as exc:
-            self._record_managed_run_sync_failure(
-                "runtime_config_apply_failed",
-                None,
-                exc,
-                action_required="fix_runtime_config",
-                extra={
-                    "runtime_group_id": payload.get("runtime_group_id"),
-                    "version": payload.get("version"),
-                },
-            )
-            return False
-        self._managed_run_runtime_config = envelope.to_dict()
-        return True
 
 
 def _unbound_binding_report(instance: Any) -> dict[str, Any]:
