@@ -8,7 +8,6 @@ from performer_api.workflow import Plan, Task
 
 from .gate import AcceptanceGate
 from .runtime import PerformerRuntime
-from .runtime_backends import prepare_codex_environment
 from .store import ConductorStore
 from .workflow import Workflow
 
@@ -248,7 +247,7 @@ class WorkflowDriver:
 
     def _runtime_environment(self, instance: Any, role: str, workspace: Path, attempt_id: str) -> dict[str, str]:
         _ = role
-        return prepare_codex_environment(
+        return self.runtime.prepare_environment(
             Path(instance.instance_dir) / "state",
             workspace_path=workspace,
             home_scope=attempt_id,
