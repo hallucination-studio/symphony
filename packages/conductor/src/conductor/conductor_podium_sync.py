@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import logging
+import os
 from pathlib import Path
 import re
 from typing import Any
@@ -8,15 +10,16 @@ from typing import Any
 import httpx
 
 from .models import InstanceCreateRequest, InstancePatchRequest
-from .conductor_podium_sync_smoke import PodiumSmokeCheckMixin
+from .conductor_smoke_protocol import SmokeCommandError, normalize_smoke_command, sanitize_reason, smoke_result
 from .conductor_service_helpers import _desired_project_labels, _hostname, _linear_agent_app_user_id, _optional_int
 from .conductor_service_types import ConductorServiceError, CoordinationResult
 from .workflow_driver import WorkflowDriver
 
 
-class ConductorPodiumSyncMixin(
-    PodiumSmokeCheckMixin,
-):
+LOGGER = logging.getLogger(__name__)
+
+
+class ConductorPodiumSyncMixin:
     async def coordinate_background_once(self) -> CoordinationResult:
         self._managed_run_reconcile_findings: list[dict[str, Any]] = []
         managed_run_driver = await WorkflowDriver(self).drive_once()
@@ -67,15 +70,10 @@ class ConductorPodiumSyncMixin(
                 synced += 1
         return synced
 
-    async def handle_podium_command(
-        self,
-        command: dict[str, Any],
-        *,
-        post_smoke_result: Any | None = None,
-    ) -> dict[str, Any]:
+    async def handle_podium_command(self, command: dict[str, Any]) -> dict[str, Any]:
         kind = str(command.get("type") or "")
         if kind == "smoke.check":
-            return await self.handle_smoke_check(command, post_smoke_result=post_smoke_result)
+            return await self.handle_smoke_check(command)
         if kind == "project.configure":
             return self._handle_project_configure(command)
         if kind == "project.unconfigure":
@@ -85,6 +83,58 @@ class ConductorPodiumSyncMixin(
         if kind == "project.activate_installation":
             return self._handle_installation_activate(command)
         return {"status": "ignored", "reason": "unsupported_command"}
+
+    async def handle_smoke_check(self, raw_command: dict[str, Any]) -> dict[str, Any]:
+        try:
+            command = normalize_smoke_command(raw_command)
+        except SmokeCommandError as exc:
+            _log_invalid_smoke_command(exc, self._smoke_instance(), self.store.get_settings())
+            return {"status": "rejected", "reason": exc.code}
+        async with self._smoke_check_lock:
+            instance = self._smoke_instance()
+            settings = self.store.get_settings()
+            _log_smoke_started(command, instance, settings)
+            result = await self._execute_smoke_check(command, instance)
+            _log_smoke_completed(command, result, instance, settings)
+            return {"status": "completed" if result["status"] == "passed" else "failed", "result": result}
+
+    async def _execute_smoke_check(self, command: dict[str, Any], instance: Any | None) -> dict[str, Any]:
+        binding_ready = _binding_matches(instance, command)
+        repository_ready = _repository_ready(instance, command)
+        config_ready = bool(instance is not None)
+        proxy_ready = False
+        label_ready = False
+        proxy_reason = "Project binding identity did not match the smoke command"
+        if binding_ready and instance is not None:
+            try:
+                proxy = self.project_label_proxy_factory(instance)
+                project_id = await proxy.find_project_id(command["project_slug"])
+                proxy_ready = project_id == command["linear_project_id"]
+                if proxy_ready:
+                    labels = await proxy.fetch_project_labels(str(project_id))
+                    expected = command["expected_label"]
+                    label_ready = any(
+                        str(label.get("id") or "") == expected["id"]
+                        or str(label.get("name") or "") == expected["name"]
+                        for label in labels
+                        if isinstance(label, dict)
+                    )
+                else:
+                    proxy_reason = "Linear proxy returned a different project identity"
+            except Exception as exc:
+                proxy_reason = sanitize_reason(exc)
+        checks = {
+            "binding_identity": binding_ready,
+            "repository_readiness": repository_ready,
+            "linear_proxy_access": proxy_ready,
+            "runtime_config_validity": config_ready,
+            "project_label_state": label_ready,
+        }
+        return smoke_result(command, checks, _first_smoke_failure(checks, proxy_reason))
+
+    def _smoke_instance(self) -> Any | None:
+        instances = self.store.list_instances()
+        return instances[0] if len(instances) == 1 else None
 
     def _handle_project_configure(self, command: dict[str, Any]) -> dict[str, Any]:
         project_id = str(command.get("linear_project_id") or "")
@@ -501,7 +551,90 @@ class ConductorPodiumSyncMixin(
         return finding
 
 
-def _append_instance_log(instance: Any, message: str) -> None:
+def _binding_matches(instance: Any | None, command: dict[str, Any]) -> bool:
+    if instance is None:
+        return False
+    filters = instance.linear_filters
+    return bool(
+        str(filters.get("binding_id") or "") == command["binding_id"]
+        and int(filters.get("binding_config_version") or 0) == command["config_version"]
+        and str(filters.get("linear_project_id") or "") == command["linear_project_id"]
+        and instance.linear_project == command["project_slug"]
+    )
+
+
+def _repository_ready(instance: Any | None, command: dict[str, Any]) -> bool:
+    if instance is None:
+        return False
+    expected_type = "git" if command["repository"]["mode"] == "git_url" else "local_path"
+    path = Path(instance.resolved_repo_path)
+    return bool(
+        instance.repo_source_type == expected_type
+        and instance.repo_source_value == command["repository"]["value"]
+        and path.is_dir()
+        and os.access(path, os.R_OK | os.X_OK)
+    )
+
+
+def _first_smoke_failure(checks: dict[str, bool], proxy_reason: str) -> tuple[str, str, str, bool] | None:
+    failures = (
+        ("binding_identity", "smoke_binding_mismatch", "Conductor binding does not match Podium", "rebind_project"),
+        ("repository_readiness", "repository_not_ready", "Bound repository is not ready", "fix_repository"),
+        ("runtime_config_validity", "runtime_runtime_unavailable", "Conductor runtime is unavailable", "restore_conductor"),
+        ("linear_proxy_access", "linear_proxy_check_failed", proxy_reason, "restore_linear_proxy"),
+        ("project_label_state", "managed_project_label_mismatch", "Managed project label is missing", "restore_project_label"),
+    )
+    for name, code, reason, action in failures:
+        if not checks[name]:
+            return code, reason, action, True
+    return None
+
+
+def _log_smoke_started(command: dict[str, Any], instance: Any | None, settings: Any) -> None:
+    message = _smoke_event_fields("conductor_smoke_check_started", command, instance, settings)
+    LOGGER.info(message)
+    _append_instance_log(instance, message)
+
+
+def _log_smoke_completed(command: dict[str, Any], result: dict[str, Any], instance: Any | None, settings: Any) -> None:
+    message = (
+        f"{_smoke_event_fields('conductor_smoke_check_completed', command, instance, settings)} status={result['status']} "
+        f"error_type={'ConductorSmokeCheckError' if result['status'] == 'failed' else '-'} "
+        f"error_code={result['error_code'] or '-'} sanitized_reason={result['sanitized_reason'] or '-'} "
+        f"action_required={result['action_required'] or '-'} retryable={str(result['retryable']).lower()} "
+        f"next_action={result['next_action'] or '-'}"
+    )
+    (LOGGER.error if result["status"] == "failed" else LOGGER.info)(message)
+    _append_instance_log(instance, message)
+
+
+def _log_invalid_smoke_command(error: SmokeCommandError, instance: Any | None, settings: Any) -> None:
+    message = (
+        f"event=conductor_smoke_command_rejected {_smoke_runtime_fields(settings, instance)} "
+        f"error_type=SmokeCommandError error_code={error.code} sanitized_reason={error.reason} "
+        "action_required=retry_smoke_check retryable=false next_action=inspect_podium_command"
+    )
+    LOGGER.error(message)
+    _append_instance_log(instance, message)
+
+
+def _smoke_event_fields(event: str, command: dict[str, Any], instance: Any | None, settings: Any) -> str:
+    return (
+        f"event={event} {_smoke_runtime_fields(settings, instance)} smoke_check_id={command['smoke_check_id']} "
+        f"binding_id={command['binding_id']} linear_project_id={command['linear_project_id']}"
+    )
+
+
+def _smoke_runtime_fields(settings: Any, instance: Any | None) -> str:
+    runtime_id = settings.podium_runtime_id or settings.conductor_id or "-"
+    return (
+        f"runtime_group_id={settings.runtime_group_id or '-'} runtime_id={runtime_id} "
+        f"conductor_id={settings.conductor_id or runtime_id} "
+        f"instance_id={getattr(instance, 'id', '-') if instance else '-'}"
+    )
+
+
+def _append_instance_log(instance: Any | None, message: str) -> None:
     log_path = getattr(instance, "log_path", None)
     if not log_path:
         return
@@ -511,7 +644,7 @@ def _append_instance_log(instance: Any, message: str) -> None:
         with path.open("a", encoding="utf-8") as handle:
             handle.write(f"{datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')} {message}\n")
     except OSError:
-        return
+        LOGGER.warning("event=conductor_instance_log_write_failed instance_id=%s", getattr(instance, "id", "-"))
 
 
 def _sanitize_error(exc: Exception | str) -> str:

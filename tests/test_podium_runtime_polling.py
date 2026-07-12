@@ -9,7 +9,7 @@ import pytest
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from conductor.podium_client import PodiumRuntimeClient
+from conductor.conductor_api import ConductorApiServer
 from podium.linear_reconciliation import BindingScanResult, LinearReconciler
 from podium.linear_reconciliation_model import active_blocker_ids
 from podium.podium_dispatch import PodiumDispatchMixin
@@ -184,7 +184,7 @@ class FakePodiumService:
         )
         self.commands: list[dict[str, Any]] = []
 
-    async def handle_podium_command(self, command: dict[str, Any], *, post_smoke_result: Any) -> dict[str, Any]:
+    async def handle_podium_command(self, command: dict[str, Any]) -> dict[str, Any]:
         self.commands.append(command)
         return {"status": "applied", "instance_id": "instance-1"}
 
@@ -212,7 +212,7 @@ async def test_runtime_client_polls_and_acks_one_command() -> None:
         assert ack_payload["status"] == "completed"
         return httpx.Response(200, json={"command": {"id": 9, "status": "completed"}})
 
-    result = await PodiumRuntimeClient(service).poll_command_once(transport=httpx.MockTransport(handler))
+    result = await ConductorApiServer(service)._poll_command_once(transport=httpx.MockTransport(handler))
     assert result["status"] == "handled"
     assert service.commands == [{"type": "project.configure"}]
     assert ack_payload["result"]["command_type"] == "project.configure"
