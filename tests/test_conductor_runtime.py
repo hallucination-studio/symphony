@@ -38,3 +38,15 @@ def test_runtime_rejects_stale_fenced_result() -> None:
 
     with pytest.raises(StaleRuntimeResult, match="stale_fencing_token"):
         PerformerRuntime.accept_result(expected, stale)
+
+
+def test_runtime_writes_sanitized_instance_log_events(tmp_path) -> None:
+    runtime = PerformerRuntime()
+    log_path = tmp_path / "conductor.log"
+
+    runtime.append_event(log_path, "event=performer_turn_started token=secret-value")
+    runtime.append_event(log_path, "event=performer_turn_completed authorization: Bearer secret-value")
+
+    logs = runtime.read_log(log_path, tail=1, order="desc")
+    assert logs["lines"] == ["event=performer_turn_completed authorization: [REDACTED]"]
+    assert "secret-value" not in logs["logs"]

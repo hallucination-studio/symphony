@@ -242,8 +242,19 @@ class WorkflowDriver:
         paths = self.runtime.paths(root)
         env = self._runtime_environment(instance, role, Path(instance.workspace_root), context.attempt_id)
         self.runtime.write_request(paths, request)
-        payload = self.runtime.run(paths, codex_home=Path(env["CODEX_HOME"]), env=env)
-        return self.runtime.accept_result(context, payload)
+        event = _turn_log_fields(context, role, paths)
+        self.runtime.append_event(Path(instance.log_path), f"event=performer_turn_started {event}")
+        try:
+            payload = self.runtime.run(paths, codex_home=Path(env["CODEX_HOME"]), env=env)
+            accepted = self.runtime.accept_result(context, payload)
+        except Exception as exc:
+            self.runtime.append_event(
+                Path(instance.log_path),
+                f"event=performer_turn_failed {event} error_type={exc.__class__.__name__} sanitized_reason={_reason(exc)}",
+            )
+            raise
+        self.runtime.append_event(Path(instance.log_path), f"event=performer_turn_completed {event}")
+        return accepted
 
     def _runtime_environment(self, instance: Any, role: str, workspace: Path, attempt_id: str) -> dict[str, str]:
         _ = role
@@ -372,6 +383,20 @@ def _task_description(task: Task) -> str:
 def _issue_description(run: dict[str, Any]) -> str:
     payload = run.get("payload") if isinstance(run.get("payload"), dict) else {}
     return str(payload.get("issue_description") or payload.get("issue_title") or run.get("issue_identifier") or "")
+
+
+def _turn_log_fields(context: TurnContext, role: str, paths: Any) -> str:
+    return " ".join(
+        (
+            f"run_id={context.run_id}",
+            f"work_item_id={context.task_id or '-'}",
+            f"attempt_id={context.attempt_id}",
+            f"fencing_token={context.fencing_token}",
+            f"turn_kind={role}",
+            f"request_path={paths.request}",
+            f"result_path={paths.result}",
+        )
+    )
 
 
 def _reason(error: Exception) -> str:

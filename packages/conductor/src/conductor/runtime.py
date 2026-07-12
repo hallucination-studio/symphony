@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -105,6 +106,50 @@ class PerformerRuntime:
                 )
             else:
                 shutil.copy2(source_path, destination_path)
+
+    def append_event(self, log_path: Path, message: str) -> None:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("a", encoding="utf-8") as handle:
+            handle.write(f"{_sanitize_log_event(message)}\n")
+
+    def read_log(
+        self,
+        log_path: Path,
+        *,
+        tail: int | None = 200,
+        limit_bytes: int = 1_048_576,
+        previous: bool = False,
+        order: str = "desc",
+    ) -> dict[str, Any]:
+        normalized_order = "asc" if order == "asc" else "desc"
+        if previous or not log_path.exists():
+            return _empty_log(log_path, normalized_order)
+        try:
+            size = log_path.stat().st_size
+            maximum = min(size, max(int(limit_bytes), 0))
+            with log_path.open("rb") as handle:
+                handle.seek(size - maximum)
+                raw = handle.read(maximum)
+        except OSError:
+            return {**_empty_log(log_path, normalized_order), "warnings": ["log_read_failed"]}
+        if size > maximum and raw:
+            newline = raw.find(b"\n")
+            raw = raw[newline + 1 :] if newline >= 0 else b""
+        lines = raw.decode("utf-8", errors="replace").splitlines()
+        if tail is not None and tail > 0:
+            lines = lines[-tail:]
+        if normalized_order == "desc":
+            lines.reverse()
+        return {
+            "generation": None,
+            "path": str(log_path),
+            "order": normalized_order,
+            "lines": lines,
+            "logs": "\n".join(lines) + ("\n" if lines else ""),
+            "offset_start": size - len(raw),
+            "offset_end": size,
+            "warnings": [],
+        }
 
     def paths(self, run_root: Path) -> RuntimePaths:
         run_root.mkdir(parents=True, exist_ok=True)
@@ -211,6 +256,30 @@ def _append_config_line(output: list[str], line: str) -> None:
     if not line.strip() and (not output or not output[-1].strip()):
         return
     output.append(line)
+
+
+def _empty_log(log_path: Path, order: str) -> dict[str, Any]:
+    return {
+        "generation": None,
+        "path": str(log_path) if log_path.exists() else None,
+        "order": order,
+        "lines": [],
+        "logs": "",
+        "offset_start": 0,
+        "offset_end": 0,
+        "warnings": [],
+    }
+
+
+def _sanitize_log_event(value: str) -> str:
+    text = str(value).replace("\x00", " ").replace("\r", " ").replace("\n", " ").strip()
+    text = re.sub(r"(?i)(authorization:\s*)(bearer|basic)\s+[^\s,;]+", r"\1[REDACTED]", text)
+    text = re.sub(r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]+", r"\1 [REDACTED]", text)
+    return re.sub(
+        r"(?i)\b(access_token|refresh_token|api_key|token|password|client_secret|cookie)\s*[:=]\s*[^\s,;]+",
+        lambda match: f"{match.group(1)}=[REDACTED]",
+        text,
+    )
 
 
 __all__ = ["PerformerRuntime", "RuntimeExecutionError", "RuntimePaths", "StaleRuntimeResult"]
