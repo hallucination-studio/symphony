@@ -16,10 +16,7 @@ from .models import (
 from .gate import AcceptanceGate
 from .runtime import PerformerRuntime
 from .conductor_podium_sync import ConductorPodiumSyncMixin
-from .conductor_service_helpers import (
-    _linear_agent_app_user_id,
-    _runtime_metrics,
-)
+from .conductor_service_helpers import _linear_agent_app_user_id
 from .linear import ManagedRunLinearProxy
 from .store import ConductorStore
 
@@ -201,7 +198,37 @@ class ConductorService(ConductorPodiumSyncMixin):
             ),
         }
         runtime["performer"] = performer
-        runtime["metrics"] = _runtime_metrics(performer)
+        running = performer.get("running") if isinstance(performer.get("running"), list) else []
+        retrying = performer.get("retrying") if isinstance(performer.get("retrying"), list) else []
+        continuing = performer.get("continuing") if isinstance(performer.get("continuing"), list) else []
+        blocked = performer.get("blocked") if isinstance(performer.get("blocked"), list) else []
+        human_interventions = (
+            performer.get("human_interventions")
+            if isinstance(performer.get("human_interventions"), list)
+            else []
+        )
+        tokens = {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0, "total_tokens": 0}
+        turns = 0
+        for row in running:
+            if not isinstance(row, dict):
+                continue
+            row_tokens = row.get("tokens") if isinstance(row.get("tokens"), dict) else {}
+            for key in tokens:
+                value = row_tokens.get(key)
+                if isinstance(value, int) and not isinstance(value, bool):
+                    tokens[key] += value
+            turn_count = row.get("turn_count")
+            if isinstance(turn_count, int) and not isinstance(turn_count, bool):
+                turns += turn_count
+        runtime["metrics"] = {
+            "tokens": tokens,
+            "turns": turns,
+            "running": len(running),
+            "retrying": len(retrying),
+            "continuing": len(continuing),
+            "blocked": len(blocked),
+            "pending_human": len(human_interventions),
+        }
         return runtime
 
     def _managed_run_runtime_snapshot(self) -> dict[str, Any]:
