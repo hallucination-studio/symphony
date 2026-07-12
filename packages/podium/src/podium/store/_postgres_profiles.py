@@ -78,6 +78,35 @@ ON CONFLICT (project_binding_id) DO UPDATE SET
 RETURNING *
 """
 
+PERFORMER_BINDING_SELECT_SQL = """
+SELECT
+  pb.id AS performer_binding_id,
+  pb.workspace_id,
+  pb.project_binding_id,
+  pb.performer_profile_id,
+  pb.credential_id,
+  pb.generation,
+  pb.state,
+  pb.error_code,
+  pb.sanitized_reason,
+  pp.performer_kind,
+  pp.turn_policy,
+  pp.policy_sha256,
+  rp.id AS runtime_profile_id,
+  rp.runtime_kind,
+  rp.config_format,
+  rp.config_document,
+  rp.config_sha256,
+  pc.auth_method,
+  pc.account_hint,
+  pc.local_ref
+FROM performer_bindings pb
+JOIN performer_profiles pp ON pp.id = pb.performer_profile_id
+JOIN runtime_profiles rp ON rp.id = pp.runtime_profile_id
+JOIN performer_credentials pc ON pc.id = pb.credential_id
+WHERE pb.project_binding_id = $1
+"""
+
 
 class PgProfilesMixin:
     async def ensure_performer_binding(
@@ -174,73 +203,13 @@ class PgProfilesMixin:
                     binding["id"],
                     _pg_datetime(now),
                 )
-                row = await connection.fetchrow(
-                    """
-                    SELECT
-                      pb.id AS performer_binding_id,
-                      pb.workspace_id,
-                      pb.project_binding_id,
-                      pb.performer_profile_id,
-                      pb.credential_id,
-                      pb.generation,
-                      pb.state,
-                      pb.error_code,
-                      pb.sanitized_reason,
-                      pp.performer_kind,
-                      pp.turn_policy,
-                      pp.policy_sha256,
-                      rp.runtime_profile_id,
-                      rp.runtime_kind,
-                      rp.config_format,
-                      rp.config_document,
-                      rp.config_sha256,
-                      pc.auth_method,
-                      pc.account_hint,
-                      pc.local_ref
-                    FROM performer_bindings pb
-                    JOIN performer_profiles pp ON pp.id = pb.performer_profile_id
-                    JOIN runtime_profiles rp ON rp.id = pp.runtime_profile_id
-                    JOIN performer_credentials pc ON pc.id = pb.credential_id
-                    WHERE pb.project_binding_id = $1
-                    """,
-                    project_binding_id,
-                )
+                row = await connection.fetchrow(PERFORMER_BINDING_SELECT_SQL, project_binding_id)
         if row is None:
             raise RuntimeError("performer_binding_create_failed")
         return _record_to_performer_binding(row)
 
     async def get_performer_binding_for_project_binding(self, project_binding_id: str) -> dict[str, Any] | None:
-        row = await self.pool.fetchrow(
-            """
-            SELECT
-              pb.id AS performer_binding_id,
-              pb.workspace_id,
-              pb.project_binding_id,
-              pb.performer_profile_id,
-              pb.credential_id,
-              pb.generation,
-              pb.state,
-              pb.error_code,
-              pb.sanitized_reason,
-              pp.performer_kind,
-              pp.turn_policy,
-              pp.policy_sha256,
-              rp.runtime_profile_id,
-              rp.runtime_kind,
-              rp.config_format,
-              rp.config_document,
-              rp.config_sha256,
-              pc.auth_method,
-              pc.account_hint,
-              pc.local_ref
-            FROM performer_bindings pb
-            JOIN performer_profiles pp ON pp.id = pb.performer_profile_id
-            JOIN runtime_profiles rp ON rp.id = pp.runtime_profile_id
-            JOIN performer_credentials pc ON pc.id = pb.credential_id
-            WHERE pb.project_binding_id = $1
-            """,
-            project_binding_id,
-        )
+        row = await self.pool.fetchrow(PERFORMER_BINDING_SELECT_SQL, project_binding_id)
         return _record_to_performer_binding(row) if row is not None else None
 
 
@@ -321,7 +290,7 @@ def _record_to_performer_binding(row: Any) -> dict[str, Any]:
         "error_code": str(row["error_code"]),
         "sanitized_reason": str(row["sanitized_reason"]),
         "performer_kind": str(row["performer_kind"]),
-        "turn_policy": _pg_json_value(row["turn_policy"]) or {},
+        "turn_policy": _pg_json_value(row["turn_policy"], {}) or {},
         "policy_sha256": str(row["policy_sha256"]),
         "runtime_profile_id": str(row["runtime_profile_id"]),
         "runtime_kind": str(row["runtime_kind"]),
@@ -336,6 +305,7 @@ def _record_to_performer_binding(row: Any) -> dict[str, Any]:
 
 __all__ = [
     "PERFORMER_BINDING_UPSERT_SQL",
+    "PERFORMER_BINDING_SELECT_SQL",
     "PERFORMER_CREDENTIAL_UPSERT_SQL",
     "PERFORMER_PROFILE_UPSERT_SQL",
     "PgProfilesMixin",

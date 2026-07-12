@@ -16,11 +16,13 @@ from podium.store._postgres_ops import PgOpsMixin
 from podium.store._postgres_runtime import PgRuntimeMixin
 from podium.store._postgres_profiles import (
     PERFORMER_BINDING_UPSERT_SQL,
+    PERFORMER_BINDING_SELECT_SQL,
     PERFORMER_PROFILE_UPSERT_SQL,
     RUNTIME_PROFILE_UPSERT_SQL,
     _credential_values,
     _performer_binding_values,
     _performer_profile_values,
+    _record_to_performer_binding,
     _runtime_profile_values,
 )
 from podium.store._postgres_schema_statements import POSTGRES_SCHEMA_STATEMENTS
@@ -147,6 +149,40 @@ def test_profile_store_values_and_sql_have_stable_parameter_contracts() -> None:
     assert _placeholder_numbers(PERFORMER_BINDING_UPSERT_SQL) == list(range(1, len(_performer_binding_values(binding)) + 1))
     assert len(_credential_values(credential)) == 11
     assert "revision" not in PERFORMER_BINDING_UPSERT_SQL.lower()
+
+
+def test_profile_binding_select_maps_runtime_profile_primary_key() -> None:
+    assert "rp.id AS runtime_profile_id" in PERFORMER_BINDING_SELECT_SQL
+    assert "rp.runtime_profile_id" not in PERFORMER_BINDING_SELECT_SQL
+
+
+def test_profile_binding_record_decodes_turn_policy_with_empty_default() -> None:
+    record = _record_to_performer_binding(
+        {
+            "performer_binding_id": "performer-binding:binding-1",
+            "workspace_id": "user-1",
+            "project_binding_id": "binding-1",
+            "performer_profile_id": "performer-profile:user-1:default",
+            "credential_id": "credential:user-1:main",
+            "generation": 1,
+            "state": "pending",
+            "error_code": "",
+            "sanitized_reason": "",
+            "performer_kind": "codex",
+            "turn_policy": None,
+            "policy_sha256": "b" * 64,
+            "runtime_profile_id": "runtime-profile:user-1:default",
+            "runtime_kind": "codex",
+            "config_format": "toml",
+            "config_document": "model = \"gpt-test\"\n",
+            "config_sha256": "a" * 64,
+            "auth_method": "chatgpt_oauth",
+            "account_hint": "main",
+            "local_ref": "slot:main",
+        }
+    )
+
+    assert record["turn_policy"] == {}
 
 
 def test_dispatch_dto_does_not_carry_a_profile() -> None:
