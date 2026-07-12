@@ -19,7 +19,6 @@ from .codex_client_helpers import (
     _timeout_seconds,
     _usage_from_any,
 )
-from .codex_client_sdk_events import _sdk_event_to_dict
 
 
 class _CodexSdkRuntimeMixin:
@@ -284,3 +283,30 @@ class _CodexSdkRuntimeMixin:
             final_response = _first_string(event, "final_response", "response", "text", default=final_response)
             structured = _first_dict(event, "structured_result", "output", "parsed", default=structured, validate=validate_structured)
         return final_response, structured
+
+
+def _sdk_event_to_dict(event: Any) -> dict[str, Any] | None:
+    raw = event if isinstance(event, dict) else _event_model_dict(event)
+    name = raw.get("event") or raw.get("type") or raw.get("method")
+    if not isinstance(name, str):
+        return None
+    params = raw.get("params") if isinstance(raw.get("params"), dict) else raw
+    payload = {**params, "type": name}
+    mapped = {"event": f"sdk_{name.replace('.', '_').replace('/', '_')}", "backend": "sdk", "payload": payload}
+    for key in ("message", "command", "exit_code", "usage", "turn_id", "thread_id"):
+        if key in payload:
+            mapped[key] = payload[key]
+    return mapped
+
+
+def _event_model_dict(event: Any) -> dict[str, Any]:
+    model_dump = getattr(event, "model_dump", None)
+    if callable(model_dump):
+        dumped = model_dump(by_alias=True)
+        if isinstance(dumped, dict):
+            return dumped
+    return {
+        key: getattr(event, key)
+        for key in ("method", "params", "type", "event", "message", "command", "exit_code", "usage", "turn_id", "thread_id")
+        if hasattr(event, key)
+    }
