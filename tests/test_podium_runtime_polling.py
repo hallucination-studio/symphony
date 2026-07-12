@@ -17,7 +17,7 @@ from podium.podium_routes_runtime_proxy import _ready_proxy_binding_or_error
 from podium.podium_routes_runtime_ops import register_runtime_ops_routes
 from podium.podium_smoke_checks import PodiumSmokeChecksMixin
 from podium.store._postgres_dispatch import DISPATCH_INSERT_SQL, LEASE_DISPATCH_SQL, _dispatch_values
-from podium.store._postgres_schema import PgSchema
+from podium.store._postgres_schema_statements import POSTGRES_SCHEMA_STATEMENTS
 
 
 class FakeRuntimeState:
@@ -506,7 +506,7 @@ async def test_reconciliation_refreshes_blocked_dispatches_after_a_completed_sca
 
 
 def test_dispatch_blocker_ids_have_a_fresh_schema_and_insert_contract() -> None:
-    schema = "\n".join(PgSchema().statements())
+    schema = "\n".join(POSTGRES_SCHEMA_STATEMENTS)
     values = _dispatch_values(_dispatch(blocked_by=["blocker-1"]))
 
     assert "blocked_by JSONB NOT NULL DEFAULT '[]'::jsonb" in schema

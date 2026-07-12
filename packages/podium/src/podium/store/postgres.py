@@ -10,7 +10,7 @@ from ._postgres_health import PgHealthMixin
 from ._postgres_linear import PgLinearMixin
 from ._postgres_linear_cutover import PgLinearCutoverMixin
 from ._postgres_linear_reconciliation import PgLinearReconciliationMixin
-from ._postgres_schema import PgSchema
+from ._postgres_schema_statements import POSTGRES_SCHEMA_STATEMENTS
 from ._postgres_ops import PgOpsMixin
 from ._postgres_project_replacements import PgProjectReplacementsMixin
 from ._postgres_project_unbind import PgProjectUnbindMixin
@@ -41,9 +41,9 @@ class PgStore(
         store._owns_pool = True
         return store
 
-    async def ensure_schema(self, schema: PgSchema | None = None) -> None:
+    async def ensure_schema(self) -> None:
         async with self.pool.acquire() as connection:
-            for statement in (schema or PgSchema()).statements():
+            for statement in POSTGRES_SCHEMA_STATEMENTS:
                 await connection.execute(statement)
 
     async def close(self) -> None:
