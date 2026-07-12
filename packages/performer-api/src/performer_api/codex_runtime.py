@@ -8,13 +8,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+import json
 import re
 import tomllib
 from typing import Any
 
 
 MAX_CODEX_CONFIG_BYTES = 128 * 1024
+MAX_PERFORMER_POLICY_BYTES = 32 * 1024
 _SHA256 = re.compile(r"\A[0-9a-f]{64}\Z")
+_IDENTIFIER = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._:-]{0,199}\Z")
 _ENV_REFERENCE = re.compile(r"\A\$[A-Za-z_][A-Za-z0-9_]*\Z")
 _SECRET_KEY = re.compile(
     r"(?i)(?:access[-_]?token|refresh[-_]?token|api[-_]?key|client[-_]?secret|"
@@ -66,6 +69,16 @@ _MODEL_PROVIDER_KEYS = frozenset(
     }
 )
 _SANDBOX_WORKSPACE_KEYS = frozenset({"network_access", "writable_roots"})
+_LEGACY_PROFILE_REVISION_FIELDS = frozenset(
+    {
+        "runtime_config_version",
+        "policy_revision",
+        "runtime_profile_revision",
+        "runtime_profile_revision_id",
+        "performer_profile_revision",
+        "performer_profile_revision_id",
+    }
+)
 
 
 class CodexRuntimeConfigError(ValueError):
@@ -81,9 +94,9 @@ class CodexRuntimeConfigError(ValueError):
 class CodexRuntimeConfig:
     binding_id: str
     binding_config_version: int
-    runtime_config_version: int
-    policy_revision: int
-    config_toml: str
+    runtime_profile_id: str
+    config_format: str
+    config_document: str
     config_sha256: str
 
     @classmethod
@@ -92,17 +105,23 @@ class CodexRuntimeConfig:
         *,
         binding_id: str,
         binding_config_version: int,
-        runtime_config_version: int,
-        policy_revision: int,
-        config_toml: str,
+        runtime_profile_id: str,
+        config_document: str,
+        config_format: str = "toml",
     ) -> "CodexRuntimeConfig":
-        normalized = validate_codex_toml(config_toml)
+        normalized_format = _required_format(config_format)
+        if normalized_format != "toml":
+            raise CodexRuntimeConfigError(
+                "managed_codex_config_invalid",
+                "Only TOML Codex runtime profiles are supported",
+            )
+        normalized = validate_codex_toml(config_document)
         return cls(
             binding_id=_required_id(binding_id, "binding_id"),
             binding_config_version=_positive_int(binding_config_version, "binding_config_version"),
-            runtime_config_version=_positive_int(runtime_config_version, "runtime_config_version"),
-            policy_revision=_positive_int(policy_revision, "policy_revision"),
-            config_toml=normalized,
+            runtime_profile_id=_required_id(runtime_profile_id, "runtime_profile_id"),
+            config_format=normalized_format,
+            config_document=normalized,
             config_sha256=_sha256(normalized),
         )
 
@@ -110,12 +129,13 @@ class CodexRuntimeConfig:
     def from_dict(cls, payload: dict[str, Any]) -> "CodexRuntimeConfig":
         if not isinstance(payload, dict):
             raise CodexRuntimeConfigError("invalid_runtime_config", "Runtime config must be an object")
+        _reject_profile_revision_fields(payload)
         config = cls.create(
             binding_id=str(payload.get("binding_id") or ""),
             binding_config_version=payload.get("binding_config_version"),
-            runtime_config_version=payload.get("runtime_config_version"),
-            policy_revision=payload.get("policy_revision"),
-            config_toml=str(payload.get("config_toml") or ""),
+            runtime_profile_id=str(payload.get("runtime_profile_id") or ""),
+            config_format=str(payload.get("config_format") or ""),
+            config_document=str(payload.get("config_document") or ""),
         )
         supplied_hash = str(payload.get("config_sha256") or "")
         if supplied_hash != config.config_sha256:
@@ -126,9 +146,9 @@ class CodexRuntimeConfig:
         return {
             "binding_id": self.binding_id,
             "binding_config_version": self.binding_config_version,
-            "runtime_config_version": self.runtime_config_version,
-            "policy_revision": self.policy_revision,
-            "config_toml": self.config_toml,
+            "runtime_profile_id": self.runtime_profile_id,
+            "config_format": self.config_format,
+            "config_document": self.config_document,
             "config_sha256": self.config_sha256,
         }
 
@@ -136,9 +156,128 @@ class CodexRuntimeConfig:
         return {
             "binding_id": self.binding_id,
             "binding_config_version": self.binding_config_version,
-            "runtime_config_version": self.runtime_config_version,
-            "policy_revision": self.policy_revision,
+            "runtime_profile_id": self.runtime_profile_id,
+            "config_format": self.config_format,
             "config_sha256": self.config_sha256,
+        }
+
+
+@dataclass(frozen=True)
+class PerformerProfileConfig:
+    """Secret-free current Performer/runtime selection delivered to Conductor."""
+
+    binding_id: str
+    binding_config_version: int
+    performer_binding_id: str
+    performer_profile_id: str
+    runtime_profile_id: str
+    performer_kind: str
+    runtime_kind: str
+    turn_policy: dict[str, Any]
+    policy_sha256: str
+    config_format: str
+    config_document: str
+    config_sha256: str
+    credential_id: str
+    credential_ref: str
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        binding_id: str,
+        binding_config_version: int,
+        performer_binding_id: str,
+        performer_profile_id: str,
+        runtime_profile_id: str,
+        performer_kind: str,
+        runtime_kind: str,
+        turn_policy: dict[str, Any],
+        config_document: str,
+        credential_id: str,
+        credential_ref: str,
+        config_format: str = "toml",
+    ) -> "PerformerProfileConfig":
+        runtime = CodexRuntimeConfig.create(
+            binding_id=binding_id,
+            binding_config_version=binding_config_version,
+            runtime_profile_id=runtime_profile_id,
+            config_format=config_format,
+            config_document=config_document,
+        )
+        normalized_policy = _validate_turn_policy(turn_policy)
+        return cls(
+            binding_id=runtime.binding_id,
+            binding_config_version=runtime.binding_config_version,
+            performer_binding_id=_required_id(performer_binding_id, "performer_binding_id"),
+            performer_profile_id=_required_id(performer_profile_id, "performer_profile_id"),
+            runtime_profile_id=runtime.runtime_profile_id,
+            performer_kind=_required_id(performer_kind, "performer_kind"),
+            runtime_kind=_required_id(runtime_kind, "runtime_kind"),
+            turn_policy=normalized_policy,
+            policy_sha256=_sha256(_canonical_json(normalized_policy)),
+            config_format=runtime.config_format,
+            config_document=runtime.config_document,
+            config_sha256=runtime.config_sha256,
+            credential_id=_required_id(credential_id, "credential_id"),
+            credential_ref=_credential_ref(credential_ref),
+        )
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "PerformerProfileConfig":
+        if not isinstance(payload, dict):
+            raise CodexRuntimeConfigError("invalid_performer_profile", "Performer profile config must be an object")
+        _reject_profile_revision_fields(payload)
+        config = cls.create(
+            binding_id=str(payload.get("binding_id") or ""),
+            binding_config_version=payload.get("binding_config_version"),
+            performer_binding_id=str(payload.get("performer_binding_id") or ""),
+            performer_profile_id=str(payload.get("performer_profile_id") or ""),
+            runtime_profile_id=str(payload.get("runtime_profile_id") or ""),
+            performer_kind=str(payload.get("performer_kind") or ""),
+            runtime_kind=str(payload.get("runtime_kind") or ""),
+            turn_policy=payload.get("turn_policy") if isinstance(payload.get("turn_policy"), dict) else {},
+            config_format=str(payload.get("config_format") or ""),
+            config_document=str(payload.get("config_document") or ""),
+            credential_id=str(payload.get("credential_id") or ""),
+            credential_ref=str(payload.get("credential_ref") or ""),
+        )
+        if str(payload.get("config_sha256") or "") != config.config_sha256:
+            raise CodexRuntimeConfigError("runtime_config_hash_mismatch", "Runtime config hash does not match content")
+        if str(payload.get("policy_sha256") or "") != config.policy_sha256:
+            raise CodexRuntimeConfigError("performer_policy_hash_mismatch", "Performer policy hash does not match content")
+        return config
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "binding_id": self.binding_id,
+            "binding_config_version": self.binding_config_version,
+            "performer_binding_id": self.performer_binding_id,
+            "performer_profile_id": self.performer_profile_id,
+            "runtime_profile_id": self.runtime_profile_id,
+            "performer_kind": self.performer_kind,
+            "runtime_kind": self.runtime_kind,
+            "turn_policy": dict(self.turn_policy),
+            "policy_sha256": self.policy_sha256,
+            "config_format": self.config_format,
+            "config_document": self.config_document,
+            "config_sha256": self.config_sha256,
+            "credential_id": self.credential_id,
+            "credential_ref": self.credential_ref,
+        }
+
+    def public_summary(self) -> dict[str, Any]:
+        return {
+            "binding_id": self.binding_id,
+            "binding_config_version": self.binding_config_version,
+            "performer_binding_id": self.performer_binding_id,
+            "performer_profile_id": self.performer_profile_id,
+            "runtime_profile_id": self.runtime_profile_id,
+            "performer_kind": self.performer_kind,
+            "runtime_kind": self.runtime_kind,
+            "config_sha256": self.config_sha256,
+            "policy_sha256": self.policy_sha256,
+            "credential_id": self.credential_id,
         }
 
 
@@ -227,9 +366,76 @@ def _enum(document: dict[str, Any], key: str, allowed: frozenset[str]) -> None:
 
 
 def _required_id(value: str, field: str) -> str:
-    if not isinstance(value, str) or not value.strip() or len(value.strip()) > 200:
-        raise CodexRuntimeConfigError("invalid_runtime_config", f"{field} is required")
-    return value.strip()
+    normalized = value.strip() if isinstance(value, str) else ""
+    if not _IDENTIFIER.fullmatch(normalized):
+        raise CodexRuntimeConfigError("invalid_runtime_config", f"{field} is invalid")
+    return normalized
+
+
+def _required_format(value: str) -> str:
+    normalized = value.strip().lower() if isinstance(value, str) else ""
+    if normalized not in {"toml"}:
+        raise CodexRuntimeConfigError("managed_codex_config_invalid", "config_format must be toml")
+    return normalized
+
+
+def _credential_ref(value: str) -> str:
+    normalized = value.strip() if isinstance(value, str) else ""
+    if not normalized or len(normalized) > 200 or "/" in normalized or "\\" in normalized:
+        raise CodexRuntimeConfigError("invalid_credential_reference", "credential_ref must be an opaque local reference")
+    if _SECRET_LITERAL.search(normalized) or re.search(
+        r"(?i)(?:bearer|basic)\s+|(?:access[_-]?token|refresh[_-]?token|api[_-]?key)\s*[=:]",
+        normalized,
+    ):
+        raise CodexRuntimeConfigError("invalid_credential_reference", "credential_ref must not contain a credential")
+    return normalized
+
+
+def _validate_turn_policy(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise CodexRuntimeConfigError("invalid_performer_policy", "turn_policy must be an object")
+    try:
+        canonical = _canonical_json(value)
+    except (TypeError, ValueError) as exc:
+        raise CodexRuntimeConfigError("invalid_performer_policy", "turn_policy contains unsupported values") from exc
+    if len(canonical.encode("utf-8")) > MAX_PERFORMER_POLICY_BYTES:
+        raise CodexRuntimeConfigError("performer_policy_too_large", "turn_policy is too large")
+    _validate_policy_values(value)
+    return dict(value)
+
+
+def _validate_policy_values(value: Any, key: str = "turn_policy") -> None:
+    if isinstance(value, dict):
+        for nested_key, nested_value in value.items():
+            name = str(nested_key)
+            if _SECRET_KEY.search(name):
+                raise CodexRuntimeConfigError(
+                    "managed_codex_secret_rejected",
+                    f"Performer policy cannot contain credential-bearing key: {name}",
+                )
+            _validate_policy_values(nested_value, name)
+    elif isinstance(value, list):
+        for item in value:
+            _validate_policy_values(item, key)
+    elif isinstance(value, (str, int, float, bool)) or value is None:
+        if isinstance(value, str) and (_SECRET_LITERAL.search(value) or len(value) > 4096):
+            raise CodexRuntimeConfigError("managed_codex_secret_rejected", "Performer policy contains an unsafe value")
+        return
+    else:
+        raise CodexRuntimeConfigError("invalid_performer_policy", "Performer policy contains an unsupported value")
+
+
+def _canonical_json(value: dict[str, Any]) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+
+
+def _reject_profile_revision_fields(payload: dict[str, Any]) -> None:
+    legacy = sorted(_LEGACY_PROFILE_REVISION_FIELDS.intersection(payload))
+    if legacy:
+        raise CodexRuntimeConfigError(
+            "profile_revision_field_rejected",
+            f"Profile revision fields are not supported: {legacy[0]}",
+        )
 
 
 def _positive_int(value: Any, field: str) -> int:
@@ -246,5 +452,7 @@ __all__ = [
     "CodexRuntimeConfig",
     "CodexRuntimeConfigError",
     "MAX_CODEX_CONFIG_BYTES",
+    "MAX_PERFORMER_POLICY_BYTES",
+    "PerformerProfileConfig",
     "validate_codex_toml",
 ]

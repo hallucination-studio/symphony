@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import pytest
 
-from performer_api.codex_runtime import CodexRuntimeConfig, CodexRuntimeConfigError, validate_codex_toml
+from performer_api.codex_runtime import (
+    CodexRuntimeConfig,
+    CodexRuntimeConfigError,
+    PerformerProfileConfig,
+    validate_codex_toml,
+)
 
 
 VALID_CONFIG = """
@@ -28,14 +33,15 @@ def test_runtime_config_normalizes_hashes_and_hides_content_from_summary() -> No
     config = CodexRuntimeConfig.create(
         binding_id="binding-1",
         binding_config_version=2,
-        runtime_config_version=3,
-        policy_revision=4,
-        config_toml=VALID_CONFIG,
+        runtime_profile_id="runtime-profile-1",
+        config_document=VALID_CONFIG,
     )
 
-    assert config.config_toml.endswith("\n")
+    assert config.config_document.endswith("\n")
     assert len(config.config_sha256) == 64
-    assert "config_toml" not in config.public_summary()
+    assert "config_document" not in config.public_summary()
+    assert "runtime_config_version" not in config.to_dict()
+    assert "policy_revision" not in config.to_dict()
     assert CodexRuntimeConfig.from_dict(config.to_dict()) == config
 
 
@@ -58,10 +64,82 @@ def test_runtime_config_requires_matching_hash() -> None:
     config = CodexRuntimeConfig.create(
         binding_id="binding-1",
         binding_config_version=1,
-        runtime_config_version=1,
-        policy_revision=1,
-        config_toml=VALID_CONFIG,
+        runtime_profile_id="runtime-profile-1",
+        config_document=VALID_CONFIG,
     )
 
     with pytest.raises(CodexRuntimeConfigError, match="hash"):
         CodexRuntimeConfig.from_dict({**config.to_dict(), "config_sha256": "0" * 64})
+
+
+def test_performer_profile_config_carries_current_profiles_and_credential_reference() -> None:
+    config = PerformerProfileConfig.create(
+        binding_id="binding-1",
+        binding_config_version=4,
+        performer_binding_id="performer-binding-1",
+        performer_profile_id="performer-profile-1",
+        runtime_profile_id="runtime-profile-1",
+        performer_kind="codex",
+        runtime_kind="codex",
+        turn_policy={"max_turns": 4, "approval": "on-request"},
+        config_document=VALID_CONFIG,
+        credential_id="credential-1",
+        credential_ref="slot:credential-1",
+    )
+
+    payload = config.to_dict()
+    assert payload["binding_config_version"] == 4
+    assert payload["config_format"] == "toml"
+    assert payload["config_sha256"] == config.config_sha256
+    assert payload["policy_sha256"] == config.policy_sha256
+    assert config.public_summary() == {
+        "binding_id": "binding-1",
+        "binding_config_version": 4,
+        "performer_binding_id": "performer-binding-1",
+        "performer_profile_id": "performer-profile-1",
+        "runtime_profile_id": "runtime-profile-1",
+        "performer_kind": "codex",
+        "runtime_kind": "codex",
+        "config_sha256": config.config_sha256,
+        "policy_sha256": config.policy_sha256,
+        "credential_id": "credential-1",
+    }
+    assert PerformerProfileConfig.from_dict(payload) == config
+
+
+def test_performer_profile_config_rejects_profile_revision_fields() -> None:
+    with pytest.raises(CodexRuntimeConfigError, match="revision"):
+        PerformerProfileConfig.from_dict(
+            {
+                "binding_id": "binding-1",
+                "binding_config_version": 1,
+                "performer_binding_id": "performer-binding-1",
+                "performer_profile_id": "performer-profile-1",
+                "performer_profile_revision_id": "legacy-revision",
+                "runtime_profile_id": "runtime-profile-1",
+                "performer_kind": "codex",
+                "runtime_kind": "codex",
+                "turn_policy": {},
+                "config_format": "toml",
+                "config_document": VALID_CONFIG,
+                "credential_id": "credential-1",
+                "credential_ref": "slot:credential-1",
+            }
+        )
+
+
+def test_performer_profile_config_rejects_secret_like_credential_reference() -> None:
+    with pytest.raises(CodexRuntimeConfigError, match="credential"):
+        PerformerProfileConfig.create(
+            binding_id="binding-1",
+            binding_config_version=1,
+            performer_binding_id="performer-binding-1",
+            performer_profile_id="performer-profile-1",
+            runtime_profile_id="runtime-profile-1",
+            performer_kind="codex",
+            runtime_kind="codex",
+            turn_policy={},
+            config_document=VALID_CONFIG,
+            credential_id="credential-1",
+            credential_ref="api" + "_key=not-a-secret",
+        )

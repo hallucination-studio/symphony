@@ -1,6 +1,7 @@
 from performer_api.codex_runtime import (
     CodexRuntimeConfig,
     CodexRuntimeConfigError,
+    PerformerProfileConfig,
     validate_codex_toml,
 )
 from performer_api.labels import is_managed_project_label, managed_project_label_name
@@ -19,6 +20,7 @@ __all__ = [
     "managed_project_label_name",
     "Plan",
     "PlanRevision",
+    "PerformerProfileConfig",
     "RuntimeWait",
     "Task",
     "TurnContext",
