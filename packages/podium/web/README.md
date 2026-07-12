@@ -25,9 +25,9 @@ npm run build
 ```
 
 The build compiles the app and emits static assets directly into
-`../src/podium/static/` (the directory the Podium backend serves). `base` is set
-to `./` so assets resolve under whatever path Podium mounts the SPA at, and the
-backend provides SPA fallback so client-side routes (e.g. `/setup`) load
+`../src/podium/static/` (the directory the Podium backend serves). `base` is
+`/` because Podium serves the SPA at its origin root, and the backend provides
+SPA fallback so client-side routes (e.g. `/setup`) load
 `index.html`.
 
 The built assets are committed so Podium serves the UI out of the box. Re-run
