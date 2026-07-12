@@ -129,27 +129,9 @@ class PodiumLinearInstallationsMixin:
         )
         return self._workspace_installation_from_disk(row) if row is not None else None
 
-    async def find_active_linear_installation(
-        self,
-        linear_organization_id: str,
-    ) -> dict[str, Any] | None:
-        row = await self.store.find_active_workspace_installation(linear_organization_id)
-        return self._workspace_installation_from_disk(row) if row is not None else None
-
     async def list_active_linear_installations(self) -> list[dict[str, Any]]:
         rows = await self.store.list_active_workspace_installations()
         return [self._workspace_installation_from_disk(row) for row in rows]
-
-    async def update_linear_installation_health(
-        self,
-        installation: dict[str, Any],
-        **changes: Any,
-    ) -> dict[str, Any]:
-        active = await self.get_active_linear_installation(str(installation.get("user_id") or ""))
-        current = active if active and active.get("id") == installation.get("id") else installation
-        updated = {**current, **changes, "updated_at": utc_now_iso()}
-        await self.save_linear_installation_record(updated)
-        return updated
 
     async def update_linear_reconciliation_health(
         self,

@@ -37,16 +37,6 @@ class PgLinearReconciliationMixin:
         state = _pg_json_value(row["state_json"], {})
         return dict(state) if isinstance(state, dict) else None
 
-    async def get_linear_issue_observation(self, binding_id: str, issue_id: str) -> dict[str, Any] | None:
-        row = await self.pool.fetchrow(
-            "SELECT * FROM linear_issue_observations WHERE binding_id = $1 AND issue_id = $2",
-            binding_id,
-            issue_id,
-        )
-        if row is None:
-            return None
-        return _observation_record(row)
-
     async def get_linear_issue_observations(
         self,
         binding_id: str,

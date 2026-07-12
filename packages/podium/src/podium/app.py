@@ -69,7 +69,7 @@ def create_app(
     debug_auth: bool = False,
 ) -> FastAPI:
     resolved_config = config or PodiumConfig.from_env()
-    state = _create_state(
+    state = ManagedPodiumState(
         turnstile_verifier=turnstile_verifier or verify_turnstile_with_cloudflare,
         session_cookie_name=session_cookie_name,
         secure_cookies=secure_cookies,
@@ -162,43 +162,6 @@ def create_app(
     )
     _register_static_fallback(app, static_root=static_root, index_file=index_file)
     return app
-
-
-def _create_state(
-    *,
-    turnstile_verifier: TurnstileVerifier,
-    session_cookie_name: str,
-    secure_cookies: bool,
-    secret_key: str,
-    linear_client_id: str,
-    linear_client_secret: str,
-    linear_redirect_uri: str,
-    linear_application_version: int,
-    podium_base_url: str,
-    store: Any,
-    config: PodiumConfig,
-    debug_auth: bool,
-    linear_graphql_transport: Callable[[httpx.Request], Any] | None,
-    linear_token_refresh: Callable[..., Any] | None,
-    linear_token_revoke: Callable[..., Any] | None,
-) -> "ManagedPodiumState":
-    return ManagedPodiumState(
-        turnstile_verifier=turnstile_verifier,
-        session_cookie_name=session_cookie_name,
-        secure_cookies=secure_cookies,
-        secret_key=secret_key,
-        linear_client_id=linear_client_id,
-        linear_client_secret=linear_client_secret,
-        linear_redirect_uri=linear_redirect_uri,
-        linear_application_version=linear_application_version,
-        podium_base_url=podium_base_url,
-        store=store,
-        config=config,
-        debug_auth=debug_auth,
-        linear_graphql_transport=linear_graphql_transport,
-        linear_token_refresh=linear_token_refresh,
-        linear_token_revoke=linear_token_revoke,
-    )
 
 
 def _make_lifespan(

@@ -266,19 +266,3 @@ class PgRuntimeMixin:
                     _pg_json(result or {}),
                 )
         return _record_to_runtime_command(updated) if updated is not None else None
-
-    async def next_runtime_command(self, runtime_id: str, *, after_id: int = 0) -> dict[str, Any] | None:
-        """Compatibility read for diagnostics; execution uses lease_runtime_command."""
-        row = await self.pool.fetchrow(
-            """
-            SELECT id, runtime_id, command_json, created_at, status, lease_expires_at,
-                   fencing_token, completed_at, result_json
-            FROM runtime_commands
-            WHERE runtime_id = $1 AND id > $2
-            ORDER BY id
-            LIMIT 1
-            """,
-            runtime_id,
-            after_id,
-        )
-        return _record_to_runtime_command(row) if row is not None else None

@@ -8,17 +8,6 @@ from .podium_shared import bearer_token, hash_secret, utc_now_iso
 
 
 class PodiumRuntimeMixin:
-    async def ensure_conductor_record(self, runtime_id: str) -> dict[str, Any] | None:
-        runtime = await self.store.get_runtime(runtime_id)
-        if runtime is None:
-            return None
-        user_id = str(runtime.get("user_id") or "")
-        rows = await self.store.list_conductors_for_user(user_id)
-        for row in rows:
-            if str(row.get("id") or "") == runtime_id:
-                return row
-        return None
-
     async def apply_runtime_report(self, runtime_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         runtime = await self.store.get_runtime(runtime_id)
         if runtime is None:

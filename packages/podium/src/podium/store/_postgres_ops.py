@@ -31,17 +31,6 @@ class PgOpsMixin:
             "updated_at": row["updated_at"].isoformat(),
         }
 
-    async def save_smoke_result(self, user_id: str, result: dict[str, Any]) -> None:
-        await self.pool.execute(
-            """
-            INSERT INTO smoke_results (user_id, result_json, updated_at)
-            VALUES ($1,$2::jsonb,now())
-            ON CONFLICT (user_id) DO UPDATE SET result_json = EXCLUDED.result_json, updated_at = now()
-            """,
-            user_id,
-            _pg_json(result),
-        )
-
     async def compare_and_save_smoke_result(
         self,
         user_id: str,

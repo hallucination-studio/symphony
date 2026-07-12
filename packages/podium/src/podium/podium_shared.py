@@ -60,35 +60,6 @@ def runtime_public(runtime: dict[str, Any], presence: dict[str, str]) -> dict[st
         "metadata": metadata if isinstance(metadata, dict) else {},
     }
 
-def run_public(dispatch: dict[str, Any]) -> dict[str, Any]:
-    status = run_status_from_dispatch(str(dispatch.get("status") or "queued"))
-    completed_at = dispatch.get("completed_at")
-    if completed_at is None and status in {"success", "failed", "cancelled"}:
-        completed_at = dispatch.get("updated_at") or dispatch.get("created_at")
-    return {
-        "run_id": str(dispatch["dispatch_id"]),
-        "issue_identifier": dispatch.get("issue_identifier"),
-        "runtime_id": dispatch.get("leased_runtime_id"),
-        "status": status,
-        "started_at": dispatch.get("created_at"),
-        "completed_at": completed_at,
-        "duration_seconds": dispatch.get("duration_seconds"),
-        "failure_reason": dispatch.get("reason") if status == "failed" else None,
-    }
-
-def run_status_from_dispatch(status: str) -> str:
-    if status in {"queued"}:
-        return "pending"
-    if status in {"leased", "accepted", "running"}:
-        return "running"
-    if status in {"completed", "success", "succeeded"}:
-        return "success"
-    if status in {"cancelled", "canceled"}:
-        return "cancelled"
-    if status in {"failed", "error"}:
-        return "failed"
-    return "running"
-
 def hash_secret(secret: str) -> str:
     return hashlib.sha256(secret.encode()).hexdigest()
 
@@ -104,13 +75,6 @@ def optional_int(value: Any, default: int | None) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return default
-
-def query_bool(value: Any) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "on"}
-    return False
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")

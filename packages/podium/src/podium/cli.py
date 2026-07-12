@@ -13,10 +13,6 @@ from .config import PodiumConfig
 from .store import PgStore
 
 
-def env_flag(name: str) -> bool:
-    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
-
-
 def secure_cookies_from_env() -> bool:
     value = os.environ.get("PODIUM_SECURE_COOKIES", "").strip().lower()
     if not value or value in {"1", "true", "yes", "on"}:
@@ -64,7 +60,7 @@ async def async_main(argv: list[str] | None = None) -> int:
         podium_base_url=os.environ.get("PODIUM_BASE_URL", "https://podium.example"),
         store=store,
         config=config,
-        debug_auth=env_flag("PODIUM_DEBUG_AUTH"),
+        debug_auth=os.environ.get("PODIUM_DEBUG_AUTH", "").strip().lower() in {"1", "true", "yes", "on"},
     )
     try:
         config = uvicorn.Config(app, host=args.host, port=args.port)

@@ -151,17 +151,6 @@ class PgDispatchMixin:
         )
         return int(value or 0)
 
-    async def count_open_dispatches_for_binding(self, binding_id: str) -> int:
-        value = await self.pool.fetchval(
-            """
-            SELECT count(*) FROM dispatches
-            WHERE project_binding_id = $1
-              AND status NOT IN ('completed', 'failed', 'cancelled', 'canceled')
-            """,
-            binding_id,
-        )
-        return int(value or 0)
-
     async def get_active_project_binding_for_project(
         self,
         user_id: str,
