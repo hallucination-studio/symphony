@@ -243,7 +243,7 @@ class WorkflowDriver:
     ) -> dict[str, Any]:
         root = Path(instance.instance_dir) / "state" / "workflow-runs" / str(run["run_id"]) / context.attempt_id
         paths = self.runtime.paths(root)
-        env = self._runtime_environment(instance, role, Path(instance.workspace_root), context.attempt_id)
+        env = self._runtime_environment(instance, Path(instance.workspace_root), context.attempt_id)
         self.runtime.write_request(paths, request)
         event = _turn_log_fields(context, role, paths)
         self.runtime.append_event(Path(instance.log_path), f"event=performer_turn_started {event}")
@@ -259,8 +259,7 @@ class WorkflowDriver:
         self.runtime.append_event(Path(instance.log_path), f"event=performer_turn_completed {event}")
         return accepted
 
-    def _runtime_environment(self, instance: Any, role: str, workspace: Path, attempt_id: str) -> dict[str, str]:
-        _ = role
+    def _runtime_environment(self, instance: Any, workspace: Path, attempt_id: str) -> dict[str, str]:
         return self.runtime.prepare_environment(
             Path(instance.instance_dir) / "state",
             workspace_path=workspace,
