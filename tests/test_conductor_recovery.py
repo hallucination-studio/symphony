@@ -1,20 +1,19 @@
 from __future__ import annotations
 
 from conductor.store import ConductorStore
-from conductor.workflow import Workflow
 from conductor.conductor_service import ConductorService
 
 
 def test_restart_reuses_parent_run_and_children(tmp_path, minimal_plan) -> None:
-    first = Workflow(ConductorStore(tmp_path))
-    run = first.accept_parent("parent-1", "APP-1", instance_id="instance-1")
-    first.commit_plan(run["run_id"], minimal_plan)
+    first = ConductorStore(tmp_path)
+    run = first.create_run("parent-1", "APP-1", instance_id="instance-1")
+    first.save_plan(run["run_id"], minimal_plan)
 
-    restarted = Workflow(ConductorStore(tmp_path))
-    same = restarted.accept_parent("parent-1", "APP-1", instance_id="instance-1")
+    restarted = ConductorStore(tmp_path)
+    same = restarted.create_run("parent-1", "APP-1", instance_id="instance-1")
 
     assert same["run_id"] == run["run_id"]
-    assert [task["task_id"] for task in restarted.store.list_tasks(run["run_id"])] == ["task-1"]
+    assert [task["task_id"] for task in restarted.list_tasks(run["run_id"])] == ["task-1"]
 
 
 def test_service_uses_one_fresh_workflow_database(tmp_path) -> None:
@@ -23,7 +22,6 @@ def test_service_uses_one_fresh_workflow_database(tmp_path) -> None:
 
     assert store.db_path == tmp_path / "workflow.db"
     assert service.store is store
-    assert service.workflow.store is store
     assert not (tmp_path / "conductor.db").exists()
 
 

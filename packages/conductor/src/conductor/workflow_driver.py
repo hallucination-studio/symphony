@@ -9,7 +9,6 @@ from performer_api.workflow import Plan, Task
 from .gate import AcceptanceGate
 from .runtime import PerformerRuntime
 from .store import ConductorStore
-from .workflow import Workflow
 
 
 class WorkflowDriver:
@@ -18,7 +17,6 @@ class WorkflowDriver:
     def __init__(self, service: Any) -> None:
         self.service = service
         self.store: ConductorStore = service.store
-        self.workflow: Workflow = service.workflow
         self.runtime: PerformerRuntime = service.performer_runtime
         self.gate: AcceptanceGate = service.acceptance_gate
 
@@ -59,14 +57,14 @@ class WorkflowDriver:
                 raise RuntimeError("managed_run_plan_missing")
             await self._project_plan(run, instance, Plan.from_dict(payload))
             return {"applied": 1}
-        task = self.workflow.next_task(str(run["run_id"]))
+        task = self.store.next_task(str(run["run_id"]))
         if task is None:
             return {}
         return await self._execute_task(run, instance, task)
 
     async def _plan(self, run: dict[str, Any], instance: Any) -> dict[str, int]:
         run_id = str(run["run_id"])
-        attempt = self.workflow.start_plan(run_id)
+        attempt = self.store.start_plan(run_id)
         context = TurnContext(run_id, "", str(attempt["attempt_id"]), int(attempt["fencing_token"]), "plan")
         body = await self._run_turn(
             run,
@@ -84,7 +82,7 @@ class WorkflowDriver:
         if "runtime_wait" in body:
             return await self._record_wait(run, instance, context, body["runtime_wait"], {})
         plan = Plan.from_dict(body.get("plan") if isinstance(body.get("plan"), dict) else {})
-        version = self.workflow.record_plan(
+        version = self.store.record_plan(
             run_id,
             context.attempt_id,
             context.fencing_token,
@@ -98,7 +96,7 @@ class WorkflowDriver:
     async def _execute_task(self, run: dict[str, Any], instance: Any, task_row: dict[str, Any]) -> dict[str, int]:
         run_id = str(run["run_id"])
         task = Task.from_dict(task_row.get("task") or {})
-        attempt = self.workflow.start_task(run_id, task.id)
+        attempt = self.store.start_task(run_id, task.id)
         await self._project_task_state(run, instance, task_row, "in_progress")
         context = TurnContext(run_id, task.id, str(attempt["attempt_id"]), int(attempt["fencing_token"]), "execute")
         body = await self._run_turn(
@@ -118,7 +116,7 @@ class WorkflowDriver:
             return await self._record_wait(run, instance, context, body["runtime_wait"], task_row)
         result = ExecuteResult.from_dict(body.get("result") if isinstance(body.get("result"), dict) else {})
         ready = result.status == "ready_for_gate"
-        updated = self.workflow.record_execute(
+        updated = self.store.record_execute(
             run_id,
             context.attempt_id,
             context.fencing_token,
@@ -131,7 +129,7 @@ class WorkflowDriver:
             await self._comment_task(run, instance, updated, f"Execution blocked: {result.blocked_reason or result.summary}")
             return {"applied": 1}
 
-        gate_attempt = self.workflow.start_gate(run_id, task.id)
+        gate_attempt = self.store.start_gate(run_id, task.id)
         command_results = self.gate.run_commands(task, Path(instance.workspace_root))
         command_evidence = {"commands": [item.to_dict() for item in command_results]}
         gate_context = TurnContext(
@@ -173,7 +171,7 @@ class WorkflowDriver:
             "provenance": evaluated.provenance,
             "rubric": evaluated.rubric,
         }
-        updated = self.workflow.record_gate(
+        updated = self.store.record_gate(
             run_id,
             gate_context.attempt_id,
             gate_context.fencing_token,
@@ -208,7 +206,7 @@ class WorkflowDriver:
 
     async def _record_wait(self, run: dict[str, Any], instance: Any, context: TurnContext, wait: Any, task: dict[str, Any]) -> dict[str, int]:
         reason = str(wait.get("reason") or "Codex runtime wait")
-        self.workflow.record_runtime_wait(
+        self.store.record_runtime_wait(
             str(run["run_id"]),
             context.attempt_id,
             context.fencing_token,
@@ -311,7 +309,7 @@ class WorkflowDriver:
         state_name = _linear_state_name(issue)
         if state_name in {"blocked", "backlog", "canceled", "cancelled"}:
             return {}
-        self.workflow.approve_plan(
+        self.store.approve_plan(
             str(run["run_id"]),
             int(run.get("plan_version") or 0),
             approval_id=f"linear-state:{state_name or 'reopened'}",
@@ -336,7 +334,7 @@ class WorkflowDriver:
         state_name = _linear_state_name(issue)
         if state_name in {"blocked", "backlog", "canceled", "cancelled"}:
             return False
-        resumed = self.workflow.resume_runtime_wait(str(run["run_id"]))
+        resumed = self.store.resume_runtime_wait(str(run["run_id"]))
         if resumed:
             await self.service._managed_run_tracker(instance).comment_issue(
                 issue_id,

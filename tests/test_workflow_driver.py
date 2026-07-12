@@ -9,7 +9,6 @@ import pytest
 
 from conductor.gate import CommandResult
 from conductor.store import ConductorStore
-from conductor.workflow import Workflow
 from conductor.workflow_driver import WorkflowDriver
 from performer_api.turns import GateResult
 from performer_api.workflow import Plan
@@ -79,7 +78,6 @@ class FakeService:
     def __init__(self, root: Path) -> None:
         instance = FakeInstance("instance-1", str(root), str(root))
         self.store = FakeConductorStore(root, instance)
-        self.workflow = Workflow(self.store)
         self.performer_runtime = SimpleNamespace()
         self.acceptance_gate = FakeGate()
         self._managed_run_runtime_config = {"version": 1}
@@ -102,7 +100,7 @@ def _queue_turns(driver: WorkflowDriver, bodies: list[dict[str, Any]]) -> None:
 @pytest.mark.anyio
 async def test_workflow_driver_creates_subissues_and_runs_sequential_gate(tmp_path: Path, two_task_plan) -> None:
     service = FakeService(tmp_path)
-    run = service.workflow.accept_parent("parent-1", "SYM-1", instance_id="instance-1")
+    run = service.store.create_run("parent-1", "SYM-1", instance_id="instance-1")
     service.store.update_run_payload(
         run["run_id"],
         {"issue_description": "Build the feature", "agent_app_user_id": "app-user-1"},
@@ -140,7 +138,7 @@ async def test_workflow_driver_creates_subissues_and_runs_sequential_gate(tmp_pa
 @pytest.mark.anyio
 async def test_workflow_driver_projects_runtime_wait_as_human_action_child(tmp_path: Path, minimal_plan) -> None:
     service = FakeService(tmp_path)
-    run = service.workflow.accept_parent("parent-1", "SYM-1", instance_id="instance-1")
+    run = service.store.create_run("parent-1", "SYM-1", instance_id="instance-1")
     driver = WorkflowDriver(service)
     bodies = [
         {"context": {}, "runtime_wait": {"kind": "approval_requested", "reason": "Approve command"}},
@@ -165,7 +163,7 @@ async def test_workflow_driver_projects_runtime_wait_as_human_action_child(tmp_p
 @pytest.mark.anyio
 async def test_workflow_driver_waits_for_parent_approval_state_change(tmp_path: Path, minimal_plan) -> None:
     service = FakeService(tmp_path)
-    run = service.workflow.accept_parent("parent-1", "SYM-1", instance_id="instance-1")
+    run = service.store.create_run("parent-1", "SYM-1", instance_id="instance-1")
     driver = WorkflowDriver(service)
     approval_plan = Plan(summary=minimal_plan.summary, tasks=minimal_plan.tasks, approval_required=True)
     _queue_turns(driver, [{"context": {}, "plan": approval_plan.to_dict(), "thread_id": "thread-1"}])
@@ -185,8 +183,8 @@ async def test_workflow_driver_waits_for_parent_approval_state_change(tmp_path: 
 @pytest.mark.anyio
 async def test_workflow_driver_does_not_duplicate_existing_subissues(tmp_path: Path, two_task_plan) -> None:
     service = FakeService(tmp_path)
-    run = service.workflow.accept_parent("parent-1", "SYM-1", instance_id="instance-1")
-    service.workflow.record_plan(run["run_id"], service.workflow.start_plan(run["run_id"])["attempt_id"], 1, two_task_plan)
+    run = service.store.create_run("parent-1", "SYM-1", instance_id="instance-1")
+    service.store.record_plan(run["run_id"], service.store.start_plan(run["run_id"])["attempt_id"], 1, two_task_plan)
     driver = WorkflowDriver(service)
     instance = service.store.get_instance("instance-1")
 
@@ -199,8 +197,8 @@ async def test_workflow_driver_does_not_duplicate_existing_subissues(tmp_path: P
 @pytest.mark.anyio
 async def test_workflow_driver_repairs_missing_subissue_projection_before_execution(tmp_path: Path, two_task_plan) -> None:
     service = FakeService(tmp_path)
-    run = service.workflow.accept_parent("parent-1", "SYM-1", instance_id="instance-1")
-    service.workflow.commit_plan(run["run_id"], two_task_plan)
+    run = service.store.create_run("parent-1", "SYM-1", instance_id="instance-1")
+    service.store.save_plan(run["run_id"], two_task_plan)
     driver = WorkflowDriver(service)
 
     assert (await driver.drive_once())["applied"] == 1

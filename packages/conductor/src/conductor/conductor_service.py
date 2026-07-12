@@ -28,7 +28,6 @@ from .conductor_service_types import (
 )
 from .linear import ManagedRunLinearProxy, ProjectLabelLinearProxy
 from .store import ConductorStore
-from .workflow import Workflow
 
 class ConductorService(ConductorPodiumSyncMixin):
     def __init__(
@@ -39,7 +38,6 @@ class ConductorService(ConductorPodiumSyncMixin):
     ):
         self.store = store
         self.data_root = data_root
-        self.workflow = Workflow(self.store)
         self.performer_runtime = PerformerRuntime()
         self.acceptance_gate = AcceptanceGate()
         self._smoke_check_lock = asyncio.Lock()

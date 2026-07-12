@@ -343,7 +343,7 @@ class ConductorPodiumSyncMixin:
                 "issue_identifier": issue_identifier or None,
                 "reason": "no_matching_instance",
             }
-        accepted = self.workflow.accept_parent(
+        accepted = self.store.create_run(
             issue_id or issue_identifier,
             issue_identifier or issue_id,
             instance_id=instance.id,
