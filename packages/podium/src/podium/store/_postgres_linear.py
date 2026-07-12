@@ -232,13 +232,6 @@ class PgLinearMixin:
         )
         return _workspace_installation(row) if row is not None else None
 
-    async def find_active_workspace_installation(self, linear_organization_id: str) -> dict[str, Any] | None:
-        row = await self.pool.fetchrow(
-            "SELECT * FROM linear_workspace_installations WHERE linear_organization_id = $1 AND active = TRUE",
-            linear_organization_id,
-        )
-        return _workspace_installation(row) if row is not None else None
-
     async def list_active_workspace_installations(self) -> list[dict[str, Any]]:
         rows = await self.pool.fetch(
             "SELECT * FROM linear_workspace_installations WHERE active = TRUE ORDER BY user_id"
