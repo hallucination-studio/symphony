@@ -51,14 +51,13 @@ class CodexSdkClient:
         workspace_path: Path,
         prompt: str,
         *,
-        on_event: EventCallback | None = None,
         existing_thread_id: str | None = None,
         output_schema: dict[str, Any],
     ) -> CodexTurnResult:
         if not workspace_path.exists() or not workspace_path.is_dir():
             raise CodexError("invalid_workspace_cwd", f"Workspace path is not a directory: {workspace_path}")
         events: list[dict[str, Any]] = []
-        emit = _event_collector(events, on_event)
+        emit = events.append
         emit(
             {
                 "event": "sdk_session_starting",
@@ -478,15 +477,6 @@ class CodexSdkClient:
             structured = _first_dict(event, "structured_result", "output", "parsed", default=structured)
             structured = _first_dict(payload, "structured_result", "output", "parsed", default=structured)
         return final_response or fallback_response, structured
-
-
-def _event_collector(events: list[dict[str, Any]], on_event: EventCallback | None) -> EventCallback:
-    def emit(event: dict[str, Any]) -> None:
-        events.append(event)
-        if on_event:
-            on_event(event)
-
-    return emit
 
 
 def _sdk_event_to_dict(event: Any) -> dict[str, Any] | None:
