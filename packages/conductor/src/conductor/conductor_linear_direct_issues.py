@@ -44,14 +44,6 @@ query ManagedRunChildren($issueId: String!) {
         state { name type }
         delegate { id }
         labels { nodes { name } }
-        relations(first: 100) {
-          nodes {
-            id
-            type
-            issue { id identifier }
-            relatedIssue { id identifier }
-          }
-        }
       }
     }
   }

@@ -5,13 +5,11 @@ from .conductor_linear_direct_comments import ManagedRunCommentMixin
 from .conductor_linear_direct_context import LinearDirectContextMixin
 from .conductor_linear_direct_issues import ManagedRunIssueMixin
 from .conductor_linear_direct_project_labels import ProjectLabelLinearProxyMixin
-from .conductor_linear_direct_relations import ManagedRunRelationMixin
 
 
 class ManagedRunLinearProxy(
     ManagedRunIssueMixin,
     ManagedRunCommentMixin,
-    ManagedRunRelationMixin,
     LinearDirectContextMixin,
     LinearDirectGraphQLBase,
 ):

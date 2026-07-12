@@ -1,58 +1,10 @@
 from __future__ import annotations
 
-import json
 import socket
-from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
 from .conductor_models import InstanceRecord
 from .conductor_service_types import PROJECT_LABEL_PREFIX
-
-
-def json_stable(payload: dict[str, Any]) -> str:
-    import json
-
-    return json.dumps(payload, separators=(",", ":"), sort_keys=True)
-
-
-def _normalize_linear_issue_dict(node: dict[str, Any]) -> dict[str, Any]:
-    labels = node.get("labels") if isinstance(node.get("labels"), dict) else {}
-    label_nodes = labels.get("nodes") if isinstance(labels, dict) else []
-    delegate = node.get("delegate") if isinstance(node.get("delegate"), dict) else None
-    state = node.get("state") if isinstance(node.get("state"), dict) else {}
-    return {
-        "id": node.get("id"),
-        "identifier": node.get("identifier"),
-        "title": node.get("title"),
-        "description": node.get("description") or "",
-        "url": node.get("url"),
-        "state": state.get("name") if isinstance(state, dict) else node.get("state"),
-        "state_type": state.get("type") if isinstance(state, dict) else None,
-        "delegate_id": delegate.get("id") if delegate else None,
-        "labels": [
-            str(label.get("name") or "")
-            for label in (label_nodes or [])
-            if isinstance(label, dict) and label.get("name")
-        ],
-    }
-
-
-def _replace_marker_block(current: str, marker_name: str, block: str) -> str:
-    start = f"<!-- {marker_name}:START -->"
-    end = f"<!-- {marker_name}:END -->"
-    replacement = f"{start}\n{block.strip()}\n{end}"
-    if start in current and end in current:
-        prefix, rest = current.split(start, 1)
-        _old, suffix = rest.split(end, 1)
-        return f"{prefix.rstrip()}\n\n{replacement}\n\n{suffix.lstrip()}".strip()
-    base = current.strip()
-    return f"{base}\n\n{replacement}".strip() if base else replacement
-
-
-def _run_due(run) -> bool:
-    next_run_at = _parse_iso(run.next_run_at)
-    return next_run_at is None or datetime.now(timezone.utc) >= next_run_at
 
 
 def _runtime_metrics(performer: dict[str, Any]) -> dict[str, Any]:
@@ -85,34 +37,12 @@ def _runtime_metrics(performer: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _performer_retry_metric(performer: dict[str, Any]) -> int:
-    counts = performer.get("counts") if isinstance(performer.get("counts"), dict) else {}
-    return _int(counts.get("retrying"))
-
-
-def _performer_failure_metric(performer: dict[str, Any]) -> int:
-    return 0
-
-
 def _int(value: Any) -> int:
     if isinstance(value, bool):
         return 0
     if isinstance(value, int):
         return value
     return 0
-
-
-def _config_int(value: Any, default: int) -> int:
-    if isinstance(value, bool):
-        return default
-    if isinstance(value, int):
-        return value
-    if isinstance(value, str):
-        try:
-            return int(value.strip())
-        except ValueError:
-            return default
-    return default
 
 
 def _optional_int(value: Any, default: int | None) -> int | None:
@@ -161,72 +91,4 @@ def _merge_project_labels(existing: list[str], desired: list[str]) -> list[str]:
     return merged
 
 
-def _parse_iso(value: str | None) -> datetime | None:
-    if not value:
-        return None
-    try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-
-
-def _iso(value: datetime) -> str:
-    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
-
-
-def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(payload, separators=(",", ":"), sort_keys=True), encoding="utf-8")
-    tmp.replace(path)
-
-
-def _sanitize_connection_error(error: str | None) -> str | None:
-    if error is None:
-        return None
-    text = str(error)
-    for marker in ("Bearer ", "token=", "access_token="):
-        if marker in text:
-            text = text.split(marker, 1)[0] + marker + "[redacted]"
-    return text[:500]
-
-
-def _safe_linear_value(value: Any) -> str:
-    text = str(value).replace("\r", " ").replace("\n", " ").strip()
-    for marker in ("Bearer ", "token=", "access_token=", "refresh_token=", "api_key="):
-        if marker in text:
-            text = text.split(marker, 1)[0] + marker + "[redacted]"
-    return text[:500]
-
-
-def _safe_multiline_linear_value(value: Any) -> str:
-    text = str(value).replace("\r", " ").strip()
-    for marker in ("Bearer ", "token=", "access_token=", "refresh_token=", "api_key="):
-        if marker in text:
-            text = text.split(marker, 1)[0] + marker + "[redacted]"
-    return text[:1000]
-
-
-def _optional_dispatch_ref(value: Any) -> str | None:
-    if isinstance(value, dict):
-        value = value.get("id")
-    text = str(value or "").strip()
-    return text or None
-
-
-def _blocked_by_issue_ids(value: Any) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    blocked_by: list[str] = []
-    seen: set[str] = set()
-    for blocker in value:
-        candidate = blocker.get("id") if isinstance(blocker, dict) else getattr(blocker, "id", blocker)
-        text = str(candidate or "").strip()
-        if not text or text in seen:
-            continue
-        seen.add(text)
-        blocked_by.append(text)
-    return blocked_by
-
-
-__all__ = [name for name in globals() if name.startswith("_") or name == "json_stable"]
+__all__ = [name for name in globals() if name.startswith("_")]
