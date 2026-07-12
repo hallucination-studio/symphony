@@ -6,7 +6,7 @@ CONDUCTOR := $(VENV)/bin/conductor
 PODIUM := $(VENV)/bin/podium
 PYTHONPATH_ALL := $(PWD)/packages/performer-api/src:$(PWD)/packages/performer/src:$(PWD)/packages/conductor/src:$(PWD)/packages/podium/src
 
-.PHONY: dev stop once test test-all install
+.PHONY: dev stop test test-all install
 
 dev: install
 	$(CONDUCTOR) --port 8081 --data-root ./.conductor
@@ -14,10 +14,6 @@ dev: install
 stop:
 	-pkill -f '$(CONDUCTOR) --port 8081 --data-root ./.conductor'
 	-pkill -f '$(PERFORMER) --turn-request-path '
-
-once: install
-	@echo "make once has been removed; pipeline attempts are leased and started by Conductor."
-	@false
 
 test:
 	PYTHONPATH=$(PYTHONPATH_ALL) $(PYTHON) -m pytest -q

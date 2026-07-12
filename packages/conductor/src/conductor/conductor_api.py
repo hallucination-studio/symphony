@@ -250,8 +250,6 @@ class ConductorApiServer:
             return 200, {"logs": logs}
         if method == "GET" and action == "runtime":
             return 200, {"runtime": self.service.instance_runtime(instance_id)}
-        if method == "POST" and action == "runtime/approve-error":
-            return 200, await self.service.approve_runtime_error(instance_id, issue_id=body.get("issue_id"))
         return 404, {"error": {"code": "not_found", "message": f"Route not found: {path}"}}
 
     def _write_response(self, writer: asyncio.StreamWriter, status: int, payload: dict[str, Any]) -> None:

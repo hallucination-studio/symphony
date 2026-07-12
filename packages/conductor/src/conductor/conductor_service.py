@@ -168,13 +168,6 @@ class ConductorService(ConductorPodiumSyncMixin):
         self.store.update_instance(restarted)
         return restarted
 
-    async def approve_runtime_error(self, instance_id: str, *, issue_id: str | None = None) -> dict[str, Any]:
-        _ = self._require_instance(instance_id), issue_id
-        raise ConductorServiceError(
-            "runtime_error_approval_removed",
-            "Runtime approvals must be completed on the blocked managed-run work item issue and resumed through Managed Runs.",
-        )
-
     def instance_runtime(self, instance_id: str) -> dict[str, object]:
         current = self._require_instance(instance_id)
         runtime: dict[str, object] = {

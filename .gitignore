@@ -9,7 +9,6 @@ docs/superpowers
 .codex-runtime
 .DS_Store
 conductor-data
-.symphony
 .claude
 .agents/
 .superpowers

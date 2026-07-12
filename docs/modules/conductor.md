@@ -24,8 +24,8 @@ The code has more than the eventual compact target, but ownership is explicit:
 | `workflow_driver.py` | One bounded plan/execute/gate progression and Linear projection |
 | `runtime.py` | Request/result files, isolated `CODEX_HOME`, process logs, result fencing |
 | `gate.py` | Declared verification commands and the single Codex Gate combination |
-| `linear.py` | Podium proxy operations for issue reads, children, comments, states, and labels |
-| `conductor_podium_sync.py` | Runtime report, command polling, dispatch lease, project labels, smoke handling |
+| `linear.py` | Podium proxy operations for issue reads, children, comments, states, and read-only project-label lookup for smoke validation |
+| `conductor_podium_sync.py` | Runtime report, command polling, dispatch lease, and smoke handling |
 | `conductor_api.py`, `conductor_service.py` | Local HTTP API and composition/background tick |
 
 `conductor_service.py` directly owns the instance, workspace, log, and
