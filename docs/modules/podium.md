@@ -84,14 +84,16 @@ them. It may additionally carry an optional safe acceptance/Gate summary:
 catalog/rubric, plan version, command counts, score/threshold, provenance,
 manifest/artifact counts, and failure code. Podium independently allowlists
 and bounds that summary; command text/output, findings, and artifact/manifest
-locations remain local. The public managed-run route currently returns
-`policy_revision: 1` and `profiles: {}`; the current Web does not render the
-optional evidence fields.
+locations remain local. The proposed runtime surface returns only selected
+profile/revision ids, policy/hash, credential method, and sanitized readiness;
+it never returns profile TOML or credential values. The Web does not render
+detailed profile contents in this slice.
 
 ## Hard-cut rules
 
-- New PostgreSQL schema only: no old runtime-group or profile rows are read or
-  migrated.
+- New PostgreSQL schema only: no old runtime-group rows are read or migrated;
+  runtime profiles/revisions/credential references use the normalized schema in
+  ADR-0004.
 - Keep Linear OAuth/tokens and browser secret boundaries unchanged.
 - Do not add a generic runtime protocol, outbox framework, WebSocket path,
   cross-model acceptance, or a second scheduler.

@@ -1,28 +1,29 @@
 # Codex runtime
 
-Performer is Codex-only. Podium owns one binding-scoped, versioned non-secret
-`config.toml` and policy revision for plan, execute, and gate turns. Podium
-delivers it as an idempotent `runtime.config.apply` command over the existing
-authenticated runtime polling transport. Reports and Web views expose only the
-config version, SHA-256, policy revision, and sanitized credential readiness.
+Performer is Codex-only. Podium owns reusable Codex runtime profiles with
+immutable non-secret `config.toml` revisions. A project binding selects one
+profile revision and one local credential reference; it does not store the
+TOML or credential fields itself. Podium delivers the selected revision through
+the existing idempotent `project.configure` command over authenticated runtime
+polling. Reports and Web views expose only ids, revision/hash, policy revision,
+and sanitized credential readiness.
 
-This is a configuration document, not a backend/profile registry. It never
-contains `auth.json`, API keys, ChatGPT access tokens, keyring exports, or
-credential-bearing environment values.
+The profile registry is reusable configuration metadata, not a backend
+scheduler. It never contains `auth.json`, API keys, ChatGPT access tokens,
+keyring exports, or credential-bearing environment values.
 
 ## Isolation
 
-Conductor materializes the accepted Podium config and a local credential source
-into an isolated per-attempt `CODEX_HOME`. Only `config.toml`, `auth.json`,
-`version.json`, and `models_cache.json` may be copied from a fixed staged seed;
-the default user home is rejected. The seed is supplied through an explicit
-local configuration and never printed in a report or log.
+Conductor materializes the selected immutable Podium config revision and the
+selected local credential slot into an isolated per-attempt `CODEX_HOME`. Only
+`config.toml`, `auth.json`, `version.json`, and `models_cache.json` may be
+copied from a fixed staged slot; the default user home is rejected. Slot paths
+and credentials are local-only and never printed in a report or log.
 
-Official `codex login` with ChatGPT OAuth is supported without an API token. The
-real-flow path uses a dedicated locally staged Codex home (and its approved
-`auth.json` when file-backed) and never reads the operator's ambient `~/.codex`.
-Codex owns login refresh; credentials remain local and are not uploaded to
-Podium.
+Official `codex login` with ChatGPT OAuth is supported without an API token by
+running it in the selected local credential slot. Multiple OAuth accounts and
+API-key slots are independent records; Codex owns login refresh inside the
+selected slot. Credentials remain local and are not uploaded to Podium.
 
 Missing or inaccessible local auth fails closed with a concrete sanitized
 reason such as `managed_codex_auth_required`, while an invalid Podium config

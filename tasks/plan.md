@@ -6,10 +6,10 @@ contraction plans. [`spec.md`](spec.md) is the product contract;
 [`todo.md`](todo.md) is the current work checklist; [`docs/modules`](../docs/modules/README.md)
 records one design baseline per module.
 
-The approved Codex configuration slice additionally follows
-[`ADR-0003`](../docs/decisions/0003-podium-managed-codex-config-and-local-login.md):
-Podium manages only non-secret config, while official `codex login` credentials
-stay local to Conductor.
+The next Codex configuration slice is specified by the proposed
+[`ADR-0004`](../docs/decisions/0004-normalized-codex-profiles-and-credential-references.md).
+Implementation is intentionally paused until the user approves its normalized
+tables and local-only credential boundary.
 
 ## Outcome
 
@@ -67,7 +67,7 @@ HTTP API is separate from that transport.
   commands pass, Codex returns `passed=true`, and score meets threshold. This
   documentation reconciliation does not change Gate behavior.
 - Managed Codex authentication may be ChatGPT OAuth from `codex login` without
-  an API token. The deterministic E2E path uses a fixed local staged seed;
+  an API token. Multiple local OAuth/API-key slots are selected by id;
   credentials remain outside the Podium command payload.
 
 ## Current Module Baselines
@@ -110,13 +110,16 @@ HTTP API is separate from that transport.
 
 ## Remaining Work
 
-1. Implement and verify the Podium-managed, versioned non-secret Codex config
-   file carried by `project.configure`. Conductor must persist and materialize
-   the config per attempt while leaving local login credentials untouched.
-2. Keep the sanitized evidence projection contract covered by the existing
+1. Await approval of the normalized runtime profile/revision/credential/runtime
+   binding design in ADR-0004; do not implement the previous single-table
+   sketch.
+2. After approval, implement and verify the profile revision carried by
+   `project.configure`, local credential selection, and isolated attempt
+   materialization.
+3. Keep the sanitized evidence projection contract covered by the existing
    operator and Linear surfaces. No new runner, endpoint, or evidence child-issue
    tree is allowed.
-3. Run a scoped real Linear/OAuth/Codex product flow after the local rebuild.
+4. Run a scoped real Linear/OAuth/Codex product flow after the local rebuild.
    The fixture now reaches the current Linear API; the configured project probe
    records a sanitized `http_401` credential failure in
    `.test-real-flow/mvp-real-probe.json`. Missing project/Podium variables still

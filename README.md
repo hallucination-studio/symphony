@@ -164,9 +164,12 @@ Managed Conductor endpoints include:
 ## Runtime
 
 Conductor prepares one isolated `CODEX_HOME` under managed instance state for
-each fenced attempt. Podium does not own a runtime-profile registry; the Web
-continues to receive its sanitized policy and plan revision fields. The execute
-turn works only within the approved task scope, while the gate turn is read-only.
+each fenced attempt. The approved design gives Podium reusable runtime profiles
+and immutable config revisions; each project binding selects one revision and a
+Conductor-local credential reference. The Web receives only sanitized profile,
+revision, policy, and readiness metadata. Raw OAuth/API credentials never leave
+the local credential slot. The execute turn works only within the approved task
+scope, while the gate turn is read-only.
 Verification commands run before the Codex Gate and their evidence is stored
 with the task result.
 
