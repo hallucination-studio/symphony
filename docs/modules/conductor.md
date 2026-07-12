@@ -132,8 +132,8 @@ single-line structured events with run/task/attempt/fence correlation.
 
 ## Migration and exit gate
 
-1. Archive existing local Managed Run databases; do not silently reinterpret
-   their expanded state machine as the new one.
+1. Start a fresh `workflow.db` at cutover; do not read, migrate, or reinterpret
+   existing local Managed Run databases.
 2. Add restart, idempotency, child-parent, revision/approval, gate/rework,
    score/rubric/evidence, parent completion, runtime-wait, and stale-result tests.
 3. Keep the compact `models.py`, `store.py`, `workflow.py`, `gate.py`, `runtime.py`,
