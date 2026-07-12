@@ -33,8 +33,7 @@ of truth is split by concern:
 - [Podium Web](docs/product/podium-web.md)
 - [Runtime Installation](docs/product/runtime-installation.md)
 - [Security Model](docs/product/security-model.md)
-- [Architecture](docs/architecture.md)
-- [Sequential Workflow](docs/workflow.md)
+- [Module Design Baselines](docs/modules/README.md)
 - [Real Flow](docs/real-flow.md)
 
 ## Runtime Flow

@@ -316,8 +316,8 @@ provenance model, not a second workflow engine.
 Podium keeps PostgreSQL authority for users, sessions, Linear applications and
 installations, selected projects, Conductors, bindings, polling observations,
 checkpoints, delegation epochs, dispatches, commands, reports, and cached log
-tails. Delete `runtime_groups`; keep `runtime_group_id` as a stable field on the
-Conductor record so the Web response does not change.
+tails. Delete `runtime_groups`; derive `runtime_group_id` as a stable
+presentation alias from the Conductor id so the Web response does not change.
 
 ## Target Source Shape
 

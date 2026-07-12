@@ -287,13 +287,13 @@ Focused regression files for this path include:
 - `tests/test_podium_runtime_polling.py`
 - `tests/test_conductor_workflow.py`
 - `tests/test_workflow_driver.py`
-- `tests/test_runtime_contract.py`
+- `tests/test_conductor_runtime.py`
 
 Managed runs may create the initial issue and observe state. They must not manually:
 
 - move the business issue to `In Review` or `Done`;
-- mutate managed-run plan versions, verification evidence, manifests, integration
-  queue rows, or Linear projection metadata outside Conductor's fenced
+- mutate managed-run plan versions, verification evidence, manifests, or Linear
+  projection metadata outside Conductor's fenced
   turn/result paths;
 - mutate managed run or work-item state outside Conductor's fenced turn/result
   paths;
@@ -352,10 +352,10 @@ than requiring a human to keep waiting and inspect logs:
 - expired or missing worker lease;
 - stale result rejected by plan/policy revision or fencing token;
 - Linear parent/work-item relationship drift;
-- verified manifest without integration completion;
+- verified manifest or artifact evidence absent from durable managed-run state;
 - Codex approval or tool-input wait visible only in stdout and not in durable
   runtime wait state plus Linear managed-run projection;
-- integration conflict awaiting a human child issue;
+- Gate failure not projected as a blocked task with a concrete reason;
 - `scenario_timeout_unresolved`;
 - Linear projection drift for managed-run metadata.
 
@@ -367,7 +367,7 @@ archive the project if a real run was involved, and rerun from a clean state.
 Past real runs exposed bugs that mock tests missed:
 
 - gate fail returned the business issue to `In Progress` but left it claimed, blocking re-dispatch;
-- verifier/human-wait handoffs must not move Linear state without durable graph evidence;
+- verifier/human-wait handoffs must not move Linear state without durable workflow evidence;
 - issue tree checks must inspect explicit `parent` fields;
 - real Codex runs can take long enough that hard turn timeouts should be separate from stall timeouts.
 

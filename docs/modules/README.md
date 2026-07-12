@@ -31,12 +31,12 @@ the only customer-facing UI and never receives Linear or Codex credentials.
 
 | Module | Owns | Does not own |
 |---|---|---|
-| `performer-api` | Shared JSON contracts and boundary validation | SDK calls, persistence, Linear, HTTP, UI |
-| `performer` | One fenced Codex turn and its isolated runtime | Scheduling, Linear, Podium, durable workflow state |
-| `conductor` | One bound repository, sequential durable workflow, Linear projection, gates | Customer OAuth, browser UI, direct Linear tokens |
-| `podium` | Auth, Linear control plane, bindings, polling, dispatch, proxy, runtime APIs | Local task execution or Codex process management |
-| `podium-web` | Existing browser routes, actions, presentation, secret-safe API use | Workflow decisions, credentials, runtime sockets |
-| `verification` | Module tests and a strict real-flow preflight | A second acceptance product or cross-model scheduler |
+| [`performer-api`](performer-api.md) | Shared JSON contracts and boundary validation | SDK calls, persistence, Linear, HTTP, UI |
+| [`performer`](performer.md) | One fenced Codex turn and its isolated runtime | Scheduling, Linear, Podium, durable workflow state |
+| [`conductor`](conductor.md) | One bound repository, sequential durable workflow, Linear projection, gates | Customer OAuth, browser UI, direct Linear tokens |
+| [`podium`](podium.md) | Auth, Linear control plane, bindings, polling, dispatch, proxy, runtime APIs | Local task execution or Codex process management |
+| [`podium-web`](podium-web.md) | Existing browser routes, actions, presentation, secret-safe API use | Workflow decisions, credentials, runtime sockets |
+| [`verification`](verification.md) | Module tests and a strict real-flow preflight | A second acceptance product or cross-model scheduler |
 
 ## Cross-module invariants
 

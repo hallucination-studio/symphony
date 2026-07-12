@@ -6,7 +6,6 @@ ownership; [`tasks/spec.md`](../../tasks/spec.md) defines the workflow contract.
 
 ## Sources of truth
 
-- [`product-shape.md`](product-shape.md): roles and customer journey.
 - [`runtime-pipeline.md`](runtime-pipeline.md): Podium -> Conductor -> Performer.
 - [`pipeline-state.md`](pipeline-state.md): durable run/task/attempt state.
 - [`gates-verification-integration.md`](gates-verification-integration.md):
@@ -17,7 +16,6 @@ ownership; [`tasks/spec.md`](../../tasks/spec.md) defines the workflow contract.
 - [`podium-web.md`](podium-web.md): unchanged browser business behavior.
 - [`runtime-installation.md`](runtime-installation.md): enrollment and binding.
 - [`security-model.md`](security-model.md): secret and error boundaries.
-- [`acceptance-catalog.md`](acceptance-catalog.md): retained gate evidence shape.
 
 The implementation has no graph scheduler, parallel work model, branch/join
 layer, workflow checkpoint groups, cross-model reviewer, or second acceptance
