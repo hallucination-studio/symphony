@@ -3,12 +3,6 @@ from __future__ import annotations
 import socket
 from typing import Any
 
-from .models import InstanceRecord
-
-
-PROJECT_LABEL_PREFIX = "symphony:"
-
-
 def _runtime_metrics(performer: dict[str, Any]) -> dict[str, Any]:
     running = performer.get("running") if isinstance(performer.get("running"), list) else []
     retrying = performer.get("retrying") if isinstance(performer.get("retrying"), list) else []
@@ -67,30 +61,6 @@ def _hostname() -> str:
 
 def _linear_agent_app_user_id(filters: dict[str, Any]) -> str:
     return str(filters.get("linear_agent_app_user_id") or filters.get("agent_app_user_id") or "").strip()
-
-
-def _desired_project_labels(instance: InstanceRecord) -> list[str]:
-    """The `symphony:` project labels that mirror an instance's routing scope.
-
-    Human-readable and keyed on the instance name (unique per Conductor) so the
-    Linear project shows exactly which Performers and profiles target it.
-    """
-    return [f"{PROJECT_LABEL_PREFIX}performer/{instance.name}"]
-
-
-def _merge_project_labels(existing: list[str], desired: list[str]) -> list[str]:
-    """Replace only the `symphony:` namespace, preserving user-owned labels.
-
-    Linear's `projectUpdate.labelIds` is a full replacement, so the caller must
-    send the complete set: every non-`symphony:` label kept as-is plus the
-    desired managed labels.
-    """
-    kept = [label for label in existing if not label.startswith(PROJECT_LABEL_PREFIX)]
-    merged = list(kept)
-    for label in desired:
-        if label not in merged:
-            merged.append(label)
-    return merged
 
 
 __all__ = [name for name in globals() if name.startswith("_")]

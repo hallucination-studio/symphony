@@ -21,6 +21,7 @@ performer-api <- podium (only if a shared contract is needed)
 ```text
 performer_api/
   __init__.py
+  labels.py         # Canonical Podium-owned project-label formatter/validator
   workflow.py       # Task, Plan, AcceptanceCatalog, PlanRevision
   turns.py          # TurnContext, RuntimeWait, ExecuteResult, GateResult
   validation.py     # plan and context validation
@@ -35,6 +36,9 @@ package. Old Managed Run compatibility exports are intentionally absent.
   acceptance criteria, verification commands, and file scope. The order is the
   execution order; task contracts contain no dependency, parallel, or
   checkpoint fields.
+- The shared project-label contract formats and validates only
+  `symphony:conductor/<Name>-<public-id>` labels. Podium owns their lifecycle;
+  Conductor uses the contract only to validate a smoke command.
 - A `Plan` may retain risks, architecture decisions, open questions, an
   acceptance catalog, and `approval_required`. `PlanRevision` adds version,
   status, policy revision, approval id, and manifest references.

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from performer_api.labels import is_managed_project_label, managed_project_label_name
 from performer_api.turns import GateResult, RuntimeWait, TurnContext
 from performer_api.validation import ContractValidationError, validate_plan
 from performer_api.workflow import AcceptanceCatalog, Plan, PlanRevision
@@ -96,3 +97,11 @@ def test_runtime_wait_round_trips_without_becoming_a_second_transport() -> None:
     wait = RuntimeWait(kind="approval_requested", reason="Approve the tool call")
 
     assert RuntimeWait.from_dict(wait.to_dict()) == wait
+
+
+def test_managed_project_label_contract_is_shared_by_podium_and_conductor() -> None:
+    label = managed_project_label_name("Bach", "abc123")
+
+    assert label == "symphony:conductor/Bach-abc123"
+    assert is_managed_project_label(label)
+    assert not is_managed_project_label(f" {label} ")

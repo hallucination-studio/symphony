@@ -17,9 +17,7 @@ from .gate import AcceptanceGate
 from .runtime import PerformerRuntime
 from .conductor_podium_sync import ConductorPodiumSyncMixin
 from .conductor_service_helpers import (
-    _desired_project_labels,
     _linear_agent_app_user_id,
-    _merge_project_labels,
     _runtime_metrics,
 )
 from .linear import ManagedRunLinearProxy
@@ -54,10 +52,6 @@ class ConductorService(ConductorPodiumSyncMixin):
         self.acceptance_gate = AcceptanceGate()
         self._smoke_check_lock = asyncio.Lock()
         self.project_label_proxy_factory = self._project_label_proxy
-        self._project_labels_last_synced_at = None
-        # instance_id -> last-synced desired-label signature, so the background
-        # loop only calls Linear when an instance's scope actually changes.
-        self._project_label_signatures: dict[str, str] = {}
         self.data_root.mkdir(parents=True, exist_ok=True)
 
     def list_instances(self) -> list[InstanceRecord]:
@@ -97,26 +91,6 @@ class ConductorService(ConductorPodiumSyncMixin):
             endpoint=f"{endpoint_base}/api/v1/linear/graphql",
             api_key=settings.podium_proxy_token.strip(),
         )
-
-    async def sync_instance_project_labels(self, instance: InstanceRecord) -> dict[str, Any]:
-        settings = self.store.get_settings()
-        if not settings.podium_proxy_token.strip():
-            return {"status": "skipped", "reason": "proxy_not_configured"}
-        project_slug = str(instance.linear_project or "").strip()
-        if not project_slug:
-            return {"status": "skipped", "reason": "missing_project_slug"}
-        proxy = self.project_label_proxy_factory(instance)
-        project_id = await proxy.find_project_id(project_slug)
-        if not project_id:
-            return {"status": "skipped", "reason": "project_not_found", "project_slug": project_slug}
-        existing = await proxy.fetch_project_labels(project_id)
-        existing_names = [row["name"] for row in existing]
-        desired = _merge_project_labels(existing_names, _desired_project_labels(instance))
-        if set(desired) == set(existing_names):
-            return {"status": "unchanged", "project_id": project_id, "labels": desired}
-        label_ids = [await proxy.ensure_project_label_id(name) for name in desired]
-        await proxy.set_project_labels(project_id, label_ids)
-        return {"status": "synced", "project_id": project_id, "labels": desired}
 
     def get_instance(self, instance_id: str) -> InstanceRecord | None:
         return self.store.get_instance(instance_id)

@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from conductor.conductor_podium_sync import ConductorPodiumSyncMixin, _smoke_runtime_fields
-from conductor.conductor_smoke_protocol import normalize_smoke_command
+from conductor.conductor_smoke_protocol import SmokeCommandError, normalize_smoke_command
 from conductor.conductor_api import ConductorApiServer
 from conductor.conductor_service import ConductorService
 from conductor.models import ConductorServiceError
@@ -14,11 +14,28 @@ from conductor.store import ConductorStore
 
 
 class _SmokeProxy:
+    def __init__(self, labels: list[dict[str, str]] | None = None) -> None:
+        self.labels = labels or [{"id": "label-1", "name": "symphony:conductor/Bach-abc123"}]
+
     async def find_project_id(self, _slug: str) -> str:
         return "project-1"
 
     async def fetch_project_labels(self, _project_id: str) -> list[dict[str, str]]:
-        return [{"id": "label-1", "name": "symphony:performer/example"}]
+        return self.labels
+
+
+def _smoke_command_payload(workspace: Path, label_name: str = "symphony:conductor/Bach-abc123") -> dict[str, object]:
+    return {
+        "type": "smoke.check",
+        "smoke_check_id": "smoke-1",
+        "binding_id": "binding-1",
+        "config_version": 1,
+        "linear_project_id": "project-1",
+        "project_slug": "example",
+        "repository": {"mode": "local_path", "value": str(workspace)},
+        "expected_label": {"id": "label-1", "name": label_name},
+        "runtime_config_version": 1,
+    }
 
 
 def test_smoke_logs_derive_runtime_group_from_conductor_identity() -> None:
@@ -31,20 +48,8 @@ def test_smoke_logs_derive_runtime_group_from_conductor_identity() -> None:
 
 
 @pytest.mark.anyio
-async def test_smoke_check_accepts_and_matches_the_performer_project_label(tmp_path: Path) -> None:
-    command = normalize_smoke_command(
-        {
-            "type": "smoke.check",
-            "smoke_check_id": "smoke-1",
-            "binding_id": "binding-1",
-            "config_version": 1,
-            "linear_project_id": "project-1",
-            "project_slug": "example",
-            "repository": {"mode": "local_path", "value": str(tmp_path)},
-            "expected_label": {"id": "label-1", "name": "symphony:performer/example"},
-            "runtime_config_version": 1,
-        }
-    )
+async def test_smoke_check_accepts_and_matches_the_podium_project_label(tmp_path: Path) -> None:
+    command = normalize_smoke_command(_smoke_command_payload(tmp_path))
     instance = SimpleNamespace(
         linear_filters={
             "binding_id": "binding-1",
@@ -64,33 +69,42 @@ async def test_smoke_check_accepts_and_matches_the_performer_project_label(tmp_p
     assert all(check["passed"] for check in result["checks"])
 
 
+def test_smoke_command_rejects_a_noncanonical_podium_label(tmp_path: Path) -> None:
+    for label_name in (
+        "symphony:conductor/Bach-ABC123",
+        " symphony:conductor/Bach-abc123 ",
+    ):
+        with pytest.raises(SmokeCommandError, match="project label"):
+            normalize_smoke_command(_smoke_command_payload(tmp_path, label_name))
+
+
 @pytest.mark.anyio
-async def test_background_tick_runs_due_project_label_sync(monkeypatch: pytest.MonkeyPatch) -> None:
-    class FakeDriver:
-        async def drive_once(self) -> dict[str, int]:
-            return {"started": 0, "applied": 0}
+async def test_smoke_check_requires_one_label_matching_id_and_name(tmp_path: Path) -> None:
+    command = normalize_smoke_command(_smoke_command_payload(tmp_path))
+    instance = SimpleNamespace(
+        linear_filters={
+            "binding_id": "binding-1",
+            "binding_config_version": 1,
+            "linear_project_id": "project-1",
+        },
+        linear_project="example",
+        repo_source_type="local_path",
+        repo_source_value=str(tmp_path),
+        resolved_repo_path=str(tmp_path),
+    )
+    service = SimpleNamespace(
+        project_label_proxy_factory=lambda _instance: _SmokeProxy(
+            [
+                {"id": "label-1", "name": "symphony:conductor/Mozart-abc123"},
+                {"id": "label-2", "name": "symphony:conductor/Bach-abc123"},
+            ]
+        )
+    )
 
-    class FakeSync(ConductorPodiumSyncMixin):
-        def __init__(self) -> None:
-            self.sync_calls = 0
-            self._project_labels_last_synced_at = None
+    result = await ConductorPodiumSyncMixin._execute_smoke_check(service, command, instance)
 
-        async def sync_project_labels_once(self) -> int:
-            self.sync_calls += 1
-            return 1
-
-    monkeypatch.setattr("conductor.conductor_podium_sync.WorkflowDriver", lambda _service: FakeDriver())
-    service = FakeSync()
-
-    result = await ConductorPodiumSyncMixin.coordinate_background_once(service)
-
-    assert service.sync_calls == 1
-    assert result["project_labels_synced"] == 1
-
-    result = await ConductorPodiumSyncMixin.coordinate_background_once(service)
-
-    assert service.sync_calls == 1
-    assert result["project_labels_synced"] == 0
+    assert result["status"] == "failed"
+    assert next(check for check in result["checks"] if check["name"] == "project_label_state")["passed"] is False
 
 
 @pytest.mark.anyio

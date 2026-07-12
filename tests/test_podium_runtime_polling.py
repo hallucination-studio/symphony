@@ -574,7 +574,7 @@ async def test_smoke_context_derives_the_group_alias_from_its_conductor() -> Non
         "agent_app_user_id": "agent-1",
         "repo_source": {"type": "local_path", "value": "/repo"},
         "label_id": "label-1",
-        "label_name": "symphony:performer/example",
+        "label_name": "symphony:conductor/Bach-abc123",
         "instance_id": "instance-1",
         "linear_project_id": "project-1",
         "project_slug": "example",
@@ -583,7 +583,13 @@ async def test_smoke_context_derives_the_group_alias_from_its_conductor() -> Non
     class Store:
         async def get_runtime(self, runtime_id: str) -> dict[str, str] | None:
             if runtime_id == "conductor-1":
-                return {"id": runtime_id, "user_id": "user-1", "enrollment_state": "enrolled"}
+                return {
+                    "id": runtime_id,
+                    "user_id": "user-1",
+                    "enrollment_state": "enrolled",
+                    "name": "Bach",
+                    "public_id": "abc123",
+                }
             return None
 
     class State:
@@ -600,3 +606,12 @@ async def test_smoke_context_derives_the_group_alias_from_its_conductor() -> Non
 
     assert context["runtime_group_id"] == "group_conductor-1"
     assert context["_binding_ready"] is True
+
+    binding["label_name"] = "symphony:conductor/Mozart-abc123"
+    stale = await PodiumSmokeChecksMixin._smoke_binding_context(
+        State(),
+        binding,
+        {"id": "installation-1", "app_user_id": "agent-1"},
+    )
+
+    assert stale["_binding_ready"] is False

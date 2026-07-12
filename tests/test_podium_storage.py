@@ -46,7 +46,7 @@ def _binding() -> dict[str, Any]:
         "candidate_config_version": 0,
         "candidate_acknowledged_config_version": 0,
         "label_id": "label-1",
-        "label_name": "symphony:performer/example",
+        "label_name": "symphony:conductor/Bach-abc123",
         "replacement_conductor_id": "",
         "replacement_repo_source": {},
         "replacement_state": "",

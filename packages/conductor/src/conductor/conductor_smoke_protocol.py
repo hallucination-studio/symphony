@@ -3,6 +3,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from performer_api.labels import is_managed_project_label
+
 
 CHECK_NAMES = (
     "binding_identity",
@@ -23,6 +25,7 @@ class SmokeCommandError(RuntimeError):
 def normalize_smoke_command(payload: dict[str, Any]) -> dict[str, Any]:
     repository = payload.get("repository") if isinstance(payload.get("repository"), dict) else {}
     expected_label = payload.get("expected_label") if isinstance(payload.get("expected_label"), dict) else {}
+    label_name = expected_label.get("name")
     command = {
         "type": str(payload.get("type") or ""),
         "smoke_check_id": _identifier(payload.get("smoke_check_id")),
@@ -36,7 +39,7 @@ def normalize_smoke_command(payload: dict[str, Any]) -> dict[str, Any]:
         },
         "expected_label": {
             "id": _identifier(expected_label.get("id")),
-            "name": str(expected_label.get("name") or "").strip(),
+            "name": str(label_name or ""),
         },
         "runtime_config_version": _positive_int(payload.get("runtime_config_version")),
     }
@@ -44,7 +47,7 @@ def normalize_smoke_command(payload: dict[str, Any]) -> dict[str, Any]:
         raise SmokeCommandError("invalid_smoke_command", "Smoke command identity is incomplete")
     if command["repository"]["mode"] not in {"local_path", "git_url"} or not command["repository"]["value"]:
         raise SmokeCommandError("invalid_smoke_command", "Smoke command repository is invalid")
-    if not command["expected_label"]["name"].startswith("symphony:performer/"):
+    if not is_managed_project_label(label_name):
         raise SmokeCommandError("invalid_smoke_command", "Smoke command project label is invalid")
     return command
 

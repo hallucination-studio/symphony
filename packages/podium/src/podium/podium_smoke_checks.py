@@ -6,6 +6,8 @@ import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from performer_api.labels import managed_project_label_name
+
 from .podium_shared import runtime_group_alias, utc_now_iso
 
 
@@ -345,6 +347,10 @@ class PodiumSmokeChecksMixin:
             and binding.get("label_name")
             and str((runtime or {}).get("id") or "") == runtime_id
             and str((runtime or {}).get("user_id") or "") == str(binding.get("user_id") or "")
+            and str(binding.get("label_name") or "") == managed_project_label_name(
+                str((runtime or {}).get("name") or ""),
+                str((runtime or {}).get("public_id") or ""),
+            )
         )
         return {
             "runtime_id": runtime_id,

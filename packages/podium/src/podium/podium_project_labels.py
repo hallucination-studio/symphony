@@ -3,6 +3,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from performer_api.labels import managed_project_label_name
+
 from .linear_graphql_client import LinearGraphQLRequestError
 
 
@@ -57,7 +59,10 @@ class PodiumProjectLabelsMixin:
         conductor = await self.store.get_runtime(str(binding.get("conductor_id") or ""))
         if conductor is None:
             raise LinearProjectLabelError("conductor_not_found")
-        label_name = managed_project_label_name(conductor)
+        label_name = managed_project_label_name(
+            str(conductor.get("name") or ""),
+            str(conductor.get("public_id") or ""),
+        )
         if binding.get("label_id") and binding.get("label_name") == label_name:
             return binding
         installation = await self.get_active_linear_installation(str(binding.get("user_id") or ""))
@@ -77,7 +82,10 @@ class PodiumProjectLabelsMixin:
         conductor: dict[str, Any],
     ) -> dict[str, Any]:
         label_id = str(binding.get("label_id") or "")
-        label_name = managed_project_label_name(conductor)
+        label_name = managed_project_label_name(
+            str(conductor.get("name") or ""),
+            str(conductor.get("public_id") or ""),
+        )
         if not label_id:
             raise LinearProjectLabelError("linear_project_label_required")
         if str(binding.get("label_name") or "") == label_name:
@@ -200,10 +208,6 @@ class PodiumProjectLabelsMixin:
             variables=variables,
             operation_name=operation_name,
         )
-
-
-def managed_project_label_name(conductor: dict[str, Any]) -> str:
-    return f"symphony:conductor/{conductor.get('name')}-{conductor.get('public_id')}"
 
 
 def _require_success(data: dict[str, Any], field: str) -> None:

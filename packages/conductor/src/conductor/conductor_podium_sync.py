@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import logging
 import os
 from pathlib import Path
@@ -11,7 +10,7 @@ import httpx
 
 from .models import ConductorServiceError, InstanceCreateRequest, InstancePatchRequest
 from .conductor_smoke_protocol import SmokeCommandError, normalize_smoke_command, sanitize_reason, smoke_result
-from .conductor_service_helpers import _desired_project_labels, _hostname, _linear_agent_app_user_id, _optional_int
+from .conductor_service_helpers import _hostname, _linear_agent_app_user_id, _optional_int
 from .workflow_driver import WorkflowDriver
 
 
@@ -22,36 +21,11 @@ class ConductorPodiumSyncMixin:
     async def coordinate_background_once(self) -> dict[str, Any]:
         self._managed_run_reconcile_findings: list[dict[str, Any]] = []
         managed_run_driver = await WorkflowDriver(self).drive_once()
-        project_labels_synced = await self._sync_project_labels_if_due(datetime.now(timezone.utc))
         return {
-            "project_labels_synced": project_labels_synced,
             "managed_run_turns_started": managed_run_driver.get("started", 0),
             "managed_run_results_applied": managed_run_driver.get("applied", 0),
             "reconcile_findings": getattr(self, "_managed_run_reconcile_findings", []),
         }
-
-    async def _sync_project_labels_if_due(self, now: datetime) -> int:
-        last_synced_at = getattr(self, "_project_labels_last_synced_at", None)
-        if last_synced_at is not None and (now - last_synced_at).total_seconds() < 300:
-            return 0
-        self._project_labels_last_synced_at = now
-        return await self.sync_project_labels_once()
-
-    async def sync_project_labels_once(self) -> int:
-        synced = 0
-        for instance in self.store.list_instances():
-            signature = "\0".join([instance.linear_project, *_desired_project_labels(instance)])
-            if self._project_label_signatures.get(instance.id) == signature:
-                continue
-            try:
-                result = await self.sync_instance_project_labels(instance)
-            except Exception:
-                continue
-            if result.get("status") in {"synced", "unchanged"}:
-                self._project_label_signatures[instance.id] = signature
-            if result.get("status") == "synced":
-                synced += 1
-        return synced
 
     async def handle_podium_command(self, command: dict[str, Any]) -> dict[str, Any]:
         kind = str(command.get("type") or "")
@@ -97,8 +71,10 @@ class ConductorPodiumSyncMixin:
                     labels = await proxy.fetch_project_labels(str(project_id))
                     expected = command["expected_label"]
                     label_ready = any(
-                        str(label.get("id") or "") == expected["id"]
-                        or str(label.get("name") or "") == expected["name"]
+                        (
+                            str(label.get("id") or "") == expected["id"]
+                            and str(label.get("name") or "") == expected["name"]
+                        )
                         for label in labels
                         if isinstance(label, dict)
                     )
@@ -442,7 +418,6 @@ class ConductorPodiumSyncMixin:
                     ),
                     "agent_app_user_id": _linear_agent_app_user_id(instance.linear_filters),
                     "process_status": instance.process_status,
-                    "constraint_labels": _desired_project_labels(instance),
                     "repo_source": {"type": instance.repo_source_type, "value": instance.repo_source_value},
                 }
             )

@@ -308,55 +308,6 @@ query ProjectLabels($projectId: String!) {
             if isinstance(node, dict) and node.get("id")
         ]
 
-    async def ensure_project_label_id(self, name: str) -> str:
-        payload = await self.graphql(
-            """
-query ProjectLabelByName($name: String!) {
-  projectLabels(filter: { name: { eq: $name } }, first: 20) {
-    nodes { id name }
-  }
-}
-""",
-            {"name": name},
-        )
-        nodes = (((payload.get("data") or {}).get("projectLabels") or {}).get("nodes") or [])
-        for node in nodes:
-            if isinstance(node, dict) and node.get("id"):
-                return str(node["id"])
-        payload = await self.graphql(
-            """
-mutation ProjectLabelCreate($name: String!) {
-  projectLabelCreate(input: { name: $name }) {
-    success
-    projectLabel { id name }
-  }
-}
-""",
-            {"name": name},
-        )
-        label = (((payload.get("data") or {}).get("projectLabelCreate") or {}).get("projectLabel") or {})
-        if not isinstance(label, dict) or not label.get("id"):
-            raise LinearProxyError("linear_project_label_create_failed", f"Could not create project label: {name}")
-        return str(label["id"])
-
-    async def set_project_labels(self, project_id: str, label_ids: list[str]) -> dict[str, Any]:
-        payload = await self.graphql(
-            """
-mutation ProjectSetLabels($projectId: String!, $labelIds: [String!]) {
-  projectUpdate(id: $projectId, input: { labelIds: $labelIds }) {
-    success
-    project { id }
-  }
-}
-""",
-            {"projectId": project_id, "labelIds": label_ids},
-        )
-        result = ((payload.get("data") or {}).get("projectUpdate") or {})
-        if not result.get("success"):
-            raise LinearProxyError("linear_project_update_failed", "projectUpdate returned success=false")
-        return {"success": True, "project_id": project_id, "label_ids": label_ids}
-
-
 def _normalize_issue(node: dict[str, Any]) -> dict[str, Any]:
     labels = node.get("labels") if isinstance(node.get("labels"), dict) else {}
     label_nodes = labels.get("nodes") if isinstance(labels, dict) else []
