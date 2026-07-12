@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 from pathlib import Path
 from typing import Any
 import shutil
@@ -25,7 +24,7 @@ from .conductor_service_helpers import (
     _linear_agent_app_user_id,
     _merge_project_labels,
 )
-from .conductor_service_types import ConductorServiceError, CoordinationCadence, CoordinationResult
+from .conductor_service_types import ConductorServiceError, CoordinationCadence
 from .conductor_linear_direct import ManagedRunLinearProxy, ProjectLabelLinearProxy
 from .store import ConductorStore as WorkflowStore
 from .workflow import Workflow
@@ -46,8 +45,6 @@ class ConductorService(ConductorPodiumSyncMixin, ConductorServiceViewsMixin):
         self.performer_runtime = PerformerRuntime()
         self.acceptance_gate = AcceptanceGate()
         self._smoke_check_lock = asyncio.Lock()
-        self._startup_locks: dict[str, asyncio.Lock] = {}
-        self.managed_run_tracker_factory = self._managed_run_tracker
         self.project_label_proxy_factory = self._project_label_proxy
         self.coordination_cadence = CoordinationCadence()
         # instance_id -> last-synced desired-label signature, so the background

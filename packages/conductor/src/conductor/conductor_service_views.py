@@ -297,9 +297,6 @@ class ConductorServiceViewsMixin:
             else:
                 shutil.copy2(item, target)
 
-    def _other_instances(self, instance_id: str) -> list[InstanceRecord]:
-        return [instance for instance in self.store.list_instances() if instance.id != instance_id]
-
     def _require_instance(self, instance_id: str) -> InstanceRecord:
         current = self.store.get_instance(instance_id)
         if current is None:
@@ -337,23 +334,3 @@ class ConductorServiceViewsMixin:
             if candidate not in existing:
                 return candidate
             index += 1
-
-    def _runtime_env(self) -> dict[str, str]:
-        settings = self.store.get_settings()
-        env: dict[str, str] = {}
-        proxy_token = settings.podium_proxy_token.strip()
-        if proxy_token:
-            env["PODIUM_PROXY_TOKEN"] = proxy_token
-        runtime_token = settings.podium_runtime_token.strip()
-        if runtime_token:
-            env["PODIUM_RUNTIME_TOKEN"] = runtime_token
-        runtime_id = settings.podium_runtime_id.strip()
-        if runtime_id:
-            env["PODIUM_RUNTIME_ID"] = runtime_id
-        runtime_group_id = settings.runtime_group_id.strip()
-        if runtime_group_id:
-            env["PODIUM_RUNTIME_GROUP_ID"] = runtime_group_id
-        return env
-
-    def _managed_mode_enabled(self) -> bool:
-        return self.store.get_settings().managed_mode
