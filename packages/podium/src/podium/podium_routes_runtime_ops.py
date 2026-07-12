@@ -196,7 +196,7 @@ def _register_runtime_report_endpoint(app: FastAPI, *, state: Any, error_respons
                 return error_response(_managed_run_report_error_status(exc), exc.code, exc.reason)
             await state.store.save_managed_run_view(str(runtime["id"]), view)
         if isinstance(result, dict):
-            result = {**result, "config": {"version": 1, "profiles": {}}}
+            result = {**result, "config": result.get("config") if isinstance(result.get("config"), dict) else {"version": 1, "profiles": {}}}
         return JSONResponse(result)
 
 
@@ -245,6 +245,10 @@ async def _managed_run_report(
     )
     if not managed_run_view_matches_binding(view, binding):
         view = {}
+    profile_summary = {"version": 1, "profiles": {}}
+    summary_method = getattr(state, "_performer_profile_summary", None)
+    if callable(summary_method):
+        profile_summary = await summary_method(binding)
     return {
         "conductor": {
             "id": conductor_id,
@@ -266,7 +270,7 @@ async def _managed_run_report(
         },
         "runtime_group_id": runtime_group_alias(conductor_id),
         "policy_revision": 1,
-        "profiles": {},
+        "profiles": profile_summary.get("profiles") if isinstance(profile_summary, dict) else {},
         "managed_runs": view or {},
     }
 

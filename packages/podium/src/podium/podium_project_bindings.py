@@ -270,6 +270,24 @@ class PodiumProjectBindingsMixin:
             raise ProjectBindingError("project_binding_version_mismatch", "Runtime binding config version is stale")
         if _repository_public(report.get("repo_source")) != _repository_public(binding.get("repo_source")):
             raise ProjectBindingError("project_repository_mismatch", "Runtime repository does not match assigned repository")
+        expected_performer_binding_id = str(binding.get("performer_binding_id") or "")
+        if expected_performer_binding_id:
+            profile = await self.store.get_performer_binding_for_project_binding(str(binding["id"]))
+            if profile is None or str(profile.get("id") or "") != expected_performer_binding_id:
+                raise ProjectBindingError("performer_binding_missing", "Current Performer binding is unavailable")
+            profile_checks = {
+                "performer_binding_id": expected_performer_binding_id,
+                "performer_profile_id": str(profile.get("performer_profile_id") or ""),
+                "runtime_profile_id": str(profile.get("runtime_profile_id") or ""),
+                "credential_id": str(profile.get("credential_id") or ""),
+                "config_sha256": str(profile.get("config_sha256") or ""),
+                "policy_sha256": str(profile.get("policy_sha256") or ""),
+            }
+            for key, expected in profile_checks.items():
+                if str(report.get(key) or "") != expected:
+                    raise ProjectBindingError("performer_binding_mismatch", "Runtime Performer profile selection is stale")
+            if int(report.get("performer_binding_generation") or 0) != int(profile.get("generation") or 0):
+                raise ProjectBindingError("performer_binding_generation_mismatch", "Runtime Performer profile generation is stale")
         ready = {
             **binding,
             "instance_id": str(report.get("instance_id") or ""),

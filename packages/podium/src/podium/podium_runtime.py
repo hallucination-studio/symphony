@@ -60,12 +60,45 @@ class PodiumRuntimeMixin:
                 "bindings_upserted": 0,
             }
         await self._store_binding_report(runtime_id, conductor, binding, metrics, queue, log_tail)
+        profile_summary = await self._performer_profile_summary(binding)
         return {
             "status": "ok",
             "bindings_upserted": 1,
             "binding_state": binding["state"],
             "binding_id": str(binding.get("id") or ""),
             "binding_config_version": int(binding.get("config_version") or 0),
+            "config": profile_summary,
+        }
+
+    async def _performer_profile_summary(self, binding: dict[str, Any]) -> dict[str, Any]:
+        binding_id = str(binding.get("performer_binding_id") or "")
+        if not binding_id:
+            return {"version": 1, "profiles": {}}
+        profile = await self.store.get_performer_binding_for_project_binding(str(binding.get("id") or ""))
+        if profile is None or str(profile.get("id") or "") != binding_id:
+            return {"version": 1, "profiles": {}}
+        return {
+            "version": 1,
+            "profiles": {
+                "performer": {
+                    "performer_binding_id": str(profile.get("id") or ""),
+                    "performer_profile_id": str(profile.get("performer_profile_id") or ""),
+                    "performer_kind": str(profile.get("performer_kind") or ""),
+                    "generation": int(profile.get("generation") or 0),
+                    "policy_sha256": str(profile.get("policy_sha256") or ""),
+                },
+                "runtime": {
+                    "runtime_profile_id": str(profile.get("runtime_profile_id") or ""),
+                    "runtime_kind": str(profile.get("runtime_kind") or ""),
+                    "config_format": str(profile.get("config_format") or ""),
+                    "config_sha256": str(profile.get("config_sha256") or ""),
+                },
+                "credential": {
+                    "credential_id": str(profile.get("credential_id") or ""),
+                    "auth_method": str(profile.get("auth_method") or ""),
+                    "account_hint": str(profile.get("account_hint") or ""),
+                },
+            },
         }
 
     async def _runtime_report_conductor(

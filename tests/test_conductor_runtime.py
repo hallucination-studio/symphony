@@ -66,6 +66,25 @@ def test_runtime_fails_closed_when_selected_credential_slot_is_missing(tmp_path)
         )
 
 
+def test_runtime_provisions_selected_slot_only_from_explicit_staged_seed(tmp_path, monkeypatch) -> None:
+    seed = tmp_path / "staged-seed"
+    seed.mkdir()
+    (seed / "auth.json").write_text("{}", encoding="utf-8")
+    (seed / "config.toml").write_text("model = 'seed'\n", encoding="utf-8")
+    monkeypatch.setenv("SYMPHONY_E2E_CODEX_HOME_SEED", str(seed))
+
+    environment = PerformerRuntime().prepare_environment(
+        tmp_path / "state",
+        codex_config_document='model = "managed"\n',
+        credential_id="credential-1",
+        credential_ref="slot:credential-1",
+    )
+
+    slot = tmp_path / "state" / "performer-credentials" / "credential-1" / "CODEX_HOME"
+    assert (slot / "auth.json").exists()
+    assert (Path(environment["CODEX_HOME"]) / "config.toml").read_text(encoding="utf-8").startswith('model = "managed"')
+
+
 def test_runtime_rejects_stale_fenced_result() -> None:
     expected = TurnContext("run-1", "task-1", "attempt-1", 3, "execute")
     stale = {"context": {**expected.to_dict(), "fencing_token": 2}}

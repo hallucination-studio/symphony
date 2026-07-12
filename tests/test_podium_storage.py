@@ -164,6 +164,41 @@ def test_dispatch_dto_does_not_carry_a_profile() -> None:
     assert "managed_run_profile" not in dispatch_public(dispatch)
 
 
+@pytest.mark.anyio
+async def test_runtime_profile_summary_exposes_hashes_but_not_documents_or_local_refs() -> None:
+    class Store:
+        async def get_performer_binding_for_project_binding(self, _binding_id: str) -> dict[str, Any]:
+            return {
+                "id": "performer-binding:binding-1",
+                "performer_profile_id": "performer-profile:user-1:default",
+                "runtime_profile_id": "runtime-profile:user-1:default",
+                "performer_kind": "codex",
+                "runtime_kind": "codex",
+                "generation": 2,
+                "policy_sha256": "b" * 64,
+                "config_format": "toml",
+                "config_sha256": "a" * 64,
+                "config_document": 'model = "private"',
+                "credential_id": "credential:user-1:main",
+                "credential_ref": "slot:main",
+                "auth_method": "chatgpt_oauth",
+                "account_hint": "main",
+            }
+
+    summary = await PodiumRuntimeMixin._performer_profile_summary(
+        SimpleNamespace(
+            store=Store(),
+        ),
+        {"id": "binding-1", "performer_binding_id": "performer-binding:binding-1"},
+    )
+
+    serialized = str(summary)
+    assert summary["profiles"]["runtime"]["config_sha256"] == "a" * 64
+    assert summary["profiles"]["credential"]["auth_method"] == "chatgpt_oauth"
+    assert "private" not in serialized
+    assert "slot:main" not in serialized
+
+
 class _RecordingPool:
     def __init__(self) -> None:
         self.calls: list[tuple[str, tuple[Any, ...]]] = []

@@ -89,6 +89,8 @@ class PerformerRuntime:
                 raise ValueError("managed_codex_credential_slot_required")
             credential_slot = instance_state_root / "performer-credentials" / _safe_scope(credential_id) / "CODEX_HOME"
             if not credential_slot.is_dir():
+                self._provision_credential_slot(instance_state_root, credential_id)
+            if not credential_slot.is_dir():
                 raise ValueError("managed_codex_credential_slot_required")
             self._copy_codex_home_seed(credential_slot, codex_home)
             if codex_config_document is None:
@@ -127,6 +129,17 @@ class PerformerRuntime:
                 )
             else:
                 shutil.copy2(source_path, destination_path)
+
+    def _provision_credential_slot(self, instance_state_root: Path, credential_id: str) -> None:
+        source = _codex_seed_from_environment()
+        if source is None:
+            return
+        destination = instance_state_root / "performer-credentials" / _safe_scope(credential_id) / "CODEX_HOME"
+        try:
+            destination.mkdir(parents=True, exist_ok=True)
+            self._copy_codex_home_seed(source, destination)
+        except OSError as exc:
+            raise ValueError("managed_codex_credential_slot_materialization_failed") from exc
 
     def append_event(self, log_path: Path, message: str) -> None:
         log_path.parent.mkdir(parents=True, exist_ok=True)
