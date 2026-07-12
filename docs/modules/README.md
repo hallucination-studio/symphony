@@ -1,72 +1,69 @@
 # Module Design Baselines
 
-Status: implemented baseline, 2026-07-12. Real Linear flow remains an
-external-environment verification step.
+Status: code baseline as of 2026-07-12. The local suite proves the covered
+contracts; a real Linear/OAuth/Codex flow is still an external verification
+step, not an implied pass.
 
-These documents define the ownership model for the hard-cut minimal polling
-workflow. `tasks/spec.md` is the product contract and `tasks/plan.md` records
-the implementation cutover. A module owns one behavior; compatibility facades
-and duplicate test/tool owners are not part of the baseline.
+These documents describe the code that exists now and the hard-cut boundaries
+that future work must preserve. They do not authorize a new feature or hide an
+unimplemented requirement. `tasks/spec.md` is the product contract and
+`tasks/plan.md` is the approved implementation plan.
 
 ## Product path
 
 ```text
 Linear parent issue
-  -> Podium Linear polling and dispatch
-  -> Conductor HTTP lease
+  -> Podium polling, dispatch, and lease
+  -> Conductor durable workflow
   -> Performer plan turn
-  -> plan revision and approval
-  -> Linear child sub-issues in plan order
+  -> ordered Linear Sub Issues
   -> Performer execute turn
-  -> command checks + one read-only Codex rubric gate
-  -> child Done, or one rework then visible block
-  -> parent Done only after every child is Done
+  -> verification commands + one read-only Codex Gate
+  -> child Done, one rework, or visible block
+  -> parent Done after every child is Done
 ```
 
-The only runtime transport is authenticated HTTP polling. Performer is still a
+Podium-to-Conductor coordination is authenticated HTTP polling. Performer is a
 local process launched by Conductor through request/result files. Podium Web is
-the customer-facing surface; it does not receive Linear credentials or Codex
-credentials.
+the only customer-facing UI and never receives Linear or Codex credentials.
 
 ## Module ownership
 
 | Module | Owns | Does not own |
 |---|---|---|
-| `performer-api` | Small JSON contracts and boundary validation | SDK calls, persistence, Linear, HTTP, UI |
-| `performer` | One fenced Codex turn and isolated runtime home | Scheduling, Linear, Podium, workflow state |
-| `conductor` | One bound repository, sequential run state, child issues, gates | Customer OAuth, browser UI, direct Linear tokens |
-| `podium` | Auth, Linear control plane, bindings, dispatch, runtime HTTP API, BFF | Local task execution or Codex process management |
-| `podium-web` | Existing browser routes, actions, presentation, secret-safe API use | Workflow decisions, tokens, runtime sockets |
-| `verification` | Small behavior suite, one real flow, evidence and docs checks | A second acceptance product or cross-model scheduler |
+| `performer-api` | Shared JSON contracts and boundary validation | SDK calls, persistence, Linear, HTTP, UI |
+| `performer` | One fenced Codex turn and its isolated runtime | Scheduling, Linear, Podium, durable workflow state |
+| `conductor` | One bound repository, sequential durable workflow, Linear projection, gates | Customer OAuth, browser UI, direct Linear tokens |
+| `podium` | Auth, Linear control plane, bindings, polling, dispatch, proxy, runtime APIs | Local task execution or Codex process management |
+| `podium-web` | Existing browser routes, actions, presentation, secret-safe API use | Workflow decisions, credentials, runtime sockets |
+| `verification` | Module tests and a strict real-flow preflight | A second acceptance product or cross-model scheduler |
 
 ## Cross-module invariants
 
-- The four Python package import boundaries remain: `performer_api` imports
-  nothing from the other three; the three roles do not import each other.
-- Linear business behavior remains: OAuth, token refresh, selected projects,
-  cursor pagination, polling checkpoints, delegation epochs, dispatch
-  deduplication, project bindings, labels, proxying, parent/child projection,
-  comments, and visible errors.
-- Podium Web business behavior remains: authentication, onboarding, project and
-  repository setup, runtime enrollment/binding, smoke action, operator pages,
-  managed-runs views, translations, redirects, cookies, and design tokens.
-- Managed Run plan revisions, approval state, risks, architecture decisions,
-  open questions, acceptance catalogs, score/rubric evidence, manifests,
-  artifacts, and provenance remain owned by the workflow/evidence modules.
-- Every blocking or terminal error has `error_code`, `sanitized_reason`,
-  `action_required`, `retryable`, and `next_action`, and is visible in durable
-  state, structured logs, Linear when relevant, and the Podium report.
-- There is no WebSocket runtime endpoint, client, setting, install response
-  field, presence channel, wake command, or compatibility shim. Conductor's
-  retained local HTTP API is separate.
-- There is no generic workflow engine, dependency graph, parallel scheduler,
-  branch/join model, checkpoint-group system, cross-model reviewer, or second
-  acceptance scheduler/backend abstraction.
+- The four Python package import boundaries remain: `performer_api` imports no
+  other product package; Performer, Conductor, and Podium do not import each
+  other.
+- Linear behavior remains: OAuth, token refresh, selected projects, cursor
+  pagination, polling checkpoints, delegation epochs, dispatch deduplication,
+  bindings, labels, proxying, parent/child projection, and visible failures.
+- Podium Web behavior remains: auth, onboarding, project and repository setup,
+  enrollment/binding, smoke actions, logs, managed-run views, translations,
+  redirects, cookies, and design tokens.
+- The workflow is strictly sequential. There is no dependency graph, parallel
+  scheduler, branch/join model, checkpoint-group system, cross-model reviewer,
+  or second acceptance scheduler.
+- There is no WebSocket runtime transport. HTTP reports refresh the retained
+  runtime-presence TTL, and the local Conductor HTTP API remains separate.
+- `runtime_group_id` is a deterministic presentation alias
+  (`group_{conductor_id}`), not persisted routing or ownership state.
+- Failures must stay sanitized and observable. Current views expose the fields
+  owned by their corresponding state records; do not claim uniform failure
+  metadata where a route or store has not implemented it.
 
 ## Baseline change protocol
 
-For each further slice, record its scope ledger in the task checklist and keep
-approval-requiring assumptions empty. A module is complete when its owner is
-singular, its public contract is explicit, old ownership paths are deleted, and
-the behavior is covered by the rebuilt module suite. Size budgets are review
-signals, not source-line gates.
+For each slice, record `authorized`, `required_consequences`, `out_of_scope`,
+`assumptions_requiring_approval`, and `deferred_ideas`. Keep the assumptions
+empty before production edits. A simplification is complete only when its
+former owner has no callers, its remaining owner is explicit, and module tests
+cover the preserved behavior. Source size is a review signal, never a gate.

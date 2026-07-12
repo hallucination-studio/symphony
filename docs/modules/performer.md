@@ -1,76 +1,56 @@
 # Module baseline: `performer`
 
-Status: implemented baseline, 2026-07-12.
+Status: implemented code baseline, 2026-07-12. The pinned SDK path is covered
+with a local source-shape test; it has not been exercised against a real Codex
+account in this repository run.
 
 ## Responsibility
 
-Performer is a local, single-turn Codex worker. Conductor starts the installed
-`performer` command with a request-file path and a result-file path. Performer
-loads one validated request, runs exactly one `plan`, `execute`, or `gate` turn,
-and writes one structured result. It never owns workflow state, Linear access,
-Podium authentication, scheduling, or repository selection.
+Performer is the local, single-turn Codex worker. Conductor starts the installed
+`performer` command with request/result paths. Performer validates one request,
+runs exactly one `plan`, `execute`, or `gate` turn, and writes one structured
+result with the exact fenced context.
 
-## Target surface
+It owns neither workflow state, Linear access, Podium authentication,
+scheduling, nor repository selection. It may make the network connection needed
+by the Codex SDK, but it must not directly access Linear/Podium or their
+credentials.
+
+## Current surface
 
 ```text
 performer/
   __init__.py
-  cli.py          # request file -> one turn -> result file
-  codex_client.py # direct pinned SDK client and event capture
-  codex_config.py # staged Codex configuration
-  backend.py      # plan, execute, gate prompts and parsing
-  schemas.py      # the three output schemas
+  cli.py                   # request file -> one result file
+  backend.py               # plan/execute/gate prompts and result parsing
+  codex_client.py          # direct SDK lifecycle, stream, retry, event capture
+  codex_client_helpers.py  # parsing, exception classification, close/env helpers
+  codex_config.py          # safe staged Codex configuration
+  schemas.py               # plan, execute, and gate JSON schemas
 ```
 
-The pinned `openai-codex` client is used directly through its canonical async
-turn API after a real SDK proof. The compatibility adapter, maybe-await layer,
-continuation provider, generic backend registry, and unused worker/title
-options are not carried forward.
+`codex_client.py` uses the pinned `openai-codex==0.1.0b3` async
+`thread.turn(..., output_schema=...)` API. It reads the final JSON from the
+SDK's notification stream and preserves notification payloads used for runtime
+approval/tool-input waits. The one-use runtime mixin has been inlined; the
+configuration and helper boundaries remain because they own different concerns.
 
 ## Turn behavior
 
 | Turn | Input | Output | Side effects |
 |---|---|---|---|
-| `plan` | Parent issue context and repository context | Ordered `Plan` | No file edits |
-| `execute` | One child task and acceptance criteria | `ExecuteResult` | Codex may edit the bound repository |
-| `gate` | One completed task and its evidence | Boolean `GateResult` | Read-only inspection only |
+| `plan` | Parent issue context and repository | Ordered `Plan` | No file edits |
+| `execute` | One Sub Issue task | `ExecuteResult` | Codex may edit the bound repository |
+| `gate` | Completed task and command evidence | `GateResult` | Read-only inspection |
 
-The request includes the exact `TurnContext`, prompt, staged runtime location,
-and output schema. The result includes the same context, a bounded summary,
-structured evidence, and a sanitized failure or runtime wait when applicable.
+## Runtime guarantees
 
-## Runtime guarantees retained
-
-- Each invocation gets an isolated per-role `CODEX_HOME` staged from an
-  approved seed; the process never falls back to the operator's home directory.
-- The fencing token is checked before the process starts and before the result
-  is accepted. A stale result is recorded and ignored.
-- SDK events, stdout, and stderr are captured with run/task/attempt correlation.
-- Retryable overload, timeout, malformed structured output, and runtime waits
-  preserve the latest sanitized reason and retry metadata.
-- Missing configuration, SDK failure, invalid JSON, and process exit are
-  operator-visible errors, not silent generic failures.
-
-## Explicit removals
-
-Remove synthetic runtime-wait injection, continuation/multi-turn policy,
-`max_turns`, unused worker-host/title arguments, default text schemas,
-role/backend capability registries, and the split helper/event/runtime files
-that only forward calls. Keep actual Codex approval/tool-input waits; removing
-those would change the product behavior.
-
-Performer must not open network connections or import Conductor/Podium.
-
-## Migration and exit gate
-
-1. Add process-level contract tests for all three turn kinds, invalid context,
-   runtime waits, timeout, and secret isolation.
-2. Replace the current client composition with the five target owners.
-3. Prove request/result paths, direct SDK initialization, event capture, and
-   result fencing with a staged runtime home.
-4. Delete old adapter/helper/runtime modules and old options from CLI help.
-
-The local slice is complete when one invocation maps to one request and one
-result, the only turn kinds are `plan|execute|gate`, and a new engineer can
-trace `cli.py` through the direct client and backend without a registry or
-continuation abstraction.
+- Each invocation uses an isolated staged `CODEX_HOME`; it never falls back to
+  the operator's home directory.
+- The context/fencing token is checked before process start and result
+  acceptance. Stale results are visible and ignored.
+- SDK events plus stdout/stderr are captured with run/task/attempt correlation.
+- Retryable overload, timeout, malformed JSON, and genuine Codex runtime waits
+  retain a sanitized reason and visible event trail.
+- Performer does not synthesize runtime waits, continuation policies, generic
+  default text schemas, or a backend registry.

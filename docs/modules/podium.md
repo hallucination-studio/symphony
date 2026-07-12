@@ -1,106 +1,81 @@
 # Module baseline: `podium`
 
-Status: implemented baseline, 2026-07-12. Linear business behavior remains
-unchanged.
+Status: implemented code baseline, 2026-07-12. Linear business behavior is
+preserved; real OAuth/Linear verification has not been run in this workspace.
 
 ## Responsibility
 
-Podium is the SaaS control plane and BFF. It retains all customer-facing
-Linear, authentication, onboarding, binding, dispatch, proxy, health, and
-operator-view behavior. It is the only service that holds Linear application
-and user tokens, and it injects them server-side into proxy requests.
+Podium is the SaaS control plane and BFF. It owns browser auth, Linear
+application configuration and installations, selected projects, Conductor
+enrollment/binding, polling reconciliation, dispatch routing, the server-side
+Linear proxy, smoke checks, and the HTTP API consumed by Podium Web.
 
-The simplification is inside the runtime channel and persistence shape. It does
-not remove a Linear business flow or change the Web's visible onboarding and
-managed-run behavior.
+It is the only product role that holds Linear application or user tokens. Those
+tokens are injected only into server-side proxy requests and never returned to
+the browser or Conductor.
 
-## Business behavior that remains fixed
+## Fixed business behavior
 
-- Session auth, PKCE/state, default and customer-owned Linear applications,
-  actor/scope validation, refresh, reconnect, revoke, and cutover.
-- Selected projects, full cursor pagination, polling checkpoints, delegation
-  epochs, dispatch deduplication, blockers, project-scoped routing, and
-  `symphony:conductor/<Name>-<public-id>` labels.
-- Conductor enrollment, one active binding per project, replacement rules,
-  proxy calls, health, smoke action, PostgreSQL transactions/CAS/advisory locks,
-  and sanitized browser responses.
-- Managed-runs response fields consumed by the Web: conductor/project/binding/
-  runtime group presentation, policy revision, profiles, run id/issue/state,
-  active task, latest reason, plan version/revision, approval status, thread id,
-  work items, task state, likely files, gate status/score, rubric summary,
-  threshold, provenance, acceptance-catalog links, and artifact references.
+- Session auth, OAuth PKCE/state, default and customer-owned Linear app paths,
+  actor/scope checks, token refresh, selected project access, and Linear
+  installation cutover remain intact.
+- Reconciliation remains cursor-paginated and checkpointed. Delegation epochs,
+  dispatch deduplication, active binding/app-user routing, labels, and Linear
+  blockers remain part of the dispatch decision.
+- A delegated issue is never leased while it has an active Linear blocker.
+  Failed/invalid live blocker checks fail closed and requeue the dispatch; a
+  later completed reconciliation can restore a cleared dispatch.
+- Podium retains the BFF routes and response shapes used by the Web app,
+  including onboarding, bindings, runtime logs, smoke actions, and managed-run
+  reports.
 
-`policy_revision` and `plan_version` are durable revision values projected from
-Conductor. An empty `profiles` object is allowed when no runtime profile
-registry is needed; it does not erase plan/evidence version history.
+## Runtime ownership after the hard cut
 
-## Runtime HTTP contract
-
-The authenticated runtime API is polling-only:
+The runtime channel is polling-only:
 
 ```text
-POST /api/v1/runtime/dispatches/lease
-POST /api/v1/runtime/dispatches/ack
-POST /api/v1/runtime/commands/lease
-POST /api/v1/runtime/commands/ack
-POST /api/v1/runtime/report
+Conductor HTTP report / command lease / dispatch lease
+  -> Podium runtime API
+  -> PostgreSQL durable state
 ```
 
-Dispatch lease/ack keeps the existing routing and deduplication semantics.
-Command lease/ack is the single delivery path for the Web-required control
-operations:
+There is no WebSocket transport or runtime socket compatibility layer. HTTP
+reports update the retained runtime-presence TTL used by Web's online/heartbeat
+views.
 
-```text
-project.configure
-project.unconfigure
-project.prepare_installation
-project.activate_installation
-smoke.check
-```
+`runtime_groups` is deleted from the fresh PostgreSQL schema. Enrollment tokens
+and managed-run views are keyed by `conductor_id`; proxy and smoke checks use
+direct runtime-to-binding-to-workspace checks. API responses retain
+`runtime_group_id` as the deterministic presentation alias
+`group_{conductor_id}`. It is not a stored owner or routing key.
 
-Commands are `queued | leased | completed | failed`, leased for five minutes,
-and fenced by an integer token. Leasing selects the oldest queued or expired
-command transactionally. A stale ack returns `409` and changes nothing. The
-runtime report is authoritative for observed binding state and includes the
-current sanitized log tail, local Codex configuration summary, and retained
-plan/gate evidence summaries.
+## Current module groups
 
-## Explicit removals
+| Area | Primary owners |
+|---|---|
+| App/API composition | `app.py`, `podium_routes_*`, `podium_state.py` |
+| Linear auth/installations/projects | `linear_*`, `podium_routes_linear_*`, `podium_linear_*` |
+| Bindings, labels, replacement | `podium_conductors.py`, `podium_project_*` |
+| Polling and dispatch | `linear_reconciliation*`, `podium_dispatch.py` |
+| Runtime/API/health/smoke | `podium_runtime.py`, `podium_routes_runtime_*`, `podium_smoke_*`, `podium_health.py` |
+| PostgreSQL | `store/_postgres_*.py`, `postgres.py` |
 
-Delete the socket route, registration, tasks, presence/wake path, install
-`socket_url`, `podium_socket_url`, socket dependencies, `dispatch.available`, the
-in-memory dispatch queue, `human.answered`, historical `log.fetch`/log-chunk
-transport, and duplicate smoke outbox/retry layers. Delete only the runtime
-profile/config registry; keep policy/plan revision and evidence projections in
-the Conductor-owned report. Remove `runtime_groups` as an independent ownership
-table; migrate its stable id into the Conductor/binding record without dropping
-customer data.
+The split is still broader than the desired end state. Do not merge modules
+merely for a line count if that would mix OAuth, polling, proxy authorization,
+or transaction ownership.
 
-The Web still reads its current routes and report shape. Removing an unused
-transport is not permission to remove a visible Web action or error state.
+## Managed-run report contract
 
-## Data and security baseline
+Conductor reports are normalized to Web's `work_items`,
+`active_work_item_id`, and `backend_session_id` fields before Web consumes
+them. The public managed-run route currently returns `policy_revision: 1` and
+`profiles: {}`; it does not claim to expose a Codex configuration summary or
+all local evidence fields.
 
-The hard cutover starts the runtime/control-plane schema fresh; no old runtime
-rows are read or migrated. `runtime_group_id` remains a stable presentation
-alias on the Conductor/binding response, not a separately owned runtime-group
-table. Runtime command and dispatch rows have transactional lease/fence fields.
-Secrets never enter reports, logs, Linear, browser responses, or install
-scripts. Errors retain category and actionable summary after sanitization.
+## Hard-cut rules
 
-## Migration and exit gate
-
-1. Add command lease/expiry/reclaim/ack/fence contract coverage.
-2. Move smoke result validation into command ack and make report state
-   authoritative.
-3. Switch Conductor to report -> command -> dispatch polling.
-4. Remove socket/config/log-fetch/runtime-group/profile-registry sources and
-   initialize the fresh schema without old runtime rows; preserve policy/plan
-   revision and evidence fields for new runs.
-5. Re-run OAuth, pagination/checkpoint/epoch, dispatch, binding, label, proxy,
-   cutover, health, smoke, and secret-boundary behavior checks.
-
-The local slice is complete when a fresh runtime can enroll, bind, receive
-smoke and project commands, lease a parent dispatch, and report failures over
-HTTP polling without any socket or direct-token path remaining. PostgreSQL
-cutover and real OAuth remain environment verification work.
+- New PostgreSQL schema only: no old runtime-group or profile rows are read or
+  migrated.
+- Keep Linear OAuth/tokens and browser secret boundaries unchanged.
+- Do not add a generic runtime protocol, outbox framework, WebSocket path,
+  cross-model acceptance, or a second scheduler.

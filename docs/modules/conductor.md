@@ -1,60 +1,37 @@
 # Module baseline: `conductor`
 
-Status: implemented baseline, 2026-07-12. Runtime/Web compatibility owners
-remain separate until their behavior is covered by the real flow.
+Status: implemented code baseline, 2026-07-12. The local workflow is covered
+by fakes and SQLite; a real Linear/Codex flow remains unverified here.
 
 ## Responsibility
 
-Conductor is the customer-side daemon for exactly one Linear project and one
-repository. It leases dispatched parent issues over HTTP, keeps the local
-workflow durable, launches Performer turns, creates and updates Linear child
-issues, runs acceptance gates, and reports a sanitized view to Podium. It is
-the only local process manager for Performer.
+Conductor is the customer-side daemon for one bound Linear project and one
+repository. It leases Podium dispatches over HTTP, keeps a durable sequential
+workflow, launches Performer, projects ordered Linear Sub Issues, runs command
+checks plus one Codex Gate, and reports a sanitized view back to Podium.
 
-Conductor does not own customer OAuth, Linear application credentials, browser
-routes, multi-project scheduling, or a general workflow platform. Linear calls
-go through Podium's authenticated proxy; the daemon never stores a direct
-Linear token.
+It is the only local process manager for Performer. It does not own customer
+OAuth, browser routes, a multi-project scheduler, or direct Linear tokens;
+Linear operations travel through Podium's authenticated proxy.
 
-## Target surface
+## Current ownership
 
-```text
-conductor/
-  __init__.py
-  cli.py          # installed entrypoint and local process setup
-  api.py          # retained local API surface
-  models.py       # settings, instance, run, task, attempt, wait
-  store.py        # one SQLite database and transactions
-  service.py      # composition root and one bounded background tick
-  podium.py       # HTTP report, command, dispatch, config, smoke calls
-  linear.py       # proxy operations for parent, child, state, comment, wait
-  workflow.py     # the only sequential state machine
-  gate.py         # command checks and boolean gate input
-  runtime.py      # Performer process, CODEX_HOME, logs, fencing
-```
+The code has more than the eventual compact target, but ownership is explicit:
 
-The old managed-run coordinator/driver/projection/store/artifact/verifier/join/
-checkpoint graph is removed. The remaining service/runtime and Linear HTTP
-owners exist only for the retained local API, enrollment, logs, labels, and
-Podium Web behavior; they are not workflow authorities.
+| Owner | Responsibility |
+|---|---|
+| `models.py`, `store.py` | SQLite settings, instances, runs, tasks, attempts, waits, revisions, and evidence rows |
+| `workflow.py` | Durable state transitions and fencing calls into the store |
+| `workflow_driver.py` | One bounded plan/execute/gate progression and Linear projection |
+| `runtime.py` | Request/result files, isolated `CODEX_HOME`, process logs, result fencing |
+| `gate.py` | Declared verification commands and the single Codex Gate combination |
+| `linear.py` | Podium proxy operations for issue reads, children, comments, states, and labels |
+| `conductor_podium_sync.py` | Runtime report, command polling, dispatch lease, project labels, smoke handling |
+| `conductor_api.py`, `conductor_service.py` | Local HTTP API and composition/background tick |
 
-## Current implementation disposition
-
-The existing code already contains semantics that the new design must preserve:
-
-| Existing capability | Retain as | Remove only |
-|---|---|---|
-| `ManagedRunPlan` architecture decisions, risks, open questions, approval | `workflow.py` plan revisions | parallel/dependency fields |
-| `conductor_managed_run_coordinator_human.py` | `workflow.py` approval/revision transitions | duplicate human-action mixins |
-| `conductor_managed_run_gates.py` snapshots, rubric scores, manifests | `gate.py` and `store.py` evidence | branch/checkpoint coupling |
-| `conductor_managed_run_verifier.py` artifact/hash verification | `gate.py` verifier | generic verifier wrappers |
-| `conductor_managed_run_store_artifacts.py` | `store.py` artifact/evidence records | duplicate row/view mixins |
-| Linear projection and managed-runs summary | `linear.py`/`api.py` report | projection helper fan-out |
-
-The checkpoint domain is the explicit deletion: remove the `Checkpoint` plan
-field, `conductor_managed_run_coordinator_checkpoints.py`, checkpoint workspace
-and branch-join helpers, `managed_run_checkpoint_results`, and checkpoint-only
-projection fields. Linear polling checkpoints in Podium are unrelated and stay.
+`conductor_service_helpers.py`, `conductor_service_views.py`, and protocol
+helpers are still active implementation owners; they are not evidence that a
+new workflow abstraction exists.
 
 ## Canonical workflow
 
@@ -64,85 +41,44 @@ todo -> in_progress -> in_review -> blocked | done
 running -> waiting | succeeded | failed | stale
 ```
 
-The service tick is bounded and idempotent:
+For one parent, Conductor validates one ordered plan, creates one Linear child
+per task with an explicit parent relation, and executes only the first
+unfinished task. A child becomes Done only after every declared verification
+command passes and the read-only Codex Gate passes. A failed gate returns the
+task to one rework; a second failure blocks the task and parent. The parent is
+Done only after all children are Done.
 
-1. Send a runtime report when due.
-2. Lease and acknowledge at most one Podium control command.
-3. Lease and acknowledge at most one parent dispatch.
-4. Advance the local workflow once.
-5. Sleep with bounded backoff and jitter.
+Plan revisions, approvals, risks, architecture decisions, open questions,
+acceptance catalogs, score/rubric/provenance, manifest references, artifacts,
+and gate evidence remain in the durable model. They are not a dependency graph
+or second scheduler.
 
-For a new parent, Conductor obtains one ordered plan, validates it, creates one
-real Linear sub-issue per task with an explicit parent relationship, and stores
-the Linear ids. A plan revision is approved before it becomes the active
-revision; risks, architecture decisions, open questions, acceptance-catalog
-entries, manifests, and artifacts remain linked to that revision. It executes
-only the first unfinished child. A child is not Done until all declared
-verification commands pass and one read-only Codex gate returns `passed=true`
-with its score, rubric, threshold, weights, provenance, and evidence. One failed
-gate may trigger one rework attempt; the next failure blocks the child and
-parent with a concrete next action. The parent becomes Done only after every
-child is Done.
+## Durable state and projection
 
-## Durable store baseline
+The fresh local `workflow.db` contains settings, instances, runs, tasks,
+attempts, runtime waits, plan revisions, acceptance catalogs, gate evidence,
+and artifact records. A restart reuses the same run and Linear child ids; a
+stale fence cannot advance state.
 
-The replacement local database contains only the tables needed to recover the
-flow:
+Current Linear projection creates task Sub Issues and runtime-wait
+`[Human Action]` children, projects state/comments, and verifies explicit
+`parent { id identifier }`. It does **not** create a separate catalog,
+gate-evidence, or artifact child-issue tree. Current Podium reports expose run
+and work-item state; detailed evidence is retained locally rather than claimed
+to be rendered by Web.
 
-| Table | Purpose |
-|---|---|
-| `settings` | Bound project/repository and runtime configuration |
-| `instance` | Conductor identity, lease/presence and current report metadata |
-| `runs` | Parent issue, state, plan summary, current task and latest failure |
-| `tasks` | Ordered child issue id, task contract, state, gate status, rework count |
-| `attempts` | Fenced plan/execute/gate invocation and result metadata |
-| `runtime_waits` | Codex/runtime approval wait and resume key |
-| `plan_revisions` | Immutable plan versions, approval, policy revision, and metadata |
-| `acceptance_catalog` | Per-task criteria, rubric, thresholds, and weights |
-| `gate_evidence` | Command/Codex findings, scores, provenance, and artifact links |
-| `artifacts` | Sanitized manifest and evidence artifact metadata |
+## Runtime and error rules
 
-Writes that advance a state, accept a result, or create a child are
-transactional and idempotent. A restarted daemon reuses the same run and child
-ids. A stale fencing token changes no current state.
+`runtime.py` stages isolated Codex homes, captures Performer stdout/stderr, and
+accepts only the expected fenced result. Errors are sanitized and appended to
+the relevant run/task/log/Linear surfaces where implemented. Do not claim that
+every current SQLite record has the same five failure fields: the run view's
+primary durable summary is `latest_reason`.
 
-## Linear projection baseline
+## Hard-cut rules
 
-`linear.py` owns only the concrete operations required by the flow: read the
-parent, create/update ordered children, project plan revisions and approval,
-set states, add concise plan/gate/error comments, link acceptance-catalog and
-gate/evidence child issues, read the project label, and create/resume a
-`[Human Action]` runtime-wait issue when Codex requires operator input. It
-verifies `parent { id identifier }` explicitly and never infers hierarchy from
-title or comments.
-
-Dependency relations, branch/join metadata, checkpoint groups, integration
-conflict children, arbitrary comment commands, and graph readiness are removed.
-Plan revisions, approval, acceptance catalogs, gate/evidence issue trees, and
-artifact provenance remain owned by this module.
-
-## Runtime and failure baseline
-
-`runtime.py` starts the installed Performer command, stages the isolated runtime
-home, captures stdout/stderr, records heartbeats, and validates the exact
-context/fence on result collection. All failures carry
-`error_code`, `sanitized_reason`, `action_required`, `retryable`, and
-`next_action` in SQLite, logs, Linear, and the Podium report. Logs are
-single-line structured events with run/task/attempt/fence correlation.
-
-## Migration and exit gate
-
-1. Start a fresh `workflow.db` at cutover; do not read, migrate, or reinterpret
-   existing local Managed Run databases.
-2. Add restart, idempotency, child-parent, revision/approval, gate/rework,
-   score/rubric/evidence, parent completion, runtime-wait, and stale-result tests.
-3. Keep the compact `models.py`, `store.py`, `workflow.py`, `gate.py`, `runtime.py`,
-   and `workflow_driver.py` as the only workflow owners.
-4. Delete checkpoint/branch-join code and duplicate wrappers; retained
-   revision, approval, catalog, rubric, manifest, artifact, and verifier
-   semantics live in the compact owners.
-
-The baseline is complete when one Conductor tick can be followed end-to-end in
-`service.py`, every child is a real Linear sub-issue, the single gate is scored
-and fenced with durable evidence, and no DAG/parallel/branch/join/checkpoint-
-group concept is present in code or schema.
+- Start a fresh `workflow.db`; never read or migrate old local runtime data.
+- Do not add DAG, parallel, branch/join, checkpoint-group, integration-queue,
+  cross-model, or second acceptance-scheduler behavior.
+- Preserve one automatic gate rework, runtime waits controlled by Linear state,
+  plan approval, fences, durable logs, and visible sanitized failure reasons.

@@ -1,73 +1,64 @@
 # Minimal Polling Workflow Checklist
 
-Status: implementation is in progress; local module slices are committed and
-the real Linear/OAuth/Codex flow remains pending an environment with approved
-credentials. The user approved the hard break: Linear and Podium Web behavior
-stay, workflow internals become one sequential parent/Sub Issue/Gate flow,
-checkpoint groups and cross-model acceptance are removed, and old tests/tools
-may be rebuilt.
+Status: implementation is in progress. Local module slices are committed;
+external Linear/OAuth/Codex verification remains pending a clean scoped project
+and approved runtime environment. This checklist is the active scope ledger;
+`tasks/spec.md` remains the product contract.
 
 ## Fixed product decisions
 
-- [x] Linear OAuth, project selection, cursor polling/checkpoints, delegation
-      epochs, dispatch routing, binding, labels, proxy, and visible failures stay.
-- [x] Podium Web routes, onboarding, auth, actions, responses, and visual
-      behavior stay; browser secrets remain server-side.
-- [x] Parent plan creates real ordered Linear Sub Issues.
-- [x] Execution is strictly sequential; no DAG, parallel, branch, join, or
-      integration queue.
-- [x] A child reaches Done only after all verification commands and one
-      read-only Codex Gate pass.
-- [x] Gate evidence keeps score, rubric, threshold, weights, provenance,
-      catalog, manifest, and artifact references.
-- [x] One failed gate may rework once; the second failure blocks visibly.
-- [x] Runtime approval/tool-input waits stay durable and create `[Human Action]`
-      Linear children; checkpoint groups are deleted.
-- [x] No cross-model reviewer or second acceptance scheduler.
+- [x] Preserve Linear OAuth, selected projects, paginated polling/checkpoints,
+  delegation epochs, dispatch routing, bindings, labels, proxy, and visible
+  failures.
+- [x] Preserve Podium Web routes, onboarding, authentication, actions,
+  responses, visual behavior, and browser secret boundaries.
+- [x] Use an ordered parent -> Linear Sub Issues -> sequential Codex workflow.
+- [x] Keep plan revision/approval and retained score/rubric/threshold/weight/
+  provenance/catalog/manifest/artifact contracts.
+- [x] Remove checkpoint groups, DAG/parallel/branch/join behavior, cross-model
+  review, and a second acceptance scheduler.
+- [x] Keep command checks plus one read-only Codex Gate, one automatic rework,
+  then visible blocking on the second failure.
+- [x] Hard-cut old local/runtime state: fresh schemas only, no migration.
 
-## Implemented module slices
+## Implemented simplification slices
 
-- [x] `performer-api`: compact workflow, turn, runtime, and validation contracts;
-      old `managed_runs*` exports removed.
-- [x] `performer`: one fenced `plan|execute|gate` request/result process,
-      isolated CODEX_HOME, changed-file scope, event capture, and sanitized
-      failures.
-- [x] `conductor`: one durable `workflow.db`, ordered plan/Sub Issue flow,
-      plan approval, execute/rework, command + Codex Gate evidence, parent
-      completion, runtime waits, and stale-fence rejection.
-- [x] `podium`: HTTP command lease/ack/report polling; socket routes,
-      wake commands, historical log fetch, and duplicate runtime channel are
-      removed without changing Linear control-plane behavior.
-- [x] `podium-web`: old fragmented tests removed and rebuilt around shared
-      setup with `App`, API client, Setup, and Product Pages module suites.
-- [x] `tools`: old scenario/observer/auditor tree removed; only
-      `tools/real_flow.py` and `tools/linear_fixture.py` remain.
-- [x] Docs: module baselines plus concise architecture/workflow/real-flow docs
-      record the ownership and deletion boundary.
+- [x] Consolidate Conductor persistence into one fresh `workflow.db`.
+- [x] Remove Podium runtime profile registry and Conductor profile input.
+- [x] Remove persisted runtime-group ownership; retain the deterministic public
+  alias `group_{conductor_id}`.
+- [x] Collapse Conductor smoke/command wrappers into their unique owners.
+- [x] Enforce active Linear blockers before dispatch lease and refresh cleared
+  blockers after a complete reconciliation pass.
+- [x] Repair the direct pinned Codex SDK stream contract and inline its one-use
+  runtime mixin into `CodexSdkClient`.
+- [x] Record one baseline document per module under `docs/modules/`.
 
-## Verification completed locally
+## Remaining code slices
 
-- [x] `make test` — 32 Python tests passed before the next implementation slice.
-- [x] Python package compilation and tool import smoke passed before this slice.
-- [x] `git diff --check` passed before this documentation/tool slice.
+- [ ] Simplify remaining one-use Conductor service/view helpers where behavior
+  ownership is demonstrably singular.
+- [ ] Audit and remove remaining disconnected tools/docs/legacy planning
+  artifacts without changing Linear or Web behavior.
+- [ ] Make retained acceptance evidence readable in the operator report and
+  Linear projection using existing owners; do not create a new evidence runner
+  or child-issue tree without explicit approval.
+- [ ] Reconcile the written Gate rule: the spec says commands + Codex
+  `passed=true`, while current retained code also applies `score >= threshold`.
+  Do not change the product rule until it is explicitly resolved.
+
+## Verification status
+
+- [x] `make test` — 63 Python tests passed after the current SDK/runtime-group
+  slices.
 - [ ] `cd packages/podium/web && npm run test && npm run lint && npm run build`
-      (run after the compact Web suite is committed).
-- [ ] `tools/real_flow.py` against a clean Linear project, Podium, Conductor,
-      and staged Codex home.
-
-## Remaining operational work
-
-- [ ] Run the real happy path: OAuth/project/binding -> delegated parent ->
-      polling dispatch -> plan approval -> ordered Sub Issues -> execute ->
-      command checks + Codex Gate -> parent Done.
-- [ ] Run one failed-gate path and confirm the sanitized reason is identical in
-      SQLite, logs, Linear, and Podium.
-- [x] Hard switch: old local/runtime state is not read or migrated; the new
-      `workflow.db` and deployment control-plane state start fresh.
+      after backend-contract/doc changes settle.
+- [ ] `tools/real_flow.py` preflight and a scoped real product flow. The current
+      tool is preflight only and cannot prove the full managed-run path.
 
 ## Stop conditions
 
-Stop and revise the slice if a change drops Linear business behavior, changes a
-Podium Web action/response, lets a child or parent bypass the Gate, allows a
-stale result to mutate state, leaks a secret, or reintroduces a DAG,
-checkpoint-group layer, cross-model reviewer, or second scheduler.
+Stop and revise the slice if it drops Linear business behavior, changes a
+Podium Web action/response, lets a child or parent bypass the Gate, permits a
+stale result to mutate state, leaks a secret, or reintroduces checkpoint,
+DAG/parallel, cross-model, or second-scheduler behavior.

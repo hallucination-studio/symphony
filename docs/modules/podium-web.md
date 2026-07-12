@@ -1,79 +1,43 @@
 # Module baseline: `podium-web`
 
-Status: implemented baseline, 2026-07-12. Visual/business behavior is held
-constant.
+Status: implemented code baseline, 2026-07-12. UI behavior is preserved; this
+document does not claim a browser run against a live Podium instance.
 
 ## Responsibility
 
-Podium Web is the existing Vite/React browser application served by Podium. It
-keeps the current business experience and presentation contract while the
-runtime implementation underneath changes from socket-oriented delivery to
-HTTP polling. The browser never makes Linear calls with a token and never
-receives Codex credentials, session secrets, or client secrets.
+`packages/podium/web` is the Vite/React/TypeScript single-page application
+served by Podium's committed static bundle. It renders onboarding, Linear
+connection/project selection, Conductor enrollment/binding, runtimes, logs,
+smoke checks, and managed runs. It is a BFF client only: Linear tokens, refresh
+tokens, session secrets, passwords, and client secrets never enter browser API
+responses.
 
-## Behavior held constant
+Read `packages/podium/web/DESIGN.md` before changing this module. Its tokens
+are normative and must stay synchronized with `src/styles/tokens.css`.
 
-Keep the current routes, authentication redirects, onboarding steps, Linear
-application choice, project and repository selection, runtime enrollment and
-binding actions, smoke action, home/operator/runtime pages, managed-runs page,
-error states, translations, cookies, redirects, and responsive layout.
+## Runtime presentation
 
-The managed-runs client continues to consume the existing report concepts:
+- The browser polls ordinary HTTP endpoints. It has no WebSocket, socket URL,
+  subscription, or live log-stream client.
+- Runtimes show online state and last heartbeat from Podium's HTTP presence
+  state, and fetch instance logs through the authenticated log route.
+- Managed-run pages consume `work_items`, `active_work_item_id`, and
+  `backend_session_id`. Conductor normalizes its internal task/report names to
+  that DTO before Podium Web sees them.
+- `runtime_group_id` remains displayable as a stable alias even though Podium
+  no longer stores a runtime-group table.
+- `managed_run_profile` remains a fixed display compatibility value of
+  `default`; the browser does not configure a profile registry.
 
-```text
-conductor, project, binding, runtime group, policy revision, profiles
-run id, issue identifier, run state, active task, latest reason,
-plan version/revision, approval status, thread id, work items
-task id, title, objective, likely files, task state, gate status,
-score/rubric summary, threshold, provenance, acceptance-catalog and artifact refs
-```
+## What the current UI does not claim
 
-The backend sends durable `policy_revision`/`plan_version` values and may send
-`profiles: {}` when no runtime profile registry is needed. Web preserves
-sanitized revision, approval, catalog, score, rubric, provenance, and artifact
-summaries already present in the response. It must not grow controls for DAGs,
-branch joins, checkpoint groups, cross-model reviewers, or a second acceptance
-scheduler.
+The managed-run pages render run/task/gate status and operator-facing errors.
+They do not currently render all local plan approval, catalog, rubric,
+provenance, manifest, or artifact evidence. Do not document such a projection
+until an API contract and browser behavior exist.
 
-## API boundary
+## Verification
 
-The client uses authenticated HTTP requests to the existing BFF routes. The
-runtime itself is not a browser concern: Web does not open a socket, display
-presence heartbeats, issue `dispatch.available`, or fetch historical log chunks.
-Current operator views receive the cached log tail included in the runtime
-report or the retained managed-runs response.
-
-Error rendering must preserve the existence, category, and next action of a
-sanitized backend failure. It must not render token values, cookies, passwords,
-client secrets, raw Codex profile values, or authorization headers.
-
-## Target ownership
-
-Keep the existing small boundaries for:
-
-```text
-src/api/         # typed BFF client, hooks, and response models
-src/pages/       # route-level business views
-src/components/  # shared visual pieces
-src/styles/      # design tokens and global layout
-src/i18n.tsx      # translations
-```
-
-Delete tests or helpers that only police retired identifiers; do not rewrite
-pages or CSS for line-count reduction. `packages/podium/web/DESIGN.md` and its
-token file remain normative. A visual change requires an explicit product
-decision, not an incidental runtime refactor.
-
-## Migration and exit gate
-
-1. Snapshot current route, action, response, DOM, secret, and error behavior.
-2. Update only API types/client assumptions required by the retained report.
-3. Keep the shared test renderer and four module suites for auth/routes,
-   BFF errors/secrets, setup, and product pages.
-4. Run build, lint, design lint, and browser DOM/network/console checks at the
-   existing desktop and mobile breakpoints.
-
-The baseline is complete when a user can complete onboarding, bind a project,
-run smoke, view runtime and managed-run status, and see a concrete error exactly
-as before, while browser network inspection shows no token leakage and no
-socket use.
+For any UI change run the module's `npm run test`, `npm run lint`, `npm run
+build`, and `npm run design:lint`. Use a real browser check when the change
+alters rendered behavior, layout, or browser networking.

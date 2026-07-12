@@ -1,113 +1,46 @@
-# Module baseline: verification, tools, and supporting docs
+# Module baseline: `verification`
 
-Status: implemented baseline, 2026-07-12. Real Linear evidence is still
-environment-dependent.
+Status: local verification baseline, 2026-07-12.
 
-## Responsibility
+## Purpose
 
-Verification is rebuilt around the one product flow while preserving the
-Managed Run acceptance catalog, rubric, score, threshold, weight, provenance,
-manifest, and artifact evidence semantics. It proves the retained
-Linear/Podium business paths, the sequential Conductor workflow, Performer
-fencing, error visibility, and the browser secret boundary. It is evidence for
-the product, not a second workflow engine, cross-model reviewer, or second
-acceptance scheduler.
+The test suite is organized by product-module ownership, not as a second
+workflow, acceptance, or audit product. Tests reuse fixtures where the setup is
+genuinely shared and keep the behavior assertion with the owning module.
 
-The user-authorized hard break permits deleting the current Python tests, Web
-tests, tools, obsolete generated acceptance harness, expanded runtime docs,
-legacy workflow guides, and retired ADR content. Rebuild the acceptance catalog
-and evidence writer only after the target
-contracts in `tasks/spec.md` and the module baselines are approved.
+## Current Python module suites
 
-## Target Python suite
+| Area | Tests |
+|---|---|
+| Shared contracts | `test_minimal_performer_api.py`, `test_package_boundaries.py` |
+| Performer | `test_minimal_performer_turn.py`, `test_performer_sdk_client.py` |
+| Conductor workflow/runtime/API | `test_conductor_api.py`, `test_conductor_gate.py`, `test_conductor_linear.py`, `test_conductor_podium_sync.py`, `test_conductor_recovery.py`, `test_conductor_runtime.py`, `test_conductor_workflow.py`, `test_workflow_driver.py` |
+| Podium runtime/storage | `test_podium_runtime_polling.py`, `test_podium_storage.py` |
 
-The rebuilt Python suite is split by module, with shared setup in one
-`conftest.py` and about thirty behavior tests:
+`make test` is the canonical command because it sets the four package source
+paths. The current suite is local/fake-based; it checks contracts, SQLite
+state, HTTP route behavior, SQL statement shape, dispatch/blocker behavior,
+and the direct pinned-SDK adapter shape.
 
-```text
-tests/
-  conftest.py
-  test_minimal_performer_api.py
-  test_minimal_performer_turn.py
-  test_runtime_contract.py
-  test_conductor_gate.py
-  test_conductor_workflow.py
-  test_conductor_recovery.py
-  test_conductor_runtime.py
-  test_workflow_driver.py
-  test_podium_runtime_polling.py
-  test_package_boundaries.py
-```
+## Real-flow boundary
 
-Coverage must include:
+`tools/real_flow.py` is a strict sanitized preflight, not a full E2E runner.
+It validates the configured Linear project and environment prerequisites but
+does not create/delegate a business issue, run Codex, assert a gate, or archive
+a complete product flow. `tools/linear_fixture.py` owns project/issue/child
+reads and sanitized GraphQL errors.
 
-- plan/task/result contract validation, revision/approval, and exact fencing;
-- parent dispatch -> ordered real child sub-issues;
-- sequential execute -> command checks -> one read-only Codex rubric/verifier gate;
-- acceptance-catalog lookup, score/threshold decisions, provenance, manifests,
-  artifacts, and Linear gate/evidence issue projections;
-- one rework and second gate failure blocking child and parent;
-- all-children-Done parent completion;
-- restart/idempotency and stale result rejection;
-- Linear OAuth/polling/checkpoint/epoch/dispatch/binding/label/proxy behavior;
-- HTTP command lease/expiry/reclaim/ack/fence behavior;
-- durable/log/Linear/Podium parity for concrete failures.
+Do not report a real Linear/OAuth/Codex flow as passed until a scoped test
+project has executed the actual product path and its report contains the
+observed parent/child relation, dispatch/epoch state, runtime logs, and result
+evidence. `.env` values are never printed or committed.
 
-Do not recreate graph schedulers, branch joins, checkpoint groups, cross-model
-reviewers, second acceptance schedulers, RED/GREEN evidence frameworks, or
-tests that assert source-line counts, phrase inventories, or retired identifier
-tombstones.
+## Checks by change type
 
-## Target Web suite
-
-Recreate only the behavior needed for the existing browser product:
-
-```text
-packages/podium/web/
-  src/test/setup.ts
-  src/test/utils.tsx
-  src/App.test.tsx
-  src/api/client.test.ts
-  src/pages/SetupPage.test.tsx
-  src/pages/ProductPages.test.tsx
-```
-
-The suite checks routes/auth, cookies and secret-safe BFF responses, setup and
-binding, runtime/smoke/operator pages, managed-runs rendering, errors, and
-responsive DOM behavior. It does not enforce retired module names or visual
-line-count limits.
-
-## Target tools and evidence
-
-Keep only:
-
-```text
-tools/real_flow.py       # one end-to-end polling/Linear/Codex flow
-tools/linear_fixture.py  # create, inspect, delegate, and clean up fixtures
-```
-
-The real flow runs from a clean Linear project and a staged Codex home. It
-exits immediately on known failures, prints the concrete error, and archives a
-report plus Podium/Conductor/Performer logs, managed-runs state, turn files,
-and Linear parent/child evidence. It must prove the happy path and the failed
-gate/error-visibility path. It never reads `~/.codex` directly and never
-stores tokens in artifacts.
-
-No cross-model review or separate acceptance scheduler is part of this
-baseline. The product gate is the single Conductor boolean gate with the
-retained score/rubric/evidence model defined in the Conductor document.
-
-## Documentation baseline
-
-Keep `README.md`, one concise architecture/workflow guide, the Web
-`DESIGN.md`, `tasks/spec.md`, `tasks/plan.md`, `tasks/todo.md`, and these module
-baselines. Retire duplicated product/runtime guides, acceptance matrices,
-generated catalogs, legacy `WORKFLOW*` files, and stale ADR proposals after
-their information is either captured here or explicitly rejected.
-
-## Exit gate
-
-Verification is complete when the rebuilt suite is green, the one real flow
-produces linked evidence, zero removed socket references remain in active code/docs,
-and no test/tool/doc still asks the implementation to support a removed
-concept.
+- Contract or workflow change: focused owner tests, then `make test`.
+- Performer SDK change: `test_performer_sdk_client.py` plus a local request/
+  result contract test; a real Codex run remains external evidence.
+- Podium Web change: run Web test/lint/build/design checks and use a browser
+  when visible behavior changes.
+- Linear/OAuth/polling change: local tests are necessary but do not replace a
+  clean scoped real-flow verification.
