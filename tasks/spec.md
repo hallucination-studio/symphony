@@ -32,9 +32,10 @@ multi-backend platform, cross-model acceptance platform, or compatibility layer.
    scheduler, and there is no checkpoint-group layer.
 3. One failed gate receives at most one automatic rework attempt. A second
    failure blocks the sub-issue and parent with a concrete next action.
-4. Existing local Conductor Managed Run databases are archived and the new
-   workflow database starts clean. Podium user, OAuth installation, selected
-   project, Conductor, and binding data must be migrated in place and retained.
+4. The cutover is hard: existing local Conductor/Managed Run state is discarded
+   and the new workflow database starts clean. No old local or Podium runtime
+   state is migrated; the deployment is initialized from the current `.env` and
+   fresh control-plane state.
 5. The current Web business experience is retained. Historical full-log fetch
    infrastructure that the Web does not call is removed; the current cached log
    tail remains available.
@@ -126,8 +127,9 @@ authorization headers never enter browser responses, Linear, or logs.
 
 ## Runtime Transport: HTTP Polling Only
 
-There is no socket endpoint, client, setting, install response field,
-presence state, compatibility response, or dependency.
+There is no WebSocket endpoint, client, setting, install response field,
+presence state, compatibility response, or dependency. Conductor keeps its
+local HTTP listener for the existing local API.
 
 Keep these authenticated HTTP operations:
 
@@ -315,7 +317,7 @@ Conductor record so the Web response does not change.
 ## Target Source Shape
 
 ```text
-performer_api/      <= 5 modules, 350-500 LOC
+performer_api/      <= 4 modules, 350-500 LOC
 performer/          <= 6 modules, 900-1,100 LOC
 conductor/          about 11 modules, LOC re-estimated for retained evidence
 podium/             about 40-50 modules, 8,000-9,000 LOC
@@ -383,7 +385,8 @@ PYTHONPATH=$(pwd)/packages/performer-api/src:$(pwd)/packages/performer/src:$(pwd
 5. The parent reaches Done only after every work sub-issue is Done.
 6. Restart/replay creates no duplicate run, task, sub-issue, attempt, or dispatch.
 7. No production code, package dependency, response, install command, setting,
-   test, tool, or active document references the removed socket transport.
+   test, tool, or active document references the removed WebSocket runtime
+   transport.
 8. Existing Podium Web business flows and browser-visible behavior still work.
 9. Linear OAuth, polling, project selection, dispatch, binding, labels, and
    proxy behavior still work.

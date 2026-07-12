@@ -82,10 +82,11 @@ transport is not permission to remove a visible Web action or error state.
 ## Data and security baseline
 
 The hard cutover starts the runtime/control-plane schema fresh; no old runtime
-rows are read or migrated. Runtime command and dispatch rows have transactional
-lease/fence fields. Secrets never enter reports, logs, Linear, browser
-responses, or install scripts. Errors retain category and actionable summary
-after sanitization.
+rows are read or migrated. `runtime_group_id` remains a stable presentation
+alias on the Conductor/binding response, not a separately owned runtime-group
+table. Runtime command and dispatch rows have transactional lease/fence fields.
+Secrets never enter reports, logs, Linear, browser responses, or install
+scripts. Errors retain category and actionable summary after sanitization.
 
 ## Migration and exit gate
 

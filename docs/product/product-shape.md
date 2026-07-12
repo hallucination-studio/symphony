@@ -22,7 +22,7 @@ Podium is the SaaS boundary and public HTTPS surface. It owns:
 - versioned Linear OAuth installation state and callback acceptance;
 - refreshable installation credentials and reliable delegated-issue polling;
 - selected projects, single-project Conductor bindings, and routing rules;
-- runtime enrollment, dispatch queues, and runtime configuration;
+- runtime enrollment, dispatch queues, and local Codex runtime preparation;
 - the scoped Linear GraphQL proxy;
 - sanitized Managed Runs views for operators.
 

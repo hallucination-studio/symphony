@@ -120,7 +120,7 @@ Performer accepts only managed one-shot turns:
 ```
 
 A Performer reads a fenced turn request, runs the requested managed-run role under
-the prepared runtime profile, writes a fenced turn result, and exits. It never
+an isolated local Codex home, writes a fenced turn result, and exits. It never
 leases dispatches, queries Linear as scheduler truth, or owns durable managed-run
 state.
 
@@ -140,8 +140,6 @@ Managed Podium endpoints include:
 - `POST /api/v1/runtime/commands/lease`
 - `POST /api/v1/runtime/commands/ack`
 - `POST /api/v1/runtime/report`
-- `POST /api/v1/runtime/config`
-- `GET /api/v1/runtime/config`
 - `GET /api/v1/managed-runs`
 - `POST /api/v1/linear/graphql`
 
@@ -164,16 +162,14 @@ Managed Conductor endpoints include:
 - `GET /api/settings`
 - `PATCH /api/settings`
 
-## Runtime Config
+## Runtime
 
-Podium pushes versioned managed-run policy and per-role runtime profiles to
-Conductor. Conductor materializes isolated runtime homes under managed instance
-state and fails closed if a required role profile is missing.
-
-Codex-backed profiles receive isolated `CODEX_HOME` directories. The execute
-profile changes the prepared workspace; the gate profile is read-only and
-cannot modify files. Verification commands run before the Codex Gate and their
-evidence is stored with the task result.
+Conductor prepares one isolated `CODEX_HOME` under managed instance state for
+each fenced attempt. Podium does not own a runtime-profile registry; the Web
+continues to receive its sanitized policy and plan revision fields. The execute
+turn works only within the approved task scope, while the gate turn is read-only.
+Verification commands run before the Codex Gate and their evidence is stored
+with the task result.
 
 Secrets flow through `$VAR` indirection such as `$PODIUM_PROXY_TOKEN`. Values are
 validated but never printed in responses, logs, result payloads, or browser API

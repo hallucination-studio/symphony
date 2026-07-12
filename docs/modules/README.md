@@ -56,8 +56,9 @@ credentials.
 - Every blocking or terminal error has `error_code`, `sanitized_reason`,
   `action_required`, `retryable`, and `next_action`, and is visible in durable
   state, structured logs, Linear when relevant, and the Podium report.
-- There is no socket endpoint, client, setting, install response field,
-  presence channel, wake command, or compatibility shim.
+- There is no WebSocket runtime endpoint, client, setting, install response
+  field, presence channel, wake command, or compatibility shim. Conductor's
+  retained local HTTP API is separate.
 - There is no generic workflow engine, dependency graph, parallel scheduler,
   branch/join model, checkpoint-group system, cross-model reviewer, or second
   acceptance scheduler/backend abstraction.

@@ -30,8 +30,9 @@ tools, and expanded runtime docs are deleted and replaced from the new spec.
 - Delete all existing tools and rebuild only one real flow plus one fixture
   helper.
 - Delete the expanded runtime/acceptance documentation and rewrite concise docs.
-- Remove all socket production code, fields, routes, settings, commands,
-  dependencies, tests, docs, and compatibility behavior.
+- Remove the WebSocket runtime transport: its routes, settings, commands,
+  dependencies, tests, docs, and compatibility behavior. The retained local
+  Conductor HTTP listener is not part of that transport.
 - Replace the current Conductor Managed Run implementation with the sequential
   parent/sub-issue/gate workflow plus the retained plan-revision, approval,
   rubric, catalog, manifest, and evidence semantics in `tasks/spec.md`.
@@ -50,7 +51,8 @@ tools, and expanded runtime docs are deleted and replaced from the new spec.
 - Preserve plan revisions, approval state, risks, architecture decisions, open
   questions, acceptance catalogs, score/rubric/threshold/weight/provenance,
   manifests, artifacts, and gate/evidence Linear projections.
-- Preserve PostgreSQL customer/account/Linear/project/Conductor/binding data.
+- Preserve customer-visible control-plane behavior in a fresh PostgreSQL
+  schema; no existing database rows are migrated or read during the hard cut.
 - Keep the four package import boundary and installed CLI entrypoints.
 
 ### out_of_scope
@@ -66,8 +68,8 @@ tools, and expanded runtime docs are deleted and replaced from the new spec.
 ### assumptions_requiring_approval
 
 - The five assumptions in `tasks/spec.md`, especially strict sequential work,
-  the boolean gate definition, one automatic rework, and archive-not-migrate for
-  old local Conductor run state.
+  the boolean gate definition, one automatic rework, and hard deletion of old
+  local/runtime state without migration.
 
 All five assumptions were approved by the user before implementation. Archive
 and real-flow verification are operational follow-ups, not design gates.
@@ -154,7 +156,7 @@ conductor/
   runtime.py      # Performer process, CODEX_HOME, logs, fencing
 ```
 
-#### Necessary logic to migrate
+#### Necessary logic to retain in the fresh cutover
 
 - CLI/local API and instance/repository setup.
 - HTTP dispatch lease/ack and reporting.
@@ -169,7 +171,7 @@ conductor/
 - Performer launch/result collection, staged runtime home, stdout/stderr logs,
   stale fence rejection, bounded retry, and failure parity.
 
-#### Delete after migration
+#### Delete after the fresh cutover
 
 Delete the current modules for:
 
@@ -233,8 +235,8 @@ confirm configure/unconfigure/installation cutover state.
 - `podium_routes_runtime_helpers.py` after inlining the few remaining helpers.
 - socket attach/detach/presence, `dispatch.available`, socket URL generation,
   WS install-script parsing, and WS response compatibility.
-- `runtime_groups` table/service model after moving its stable external id onto
-  the Conductor record and migrating foreign keys.
+- `runtime_groups` table/service model and old runtime rows; the fresh schema
+  creates only the fields needed by current Web responses.
 - Podium-owned Managed Run role profiles/capacity/runtime-config table and its
   `performer_api` dependency. Minimal Codex config is local to Conductor; Web
   still receives the current sanitized policy/plan revision and retained
@@ -335,7 +337,7 @@ docs/real-flow.md
 ### Phase 0: Approve The Hard Break
 
 1. Approve `tasks/spec.md`, including sequential execution, boolean gate, one
-   rework, and old local-state archive.
+   rework, and hard deletion of old local/runtime state without migration.
 2. Record a sanitized snapshot of current Web routes/API responses and Podium
    customer-data tables that must survive.
 3. Record the current package/build commands. Do not use the old tests as the
@@ -374,7 +376,8 @@ Gate: `test_performer_turn.py` green and one real isolated turn succeeds.
 
 1. Add RED store tests for the workflow and retained revision/catalog/evidence
    tables, restart, idempotent run/task creation, and stale fencing.
-2. Build the new `models.py` and single `store.py`; archive old local run state.
+2. Build the new `models.py` and single `store.py`; start the fresh database
+   without reading old local run state.
 3. Add RED workflow tests for plan revision/approval -> ordered Linear
    sub-issues -> execute -> rubric-backed gate/evidence -> child Done -> parent
    Done.
@@ -401,16 +404,16 @@ remains, while revision/manifest/evidence behavior is covered.
 3. Move smoke result to command ack and retain cached Web log tails.
 4. Delete Podium/Conductor WS routes/tasks/settings/install fields/dependencies,
    dispatch wake queue, and historical log-fetch command.
-5. Remove `runtime_groups` and Podium runtime policy/config ownership with an
-   in-place PostgreSQL migration that preserves users, Linear installations,
-   selected projects, Conductors, and bindings.
+5. Remove `runtime_groups` and Podium runtime policy/config ownership from the
+   fresh PostgreSQL schema; do not migrate old runtime rows.
 6. Merge the audited thin route/store/supervisor/helper modules.
 7. Run OAuth, polling pagination/checkpoint/epoch, dispatch, binding, label,
    proxy, cutover, health, and secret-boundary tests.
 
-Gate: repository-wide socket search finds no active
-production, dependency, response, setting, test, tool, or doc reference; Web
-business APIs retain their contract.
+Gate: repository-wide WebSocket/runtime-transport search finds no active
+production, dependency, response, setting, test, tool, or doc reference; the
+retained local Conductor HTTP listener and Web business APIs retain their
+contract.
 
 ### Phase 5: Preserve Web Behavior With New Tests
 
@@ -469,7 +472,7 @@ approve spec/data hard break
   state.
 - A failure exists only in stdout/local files and not in durable state, logs,
   Linear, and Podium.
-- Podium customer data would be dropped rather than migrated.
+- A fresh cutover accidentally reads or exposes old runtime state.
 - New abstractions recreate a general scheduler, acceptance framework, or
   compatibility layer.
 

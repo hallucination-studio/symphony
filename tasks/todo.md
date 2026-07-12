@@ -1,10 +1,11 @@
 # Minimal Polling Workflow Checklist
 
-Status: implementation slices complete locally; real Linear/OAuth/Codex flow
-is pending an environment with approved credentials. The user approved the
-hard break: Linear and Podium Web behavior stay, workflow internals become one
-sequential parent/Sub Issue/Gate flow, checkpoint groups and cross-model
-acceptance are removed, and old tests/tools may be rebuilt.
+Status: implementation is in progress; local module slices are committed and
+the real Linear/OAuth/Codex flow remains pending an environment with approved
+credentials. The user approved the hard break: Linear and Podium Web behavior
+stay, workflow internals become one sequential parent/Sub Issue/Gate flow,
+checkpoint groups and cross-model acceptance are removed, and old tests/tools
+may be rebuilt.
 
 ## Fixed product decisions
 
@@ -46,7 +47,7 @@ acceptance are removed, and old tests/tools may be rebuilt.
 
 ## Verification completed locally
 
-- [x] `make test` — 30 Python tests passed.
+- [x] `make test` — 32 Python tests passed before the next implementation slice.
 - [x] Python package compilation and tool import smoke passed before this slice.
 - [x] `git diff --check` passed before this documentation/tool slice.
 - [ ] `cd packages/podium/web && npm run test && npm run lint && npm run build`
@@ -61,10 +62,8 @@ acceptance are removed, and old tests/tools may be rebuilt.
       command checks + Codex Gate -> parent Done.
 - [ ] Run one failed-gate path and confirm the sanitized reason is identical in
       SQLite, logs, Linear, and Podium.
-- [ ] Confirm Podium PostgreSQL migration preserves users, installations,
-      selected projects, Conductors, and bindings in the deployment database.
-- [ ] Archive any old local Conductor workflow database before deploying the new
-      `workflow.db` schema.
+- [x] Hard switch: old local/runtime state is not read or migrated; the new
+      `workflow.db` and deployment control-plane state start fresh.
 
 ## Stop conditions
 

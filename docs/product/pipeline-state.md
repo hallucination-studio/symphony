@@ -4,7 +4,7 @@
 
 Conductor's durable `workflow.db` store is the execution source of truth.
 Linear is the operator projection and human-event surface. Podium supplies
-dispatches, runtime configuration, and reporting transport, but Conductor owns
+dispatches and reporting transport, but Conductor owns
 local run state, plan revisions, Sub Issue state, gate evidence, waits, and
 convergence.
 

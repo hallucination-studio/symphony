@@ -1,145 +1,64 @@
-# Linear Projection
+# Linear projection
 
-## Authority Boundary
+## Authority boundary
 
-Conductor's durable managed-run store is scheduler truth. Linear is an
-operator-visible mirror and human-event inbox. Conductor writes run status,
-work-item contracts, attempts, waits, and approved revision state to Linear, then
-ingests only allowed human events.
+Conductor's durable `workflow.db` is the execution source of truth. Linear is
+the operator-visible projection and the source of explicitly observed human
+actions. Podium owns Linear OAuth, polling, delegation epochs, dispatch
+eligibility, labels, and the authenticated GraphQL proxy. Conductor never holds
+a direct Linear token.
 
-Linear comments are projection and context. They are never parsed as scheduler
-commands.
+Comments add context only. They never act as commands.
 
-## Issue Topology
+## Issue shape
 
-The root business issue is immutable delegated intent and the status anchor for
-the run. It is not a scheduler aggregate node.
-
-Each accepted work item projects to one Linear child issue. Parent/child nesting
-expresses the managed-run plan. Linear `blocks` relations may mirror work-item
-dependencies for operator readability, but dependency satisfaction comes only
-from Conductor work-item state: dependencies must be Done.
-
-## Dependency Observation Gap
-
-Inbound human-created `blocks` relations do not currently change execution
-readiness. The former direct-unit implementation was never connected to the
-installed Conductor path and rewrote accepted work-item payloads, so it is not a
-supported ingestion contract or acceptance proof.
-
-C1.2 and C3.1 will close this gap with typed Linear observations and a versioned
-immutable `DependencyOverlay`. The target behavior will:
-
-- preserve the accepted plan and its dependency hash;
-- append validated human-created `blocks` edges in an overlay;
-- reject cycles, stale versions, partial observations, and changes to started
-  targets;
-- derive effective readiness from plan dependencies union the active overlay;
-- commit nothing when the effective topology is unchanged.
-
-A lagging or partial Linear read must not delete a live overlay edge. Until that
-contract is implemented and accepted, inbound dependency changes remain an
-explicit product gap.
-
-## Attempt Comments
-
-Every attempt projects to exactly one status-bearing comment on its work-item
-issue. The comment includes turn kind, attempt state, attempt id, backend thread id when
-available, verify score, sanitized error summary, and links to safe evidence.
-
-Idempotency is by durable projection mapping:
+One delegated parent issue maps idempotently to one run. An approved plan
+creates one ordered Sub Issue per task, each with an explicit Linear parent
+relationship. Conductor executes only the first unfinished Sub Issue.
 
 ```text
-attempt_id -> linear_comment_id
+Parent business issue
+  ├─ Sub Issue 1  -> verification commands + Codex Gate -> Done
+  ├─ Sub Issue 2  -> verification commands + Codex Gate -> Done
+  └─ [Human Action] runtime wait (only when Codex needs input)
 ```
 
-Reconcile updates the known `comment_id` when it exists and creates a comment
-only when no mapping exists. There are no hidden comment markers; the durable
-`comment_id` mapping is the replay key.
+There is no task dependency graph, `blocks` projection, branch, join,
+checkpoint group, integration child, or comment-command protocol in the
+Conductor workflow.
 
-## Human Action
+Active Linear blockers on the delegated parent remain a Podium intake concern:
+Podium must not lease a dispatch while an active blocker exists, and must
+reconsider the same dispatch when the blocker clears. This is unrelated to the
+removed task-dependency graph.
 
-Managed Runs use blocked parent or work-item state for operator action. Entering
-a blocked state moves the relevant Linear issue to a blocked-style workflow
-state and records one instruction update keyed by the managed-run wait identity.
+## Visible lifecycle
 
-The instruction comment states:
+- The parent carries concise plan, execution, gate, and terminal summaries.
+- Each Sub Issue shows `todo`, `in_progress`, `blocked`, or `done` through its
+  normal Linear state.
+- A failed gate remains non-Done. One rework is allowed; the second failure
+  blocks the task and parent with a concrete sanitized next action.
+- A runtime approval or tool-input wait records a durable wait and may create a
+  `[Human Action]` child. Completing that exact action resumes a fresh fenced
+  attempt; comments alone do not resume work.
+- Plan revisions, approval, risks, architecture decisions, open questions,
+  acceptance catalog entries, command evidence, one Codex Gate result, score,
+  rubric, threshold, provenance, manifest, and artifact references remain
+  visible as compact projection metadata. They do not create another scheduler.
 
-- the structured reason the run or work item stalled;
-- what information or action the operator should provide;
-- that comments are context only;
-- that resume requires flipping the issue out of the blocked-style state.
+Every terminal or blocking projection carries the same sanitized fields as the
+durable run: `error_code`, `sanitized_reason`, `action_required`, `retryable`,
+and `next_action`.
 
-The resume trigger is the state flip. A free-text comment alone never resumes
-work.
+## Idempotency and validation
 
-Runtime approval, permission, and tool-input waits may still project as
-`[Human Action]` child issues where that runtime wait flow uses child issue
-completion as the resume signal. Those child issues are runtime wait artifacts,
-not a replacement for work-item-level Managed Runs projection.
+Conductor stores each child issue id before later state changes. Repeated polls
+or restart recovery reuse the same run, task, child, and fenced attempt. A
+stale Performer result changes nothing. Before treating a child as projected,
+Conductor validates its explicit `parent { id identifier }` relationship rather
+than relying on title text or comments.
 
-## Projection Health
-
-The root issue carries a Managed Runs summary block. That block includes:
-
-- `projection_healthy: true|false`;
-- `last_successful_projection_at`;
-- `last_projection_error` when the latest projection attempt failed.
-
-Projection failures are durable state, not log-only warnings. If per-node
-projection fails, Conductor records the sanitized error and makes a best-effort
-root-status update before retrying on the next tick.
-
-## Plan Revisions
-
-When implementation needs changed scope, dependencies, acceptance criteria, or a
-human decision, Conductor records a new plan version only after approval. Linear
-mirrors the approved revision as:
-
-- unchanged work-item issues updated in place;
-- removed work-item issues moved to Canceled;
-- new work-item issues created under the same parent;
-- dependency `blocks` refreshed from the approved plan;
-- visible revision context with sanitized reason and plan version.
-
-The root business issue is not rewritten. Operators can see what ran, why the
-plan changed, which work items were canceled, and which work items are active.
-
-## Operator Fields
-
-Projection payloads include stable metadata needed to join Linear to durable
-state:
-
-- run id and plan version;
-- work item id and parent issue id;
-- active policy id/version;
-- plan, work-item, and verification attempt ids;
-- operator status;
-- operator wait kind;
-- runtime wait id where present;
-- linear projection id and last synced comment ids.
-
-Metadata is sanitized. It must not include secrets, raw tokens, cookies,
-passwords, or raw backend profile settings.
-
-## Final Shape
-
-```text
-Root business issue (status anchor)
-  [work item] implement login        Done
-    comment: plan#1 succeeded
-    comment: work-item#1 failed: <sanitized reason>
-    comment: work-item#2 succeeded
-    comment: verification passed
-  [work item] implement logout v2    In Progress
-  [work item] implement logout       Canceled by approved revision
-
-blocks: login -> logout v2
-```
-
-## Verification
-
-A real run must prove the Linear tree matches durable state: work-item issues,
-parentage, dependency `blocks`, approved revision effects, attempt comments by
-`comment_id`, blocked-state flips, runtime wait child issues when used,
-projection health, and sanitized error summaries.
+Projection failures are durable and visible in the parent/Sub Issue, local
+structured log, and Podium managed-runs response. Projection data never
+contains tokens, cookies, passwords, client secrets, or raw Codex credentials.
