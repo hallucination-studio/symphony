@@ -29,9 +29,10 @@ The code has more than the eventual compact target, but ownership is explicit:
 | `conductor_podium_sync.py` | Runtime report, command polling, dispatch lease, project labels, smoke handling |
 | `conductor_api.py`, `conductor_service.py` | Local HTTP API and composition/background tick |
 
-`conductor_service_helpers.py`, `conductor_service_views.py`, and protocol
-helpers are still active implementation owners; they are not evidence that a
-new workflow abstraction exists.
+`conductor_service.py` directly owns the instance, workspace, log, and
+runtime-view operations. `conductor_service_helpers.py` remains only for
+functions shared by the service and sync owner; protocol helpers remain local
+to their concrete boundary.
 
 ## Canonical workflow
 

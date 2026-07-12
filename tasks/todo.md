@@ -33,6 +33,8 @@ and approved runtime environment. This checklist is the active scope ledger;
 - [x] Repair the direct pinned Codex SDK stream contract and inline its one-use
   runtime mixin into `CodexSdkClient`.
 - [x] Record one baseline document per module under `docs/modules/`.
+- [x] Merge the one-consumer Conductor service-view mixin into
+  `conductor_service.py`.
 
 ## Remaining code slices
 
