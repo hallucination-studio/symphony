@@ -11,7 +11,6 @@ import {
   RepositoryModeFields,
   RepositoryValueField,
 } from "./RepositoryStep.components";
-import { validateRepositoryValue } from "./RepositoryStep.helpers";
 
 export function RepositoryStep({
   stepNumber,
@@ -87,4 +86,16 @@ export function RepositoryStep({
       <PrivateRepositoryPanel mode={mode} />
     </SetupStepShell>
   );
+}
+
+function validateRepositoryValue(
+  mode: RepositoryMode,
+  value: string,
+  t: (key: string, values?: Record<string, string | number>) => string,
+): string | null {
+  if (!value.trim()) return t("Repository value is required.");
+  if (mode === "git_url" && !/^(https?:\/\/|git@|ssh:\/\/)/.test(value.trim())) {
+    return t("Git URL must start with http(s)://, git@, or ssh://.");
+  }
+  return null;
 }
