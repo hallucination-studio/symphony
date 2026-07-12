@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 
 from conductor.gate import CommandResult
+from conductor.runtime import StaleRuntimeResult
 from conductor.store import ConductorStore
 from conductor.workflow_driver import WorkflowDriver
 from performer_api.turns import GateResult
@@ -40,7 +41,11 @@ class FakeLinear:
         self.transition_failure_target = ""
 
     async def create_child_issue_for(self, **kwargs: Any) -> dict[str, str]:
-        issue = {"id": f"child-{len(self.children) + 1}", "identifier": f"SYM-{len(self.children) + 1}"}
+        issue = {
+            "id": f"child-{len(self.children) + 1}",
+            "identifier": f"SYM-{len(self.children) + 1}",
+            "description": str(kwargs.get("description") or ""),
+        }
         self.children.append(issue)
         self.issue_states[issue["id"]] = "Backlog"
         return issue
@@ -172,6 +177,91 @@ async def test_workflow_driver_creates_subissues_and_runs_sequential_gate(tmp_pa
     assert [task["state"] for task in tasks] == ["done", "todo"]
     assert len(service.linear.children) == 2
     assert service.linear.transitions[0] == ("child-1", "In Progress")
+
+
+@pytest.mark.anyio
+async def test_workflow_driver_closes_parent_after_every_subissue_passes(tmp_path: Path, two_task_plan) -> None:
+    service = FakeService(tmp_path)
+    run = service.store.create_run("parent-1", "SYM-1", instance_id="instance-1")
+    driver = WorkflowDriver(service)
+    _queue_turns(
+        driver,
+        [
+            {"context": {}, "plan": two_task_plan.to_dict(), "thread_id": "thread-1"},
+            {"context": {}, "result": {"status": "ready_for_gate", "summary": "task one"}, "thread_id": "thread-1"},
+            {
+                "context": {},
+                "gate_result": {
+                    "passed": True,
+                    "score": 4,
+                    "threshold": 3,
+                    "rubric": {},
+                    "provenance": [],
+                    "findings": [],
+                    "artifact_refs": [],
+                },
+                "thread_id": "thread-1",
+            },
+            {"context": {}, "result": {"status": "ready_for_gate", "summary": "task two"}, "thread_id": "thread-1"},
+            {
+                "context": {},
+                "gate_result": {
+                    "passed": True,
+                    "score": 4,
+                    "threshold": 3,
+                    "rubric": {},
+                    "provenance": [],
+                    "findings": [],
+                    "artifact_refs": [],
+                },
+                "thread_id": "thread-1",
+            },
+        ],
+    )
+
+    for _ in range(5):
+        assert (await driver.drive_once())["failed"] == 0
+
+    persisted = service.store.get_run(run["run_id"])
+    assert persisted is not None
+    assert persisted["state"] == "done"
+    assert [task["state"] for task in service.store.list_tasks(run["run_id"])] == ["done", "done"]
+    assert service.linear.transitions == [
+        ("child-1", "In Progress"),
+        ("child-1", "Done"),
+        ("child-2", "In Progress"),
+        ("child-2", "Done"),
+        ("parent-1", "Done"),
+    ]
+
+
+@pytest.mark.anyio
+async def test_workflow_driver_ignores_stale_result_without_failing_run(tmp_path: Path, minimal_plan) -> None:
+    service = FakeService(tmp_path)
+    run = service.store.create_run("parent-1", "SYM-1", instance_id="instance-1")
+    service.store.save_plan(run["run_id"], minimal_plan)
+    driver = WorkflowDriver(service)
+
+    async def stale_turn(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        raise StaleRuntimeResult("stale_fencing_token")
+
+    driver._run_turn = stale_turn  # type: ignore[method-assign]
+
+    assert (await driver.drive_once())["failed"] == 0
+    result = await driver.drive_once()
+
+    assert result["failed"] == 0
+    persisted = service.store.get_run(run["run_id"])
+    assert persisted is not None
+    assert persisted["state"] == "executing"
+    assert persisted["latest_reason"] == "stale_fencing_token"
+    assert any(
+        event.startswith("event=managed_run_result_stale level=warning ")
+        and "run_id=" + str(run["run_id"]) in event
+        and "error_code=stale_fencing_token" in event
+        and "next_action=ignore_stale_result" in event
+        for event in service.performer_runtime.events
+    )
 
 
 @pytest.mark.anyio
@@ -433,7 +523,13 @@ async def test_workflow_driver_projects_runtime_wait_as_human_action_child(tmp_p
     run = service.store.create_run("parent-1", "SYM-1", instance_id="instance-1")
     driver = WorkflowDriver(service)
     bodies = [
-        {"context": {}, "runtime_wait": {"kind": "approval_requested", "reason": "Approve command"}},
+        {
+            "context": {},
+            "runtime_wait": {
+                "kind": "approval_requested",
+                "reason": "Authorization: Bearer wait-secret",
+            },
+        },
         {"context": {}, "plan": minimal_plan.to_dict(), "thread_id": "thread-1"},
     ]
 
@@ -442,6 +538,9 @@ async def test_workflow_driver_projects_runtime_wait_as_human_action_child(tmp_p
     assert (await driver.drive_once())["applied"] == 0
     wait = service.store.list_runtime_waits(run["run_id"])[0]
     assert wait["linear_issue_id"] == "child-1"
+    assert "wait-secret" not in str(wait)
+    assert "wait-secret" not in str(service.linear.children)
+    assert "wait-secret" not in str(service.linear.comments)
     assert service.store.get_run(run["run_id"])["state"] == "blocked"
 
     assert (await driver.drive_once())["applied"] == 0

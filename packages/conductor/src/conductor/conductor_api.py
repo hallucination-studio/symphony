@@ -146,7 +146,7 @@ class ConductorApiServer:
             self._write_response(writer, status, payload)
             await writer.drain()
         except Exception as exc:
-            self._write_response(writer, 500, {"error": {"code": "internal_error", "message": str(exc)}})
+            self._write_response(writer, 500, {"error": {"code": "internal_error", "message": sanitize_reason(exc)}})
             await writer.drain()
         finally:
             writer.close()

@@ -136,6 +136,90 @@ def test_gate_failure_allows_one_rework_then_blocks_task_and_parent(tmp_path, mi
     assert store.get_run(run["run_id"])["state"] == RunState.BLOCKED.value
 
 
+def test_duplicate_gate_result_is_idempotent(tmp_path, minimal_plan) -> None:
+    store = _store(tmp_path)
+    run = store.create_run("parent-1", "APP-1", instance_id="instance-1")
+    store.save_plan(run["run_id"], minimal_plan)
+    task = store.next_task(run["run_id"])
+    gate = _start_gate(store, run["run_id"], task["task_id"])
+
+    first = store.record_gate(
+        run["run_id"],
+        gate["attempt_id"],
+        gate["fencing_token"],
+        passed=False,
+        score=2,
+        command_passed=0,
+        command_total=0,
+    )
+    duplicate = store.record_gate(
+        run["run_id"],
+        gate["attempt_id"],
+        gate["fencing_token"],
+        passed=False,
+        score=2,
+        command_passed=0,
+        command_total=0,
+    )
+
+    assert duplicate == first
+    assert duplicate["rework_count"] == 1
+    with store.connect() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM gate_evidence").fetchone()[0] == 1
+
+
+def test_duplicate_plan_result_is_idempotent(tmp_path, minimal_plan) -> None:
+    store = _store(tmp_path)
+    run = store.create_run("parent-1", "APP-1", instance_id="instance-1")
+    attempt = store.start_plan(run["run_id"])
+
+    first = store.record_plan(
+        run["run_id"],
+        attempt["attempt_id"],
+        attempt["fencing_token"],
+        minimal_plan,
+    )
+    duplicate = store.record_plan(
+        run["run_id"],
+        attempt["attempt_id"],
+        attempt["fencing_token"],
+        minimal_plan,
+    )
+
+    assert duplicate == first == 1
+    with store.connect() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM plan_revisions").fetchone()[0] == 1
+
+
+def test_stale_attempt_result_cannot_change_the_current_task(tmp_path, minimal_plan) -> None:
+    store = _store(tmp_path)
+    run = store.create_run("parent-1", "APP-1", instance_id="instance-1")
+    store.save_plan(run["run_id"], minimal_plan)
+    task = store.next_task(run["run_id"])
+    stale = store.start_task(run["run_id"], task["task_id"])
+    store.record_runtime_wait(
+        run["run_id"],
+        stale["attempt_id"],
+        stale["fencing_token"],
+        kind="approval_requested",
+        reason="Approve the tool call",
+    )
+    assert store.resume_runtime_wait(run["run_id"]) is True
+    current = store.start_task(run["run_id"], task["task_id"])
+
+    with pytest.raises(StaleAttemptError, match="stale_attempt_state"):
+        store.record_execute(
+            run["run_id"],
+            stale["attempt_id"],
+            stale["fencing_token"],
+            ready_for_gate=True,
+        )
+
+    persisted = store.get_task(run["run_id"], task["task_id"])
+    assert persisted["state"] == TaskState.IN_PROGRESS.value
+    assert current["attempt_id"] != stale["attempt_id"]
+
+
 def test_gate_score_below_threshold_fails_even_when_codex_claims_passed(tmp_path, minimal_plan) -> None:
     store = _store(tmp_path)
     run = store.create_run("parent-1", "APP-1", instance_id="instance-1")
@@ -561,10 +645,24 @@ def test_runtime_wait_is_durable_and_can_resume_once_reopened(tmp_path) -> None:
         attempt["attempt_id"],
         attempt["fencing_token"],
         kind="approval_requested",
-        reason="Approve the tool call",
+        reason="Authorization: Bearer wait-secret",
     )
 
     assert store.get_run(run["run_id"])["state"] == RunState.BLOCKED.value
+    wait = store.list_runtime_waits(run["run_id"])[0]
+    assert wait["reason"] == "Authorization: [REDACTED]"
+    assert "wait-secret" not in str(wait)
     assert store.resume_runtime_wait(run["run_id"]) is True
     assert store.get_run(run["run_id"])["state"] == RunState.PLANNING.value
     assert store.list_runtime_waits(run["run_id"])[0]["state"] == "resolved"
+
+
+def test_failure_reason_is_sanitized_before_persistence(tmp_path) -> None:
+    store = _store(tmp_path)
+    run = store.create_run("parent-1", "APP-1", instance_id="instance-1")
+
+    store.fail_run(run["run_id"], "Codex failed: token=fail-secret")
+
+    persisted = store.get_run(run["run_id"])
+    assert persisted["latest_reason"] == "Codex failed: token=[REDACTED]"
+    assert "fail-secret" not in str(persisted)

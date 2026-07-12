@@ -14,6 +14,7 @@ from .acceptance_evidence import (
     gate_evidence_projection,
     gate_number,
 )
+from .conductor_smoke_protocol import sanitize_reason
 from .models import (
     AttemptState,
     ConductorSettings,
@@ -299,14 +300,14 @@ class ConductorStore:
         with self.connect() as connection:
             connection.execute(
                 "UPDATE runs SET state = ?, latest_reason = ?, updated_at = ? WHERE run_id = ?",
-                (RunState.FAILED.value, reason, utc_now_iso(), run_id),
+                (RunState.FAILED.value, sanitize_reason(reason), utc_now_iso(), run_id),
             )
 
     def update_run_reason(self, run_id: str, reason: str) -> None:
         with self.connect() as connection:
             connection.execute(
                 "UPDATE runs SET latest_reason = ?, updated_at = ? WHERE run_id = ?",
-                (reason, utc_now_iso(), run_id),
+                (sanitize_reason(reason), utc_now_iso(), run_id),
             )
 
     def managed_run_view(self) -> dict[str, Any]:
@@ -568,6 +569,9 @@ class ConductorStore:
         manifest_refs: list[str] | None = None,
     ) -> int:
         attempt = self._attempt(run_id, attempt_id, fencing_token, kind="plan")
+        if self._result_attempt_is_duplicate(attempt):
+            return int((self.get_run(run_id) or {}).get("plan_version") or 0)
+        self._require_running_attempt(attempt)
         version = self.save_plan(
             run_id,
             plan,
@@ -585,9 +589,16 @@ class ConductorStore:
 
     def record_runtime_wait(self, run_id: str, attempt_id: str, fencing_token: int, *, kind: str, reason: str) -> None:
         attempt = self._attempt(run_id, attempt_id, fencing_token)
+        if self._result_attempt_is_duplicate(attempt):
+            return
+        self._require_running_attempt(attempt)
+        reason = sanitize_reason(reason)
         now = utc_now_iso()
         wait_id = f"wait-{uuid4().hex}"
         with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if self._guard_attempt_state(connection, attempt_id):
+                return
             connection.execute(
                 "INSERT INTO runtime_waits (wait_id, run_id, task_id, kind, reason, state, created_at) VALUES (?, ?, ?, ?, ?, 'open', ?)",
                 (wait_id, run_id, attempt.get("task_id") or "", kind, reason, now),
@@ -715,12 +726,21 @@ class ConductorStore:
 
     def record_execute(self, run_id: str, attempt_id: str, fencing_token: int, *, ready_for_gate: bool, result: dict[str, Any] | None = None) -> dict[str, Any]:
         attempt = self._attempt(run_id, attempt_id, fencing_token, kind="execute")
+        if self._result_attempt_is_duplicate(attempt):
+            return self.get_task(run_id, str(attempt["task_id"])) or {}
+        self._require_running_attempt(attempt)
         now = utc_now_iso()
         state = TaskState.IN_REVIEW.value if ready_for_gate else TaskState.BLOCKED.value
         run_state = RunState.EXECUTING.value if ready_for_gate else RunState.BLOCKED.value
         reason = "ready_for_gate" if ready_for_gate else "execute_failed"
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            if self._guard_attempt_state(connection, attempt_id):
+                row = connection.execute(
+                    "SELECT * FROM tasks WHERE run_id = ? AND task_id = ?",
+                    (run_id, attempt["task_id"]),
+                ).fetchone()
+                return _task(row) if row is not None else {}
             connection.execute(
                 "UPDATE attempts SET state = ?, result_json = ?, updated_at = ? WHERE attempt_id = ?",
                 (AttemptState.SUCCEEDED.value if ready_for_gate else AttemptState.FAILED.value, _dump(result or {}), now, attempt["attempt_id"]),
@@ -749,6 +769,9 @@ class ConductorStore:
         evidence: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         attempt = self._attempt(run_id, attempt_id, fencing_token, kind="gate")
+        if self._result_attempt_is_duplicate(attempt):
+            return self.get_task(run_id, str(attempt["task_id"])) or {}
+        self._require_running_attempt(attempt)
         score = gate_number(score)
         threshold = gate_number(threshold)
         now = utc_now_iso()
@@ -756,6 +779,12 @@ class ConductorStore:
         stale_reason = ""
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            if self._guard_attempt_state(connection, attempt_id):
+                row = connection.execute(
+                    "SELECT * FROM tasks WHERE run_id = ? AND task_id = ?",
+                    (run_id, attempt["task_id"]),
+                ).fetchone()
+                return _task(row) if row is not None else {}
             attempt_payload = _load(str(attempt.get("result_json") or "{}"))
             plan_version = int(attempt_payload.get("plan_version") or 0)
             run = connection.execute("SELECT plan_version FROM runs WHERE run_id = ?", (run_id,)).fetchone()
@@ -870,6 +899,33 @@ class ConductorStore:
         if kind is not None and str(row["kind"]) != kind:
             raise StaleAttemptError("attempt_kind_mismatch")
         return {key: row[key] for key in row.keys()}
+
+    @staticmethod
+    def _result_attempt_is_duplicate(attempt: dict[str, Any]) -> bool:
+        return str(attempt.get("state") or "") in {
+            AttemptState.SUCCEEDED.value,
+            AttemptState.FAILED.value,
+        }
+
+    @staticmethod
+    def _require_running_attempt(attempt: dict[str, Any]) -> None:
+        if str(attempt.get("state") or "") != AttemptState.RUNNING.value:
+            raise StaleAttemptError("stale_attempt_state")
+
+    @staticmethod
+    def _guard_attempt_state(connection: sqlite3.Connection, attempt_id: str) -> bool:
+        row = connection.execute(
+            "SELECT state FROM attempts WHERE attempt_id = ?",
+            (attempt_id,),
+        ).fetchone()
+        if row is None:
+            raise StaleAttemptError("stale_attempt_state")
+        state = str(row["state"] or "")
+        if state in {AttemptState.SUCCEEDED.value, AttemptState.FAILED.value}:
+            return True
+        if state != AttemptState.RUNNING.value:
+            raise StaleAttemptError("stale_attempt_state")
+        return False
 
     def _init_db(self) -> None:
         with self.connect() as connection:

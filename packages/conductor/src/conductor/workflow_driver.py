@@ -7,7 +7,8 @@ from performer_api.turns import ExecuteResult, GateResult, TurnContext
 from performer_api.workflow import Plan, Task
 
 from .gate import AcceptanceGate
-from .runtime import PerformerRuntime
+from .conductor_smoke_protocol import sanitize_reason
+from .runtime import PerformerRuntime, StaleRuntimeResult
 from .store import ConductorStore, StaleAttemptError
 
 
@@ -25,6 +26,9 @@ class WorkflowDriver:
         for run in self.store.list_runs():
             try:
                 result = await self._drive_run(run)
+            except (StaleAttemptError, StaleRuntimeResult) as exc:
+                self._record_stale_result(run, exc)
+                continue
             except Exception as exc:
                 self.store.fail_run(str(run["run_id"]), _reason(exc))
                 counts["failed"] += 1
@@ -302,7 +306,7 @@ class WorkflowDriver:
         return {"applied": 1}
 
     async def _record_wait(self, run: dict[str, Any], instance: Any, context: TurnContext, wait: Any, task: dict[str, Any]) -> dict[str, int]:
-        reason = str(wait.get("reason") or "Codex runtime wait")
+        reason = sanitize_reason(wait.get("reason") or "Codex runtime wait")
         self.store.record_runtime_wait(
             str(run["run_id"]),
             context.attempt_id,
@@ -347,6 +351,14 @@ class WorkflowDriver:
         try:
             payload = self.runtime.run(paths, codex_home=Path(env["CODEX_HOME"]), env=env)
             accepted = self.runtime.accept_result(context, payload)
+        except StaleRuntimeResult as exc:
+            self.runtime.append_event(
+                Path(instance.log_path),
+                f"event=performer_result_stale level=warning {event} error_type={exc.__class__.__name__} "
+                f"error_code={_reason(exc)} sanitized_reason={_reason(exc)} action_required=false "
+                "retryable=true next_action=ignore_stale_result",
+            )
+            raise
         except Exception as exc:
             self.runtime.append_event(
                 Path(instance.log_path),
@@ -355,6 +367,28 @@ class WorkflowDriver:
             raise
         self.runtime.append_event(Path(instance.log_path), f"event=performer_turn_completed {event}")
         return accepted
+
+    def _record_stale_result(self, run: dict[str, Any], error: Exception) -> None:
+        run_id = str(run["run_id"])
+        reason = _reason(error)
+        self.store.update_run_reason(run_id, reason)
+        instance = self.store.get_instance(str(run.get("instance_id") or ""))
+        if instance is None:
+            return
+        fields = (
+            "event=managed_run_result_stale",
+            "level=warning",
+            f"instance_id={instance.id}",
+            f"run_id={run_id}",
+            f"work_item_id={str(run.get('active_task_id') or '-')}",
+            f"error_type={error.__class__.__name__}",
+            f"error_code={reason}",
+            f"sanitized_reason={reason.replace(' ', '_')[:500]}",
+            "action_required=false",
+            "retryable=true",
+            "next_action=ignore_stale_result",
+        )
+        self.runtime.append_event(Path(instance.log_path), " ".join(fields))
 
     def _runtime_environment(self, instance: Any, workspace: Path, attempt_id: str) -> dict[str, str]:
         return self.runtime.prepare_environment(
@@ -584,8 +618,7 @@ def _turn_log_fields(context: TurnContext, role: str, paths: Any) -> str:
 
 
 def _reason(error: Exception) -> str:
-    text = str(error).strip().replace("\n", " ")
-    return text[:500] or error.__class__.__name__
+    return sanitize_reason(str(error).strip()) or error.__class__.__name__
 
 
 def _linear_state_name(issue: dict[str, Any]) -> str:

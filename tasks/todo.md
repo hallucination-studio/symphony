@@ -1,8 +1,8 @@
 # Minimal Polling Workflow Checklist
 
-Status: implementation is in progress. Local module slices are committed;
-external Linear/OAuth/Codex verification remains pending a clean scoped project
-and approved runtime environment. This checklist is the active scope ledger;
+Status: local MVP acceptance closure is complete; external Linear/OAuth/Codex
+verification is blocked by invalid credentials in the current environment. This
+checklist is the active scope ledger;
 `tasks/spec.md` remains the product contract.
 
 ## Fixed product decisions
@@ -54,6 +54,22 @@ and approved runtime environment. This checklist is the active scope ledger;
   `passed=true`, while current retained code also applies `score >= threshold`.
   Do not change the product rule until it is explicitly resolved.
 
+## MVP acceptance closure slice
+
+- **Authorized:** prove one successful sequential parent/task/Gate closure;
+  one Gate rework followed by a second-failure block; duplicate-result
+  idempotency; stale-result rejection; sanitized runtime waits, failures, and
+  logs; and one real Linear/OAuth/Codex flow through `tools/real_flow.py`.
+- **Required consequences:** terminal attempt results cannot be applied twice;
+  stale attempts cannot mutate the current task; runtime output and wait/failure
+  reasons use the existing sanitized product surfaces; every accepted claim has
+  focused test or real-flow evidence.
+- **Out of scope:** changing the Gate threshold rule, adding a new endpoint or
+  scheduler, changing Linear/Web vocabulary, or creating a second E2E runner.
+- **Assumptions requiring approval:** none.
+- **Deferred ideas:** richer real-flow orchestration automation and optional Web
+  rendering of detailed evidence remain outside this closure slice.
+
 ## Current evidence-projection slice ledger
 
 - **Authorized:** expose the already-retained acceptance catalog, rubric,
@@ -74,13 +90,18 @@ and approved runtime environment. This checklist is the active scope ledger;
 
 ## Verification status
 
-- [x] `make test` — 101 Python tests passed, including the acceptance-evidence
-  projection, stale-revision, numeric-boundary, and error-visibility cases.
+- [x] `make test` — 111 Python tests passed, including the full success closure,
+      Gate rework/block, duplicate/stale result, and runtime redaction cases.
 - [x] `cd packages/podium/web && npm run test && npm run lint && npm run
       design:lint && npm run build` — 27 Web tests passed; lint/build clean
       (design lint: 0 errors, 0 warnings).
-- [ ] `tools/real_flow.py` preflight and a scoped real product flow. The current
-      tool is preflight only and cannot prove the full managed-run path.
+- [x] `tools/real_flow.py --offline` — staged Codex seed preflight passed;
+      report: `.test-real-flow/mvp-offline-report.json`.
+- [x] MVP acceptance closure evidence for duplicate/stale result handling and
+      runtime wait/failure/log redaction is covered by the 111-test suite.
+- [ ] Real Linear/OAuth/Codex product flow — blocked by `401 Unauthorized` for
+      both configured Linear credential paths; sanitized report:
+      `.test-real-flow/mvp-real-report.json`.
 
 ## Stop conditions
 

@@ -14,6 +14,10 @@ CHECK_NAMES = (
     "project_label_state",
 )
 
+_BARE_SECRET = re.compile(
+    r"(?i)\b(?:sk-[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b"
+)
+
 
 class SmokeCommandError(RuntimeError):
     def __init__(self, code: str, reason: str) -> None:
@@ -89,6 +93,7 @@ def sanitize_reason(value: Any) -> str:
         lambda match: f"{match.group(1)}=[REDACTED]",
         text,
     )
+    text = _BARE_SECRET.sub("[REDACTED]", text)
     return text[:500] or "runtime_error"
 
 

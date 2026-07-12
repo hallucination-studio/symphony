@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -50,3 +51,26 @@ def test_runtime_writes_sanitized_instance_log_events(tmp_path) -> None:
     logs = runtime.read_log(log_path, tail=1, order="desc")
     assert logs["lines"] == ["event=performer_turn_completed authorization: [REDACTED]"]
     assert "secret-value" not in logs["logs"]
+
+
+def test_runtime_sanitizes_performer_stdout_and_stderr_before_persisting(tmp_path, monkeypatch) -> None:
+    runtime = PerformerRuntime()
+    paths = runtime.paths(tmp_path / "attempt")
+
+    def fake_run(*_args, **_kwargs):
+        paths.result.write_text("{}", encoding="utf-8")
+        return SimpleNamespace(
+            returncode=0,
+            stdout="Authorization: Bearer stdout-secret\n",
+            stderr="token=stderr-secret\n",
+        )
+
+    monkeypatch.setattr("conductor.runtime.subprocess.run", fake_run)
+
+    runtime.run(paths, codex_home=tmp_path / "codex")
+
+    log_text = paths.log.read_text(encoding="utf-8")
+    assert "stdout-secret" not in log_text
+    assert "stderr-secret" not in log_text
+    assert "Authorization: [REDACTED]" in log_text
+    assert "token=[REDACTED]" in log_text

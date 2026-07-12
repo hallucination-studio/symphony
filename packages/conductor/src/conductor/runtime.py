@@ -134,7 +134,7 @@ class PerformerRuntime:
         if size > maximum and raw:
             newline = raw.find(b"\n")
             raw = raw[newline + 1 :] if newline >= 0 else b""
-        lines = raw.decode("utf-8", errors="replace").splitlines()
+        lines = [_sanitize_log_event(line) for line in raw.decode("utf-8", errors="replace").splitlines()]
         if tail is not None and tail > 0:
             lines = lines[-tail:]
         if normalized_order == "desc":
@@ -165,7 +165,7 @@ class PerformerRuntime:
         except OSError as exc:
             raise RuntimeExecutionError(f"performer_start_failed:{exc}") from exc
         paths.log.write_text(
-            f"stdout\n{completed.stdout}\nstderr\n{completed.stderr}\nexit_code={completed.returncode}\n",
+            f"stdout\n{_sanitize_log_stream(completed.stdout)}\nstderr\n{_sanitize_log_stream(completed.stderr)}\nexit_code={completed.returncode}\n",
             encoding="utf-8",
         )
         if completed.returncode != 0:
@@ -272,13 +272,24 @@ def _empty_log(log_path: Path, order: str) -> dict[str, Any]:
 
 def _sanitize_log_event(value: str) -> str:
     text = str(value).replace("\x00", " ").replace("\r", " ").replace("\n", " ").strip()
+    if not text:
+        return ""
     text = re.sub(r"(?i)(authorization:\s*)(bearer|basic)\s+[^\s,;]+", r"\1[REDACTED]", text)
     text = re.sub(r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]+", r"\1 [REDACTED]", text)
-    return re.sub(
+    text = re.sub(
         r"(?i)\b(access_token|refresh_token|api_key|token|password|client_secret|cookie)\s*[:=]\s*[^\s,;]+",
         lambda match: f"{match.group(1)}=[REDACTED]",
         text,
     )
+    return re.sub(
+        r"(?i)\b(?:sk-[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b",
+        "[REDACTED]",
+        text,
+    )
+
+
+def _sanitize_log_stream(value: Any) -> str:
+    return "\n".join(_sanitize_log_event(line) for line in str(value or "").splitlines())
 
 
 __all__ = ["PerformerRuntime", "RuntimeExecutionError", "RuntimePaths", "StaleRuntimeResult"]

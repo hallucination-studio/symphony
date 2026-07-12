@@ -98,13 +98,15 @@ HTTP API is separate from that transport.
 
 1. Finish any remaining demonstrated single-owner simplifications, keeping
    Linear and Web behavior fixed.
-2. Define the sanitized evidence projection contract before exposing retained
-   catalog/manifest/artifact/gate details in existing operator and Linear
-   surfaces. No new runner, endpoint, or evidence child-issue tree is allowed.
+2. Keep the sanitized evidence projection contract covered by the existing
+   operator and Linear surfaces. No new runner, endpoint, or evidence child-issue
+   tree is allowed.
 3. Resolve the Gate threshold rule explicitly before changing its behavior.
 4. Run a scoped real Linear/OAuth/Codex product flow after the local rebuild.
-   `tools/real_flow.py` is currently a strict preflight, not proof of that
-   complete external flow.
+   The staged Codex preflight passes, but the current environment's Linear
+   credentials return `401 Unauthorized`; `.test-real-flow/mvp-real-report.json`
+   records the sanitized blocker. `tools/real_flow.py` remains a strict
+   preflight/observation tool, not proof of a complete external flow.
 
 ## Verification Rule
 
