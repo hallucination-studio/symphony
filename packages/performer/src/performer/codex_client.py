@@ -10,7 +10,6 @@ from .codex_client_helpers import (
     _classify_sdk_exception,
     _close_sdk_client,
     _latest_turn_identity,
-    _maybe_await,
     _parse_structured_result,
     _string_attr,
     _timeout_seconds,
@@ -32,30 +31,7 @@ class CodexTurnResult:
     events: list[dict[str, Any]] = field(default_factory=list)
 
 
-CodexRunResult = CodexTurnResult
-
-
 EventCallback = Callable[[dict[str, Any]], None]
-ContinuationProvider = Callable[[int], Any]
-
-
-STRUCTURED_RESULT_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "summary": {"type": "string"},
-        "test_commands": {"type": "array", "items": {"type": "string"}},
-        "changed_files": {"type": "array", "items": {"type": "string"}},
-        "remaining_risks": {"type": "array", "items": {"type": "string"}},
-        "next_action": {"type": "string", "enum": ["ready_for_review", "needs_human", "blocked"]},
-    },
-    "required": ["summary", "test_commands", "changed_files", "remaining_risks", "next_action"],
-    "additionalProperties": False,
-}
-
-
-TEXT_RESULT_SCHEMA: dict[str, Any] = {"type": "object", "additionalProperties": True}
-
-
 
 class CodexSdkClient(_CodexSdkRuntimeMixin):
     def __init__(self, config: CodexConfig, *, sdk_factory: Any | None = None):
@@ -69,15 +45,10 @@ class CodexSdkClient(_CodexSdkRuntimeMixin):
         title: str,
         *,
         on_event: EventCallback | None = None,
-        max_turns: int = 1,
-        continuation_provider: ContinuationProvider | None = None,
-        worker_host: str | None = None,
         existing_thread_id: str | None = None,
-        output_schema: dict[str, Any] | None = None,
-    ) -> CodexRunResult:
+        output_schema: dict[str, Any],
+    ) -> CodexTurnResult:
         _ = title
-        if worker_host:
-            raise CodexError("unsupported_sdk_worker_host", "Codex SDK backend does not support worker_host")
         if not workspace_path.exists() or not workspace_path.is_dir():
             raise CodexError("invalid_workspace_cwd", f"Workspace path is not a directory: {workspace_path}")
         events: list[dict[str, Any]] = []
@@ -90,99 +61,40 @@ class CodexSdkClient(_CodexSdkRuntimeMixin):
                 "cwd": str(workspace_path),
             }
         )
-        validate_default_shape = output_schema is None
         client, thread, thread_id = await self._init_thread(workspace_path, existing_thread_id, emit=emit)
         emit({"event": "session_started", "backend": "sdk", "thread_id": thread_id, "session_id": f"{thread_id}-", "cwd": str(workspace_path)})
-        turn_id, session_id, turn_count, final_response, structured = await self._run_session_turns(
+        _turn, turn_id, session_id, final_response, structured = await self._run_structured_turn(
             thread,
             prompt,
-            output_schema or STRUCTURED_RESULT_SCHEMA,
+            output_schema,
             thread_id=thread_id,
             emit=emit,
             events=events,
-            max_turns=max_turns,
-            continuation_provider=continuation_provider,
-            validate_default_shape=validate_default_shape,
+            require_structured=True,
+            validate_structured=True,
         )
         await _close_sdk_client(client)
-        return CodexRunResult(
+        emit(
+            {
+                "event": "turn_completed",
+                "backend": "sdk",
+                "thread_id": thread_id,
+                "turn_id": turn_id,
+                "session_id": session_id,
+                "message": final_response,
+            }
+        )
+        return CodexTurnResult(
             True,
             thread_id,
             turn_id,
             session_id,
-            turn_count,
+            1,
             backend="sdk",
             final_response=final_response,
             structured_result=structured,
             events=events,
         )
-
-    async def _run_session_turns(
-        self,
-        thread: Any,
-        prompt: str,
-        schema: dict[str, Any],
-        *,
-        thread_id: str,
-        emit: EventCallback,
-        events: list[dict[str, Any]],
-        max_turns: int,
-        continuation_provider: ContinuationProvider | None,
-        validate_default_shape: bool,
-    ) -> tuple[str, str, int, str | None, dict[str, Any] | None]:
-        final_response: str | None = None
-        structured: dict[str, Any] | None = None
-        turn_count = 0
-        turn_id = "turn"
-        session_id = f"{thread_id}-{turn_id}"
-        turn_prompt: str | None = prompt
-        max_turn_count = max(1, int(max_turns or 1))
-        while turn_prompt is not None and turn_count < max_turn_count:
-            require_structured_this_turn = turn_count + 1 >= max_turn_count or continuation_provider is None
-            turn, turn_id, session_id, final_response, turn_structured = await self._run_structured_turn(
-                thread,
-                turn_prompt,
-                schema,
-                thread_id=thread_id,
-                emit=emit,
-                events=events,
-                require_structured=require_structured_this_turn,
-                validate_default_shape=validate_default_shape,
-            )
-            if turn_structured is None:
-                turn_structured = _parse_structured_result(final_response, validate=validate_default_shape)
-            if turn_structured is not None:
-                structured = turn_structured
-            turn_count += 1
-            emit(
-                {
-                    "event": "turn_completed",
-                    "backend": "sdk",
-                    "thread_id": thread_id,
-                    "turn_id": turn_id,
-                    "session_id": session_id,
-                    "message": final_response,
-                }
-            )
-            if structured is not None or turn_count >= max_turn_count or continuation_provider is None:
-                break
-            turn_prompt = await _maybe_await(continuation_provider(turn_count))
-            if turn_prompt is not None and not isinstance(turn_prompt, str):
-                raise CodexError(
-                    "invalid_continuation_prompt",
-                    f"Continuation provider returned unsupported prompt type: {type(turn_prompt).__name__}",
-                )
-            if turn_prompt:
-                emit(
-                    {
-                        "event": "turn_continuing",
-                        "backend": "sdk",
-                        "thread_id": thread_id,
-                        "turn_count": turn_count,
-                        "next_turn": turn_count + 1,
-                    }
-                )
-        return turn_id, session_id, turn_count, final_response, structured
 
     async def _run_structured_turn(
         self,

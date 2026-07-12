@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import inspect
 import json
 import logging
 import os
@@ -9,8 +8,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .codex_client_helper_adapter import _ThreadRunAdapter
-from .codex_client_helper_async import _maybe_await
 from .codex_config import CodexConfig
 
 logger = logging.getLogger(__name__)
@@ -96,7 +93,6 @@ def _is_terminal_init_error(code: str) -> bool:
         "invalid_workspace_cwd",
         "sdk_missing_thread_start",
         "sdk_missing_thread_resume",
-        "unsupported_sdk_worker_host",
     }
 
 
@@ -202,20 +198,6 @@ def _codex_sdk_env() -> dict[str, str]:
     return env
 
 
-def _callable_accepts_keyword(value: Any, keyword: str) -> bool:
-    try:
-        signature = inspect.signature(value)
-    except (TypeError, ValueError):
-        return False
-    for parameter in signature.parameters.values():
-        if parameter.kind is inspect.Parameter.VAR_KEYWORD:
-            return True
-        if parameter.kind in {inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY}:
-            if parameter.name == keyword:
-                return True
-    return False
-
-
 def _timeout_seconds(timeout_ms: int) -> float | None:
     if timeout_ms <= 0:
         return None
@@ -246,15 +228,9 @@ async def _close_sdk_client(client: Any) -> None:
     if not callable(close):
         return
     try:
-        await _maybe_await(close())
+        await close()
     except Exception as exc:
         logger.debug("codex_sdk_close_failed reason=%s", exc)
-
-
-async def _aiter(value: Any) -> Any:
-    iterator = await _maybe_await(value)
-    async for item in iterator:
-        yield item
 
 
 def _string_attr(value: Any, name: str) -> str | None:

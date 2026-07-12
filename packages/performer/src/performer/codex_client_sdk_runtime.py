@@ -1,14 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import os
 from pathlib import Path
 from typing import Any, Callable
 
 from .codex_client_helpers import (
     CodexError,
-    _ThreadRunAdapter,
-    _callable_accepts_keyword,
     _classify_sdk_exception,
     _codex_sdk_env,
     _first_dict,
@@ -16,7 +15,6 @@ from .codex_client_helpers import (
     _init_backoff_ms,
     _is_terminal_init_error,
     _is_transient_codex_error,
-    _maybe_await,
     _string_attr,
     _timeout_seconds,
     _usage_from_any,
@@ -137,7 +135,7 @@ class _CodexSdkRuntimeMixin:
         max_delay_ms = max(1, self.config.overload_max_delay_ms)
         for attempt in range(1, attempts + 1):
             try:
-                return await _maybe_await(op())
+                return await op()
             except Exception as exc:
                 classified = _classify_sdk_exception(exc)
                 if classified.code == "codex_bad_request":
@@ -195,7 +193,7 @@ class _CodexSdkRuntimeMixin:
     async def _client(self) -> Any:
         if self.sdk_factory is not None:
             client = self.sdk_factory(self.config)
-            if hasattr(client, "__await__"):
+            if inspect.isawaitable(client):
                 client = await client
             return client
         if self.config.sdk_codex_bin and not os.access(self.config.sdk_codex_bin, os.X_OK):
@@ -211,11 +209,11 @@ class _CodexSdkRuntimeMixin:
         sdk_env = _codex_sdk_env()
         if not (self.config.sdk_codex_bin or sdk_env or self.config.config_overrides):
             return None
-        sdk_kwargs: dict[str, Any] = {"codex_bin": self.config.sdk_codex_bin}
-        if sdk_env and _callable_accepts_keyword(sdk_config_cls, "env"):
-            sdk_kwargs["env"] = sdk_env
-        if self.config.config_overrides and _callable_accepts_keyword(sdk_config_cls, "config_overrides"):
-            sdk_kwargs["config_overrides"] = tuple(self.config.config_overrides)
+        sdk_kwargs: dict[str, Any] = {
+            "codex_bin": self.config.sdk_codex_bin,
+            "env": sdk_env or None,
+            "config_overrides": tuple(self.config.config_overrides),
+        }
         return sdk_config_cls(**sdk_kwargs)
 
     async def _thread(
@@ -232,14 +230,14 @@ class _CodexSdkRuntimeMixin:
             if not callable(resume):
                 raise CodexError("sdk_missing_thread_resume", "Codex SDK client does not support thread_resume")
             try:
-                return await _maybe_await(resume(existing_thread_id, **kwargs))
+                return await resume(existing_thread_id, **kwargs)
             except Exception as exc:
                 if emit is not None:
                     emit({"event": "thread_resume_failed", "backend": "sdk", "thread_id": existing_thread_id, "cwd": str(workspace_path), "message": str(exc)})
         start = getattr(client, "thread_start", None)
         if not callable(start):
             raise CodexError("sdk_missing_thread_start", "Codex SDK client does not support thread_start")
-        return await _maybe_await(start(**kwargs))
+        return await start(**kwargs)
 
     def _thread_kwargs(self, workspace_path: Path) -> dict[str, Any]:
         kwargs: dict[str, Any] = {"cwd": str(workspace_path)}
@@ -250,16 +248,10 @@ class _CodexSdkRuntimeMixin:
         return kwargs
 
     async def _start_sdk_turn(self, thread: Any, prompt: str, output_schema: dict[str, Any]) -> Any:
-        run = getattr(thread, "run", None)
-        if callable(run):
-            return _ThreadRunAdapter(thread, output_schema, prompt)
         turn = getattr(thread, "turn", None)
         if callable(turn):
-            try:
-                return await _maybe_await(turn(prompt, output_schema=output_schema))
-            except TypeError:
-                return await _maybe_await(turn(prompt))
-        raise CodexError("sdk_missing_turn", "Codex SDK thread does not support turn or run")
+            return await turn(prompt, output_schema=output_schema)
+        raise CodexError("sdk_missing_turn", "Codex SDK thread does not support turn")
 
     async def _consume_turn(
         self,
@@ -271,17 +263,7 @@ class _CodexSdkRuntimeMixin:
         stream = getattr(turn, "stream", None)
         if callable(stream):
             return await self._consume_turn_stream(stream, emit, validate_structured=validate_structured)
-        run = getattr(turn, "run", None)
-        if not callable(run):
-            raise CodexError("sdk_missing_run", "Codex SDK turn does not support stream or run")
-        result = await _maybe_await(run())
-        usage = _usage_from_any(result)
-        if usage is not None:
-            emit({"event": "thread_token_usage_updated", "backend": "sdk", "usage": usage, **usage})
-        return (
-            _first_string(result, "final_response", "response", "text"),
-            _first_dict(result, "structured_result", "output", "parsed", validate=validate_structured),
-        )
+        raise CodexError("sdk_missing_stream", "Codex SDK turn does not support stream")
 
     async def _consume_turn_stream(
         self,
@@ -290,11 +272,9 @@ class _CodexSdkRuntimeMixin:
         *,
         validate_structured: bool,
     ) -> tuple[str | None, dict[str, Any] | None]:
-        from .codex_client_helpers import _aiter
-
         final_response: str | None = None
         structured: dict[str, Any] | None = None
-        async for event in _aiter(stream()):
+        async for event in stream():
             mapped = _sdk_event_to_dict(event)
             if mapped:
                 emit(mapped)
