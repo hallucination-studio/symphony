@@ -9,14 +9,18 @@ prevent later phases from collecting their own evidence.
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
 import re
 import sys
 from typing import Any, Iterable
 from uuid import uuid4
+
+import httpx
 
 try:  # package import for pytest; top-level fallback for ``python tools/real_flow.py``
     from .linear_fixture import LinearFixture, LinearFixtureError, required_environment
@@ -24,7 +28,6 @@ except ImportError:  # pragma: no cover - exercised by the documented script ent
     from linear_fixture import LinearFixture, LinearFixtureError, required_environment
 
 
-_PHASES = ("oauth", "linear", "performer", "overall")
 _DIAGNOSTIC_PHASES = ("oauth", "linear", "performer")
 _SENSITIVE_KEY = re.compile(
     r"(?i)(?:access[-_]?token|refresh[-_]?token|api[-_]?key|client[-_]?secret|"
@@ -49,6 +52,120 @@ class _RunContext:
     offline: bool
     settings: dict[str, str]
     phase_reports: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class _HttpObservation:
+    status_code: int
+    payload: dict[str, Any]
+    error_code: str = ""
+
+
+class _PodiumObserver:
+    """Read-only Podium HTTP observer used by the real phases."""
+
+    def __init__(self, base_url: str, *, timeout: float) -> None:
+        self.base_url = base_url.rstrip("/")
+        # A dead Podium must fail visibly within one bounded probe window.
+        self.timeout = min(max(0.1, float(timeout)), 20.0)
+
+    def get(self, path: str) -> _HttpObservation:
+        url = f"{self.base_url}/{path.lstrip('/')}"
+        try:
+            response = httpx.get(
+                url,
+                timeout=self.timeout,
+                follow_redirects=False,
+                headers={"Accept": "application/json"},
+            )
+            try:
+                payload = response.json()
+            except ValueError:
+                payload = {}
+            return _HttpObservation(
+                response.status_code,
+                payload if isinstance(payload, dict) else {},
+                "" if response.status_code else "podium_empty_response",
+            )
+        except (httpx.HTTPError, ValueError) as exc:
+            return _HttpObservation(0, {}, f"podium_request_failed:{type(exc).__name__}")
+
+    def post(self, path: str, payload: dict[str, Any] | None = None) -> _HttpObservation:
+        url = f"{self.base_url}/{path.lstrip('/')}"
+        try:
+            response = httpx.post(
+                url,
+                timeout=self.timeout,
+                follow_redirects=False,
+                headers={"Accept": "application/json", "Content-Type": "application/json"},
+                json=payload or {},
+            )
+            try:
+                body = response.json()
+            except ValueError:
+                body = {}
+            return _HttpObservation(
+                response.status_code,
+                body if isinstance(body, dict) else {},
+                "" if response.status_code else "podium_empty_response",
+            )
+        except (httpx.HTTPError, ValueError) as exc:
+            return _HttpObservation(0, {}, f"podium_request_failed:{type(exc).__name__}")
+
+
+def _append_check(
+    checks: list[dict[str, Any]],
+    failures: list[dict[str, Any]],
+    *,
+    name: str,
+    passed: bool,
+    group: str,
+    error_code: str,
+    reason: str,
+    observations: dict[str, Any] | None = None,
+    action_required: bool = False,
+    retryable: bool = False,
+    next_action: str = "inspect_artifacts",
+) -> None:
+    checks.append(
+        {
+            "name": name,
+            "passed": bool(passed),
+            "required": True,
+            "observations": _sanitize_value(observations or {}),
+        }
+    )
+    if not passed:
+        failures.append(
+            _failure(
+                group,
+                error_code,
+                reason,
+                action_required=action_required,
+                retryable=retryable,
+                next_action=next_action,
+            )
+        )
+
+
+def _contains_sensitive_key(value: Any) -> bool:
+    if isinstance(value, dict):
+        return any(_SENSITIVE_KEY.search(str(key)) or _contains_sensitive_key(item) for key, item in value.items())
+    if isinstance(value, (list, tuple)):
+        return any(_contains_sensitive_key(item) for item in value)
+    return False
+
+
+@contextmanager
+def _fixture_environment() -> Iterable[None]:
+    """Force Linear fixture reads to use the explicit Podium app token only."""
+
+    prior = os.environ.pop("LINEAR_API_KEY", None)
+    try:
+        yield
+    finally:
+        if prior is not None:
+            os.environ["LINEAR_API_KEY"] = prior
 
 
 def _sanitize_reason(value: object) -> str:
@@ -232,7 +349,6 @@ def _context(args: argparse.Namespace) -> _RunContext:
             "run_id": run_id,
             "project_slug": project_slug,
             "podium_url_present": bool(settings["podium_url"]),
-            "codex_seed_path": settings["codex_seed"],
             "codex_seed_name": Path(settings["codex_seed"]).name if settings["codex_seed"] else "",
         },
     )
@@ -270,40 +386,428 @@ def _offline_phase(context: _RunContext, phase: str) -> dict[str, Any]:
 def _run_oauth_phase(context: _RunContext) -> dict[str, Any]:
     if context.offline:
         return _offline_phase(context, "oauth")
+    checks: list[dict[str, Any]] = []
+    failures: list[dict[str, Any]] = []
+    observations: dict[str, Any] = {}
+    observer = _PodiumObserver(context.settings["podium_url"], timeout=context.timeout)
+
+    unauthenticated = observer.get("/api/v1/auth/me")
+    _append_check(
+        checks,
+        failures,
+        name="oauth_unauthenticated_rejected",
+        passed=unauthenticated.status_code == 401,
+        group="auth",
+        error_code="oauth_unauthenticated_probe_failed",
+        reason="Unauthenticated /api/v1/auth/me must return 401",
+        observations={"status_code": unauthenticated.status_code, "error_code": unauthenticated.error_code},
+    )
+
+    authenticated = observer.get("/api/v1/auth/me")
+    user = authenticated.payload.get("user")
+    auth_session_ok = authenticated.status_code == 200 and isinstance(user, dict)
+    _append_check(
+        checks,
+        failures,
+        name="oauth_authenticated_session_observed",
+        passed=auth_session_ok,
+        group="auth",
+        error_code="oauth_browser_session_unavailable",
+        reason="The existing signed-in browser session was not available to the observer",
+        observations={
+            "status_code": authenticated.status_code,
+            "user_id": user.get("id") if isinstance(user, dict) else "",
+            "user_email_present": bool(user.get("email")) if isinstance(user, dict) else False,
+        },
+        action_required=True,
+        next_action="reuse_existing_signed_in_browser_session",
+    )
+    observations["user"] = {
+        "id": user.get("id") if isinstance(user, dict) else "",
+        "email_present": bool(user.get("email")) if isinstance(user, dict) else False,
+    }
+
+    installations = observer.get("/api/v1/linear/installations")
+    active = installations.payload.get("active")
+    active_ok = installations.status_code == 200 and isinstance(active, dict) and str(active.get("state") or "") == "active"
+    installation_error = "linear_reauthorization_required" if not active_ok else ""
+    _append_check(
+        checks,
+        failures,
+        name="oauth_active_installation_healthy",
+        passed=active_ok,
+        group="auth",
+        error_code=installation_error or "oauth_installation_unavailable",
+        reason="An active Linear installation is required; reauthorization is never started by the runner",
+        observations={
+            "status_code": installations.status_code,
+            "installation_id": active.get("id") if isinstance(active, dict) else "",
+            "organization_id": active.get("linear_organization_id") if isinstance(active, dict) else "",
+            "app_user_id": active.get("app_user_id") if isinstance(active, dict) else "",
+            "state": active.get("state") if isinstance(active, dict) else "",
+            "reconciliation_state": active.get("reconciliation_state") if isinstance(active, dict) else "",
+        },
+        action_required=True,
+        next_action="reauthorize_the_existing_linear_installation_externally" if not active_ok else "continue",
+    )
+    _append_check(
+        checks,
+        failures,
+        name="oauth_installation_response_sanitized",
+        passed=not _contains_sensitive_key(installations.payload),
+        group="redaction",
+        error_code="oauth_installation_response_contains_secret_field",
+        reason="Podium installation responses must not contain tokens, cookies, or client secrets",
+        observations={"status_code": installations.status_code},
+        next_action="inspect_podium_response_sanitization",
+    )
+
+    projects = observer.get("/api/v1/linear/projects")
+    project_rows = projects.payload.get("projects")
+    project_rows = project_rows if isinstance(project_rows, list) else []
+    selected_project = next(
+        (row for row in project_rows if isinstance(row, dict) and str(row.get("slug") or row.get("slug_id") or "") == context.project_slug),
+        None,
+    )
+    _append_check(
+        checks,
+        failures,
+        name="oauth_selected_project_visible",
+        passed=projects.status_code == 200 and selected_project is not None,
+        group="binding",
+        error_code="selected_project_not_visible",
+        reason="The configured project slug must be present in the authenticated Podium project list",
+        observations={
+            "status_code": projects.status_code,
+            "project_id": selected_project.get("id") if isinstance(selected_project, dict) else "",
+            "project_slug": context.project_slug,
+        },
+        next_action="select_the_existing_project_without_mutating_member_ids",
+    )
+
+    runtimes = observer.get("/api/v1/runtimes")
+    runtime_rows = runtimes.payload.get("runtimes")
+    conductor_rows = runtimes.payload.get("conductors")
+    has_runtime = bool(runtime_rows or conductor_rows)
+    _append_check(
+        checks,
+        failures,
+        name="oauth_existing_runtime_enrolled",
+        passed=runtimes.status_code == 200 and has_runtime,
+        group="binding",
+        error_code="runtime_not_enrolled",
+        reason="OAuth phase reuses one enrolled runtime and never creates a replacement",
+        observations={"status_code": runtimes.status_code, "runtime_count": len(runtime_rows or []) if isinstance(runtime_rows, list) else 0},
+        next_action="enroll_one_conductor_then_rerun_the_batch",
+    )
+
+    missing_state = observer.get("/api/v1/linear/oauth/callback")
+    invalid_state = observer.get(f"/api/v1/linear/oauth/callback?state={uuid4().hex}")
+    for name, response in (("oauth_callback_missing_state_rejected", missing_state), ("oauth_callback_invalid_state_rejected", invalid_state)):
+        _append_check(
+            checks,
+            failures,
+            name=name,
+            passed=response.status_code == 400,
+            group="auth",
+            error_code="oauth_callback_negative_probe_failed",
+            reason="OAuth callback negative probes must fail closed with HTTP 400",
+            observations={"status_code": response.status_code, "error_code": response.error_code},
+            next_action="inspect_oauth_callback_state_validation",
+        )
+
     return _phase_report(
         context,
         "oauth",
-        "blocked",
-        checks=(),
-        failures=(
-            _failure(
-                "auth",
-                "oauth_browser_session_unavailable",
-                "the existing signed-in browser session must be observed by the operator",
-                action_required=True,
-                next_action="reuse_existing_signed_in_browser_session",
-            ),
-        ),
+        "passed" if not failures else "failed",
+        checks=checks,
+        failures=failures,
+        observations=observations,
     )
 
 
 def _run_linear_phase(context: _RunContext) -> dict[str, Any]:
     if context.offline:
         return _offline_phase(context, "linear")
+    checks: list[dict[str, Any]] = []
+    failures: list[dict[str, Any]] = []
+    observations: dict[str, Any] = {}
+    observer = _PodiumObserver(context.settings["podium_url"], timeout=context.timeout)
+    fixture: LinearFixture | None = None
+    project: dict[str, Any] | None = None
+    parent: dict[str, Any] | None = None
+
+    with _fixture_environment():
+        try:
+            fixture = LinearFixture.from_environment(timeout=min(max(context.timeout, 0.1), 20.0))
+            viewer = fixture.graphql("query { viewer { id } }")
+            viewer_id = ((viewer.get("viewer") or {}).get("id") if isinstance(viewer.get("viewer"), dict) else "")
+            _append_check(
+                checks,
+                failures,
+                name="linear_fixture_viewer_visible",
+                passed=bool(viewer_id),
+                group="linear",
+                error_code="linear_fixture_failed",
+                reason="The staged Linear fixture credential must read viewer data",
+                observations={"viewer_id": viewer_id, "token_present": True},
+                next_action="fix_podium_linear_app_access_token",
+            )
+        except LinearFixtureError as exc:
+            _append_check(
+                checks,
+                failures,
+                name="linear_fixture_viewer_visible",
+                passed=False,
+                group="linear",
+                error_code="linear_fixture_failed",
+                reason=_sanitize_reason(exc),
+                observations={"token_present": bool(os.environ.get("PODIUM_LINEAR_APP_ACCESS_TOKEN"))},
+                next_action="fix_podium_linear_app_access_token",
+            )
+
+        if fixture is not None:
+            try:
+                project = fixture.project(context.project_slug)
+                observations["project"] = {
+                    "id": project.get("id"),
+                    "team_id": (project.get("team") or {}).get("id"),
+                    "slug": project.get("slugId"),
+                }
+                _append_check(
+                    checks,
+                    failures,
+                    name="linear_fixture_project_visible",
+                    passed=True,
+                    group="linear",
+                    error_code="linear_project_not_found",
+                    reason="The configured Linear project must be readable",
+                    observations=observations["project"],
+                )
+            except LinearFixtureError as exc:
+                _append_check(
+                    checks,
+                    failures,
+                    name="linear_fixture_project_visible",
+                    passed=False,
+                    group="linear",
+                    error_code="linear_project_not_found",
+                    reason=_sanitize_reason(exc),
+                    next_action="fix_linear_project_scope",
+                )
+        else:
+            _append_check(
+                checks,
+                failures,
+                name="linear_fixture_project_visible",
+                passed=False,
+                group="linear",
+                error_code="linear_fixture_unavailable",
+                reason="Project lookup cannot run until the fixture credential is readable",
+                next_action="fix_podium_linear_app_access_token",
+            )
+
+        state = None
+        if fixture is not None and project is not None:
+            team_id = str((project.get("team") or {}).get("id") or "")
+            try:
+                states = fixture.workflow_states(team_id)
+                state = _select_backlog_state(states)
+                _append_check(
+                    checks,
+                    failures,
+                    name="linear_fixture_backlog_state_unambiguous",
+                    passed=True,
+                    group="linear",
+                    error_code="linear_fixture_state_ambiguous",
+                    reason="Exactly one backlog/unstarted state must be selected",
+                    observations={"state_id": state["id"], "state_type": state["type"]},
+                )
+            except (LinearFixtureError, ValueError) as exc:
+                _append_check(
+                    checks,
+                    failures,
+                    name="linear_fixture_backlog_state_unambiguous",
+                    passed=False,
+                    group="linear",
+                    error_code="linear_fixture_state_ambiguous",
+                    reason=_sanitize_reason(exc),
+                    next_action="choose_one_disposable_backlog_state",
+                )
+        else:
+            _append_check(
+                checks,
+                failures,
+                name="linear_fixture_backlog_state_unambiguous",
+                passed=False,
+                group="linear",
+                error_code="linear_fixture_state_unavailable",
+                reason="Workflow state lookup requires a readable project",
+                next_action="fix_linear_project_scope",
+            )
+
+        active_installation = observer.get("/api/v1/linear/installations")
+        active = active_installation.payload.get("active")
+        app_user_id = str(active.get("app_user_id") or "") if isinstance(active, dict) else ""
+        if fixture is not None and project is not None and state is not None and app_user_id:
+            try:
+                parent = fixture.create_parent_issue(
+                    team_id=str((project.get("team") or {}).get("id") or ""),
+                    project_id=str(project.get("id") or ""),
+                    state_id=str(state["id"]),
+                    title=f"[Symphony real-e2e {context.run_id}] Linear dispatch probe",
+                    description="Diagnostic fixture only. Do not manually transition this issue.",
+                    delegate_id=app_user_id,
+                )
+                _append_check(
+                    checks,
+                    failures,
+                    name="linear_fixture_parent_created",
+                    passed=True,
+                    group="linear",
+                    error_code="linear_issue_create_failed",
+                    reason="A disposable parent issue must be created through the fixture helper",
+                    observations={"issue_id": parent.get("id"), "identifier": parent.get("identifier")},
+                )
+            except LinearFixtureError as exc:
+                _append_check(
+                    checks,
+                    failures,
+                    name="linear_fixture_parent_created",
+                    passed=False,
+                    group="linear",
+                    error_code="linear_issue_create_failed",
+                    reason=_sanitize_reason(exc),
+                    next_action="fix_linear_write_scope",
+                )
+        else:
+            _append_check(
+                checks,
+                failures,
+                name="linear_fixture_parent_created",
+                passed=False,
+                group="linear",
+                error_code="linear_parent_prerequisite_missing",
+                reason="Parent creation requires a readable project, state, and existing app user",
+                next_action="repair_oauth_installation_and_fixture_access",
+            )
+
+        if fixture is not None and parent is not None:
+            try:
+                issue = fixture.issue(str(parent["id"]))
+                children = fixture.children(str(parent["id"]))
+                issue_parent_ok = issue.get("parent") is None
+                child_parent_ok = all(
+                    isinstance(child.get("parent"), dict)
+                    and child["parent"].get("id") == parent.get("id")
+                    and child["parent"].get("identifier") == parent.get("identifier")
+                    for child in children
+                )
+                _append_check(
+                    checks,
+                    failures,
+                    name="linear_fixture_parent_tree_explicit",
+                    passed=issue_parent_ok and child_parent_ok,
+                    group="linear",
+                    error_code="linear_parent_tree_mismatch",
+                    reason="Parent and child reads must include explicit parent fields",
+                    observations={"child_count": len(children), "parent_is_null": issue_parent_ok},
+                    next_action="inspect_linear_fixture_parent_fields",
+                )
+            except LinearFixtureError as exc:
+                _append_check(
+                    checks,
+                    failures,
+                    name="linear_fixture_parent_tree_explicit",
+                    passed=False,
+                    group="linear",
+                    error_code="linear_issue_read_failed",
+                    reason=_sanitize_reason(exc),
+                    next_action="fix_linear_read_scope",
+                )
+        else:
+            _append_check(
+                checks,
+                failures,
+                name="linear_fixture_parent_tree_explicit",
+                passed=False,
+                group="linear",
+                error_code="linear_parent_tree_unavailable",
+                reason="Parent tree reads require a successfully created disposable issue",
+                next_action="fix_linear_write_scope",
+            )
+
+    health = observer.get("/api/v1/health")
+    _append_check(
+        checks,
+        failures,
+        name="podium_health_and_reconciliation",
+        passed=health.status_code == 200 and health.payload.get("status") == "ok",
+        group="linear",
+        error_code="podium_reconciliation_unhealthy",
+        reason="Podium health must be ok after its reconciliation loop starts",
+        observations={"status_code": health.status_code, "status": health.payload.get("status"), "error_code": health.error_code},
+        retryable=True,
+        next_action="inspect_podium_linear_reconciliation_log",
+    )
+
+    selected_projects = observer.get("/api/v1/linear/projects")
+    _append_check(
+        checks,
+        failures,
+        name="podium_selected_project_visible",
+        passed=selected_projects.status_code == 200,
+        group="binding",
+        error_code="podium_selected_project_unavailable",
+        reason="Podium must expose the already selected project without changing it",
+        observations={"status_code": selected_projects.status_code, "project_slug": context.project_slug},
+        next_action="reuse_the_existing_authenticated_podium_session",
+    )
+
+    runtime_list = observer.get("/api/v1/runtimes")
+    _append_check(
+        checks,
+        failures,
+        name="podium_runtime_identity_visible",
+        passed=runtime_list.status_code == 200,
+        group="binding",
+        error_code="runtime_identity_unavailable",
+        reason="An enrolled runtime identity is required for dispatch routing",
+        observations={"status_code": runtime_list.status_code},
+        next_action="reuse_one_enrolled_runtime",
+    )
+
+    dispatch_probe = observer.post("/api/v1/runtime/dispatches/lease")
+    _append_check(
+        checks,
+        failures,
+        name="podium_dispatch_lease_probe",
+        passed=False,
+        group="binding",
+        error_code="dispatch_probe_credentials_unavailable",
+        reason="The dispatch lease probe requires the enrolled runtime bearer and never uses the Linear fixture token",
+        observations={"status_code": dispatch_probe.status_code, "error_code": dispatch_probe.error_code},
+        action_required=True,
+        next_action="run_the_lease_probe_from_the_enrolled_conductor",
+    )
+
     return _phase_report(
         context,
         "linear",
-        "blocked",
-        failures=(
-            _failure(
-                "linear",
-                "linear_observation_not_started",
-                "Linear phase requires a healthy Podium process and existing OAuth installation",
-                action_required=True,
-                next_action="start_podium_and_reuse_existing_installation",
-            ),
-        ),
+        "passed" if not failures else "failed",
+        checks=checks,
+        failures=failures,
+        observations=observations,
     )
+
+
+def _select_backlog_state(states: list[dict[str, str]]) -> dict[str, str]:
+    backlog = [state for state in states if state.get("type") == "backlog"]
+    if not backlog:
+        backlog = [state for state in states if state.get("type") == "unstarted"]
+    if len(backlog) != 1:
+        raise ValueError("linear_fixture_state_ambiguous")
+    return backlog[0]
 
 
 def _run_performer_phase(context: _RunContext) -> dict[str, Any]:
