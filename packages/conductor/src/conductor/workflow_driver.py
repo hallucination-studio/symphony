@@ -17,7 +17,7 @@ class WorkflowDriver:
 
     def __init__(self, service: Any) -> None:
         self.service = service
-        self.store: ConductorStore = service.workflow_store
+        self.store: ConductorStore = service.store
         self.workflow: Workflow = service.workflow
         self.runtime: PerformerRuntime = service.performer_runtime
         self.gate: AcceptanceGate = service.acceptance_gate

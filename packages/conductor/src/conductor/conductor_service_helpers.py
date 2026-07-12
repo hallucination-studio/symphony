@@ -3,7 +3,7 @@ from __future__ import annotations
 import socket
 from typing import Any
 
-from .conductor_models import InstanceRecord
+from .models import InstanceRecord
 from .conductor_service_types import PROJECT_LABEL_PREFIX
 
 

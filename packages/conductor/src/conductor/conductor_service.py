@@ -6,13 +6,12 @@ from typing import Any
 import shutil
 import subprocess
 
-from .conductor_models import (
+from .models import (
     ConductorSettings,
     InstanceCreateRequest,
     InstancePatchRequest,
     InstanceRecord,
 )
-from .conductor_store import ConductorStore
 from .gate import AcceptanceGate
 from .runtime import PerformerRuntime
 from .conductor_podium_sync import ConductorPodiumSyncMixin
@@ -24,7 +23,7 @@ from .conductor_service_helpers import (
 )
 from .conductor_service_types import ConductorServiceError, CoordinationCadence
 from .linear import ManagedRunLinearProxy, ProjectLabelLinearProxy
-from .store import ConductorStore as WorkflowStore
+from .store import ConductorStore
 from .workflow import Workflow
 
 class ConductorService(ConductorPodiumSyncMixin, ConductorServiceViewsMixin):
@@ -36,8 +35,7 @@ class ConductorService(ConductorPodiumSyncMixin, ConductorServiceViewsMixin):
     ):
         self.store = store
         self.data_root = data_root
-        self.workflow_store = WorkflowStore(data_root / "workflow.db")
-        self.workflow = Workflow(self.workflow_store)
+        self.workflow = Workflow(self.store)
         self.performer_runtime = PerformerRuntime()
         self.acceptance_gate = AcceptanceGate()
         self._smoke_check_lock = asyncio.Lock()

@@ -22,8 +22,9 @@ class FakeInstance:
     workspace_root: str
 
 
-class FakeInstanceStore:
-    def __init__(self, instance: FakeInstance) -> None:
+class FakeConductorStore(ConductorStore):
+    def __init__(self, root: Path, instance: FakeInstance) -> None:
+        super().__init__(root)
         self.instance = instance
 
     def get_instance(self, instance_id: str) -> FakeInstance | None:
@@ -77,9 +78,8 @@ class FakeGate:
 class FakeService:
     def __init__(self, root: Path) -> None:
         instance = FakeInstance("instance-1", str(root), str(root))
-        self.store = FakeInstanceStore(instance)
-        self.workflow_store = ConductorStore(root / "workflow.db")
-        self.workflow = Workflow(self.workflow_store)
+        self.store = FakeConductorStore(root, instance)
+        self.workflow = Workflow(self.store)
         self.performer_runtime = SimpleNamespace()
         self.acceptance_gate = FakeGate()
         self._managed_run_runtime_config = {"version": 1}
@@ -103,7 +103,7 @@ def _queue_turns(driver: WorkflowDriver, bodies: list[dict[str, Any]]) -> None:
 async def test_workflow_driver_creates_subissues_and_runs_sequential_gate(tmp_path: Path, two_task_plan) -> None:
     service = FakeService(tmp_path)
     run = service.workflow.accept_parent("parent-1", "SYM-1", instance_id="instance-1")
-    service.workflow_store.update_run_payload(
+    service.store.update_run_payload(
         run["run_id"],
         {"issue_description": "Build the feature", "agent_app_user_id": "app-user-1"},
     )
@@ -130,7 +130,7 @@ async def test_workflow_driver_creates_subissues_and_runs_sequential_gate(tmp_pa
 
     assert (await driver.drive_once())["applied"] == 1
     assert (await driver.drive_once())["applied"] == 1
-    view = service.workflow_store.managed_run_view()
+    view = service.store.managed_run_view()
     tasks = view["runs"][0]["tasks"]
     assert [task["state"] for task in tasks] == ["done", "todo"]
     assert len(service.linear.children) == 2
@@ -150,16 +150,16 @@ async def test_workflow_driver_projects_runtime_wait_as_human_action_child(tmp_p
     _queue_turns(driver, bodies)
 
     assert (await driver.drive_once())["applied"] == 0
-    wait = service.workflow_store.list_runtime_waits(run["run_id"])[0]
+    wait = service.store.list_runtime_waits(run["run_id"])[0]
     assert wait["linear_issue_id"] == "child-1"
-    assert service.workflow_store.get_run(run["run_id"])["state"] == "blocked"
+    assert service.store.get_run(run["run_id"])["state"] == "blocked"
 
     assert (await driver.drive_once())["applied"] == 0
-    assert service.workflow_store.get_run(run["run_id"])["plan_version"] == 0
+    assert service.store.get_run(run["run_id"])["plan_version"] == 0
 
     service.linear.issue_states["child-1"] = "In Progress"
     assert (await driver.drive_once())["applied"] == 1
-    assert service.workflow_store.get_run(run["run_id"])["plan_version"] == 1
+    assert service.store.get_run(run["run_id"])["plan_version"] == 1
 
 
 @pytest.mark.anyio
@@ -172,14 +172,14 @@ async def test_workflow_driver_waits_for_parent_approval_state_change(tmp_path: 
 
     assert (await driver.drive_once())["applied"] == 1
     assert service.linear.transitions == [("parent-1", "Blocked")]
-    assert service.workflow_store.get_run(run["run_id"])["state"] == "awaiting_approval"
+    assert service.store.get_run(run["run_id"])["state"] == "awaiting_approval"
 
     assert (await driver.drive_once())["applied"] == 0
-    assert service.workflow_store.get_run(run["run_id"])["state"] == "awaiting_approval"
+    assert service.store.get_run(run["run_id"])["state"] == "awaiting_approval"
 
     service.linear.issue_states["parent-1"] = "In Progress"
     assert (await driver.drive_once())["applied"] == 1
-    assert service.workflow_store.get_run(run["run_id"])["state"] == "executing"
+    assert service.store.get_run(run["run_id"])["state"] == "executing"
 
 
 @pytest.mark.anyio
@@ -205,4 +205,4 @@ async def test_workflow_driver_repairs_missing_subissue_projection_before_execut
 
     assert (await driver.drive_once())["applied"] == 1
     assert len(service.linear.children) == 2
-    assert service.workflow_store.get_run(run["run_id"])["state"] == "executing"
+    assert service.store.get_run(run["run_id"])["state"] == "executing"

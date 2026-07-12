@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from .conductor_models import utc_now_iso
+from .models import utc_now_iso
 from .conductor_smoke_protocol import (
     SmokeCommandError,
     normalize_smoke_command,

@@ -8,7 +8,7 @@ import random
 from typing import Any
 from urllib.parse import parse_qs
 
-from .conductor_models import InstanceCreateRequest, InstancePatchRequest, InstanceRecord
+from .models import InstanceCreateRequest, InstancePatchRequest, InstanceRecord
 from .conductor_service import ConductorService, ConductorServiceError
 from .conductor_smoke_protocol import sanitize_reason
 from .podium_client import PodiumRuntimeClient

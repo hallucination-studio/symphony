@@ -7,7 +7,7 @@ from typing import Any
 
 import httpx
 
-from .conductor_models import InstanceCreateRequest, InstancePatchRequest
+from .models import InstanceCreateRequest, InstancePatchRequest
 from .conductor_podium_sync_smoke import PodiumSmokeCheckMixin
 from .conductor_service_helpers import _desired_project_labels, _hostname, _linear_agent_app_user_id, _optional_int
 from .conductor_service_types import ConductorServiceError, CoordinationResult
@@ -298,7 +298,7 @@ class ConductorPodiumSyncMixin(
             issue_identifier or issue_id,
             instance_id=instance.id,
         )
-        self.workflow_store.update_run_payload(
+        self.store.update_run_payload(
             str(accepted["run_id"]),
             {
                 "issue_title": str(event.get("issue_title") or ""),
@@ -306,7 +306,7 @@ class ConductorPodiumSyncMixin(
                 "agent_app_user_id": agent_app_user_id,
             },
         )
-        run = self.workflow_store.get_run(str(accepted["run_id"])) or {}
+        run = self.store.get_run(str(accepted["run_id"])) or {}
         return {
             "status": "accepted",
             "issue_id": issue_id or None,

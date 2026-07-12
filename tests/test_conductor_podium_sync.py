@@ -12,7 +12,7 @@ from conductor.conductor_service_types import CoordinationCadence
 from conductor.conductor_api import ConductorApiServer
 from conductor.conductor_service import ConductorService
 from conductor.conductor_service_types import ConductorServiceError
-from conductor.conductor_store import ConductorStore as ServiceStore
+from conductor.store import ConductorStore
 
 
 class _SmokeProxy:
@@ -117,7 +117,7 @@ async def test_podium_tick_reports_then_handles_command_dispatch_and_workflow(
 
 
 def test_managed_run_linear_proxy_requires_podium_configuration(tmp_path: Path) -> None:
-    service = ConductorService(store=ServiceStore(tmp_path), data_root=tmp_path)
+    service = ConductorService(store=ConductorStore(tmp_path), data_root=tmp_path)
     instance = SimpleNamespace(linear_project="example", linear_filters={})
 
     with pytest.raises(ConductorServiceError) as error:

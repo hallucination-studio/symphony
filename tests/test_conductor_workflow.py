@@ -8,7 +8,7 @@ from conductor.workflow import Workflow
 
 
 def _workflow(tmp_path) -> Workflow:
-    return Workflow(ConductorStore(tmp_path / "workflow.db"))
+    return Workflow(ConductorStore(tmp_path))
 
 
 def _execute_and_gate(workflow: Workflow, run_id: str, task_id: str, *, passed: bool, score: int) -> dict[str, object]:

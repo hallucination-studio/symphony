@@ -5,7 +5,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from .conductor_models import InstanceCreateRequest, InstancePatchRequest, InstanceRecord
+from .models import InstanceCreateRequest, InstancePatchRequest, InstanceRecord
 from .conductor_service_helpers import *  # noqa: F403
 from .conductor_service_types import *  # noqa: F403
 
@@ -117,7 +117,7 @@ class ConductorServiceViewsMixin:
         return runtime
 
     def _managed_run_runtime_snapshot(self) -> dict[str, Any]:
-        view = self.workflow_store.managed_run_view()
+        view = self.store.managed_run_view()
         runs = view.get("runs") if isinstance(view.get("runs"), list) else []
         runtime_waits = view.get("runtime_waits") if isinstance(view.get("runtime_waits"), list) else []
         if not runtime_waits:
@@ -181,7 +181,7 @@ class ConductorServiceViewsMixin:
         }
 
     def managed_run_view(self) -> dict[str, Any]:
-        return self.workflow_store.managed_run_view()
+        return self.store.managed_run_view()
 
     def query_instance_logs(
         self,
