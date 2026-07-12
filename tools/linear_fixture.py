@@ -25,23 +25,35 @@ class LinearFixture:
     api_key: str
     endpoint: str = DEFAULT_ENDPOINT
     timeout: float = 20.0
+    authorization_scheme: str = ""
 
     @classmethod
     def from_environment(cls, *, timeout: float = 20.0) -> "LinearFixture":
-        key = (os.environ.get("LINEAR_API_KEY") or os.environ.get("PODIUM_LINEAR_APP_ACCESS_TOKEN", "")).strip()
-        if not key:
+        api_key = os.environ.get("LINEAR_API_KEY", "").strip()
+        if api_key:
+            return cls(
+                api_key,
+                os.environ.get("LINEAR_GRAPHQL_ENDPOINT", DEFAULT_ENDPOINT).strip() or DEFAULT_ENDPOINT,
+                timeout,
+            )
+        api_key = os.environ.get("PODIUM_LINEAR_APP_ACCESS_TOKEN", "").strip()
+        if not api_key:
             raise LinearFixtureError("LINEAR_API_KEY or PODIUM_LINEAR_APP_ACCESS_TOKEN is required for a real flow")
         return cls(
-            key,
+            api_key,
             os.environ.get("LINEAR_GRAPHQL_ENDPOINT", DEFAULT_ENDPOINT).strip() or DEFAULT_ENDPOINT,
             timeout,
+            "Bearer",
         )
 
     def graphql(self, query: str, variables: dict[str, Any] | None = None) -> dict[str, Any]:
         try:
             response = httpx.post(
                 self.endpoint,
-                headers={"Authorization": self.api_key, "Content-Type": "application/json"},
+                headers={
+                    "Authorization": " ".join(part for part in (self.authorization_scheme, self.api_key) if part),
+                    "Content-Type": "application/json",
+                },
                 json={"query": query, "variables": variables or {}},
                 timeout=self.timeout,
             )
@@ -69,7 +81,7 @@ class LinearFixture:
         data = self.graphql(
             """
             query($slug: String!) { projects(filter: {slugId: {eq: $slug}}, first: 1) {
-              nodes { id name slugId team { id } }
+              nodes { id name slugId teams { nodes { id } } }
             } }
             """,
             {"slug": slug},
@@ -77,7 +89,12 @@ class LinearFixture:
         nodes = ((data.get("projects") or {}).get("nodes") or [])
         if not nodes:
             raise LinearFixtureError(f"linear_project_not_found:{slug}")
-        return dict(nodes[0])
+        project = dict(nodes[0])
+        teams = project.get("teams") if isinstance(project.get("teams"), dict) else {}
+        team_nodes = teams.get("nodes") if isinstance(teams.get("nodes"), list) else []
+        first_team = team_nodes[0] if team_nodes and isinstance(team_nodes[0], dict) else None
+        project["team"] = {"id": str(first_team.get("id"))} if first_team and first_team.get("id") else None
+        return project
 
     def issue(self, issue_id: str) -> dict[str, Any]:
         data = self.graphql(

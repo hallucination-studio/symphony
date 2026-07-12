@@ -6,6 +6,59 @@ import pytest
 from tools import linear_fixture
 
 
+def test_linear_fixture_uses_bearer_for_podium_app_token(monkeypatch) -> None:
+    monkeypatch.delenv("LINEAR_API_KEY", raising=False)
+    monkeypatch.setenv("PODIUM_LINEAR_APP_ACCESS_TOKEN", "oauth-token")
+    request = httpx.Request("POST", "https://api.linear.app/graphql")
+    response = httpx.Response(200, request=request, json={"data": {"viewer": {"id": "viewer-1"}}})
+    captured: dict[str, object] = {}
+
+    def fake_post(*args, **kwargs):
+        captured.update(kwargs)
+        return response
+
+    monkeypatch.setattr(linear_fixture.httpx, "post", fake_post)
+
+    assert linear_fixture.LinearFixture.from_environment().graphql("query { viewer { id } }") == {
+        "viewer": {"id": "viewer-1"}
+    }
+    assert captured["headers"]["Authorization"] == "Bearer oauth-token"
+
+
+def test_linear_fixture_normalizes_current_project_teams_shape(monkeypatch) -> None:
+    request = httpx.Request("POST", "https://api.linear.app/graphql")
+    response = httpx.Response(
+        200,
+        request=request,
+        json={
+            "data": {
+                "projects": {
+                    "nodes": [
+                        {
+                            "id": "project-1",
+                            "name": "Fixture",
+                            "slugId": "fixture",
+                            "teams": {"nodes": [{"id": "team-1"}]},
+                        }
+                    ]
+                }
+            }
+        },
+    )
+    captured: dict[str, object] = {}
+
+    def fake_post(*args, **kwargs):
+        captured.update(kwargs)
+        return response
+
+    monkeypatch.setattr(linear_fixture.httpx, "post", fake_post)
+
+    project = linear_fixture.LinearFixture("fixture-token").project("fixture")
+
+    assert project["team"] == {"id": "team-1"}
+    assert "teams { nodes { id } }" in captured["json"]["query"]
+
+
 def test_linear_fixture_reports_http_status_without_credentials(monkeypatch) -> None:
     request = httpx.Request("POST", "https://api.linear.app/graphql")
     response = httpx.Response(401, request=request)
