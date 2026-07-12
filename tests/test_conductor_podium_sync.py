@@ -5,6 +5,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from performer_api.codex_runtime import PerformerProfileConfig
+
 from conductor.conductor_podium_sync import (
     ConductorPodiumSyncMixin,
     _managed_runs_report_view,
@@ -196,19 +198,78 @@ def test_unbind_and_rebind_hard_cut_old_managed_runs(tmp_path: Path) -> None:
     assert store.list_runs() == []
 
     store.create_run("parent-stale", "STALE-1", instance_id=instance.id)
+    profile = PerformerProfileConfig.create(
+        binding_id="binding-new",
+        binding_config_version=3,
+        performer_binding_id="performer-binding:binding-new",
+        performer_profile_id="performer-profile:user-1:default",
+        runtime_profile_id="runtime-profile:user-1:default",
+        performer_kind="codex",
+        runtime_kind="codex",
+        turn_policy={"max_turns": 4},
+        config_document='model = "managed"\napproval_policy = "never"\n',
+        credential_id="credential:user-1:chatgpt-main",
+        credential_ref="slot:chatgpt-main",
+    )
     rebound = service._handle_project_configure(
         {
+            **profile.to_dict(),
             "linear_project_id": "project-new",
             "project_slug": "NEW",
             "project_name": "New",
             "binding_id": "binding-new",
             "config_version": 3,
+            "auth_method": "chatgpt_oauth",
+            "account_hint": "main",
+            "performer_binding_generation": 1,
             "repository": {"mode": "local_path", "value": str(tmp_path)},
         }
     )
 
     assert rebound["status"] == "applied"
     assert store.managed_run_view() == {"runs": []}
+    current = store.get_instance(instance.id)
+    assert current is not None
+    assert current.linear_filters["performer_profile_id"] == "performer-profile:user-1:default"
+    assert current.linear_filters["runtime_profile_id"] == "runtime-profile:user-1:default"
+    assert current.linear_filters["config_sha256"] == profile.config_sha256
+    assert current.linear_filters["policy_sha256"] == profile.policy_sha256
+    report = service.build_podium_report()
+    reported = report["bindings"][0]
+    assert reported["config_sha256"] == profile.config_sha256
+    assert "config_document" not in reported
+    assert "credential_ref" not in reported
+
+
+def test_project_configure_rejects_removed_profile_revision_fields(tmp_path: Path) -> None:
+    profile = PerformerProfileConfig.create(
+        binding_id="binding-1",
+        binding_config_version=1,
+        performer_binding_id="performer-binding:binding-1",
+        performer_profile_id="performer-profile:user-1:default",
+        runtime_profile_id="runtime-profile:user-1:default",
+        performer_kind="codex",
+        runtime_kind="codex",
+        turn_policy={},
+        config_document='model = "managed"\n',
+        credential_id="credential:user-1:chatgpt-main",
+        credential_ref="slot:chatgpt-main",
+    )
+    service = ConductorService(store=ConductorStore(tmp_path), data_root=tmp_path)
+
+    result = service._handle_project_configure(
+        {
+            **profile.to_dict(),
+            "performer_profile_revision_id": "legacy",
+            "linear_project_id": "project-1",
+            "project_slug": "project",
+            "project_name": "Project",
+            "config_version": 1,
+            "repository": {"mode": "local_path", "value": str(tmp_path)},
+        }
+    )
+
+    assert result == {"status": "rejected", "reason": "profile_revision_field_rejected"}
 
 
 def test_binding_hard_cut_keeps_old_state_when_instance_write_fails(tmp_path: Path) -> None:

@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
 
+from performer_api.codex_runtime import CodexRuntimeConfigError, validate_codex_toml
 from performer_api.turns import TurnContext
 
 
@@ -70,6 +71,9 @@ class PerformerRuntime:
         *,
         workspace_path: Path | str | None = None,
         home_scope: str | None = None,
+        codex_config_document: str | None = None,
+        credential_id: str | None = None,
+        credential_ref: str | None = None,
     ) -> dict[str, str]:
         codex_home = instance_state_root / "runtime-homes" / _safe_scope(home_scope or "attempt") / "codex"
         try:
@@ -79,9 +83,25 @@ class PerformerRuntime:
         if not codex_home.is_dir():
             raise ValueError(f"isolated CODEX_HOME could not be materialized: {codex_home}")
 
-        source = _codex_seed_from_environment()
-        if source is not None:
-            self._copy_codex_home_seed(source, codex_home)
+        managed_profile = codex_config_document is not None or credential_id is not None
+        if managed_profile:
+            if not credential_id or not credential_ref or "/" in credential_ref or "\\" in credential_ref:
+                raise ValueError("managed_codex_credential_slot_required")
+            credential_slot = instance_state_root / "performer-credentials" / _safe_scope(credential_id) / "CODEX_HOME"
+            if not credential_slot.is_dir():
+                raise ValueError("managed_codex_credential_slot_required")
+            self._copy_codex_home_seed(credential_slot, codex_home)
+            if codex_config_document is None:
+                raise ValueError("managed_codex_config_required")
+            try:
+                normalized_config = validate_codex_toml(codex_config_document)
+            except CodexRuntimeConfigError as exc:
+                raise ValueError(exc.code) from exc
+            (codex_home / "config.toml").write_text(normalized_config, encoding="utf-8")
+        else:
+            source = _codex_seed_from_environment()
+            if source is not None:
+                self._copy_codex_home_seed(source, codex_home)
         if workspace_path is not None:
             _trust_codex_project(codex_home / "config.toml", Path(workspace_path))
 
@@ -92,8 +112,10 @@ class PerformerRuntime:
                 environment[key] = value
         return environment
 
-    def _copy_codex_home_seed(self, source: Path, destination: Path) -> None:
+    def _copy_codex_home_seed(self, source: Path, destination: Path, *, include_config: bool = True) -> None:
         for name in self.ALLOWED_CODEX_SEED_FILES:
+            if name == "config.toml" and not include_config:
+                continue
             source_path = source / name
             if not source_path.is_file():
                 continue
@@ -169,7 +191,9 @@ class PerformerRuntime:
             encoding="utf-8",
         )
         if completed.returncode != 0:
-            raise RuntimeExecutionError(f"performer_failed:exit_{completed.returncode}")
+            reason = _process_failure_reason(completed.stdout, completed.stderr)
+            suffix = f":{reason}" if reason else ""
+            raise RuntimeExecutionError(f"performer_failed:exit_{completed.returncode}{suffix}")
         try:
             payload = json.loads(paths.result.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
@@ -290,6 +314,20 @@ def _sanitize_log_event(value: str) -> str:
 
 def _sanitize_log_stream(value: Any) -> str:
     return "\n".join(_sanitize_log_event(line) for line in str(value or "").splitlines())
+
+
+def _process_failure_reason(stdout: Any, stderr: Any) -> str:
+    """Preserve one sanitized actionable process error for durable state."""
+
+    for stream in (stdout, stderr):
+        for line in _sanitize_log_stream(stream).splitlines():
+            message = line.strip()
+            if not message:
+                continue
+            if message.lower().startswith("performer startup failed:"):
+                message = message.split(":", 1)[1].strip()
+            return message[:500]
+    return ""
 
 
 __all__ = ["PerformerRuntime", "RuntimeExecutionError", "RuntimePaths", "StaleRuntimeResult"]

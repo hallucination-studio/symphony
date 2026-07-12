@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import json
 import logging
 import os
@@ -8,6 +9,8 @@ import re
 from typing import Any
 
 import httpx
+
+from performer_api.codex_runtime import CodexRuntimeConfigError, PerformerProfileConfig
 
 from .models import ConductorServiceError, InstanceCreateRequest, InstancePatchRequest
 from .conductor_smoke_protocol import SmokeCommandError, normalize_smoke_command, sanitize_reason, smoke_result
@@ -110,15 +113,26 @@ class ConductorPodiumSyncMixin:
 
     def _handle_project_configure(self, command: dict[str, Any]) -> dict[str, Any]:
         project_id = str(command.get("linear_project_id") or "")
-        version = _optional_int(command.get("config_version"), 0) or 0
+        version = _optional_int(command.get("binding_config_version"), 0) or _optional_int(command.get("config_version"), 0) or 0
         repository = command.get("repository") if isinstance(command.get("repository"), dict) else {}
         mode = str(repository.get("mode") or "")
         value = str(repository.get("value") or "")
         if not project_id or version <= 0 or mode not in {"local_path", "git_url"} or not value:
             return {"status": "rejected", "reason": "invalid_project_config"}
         instances = self.store.list_instances()
+        try:
+            profile = _profile_from_command(command, version)
+        except (CodexRuntimeConfigError, TypeError, ValueError) as exc:
+            self._record_managed_run_sync_failure(
+                "project_profile_config_rejected",
+                instances[0] if instances else None,
+                exc,
+                action_required="fix_performer_profile",
+                extra={"binding_id": str(command.get("binding_id") or ""), "config_version": version},
+            )
+            return {"status": "rejected", "reason": getattr(exc, "code", "invalid_performer_profile")}
         if instances:
-            return self._update_project_instance(instances[0], command, project_id, version, mode, value)
+            return self._update_project_instance(instances[0], command, project_id, version, mode, value, profile)
         try:
             instance = self.create_instance(
                 InstanceCreateRequest(
@@ -126,7 +140,7 @@ class ConductorPodiumSyncMixin:
                     repo_source_type="git" if mode == "git_url" else "local_path",
                     repo_source_value=value,
                     linear_project=str(command.get("project_slug") or ""),
-                    linear_filters=_project_filters(command, project_id, version),
+                    linear_filters=_project_filters(command, project_id, version, profile),
                 )
             )
         except ConductorServiceError as exc:
@@ -138,7 +152,7 @@ class ConductorPodiumSyncMixin:
                 extra={"linear_project_id": project_id, "config_version": version},
             )
             return {"status": "rejected", "reason": exc.code}
-        return {"status": "applied", "instance_id": instance.id, "config_version": version}
+        return {"status": "applied", "instance_id": instance.id, "config_version": version, "binding_config_version": version}
 
     def _update_project_instance(
         self,
@@ -148,12 +162,13 @@ class ConductorPodiumSyncMixin:
         version: int,
         mode: str,
         value: str,
+        profile: PerformerProfileConfig,
     ) -> dict[str, Any]:
         current_project_id = str(instance.linear_filters.get("linear_project_id") or "")
         current_version = _optional_int(instance.linear_filters.get("binding_config_version"), 0) or 0
         if current_project_id != project_id:
             if not current_project_id and instance.linear_filters.get("unbound_binding_id"):
-                return self._rebind_project_instance(instance, command, project_id, version, mode, value)
+                return self._rebind_project_instance(instance, command, project_id, version, mode, value, profile)
             return {
                 "status": "rejected",
                 "reason": "conductor_already_bound_to_project",
@@ -164,7 +179,7 @@ class ConductorPodiumSyncMixin:
         expected_type = "git" if mode == "git_url" else "local_path"
         if instance.repo_source_type != expected_type or instance.repo_source_value != value:
             return {"status": "rejected", "reason": "repository_change_requires_rebind"}
-        filters = _project_filters(command, project_id, version)
+        filters = _project_filters(command, project_id, version, profile)
         if version == current_version and filters == instance.linear_filters:
             return {"status": "already_applied", "instance_id": instance.id, "config_version": version}
         updated = self.update_instance(
@@ -175,7 +190,7 @@ class ConductorPodiumSyncMixin:
                 linear_filters=filters,
             ),
         )
-        return {"status": "applied", "instance_id": updated.id, "config_version": version}
+        return {"status": "applied", "instance_id": updated.id, "config_version": version, "binding_config_version": version}
 
     def _rebind_project_instance(
         self,
@@ -185,6 +200,7 @@ class ConductorPodiumSyncMixin:
         version: int,
         mode: str,
         value: str,
+        profile: PerformerProfileConfig,
     ) -> dict[str, Any]:
         unbound_version = _optional_int(instance.linear_filters.get("unbound_config_version"), 0) or 0
         if version <= unbound_version:
@@ -197,10 +213,10 @@ class ConductorPodiumSyncMixin:
             InstancePatchRequest(
                 name=str(command.get("project_name") or command.get("project_slug") or project_id),
                 linear_project=str(command.get("project_slug") or ""),
-                linear_filters=_project_filters(command, project_id, version),
+                linear_filters=_project_filters(command, project_id, version, profile),
             ),
         )
-        return {"status": "applied", "instance_id": updated.id, "config_version": version}
+        return {"status": "applied", "instance_id": updated.id, "config_version": version, "binding_config_version": version}
 
     def _handle_project_unconfigure(self, command: dict[str, Any]) -> dict[str, Any]:
         instances = self.store.list_instances()
@@ -428,6 +444,7 @@ class ConductorPodiumSyncMixin:
                     "project_slug": instance.linear_project,
                     "linear_project_id": str(instance.linear_filters.get("linear_project_id") or ""),
                     "binding_config_version": int(instance.linear_filters.get("binding_config_version") or 0),
+                    **_managed_profile_report_fields(instance),
                     "prepared_installation_id": str(instance.linear_filters.get("pending_installation_id") or ""),
                     "prepared_binding_config_version": int(
                         instance.linear_filters.get("pending_binding_config_version") or 0
@@ -632,12 +649,53 @@ def _sanitize_error(exc: Exception | str) -> str:
     return text[:500]
 
 
-def _project_filters(command: dict[str, Any], project_id: str, version: int) -> dict[str, Any]:
+def _project_filters(
+    command: dict[str, Any],
+    project_id: str,
+    version: int,
+    profile: PerformerProfileConfig,
+) -> dict[str, Any]:
     return {
         "binding_id": str(command.get("binding_id") or ""),
         "binding_config_version": version,
         "linear_project_id": project_id,
         "agent_app_user_id": str(command.get("agent_app_user_id") or ""),
+        "performer_binding_id": profile.performer_binding_id,
+        "performer_profile_id": profile.performer_profile_id,
+        "runtime_profile_id": profile.runtime_profile_id,
+        "performer_kind": profile.performer_kind,
+        "runtime_kind": profile.runtime_kind,
+        "performer_binding_generation": int(command.get("performer_binding_generation") or 1),
+        "turn_policy": dict(profile.turn_policy),
+        "policy_sha256": profile.policy_sha256,
+        "config_format": profile.config_format,
+        "config_document": profile.config_document,
+        "config_sha256": profile.config_sha256,
+        "credential_id": profile.credential_id,
+        "credential_ref": profile.credential_ref,
+        "auth_method": str(command.get("auth_method") or ""),
+        "account_hint": str(command.get("account_hint") or ""),
+    }
+
+
+def _profile_from_command(command: dict[str, Any], version: int) -> PerformerProfileConfig:
+    payload = dict(command)
+    payload["binding_config_version"] = version
+    return PerformerProfileConfig.from_dict(payload)
+
+
+def _managed_profile_report_fields(instance: Any) -> dict[str, Any]:
+    filters = instance.linear_filters
+    return {
+        "performer_binding_id": str(filters.get("performer_binding_id") or ""),
+        "performer_profile_id": str(filters.get("performer_profile_id") or ""),
+        "runtime_profile_id": str(filters.get("runtime_profile_id") or ""),
+        "performer_binding_generation": int(filters.get("performer_binding_generation") or 0),
+        "config_sha256": str(filters.get("config_sha256") or ""),
+        "policy_sha256": str(filters.get("policy_sha256") or ""),
+        "credential_id": str(filters.get("credential_id") or ""),
+        "auth_method": str(filters.get("auth_method") or ""),
+        "account_hint": str(filters.get("account_hint") or ""),
     }
 
 

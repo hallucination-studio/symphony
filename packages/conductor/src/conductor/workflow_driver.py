@@ -391,10 +391,17 @@ class WorkflowDriver:
         self.runtime.append_event(Path(instance.log_path), " ".join(fields))
 
     def _runtime_environment(self, instance: Any, workspace: Path, attempt_id: str) -> dict[str, str]:
+        filters = instance.linear_filters if isinstance(instance.linear_filters, dict) else {}
+        config_document = filters.get("config_document")
+        credential_id = filters.get("credential_id")
+        credential_ref = filters.get("credential_ref")
         return self.runtime.prepare_environment(
             Path(instance.instance_dir) / "state",
             workspace_path=workspace,
             home_scope=attempt_id,
+            codex_config_document=str(config_document) if config_document else None,
+            credential_id=str(credential_id) if credential_id else None,
+            credential_ref=str(credential_ref) if credential_ref else None,
         )
 
     async def _project_plan(self, run: dict[str, Any], instance: Any, plan: Plan) -> None:
