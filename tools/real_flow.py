@@ -2189,30 +2189,27 @@ def _overall_scenario_passed(name: str, run: dict[str, Any] | None, history: lis
 def _run_overall_phase(context: _RunContext, prerequisites: list[dict[str, Any]]) -> dict[str, Any]:
     failed = [str(report.get("phase")) for report in prerequisites if report.get("status") != "passed"]
     same_run = all(str(report.get("run_id") or "") == context.run_id for report in prerequisites)
-    metadata_required = not failed and any(bool(report.get("checks")) for report in prerequisites)
     metadata_failures: list[str] = []
-    execution_policy_sha256 = ""
-    if metadata_required:
-        report_by_phase = {str(report.get("phase") or ""): report for report in prerequisites}
-        oauth_project = (report_by_phase.get("oauth", {}).get("observations") or {}).get("selected_project") or {}
-        linear_project = (report_by_phase.get("linear", {}).get("observations") or {}).get("project") or {}
-        performer_observations = report_by_phase.get("performer", {}).get("observations") or {}
-        oauth_project_id = str(oauth_project.get("id") or "")
-        linear_project_id = str(linear_project.get("id") or "")
-        oauth_project_slug = str(oauth_project.get("slug") or oauth_project.get("slug_id") or "")
-        linear_project_slug = str(linear_project.get("slug") or linear_project.get("slug_id") or "")
-        if (
-            not oauth_project_id
-            or oauth_project_id != linear_project_id
-            or oauth_project_slug != context.project_slug
-            or linear_project_slug != context.project_slug
-        ):
-            metadata_failures.append("project_identity")
-        execution_policy_sha256 = str(
-            performer_observations.get("execution_policy_sha256") or ""
-        )
-        if re.fullmatch(r"[0-9a-f]{64}", execution_policy_sha256) is None:
-            metadata_failures.append("execution_policy_identity")
+    report_by_phase = {str(report.get("phase") or ""): report for report in prerequisites}
+    oauth_project = (report_by_phase.get("oauth", {}).get("observations") or {}).get("selected_project") or {}
+    linear_project = (report_by_phase.get("linear", {}).get("observations") or {}).get("project") or {}
+    performer_observations = report_by_phase.get("performer", {}).get("observations") or {}
+    oauth_project_id = str(oauth_project.get("id") or "")
+    linear_project_id = str(linear_project.get("id") or "")
+    oauth_project_slug = str(oauth_project.get("slug") or oauth_project.get("slug_id") or "")
+    linear_project_slug = str(linear_project.get("slug") or linear_project.get("slug_id") or "")
+    if (
+        not oauth_project_id
+        or oauth_project_id != linear_project_id
+        or oauth_project_slug != context.project_slug
+        or linear_project_slug != context.project_slug
+    ):
+        metadata_failures.append("project_identity")
+    execution_policy_sha256 = str(
+        performer_observations.get("execution_policy_sha256") or ""
+    )
+    if re.fullmatch(r"[0-9a-f]{64}", execution_policy_sha256) is None:
+        metadata_failures.append("execution_policy_identity")
     if failed or not same_run or metadata_failures:
         blocked = [*failed, "run_identity"] if not same_run else [*failed]
         blocked.extend(metadata_failures)
@@ -2230,6 +2227,7 @@ def _run_overall_phase(context: _RunContext, prerequisites: list[dict[str, Any]]
     _append_check(checks, failures, name="overall_fixture_plan_contract", passed=contract_ok, group="evidence", error_code="fixture_plan_contract_mismatch", reason="Overall fixtures must contain the exact bounded verification scripts", observations={"fixture_count": len(fixture_paths)}, next_action="repair_overall_fixture_scripts")
 
     probe_results, probe_artifacts = _overall_isolated_fencing_probes(context.artifact_root)
+    artifacts.extend(probe_artifacts)
     _append_check(checks, failures, name="overall_duplicate_result_idempotent", passed=probe_results["duplicate"], group="fence", error_code="duplicate_result_changed_state", reason="The Conductor result boundary must apply an accepted result only once", observations={"probe": "isolated_conductor_store"}, next_action="inspect_duplicate_result_fencing")
     _append_check(checks, failures, name="overall_stale_result_rejected", passed=probe_results["stale"], group="fence", error_code="stale_result_changed_state", reason="A stale attempt must not change the current task", observations={"probe": "isolated_conductor_store"}, next_action="inspect_stale_attempt_fencing")
 
@@ -2257,8 +2255,6 @@ def _run_overall_phase(context: _RunContext, prerequisites: list[dict[str, Any]]
         action_required=True,
         next_action="bind_and_check_the_selected_conductor_instance",
     )
-    if binding_ok:
-        artifacts.extend(probe_artifacts)
     observations: dict[str, Any] = {
         "fixture_root": str(context.artifact_root / "fixtures"),
         "managed_runs_status_code": managed_runs.status_code,

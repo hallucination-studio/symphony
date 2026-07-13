@@ -1081,7 +1081,12 @@ def test_overall_records_each_scenario_when_managed_runs_are_not_authenticated(m
         "overall_runtime_wait_resumable",
         "overall_redaction_parity",
     }
-    assert len(report["artifacts"]) == 4
+    assert len(report["artifacts"]) == 5
+    assert any(
+        Path(artifact).name == "evidence.json"
+        and Path(artifact).parent.name == "fencing-probes"
+        for artifact in report["artifacts"]
+    )
 
 
 def test_overall_rejects_prerequisites_for_different_projects(tmp_path: Path) -> None:
@@ -1123,6 +1128,41 @@ def test_overall_rejects_prerequisites_for_different_projects(tmp_path: Path) ->
 
     assert report["status"] == "skipped"
     assert report["blocked_by"] == ["project_identity"]
+
+
+def test_overall_rejects_passed_prerequisites_without_identity_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class FakeObserver:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def get_authenticated(self, _path: str) -> real_flow._HttpObservation:
+            return real_flow._HttpObservation(401, {})
+
+    monkeypatch.setattr(real_flow, "_PodiumObserver", FakeObserver)
+    context = real_flow._RunContext(
+        run_id="run-missing-identity",
+        artifact_root=tmp_path,
+        output_path=tmp_path / "report.json",
+        project_slug="fixture",
+        timeout=1,
+        offline=False,
+        settings={"podium_url": "http://podium"},
+    )
+    prerequisites = [
+        real_flow._phase_report(context, phase, "passed")
+        for phase in ("oauth", "linear", "performer")
+    ]
+
+    report = real_flow._run_overall_phase(context, prerequisites)
+
+    assert report["status"] == "skipped"
+    assert report["blocked_by"] == [
+        "project_identity",
+        "execution_policy_identity",
+    ]
 
 
 @pytest.mark.parametrize("phase", ["oauth", "linear", "performer"])
