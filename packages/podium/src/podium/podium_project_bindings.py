@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from performer_api.codex_runtime import CodexRuntimeConfigError, PerformerProfileConfig
+from performer_api.codex_runtime import PerformerProfileConfig, RuntimePolicyError
 
 from .performer_profiles import PerformerProfileLoadError
 from .podium_project_binding_creation import (
@@ -218,14 +218,17 @@ class PodiumProjectBindingsMixin:
                     "runtime_profile_id": str(profile["runtime_profile_id"]),
                     "performer_kind": str(profile["performer_kind"]),
                     "runtime_kind": str(profile["runtime_kind"]),
+                    "execution_policy": (
+                        profile.get("execution_policy")
+                        if isinstance(profile.get("execution_policy"), dict)
+                        else {}
+                    ),
+                    "execution_policy_sha256": str(profile["execution_policy_sha256"]),
                     "turn_policy": profile.get("turn_policy") if isinstance(profile.get("turn_policy"), dict) else {},
-                    "policy_sha256": str(profile["policy_sha256"]),
-                    "config_format": str(profile["config_format"]),
-                    "config_document": str(profile["config_document"]),
-                    "config_sha256": str(profile["config_sha256"]),
+                    "turn_policy_sha256": str(profile["turn_policy_sha256"]),
                 }
             )
-        except (CodexRuntimeConfigError, KeyError, TypeError, ValueError) as exc:
+        except (RuntimePolicyError, KeyError, TypeError, ValueError) as exc:
             raise ProjectBindingError("performer_profile_invalid", "Current Performer profile is invalid") from exc
         command = {
             "type": "project.configure",
@@ -271,8 +274,8 @@ class PodiumProjectBindingsMixin:
                 "performer_binding_id": expected_performer_binding_id,
                 "performer_profile_id": str(profile.get("performer_profile_id") or ""),
                 "runtime_profile_id": str(profile.get("runtime_profile_id") or ""),
-                "config_sha256": str(profile.get("config_sha256") or ""),
-                "policy_sha256": str(profile.get("policy_sha256") or ""),
+                "execution_policy_sha256": str(profile.get("execution_policy_sha256") or ""),
+                "turn_policy_sha256": str(profile.get("turn_policy_sha256") or ""),
             }
             for key, expected in profile_checks.items():
                 if str(report.get(key) or "") != expected:

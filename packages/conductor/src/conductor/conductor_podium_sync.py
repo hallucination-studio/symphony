@@ -10,7 +10,7 @@ from typing import Any
 
 import httpx
 
-from performer_api.codex_runtime import CodexRuntimeConfigError, PerformerProfileConfig
+from performer_api.codex_runtime import PerformerProfileConfig, RuntimePolicyError
 
 from .models import ConductorServiceError, InstanceCreateRequest, InstancePatchRequest
 from .conductor_smoke_protocol import SmokeCommandError, normalize_smoke_command, sanitize_reason, smoke_result
@@ -30,6 +30,33 @@ _REPORT_IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,79}\Z")
 _GATE_FAILURE_CODES = frozenset({"", "verification_command_failed", "codex_gate_failed"})
 _BARE_SECRET = re.compile(
     r"(?i)\b(?:sk-[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b"
+)
+_PROFILE_COMMAND_KEYS = frozenset(
+    {
+        "binding_id",
+        "binding_config_version",
+        "performer_binding_id",
+        "performer_profile_id",
+        "runtime_profile_id",
+        "performer_kind",
+        "runtime_kind",
+        "execution_policy",
+        "execution_policy_sha256",
+        "turn_policy",
+        "turn_policy_sha256",
+    }
+)
+_PROJECT_CONFIGURE_KEYS = _PROFILE_COMMAND_KEYS | frozenset(
+    {
+        "type",
+        "config_version",
+        "performer_binding_generation",
+        "linear_project_id",
+        "project_slug",
+        "project_name",
+        "agent_app_user_id",
+        "repository",
+    }
 )
 
 
@@ -121,8 +148,9 @@ class ConductorPodiumSyncMixin:
             return {"status": "rejected", "reason": "invalid_project_config"}
         instances = self.store.list_instances()
         try:
+            _validate_project_configure_command(command)
             profile = _profile_from_command(command, version)
-        except (CodexRuntimeConfigError, TypeError, ValueError) as exc:
+        except (RuntimePolicyError, TypeError, ValueError) as exc:
             self._record_managed_run_sync_failure(
                 "project_profile_config_rejected",
                 instances[0] if instances else None,
@@ -179,6 +207,29 @@ class ConductorPodiumSyncMixin:
         expected_type = "git" if mode == "git_url" else "local_path"
         if instance.repo_source_type != expected_type or instance.repo_source_value != value:
             return {"status": "rejected", "reason": "repository_change_requires_rebind"}
+        current_generation = (
+            _optional_int(instance.linear_filters.get("performer_binding_generation"), 0) or 0
+        )
+        incoming_generation = (
+            _optional_int(command.get("performer_binding_generation"), 1) or 1
+        )
+        if incoming_generation < current_generation:
+            return {
+                "status": "rejected",
+                "reason": "stale_performer_binding_generation",
+                "current_generation": current_generation,
+            }
+        if incoming_generation == current_generation and current_generation > 0:
+            current_hashes = (
+                str(instance.linear_filters.get("execution_policy_sha256") or ""),
+                str(instance.linear_filters.get("turn_policy_sha256") or ""),
+            )
+            incoming_hashes = (
+                profile.execution_policy_sha256,
+                profile.turn_policy_sha256,
+            )
+            if all(current_hashes) and incoming_hashes != current_hashes:
+                return {"status": "rejected", "reason": "performer_binding_hash_mismatch"}
         filters = _project_filters(command, project_id, version, profile)
         if version == current_version and filters == instance.linear_filters:
             return {"status": "already_applied", "instance_id": instance.id, "config_version": version}
@@ -666,18 +717,37 @@ def _project_filters(
         "performer_kind": profile.performer_kind,
         "runtime_kind": profile.runtime_kind,
         "performer_binding_generation": int(command.get("performer_binding_generation") or 1),
+        "execution_policy": dict(profile.execution_policy),
+        "execution_policy_sha256": profile.execution_policy_sha256,
         "turn_policy": dict(profile.turn_policy),
-        "policy_sha256": profile.policy_sha256,
-        "config_format": profile.config_format,
-        "config_document": profile.config_document,
-        "config_sha256": profile.config_sha256,
+        "turn_policy_sha256": profile.turn_policy_sha256,
     }
 
 
 def _profile_from_command(command: dict[str, Any], version: int) -> PerformerProfileConfig:
-    payload = dict(command)
+    payload = {key: command.get(key) for key in _PROFILE_COMMAND_KEYS}
     payload["binding_config_version"] = version
     return PerformerProfileConfig.from_dict(payload)
+
+
+def _validate_project_configure_command(command: dict[str, Any]) -> None:
+    if set(command) - _PROJECT_CONFIGURE_KEYS:
+        raise RuntimePolicyError(
+            "project_config_key_rejected",
+            "Project configuration contains an unsupported field",
+        )
+    repository = command.get("repository")
+    if isinstance(repository, dict) and set(repository) - {"mode", "value"}:
+        raise RuntimePolicyError(
+            "project_config_key_rejected",
+            "Project repository configuration contains an unsupported field",
+        )
+    generation = command.get("performer_binding_generation")
+    if isinstance(generation, bool) or not isinstance(generation, int) or generation <= 0:
+        raise RuntimePolicyError(
+            "invalid_performer_binding_generation",
+            "Performer binding generation must be a positive integer",
+        )
 
 
 def _managed_profile_report_fields(instance: Any) -> dict[str, Any]:
@@ -687,8 +757,8 @@ def _managed_profile_report_fields(instance: Any) -> dict[str, Any]:
         "performer_profile_id": str(filters.get("performer_profile_id") or ""),
         "runtime_profile_id": str(filters.get("runtime_profile_id") or ""),
         "performer_binding_generation": int(filters.get("performer_binding_generation") or 0),
-        "config_sha256": str(filters.get("config_sha256") or ""),
-        "policy_sha256": str(filters.get("policy_sha256") or ""),
+        "execution_policy_sha256": str(filters.get("execution_policy_sha256") or ""),
+        "turn_policy_sha256": str(filters.get("turn_policy_sha256") or ""),
     }
 
 

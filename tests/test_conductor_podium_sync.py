@@ -21,6 +21,25 @@ from conductor.store import ConductorStore
 from podium.podium_routes_runtime_ops import _normalize_managed_run_report
 
 
+EXECUTION_POLICY = {
+    "version": 1,
+    "model": "gpt-5.4",
+    "model_provider": "openai",
+    "approval_mode": "auto_review",
+    "reasoning_effort": "high",
+    "reasoning_summary": "auto",
+    "sandbox": {
+        "plan": "read_only",
+        "execute": "workspace_write",
+        "gate": "read_only",
+    },
+    "initialize_timeout_ms": 5000,
+    "turn_timeout_ms": 3_600_000,
+    "initialize_max_attempts": 4,
+    "overload_max_attempts": 5,
+}
+
+
 class _SmokeProxy:
     def __init__(self, labels: list[dict[str, str]] | None = None) -> None:
         self.labels = labels or [{"id": "label-1", "name": "symphony:conductor/Bach-abc123"}]
@@ -211,8 +230,8 @@ def test_unbind_and_rebind_hard_cut_old_managed_runs(tmp_path: Path) -> None:
         runtime_profile_id="runtime-profile:user-1:default",
         performer_kind="codex",
         runtime_kind="codex",
+        execution_policy=EXECUTION_POLICY,
         turn_policy={"max_turns": 4},
-        config_document='model = "managed"\napproval_policy = "never"\ncli_auth_credentials_store = "file"\n',
     )
     rebound = service._handle_project_configure(
         {
@@ -233,11 +252,14 @@ def test_unbind_and_rebind_hard_cut_old_managed_runs(tmp_path: Path) -> None:
     assert current is not None
     assert current.linear_filters["performer_profile_id"] == "performer-profile:user-1:default"
     assert current.linear_filters["runtime_profile_id"] == "runtime-profile:user-1:default"
-    assert current.linear_filters["config_sha256"] == profile.config_sha256
-    assert current.linear_filters["policy_sha256"] == profile.policy_sha256
+    assert current.linear_filters["execution_policy"] == EXECUTION_POLICY
+    assert current.linear_filters["execution_policy_sha256"] == profile.execution_policy_sha256
+    assert current.linear_filters["turn_policy_sha256"] == profile.turn_policy_sha256
     report = service.build_podium_report()
     reported = report["bindings"][0]
-    assert reported["config_sha256"] == profile.config_sha256
+    assert reported["execution_policy_sha256"] == profile.execution_policy_sha256
+    assert reported["turn_policy_sha256"] == profile.turn_policy_sha256
+    assert "execution_policy" not in reported
     assert "config_document" not in reported
     assert "credential_ref" not in reported
 
@@ -251,8 +273,8 @@ def test_project_configure_rejects_removed_profile_revision_fields(tmp_path: Pat
         runtime_profile_id="runtime-profile:user-1:default",
         performer_kind="codex",
         runtime_kind="codex",
+        execution_policy=EXECUTION_POLICY,
         turn_policy={},
-        config_document='model = "managed"\ncli_auth_credentials_store = "file"\n',
     )
     service = ConductorService(store=ConductorStore(tmp_path), data_root=tmp_path)
 
@@ -268,7 +290,50 @@ def test_project_configure_rejects_removed_profile_revision_fields(tmp_path: Pat
         }
     )
 
-    assert result == {"status": "rejected", "reason": "profile_revision_field_rejected"}
+    assert result == {"status": "rejected", "reason": "project_config_key_rejected"}
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "config_format",
+        "config_document",
+        "config_sha256",
+        "credential_id",
+        "credential_ref",
+        "slot_id",
+        "api_host",
+        "codex_home",
+        "codex_endpoint",
+    ],
+)
+def test_project_configure_rejects_codex_owned_profile_fields(tmp_path: Path, field: str) -> None:
+    profile = PerformerProfileConfig.create(
+        binding_id="binding-1",
+        binding_config_version=1,
+        performer_binding_id="performer-binding:binding-1",
+        performer_profile_id="performer-profile:user-1:default",
+        runtime_profile_id="runtime-profile:user-1:default",
+        performer_kind="codex",
+        runtime_kind="codex",
+        execution_policy=EXECUTION_POLICY,
+        turn_policy={},
+    )
+    service = ConductorService(store=ConductorStore(tmp_path), data_root=tmp_path)
+
+    result = service._handle_project_configure(
+        {
+            **profile.to_dict(),
+            field: "legacy",
+            "linear_project_id": "project-1",
+            "project_slug": "project",
+            "project_name": "Project",
+            "config_version": 1,
+            "repository": {"mode": "local_path", "value": str(tmp_path)},
+        }
+    )
+
+    assert result == {"status": "rejected", "reason": "project_config_key_rejected"}
 
 
 def test_binding_hard_cut_keeps_old_state_when_instance_write_fails(tmp_path: Path) -> None:

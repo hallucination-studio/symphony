@@ -6,16 +6,13 @@ from pathlib import Path
 import re
 from typing import Any
 
-from performer_api.codex_runtime import (
-    CodexRuntimeConfig,
-    CodexRuntimeConfigError,
-    PerformerProfileConfig,
-)
+from performer_api.codex_runtime import PerformerProfileConfig, RuntimePolicyError
 
 
 MAX_PROFILE_METADATA_BYTES = 64 * 1024
 _IDENTIFIER = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._-]{0,79}\Z")
-_PERFORMER_KEYS = frozenset({"performer_kind", "runtime_kind", "turn_policy"})
+_RUNTIME_KEYS = frozenset({"runtime_kind", "execution_policy"})
+_PERFORMER_KEYS = frozenset({"performer_kind", "turn_policy"})
 
 
 class PerformerProfileLoadError(ValueError):
@@ -38,20 +35,19 @@ def load_profile_bundle(
     profile_name: str = "default",
 ) -> ProfileBundle:
     profile_dir = _profile_dir(root, profile_name)
-    runtime_document = _read_text(profile_dir / "runtime.toml")
+    runtime_payload = _read_json_object(profile_dir / "runtime.json")
     performer_payload = _read_json_object(profile_dir / "performer.json")
-    unknown = sorted(set(performer_payload) - _PERFORMER_KEYS)
-    if unknown:
-        raise PerformerProfileLoadError(
-            "performer_profile_key_rejected",
-            f"Performer profile key is not allowed: {unknown[0]}",
-        )
+    _reject_unknown_keys(runtime_payload, _RUNTIME_KEYS, document="Runtime")
+    _reject_unknown_keys(performer_payload, _PERFORMER_KEYS, document="Performer")
     workspace = _identifier(workspace_id, "workspace_id")
     profile = _identifier(profile_name, "profile_name")
     runtime_profile_id = f"runtime-profile:{workspace}:{profile}"
     performer_profile_id = f"performer-profile:{workspace}:{profile}"
     performer_kind = _identifier(performer_payload.get("performer_kind") or "codex", "performer_kind")
-    runtime_kind = _identifier(performer_payload.get("runtime_kind") or "codex", "runtime_kind")
+    runtime_kind = _identifier(runtime_payload.get("runtime_kind") or "codex", "runtime_kind")
+    execution_policy = runtime_payload.get("execution_policy")
+    if not isinstance(execution_policy, dict):
+        raise PerformerProfileLoadError("invalid_runtime_policy", "execution_policy must be an object")
     turn_policy = performer_payload.get("turn_policy")
     if not isinstance(turn_policy, dict):
         raise PerformerProfileLoadError("invalid_performer_policy", "turn_policy must be an object")
@@ -65,19 +61,18 @@ def load_profile_bundle(
             runtime_profile_id=runtime_profile_id,
             performer_kind=performer_kind,
             runtime_kind=runtime_kind,
+            execution_policy=execution_policy,
             turn_policy=turn_policy,
-            config_document=runtime_document,
         )
-    except CodexRuntimeConfigError as exc:
+    except RuntimePolicyError as exc:
         raise PerformerProfileLoadError(exc.code, exc.reason) from exc
 
     runtime_profile = {
         "id": runtime_profile_id,
         "name": profile,
         "runtime_kind": runtime_kind,
-        "config_format": config.config_format,
-        "config_document": config.config_document,
-        "config_sha256": config.config_sha256,
+        "execution_policy": config.execution_policy,
+        "execution_policy_sha256": config.execution_policy_sha256,
         "state": "active",
     }
     performer_profile = {
@@ -86,7 +81,7 @@ def load_profile_bundle(
         "performer_kind": performer_kind,
         "runtime_profile_id": runtime_profile_id,
         "turn_policy": config.turn_policy,
-        "policy_sha256": config.policy_sha256,
+        "turn_policy_sha256": config.turn_policy_sha256,
         "state": "active",
     }
     return ProfileBundle(
@@ -104,7 +99,7 @@ def _profile_dir(root: Path | str, profile_name: str) -> Path:
         raise PerformerProfileLoadError("performer_profile_required", "Managed Performer profile directory is unavailable")
     candidate = base / profile_name
     directory = candidate if candidate.is_dir() else base
-    if not (directory / "runtime.toml").is_file() or not (directory / "performer.json").is_file():
+    if not (directory / "runtime.json").is_file() or not (directory / "performer.json").is_file():
         raise PerformerProfileLoadError("performer_profile_required", "Managed Performer profile files are incomplete")
     return directory
 
@@ -126,15 +121,24 @@ def _read_json(path: Path) -> Any:
         raise PerformerProfileLoadError("performer_profile_too_large", "Managed Performer profile metadata is too large")
     try:
         return json.loads(content)
-    except json.JSONDecodeError as exc:
+    except (json.JSONDecodeError, RecursionError) as exc:
         raise PerformerProfileLoadError("performer_profile_invalid", "Managed Performer profile JSON is invalid") from exc
 
 
 def _read_json_object(path: Path) -> dict[str, Any]:
     value = _read_json(path)
     if not isinstance(value, dict):
-        raise PerformerProfileLoadError("performer_profile_invalid", "performer.json must contain an object")
+        raise PerformerProfileLoadError("performer_profile_invalid", f"{path.name} must contain an object")
     return value
+
+
+def _reject_unknown_keys(payload: dict[str, Any], allowed: frozenset[str], *, document: str) -> None:
+    unknown = sorted(set(payload) - allowed)
+    if unknown:
+        raise PerformerProfileLoadError(
+            "performer_profile_key_rejected",
+            f"{document} profile contains a field that is not allowed",
+        )
 
 
 def _identifier(value: Any, field: str) -> str:

@@ -8,16 +8,15 @@ from ._postgres_records import _pg_datetime, _pg_json, _pg_json_value
 
 RUNTIME_PROFILE_UPSERT_SQL = """
 INSERT INTO runtime_profiles (
-  id, workspace_id, name, runtime_kind, config_format, config_document,
-  config_sha256, state, created_by, created_at, updated_at
+  id, workspace_id, name, runtime_kind, execution_policy,
+  execution_policy_sha256, state, created_by, created_at, updated_at
 )
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::timestamptz,$11::timestamptz)
+VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7,$8,$9::timestamptz,$10::timestamptz)
 ON CONFLICT (id) DO UPDATE SET
   name = EXCLUDED.name,
   runtime_kind = EXCLUDED.runtime_kind,
-  config_format = EXCLUDED.config_format,
-  config_document = EXCLUDED.config_document,
-  config_sha256 = EXCLUDED.config_sha256,
+  execution_policy = EXCLUDED.execution_policy,
+  execution_policy_sha256 = EXCLUDED.execution_policy_sha256,
   state = EXCLUDED.state,
   updated_at = EXCLUDED.updated_at
 RETURNING *
@@ -26,7 +25,7 @@ RETURNING *
 PERFORMER_PROFILE_UPSERT_SQL = """
 INSERT INTO performer_profiles (
   id, workspace_id, name, performer_kind, runtime_profile_id, turn_policy,
-  policy_sha256, state, created_by, created_at, updated_at
+  turn_policy_sha256, state, created_by, created_at, updated_at
 )
 VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9,$10::timestamptz,$11::timestamptz)
 ON CONFLICT (id) DO UPDATE SET
@@ -34,7 +33,7 @@ ON CONFLICT (id) DO UPDATE SET
   performer_kind = EXCLUDED.performer_kind,
   runtime_profile_id = EXCLUDED.runtime_profile_id,
   turn_policy = EXCLUDED.turn_policy,
-  policy_sha256 = EXCLUDED.policy_sha256,
+  turn_policy_sha256 = EXCLUDED.turn_policy_sha256,
   state = EXCLUDED.state,
   updated_at = EXCLUDED.updated_at
 RETURNING *
@@ -71,12 +70,11 @@ SELECT
   pb.sanitized_reason,
   pp.performer_kind,
   pp.turn_policy,
-  pp.policy_sha256,
+  pp.turn_policy_sha256,
   rp.id AS runtime_profile_id,
   rp.runtime_kind,
-  rp.config_format,
-  rp.config_document,
-  rp.config_sha256
+  rp.execution_policy,
+  rp.execution_policy_sha256
 FROM performer_bindings pb
 JOIN performer_profiles pp ON pp.id = pb.performer_profile_id
 JOIN runtime_profiles rp ON rp.id = pp.runtime_profile_id
@@ -97,14 +95,14 @@ class PgProfilesMixin:
         async with self.pool.acquire() as connection:
             async with connection.transaction():
                 runtime_before = await connection.fetchrow(
-                    "SELECT config_sha256 FROM runtime_profiles WHERE id = $1 FOR UPDATE",
+                    "SELECT execution_policy_sha256 FROM runtime_profiles WHERE id = $1 FOR UPDATE",
                     str(runtime_profile["id"]),
                 )
                 await connection.fetchrow(
                     RUNTIME_PROFILE_UPSERT_SQL,
                     *_runtime_profile_values(runtime_profile, workspace_id=workspace_id, now=now),
                 )
-                if runtime_before is not None and str(runtime_before["config_sha256"]) != str(runtime_profile["config_sha256"]):
+                if runtime_before is not None and str(runtime_before["execution_policy_sha256"]) != str(runtime_profile["execution_policy_sha256"]):
                     await connection.execute(
                         """
                         UPDATE performer_bindings pb
@@ -118,7 +116,7 @@ class PgProfilesMixin:
                     )
 
                 performer_before = await connection.fetchrow(
-                    "SELECT policy_sha256, runtime_profile_id FROM performer_profiles WHERE id = $1 FOR UPDATE",
+                    "SELECT turn_policy_sha256, runtime_profile_id FROM performer_profiles WHERE id = $1 FOR UPDATE",
                     str(performer_profile["id"]),
                 )
                 await connection.fetchrow(
@@ -126,7 +124,7 @@ class PgProfilesMixin:
                     *_performer_profile_values(performer_profile, workspace_id=workspace_id, now=now),
                 )
                 if performer_before is not None and (
-                    str(performer_before["policy_sha256"]) != str(performer_profile["policy_sha256"])
+                    str(performer_before["turn_policy_sha256"]) != str(performer_profile["turn_policy_sha256"])
                     or str(performer_before["runtime_profile_id"]) != str(performer_profile["runtime_profile_id"])
                 ):
                     await connection.execute(
@@ -173,9 +171,8 @@ def _runtime_profile_values(profile: dict[str, Any], *, workspace_id: str = "", 
         workspace_id,
         str(profile.get("name") or "default"),
         str(profile.get("runtime_kind") or "codex"),
-        str(profile.get("config_format") or "toml"),
-        str(profile.get("config_document") or ""),
-        str(profile.get("config_sha256") or ""),
+        _pg_json(profile.get("execution_policy") or {}),
+        str(profile.get("execution_policy_sha256") or ""),
         str(profile.get("state") or "active"),
         str(profile.get("created_by") or workspace_id),
         _pg_datetime(profile.get("created_at") or now),
@@ -192,7 +189,7 @@ def _performer_profile_values(profile: dict[str, Any], *, workspace_id: str = ""
         str(profile.get("performer_kind") or "codex"),
         str(profile["runtime_profile_id"]),
         _pg_json(profile.get("turn_policy") or {}),
-        str(profile.get("policy_sha256") or ""),
+        str(profile.get("turn_policy_sha256") or ""),
         str(profile.get("state") or "active"),
         str(profile.get("created_by") or workspace_id),
         _pg_datetime(profile.get("created_at") or now),
@@ -226,12 +223,11 @@ def _record_to_performer_binding(row: Any) -> dict[str, Any]:
         "sanitized_reason": str(row["sanitized_reason"]),
         "performer_kind": str(row["performer_kind"]),
         "turn_policy": _pg_json_value(row["turn_policy"], {}) or {},
-        "policy_sha256": str(row["policy_sha256"]),
+        "turn_policy_sha256": str(row["turn_policy_sha256"]),
         "runtime_profile_id": str(row["runtime_profile_id"]),
         "runtime_kind": str(row["runtime_kind"]),
-        "config_format": str(row["config_format"]),
-        "config_document": str(row["config_document"]),
-        "config_sha256": str(row["config_sha256"]),
+        "execution_policy": _pg_json_value(row["execution_policy"], {}) or {},
+        "execution_policy_sha256": str(row["execution_policy_sha256"]),
     }
 
 

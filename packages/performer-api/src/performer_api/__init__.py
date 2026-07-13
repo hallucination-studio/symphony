@@ -1,8 +1,7 @@
 from performer_api.codex_runtime import (
-    CodexRuntimeConfig,
-    CodexRuntimeConfigError,
     PerformerProfileConfig,
-    validate_codex_toml,
+    RuntimePolicy,
+    RuntimePolicyError,
 )
 from performer_api.labels import is_managed_project_label, managed_project_label_name
 from performer_api.turns import ExecuteResult, GateResult, RuntimeWait, TurnContext
@@ -11,8 +10,6 @@ from performer_api.workflow import AcceptanceCatalog, Plan, PlanRevision, Task
 
 __all__ = [
     "AcceptanceCatalog",
-    "CodexRuntimeConfig",
-    "CodexRuntimeConfigError",
     "ContractValidationError",
     "ExecuteResult",
     "GateResult",
@@ -21,9 +18,10 @@ __all__ = [
     "Plan",
     "PlanRevision",
     "PerformerProfileConfig",
+    "RuntimePolicy",
+    "RuntimePolicyError",
     "RuntimeWait",
     "Task",
     "TurnContext",
     "validate_plan",
-    "validate_codex_toml",
 ]

@@ -85,13 +85,14 @@ class PodiumRuntimeMixin:
                     "performer_profile_id": str(profile.get("performer_profile_id") or ""),
                     "performer_kind": str(profile.get("performer_kind") or ""),
                     "generation": int(profile.get("generation") or 0),
-                    "policy_sha256": str(profile.get("policy_sha256") or ""),
+                    "turn_policy_sha256": str(profile.get("turn_policy_sha256") or ""),
                 },
                 "runtime": {
                     "runtime_profile_id": str(profile.get("runtime_profile_id") or ""),
                     "runtime_kind": str(profile.get("runtime_kind") or ""),
-                    "config_format": str(profile.get("config_format") or ""),
-                    "config_sha256": str(profile.get("config_sha256") or ""),
+                    "execution_policy_sha256": str(
+                        profile.get("execution_policy_sha256") or ""
+                    ),
                 },
             },
         }
