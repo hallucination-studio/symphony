@@ -1199,6 +1199,19 @@ _OVERALL_FIXTURES: dict[str, dict[str, str]] = {
     },
 }
 
+_OVERALL_CHECK_NAMES = {
+    "success": "overall_success_closure",
+    "rework": "overall_gate_rework_block",
+    "block": "overall_gate_rework_block",
+    "runtime_wait": "overall_runtime_wait_resumable",
+}
+
+
+def _overall_fixture_contract(name: str) -> tuple[str, str]:
+    script = next(iter(_OVERALL_FIXTURES[name]))
+    relative = f".e2e/{script}"
+    return relative, f"python {relative}"
+
 
 def _prepare_overall_fixtures(root: Path) -> tuple[dict[str, Path], list[str]]:
     fixture_paths: dict[str, Path] = {}
@@ -1218,13 +1231,8 @@ def _prepare_overall_fixtures(root: Path) -> tuple[dict[str, Path], list[str]]:
 
 
 def _fixture_contract_ok(paths: dict[str, Path]) -> bool:
-    expected = {
-        "success": (".e2e/verify_success.py", "python .e2e/verify_success.py"),
-        "rework": (".e2e/verify_once.py", "python .e2e/verify_once.py"),
-        "block": (".e2e/verify_always_fail.py", "python .e2e/verify_always_fail.py"),
-        "runtime_wait": (".e2e/ask_for_input.py", "python .e2e/ask_for_input.py"),
-    }
-    for name, (relative, command) in expected.items():
+    for name in _OVERALL_FIXTURES:
+        relative, _command = _overall_fixture_contract(name)
         root = paths.get(name)
         if root is None or not (root / ".git").is_dir():
             return False
@@ -1236,8 +1244,6 @@ def _fixture_contract_ok(paths: dict[str, Path]) -> bool:
             if script.read_text(encoding="utf-8") != expected_content:
                 return False
         except OSError:
-            return False
-        if command != f"python {relative}":
             return False
     return True
 
@@ -2035,18 +2041,14 @@ def _overall_task_rows(run: dict[str, Any] | None) -> list[dict[str, Any]]:
 
 
 def _overall_plan_contract_ok(name: str, run: dict[str, Any] | None) -> bool:
-    expected = {
-        scenario: (f"python .e2e/{next(iter(files))}", f".e2e/{next(iter(files))}")
-        for scenario, files in _OVERALL_FIXTURES.items()
-    }
     plan = run.get("plan") if isinstance(run, dict) else None
     tasks = plan.get("tasks") if isinstance(plan, dict) else None
-    if name not in expected or not isinstance(tasks, list) or len(tasks) != 1:
+    if name not in _OVERALL_FIXTURES or not isinstance(tasks, list) or len(tasks) != 1:
         return False
     task = tasks[0]
     if not isinstance(task, dict):
         return False
-    command, file_scope = expected[name]
+    file_scope, command = _overall_fixture_contract(name)
     return task.get("verification_commands") == [command] and task.get(
         "files_likely_touched"
     ) == [file_scope]
@@ -2150,17 +2152,42 @@ def _overall_conductor_binding_ready(
     }
 
 
-def _overall_scenario_passed(name: str, run: dict[str, Any] | None, history: list[dict[str, Any]], issue: dict[str, Any] | None, children: list[dict[str, Any]]) -> bool:
+def _overall_scenario_passed(
+    name: str,
+    run: dict[str, Any] | None,
+    history: list[dict[str, Any]],
+    issue: dict[str, Any] | None,
+    children: list[dict[str, Any]],
+) -> bool:
     if not isinstance(run, dict):
         return False
     state = str(run.get("state") or "")
     tasks = _overall_task_rows(run)
     if name == "success":
-        return state == "done" and bool(issue and _linear_issue_state_name(issue) in {"done", "completed"}) and bool(tasks) and all(str(task.get("state") or "") == "done" for task in tasks) and all(_linear_issue_state_name(child) in {"done", "completed"} for child in children)
+        issue_done = bool(
+            issue and _linear_issue_state_name(issue) in {"done", "completed"}
+        )
+        tasks_done = bool(tasks) and all(
+            str(task.get("state") or "") == "done" for task in tasks
+        )
+        children_done = all(
+            _linear_issue_state_name(child) in {"done", "completed"}
+            for child in children
+        )
+        return state == "done" and issue_done and tasks_done and children_done
     if name == "rework":
-        return state == "done" and bool(tasks) and any(int(task.get("rework_count") or 0) == 1 for task in tasks)
+        reworked_once = any(
+            int(task.get("rework_count") or 0) == 1 for task in tasks
+        )
+        return state == "done" and bool(tasks) and reworked_once
     if name == "block":
-        return state == "blocked" and str(run.get("latest_reason") or "").startswith("gate_failed") and bool(tasks) and any(str(task.get("state") or "") == "blocked" and int(task.get("rework_count") or 0) >= 1 for task in tasks)
+        gate_failed = str(run.get("latest_reason") or "").startswith("gate_failed")
+        task_blocked = any(
+            str(task.get("state") or "") == "blocked"
+            and int(task.get("rework_count") or 0) >= 1
+            for task in tasks
+        )
+        return state == "blocked" and gate_failed and bool(tasks) and task_blocked
     if name == "runtime_wait":
         wait_index = next(
             (
@@ -2190,26 +2217,30 @@ def _run_overall_phase(context: _RunContext, prerequisites: list[dict[str, Any]]
     failed = [str(report.get("phase")) for report in prerequisites if report.get("status") != "passed"]
     same_run = all(str(report.get("run_id") or "") == context.run_id for report in prerequisites)
     metadata_failures: list[str] = []
-    report_by_phase = {str(report.get("phase") or ""): report for report in prerequisites}
-    oauth_project = (report_by_phase.get("oauth", {}).get("observations") or {}).get("selected_project") or {}
-    linear_project = (report_by_phase.get("linear", {}).get("observations") or {}).get("project") or {}
-    performer_observations = report_by_phase.get("performer", {}).get("observations") or {}
-    oauth_project_id = str(oauth_project.get("id") or "")
-    linear_project_id = str(linear_project.get("id") or "")
-    oauth_project_slug = str(oauth_project.get("slug") or oauth_project.get("slug_id") or "")
-    linear_project_slug = str(linear_project.get("slug") or linear_project.get("slug_id") or "")
-    if (
-        not oauth_project_id
-        or oauth_project_id != linear_project_id
-        or oauth_project_slug != context.project_slug
-        or linear_project_slug != context.project_slug
-    ):
-        metadata_failures.append("project_identity")
-    execution_policy_sha256 = str(
-        performer_observations.get("execution_policy_sha256") or ""
-    )
-    if re.fullmatch(r"[0-9a-f]{64}", execution_policy_sha256) is None:
-        metadata_failures.append("execution_policy_identity")
+    execution_policy_sha256 = ""
+    if not failed:
+        report_by_phase = {
+            str(report.get("phase") or ""): report for report in prerequisites
+        }
+        oauth_project = (report_by_phase.get("oauth", {}).get("observations") or {}).get("selected_project") or {}
+        linear_project = (report_by_phase.get("linear", {}).get("observations") or {}).get("project") or {}
+        performer_observations = report_by_phase.get("performer", {}).get("observations") or {}
+        oauth_project_id = str(oauth_project.get("id") or "")
+        linear_project_id = str(linear_project.get("id") or "")
+        oauth_project_slug = str(oauth_project.get("slug") or oauth_project.get("slug_id") or "")
+        linear_project_slug = str(linear_project.get("slug") or linear_project.get("slug_id") or "")
+        if (
+            not oauth_project_id
+            or oauth_project_id != linear_project_id
+            or oauth_project_slug != context.project_slug
+            or linear_project_slug != context.project_slug
+        ):
+            metadata_failures.append("project_identity")
+        execution_policy_sha256 = str(
+            performer_observations.get("execution_policy_sha256") or ""
+        )
+        if re.fullmatch(r"[0-9a-f]{64}", execution_policy_sha256) is None:
+            metadata_failures.append("execution_policy_identity")
     if failed or not same_run or metadata_failures:
         blocked = [*failed, "run_identity"] if not same_run else [*failed]
         blocked.extend(metadata_failures)
@@ -2304,11 +2335,10 @@ def _run_overall_phase(context: _RunContext, prerequisites: list[dict[str, Any]]
                     fixture = None
         if repository_ok and fixture is not None and project is not None and state is not None:
             for name in scenario_names:
-                script = next(iter(_OVERALL_FIXTURES[name]))
-                command = f"python .e2e/{script}"
+                relative, command = _overall_fixture_contract(name)
                 description = (
                     f"Symphony real-e2e scenario={name}. Execute exactly `{command}`. "
-                    f"The verification file scope is `.e2e/{script}`; do not edit the verifier."
+                    f"The verification file scope is `{relative}`; do not edit the verifier."
                 )
                 try:
                     issue = fixture.create_parent_issue(
@@ -2326,7 +2356,7 @@ def _run_overall_phase(context: _RunContext, prerequisites: list[dict[str, Any]]
             for name in scenario_names:
                 issue = scenario_issues.get(name)
                 if issue is None:
-                    check_name = {"success": "overall_success_closure", "rework": "overall_gate_rework_block", "block": "overall_gate_rework_block", "runtime_wait": "overall_runtime_wait_resumable"}[name]
+                    check_name = _OVERALL_CHECK_NAMES[name]
                     _append_check(checks, failures, name=check_name, passed=False, group="workflow", error_code="overall_scenario_issue_create_failed", reason=f"The real {name} scenario issue was not created.", observations=observations["scenarios"].get(name, {}), action_required=True, next_action="inspect_linear_fixture_issue_creation")
                     continue
                 run, history, latest = _overall_conductor_run(conductor, str(issue.get("id") or ""), timeout=context.timeout)
@@ -2384,7 +2414,7 @@ def _run_overall_phase(context: _RunContext, prerequisites: list[dict[str, Any]]
                     "runtime_wait_resumed": runtime_wait_resumed,
                     "runtime_wait_error": runtime_wait_error,
                 }
-                check_name = {"success": "overall_success_closure", "rework": "overall_gate_rework_block", "block": "overall_gate_rework_block", "runtime_wait": "overall_runtime_wait_resumable"}[name]
+                check_name = _OVERALL_CHECK_NAMES[name]
                 error_code = (
                     "fixture_plan_contract_mismatch"
                     if not plan_contract_ok
@@ -2393,7 +2423,7 @@ def _run_overall_phase(context: _RunContext, prerequisites: list[dict[str, Any]]
                 _append_check(checks, failures, name=check_name, passed=passed, group="workflow", error_code=error_code, reason=f"Real {name} scenario did not reach its required durable state", observations=observations["scenarios"][name], action_required=True, next_action="inspect_conductor_managed_run_and_linear_projection")
     else:
         for name in scenario_names:
-            check_name = {"success": "overall_success_closure", "rework": "overall_gate_rework_block", "block": "overall_gate_rework_block", "runtime_wait": "overall_runtime_wait_resumable"}[name]
+            check_name = _OVERALL_CHECK_NAMES[name]
             _append_check(checks, failures, name=check_name, passed=False, group="workflow", error_code="overall_product_evidence_unavailable", reason="A real delegated issue and enrolled Conductor are required; no fixture success is inferred", observations={"conductor_url_present": bool(conductor_url), "scenario": name}, action_required=True, next_action="restore_oauth_linear_fixture_and_enrolled_conductor")
 
     redaction_ok = not _browser_payload_has_secret(managed_runs.payload)
