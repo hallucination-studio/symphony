@@ -44,11 +44,11 @@ prerequisite gates pass in that same batch.
 8. The Codex seed is a fixed, approved staged copy. Every phase receives a
    byte-identical copy in its own temporary `CODEX_HOME`; no phase reads
    `~/.codex`, and no phase copies an unapproved file.
-9. The Codex profile is fixed for this plan:
-   `model = gpt-5.4`, provider base URL
-   `http://52.253.109.220:8080/v1`, `wire_api = responses`,
-   `cli_auth_credentials_store = file`. The authentication material is the
-   official `codex login` OAuth seed, not an API token in Podium.
+9. The Performer phase reads both `config.toml` and opaque login state only
+   from the fixed test seed directory. The config must use `model = gpt-5.4`
+   and `cli_auth_credentials_store = file`; provider details are whatever the
+   operator explicitly staged in that test-only config. Podium profiles must
+   not override the Performer-phase config.
 10. A local pytest pass is not a real E2E pass. A real phase requires running
    services, real HTTP/GraphQL responses, durable state, logs, and archived
    sanitized evidence.
@@ -70,7 +70,7 @@ and the existing environment contract:
 | `SYMPHONY_E2E_PROJECT_SLUG` | Selected Linear project lookup | Using a label as the routing key |
 | `SYMPHONY_E2E_CODEX_HOME_SEED` | Approved staged Codex seed | Falling back to `~/.codex` |
 | `PODIUM_LINEAR_APP_ACCESS_TOKEN` | Direct fixture GraphQL only | Podium/Conductor/Performer managed auth |
-| `PODIUM_PERFORMER_PROFILE_DIR` and `PODIUM_PERFORMER_PROFILE_NAME` | Current profile source | Uploading credential files to Podium |
+| `PODIUM_PERFORMER_PROFILE_DIR` and `PODIUM_PERFORMER_PROFILE_NAME` | Podium service configuration used only by Overall | Overriding the independent Performer phase |
 | `SYMPHONY_E2E_BROWSER_OBSERVATION_PATH` | Sanitized same-origin responses written by the browser skill | Reading/exporting cookies, localStorage, or bearer values |
 | `SYMPHONY_E2E_CONDUCTOR_URL` | Read-only local Conductor observation after its own polling | Supplying a runtime bearer to the runner |
 | `SYMPHONY_E2E_FIXTURE_REPOSITORY` | Explicit disposable Git workspace receiving the verifier scripts | Writing into an inferred customer repository |
@@ -299,9 +299,7 @@ back to a login form or a newly created account.
    but no access token, refresh token, cookie, or client secret.
 5. Call `GET /api/v1/linear/projects`; require the configured project slug to
    be present and record its id/team id.
-6. Call `GET /api/v1/runtimes` and verify the existing runtime is enrolled;
-   do not create a replacement conductor in this phase.
-7. Run negative callback probes only against the existing Podium service:
+6. Run negative callback probes only against the existing Podium service:
    missing state and a random invalid state must fail. An expired-state check
    belongs to the local callback test because creating an expired state would
    require starting OAuth. Do not call
@@ -339,9 +337,10 @@ not an agent-generated consent flow.
 
 ### Objective
 
-Prove direct Linear fixture access plus Podium polling, checkpoint, delegation
-epoch, dispatch deduplication, binding routing, and lease/ack behavior. This
-phase does not start a Performer turn.
+Prove direct Linear fixture access independently of Podium, OAuth, Conductor,
+and Performer. Podium polling, checkpoint, binding, dispatch, and lease/ack
+belong exclusively to Overall, where the complete managed product path is
+tested.
 
 ### Ordered checks and allowed calls
 
@@ -351,54 +350,23 @@ phase does not start a Performer turn.
    `linear_fixture_failed` failure; do not retry indefinitely.
 2. Call `fixture.project(project_slug)` and record only project id, team id,
    name, and slug. This is the only approved project lookup.
-3. Read the existing Podium selected-project and conductor-binding responses.
-   Do not select a new project or change `memberIds`.
-4. Use the existing enrolled conductor and
-   `PUT /api/v1/conductors/{id}/binding` only when the binding is absent. The
-   body must contain the selected project id and the approved disposable
-   repository. A second active binding must be asserted rejected.
-5. Verify `symphony:conductor/<Name>-<public-id>` through
-   `ManagedRunLinearProxy.fetch_project_labels()` or the equivalent Podium
-   response. Never use the label as the dispatch routing key.
-6. Resolve the selected team's workflow states with
+3. Resolve the selected team's workflow states with
    `fixture.workflow_states(project["team"]["id"])`. Select exactly one
    non-terminal state whose `type` is `backlog` (fall back to `unstarted` only
    when the team has no backlog state); multiple or missing candidates fail
    with `linear_fixture_state_ambiguous`.
-7. Create one disposable parent with
+4. Create one disposable, non-delegated parent with
    `fixture.create_parent_issue(team_id, project_id, state_id, title,
    description, delegate_id=app_user_id)`. The helper uses the same
    `issueCreate` input contract as `ManagedRunLinearProxy`, sets
    `parentId: null`, and verifies the explicit returned `parent` field is null.
    Record its id and identifier.
-8. Read it with `fixture.issue()` and require `parent` to be null. Read its
+5. Read it with `fixture.issue()` and require `parent` to be null. Read its
    children with `fixture.children()` and require explicit `parent.id` and
    `parent.identifier` on every child.
-9. Start Podium with `podium api` and
-   `PODIUM_LINEAR_RECONCILIATION_INTERVAL_SECONDS=1`. The app lifespan starts
-   `run_linear_reconciliation_loop()` automatically; the external runner must
-   not call the internal `LinearReconciler.reconcile_once()` directly. Wait for
-   `GET /api/v1/health` to return `200 {"status":"ok"}`, then read the
-   authenticated installation response and require
-   `reconciliation_state=healthy` with a fresh `last_reconciliation_at`.
-   A `503` or `reconciliation_state=degraded` is an immediate failure with the
-   Podium health error fields and the matching `podium.log` event.
-10. Observe the already enrolled Conductor after its own polling loop. When
-    `SYMPHONY_E2E_CONDUCTOR_URL` is set, read its existing
-    `/api/managed-runs` response and require a run whose `parent_issue_id`
-    matches the disposable parent. The runner never sends a runtime bearer or
-    acknowledges a dispatch itself. Missing URL, missing matching run, or a
-    failed parent prerequisite is a concrete binding failure. Repeat
-    reconciliation and issue observation; assert one run for the delegation
-    epoch.
-11. Restart only the Podium process while preserving the same database,
-    `PODIUM_SECRET_KEY`, selected installation, and binding. Wait for health
-    again, repeat the scan, and assert the cursor checkpoint and dispatch count
-    remain unchanged.
-12. Redelegate the fixture issue only when the test fixture supports a new
-    delegation epoch; assert a new epoch is visible and the old epoch is not
-    requeued. If the token cannot perform that mutation, record the concrete
-    permission error and do not simulate it.
+6. Record only direct Linear identifiers and sanitized GraphQL failures. This
+   phase must not instantiate `_PodiumObserver`, read a browser observation,
+   require an OAuth installation, inspect a runtime, or observe a dispatch.
 
 ### Existing regression tests to run
 
@@ -420,12 +388,11 @@ tests/test_real_flow_fixture.py::test_linear_fixture_creates_a_parent_issue_with
 
 - `1/1`: the `.env` token successfully reads viewer and project data, with no
   token value in evidence. A `401` is a hard failure.
-- `1/1`: selected project, one-to-one binding, label, explicit parent fields,
-  and runtime identity all match.
-- `1/1`: baseline/incremental pagination, checkpoint persistence, delegation
-  epoch, duplicate observation, restart, and blocker behavior are observed.
-- `1/1`: exactly one dispatch is leased/acked for the original epoch, and all
-  errors are durable, logged, sanitized, and linked to the report.
+- `1/1`: project and workflow-state identity are resolved directly.
+- `1/1`: one root fixture issue is created and read with explicit parent
+  semantics.
+- `1/1`: all direct Linear failures are bounded and sanitized, with no Podium,
+  OAuth, runtime, or dispatch dependency.
 
 No Linear phase pass may be claimed from a mocked GraphQL transport or a local
 database-only assertion.
@@ -434,9 +401,10 @@ database-only assertion.
 
 ### Objective
 
-Prove a real `performer` process can consume the managed profile and official
-Codex OAuth seed, run the three turn kinds with `gpt-5.4`, and preserve fenced,
-structured, sanitized results without Linear.
+Prove a real `performer` process can consume only the static test config and
+official opaque Codex login seed, run the three turn kinds with `gpt-5.4`, and
+preserve fenced, structured, sanitized results without Podium, OAuth, or
+Linear.
 
 ### Ordered checks and allowed calls
 
@@ -444,9 +412,9 @@ structured, sanitized results without Linear.
    `PerformerRuntime.prepare_environment()` from the approved seed. Assert the
    directory contains only the approved seed files plus the managed config;
    assert the path is not `~/.codex`.
-2. Parse the materialized TOML using the same shared validation contract in
-   `performer_api.codex_runtime`; compare model/provider/wire API and config
-   hash with the shared run manifest.
+2. Parse the test seed's `config.toml` using the same shared validation
+   contract in `performer_api.codex_runtime`; require `gpt-5.4` and file auth,
+   and record its hash. Do not read or merge a Podium Performer profile.
 3. Create a disposable git workspace and write a plan turn request through
    `PerformerRuntime.write_request()`. Launch only
    `performer.cli.run_turn()`/the installed `performer` executable; do not
@@ -479,7 +447,7 @@ tests/test_conductor_runtime.py::test_runtime_provisions_selected_slot_only_from
 tests/test_conductor_runtime.py::test_runtime_sanitizes_performer_stdout_and_stderr_before_persisting
 tests/test_conductor_runtime.py::test_runtime_preserves_sanitized_performer_failure_reason
 tests/test_performer_api_codex_runtime.py::test_runtime_config_normalizes_hashes_and_hides_content_from_summary
-tests/test_performer_api_codex_runtime.py::test_performer_profile_config_carries_current_profiles_and_credential_reference
+tests/test_performer_api_codex_runtime.py::test_performer_profile_config_carries_only_current_non_secret_profiles
 ```
 
 ### Performer pass rubric: 4/4

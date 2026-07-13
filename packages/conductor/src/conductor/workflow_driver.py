@@ -344,7 +344,7 @@ class WorkflowDriver:
     ) -> dict[str, Any]:
         root = Path(instance.instance_dir) / "state" / "workflow-runs" / str(run["run_id"]) / context.attempt_id
         paths = self.runtime.paths(root)
-        env = self._runtime_environment(instance, Path(instance.workspace_root), context.attempt_id)
+        env, credential = self._runtime_environment(instance, Path(instance.workspace_root), context.attempt_id)
         self.runtime.write_request(paths, request)
         event = _turn_log_fields(context, role, paths)
         self.runtime.append_event(Path(instance.log_path), f"event=performer_turn_started {event}")
@@ -365,6 +365,9 @@ class WorkflowDriver:
                 f"event=performer_turn_failed {event} error_type={exc.__class__.__name__} sanitized_reason={_reason(exc)}",
             )
             raise
+        finally:
+            if credential is not None:
+                self.service.performer_credentials.reconcile(credential)
         self.runtime.append_event(Path(instance.log_path), f"event=performer_turn_completed {event}")
         return accepted
 
@@ -390,19 +393,17 @@ class WorkflowDriver:
         )
         self.runtime.append_event(Path(instance.log_path), " ".join(fields))
 
-    def _runtime_environment(self, instance: Any, workspace: Path, attempt_id: str) -> dict[str, str]:
+    def _runtime_environment(self, instance: Any, workspace: Path, attempt_id: str) -> tuple[dict[str, str], Any | None]:
         filters = instance.linear_filters if isinstance(instance.linear_filters, dict) else {}
         config_document = filters.get("config_document")
-        credential_id = filters.get("credential_id")
-        credential_ref = filters.get("credential_ref")
+        if config_document:
+            slot_id = self.service.performer_credentials.selected_slot_id()
+            home = Path(instance.instance_dir) / "state" / "runtime-homes" / attempt_id / "codex"
+            credential = self.service.performer_credentials.materialize(slot_id, home, str(config_document))
+            return {"CODEX_HOME": str(home)}, credential
         return self.runtime.prepare_environment(
-            Path(instance.instance_dir) / "state",
-            workspace_path=workspace,
-            home_scope=attempt_id,
-            codex_config_document=str(config_document) if config_document else None,
-            credential_id=str(credential_id) if credential_id else None,
-            credential_ref=str(credential_ref) if credential_ref else None,
-        )
+            Path(instance.instance_dir) / "state", workspace_path=workspace, home_scope=attempt_id
+        ), None
 
     async def _project_plan(self, run: dict[str, Any], instance: Any, plan: Plan) -> None:
         proxy = self.service._managed_run_tracker()

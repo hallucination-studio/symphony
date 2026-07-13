@@ -32,7 +32,6 @@ _REASONING_EFFORTS = frozenset({"minimal", "low", "medium", "high", "xhigh"})
 _APPROVAL_POLICIES = frozenset({"untrusted", "on-request", "never"})
 _APPROVAL_REVIEWERS = frozenset({"user", "auto_review"})
 _SANDBOX_MODES = frozenset({"read-only", "workspace-write", "danger-full-access"})
-_AUTH_STORES = frozenset({"file", "keyring", "auto"})
 _LOGIN_METHODS = frozenset({"chatgpt", "api"})
 _TOP_LEVEL_KEYS = frozenset(
     {
@@ -178,8 +177,6 @@ class PerformerProfileConfig:
     config_format: str
     config_document: str
     config_sha256: str
-    credential_id: str
-    credential_ref: str
 
     @classmethod
     def create(
@@ -194,8 +191,6 @@ class PerformerProfileConfig:
         runtime_kind: str,
         turn_policy: dict[str, Any],
         config_document: str,
-        credential_id: str,
-        credential_ref: str,
         config_format: str = "toml",
     ) -> "PerformerProfileConfig":
         runtime = CodexRuntimeConfig.create(
@@ -219,8 +214,6 @@ class PerformerProfileConfig:
             config_format=runtime.config_format,
             config_document=runtime.config_document,
             config_sha256=runtime.config_sha256,
-            credential_id=_required_id(credential_id, "credential_id"),
-            credential_ref=_credential_ref(credential_ref),
         )
 
     @classmethod
@@ -239,8 +232,6 @@ class PerformerProfileConfig:
             turn_policy=payload.get("turn_policy") if isinstance(payload.get("turn_policy"), dict) else {},
             config_format=str(payload.get("config_format") or ""),
             config_document=str(payload.get("config_document") or ""),
-            credential_id=str(payload.get("credential_id") or ""),
-            credential_ref=str(payload.get("credential_ref") or ""),
         )
         if str(payload.get("config_sha256") or "") != config.config_sha256:
             raise CodexRuntimeConfigError("runtime_config_hash_mismatch", "Runtime config hash does not match content")
@@ -262,8 +253,6 @@ class PerformerProfileConfig:
             "config_format": self.config_format,
             "config_document": self.config_document,
             "config_sha256": self.config_sha256,
-            "credential_id": self.credential_id,
-            "credential_ref": self.credential_ref,
         }
 
     def public_summary(self) -> dict[str, Any]:
@@ -277,7 +266,6 @@ class PerformerProfileConfig:
             "runtime_kind": self.runtime_kind,
             "config_sha256": self.config_sha256,
             "policy_sha256": self.policy_sha256,
-            "credential_id": self.credential_id,
         }
 
 
@@ -311,7 +299,11 @@ def _validate_document(document: dict[str, Any]) -> None:
     _enum(document, "approval_policy", _APPROVAL_POLICIES)
     _enum(document, "approvals_reviewer", _APPROVAL_REVIEWERS)
     _enum(document, "sandbox_mode", _SANDBOX_MODES)
-    _enum(document, "cli_auth_credentials_store", _AUTH_STORES)
+    if document.get("cli_auth_credentials_store") != "file":
+        raise CodexRuntimeConfigError(
+            "managed_codex_config_invalid",
+            'Managed Codex config requires cli_auth_credentials_store = "file"',
+        )
     _enum(document, "forced_login_method", _LOGIN_METHODS)
     providers = document.get("model_providers")
     if providers is not None:
@@ -376,18 +368,6 @@ def _required_format(value: str) -> str:
     normalized = value.strip().lower() if isinstance(value, str) else ""
     if normalized not in {"toml"}:
         raise CodexRuntimeConfigError("managed_codex_config_invalid", "config_format must be toml")
-    return normalized
-
-
-def _credential_ref(value: str) -> str:
-    normalized = value.strip() if isinstance(value, str) else ""
-    if not normalized or len(normalized) > 200 or "/" in normalized or "\\" in normalized:
-        raise CodexRuntimeConfigError("invalid_credential_reference", "credential_ref must be an opaque local reference")
-    if _SECRET_LITERAL.search(normalized) or re.search(
-        r"(?i)(?:bearer|basic)\s+|(?:access[_-]?token|refresh[_-]?token|api[_-]?key)\s*[=:]",
-        normalized,
-    ):
-        raise CodexRuntimeConfigError("invalid_credential_reference", "credential_ref must not contain a credential")
     return normalized
 
 

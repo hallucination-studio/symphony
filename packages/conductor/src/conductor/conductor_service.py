@@ -15,6 +15,7 @@ from .models import (
 )
 from .gate import AcceptanceGate
 from .runtime import PerformerRuntime
+from .performer_credentials import PerformerCredentialSlots
 from .conductor_podium_sync import ConductorPodiumSyncMixin
 from .conductor_service_helpers import _linear_agent_app_user_id
 from .linear import ManagedRunLinearProxy
@@ -46,6 +47,7 @@ class ConductorService(ConductorPodiumSyncMixin):
         self.store = store
         self.data_root = data_root
         self.performer_runtime = PerformerRuntime()
+        self.performer_credentials = PerformerCredentialSlots(data_root)
         self.acceptance_gate = AcceptanceGate()
         self._smoke_check_lock = asyncio.Lock()
         self.project_label_proxy_factory = self._project_label_proxy

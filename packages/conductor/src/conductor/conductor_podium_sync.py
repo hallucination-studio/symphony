@@ -671,10 +671,6 @@ def _project_filters(
         "config_format": profile.config_format,
         "config_document": profile.config_document,
         "config_sha256": profile.config_sha256,
-        "credential_id": profile.credential_id,
-        "credential_ref": profile.credential_ref,
-        "auth_method": str(command.get("auth_method") or ""),
-        "account_hint": str(command.get("account_hint") or ""),
     }
 
 
@@ -693,9 +689,6 @@ def _managed_profile_report_fields(instance: Any) -> dict[str, Any]:
         "performer_binding_generation": int(filters.get("performer_binding_generation") or 0),
         "config_sha256": str(filters.get("config_sha256") or ""),
         "policy_sha256": str(filters.get("policy_sha256") or ""),
-        "credential_id": str(filters.get("credential_id") or ""),
-        "auth_method": str(filters.get("auth_method") or ""),
-        "account_hint": str(filters.get("account_hint") or ""),
     }
 
 

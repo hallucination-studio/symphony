@@ -40,6 +40,8 @@ from .podium_routes_linear_projects import register_linear_project_routes
 from .podium_routes_runtime_enrollment import register_runtime_identity_routes
 from .podium_routes_runtime_ops import register_runtime_ops_routes
 from .podium_routes_runtime_proxy import register_linear_proxy_route
+from .podium_routes_live_credentials import register_live_credential_routes
+from .live_conductor_relay import LiveConductorRelay
 from .podium_runtime import PodiumRuntimeMixin
 from .podium_smoke_checks import PodiumSmokeChecksMixin
 from .podium_shared import utc_now_iso
@@ -155,6 +157,7 @@ def create_app(
     )
     register_conductor_binding_routes(app, state=state, require_user=require_user, error_response=error_response)
     register_runtime_ops_routes(app, state=state, require_user=require_user, error_response=error_response)
+    register_live_credential_routes(app, state=state, require_user=require_user, error_response=error_response)
     register_linear_proxy_route(
         app,
         state=state,
@@ -296,6 +299,7 @@ class ManagedPodiumState(
     linear_graphql_transport: Callable[[httpx.Request], Any] | None = None
     linear_token_refresh: Callable[..., Any] | None = None
     linear_token_revoke: Callable[..., Any] | None = None
+    live_relay: LiveConductorRelay = field(default_factory=LiveConductorRelay)
 
 
 async def verify_turnstile_with_cloudflare(token: str, ip: str | None) -> bool:

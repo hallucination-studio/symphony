@@ -39,7 +39,14 @@ async def test_plan_turn_writes_validated_plan(tmp_path: Path, task_payload, fak
 
     assert body["turn_kind"] == "plan"
     assert body["plan"]["tasks"][0]["id"] == "task-1"
-    assert client.calls[0]["output_schema"]["required"] == ["summary", "tasks"]
+    assert set(client.calls[0]["output_schema"]["required"]) == {
+        "summary",
+        "tasks",
+        "risks",
+        "architecture_decisions",
+        "open_questions",
+        "approval_required",
+    }
 
 
 @pytest.mark.asyncio

@@ -34,39 +34,6 @@ def test_runtime_prepares_an_isolated_home_from_approved_seed_files(tmp_path, mo
     assert "secret_setting" not in config
 
 
-def test_runtime_materializes_managed_profile_config_and_selected_credential_slot(tmp_path) -> None:
-    state = tmp_path / "state"
-    slot = state / "performer-credentials" / "credential-1" / "CODEX_HOME"
-    slot.mkdir(parents=True)
-    (slot / "auth.json").write_text("{}", encoding="utf-8")
-    (slot / "config.toml").write_text("model = 'wrong'\n", encoding="utf-8")
-
-    environment = PerformerRuntime().prepare_environment(
-        state,
-        workspace_path=tmp_path,
-        home_scope="attempt-1",
-        codex_config_document='model = "managed"\napproval_policy = "never"\n',
-        credential_id="credential-1",
-        credential_ref="slot:credential-1",
-    )
-    home = Path(environment["CODEX_HOME"])
-
-    assert (home / "auth.json").exists()
-    managed_config = (home / "config.toml").read_text(encoding="utf-8")
-    assert managed_config.startswith('model = "managed"\napproval_policy = "never"\n')
-    assert "wrong" not in managed_config
-
-
-def test_runtime_fails_closed_when_selected_credential_slot_is_missing(tmp_path) -> None:
-    with pytest.raises(ValueError, match="managed_codex_credential_slot_required"):
-        PerformerRuntime().prepare_environment(
-            tmp_path / "state",
-            codex_config_document='model = "managed"\n',
-            credential_id="credential-1",
-            credential_ref="slot:credential-1",
-        )
-
-
 def test_runtime_resolves_performer_from_python_environment_when_path_is_missing(tmp_path, monkeypatch) -> None:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -97,43 +64,6 @@ def test_runtime_resolves_performer_next_to_conductor_launcher_when_python_is_ho
     monkeypatch.setattr("conductor.runtime.sys.executable", "/usr/bin/python3")
 
     assert PerformerRuntime().performer_command == (str(performer),)
-
-
-def test_runtime_provisions_selected_slot_only_from_explicit_staged_seed(tmp_path, monkeypatch) -> None:
-    seed = tmp_path / "staged-seed"
-    seed.mkdir()
-    (seed / "auth.json").write_text("{}", encoding="utf-8")
-    (seed / "config.toml").write_text("model = 'seed'\n", encoding="utf-8")
-    monkeypatch.setenv("SYMPHONY_E2E_CODEX_HOME_SEED", str(seed))
-
-    environment = PerformerRuntime().prepare_environment(
-        tmp_path / "state",
-        codex_config_document='model = "managed"\n',
-        credential_id="credential-1",
-        credential_ref="slot:credential-1",
-    )
-
-    slot = tmp_path / "state" / "performer-credentials" / "credential-1" / "CODEX_HOME"
-    assert (slot / "auth.json").exists()
-    assert (Path(environment["CODEX_HOME"]) / "config.toml").read_text(encoding="utf-8").startswith('model = "managed"')
-
-
-def test_runtime_rejects_symlinked_seed_files(tmp_path, monkeypatch) -> None:
-    seed = tmp_path / "staged-seed"
-    seed.mkdir()
-    outside = tmp_path / "outside-auth.json"
-    outside.write_text("{}", encoding="utf-8")
-    (seed / "auth.json").symlink_to(outside)
-    (seed / "config.toml").write_text("model = 'seed'\n", encoding="utf-8")
-    monkeypatch.setenv("SYMPHONY_E2E_CODEX_HOME_SEED", str(seed))
-
-    with pytest.raises(ValueError, match="codex_seed_symlink_forbidden"):
-        PerformerRuntime().prepare_environment(
-            tmp_path / "state",
-            codex_config_document='model = "managed"\n',
-            credential_id="credential-1",
-            credential_ref="slot:credential-1",
-        )
 
 
 def test_runtime_rejects_stale_fenced_result() -> None:

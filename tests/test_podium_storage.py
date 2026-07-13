@@ -19,7 +19,6 @@ from podium.store._postgres_profiles import (
     PERFORMER_BINDING_SELECT_SQL,
     PERFORMER_PROFILE_UPSERT_SQL,
     RUNTIME_PROFILE_UPSERT_SQL,
-    _credential_values,
     _performer_binding_values,
     _performer_profile_values,
     _record_to_performer_binding,
@@ -93,7 +92,7 @@ def test_fresh_schema_contains_layered_current_profiles_without_revision_tables(
 
     assert "CREATE TABLE IF NOT EXISTS runtime_profiles" in schema
     assert "CREATE TABLE IF NOT EXISTS performer_profiles" in schema
-    assert "CREATE TABLE IF NOT EXISTS performer_credentials" in schema
+    assert "performer_credentials" not in schema
     assert "CREATE TABLE IF NOT EXISTS performer_bindings" in schema
     assert "performer_binding_id TEXT" in schema
     assert "runtime_profile_revisions" not in schema
@@ -121,22 +120,11 @@ def test_profile_store_values_and_sql_have_stable_parameter_contracts() -> None:
         "policy_sha256": "b" * 64,
         "state": "active",
     }
-    credential = {
-        "id": "credential:user-1:chatgpt-main",
-        "workspace_id": "user-1",
-        "name": "ChatGPT main",
-        "performer_kind": "codex",
-        "auth_method": "chatgpt_oauth",
-        "account_hint": "main",
-        "local_ref": "slot:chatgpt-main",
-        "state": "active",
-    }
     binding = {
         "id": "performer-binding:binding-1",
         "workspace_id": "user-1",
         "project_binding_id": "binding-1",
         "performer_profile_id": performer["id"],
-        "credential_id": credential["id"],
         "generation": 1,
         "state": "ready",
         "error_code": "",
@@ -147,8 +135,8 @@ def test_profile_store_values_and_sql_have_stable_parameter_contracts() -> None:
     assert _placeholder_numbers(RUNTIME_PROFILE_UPSERT_SQL) == list(range(1, len(_runtime_profile_values(runtime)) + 1))
     assert _placeholder_numbers(PERFORMER_PROFILE_UPSERT_SQL) == list(range(1, len(_performer_profile_values(performer)) + 1))
     assert _placeholder_numbers(PERFORMER_BINDING_UPSERT_SQL) == list(range(1, len(_performer_binding_values(binding)) + 1))
-    assert len(_credential_values(credential)) == 11
     assert "revision" not in PERFORMER_BINDING_UPSERT_SQL.lower()
+    assert "credential" not in PERFORMER_BINDING_UPSERT_SQL.lower()
 
 
 def test_profile_binding_select_maps_runtime_profile_primary_key() -> None:
@@ -163,7 +151,6 @@ def test_profile_binding_record_decodes_turn_policy_with_empty_default() -> None
             "workspace_id": "user-1",
             "project_binding_id": "binding-1",
             "performer_profile_id": "performer-profile:user-1:default",
-            "credential_id": "credential:user-1:main",
             "generation": 1,
             "state": "pending",
             "error_code": "",
@@ -176,9 +163,6 @@ def test_profile_binding_record_decodes_turn_policy_with_empty_default() -> None
             "config_format": "toml",
             "config_document": "model = \"gpt-test\"\n",
             "config_sha256": "a" * 64,
-            "auth_method": "chatgpt_oauth",
-            "account_hint": "main",
-            "local_ref": "slot:main",
         }
     )
 
@@ -201,7 +185,7 @@ def test_dispatch_dto_does_not_carry_a_profile() -> None:
 
 
 @pytest.mark.anyio
-async def test_runtime_profile_summary_exposes_hashes_but_not_documents_or_local_refs() -> None:
+async def test_runtime_profile_summary_exposes_only_non_secret_profile_hashes() -> None:
     class Store:
         async def get_performer_binding_for_project_binding(self, _binding_id: str) -> dict[str, Any]:
             return {
@@ -215,10 +199,6 @@ async def test_runtime_profile_summary_exposes_hashes_but_not_documents_or_local
                 "config_format": "toml",
                 "config_sha256": "a" * 64,
                 "config_document": 'model = "private"',
-                "credential_id": "credential:user-1:main",
-                "credential_ref": "slot:main",
-                "auth_method": "chatgpt_oauth",
-                "account_hint": "main",
             }
 
     summary = await PodiumRuntimeMixin._performer_profile_summary(
@@ -230,7 +210,7 @@ async def test_runtime_profile_summary_exposes_hashes_but_not_documents_or_local
 
     serialized = str(summary)
     assert summary["profiles"]["runtime"]["config_sha256"] == "a" * 64
-    assert summary["profiles"]["credential"]["auth_method"] == "chatgpt_oauth"
+    assert "credential" not in summary["profiles"]
     assert "private" not in serialized
     assert "slot:main" not in serialized
 

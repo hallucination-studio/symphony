@@ -20,8 +20,6 @@ class PodiumPerformerProfilesMixin:
                 workspace_id=workspace_id,
                 runtime_profile=bundle.runtime_profile,
                 performer_profile=bundle.performer_profile,
-                credentials=bundle.credentials,
-                selected_credential=bundle.selected_credential,
             )
         except PerformerProfileLoadError:
             raise

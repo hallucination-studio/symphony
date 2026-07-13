@@ -169,11 +169,16 @@ async def test_podium_tick_applies_command_before_reporting_dispatch_and_workflo
         calls.append("command")
         return {"status": "idle"}
 
+    async def poll_live_once(_server: ConductorApiServer) -> dict[str, str]:
+        calls.append("live")
+        return {"status": "idle"}
+
     monkeypatch.setattr(ConductorApiServer, "_poll_command_once", poll_command_once, raising=False)
+    monkeypatch.setattr(ConductorApiServer, "_poll_live_once", poll_live_once, raising=False)
 
     await ConductorApiServer(FakeService())._poll_once()
 
-    assert calls == ["command", "report", "dispatch", "workflow"]
+    assert calls == ["live", "command", "report", "dispatch", "workflow"]
 
 
 def test_managed_run_linear_proxy_requires_podium_configuration(tmp_path: Path) -> None:
@@ -207,9 +212,7 @@ def test_unbind_and_rebind_hard_cut_old_managed_runs(tmp_path: Path) -> None:
         performer_kind="codex",
         runtime_kind="codex",
         turn_policy={"max_turns": 4},
-        config_document='model = "managed"\napproval_policy = "never"\n',
-        credential_id="credential:user-1:chatgpt-main",
-        credential_ref="slot:chatgpt-main",
+        config_document='model = "managed"\napproval_policy = "never"\ncli_auth_credentials_store = "file"\n',
     )
     rebound = service._handle_project_configure(
         {
@@ -219,8 +222,6 @@ def test_unbind_and_rebind_hard_cut_old_managed_runs(tmp_path: Path) -> None:
             "project_name": "New",
             "binding_id": "binding-new",
             "config_version": 3,
-            "auth_method": "chatgpt_oauth",
-            "account_hint": "main",
             "performer_binding_generation": 1,
             "repository": {"mode": "local_path", "value": str(tmp_path)},
         }
@@ -251,9 +252,7 @@ def test_project_configure_rejects_removed_profile_revision_fields(tmp_path: Pat
         performer_kind="codex",
         runtime_kind="codex",
         turn_policy={},
-        config_document='model = "managed"\n',
-        credential_id="credential:user-1:chatgpt-main",
-        credential_ref="slot:chatgpt-main",
+        config_document='model = "managed"\ncli_auth_credentials_store = "file"\n',
     )
     service = ConductorService(store=ConductorStore(tmp_path), data_root=tmp_path)
 

@@ -151,7 +151,6 @@ def test_oauth_phase_collects_all_checks_after_unavailable_session(monkeypatch, 
                 "/api/v1/auth/me": real_flow._HttpObservation(401, {}),
                 "/api/v1/linear/installations": real_flow._HttpObservation(401, {}),
                 "/api/v1/linear/projects": real_flow._HttpObservation(401, {}),
-                "/api/v1/runtimes": real_flow._HttpObservation(401, {}),
                 "/api/v1/linear/oauth/callback": real_flow._HttpObservation(400, {}),
             }
 
@@ -176,16 +175,75 @@ def test_oauth_phase_collects_all_checks_after_unavailable_session(monkeypatch, 
     report = real_flow._run_oauth_phase(context)
 
     assert report["status"] == "failed"
-    assert len(report["checks"]) == 8
+    assert len(report["checks"]) == 7
     assert {check["name"] for check in report["checks"]} >= {
         "oauth_unauthenticated_rejected",
         "oauth_authenticated_session_observed",
         "oauth_active_installation_healthy",
         "oauth_selected_project_visible",
-        "oauth_existing_runtime_enrolled",
         "oauth_callback_missing_state_rejected",
         "oauth_callback_invalid_state_rejected",
     }
+
+
+def test_linear_phase_is_independent_from_podium_and_oauth(monkeypatch, tmp_path: Path) -> None:
+    class FakeFixture:
+        @classmethod
+        def from_environment(cls, **_kwargs):
+            return cls()
+
+        def graphql(self, _query):
+            return {"viewer": {"id": "viewer-1"}}
+
+        def project(self, slug):
+            return {"id": "project-1", "name": "Fixture", "slug": slug, "team": {"id": "team-1"}}
+
+        def workflow_states(self, _team_id):
+            return [{"id": "state-1", "type": "backlog"}]
+
+        def create_parent_issue(self, *_args, **_kwargs):
+            return {"id": "issue-1", "identifier": "SYM-1", "parent": None}
+
+        def issue(self, _issue_id):
+            return {"id": "issue-1", "identifier": "SYM-1", "parent": None}
+
+        def children(self, _issue_id):
+            return []
+
+    class ForbiddenObserver:
+        def __init__(self, *_args, **_kwargs):
+            raise AssertionError("Linear phase must not access Podium")
+
+    monkeypatch.setattr(real_flow, "LinearFixture", FakeFixture)
+    monkeypatch.setattr(real_flow, "_PodiumObserver", ForbiddenObserver)
+    context = real_flow._RunContext(
+        run_id="run-linear",
+        artifact_root=tmp_path,
+        output_path=tmp_path / "report.json",
+        project_slug="fixture",
+        timeout=1,
+        offline=False,
+        settings={"project_slug": "fixture", "codex_seed": "", "podium_url": ""},
+    )
+
+    report = real_flow._run_linear_phase(context)
+
+    assert report["status"] == "passed"
+    assert all(check["name"].startswith("linear_fixture_") for check in report["checks"])
+
+
+def test_performer_config_is_loaded_only_from_static_seed(tmp_path: Path) -> None:
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    (seed / "config.toml").write_text(
+        'model = "gpt-5.4"\napproval_policy = "never"\nsandbox_mode = "read-only"\ncli_auth_credentials_store = "file"\n',
+        encoding="utf-8",
+    )
+
+    config = real_flow._load_static_performer_config(seed)
+
+    assert 'model = "gpt-5.4"' in config
+    assert 'cli_auth_credentials_store = "file"' in config
 
 
 def test_podium_observer_bounds_external_timeout() -> None:
@@ -206,7 +264,7 @@ def test_authenticated_observer_reads_only_sanitized_browser_observations(tmp_pa
                         "status_code": 200,
                         "payload": {
                             "conductors": [
-                                {"profiles": {"credential": {"auth_method": "chatgpt_oauth"}}}
+                                {"profiles": {"performer": {"performer_kind": "codex"}}}
                             ]
                         },
                     },
@@ -226,7 +284,7 @@ def test_authenticated_observer_reads_only_sanitized_browser_observations(tmp_pa
     assert authenticated.status_code == 200
     assert authenticated.payload["user"]["id"] == "user-1"
     assert managed_runs.status_code == 200
-    assert managed_runs.payload["conductors"][0]["profiles"]["credential"]["auth_method"] == "chatgpt_oauth"
+    assert managed_runs.payload["conductors"][0]["profiles"]["performer"]["performer_kind"] == "codex"
 
 
 def test_authenticated_observer_rejects_secret_bearing_browser_observation(tmp_path: Path) -> None:
@@ -353,18 +411,6 @@ def test_authenticated_observer_rejects_symlinked_auth_path(tmp_path: Path) -> N
 
     assert response.status_code == 0
     assert response.error_code == "browser_session_observation_path_forbidden"
-
-
-def test_fixed_codex_profile_is_the_approved_gpt_5_4_responses_file_auth_config() -> None:
-    import tomllib
-
-    config = tomllib.loads(real_flow._fixed_codex_config())
-    provider = config["model_providers"][config["model_provider"]]
-
-    assert config["model"] == "gpt-5.4"
-    assert config["cli_auth_credentials_store"] == "file"
-    assert provider["base_url"] == "http://52.253.109.220:8080/v1"
-    assert provider["wire_api"] == "responses"
 
 
 def test_performer_phase_fails_closed_when_staged_seed_has_no_auth(tmp_path: Path) -> None:

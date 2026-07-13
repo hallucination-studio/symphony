@@ -6,11 +6,12 @@ contraction plans. [`spec.md`](spec.md) is the product contract;
 [`todo.md`](todo.md) is the current work checklist; [`docs/modules`](../docs/modules/README.md)
 records one design baseline per module.
 
-The Codex configuration slice follows the accepted
-[`ADR-0004`](../docs/decisions/0004-normalized-codex-profiles-and-credential-references.md).
-The normalized current profile rows, local credential slots, and binding
-generation/hash fencing are implemented; real-flow verification remains
-environment-dependent.
+The non-secret Codex profile slice continues to follow
+[`ADR-0004`](../docs/decisions/0004-normalized-codex-profiles-and-credential-references.md),
+while credential ownership, selection, readiness, and reporting are superseded
+by the approved
+[`ADR-0005`](../docs/decisions/0005-conductor-owned-opaque-codex-credentials.md).
+ADR-0005 implementation and real-flow verification are active work.
 
 ## Outcome
 
@@ -111,17 +112,62 @@ HTTP API is separate from that transport.
 
 ## Remaining Work
 
-1. Keep the accepted current profile documents, binding generation/hash fencing,
-   local credential selection, and isolated attempt materialization covered by
-   regression tests; do not add profile revision tables.
-2. Keep the sanitized evidence projection contract covered by the existing
+1. Hard-cut Podium credential persistence and credential-bearing shared command
+   fields while retaining current non-secret profile documents and binding
+   generation/hash fencing.
+2. Implement Conductor-owned opaque credential slots, local selection,
+   isolated attempt materialization, bounded live checks, and safe OAuth refresh
+   copy-back without parsing `auth.json`.
+3. Implement the outbound-only ephemeral Podium/Conductor inventory and check
+   relay without durable credential-management state.
+4. Keep the sanitized evidence projection contract covered by the existing
    operator and Linear surfaces. No new runner, endpoint, or evidence child-issue
    tree is allowed.
-3. Run the single staged real Linear/OAuth/Codex batch after the local rebuild.
+5. Run the single staged real Linear/OAuth/Codex batch after the local rebuild.
    `tools/real_flow.py --phase all` records all three prerequisite phases and
    Overall under one `run_id`; current external blockers remain visible in
    the newest `.test-real-flow/batch-report-*.json` and do not count as
    acceptance.
+
+## ADR-0005 implementation scope ledger
+
+### Authorized
+
+- Remove Podium credential rows, binding credential references, and credential
+  fields from the shared `project.configure` contract.
+- Add Conductor-owned opaque Codex credential slots supporting official OAuth
+  and API-key login state through the same file-based path.
+- Add local init, live check, and selection commands plus isolated attempt
+  materialization and safe refresh copy-back.
+- Add an ephemeral outbound-only Podium/Conductor inventory and check relay.
+- Update the existing real-flow runner to reuse fixed test slots and model
+  `gpt-5.4`.
+
+### Required consequences
+
+- Managed runtime TOML requires `cli_auth_credentials_store = "file"`.
+- Podium retains only non-secret runtime and Performer profiles; it stores no
+  slot inventory, selection, auth method, readiness, or check result.
+- Conductor is the sole durable owner of slot metadata and selection, and every
+  Performer attempt receives a fresh isolated `CODEX_HOME`.
+- OAuth refresh copy-back is locked, bounded, atomic, path-safe, and opaque.
+- Live responses are bounded, sanitized, no-store, single-delivery, and not
+  written to runtime commands or other durable Podium state.
+
+### Out of scope
+
+- Remote credential mutation, Podium credential vaults, KMS/keyring extraction,
+  parsing `auth.json`, a second runtime transport, a second E2E runner, or an
+  additional scheduler.
+
+### Assumptions requiring approval
+
+- None.
+
+### Deferred ideas
+
+- Durable multi-process live relay, remote slot lifecycle management, cached
+  readiness/account discovery, and managed credential brokerage.
 
 ## Verification Rule
 

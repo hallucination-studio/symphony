@@ -105,22 +105,6 @@ POSTGRES_SCHEMA_STATEMENTS: Iterable[str] = (
             )
             """,
             """
-            CREATE TABLE IF NOT EXISTS performer_credentials (
-                id TEXT PRIMARY KEY,
-                workspace_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-                name TEXT NOT NULL,
-                performer_kind TEXT NOT NULL,
-                auth_method TEXT NOT NULL,
-                account_hint TEXT NOT NULL DEFAULT '',
-                local_ref TEXT NOT NULL,
-                state TEXT NOT NULL DEFAULT 'active',
-                created_by TEXT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
-                created_at TIMESTAMPTZ NOT NULL,
-                updated_at TIMESTAMPTZ NOT NULL,
-                UNIQUE(workspace_id, name)
-            )
-            """,
-            """
             CREATE TABLE IF NOT EXISTS project_bindings (
                 id TEXT PRIMARY KEY,
                 conductor_id TEXT NOT NULL REFERENCES conductors(id) ON DELETE CASCADE,
@@ -166,7 +150,6 @@ POSTGRES_SCHEMA_STATEMENTS: Iterable[str] = (
                 workspace_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
                 project_binding_id TEXT NOT NULL UNIQUE REFERENCES project_bindings(id) ON DELETE CASCADE,
                 performer_profile_id TEXT NOT NULL REFERENCES performer_profiles(id) ON DELETE RESTRICT,
-                credential_id TEXT NOT NULL REFERENCES performer_credentials(id) ON DELETE RESTRICT,
                 generation BIGINT NOT NULL DEFAULT 1,
                 state TEXT NOT NULL DEFAULT 'pending',
                 error_code TEXT NOT NULL DEFAULT '',
@@ -185,7 +168,6 @@ POSTGRES_SCHEMA_STATEMENTS: Iterable[str] = (
             """,
             "CREATE INDEX IF NOT EXISTS performer_profiles_runtime_index ON performer_profiles (runtime_profile_id)",
             "CREATE INDEX IF NOT EXISTS performer_bindings_profile_index ON performer_bindings (performer_profile_id)",
-            "CREATE INDEX IF NOT EXISTS performer_bindings_credential_index ON performer_bindings (credential_id)",
             """
             CREATE TABLE IF NOT EXISTS dispatches (
                 id TEXT PRIMARY KEY,

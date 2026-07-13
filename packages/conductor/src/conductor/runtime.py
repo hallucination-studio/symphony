@@ -10,7 +10,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
 
-from performer_api.codex_runtime import CodexRuntimeConfigError, validate_codex_toml
 from performer_api.turns import TurnContext
 
 
@@ -72,9 +71,6 @@ class PerformerRuntime:
         *,
         workspace_path: Path | str | None = None,
         home_scope: str | None = None,
-        codex_config_document: str | None = None,
-        credential_id: str | None = None,
-        credential_ref: str | None = None,
     ) -> dict[str, str]:
         codex_home = instance_state_root / "runtime-homes" / _safe_scope(home_scope or "attempt") / "codex"
         try:
@@ -88,27 +84,9 @@ class PerformerRuntime:
         if not codex_home.is_dir():
             raise ValueError(f"isolated CODEX_HOME could not be materialized: {codex_home}")
 
-        managed_profile = codex_config_document is not None or credential_id is not None
-        if managed_profile:
-            if not credential_id or not credential_ref or "/" in credential_ref or "\\" in credential_ref:
-                raise ValueError("managed_codex_credential_slot_required")
-            credential_slot = instance_state_root / "performer-credentials" / _safe_scope(credential_id) / "CODEX_HOME"
-            if not credential_slot.is_dir():
-                self._provision_credential_slot(instance_state_root, credential_id)
-            if not credential_slot.is_dir():
-                raise ValueError("managed_codex_credential_slot_required")
-            self._copy_codex_home_seed(credential_slot, codex_home)
-            if codex_config_document is None:
-                raise ValueError("managed_codex_config_required")
-            try:
-                normalized_config = validate_codex_toml(codex_config_document)
-            except CodexRuntimeConfigError as exc:
-                raise ValueError(exc.code) from exc
-            (codex_home / "config.toml").write_text(normalized_config, encoding="utf-8")
-        else:
-            source = _codex_seed_from_environment()
-            if source is not None:
-                self._copy_codex_home_seed(source, codex_home)
+        source = _codex_seed_from_environment()
+        if source is not None:
+            self._copy_codex_home_seed(source, codex_home)
         if workspace_path is not None:
             _trust_codex_project(codex_home / "config.toml", Path(workspace_path))
 
@@ -143,19 +121,6 @@ class PerformerRuntime:
                 shutil.copy2(source_path, destination_path)
             if name == "auth.json":
                 destination_path.chmod(0o600)
-
-    def _provision_credential_slot(self, instance_state_root: Path, credential_id: str) -> None:
-        source = _codex_seed_from_environment()
-        if source is None:
-            return
-        destination = instance_state_root / "performer-credentials" / _safe_scope(credential_id) / "CODEX_HOME"
-        try:
-            if destination.exists():
-                shutil.rmtree(destination)
-            destination.mkdir(parents=True, exist_ok=False)
-            self._copy_codex_home_seed(source, destination)
-        except OSError as exc:
-            raise ValueError("managed_codex_credential_slot_materialization_failed") from exc
 
     def append_event(self, log_path: Path, message: str) -> None:
         log_path.parent.mkdir(parents=True, exist_ok=True)

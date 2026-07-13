@@ -93,11 +93,6 @@ class PodiumRuntimeMixin:
                     "config_format": str(profile.get("config_format") or ""),
                     "config_sha256": str(profile.get("config_sha256") or ""),
                 },
-                "credential": {
-                    "credential_id": str(profile.get("credential_id") or ""),
-                    "auth_method": str(profile.get("auth_method") or ""),
-                    "account_hint": str(profile.get("account_hint") or ""),
-                },
             },
         }
 

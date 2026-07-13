@@ -815,32 +815,6 @@ def _run_oauth_phase(context: _RunContext) -> dict[str, Any]:
         "slug_id": selected_project.get("slug_id") if isinstance(selected_project, dict) else "",
     }
 
-    runtimes = observer.get_authenticated("/api/v1/runtimes")
-    runtime_rows = runtimes.payload.get("runtimes")
-    conductor_rows = runtimes.payload.get("conductors")
-    enrolled = [
-        row
-        for row in (conductor_rows if isinstance(conductor_rows, list) else [])
-        if isinstance(row, dict)
-        and str(row.get("enrollment_state") or "") == "enrolled"
-        and bool(row.get("online"))
-        and isinstance(row.get("binding"), dict)
-        and bool(row["binding"].get("active"))
-        and str(row["binding"].get("project_slug") or "") == context.project_slug
-    ]
-    has_runtime = bool(enrolled)
-    _append_check(
-        checks,
-        failures,
-        name="oauth_existing_runtime_enrolled",
-        passed=runtimes.status_code == 200 and has_runtime,
-        group="binding",
-        error_code="runtime_not_enrolled",
-        reason="OAuth phase reuses one enrolled runtime and never creates a replacement",
-        observations={"status_code": runtimes.status_code, "runtime_count": len(enrolled)},
-        next_action="enroll_one_conductor_then_rerun_the_batch",
-    )
-
     missing_state = observer.get("/api/v1/linear/oauth/callback")
     invalid_state = observer.get(f"/api/v1/linear/oauth/callback?state={uuid4().hex}")
     for name, response in (("oauth_callback_missing_state_rejected", missing_state), ("oauth_callback_invalid_state_rejected", invalid_state)):
@@ -867,18 +841,16 @@ def _run_oauth_phase(context: _RunContext) -> dict[str, Any]:
 
 
 def _run_linear_phase(context: _RunContext) -> dict[str, Any]:
+    """Exercise the direct Linear fixture without Podium, OAuth, or Conductor."""
+
     if context.offline:
         return _offline_phase(context, "linear")
     checks: list[dict[str, Any]] = []
     failures: list[dict[str, Any]] = []
     observations: dict[str, Any] = {}
-    observer = _PodiumObserver(
-        context.settings["podium_url"],
-        timeout=context.timeout,
-        browser_observation=context.settings.get("browser_observation", ""),
-    )
     fixture: LinearFixture | None = None
     project: dict[str, Any] | None = None
+    state: dict[str, str] | None = None
     parent: dict[str, Any] | None = None
 
     with _fixture_environment():
@@ -893,11 +865,11 @@ def _run_linear_phase(context: _RunContext) -> dict[str, Any]:
                 passed=bool(viewer_id),
                 group="linear",
                 error_code="linear_fixture_failed",
-                reason="The staged Linear fixture credential must read viewer data",
-                observations={"viewer_id": viewer_id, "token_present": True},
+                reason="The configured Linear fixture token must read viewer identity",
+                observations={"viewer_id_present": bool(viewer_id), "token_present": bool(os.environ.get("PODIUM_LINEAR_APP_ACCESS_TOKEN"))},
                 next_action="fix_podium_linear_app_access_token",
             )
-        except LinearFixtureError as exc:
+        except Exception as exc:
             _append_check(
                 checks,
                 failures,
@@ -913,22 +885,18 @@ def _run_linear_phase(context: _RunContext) -> dict[str, Any]:
         if fixture is not None:
             try:
                 project = fixture.project(context.project_slug)
-                observations["project"] = {
-                    "id": project.get("id"),
-                    "team_id": (project.get("team") or {}).get("id"),
-                    "slug": project.get("slugId"),
-                }
                 _append_check(
                     checks,
                     failures,
                     name="linear_fixture_project_visible",
-                    passed=True,
+                    passed=bool(project.get("id")) and bool((project.get("team") or {}).get("id")),
                     group="linear",
                     error_code="linear_project_not_found",
-                    reason="The configured Linear project must be readable",
-                    observations=observations["project"],
+                    reason="The configured project slug must be visible to the direct Linear fixture token",
+                    observations={"project_id": project.get("id"), "project_slug": project.get("slug"), "team_id": (project.get("team") or {}).get("id")},
+                    next_action="fix_linear_project_scope",
                 )
-            except LinearFixtureError as exc:
+            except Exception as exc:
                 _append_check(
                     checks,
                     failures,
@@ -947,16 +915,13 @@ def _run_linear_phase(context: _RunContext) -> dict[str, Any]:
                 passed=False,
                 group="linear",
                 error_code="linear_fixture_unavailable",
-                reason="Project lookup cannot run until the fixture credential is readable",
+                reason="Project lookup requires a working direct Linear fixture credential",
                 next_action="fix_podium_linear_app_access_token",
             )
 
-        state = None
         if fixture is not None and project is not None:
-            team_id = str((project.get("team") or {}).get("id") or "")
             try:
-                states = fixture.workflow_states(team_id)
-                state = _select_backlog_state(states)
+                state = _select_backlog_state(fixture.workflow_states(str((project.get("team") or {}).get("id") or "")))
                 _append_check(
                     checks,
                     failures,
@@ -964,10 +929,10 @@ def _run_linear_phase(context: _RunContext) -> dict[str, Any]:
                     passed=True,
                     group="linear",
                     error_code="linear_fixture_state_ambiguous",
-                    reason="Exactly one backlog/unstarted state must be selected",
-                    observations={"state_id": state["id"], "state_type": state["type"]},
+                    reason="Exactly one backlog or fallback unstarted state is required",
+                    observations={"state_id": state.get("id"), "state_type": state.get("type")},
                 )
-            except (LinearFixtureError, ValueError) as exc:
+            except Exception as exc:
                 _append_check(
                     checks,
                     failures,
@@ -976,7 +941,7 @@ def _run_linear_phase(context: _RunContext) -> dict[str, Any]:
                     group="linear",
                     error_code="linear_fixture_state_ambiguous",
                     reason=_sanitize_reason(exc),
-                    next_action="choose_one_disposable_backlog_state",
+                    next_action="fix_linear_project_scope",
                 )
         else:
             _append_check(
@@ -986,274 +951,108 @@ def _run_linear_phase(context: _RunContext) -> dict[str, Any]:
                 passed=False,
                 group="linear",
                 error_code="linear_fixture_state_unavailable",
-                reason="Workflow state lookup requires a readable project",
+                reason="Workflow-state lookup requires a visible Linear project",
                 next_action="fix_linear_project_scope",
             )
 
-    active_installation = observer.get_authenticated("/api/v1/linear/installations")
-    active = active_installation.payload.get("active")
-    app_user_id = str(active.get("app_user_id") or "") if isinstance(active, dict) else ""
-    reconciliation_ok = (
-        active_installation.status_code == 200
-        and isinstance(active, dict)
-        and str(active.get("state") or "") == "active"
-        and str(active.get("reconciliation_state") or "").lower() in {"active", "healthy", "ready", "ok"}
-        and bool(str(active.get("last_reconciliation_at") or "").strip())
-        and not str(active.get("reconciliation_error_code") or "").strip()
-    )
-    _append_check(
-        checks,
-        failures,
-        name="podium_linear_reconciliation_healthy",
-        passed=reconciliation_ok,
-        group="linear",
-        error_code="podium_reconciliation_unhealthy",
-        reason="The existing installation must have a healthy recent reconciliation checkpoint",
-        observations={
-            "status_code": active_installation.status_code,
-            "state": active.get("state") if isinstance(active, dict) else "",
-            "reconciliation_state": active.get("reconciliation_state") if isinstance(active, dict) else "",
-            "last_reconciliation_at": active.get("last_reconciliation_at") if isinstance(active, dict) else "",
-            "reconciliation_error_code": active.get("reconciliation_error_code") if isinstance(active, dict) else "",
-        },
-        retryable=True,
-        next_action="repair_linear_installation_then_wait_for_reconciliation",
-    )
-    installation_ready = (
-        active_installation.status_code == 200
-        and isinstance(active, dict)
-        and str(active.get("state") or "") == "active"
-        and bool(app_user_id)
-        and str(active.get("reconciliation_state") or "").lower() in {"", "active", "healthy", "ready", "ok"}
-        and not str(active.get("error_code") or "").strip()
-    )
-    if fixture is not None and project is not None and state is not None and app_user_id and installation_ready:
-        try:
-            parent = fixture.create_parent_issue(
-                team_id=str((project.get("team") or {}).get("id") or ""),
-                project_id=str(project.get("id") or ""),
-                state_id=str(state["id"]),
-                title=f"[Symphony real-e2e {context.run_id}] Linear dispatch probe",
-                description="Diagnostic fixture only. Do not manually transition this issue.",
-                delegate_id=app_user_id,
-            )
-            _append_check(
-                checks,
-                failures,
-                name="linear_fixture_parent_created",
-                passed=True,
-                group="linear",
-                error_code="linear_issue_create_failed",
-                reason="A disposable parent issue must be created through the fixture helper",
-                observations={"issue_id": parent.get("id"), "identifier": parent.get("identifier")},
-            )
-        except LinearFixtureError as exc:
+        if fixture is not None and project is not None and state is not None:
+            try:
+                parent = fixture.create_parent_issue(
+                    team_id=str((project.get("team") or {}).get("id") or ""),
+                    project_id=str(project.get("id") or ""),
+                    state_id=str(state.get("id") or ""),
+                    title=f"Symphony real E2E fixture {context.run_id}",
+                    description="Direct Linear phase fixture. It is intentionally not delegated and does not exercise Podium.",
+                )
+                _append_check(
+                    checks,
+                    failures,
+                    name="linear_fixture_parent_created",
+                    passed=bool(parent.get("id")) and parent.get("parent") is None,
+                    group="linear",
+                    error_code="linear_issue_create_failed",
+                    reason="The direct Linear fixture must create one explicit root issue",
+                    observations={"issue_id": parent.get("id"), "issue_identifier": parent.get("identifier"), "parent_is_null": parent.get("parent") is None},
+                    next_action="fix_linear_write_scope",
+                )
+            except Exception as exc:
+                _append_check(
+                    checks,
+                    failures,
+                    name="linear_fixture_parent_created",
+                    passed=False,
+                    group="linear",
+                    error_code="linear_issue_create_failed",
+                    reason=_sanitize_reason(exc),
+                    next_action="fix_linear_write_scope",
+                )
+        else:
             _append_check(
                 checks,
                 failures,
                 name="linear_fixture_parent_created",
                 passed=False,
                 group="linear",
-                error_code="linear_issue_create_failed",
-                reason=_sanitize_reason(exc),
+                error_code="linear_parent_prerequisite_missing",
+                reason="Parent creation requires direct Linear viewer, project, and workflow-state access",
+                next_action="repair_linear_fixture_access",
+            )
+
+        if fixture is not None and parent is not None and parent.get("id"):
+            try:
+                fetched = fixture.issue(str(parent["id"]))
+                children = fixture.children(str(parent["id"]))
+                child_parents_explicit = all(
+                    isinstance(child, dict)
+                    and isinstance(child.get("parent"), dict)
+                    and bool(child["parent"].get("id"))
+                    and bool(child["parent"].get("identifier"))
+                    for child in children
+                )
+                tree_ok = fetched.get("parent") is None and child_parents_explicit
+                _append_check(
+                    checks,
+                    failures,
+                    name="linear_fixture_parent_tree_explicit",
+                    passed=tree_ok,
+                    group="linear",
+                    error_code="linear_parent_tree_mismatch",
+                    reason="The fixture root must have parent null and every returned child must expose explicit parent identity",
+                    observations={"parent_is_null": fetched.get("parent") is None, "child_count": len(children), "child_parents_explicit": child_parents_explicit},
+                    next_action="inspect_linear_fixture_parent_fields",
+                )
+            except Exception as exc:
+                _append_check(
+                    checks,
+                    failures,
+                    name="linear_fixture_parent_tree_explicit",
+                    passed=False,
+                    group="linear",
+                    error_code="linear_issue_read_failed",
+                    reason=_sanitize_reason(exc),
+                    next_action="fix_linear_read_scope",
+                )
+        else:
+            _append_check(
+                checks,
+                failures,
+                name="linear_fixture_parent_tree_explicit",
+                passed=False,
+                group="linear",
+                error_code="linear_parent_tree_unavailable",
+                reason="Parent tree reads require a successfully created direct Linear fixture issue",
                 next_action="fix_linear_write_scope",
             )
-    else:
-        _append_check(
-            checks,
-            failures,
-            name="linear_fixture_parent_created",
-            passed=False,
-            group="linear",
-            error_code="linear_parent_prerequisite_missing",
-            reason="Parent creation requires a readable project, state, and existing app user",
-            next_action="repair_oauth_installation_and_fixture_access",
-        )
 
-    if fixture is not None and parent is not None:
-        try:
-            issue = fixture.issue(str(parent["id"]))
-            children = fixture.children(str(parent["id"]))
-            issue_parent_ok = issue.get("parent") is None
-            child_parent_ok = all(
-                isinstance(child.get("parent"), dict)
-                and child["parent"].get("id") == parent.get("id")
-                and child["parent"].get("identifier") == parent.get("identifier")
-                for child in children
-            )
-            _append_check(
-                checks,
-                failures,
-                name="linear_fixture_parent_tree_explicit",
-                passed=issue_parent_ok and child_parent_ok,
-                group="linear",
-                error_code="linear_parent_tree_mismatch",
-                reason="Parent and child reads must include explicit parent fields",
-                observations={"child_count": len(children), "parent_is_null": issue_parent_ok},
-                next_action="inspect_linear_fixture_parent_fields",
-            )
-        except LinearFixtureError as exc:
-            _append_check(
-                checks,
-                failures,
-                name="linear_fixture_parent_tree_explicit",
-                passed=False,
-                group="linear",
-                error_code="linear_issue_read_failed",
-                reason=_sanitize_reason(exc),
-                next_action="fix_linear_read_scope",
-            )
-    else:
-        _append_check(
-            checks,
-            failures,
-            name="linear_fixture_parent_tree_explicit",
-            passed=False,
-            group="linear",
-            error_code="linear_parent_tree_unavailable",
-            reason="Parent tree reads require a successfully created disposable issue",
-            next_action="fix_linear_write_scope",
-        )
-
-    selected_projects = observer.get_authenticated("/api/v1/linear/projects")
-    selected_rows = selected_projects.payload.get("projects") if isinstance(selected_projects.payload, dict) else []
-    selected_match = next(
-        (
-            row
-            for row in (selected_rows if isinstance(selected_rows, list) else [])
-            if isinstance(row, dict)
-            and str(row.get("slug") or row.get("slug_id") or "") == context.project_slug
-            and bool(str(row.get("id") or "").strip())
-        ),
-        None,
-    )
-    _append_check(
-        checks,
-        failures,
-        name="podium_selected_project_visible",
-        passed=selected_projects.status_code == 200 and selected_match is not None,
-        group="binding",
-        error_code="podium_selected_project_unavailable",
-        reason="Podium must expose the already selected project without changing it",
-        observations={"status_code": selected_projects.status_code, "project_slug": context.project_slug, "project_id": selected_match.get("id") if isinstance(selected_match, dict) else ""},
-        next_action="reuse_the_existing_authenticated_podium_session",
-    )
-
-    runtime_list = observer.get_authenticated("/api/v1/runtimes")
-    _append_check(
-        checks,
-        failures,
-        name="podium_runtime_identity_visible",
-        passed=runtime_list.status_code == 200,
-        group="binding",
-        error_code="runtime_identity_unavailable",
-        reason="An enrolled runtime identity is required for dispatch routing",
-        observations={"status_code": runtime_list.status_code},
-        next_action="reuse_one_enrolled_runtime",
-    )
-    runtime_conductors = runtime_list.payload.get("conductors") if isinstance(runtime_list.payload, dict) else []
-    matching_bindings = [
-        row.get("binding")
-        for row in (runtime_conductors if isinstance(runtime_conductors, list) else [])
-        if isinstance(row, dict) and isinstance(row.get("binding"), dict)
-        and str(row["binding"].get("project_slug") or "") == context.project_slug
-        and bool(row["binding"].get("active"))
-    ]
-    binding_ok = runtime_list.status_code == 200 and len(matching_bindings) == 1
-    _append_check(
-        checks,
-        failures,
-        name="linear_binding_identity_and_label",
-        passed=(
-            binding_ok
-            and bool(str(matching_bindings[0].get("linear_project_id") or ""))
-            and str(matching_bindings[0].get("label_name") or "").startswith("symphony:conductor/")
-        ) if matching_bindings else False,
-        group="binding",
-        error_code="linear_binding_identity_mismatch",
-        reason="Exactly one active Conductor binding and its managed label must match the selected project",
-        observations={
-            "binding_count": len(matching_bindings),
-            "label_name": matching_bindings[0].get("label_name") if matching_bindings else "",
-            "linear_project_id": matching_bindings[0].get("linear_project_id") if matching_bindings else "",
-        },
-        next_action="repair_one_to_one_conductor_binding",
-    )
-
-    dispatch_observation: dict[str, Any] = {}
-    conductor_url = context.settings.get("conductor_url", "").strip()
-    if parent is None:
-        dispatch_passed = False
-        dispatch_error = "dispatch_probe_prerequisite_missing"
-        dispatch_reason = "Dispatch observation requires a successfully created disposable parent issue"
-        dispatch_next_action = "fix_linear_fixture_access_before_observing_conductor_dispatch"
-    elif not conductor_url:
-        dispatch_passed = False
-        dispatch_error = "dispatch_probe_conductor_unavailable"
-        dispatch_reason = "Dispatch lease must be observed from the enrolled Conductor local API"
-        dispatch_next_action = "set_symphony_e2e_conductor_url_for_the_enrolled_runtime"
-    else:
-        conductor = _ConductorObserver(conductor_url, timeout=context.timeout)
-        deadline = time.monotonic() + min(max(context.timeout, 0.1), 20.0)
-        matched_run: dict[str, Any] | None = None
-        matched_count = 0
-        latest = _HttpObservation(0, {})
-        while time.monotonic() <= deadline:
-            latest = conductor.get("/api/managed-runs")
-            rows = latest.payload.get("managed_runs") if isinstance(latest.payload, dict) else None
-            runs = rows.get("runs") if isinstance(rows, dict) else None
-            if isinstance(runs, list):
-                matching = [
-                    row for row in runs
-                    if isinstance(row, dict) and str(row.get("parent_issue_id") or "") == str(parent.get("id") or "")
-                ]
-                matched_count = len(matching)
-                matched_run = next(
-                    iter(matching),
-                    None,
-                )
-            if matched_run is not None:
-                break
-            time.sleep(min(0.25, max(0.0, deadline - time.monotonic())))
-        dispatch_passed = latest.status_code == 200 and matched_run is not None
-        dispatch_error = "" if dispatch_passed else "dispatch_not_observed"
-        dispatch_reason = (
-            "The enrolled Conductor accepted the disposable parent dispatch"
-            if dispatch_passed
-            else "The enrolled Conductor did not expose a run for the disposable parent within the bounded observation window"
-        )
-        dispatch_next_action = "continue" if dispatch_passed else "inspect_conductor_poll_and_podium_dispatch_logs"
-        dispatch_observation = {
-            "status_code": latest.status_code,
-            "error_code": latest.error_code,
-            "parent_issue_id": parent.get("id"),
-            "run_id": matched_run.get("run_id") if isinstance(matched_run, dict) else "",
-            "matched_count": matched_count,
-        }
-    _append_check(
-        checks,
-        failures,
-        name="podium_dispatch_lease_probe",
-        passed=dispatch_passed,
-        group="binding",
-        error_code=dispatch_error,
-        reason=dispatch_reason,
-        observations=dispatch_observation,
-        action_required=not dispatch_passed,
-        next_action=dispatch_next_action,
-    )
-    _append_check(
-        checks,
-        failures,
-        name="linear_dispatch_deduplicated",
-        passed=dispatch_passed and dispatch_observation.get("matched_count") == 1,
-        group="linear",
-        error_code="linear_dispatch_duplicate",
-        reason="A delegation epoch must produce exactly one durable Conductor run",
-        observations={"matched_count": dispatch_observation.get("matched_count", 0), "parent_issue_id": dispatch_observation.get("parent_issue_id", "")},
-        next_action="inspect_poll_checkpoint_and_delegation_epoch",
-    )
-
+    observations["project"] = {
+        "id": project.get("id") if isinstance(project, dict) else "",
+        "slug": project.get("slug") if isinstance(project, dict) else context.project_slug,
+        "team_id": (project.get("team") or {}).get("id") if isinstance(project, dict) else "",
+    }
+    observations["parent"] = {
+        "id": parent.get("id") if isinstance(parent, dict) else "",
+        "identifier": parent.get("identifier") if isinstance(parent, dict) else "",
+    }
     return _phase_report(
         context,
         "linear",
@@ -1262,8 +1061,6 @@ def _run_linear_phase(context: _RunContext) -> dict[str, Any]:
         failures=failures,
         observations=observations,
     )
-
-
 def _select_backlog_state(states: list[dict[str, str]]) -> dict[str, str]:
     backlog = [state for state in states if state.get("type") == "backlog"]
     if not backlog:
@@ -1273,70 +1070,20 @@ def _select_backlog_state(states: list[dict[str, str]]) -> dict[str, str]:
     return backlog[0]
 
 
-def _fixed_codex_config() -> str:
-    return (
-        'model_provider = "symphony_e2e"\n'
-        'model = "gpt-5.4"\n'
-        'approval_policy = "never"\n'
-        'sandbox_mode = "workspace-write"\n'
-        'cli_auth_credentials_store = "file"\n'
-        '\n'
-        '[model_providers.symphony_e2e]\n'
-        'name = "symphony_e2e"\n'
-        'base_url = "http://52.253.109.220:8080/v1"\n'
-        'wire_api = "responses"\n'
-        'requires_openai_auth = true\n'
-        '\n'
-        '[sandbox_workspace_write]\n'
-        'network_access = true\n'
-    )
+def _load_static_performer_config(seed: Path) -> str:
+    """Load the test-only runtime config from the approved static Codex seed."""
 
-
-def _load_staged_performer_profile(settings: dict[str, str]) -> tuple[str, dict[str, Any], str, str]:
-    """Load the secret-free Podium profile projection used by the E2E performer phase."""
-
-    profile_root = str(settings.get("performer_profile_dir") or "").strip()
-    profile_name = str(settings.get("performer_profile_name") or "").strip()
-    if not profile_root or not profile_name or Path(profile_name).name != profile_name:
-        raise ValueError("performer_profile_not_configured")
-    root = Path(profile_root).expanduser().resolve()
-    if not root.is_dir() or root.name == ".codex" or _AUTH_PATH.search(str(root)):
-        raise ValueError("performer_profile_path_invalid")
-    profile = root / profile_name
-    if not profile.is_dir():
-        raise ValueError("performer_profile_not_found")
-    performer_path = profile / "performer.json"
-    runtime_path = profile / "runtime.toml"
-    credentials_path = profile / "credentials.json"
-    if not all(path.is_file() and not path.is_symlink() for path in (performer_path, runtime_path, credentials_path)):
-        raise ValueError("performer_profile_files_incomplete")
+    path = Path(seed) / "config.toml"
+    if not path.is_file() or path.is_symlink():
+        raise ValueError("staged_codex_config_invalid")
     try:
-        performer = json.loads(performer_path.read_text(encoding="utf-8"))
-        credentials = json.loads(credentials_path.read_text(encoding="utf-8"))
-        config_document = runtime_path.read_text(encoding="utf-8")
-    except (OSError, json.JSONDecodeError) as exc:
-        raise ValueError("performer_profile_invalid") from exc
-    if not isinstance(performer, dict) or not isinstance(credentials, list):
-        raise ValueError("performer_profile_invalid")
-    credential_id = str(performer.get("credential_id") or "")
-    selected = next((item for item in credentials if isinstance(item, dict) and str(item.get("id") or "") == credential_id), None)
-    credential_ref = str(selected.get("local_ref") or "") if isinstance(selected, dict) else ""
-    if not credential_id or not credential_ref.startswith("slot:") or "/" in credential_ref or "\\" in credential_ref:
-        raise ValueError("performer_profile_credential_invalid")
-    normalized = validate_codex_toml(config_document)
+        normalized = validate_codex_toml(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError) as exc:
+        raise ValueError("staged_codex_config_invalid") from exc
     parsed = tomllib.loads(normalized)
-    provider_name = str(parsed.get("model_provider") or "")
-    provider = parsed.get("model_providers", {}).get(provider_name, {}) if isinstance(parsed.get("model_providers"), dict) else {}
-    if (
-        parsed.get("model") != "gpt-5.4"
-        or parsed.get("cli_auth_credentials_store") != "file"
-        or provider.get("base_url") != "http://52.253.109.220:8080/v1"
-        or provider.get("wire_api") != "responses"
-    ):
-        raise ValueError("performer_profile_fixed_model_mismatch")
-    return normalized, performer, credential_id, credential_ref
-
-
+    if parsed.get("model") != "gpt-5.4" or parsed.get("cli_auth_credentials_store") != "file":
+        raise ValueError("staged_codex_config_fixed_model_mismatch")
+    return normalized
 def _sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -1543,14 +1290,9 @@ def _run_performer_phase(context: _RunContext) -> dict[str, Any]:
     if not seed_ok:
         return _phase_report(context, "performer", "failed", checks=checks, failures=failures, observations=observations)
 
-    profile_metadata: dict[str, Any] = {}
-    credential_id = "e2e-codex-oauth"
-    credential_ref = "slot:e2e-codex-oauth"
-    fixed_config = _fixed_codex_config()
+    slot_id = "e2e-codex-oauth"
     try:
-        if context.settings.get("performer_profile_dir") or context.settings.get("performer_profile_name"):
-            fixed_config, profile_metadata, credential_id, credential_ref = _load_staged_performer_profile(context.settings)
-        normalized_config = validate_codex_toml(fixed_config)
+        normalized_config = _load_static_performer_config(seed)
         parsed_config = tomllib.loads(normalized_config)
     except Exception as exc:
         _append_check(
@@ -1566,19 +1308,14 @@ def _run_performer_phase(context: _RunContext) -> dict[str, Any]:
         return _phase_report(context, "performer", "failed", checks=checks, failures=failures, observations=observations)
     provider_name = str(parsed_config.get("model_provider") or "")
     provider = parsed_config.get("model_providers", {}).get(provider_name, {})
-    fixed_profile_ok = (
-        parsed_config.get("model") == "gpt-5.4"
-        and parsed_config.get("cli_auth_credentials_store") == "file"
-        and provider.get("base_url") == "http://52.253.109.220:8080/v1"
-        and provider.get("wire_api") == "responses"
-    )
+    fixed_profile_ok = parsed_config.get("model") == "gpt-5.4" and parsed_config.get("cli_auth_credentials_store") == "file"
     config_hash = hashlib.sha256(normalized_config.encode("utf-8")).hexdigest()
     observations["config_sha256"] = config_hash
     observations["profile"] = {
-        "performer_kind": profile_metadata.get("performer_kind", "codex"),
-        "runtime_kind": profile_metadata.get("runtime_kind", "codex"),
-        "credential_id": credential_id,
-        "profile_name_present": bool(context.settings.get("performer_profile_name")),
+        "performer_kind": "codex",
+        "runtime_kind": "codex",
+        "slot_id": slot_id,
+        "source": "static_test_seed",
     }
     observations["model"] = parsed_config.get("model")
     observations["provider"] = {"name": provider_name, "base_url": provider.get("base_url"), "wire_api": provider.get("wire_api")}
@@ -1589,7 +1326,7 @@ def _run_performer_phase(context: _RunContext) -> dict[str, Any]:
         passed=fixed_profile_ok,
         group="provider",
         error_code="codex_profile_mismatch",
-        reason="Performer must use gpt-5.4, the fixed 52 provider, responses wire API, and file auth",
+        reason="Performer test seed must use gpt-5.4 and file-based Codex authentication",
         observations=observations["provider"] | {"model": observations["model"], "config_sha256": config_hash},
         next_action="repair_fixed_gpt_5_4_codex_profile",
     )
@@ -1601,14 +1338,19 @@ def _run_performer_phase(context: _RunContext) -> dict[str, Any]:
         _git_workspace(workspace)
         runtime = PerformerRuntime()
         try:
-            environment = runtime.prepare_environment(
-                state_root,
-                workspace_path=workspace,
-                home_scope=f"{context.run_id}-performer",
-                codex_config_document=normalized_config,
-                credential_id=credential_id,
-                credential_ref=credential_ref,
+            from conductor.performer_credentials import PerformerCredentialSlots
+
+            slots = PerformerCredentialSlots(state_root)
+            slots.init(slot_id, "Real E2E Codex slot")
+            slots.stage_seed(slot_id, seed)
+            slots.check(slot_id, normalized_config, model="gpt-5.4")
+            slots.select(slot_id)
+            materialized = slots.materialize(
+                slot_id,
+                state_root / "runtime-homes" / f"{context.run_id}-performer" / "codex",
+                normalized_config,
             )
+            environment = {"CODEX_HOME": str(materialized.codex_home)}
             codex_home = Path(environment["CODEX_HOME"])
             home_files = {path.name for path in codex_home.iterdir() if path.is_file()}
             home_ok = codex_home != Path.home() / ".codex" and {"config.toml", "auth.json"} <= home_files
@@ -1791,6 +1533,7 @@ def _run_performer_phase(context: _RunContext) -> dict[str, Any]:
                 observations={"run_id": context.run_id, "task_id": task.id, "stale_rejected": stale_rejected},
                 next_action="inspect_performer_result_fencing",
             )
+        slots.reconcile(materialized)
 
     expected_artifact_paths: list[Path] = [plan_paths.request, plan_paths.result, plan_paths.log]
     if task is not None:

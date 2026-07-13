@@ -505,6 +505,8 @@ def _terminal_sdk_error(event: Any) -> CodexError | None:
         return CodexError("upstream_overloaded_exhausted", "Codex upstream failed after SDK retries", http_status=http_status)
     if re.search(r"(?i)unauthori[sz]ed|authentication|invalid[_ -]?token|login required", error_text):
         return CodexError("codex_auth_failed", "Codex authentication failed", http_status=http_status)
+    if re.search(r"(?i)invalid[_ -]?(?:json[_ -]?)?schema|invalid_request_error|response_format", error_text):
+        return CodexError("codex_bad_request", "Codex rejected the structured output schema", http_status=http_status)
     return CodexError("codex_sdk_error", "Codex SDK reported an unrecoverable turn error", http_status=http_status)
 
 

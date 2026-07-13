@@ -223,8 +223,6 @@ class PodiumProjectBindingsMixin:
                     "config_format": str(profile["config_format"]),
                     "config_document": str(profile["config_document"]),
                     "config_sha256": str(profile["config_sha256"]),
-                    "credential_id": str(profile["credential_id"]),
-                    "credential_ref": str(profile["credential_ref"]),
                 }
             )
         except (CodexRuntimeConfigError, KeyError, TypeError, ValueError) as exc:
@@ -240,13 +238,7 @@ class PodiumProjectBindingsMixin:
             "agent_app_user_id": str(binding.get("agent_app_user_id") or ""),
             "repository": _repository_public(binding.get("repo_source")),
         }
-        command.update(
-            {
-                "auth_method": str(profile.get("auth_method") or ""),
-                "account_hint": str(profile.get("account_hint") or ""),
-                "performer_binding_generation": int(profile.get("generation") or 1),
-            }
-        )
+        command["performer_binding_generation"] = int(profile.get("generation") or 1)
         return command
 
     async def acknowledge_project_binding(
@@ -279,7 +271,6 @@ class PodiumProjectBindingsMixin:
                 "performer_binding_id": expected_performer_binding_id,
                 "performer_profile_id": str(profile.get("performer_profile_id") or ""),
                 "runtime_profile_id": str(profile.get("runtime_profile_id") or ""),
-                "credential_id": str(profile.get("credential_id") or ""),
                 "config_sha256": str(profile.get("config_sha256") or ""),
                 "policy_sha256": str(profile.get("policy_sha256") or ""),
             }

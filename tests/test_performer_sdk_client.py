@@ -5,12 +5,12 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from openai_codex.generated.v2_all import ItemCompletedNotification, ThreadItem
+from openai_codex.generated.v2_all import ErrorNotification, ItemCompletedNotification, ThreadItem
 from openai_codex.models import Notification as SdkNotification, UnknownNotification
 
 from performer.backend import runtime_wait_from_events
 from performer.backend import TurnBackend, TurnBackendError
-from performer.codex_client import CodexSdkClient
+from performer.codex_client import CodexSdkClient, _event_payload
 from performer.codex_config import CodexConfig
 from performer.codex_client_helpers import CodexError
 
@@ -154,6 +154,46 @@ async def test_sdk_client_classifies_terminal_bad_gateway_text(tmp_path: Path) -
         await client.run_session(tmp_path, "Return JSON", output_schema={"type": "object"})
 
     assert exc_info.value.code == "upstream_overloaded_exhausted"
+
+
+def test_sdk_client_reads_generated_v2_notification_payload_directly() -> None:
+    event = SdkNotification(
+        "error",
+        ErrorNotification.model_validate(
+            {
+                "error": {
+                    "message": '{"error":{"code":"invalid_json_schema","type":"invalid_request_error"}}',
+                    "codexErrorInfo": "other",
+                },
+                "threadId": "thread-1",
+                "turnId": "turn-1",
+                "willRetry": False,
+            }
+        ),
+    )
+
+    payload = _event_payload(event)
+
+    assert payload["willRetry"] is False
+    assert "invalid_json_schema" in payload["error"]["message"]
+
+
+def test_all_performer_output_schemas_are_strict_at_every_object_boundary() -> None:
+    from performer.schemas import EXECUTE_SCHEMA, GATE_SCHEMA, PLAN_SCHEMA
+
+    def assert_strict(value: object) -> None:
+        if isinstance(value, dict):
+            if value.get("type") == "object":
+                assert value.get("additionalProperties") is False
+                assert isinstance(value.get("properties"), dict)
+            for nested in value.values():
+                assert_strict(nested)
+        elif isinstance(value, list):
+            for nested in value:
+                assert_strict(nested)
+
+    for schema in (PLAN_SCHEMA, EXECUTE_SCHEMA, GATE_SCHEMA):
+        assert_strict(schema)
 
 
 @pytest.mark.parametrize("sandbox", ["workspace-write", "workspace_write"])

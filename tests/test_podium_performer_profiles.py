@@ -10,10 +10,10 @@ from podium.performer_profiles import PerformerProfileLoadError, load_profile_bu
 from podium.podium_project_bindings import PodiumProjectBindingsMixin
 
 
-VALID_CONFIG = 'model = "gpt-test"\napproval_policy = "never"\n'
+VALID_CONFIG = 'model = "gpt-test"\napproval_policy = "never"\ncli_auth_credentials_store = "file"\n'
 
 
-def _write_bundle(root: Path, *, performer: dict[str, object] | None = None, credentials: object | None = None) -> Path:
+def _write_bundle(root: Path, *, performer: dict[str, object] | None = None) -> Path:
     profile_dir = root / "default"
     profile_dir.mkdir(parents=True)
     (profile_dir / "runtime.toml").write_text(VALID_CONFIG, encoding="utf-8")
@@ -23,80 +23,29 @@ def _write_bundle(root: Path, *, performer: dict[str, object] | None = None, cre
                 "performer_kind": "codex",
                 "runtime_kind": "codex",
                 "turn_policy": {"max_turns": 4},
-                "credential_id": "chatgpt-main",
                 **(performer or {}),
             }
-        ),
-        encoding="utf-8",
-    )
-    (profile_dir / "credentials.json").write_text(
-        json.dumps(
-            credentials
-            or [
-                {
-                    "id": "chatgpt-main",
-                    "name": "ChatGPT main",
-                    "auth_method": "chatgpt_oauth",
-                    "account_hint": "murphy@example.com",
-                    "local_ref": "slot:chatgpt-main",
-                }
-            ]
         ),
         encoding="utf-8",
     )
     return profile_dir
 
 
-def test_profile_bundle_loads_current_profiles_and_multiple_credentials(tmp_path: Path) -> None:
-    _write_bundle(
-        tmp_path,
-        credentials=[
-            {
-                "id": "chatgpt-main",
-                "name": "ChatGPT main",
-                "auth_method": "chatgpt_oauth",
-                "account_hint": "main",
-                "local_ref": "slot:chatgpt-main",
-            },
-            {
-                "id": "openai-backup",
-                "name": "OpenAI backup",
-                "auth_method": "api_key",
-                "account_hint": "backup",
-                "local_ref": "slot:openai-backup",
-            },
-        ],
-    )
+def test_profile_bundle_loads_only_current_non_secret_profiles(tmp_path: Path) -> None:
+    _write_bundle(tmp_path)
 
     bundle = load_profile_bundle(tmp_path, workspace_id="user-1", profile_name="default")
 
     assert bundle.performer_profile["id"] == "performer-profile:user-1:default"
     assert bundle.runtime_profile["id"] == "runtime-profile:user-1:default"
     assert bundle.performer_profile["runtime_profile_id"] == bundle.runtime_profile["id"]
-    assert bundle.selected_credential["id"] == "credential:user-1:chatgpt-main"
-    assert {row["id"] for row in bundle.credentials} == {
-        "credential:user-1:chatgpt-main",
-        "credential:user-1:openai-backup",
-    }
-    assert "auth" + ".json" not in str(bundle)
+    assert not hasattr(bundle, "credentials")
+    assert not hasattr(bundle, "selected_credential")
 
 
-def test_profile_bundle_rejects_raw_credential_metadata(tmp_path: Path) -> None:
-    _write_bundle(
-        tmp_path,
-        credentials=[
-            {
-                "id": "chatgpt-main",
-                "name": "ChatGPT main",
-                "auth_method": "api_key",
-                "account_hint": "main",
-                "local_ref": "slot:chatgpt-main",
-                "api_key": "not-a-secret",
-            }
-        ],
-    )
-
-    with pytest.raises(PerformerProfileLoadError, match="(?i)credential"):
+def test_profile_bundle_rejects_credential_selection_field(tmp_path: Path) -> None:
+    _write_bundle(tmp_path, performer={"credential_id": "legacy"})
+    with pytest.raises(PerformerProfileLoadError, match="not allowed"):
         load_profile_bundle(tmp_path, workspace_id="user-1")
 
 
@@ -122,10 +71,6 @@ async def test_project_binding_command_contains_current_profile_documents_withou
                 "config_format": "toml",
                 "config_document": VALID_CONFIG,
                 "config_sha256": hashlib.sha256(VALID_CONFIG.encode()).hexdigest(),
-                "credential_id": "credential:user-1:chatgpt-main",
-                "credential_ref": "slot:chatgpt-main",
-                "auth_method": "chatgpt_oauth",
-                "account_hint": "main",
                 "state": "pending",
                 "generation": 2,
             }
@@ -148,5 +93,8 @@ async def test_project_binding_command_contains_current_profile_documents_withou
     assert command["performer_binding_id"] == "performer-binding:binding-1"
     assert command["runtime_profile_id"] == "runtime-profile:user-1:default"
     assert command["config_document"] == VALID_CONFIG.strip() + "\n"
-    assert command["credential_ref"] == "slot:chatgpt-main"
+    assert "credential_id" not in command
+    assert "credential_ref" not in command
+    assert "auth_method" not in command
+    assert "account_hint" not in command
     assert not any("revision" in key for key in command)

@@ -1,9 +1,9 @@
 # Minimal Polling Workflow Checklist
 
-Status: the normalized Podium-managed Codex profile/local-login design is
-approved and implemented. No implementation of the rejected single-table
-sketch is retained. External Linear/OAuth/Codex verification remains blocked
-until the staged credentials/services are healthy and exercised. This checklist
+Status: ADR-0005 is approved and its Conductor-owned opaque credential hard cut
+is in progress. ADR-0004 remains authoritative only for non-secret current
+runtime and Performer profiles. External Linear/OAuth/Codex verification remains
+acceptance-gated until the implementation and staged run complete. This checklist
 is the active scope ledger;
 `tasks/spec.md` remains the product contract.
 
@@ -79,6 +79,9 @@ is the active scope ledger;
 
 ## Podium-managed Codex configuration/local-login slice ledger
 
+The credential ownership/reference portion of this ledger is superseded by
+ADR-0005. Its non-secret runtime/Performer profile decisions remain active.
+
 - **Authorized:** design a reusable Podium Performer-profile wrapper that
   references current runtime profiles, separate credential metadata/reference
   records, and Conductor-local selected OAuth/API-key slots for isolated
@@ -97,6 +100,41 @@ is the active scope ledger;
   fencing, local-only credentials, and file/directory profile provisioning.
 - **Deferred ideas:** KMS-backed Podium API-key storage, browser editing UI,
   and a managed credential brokerage require a separate product decision.
+
+## ADR-0005 Conductor-owned opaque credential implementation ledger
+
+- **Authorized:** remove Podium credential persistence and shared credential
+  fields; implement Conductor-local opaque OAuth/API-key slots, active-slot
+  selection, bounded live checks, isolated attempt homes, safe refresh
+  copy-back, and an ephemeral outbound-only Podium inspection relay; reuse fixed
+  real-E2E slots with model `gpt-5.4`.
+- **Required consequences:** managed TOML requires file credential storage;
+  Podium stores only non-secret runtime/Performer profiles; Conductor alone owns
+  slot metadata and selection; Symphony never parses `auth.json`; live results
+  are single-delivery, bounded, sanitized, no-store, and non-durable.
+- **Out of scope:** remote slot mutation, credential upload, Podium vault/KMS,
+  keyring extraction, credential-schema interpretation, another transport,
+  runner, or scheduler.
+- **Assumptions requiring approval:** none.
+- **Deferred ideas:** durable multi-process relay, remote credential lifecycle,
+  cached account/readiness details, and managed credential brokerage.
+
+### ADR-0005 implementation checklist
+
+- [ ] Hard-cut credential fields from shared contracts and Podium profiles,
+      schema, storage, commands, reports, and Conductor configuration reports.
+- [ ] Implement Conductor slot service and `init`, `check --live`, and `select`
+      CLI commands.
+- [ ] Implement isolated attempt materialization, slot locking, and opaque
+      refresh reconciliation.
+- [ ] Implement ephemeral Podium live inventory/check endpoints and Conductor
+      outbound lease/reply polling.
+- [ ] Update real-flow staging to reuse fixed OAuth/API-key slots and pin
+      `gpt-5.4`.
+- [ ] Run focused tests, one complete `make test`, group the full failure set by
+      root cause, repair by group, then rerun focused and full verification.
+- [ ] Complete code/security review and one `tools/real_flow.py --phase all`
+      batch without claiming acceptance when external prerequisites fail.
 
 ## Current evidence-projection slice ledger
 

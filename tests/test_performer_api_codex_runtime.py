@@ -72,7 +72,7 @@ def test_runtime_config_requires_matching_hash() -> None:
         CodexRuntimeConfig.from_dict({**config.to_dict(), "config_sha256": "0" * 64})
 
 
-def test_performer_profile_config_carries_current_profiles_and_credential_reference() -> None:
+def test_performer_profile_config_carries_only_current_non_secret_profiles() -> None:
     config = PerformerProfileConfig.create(
         binding_id="binding-1",
         binding_config_version=4,
@@ -83,8 +83,6 @@ def test_performer_profile_config_carries_current_profiles_and_credential_refere
         runtime_kind="codex",
         turn_policy={"max_turns": 4, "approval": "on-request"},
         config_document=VALID_CONFIG,
-        credential_id="credential-1",
-        credential_ref="slot:credential-1",
     )
 
     payload = config.to_dict()
@@ -102,7 +100,6 @@ def test_performer_profile_config_carries_current_profiles_and_credential_refere
         "runtime_kind": "codex",
         "config_sha256": config.config_sha256,
         "policy_sha256": config.policy_sha256,
-        "credential_id": "credential-1",
     }
     assert PerformerProfileConfig.from_dict(payload) == config
 
@@ -122,24 +119,18 @@ def test_performer_profile_config_rejects_profile_revision_fields() -> None:
                 "turn_policy": {},
                 "config_format": "toml",
                 "config_document": VALID_CONFIG,
-                "credential_id": "credential-1",
-                "credential_ref": "slot:credential-1",
             }
         )
 
 
-def test_performer_profile_config_rejects_secret_like_credential_reference() -> None:
-    with pytest.raises(CodexRuntimeConfigError, match="credential"):
-        PerformerProfileConfig.create(
-            binding_id="binding-1",
-            binding_config_version=1,
-            performer_binding_id="performer-binding-1",
-            performer_profile_id="performer-profile-1",
-            runtime_profile_id="runtime-profile-1",
-            performer_kind="codex",
-            runtime_kind="codex",
-            turn_policy={},
-            config_document=VALID_CONFIG,
-            credential_id="credential-1",
-            credential_ref="api" + "_key=not-a-secret",
-        )
+@pytest.mark.parametrize(
+    "source",
+    [
+        'model = "gpt-test"\n',
+        'model = "gpt-test"\ncli_auth_credentials_store = "auto"\n',
+        'model = "gpt-test"\ncli_auth_credentials_store = "keyring"\n',
+    ],
+)
+def test_managed_runtime_config_requires_file_credential_store(source: str) -> None:
+    with pytest.raises(CodexRuntimeConfigError, match="requires"):
+        validate_codex_toml(source)

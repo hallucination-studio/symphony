@@ -4,6 +4,8 @@ import asyncio
 import json
 import logging
 import random
+import base64
+from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import parse_qs
 
@@ -69,6 +71,9 @@ class ConductorApiServer:
             await asyncio.sleep(_jitter(delay))
 
     async def _poll_once(self) -> dict[str, Any]:
+        live = await self._poll_live_once()
+        if live.get("reason") == "runtime_unauthorized":
+            return live
         command = await self._poll_command_once()
         if command.get("reason") == "runtime_unauthorized":
             return command
@@ -81,6 +86,90 @@ class ConductorApiServer:
             return dispatch
         await self.service.coordinate_background_once()
         return dispatch
+
+    async def _poll_live_once(self, *, transport: httpx.AsyncBaseTransport | None = None) -> dict[str, Any]:
+        settings = self.service.store.get_settings()
+        podium_url = settings.podium_url.strip().rstrip("/")
+        runtime_token = settings.podium_runtime_token.strip()
+        if not podium_url or not runtime_token:
+            return {"status": "skipped", "reason": "runtime_not_configured"}
+        headers = {"Authorization": f"Bearer {runtime_token}"}
+        async with httpx.AsyncClient(timeout=80, trust_env=False, transport=transport) as client:
+            response = await client.post(f"{podium_url}/api/v1/runtime/live/lease", headers=headers)
+            if response.status_code == 401:
+                return {"status": "skipped", "reason": "runtime_unauthorized"}
+            response.raise_for_status()
+            request = response.json().get("request")
+            if not request:
+                return {"status": "idle"}
+            operation = str(request.get("operation") or "")
+            try:
+                if operation == "performer_credentials.inspect":
+                    payload = request.get("payload") if isinstance(request.get("payload"), dict) else {}
+                    inventory = self.service.performer_credentials.list()
+                    slots = inventory["slots"]
+                    cursor = str(payload.get("cursor") or "")
+                    try:
+                        after = base64.urlsafe_b64decode(cursor + "==").decode() if cursor else ""
+                    except Exception:
+                        raise ValueError("managed_codex_cursor_invalid")
+                    slots = [slot for slot in slots if str(slot["slot_id"]) > after]
+                    limit = min(max(int(payload.get("limit") or 25), 1), 25)
+                    page = slots[:limit]
+                    selected = inventory.get("selection")
+                    selected_id = str((selected or {}).get("slot_id") or "")
+                    for slot in page:
+                        slot["selected"] = str(slot["slot_id"]) == selected_id
+                        slot["precheck"] = None
+                    next_cursor = None
+                    if len(slots) > limit:
+                        next_cursor = base64.urlsafe_b64encode(str(page[-1]["slot_id"]).encode()).decode().rstrip("=")
+                    result = {
+                        "version": 1,
+                        "conductor_id": settings.conductor_id,
+                        "observed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                        "selection": {"slot_id": selected_id} if selected_id else None,
+                        "next_cursor": next_cursor,
+                        "slots": page,
+                    }
+                elif operation == "performer_credentials.check":
+                    payload = request.get("payload") if isinstance(request.get("payload"), dict) else {}
+                    instances = self.service.store.list_instances()
+                    config = str(instances[0].linear_filters.get("config_document") or "") if len(instances) == 1 else ""
+                    if not config:
+                        raise ValueError("managed_codex_config_required")
+                    remaining = max((int(request.get("deadline_unix_ms") or 0) / 1000) - __import__("time").time(), 0.0)
+                    checked = self.service.performer_credentials.check(str(payload.get("slot_id") or ""), config, timeout=min(remaining, 60.0))
+                    result = {
+                        "version": 1,
+                        "conductor_id": settings.conductor_id,
+                        "slot_id": str(checked["slot_id"]),
+                        "checked_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                        "check": {"status": "passed", "error_code": None, "sanitized_reason": None},
+                    }
+                else:
+                    result = {"status": "failed", "error_code": "unsupported_live_operation"}
+            except Exception as exc:
+                code = str(getattr(exc, "code", "managed_codex_check_failed"))
+                if operation == "performer_credentials.check":
+                    result = {
+                        "version": 1,
+                        "conductor_id": settings.conductor_id,
+                        "slot_id": str((request.get("payload") or {}).get("slot_id") or ""),
+                        "checked_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                        "check": {"status": "failed", "error_code": code, "sanitized_reason": code[:160]},
+                    }
+                else:
+                    result = {"status": "failed", "error_code": code}
+            reply = await client.post(
+                f"{podium_url}/api/v1/runtime/live/reply",
+                headers=headers,
+                json={"request_id": request.get("request_id"), "lease_token": request.get("lease_token"), "result": result},
+            )
+            if reply.status_code == 409:
+                return {"status": "stale"}
+            reply.raise_for_status()
+            return {"status": "handled", "operation": operation}
 
     async def _poll_command_once(
         self,
