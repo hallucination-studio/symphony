@@ -5,10 +5,11 @@ import json
 
 import pytest
 
-from performer_api.codex_runtime import (
+from performer_api.runtime_policy import (
     PerformerProfileConfig,
     RuntimePolicy,
     RuntimePolicyError,
+    canonical_sha256,
 )
 
 
@@ -57,6 +58,14 @@ def test_runtime_policy_accepts_canonical_real_e2e_fixture_and_round_trips() -> 
 
     assert policy.to_dict() == EXECUTION_POLICY
     assert RuntimePolicy.from_dict(policy.to_dict()) == policy
+    assert canonical_sha256(policy.to_dict()) == _canonical_hash(EXECUTION_POLICY)
+
+
+def test_canonical_hash_rejects_non_object_and_non_finite_values() -> None:
+    with pytest.raises(RuntimePolicyError, match="object"):
+        canonical_sha256([])  # type: ignore[arg-type]
+    with pytest.raises(RuntimePolicyError, match="unsupported"):
+        canonical_sha256({"value": float("nan")})
 
 
 def test_performer_profile_config_hashes_both_policies_and_hides_documents_from_summary() -> None:
@@ -107,7 +116,7 @@ def test_one_policy_mutation_changes_only_its_relevant_hash() -> None:
         "codex_endpoint",
     ],
 )
-def test_runtime_policy_rejects_every_codex_owned_field(field: str) -> None:
+def test_runtime_policy_rejects_every_provider_owned_legacy_field(field: str) -> None:
     with pytest.raises(RuntimePolicyError, match=field):
         RuntimePolicy.from_dict({**EXECUTION_POLICY, field: "forbidden"})
 
