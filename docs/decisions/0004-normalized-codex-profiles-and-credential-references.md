@@ -2,7 +2,15 @@
 
 ## Status
 
-Accepted by the user on 2026-07-12
+Accepted by the user on 2026-07-12. Proposed
+[ADR-0005](0005-conductor-owned-opaque-codex-credentials.md) would supersede
+the Codex configuration-document, configuration-hash, credential ownership,
+credential selection, local materialization, and project-level multi-account
+portions after explicit user approval. That includes this ADR's rejection of a
+single Conductor-wide Codex account. Until then, ADR-0004 remains accepted.
+Its separate mutable `runtime_profiles`, `performer_profiles`, and
+`performer_bindings` without profile revision tables remain part of both
+designs.
 
 ## Date
 
