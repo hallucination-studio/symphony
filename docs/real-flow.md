@@ -28,12 +28,13 @@ mkdir -p /path/to/staged-seed
 CODEX_HOME=/path/to/staged-seed codex login
 ```
 
-For deterministic managed runs, set `cli_auth_credentials_store = "file"` in
-that staged home's `config.toml` and verify that it contains the approved
-`auth.json`. The runner copies approved seed files into each isolated attempt;
-it never reads `~/.codex`, uploads `auth.json`, or places a token in Podium.
-Codex refreshes ChatGPT OAuth credentials during use; any refresh remains on
-the Conductor machine.
+The operator may use the official Codex tooling to prepare the approved seed.
+The runner treats the seed as opaque: it does not parse `config.toml`, read
+`auth.json`, or import a provider SDK. It stages one isolated per-batch context
+and shares that context with installed Performer control and turn processes.
+It never reads `~/.codex`, uploads provider credential files, or places a token
+in Podium. Any provider-owned refresh remains inside the staged context on the
+Conductor machine.
 
 When Podium requires an existing browser session, use the browser skill on the
 Podium page to issue same-origin `fetch` requests for the public OAuth/project/

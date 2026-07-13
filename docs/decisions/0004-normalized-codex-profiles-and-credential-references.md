@@ -2,15 +2,20 @@
 
 ## Status
 
-Accepted by the user on 2026-07-12. Proposed
-[ADR-0005](0005-conductor-owned-opaque-codex-credentials.md) would supersede
-the Codex configuration-document, configuration-hash, credential ownership,
-credential selection, local materialization, and project-level multi-account
-portions after explicit user approval. That includes this ADR's rejection of a
-single Conductor-wide Codex account. Until then, ADR-0004 remains accepted.
-Its separate mutable `runtime_profiles`, `performer_profiles`, and
-`performer_bindings` without profile revision tables remain part of both
-designs.
+Partially superseded by accepted
+[ADR-0005](0005-conductor-owned-opaque-codex-credentials.md) and
+[ADR-0006](0006-performer-owned-backend-interface.md) on 2026-07-13.
+ADR-0005 replaces this ADR's Codex configuration document/hash, credential
+table/reference, credential selection, local slot/materialization,
+per-attempt `CODEX_HOME`, project-level multi-account, and rollback decisions.
+ADR-0006 corrects the surviving runtime ownership boundary so provider SDK,
+authentication, configuration, Check, and provider-handle behavior belongs to
+Performer backend implementations rather than Conductor.
+
+The retained decision is limited to separate mutable `runtime_profiles`,
+`performer_profiles`, and `performer_bindings`, with no profile revision
+tables. Their contents and runtime behavior are defined by ADR-0005, ADR-0006,
+and [`runtime-profiles-backends.md`](../product/runtime-profiles-backends.md).
 
 ## Date
 

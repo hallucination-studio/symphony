@@ -1,95 +1,78 @@
-# Module baseline: `conductor`
+# Module target: `conductor`
 
-Status: implemented code baseline, 2026-07-12. The local workflow is covered
-by fakes and SQLite; a real Linear/Codex flow remains unverified here.
+Status: ADR-0006 target boundary accepted on 2026-07-13; implementation is
+tracked in `tasks/plan.md`.
 
 ## Responsibility
 
 Conductor is the customer-side daemon for one bound Linear project and one
-repository. It leases Podium dispatches over HTTP, keeps a durable sequential
-workflow, launches Performer, projects ordered Linear Sub Issues, runs command
-checks plus one Codex Gate, and reports a sanitized view back to Podium.
+repository. It leases Podium dispatches over HTTP, keeps the durable sequential
+workflow, starts installed Performer control/turn processes, projects ordered
+Linear Sub Issues, runs verification commands, and reports a sanitized view to
+Podium.
 
-It is the only local process manager for Performer. It does not own customer
-OAuth, browser routes, a multi-project scheduler, or direct Linear tokens;
-Linear operations travel through Podium's authenticated proxy.
+It is the only local process manager for Performer. It imports only
+`performer_api` shared contracts. It must not import `performer`, a provider
+SDK, provider-generated types, or implement a provider-specific controller.
 
-## Current ownership
-
-The code has more than the eventual compact target, but ownership is explicit:
+## Target ownership
 
 | Owner | Responsibility |
 |---|---|
-| `models.py`, `store.py` | SQLite settings, instances, runs, tasks, attempts, waits, revisions, evidence rows, and all durable state transitions/fencing |
+| `models.py`, `store.py` | SQLite workflow/evidence plus generic `performer_control_state` |
 | `workflow_driver.py` | One bounded plan/execute/gate progression and Linear projection |
-| `runtime.py` | Request/result files, isolated `CODEX_HOME`, process logs, result fencing |
-| `gate.py` | Declared verification commands and the single Codex Gate combination |
-| `linear.py` | Podium proxy operations for issue reads, children, comments, states, and read-only project-label lookup for smoke validation |
-| `conductor_podium_sync.py` | Runtime report, command polling, dispatch lease, and smoke handling |
-| `conductor_api.py`, `conductor_service.py` | Local HTTP API and composition/background tick |
+| `runtime.py` | Fenced request/result files, turn subprocess lifecycle, logs, result fencing |
+| `performer_control.py` | Generic installed control-host supervision and `performer_api` protocol |
+| `gate.py` | Declared commands plus selected-backend Gate combination |
+| `linear.py` | Podium proxy operations |
+| `conductor_podium_sync.py` | Reports, command polling, dispatch lease, smoke handling |
+| `conductor_api.py`, `conductor_service.py` | Local API, composition, background tick |
 
-`conductor_service.py` directly owns the instance, workspace, log, and
-runtime-view operations. `conductor_service_helpers.py` remains only for
-functions shared by the service and sync owner; protocol helpers remain local
-to their concrete boundary.
+## Performer process boundary
+
+Conductor builds one immutable allowlisted backend environment for its
+lifetime and passes it to the long-running Performer control host and all
+short-lived turn processes. It may select HOME, optional provider-owned home
+variables, and approved binary paths, but it does not interpret provider files
+or provider SDK semantics.
+
+The generic coordinator owns async process start, stream framing, heartbeat,
+timeout, cancellation, exit, and safe log capture. A pending provider login
+handle stays inside Performer. Conductor holds only a generic subprocess handle
+and permits status/cancel while blocking conflicting config/Check/turn work.
+
+## Readiness
+
+The local `performer_control_state` is secret-free and bound to backend kind,
+binding generation, capability version, and execution-policy hash. Startup or
+identity mismatch resets current readiness to `unchecked` while preserving the
+last sanitized Check evidence.
+
+A non-ready plan/execute/gate does not create an attempt. The run blocks with a
+generic actionable reason visible in SQLite, logs, Podium, and Linear. A
+compatible manual Check resumes the exact prior phase once with a new fence.
 
 ## Canonical workflow
 
-```text
+~~~text
 planning -> awaiting_approval -> executing -> blocked | failed | done
 todo -> in_progress -> in_review -> blocked | done
 running -> waiting | succeeded | failed | stale
-```
+~~~
 
-For one parent, Conductor validates one ordered plan, creates one Linear child
-per task with an explicit parent relation, and executes only the first
-unfinished task. A child becomes Done only after every declared verification
-command passes and the read-only Codex Gate passes. A failed gate returns the
-task to one rework; a second failure blocks the task and parent. The parent is
-Done only after all children are Done.
-
-Plan revisions, approvals, risks, architecture decisions, open questions,
-acceptance catalogs, score/rubric/provenance, manifest references, artifacts,
-and gate evidence remain in the durable model. They are not a dependency graph
-or second scheduler.
-
-## Durable state and projection
-
-The fresh local `workflow.db` contains settings, instances, runs, tasks,
-attempts, runtime waits, plan revisions, acceptance catalogs, gate evidence,
-and artifact records. A restart reuses the same run and Linear child ids; a
-stale fence cannot advance state.
-
-Current Linear projection creates task Sub Issues and runtime-wait
-`[Human Action]` children, projects state/comments, and verifies explicit
-`parent { id identifier }`. It does **not** create a separate catalog,
-gate-evidence, or artifact child-issue tree. Current Podium reports expose run
-and work-item state plus an optional safe Gate summary. Detailed local evidence
-keeps bounded, redacted command/output excerpts and findings; its provenance is
-the real Conductor-created Codex Gate attempt. Podium and Linear
-receive counts, scores, safe rubric/provenance, and catalog/manifest/artifact
-summaries rather than full evidence or locations.
-
-The outbound managed-run report is a bounded current-binding snapshot: it
-prioritizes nonterminal runs, then recent terminal history, and reports the
-total number of active runs so Podium can keep installation cutover fail-closed
-when history is compacted.
-
-## Runtime and error rules
-
-`runtime.py` stages isolated Codex homes, captures Performer stdout/stderr, and
-accepts only the expected fenced result. Errors are sanitized and appended to
-the relevant run/task/log/Linear surfaces where implemented. Do not claim that
-every current SQLite record has the same five failure fields: the run view's
-primary durable summary is `latest_reason`.
+For one parent, Conductor executes only the first unfinished task. A child is
+Done only after verification commands and the selected backend's read-only Gate
+pass. One failed Gate reworks once; a second failure blocks task and parent.
+The parent is Done only after every child is Done.
 
 ## Hard-cut rules
 
-- Start a fresh `workflow.db`; never read or migrate old local runtime data.
-- A successful project unbind or rebind atomically replaces the binding and
-  clears old runs, tasks, attempts, revisions, waits, catalogs, evidence, and
-  artifacts before the new binding can report work.
+- Never add a CodexController, ClaudeController, provider SDK dependency, or
+  provider response parser to Conductor.
+- Never import Performer internals; shared contracts belong in `performer_api`.
+- Remove credential slots, per-attempt provider-home materialization, provider
+  config parsing/writes, and auth reconciliation.
+- Preserve one automatic Gate rework, runtime waits, plan approval, fencing,
+  durable logs, and visible sanitized failure reasons.
 - Do not add DAG, parallel, branch/join, checkpoint-group, integration-queue,
-  cross-model, or second acceptance-scheduler behavior.
-- Preserve one automatic gate rework, runtime waits controlled by Linear state,
-  plan approval, fences, durable logs, and visible sanitized failure reasons.
+  cross-model, dynamic-plugin, or second acceptance-scheduler behavior.

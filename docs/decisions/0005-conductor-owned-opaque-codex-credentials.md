@@ -2,11 +2,22 @@
 
 ## Status
 
-Proposed on 2026-07-13 for user approval. No production implementation is
-authorized until this ADR and the companion
-[runtime design](../product/runtime-profiles-backends.md) are approved.
+Partially superseded by accepted
+[ADR-0006](0006-performer-owned-backend-interface.md) on 2026-07-13.
 
-If accepted, this ADR supersedes ADR-0004's Codex config document/hash,
+ADR-0006 replaces this ADR's assignment of provider SDK, login/logout,
+configuration, Check execution, provider handles, and provider-specific
+control ownership to Conductor. The historical rationale below is retained,
+but must not be used as an implementation plan for that ownership.
+
+The retained decisions are one fixed backend context per Conductor, one active
+account for the Codex implementation, provider-owned credential/config files,
+no Podium persistence of provider data, explicit manual Check, policy-only
+profiles, and no production copying of provider homes. Their current
+implementation boundary is defined by ADR-0006 and the companion
+[runtime design](../product/runtime-profiles-backends.md).
+
+This ADR supersedes ADR-0004's Codex config document/hash,
 credential table, credential slot, and per-attempt `CODEX_HOME` decisions.
 ADR-0004's separate `runtime_profiles`, `performer_profiles`, and
 `performer_bindings` remain.
@@ -293,8 +304,8 @@ There is no `performer_credentials` table and no slot field.
 
 ### Assumptions requiring approval
 
-- The complete written ADR and companion runtime design still require the
-  user's final review before production implementation starts.
+- None. The user approved this ADR and its companion runtime design on
+  2026-07-13.
 
 ### Deferred ideas
 
@@ -302,7 +313,7 @@ There is no `performer_credentials` table and no slot field.
 - Automatic Check and transactional rollback.
 - A wider Podium editor for Codex providers or arbitrary config keys.
 
-### Approval points
+### Accepted approval points
 
 Approval of this ADR confirms:
 
@@ -333,7 +344,7 @@ The one all-phase run must prove:
 - success closure, one Gate rework then block, duplicate idempotency, stale
   rejection, and secret-safe waits/failures/logs.
 
-## Migration after approval
+## Implementation cutover
 
 Remove:
 
@@ -381,5 +392,3 @@ Tradeoffs:
 - Failed changes are not rolled back; the current Codex context remains blocked
   until the user corrects it and Check passes.
 - Secret values in the config source are redacted.
-
-Until approval, the checkpointed code remains unchanged.

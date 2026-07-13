@@ -14,8 +14,10 @@ its stdout/stderr to `/tmp/podium-conductor-<runtime-id>.log`. `--no-start`
 leaves process startup to the operator.
 
 The generated command can set the data root, Conductor command, and local port.
-The fresh local `workflow.db` and isolated Codex homes live under that data
-root; separate Conductors should use separate roots.
+The fresh local `workflow.db`, logs, and generic Performer readiness state live
+under that data root; separate Conductors should use separate roots. Provider
+credential/config stores are provider-owned fixed process contexts and are not
+materialized per attempt under Conductor state.
 
 ## What the current installer does not do
 

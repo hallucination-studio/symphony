@@ -41,14 +41,14 @@ prerequisite gates pass in that same batch.
    Performer environment, a report, a log, a Linear comment, or a browser
    response. The managed path continues to use the existing Podium OAuth
    installation and runtime bearer tokens.
-8. The Codex seed is a fixed, approved staged copy. Every phase receives a
-   byte-identical copy in its own temporary `CODEX_HOME`; no phase reads
-   `~/.codex`, and no phase copies an unapproved file.
-9. The Performer phase reads both `config.toml` and opaque login state only
-   from the fixed test seed directory. The config must use `model = gpt-5.4`
-   and `cli_auth_credentials_store = file`; provider details are whatever the
-   operator explicitly staged in that test-only config. Podium profiles must
-   not override the Performer-phase config.
+8. The Codex seed is a fixed, approved staged copy. The runner creates one
+   isolated per-batch context shared by installed Performer control and turn
+   processes; no phase reads `~/.codex` or copies an unapproved file.
+9. The Performer phase treats provider config and login state as opaque. It
+   does not parse `config.toml`, read `auth.json`, or import a provider SDK.
+   The canonical real-E2E `gpt-5.4` policy is supplied through the
+   provider-neutral Performer turn contract; provider-owned context details are
+   whatever the operator explicitly staged for this test batch.
 10. A local pytest pass is not a real E2E pass. A real phase requires running
    services, real HTTP/GraphQL responses, durable state, logs, and archived
    sanitized evidence.
@@ -261,14 +261,16 @@ call their private SQL or mutate their tables.
   `get_task()`, `list_tasks()`, and `get_gate_evidence_summary()`.
   Direct store calls are allowed only in the isolated Conductor test process
   for duplicate/stale probes; they are not a substitute for Linear projection.
-- `performer.cli.run_turn()` is the one-shot request/result entrypoint.
-  `performer.backend.TurnBackend.plan()`, `.execute()`, and `.gate()` are the
-  three turn contracts. `performer.codex_client.CodexSdkClient.run_session()`
-  is the real SDK call. `runtime_wait_from_events()` is the only runtime-wait
-  classifier.
-- `conductor.runtime.PerformerRuntime.prepare_environment()`, `.write_request()`,
-  `.run()`, and `.accept_result()` own isolated home materialization and result
-  fencing. Do not launch `codex` directly from the E2E driver.
+- The installed `performer` turn command is the one-shot request/result
+  entrypoint. Performer core selects `PerformerBackend` through its explicit
+  registry; CodexBackend owns the real SDK call and runtime-wait normalization.
+- The installed `performer control` command is the provider-neutral status,
+  login/config, and manual Check boundary. Provider handles remain inside that
+  process.
+- `conductor.runtime.PerformerRuntime` owns fixed-context process launch,
+  request/result files, logs, and result fencing. It does not materialize a
+  provider home per attempt. Do not launch a provider binary or import a
+  provider SDK directly from the E2E driver.
 
 ## 4. Phase OAuth
 
@@ -401,65 +403,63 @@ database-only assertion.
 
 ### Objective
 
-Prove a real `performer` process can consume only the static test config and
-official opaque Codex login seed, run the three turn kinds with `gpt-5.4`, and
-preserve fenced, structured, sanitized results without Podium, OAuth, or
-Linear.
+Prove installed Performer control and turn processes can share one opaque
+staged backend context, run manual Check plus the three turn kinds with the
+canonical `gpt-5.4` policy, and preserve fenced, structured, sanitized results
+without Podium, OAuth, or Linear.
 
 ### Ordered checks and allowed calls
 
-1. Materialize a fresh phase `CODEX_HOME` through
-   `PerformerRuntime.prepare_environment()` from the approved seed. Assert the
-   directory contains only the approved seed files plus the managed config;
-   assert the path is not `~/.codex`.
-2. Parse the test seed's `config.toml` using the same shared validation
-   contract in `performer_api.codex_runtime`; require `gpt-5.4` and file auth,
-   and record its hash. Do not read or merge a Podium Performer profile.
-3. Create a disposable git workspace and write a plan turn request through
-   `PerformerRuntime.write_request()`. Launch only
-   `performer.cli.run_turn()`/the installed `performer` executable; do not
-   call `codex app-server` directly.
-4. Require `performer.backend.TurnBackend.plan()` to return a valid `Plan`, no
-   workspace changes, and the exact `TurnContext`.
-5. Use the returned task to run `TurnBackend.execute()`. Require changed files
-   to remain within `files_likely_touched`, and require a valid
-   `ExecuteResult`.
-6. Run `TurnBackend.gate()` with bounded command evidence. Require a valid
-   `GateResult`, no workspace changes, and a read-only turn.
-7. Read the result JSON through `PerformerRuntime.accept_result()` and verify
+1. Stage one isolated per-batch backend context from the approved seed. Assert
+   the source and staged path are not `~/.codex`; do not parse or print provider
+   config/auth files.
+2. Start the installed `performer control` process with the fixed allowlisted
+   environment. Obtain backend kind and capabilities through the closed
+   `performer.status` contract.
+3. Run one explicit real `performer.check` using the canonical `gpt-5.4`
+   execution policy. Require `ready` before starting a managed turn.
+4. Create a disposable git workspace and write a plan turn request through the
+   provider-neutral fenced contract. Launch only the installed `performer`
+   executable; the runner must not call a provider SDK/app-server directly.
+5. Require the plan result to contain a valid `Plan`, no workspace changes,
+   and the exact `TurnContext`.
+6. Use the returned task for execute, require changed files to remain within
+   `files_likely_touched`, and require a valid `ExecuteResult`.
+7. Run gate with bounded command evidence. Require a valid `GateResult`, no
+   workspace changes, and a read-only turn.
+8. Read each result JSON through Conductor's normal fencing parser and verify
    the attempt id, fencing token, run id, task id, and turn kind are exact.
-8. Capture SDK events and performer stdout/stderr. Classify waits with
-   `runtime_wait_from_events()` and terminal upstream errors with
-   `CodexSdkClient`'s existing stream/error path. A provider `502` must remain
-   an upstream failure with its HTTP category, not `invalid_structured_output`.
-9. Scan every event, result, log, and report for token-shaped values, auth
-   contents, Authorization headers, and unbounded raw provider output.
+9. Capture normalized control/turn events and Performer stdout/stderr. A
+   provider `502` must remain a generic upstream/backend failure with a bounded
+   sanitized adapter summary, not `invalid_structured_output`.
+10. Scan control frames, events, results, logs, reports, argv, environment
+    snapshots, and staged artifacts for token-shaped values, auth contents,
+    Authorization headers, private provider paths, and raw provider output.
+11. Stop the control host and archive only sanitized evidence.
 
 ### Existing regression tests to run
 
 ```text
-tests/test_performer_sdk_client.py::test_sdk_client_reads_schema_json_and_notification_payload
-tests/test_performer_sdk_client.py::test_sdk_client_surfaces_terminal_upstream_error_after_stream_retries
-tests/test_conductor_runtime.py::test_runtime_prepares_an_isolated_home_from_approved_seed_files
-tests/test_conductor_runtime.py::test_runtime_materializes_managed_profile_config_and_selected_credential_slot
-tests/test_conductor_runtime.py::test_runtime_fails_closed_when_selected_credential_slot_is_missing
-tests/test_conductor_runtime.py::test_runtime_provisions_selected_slot_only_from_explicit_staged_seed
-tests/test_conductor_runtime.py::test_runtime_sanitizes_performer_stdout_and_stderr_before_persisting
-tests/test_conductor_runtime.py::test_runtime_preserves_sanitized_performer_failure_reason
-tests/test_performer_api_codex_runtime.py::test_runtime_config_normalizes_hashes_and_hides_content_from_summary
-tests/test_performer_api_codex_runtime.py::test_performer_profile_config_carries_only_current_non_secret_profiles
+tests/test_performer_api_control.py
+tests/test_performer_api_runtime_policy.py
+tests/test_performer_backend_contract.py
+tests/test_performer_control_cli.py
+tests/test_performer_sdk_client.py
+tests/test_conductor_performer_control.py
+tests/test_conductor_runtime.py
+tests/test_package_boundaries.py
 ```
 
 ### Performer pass rubric: 4/4
 
-- `1/1`: isolated profile/home is materialized from the fixed seed, with the
-  exact `gpt-5.4` configuration and no secret crossing the Podium boundary.
-- `1/1`: real plan, execute, and gate turns produce valid structured results
-  with exact context and fencing fields.
+- `1/1`: one isolated staged context is shared by installed control and turn
+  processes, with no provider file parsing or secret crossing the boundary.
+- `1/1`: real manual Check plus plan, execute, and gate produce valid
+  normalized results with exact context and fencing fields.
 - `1/1`: SDK retries, runtime waits, process failures, and provider errors are
-  captured with stable error codes and correlated logs.
-- `1/1`: result, event, stdout/stderr, and report scans prove no secret or
-  raw credential path is exposed.
+  captured inside Performer with stable generic outer errors and correlated logs.
+- `1/1`: control/result/event/stdout/stderr/report/artifact scans prove no
+  secret or private provider path is exposed and Conductor has no provider SDK.
 
 If the provider is unavailable, this phase is `failed`, not `passed with a
 synthetic result`. A synthetic SDK fake is allowed only in the listed local

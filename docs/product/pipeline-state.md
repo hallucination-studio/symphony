@@ -41,7 +41,8 @@ done
 `awaiting_approval` means a planned human approval gate is blocking execution.
 `blocked` always carries `latest_reason` with a sanitized, operator-visible
 cause. `done` is allowed only after every ordered task passes its verification
-commands and the single Codex Gate, with the parent Linear summary recorded.
+commands and the single selected-backend Performer Gate, with the parent Linear
+summary recorded.
 
 ## Work-Item State
 
@@ -56,7 +57,8 @@ blocked
 ```
 
 Conductor selects exactly one `todo` item at a time. A task can start only when
-its file scope is present and the staged Codex runtime is available.
+its file scope is present and compatible generic Performer readiness is
+`ready`.
 
 `blocked` work items stay out of Done and expose their `gate_status` in durable
 state and Linear projection.
@@ -79,7 +81,8 @@ Execution results are claims, not verdicts. Conductor verifies:
 - changed files are declared and planned;
 - undeclared changes are absent;
 - every declared verification command passes;
-- the read-only Codex Gate returns `passed=true` and meets its threshold.
+- the read-only selected-backend Performer Gate returns `passed=true` and meets
+  its threshold.
 
 The first Gate failure allows one automatic rework. A second failure blocks the
 task and parent with a concrete reason.
@@ -90,7 +93,7 @@ A restarted Conductor resumes from durable state:
 
 - Done tasks remain terminal;
 - gate evidence and waits remain authoritative;
-- the latest Codex thread id is reused when available;
+- the latest normalized backend session id is reused when available;
 - the next non-terminal ordered task is selected;
 - blocked reasons remain visible until a real operator action or approved plan
   revision resolves them.

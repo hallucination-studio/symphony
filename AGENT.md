@@ -36,6 +36,16 @@ Current hard renames:
   - `performer`, `conductor`, and `podium` may import `performer_api`;
   - `performer`, `conductor`, and `podium` must not directly import each other.
 - Keep Conductor as the only local process manager for Performer. Conductor should start Performer through the installed `performer` command or the existing repo-local fallback, not by importing Performer internals.
+- Treat provider isolation as a hard build invariant. Provider SDK dependencies,
+  imports, generated types, authentication/configuration logic, provider
+  process/session handles, provider error parsing, and provider-specific request
+  types may exist only in Performer-owned backend implementation modules.
+  Conductor and Podium must not depend on provider SDKs or implement provider
+  controllers.
+- Conductor consumes only closed contracts from `performer_api` and controls
+  Performer through installed control/turn subprocesses. Performer's internal
+  `PerformerBackend` Protocol/ABC and explicit registry remain private to the
+  Performer package.
 - Keep shared schemas and parsing in `performer_api` when more than one role needs the contract. Keep runtime adapters, subprocess management, tracker clients, and daemon logic in their owning role package.
 - Do not reintroduce Performer HTTP status/web UI or Conductor static web UI unless the product direction explicitly changes. Runtime status should flow through durable Managed Run state, Conductor APIs, reports, and correlated logs.
 - Avoid compatibility shims for old `symphony` imports, commands, labels, files, or logs unless explicitly requested. This refactor is a hard break.
@@ -46,7 +56,11 @@ Current hard renames:
   `docs/product/linear-projection.md`, and
   `docs/product/runtime-profiles-backends.md`. Do not add legacy scheduling or
   retired workflow-file execution paths.
-- Prefer small focused modules over large cross-role files. When adding behavior, put lifecycle, repo materialization, Managed Run reads, registration/reporting, tracker integration, and Codex process handling in clearly owned modules.
+- Prefer small focused modules over large cross-role files. When adding
+  behavior, put lifecycle, repo materialization, Managed Run reads,
+  registration/reporting, and tracker integration in clearly owned modules;
+  put all provider process/SDK handling in Performer backend implementation
+  modules.
 - Use structured models and parsers already in the codebase instead of ad hoc string manipulation for workflow config, durable state, API/report snapshots, registration payloads, and Linear data.
 - Tests should cover both the role-local behavior and the cross-role contract. Add or update import-boundary tests when package relationships change.
 

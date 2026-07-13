@@ -1,69 +1,72 @@
-# Module baseline: `performer-api`
+# Module target: `performer-api`
 
-Status: implemented code baseline, 2026-07-12.
+Status: ADR-0006 target boundary accepted on 2026-07-13; implementation is
+tracked in `tasks/plan.md`.
 
 ## Responsibility
 
-`performer-api` is the dependency-free shared wire-contract package. It carries
-only the JSON models that must cross the Performer/Conductor boundary: plans,
-tasks, fenced turn context, execute/gate results, and runtime waits. It does
-not execute work, persist state, call Linear, make HTTP requests, or select a
-Codex backend.
+`performer-api` is the dependency-free shared wire-contract package. It
+contains only closed JSON models needed across role/process boundaries:
 
-```text
+- ordered plans, tasks, revisions, and acceptance evidence;
+- fenced turn request/result context;
+- execution and turn policy;
+- provider-neutral Performer control request/event/result contracts;
+- capabilities, readiness, and sanitized control errors.
+
+It does not execute work, select or load a backend implementation, persist
+state, call Linear, make HTTP requests, import a provider SDK, or contain SDK
+objects/generated provider types.
+
+~~~text
 performer-api <- performer
 performer-api <- conductor
-performer-api <- podium (only if a shared contract is needed)
-```
+performer-api <- podium, only when a shared contract is needed
+~~~
 
-## Current surface
+## Target surface
 
-```text
+~~~text
 performer_api/
-  __init__.py
-  labels.py         # Canonical Podium-owned project-label formatter/validator
-  workflow.py       # Task, Plan, AcceptanceCatalog, PlanRevision
-  turns.py          # TurnContext, RuntimeWait, ExecuteResult, GateResult
-  validation.py     # plan and context validation
-```
+  labels.py
+  workflow.py
+  turns.py or performer_turns.py
+  runtime_policy.py
+  performer_control.py
+  validation.py
+~~~
 
-There is no `runtime.py`, `TurnRequest`, or `TurnResult` module/type in this
-package. Old Managed Run compatibility exports are intentionally absent.
+Codex-named shared policy modules are removed after callers migrate; no
+compatibility alias remains.
 
 ## Contracts
 
-- A `Plan` contains ordered `Task` values. Each task declares an objective,
-  acceptance criteria, verification commands, and file scope. The order is the
-  execution order; task contracts contain no dependency, parallel, or
-  checkpoint fields.
-- The shared project-label contract formats and validates only
-  `symphony:conductor/<Name>-<public-id>` labels. Podium owns their lifecycle;
-  Conductor uses the contract only to validate a smoke command.
-- A `Plan` may retain risks, architecture decisions, open questions, an
-  acceptance catalog, and `approval_required`. `PlanRevision` adds version,
-  status, policy revision, approval id, and manifest references.
-- `TurnContext` is the fencing boundary: run id, task id, attempt id, fencing
-  token, and `plan|execute|gate`. Performer echoes it and Conductor rejects a
-  stale or mismatched result.
-- `ExecuteResult` carries status, summary, changed files, criterion evidence,
-  and an optional blocked reason.
-- `GateResult` carries `passed`, score/threshold/rubric/provenance, findings,
-  and artifact references. It represents one Codex evaluator, never a
-  cross-model review or scheduler.
-- `RuntimeWait` carries only a wait kind and sanitized reason. Resume identity
-  belongs to Conductor's durable wait record, not this wire model.
+- `RuntimePolicy` and `PerformerProfileConfig` contain only Symphony policy,
+  binding identity, and canonical hashes.
+- `PerformerTurnRequest` / `PerformerTurnResult` carry strict fencing and
+  normalized plan/execute/gate data.
+- `PerformerControlRequest`, events, and results are closed discriminated
+  unions for status, login, session deletion, config read/write, and Check.
+  They contain metadata only; an optional secret value uses a separate bounded
+  stdin frame and never becomes a serializable result/request field.
+- `PerformerCapabilities` describes backend kind/display label, supported
+  logical login/config/Check operations, turn kinds, and protocol version.
+- `PerformerReadinessState` is provider-neutral and bound to backend,
+  binding, capability, and policy identity.
+- `PerformerControlError` preserves stable category, sanitized reason,
+  action, retryability, attempt number where applicable, and next action.
+
+Logical settings such as `api_base_url` are mapped to provider configuration
+inside Performer. No shared contract exposes provider config keys, JSON-RPC,
+filesystem operations, paths, raw SDK payloads, or secrets.
 
 ## Boundary rules
 
-- Validate untrusted JSON at the Performer/Conductor boundary; keep internal
-  calls typed rather than repeating defensive parsing.
-- Do not place SDK objects, secrets, credentials, or local runtime paths in a
-  shared contract.
-- Keep unknown turn kinds and malformed fencing contexts deterministic and
-  reject them with a stable reason.
-
-## Explicit removals
-
-The package has no capacity scheduler, dependency policy, checkpoint group,
-parallel executor, backend registry, or compatibility aliases. Durable plan
-and acceptance data remain contracts rather than a workflow engine.
+- Validate untrusted JSON at every process/HTTP boundary.
+- Reject unknown discriminators/fields, oversized data, secret-like fields,
+  local paths, Base64 blobs, and provider-generated shapes.
+- Conductor must be able to construct and validate every control/turn exchange
+  using only this package.
+- Backend Python interfaces and registries belong in `performer`, not here.
+- The package has no scheduler, dynamic plugin loader, provider marketplace, or
+  compatibility aliases.

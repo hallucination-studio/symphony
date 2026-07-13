@@ -1,16 +1,20 @@
 # Product architecture
 
-These documents describe the current product, not historical plans. The
-compact module baselines in [`docs/modules`](../modules/README.md) define
-ownership; [`tasks/spec.md`](../../tasks/spec.md) defines the workflow contract.
+These documents describe the accepted target product architecture, not
+historical plans. The compact module baselines in
+[`docs/modules`](../modules/README.md) define ownership;
+[`tasks/spec.md`](../../tasks/spec.md) defines the workflow contract and
+[`tasks/plan.md`](../../tasks/plan.md) tracks remaining implementation.
 
 ## Sources of truth
 
 - [`runtime-pipeline.md`](runtime-pipeline.md): Podium -> Conductor -> Performer.
 - [`pipeline-state.md`](pipeline-state.md): durable run/task/attempt state.
 - [`gates-verification-integration.md`](gates-verification-integration.md):
-  command checks and the single Codex Gate.
+  command checks and the single selected-backend Performer Gate.
 - [`linear-projection.md`](linear-projection.md): parent/Sub Issue projection.
+- [`runtime-profiles-backends.md`](runtime-profiles-backends.md): shared
+  policy/control contracts, Performer backend ownership, and readiness.
 - [`linear-integration.md`](linear-integration.md): OAuth, polling, routing, and
   the Linear proxy.
 - [`podium-web.md`](podium-web.md): unchanged browser business behavior.

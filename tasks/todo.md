@@ -1,183 +1,122 @@
-# Minimal Polling Workflow Checklist
+# ADR-0006 Performer Backend Boundary Checklist
 
-Status: ADR-0005 is approved and its Conductor-owned opaque credential hard cut
-is in progress. ADR-0004 remains authoritative only for non-secret current
-runtime and Performer profiles. External Linear/OAuth/Codex verification remains
-acceptance-gated until the implementation and staged run complete. This checklist
-is the active scope ledger;
-`tasks/spec.md` remains the product contract.
+Status: approved implementation plan. Phase 1 is retained completed history;
+the former Conductor CodexController direction is superseded and must not be
+continued. Detailed contracts and commands are in `tasks/plan.md`.
 
-## Fixed product decisions
+## Non-negotiable execution rule
 
-- [x] Preserve Linear OAuth, selected projects, paginated polling/checkpoints,
-  delegation epochs, dispatch routing, bindings, labels, proxy, and visible
-  failures.
-- [x] Preserve Podium Web routes, onboarding, authentication, actions,
-  responses, visual behavior, and browser secret boundaries.
-- [x] Use an ordered parent -> Linear Sub Issues -> sequential Codex workflow.
-- [x] Keep plan revision/approval and retained score/rubric/threshold/weight/
-  provenance/catalog/manifest/artifact contracts.
-- [x] Remove checkpoint groups, DAG/parallel/branch/join behavior, cross-model
-  review, and a second acceptance scheduler.
-- [x] Keep command checks plus one read-only Codex Gate, one automatic rework,
-  then visible blocking on the second failure.
-- [x] Hard-cut old local/runtime state: fresh schemas only, no migration.
+- [ ] For each new phase: finish the coherent change, run focused tests, run
+      one complete `make test`, inventory every failure, group by root cause,
+      repair groups, then rerun focused tests and `make test`.
+- [ ] Do not repair and rerun one failing test at a time.
+- [ ] Keep `.test/adr-0006/phase-N-make-test.log` and
+      `phase-N-root-causes.md` for every new phase.
+- [ ] Keep `assumptions_requiring_approval` empty before production edits.
+- [ ] Freeze `performer_api` contracts before parallel implementation lanes.
+- [ ] Keep shared integration files owned by the primary agent.
 
-## Implemented simplification slices
+## Phase 1: Policy/profile hard cut — completed history
 
-- [x] Consolidate Conductor persistence into one fresh `workflow.db`.
-- [ ] Replace the removed profile compatibility value with layered Podium
-  Performer profiles -> runtime profiles plus a Performer binding and separate
-  credential reference; use binding generation/hash fencing and do not widen
-  `project_bindings` with TOML or credential fields.
-- [x] Remove persisted runtime-group ownership; retain the deterministic public
-  alias `group_{conductor_id}`.
-- [x] Collapse Conductor smoke/command wrappers into their unique owners.
-- [x] Enforce active Linear blockers before dispatch lease and refresh cleared
-  blockers after a complete reconciliation pass.
-- [x] Repair the direct pinned Codex SDK stream contract and inline its one-use
-  runtime mixin into `CodexSdkClient`.
-- [x] Record one baseline document per module under `docs/modules/`.
-- [x] Merge the one-consumer Conductor service-view mixin into
-  `conductor_service.py`.
-- [x] Remove the `Workflow` forwarding facade; `ConductorStore` is the sole
-  durable workflow-transition owner.
-- [x] Remove unlinked duplicate workflow/acceptance and agent-guidance docs.
-- [x] Replace obsolete Web, installer, security, and Linear-projection claims
-  with the current module-owned baseline.
+- [x] Replace shared Codex TOML/config documents with `RuntimePolicy` and
+      policy-only `PerformerProfileConfig`.
+- [x] Reject Codex-owned config, credential, slot, path, and legacy revision
+      fields at the shared boundary.
+- [x] Replace Podium `runtime.toml` ingestion with execution/turn policy JSON.
+- [x] Rename PostgreSQL profile columns/hashes while preserving mutable rows,
+      bindings, generation fencing, and no revision tables.
+- [x] Change `project.configure`, Conductor projection, reports, and acks to
+      policy documents/hashes only.
+- [x] Commit the Phase 1 checkpoint as `e3b5b09`.
 
-## Remaining code slices
+## Phase 2: Performer backend boundary
 
-- [x] Simplify remaining one-use Conductor service/view helpers where behavior
-  ownership is demonstrably singular.
-- [x] Audit remaining tools/docs/legacy planning artifacts without changing
-  Linear or Web behavior; no tracked disconnected artifact was found that is
-  safe to remove.
-- [x] Make retained acceptance evidence readable in the operator report and
-  Linear projection using existing owners; do not create a new evidence runner
-  or child-issue tree without explicit approval.
-- [x] Reconcile the written Gate rule with the retained product contract:
-  commands must pass, Codex must return `passed=true`, and the score must meet
-  the threshold. No Gate behavior was changed; the existing threshold test
-  remains the regression guard.
+- [ ] Add provider-neutral turn/control/capability/readiness contracts in
+      `performer_api`; remove active Codex-named shared modules without aliases.
+- [ ] Add internal `PerformerBackend` Protocol/ABC and explicit closed registry.
+- [ ] Prove a deterministic test backend satisfies the same contract without a
+      provider SDK.
+- [ ] Move all Codex turn SDK imports, types, policy mapping, errors, and result
+      normalization behind `CodexBackend`.
+- [ ] Add long-running `performer control` framed stdin/stdout protocol.
+- [ ] Keep device-login handles and provider sessions inside the Performer
+      control process; keep status/cancel usable while login is pending.
+- [ ] Keep API keys only in request/relay/pipe/process memory with no durable
+      request/result, argv, environment, stdout, stderr, or log artifact.
+- [ ] Replace the wrong-direction Conductor `CodexController` with generic
+      `PerformerCoordinator` using only `performer_api`.
+- [ ] Remove `openai-codex` and provider-generated types from Conductor.
+- [ ] Add one generic secret-free `performer_control_state` row with backend,
+      binding, capability, policy, readiness, and sanitized Check identity.
+- [ ] Make Conductor control/turn process handling asynchronous so scheduler,
+      lease/log heartbeats, status, and cancel remain responsive.
+- [ ] Use one immutable allowlisted environment for control and turn processes.
+- [ ] Remove credential slots, per-attempt provider-home materialization, TOML
+      writing/parsing, auth copy-back, and duplicate environment sources.
+- [ ] Block non-ready plan/execute/gate turns visibly and resume their exact
+      prior phase only after a compatible manual Check.
+- [ ] Prove the same generic sanitized failure in SQLite, logs, Podium
+      managed-runs/report, and Linear.
+- [ ] Run Phase 2 focused tests, full failure collection, grouped repair, full
+      rerun, boundary searches, and green checkpoint commit.
 
-## MVP acceptance closure slice
+## Phase 3: Provider-neutral Podium live API and Web
 
-- **Authorized:** prove one successful sequential parent/task/Gate closure;
-  one Gate rework followed by a second-failure block; duplicate-result
-  idempotency; stale-result rejection; sanitized runtime waits, failures, and
-  logs; and one real Linear/OAuth/Codex flow through `tools/real_flow.py`.
-- **Required consequences:** terminal attempt results cannot be applied twice;
-  stale attempts cannot mutate the current task; runtime output and wait/failure
-  reasons use the existing sanitized product surfaces; every accepted claim has
-  focused test or real-flow evidence.
-- **Out of scope:** changing the Gate threshold rule, adding a new endpoint or
-  scheduler, changing Linear/Web vocabulary, or creating a second E2E runner.
-- **Assumptions requiring approval:** none.
-- **Deferred ideas:** richer real-flow orchestration automation and optional Web
-  rendering of detailed evidence remain outside this closure slice.
+- [ ] Replace credential/Codex-specific live operations with
+      `performer.status`, `performer.login`, `performer.session.delete`,
+      `performer.config.read`, `performer.config.write`, and `performer.check`.
+- [ ] Add owner-only no-store `/conductors/{id}/performer/*` routes while
+      preserving live relay fencing, deadlines, duplicate/stale rejection, and
+      Check rate limiting.
+- [ ] Return backend kind plus closed capabilities; Podium must not infer
+      provider support or pass raw SDK/path/Base64/unknown fields.
+- [ ] Keep API keys and device-login material out of PostgreSQL commands,
+      retries, reports, logs, and background jobs.
+- [ ] Add generic Web contracts and transient non-cached secret/config/login
+      state.
+- [ ] Add `RuntimesPerformerDrawer` rendered from capabilities, not provider
+      branches; backend branding may be display data only.
+- [ ] Prove login/config mutations never trigger Check automatically and API
+      key/transient state is cleared before completion or on close.
+- [ ] Run Web test/lint/design-lint/build, Phase 3 focused Python tests, full
+      failure collection, grouped repair, full rerun, and green checkpoint.
 
-## Podium-managed Codex configuration/local-login slice ledger
+## Phase 4: Real E2E and active docs
 
-The credential ownership/reference portion of this ledger is superseded by
-ADR-0005. Its non-secret runtime/Performer profile decisions remain active.
+- [ ] Rewrite the Performer diagnostic to start installed `performer control`,
+      obtain capabilities, run manual Check, and run plan/execute/gate through
+      installed Performer turn commands.
+- [ ] Share one approved staged per-batch provider context across control and
+      turns; never import provider SDKs or parse provider auth/config in tools.
+- [ ] Retain stale fencing, duplicate-result, immediate failure, secret/path,
+      and required-artifact checks.
+- [ ] Reconcile README, agent rules, module/security docs, real-flow docs, and
+      real-E2E design with ADR-0006 while preserving historical ADR rationale.
+- [ ] Run Phase 4 focused tests, documentation searches, `git diff --check`,
+      full failure collection, grouped repair, and full rerun.
+- [ ] Run OAuth, Linear, and Performer diagnostics consecutively with no fixes
+      between them; collect and group the complete failure set.
+- [ ] Repair diagnostic root-cause groups, rerun local focused plus full tests,
+      then rerun all diagnostics as one batch.
+- [ ] After all prerequisites pass, run one final `tools/real_flow.py --phase all`.
 
-- **Authorized:** design a reusable Podium Performer-profile wrapper that
-  references current runtime profiles, separate credential metadata/reference
-  records, and Conductor-local selected OAuth/API-key slots for isolated
-  Performer attempts. Official `codex login` ChatGPT OAuth without an API token
-  is supported.
-- **Required consequences:** layered current Performer/runtime profile facts,
-  binding generation/hash fencing, credential metadata, and Performer binding;
-  strict TOML/secret validation; idempotent/stale command handling; isolated
-  attempt materialization; sanitized readiness/failure fields; local
-  credentials kept outside Podium; focused tests and real-flow evidence.
-- **Out of scope:** sending `auth.json`, keyring exports, API keys, or access
-  tokens through Podium; a Podium credential vault; a second runtime transport;
-  a new scheduler; or detailed credential rendering in Web/Linear.
-- **Assumptions requiring approval:** none. The user approved the simplified
-  ADR-0004 layered table shape, mutable profile rows with generation/hash
-  fencing, local-only credentials, and file/directory profile provisioning.
-- **Deferred ideas:** KMS-backed Podium API-key storage, browser editing UI,
-  and a managed credential brokerage require a separate product decision.
+## Final acceptance
 
-## ADR-0005 Conductor-owned opaque credential implementation ledger
-
-- **Authorized:** remove Podium credential persistence and shared credential
-  fields; implement Conductor-local opaque OAuth/API-key slots, active-slot
-  selection, bounded live checks, isolated attempt homes, safe refresh
-  copy-back, and an ephemeral outbound-only Podium inspection relay; reuse fixed
-  real-E2E slots with model `gpt-5.4`.
-- **Required consequences:** managed TOML requires file credential storage;
-  Podium stores only non-secret runtime/Performer profiles; Conductor alone owns
-  slot metadata and selection; Symphony never parses `auth.json`; live results
-  are single-delivery, bounded, sanitized, no-store, and non-durable.
-- **Out of scope:** remote slot mutation, credential upload, Podium vault/KMS,
-  keyring extraction, credential-schema interpretation, another transport,
-  runner, or scheduler.
-- **Assumptions requiring approval:** none.
-- **Deferred ideas:** durable multi-process relay, remote credential lifecycle,
-  cached account/readiness details, and managed credential brokerage.
-
-### ADR-0005 implementation checklist
-
-- [ ] Hard-cut credential fields from shared contracts and Podium profiles,
-      schema, storage, commands, reports, and Conductor configuration reports.
-- [ ] Implement Conductor slot service and `init`, `check --live`, and `select`
-      CLI commands.
-- [ ] Implement isolated attempt materialization, slot locking, and opaque
-      refresh reconciliation.
-- [ ] Implement ephemeral Podium live inventory/check endpoints and Conductor
-      outbound lease/reply polling.
-- [ ] Update real-flow staging to reuse fixed OAuth/API-key slots and pin
-      `gpt-5.4`.
-- [ ] Run focused tests, one complete `make test`, group the full failure set by
-      root cause, repair by group, then rerun focused and full verification.
-- [ ] Complete code/security review and one `tools/real_flow.py --phase all`
-      batch without claiming acceptance when external prerequisites fail.
-
-## Current evidence-projection slice ledger
-
-- **Authorized:** expose the already-retained acceptance catalog, rubric,
-  provenance, manifest, artifact, and Gate facts through the existing
-  authenticated managed-runs report and existing Linear Gate comment.
-- **Required consequences:** write bounded, sanitized local Gate details after
-  the decision and derive one revision-aware summary; prevent raw command
-  output, findings, secret-like values, and artifact/manifest locations from
-  entering Podium or Linear.
-- **Out of scope:** new endpoints, Web layout changes, new child issues,
-  artifact download, manifest generation, a new verifier, another scheduler,
-  cross-model review, or a Gate-rule change.
-- **Assumptions requiring approval:** none. Existing `score >= threshold`
-  behavior remains unchanged, and absent production manifest refs stay absent.
-- **Deferred ideas:** rendering the optional summary in the current Web page,
-  generating manifests, and allowing task identity changes across plan
-  revisions all belong to separately approved product slices.
-
-## Verification status
-
-- [x] `make test` — 177 Python tests passed, including Gate rework/block,
-      duplicate/stale result, runtime redaction, and real-flow contract cases.
-- [x] `cd packages/podium/web && npm run test && npm run lint && npm run
-      design:lint && npm run build` — 27 Web tests passed; lint/build clean
-      (design lint: 0 errors, 0 warnings).
-- [x] `tools/real_flow.py --offline` — staged Codex seed preflight passed;
-      report: `.test-real-flow/mvp-offline-report.json`.
-- [x] `tools/real_flow.py --phase all` — one shared `run_id`, all three phases,
-      Overall `blocked_by` when prerequisites fail, and sanitized per-run
-      artifact manifest; latest evidence: `.test-real-flow/batch-report-final-verified.json`.
-- [x] MVP transition and redaction behavior is covered by the 177-test suite;
-      Overall real issue scenarios remain acceptance-gated on external OAuth,
-      Linear, Codex, and disposable-repository prerequisites.
-- [ ] Real Linear/OAuth/Codex product flow — current configured project probe
-      reaches Linear but returns sanitized `linear_request_failed:http_401`;
-      evidence: `.test-real-flow/mvp-real-probe.json`. The standard report also
-      records missing project/Podium environment when those values are absent:
-      `.test-real-flow/mvp-real-report.json`.
-
-## Stop conditions
-
-Stop and revise the slice if it drops Linear business behavior, changes a
-Podium Web action/response, lets a child or parent bypass the Gate, permits a
-stale result to mutate state, leaks a secret, or reintroduces checkpoint,
-DAG/parallel, cross-model, or second-scheduler behavior.
+- [ ] One real successful parent/task/Gate closure.
+- [ ] First Gate failure reworks; second failure blocks task and parent.
+- [ ] Duplicate results do not advance state twice.
+- [ ] Stale results do not change the current task.
+- [ ] Manual compatible Check gates plan/execute/gate through Performer.
+- [ ] Conductor has no provider SDK dependency, provider controller, or
+      provider-generated type.
+- [ ] Control secrets leave no durable request/result/cache/log/report artifact.
+- [ ] Capability-driven API/UI works without provider branches in Conductor or
+      Podium.
+- [ ] Runtime waits, failures, browser responses, reports, and logs contain no
+      secrets or private provider paths.
+- [ ] Real OAuth, Linear, manual Check, and CodexBackend plan/execute/gate
+      complete under one final run id.
+- [ ] `git diff --check`, `make test`, Web test/lint/design-lint/build, code
+      review, import-boundary review, and security review are green.
+- [ ] Every MVP requirement has evidence-backed 4/4 acceptance and an artifact
+      or report path.

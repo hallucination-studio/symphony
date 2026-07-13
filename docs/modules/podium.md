@@ -1,7 +1,8 @@
 # Module baseline: `podium`
 
-Status: implemented code baseline, 2026-07-12. Linear business behavior is
-preserved; real OAuth/Linear verification has not been run in this workspace.
+Status: module boundary amended by accepted ADR-0006 on 2026-07-13. Linear
+business behavior is preserved; provider-neutral live control remains target
+implementation work tracked in `tasks/plan.md`.
 
 ## Responsibility
 
@@ -85,17 +86,20 @@ catalog/rubric, plan version, command counts, score/threshold, provenance,
 manifest/artifact counts, and failure code. Podium independently allowlists
 and bounds that summary; command text/output, findings, and artifact/manifest
 locations remain local. The accepted runtime surface returns only selected
-profile ids, binding-generation/hash, policy/hash, credential method, and
-sanitized readiness; it never returns profile TOML or credential values. The
-Web does not render detailed profile contents in this slice.
+profile ids, binding-generation/hash, policy/hash, closed Performer
+capabilities, and sanitized generic readiness. Provider account/config/Check
+projections use a bounded no-store live relay and are never PostgreSQL facts.
+Secret values, provider paths, and raw SDK fields never enter browser
+responses.
 
 ## Hard-cut rules
 
-- New PostgreSQL schema only: no old runtime-group rows are read or migrated;
-  Performer profiles, runtime profiles, and credential references use the
-  layered normalized schema in ADR-0004. Profile rows contain current
-  validated documents; binding generation and hashes fence updates. There are
-  no profile revision tables.
+- New PostgreSQL schema only: no old runtime-group rows are read or migrated.
+  Runtime profiles and Performer profiles contain secret-free execution/turn
+  policy; Performer bindings plus generation/hashes fence updates. There are no
+  credential references or profile revision tables.
 - Keep Linear OAuth/tokens and browser secret boundaries unchanged.
-- Do not add a generic runtime protocol, outbox framework, WebSocket path,
-  cross-model acceptance, or a second scheduler.
+- Do not import provider SDKs, parse provider responses, or persist live
+  provider control facts in Podium.
+- Do not add a dynamic backend plugin protocol, outbox framework, WebSocket
+  path, cross-model acceptance, or a second scheduler.

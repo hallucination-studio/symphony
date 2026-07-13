@@ -1,8 +1,9 @@
 # Module Design Baselines
 
-Status: code baseline as of 2026-07-12. The local suite proves the covered
-contracts; a real Linear/OAuth/Codex flow is still an external verification
-step, not an implied pass.
+Status: module boundary baseline amended by accepted ADR-0006 on 2026-07-13.
+The corrected provider boundary is target work until the implementation plan
+and verification are complete; a real Linear/OAuth/Performer flow is still an
+external verification step, not an implied pass.
 
 These documents describe the code that exists now and the hard-cut boundaries
 that future work must preserve. They do not authorize a new feature or hide an
@@ -18,23 +19,24 @@ Linear parent issue
   -> Performer plan turn
   -> ordered Linear Sub Issues
   -> Performer execute turn
-  -> verification commands + one read-only Codex Gate
+  -> verification commands + one read-only selected-backend Gate
   -> child Done, one rework, or visible block
   -> parent Done after every child is Done
 ```
 
 Podium-to-Conductor coordination is authenticated HTTP polling. Performer is a
-local process launched by Conductor through request/result files. Podium Web is
-the only customer-facing UI and never receives Linear or Codex credentials.
+local process launched by Conductor through provider-neutral control and fenced
+turn contracts. Podium Web is the only customer-facing UI and never receives
+Linear or provider credentials.
 
 ## Module ownership
 
 | Module | Owns | Does not own |
 |---|---|---|
-| [`performer-api`](performer-api.md) | Shared JSON contracts and boundary validation | SDK calls, persistence, Linear, HTTP, UI |
-| [`performer`](performer.md) | One fenced Codex turn and its isolated runtime | Scheduling, Linear, Podium, durable workflow state |
-| [`conductor`](conductor.md) | One bound repository, sequential durable workflow, Linear projection, gates | Customer OAuth, browser UI, direct Linear tokens |
-| [`podium`](podium.md) | Auth, Linear control plane, bindings, polling, dispatch, proxy, runtime APIs | Local task execution or Codex process management |
+| [`performer-api`](performer-api.md) | Provider-neutral turn/control/capability/readiness JSON contracts | Backend registry, SDK calls, persistence, Linear, HTTP, UI |
+| [`performer`](performer.md) | Backend interface/registry, provider SDK adapters, control host, fenced turns | Scheduling, Linear, Podium, durable workflow state |
+| [`conductor`](conductor.md) | One bound repository, sequential durable workflow, generic Performer process/readiness coordination, Linear projection, gates | Provider SDKs/controllers, Customer OAuth, browser UI, direct Linear tokens |
+| [`podium`](podium.md) | Auth, Linear control plane, bindings, polling, dispatch, proxy, provider-neutral runtime APIs | Local task execution or provider SDK process management |
 | [`podium-web`](podium-web.md) | Existing browser routes, actions, presentation, secret-safe API use | Workflow decisions, credentials, runtime sockets |
 | [`verification`](verification.md) | Module tests and a strict real-flow preflight | A second acceptance product or cross-model scheduler |
 
@@ -43,6 +45,10 @@ the only customer-facing UI and never receives Linear or Codex credentials.
 - The four Python package import boundaries remain: `performer_api` imports no
   other product package; Performer, Conductor, and Podium do not import each
   other.
+- Provider SDKs, generated types, authentication/configuration logic, provider
+  handles, and provider response parsing exist only in Performer backend
+  implementations. Conductor consumes only `performer_api` and installed
+  Performer processes.
 - Linear behavior remains: OAuth, token refresh, selected projects, cursor
   pagination, polling checkpoints, delegation epochs, dispatch deduplication,
   bindings, labels, proxying, parent/child projection, and visible failures.

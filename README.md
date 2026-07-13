@@ -10,8 +10,9 @@ Symphony is one orchestration system for running coding agents as an
   binds one Linear project and repository, leases dispatches, owns durable
   Managed Runs state, starts Performer turns, and reports local state. Multiple
   isolated Conductors may run on the same host for different projects.
-- **Performer** is the execution worker. It runs one fenced managed-run turn from
-  Conductor-owned request/result JSON paths.
+- **Performer** is the execution worker and backend boundary. It runs fenced
+  managed-run turns, exposes provider-neutral control operations, and owns the
+  internal backend interface plus provider SDK adapters.
 - **performer-api** contains the shared contracts that let those roles exchange
   state without importing each other's runtime code.
 
@@ -50,8 +51,8 @@ Managed execution is a Conductor-owned Linear-native managed run:
 6. Performer runs one plan, execute, or read-only gate turn under the compact
    workflow contract.
 7. Conductor creates Linear Sub Issues, executes them strictly in order, runs
-   verification commands plus one Codex Gate per task, and projects sanitized
-   evidence to Podium and Linear.
+   verification commands plus one selected-backend Gate per task, and projects
+   sanitized evidence to Podium and Linear.
 
 Dispatch routing is based on Linear organization, stable project id, installed
 app user, selected scope, single-project Conductor binding, active state,
@@ -119,10 +120,21 @@ Performer accepts only managed one-shot turns:
   --turn-result-path /path/to/turn-result.json
 ```
 
-A Performer reads a fenced turn request, runs the requested managed-run role under
-an isolated local Codex home, writes a fenced turn result, and exits. It never
-leases dispatches, queries Linear as scheduler truth, or owns durable managed-run
-state.
+A Performer reads a fenced turn request, selects an approved backend through
+its internal registry, writes a fenced normalized result, and exits. It never
+leases dispatches, queries Linear as scheduler truth, or owns durable
+managed-run state.
+
+Provider-neutral live control uses the installed control mode and a bounded
+stdin/stdout protocol managed by Conductor:
+
+```bash
+.venv/bin/performer control
+```
+
+Provider SDKs, authentication/configuration behavior, Check execution, and
+provider session handles remain inside Performer backend implementations.
+Conductor imports only `performer_api` contracts.
 
 ## Podium API Surface
 
@@ -164,17 +176,24 @@ Managed Conductor endpoints include:
 
 ## Runtime
 
-Conductor prepares one isolated `CODEX_HOME` under managed instance state for
-each fenced attempt. The accepted design gives Podium reusable `runtime_profile`
-rows plus a Symphony-owned `performer_profile` wrapper. Each project binding
-selects a Performer profile and a Conductor-local credential slot. Profile rows
-hold current validated documents; the binding generation and content hashes
-fence `project.configure` updates. The Web receives only sanitized profile,
-generation/hash, policy, and readiness metadata. Raw OAuth/API credentials
-never leave the local credential slot. The execute turn works only within the
-approved task scope, while the gate turn is read-only.
-Verification commands run before the Codex Gate and their evidence is stored
-with the task result.
+Podium stores reusable `runtime_profile` rows plus a Symphony-owned
+`performer_profile` wrapper. Profiles contain only secret-free execution/turn
+policy and hashes; binding generation fences `project.configure` updates.
+
+One Conductor selects one fixed allowlisted backend process context and starts
+installed Performer control/turn processes. It persists generic readiness but
+does not import `performer`, provider SDKs, or provider-generated types.
+Performer owns the internal `PerformerBackend` interface, explicit closed
+registry, policy-to-SDK mapping, login/config/Check behavior, response
+validation, and sanitization. Codex is the first production adapter; another
+provider requires a separately approved implementation.
+
+Secret-bearing control operations use pipes and are never persisted as control
+request/result files. The Web receives only normalized capabilities, profile,
+generation/hash, policy, and readiness metadata. The execute turn works only
+within the approved task scope, while the gate turn is read-only.
+Verification commands run before the selected backend's read-only Performer
+Gate and their evidence is stored with the task result.
 
 Secrets flow through `$VAR` indirection such as `$PODIUM_PROXY_TOKEN`. Values are
 validated but never printed in responses, logs, result payloads, or browser API

@@ -1,7 +1,8 @@
 # Module baseline: `podium-web`
 
-Status: implemented code baseline, 2026-07-12. UI behavior is preserved; this
-document does not claim a browser run against a live Podium instance.
+Status: module boundary amended by accepted ADR-0006 on 2026-07-13. Existing UI
+behavior is preserved; the capability-driven Performer drawer remains target
+implementation work and this document does not claim a live browser run.
 
 ## Responsibility
 
@@ -27,8 +28,10 @@ are normative and must stay synchronized with `src/styles/tokens.css`.
 - `runtime_group_id` remains displayable as a stable alias even though Podium
   no longer stores a runtime-group table.
 - The browser receives only sanitized selected profile metadata,
-  binding-generation/hash, and readiness; it does not configure credential
-  slots or render profile TOML.
+  binding-generation/hash, generic readiness, and closed Performer
+  capabilities. Live login/config/Check controls are provider-neutral and
+  capability-driven; secret inputs and config source remain transient local
+  state and never enter client caches.
 
 ## What the current UI does not claim
 

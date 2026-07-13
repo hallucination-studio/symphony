@@ -11,9 +11,9 @@ blocker checks, bindings, labels, and the authenticated Linear proxy.
 
 One delegated parent maps idempotently to one run. A plan creates one ordered
 Linear Sub Issue per task with an explicit `parent { id identifier }` relation.
-Conductor executes only the first unfinished Sub Issue. Codex approval or tool
-input waits may create a `[Human Action]` child for the exact affected parent or
-Sub Issue.
+Conductor executes only the first unfinished Sub Issue. Performer backend
+approval or tool-input waits may create a `[Human Action]` child for the exact
+affected parent or Sub Issue.
 
 Podium's active `blocks` relation check remains an intake concern: it prevents
 leasing a delegated parent while its blocker is active. It is unrelated to the

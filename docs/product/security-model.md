@@ -8,7 +8,7 @@ application secrets and installation tokens at rest, refreshes them server
 side, and injects them only into outbound Linear proxy requests.
 
 Browser and Conductor responses never contain Linear access or refresh tokens,
-session-cookie values, passwords, client secrets, raw Codex credentials, or
+session-cookie values, passwords, client secrets, raw provider credentials, or
 Authorization headers. Conductor has a scoped Podium runtime credential and a
 scoped proxy credential, not a direct Linear token.
 
@@ -32,20 +32,30 @@ Podium resolves the runtime to its active project binding and installation,
 enforces the project/organization boundary, logs a sanitized audit result, and
 does not fall back to a deployment-wide Linear token.
 
-## Local Codex isolation
+## Local Performer and provider isolation
 
-Podium owns only a validated non-secret Codex `config.toml`, delivered with a
-binding generation and content hash. Conductor stages an isolated `CODEX_HOME`
-per managed turn and captures sanitized Performer output. `codex login`
-ChatGPT OAuth credentials remain a local Conductor concern: approved local
-Codex seed files are copied only from a fixed staged seed. The ambient
-`~/.codex` home is rejected.
+Podium owns only secret-free Symphony execution/turn policy, profile ids,
+binding generation, and hashes. One Conductor selects one fixed allowlisted
+backend process context and starts installed Performer control/turn processes.
+It imports only `performer_api` and does not import a provider SDK, parse
+provider files, or hold provider login/session handles.
 
-Codex performs OAuth refresh during use; credentials never enter Podium
-PostgreSQL, runtime commands, browser responses, Linear comments, logs, or
-managed-run reports. Secret configuration uses `$VAR` indirection; values are
-validated but not returned in reports, Linear comments, or logs. Missing or
-invalid config/auth setup fails closed with a sanitized actionable reason.
+Performer backend implementations are the only modules allowed to import
+provider SDKs or generated provider types and to perform provider
+authentication, configuration, Check, or turn mapping. Provider responses are
+untrusted until validated and normalized inside that boundary.
+
+Secret-bearing controls use stdin/stdout pipes or an equivalent in-memory
+channel. API keys, device secrets, credentials, provider config paths, and raw
+SDK payloads never enter persisted control files, Conductor SQLite, Podium
+PostgreSQL/runtime commands, browser caches/responses, Linear comments, logs,
+or managed-run reports.
+
+Production reuses the fixed provider-owned context and does not create
+per-attempt credential/config copies. The real-E2E harness may stage one
+isolated per-batch context from an approved fixed seed and must reject direct
+ambient `~/.codex` inputs. Missing or invalid backend setup fails closed with a
+generic actionable reason plus a bounded sanitized adapter summary.
 
 ## Error visibility
 

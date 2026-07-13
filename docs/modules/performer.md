@@ -1,56 +1,80 @@
-# Module baseline: `performer`
+# Module target: `performer`
 
-Status: implemented code baseline, 2026-07-12. The pinned SDK path is covered
-with a local source-shape test; it has not been exercised against a real Codex
-account in this repository run.
+Status: ADR-0006 target boundary accepted on 2026-07-13; implementation is
+tracked in `tasks/plan.md`.
 
 ## Responsibility
 
-Performer is the local, single-turn Codex worker. Conductor starts the installed
-`performer` command with request/result paths. Performer validates one request,
-runs exactly one `plan`, `execute`, or `gate` turn, and writes one structured
-result with the exact fenced context.
+Performer is the local execution worker and provider boundary. Conductor starts
+the installed `performer` command for:
 
-It owns neither workflow state, Linear access, Podium authentication,
-scheduling, nor repository selection. It may make the network connection needed
-by the Codex SDK, but it must not directly access Linear/Podium or their
-credentials.
+- one fenced `plan`, `execute`, or `gate` turn; or
+- provider-neutral control over a bounded stdin/stdout protocol.
 
-## Current surface
+Performer owns the internal backend interface, explicit closed registry,
+provider SDKs, provider login/config/Check behavior, policy-to-SDK mapping,
+third-party response validation, error classification, and sanitization.
 
-```text
+It owns neither durable workflow state, Linear access, Podium authentication,
+scheduling, repository selection, nor operator projection.
+
+## Target shape
+
+~~~text
 performer/
-  __init__.py
-  cli.py                   # request file -> one result file
-  backend.py               # plan/execute/gate prompts and result parsing
-  codex_client.py          # direct SDK lifecycle, stream, retry, event capture
-  codex_client_helpers.py  # parsing, exception classification, close/env helpers
-  codex_config.py          # safe staged Codex configuration
-  schemas.py               # plan, execute, and gate JSON schemas
-```
+  cli.py
+  managed_turn.py
+  control_host.py
+  backend_interface.py
+  backend_registry.py
+  backends/
+    codex.py
+  schemas.py
+~~~
 
-`codex_client.py` uses the pinned `openai-codex==0.1.0b3` async
-`thread.turn(..., output_schema=...)` API. It reads the final JSON from the
-SDK's notification stream and preserves notification payloads used for runtime
-approval/tool-input waits. The one-use runtime mixin has been inlined; the
-configuration and helper boundaries remain because they own different concerns.
+Codex helper modules may remain split where they have clear SDK-owned
+responsibilities, but every provider SDK import and generated provider type
+must stay under Performer-owned backend implementation modules.
+
+## Backend contract
+
+`PerformerBackend` is a private Protocol or ABC with capability, control, and
+turn behavior. The explicit registry maps approved `performer_kind` values to
+factories. It does not load arbitrary plugins, entry points, or user code.
+
+CodexBackend is the first production implementation. A deterministic fake
+backend exercises the same contract in tests. A production ClaudeBackend
+requires a separately approved SDK/auth/config design.
+
+Performer core owns Symphony prompts, schemas, workspace-change rules, wire
+validation, runtime-wait normalization, and final result framing. Backend
+implementations hide provider SDK/CLI differences.
 
 ## Turn behavior
 
 | Turn | Input | Output | Side effects |
 |---|---|---|---|
 | `plan` | Parent issue context and repository | Ordered `Plan` | No file edits |
-| `execute` | One Sub Issue task | `ExecuteResult` | Codex may edit the bound repository |
+| `execute` | One Sub Issue task | `ExecuteResult` | Backend may edit the bound repository |
 | `gate` | Completed task and command evidence | `GateResult` | Read-only inspection |
+
+## Control behavior
+
+The long-running control host uses a closed metadata frame plus an optional
+length-delimited stdin secret frame and closed stdout events/results. Provider
+login handles stay inside the process. API keys and similar secrets exist only
+in secret-frame/backend-call memory and never in argv, environment, files,
+stdout, stderr, logs, or result payloads.
+
+Status/cancel remain available while device login is pending. Login/config
+mutations return readiness `unchecked`; only an explicit structured Check may
+return `ready`.
 
 ## Runtime guarantees
 
-- Each invocation uses an isolated staged `CODEX_HOME`; it never falls back to
-  the operator's home directory.
-- The context/fencing token is checked before process start and result
-  acceptance. Stale results are visible and ignored.
-- SDK events plus stdout/stderr are captured with run/task/attempt correlation.
-- Retryable overload, timeout, malformed JSON, and genuine Codex runtime waits
-  retain a sanitized reason and visible event trail.
-- Performer does not synthesize runtime waits, continuation policies, generic
-  default text schemas, or a backend registry.
+- The registry fails closed for unknown backend kinds.
+- Provider responses are untrusted until validated and normalized.
+- Fencing is checked before turn start and result acceptance.
+- SDK events/stdout/stderr are captured with correlation and redaction.
+- Provider errors never cross as raw exceptions, paths, or payloads.
+- Performer does not own workflow resume, durable readiness, Linear, or Podium.
