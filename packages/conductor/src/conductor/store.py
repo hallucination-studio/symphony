@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from performer_api.performer_control import PerformerReadinessState
+from performer_api.performer_control import PerformerControlError, PerformerReadinessState
 from performer_api.workflow import Plan
 
 from .acceptance_evidence import (
@@ -410,6 +410,143 @@ class ConductorStore:
         if row is None:
             raise RuntimeError("performer_control_state_missing")
         return _performer_control_state(row)
+
+    def block_run_for_performer(
+        self,
+        run_id: str,
+        *,
+        performer_kind: str,
+        binding_generation: int,
+        execution_policy_sha256: str,
+        error: PerformerControlError,
+        task_id: str | None = None,
+    ) -> dict[str, Any]:
+        if not isinstance(error, PerformerControlError):
+            raise TypeError("error must be PerformerControlError")
+        identity = PerformerReadinessState(
+            performer_kind=performer_kind,
+            binding_generation=binding_generation,
+            capability_version=1,
+            execution_policy_sha256=execution_policy_sha256,
+            status="unchecked",
+            last_check_status="none",
+            error=None,
+        )
+        run = self.get_run(run_id)
+        if run is None:
+            raise KeyError(run_id)
+        payload = dict(run.get("payload") or {})
+        existing = payload.get("performer_readiness_block")
+        prior_phase = (
+            str(existing.get("prior_phase") or "")
+            if isinstance(existing, dict)
+            else _performer_prior_phase(run, self.get_task(run_id, task_id) if task_id else None)
+        )
+        marker = {
+            "version": 1,
+            "performer_kind": identity.performer_kind,
+            "binding_generation": identity.binding_generation,
+            "execution_policy_sha256": identity.execution_policy_sha256,
+            **error.to_dict(),
+            "prior_phase": prior_phase,
+        }
+        payload["performer_readiness_block"] = marker
+        now = utc_now_iso()
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if task_id:
+                task_row = connection.execute(
+                    "SELECT * FROM tasks WHERE run_id = ? AND task_id = ?",
+                    (run_id, task_id),
+                ).fetchone()
+                if task_row is None:
+                    raise KeyError(task_id)
+                task_result = _load(task_row["result_json"])
+                task_marker = dict(marker)
+                task_marker["prior_state"] = str(task_row["state"])
+                task_result["performer_readiness_block"] = task_marker
+                connection.execute(
+                    "UPDATE tasks SET state = ?, result_json = ?, updated_at = ? WHERE run_id = ? AND task_id = ?",
+                    (
+                        TaskState.BLOCKED.value,
+                        _dump(task_result),
+                        now,
+                        run_id,
+                        task_id,
+                    ),
+                )
+            connection.execute(
+                "UPDATE runs SET state = ?, latest_reason = ?, payload_json = ?, updated_at = ? WHERE run_id = ?",
+                (
+                    RunState.BLOCKED.value,
+                    error.error_code,
+                    _dump(payload),
+                    now,
+                    run_id,
+                ),
+            )
+        blocked = self.get_run(run_id)
+        if blocked is None:
+            raise RuntimeError("performer_readiness_block_missing")
+        return blocked
+
+    def resume_run_from_performer_block(
+        self,
+        run_id: str,
+        *,
+        performer_kind: str,
+        binding_generation: int,
+        execution_policy_sha256: str,
+    ) -> dict[str, Any]:
+        run = self.get_run(run_id)
+        if run is None:
+            raise KeyError(run_id)
+        payload = dict(run.get("payload") or {})
+        marker = payload.get("performer_readiness_block")
+        if not isinstance(marker, dict):
+            return run
+        if (
+            marker.get("performer_kind") != performer_kind
+            or marker.get("binding_generation") != binding_generation
+            or marker.get("execution_policy_sha256") != execution_policy_sha256
+        ):
+            return run
+        prior_phase = str(marker.get("prior_phase") or "planning")
+        resumed_state = (
+            RunState.PLANNING.value
+            if prior_phase == RunState.PLANNING.value
+            else RunState.EXECUTING.value
+        )
+        payload.pop("performer_readiness_block", None)
+        now = utc_now_iso()
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            task_id = str(run.get("active_task_id") or "")
+            if task_id:
+                task_row = connection.execute(
+                    "SELECT * FROM tasks WHERE run_id = ? AND task_id = ?",
+                    (run_id, task_id),
+                ).fetchone()
+                if task_row is not None:
+                    task_result = _load(task_row["result_json"])
+                    task_marker = task_result.pop("performer_readiness_block", None)
+                    prior_state = (
+                        str(task_marker.get("prior_state") or TaskState.IN_PROGRESS.value)
+                        if isinstance(task_marker, dict)
+                        else TaskState.IN_PROGRESS.value
+                    )
+                    connection.execute(
+                        "UPDATE tasks SET state = ?, result_json = ?, updated_at = ? WHERE run_id = ? AND task_id = ?",
+                        (prior_state, _dump(task_result), now, run_id, task_id),
+                    )
+            connection.execute(
+                "UPDATE runs SET state = ?, latest_reason = 'performer_readiness_resumed', payload_json = ?, updated_at = ? WHERE run_id = ?",
+                (resumed_state, _dump(payload), now, run_id),
+            )
+        resumed = self.get_run(run_id)
+        if resumed is None:
+            raise RuntimeError("performer_readiness_resume_missing")
+        return resumed
 
     def create_run(self, parent_issue_id: str, issue_identifier: str, *, instance_id: str) -> dict[str, Any]:
         with self.connect() as connection:
@@ -1292,6 +1429,17 @@ def _performer_control_state(row: sqlite3.Row) -> dict[str, Any]:
         "next_action": next_action or None,
         "updated_at": str(row["updated_at"]),
     }
+
+
+def _performer_prior_phase(
+    run: dict[str, Any],
+    task: dict[str, Any] | None,
+) -> str:
+    if task is None:
+        return str(run.get("state") or RunState.PLANNING.value)
+    if task.get("state") == TaskState.IN_REVIEW.value:
+        return "gating"
+    return "executing"
 
 
 __all__ = ["ConductorStore", "StaleAttemptError"]

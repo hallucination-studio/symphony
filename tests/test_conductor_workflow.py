@@ -7,6 +7,7 @@ import pytest
 from conductor.acceptance_evidence import canonical_gate_evidence
 from conductor.models import RunState, TaskState
 from conductor.store import ConductorStore, StaleAttemptError
+from performer_api.performer_control import PerformerControlError
 from performer_api.workflow import AcceptanceCatalog, Plan
 
 
@@ -666,3 +667,111 @@ def test_failure_reason_is_sanitized_before_persistence(tmp_path) -> None:
     persisted = store.get_run(run["run_id"])
     assert persisted["latest_reason"] == "Codex failed: token=[REDACTED]"
     assert "fail-secret" not in str(persisted)
+
+
+def test_performer_readiness_block_preserves_planning_phase_and_resumes_without_an_attempt(tmp_path) -> None:
+    store = _store(tmp_path)
+    run = store.create_run("parent-1", "APP-1", instance_id="instance-1")
+
+    blocked = store.block_run_for_performer(
+        run["run_id"],
+        performer_kind="codex",
+        binding_generation=7,
+        execution_policy_sha256="a" * 64,
+        error=PerformerControlError(
+            error_code="performer_check_required",
+            sanitized_reason="Run the manual Performer Check.",
+            action_required=True,
+            retryable=True,
+            attempt_number=None,
+            next_action="Run Check and retry the managed run.",
+        ),
+    )
+
+    assert blocked["state"] == RunState.BLOCKED.value
+    assert blocked["latest_reason"] == "performer_check_required"
+    assert blocked["payload"]["performer_readiness_block"] == {
+        "version": 1,
+        "performer_kind": "codex",
+        "binding_generation": 7,
+        "execution_policy_sha256": "a" * 64,
+        "error_code": "performer_check_required",
+        "sanitized_reason": "Run the manual Performer Check.",
+        "action_required": True,
+        "retryable": True,
+        "attempt_number": None,
+        "next_action": "Run Check and retry the managed run.",
+        "prior_phase": "planning",
+    }
+    with store.connect() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM attempts WHERE run_id = ?", (run["run_id"],)).fetchone()[0] == 0
+    assert store.managed_run_view()["runs"][0]["payload"]["performer_readiness_block"]["error_code"] == "performer_check_required"
+
+    stale = store.resume_run_from_performer_block(
+        run["run_id"],
+        performer_kind="codex",
+        binding_generation=8,
+        execution_policy_sha256="a" * 64,
+    )
+    assert stale["state"] == RunState.BLOCKED.value
+
+    resumed = store.resume_run_from_performer_block(
+        run["run_id"],
+        performer_kind="codex",
+        binding_generation=7,
+        execution_policy_sha256="a" * 64,
+    )
+
+    assert resumed["state"] == RunState.PLANNING.value
+    assert "performer_readiness_block" not in resumed["payload"]
+
+
+def test_performer_readiness_block_preserves_task_result_and_restores_in_review(tmp_path, minimal_plan) -> None:
+    store = _store(tmp_path)
+    run = store.create_run("parent-1", "APP-1", instance_id="instance-1")
+    store.save_plan(run["run_id"], minimal_plan)
+    task = store.next_task(run["run_id"])
+    attempt = store.start_task(run["run_id"], task["task_id"])
+    store.record_execute(
+        run["run_id"],
+        attempt["attempt_id"],
+        attempt["fencing_token"],
+        ready_for_gate=True,
+        result={"status": "ready_for_gate", "summary": "implementation retained"},
+    )
+
+    store.block_run_for_performer(
+        run["run_id"],
+        task_id=task["task_id"],
+        performer_kind="codex",
+        binding_generation=7,
+        execution_policy_sha256="a" * 64,
+        error=PerformerControlError(
+            error_code="performer_check_failed",
+            sanitized_reason="Provider validation failed.",
+            action_required=True,
+            retryable=True,
+            attempt_number=1,
+            next_action="Repair the backend configuration and run Check again.",
+        ),
+    )
+
+    blocked_task = store.get_task(run["run_id"], task["task_id"])
+    assert blocked_task["state"] == TaskState.BLOCKED.value
+    assert blocked_task["result"]["summary"] == "implementation retained"
+    assert blocked_task["result"]["performer_readiness_block"]["prior_state"] == TaskState.IN_REVIEW.value
+    assert blocked_task["result"]["performer_readiness_block"]["error_code"] == "performer_check_failed"
+
+    store.resume_run_from_performer_block(
+        run["run_id"],
+        performer_kind="codex",
+        binding_generation=7,
+        execution_policy_sha256="a" * 64,
+    )
+
+    resumed_task = store.get_task(run["run_id"], task["task_id"])
+    assert resumed_task["state"] == TaskState.IN_REVIEW.value
+    assert resumed_task["result"] == {
+        "status": "ready_for_gate",
+        "summary": "implementation retained",
+    }
