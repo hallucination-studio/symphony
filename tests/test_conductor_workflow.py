@@ -702,6 +702,13 @@ def test_performer_readiness_block_preserves_planning_phase_and_resumes_without_
         "attempt_number": None,
         "next_action": "Run Check and retry the managed run.",
         "prior_phase": "planning",
+        "linear_projection": {
+            "status": "pending",
+            "attempt_number": 0,
+            "last_error_code": None,
+            "last_sanitized_reason": None,
+            "next_action": "project_linear_readiness_block",
+        },
     }
     with store.connect() as connection:
         assert connection.execute("SELECT COUNT(*) FROM attempts WHERE run_id = ?", (run["run_id"],)).fetchone()[0] == 0
@@ -714,6 +721,20 @@ def test_performer_readiness_block_preserves_planning_phase_and_resumes_without_
         execution_policy_sha256="a" * 64,
     )
     assert stale["state"] == RunState.BLOCKED.value
+
+    pending = store.resume_run_from_performer_block(
+        run["run_id"],
+        performer_kind="codex",
+        binding_generation=7,
+        execution_policy_sha256="a" * 64,
+    )
+    assert pending["state"] == RunState.BLOCKED.value
+
+    store.record_performer_readiness_projection(
+        run["run_id"],
+        status="complete",
+        next_action="wait_for_compatible_performer_check",
+    )
 
     resumed = store.resume_run_from_performer_block(
         run["run_id"],
@@ -761,7 +782,13 @@ def test_performer_readiness_block_preserves_task_result_and_restores_in_review(
     assert blocked_task["result"]["summary"] == "implementation retained"
     assert blocked_task["result"]["performer_readiness_block"]["prior_state"] == TaskState.IN_REVIEW.value
     assert blocked_task["result"]["performer_readiness_block"]["error_code"] == "performer_check_failed"
+    assert "linear_projection" not in blocked_task["result"]["performer_readiness_block"]
 
+    store.record_performer_readiness_projection(
+        run["run_id"],
+        status="complete",
+        next_action="wait_for_compatible_performer_check",
+    )
     store.resume_run_from_performer_block(
         run["run_id"],
         performer_kind="codex",
@@ -775,3 +802,57 @@ def test_performer_readiness_block_preserves_task_result_and_restores_in_review(
         "status": "ready_for_gate",
         "summary": "implementation retained",
     }
+
+
+def test_performer_readiness_block_before_task_attempt_restores_todo_task(
+    tmp_path,
+    minimal_plan,
+) -> None:
+    store = _store(tmp_path)
+    run = store.create_run("parent-1", "APP-1", instance_id="instance-1")
+    store.save_plan(run["run_id"], minimal_plan)
+    task = store.next_task(run["run_id"])
+
+    store.block_run_for_performer(
+        run["run_id"],
+        task_id=task["task_id"],
+        performer_kind="codex",
+        binding_generation=7,
+        execution_policy_sha256="a" * 64,
+        error=PerformerControlError(
+            error_code="performer_check_required",
+            sanitized_reason="Run the manual Performer Check.",
+            action_required=True,
+            retryable=True,
+            attempt_number=None,
+            next_action="Run Check and retry the managed run.",
+        ),
+    )
+
+    blocked_run = store.get_run(run["run_id"])
+    assert blocked_run["active_task_id"] == task["task_id"]
+    blocked_task = store.get_task(run["run_id"], task["task_id"])
+    assert blocked_task["state"] == TaskState.BLOCKED.value
+    assert "linear_projection" not in blocked_task["result"]["performer_readiness_block"]
+    with store.connect() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM attempts WHERE run_id = ? AND task_id = ?",
+            (run["run_id"], task["task_id"]),
+        ).fetchone()[0] == 0
+
+    store.record_performer_readiness_projection(
+        run["run_id"],
+        status="complete",
+        next_action="wait_for_compatible_performer_check",
+    )
+    store.resume_run_from_performer_block(
+        run["run_id"],
+        performer_kind="codex",
+        binding_generation=7,
+        execution_policy_sha256="a" * 64,
+    )
+
+    resumed_run = store.get_run(run["run_id"])
+    resumed_task = store.get_task(run["run_id"], task["task_id"])
+    assert resumed_run["state"] == RunState.EXECUTING.value
+    assert resumed_task["state"] == TaskState.TODO.value

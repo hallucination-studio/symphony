@@ -1,11 +1,23 @@
 from __future__ import annotations
 
+import asyncio
+from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
 
-from performer_api.turns import ExecuteResult, GateResult, TurnContext
+from performer_api.performer_control import PerformerControlError
+from performer_api.runtime_policy import RuntimePolicy, canonical_sha256
+from performer_api.turns import (
+    ExecuteResult,
+    GateResult,
+    PerformerTurnRequest,
+    PerformerTurnResult,
+    TurnContext,
+)
 from performer_api.workflow import Plan, Task
 
+from .acceptance_evidence import canonical_gate_evidence
 from .gate import AcceptanceGate
 from .conductor_smoke_protocol import sanitize_reason
 from .runtime import PerformerRuntime, StaleRuntimeResult
@@ -20,6 +32,9 @@ class WorkflowDriver:
         self.store: ConductorStore = service.store
         self.runtime: PerformerRuntime = service.performer_runtime
         self.gate: AcceptanceGate = service.acceptance_gate
+        self._turn_reservation: ContextVar[bool] = ContextVar(
+            "workflow_driver_turn_reservation", default=False
+        )
 
     async def drive_once(self) -> dict[str, int]:
         counts = {"started": 0, "applied": 0, "failed": 0}
@@ -30,7 +45,18 @@ class WorkflowDriver:
                 self._record_stale_result(run, exc)
                 continue
             except Exception as exc:
-                self.store.fail_run(str(run["run_id"]), _reason(exc))
+                reason = _reason(exc)
+                run_id = str(run["run_id"])
+                self.store.fail_run(run_id, reason)
+                instance = self.store.get_instance(str(run.get("instance_id") or ""))
+                if instance is not None:
+                    self.runtime.append_event(
+                        Path(instance.log_path),
+                        "event=managed_run_drive_failed level=error "
+                        f"run_id={run_id} error_type={exc.__class__.__name__} "
+                        f"error_code={reason.split(':', 1)[0]} sanitized_reason={reason.replace(' ', '_')} "
+                        "action_required=true retryable=false next_action=inspect_managed_run_state",
+                    )
                 counts["failed"] += 1
                 continue
             for key, value in result.items():
@@ -51,6 +77,29 @@ class WorkflowDriver:
                 refreshed = self.store.get_run(str(run["run_id"])) or run
                 return await self._drive_run(refreshed)
             return {}
+        if state == "blocked" and isinstance(
+            (run.get("payload") or {}).get("performer_readiness_block"), dict
+        ):
+            marker = dict((run.get("payload") or {})["performer_readiness_block"])
+            projection = marker.get("linear_projection")
+            if not isinstance(projection, dict) or projection.get("status") != "complete":
+                await self._project_performer_readiness_block(run, instance, marker)
+                return {}
+            if not self._performer_is_ready(instance):
+                return {}
+            if not await self._project_performer_resumed_marker(run, instance, marker):
+                return {}
+            identity = self._performer_identity(instance)
+            resumed = self.store.resume_run_from_performer_block(
+                str(run["run_id"]),
+                performer_kind=identity["performer_kind"],
+                binding_generation=identity["binding_generation"],
+                execution_policy_sha256=identity["execution_policy_sha256"],
+            )
+            if resumed.get("state") == "blocked":
+                return {}
+            await self._record_performer_resumed(resumed, instance, marker)
+            return await self._drive_run(resumed)
         if state == "executing" and str(run.get("latest_reason") or "") == "stale_gate_projection_failed":
             return await self._retry_stale_gate_todo_projection(run, instance)
         if int(run.get("plan_version") or 0) == 0:
@@ -70,22 +119,31 @@ class WorkflowDriver:
 
     async def _plan(self, run: dict[str, Any], instance: Any) -> dict[str, int]:
         run_id = str(run["run_id"])
-        attempt = self.store.start_plan(run_id)
-        context = TurnContext(run_id, "", str(attempt["attempt_id"]), int(attempt["fencing_token"]), "plan")
-        body = await self._run_turn(
-            run,
-            instance,
-            context,
-            {
-                "turn_kind": "plan",
-                "workspace_path": instance.workspace_root,
-                "issue_description": _issue_description(run),
-                "thread_id": str((run.get("payload") or {}).get("thread_id") or ""),
-                "context": context.to_dict(),
-            },
-            role="plan",
-        )
-        if "runtime_wait" in body:
+        async with self._reserved_performer_turn():
+            if not await self._require_performer_ready(run, instance):
+                return {"applied": 1}
+            attempt = self.store.start_plan(run_id)
+            context = TurnContext(
+                run_id,
+                "",
+                str(attempt["attempt_id"]),
+                int(attempt["fencing_token"]),
+                "plan",
+            )
+            request = self._turn_request(
+                instance,
+                context,
+                thread_id=str((run.get("payload") or {}).get("thread_id") or ""),
+                issue_description=_issue_description(run),
+            )
+            body = await self._run_turn(
+                run,
+                instance,
+                context,
+                request.to_dict(),
+                role="plan",
+            )
+        if body.get("runtime_wait") is not None:
             return await self._record_wait(run, instance, context, body["runtime_wait"], {})
         plan = Plan.from_dict(body.get("plan") if isinstance(body.get("plan"), dict) else {})
         version = self.store.record_plan(
@@ -102,25 +160,36 @@ class WorkflowDriver:
     async def _execute_task(self, run: dict[str, Any], instance: Any, task_row: dict[str, Any]) -> dict[str, int]:
         run_id = str(run["run_id"])
         task = Task.from_dict(task_row.get("task") or {})
-        attempt = self.store.start_task(run_id, task.id)
-        await self._project_task_state(run, instance, task_row, "in_progress")
-        context = TurnContext(run_id, task.id, str(attempt["attempt_id"]), int(attempt["fencing_token"]), "execute")
-        body = await self._run_turn(
-            run,
-            instance,
-            context,
-            {
-                "turn_kind": "execute",
-                "workspace_path": instance.workspace_root,
-                "task": task.to_dict(),
-                "thread_id": str((run.get("payload") or {}).get("thread_id") or ""),
-                "context": context.to_dict(),
-            },
-            role="execute",
-        )
-        if "runtime_wait" in body:
+        async with self._reserved_performer_turn():
+            if not await self._require_performer_ready(run, instance, task_row=task_row):
+                return {"applied": 1}
+            attempt = self.store.start_task(run_id, task.id)
+            await self._project_task_state(run, instance, task_row, "in_progress")
+            context = TurnContext(
+                run_id,
+                task.id,
+                str(attempt["attempt_id"]),
+                int(attempt["fencing_token"]),
+                "execute",
+            )
+            execute_request = self._turn_request(
+                instance,
+                context,
+                thread_id=str((run.get("payload") or {}).get("thread_id") or ""),
+                task=task,
+            )
+            body = await self._run_turn(
+                run,
+                instance,
+                context,
+                execute_request.to_dict(),
+                role="execute",
+            )
+        if body.get("runtime_wait") is not None:
             return await self._record_wait(run, instance, context, body["runtime_wait"], task_row)
-        result = ExecuteResult.from_dict(body.get("result") if isinstance(body.get("result"), dict) else {})
+        result = ExecuteResult.from_dict(
+            body.get("execute_result") if isinstance(body.get("execute_result"), dict) else {}
+        )
         ready = result.status == "ready_for_gate"
         updated = self.store.record_execute(
             run_id,
@@ -135,32 +204,48 @@ class WorkflowDriver:
             await self._comment_task(run, instance, updated, f"Execution blocked: {result.blocked_reason or result.summary}")
             return {"applied": 1}
 
-        gate_attempt = self.store.start_gate(run_id, task.id)
-        command_results = self.gate.run_commands(task, Path(instance.workspace_root))
-        command_evidence = {"commands": [item.to_dict() for item in command_results]}
-        gate_context = TurnContext(
-            run_id,
-            task.id,
-            str(gate_attempt["attempt_id"]),
-            int(gate_attempt["fencing_token"]),
-            "gate",
-        )
-        captured_plan_version = int((gate_attempt.get("result") or {}).get("plan_version") or 0)
-        gate_body = await self._run_turn(
-            run,
-            instance,
-            gate_context,
-            {
-                "turn_kind": "gate",
-                "workspace_path": instance.workspace_root,
-                "task": task.to_dict(),
-                "evidence": command_evidence,
-                "thread_id": str((run.get("payload") or {}).get("thread_id") or ""),
-                "context": gate_context.to_dict(),
-            },
-            role="gate",
-        )
-        if "runtime_wait" in gate_body:
+        ready_for_gate_row = self.store.get_task(run_id, task.id) or updated
+        refreshed_run = self.store.get_run(run_id) or run
+        async with self._reserved_performer_turn():
+            if not await self._require_performer_ready(
+                refreshed_run,
+                instance,
+                task_row=ready_for_gate_row,
+            ):
+                return {"applied": 1}
+            gate_attempt = self.store.start_gate(run_id, task.id)
+            command_results = self.gate.run_commands(task, Path(instance.workspace_root))
+            command_evidence = {"commands": [item.to_dict() for item in command_results]}
+            prompt_command_evidence = _sanitize_command_evidence(
+                command_evidence,
+                attempt_id=str(gate_attempt["attempt_id"]),
+                plan_version=int((gate_attempt.get("result") or {}).get("plan_version") or 0),
+            )
+            gate_context = TurnContext(
+                run_id,
+                task.id,
+                str(gate_attempt["attempt_id"]),
+                int(gate_attempt["fencing_token"]),
+                "gate",
+            )
+            captured_plan_version = int(
+                (gate_attempt.get("result") or {}).get("plan_version") or 0
+            )
+            gate_request = self._turn_request(
+                instance,
+                gate_context,
+                thread_id=str((run.get("payload") or {}).get("thread_id") or ""),
+                task=task,
+                evidence=prompt_command_evidence,
+            )
+            gate_body = await self._run_turn(
+                run,
+                instance,
+                gate_context,
+                gate_request.to_dict(),
+                role="gate",
+            )
+        if gate_body.get("runtime_wait") is not None:
             return await self._record_wait(run, instance, gate_context, gate_body["runtime_wait"], task_row)
         codex_gate = GateResult.from_dict(
             gate_body.get("gate_result") if isinstance(gate_body.get("gate_result"), dict) else {}
@@ -342,15 +427,31 @@ class WorkflowDriver:
         *,
         role: str,
     ) -> dict[str, Any]:
-        root = Path(instance.instance_dir) / "state" / "workflow-runs" / str(run["run_id"]) / context.attempt_id
-        paths = self.runtime.paths(root)
-        env, credential = self._runtime_environment(instance, Path(instance.workspace_root), context.attempt_id)
-        self.runtime.write_request(paths, request)
-        event = _turn_log_fields(context, role, paths)
-        self.runtime.append_event(Path(instance.log_path), f"event=performer_turn_started {event}")
-        try:
-            payload = self.runtime.run(paths, codex_home=Path(env["CODEX_HOME"]), env=env)
+        async def invoke() -> tuple[dict[str, Any], str]:
+            root = (
+                Path(instance.instance_dir)
+                / "state"
+                / "workflow-runs"
+                / str(run["run_id"])
+                / context.attempt_id
+            )
+            paths = self.runtime.paths(root)
+            self.runtime.write_request(paths, request)
+            event = _turn_log_fields(context, role, paths)
+            self.runtime.append_event(
+                Path(instance.log_path), f"event=performer_turn_started {event}"
+            )
+            payload = await self.runtime.run_async(paths)
             accepted = self.runtime.accept_result(context, payload)
+            return PerformerTurnResult.from_dict(accepted).to_dict(), event
+
+        event = ""
+        try:
+            if self._turn_reservation.get():
+                accepted, event = await invoke()
+            else:
+                async with self._performer_operation():
+                    accepted, event = await invoke()
         except StaleRuntimeResult as exc:
             self.runtime.append_event(
                 Path(instance.log_path),
@@ -362,14 +463,293 @@ class WorkflowDriver:
         except Exception as exc:
             self.runtime.append_event(
                 Path(instance.log_path),
-                f"event=performer_turn_failed {event} error_type={exc.__class__.__name__} sanitized_reason={_reason(exc)}",
+                f"event=performer_turn_failed {event} error_type={exc.__class__.__name__} "
+                f"error_code={_reason(exc).split(':', 1)[0]} sanitized_reason={_reason(exc).replace(' ', '_')} "
+                "action_required=true retryable=false next_action=inspect_performer_attempt",
             )
             raise
-        finally:
-            if credential is not None:
-                self.service.performer_credentials.reconcile(credential)
         self.runtime.append_event(Path(instance.log_path), f"event=performer_turn_completed {event}")
         return accepted
+
+    @asynccontextmanager
+    async def _reserved_performer_turn(self):
+        async with self._performer_operation():
+            token = self._turn_reservation.set(True)
+            try:
+                yield
+            finally:
+                self._turn_reservation.reset(token)
+
+    @asynccontextmanager
+    async def _performer_operation(self):
+        coordinator = self.service.performer_coordinator
+        operation = getattr(coordinator, "turn_exchange", None)
+        if callable(operation):
+            async with operation():
+                yield
+            return
+        raise RuntimeError("performer_coordinator_unavailable")
+
+    def _turn_request(
+        self,
+        instance: Any,
+        context: TurnContext,
+        *,
+        thread_id: str,
+        issue_description: str = "",
+        task: Task | None = None,
+        evidence: dict[str, Any] | None = None,
+    ) -> PerformerTurnRequest:
+        identity = self._performer_identity(instance)
+        return PerformerTurnRequest(
+            protocol_version=1,
+            context=context,
+            performer_kind=identity["performer_kind"],
+            performer_binding_id=identity["performer_binding_id"],
+            binding_generation=identity["binding_generation"],
+            execution_policy=identity["execution_policy"],
+            execution_policy_sha256=identity["execution_policy_sha256"],
+            turn_policy_sha256=identity["turn_policy_sha256"],
+            workspace_path=str(instance.workspace_root),
+            thread_id=thread_id,
+            issue_description=issue_description,
+            task=task,
+            evidence=evidence,
+        )
+
+    def _performer_identity(self, instance: Any) -> dict[str, Any]:
+        filters = instance.linear_filters if isinstance(instance.linear_filters, dict) else {}
+        policy = RuntimePolicy.from_dict(filters.get("execution_policy"))
+        policy_hash = canonical_sha256(policy.to_dict())
+        supplied_hash = str(filters.get("execution_policy_sha256") or "")
+        if supplied_hash != policy_hash:
+            raise RuntimeError("execution_policy_hash_mismatch")
+        performer_kind = str(filters.get("performer_kind") or "")
+        performer_binding_id = str(filters.get("performer_binding_id") or "")
+        binding_generation = filters.get("performer_binding_generation")
+        turn_policy_sha256 = str(filters.get("turn_policy_sha256") or "")
+        if not performer_kind or not performer_binding_id:
+            raise RuntimeError("performer_binding_required")
+        if (
+            isinstance(binding_generation, bool)
+            or not isinstance(binding_generation, int)
+            or binding_generation <= 0
+        ):
+            raise RuntimeError("performer_binding_generation_invalid")
+        if len(turn_policy_sha256) != 64:
+            raise RuntimeError("turn_policy_hash_invalid")
+        return {
+            "performer_kind": performer_kind,
+            "performer_binding_id": performer_binding_id,
+            "binding_generation": binding_generation,
+            "execution_policy": policy.to_dict(),
+            "execution_policy_sha256": policy_hash,
+            "turn_policy_sha256": turn_policy_sha256,
+        }
+
+    def _performer_is_ready(self, instance: Any) -> bool:
+        identity = self._performer_identity(instance)
+        state = self.store.get_performer_control_state()
+        return (
+            state.get("status") == "ready"
+            and state.get("last_check_status") == "passed"
+            and state.get("performer_kind") == identity["performer_kind"]
+            and state.get("binding_generation") == identity["binding_generation"]
+            and state.get("execution_policy_sha256")
+            == identity["execution_policy_sha256"]
+            and int(state.get("capability_version") or 0) > 0
+        )
+
+    async def _require_performer_ready(
+        self,
+        run: dict[str, Any],
+        instance: Any,
+        *,
+        task_row: dict[str, Any] | None = None,
+    ) -> bool:
+        if self._performer_is_ready(instance):
+            return True
+        identity = self._performer_identity(instance)
+        state = self.store.get_performer_control_state()
+        error = _performer_readiness_error(state, identity)
+        existing = (run.get("payload") or {}).get("performer_readiness_block")
+        if isinstance(existing, dict):
+            return False
+        blocked = self.store.block_run_for_performer(
+            str(run["run_id"]),
+            task_id=str(task_row.get("task_id") or "") if task_row is not None else None,
+            performer_kind=identity["performer_kind"],
+            binding_generation=identity["binding_generation"],
+            execution_policy_sha256=identity["execution_policy_sha256"],
+            error=error,
+        )
+        self._log_performer_readiness_event(
+            event="managed_run_performer_blocked",
+            level="error" if error.action_required else "warning",
+            run=blocked,
+            instance=instance,
+            error=error,
+            task_id=str(task_row.get("task_id") or "") if task_row is not None else "",
+        )
+        marker = dict(
+            (blocked.get("payload") or {}).get("performer_readiness_block") or {}
+        )
+        await self._project_performer_readiness_block(blocked, instance, marker)
+        return False
+
+    async def _project_performer_readiness_block(
+        self,
+        run: dict[str, Any],
+        instance: Any,
+        marker: dict[str, Any],
+    ) -> None:
+        run_id = str(run["run_id"])
+        task_id = str(marker.get("task_id") or "")
+        issue_id = str(run["parent_issue_id"])
+        try:
+            if task_id:
+                task = self.store.get_task(run_id, task_id)
+                if task is None:
+                    raise RuntimeError("performer_readiness_task_missing")
+                issue_id = str(task.get("linear_issue_id") or issue_id)
+                await self._project_task_state(run, instance, task, "blocked")
+            else:
+                await self._transition(
+                    parent_id=issue_id,
+                    instance=instance,
+                    names=["Blocked"],
+                    state_type="backlog",
+                )
+            result = await self.service._managed_run_tracker().update_issue_description_marker_block(
+                issue_id,
+                "SYMPHONY_PERFORMER_READINESS",
+                _performer_block_marker(marker),
+            )
+            if result.get("success") is False:
+                raise RuntimeError("performer_readiness_description_projection_failed")
+        except Exception as exc:
+            reason = _reason(exc)[:500]
+            updated = self.store.record_performer_readiness_projection(
+                run_id,
+                status="pending",
+                error_code="performer_readiness_projection_failed",
+                sanitized_reason=reason,
+                next_action="retry_linear_projection",
+            )
+            updated_marker = dict(
+                (updated.get("payload") or {}).get("performer_readiness_block") or {}
+            )
+            updated_projection = dict(updated_marker.get("linear_projection") or {})
+            self.runtime.append_event(
+                Path(instance.log_path),
+                "event=linear_projection_updated level=error "
+                f"instance_id={instance.id} run_id={run_id} work_item_id={task_id or '-'} "
+                f"attempt_number={int(updated_projection.get('attempt_number') or 0)} "
+                f"error_type={exc.__class__.__name__} "
+                "error_code=performer_readiness_projection_failed "
+                f"sanitized_reason={reason.replace(' ', '_')} "
+                "action_required=false retryable=true next_action=retry_linear_projection",
+            )
+            return
+        self.store.record_performer_readiness_projection(
+            run_id,
+            status="complete",
+            next_action="wait_for_compatible_performer_check",
+        )
+        self.runtime.append_event(
+            Path(instance.log_path),
+            "event=linear_projection_updated level=info "
+            f"instance_id={instance.id} run_id={run_id} work_item_id={task_id or '-'} "
+            "error_code=none sanitized_reason=performer_readiness_block_projected "
+            "action_required=false retryable=false "
+            "next_action=wait_for_compatible_performer_check",
+        )
+
+    async def _project_performer_resumed_marker(
+        self,
+        run: dict[str, Any],
+        instance: Any,
+        marker: dict[str, Any],
+    ) -> bool:
+        run_id = str(run["run_id"])
+        task_id = str(marker.get("task_id") or "")
+        issue_id = str(run["parent_issue_id"])
+        if task_id:
+            task = self.store.get_task(run_id, task_id) or {}
+            issue_id = str(task.get("linear_issue_id") or issue_id)
+        try:
+            result = await self.service._managed_run_tracker().update_issue_description_marker_block(
+                issue_id,
+                "SYMPHONY_PERFORMER_READINESS",
+                _performer_resumed_marker(marker),
+            )
+            if result.get("success") is False:
+                raise RuntimeError("performer_resume_description_projection_failed")
+        except Exception as exc:
+            self.runtime.append_event(
+                Path(instance.log_path),
+                "event=linear_projection_updated level=warning "
+                f"instance_id={instance.id} run_id={run_id} work_item_id={task_id or '-'} "
+                f"error_type={exc.__class__.__name__} "
+                "error_code=performer_resume_projection_failed "
+                f"sanitized_reason={_reason(exc).replace(' ', '_')[:500]} "
+                "action_required=false retryable=true next_action=retry_linear_projection",
+            )
+            return False
+        return True
+
+    async def _record_performer_resumed(
+        self,
+        run: dict[str, Any],
+        instance: Any,
+        marker: dict[str, Any],
+    ) -> None:
+        self.runtime.append_event(
+            Path(instance.log_path),
+            " ".join(
+                (
+                    "event=managed_run_performer_resumed",
+                    "level=info",
+                    f"instance_id={instance.id}",
+                    f"run_id={run['run_id']}",
+                    f"work_item_id={str(marker.get('task_id') or '-')}",
+                    f"performer_kind={str(marker.get('performer_kind') or '-')}",
+                    f"binding_generation={int(marker.get('binding_generation') or 0)}",
+                    "action_required=false",
+                    "retryable=false",
+                    "next_action=resume_prior_phase",
+                )
+            ),
+        )
+
+    def _log_performer_readiness_event(
+        self,
+        *,
+        event: str,
+        level: str,
+        run: dict[str, Any],
+        instance: Any,
+        error: PerformerControlError,
+        task_id: str,
+    ) -> None:
+        identity = self._performer_identity(instance)
+        fields = (
+            f"event={event}",
+            f"level={level}",
+            f"instance_id={instance.id}",
+            f"run_id={run['run_id']}",
+            f"work_item_id={task_id or '-'}",
+            f"performer_kind={identity['performer_kind']}",
+            f"binding_generation={identity['binding_generation']}",
+            f"error_type=PerformerControlError",
+            f"error_code={error.error_code}",
+            f"sanitized_reason={error.sanitized_reason.replace(' ', '_')[:500]}",
+            f"action_required={'true' if error.action_required else 'false'}",
+            f"retryable={'true' if error.retryable else 'false'}",
+            f"attempt_number={error.attempt_number or 0}",
+            f"next_action={error.next_action.replace(' ', '_')[:500]}",
+        )
+        self.runtime.append_event(Path(instance.log_path), " ".join(fields))
 
     def _record_stale_result(self, run: dict[str, Any], error: Exception) -> None:
         run_id = str(run["run_id"])
@@ -392,18 +772,6 @@ class WorkflowDriver:
             "next_action=ignore_stale_result",
         )
         self.runtime.append_event(Path(instance.log_path), " ".join(fields))
-
-    def _runtime_environment(self, instance: Any, workspace: Path, attempt_id: str) -> tuple[dict[str, str], Any | None]:
-        filters = instance.linear_filters if isinstance(instance.linear_filters, dict) else {}
-        config_document = filters.get("config_document")
-        if config_document:
-            slot_id = self.service.performer_credentials.selected_slot_id()
-            home = Path(instance.instance_dir) / "state" / "runtime-homes" / attempt_id / "codex"
-            credential = self.service.performer_credentials.materialize(slot_id, home, str(config_document))
-            return {"CODEX_HOME": str(home)}, credential
-        return self.runtime.prepare_environment(
-            Path(instance.instance_dir) / "state", workspace_path=workspace, home_scope=attempt_id
-        ), None
 
     async def _project_plan(self, run: dict[str, Any], instance: Any, plan: Plan) -> None:
         proxy = self.service._managed_run_tracker()
@@ -547,6 +915,12 @@ class WorkflowDriver:
     def _policy_revision(self) -> int:
         return 1
 
+    @staticmethod
+    def _execution_policy(instance: Any) -> dict[str, Any]:
+        filters = instance.linear_filters if isinstance(instance.linear_filters, dict) else {}
+        policy = filters.get("execution_policy")
+        return RuntimePolicy.from_dict(policy if isinstance(policy, dict) else {}).to_dict()
+
 
 def _task_description(task: Task) -> str:
     return "\n".join(
@@ -634,6 +1008,105 @@ def _linear_state_name(issue: dict[str, Any]) -> str:
     if isinstance(state, dict):
         state = state.get("name")
     return str(state or "").strip().lower()
+
+
+def _performer_readiness_error(
+    state: dict[str, Any],
+    identity: dict[str, Any],
+) -> PerformerControlError:
+    compatible_identity = (
+        state.get("performer_kind") == identity["performer_kind"]
+        and state.get("binding_generation") == identity["binding_generation"]
+        and state.get("execution_policy_sha256") == identity["execution_policy_sha256"]
+        and int(state.get("capability_version") or 0) > 0
+    )
+    if not compatible_identity:
+        return PerformerControlError(
+            error_code="performer_check_required",
+            sanitized_reason="The Performer binding or policy changed and requires a new Check.",
+            action_required=True,
+            retryable=False,
+            attempt_number=None,
+            next_action="Run the manual Performer Check for the current binding.",
+        )
+    if state.get("status") == "checking":
+        return PerformerControlError(
+            error_code="performer_busy",
+            sanitized_reason="The Performer manual Check is still running.",
+            action_required=False,
+            retryable=True,
+            attempt_number=state.get("attempt_number"),
+            next_action="Wait for the current Check to finish.",
+        )
+    if state.get("status") == "failed" and state.get("error_code"):
+        return PerformerControlError(
+            error_code=str(state["error_code"]),
+            sanitized_reason=str(
+                state.get("sanitized_reason") or "The Performer manual Check failed."
+            ),
+            action_required=bool(state.get("action_required")),
+            retryable=bool(state.get("retryable")),
+            attempt_number=state.get("attempt_number"),
+            next_action=str(
+                state.get("next_action")
+                or "Repair the Performer backend configuration and run Check again."
+            ),
+        )
+    return PerformerControlError(
+        error_code="performer_check_required",
+        sanitized_reason="A successful manual Performer Check is required.",
+        action_required=True,
+        retryable=False,
+        attempt_number=None,
+        next_action="Run the manual Performer Check.",
+    )
+
+
+def _performer_block_marker(marker: dict[str, Any]) -> str:
+    return "\n".join(
+        (
+            "## Performer Readiness",
+            "Status: blocked",
+            f"Error code: `{str(marker.get('error_code') or 'performer_check_required')}`",
+            f"Reason: {str(marker.get('sanitized_reason') or 'A successful manual Performer Check is required.')}",
+            f"Next action: {str(marker.get('next_action') or 'Run the manual Performer Check.')}",
+        )
+    )[:1_500]
+
+
+def _performer_resumed_marker(marker: dict[str, Any]) -> str:
+    return "\n".join(
+        (
+            "## Performer Readiness",
+            "Status: resumed",
+            "Last Check: passed",
+            f"Backend: `{str(marker.get('performer_kind') or 'performer')}`",
+            "The compatible manual Performer Check passed and the managed run resumed.",
+        )
+    )[:1_500]
+
+
+def _sanitize_command_evidence(
+    evidence: dict[str, Any],
+    *,
+    attempt_id: str,
+    plan_version: int,
+) -> dict[str, Any]:
+    commands = evidence.get("commands") if isinstance(evidence.get("commands"), list) else []
+    passed = sum(1 for command in commands if isinstance(command, dict) and command.get("passed") is True)
+    normalized = canonical_gate_evidence(
+        {"commands": commands},
+        passed=passed == len(commands),
+        score=1,
+        threshold=1,
+        attempt_id=attempt_id,
+        plan_version=max(1, plan_version),
+        catalog=None,
+        manifest_refs=[],
+        command_passed=passed,
+        command_total=len(commands),
+    )
+    return {"commands": normalized["commands"]}
 
 
 __all__ = ["WorkflowDriver"]

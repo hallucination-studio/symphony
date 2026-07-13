@@ -423,15 +423,6 @@ class ConductorStore:
     ) -> dict[str, Any]:
         if not isinstance(error, PerformerControlError):
             raise TypeError("error must be PerformerControlError")
-        identity = PerformerReadinessState(
-            performer_kind=performer_kind,
-            binding_generation=binding_generation,
-            capability_version=1,
-            execution_policy_sha256=execution_policy_sha256,
-            status="unchecked",
-            last_check_status="none",
-            error=None,
-        )
         run = self.get_run(run_id)
         if run is None:
             raise KeyError(run_id)
@@ -444,12 +435,21 @@ class ConductorStore:
         )
         marker = {
             "version": 1,
-            "performer_kind": identity.performer_kind,
-            "binding_generation": identity.binding_generation,
-            "execution_policy_sha256": identity.execution_policy_sha256,
+            "performer_kind": performer_kind,
+            "binding_generation": binding_generation,
+            "execution_policy_sha256": execution_policy_sha256,
             **error.to_dict(),
             "prior_phase": prior_phase,
+            "linear_projection": {
+                "status": "pending",
+                "attempt_number": 0,
+                "last_error_code": None,
+                "last_sanitized_reason": None,
+                "next_action": "project_linear_readiness_block",
+            },
         }
+        if task_id:
+            marker["task_id"] = task_id
         payload["performer_readiness_block"] = marker
         now = utc_now_iso()
         with self.connect() as connection:
@@ -463,6 +463,7 @@ class ConductorStore:
                     raise KeyError(task_id)
                 task_result = _load(task_row["result_json"])
                 task_marker = dict(marker)
+                task_marker.pop("linear_projection", None)
                 task_marker["prior_state"] = str(task_row["state"])
                 task_result["performer_readiness_block"] = task_marker
                 connection.execute(
@@ -476,9 +477,10 @@ class ConductorStore:
                     ),
                 )
             connection.execute(
-                "UPDATE runs SET state = ?, latest_reason = ?, payload_json = ?, updated_at = ? WHERE run_id = ?",
+                "UPDATE runs SET state = ?, active_task_id = ?, latest_reason = ?, payload_json = ?, updated_at = ? WHERE run_id = ?",
                 (
                     RunState.BLOCKED.value,
+                    task_id or str(run.get("active_task_id") or ""),
                     error.error_code,
                     _dump(payload),
                     now,
@@ -489,6 +491,49 @@ class ConductorStore:
         if blocked is None:
             raise RuntimeError("performer_readiness_block_missing")
         return blocked
+
+    def record_performer_readiness_projection(
+        self,
+        run_id: str,
+        *,
+        status: str,
+        error_code: str | None = None,
+        sanitized_reason: str | None = None,
+        next_action: str,
+    ) -> dict[str, Any]:
+        if status not in {"pending", "complete"}:
+            raise ValueError("performer readiness projection status is invalid")
+        run = self.get_run(run_id)
+        if run is None:
+            raise KeyError(run_id)
+        payload = dict(run.get("payload") or {})
+        marker = payload.get("performer_readiness_block")
+        if not isinstance(marker, dict):
+            raise RuntimeError("performer_readiness_block_missing")
+        projection = marker.get("linear_projection")
+        attempt_number = (
+            int(projection.get("attempt_number") or 0)
+            if isinstance(projection, dict)
+            else 0
+        )
+        marker = dict(marker)
+        marker["linear_projection"] = {
+            "status": status,
+            "attempt_number": attempt_number + 1,
+            "last_error_code": error_code,
+            "last_sanitized_reason": sanitized_reason,
+            "next_action": next_action,
+        }
+        payload["performer_readiness_block"] = marker
+        with self.connect() as connection:
+            connection.execute(
+                "UPDATE runs SET payload_json = ?, updated_at = ? WHERE run_id = ?",
+                (_dump(payload), utc_now_iso(), run_id),
+            )
+        updated = self.get_run(run_id)
+        if updated is None:
+            raise RuntimeError("performer_readiness_projection_missing")
+        return updated
 
     def resume_run_from_performer_block(
         self,
@@ -511,6 +556,9 @@ class ConductorStore:
             or marker.get("execution_policy_sha256") != execution_policy_sha256
         ):
             return run
+        projection = marker.get("linear_projection")
+        if not isinstance(projection, dict) or projection.get("status") != "complete":
+            return run
         prior_phase = str(marker.get("prior_phase") or "planning")
         resumed_state = (
             RunState.PLANNING.value
@@ -521,7 +569,7 @@ class ConductorStore:
         now = utc_now_iso()
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            task_id = str(run.get("active_task_id") or "")
+            task_id = str(marker.get("task_id") or run.get("active_task_id") or "")
             if task_id:
                 task_row = connection.execute(
                     "SELECT * FROM tasks WHERE run_id = ? AND task_id = ?",

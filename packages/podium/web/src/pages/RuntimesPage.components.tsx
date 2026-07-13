@@ -136,12 +136,26 @@ export function PerformerDrawer({
   performer: ConductorBinding;
   onClose: () => void;
 }) {
+  return (
+    <Drawer title={performer.name} onClose={onClose}>
+      <PerformerDetails conductor={conductor} performer={performer} />
+    </Drawer>
+  );
+}
+
+export function PerformerDetails({
+  conductor,
+  performer,
+}: {
+  conductor: ConductorRecord;
+  performer: ConductorBinding;
+}) {
   const scoped = performerIsScoped(performer);
   const constraints = performerConstraints(performer);
   const { t } = useI18n();
 
   return (
-    <Drawer title={performer.name} onClose={onClose}>
+    <>
       <div className="row-between" style={{ marginBottom: "var(--space-4)" }}>
         <span className="muted">{t("Status")}</span>
         <StatusBadge status={performerStatus(performer)} />
@@ -197,7 +211,7 @@ export function PerformerDrawer({
         instanceId={performer.instance_id}
         online={conductor.online}
       />
-    </Drawer>
+    </>
   );
 }
 

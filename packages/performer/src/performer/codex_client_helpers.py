@@ -5,34 +5,12 @@ import logging
 import os
 import re
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
-
-from .codex_config import CodexConfig
 
 logger = logging.getLogger(__name__)
 
-try:
-    from openai_codex.errors import (  # type: ignore
-        InvalidParamsError as SdkInvalidParamsError,
-        InvalidRequestError as SdkInvalidRequestError,
-        MethodNotFoundError as SdkMethodNotFoundError,
-        ParseError as SdkParseError,
-        RetryLimitExceededError as SdkRetryLimitExceededError,
-        ServerBusyError as SdkServerBusyError,
-        TransportClosedError as SdkTransportClosedError,
-        is_retryable_error as sdk_is_retryable_error,
-    )
-except ImportError:
-    SdkInvalidParamsError = None
-    SdkInvalidRequestError = None
-    SdkMethodNotFoundError = None
-    SdkParseError = None
-    SdkRetryLimitExceededError = None
-    SdkServerBusyError = None
-    SdkTransportClosedError = None
-    sdk_is_retryable_error = None
-
+_INIT_BACKOFF_MS = 500
+_INIT_BACKOFF_MAX_MS = 8_000
 
 class CodexError(Exception):
     def __init__(self, code: str, message: str, *, http_status: int | None = None):
@@ -89,30 +67,62 @@ def _classify_sdk_exception(exc: BaseException) -> _SdkErrorClassification:
     inferred_http_status = http_status or _http_status_from_error_text(str(exc))
     if inferred_http_status in {429, 500, 502, 503, 504} or _looks_like_upstream_overload(str(exc)):
         return _SdkErrorClassification("upstream_overloaded", inferred_http_status)
-    if _is_instance(exc, SdkRetryLimitExceededError):
+    class_name = type(exc).__name__
+    if class_name == "RetryLimitExceededError":
         return _SdkErrorClassification("upstream_overloaded", inferred_http_status)
-    if _is_instance(exc, SdkServerBusyError):
+    if class_name == "ServerBusyError":
         return _SdkErrorClassification("upstream_overloaded", inferred_http_status)
-    if (
-        _is_instance(exc, SdkInvalidParamsError)
-        or _is_instance(exc, SdkInvalidRequestError)
-        or _is_instance(exc, SdkMethodNotFoundError)
-        or _is_instance(exc, SdkParseError)
-    ):
+    if class_name in {
+        "InvalidParamsError",
+        "InvalidRequestError",
+        "MethodNotFoundError",
+        "ParseError",
+    }:
         return _SdkErrorClassification("codex_bad_request", inferred_http_status)
-    if _is_instance(exc, SdkTransportClosedError):
+    if class_name == "TransportClosedError":
         return _SdkErrorClassification("sdk_transport_error", inferred_http_status)
-    if sdk_is_retryable_error is not None:
-        try:
-            if sdk_is_retryable_error(exc):
-                return _SdkErrorClassification("upstream_overloaded", inferred_http_status)
-        except Exception:
-            pass
+    if _sdk_is_retryable(exc):
+        return _SdkErrorClassification("upstream_overloaded", inferred_http_status)
     return _SdkErrorClassification("sdk_transport_error", inferred_http_status)
 
 
-def _is_instance(value: BaseException, class_obj: Any) -> bool:
-    return class_obj is not None and isinstance(value, class_obj)
+def _sdk_is_retryable(exc: BaseException) -> bool:
+    try:
+        from .backends.codex import is_codex_sdk_retryable
+
+        return is_codex_sdk_retryable(exc)
+    except Exception:
+        return False
+
+
+def _sanitized_sdk_reason(
+    exc: BaseException,
+    classification: _SdkErrorClassification | None = None,
+) -> str:
+    classified = classification or _classify_sdk_exception(exc)
+    status_suffix = (
+        f" (HTTP {classified.http_status})"
+        if classified.http_status is not None
+        else ""
+    )
+    reasons = {
+        "codex_auth_failed": "Codex authentication failed",
+        "codex_bad_request": "Codex rejected the SDK request",
+        "codex_sdk_not_installed": "The Codex SDK is not installed",
+        "invalid_sdk_codex_bin": "The configured Codex binary is not executable",
+        "invalid_structured_output": "Codex returned invalid structured output",
+        "invalid_workspace_cwd": "The managed workspace is not a directory",
+        "response_error": "Codex returned an invalid SDK response",
+        "sdk_missing_stream": "The Codex SDK does not support turn streaming",
+        "sdk_missing_thread_resume": "The Codex SDK does not support thread resume",
+        "sdk_missing_thread_start": "The Codex SDK does not support thread start",
+        "sdk_missing_turn": "The Codex SDK does not support turns",
+        "sdk_transport_error": "Codex SDK transport failed",
+        "timeout": "Codex SDK request timed out",
+        "upstream_overloaded": "Codex upstream is overloaded",
+        "upstream_overloaded_exhausted": "Codex upstream retries were exhausted",
+    }
+    return f"{reasons.get(classified.code, 'Codex SDK request failed')}{status_suffix}"
 
 
 def _sdk_http_status(exc: BaseException) -> int | None:
@@ -167,18 +177,22 @@ def _optional_int(value: Any) -> int | None:
         return None
 
 
-def _init_backoff_ms(config: CodexConfig, completed_failures: int) -> int:
-    base = max(1, config.init_backoff_ms)
-    cap = max(1, config.init_backoff_max_ms)
-    return min(base * (2 ** (completed_failures - 1)), cap)
+def _init_backoff_ms(completed_failures: int) -> int:
+    return min(
+        _INIT_BACKOFF_MS * (2 ** (completed_failures - 1)),
+        _INIT_BACKOFF_MAX_MS,
+    )
 
 
 def _codex_sdk_env() -> dict[str, str]:
-    env: dict[str, str] = {}
     home = os.environ.get("HOME")
+    if not home:
+        raise CodexError(
+            "managed_home_required",
+            "HOME is required for managed Codex execution",
+        )
+    env = {"HOME": home}
     codex_home = os.environ.get("CODEX_HOME")
-    if home:
-        env["HOME"] = home
     if codex_home:
         env["CODEX_HOME"] = codex_home
     return env
@@ -216,7 +230,10 @@ async def _close_sdk_client(client: Any) -> None:
     try:
         await close()
     except Exception as exc:
-        logger.debug("codex_sdk_close_failed reason=%s", exc)
+        logger.debug(
+            "event=codex_sdk_close_failed error_type=%s",
+            type(exc).__name__,
+        )
 
 
 def _string_attr(value: Any, name: str) -> str | None:

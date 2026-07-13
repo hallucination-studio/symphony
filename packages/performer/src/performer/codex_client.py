@@ -22,6 +22,7 @@ from .codex_client_helpers import (
     _latest_turn_identity,
     _looks_like_upstream_overload,
     _parse_structured_result,
+    _sanitized_sdk_reason,
     _string_attr,
     _timeout_seconds,
     _usage_from_any,
@@ -38,10 +39,21 @@ class CodexTurnResult:
 
 EventCallback = Callable[[dict[str, Any]], None]
 
+_OVERLOAD_INITIAL_DELAY_MS = 250
+_OVERLOAD_MAX_DELAY_MS = 8_000
+
+
 class CodexSdkClient:
-    def __init__(self, config: CodexConfig, *, sdk_factory: Any | None = None):
+    def __init__(
+        self,
+        config: CodexConfig,
+        *,
+        sdk_factory: Any | None = None,
+        sdk_types: Any | None = None,
+    ):
         self.config = config
         self.sdk_factory = sdk_factory
+        self.sdk_types = sdk_types
 
     async def run_session(
         self,
@@ -132,10 +144,13 @@ class CodexSdkClient:
                         "thread_id": thread_id,
                         "turn_id": timeout_turn_id,
                         "session_id": timeout_session_id,
-                        "timeout_ms": self.config.hard_turn_timeout_ms,
+                        "timeout_ms": self.config.turn_timeout_ms,
                     }
                 )
-                raise CodexError("timeout", f"Codex SDK turn exceeded hard_turn_timeout_ms={self.config.hard_turn_timeout_ms}") from exc
+                raise CodexError(
+                    "timeout",
+                    f"Codex SDK turn exceeded turn_timeout_ms={self.config.turn_timeout_ms}",
+                ) from exc
             except Exception as exc:
                 classified = _classify_sdk_exception(exc)
                 code = classified.code
@@ -144,7 +159,11 @@ class CodexSdkClient:
                 if code != "invalid_structured_output" or attempt >= 2:
                     if isinstance(exc, CodexError):
                         raise
-                    raise CodexError(code, str(exc), http_status=classified.http_status) from exc
+                    raise CodexError(
+                        code,
+                        _sanitized_sdk_reason(exc, classified),
+                        http_status=classified.http_status,
+                    ) from exc
                 emit(
                     {
                         "event": "turn_retrying",
@@ -173,7 +192,7 @@ class CodexSdkClient:
     ) -> tuple[str, str, str | None]:
         return await asyncio.wait_for(
             self._run_turn(thread, prompt, output_schema, thread_id=thread_id, emit=emit),
-            timeout=_timeout_seconds(self.config.hard_turn_timeout_ms),
+            timeout=_timeout_seconds(self.config.turn_timeout_ms),
         )
 
     async def _run_turn(
@@ -202,7 +221,7 @@ class CodexSdkClient:
         *,
         emit: EventCallback,
     ) -> tuple[Any, Any, str]:
-        attempts = max(1, self.config.init_max_attempts)
+        attempts = max(1, self.config.initialize_max_attempts)
         last_code = "sdk_transport_error"
         last_message = ""
         for attempt in range(1, attempts + 1):
@@ -245,7 +264,7 @@ class CodexSdkClient:
                 lambda: self._client_and_thread(workspace_path, existing_thread_id, emit=emit),
                 emit=emit,
             ),
-            timeout=_timeout_seconds(self.config.read_timeout_ms),
+            timeout=_timeout_seconds(self.config.initialize_timeout_ms),
         )
         thread_id = _string_attr(thread, "id") or existing_thread_id
         if not thread_id:
@@ -262,7 +281,10 @@ class CodexSdkClient:
         emit: EventCallback,
     ) -> tuple[str, str]:
         code = "timeout"
-        message = f"Codex SDK init exceeded read_timeout_ms={self.config.read_timeout_ms}"
+        message = (
+            "Codex SDK init exceeded "
+            f"initialize_timeout_ms={self.config.initialize_timeout_ms}"
+        )
         if attempt >= attempts:
             emit({"event": "codex_init_failed", "backend": "sdk", "attempts": attempt, "message": code})
             raise CodexError("codex_init_failed", f"{code}: {message}") from exc
@@ -279,19 +301,22 @@ class CodexSdkClient:
     ) -> tuple[str, str]:
         classified = _classify_sdk_exception(exc)
         code = classified.code
+        reason = _sanitized_sdk_reason(exc, classified)
         if _is_terminal_init_error(code):
             emit({"event": "codex_init_failed", "backend": "sdk", "attempts": attempt, "message": code})
-            if isinstance(exc, CodexError):
-                raise exc
-            raise CodexError(code, str(exc), http_status=classified.http_status) from exc
+            raise CodexError(code, reason, http_status=classified.http_status) from exc
         if attempt >= attempts or not _is_transient_codex_error(code):
             emit({"event": "codex_init_failed", "backend": "sdk", "attempts": attempt, "message": code})
-            raise CodexError("codex_init_failed", f"{code}: {exc}", http_status=classified.http_status) from exc
+            raise CodexError(
+                "codex_init_failed",
+                f"{code}: {reason}",
+                http_status=classified.http_status,
+            ) from exc
         await self._sleep_before_init_retry(attempt, code, emit=emit)
-        return code, str(exc)
+        return code, reason
 
     async def _sleep_before_init_retry(self, attempt: int, code: str, *, emit: EventCallback) -> None:
-        delay_ms = _init_backoff_ms(self.config, attempt)
+        delay_ms = _init_backoff_ms(attempt)
         emit(
             {
                 "event": "codex_init_retrying",
@@ -305,13 +330,14 @@ class CodexSdkClient:
 
     async def _retry_overload(self, op: Callable[[], Any], *, emit: EventCallback) -> Any:
         attempts = max(1, self.config.overload_max_attempts)
-        delay_ms = max(1, self.config.overload_initial_delay_ms)
-        max_delay_ms = max(1, self.config.overload_max_delay_ms)
+        delay_ms = _OVERLOAD_INITIAL_DELAY_MS
+        max_delay_ms = _OVERLOAD_MAX_DELAY_MS
         for attempt in range(1, attempts + 1):
             try:
                 return await op()
             except Exception as exc:
                 classified = _classify_sdk_exception(exc)
+                reason = _sanitized_sdk_reason(exc, classified)
                 if classified.code == "codex_bad_request":
                     self._emit_terminal_request_failure(exc, classified, emit)
                 if classified.code != "upstream_overloaded":
@@ -323,11 +349,13 @@ class CodexSdkClient:
                             "backend": "sdk",
                             "attempts": attempt,
                             "http_status": classified.http_status,
-                            "message": str(exc),
+                            "message": reason,
                         }
                     )
                     raise CodexError(
-                        "upstream_overloaded_exhausted", str(exc), http_status=classified.http_status
+                        "upstream_overloaded_exhausted",
+                        reason,
+                        http_status=classified.http_status,
                     ) from exc
                 current_delay_ms = min(delay_ms, max_delay_ms)
                 emit(
@@ -337,23 +365,28 @@ class CodexSdkClient:
                         "attempt": attempt + 1,
                         "delay_ms": current_delay_ms,
                         "http_status": classified.http_status,
-                        "message": str(exc),
+                        "message": reason,
                     }
                 )
                 await asyncio.sleep(current_delay_ms / 1000)
                 delay_ms = min(max_delay_ms, delay_ms * 2)
 
     def _emit_terminal_request_failure(self, exc: Exception, classified: Any, emit: EventCallback) -> None:
+        reason = _sanitized_sdk_reason(exc, classified)
         emit(
             {
                 "event": "codex_request_failed_terminal",
                 "backend": "sdk",
                 "code": classified.code,
                 "http_status": classified.http_status,
-                "message": str(exc),
+                "message": reason,
             }
         )
-        raise CodexError(classified.code, str(exc), http_status=classified.http_status) from exc
+        raise CodexError(
+            classified.code,
+            reason,
+            http_status=classified.http_status,
+        ) from exc
 
     async def _client_and_thread(
         self,
@@ -367,28 +400,19 @@ class CodexSdkClient:
         return client, thread
 
     async def _client(self) -> Any:
-        if self.sdk_factory is not None:
-            client = self.sdk_factory(self.config)
-            if inspect.isawaitable(client):
-                client = await client
-            return client
         if self.config.sdk_codex_bin and not os.access(self.config.sdk_codex_bin, os.X_OK):
             raise CodexError("invalid_sdk_codex_bin", f"Codex binary is not executable: {self.config.sdk_codex_bin}")
-        try:
-            from openai_codex import AsyncCodex  # type: ignore
-            from openai_codex import CodexConfig as SdkCodexConfig  # type: ignore
-        except ImportError as exc:
-            raise CodexError("codex_sdk_not_installed", "Install openai-codex to run Performer Codex turns") from exc
-        return AsyncCodex(config=self._sdk_config(SdkCodexConfig))
+        factory = self.sdk_factory or _default_sdk_factory
+        client = factory(self.config)
+        if inspect.isawaitable(client):
+            client = await client
+        return client
 
-    def _sdk_config(self, sdk_config_cls: Any) -> Any | None:
+    def _sdk_config(self, sdk_config_cls: Any) -> Any:
         sdk_env = _codex_sdk_env()
-        if not (self.config.sdk_codex_bin or sdk_env or self.config.config_overrides):
-            return None
         return sdk_config_cls(
             codex_bin=self.config.sdk_codex_bin,
-            env=sdk_env or None,
-            config_overrides=tuple(self.config.config_overrides),
+            env=sdk_env,
         )
 
     async def _thread(
@@ -405,16 +429,20 @@ class CodexSdkClient:
             if not callable(resume):
                 raise CodexError("sdk_missing_thread_resume", "Codex SDK client does not support thread_resume")
             try:
-                return await resume(existing_thread_id, **kwargs)
+                resume_kwargs = {
+                    key: value for key, value in kwargs.items() if key != "ephemeral"
+                }
+                return await resume(existing_thread_id, **resume_kwargs)
             except Exception as exc:
                 if emit is not None:
+                    classified = _classify_sdk_exception(exc)
                     emit(
                         {
                             "event": "thread_resume_failed",
                             "backend": "sdk",
                             "thread_id": existing_thread_id,
                             "cwd": str(workspace_path),
-                            "message": str(exc),
+                            "message": _sanitized_sdk_reason(exc, classified),
                         }
                     )
         start = getattr(client, "thread_start", None)
@@ -423,25 +451,32 @@ class CodexSdkClient:
         return await start(**kwargs)
 
     def _thread_kwargs(self, workspace_path: Path) -> dict[str, Any]:
-        kwargs: dict[str, Any] = {"cwd": str(workspace_path)}
-        if self.config.model:
-            kwargs["model"] = self.config.model
-        if self.config.sandbox:
-            try:
-                from openai_codex import Sandbox  # type: ignore
+        sdk_types = self.sdk_types or _default_sdk_types()
 
-                sandbox_value = self.config.sandbox.replace("_", "-")
-                kwargs["sandbox"] = Sandbox(sandbox_value)
-            except (ImportError, ValueError):
-                # Keep the configured value visible to alternate SDK adapters;
-                # the pinned SDK path above validates it as its enum type.
-                kwargs["sandbox"] = self.config.sandbox
-        return kwargs
+        return {
+            "approval_mode": sdk_types.ApprovalMode(self.config.approval_mode),
+            "cwd": str(workspace_path),
+            "ephemeral": True,
+            "model": self.config.model,
+            "model_provider": self.config.model_provider,
+            "sandbox": sdk_types.Sandbox(self.config.sandbox.replace("_", "-")),
+        }
 
     async def _start_sdk_turn(self, thread: Any, prompt: str, output_schema: dict[str, Any]) -> Any:
         turn = getattr(thread, "turn", None)
         if callable(turn):
-            return await turn(prompt, output_schema=output_schema)
+            sdk_types = self.sdk_types or _default_sdk_types()
+
+            return await turn(
+                prompt,
+                approval_mode=sdk_types.ApprovalMode(self.config.approval_mode),
+                effort=sdk_types.ReasoningEffort(self.config.reasoning_effort),
+                summary=sdk_types.ReasoningSummary.model_validate(
+                    self.config.reasoning_summary
+                ),
+                sandbox=sdk_types.Sandbox(self.config.sandbox.replace("_", "-")),
+                output_schema=output_schema,
+            )
         raise CodexError("sdk_missing_turn", "Codex SDK thread does not support turn")
 
     async def _consume_turn(self, turn: Any, emit: EventCallback) -> str | None:
@@ -477,6 +512,18 @@ class CodexSdkClient:
         if terminal_error is not None:
             raise terminal_error
         return final_response or fallback_response
+
+
+def _default_sdk_factory(config: CodexConfig) -> Any:
+    from .backends.codex import create_codex_sdk_client
+
+    return create_codex_sdk_client(config)
+
+
+def _default_sdk_types() -> Any:
+    from .backends.codex import codex_sdk_types
+
+    return codex_sdk_types()
 
 
 def _terminal_sdk_error(event: Any) -> CodexError | None:

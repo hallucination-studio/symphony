@@ -195,4 +195,434 @@ describe("api client", () => {
       api.saveRepository("git_url", "x"),
     ).rejects.toBeInstanceOf(ApiError);
   });
+
+  it("parses a closed provider-neutral Performer status response", async () => {
+    global.fetch = mockFetch(200, {
+      control_result: performerResult("performer.status", {
+        capabilities: {
+        protocol_version: 1,
+        capability_version: 1,
+        performer_kind: "codex",
+        display_name: "Codex",
+        turn_kinds: ["plan", "execute", "gate"],
+        login_methods: ["device_code", "api_key"],
+        supports_session_delete: true,
+        editable_settings: ["api_base_url"],
+        config_source_visible: true,
+        check_supported: true,
+      },
+        readiness: readiness(),
+        account: { status: "authenticated", display_label: "Developer" },
+        login: { status: "idle", method: null },
+      }),
+      events: [],
+    });
+
+    const status = await api.performerStatus("conductor-1");
+
+    expect(global.fetch).toHaveBeenCalledWith(
+      "/api/v1/conductors/conductor-1/performer",
+      expect.objectContaining({ credentials: "include" }),
+    );
+    expect(status.capabilities.performer_kind).toBe("codex");
+    expect(status.capabilities.login_methods).toEqual(["device_code", "api_key"]);
+  });
+
+  it("does not narrow a declared Performer backend identity in the browser", async () => {
+    global.fetch = mockFetch(200, {
+      control_result: performerResult("performer.status", {
+        capabilities: {
+          protocol_version: 1,
+          capability_version: 1,
+          performer_kind: "backend_alpha",
+          display_name: "Backend Alpha",
+          turn_kinds: ["plan", "execute", "gate"],
+          login_methods: ["device_code"],
+          supports_session_delete: true,
+          editable_settings: [],
+          config_source_visible: false,
+          check_supported: true,
+        },
+        readiness: { ...readiness(), performer_kind: "backend_alpha" },
+        account: { status: "logged_out", display_label: null },
+        login: { status: "idle", method: null },
+      }),
+      events: [],
+    });
+
+    const status = await api.performerStatus("conductor-1");
+
+    expect(status.capabilities.performer_kind).toBe("backend_alpha");
+    expect(status.capabilities.display_name).toBe("Backend Alpha");
+  });
+
+  it("unwraps the no-store control envelope and validates a device challenge event", async () => {
+    const result = performerResult("performer.login", {
+      readiness: readiness(),
+      login: { status: "pending", method: "device_code" },
+    });
+    global.fetch = mockFetch(200, {
+      control_result: result,
+      events: [{
+        protocol_version: 1,
+        request_id: result.request_id,
+        operation: "performer.login",
+        sequence: 1,
+        event_kind: "login.pending",
+        message: "Open the verification URL",
+        verification_url: "https://example.test/device",
+        user_code: "ABCD-EFGH",
+        expires_at: null,
+      }],
+    });
+
+    const envelope = await api.performerLogin("conductor-1", { method: "device_code" });
+
+    expect(envelope.events[0].user_code).toBe("ABCD-EFGH");
+    expect(envelope.control_result.login?.status).toBe("pending");
+  });
+
+  it("rejects unknown Performer response fields instead of trusting JSON", async () => {
+    global.fetch = mockFetch(200, {
+      control_result: {
+        ...performerResult("performer.status", {
+        capabilities: {
+          protocol_version: 1,
+          capability_version: 1,
+          performer_kind: "codex",
+          display_name: "Codex",
+          turn_kinds: ["plan", "execute", "gate"],
+          login_methods: ["device_code"],
+          supports_session_delete: true,
+          editable_settings: ["api_base_url"],
+          config_source_visible: true,
+          check_supported: true,
+        },
+        readiness: readiness(),
+        account: { status: "logged_out", display_label: null },
+        login: { status: "idle", method: null },
+        }),
+        sdk_response: { auth_json_path: "/Users/private/.codex/auth.json" },
+      },
+      events: [],
+    });
+
+    await expect(api.performerStatus("conductor-1")).rejects.toMatchObject({
+      code: "performer_control_protocol_invalid",
+    });
+  });
+
+  it("dispatches API keys synchronously into a native Request without retaining input", async () => {
+    const sentinel = "sk-browser-memory-only";
+    const responseBody = {
+      control_result: performerResult("performer.login", {
+        readiness: readiness(),
+        login: { status: "succeeded", method: "api_key" },
+        account: { status: "authenticated", display_label: null },
+      }),
+      events: [],
+    };
+    let releaseFetch: (() => void) | undefined;
+    const fetchMock = vi.fn().mockImplementation(() => new Promise<Response>((resolve) => {
+      releaseFetch = () => resolve({
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify(responseBody),
+      } as Response);
+    }));
+    global.fetch = fetchMock;
+    let apiKey: string | null = sentinel;
+
+    const pending = api.performerApiKeyLogin("conductor/one", () => {
+      const value = apiKey;
+      apiKey = null;
+      return value!;
+    });
+
+    expect(apiKey).toBeNull();
+    expect(fetchMock).toHaveBeenCalledOnce();
+    const [request, init] = fetchMock.mock.calls[0];
+    expect(request).toBeInstanceOf(Request);
+    expect(init).toBeUndefined();
+    expect(request.url).toContain(
+      "/api/v1/conductors/conductor%2Fone/performer/login",
+    );
+    expect(await request.clone().json()).toEqual({
+      method: "api_key",
+      api_key: sentinel,
+    });
+
+    releaseFetch?.();
+    const result = await pending;
+    expect(JSON.stringify(result)).not.toContain(sentinel);
+  });
+
+  it("uses the generic Performer session, config, and Check routes", async () => {
+    const responses = [
+      { control_result: performerResult("performer.session.delete", {
+        readiness: readiness(),
+        account: { status: "logged_out", display_label: null },
+        login: { status: "idle", method: null },
+      }), events: [] },
+      { control_result: performerResult("performer.config.read", {
+        configuration: {
+          settings: { api_base_url: "https://api.example.test/v1" },
+          source_format: "text",
+          source_text: 'model = "gpt-5.4"',
+        },
+      }), events: [] },
+      { control_result: performerResult("performer.config.write", {
+        readiness: readiness(),
+        configuration: {
+          settings: { api_base_url: "https://api.example.test/v2" },
+          source_format: null,
+          source_text: null,
+        },
+      }), events: [] },
+      { control_result: performerResult("performer.check", {
+        readiness: { ...readiness(), status: "ready", last_check_status: "passed" },
+        check: {
+          status: "passed",
+          started_at: "2026-07-13T00:00:00Z",
+          finished_at: "2026-07-13T00:00:01Z",
+          summary: "Structured read-only Check passed.",
+        },
+      }), events: [] },
+    ];
+    const fetchMock = vi.fn();
+    for (const response of responses) {
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify(response),
+      } as Response);
+    }
+    global.fetch = fetchMock;
+
+    await api.deletePerformerSession("conductor-1", "logout");
+    await api.performerConfiguration("conductor-1");
+    await api.updatePerformerConfiguration("conductor-1", {
+      setting: "api_base_url",
+      value: "https://api.example.test/v2",
+    });
+    await api.checkPerformer("conductor-1");
+
+    expect(fetchMock.mock.calls.map(([path, init]) => [path, init.method ?? "GET"]))
+      .toEqual([
+        ["/api/v1/conductors/conductor-1/performer/session", "DELETE"],
+        ["/api/v1/conductors/conductor-1/performer/config", "GET"],
+        ["/api/v1/conductors/conductor-1/performer/config", "PATCH"],
+        ["/api/v1/conductors/conductor-1/performer/check", "POST"],
+      ]);
+  });
+
+  it("rejects a bare control result now that the BFF envelope is frozen", async () => {
+    global.fetch = mockFetch(200, performerResult("performer.config.read", {
+      configuration: { settings: {}, source_format: null, source_text: null },
+    }));
+
+    await expect(api.performerConfiguration("conductor-1")).rejects.toMatchObject({
+      code: "performer_control_protocol_invalid",
+    });
+  });
+
+  it("rejects device challenge events that do not correlate to the result", async () => {
+    const result = performerResult("performer.login", {
+      readiness: readiness(),
+      login: { status: "pending", method: "device_code" },
+    });
+    global.fetch = mockFetch(200, {
+      control_result: result,
+      events: [{
+        protocol_version: 1,
+        request_id: "another-request",
+        operation: "performer.login",
+        sequence: 1,
+        event_kind: "login.pending",
+        message: "Open another verification URL",
+        verification_url: "https://phishing.example/device",
+        user_code: "WRONG-CODE",
+        expires_at: null,
+      }],
+    });
+
+    await expect(api.performerLogin("conductor-1", { method: "device_code" }))
+      .rejects.toMatchObject({ code: "performer_control_protocol_invalid" });
+  });
+
+  it("rejects login events on non-login operations", async () => {
+    const result = performerResult("performer.status", {
+      capabilities: {
+        protocol_version: 1,
+        capability_version: 1,
+        performer_kind: "codex",
+        display_name: "Codex",
+        turn_kinds: ["plan", "execute", "gate"],
+        login_methods: ["device_code"],
+        supports_session_delete: true,
+        editable_settings: [],
+        config_source_visible: false,
+        check_supported: true,
+      },
+      readiness: readiness(),
+      account: { status: "logged_out", display_label: null },
+      login: { status: "idle", method: null },
+    });
+    global.fetch = mockFetch(200, {
+      control_result: result,
+      events: [{
+        protocol_version: 1,
+        request_id: result.request_id,
+        operation: "performer.status",
+        sequence: 1,
+        event_kind: "login.pending",
+        message: "Wrong operation",
+        verification_url: "https://example.test/device",
+        user_code: "WRONG-CODE",
+        expires_at: null,
+      }],
+    });
+
+    await expect(api.performerStatus("conductor-1")).rejects.toMatchObject({
+      code: "performer_control_protocol_invalid",
+    });
+  });
+
+  it("rejects operation-specific success fields that are not allowed", async () => {
+    global.fetch = mockFetch(200, {
+      control_result: performerResult("performer.config.read", {
+        configuration: { settings: {}, source_format: null, source_text: null },
+        account: { status: "authenticated", display_label: "raw extra" },
+      }),
+      events: [],
+    });
+
+    await expect(api.performerConfiguration("conductor-1")).rejects.toMatchObject({
+      code: "performer_control_protocol_invalid",
+    });
+  });
+
+  it("accepts redacted config source", async () => {
+    global.fetch = mockFetch(200, {
+      control_result: performerResult("performer.config.read", {
+        configuration: {
+          settings: {},
+          source_format: "text",
+          source_text: 'api_key = "[REDACTED]"',
+        },
+      }),
+      events: [],
+    });
+
+    const envelope = await api.performerConfiguration("conductor-1");
+    expect(envelope.control_result.configuration?.source_text).toBe(
+      'api_key = "[REDACTED]"',
+    );
+  });
+
+  it("accepts an explicitly redacted nested secret assignment", async () => {
+    const sourceText = 'http_headers = { "X-Api-Key" = "[REDACTED]" }';
+    global.fetch = mockFetch(200, {
+      control_result: performerResult("performer.config.read", {
+        configuration: {
+          settings: {},
+          source_format: "text",
+          source_text: sourceText,
+        },
+      }),
+      events: [],
+    });
+
+    const envelope = await api.performerConfiguration("conductor-1");
+    expect(envelope.control_result.configuration?.source_text).toBe(sourceText);
+  });
+
+  it("accepts an HTTP API base URL allowed by the shared contract", async () => {
+    global.fetch = mockFetch(200, {
+      control_result: performerResult("performer.config.read", {
+        configuration: {
+          settings: { api_base_url: "http://127.0.0.1:11434/v1" },
+          source_format: null,
+          source_text: null,
+        },
+      }),
+      events: [],
+    });
+
+    const envelope = await api.performerConfiguration("conductor-1");
+
+    expect(envelope.control_result.configuration?.settings.api_base_url).toBe(
+      "http://127.0.0.1:11434/v1",
+    );
+  });
+
+  it.each([
+    'api_key = "raw-secret-value"',
+    'http_headers = { "X-Api-Key" = "raw-secret-value" }',
+    'env = { "OPENAI_API_KEY" = "raw-secret-value" }',
+    "headers = { authorization = 'Bearer raw-secret-value' }",
+    'config = "/tmp/private/config.toml"',
+    "QUJD".repeat(40),
+  ])("rejects unsafe config source: %s", async (sourceText) => {
+    global.fetch = mockFetch(200, {
+      control_result: performerResult("performer.config.read", {
+        configuration: {
+          settings: {},
+          source_format: "text",
+          source_text: sourceText,
+        },
+      }),
+      events: [],
+    });
+
+    await expect(api.performerConfiguration("conductor-1")).rejects.toMatchObject({
+      code: "performer_control_protocol_invalid",
+    });
+  });
+
+  it("does not expose an untrusted non-2xx Performer error message", async () => {
+    global.fetch = mockFetch(500, {
+      error: {
+        code: "provider_raw_failure",
+        message: "Read /Users/private/.codex/auth.json with sk-raw-secret",
+      },
+    });
+
+    await expect(api.checkPerformer("conductor-1")).rejects.toMatchObject({
+      code: "performer_control_failed",
+      message: "Performer control request failed",
+    });
+  });
 });
+
+function readiness() {
+  return {
+    performer_kind: "codex",
+    binding_generation: 1,
+    capability_version: 1,
+    execution_policy_sha256: "a".repeat(64),
+    status: "unchecked",
+    last_check_status: "none",
+    error: null,
+  };
+}
+
+function performerResult(
+  operation: string,
+  fields: Record<string, unknown>,
+) {
+  return {
+    protocol_version: 1,
+    request_id: `web-${operation}`,
+    operation,
+    status: "succeeded",
+    capabilities: null,
+    readiness: null,
+    account: null,
+    login: null,
+    configuration: null,
+    check: null,
+    error: null,
+    ...fields,
+  };
+}

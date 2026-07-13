@@ -1,10 +1,21 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
+
+from performer_api.performer_control import (
+    CONTROL_OPERATIONS,
+    PerformerControlError,
+    PerformerControlEvent,
+    PerformerControlResult,
+    PerformerReadinessState,
+)
+from performer_api.runtime_policy import RuntimePolicy, canonical_sha256
 
 from .models import (
     ConductorServiceError,
@@ -12,10 +23,15 @@ from .models import (
     InstanceCreateRequest,
     InstancePatchRequest,
     InstanceRecord,
+    utc_now_iso,
 )
 from .gate import AcceptanceGate
+from .performer_control import (
+    PerformerCoordinator,
+    PerformerCoordinatorError,
+    PerformerCoordinatorHooks,
+)
 from .runtime import PerformerRuntime
-from .performer_credentials import PerformerCredentialSlots
 from .conductor_podium_sync import ConductorPodiumSyncMixin
 from .conductor_service_helpers import _linear_agent_app_user_id
 from .linear import ManagedRunLinearProxy
@@ -36,6 +52,25 @@ WORKSPACE_INIT_EXCLUDES = {
     "target",
 }
 
+_CONTROL_STDERR_EVENTS = frozenset(
+    {"performer_control_operation_failed", "performer_control_protocol_failed"}
+)
+_CONTROL_STDERR_FIELDS = frozenset(
+    {
+        "event",
+        "error_type",
+        "error_code",
+        "sanitized_reason",
+        "action_required",
+        "retryable",
+        "next_action",
+        "request_id",
+        "operation",
+    }
+)
+_CONTROL_STDERR_REQUIRED_FIELDS = _CONTROL_STDERR_FIELDS - {"request_id", "operation"}
+_SAFE_CONTROL_REQUEST_ID = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._:-]{0,199}\Z")
+
 
 class ConductorService(ConductorPodiumSyncMixin):
     def __init__(
@@ -47,11 +82,301 @@ class ConductorService(ConductorPodiumSyncMixin):
         self.store = store
         self.data_root = data_root
         self.performer_runtime = PerformerRuntime()
-        self.performer_credentials = PerformerCredentialSlots(data_root)
+        self.performer_coordinator = PerformerCoordinator(
+            command=(*self.performer_runtime.performer_command, "control"),
+            process_env=self.performer_runtime.prepare_environment(),
+            hooks=PerformerCoordinatorHooks(
+                on_event=self._on_performer_control_event,
+                on_failure=self._on_performer_control_failure,
+                on_readiness_invalidated=self._on_performer_readiness_invalidated,
+                on_check_started=self._on_performer_check_started,
+                on_login_lost=self._on_performer_login_lost,
+                on_stderr=self._on_performer_control_stderr,
+            ),
+            cwd=None,
+        )
         self.acceptance_gate = AcceptanceGate()
         self._smoke_check_lock = asyncio.Lock()
         self.project_label_proxy_factory = self._project_label_proxy
         self.data_root.mkdir(parents=True, exist_ok=True)
+
+    async def start(self) -> None:
+        instances = self.store.list_instances()
+        if not instances:
+            return
+        await self.ensure_performer_control_started()
+
+    async def ensure_performer_control_started(self) -> None:
+        instances = self.store.list_instances()
+        if len(instances) != 1:
+            raise ConductorServiceError(
+                "performer_binding_required",
+                "A Performer binding is required before control",
+            )
+        instance = instances[0]
+        self.performer_coordinator.cwd = instance.workspace_root
+        self._ensure_performer_identity(instance)
+        if not self.performer_coordinator.is_running:
+            await self.performer_coordinator.start()
+
+    async def stop(self) -> None:
+        await self.performer_coordinator.stop()
+
+    def _ensure_performer_identity(self, instance: InstanceRecord) -> dict[str, Any]:
+        identity = self._performer_identity_for_current_capabilities(instance)
+        return self.store.ensure_performer_control_identity(**identity)
+
+    def _performer_identity_for_current_capabilities(
+        self, instance: InstanceRecord
+    ) -> dict[str, Any]:
+        current = self.store.get_performer_control_state()
+        capability_version = int(current.get("capability_version") or 0)
+        return _performer_identity(
+            instance,
+            capability_version=max(1, capability_version),
+        )
+
+    async def _on_performer_readiness_invalidated(self, _request: Any) -> None:
+        instances = self.store.list_instances()
+        if not instances:
+            return
+        identity = self._performer_identity_for_current_capabilities(instances[0])
+        self.store.ensure_performer_control_identity(**identity)
+        current = self.store.get_performer_control_state()
+        self.store.record_performer_readiness(
+            PerformerReadinessState(
+                performer_kind=identity["performer_kind"],
+                binding_generation=identity["binding_generation"],
+                capability_version=max(1, int(current.get("capability_version") or 1)),
+                execution_policy_sha256=identity["execution_policy_sha256"],
+                status="unchecked",
+                last_check_status="none",
+                error=None,
+            )
+        )
+
+    async def _on_performer_check_started(self, _request: Any) -> None:
+        """Make a manual Check non-ready before its backend request is written."""
+
+        instances = self.store.list_instances()
+        if not instances:
+            return
+        identity = self._performer_identity_for_current_capabilities(instances[0])
+        self.store.ensure_performer_control_identity(**identity)
+        current = self.store.get_performer_control_state()
+        self.store.record_performer_readiness(
+            PerformerReadinessState(
+                performer_kind=identity["performer_kind"],
+                binding_generation=identity["binding_generation"],
+                capability_version=identity["capability_version"],
+                execution_policy_sha256=identity["execution_policy_sha256"],
+                status="checking",
+                last_check_status=str(current.get("last_check_status") or "none"),
+                error=None,
+            ),
+            check_started_at=utc_now_iso(),
+        )
+        self._append_control_log(
+            "event=performer_check_started level=info "
+            f"performer_kind={identity['performer_kind']} "
+            f"binding_generation={identity['binding_generation']} "
+            f"capability_version={identity['capability_version']} "
+            f"execution_policy_sha256={identity['execution_policy_sha256']}"
+        )
+
+    async def _on_performer_control_failure(self, error: PerformerCoordinatorError) -> None:
+        instances = self.store.list_instances()
+        if not instances:
+            return
+        identity = self._performer_identity_for_current_capabilities(instances[0])
+        self.store.ensure_performer_control_identity(**identity)
+        current = self.store.get_performer_control_state()
+        readiness = PerformerReadinessState(
+            performer_kind=identity["performer_kind"],
+            binding_generation=identity["binding_generation"],
+            capability_version=max(1, int(current.get("capability_version") or 1)),
+            execution_policy_sha256=identity["execution_policy_sha256"],
+            status="failed",
+            last_check_status="failed",
+            error=PerformerControlError(
+                error_code=error.error_code,
+                sanitized_reason=error.sanitized_reason,
+                action_required=error.action_required,
+                retryable=error.retryable,
+                attempt_number=None,
+                next_action=error.next_action,
+            ),
+        )
+        self.store.record_performer_readiness(readiness)
+        self._append_control_log(
+            "event=performer_control_failed level=error "
+            f"error_code={error.error_code} sanitized_reason={error.sanitized_reason.replace(' ', '_')} "
+            f"action_required={'true' if error.action_required else 'false'} "
+            f"retryable={'true' if error.retryable else 'false'} next_action={error.next_action.replace(' ', '_')}"
+        )
+
+    def apply_performer_control_result(self, result: PerformerControlResult) -> dict[str, Any]:
+        """Persist the compatible manual Check outcome and expose failures durably."""
+
+        if not isinstance(result, PerformerControlResult):
+            raise TypeError("result must be PerformerControlResult")
+        instances = self.store.list_instances()
+        if not instances:
+            raise ConductorServiceError("performer_binding_required", "A Performer binding is required before control")
+        identity = self._performer_identity_for_current_capabilities(instances[0])
+        self.store.ensure_performer_control_identity(**identity)
+        current = self.store.get_performer_control_state()
+        if (
+            result.operation == "performer.status"
+            and result.status == "succeeded"
+            and result.capabilities is not None
+        ):
+            capabilities = result.capabilities
+            if capabilities.performer_kind != identity["performer_kind"]:
+                readiness = PerformerReadinessState(
+                    performer_kind=identity["performer_kind"],
+                    binding_generation=identity["binding_generation"],
+                    capability_version=identity["capability_version"],
+                    execution_policy_sha256=identity["execution_policy_sha256"],
+                    status="failed",
+                    last_check_status=str(current.get("last_check_status") or "none"),
+                    error=PerformerControlError(
+                        error_code="performer_control_protocol_invalid",
+                        sanitized_reason="Performer status reported a backend that does not match the active binding.",
+                        action_required=True,
+                        retryable=False,
+                        attempt_number=None,
+                        next_action="Restart the Performer control host and refresh backend status.",
+                    ),
+                )
+                self.store.record_performer_readiness(readiness)
+            else:
+                status_identity = _performer_identity(
+                    instances[0],
+                    capability_version=capabilities.capability_version,
+                )
+                self.store.ensure_performer_control_identity(**status_identity)
+                if (
+                    result.login is not None
+                    and result.login.status == "failed"
+                    and result.readiness is not None
+                    and result.readiness.status == "failed"
+                    and result.readiness.error is not None
+                    and result.readiness.error.error_code == "performer_login_failed"
+                ):
+                    self._record_performer_login_failure(status_identity)
+        elif result.operation == "performer.check" and result.readiness is not None:
+            readiness = result.readiness
+            compatible = (
+                readiness.performer_kind == identity["performer_kind"]
+                and readiness.binding_generation == identity["binding_generation"]
+                and readiness.capability_version == identity["capability_version"]
+                and readiness.execution_policy_sha256 == identity["execution_policy_sha256"]
+            )
+            if not compatible:
+                readiness = PerformerReadinessState(
+                    performer_kind=identity["performer_kind"],
+                    binding_generation=identity["binding_generation"],
+                    capability_version=identity["capability_version"],
+                    execution_policy_sha256=identity["execution_policy_sha256"],
+                    status="failed",
+                    last_check_status="failed",
+                    error=PerformerControlError(
+                        error_code="stale_fencing_token",
+                        sanitized_reason="Performer Check evidence does not match the active binding or policy.",
+                        action_required=True,
+                        retryable=False,
+                        attempt_number=None,
+                        next_action="Run Check again for the active Performer binding.",
+                    ),
+                )
+            self.store.record_performer_readiness(
+                readiness,
+                check_started_at=result.check.started_at if result.check is not None else None,
+                check_finished_at=result.check.finished_at if result.check is not None else None,
+            )
+        elif result.status == "failed" and result.error is not None:
+            last_check_status = str(current.get("last_check_status") or "none")
+            if result.operation == "performer.check":
+                last_check_status = "failed"
+            readiness = PerformerReadinessState(
+                performer_kind=identity["performer_kind"],
+                binding_generation=identity["binding_generation"],
+                capability_version=identity["capability_version"],
+                execution_policy_sha256=identity["execution_policy_sha256"],
+                status="failed",
+                last_check_status=last_check_status,
+                error=result.error,
+            )
+            self.store.record_performer_readiness(readiness)
+        state = self.store.get_performer_control_state()
+        error_code = result.error.error_code if result.error is not None else ""
+        self._append_control_log(
+            "event=performer_control_result_applied level=info "
+            f"request_id={result.request_id} operation={result.operation} status={result.status} "
+            f"error_code={error_code or 'none'}"
+        )
+        return state
+
+    async def _on_performer_control_event(self, event: PerformerControlEvent) -> None:
+        event_message = event.message.replace(" ", "_")
+        if event.event_kind in {"login.pending", "login.succeeded", "login.failed"}:
+            event_message = f"Performer_device_{event.event_kind.replace('.', '_')}."
+        if event.event_kind == "login.failed":
+            instances = self.store.list_instances()
+            if instances:
+                identity = self._performer_identity_for_current_capabilities(instances[0])
+                self.store.ensure_performer_control_identity(**identity)
+                self._record_performer_login_failure(identity)
+                self._append_control_log(
+                    "event=performer_login_failed level=error "
+                    f"request_id={event.request_id} operation={event.operation} "
+                    "error_code=performer_login_failed "
+                    "sanitized_reason=Performer_device_login_failed. "
+                    "action_required=true retryable=true next_action=Retry_device_login."
+                )
+        self._append_control_log(
+            "event=performer_control_event level=info "
+            f"request_id={event.request_id} operation={event.operation} "
+            f"event_kind={event.event_kind} sequence={event.sequence} "
+            f"message={event_message}"
+        )
+
+    def _record_performer_login_failure(self, identity: dict[str, Any]) -> None:
+        current = self.store.get_performer_control_state()
+        self.store.record_performer_readiness(
+            PerformerReadinessState(
+                performer_kind=identity["performer_kind"],
+                binding_generation=identity["binding_generation"],
+                capability_version=identity["capability_version"],
+                execution_policy_sha256=identity["execution_policy_sha256"],
+                status="failed",
+                last_check_status=str(current.get("last_check_status") or "none"),
+                error=PerformerControlError(
+                    error_code="performer_login_failed",
+                    sanitized_reason="Performer device login failed.",
+                    action_required=True,
+                    retryable=True,
+                    attempt_number=None,
+                    next_action="Retry device login.",
+                ),
+            )
+        )
+
+    async def _on_performer_login_lost(self, _error: Any) -> None:
+        self._append_control_log(
+            "event=performer_login_lost level=error error_code=performer_login_lost "
+            "sanitized_reason=The_pending_device_login_was_lost "
+            "action_required=true retryable=false next_action=restart_login"
+        )
+
+    async def _on_performer_control_stderr(self, message: str) -> None:
+        self._append_control_log(_safe_performer_control_stderr(message))
+
+    def _append_control_log(self, message: str) -> None:
+        instances = self.store.list_instances()
+        log_path = Path(instances[0].log_path) if instances else self.data_root / "conductor.log"
+        self.performer_runtime.append_event(log_path, message)
 
     def list_instances(self) -> list[InstanceRecord]:
         return self.store.list_instances()
@@ -436,3 +761,101 @@ class ConductorService(ConductorPodiumSyncMixin):
             if candidate not in existing:
                 return candidate
             index += 1
+
+def _safe_performer_control_stderr(message: str) -> str:
+    """Accept only the closed stderr log envelope emitted by control_host.
+
+    Provider SDKs can write arbitrary diagnostics to stderr.  They are useful
+    only after the owning Performer has converted them into the closed control
+    result/event contracts; retaining raw text here would make the Conductor
+    log a secret and private-path sink.
+    """
+
+    try:
+        if not isinstance(message, str) or len(message.encode("utf-8")) > 64 * 1024:
+            raise ValueError
+        payload = json.loads(message)
+        if not isinstance(payload, dict):
+            raise ValueError
+        if not _CONTROL_STDERR_REQUIRED_FIELDS <= set(payload) <= _CONTROL_STDERR_FIELDS:
+            raise ValueError
+        if payload.get("event") not in _CONTROL_STDERR_EVENTS:
+            raise ValueError
+        error = PerformerControlError(
+            error_code=payload.get("error_code"),
+            sanitized_reason=payload.get("sanitized_reason"),
+            action_required=payload.get("action_required"),
+            retryable=payload.get("retryable"),
+            attempt_number=None,
+            next_action=payload.get("next_action"),
+        )
+        request_id = payload.get("request_id")
+        operation = payload.get("operation")
+        if (request_id is None) != (operation is None):
+            raise ValueError
+        correlation = ""
+        if request_id is not None:
+            if (
+                not isinstance(request_id, str)
+                or not _SAFE_CONTROL_REQUEST_ID.fullmatch(request_id)
+                or operation not in CONTROL_OPERATIONS
+            ):
+                raise ValueError
+            correlation = f" request_id={request_id} operation={operation}"
+        return (
+            "event=performer_control_host_log level=error "
+            f"host_event={payload['event']} error_code={error.error_code} "
+            f"sanitized_reason={error.sanitized_reason.replace(' ', '_')} "
+            f"action_required={'true' if error.action_required else 'false'} "
+            f"retryable={'true' if error.retryable else 'false'} "
+            f"next_action={error.next_action.replace(' ', '_')}{correlation}"
+        )
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return (
+            "event=performer_control_stderr_invalid level=warning "
+            "error_code=performer_control_protocol_invalid "
+            "sanitized_reason=Performer_control_emitted_an_unstructured_stderr_record "
+            "action_required=true retryable=false "
+            "next_action=inspect_performer_control_result_and_restart_host"
+        )
+
+
+def _performer_identity(
+    instance: InstanceRecord,
+    *,
+    capability_version: int = 1,
+) -> dict[str, Any]:
+    filters = instance.linear_filters if isinstance(instance.linear_filters, dict) else {}
+    policy = RuntimePolicy.from_dict(filters.get("execution_policy"))
+    policy_hash = canonical_sha256(policy.to_dict())
+    supplied_hash = str(filters.get("execution_policy_sha256") or "")
+    if supplied_hash != policy_hash:
+        raise ConductorServiceError(
+            "execution_policy_hash_mismatch",
+            "The configured Performer execution policy hash does not match its content",
+        )
+    kind = str(filters.get("performer_kind") or "")
+    binding_id = str(filters.get("performer_binding_id") or "")
+    generation = filters.get("performer_binding_generation")
+    turn_hash = str(filters.get("turn_policy_sha256") or "")
+    if not kind or not binding_id or not isinstance(generation, int) or isinstance(generation, bool) or generation <= 0:
+        raise ConductorServiceError(
+            "performer_binding_required",
+            "A complete Performer binding is required before control can start",
+        )
+    if len(turn_hash) != 64:
+        raise ConductorServiceError(
+            "turn_policy_hash_invalid",
+            "The configured Performer turn policy hash is invalid",
+        )
+    if isinstance(capability_version, bool) or not isinstance(capability_version, int) or capability_version <= 0:
+        raise ConductorServiceError(
+            "performer_capability_version_invalid",
+            "The Performer capability version is invalid",
+        )
+    return {
+        "performer_kind": kind,
+        "binding_generation": generation,
+        "capability_version": capability_version,
+        "execution_policy_sha256": policy_hash,
+    }

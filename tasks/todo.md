@@ -29,56 +29,56 @@ continued. Detailed contracts and commands are in `tasks/plan.md`.
       policy documents/hashes only.
 - [x] Commit the Phase 1 checkpoint as `e3b5b09`.
 
-## Phase 2: Performer backend boundary
+## Phase 2: Performer backend boundary — completed checkpoint
 
-- [ ] Add provider-neutral turn/control/capability/readiness contracts in
+- [x] Add provider-neutral turn/control/capability/readiness contracts in
       `performer_api`; remove active Codex-named shared modules without aliases.
-- [ ] Add internal `PerformerBackend` Protocol/ABC and explicit closed registry.
-- [ ] Prove a deterministic test backend satisfies the same contract without a
+- [x] Add internal `PerformerBackend` Protocol/ABC and explicit closed registry.
+- [x] Prove a deterministic test backend satisfies the same contract without a
       provider SDK.
-- [ ] Move all Codex turn SDK imports, types, policy mapping, errors, and result
+- [x] Move all Codex turn SDK imports, types, policy mapping, errors, and result
       normalization behind `CodexBackend`.
-- [ ] Add long-running `performer control` framed stdin/stdout protocol.
-- [ ] Keep device-login handles and provider sessions inside the Performer
+- [x] Add long-running `performer control` framed stdin/stdout protocol.
+- [x] Keep device-login handles and provider sessions inside the Performer
       control process; keep status/cancel usable while login is pending.
-- [ ] Keep API keys only in request/relay/pipe/process memory with no durable
+- [x] Keep API keys only in request/relay/pipe/process memory with no durable
       request/result, argv, environment, stdout, stderr, or log artifact.
-- [ ] Replace the wrong-direction Conductor `CodexController` with generic
+- [x] Replace the wrong-direction Conductor `CodexController` with generic
       `PerformerCoordinator` using only `performer_api`.
-- [ ] Remove `openai-codex` and provider-generated types from Conductor.
-- [ ] Add one generic secret-free `performer_control_state` row with backend,
+- [x] Remove `openai-codex` and provider-generated types from Conductor.
+- [x] Add one generic secret-free `performer_control_state` row with backend,
       binding, capability, policy, readiness, and sanitized Check identity.
-- [ ] Make Conductor control/turn process handling asynchronous so scheduler,
+- [x] Make Conductor control/turn process handling asynchronous so scheduler,
       lease/log heartbeats, status, and cancel remain responsive.
-- [ ] Use one immutable allowlisted environment for control and turn processes.
-- [ ] Remove credential slots, per-attempt provider-home materialization, TOML
+- [x] Use one immutable allowlisted environment for control and turn processes.
+- [x] Remove credential slots, per-attempt provider-home materialization, TOML
       writing/parsing, auth copy-back, and duplicate environment sources.
-- [ ] Block non-ready plan/execute/gate turns visibly and resume their exact
+- [x] Block non-ready plan/execute/gate turns visibly and resume their exact
       prior phase only after a compatible manual Check.
-- [ ] Prove the same generic sanitized failure in SQLite, logs, Podium
+- [x] Prove the same generic sanitized failure in SQLite, logs, Podium
       managed-runs/report, and Linear.
-- [ ] Run Phase 2 focused tests, full failure collection, grouped repair, full
+- [x] Run Phase 2 focused tests, full failure collection, grouped repair, full
       rerun, boundary searches, and green checkpoint commit.
 
-## Phase 3: Provider-neutral Podium live API and Web
+## Phase 3: Provider-neutral Podium live API and Web — completed checkpoint
 
-- [ ] Replace credential/Codex-specific live operations with
+- [x] Replace credential/Codex-specific live operations with
       `performer.status`, `performer.login`, `performer.session.delete`,
       `performer.config.read`, `performer.config.write`, and `performer.check`.
-- [ ] Add owner-only no-store `/conductors/{id}/performer/*` routes while
+- [x] Add owner-only no-store `/conductors/{id}/performer/*` routes while
       preserving live relay fencing, deadlines, duplicate/stale rejection, and
       Check rate limiting.
-- [ ] Return backend kind plus closed capabilities; Podium must not infer
+- [x] Return backend kind plus closed capabilities; Podium must not infer
       provider support or pass raw SDK/path/Base64/unknown fields.
-- [ ] Keep API keys and device-login material out of PostgreSQL commands,
+- [x] Keep API keys and device-login material out of PostgreSQL commands,
       retries, reports, logs, and background jobs.
-- [ ] Add generic Web contracts and transient non-cached secret/config/login
+- [x] Add generic Web contracts and transient non-cached secret/config/login
       state.
-- [ ] Add `RuntimesPerformerDrawer` rendered from capabilities, not provider
+- [x] Add `RuntimesPerformerDrawer` rendered from capabilities, not provider
       branches; backend branding may be display data only.
-- [ ] Prove login/config mutations never trigger Check automatically and API
+- [x] Prove login/config mutations never trigger Check automatically and API
       key/transient state is cleared before completion or on close.
-- [ ] Run Web test/lint/design-lint/build, Phase 3 focused Python tests, full
+- [x] Run Web test/lint/design-lint/build, Phase 3 focused Python tests, full
       failure collection, grouped repair, full rerun, and green checkpoint.
 
 ## Phase 4: Real E2E and active docs

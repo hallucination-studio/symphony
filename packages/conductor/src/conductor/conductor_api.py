@@ -4,16 +4,43 @@ import asyncio
 import json
 import logging
 import random
-import base64
-from datetime import datetime, timezone
+import time
 from typing import Any
 from urllib.parse import parse_qs
+from uuid import uuid4
 
 import httpx
+from performer_api.performer_control import (
+    CONTROL_OPERATIONS,
+    PerformerControlError,
+    PerformerControlRequest,
+    PerformerControlResult,
+    PerformerSecretInput,
+)
+from performer_api.runtime_policy import RuntimePolicy, canonical_sha256
+
+_LIVE_CONTROL_ERROR_CODES = frozenset(
+    {
+        "execution_policy_hash_mismatch",
+        "performer_binding_generation_invalid",
+        "performer_binding_required",
+        "performer_capability_version_invalid",
+        "performer_control_arguments_invalid",
+        "performer_control_busy",
+        "performer_control_process_exited",
+        "performer_control_protocol_invalid",
+        "performer_control_request_id_missing",
+        "performer_control_timeout",
+        "performer_login_secret_not_allowed",
+        "performer_login_secret_required",
+        "stale_fencing_token",
+    }
+)
 
 from .models import ConductorServiceError, InstanceCreateRequest, InstancePatchRequest, InstanceRecord
 from .conductor_service import ConductorService
 from .conductor_smoke_protocol import sanitize_reason
+from .performer_control import PerformerCoordinatorError
 
 
 LOGGER = logging.getLogger(__name__)
@@ -103,68 +130,72 @@ class ConductorApiServer:
             if not request:
                 return {"status": "idle"}
             operation = str(request.get("operation") or "")
+            request_id = str(request.get("request_id") or uuid4().hex)
             try:
-                if operation == "performer_credentials.inspect":
-                    payload = request.get("payload") if isinstance(request.get("payload"), dict) else {}
-                    inventory = self.service.performer_credentials.list()
-                    slots = inventory["slots"]
-                    cursor = str(payload.get("cursor") or "")
-                    try:
-                        after = base64.urlsafe_b64decode(cursor + "==").decode() if cursor else ""
-                    except Exception:
-                        raise ValueError("managed_codex_cursor_invalid")
-                    slots = [slot for slot in slots if str(slot["slot_id"]) > after]
-                    limit = min(max(int(payload.get("limit") or 25), 1), 25)
-                    page = slots[:limit]
-                    selected = inventory.get("selection")
-                    selected_id = str((selected or {}).get("slot_id") or "")
-                    for slot in page:
-                        slot["selected"] = str(slot["slot_id"]) == selected_id
-                        slot["precheck"] = None
-                    next_cursor = None
-                    if len(slots) > limit:
-                        next_cursor = base64.urlsafe_b64encode(str(page[-1]["slot_id"]).encode()).decode().rstrip("=")
-                    result = {
-                        "version": 1,
-                        "conductor_id": settings.conductor_id,
-                        "observed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-                        "selection": {"slot_id": selected_id} if selected_id else None,
-                        "next_cursor": next_cursor,
-                        "slots": page,
-                    }
-                elif operation == "performer_credentials.check":
-                    payload = request.get("payload") if isinstance(request.get("payload"), dict) else {}
-                    instances = self.service.store.list_instances()
-                    config = str(instances[0].linear_filters.get("config_document") or "") if len(instances) == 1 else ""
-                    if not config:
-                        raise ValueError("managed_codex_config_required")
-                    remaining = max((int(request.get("deadline_unix_ms") or 0) / 1000) - __import__("time").time(), 0.0)
-                    checked = self.service.performer_credentials.check(str(payload.get("slot_id") or ""), config, timeout=min(remaining, 60.0))
-                    result = {
-                        "version": 1,
-                        "conductor_id": settings.conductor_id,
-                        "slot_id": str(checked["slot_id"]),
-                        "checked_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-                        "check": {"status": "passed", "error_code": None, "sanitized_reason": None},
-                    }
-                else:
-                    result = {"status": "failed", "error_code": "unsupported_live_operation"}
+                deadline_ms = _safe_int(request.get("deadline_unix_ms"), 0)
+                remaining = deadline_ms / 1000 - time.time() if deadline_ms else 30.0
+                if remaining <= 0:
+                    raise PerformerCoordinatorError(
+                        "performer_control_timeout",
+                        "Performer control lease expired before execution",
+                        action_required=False,
+                        retryable=True,
+                        next_action="request_a_new_live_operation",
+                    )
+                control_request, secret_input = _build_live_control_request(self.service, request)
+                events: list[dict[str, Any]] = []
+                await self.service.ensure_performer_control_started()
+                remaining = deadline_ms / 1000 - time.time() if deadline_ms else 30.0
+                if remaining <= 0:
+                    raise PerformerCoordinatorError(
+                        "performer_control_timeout",
+                        "Performer control lease expired before execution",
+                        action_required=False,
+                        retryable=True,
+                        next_action="request_a_new_live_operation",
+                    )
+                control_result = await self.service.performer_coordinator.request(
+                    control_request,
+                    secret_input=secret_input,
+                    timeout_seconds=min(remaining, 75.0),
+                    event_collector=lambda event: events.append(event.to_dict()),
+                )
+                result = control_result.to_dict()
+                self.service.apply_performer_control_result(control_result)
             except Exception as exc:
-                code = str(getattr(exc, "code", "managed_codex_check_failed"))
-                if operation == "performer_credentials.check":
-                    result = {
-                        "version": 1,
-                        "conductor_id": settings.conductor_id,
-                        "slot_id": str((request.get("payload") or {}).get("slot_id") or ""),
-                        "checked_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-                        "check": {"status": "failed", "error_code": code, "sanitized_reason": code[:160]},
-                    }
-                else:
-                    result = {"status": "failed", "error_code": code}
+                result = _live_control_failure(request_id, operation, exc)
+                if operation in CONTROL_OPERATIONS:
+                    try:
+                        self.service.apply_performer_control_result(
+                            PerformerControlResult.from_dict(result)
+                        )
+                    except Exception as apply_exc:
+                        LOGGER.error(
+                            "event=performer_control_result_persist_failed operation=%s "
+                            "error_code=performer_control_state_persist_failed sanitized_reason=%s "
+                            "action_required=true retryable=true next_action=inspect_conductor_state",
+                            operation,
+                            sanitize_reason(apply_exc).replace(" ", "_")[:160],
+                        )
+                LOGGER.warning(
+                    "event=conductor_live_operation_rejected operation=%s error_code=%s "
+                    "sanitized_reason=%s action_required=%s retryable=%s next_action=%s",
+                    operation.replace("\r", "_").replace("\n", "_")[:100],
+                    str(result.get("error", {}).get("error_code") or result.get("error_code") or "performer_control_protocol_invalid"),
+                    str(result.get("error", {}).get("sanitized_reason") or result.get("sanitized_reason") or "control_request_rejected").replace(" ", "_")[:160],
+                    str(result.get("error", {}).get("action_required") if isinstance(result.get("error"), dict) else result.get("action_required", True)).lower(),
+                    str(result.get("error", {}).get("retryable") if isinstance(result.get("error"), dict) else result.get("retryable", False)).lower(),
+                    str(result.get("error", {}).get("next_action") if isinstance(result.get("error"), dict) else result.get("next_action", "inspect_performer_control")).replace(" ", "_")[:160],
+                )
             reply = await client.post(
                 f"{podium_url}/api/v1/runtime/live/reply",
                 headers=headers,
-                json={"request_id": request.get("request_id"), "lease_token": request.get("lease_token"), "result": result},
+                json={
+                    "request_id": request_id,
+                    "lease_token": request.get("lease_token"),
+                    "result": result,
+                    "events": events if "events" in locals() else [],
+                },
             )
             if reply.status_code == 409:
                 return {"status": "stale"}
@@ -269,7 +300,10 @@ class ConductorApiServer:
             if method == "GET" and path == "/":
                 return 200, {"service": "conductor", "status": "ok"}
             if method == "GET" and path == "/api/managed-runs":
-                return 200, {"managed_runs": self.service.managed_run_view()}
+                return 200, {
+                    "managed_runs": self.service.managed_run_view(),
+                    "performer_control": self.service.store.get_performer_control_state(),
+                }
             if method == "GET" and path == "/api/instances":
                 return 200, {
                     "instances": [_public_instance(instance) for instance in self.service.list_instances()]
@@ -410,3 +444,171 @@ def _bool(value: Any) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes", "on"}
     return False
+
+
+def _safe_int(value: Any, default: int) -> int:
+    if isinstance(value, bool):
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _build_live_control_request(
+    service: ConductorService,
+    live_request: dict[str, Any],
+) -> tuple[PerformerControlRequest, bytes | None]:
+    expected_fields = {
+        "request_id",
+        "lease_token",
+        "operation",
+        "payload",
+        "deadline_unix_ms",
+    }
+    if not isinstance(live_request, dict) or set(live_request) != expected_fields:
+        raise ValueError("performer_control_protocol_invalid")
+    operation = live_request.get("operation")
+    if operation not in CONTROL_OPERATIONS:
+        raise ValueError("unsupported_live_operation")
+    request_id = live_request.get("request_id")
+    lease_token = live_request.get("lease_token")
+    deadline_unix_ms = live_request.get("deadline_unix_ms")
+    if (
+        not isinstance(request_id, str)
+        or not request_id
+        or not isinstance(lease_token, str)
+        or not lease_token
+        or isinstance(deadline_unix_ms, bool)
+        or not isinstance(deadline_unix_ms, int)
+        or deadline_unix_ms <= 0
+    ):
+        raise ValueError("performer_control_protocol_invalid")
+    payload = live_request.get("payload")
+    if not isinstance(payload, dict):
+        raise ValueError("performer_control_protocol_invalid")
+    instances = service.store.list_instances()
+    if len(instances) != 1:
+        raise ValueError("performer_binding_required")
+    filters = instances[0].linear_filters if isinstance(instances[0].linear_filters, dict) else {}
+    performer_kind = str(filters.get("performer_kind") or "")
+    if not performer_kind:
+        raise ValueError("performer_binding_required")
+    arguments: dict[str, Any]
+    secret_input: bytes | None = None
+    secret_meta: PerformerSecretInput | None = None
+    if operation in {"performer.status", "performer.config.read"}:
+        if payload:
+            raise ValueError("performer_control_arguments_invalid")
+        arguments = {}
+    elif operation == "performer.login":
+        method = str(payload.get("method") or "")
+        expected_keys = {"method", "api_key"} if method == "api_key" else {"method"}
+        if set(payload) != expected_keys:
+            raise ValueError("performer_control_arguments_invalid")
+        arguments = {"method": method}
+        raw_secret = payload.get("api_key")
+        if method == "api_key":
+            if not isinstance(raw_secret, str) or not raw_secret:
+                raise ValueError("performer_login_secret_required")
+            secret_input = raw_secret.encode("utf-8")
+            secret_meta = PerformerSecretInput(kind="api_key", length=len(secret_input))
+        elif raw_secret is not None:
+            raise ValueError("performer_login_secret_not_allowed")
+    elif operation == "performer.session.delete":
+        if set(payload) != {"action"}:
+            raise ValueError("performer_control_arguments_invalid")
+        arguments = {"action": str(payload.get("action") or "")}
+    elif operation == "performer.config.write":
+        if set(payload) != {"setting", "value"}:
+            raise ValueError("performer_control_arguments_invalid")
+        arguments = {"setting": payload.get("setting"), "value": payload.get("value")}
+    else:  # performer.check
+        if payload:
+            raise ValueError("performer_control_arguments_invalid")
+        policy = RuntimePolicy.from_dict(filters.get("execution_policy"))
+        binding_generation = filters.get("performer_binding_generation")
+        if isinstance(binding_generation, bool) or not isinstance(binding_generation, int) or binding_generation <= 0:
+            raise ValueError("performer_binding_generation_invalid")
+        arguments = {
+            "binding_generation": binding_generation,
+            "execution_policy": policy.to_dict(),
+            "execution_policy_sha256": canonical_sha256(policy.to_dict()),
+        }
+    return (
+        PerformerControlRequest(
+            protocol_version=1,
+            request_id=request_id,
+            operation=operation,
+            performer_kind=performer_kind,
+            arguments=arguments,
+            secret_input=secret_meta,
+        ),
+        secret_input,
+    )
+
+
+def _live_control_failure(request_id: str, operation: str, exc: Exception) -> dict[str, Any]:
+    error_code = str(
+        getattr(exc, "error_code", "") or getattr(exc, "code", "") or ""
+    )
+    if error_code not in _LIVE_CONTROL_ERROR_CODES:
+        error_code = "performer_control_protocol_invalid"
+    if operation not in CONTROL_OPERATIONS:
+        error_code = "unsupported_live_operation"
+    retryable = bool(getattr(exc, "retryable", False))
+    action_required = bool(getattr(exc, "action_required", not retryable))
+    next_action = "inspect_performer_control"
+    sanitized_reason = "The Performer control request was rejected."
+    if error_code != "performer_control_protocol_invalid":
+        candidate_next_action = getattr(exc, "next_action", next_action)
+        candidate_reason = getattr(exc, "sanitized_reason", sanitized_reason)
+        if isinstance(candidate_next_action, str):
+            next_action = candidate_next_action
+        if isinstance(candidate_reason, str):
+            sanitized_reason = candidate_reason
+    if operation not in CONTROL_OPERATIONS:
+        sanitized_reason = "The requested Performer operation is not supported."
+        next_action = "Refresh Podium and retry with a supported Performer operation."
+        retryable = False
+        action_required = False
+    try:
+        error = PerformerControlError(
+            error_code=error_code,
+            sanitized_reason=sanitized_reason[:500],
+            action_required=action_required,
+            retryable=retryable,
+            attempt_number=None,
+            next_action=next_action[:500],
+        )
+    except ValueError:
+        error = PerformerControlError(
+            error_code="performer_control_protocol_invalid",
+            sanitized_reason="The Performer control request was rejected.",
+            action_required=True,
+            retryable=False,
+            attempt_number=None,
+            next_action="inspect_performer_control",
+        )
+    if operation not in CONTROL_OPERATIONS:
+        return {
+            "status": "failed",
+            "error_code": error.error_code,
+            "sanitized_reason": error.sanitized_reason,
+            "action_required": error.action_required,
+            "retryable": error.retryable,
+            "next_action": error.next_action,
+        }
+    return PerformerControlResult(
+        protocol_version=1,
+        request_id=request_id,
+        operation=operation,
+        status="failed",
+        capabilities=None,
+        readiness=None,
+        account=None,
+        login=None,
+        configuration=None,
+        check=None,
+        error=error,
+    ).to_dict()

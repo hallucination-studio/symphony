@@ -9,9 +9,9 @@ import type { ConductorBinding, ConductorRecord, RuntimeRecord } from "../api/ty
 import { useI18n } from "../i18n";
 import {
   ConductorCard,
-  PerformerDrawer,
   ReconnectDrawer,
 } from "./RuntimesPage.components";
+import { RuntimesPerformerDrawer } from "./RuntimesPerformerDrawer";
 
 interface SelectedPerformer {
   conductor: ConductorRecord;
@@ -92,7 +92,9 @@ export default function RuntimesPage() {
       </QueryState>
 
       {selected ? (
-        <PerformerDrawer
+        <RuntimesPerformerDrawer
+          conductorId={selected.conductor.conductor_id}
+          performerName={selected.performer.name}
           conductor={selected.conductor}
           performer={selected.performer}
           onClose={() => setSelected(null)}

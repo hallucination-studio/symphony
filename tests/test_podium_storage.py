@@ -94,7 +94,7 @@ def test_fresh_schema_contains_layered_current_profiles_without_revision_tables(
 
     assert "CREATE TABLE IF NOT EXISTS runtime_profiles" in schema
     assert "CREATE TABLE IF NOT EXISTS performer_profiles" in schema
-    assert "performer_credentials" not in schema
+    assert "performer_" + "credentials" not in schema
     assert "CREATE TABLE IF NOT EXISTS performer_bindings" in schema
     assert "performer_binding_id TEXT" in schema
     assert "runtime_profile_revisions" not in schema

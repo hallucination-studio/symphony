@@ -40,7 +40,7 @@ from .podium_routes_linear_projects import register_linear_project_routes
 from .podium_routes_runtime_enrollment import register_runtime_identity_routes
 from .podium_routes_runtime_ops import register_runtime_ops_routes
 from .podium_routes_runtime_proxy import register_linear_proxy_route
-from .podium_routes_live_credentials import register_live_credential_routes
+from .podium_routes_performer_control import register_performer_control_routes
 from .live_conductor_relay import LiveConductorRelay
 from .podium_runtime import PodiumRuntimeMixin
 from .podium_smoke_checks import PodiumSmokeChecksMixin
@@ -157,7 +157,7 @@ def create_app(
     )
     register_conductor_binding_routes(app, state=state, require_user=require_user, error_response=error_response)
     register_runtime_ops_routes(app, state=state, require_user=require_user, error_response=error_response)
-    register_live_credential_routes(app, state=state, require_user=require_user, error_response=error_response)
+    register_performer_control_routes(app, state=state, require_user=require_user, error_response=error_response)
     register_linear_proxy_route(
         app,
         state=state,

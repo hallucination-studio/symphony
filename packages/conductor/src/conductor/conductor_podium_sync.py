@@ -517,6 +517,12 @@ class ConductorPodiumSyncMixin:
                 "offset_end": logs.get("offset_end", 0),
                 "lines": logs.get("lines") or [],
             }
+        managed_runs_payload = {**managed_runs_binding, **managed_runs_view} if managed_runs_binding else {}
+        get_control_state = getattr(self.store, "get_performer_control_state", None)
+        if managed_runs_payload and callable(get_control_state):
+            managed_runs_payload["performer_control"] = _sanitize_performer_control_state(
+                get_control_state()
+            )
         report = {
             "conductor_id": settings.conductor_id,
             "hostname": _hostname(),
@@ -526,7 +532,7 @@ class ConductorPodiumSyncMixin:
             "metrics": metrics,
             "queue": queue,
             "log_tail": log_tail,
-            "managed_runs": {**managed_runs_binding, **managed_runs_view} if managed_runs_binding else {},
+            "managed_runs": managed_runs_payload,
         }
         report.update(unbound)
         return report
@@ -831,6 +837,28 @@ def _managed_runs_report_view(view: Any) -> dict[str, Any]:
     return {"active_runs_total": len(active), "runs": [row for _, row in snapshot]}
 
 
+def _sanitize_performer_control_state(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    return {
+        "performer_kind": _safe_report_text(value.get("performer_kind"), 100),
+        "binding_generation": int(value.get("binding_generation") or 0),
+        "capability_version": int(value.get("capability_version") or 0),
+        "execution_policy_sha256": str(value.get("execution_policy_sha256") or ("0" * 64)),
+        "status": _safe_report_text(value.get("status") or "unchecked", 20),
+        "last_check_status": _safe_report_text(value.get("last_check_status") or "none", 20),
+        "last_check_started_at": _safe_report_text(value.get("last_check_started_at"), 100),
+        "last_check_finished_at": _safe_report_text(value.get("last_check_finished_at"), 100),
+        "error_code": _safe_report_text(value.get("error_code"), 100),
+        "sanitized_reason": _safe_report_text(value.get("sanitized_reason"), 500),
+        "action_required": bool(value.get("action_required")),
+        "retryable": bool(value.get("retryable")),
+        "attempt_number": value.get("attempt_number"),
+        "next_action": _safe_report_text(value.get("next_action"), 500),
+        "updated_at": _safe_report_text(value.get("updated_at"), 100),
+    }
+
+
 def _managed_run_report(run: dict[str, Any]) -> dict[str, Any]:
     payload = run.get("payload") if isinstance(run.get("payload"), dict) else {}
     tasks = run.get("tasks") if isinstance(run.get("tasks"), list) else []
@@ -869,6 +897,13 @@ def _managed_run_work_item(task: dict[str, Any]) -> dict[str, Any]:
 
 def _snapshot_text(value: Any, limit: int) -> str:
     return value[:limit] if isinstance(value, str) else ""
+
+
+def _safe_report_text(value: Any, limit: int) -> str:
+    if not isinstance(value, str):
+        return ""
+    sanitized = _sanitize_managed_runs_view(sanitize_reason(value))
+    return str(sanitized)[:limit]
 
 
 def _managed_run_gate(value: Any) -> dict[str, Any]:

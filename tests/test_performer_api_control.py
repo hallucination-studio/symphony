@@ -335,6 +335,38 @@ def test_control_event_is_closed_and_drops_no_raw_provider_payload() -> None:
         PerformerControlEvent.from_dict({**event.to_dict(), "sdk_notification": {"raw": True}})
 
 
+@pytest.mark.parametrize(
+    ("status", "method"),
+    [
+        ("idle", "device_code"),
+        ("lost", "api_key"),
+        ("succeeded", None),
+        ("failed", None),
+    ],
+)
+def test_login_state_requires_a_method_only_for_active_or_terminal_login(
+    status: str, method: str | None
+) -> None:
+    with pytest.raises(ValueError):
+        PerformerLoginState(status=status, method=method)
+
+
+@pytest.mark.parametrize("event_kind", ["login.succeeded", "login.failed"])
+def test_terminal_login_events_must_belong_to_login_operation(event_kind: str) -> None:
+    with pytest.raises(ValueError):
+        PerformerControlEvent(
+            protocol_version=1,
+            request_id="control-terminal-event",
+            operation="performer.status",
+            sequence=1,
+            event_kind=event_kind,
+            message="Login event",
+            verification_url=None,
+            user_code=None,
+            expires_at=None,
+        )
+
+
 def test_readiness_is_bound_to_backend_binding_capability_and_policy() -> None:
     readiness = _readiness("ready")
 
@@ -448,6 +480,43 @@ def test_config_source_rejects_secret_assignments_private_paths_and_urlsafe_base
             source_format="text",
             source_text=source_text,
         )
+
+
+@pytest.mark.parametrize(
+    "source_text",
+    [
+        'http_headers = { "X-Api-Key" = "sentinel-secret-value" }',
+        'env = { "OPENAI_API_KEY" = "sentinel-secret-value" }',
+        "headers = { authorization = 'Bearer sentinel-secret-value' }",
+    ],
+)
+def test_config_source_rejects_quoted_and_nested_secret_assignments(
+    source_text: str,
+) -> None:
+    with pytest.raises(ValueError):
+        PerformerConfigurationSnapshot(
+            settings={"api_base_url": None},
+            source_format="text",
+            source_text=source_text,
+        )
+
+
+def test_config_source_accepts_explicitly_redacted_nested_secret_assignment() -> None:
+    snapshot = PerformerConfigurationSnapshot(
+        settings={"api_base_url": None},
+        source_format="text",
+        source_text='http_headers = { "X-Api-Key" = "[REDACTED]" }',
+    )
+
+    assert snapshot.source_text == 'http_headers = { "X-Api-Key" = "[REDACTED]" }'
+
+
+def test_wire_safety_accepts_a_redacted_assignment_before_shell_words() -> None:
+    from performer_api._wire_safety import safe_text
+
+    command = "OPENAI_API_KEY=[REDACTED] pytest -q"
+
+    assert safe_text(command, "gate command", max_bytes=500) == command
 
 
 def test_check_result_and_failure_result_use_closed_errors() -> None:

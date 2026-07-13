@@ -10,6 +10,7 @@ from performer_api.runtime_policy import PerformerProfileConfig
 from conductor.conductor_podium_sync import (
     ConductorPodiumSyncMixin,
     _managed_runs_report_view,
+    _sanitize_performer_control_state,
     _sanitize_managed_runs_view,
     _smoke_runtime_fields,
 )
@@ -103,6 +104,52 @@ def test_managed_run_snapshot_redacts_bare_token_shapes() -> None:
 
     assert token_shaped_value not in str(snapshot)
     assert snapshot["runs"][0]["latest_reason"] == "failed: [REDACTED]"
+
+
+def test_performer_control_report_is_closed_bounded_and_redacted() -> None:
+    token = "sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+
+    report = _sanitize_performer_control_state(
+        {
+            "performer_kind": "codex",
+            "binding_generation": 7,
+            "capability_version": 1,
+            "execution_policy_sha256": "a" * 64,
+            "status": "failed",
+            "last_check_status": "failed",
+            "last_check_started_at": "2026-07-13T00:00:00Z",
+            "last_check_finished_at": "2026-07-13T00:00:01Z",
+            "error_code": "performer_check_failed",
+            "sanitized_reason": f"backend rejected token=plain-secret {token}",
+            "action_required": True,
+            "retryable": False,
+            "attempt_number": 1,
+            "next_action": "repair configuration",
+            "updated_at": "2026-07-13T00:00:01Z",
+            "unknown_provider_field": token,
+        }
+    )
+
+    assert set(report) == {
+        "performer_kind",
+        "binding_generation",
+        "capability_version",
+        "execution_policy_sha256",
+        "status",
+        "last_check_status",
+        "last_check_started_at",
+        "last_check_finished_at",
+        "error_code",
+        "sanitized_reason",
+        "action_required",
+        "retryable",
+        "attempt_number",
+        "next_action",
+        "updated_at",
+    }
+    assert report["sanitized_reason"] == "backend rejected token=[REDACTED] [REDACTED]"
+    assert token not in str(report)
+    assert "plain-secret" not in str(report)
 
 
 @pytest.mark.anyio

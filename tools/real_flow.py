@@ -12,7 +12,6 @@ import argparse
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -20,15 +19,12 @@ import re
 import shutil
 import subprocess
 import sys
-import tempfile
 import time
-import tomllib
 from typing import Any, Iterable
 from urllib.parse import urlparse
 from uuid import uuid4
 
 import httpx
-from performer_api.codex_runtime import validate_codex_toml
 
 try:  # package import for pytest; top-level fallback for ``python tools/real_flow.py``
     from .linear_fixture import LinearFixture, LinearFixtureError, required_environment
@@ -595,13 +591,12 @@ def _legacy_preflight(args: argparse.Namespace) -> int:
     def check(name: str, passed: bool, **details: object) -> None:
         report["checks"].append({"name": name, "passed": passed, **details})
 
-    seed = Path(settings["codex_seed"]).expanduser() if settings["codex_seed"] else None
-    check("staged_codex_seed", bool(seed and seed.is_dir() and seed.name != ".codex"), required=True)
+    check("performer_control_boundary", True, required=True)
     check("podium_url", bool(settings["podium_url"]), required=not args.offline)
     check("project_slug", bool(project_slug), required=not args.offline)
     if not all(item["passed"] or not item["required"] for item in report["checks"]):
         report["error_code"] = "real_flow_preflight_failed"
-        report["next_action"] = "stage_codex_home_and_set_linear_podium_environment"
+        report["next_action"] = "set_linear_and_podium_environment"
         _write_report(args.out, report)
         return 2
     if args.offline:
@@ -641,7 +636,7 @@ def _context(args: argparse.Namespace, *, output_path: Path | None = None) -> _R
             "project_slug": project_slug,
             "podium_url_present": bool(settings["podium_url"]),
             "conductor_url_present": bool(settings.get("conductor_url")),
-            "codex_seed_name": Path(settings["codex_seed"]).name if settings["codex_seed"] else "",
+            "performer_control_boundary": "installed_process",
             "performer_profile_present": bool(settings.get("performer_profile_dir") and settings.get("performer_profile_name")),
             "fixture_repository_present": bool(settings.get("fixture_repository")),
             "browser_observation_present": bool(settings.get("browser_observation")),
@@ -1070,38 +1065,6 @@ def _select_backlog_state(states: list[dict[str, str]]) -> dict[str, str]:
     return backlog[0]
 
 
-def _load_static_performer_config(seed: Path) -> str:
-    """Load the test-only runtime config from the approved static Codex seed."""
-
-    path = Path(seed) / "config.toml"
-    if not path.is_file() or path.is_symlink():
-        raise ValueError("staged_codex_config_invalid")
-    try:
-        normalized = validate_codex_toml(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError) as exc:
-        raise ValueError("staged_codex_config_invalid") from exc
-    parsed = tomllib.loads(normalized)
-    if parsed.get("model") != "gpt-5.4" or parsed.get("cli_auth_credentials_store") != "file":
-        raise ValueError("staged_codex_config_fixed_model_mismatch")
-    return normalized
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(65_536), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _sha256_seed(seed: Path) -> str:
-    digest = hashlib.sha256()
-    for path in sorted(seed / name for name in ("config.toml", "auth.json", "version.json", "models_cache.json")):
-        if not path.is_file():
-            continue
-        digest.update(path.name.encode("utf-8"))
-        digest.update(path.read_bytes())
-    return digest.hexdigest()
-
-
 def _git_workspace(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
     subprocess.run(["git", "init", "--quiet", str(path)], check=False, capture_output=True, text=True, timeout=10)
@@ -1109,7 +1072,15 @@ def _git_workspace(path: Path) -> None:
 
 
 def _artifact_paths(paths: Any) -> list[str]:
-    return [str(path) for path in (getattr(paths, "request", None), getattr(paths, "result", None), getattr(paths, "log", None)) if isinstance(path, Path) and path.exists()]
+    return [
+        str(path)
+        for path in (
+            getattr(paths, "request", None),
+            getattr(paths, "result", None),
+            getattr(paths, "log", None),
+        )
+        if isinstance(path, Path) and path.exists()
+    ]
 
 
 def _artifact_has_secret(paths: Iterable[str]) -> bool:
@@ -1118,8 +1089,6 @@ def _artifact_has_secret(paths: Iterable[str]) -> bool:
         if path.name == "auth.json" or _AUTH_PATH.search(str(path)) or _CODEX_HOME_PATH.search(str(path)):
             return True
         if not path.is_file():
-            # An artifact that cannot be inspected is not evidence of a clean
-            # boundary; fail closed and leave the reason in the report.
             return True
         try:
             if path.stat().st_size > 8 * 1024 * 1024:
@@ -1137,7 +1106,10 @@ def _artifact_has_secret(paths: Iterable[str]) -> bool:
             or re.search(r"(?i)authorization\s*[:=]", content)
             or _AUTH_PATH.search(content)
             or _CODEX_HOME_PATH.search(content)
-            or re.search(r"(?i)\beyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b", content)
+            or re.search(
+                r"(?i)\beyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b",
+                content,
+            )
         ):
             return True
     return False
@@ -1247,339 +1219,33 @@ def _run_performer_phase(context: _RunContext) -> dict[str, Any]:
     if context.offline:
         return _offline_phase(context, "performer")
 
-    from conductor.runtime import PerformerRuntime, RuntimeExecutionError, StaleRuntimeResult
-    from performer_api.codex_runtime import validate_codex_toml
-    from performer_api.turns import TurnContext
-    from performer_api.workflow import Plan
-
     checks: list[dict[str, Any]] = []
     failures: list[dict[str, Any]] = []
-    observations: dict[str, Any] = {}
-    artifacts: list[str] = []
-    seed_raw = context.settings.get("codex_seed", "").strip()
-    seed = Path(seed_raw).expanduser().resolve() if seed_raw else None
-    if seed is None or not seed.is_dir() or seed.name == ".codex":
-        _append_check(
-            checks,
-            failures,
-            name="performer_staged_seed_isolated",
-            passed=False,
-            group="provider",
-            error_code="staged_codex_seed_invalid",
-            reason="Performer requires an explicit staged Codex seed and never reads ~/.codex",
-            next_action="stage_approved_codex_seed_files",
-        )
-        return _phase_report(context, "performer", "failed", checks=checks, failures=failures)
-
-    required_seed = {"config.toml", "auth.json"}
-    seed_files = {path.name for path in seed.iterdir() if path.is_file()}
-    seed_ok = required_seed <= seed_files
-    observations["seed_hash"] = _sha256_seed(seed)
-    observations["seed_files"] = sorted(seed_files & set(("config.toml", "auth.json", "version.json", "models_cache.json")))
-    _append_check(
-        checks,
-        failures,
-        name="performer_staged_seed_isolated",
-        passed=seed_ok,
-        group="provider",
-        error_code="staged_codex_seed_incomplete",
-        reason="The staged seed must contain config.toml and official codex login auth.json",
-        observations={"seed_hash": observations["seed_hash"], "seed_files": observations["seed_files"]},
-        next_action="copy_only_approved_codex_seed_files",
-    )
-    if not seed_ok:
-        return _phase_report(context, "performer", "failed", checks=checks, failures=failures, observations=observations)
-
-    slot_id = "e2e-codex-oauth"
-    try:
-        normalized_config = _load_static_performer_config(seed)
-        parsed_config = tomllib.loads(normalized_config)
-    except Exception as exc:
-        _append_check(
-            checks,
-            failures,
-            name="performer_fixed_codex_profile",
-            passed=False,
-            group="provider",
-            error_code="managed_codex_config_invalid",
-            reason=_sanitize_reason(exc),
-            next_action="repair_fixed_gpt_5_4_codex_profile",
-        )
-        return _phase_report(context, "performer", "failed", checks=checks, failures=failures, observations=observations)
-    provider_name = str(parsed_config.get("model_provider") or "")
-    provider = parsed_config.get("model_providers", {}).get(provider_name, {})
-    fixed_profile_ok = parsed_config.get("model") == "gpt-5.4" and parsed_config.get("cli_auth_credentials_store") == "file"
-    config_hash = hashlib.sha256(normalized_config.encode("utf-8")).hexdigest()
-    observations["config_sha256"] = config_hash
-    observations["profile"] = {
-        "performer_kind": "codex",
-        "runtime_kind": "codex",
-        "slot_id": slot_id,
-        "source": "static_test_seed",
+    observations = {
+        "boundary": "installed_performer_control_and_turn_processes",
+        "provider_owned_state_in_conductor": False,
     }
-    observations["model"] = parsed_config.get("model")
-    observations["provider"] = {"name": provider_name, "base_url": provider.get("base_url"), "wire_api": provider.get("wire_api")}
     _append_check(
         checks,
         failures,
-        name="performer_fixed_codex_profile",
-        passed=fixed_profile_ok,
-        group="provider",
-        error_code="codex_profile_mismatch",
-        reason="Performer test seed must use gpt-5.4 and file-based Codex authentication",
-        observations=observations["provider"] | {"model": observations["model"], "config_sha256": config_hash},
-        next_action="repair_fixed_gpt_5_4_codex_profile",
-    )
-
-    with tempfile.TemporaryDirectory(prefix="symphony-real-e2e-") as temporary_root:
-        temp_root = Path(temporary_root)
-        workspace = temp_root / "workspace"
-        state_root = temp_root / "state"
-        _git_workspace(workspace)
-        runtime = PerformerRuntime()
-        try:
-            from conductor.performer_credentials import PerformerCredentialSlots
-
-            slots = PerformerCredentialSlots(state_root)
-            slots.init(slot_id, "Real E2E Codex slot")
-            slots.stage_seed(slot_id, seed)
-            slots.check(slot_id, normalized_config, model="gpt-5.4")
-            slots.select(slot_id)
-            materialized = slots.materialize(
-                slot_id,
-                state_root / "runtime-homes" / f"{context.run_id}-performer" / "codex",
-                normalized_config,
-            )
-            environment = {"CODEX_HOME": str(materialized.codex_home)}
-            codex_home = Path(environment["CODEX_HOME"])
-            home_files = {path.name for path in codex_home.iterdir() if path.is_file()}
-            home_ok = codex_home != Path.home() / ".codex" and {"config.toml", "auth.json"} <= home_files
-            _append_check(
-                checks,
-                failures,
-                name="performer_isolated_home_materialized",
-                passed=home_ok,
-                group="provider",
-                error_code="managed_codex_home_required",
-                reason="PerformerRuntime must materialize an isolated home with the selected credential slot",
-                observations={"files": sorted(home_files), "config_sha256": _sha256_file(codex_home / "config.toml") if (codex_home / "config.toml").is_file() else ""},
-                next_action="repair_isolated_codex_home_materialization",
-            )
-            materialized_config_hash = _sha256_file(codex_home / "config.toml") if (codex_home / "config.toml").is_file() else ""
-            observations["materialized_config_sha256"] = materialized_config_hash
-        except Exception as exc:
-            _append_check(
-                checks,
-                failures,
-                name="performer_isolated_home_materialized",
-                passed=False,
-                group="provider",
-                error_code="managed_codex_home_materialization_failed",
-                reason=_sanitize_reason(exc),
-                next_action="repair_isolated_codex_home_materialization",
-            )
-            return _phase_report(context, "performer", "failed", checks=checks, failures=failures, observations=observations)
-
-        env = {**environment, "CODEX_MODEL": "gpt-5.4", "CODEX_SANDBOX": "workspace-write"}
-        plan_context = TurnContext(context.run_id, "", f"{context.run_id}-plan", 1, "plan")
-        plan_paths = runtime.paths(context.artifact_root / "requests" / "performer" / "plan")
-        runtime.write_request(
-            plan_paths,
-            {
-                "context": plan_context.to_dict(),
-                "workspace_path": str(workspace),
-                "issue_description": "Create one bounded disposable plan. Do not change files. Return a minimal executable task.",
-            },
-        )
-        artifacts.extend(_artifact_paths(plan_paths))
-        plan_payload: dict[str, Any] | None = None
-        try:
-            plan_payload = runtime.run(plan_paths, codex_home=Path(env["CODEX_HOME"]), env=env)
-            runtime.accept_result(plan_context, plan_payload)
-            plan = Plan.from_dict(plan_payload.get("plan") if isinstance(plan_payload.get("plan"), dict) else {})
-            plan_ok = bool(plan.tasks)
-            task = plan.tasks[0] if plan_ok else None
-            _append_check(
-                checks,
-                failures,
-                name="performer_plan_turn",
-                passed=plan_ok,
-                group="provider",
-                error_code="performer_plan_invalid",
-                reason="Real Performer plan turn must return one valid bounded task",
-                observations={"task_count": len(plan.tasks)},
-                next_action="inspect_performer_plan_result",
-            )
-        except Exception as exc:
-            task = None
-            code = "performer_turn_failed"
-            if isinstance(exc, RuntimeExecutionError):
-                reason = _sanitize_reason(exc)
-                parts = reason.split(":")
-                if reason.startswith("performer_failed:exit_") and len(parts) >= 3:
-                    code = parts[2] or code
-                else:
-                    code = parts[0] or code
-            _append_check(
-                checks,
-                failures,
-                name="performer_plan_turn",
-                passed=False,
-                group="provider",
-                error_code=code,
-                reason=_sanitize_reason(exc),
-                observations={"result_present": bool(plan_paths.result.exists())},
-                next_action="inspect_performer_log_and_upstream_provider",
-            )
-        artifacts.extend(_artifact_paths(plan_paths))
-
-        execute_paths = runtime.paths(context.artifact_root / "requests" / "performer" / "execute")
-        gate_paths = runtime.paths(context.artifact_root / "requests" / "performer" / "gate")
-        if task is None:
-            for name in ("performer_execute_turn", "performer_gate_turn", "performer_result_fencing"):
-                _append_check(
-                    checks,
-                    failures,
-                    name=name,
-                    passed=False,
-                    group="provider",
-                    error_code="performer_plan_prerequisite_failed",
-                    reason="Execute and Gate cannot start until the real plan turn returns a task",
-                    next_action="fix_performer_plan_turn_then_rerun_batch",
-                )
-        else:
-            execute_context = TurnContext(context.run_id, task.id, f"{context.run_id}-execute", 1, "execute")
-            runtime.write_request(
-                execute_paths,
-                {"context": execute_context.to_dict(), "workspace_path": str(workspace), "task": task.to_dict()},
-            )
-            try:
-                execute_payload = runtime.run(execute_paths, codex_home=Path(env["CODEX_HOME"]), env=env)
-                runtime.accept_result(execute_context, execute_payload)
-                execute_ok = isinstance(execute_payload.get("result"), dict)
-                _append_check(
-                    checks,
-                    failures,
-                    name="performer_execute_turn",
-                    passed=execute_ok,
-                    group="provider",
-                    error_code="performer_execute_invalid",
-                    reason="Real Performer execute turn must return a fenced result",
-                    observations={"result_present": execute_ok},
-                    next_action="inspect_performer_execute_result",
-                )
-            except Exception as exc:
-                execute_payload = None
-                _append_check(
-                    checks,
-                    failures,
-                    name="performer_execute_turn",
-                    passed=False,
-                    group="provider",
-                    error_code="performer_execute_failed",
-                    reason=_sanitize_reason(exc),
-                    next_action="inspect_performer_log_and_upstream_provider",
-                )
-            evidence = execute_payload.get("result") if isinstance(execute_payload, dict) and isinstance(execute_payload.get("result"), dict) else {}
-            gate_context = TurnContext(context.run_id, task.id, f"{context.run_id}-gate", 1, "gate")
-            runtime.write_request(
-                gate_paths,
-                {"context": gate_context.to_dict(), "workspace_path": str(workspace), "task": task.to_dict(), "evidence": evidence},
-            )
-            try:
-                gate_payload = runtime.run(gate_paths, codex_home=Path(env["CODEX_HOME"]), env=env)
-                runtime.accept_result(gate_context, gate_payload)
-                gate_result = gate_payload.get("gate_result")
-                gate_ok = isinstance(gate_result, dict) and isinstance(gate_result.get("passed"), bool)
-                _append_check(
-                    checks,
-                    failures,
-                    name="performer_gate_turn",
-                    passed=gate_ok,
-                    group="provider",
-                    error_code="performer_gate_invalid",
-                    reason="Real Performer Gate turn must return a fenced GateResult",
-                    observations={"result_present": gate_ok},
-                    next_action="inspect_performer_gate_result",
-                )
-            except Exception as exc:
-                _append_check(
-                    checks,
-                    failures,
-                    name="performer_gate_turn",
-                    passed=False,
-                    group="provider",
-                    error_code="performer_gate_failed",
-                    reason=_sanitize_reason(exc),
-                    next_action="inspect_performer_log_and_upstream_provider",
-                )
-            artifacts.extend(_artifact_paths(execute_paths))
-            artifacts.extend(_artifact_paths(gate_paths))
-            stale_rejected = False
-            if isinstance(execute_payload, dict):
-                stale_payload = {"context": {**execute_context.to_dict(), "fencing_token": max(0, execute_context.fencing_token - 1)}}
-                try:
-                    runtime.accept_result(execute_context, stale_payload)
-                except StaleRuntimeResult:
-                    stale_rejected = True
-            _append_check(
-                checks,
-                failures,
-                name="performer_result_fencing",
-                passed=stale_rejected,
-                group="fence",
-                error_code="performer_result_fence_failed",
-                reason="PerformerRuntime must reject a stale fencing token before a result can be applied",
-                observations={"run_id": context.run_id, "task_id": task.id, "stale_rejected": stale_rejected},
-                next_action="inspect_performer_result_fencing",
-            )
-        slots.reconcile(materialized)
-
-    expected_artifact_paths: list[Path] = [plan_paths.request, plan_paths.result, plan_paths.log]
-    if task is not None:
-        expected_artifact_paths.extend(
-            [
-                execute_paths.request,
-                execute_paths.result,
-                execute_paths.log,
-                gate_paths.request,
-                gate_paths.result,
-                gate_paths.log,
-            ]
-        )
-    missing_artifacts = [path.name for path in expected_artifact_paths if not path.exists()]
-    _append_check(
-        checks,
-        failures,
-        name="performer_required_artifacts_present",
-        passed=not missing_artifacts,
-        group="evidence",
-        error_code="performer_artifact_missing",
-        reason="Each attempted Performer turn must leave request, result, and log artifacts",
-        observations={"missing": missing_artifacts},
-        next_action="inspect_performer_process_exit_and_artifact_collection",
-    )
-
-    redaction_failed = _artifact_has_secret(artifacts)
-    _append_check(
-        checks,
-        failures,
-        name="performer_artifacts_sanitized",
-        passed=not redaction_failed,
-        group="redaction",
-        error_code="performer_artifact_secret_detected",
-        reason="Performer request/result/log artifacts must not contain credential values or Authorization headers",
-        observations={"artifact_count": len(artifacts)},
-        next_action="inspect_performer_artifact_redaction",
+        name="performer_control_boundary_real_flow",
+        passed=False,
+        group="performer",
+        error_code="performer_control_real_flow_pending",
+        reason=(
+            "The real-flow runner has not yet integrated the installed Performer "
+            "control and turn process boundary."
+        ),
+        observations=observations,
+        next_action="complete_installed_performer_control_and_turn_real_flow_integration",
     )
     return _phase_report(
         context,
         "performer",
-        "passed" if not failures else "failed",
+        "failed",
         checks=checks,
         failures=failures,
         observations=observations,
-        artifacts=sorted(set(artifacts)),
     )
 
 

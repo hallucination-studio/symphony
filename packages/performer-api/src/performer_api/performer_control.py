@@ -315,8 +315,10 @@ class PerformerLoginState:
             raise ValueError("login status is unsupported")
         if self.method is not None and self.method not in LOGIN_METHODS:
             raise ValueError("login method is unsupported")
-        if self.status == "pending" and self.method is None:
-            raise ValueError("pending login requires a method")
+        if self.status in {"pending", "succeeded", "failed"} and self.method is None:
+            raise ValueError("active or terminal login requires a method")
+        if self.status in {"idle", "lost"} and self.method is not None:
+            raise ValueError("idle or lost login must not carry a method")
 
     def to_dict(self) -> dict[str, Any]:
         return {"status": self.status, "method": self.method}
@@ -503,9 +505,10 @@ class PerformerControlEvent:
         if self.event_kind not in CONTROL_EVENT_KINDS:
             raise ValueError("control event kind is unsupported")
         _safe_text(self.message, "message", max_bytes=500)
-        if self.event_kind == "login.pending":
+        if self.event_kind.startswith("login."):
             if self.operation != "performer.login":
-                raise ValueError("pending login event requires login operation")
+                raise ValueError("login event requires login operation")
+        if self.event_kind == "login.pending":
             if self.verification_url is None or self.user_code is None:
                 raise ValueError("pending login event requires verification data")
             _https_url(self.verification_url, "verification_url")

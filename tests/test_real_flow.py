@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import inspect
 from argparse import Namespace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -232,18 +233,15 @@ def test_linear_phase_is_independent_from_podium_and_oauth(monkeypatch, tmp_path
     assert all(check["name"].startswith("linear_fixture_") for check in report["checks"])
 
 
-def test_performer_config_is_loaded_only_from_static_seed(tmp_path: Path) -> None:
-    seed = tmp_path / "seed"
-    seed.mkdir()
-    (seed / "config.toml").write_text(
-        'model = "gpt-5.4"\napproval_policy = "never"\nsandbox_mode = "read-only"\ncli_auth_credentials_store = "file"\n',
-        encoding="utf-8",
-    )
+def test_real_flow_has_no_active_provider_owned_runtime_path() -> None:
+    source = inspect.getsource(real_flow._run_performer_phase)
 
-    config = real_flow._load_static_performer_config(seed)
-
-    assert 'model = "gpt-5.4"' in config
-    assert 'cli_auth_credentials_store = "file"' in config
+    assert "performer_api." + "codex_runtime" not in source
+    assert "conductor." + "performer_" + "credentials" not in source
+    assert "PerformerCredential" + "Slots" not in source
+    assert "validate_codex_toml" not in source
+    assert "config.toml" not in source
+    assert "codex_home=" not in source
 
 
 def test_podium_observer_bounds_external_timeout() -> None:
@@ -413,10 +411,9 @@ def test_authenticated_observer_rejects_symlinked_auth_path(tmp_path: Path) -> N
     assert response.error_code == "browser_session_observation_path_forbidden"
 
 
-def test_performer_phase_fails_closed_when_staged_seed_has_no_auth(tmp_path: Path) -> None:
-    seed = tmp_path / "seed"
-    seed.mkdir()
-    (seed / "config.toml").write_text('model = "gpt-5.4"\n', encoding="utf-8")
+def test_performer_phase_fails_closed_while_control_boundary_real_flow_is_pending(
+    tmp_path: Path,
+) -> None:
     context = real_flow._RunContext(
         run_id="run-performer",
         artifact_root=tmp_path / "artifacts",
@@ -424,14 +421,23 @@ def test_performer_phase_fails_closed_when_staged_seed_has_no_auth(tmp_path: Pat
         project_slug="fixture",
         timeout=0.1,
         offline=False,
-        settings={"podium_url": "http://podium", "project_slug": "fixture", "codex_seed": str(seed)},
+        settings={"podium_url": "http://podium", "project_slug": "fixture"},
     )
 
     report = real_flow._run_performer_phase(context)
 
     assert report["status"] == "failed"
-    assert report["failures"][0]["error_code"] == "staged_codex_seed_incomplete"
-    assert str(seed) not in json.dumps(report)
+    assert [check["name"] for check in report["checks"]] == [
+        "performer_control_boundary_real_flow"
+    ]
+    assert report["failures"][0]["error_code"] == "performer_control_real_flow_pending"
+    assert report["failures"][0]["next_action"] == (
+        "complete_installed_performer_control_and_turn_real_flow_integration"
+    )
+    assert report["observations"] == {
+        "boundary": "installed_performer_control_and_turn_processes",
+        "provider_owned_state_in_conductor": False,
+    }
 
 
 def test_overall_fixtures_have_deterministic_success_rework_and_block_behavior(tmp_path: Path) -> None:

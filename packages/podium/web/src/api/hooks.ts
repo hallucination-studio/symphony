@@ -3,8 +3,14 @@ import {
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
+import { useCallback, useEffect, useState } from "react";
 import { api } from "./client";
-import type { RepositoryMode } from "./types";
+import type {
+  AuthenticationChallenge,
+  PerformerControlEnvelope,
+  PerformerDeviceLoginRequest,
+  RepositoryMode,
+} from "./types";
 
 export function useBootstrap() {
   return useQuery({
@@ -79,6 +85,119 @@ export function useManagedRuns() {
     queryFn: () => api.managedRuns(),
     refetchInterval: 5000,
   });
+}
+
+export function usePerformerStatus(conductorId: string | null) {
+  return useQuery({
+    queryKey: ["performer", conductorId, "status"],
+    queryFn: () => api.performerStatus(conductorId!),
+    enabled: Boolean(conductorId),
+    retry: false,
+  });
+}
+
+/**
+ * Live controls intentionally avoid useMutation. TanStack retains mutation
+ * variables and results for inspection; API keys, device challenges, and
+ * config source are transient drawer state and must never enter that cache.
+ */
+export function usePerformerControl(conductorId: string) {
+  const qc = useQueryClient();
+  const [challenge, setChallenge] = useState<AuthenticationChallenge | null>(null);
+  const [configurationSource, setConfigurationSource] = useState<string | null>(null);
+
+  const clearTransient = useCallback(() => {
+    setChallenge(null);
+    setConfigurationSource(null);
+  }, []);
+
+  useEffect(() => clearTransient, [clearTransient]);
+
+  const refreshStatus = useCallback(() => qc.invalidateQueries({
+    queryKey: ["performer", conductorId, "status"],
+  }), [conductorId, qc]);
+
+  const login = useCallback(async (input: PerformerDeviceLoginRequest) => {
+    setChallenge(null);
+    const envelope = await api.performerLogin(conductorId, input);
+    const result = envelope.control_result;
+    const pending = envelope.events.find((event) => event.event_kind === "login.pending");
+    if (pending?.verification_url && pending.user_code) {
+      setChallenge({
+        kind: "device_code",
+        message: pending.message,
+        verification_url: pending.verification_url,
+        user_code: pending.user_code,
+        expires_at: pending.expires_at,
+      });
+    }
+    await refreshStatus();
+    return { envelope, result };
+  }, [conductorId, refreshStatus]);
+
+  const loginWithApiKey = useCallback((takeApiKey: () => string) => {
+    setChallenge(null);
+    const dispatched = api.performerApiKeyLogin(conductorId, takeApiKey);
+    return finishPerformerControl(dispatched, refreshStatus);
+  }, [conductorId, refreshStatus]);
+
+  const deleteSession = useCallback(async (action: "cancel_login" | "logout") => {
+    const envelope = await api.deletePerformerSession(conductorId, action);
+    const result = envelope.control_result;
+    setChallenge(null);
+    await refreshStatus();
+    return { envelope, result };
+  }, [conductorId, refreshStatus]);
+
+  const readConfiguration = useCallback(async () => {
+    const envelope = await api.performerConfiguration(conductorId);
+    const result = envelope.control_result;
+    setConfigurationSource(
+      result.status === "succeeded" ? result.configuration?.source_text ?? null : null,
+    );
+    return { envelope, result };
+  }, [conductorId]);
+
+  const writeConfiguration = useCallback(async (value: string) => {
+    const envelope = await api.updatePerformerConfiguration(conductorId, {
+      setting: "api_base_url",
+      value,
+    });
+    const result = envelope.control_result;
+    setConfigurationSource(null);
+    await refreshStatus();
+    return { envelope, result };
+  }, [conductorId, refreshStatus]);
+
+  const check = useCallback(async () => {
+    const envelope = await api.checkPerformer(conductorId);
+    const result = envelope.control_result;
+    await refreshStatus();
+    return { envelope, result };
+  }, [conductorId, refreshStatus]);
+
+  return {
+    challenge,
+    configurationSource,
+    setAuthenticationChallenge: setChallenge,
+    clearTransient,
+    login,
+    loginWithApiKey,
+    deleteSession,
+    readConfiguration,
+    writeConfiguration,
+    check,
+  };
+}
+
+async function finishPerformerControl(
+  dispatched: Promise<PerformerControlEnvelope>,
+  refreshStatus: () => Promise<unknown>,
+) {
+  const envelope = await dispatched;
+  const result = envelope.control_result;
+  await refreshStatus();
+  return { envelope, result };
 }
 
 export function useSmokeCheckResult() {

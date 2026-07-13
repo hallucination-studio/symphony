@@ -22,8 +22,21 @@ _ABSOLUTE_PATH = re.compile(
 )
 _BASE64_BLOB = re.compile(r"\b[A-Za-z0-9+/_-]{160,}={0,2}\b")
 _SECRET_ASSIGNMENT = re.compile(
-    r"(?im)\b(?:api[_-]?key|client[_-]?secret|access[_-]?token|refresh[_-]?token|"
-    r"password|authorization|private[_-]?key)\b\s*[:=]\s*([^\r\n,;]+)"
+    r"""(?ix)
+    (?<![A-Za-z0-9_-])
+    [\"']?
+    (?:(?:[A-Za-z][A-Za-z0-9]*[_-])*)
+    (?:api[_-]?key|client[_-]?secret|access[_-]?token|refresh[_-]?token|
+       password|authorization|private[_-]?key)
+    [\"']?
+    (?![A-Za-z0-9_-])
+    \s*[:=]\s*
+    (
+        \"(?:[^\"\\\\]|\\\\.)*\"
+        | '(?:[^'\\\\]|\\\\.)*'
+        | [^\s,\r\n;}]+
+    )
+    """
 )
 
 

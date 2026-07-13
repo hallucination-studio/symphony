@@ -1,0 +1,135 @@
+.performer-control-stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.performer-control-section {
+  padding: var(--space-4);
+  box-shadow: none;
+}
+
+.performer-control-section + .performer-control-section {
+  margin-top: 0;
+}
+
+.performer-control-summary {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-4);
+  padding: var(--space-3) 0;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.performer-control-summary:first-child {
+  padding-top: 0;
+}
+
+.performer-control-summary:last-child {
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+
+.performer-control-label {
+  color: var(--color-text);
+  font-size: var(--font-size-title);
+  line-height: var(--line-height-title);
+  font-weight: 600;
+}
+
+.performer-control-description,
+.performer-control-state {
+  margin: var(--space-1) 0 0;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-caption);
+  line-height: var(--line-height-caption);
+}
+
+.performer-control-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.performer-control-form {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-3);
+  margin-top: var(--space-4);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--color-border);
+}
+
+.performer-control-form .field {
+  width: 100%;
+  margin-bottom: 0;
+}
+
+.performer-control-challenge {
+  display: grid;
+  gap: var(--space-2);
+  margin-top: var(--space-4);
+  padding: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg);
+}
+
+.performer-control-challenge p {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-caption);
+  line-height: var(--line-height-caption);
+}
+
+.performer-control-code,
+.performer-control-source {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-caption);
+  line-height: var(--line-height-title);
+}
+
+.performer-control-code {
+  display: inline-flex;
+  width: fit-content;
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border-strong);
+  letter-spacing: 0.04em;
+}
+
+.performer-control-source {
+  overflow: auto;
+  margin: var(--space-4) 0 0;
+  padding: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg);
+  color: var(--color-text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.performer-control-message,
+.performer-control-alert {
+  margin: 0;
+  padding: var(--space-3);
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-caption);
+  line-height: var(--line-height-caption);
+}
+
+.performer-control-message {
+  color: var(--color-text);
+  background: var(--status-completed-bg);
+  border: 1px solid var(--status-completed);
+}
+
+.performer-control-alert {
+  color: var(--color-text);
+  background: var(--status-blocked-bg);
+  border: 1px solid var(--status-blocked);
+}

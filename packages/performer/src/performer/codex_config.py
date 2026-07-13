@@ -1,36 +1,45 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-import re
+from dataclasses import dataclass
 
-
-_SECRET_KEY_MARKERS = ("api_key", "apikey", "token", "secret", "password")
-_ENV_REFERENCE = re.compile(r"\$[A-Za-z_][A-Za-z0-9_]*")
+from performer_api.runtime_policy import RuntimePolicy
 
 
 @dataclass(frozen=True)
 class CodexConfig:
-    model: str | None = None
+    model: str
+    model_provider: str
+    approval_mode: str
+    reasoning_effort: str
+    reasoning_summary: str
+    sandbox: str
+    initialize_timeout_ms: int
+    turn_timeout_ms: int
+    initialize_max_attempts: int
+    overload_max_attempts: int
     sdk_codex_bin: str | None = None
-    sandbox: str | None = None
-    config_overrides: tuple[str, ...] = field(default=(), repr=False)
-    hard_turn_timeout_ms: int = 3_600_000
-    read_timeout_ms: int = 5_000
-    init_max_attempts: int = 4
-    init_backoff_ms: int = 500
-    init_backoff_max_ms: int = 8_000
-    overload_max_attempts: int = 5
-    overload_initial_delay_ms: int = 250
-    overload_max_delay_ms: int = 8_000
 
-    def __post_init__(self) -> None:
-        for override in self.config_overrides:
-            key, separator, value = override.partition("=")
-            if not separator or not key.strip() or not value:
-                raise ValueError("Codex config overrides must be KEY=VALUE strings")
-            normalized_key = re.sub(r"[-.]+", "_", key.lower())
-            if any(marker in normalized_key for marker in _SECRET_KEY_MARKERS):
-                if _ENV_REFERENCE.fullmatch(value.strip()) is None:
-                    raise ValueError(
-                        "secret-bearing Codex config override values must use $VAR indirection"
-                    )
+    @classmethod
+    def from_runtime_policy(
+        cls,
+        policy: RuntimePolicy,
+        turn_kind: str,
+        *,
+        sdk_codex_bin: str | None = None,
+    ) -> "CodexConfig":
+        sandbox = policy.sandbox.get(turn_kind)
+        if sandbox is None:
+            raise ValueError("turn_kind must be plan, execute, or gate")
+        return cls(
+            model=policy.model,
+            model_provider=policy.model_provider,
+            approval_mode=policy.approval_mode,
+            reasoning_effort=policy.reasoning_effort,
+            reasoning_summary=policy.reasoning_summary,
+            sandbox=sandbox,
+            initialize_timeout_ms=policy.initialize_timeout_ms,
+            turn_timeout_ms=policy.turn_timeout_ms,
+            initialize_max_attempts=policy.initialize_max_attempts,
+            overload_max_attempts=policy.overload_max_attempts,
+            sdk_codex_bin=sdk_codex_bin,
+        )

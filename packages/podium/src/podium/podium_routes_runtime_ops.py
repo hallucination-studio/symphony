@@ -298,11 +298,55 @@ def _normalize_managed_run_report(
         "binding_config_version": binding_config_version,
         "runs": [_normalize_managed_run(run) for run in runs if isinstance(run, dict)],
     }
+    if "performer_control" in value:
+        report["performer_control"] = _normalize_performer_control_state(value["performer_control"])
     if len(report["runs"]) != len(runs) or len(json.dumps(report, separators=(",", ":"), ensure_ascii=False).encode()) > _MAX_MANAGED_RUN_REPORT_BYTES:
         raise ManagedRunReportError("managed_run_report_too_large", "Managed-run report is invalid or too large")
     observed_active_runs = sum(1 for run in report["runs"] if run["state"] not in {"done", "failed"})
     report["active_runs_total"] = max(_report_int(value.get("active_runs_total")), observed_active_runs)
     return report
+
+
+def _normalize_performer_control_state(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ManagedRunReportError("invalid_managed_run_report", "Performer control state must be an object")
+    expected = {
+        "performer_kind", "binding_generation", "capability_version", "execution_policy_sha256",
+        "status", "last_check_status", "last_check_started_at", "last_check_finished_at",
+        "error_code", "sanitized_reason", "action_required", "retryable", "attempt_number",
+        "next_action", "updated_at",
+    }
+    if set(value) != expected:
+        raise ManagedRunReportError("invalid_managed_run_report", "Performer control state fields are invalid")
+    status = str(value.get("status") or "")
+    check_status = str(value.get("last_check_status") or "")
+    if status not in {"unchecked", "checking", "ready", "failed"} or check_status not in {"none", "passed", "failed"}:
+        raise ManagedRunReportError("invalid_managed_run_report", "Performer control readiness is invalid")
+    digest = str(value.get("execution_policy_sha256") or "")
+    if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest.lower()):
+        raise ManagedRunReportError("invalid_managed_run_report", "Performer control policy identity is invalid")
+    if not isinstance(value.get("action_required"), bool) or not isinstance(value.get("retryable"), bool):
+        raise ManagedRunReportError("invalid_managed_run_report", "Performer control flags are invalid")
+    attempt = value.get("attempt_number")
+    if attempt is not None and (isinstance(attempt, bool) or not isinstance(attempt, int) or attempt <= 0):
+        raise ManagedRunReportError("invalid_managed_run_report", "Performer control attempt is invalid")
+    return {
+        "performer_kind": _report_text(value.get("performer_kind"), 80),
+        "binding_generation": _report_int(value.get("binding_generation")),
+        "capability_version": _report_int(value.get("capability_version")),
+        "execution_policy_sha256": digest,
+        "status": status,
+        "last_check_status": check_status,
+        "last_check_started_at": _report_text(value.get("last_check_started_at"), 100),
+        "last_check_finished_at": _report_text(value.get("last_check_finished_at"), 100),
+        "error_code": _report_text(value.get("error_code"), 120),
+        "sanitized_reason": _report_text(value.get("sanitized_reason"), 500),
+        "action_required": value["action_required"],
+        "retryable": value["retryable"],
+        "attempt_number": attempt,
+        "next_action": _report_text(value.get("next_action"), 500),
+        "updated_at": _report_text(value.get("updated_at"), 100),
+    }
 
 
 async def _bounded_runtime_report_payload(request: Request) -> dict[str, Any]:

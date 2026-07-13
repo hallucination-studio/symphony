@@ -1,7 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import asyncio
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -10,8 +13,25 @@ from conductor.gate import CommandResult
 from conductor.runtime import StaleRuntimeResult
 from conductor.store import ConductorStore
 from conductor.workflow_driver import WorkflowDriver
-from performer_api.turns import GateResult
+from performer_api.performer_control import PerformerControlError, PerformerReadinessState
+from performer_api.runtime_policy import canonical_sha256
+from performer_api.turns import GateResult, TurnContext
 from performer_api.workflow import AcceptanceCatalog, Plan
+
+
+EXECUTION_POLICY = {
+    "version": 1,
+    "model": "gpt-5.4",
+    "model_provider": "openai",
+    "approval_mode": "auto_review",
+    "reasoning_effort": "high",
+    "reasoning_summary": "auto",
+    "sandbox": {"plan": "read_only", "execute": "workspace_write", "gate": "read_only"},
+    "initialize_timeout_ms": 5000,
+    "turn_timeout_ms": 3_600_000,
+    "initialize_max_attempts": 4,
+    "overload_max_attempts": 5,
+}
 
 
 @dataclass
@@ -20,6 +40,16 @@ class FakeInstance:
     instance_dir: str
     workspace_root: str
     log_path: str
+    linear_filters: dict[str, Any] = field(
+        default_factory=lambda: {
+            "performer_kind": "codex",
+            "performer_binding_id": "performer-binding-1",
+            "performer_binding_generation": 1,
+            "execution_policy": dict(EXECUTION_POLICY),
+            "execution_policy_sha256": canonical_sha256(EXECUTION_POLICY),
+            "turn_policy_sha256": "b" * 64,
+        }
+    )
 
 
 class FakeConductorStore(ConductorStore):
@@ -36,6 +66,7 @@ class FakeLinear:
         self.children: list[dict[str, str]] = []
         self.transitions: list[tuple[str, str]] = []
         self.comments: list[tuple[str, str]] = []
+        self.marker_updates: list[tuple[str, str, str]] = []
         self.issue_states: dict[str, str] = {"parent-1": "In Progress"}
         self.transition_failures = 0
         self.transition_failure_target = ""
@@ -50,7 +81,13 @@ class FakeLinear:
         self.issue_states[issue["id"]] = "Backlog"
         return issue
 
-    async def update_issue_description_marker_block(self, *_args: Any, **_kwargs: Any) -> dict[str, bool]:
+    async def update_issue_description_marker_block(
+        self,
+        issue_id: str,
+        marker_name: str,
+        block: str,
+    ) -> dict[str, bool]:
+        self.marker_updates.append((issue_id, marker_name, block))
         return {"success": True}
 
     async def transition_issue_by_state_target(self, issue_id: str, *, names: list[str], state_type: str) -> dict[str, Any]:
@@ -92,6 +129,20 @@ class FakeRuntime:
         self.events.append(message)
 
 
+class FakePerformerCoordinator:
+    def __init__(self) -> None:
+        self.turn_active = False
+
+    @asynccontextmanager
+    async def turn_exchange(self):
+        assert self.turn_active is False
+        self.turn_active = True
+        try:
+            yield
+        finally:
+            self.turn_active = False
+
+
 class EvidenceGate(FakeGate):
     def run_commands(self, _task: Any, _workspace: Path) -> list[CommandResult]:
         return [
@@ -124,6 +175,18 @@ class FakeService:
         self.store = FakeConductorStore(root, instance)
         self.performer_runtime = FakeRuntime()
         self.acceptance_gate = FakeGate()
+        self.performer_coordinator = FakePerformerCoordinator()
+        self.store.record_performer_readiness(
+            PerformerReadinessState(
+                performer_kind="codex",
+                binding_generation=1,
+                capability_version=1,
+                execution_policy_sha256=canonical_sha256(EXECUTION_POLICY),
+                status="ready",
+                last_check_status="passed",
+                error=None,
+            )
+        )
         self._managed_run_runtime_config = {"version": 1}
         self.linear = FakeLinear()
 
@@ -131,14 +194,433 @@ class FakeService:
         return self.linear
 
 
+def _set_readiness(
+    service: FakeService,
+    status: str,
+    *,
+    error_code: str = "performer_check_required",
+) -> None:
+    error = None
+    last_check_status = "passed" if status == "ready" else "none"
+    if status == "failed":
+        last_check_status = "failed"
+        error = PerformerControlError(
+            error_code=error_code,
+            sanitized_reason="The Performer backend requires operator action.",
+            action_required=True,
+            retryable=True,
+            attempt_number=1,
+            next_action="Run the manual Performer Check.",
+        )
+    service.store.record_performer_readiness(
+        PerformerReadinessState(
+            performer_kind="codex",
+            binding_generation=1,
+            capability_version=1,
+            execution_policy_sha256=canonical_sha256(EXECUTION_POLICY),
+            status=status,
+            last_check_status=last_check_status,
+            error=error,
+        )
+    )
+
+
 def _queue_turns(driver: WorkflowDriver, bodies: list[dict[str, Any]]) -> None:
     async def fake_run_turn(_run: dict[str, Any], _instance: Any, context: Any, _request: dict[str, Any], *, role: str) -> dict[str, Any]:
         body = dict(bodies.pop(0))
         body["context"] = context.to_dict()
-        body["turn_kind"] = role
+        if isinstance(body.get("execute_result"), dict):
+            body["execute_result"] = {
+                "changed_files": [],
+                "acceptance_evidence": [],
+                "blocked_reason": None,
+                **body["execute_result"],
+            }
         return body
 
     driver._run_turn = fake_run_turn  # type: ignore[method-assign]
+
+
+@pytest.mark.anyio
+async def test_workflow_driver_carries_execution_policy_in_plan_execute_and_gate_requests(
+    tmp_path: Path,
+    minimal_plan,
+) -> None:
+    service = FakeService(tmp_path)
+    run = service.store.create_run("parent-1", "SYM-1", instance_id="instance-1")
+    driver = WorkflowDriver(service)
+    requests: list[dict[str, Any]] = []
+    bodies = [
+        {"plan": minimal_plan.to_dict(), "thread_id": "thread-1"},
+        {"execute_result": {"status": "ready_for_gate", "summary": "implemented"}, "thread_id": "thread-1"},
+        {
+            "gate_result": {
+                "passed": True,
+                "score": 4,
+                "threshold": 3,
+                "rubric": {},
+                "provenance": [],
+                "findings": [],
+                "artifact_refs": [],
+            },
+            "thread_id": "thread-1",
+        },
+    ]
+
+    async def capture_turn(
+        _run: dict[str, Any],
+        _instance: Any,
+        context: Any,
+        request: dict[str, Any],
+        *,
+        role: str,
+    ) -> dict[str, Any]:
+        requests.append(dict(request))
+        body = dict(bodies.pop(0))
+        body["context"] = context.to_dict()
+        if isinstance(body.get("execute_result"), dict):
+            body["execute_result"] = {
+                "changed_files": [],
+                "acceptance_evidence": [],
+                "blocked_reason": None,
+                **body["execute_result"],
+            }
+        return body
+
+    driver._run_turn = capture_turn  # type: ignore[method-assign]
+
+    assert (await driver.drive_once())["applied"] == 1
+    assert (await driver.drive_once())["applied"] == 1
+
+    assert [request["context"]["turn_kind"] for request in requests] == ["plan", "execute", "gate"]
+    assert all(request["execution_policy"] == EXECUTION_POLICY for request in requests)
+    assert all(request["performer_kind"] == "codex" for request in requests)
+    assert all(request["performer_binding_id"] == "performer-binding-1" for request in requests)
+    assert all(request["binding_generation"] == 1 for request in requests)
+    assert all(request["execution_policy_sha256"] == canonical_sha256(EXECUTION_POLICY) for request in requests)
+    assert all(request["turn_policy_sha256"] == "b" * 64 for request in requests)
+
+
+@pytest.mark.anyio
+async def test_workflow_driver_holds_performer_turn_exclusion_for_complete_call(
+    tmp_path: Path,
+    minimal_plan,
+) -> None:
+    service = FakeService(tmp_path)
+    instance = service.store.instance
+    run = service.store.create_run("parent-1", "SYM-1", instance_id=instance.id)
+    context = TurnContext(str(run["run_id"]), "", "attempt-1", 1, "plan")
+
+    class LockAssertingRuntime(FakeRuntime):
+        def paths(self, root: Path) -> Any:
+            root.mkdir(parents=True, exist_ok=True)
+            return SimpleNamespace(
+                request=root / "turn-request.json",
+                result=root / "turn-result.json",
+                log=root / "performer.log",
+            )
+
+        def write_request(self, paths: Any, payload: dict[str, Any]) -> None:
+            self.request = dict(payload)
+            paths.request.write_text("{}", encoding="utf-8")
+
+        async def run_async(self, _paths: Any) -> dict[str, Any]:
+            assert service.performer_coordinator.turn_active is True
+            return {
+                "protocol_version": 1,
+                "context": context.to_dict(),
+                "thread_id": "",
+                    "plan": minimal_plan.to_dict(),
+                "execute_result": None,
+                "gate_result": None,
+                "runtime_wait": None,
+                "events": [],
+            }
+
+        @staticmethod
+        def accept_result(_expected: TurnContext, payload: dict[str, Any]) -> dict[str, Any]:
+            return payload
+
+    service.performer_runtime = LockAssertingRuntime()
+    driver = WorkflowDriver(service)
+
+    result = await driver._run_turn(
+        run,
+        instance,
+        context,
+        {
+            "protocol_version": 1,
+            "context": context.to_dict(),
+            "performer_kind": "codex",
+            "performer_binding_id": "performer-binding-1",
+            "binding_generation": 1,
+            "execution_policy": EXECUTION_POLICY,
+            "execution_policy_sha256": canonical_sha256(EXECUTION_POLICY),
+            "turn_policy_sha256": "b" * 64,
+            "workspace_path": instance.workspace_root,
+            "thread_id": "",
+            "issue_description": "test",
+            "task": None,
+            "evidence": None,
+        },
+        role="plan",
+    )
+
+    assert result["context"]["turn_kind"] == "plan"
+    assert service.performer_coordinator.turn_active is False
+
+
+@pytest.mark.anyio
+async def test_planning_blocks_before_attempt_and_compatible_ready_state_resumes_once(
+    tmp_path: Path,
+    minimal_plan,
+) -> None:
+    service = FakeService(tmp_path)
+    _set_readiness(service, "failed")
+    run = service.store.create_run("parent-1", "SYM-1", instance_id="instance-1")
+    driver = WorkflowDriver(service)
+
+    async def unexpected_turn(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("a non-ready Performer must not start a turn")
+
+    driver._run_turn = unexpected_turn  # type: ignore[method-assign]
+
+    blocked = await driver.drive_once()
+
+    assert blocked["failed"] == 0
+    persisted = service.store.get_run(run["run_id"])
+    assert persisted["state"] == "blocked"
+    assert persisted["latest_reason"] == "performer_check_required"
+    with service.store.connect() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM attempts WHERE run_id = ?",
+            (run["run_id"],),
+        ).fetchone()[0] == 0
+    assert any(event.startswith("event=managed_run_performer_blocked ") for event in service.performer_runtime.events)
+    assert any(
+        marker_name == "SYMPHONY_PERFORMER_READINESS"
+        and "performer_check_required" in block
+        for _issue_id, marker_name, block in service.linear.marker_updates
+    )
+    assert service.linear.comments == []
+
+    _set_readiness(service, "ready")
+    _queue_turns(driver, [{"plan": minimal_plan.to_dict(), "thread_id": "thread-1"}])
+
+    resumed = await driver.drive_once()
+
+    assert resumed["failed"] == 0
+    with service.store.connect() as connection:
+        rows = connection.execute(
+            "SELECT kind, fencing_token FROM attempts WHERE run_id = ?",
+            (run["run_id"],),
+        ).fetchall()
+    assert [(row["kind"], row["fencing_token"]) for row in rows] == [("plan", 1)]
+    assert any(event.startswith("event=managed_run_performer_resumed ") for event in service.performer_runtime.events)
+
+
+@pytest.mark.anyio
+async def test_readiness_linear_projection_retries_durably_before_resuming_or_starting_turn(
+    tmp_path: Path,
+    minimal_plan,
+) -> None:
+    service = FakeService(tmp_path)
+    _set_readiness(service, "failed")
+    service.linear.transition_failures = 2
+    service.linear.transition_failure_target = "Blocked"
+    run = service.store.create_run("parent-1", "SYM-1", instance_id="instance-1")
+    driver = WorkflowDriver(service)
+
+    def attempts() -> list[tuple[str, int]]:
+        with service.store.connect() as connection:
+            rows = connection.execute(
+                "SELECT kind, fencing_token FROM attempts WHERE run_id = ? ORDER BY created_at",
+                (run["run_id"],),
+            ).fetchall()
+        return [(str(row["kind"]), int(row["fencing_token"])) for row in rows]
+
+    first = await driver.drive_once()
+
+    first_block = service.store.get_run(run["run_id"])["payload"]["performer_readiness_block"]
+    assert first["failed"] == 0
+    assert first_block["linear_projection"]["status"] == "pending"
+    assert first_block["linear_projection"]["attempt_number"] == 1
+    assert first_block["linear_projection"]["last_error_code"] == "performer_readiness_projection_failed"
+    assert "temporary_projection_failure" in first_block["linear_projection"]["last_sanitized_reason"]
+    assert first_block["linear_projection"]["next_action"] == "retry_linear_projection"
+    assert attempts() == []
+    assert service.linear.transitions == []
+    assert [
+        update
+        for update in service.linear.marker_updates
+        if update[1] == "SYMPHONY_PERFORMER_READINESS"
+    ] == []
+
+    second = await driver.drive_once()
+
+    second_block = service.store.get_run(run["run_id"])["payload"]["performer_readiness_block"]
+    assert second["failed"] == 0
+    assert second_block["linear_projection"]["status"] == "pending"
+    assert second_block["linear_projection"]["attempt_number"] == 2
+    assert second_block["linear_projection"]["last_error_code"] == "performer_readiness_projection_failed"
+    assert "temporary_projection_failure" in second_block["linear_projection"]["last_sanitized_reason"]
+    assert second_block["linear_projection"]["next_action"] == "retry_linear_projection"
+    assert attempts() == []
+    failure_logs = [
+        event
+        for event in service.performer_runtime.events
+        if "error_code=performer_readiness_projection_failed" in event
+    ]
+    assert len(failure_logs) == 2
+    assert "attempt_number=1" in failure_logs[0]
+    assert "attempt_number=2" in failure_logs[1]
+
+    third = await driver.drive_once()
+
+    third_block = service.store.get_run(run["run_id"])["payload"]["performer_readiness_block"]
+    readiness_updates = [
+        update
+        for update in service.linear.marker_updates
+        if update[1] == "SYMPHONY_PERFORMER_READINESS"
+    ]
+    assert third["failed"] == 0
+    assert third_block["linear_projection"]["status"] == "complete"
+    assert third_block["linear_projection"]["attempt_number"] == 3
+    assert attempts() == []
+    assert service.linear.transitions == [("parent-1", "Blocked")]
+    assert len(readiness_updates) == 1
+    assert "performer_check_required" in readiness_updates[0][2]
+
+    fourth = await driver.drive_once()
+
+    assert fourth["failed"] == 0
+    assert attempts() == []
+    assert service.linear.transitions == [("parent-1", "Blocked")]
+    assert len([
+        update
+        for update in service.linear.marker_updates
+        if update[1] == "SYMPHONY_PERFORMER_READINESS"
+    ]) == 1
+
+    _set_readiness(service, "ready")
+    _queue_turns(driver, [{"plan": minimal_plan.to_dict(), "thread_id": "thread-1"}])
+
+    resumed = await driver.drive_once()
+
+    assert resumed["failed"] == 0
+    assert attempts() == [("plan", 1)]
+    assert "performer_readiness_block" not in service.store.get_run(run["run_id"])["payload"]
+    resumed_updates = [
+        update
+        for update in service.linear.marker_updates
+        if update[1] == "SYMPHONY_PERFORMER_READINESS"
+    ]
+    assert len(resumed_updates) == 2
+    assert "Status: resumed" in resumed_updates[-1][2]
+    assert service.linear.comments == []
+
+
+@pytest.mark.anyio
+async def test_turn_reservation_rechecks_readiness_before_creating_plan_attempt(
+    tmp_path: Path,
+) -> None:
+    service = FakeService(tmp_path)
+    run = service.store.create_run("parent-1", "SYM-1", instance_id="instance-1")
+
+    class CheckStartsBeforeTurn:
+        @asynccontextmanager
+        async def turn_exchange(self):
+            _set_readiness(service, "checking")
+            yield
+
+    service.performer_coordinator = CheckStartsBeforeTurn()
+    driver = WorkflowDriver(service)
+
+    result = await driver.drive_once()
+
+    assert result["failed"] == 0
+    assert service.store.get_run(run["run_id"])["state"] == "blocked"
+    with service.store.connect() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM attempts WHERE run_id = ?",
+            (run["run_id"],),
+        ).fetchone()[0] == 0
+
+
+@pytest.mark.anyio
+async def test_execution_blocks_before_task_attempt_when_readiness_is_not_ready(
+    tmp_path: Path,
+    minimal_plan,
+) -> None:
+    service = FakeService(tmp_path)
+    run = service.store.create_run("parent-1", "SYM-1", instance_id="instance-1")
+    service.store.save_plan(run["run_id"], minimal_plan)
+    driver = WorkflowDriver(service)
+    assert (await driver.drive_once())["applied"] == 1
+    _set_readiness(service, "failed")
+
+    result = await driver.drive_once()
+
+    assert result["failed"] == 0
+    task = service.store.get_task(run["run_id"], "task-1")
+    assert task["state"] == "blocked"
+    with service.store.connect() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM attempts WHERE run_id = ? AND task_id = 'task-1'",
+            (run["run_id"],),
+        ).fetchone()[0] == 0
+
+
+@pytest.mark.anyio
+async def test_gate_blocks_before_gate_attempt_if_readiness_changes_after_execute(
+    tmp_path: Path,
+    minimal_plan,
+) -> None:
+    service = FakeService(tmp_path)
+    run = service.store.create_run("parent-1", "SYM-1", instance_id="instance-1")
+    service.store.save_plan(run["run_id"], minimal_plan)
+    driver = WorkflowDriver(service)
+    assert (await driver.drive_once())["applied"] == 1
+
+    async def execute_then_invalidate(
+        _run: dict[str, Any],
+        _instance: Any,
+        context: TurnContext,
+        _request: dict[str, Any],
+        *,
+        role: str,
+    ) -> dict[str, Any]:
+        assert role == "execute"
+        _set_readiness(service, "failed")
+        return {
+            "context": context.to_dict(),
+            "thread_id": "thread-1",
+            "execute_result": {
+                "status": "ready_for_gate",
+                "summary": "implemented",
+                "changed_files": [],
+                "acceptance_evidence": [],
+                "blocked_reason": None,
+            },
+        }
+
+    driver._run_turn = execute_then_invalidate  # type: ignore[method-assign]
+
+    result = await driver.drive_once()
+
+    assert result["failed"] == 0
+    task = service.store.get_task(run["run_id"], "task-1")
+    assert task["state"] == "blocked"
+    assert task["result"]["summary"] == "implemented"
+    with service.store.connect() as connection:
+        kinds = [
+            row["kind"]
+            for row in connection.execute(
+                "SELECT kind FROM attempts WHERE run_id = ? AND task_id = 'task-1' ORDER BY created_at",
+                (run["run_id"],),
+            ).fetchall()
+        ]
+    assert kinds == ["execute"]
 
 
 @pytest.mark.anyio
@@ -152,7 +634,7 @@ async def test_workflow_driver_creates_subissues_and_runs_sequential_gate(tmp_pa
     driver = WorkflowDriver(service)
     bodies = [
         {"context": {}, "plan": two_task_plan.to_dict(), "thread_id": "thread-1"},
-        {"context": {}, "result": {"status": "ready_for_gate", "summary": "implemented"}, "thread_id": "thread-1"},
+        {"context": {}, "execute_result": {"status": "ready_for_gate", "summary": "implemented"}, "thread_id": "thread-1"},
         {
             "context": {},
             "gate_result": {
@@ -188,7 +670,7 @@ async def test_workflow_driver_closes_parent_after_every_subissue_passes(tmp_pat
         driver,
         [
             {"context": {}, "plan": two_task_plan.to_dict(), "thread_id": "thread-1"},
-            {"context": {}, "result": {"status": "ready_for_gate", "summary": "task one"}, "thread_id": "thread-1"},
+            {"context": {}, "execute_result": {"status": "ready_for_gate", "summary": "task one"}, "thread_id": "thread-1"},
             {
                 "context": {},
                 "gate_result": {
@@ -202,7 +684,7 @@ async def test_workflow_driver_closes_parent_after_every_subissue_passes(tmp_pat
                 },
                 "thread_id": "thread-1",
             },
-            {"context": {}, "result": {"status": "ready_for_gate", "summary": "task two"}, "thread_id": "thread-1"},
+            {"context": {}, "execute_result": {"status": "ready_for_gate", "summary": "task two"}, "thread_id": "thread-1"},
             {
                 "context": {},
                 "gate_result": {
@@ -283,17 +765,17 @@ async def test_workflow_driver_projects_only_a_gate_summary_to_linear(tmp_path: 
         driver,
         [
             {"context": {}, "plan": plan.to_dict(), "thread_id": "thread-1"},
-            {"context": {}, "result": {"status": "ready_for_gate", "summary": "implemented"}, "thread_id": "thread-1"},
+            {"context": {}, "execute_result": {"status": "ready_for_gate", "summary": "implemented"}, "thread_id": "thread-1"},
             {
                 "context": {},
                 "gate_result": {
                     "passed": True,
                     "score": 4,
-                    "threshold": 3,
-                    "rubric": {"correctness": {"score": 4, "weight": 2}},
-                    "provenance": [{"source": "codex", "token": "provenance-secret"}],
-                    "findings": ["token=finding-secret"],
-                    "artifact_refs": ["artifact://run-1/secret-path"],
+                        "threshold": 3,
+                        "rubric": {"correctness": {"score": 4, "weight": 2}},
+                        "provenance": [{"source": "codex"}],
+                        "findings": ["Verification passed."],
+                        "artifact_refs": ["artifact://run-1/evidence"],
                 },
                 "thread_id": "thread-1",
             },
@@ -325,7 +807,7 @@ async def test_workflow_driver_discards_a_stale_gate_without_failing_the_run(tmp
         driver,
         [
             {"context": {}, "plan": minimal_plan.to_dict(), "thread_id": "thread-1"},
-            {"context": {}, "result": {"status": "ready_for_gate", "summary": "implemented"}, "thread_id": "thread-1"},
+            {"context": {}, "execute_result": {"status": "ready_for_gate", "summary": "implemented"}, "thread_id": "thread-1"},
             {
                 "context": {},
                 "gate_result": {
@@ -378,7 +860,7 @@ async def test_workflow_driver_retries_a_stale_gate_todo_projection(tmp_path: Pa
         driver,
         [
             {"context": {}, "plan": minimal_plan.to_dict(), "thread_id": "thread-1"},
-            {"context": {}, "result": {"status": "ready_for_gate", "summary": "implemented"}, "thread_id": "thread-1"},
+            {"context": {}, "execute_result": {"status": "ready_for_gate", "summary": "implemented"}, "thread_id": "thread-1"},
             {
                 "context": {},
                 "gate_result": {
@@ -429,7 +911,7 @@ async def test_workflow_driver_logs_the_second_gate_failure(tmp_path: Path, mini
         driver,
         [
             {"context": {}, "plan": minimal_plan.to_dict(), "thread_id": "thread-1"},
-            {"context": {}, "result": {"status": "ready_for_gate", "summary": "implemented"}, "thread_id": "thread-1"},
+            {"context": {}, "execute_result": {"status": "ready_for_gate", "summary": "implemented"}, "thread_id": "thread-1"},
             {
                 "context": {},
                 "gate_result": {
@@ -443,7 +925,7 @@ async def test_workflow_driver_logs_the_second_gate_failure(tmp_path: Path, mini
                 },
                 "thread_id": "thread-1",
             },
-            {"context": {}, "result": {"status": "ready_for_gate", "summary": "reworked"}, "thread_id": "thread-1"},
+            {"context": {}, "execute_result": {"status": "ready_for_gate", "summary": "reworked"}, "thread_id": "thread-1"},
             {
                 "context": {},
                 "gate_result": {
@@ -485,7 +967,7 @@ async def test_workflow_driver_logs_a_rejected_gate_result(tmp_path: Path, minim
         driver,
         [
             {"context": {}, "plan": minimal_plan.to_dict(), "thread_id": "thread-1"},
-            {"context": {}, "result": {"status": "ready_for_gate", "summary": "implemented"}, "thread_id": "thread-1"},
+            {"context": {}, "execute_result": {"status": "ready_for_gate", "summary": "implemented"}, "thread_id": "thread-1"},
             {
                 "context": {},
                 "gate_result": {

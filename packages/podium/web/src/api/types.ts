@@ -286,3 +286,211 @@ export interface EnrollmentToken {
   install_command: string;
   expires_at?: string | null;
 }
+
+// Closed, provider-neutral browser projections of Performer live-control
+// contracts. Provider SDK objects and provider-owned configuration keys never
+// belong in this module.
+export type PerformerLoginMethod = "device_code" | "api_key";
+export type PerformerTurnKind = "plan" | "execute" | "gate";
+export type PerformerReadinessStatus = "unchecked" | "checking" | "ready" | "failed";
+export type PerformerLoginStatus = "idle" | "pending" | "succeeded" | "failed" | "lost";
+export type PerformerAccountStatus = "authenticated" | "logged_out" | "unknown";
+
+export interface PerformerCapabilities {
+  protocol_version: 1;
+  capability_version: number;
+  performer_kind: string;
+  display_name: string;
+  turn_kinds: PerformerTurnKind[];
+  login_methods: PerformerLoginMethod[];
+  supports_session_delete: boolean;
+  editable_settings: "api_base_url"[];
+  config_source_visible: boolean;
+  check_supported: boolean;
+}
+
+export interface PerformerControlError {
+  error_code: string;
+  sanitized_reason: string;
+  action_required: boolean;
+  retryable: boolean;
+  attempt_number: number | null;
+  next_action: string;
+}
+
+export interface PerformerReadinessState {
+  performer_kind: string;
+  binding_generation: number;
+  capability_version: number;
+  execution_policy_sha256: string;
+  status: PerformerReadinessStatus;
+  last_check_status: "none" | "passed" | "failed";
+  error: PerformerControlError | null;
+}
+
+export interface PerformerAccountState {
+  status: PerformerAccountStatus;
+  display_label: string | null;
+}
+
+export interface PerformerLoginState {
+  status: PerformerLoginStatus;
+  method: PerformerLoginMethod | null;
+}
+
+export interface AuthenticationChallenge {
+  kind: "device_code";
+  message: string;
+  verification_url: string;
+  user_code: string;
+  expires_at: string | null;
+}
+
+export interface PerformerConfigurationSnapshot {
+  settings: { api_base_url?: string | null };
+  source_format: "text" | null;
+  source_text: string | null;
+}
+
+export interface PerformerCheckState {
+  status: "passed" | "failed";
+  started_at: string;
+  finished_at: string;
+  summary: string;
+}
+
+export interface PerformerStatus {
+  capabilities: PerformerCapabilities;
+  readiness: PerformerReadinessState;
+  account: PerformerAccountState;
+  login: PerformerLoginState;
+}
+
+export type PerformerDeviceLoginRequest = { method: "device_code" };
+export type PerformerSessionDeleteRequest = { action: "cancel_login" | "logout" };
+export type PerformerConfigurationWriteRequest = {
+  setting: "api_base_url";
+  value: string;
+};
+
+export type PerformerControlOperation =
+  | "performer.status"
+  | "performer.login"
+  | "performer.session.delete"
+  | "performer.config.read"
+  | "performer.config.write"
+  | "performer.check";
+
+interface PerformerControlResultBase {
+  protocol_version: 1;
+  request_id: string;
+  operation: PerformerControlOperation;
+  capabilities: PerformerCapabilities | null;
+  readiness: PerformerReadinessState | null;
+  account: PerformerAccountState | null;
+  login: PerformerLoginState | null;
+  configuration: PerformerConfigurationSnapshot | null;
+  check: PerformerCheckState | null;
+}
+
+interface PerformerControlSuccessBase extends PerformerControlResultBase {
+  status: "succeeded";
+  error: null;
+}
+
+export interface PerformerStatusSuccess extends PerformerControlSuccessBase {
+  operation: "performer.status";
+  capabilities: PerformerCapabilities;
+  readiness: PerformerReadinessState;
+  account: PerformerAccountState;
+  login: PerformerLoginState;
+  configuration: null;
+  check: null;
+}
+
+export interface PerformerLoginSuccess extends PerformerControlSuccessBase {
+  operation: "performer.login";
+  capabilities: null;
+  readiness: PerformerReadinessState;
+  account: PerformerAccountState | null;
+  login: PerformerLoginState;
+  configuration: null;
+  check: null;
+}
+
+export interface PerformerSessionDeleteSuccess extends PerformerControlSuccessBase {
+  operation: "performer.session.delete";
+  capabilities: null;
+  readiness: PerformerReadinessState;
+  account: PerformerAccountState;
+  login: PerformerLoginState;
+  configuration: null;
+  check: null;
+}
+
+export interface PerformerConfigReadSuccess extends PerformerControlSuccessBase {
+  operation: "performer.config.read";
+  capabilities: null;
+  readiness: null;
+  account: null;
+  login: null;
+  configuration: PerformerConfigurationSnapshot;
+  check: null;
+}
+
+export interface PerformerConfigWriteSuccess extends PerformerControlSuccessBase {
+  operation: "performer.config.write";
+  capabilities: null;
+  readiness: PerformerReadinessState;
+  account: null;
+  login: null;
+  configuration: PerformerConfigurationSnapshot;
+  check: null;
+}
+
+export interface PerformerCheckSuccess extends PerformerControlSuccessBase {
+  operation: "performer.check";
+  capabilities: null;
+  readiness: PerformerReadinessState;
+  account: null;
+  login: null;
+  configuration: null;
+  check: PerformerCheckState;
+}
+
+export interface PerformerControlFailure extends PerformerControlResultBase {
+  status: "failed";
+  capabilities: null;
+  account: null;
+  login: null;
+  configuration: null;
+  check: null;
+  error: PerformerControlError;
+}
+
+export type PerformerControlSuccess =
+  | PerformerStatusSuccess
+  | PerformerLoginSuccess
+  | PerformerSessionDeleteSuccess
+  | PerformerConfigReadSuccess
+  | PerformerConfigWriteSuccess
+  | PerformerCheckSuccess;
+
+export type PerformerControlResult = PerformerControlSuccess | PerformerControlFailure;
+
+export interface PerformerControlEvent {
+  protocol_version: 1;
+  request_id: string;
+  operation: PerformerControlOperation;
+  sequence: number;
+  event_kind: "login.pending" | "login.succeeded" | "login.failed" | "control.heartbeat";
+  message: string;
+  verification_url: string | null;
+  user_code: string | null;
+  expires_at: string | null;
+}
+
+export interface PerformerControlEnvelope {
+  control_result: PerformerControlResult;
+  events: PerformerControlEvent[];
+}
