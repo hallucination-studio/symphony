@@ -1074,7 +1074,11 @@ def _run_linear_phase(context: _RunContext) -> dict[str, Any]:
 
     observations["project"] = {
         "id": project.get("id") if isinstance(project, dict) else "",
-        "slug": project.get("slug") if isinstance(project, dict) else context.project_slug,
+        "slug": (
+            project.get("slug") or project.get("slugId")
+            if isinstance(project, dict)
+            else context.project_slug
+        ),
         "team_id": (project.get("team") or {}).get("id") if isinstance(project, dict) else "",
     }
     observations["parent"] = {
@@ -1096,6 +1100,13 @@ def _select_backlog_state(states: list[dict[str, str]]) -> dict[str, str]:
     if len(backlog) != 1:
         raise ValueError("linear_fixture_state_ambiguous")
     return backlog[0]
+
+
+def _select_started_state(states: list[dict[str, str]]) -> dict[str, str]:
+    started = [state for state in states if state.get("type") == "started"]
+    if len(started) != 1:
+        raise ValueError("linear_fixture_started_state_ambiguous")
+    return started[0]
 
 
 def _git_workspace(path: Path) -> None:
@@ -1246,6 +1257,12 @@ def _materialize_fixture_repository(context: _RunContext, fixture_paths: dict[st
     target_root = repository / ".e2e"
     try:
         target_root.mkdir(parents=True, exist_ok=True)
+        ignore_path = target_root / ".gitignore"
+        ignore_content = "state/\ninput-approved\n"
+        if ignore_path.exists() and ignore_path.read_text(encoding="utf-8") != ignore_content:
+            return False, "", "fixture_repository_file_conflict"
+        if not ignore_path.exists():
+            ignore_path.write_text(ignore_content, encoding="utf-8")
         for scenario, source_root in fixture_paths.items():
             for source in (source_root / ".e2e").iterdir():
                 if not source.is_file() or source.name == ".gitignore":
@@ -1683,6 +1700,7 @@ def _run_performer_phase(context: _RunContext) -> dict[str, Any]:
                             else "The installed Performer manual Check did not produce compatible readiness."
                         ),
                     )
+                observations["execution_policy_sha256"] = policy_hash
                 _append_check(
                     checks,
                     failures,
@@ -1972,8 +1990,9 @@ def _overall_conductor_run(
     parent_issue_id: str,
     *,
     timeout: float,
+    wait_for_runtime_wait_resolution: bool = False,
 ) -> tuple[dict[str, Any] | None, list[dict[str, Any]], _HttpObservation]:
-    deadline = time.monotonic() + min(max(timeout, 0.1), 60.0)
+    deadline = time.monotonic() + max(timeout, 0.1)
     history: list[dict[str, Any]] = []
     latest = _HttpObservation(0, {})
     matched: dict[str, Any] | None = None
@@ -1998,7 +2017,13 @@ def _overall_conductor_run(
                 }
                 if not history or snapshot != history[-1]:
                     history.append(snapshot)
-                if snapshot["state"] in {"done", "blocked", "failed"}:
+                has_open_runtime_wait = any(
+                    isinstance(wait, dict) and wait.get("state") == "open"
+                    for wait in snapshot["runtime_waits"]
+                )
+                if snapshot["state"] in {"done", "blocked", "failed"} and not (
+                    wait_for_runtime_wait_resolution and has_open_runtime_wait
+                ):
                     break
         time.sleep(min(0.25, max(0.0, deadline - time.monotonic())))
     return matched, history, latest
@@ -2009,21 +2034,155 @@ def _overall_task_rows(run: dict[str, Any] | None) -> list[dict[str, Any]]:
     return [task for task in tasks if isinstance(task, dict)]
 
 
+def _overall_plan_contract_ok(name: str, run: dict[str, Any] | None) -> bool:
+    expected = {
+        scenario: (f"python .e2e/{next(iter(files))}", f".e2e/{next(iter(files))}")
+        for scenario, files in _OVERALL_FIXTURES.items()
+    }
+    plan = run.get("plan") if isinstance(run, dict) else None
+    tasks = plan.get("tasks") if isinstance(plan, dict) else None
+    if name not in expected or not isinstance(tasks, list) or len(tasks) != 1:
+        return False
+    task = tasks[0]
+    if not isinstance(task, dict):
+        return False
+    command, file_scope = expected[name]
+    return task.get("verification_commands") == [command] and task.get(
+        "files_likely_touched"
+    ) == [file_scope]
+
+
+def _linear_issue_state_name(issue: dict[str, Any] | None) -> str:
+    state = issue.get("state") if isinstance(issue, dict) else None
+    if isinstance(state, dict):
+        state = state.get("name") or state.get("type")
+    return str(state or "").strip().lower()
+
+
+def _overall_resume_runtime_wait(
+    run: dict[str, Any] | None,
+    fixture: LinearFixture,
+    repository: Path,
+    started_state: dict[str, str],
+) -> tuple[bool, str]:
+    waits = run.get("runtime_waits") if isinstance(run, dict) else None
+    open_waits = [
+        wait
+        for wait in (waits if isinstance(waits, list) else [])
+        if isinstance(wait, dict) and wait.get("state") == "open"
+    ]
+    if not open_waits:
+        return False, "runtime_wait_not_observed"
+    wait = open_waits[-1]
+    if str(wait.get("kind") or "") != "tool_input_required":
+        return False, "runtime_wait_stimulus_unavailable"
+    wait_issue_id = str(wait.get("linear_issue_id") or "")
+    state_id = str(started_state.get("id") or "")
+    if not wait_issue_id or not state_id:
+        return False, "runtime_wait_projection_missing"
+    try:
+        marker = repository / ".e2e" / "input-approved"
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text("approved\n", encoding="utf-8")
+        fixture.transition_issue(wait_issue_id, state_id)
+    except (LinearFixtureError, OSError):
+        return False, "runtime_wait_reopen_failed"
+    return True, ""
+
+
+def _overall_conductor_binding_ready(
+    conductor: _ConductorObserver,
+    context: _RunContext,
+    execution_policy_sha256: str,
+) -> tuple[bool, dict[str, Any]]:
+    instances_response = conductor.get("/api/instances")
+    instances = (
+        instances_response.payload.get("instances")
+        if isinstance(instances_response.payload, dict)
+        else None
+    )
+    instance = instances[0] if isinstance(instances, list) and len(instances) == 1 else None
+    expected_repository = str(context.settings.get("fixture_repository") or "").strip()
+    workspace_matches = False
+    if isinstance(instance, dict) and expected_repository:
+        try:
+            workspace_matches = Path(str(instance.get("workspace_root") or "")).resolve() == Path(
+                expected_repository
+            ).expanduser().resolve()
+        except OSError:
+            workspace_matches = False
+
+    managed_response = conductor.get("/api/managed-runs")
+    control = (
+        managed_response.payload.get("performer_control")
+        if isinstance(managed_response.payload, dict)
+        else None
+    )
+    control = control if isinstance(control, dict) else {}
+    policy_matches = bool(execution_policy_sha256) and str(
+        control.get("execution_policy_sha256") or ""
+    ) == execution_policy_sha256
+    passed = bool(
+        instances_response.status_code == 200
+        and managed_response.status_code == 200
+        and isinstance(instance, dict)
+        and str(instance.get("linear_project") or "") == context.project_slug
+        and str(instance.get("process_status") or "") == "running"
+        and workspace_matches
+        and control.get("status") == "ready"
+        and control.get("last_check_status") == "passed"
+        and policy_matches
+    )
+    return passed, {
+        "instance_count": len(instances) if isinstance(instances, list) else 0,
+        "instance_id": str(instance.get("id") or "") if isinstance(instance, dict) else "",
+        "project_matches": bool(
+            isinstance(instance, dict)
+            and str(instance.get("linear_project") or "") == context.project_slug
+        ),
+        "workspace_matches": workspace_matches,
+        "process_running": bool(
+            isinstance(instance, dict) and instance.get("process_status") == "running"
+        ),
+        "performer_ready": control.get("status") == "ready",
+        "manual_check_passed": control.get("last_check_status") == "passed",
+        "policy_matches": policy_matches,
+    }
+
+
 def _overall_scenario_passed(name: str, run: dict[str, Any] | None, history: list[dict[str, Any]], issue: dict[str, Any] | None, children: list[dict[str, Any]]) -> bool:
     if not isinstance(run, dict):
         return False
     state = str(run.get("state") or "")
     tasks = _overall_task_rows(run)
     if name == "success":
-        return state == "done" and bool(issue and str(issue.get("state") or "").lower() in {"done", "completed"}) and bool(tasks) and all(str(task.get("state") or "") == "done" for task in tasks) and all(str(child.get("state") or "").lower() in {"done", "completed"} for child in children)
+        return state == "done" and bool(issue and _linear_issue_state_name(issue) in {"done", "completed"}) and bool(tasks) and all(str(task.get("state") or "") == "done" for task in tasks) and all(_linear_issue_state_name(child) in {"done", "completed"} for child in children)
     if name == "rework":
         return state == "done" and bool(tasks) and any(int(task.get("rework_count") or 0) == 1 for task in tasks)
     if name == "block":
         return state == "blocked" and str(run.get("latest_reason") or "").startswith("gate_failed") and bool(tasks) and any(str(task.get("state") or "") == "blocked" and int(task.get("rework_count") or 0) >= 1 for task in tasks)
     if name == "runtime_wait":
-        saw_wait = any(any(wait.get("state") == "open" for wait in snapshot.get("runtime_waits", []) if isinstance(wait, dict)) for snapshot in history)
-        saw_resume = any(str(snapshot.get("state") or "") in {"planning", "executing", "done"} for snapshot in history[1:])
-        return saw_wait and saw_resume
+        wait_index = next(
+            (
+                index
+                for index, snapshot in enumerate(history)
+                if any(
+                    isinstance(wait, dict) and wait.get("state") == "open"
+                    for wait in snapshot.get("runtime_waits", [])
+                )
+            ),
+            None,
+        )
+        if wait_index is None:
+            return False
+        return any(
+            str(snapshot.get("state") or "") in {"planning", "executing", "done"}
+            and not any(
+                isinstance(wait, dict) and wait.get("state") == "open"
+                for wait in snapshot.get("runtime_waits", [])
+            )
+            for snapshot in history[wait_index + 1 :]
+        )
     return False
 
 
@@ -2032,15 +2191,28 @@ def _run_overall_phase(context: _RunContext, prerequisites: list[dict[str, Any]]
     same_run = all(str(report.get("run_id") or "") == context.run_id for report in prerequisites)
     metadata_required = not failed and any(bool(report.get("checks")) for report in prerequisites)
     metadata_failures: list[str] = []
+    execution_policy_sha256 = ""
     if metadata_required:
         report_by_phase = {str(report.get("phase") or ""): report for report in prerequisites}
         oauth_project = (report_by_phase.get("oauth", {}).get("observations") or {}).get("selected_project") or {}
         linear_project = (report_by_phase.get("linear", {}).get("observations") or {}).get("project") or {}
         performer_observations = report_by_phase.get("performer", {}).get("observations") or {}
-        if not str(oauth_project.get("id") or "") or not str(linear_project.get("id") or ""):
+        oauth_project_id = str(oauth_project.get("id") or "")
+        linear_project_id = str(linear_project.get("id") or "")
+        oauth_project_slug = str(oauth_project.get("slug") or oauth_project.get("slug_id") or "")
+        linear_project_slug = str(linear_project.get("slug") or linear_project.get("slug_id") or "")
+        if (
+            not oauth_project_id
+            or oauth_project_id != linear_project_id
+            or oauth_project_slug != context.project_slug
+            or linear_project_slug != context.project_slug
+        ):
             metadata_failures.append("project_identity")
-        if not str(performer_observations.get("seed_hash") or "") or not str(performer_observations.get("config_sha256") or ""):
-            metadata_failures.append("profile_or_seed_hash")
+        execution_policy_sha256 = str(
+            performer_observations.get("execution_policy_sha256") or ""
+        )
+        if re.fullmatch(r"[0-9a-f]{64}", execution_policy_sha256) is None:
+            metadata_failures.append("execution_policy_identity")
     if failed or not same_run or metadata_failures:
         blocked = [*failed, "run_identity"] if not same_run else [*failed]
         blocked.extend(metadata_failures)
@@ -2065,7 +2237,27 @@ def _run_overall_phase(context: _RunContext, prerequisites: list[dict[str, Any]]
     managed_runs = observer.get_authenticated("/api/v1/managed-runs")
     conductor_url = context.settings.get("conductor_url", "").strip()
     conductor = _ConductorObserver(conductor_url, timeout=context.timeout) if conductor_url else None
-    if conductor_url:
+    binding_ok = False
+    binding_observation: dict[str, Any] = {"conductor_url_present": bool(conductor_url)}
+    if conductor is not None and not conductor.error_code:
+        binding_ok, binding_observation = _overall_conductor_binding_ready(
+            conductor,
+            context,
+            execution_policy_sha256,
+        )
+    _append_check(
+        checks,
+        failures,
+        name="overall_conductor_binding_ready",
+        passed=binding_ok,
+        group="binding",
+        error_code="overall_conductor_binding_mismatch",
+        reason="Overall requires one running Conductor bound to the selected project, repository, and compatible checked policy.",
+        observations=binding_observation,
+        action_required=True,
+        next_action="bind_and_check_the_selected_conductor_instance",
+    )
+    if binding_ok:
         artifacts.extend(probe_artifacts)
     observations: dict[str, Any] = {
         "fixture_root": str(context.artifact_root / "fixtures"),
@@ -2096,8 +2288,9 @@ def _run_overall_phase(context: _RunContext, prerequisites: list[dict[str, Any]]
     fixture: LinearFixture | None = None
     project: dict[str, Any] | None = None
     state: dict[str, str] | None = None
+    started_state: dict[str, str] | None = None
     app_user_id = ""
-    if conductor is not None and not conductor.error_code:
+    if binding_ok and conductor is not None:
         installation = observer.get_authenticated("/api/v1/linear/installations")
         active = installation.payload.get("active") if isinstance(installation.payload, dict) else None
         app_user_id = str(active.get("app_user_id") or "") if isinstance(active, dict) else ""
@@ -2106,7 +2299,11 @@ def _run_overall_phase(context: _RunContext, prerequisites: list[dict[str, Any]]
                 try:
                     fixture = LinearFixture.from_environment(timeout=min(max(context.timeout, 0.1), 20.0))
                     project = fixture.project(context.project_slug)
-                    state = _select_backlog_state(fixture.workflow_states(str((project.get("team") or {}).get("id") or "")))
+                    workflow_states = fixture.workflow_states(
+                        str((project.get("team") or {}).get("id") or "")
+                    )
+                    state = _select_backlog_state(workflow_states)
+                    started_state = _select_started_state(workflow_states)
                 except (LinearFixtureError, ValueError):
                     fixture = None
         if repository_ok and fixture is not None and project is not None and state is not None:
@@ -2128,13 +2325,42 @@ def _run_overall_phase(context: _RunContext, prerequisites: list[dict[str, Any]]
                 except LinearFixtureError as exc:
                     observations["scenarios"][name] = {"error_code": _sanitize_reason(exc)}
 
-    if conductor is not None and not conductor.error_code and scenario_issues:
+    if binding_ok and conductor is not None and scenario_issues:
         with _fixture_environment():
             for name in scenario_names:
                 issue = scenario_issues.get(name)
                 if issue is None:
+                    check_name = {"success": "overall_success_closure", "rework": "overall_gate_rework_block", "block": "overall_gate_rework_block", "runtime_wait": "overall_runtime_wait_resumable"}[name]
+                    _append_check(checks, failures, name=check_name, passed=False, group="workflow", error_code="overall_scenario_issue_create_failed", reason=f"The real {name} scenario issue was not created.", observations=observations["scenarios"].get(name, {}), action_required=True, next_action="inspect_linear_fixture_issue_creation")
                     continue
                 run, history, latest = _overall_conductor_run(conductor, str(issue.get("id") or ""), timeout=context.timeout)
+                plan_contract_ok = _overall_plan_contract_ok(name, run)
+                runtime_wait_resumed = False
+                runtime_wait_error = ""
+                if (
+                    name == "runtime_wait"
+                    and plan_contract_ok
+                    and fixture is not None
+                    and started_state is not None
+                    and repository_path
+                ):
+                    runtime_wait_resumed, runtime_wait_error = _overall_resume_runtime_wait(
+                        run,
+                        fixture,
+                        Path(repository_path),
+                        started_state,
+                    )
+                    if runtime_wait_resumed:
+                        resumed_run, resumed_history, latest = _overall_conductor_run(
+                            conductor,
+                            str(issue.get("id") or ""),
+                            timeout=context.timeout,
+                            wait_for_runtime_wait_resolution=True,
+                        )
+                        run = resumed_run or run
+                        for snapshot in resumed_history:
+                            if not history or snapshot != history[-1]:
+                                history.append(snapshot)
                 children: list[dict[str, Any]] = []
                 current_issue = issue
                 if fixture is not None:
@@ -2143,16 +2369,32 @@ def _run_overall_phase(context: _RunContext, prerequisites: list[dict[str, Any]]
                         children = fixture.children(str(issue.get("id") or ""))
                     except LinearFixtureError:
                         children = []
-                passed = _overall_scenario_passed(name, run, history, current_issue, children)
+                passed = plan_contract_ok and (
+                    name != "runtime_wait" or runtime_wait_resumed
+                ) and _overall_scenario_passed(
+                    name,
+                    run,
+                    history,
+                    current_issue,
+                    children,
+                )
                 observations["scenarios"][name] = {
                     "parent_issue_id": issue.get("id"), "identifier": issue.get("identifier"),
                     "run_id": run.get("run_id") if isinstance(run, dict) else "",
                     "state": run.get("state") if isinstance(run, dict) else "",
                     "history_states": [snapshot.get("state") for snapshot in history],
                     "children": len(children), "status_code": latest.status_code,
+                    "plan_contract_ok": plan_contract_ok,
+                    "runtime_wait_resumed": runtime_wait_resumed,
+                    "runtime_wait_error": runtime_wait_error,
                 }
                 check_name = {"success": "overall_success_closure", "rework": "overall_gate_rework_block", "block": "overall_gate_rework_block", "runtime_wait": "overall_runtime_wait_resumable"}[name]
-                _append_check(checks, failures, name=check_name, passed=passed, group="workflow", error_code="overall_scenario_not_observed", reason=f"Real {name} scenario did not reach its required durable state", observations=observations["scenarios"][name], action_required=True, next_action="inspect_conductor_managed_run_and_linear_projection")
+                error_code = (
+                    "fixture_plan_contract_mismatch"
+                    if not plan_contract_ok
+                    else runtime_wait_error or "overall_scenario_not_observed"
+                )
+                _append_check(checks, failures, name=check_name, passed=passed, group="workflow", error_code=error_code, reason=f"Real {name} scenario did not reach its required durable state", observations=observations["scenarios"][name], action_required=True, next_action="inspect_conductor_managed_run_and_linear_projection")
     else:
         for name in scenario_names:
             check_name = {"success": "overall_success_closure", "rework": "overall_gate_rework_block", "block": "overall_gate_rework_block", "runtime_wait": "overall_runtime_wait_resumable"}[name]

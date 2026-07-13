@@ -197,6 +197,31 @@ class LinearFixture:
         nodes = ((data.get("issue") or {}).get("children") or {}).get("nodes") or []
         return [dict(node) for node in nodes if isinstance(node, dict)]
 
+    def transition_issue(self, issue_id: str, state_id: str) -> dict[str, Any]:
+        data = self.graphql(
+            """
+            mutation($issueId: String!, $stateId: String!) {
+              issueUpdate(id: $issueId, input: {stateId: $stateId}) {
+                success
+                issue { id state { id } }
+              }
+            }
+            """,
+            {"issueId": issue_id, "stateId": state_id},
+        )
+        result = data.get("issueUpdate") or {}
+        issue = result.get("issue") if isinstance(result, dict) else None
+        state = issue.get("state") if isinstance(issue, dict) else None
+        if (
+            not result.get("success")
+            or not isinstance(issue, dict)
+            or str(issue.get("id") or "") != issue_id
+            or not isinstance(state, dict)
+            or str(state.get("id") or "") != state_id
+        ):
+            raise LinearFixtureError("linear_issue_transition_failed")
+        return dict(issue)
+
 
 def required_environment() -> dict[str, str]:
     """Return non-secret real-flow settings without exposing secret values."""

@@ -470,9 +470,11 @@ pytest regression tests.
 ### Preconditions
 
 The runner must verify `oauth.status == passed`, `linear.status == passed`, and
-`performer.status == passed` for the same `run_id`, profile hash, project id,
-and staged-seed hash. Otherwise Overall writes `status=skipped` and
-`blocked_by` without mutating Linear.
+`performer.status == passed` for the same `run_id` and Linear project identity,
+and must require the Performer phase's provider-neutral execution-policy hash.
+It must not publish a provider seed, authentication, or configuration hash.
+Otherwise Overall writes `status=skipped` and `blocked_by` without mutating
+Linear.
 
 The runner observes the already enrolled Conductor at
 `SYMPHONY_E2E_CONDUCTOR_URL`; it does not enroll a replacement process or
@@ -552,9 +554,11 @@ event in the real batch.
 
 ### Ordered product flow
 
-1. Verify the already enrolled Conductor binding and its profile generation/hash
-   through the authenticated runtime observation and local Conductor API. The
-   runner never mutates `memberIds`, starts OAuth, or supplies a bearer.
+1. Verify through the authenticated runtime observation and local Conductor API
+   that exactly one running instance is bound to the selected project and
+   disposable workspace, and that its ready manual Check matches the
+   provider-neutral execution-policy hash. The runner never mutates
+   `memberIds`, starts OAuth, or supplies a bearer.
 2. Create a fresh delegated parent issue after binding is ready. Do not move it
    manually to `In Review` or `Done`.
 3. Let Podium polling and `poll_podium_dispatch_once()` create and lease one

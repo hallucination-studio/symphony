@@ -164,3 +164,37 @@ def test_linear_fixture_creates_a_parent_issue_with_explicit_parent_null(monkeyp
         "description": "Real-flow fixture parent.",
         "delegateId": "app-user-1",
     }
+
+
+def test_linear_fixture_transitions_issue_to_explicit_state(monkeypatch) -> None:
+    request = httpx.Request("POST", "https://api.linear.app/graphql")
+    response = httpx.Response(
+        200,
+        request=request,
+        json={
+            "data": {
+                "issueUpdate": {
+                    "success": True,
+                    "issue": {"id": "wait-1", "state": {"id": "state-started"}},
+                }
+            }
+        },
+    )
+    captured: dict[str, object] = {}
+
+    def fake_post(*args, **kwargs):
+        captured.update(kwargs)
+        return response
+
+    monkeypatch.setattr(linear_fixture.httpx, "post", fake_post)
+
+    issue = linear_fixture.LinearFixture("fixture-token").transition_issue(
+        "wait-1",
+        "state-started",
+    )
+
+    assert issue["id"] == "wait-1"
+    assert captured["json"]["variables"] == {
+        "issueId": "wait-1",
+        "stateId": "state-started",
+    }

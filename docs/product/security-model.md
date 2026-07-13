@@ -61,8 +61,9 @@ The harness copies only `config.toml`, `auth.json`, `version.json`, and
 `models_cache.json` when present, requires the authentication/config seed
 baseline, passes the temporary context only through the installed process
 environment, and deletes it after the Performer phase. Reports contain only
-presence, hashes, normalized results, and sanitized artifact paths, never the
-staged context path or file contents.
+provider-neutral policy hashes, normalized results, and sanitized artifact
+paths; they never contain seed/auth/config content hashes, the staged context
+path, or file contents.
 
 ## Error visibility
 

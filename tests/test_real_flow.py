@@ -149,6 +149,14 @@ def test_select_backlog_state_rejects_ambiguous_candidates() -> None:
         )
 
 
+def test_select_started_state_requires_one_started_state() -> None:
+    assert real_flow._select_started_state(
+        [{"id": "started", "type": "started"}]
+    )["id"] == "started"
+    with pytest.raises(ValueError, match="linear_fixture_started_state_ambiguous"):
+        real_flow._select_started_state([])
+
+
 def test_oauth_phase_collects_all_checks_after_unavailable_session(monkeypatch, tmp_path: Path) -> None:
     class FakeObserver:
         def __init__(self, *_args, **_kwargs):
@@ -201,7 +209,12 @@ def test_linear_phase_is_independent_from_podium_and_oauth(monkeypatch, tmp_path
             return {"viewer": {"id": "viewer-1"}}
 
         def project(self, slug):
-            return {"id": "project-1", "name": "Fixture", "slug": slug, "team": {"id": "team-1"}}
+            return {
+                "id": "project-1",
+                "name": "Fixture",
+                "slugId": slug,
+                "team": {"id": "team-1"},
+            }
 
         def workflow_states(self, _team_id):
             return [{"id": "state-1", "type": "backlog"}]
@@ -235,6 +248,7 @@ def test_linear_phase_is_independent_from_podium_and_oauth(monkeypatch, tmp_path
 
     assert report["status"] == "passed"
     assert all(check["name"].startswith("linear_fixture_") for check in report["checks"])
+    assert report["observations"]["project"]["slug"] == "fixture"
 
 
 def test_real_flow_has_no_active_provider_owned_runtime_path() -> None:
@@ -676,6 +690,11 @@ def test_performer_phase_uses_one_staged_context_for_installed_control_and_turns
     for artifact in report["artifacts"]:
         assert staged_home not in Path(artifact).read_text(encoding="utf-8")
     assert not real_flow._artifact_has_secret(report["artifacts"])
+    assert report["observations"]["execution_policy_sha256"] == real_flow.canonical_sha256(
+        real_flow._REAL_EXECUTION_POLICY
+    )
+    assert "seed_hash" not in report["observations"]
+    assert "config_sha256" not in report["observations"]
 
 
 def test_performer_phase_fails_closed_when_the_approved_seed_is_missing(tmp_path: Path) -> None:
@@ -815,6 +834,185 @@ def test_overall_fixture_contract_rejects_tampered_script(tmp_path: Path) -> Non
     assert real_flow._fixture_contract_ok(paths) is False
 
 
+def test_overall_materialization_ignores_runtime_fixture_state(tmp_path: Path) -> None:
+    fixture_paths, _artifacts = real_flow._prepare_overall_fixtures(tmp_path / "artifacts")
+    repository = tmp_path / "repository"
+    real_flow._git_workspace(repository)
+    context = real_flow._RunContext(
+        run_id="run-materialize",
+        artifact_root=tmp_path / "artifacts",
+        output_path=tmp_path / "report.json",
+        project_slug="fixture",
+        timeout=1,
+        offline=False,
+        settings={"fixture_repository": str(repository)},
+    )
+
+    passed, path, error_code = real_flow._materialize_fixture_repository(
+        context,
+        fixture_paths,
+    )
+
+    assert passed is True
+    assert path == str(repository.resolve())
+    assert error_code == ""
+    assert (repository / ".e2e" / ".gitignore").read_text(encoding="utf-8") == (
+        "state/\ninput-approved\n"
+    )
+
+
+def test_overall_validates_the_committed_plan_against_the_scenario_contract() -> None:
+    run = {
+        "plan": {
+            "tasks": [
+                {
+                    "verification_commands": ["python .e2e/verify_success.py"],
+                    "files_likely_touched": [".e2e/verify_success.py"],
+                }
+            ]
+        }
+    }
+
+    assert real_flow._overall_plan_contract_ok("success", run) is True
+    run["plan"]["tasks"][0]["verification_commands"] = ["true"]
+    assert real_flow._overall_plan_contract_ok("success", run) is False
+
+
+def test_overall_success_reads_nested_linear_state_names() -> None:
+    run = {"state": "done", "tasks": [{"state": "done"}]}
+
+    assert real_flow._overall_scenario_passed(
+        "success",
+        run,
+        [],
+        {"state": {"name": "Done"}},
+        [{"state": {"name": "Completed"}}],
+    ) is True
+
+
+def test_overall_conductor_poll_uses_the_requested_timeout(monkeypatch) -> None:
+    clock = {"now": 0.0}
+
+    class Observer:
+        def get(self, _path: str):
+            state = "done" if clock["now"] >= 61.0 else "executing"
+            return real_flow._HttpObservation(
+                200,
+                {
+                    "managed_runs": {
+                        "runs": [
+                            {
+                                "parent_issue_id": "parent-1",
+                                "run_id": "run-1",
+                                "state": state,
+                                "tasks": [],
+                            }
+                        ]
+                    }
+                },
+            )
+
+    monkeypatch.setattr(real_flow.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(
+        real_flow.time,
+        "sleep",
+        lambda seconds: clock.__setitem__("now", clock["now"] + max(seconds, 1.0)),
+    )
+
+    run, _history, _latest = real_flow._overall_conductor_run(
+        Observer(),
+        "parent-1",
+        timeout=70,
+    )
+
+    assert run["state"] == "done"
+
+
+def test_overall_resumes_runtime_wait_through_marker_and_linear_reopen(tmp_path: Path) -> None:
+    class Fixture:
+        transitions: list[tuple[str, str]] = []
+
+        def transition_issue(self, issue_id: str, state_id: str):
+            self.transitions.append((issue_id, state_id))
+            return {"id": issue_id, "state": {"id": state_id}}
+
+    fixture = Fixture()
+    repository = tmp_path / "repo"
+    (repository / ".e2e").mkdir(parents=True)
+    run = {
+        "runtime_waits": [
+            {
+                "state": "open",
+                "linear_issue_id": "wait-1",
+                "kind": "tool_input_required",
+            }
+        ]
+    }
+
+    resumed, error_code = real_flow._overall_resume_runtime_wait(
+        run,
+        fixture,
+        repository,
+        {"id": "state-started"},
+    )
+
+    assert resumed is True
+    assert error_code == ""
+    assert (repository / ".e2e" / "input-approved").read_text(encoding="utf-8") == "approved\n"
+    assert fixture.transitions == [("wait-1", "state-started")]
+
+
+def test_overall_requires_matching_ready_conductor_binding(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+
+    class Observer:
+        def get(self, path: str):
+            if path == "/api/instances":
+                return real_flow._HttpObservation(
+                    200,
+                    {
+                        "instances": [
+                            {
+                                "id": "instance-1",
+                                "linear_project": "fixture",
+                                "workspace_root": str(repository),
+                                "process_status": "running",
+                            }
+                        ]
+                    },
+                )
+            return real_flow._HttpObservation(
+                200,
+                {
+                    "performer_control": {
+                        "status": "ready",
+                        "last_check_status": "passed",
+                        "execution_policy_sha256": "a" * 64,
+                    }
+                },
+            )
+
+    context = real_flow._RunContext(
+        run_id="run-binding",
+        artifact_root=tmp_path / "artifacts",
+        output_path=tmp_path / "report.json",
+        project_slug="fixture",
+        timeout=1,
+        offline=False,
+        settings={"fixture_repository": str(repository)},
+    )
+
+    passed, observation = real_flow._overall_conductor_binding_ready(
+        Observer(),
+        context,
+        "a" * 64,
+    )
+
+    assert passed is True
+    assert observation["instance_id"] == "instance-1"
+
+
 def test_overall_fencing_probe_uses_durable_store_boundaries(tmp_path: Path) -> None:
     results, artifacts = real_flow._overall_isolated_fencing_probes(tmp_path)
 
@@ -845,8 +1043,29 @@ def test_overall_records_each_scenario_when_managed_runs_are_not_authenticated(m
         offline=False,
         settings={"podium_url": "http://podium", "project_slug": "fixture", "codex_seed": ""},
     )
+    passing_check = {"name": "required", "passed": True, "required": True}
     prerequisites = [
-        real_flow._phase_report(context, phase, "passed") for phase in ("oauth", "linear", "performer")
+        real_flow._phase_report(
+            context,
+            "oauth",
+            "passed",
+            checks=(passing_check,),
+            observations={"selected_project": {"id": "project-1", "slug": "fixture"}},
+        ),
+        real_flow._phase_report(
+            context,
+            "linear",
+            "passed",
+            checks=(passing_check,),
+            observations={"project": {"id": "project-1", "slug": "fixture"}},
+        ),
+        real_flow._phase_report(
+            context,
+            "performer",
+            "passed",
+            checks=(passing_check,),
+            observations={"execution_policy_sha256": "a" * 64},
+        ),
     ]
 
     report = real_flow._run_overall_phase(context, prerequisites)
@@ -854,6 +1073,7 @@ def test_overall_records_each_scenario_when_managed_runs_are_not_authenticated(m
     assert report["status"] == "failed"
     assert {check["name"] for check in report["checks"]} == {
         "overall_fixture_plan_contract",
+        "overall_conductor_binding_ready",
         "overall_success_closure",
         "overall_gate_rework_block",
         "overall_duplicate_result_idempotent",
@@ -862,6 +1082,47 @@ def test_overall_records_each_scenario_when_managed_runs_are_not_authenticated(m
         "overall_redaction_parity",
     }
     assert len(report["artifacts"]) == 4
+
+
+def test_overall_rejects_prerequisites_for_different_projects(tmp_path: Path) -> None:
+    context = real_flow._RunContext(
+        run_id="run-project-mismatch",
+        artifact_root=tmp_path,
+        output_path=tmp_path / "report.json",
+        project_slug="fixture",
+        timeout=1,
+        offline=False,
+        settings={"podium_url": "http://podium"},
+    )
+    passing_check = {"name": "required", "passed": True, "required": True}
+    prerequisites = [
+        real_flow._phase_report(
+            context,
+            "oauth",
+            "passed",
+            checks=(passing_check,),
+            observations={"selected_project": {"id": "project-1", "slug": "fixture"}},
+        ),
+        real_flow._phase_report(
+            context,
+            "linear",
+            "passed",
+            checks=(passing_check,),
+            observations={"project": {"id": "project-2", "slug": "fixture"}},
+        ),
+        real_flow._phase_report(
+            context,
+            "performer",
+            "passed",
+            checks=(passing_check,),
+            observations={"execution_policy_sha256": "a" * 64},
+        ),
+    ]
+
+    report = real_flow._run_overall_phase(context, prerequisites)
+
+    assert report["status"] == "skipped"
+    assert report["blocked_by"] == ["project_identity"]
 
 
 @pytest.mark.parametrize("phase", ["oauth", "linear", "performer"])
