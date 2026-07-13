@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -81,6 +82,23 @@ def test_runtime_resolves_performer_from_python_environment_when_path_is_missing
     assert PerformerRuntime().performer_command == (str(performer),)
 
 
+def test_runtime_resolves_performer_next_to_conductor_launcher_when_python_is_host_interpreter(tmp_path, monkeypatch) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    conductor = bin_dir / "conductor"
+    performer = bin_dir / "performer"
+    conductor.write_text("#!/bin/sh\n", encoding="utf-8")
+    performer.write_text("#!/bin/sh\n", encoding="utf-8")
+    conductor.chmod(0o755)
+    performer.chmod(0o755)
+
+    monkeypatch.setattr("conductor.runtime.shutil.which", lambda _name: None)
+    monkeypatch.setattr("conductor.runtime.sys.argv", [str(conductor)])
+    monkeypatch.setattr("conductor.runtime.sys.executable", "/usr/bin/python3")
+
+    assert PerformerRuntime().performer_command == (str(performer),)
+
+
 def test_runtime_provisions_selected_slot_only_from_explicit_staged_seed(tmp_path, monkeypatch) -> None:
     seed = tmp_path / "staged-seed"
     seed.mkdir()
@@ -98,6 +116,24 @@ def test_runtime_provisions_selected_slot_only_from_explicit_staged_seed(tmp_pat
     slot = tmp_path / "state" / "performer-credentials" / "credential-1" / "CODEX_HOME"
     assert (slot / "auth.json").exists()
     assert (Path(environment["CODEX_HOME"]) / "config.toml").read_text(encoding="utf-8").startswith('model = "managed"')
+
+
+def test_runtime_rejects_symlinked_seed_files(tmp_path, monkeypatch) -> None:
+    seed = tmp_path / "staged-seed"
+    seed.mkdir()
+    outside = tmp_path / "outside-auth.json"
+    outside.write_text("{}", encoding="utf-8")
+    (seed / "auth.json").symlink_to(outside)
+    (seed / "config.toml").write_text("model = 'seed'\n", encoding="utf-8")
+    monkeypatch.setenv("SYMPHONY_E2E_CODEX_HOME_SEED", str(seed))
+
+    with pytest.raises(ValueError, match="codex_seed_symlink_forbidden"):
+        PerformerRuntime().prepare_environment(
+            tmp_path / "state",
+            codex_config_document='model = "managed"\n',
+            credential_id="credential-1",
+            credential_ref="slot:credential-1",
+        )
 
 
 def test_runtime_rejects_stale_fenced_result() -> None:
@@ -118,6 +154,52 @@ def test_runtime_writes_sanitized_instance_log_events(tmp_path) -> None:
     logs = runtime.read_log(log_path, tail=1, order="desc")
     assert logs["lines"] == ["event=performer_turn_completed authorization: [REDACTED]"]
     assert "secret-value" not in logs["logs"]
+
+
+def test_runtime_does_not_forward_parent_credentials_to_performer(tmp_path, monkeypatch) -> None:
+    runtime = PerformerRuntime(performer_command=("performer",))
+    paths = runtime.paths(tmp_path / "attempt")
+    paths.request.write_text("{}", encoding="utf-8")
+    captured: dict[str, object] = {}
+
+    def fake_run(command, *, env, capture_output, text, check, timeout):
+        captured["command"] = command
+        captured["env"] = env
+        paths.result.write_text(json.dumps({"context": {}}), encoding="utf-8")
+        return SimpleNamespace(stdout="", stderr="", returncode=0)
+
+    monkeypatch.setenv("PODIUM_LINEAR_APP_ACCESS_TOKEN", "linear-secret")
+    monkeypatch.setenv("PODIUM_PROXY_TOKEN", "podium-secret")
+    monkeypatch.setenv("LINEAR_API_KEY", "linear-api-secret")
+    monkeypatch.setattr("conductor.runtime.subprocess.run", fake_run)
+
+    runtime.run(paths, codex_home=tmp_path / "codex", env={"CODEX_MODEL": "gpt-5.4"})
+
+    process_env = captured["env"]
+    assert process_env["CODEX_HOME"] == str(tmp_path / "codex")
+    assert process_env["CODEX_MODEL"] == "gpt-5.4"
+    assert "PODIUM_LINEAR_APP_ACCESS_TOKEN" not in process_env
+    assert "PODIUM_PROXY_TOKEN" not in process_env
+    assert "LINEAR_API_KEY" not in process_env
+
+
+def test_runtime_does_not_forward_codex_config_overrides(tmp_path, monkeypatch) -> None:
+    runtime = PerformerRuntime(performer_command=("performer",))
+    paths = runtime.paths(tmp_path / "attempt")
+    paths.request.write_text("{}", encoding="utf-8")
+    captured: dict[str, object] = {}
+
+    def fake_run(command, *, env, capture_output, text, check, timeout):
+        captured["env"] = env
+        paths.result.write_text(json.dumps({"context": {}}), encoding="utf-8")
+        return SimpleNamespace(stdout="", stderr="", returncode=0)
+
+    monkeypatch.setenv("CODEX_CONFIG_OVERRIDES", "model='attacker'")
+    monkeypatch.setattr("conductor.runtime.subprocess.run", fake_run)
+
+    runtime.run(paths, codex_home=tmp_path / "codex")
+
+    assert "CODEX_CONFIG_OVERRIDES" not in captured["env"]
 
 
 def test_runtime_sanitizes_performer_stdout_and_stderr_before_persisting(tmp_path, monkeypatch) -> None:
@@ -141,6 +223,20 @@ def test_runtime_sanitizes_performer_stdout_and_stderr_before_persisting(tmp_pat
     assert "stderr-secret" not in log_text
     assert "Authorization: [REDACTED]" in log_text
     assert "token=[REDACTED]" in log_text
+
+
+def test_runtime_redacts_auth_paths_and_jwt_like_values(tmp_path) -> None:
+    runtime = PerformerRuntime()
+    log_path = tmp_path / "conductor.log"
+    jwt = "eyJ" + "a" * 24 + "." + "b" * 16 + "." + "c" * 16
+
+    runtime.append_event(log_path, f"path=/tmp/.codex/auth.json jwt={jwt}")
+
+    logs = runtime.read_log(log_path, order="asc")["logs"]
+    assert "auth.json" not in logs
+    assert jwt not in logs
+    assert "[REDACTED_PATH]" in logs
+    assert "[REDACTED]" in logs
 
 
 def test_runtime_preserves_sanitized_performer_failure_reason(tmp_path, monkeypatch) -> None:

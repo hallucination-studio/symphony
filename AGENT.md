@@ -168,9 +168,10 @@ The final response must be evidence-backed and specific:
 
 For pipeline, Linear, Conductor, Codex, retry, rework, or delegated-work
 behavior, local tests are necessary but not sufficient when the behavior spans
-the running product. Use the single `tools/real_flow.py` runner and
-`docs/real-flow.md`; it performs strict preflight and records a sanitized
-report without pretending that a gate passed.
+the running product. Use the single `tools/real_flow.py --phase all` runner and
+`docs/real-flow.md`; it executes all three prerequisite phases under one
+`run_id`, records the Overall prerequisite result, and never pretends that a
+gate passed.
 
 Human intervention must be visible in Linear. Pipeline waits use node-level
 `need_human`: Conductor moves the affected issue to the blocked-style state,

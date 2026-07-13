@@ -84,16 +84,18 @@ them. It may additionally carry an optional safe acceptance/Gate summary:
 catalog/rubric, plan version, command counts, score/threshold, provenance,
 manifest/artifact counts, and failure code. Podium independently allowlists
 and bounds that summary; command text/output, findings, and artifact/manifest
-locations remain local. The proposed runtime surface returns only selected
-profile/revision ids, policy/hash, credential method, and sanitized readiness;
-it never returns profile TOML or credential values. The Web does not render
-detailed profile contents in this slice.
+locations remain local. The accepted runtime surface returns only selected
+profile ids, binding-generation/hash, policy/hash, credential method, and
+sanitized readiness; it never returns profile TOML or credential values. The
+Web does not render detailed profile contents in this slice.
 
 ## Hard-cut rules
 
 - New PostgreSQL schema only: no old runtime-group rows are read or migrated;
-  Performer profiles, runtime profiles/revisions, and credential references use
-  the layered normalized schema in ADR-0004.
+  Performer profiles, runtime profiles, and credential references use the
+  layered normalized schema in ADR-0004. Profile rows contain current
+  validated documents; binding generation and hashes fence updates. There are
+  no profile revision tables.
 - Keep Linear OAuth/tokens and browser secret boundaries unchanged.
 - Do not add a generic runtime protocol, outbox framework, WebSocket path,
   cross-model acceptance, or a second scheduler.

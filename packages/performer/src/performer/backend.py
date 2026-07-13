@@ -9,11 +9,14 @@ from performer_api.turns import ExecuteResult, GateResult, RuntimeWait
 from performer_api.validation import ContractValidationError, validate_plan
 from performer_api.workflow import Plan, Task
 
+from .codex_client_helpers import CodexError
 from .schemas import EXECUTE_SCHEMA, GATE_SCHEMA, PLAN_SCHEMA
 
 
 class TurnBackendError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, code: str = "") -> None:
+        super().__init__(message)
+        self.code = code
 
 
 @dataclass(frozen=True)
@@ -120,7 +123,9 @@ class TurnBackend:
                 output_schema=schema,
             )
         except Exception as exc:
-            raise TurnBackendError(str(exc)) from exc
+            code = str(getattr(exc, "code", "") or "") if isinstance(exc, CodexError) else ""
+            reason = f"{code}:{exc}" if code else str(exc)
+            raise TurnBackendError(reason, code=code) from exc
 
 
 def _plan_prompt(issue_description: str) -> str:

@@ -3,8 +3,10 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 import inspect
+import json
 import os
 from pathlib import Path
+import re
 from typing import Any, Callable
 
 from .codex_client_helpers import (
@@ -15,7 +17,10 @@ from .codex_client_helpers import (
     _init_backoff_ms,
     _is_terminal_init_error,
     _is_transient_codex_error,
+    _http_status_from_any,
+    _http_status_from_error_text,
     _latest_turn_identity,
+    _looks_like_upstream_overload,
     _parse_structured_result,
     _string_attr,
     _timeout_seconds,
@@ -60,15 +65,17 @@ class CodexSdkClient:
         )
         client, thread, thread_id = await self._init_thread(workspace_path, existing_thread_id, emit=emit)
         emit({"event": "session_started", "backend": "sdk", "thread_id": thread_id, "session_id": f"{thread_id}-", "cwd": str(workspace_path)})
-        turn_id, session_id, final_response, structured = await self._run_structured_turn(
-            thread,
-            prompt,
-            output_schema,
-            thread_id=thread_id,
-            emit=emit,
-            events=events,
-        )
-        await _close_sdk_client(client)
+        try:
+            turn_id, session_id, final_response, structured = await self._run_structured_turn(
+                thread,
+                prompt,
+                output_schema,
+                thread_id=thread_id,
+                emit=emit,
+                events=events,
+            )
+        finally:
+            await _close_sdk_client(client)
         emit(
             {
                 "event": "turn_completed",
@@ -420,7 +427,15 @@ class CodexSdkClient:
         if self.config.model:
             kwargs["model"] = self.config.model
         if self.config.sandbox:
-            kwargs["sandbox"] = self.config.sandbox
+            try:
+                from openai_codex import Sandbox  # type: ignore
+
+                sandbox_value = self.config.sandbox.replace("_", "-")
+                kwargs["sandbox"] = Sandbox(sandbox_value)
+            except (ImportError, ValueError):
+                # Keep the configured value visible to alternate SDK adapters;
+                # the pinned SDK path above validates it as its enum type.
+                kwargs["sandbox"] = self.config.sandbox
         return kwargs
 
     async def _start_sdk_turn(self, thread: Any, prompt: str, output_schema: dict[str, Any]) -> Any:
@@ -442,10 +457,14 @@ class CodexSdkClient:
     ) -> str | None:
         final_response: str | None = None
         fallback_response: str | None = None
+        terminal_error: CodexError | None = None
         async for event in stream():
             mapped = _sdk_event_to_dict(event)
             if mapped:
                 emit(mapped)
+            event_error = _terminal_sdk_error(event)
+            if event_error is not None:
+                terminal_error = event_error
             usage = _usage_from_any(_event_payload(event))
             if usage is not None:
                 emit({"event": "thread_token_usage_updated", "backend": "sdk", "usage": usage, **usage})
@@ -455,7 +474,38 @@ class CodexSdkClient:
                     final_response = response
                 elif fallback_response is None:
                     fallback_response = response
+        if terminal_error is not None:
+            raise terminal_error
         return final_response or fallback_response
+
+
+def _terminal_sdk_error(event: Any) -> CodexError | None:
+    """Turn the SDK's terminal error notification into an actionable failure.
+
+    The app-server retries transient upstream failures inside the stream and
+    emits a final ``error`` notification when those retries are exhausted. A
+    missing agent message after that notification is not a structured-output
+    problem, so preserve the transport failure instead of misclassifying it.
+    """
+
+    payload = _event_payload(event)
+    event_type = str(payload.get("type") or getattr(event, "method", "") or "")
+    if event_type != "error" or bool(payload.get("willRetry")):
+        return None
+    error = payload.get("error") if isinstance(payload.get("error"), dict) else {}
+    error_text = json.dumps(error, sort_keys=True, default=str)
+    http_status = _http_status_from_any(error) or _http_status_from_error_text(error_text)
+    if http_status in {429, 500, 502, 503, 504}:
+        return CodexError(
+            "upstream_overloaded_exhausted",
+            f"Codex upstream returned HTTP {http_status} after SDK retries",
+            http_status=http_status,
+        )
+    if _looks_like_upstream_overload(error_text):
+        return CodexError("upstream_overloaded_exhausted", "Codex upstream failed after SDK retries", http_status=http_status)
+    if re.search(r"(?i)unauthori[sz]ed|authentication|invalid[_ -]?token|login required", error_text):
+        return CodexError("codex_auth_failed", "Codex authentication failed", http_status=http_status)
+    return CodexError("codex_sdk_error", "Codex SDK reported an unrecoverable turn error", http_status=http_status)
 
 
 def _sdk_event_to_dict(event: Any) -> dict[str, Any] | None:

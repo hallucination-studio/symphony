@@ -83,10 +83,11 @@ PYTHONPATH=$(pwd)/packages/performer-api/src:$(pwd)/packages/performer/src:$(pwd
   .venv/bin/python -m pytest tests/test_minimal_performer_api.py tests/test_conductor_workflow.py tests/test_podium_runtime_polling.py -q
 ```
 
-Real Linear integration runs also pin repo source roots:
+Real Linear integration runs load the staged environment and pin repo source roots:
 
 ```bash
-PYTHONPATH=$(pwd)/tools .venv/bin/python tools/real_flow.py --project-slug <linear-project-slug> --out .test-real-flow/report.json
+set -a && source .env && set +a
+PYTHONPATH=$(pwd)/tools .venv/bin/python tools/real_flow.py --phase all --project-slug "$SYMPHONY_E2E_PROJECT_SLUG" --out .test-real-flow/batch-report.json
 ```
 
 ## Run Conductor
@@ -164,13 +165,14 @@ Managed Conductor endpoints include:
 ## Runtime
 
 Conductor prepares one isolated `CODEX_HOME` under managed instance state for
-each fenced attempt. The approved design gives Podium reusable `runtime_profile`
-revisions plus a Symphony-owned `performer_profile` wrapper. Each project
-binding selects a Performer revision, which references one runtime revision and
-a Conductor-local credential slot. The Web receives only sanitized profile,
-revision, policy, and readiness metadata. Raw OAuth/API credentials never leave
-the local credential slot. The execute turn works only within the approved task
-scope, while the gate turn is read-only.
+each fenced attempt. The accepted design gives Podium reusable `runtime_profile`
+rows plus a Symphony-owned `performer_profile` wrapper. Each project binding
+selects a Performer profile and a Conductor-local credential slot. Profile rows
+hold current validated documents; the binding generation and content hashes
+fence `project.configure` updates. The Web receives only sanitized profile,
+generation/hash, policy, and readiness metadata. Raw OAuth/API credentials
+never leave the local credential slot. The execute turn works only within the
+approved task scope, while the gate turn is read-only.
 Verification commands run before the Codex Gate and their evidence is stored
 with the task result.
 

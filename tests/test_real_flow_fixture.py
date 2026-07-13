@@ -25,6 +25,16 @@ def test_linear_fixture_uses_bearer_for_podium_app_token(monkeypatch) -> None:
     assert captured["headers"]["Authorization"] == "Bearer oauth-token"
 
 
+def test_linear_fixture_ignores_endpoint_override_from_environment(monkeypatch) -> None:
+    monkeypatch.delenv("LINEAR_API_KEY", raising=False)
+    monkeypatch.setenv("PODIUM_LINEAR_APP_ACCESS_TOKEN", "oauth-token")
+    monkeypatch.setenv("LINEAR_GRAPHQL_ENDPOINT", "https://attacker.invalid/graphql")
+
+    fixture = linear_fixture.LinearFixture.from_environment()
+
+    assert fixture.endpoint == linear_fixture.DEFAULT_ENDPOINT
+
+
 def test_linear_fixture_normalizes_current_project_teams_shape(monkeypatch) -> None:
     request = httpx.Request("POST", "https://api.linear.app/graphql")
     response = httpx.Response(
@@ -117,6 +127,10 @@ def test_linear_fixture_creates_a_parent_issue_with_explicit_parent_null(monkeyp
                         "title": "Fixture parent",
                         "parent": None,
                         "delegate": {"id": "app-user-1"},
+                        "project": {"id": "project-1"},
+                        "state": {"id": "state-backlog"},
+                        "project": {"id": "project-1"},
+                        "state": {"id": "state-backlog"},
                     },
                 }
             }

@@ -6,10 +6,11 @@ contraction plans. [`spec.md`](spec.md) is the product contract;
 [`todo.md`](todo.md) is the current work checklist; [`docs/modules`](../docs/modules/README.md)
 records one design baseline per module.
 
-The next Codex configuration slice is specified by the proposed
+The Codex configuration slice follows the accepted
 [`ADR-0004`](../docs/decisions/0004-normalized-codex-profiles-and-credential-references.md).
-Implementation is intentionally paused until the user approves its normalized
-tables and local-only credential boundary.
+The normalized current profile rows, local credential slots, and binding
+generation/hash fencing are implemented; real-flow verification remains
+environment-dependent.
 
 ## Outcome
 
@@ -110,22 +111,17 @@ HTTP API is separate from that transport.
 
 ## Remaining Work
 
-1. Await approval of the layered Performer profile/runtime profile/revision/
-   credential/binding design in ADR-0004; do not implement the previous
-   single-table sketch.
-2. After approval, implement and verify the profile revision carried by
-   `project.configure`, local credential selection, and isolated attempt
-   materialization.
-3. Keep the sanitized evidence projection contract covered by the existing
+1. Keep the accepted current profile documents, binding generation/hash fencing,
+   local credential selection, and isolated attempt materialization covered by
+   regression tests; do not add profile revision tables.
+2. Keep the sanitized evidence projection contract covered by the existing
    operator and Linear surfaces. No new runner, endpoint, or evidence child-issue
    tree is allowed.
-4. Run a scoped real Linear/OAuth/Codex product flow after the local rebuild.
-   The fixture now reaches the current Linear API; the configured project probe
-   records a sanitized `http_401` credential failure in
-   `.test-real-flow/mvp-real-probe.json`. Missing project/Podium variables still
-   fail closed in `.test-real-flow/mvp-real-report.json`.
-   `tools/real_flow.py` remains a strict
-   preflight/observation tool, not proof of a complete external flow.
+3. Run the single staged real Linear/OAuth/Codex batch after the local rebuild.
+   `tools/real_flow.py --phase all` records all three prerequisite phases and
+   Overall under one `run_id`; current external blockers remain visible in
+   the newest `.test-real-flow/batch-report-*.json` and do not count as
+   acceptance.
 
 ## Verification Rule
 

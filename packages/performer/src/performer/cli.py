@@ -181,7 +181,11 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         return 0
     except Exception as exc:
-        print(f"performer startup failed: {exc}", flush=True)
+        code = str(getattr(exc, "code", "") or "").strip()
+        reason = str(exc)
+        if code and not reason.startswith(f"{code}:"):
+            reason = f"{code}:{reason}"
+        print(f"performer startup failed: {reason}", flush=True)
         return 1
     return 0
 

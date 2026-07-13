@@ -1,10 +1,9 @@
 # Minimal Polling Workflow Checklist
 
-Status: local MVP acceptance closure is complete; the normalized
-Podium-managed Codex profile/local-login design is awaiting user approval.
-No implementation of the rejected single-table sketch is retained. External
-Linear/OAuth/Codex verification remains blocked until the approved design is
-implemented and the staged credentials/services are exercised. This checklist
+Status: the normalized Podium-managed Codex profile/local-login design is
+approved and implemented. No implementation of the rejected single-table
+sketch is retained. External Linear/OAuth/Codex verification remains blocked
+until the staged credentials/services are healthy and exercised. This checklist
 is the active scope ledger;
 `tasks/spec.md` remains the product contract.
 
@@ -28,8 +27,9 @@ is the active scope ledger;
 
 - [x] Consolidate Conductor persistence into one fresh `workflow.db`.
 - [ ] Replace the removed profile compatibility value with layered Podium
-  Performer profiles -> runtime profiles/revisions plus a Performer binding
-  reference; do not widen `project_bindings` with TOML or credential fields.
+  Performer profiles -> runtime profiles plus a Performer binding and separate
+  credential reference; use binding generation/hash fencing and do not widen
+  `project_bindings` with TOML or credential fields.
 - [x] Remove persisted runtime-group ownership; retain the deterministic public
   alias `group_{conductor_id}`.
 - [x] Collapse Conductor smoke/command wrappers into their unique owners.
@@ -77,25 +77,24 @@ is the active scope ledger;
 - **Deferred ideas:** richer real-flow orchestration automation and optional Web
   rendering of detailed evidence remain outside this closure slice.
 
-## Podium-managed Codex configuration/local-login slice ledger (design pending)
+## Podium-managed Codex configuration/local-login slice ledger
 
 - **Authorized:** design a reusable Podium Performer-profile wrapper that
-  references runtime profiles/revisions, separate credential metadata/reference
+  references current runtime profiles, separate credential metadata/reference
   records, and Conductor-local selected OAuth/API-key slots for isolated
   Performer attempts. Official `codex login` ChatGPT OAuth without an API token
   is supported.
-- **Required consequences:** layered Performer/runtime profile facts,
-  immutable revisions, credential metadata, and Performer binding; strict
-  TOML/secret validation; durable revision/hash/policy; idempotent/stale
-  command handling; isolated attempt materialization; sanitized
-  readiness/failure fields; local credentials kept outside Podium; focused
-  tests and real-flow evidence.
+- **Required consequences:** layered current Performer/runtime profile facts,
+  binding generation/hash fencing, credential metadata, and Performer binding;
+  strict TOML/secret validation; idempotent/stale command handling; isolated
+  attempt materialization; sanitized readiness/failure fields; local
+  credentials kept outside Podium; focused tests and real-flow evidence.
 - **Out of scope:** sending `auth.json`, keyring exports, API keys, or access
   tokens through Podium; a Podium credential vault; a second runtime transport;
   a new scheduler; or detailed credential rendering in Web/Linear.
-- **Assumptions requiring approval:** the ADR-0004 layered table shape, local-only
-  credentials, and file/directory profile provisioning listed in its approval
-  questions. No production implementation may start before approval.
+- **Assumptions requiring approval:** none. The user approved the simplified
+  ADR-0004 layered table shape, mutable profile rows with generation/hash
+  fencing, local-only credentials, and file/directory profile provisioning.
 - **Deferred ideas:** KMS-backed Podium API-key storage, browser editing UI,
   and a managed credential brokerage require a separate product decision.
 
@@ -119,15 +118,19 @@ is the active scope ledger;
 
 ## Verification status
 
-- [x] `make test` — 115 Python tests passed, including the full success closure,
-      Gate rework/block, duplicate/stale result, and runtime redaction cases.
+- [x] `make test` — 177 Python tests passed, including Gate rework/block,
+      duplicate/stale result, runtime redaction, and real-flow contract cases.
 - [x] `cd packages/podium/web && npm run test && npm run lint && npm run
       design:lint && npm run build` — 27 Web tests passed; lint/build clean
       (design lint: 0 errors, 0 warnings).
 - [x] `tools/real_flow.py --offline` — staged Codex seed preflight passed;
       report: `.test-real-flow/mvp-offline-report.json`.
-- [x] MVP acceptance closure evidence for duplicate/stale result handling and
-      runtime wait/failure/log redaction is covered by the 113-test suite.
+- [x] `tools/real_flow.py --phase all` — one shared `run_id`, all three phases,
+      Overall `blocked_by` when prerequisites fail, and sanitized per-run
+      artifact manifest; latest evidence: `.test-real-flow/batch-report-final-verified.json`.
+- [x] MVP transition and redaction behavior is covered by the 177-test suite;
+      Overall real issue scenarios remain acceptance-gated on external OAuth,
+      Linear, Codex, and disposable-repository prerequisites.
 - [ ] Real Linear/OAuth/Codex product flow — current configured project probe
       reaches Linear but returns sanitized `linear_request_failed:http_401`;
       evidence: `.test-real-flow/mvp-real-probe.json`. The standard report also

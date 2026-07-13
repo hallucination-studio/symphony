@@ -26,8 +26,9 @@ are normative and must stay synchronized with `src/styles/tokens.css`.
   that DTO before Podium Web sees them.
 - `runtime_group_id` remains displayable as a stable alias even though Podium
   no longer stores a runtime-group table.
-- The browser receives only sanitized selected profile/revision metadata and
-  readiness; it does not configure credential slots or render profile TOML.
+- The browser receives only sanitized selected profile metadata,
+  binding-generation/hash, and readiness; it does not configure credential
+  slots or render profile TOML.
 
 ## What the current UI does not claim
 

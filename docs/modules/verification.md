@@ -24,11 +24,11 @@ and the direct pinned-SDK adapter shape.
 
 ## Real-flow boundary
 
-`tools/real_flow.py` is a strict sanitized preflight, not a full E2E runner.
-It validates the configured Linear project and environment prerequisites but
-does not create/delegate a business issue, run Codex, assert a gate, or archive
-a complete product flow. `tools/linear_fixture.py` owns project/issue/child
-reads and sanitized GraphQL errors.
+`tools/real_flow.py --phase all` is the single sanitized staged real E2E runner.
+It records OAuth, Linear, Performer, and Overall reports under one `run_id`;
+phase-only invocations remain diagnostic and are not acceptance evidence.
+`tools/linear_fixture.py` owns project/issue/child reads and sanitized GraphQL
+errors.
 
 Do not report a real Linear/OAuth/Codex flow as passed until a scoped test
 project has executed the actual product path and its report contains the

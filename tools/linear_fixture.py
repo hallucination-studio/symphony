@@ -33,17 +33,15 @@ class LinearFixture:
         if api_key:
             return cls(
                 api_key,
-                os.environ.get("LINEAR_GRAPHQL_ENDPOINT", DEFAULT_ENDPOINT).strip() or DEFAULT_ENDPOINT,
-                timeout,
+                timeout=timeout,
             )
         api_key = os.environ.get("PODIUM_LINEAR_APP_ACCESS_TOKEN", "").strip()
         if not api_key:
             raise LinearFixtureError("LINEAR_API_KEY or PODIUM_LINEAR_APP_ACCESS_TOKEN is required for a real flow")
         return cls(
             api_key,
-            os.environ.get("LINEAR_GRAPHQL_ENDPOINT", DEFAULT_ENDPOINT).strip() or DEFAULT_ENDPOINT,
-            timeout,
-            "Bearer",
+            timeout=timeout,
+            authorization_scheme="Bearer",
         )
 
     def graphql(self, query: str, variables: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -56,6 +54,7 @@ class LinearFixture:
                 },
                 json={"query": query, "variables": variables or {}},
                 timeout=self.timeout,
+                trust_env=False,
             )
             response.raise_for_status()
             payload = response.json()
@@ -144,6 +143,8 @@ class LinearFixture:
                   id identifier title
                   parent { id identifier }
                   delegate { id }
+                  project { id }
+                  state { id }
                 }
               }
             }
@@ -163,6 +164,15 @@ class LinearFixture:
             raise LinearFixtureError("linear_issue_create_failed")
         if issue.get("parent") is not None:
             raise LinearFixtureError("linear_parent_parent_mismatch")
+        delegate = issue.get("delegate") if isinstance(issue.get("delegate"), dict) else {}
+        project = issue.get("project") if isinstance(issue.get("project"), dict) else {}
+        state = issue.get("state") if isinstance(issue.get("state"), dict) else {}
+        if delegate_id and str(delegate.get("id") or "") != delegate_id:
+            raise LinearFixtureError("linear_parent_delegate_mismatch")
+        if str(project.get("id") or "") != project_id:
+            raise LinearFixtureError("linear_parent_project_mismatch")
+        if str(state.get("id") or "") != state_id:
+            raise LinearFixtureError("linear_parent_state_mismatch")
         return dict(issue)
 
     def issue(self, issue_id: str) -> dict[str, Any]:
@@ -195,6 +205,13 @@ def required_environment() -> dict[str, str]:
         "project_slug": os.environ.get("SYMPHONY_E2E_PROJECT_SLUG", "").strip(),
         "podium_url": os.environ.get("SYMPHONY_E2E_PODIUM_URL", "").strip(),
         "codex_seed": os.environ.get("SYMPHONY_E2E_CODEX_HOME_SEED", "").strip(),
+        "conductor_url": os.environ.get("SYMPHONY_E2E_CONDUCTOR_URL", "").strip(),
+        "performer_profile_dir": os.environ.get("PODIUM_PERFORMER_PROFILE_DIR", "").strip(),
+        "performer_profile_name": os.environ.get("PODIUM_PERFORMER_PROFILE_NAME", "").strip(),
+        "fixture_repository": os.environ.get("SYMPHONY_E2E_FIXTURE_REPOSITORY", "").strip(),
+        # The browser writes only sanitized same-origin responses here.  The
+        # runner never receives a cookie or bearer value.
+        "browser_observation": os.environ.get("SYMPHONY_E2E_BROWSER_OBSERVATION_PATH", "").strip(),
     }
 
 

@@ -26,7 +26,6 @@ _CODEX_ENV_KEYS = (
     "CODEX_MODEL",
     "CODEX_SDK_CODEX_BIN",
     "CODEX_SANDBOX",
-    "CODEX_CONFIG_OVERRIDES",
     "CODEX_HARD_TURN_TIMEOUT_MS",
     "CODEX_READ_TIMEOUT_MS",
     "CODEX_INIT_MAX_ATTEMPTS",
@@ -36,6 +35,7 @@ _CODEX_ENV_KEYS = (
     "CODEX_OVERLOAD_INITIAL_DELAY_MS",
     "CODEX_OVERLOAD_MAX_DELAY_MS",
 )
+_PERFORMER_PROCESS_ENV_KEYS = frozenset({"PATH", "LANG", "LC_ALL", "TMPDIR", *_CODEX_ENV_KEYS})
 _CODEX_CONFIG_ALLOWED_TOP_LEVEL_KEYS = {
     "model_provider",
     "model",
@@ -78,7 +78,11 @@ class PerformerRuntime:
     ) -> dict[str, str]:
         codex_home = instance_state_root / "runtime-homes" / _safe_scope(home_scope or "attempt") / "codex"
         try:
-            codex_home.mkdir(parents=True, exist_ok=True)
+            if codex_home.exists() and not codex_home.is_dir():
+                raise OSError("CODEX_HOME path is not a directory")
+            if codex_home.is_dir():
+                shutil.rmtree(codex_home)
+            codex_home.mkdir(parents=True, exist_ok=False)
         except OSError as exc:
             raise ValueError(f"isolated CODEX_HOME could not be materialized: {codex_home}") from exc
         if not codex_home.is_dir():
@@ -122,6 +126,13 @@ class PerformerRuntime:
             source_path = source / name
             if not source_path.is_file():
                 continue
+            if source_path.is_symlink():
+                raise ValueError("codex_seed_symlink_forbidden")
+            try:
+                if source_path.resolve(strict=True).parent != source.resolve(strict=True):
+                    raise ValueError("codex_seed_path_escape")
+            except OSError as exc:
+                raise ValueError("codex_seed_path_unreadable") from exc
             destination_path = destination / name
             if name == "config.toml":
                 destination_path.write_text(
@@ -130,6 +141,8 @@ class PerformerRuntime:
                 )
             else:
                 shutil.copy2(source_path, destination_path)
+            if name == "auth.json":
+                destination_path.chmod(0o600)
 
     def _provision_credential_slot(self, instance_state_root: Path, credential_id: str) -> None:
         source = _codex_seed_from_environment()
@@ -137,7 +150,9 @@ class PerformerRuntime:
             return
         destination = instance_state_root / "performer-credentials" / _safe_scope(credential_id) / "CODEX_HOME"
         try:
-            destination.mkdir(parents=True, exist_ok=True)
+            if destination.exists():
+                shutil.rmtree(destination)
+            destination.mkdir(parents=True, exist_ok=False)
             self._copy_codex_home_seed(source, destination)
         except OSError as exc:
             raise ValueError("managed_codex_credential_slot_materialization_failed") from exc
@@ -194,10 +209,22 @@ class PerformerRuntime:
         paths.request.write_text(json.dumps(payload, sort_keys=True, separators=(",", ":")), encoding="utf-8")
 
     def run(self, paths: RuntimePaths, *, codex_home: Path, env: dict[str, str] | None = None) -> dict[str, Any]:
-        process_env = {**os.environ, **(env or {}), "CODEX_HOME": str(codex_home)}
+        supplied = env or {}
+        process_env = {
+            key: value
+            for key, value in {**os.environ, **supplied}.items()
+            if key in _PERFORMER_PROCESS_ENV_KEYS
+        }
+        process_env["CODEX_HOME"] = str(codex_home)
         command = [*self.performer_command, "--turn-request-path", str(paths.request), "--turn-result-path", str(paths.result)]
         try:
-            completed = subprocess.run(command, env=process_env, capture_output=True, text=True, check=False)
+            timeout_seconds = _performer_timeout_seconds(process_env)
+            completed = subprocess.run(command, env=process_env, capture_output=True, text=True, check=False, timeout=timeout_seconds)
+        except subprocess.TimeoutExpired as exc:
+            stdout = _sanitize_log_stream(exc.stdout)
+            stderr = _sanitize_log_stream(exc.stderr)
+            paths.log.write_text(f"stdout\n{stdout}\nstderr\n{stderr}\nerror_code=performer_timeout\n", encoding="utf-8")
+            raise RuntimeExecutionError("performer_timeout") from exc
         except OSError as exc:
             raise RuntimeExecutionError(f"performer_start_failed:{exc}") from exc
         paths.log.write_text(
@@ -234,7 +261,10 @@ def _codex_seed_from_environment() -> Path | None:
         raw = os.environ.get(raw[1:], "").strip()
     if not raw:
         return None
-    source = Path(raw).expanduser().resolve()
+    source_path = Path(raw).expanduser()
+    if source_path.is_symlink():
+        raise ValueError("Codex seed symlink is not allowed")
+    source = source_path.resolve()
     if source.name == ".codex":
         raise ValueError("Codex seed must be a fixed copied directory, not ~/.codex")
     if not source.is_dir():
@@ -243,13 +273,20 @@ def _codex_seed_from_environment() -> Path | None:
 
 
 def _default_performer_command() -> tuple[str, ...]:
-    installed = shutil.which("performer")
-    if installed:
-        return (installed,)
+    # A venv console script may resolve ``sys.executable`` to the host Python
+    # (not the venv path) while ``sys.argv[0]`` still points at ``bin/conductor``.
+    # Resolve the sibling console script before falling back to PATH.
+    launcher = Path(sys.argv[0]).expanduser()
+    if launcher.name in {"conductor", "conductor.exe"}:
+        sibling = launcher.resolve().with_name("performer")
+        if sibling.is_file() and os.access(sibling, os.X_OK):
+            return (str(sibling),)
     sibling = Path(sys.executable).with_name("performer")
     if sibling.is_file() and os.access(sibling, os.X_OK):
         return (str(sibling),)
-    return ("performer",)
+    # Never fall back to an arbitrary PATH executable.  The module invocation
+    # stays within the interpreter that launched Conductor.
+    return (sys.executable, "-m", "performer")
 
 
 def _trust_codex_project(config_path: Path, workspace_path: Path) -> None:
@@ -329,6 +366,9 @@ def _sanitize_log_event(value: str) -> str:
         lambda match: f"{match.group(1)}=[REDACTED]",
         text,
     )
+    text = re.sub(r"(?i)(?:^|[\s=:])(?:[A-Za-z]:)?[^\s,;]*(?:[/\\](?:\.codex|auth\.json)|(?:^|:)auth\.json)(?:[/\\][^\s,;]*)?", " [REDACTED_PATH]", text)
+    text = re.sub(r"(?i)(?:^|[\s=:])auth\.json(?:[/\\][^\s,;]*)?", " [REDACTED_PATH]", text)
+    text = re.sub(r"(?i)\beyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b", "[REDACTED]", text)
     return re.sub(
         r"(?i)\b(?:sk-[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b",
         "[REDACTED]",
@@ -337,7 +377,17 @@ def _sanitize_log_event(value: str) -> str:
 
 
 def _sanitize_log_stream(value: Any) -> str:
-    return "\n".join(_sanitize_log_event(line) for line in str(value or "").splitlines())
+    sanitized = "\n".join(_sanitize_log_event(line) for line in str(value or "").splitlines())
+    return sanitized[-262_144:]
+
+
+def _performer_timeout_seconds(environment: dict[str, str]) -> float:
+    raw = environment.get("CODEX_HARD_TURN_TIMEOUT_MS") or os.environ.get("CODEX_HARD_TURN_TIMEOUT_MS") or "3600000"
+    try:
+        milliseconds = max(1_000, int(raw))
+    except (TypeError, ValueError):
+        milliseconds = 3_600_000
+    return max(30.0, min(3_900.0, milliseconds / 1000.0 + 30.0))
 
 
 def _process_failure_reason(stdout: Any, stderr: Any) -> str:

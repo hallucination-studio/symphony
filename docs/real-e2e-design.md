@@ -1,10 +1,9 @@
 # Real E2E Design: OAuth, Linear, Performer, and MVP Closure
 
-Status: **agent execution contract, design only**. This document is the
-source of truth for the staged real E2E work. It does not authorize a product
-code change, an OAuth reauthorization, a new runner, or a second acceptance
-framework. An implementation change is allowed only after this plan is
-approved and its slice ledger is recorded.
+Status: **implemented agent execution contract**. This document is the source
+of truth for the staged real E2E runner and acceptance rubric. It authorizes the
+single `tools/real_flow.py` batch implementation, but never an OAuth
+reauthorization, a second runner, or a secret-bearing credential transport.
 
 The purpose of the split is to collect a complete failure set before the
 overall run. The three prerequisite phases are logically isolated, but a real
@@ -72,10 +71,29 @@ and the existing environment contract:
 | `SYMPHONY_E2E_CODEX_HOME_SEED` | Approved staged Codex seed | Falling back to `~/.codex` |
 | `PODIUM_LINEAR_APP_ACCESS_TOKEN` | Direct fixture GraphQL only | Podium/Conductor/Performer managed auth |
 | `PODIUM_PERFORMER_PROFILE_DIR` and `PODIUM_PERFORMER_PROFILE_NAME` | Current profile source | Uploading credential files to Podium |
+| `SYMPHONY_E2E_BROWSER_OBSERVATION_PATH` | Sanitized same-origin responses written by the browser skill | Reading/exporting cookies, localStorage, or bearer values |
+| `SYMPHONY_E2E_CONDUCTOR_URL` | Read-only local Conductor observation after its own polling | Supplying a runtime bearer to the runner |
+| `SYMPHONY_E2E_FIXTURE_REPOSITORY` | Explicit disposable Git workspace receiving the verifier scripts | Writing into an inferred customer repository |
 
 `LINEAR_API_KEY` is unset for the Linear phase so that the phase cannot silently
 use a different credential. The runner records only `token_present`, token
 length, request status, and sanitized error code. It never records the value.
+
+The browser skill writes the observation file by issuing same-origin `fetch`
+requests from the already signed-in Podium page and saving only this shape:
+
+```json
+{
+  "base_url": "http://127.0.0.1:8090",
+  "captured_at": "2026-07-12T15:15:47.674Z",
+  "observations": {
+    "/api/v1/auth/me": {"status_code": 200, "payload": {"user": {"id": "...", "email": "..."}}}
+  }
+}
+```
+
+The runner rejects any observation containing credential fields or token-shaped
+values. The file is an evidence handoff, not an authentication transport.
 
 ### 2.2 Run identity and directories
 
@@ -167,11 +185,10 @@ must still leave the per-phase reports and sanitized artifact manifest.
 per-phase reports there; `<generated-run-id>` is never a shell input or a
 literal directory name.
 
-At the time this design is recorded, the existing runner still provides only
-the original strict preflight. The phase/all command above is the first
-implementation slice required by this design; until that slice lands, no real
-E2E acceptance command or phase-only diagnostic result may be reported as
-passing.
+The runner now implements the phase/all command above. A phase-only command is
+diagnostic evidence only; the final acceptance unit remains one fresh `all`
+batch with one `run_id`. Current external 401/502 blockers are recorded as
+failures and cannot be converted into a phase pass.
 
 ## 3. Allowed Code and Test Entrypoints
 
@@ -261,11 +278,11 @@ Prove the existing Podium account/session and Linear OAuth installation are
 usable without starting a new OAuth flow.
 
 The authenticated checks use the existing signed-in browser session through
-the `browser:control-in-app-browser` skill. Open `SYMPHONY_E2E_PODIUM_URL` in a clean
+the browser skill. Open `SYMPHONY_E2E_PODIUM_URL` in a clean
 browser context for the unauthenticated probe, then use the already signed-in
 browser context for the authenticated probes. The runner may inspect same-origin
-HTTP responses through that browser context, but must not export, read, or copy
-the httpOnly session cookie. If the existing signed-in context is unavailable,
+HTTP responses through the browser observation file described above, but must
+not export, read, or copy the httpOnly session cookie. If the existing signed-in context is unavailable,
 record `oauth_browser_session_unavailable` and fail this phase; do not fall
 back to a login form or a newly created account.
 
@@ -366,13 +383,14 @@ phase does not start a Performer turn.
    `reconciliation_state=healthy` with a fresh `last_reconciliation_at`.
    A `503` or `reconciliation_state=degraded` is an immediate failure with the
    Podium health error fields and the matching `podium.log` event.
-10. Use a **lease-only runtime probe** for this phase: call
-    `/api/v1/runtime/dispatches/lease`, record the dispatch identity and
-    fencing token, then ack it with `status=failed` and
-    `reason=linear_phase_dispatch_probe`. Do not start `ConductorApiServer` in
-    this phase, so no `dispatch_podium_event()` or `WorkflowDriver.drive_once()`
-    can start a managed run. Repeat reconciliation and issue observation;
-    assert one dispatch for the delegation epoch.
+10. Observe the already enrolled Conductor after its own polling loop. When
+    `SYMPHONY_E2E_CONDUCTOR_URL` is set, read its existing
+    `/api/managed-runs` response and require a run whose `parent_issue_id`
+    matches the disposable parent. The runner never sends a runtime bearer or
+    acknowledges a dispatch itself. Missing URL, missing matching run, or a
+    failed parent prerequisite is a concrete binding failure. Repeat
+    reconciliation and issue observation; assert one run for the delegation
+    epoch.
 11. Restart only the Podium process while preserving the same database,
     `PODIUM_SECRET_KEY`, selected installation, and binding. Wait for health
     again, repeat the scan, and assert the cursor checkpoint and dispatch count
@@ -488,11 +506,24 @@ The runner must verify `oauth.status == passed`, `linear.status == passed`, and
 and staged-seed hash. Otherwise Overall writes `status=skipped` and
 `blocked_by` without mutating Linear.
 
+The runner observes the already enrolled Conductor at
+`SYMPHONY_E2E_CONDUCTOR_URL`; it does not enroll a replacement process or
+transport a runtime/proxy bearer. The Conductor must already be bound to the
+selected disposable repository, and the runner fails the repository
+materialization check when that explicit binding is absent.
+
 ### Deterministic Overall fixtures
 
-Overall uses three disposable repositories prepared by the runner. They are
-test fixtures, not product repositories, and their files are created before a
-parent issue is delegated:
+Overall prepares exact verifier fixtures under the run artifact root. Before
+creating a delegated parent, the runner must also receive
+`SYMPHONY_E2E_FIXTURE_REPOSITORY`, an existing disposable Git workspace bound
+to the enrolled Conductor. The scripts are copied into that workspace only
+when the target is explicitly configured; no repository path is inferred from
+the project or Linear label. Missing or conflicting materialization is a
+binding failure and prevents scenario issue creation.
+Disposable parent issues are retained with an explicit
+`cleanup=retained_for_audit` observation so their Linear tree and logs remain
+inspectable; the runner never silently assumes cleanup after a timeout.
 
 | Fixture | Required verification command | Deterministic behavior |
 |---|---|---|
@@ -553,43 +584,37 @@ event in the real batch.
 
 ### Ordered product flow
 
-1. Start an isolated Podium/Conductor pair against the existing healthy OAuth
-   installation and selected project. Use a fresh Conductor `workflow.db` and
-   disposable repository for this run.
-2. Enroll/reuse exactly one conductor and apply the existing
-   `project.configure` command through
-   `ConductorService.handle_podium_command()` (the inherited
-   `ConductorPodiumSyncMixin` implementation).
-   Verify generation/hash and the next `build_podium_report()` before dispatch.
-3. Create a fresh delegated parent issue after binding is ready. Do not move it
+1. Verify the already enrolled Conductor binding and its profile generation/hash
+   through the authenticated runtime observation and local Conductor API. The
+   runner never mutates `memberIds`, starts OAuth, or supplies a bearer.
+2. Create a fresh delegated parent issue after binding is ready. Do not move it
    manually to `In Review` or `Done`.
-4. Let Podium polling and `poll_podium_dispatch_once()` create and lease one
+3. Let Podium polling and `poll_podium_dispatch_once()` create and lease one
    dispatch. Let `WorkflowDriver.drive_once()` perform plan, task projection,
    execute, command verification, gate, and parent projection.
-5. Verify success through all three product surfaces: Conductor `workflow.db`,
+4. Verify success through all three product surfaces: Conductor `workflow.db`,
    `GET /api/v1/managed-runs`, and Linear issue/child tree plus comments.
-6. Run separate disposable issues/workspaces for rework and block. The first
+5. Run separate disposable issues/workspaces for rework and block. The first
    gate failure must be produced by the real `AcceptanceGate.evaluate()` path;
    the second failure must be produced by the same path, not by manually
    editing the store state.
-7. For duplicate-result probes, archive the exact accepted result JSON before
+6. For duplicate-result probes, archive the exact accepted result JSON before
    applying it. Replay the same result through the Conductor-owned
    `record_execute()`/`record_gate()` state transition boundary in the isolated
-   Conductor process; do not call the private
+   Conductor store probe; do not call the private
    `_result_attempt_is_duplicate()` helper. Assert no second state transition,
-   comment, child issue, or parent transition. This is a durable Conductor
-   integration probe, and its report must distinguish it from the external
-   Codex success turn.
-8. Submit an old attempt/fencing token and an old plan-version gate result to
+   comment, child issue, or parent transition. The report marks this as an
+   isolated fencing probe, distinct from the external Codex success turn.
+7. Submit an old attempt/fencing token and an old plan-version gate result to
    the same Conductor transition boundary. Assert `StaleAttemptError` or
    `StaleRuntimeResult`, unchanged current task/run, warning log, and no Linear
    mutation. The archived stale payload and the before/after managed-run views
    are required evidence.
-9. Exercise the runtime-wait fixture above through the real Performer event
+8. Exercise the runtime-wait fixture above through the real Performer event
    classifier and `WorkflowDriver._record_wait()` product path. Resolve it only
    by reopening the recorded Linear wait issue and observing
    `_runtime_wait_reopened()`; a comment alone must not resume it.
-10. Collect and scan Podium managed-runs, Linear comments, Conductor logs,
+9. Collect and scan Podium managed-runs, Linear comments, Conductor logs,
     Performer logs, request/result files, and the final report for redaction
     and durable error parity.
 

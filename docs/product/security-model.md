@@ -35,11 +35,11 @@ does not fall back to a deployment-wide Linear token.
 ## Local Codex isolation
 
 Podium owns only a validated non-secret Codex `config.toml`, delivered with a
-version/hash and policy revision. Conductor stages an isolated `CODEX_HOME` per
-managed turn and captures sanitized Performer output. `codex login` ChatGPT
-OAuth credentials remain a local Conductor concern: approved local Codex seed
-files are copied only from a fixed staged seed. The ambient `~/.codex` home is
-rejected.
+binding generation and content hash. Conductor stages an isolated `CODEX_HOME`
+per managed turn and captures sanitized Performer output. `codex login`
+ChatGPT OAuth credentials remain a local Conductor concern: approved local
+Codex seed files are copied only from a fixed staged seed. The ambient
+`~/.codex` home is rejected.
 
 Codex performs OAuth refresh during use; credentials never enter Podium
 PostgreSQL, runtime commands, browser responses, Linear comments, logs, or

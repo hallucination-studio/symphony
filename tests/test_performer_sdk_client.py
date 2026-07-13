@@ -9,8 +9,10 @@ from openai_codex.generated.v2_all import ItemCompletedNotification, ThreadItem
 from openai_codex.models import Notification as SdkNotification, UnknownNotification
 
 from performer.backend import runtime_wait_from_events
+from performer.backend import TurnBackend, TurnBackendError
 from performer.codex_client import CodexSdkClient
 from performer.codex_config import CodexConfig
+from performer.codex_client_helpers import CodexError
 
 
 class FakeTurn:
@@ -93,3 +95,85 @@ async def test_sdk_client_reads_schema_json_and_notification_payload(tmp_path: P
     assert wait is not None
     assert wait.kind == "permission_required"
     assert wait.reason == "Need workspace permission."
+
+
+@pytest.mark.asyncio
+async def test_sdk_client_surfaces_terminal_upstream_error_after_stream_retries(tmp_path: Path) -> None:
+    thread = FakeThread(
+        [
+            SdkNotification(
+                "error",
+                UnknownNotification(
+                    {
+                        "error": {
+                            "codexErrorInfo": {"responseStreamDisconnected": {"httpStatusCode": 502}},
+                            "message": "upstream request failed",
+                        },
+                        "willRetry": False,
+                        "type": "error",
+                    }
+                ),
+            )
+        ]
+    )
+    sdk = FakeAsyncCodex(thread)
+    client = CodexSdkClient(CodexConfig(), sdk_factory=lambda _config: sdk)
+
+    with pytest.raises(CodexError) as exc_info:
+        await client.run_session(
+            tmp_path,
+            "Return JSON",
+            output_schema={"type": "object"},
+        )
+
+    assert exc_info.value.code == "upstream_overloaded_exhausted"
+    assert exc_info.value.http_status == 502
+    assert sdk.closed is True
+
+
+@pytest.mark.asyncio
+async def test_sdk_client_classifies_terminal_bad_gateway_text(tmp_path: Path) -> None:
+    thread = FakeThread(
+        [
+            SdkNotification(
+                "error",
+                UnknownNotification(
+                    {
+                        "error": {"message": "Bad Gateway from upstream"},
+                        "willRetry": False,
+                        "type": "error",
+                    }
+                ),
+            )
+        ]
+    )
+    sdk = FakeAsyncCodex(thread)
+    client = CodexSdkClient(CodexConfig(), sdk_factory=lambda _config: sdk)
+
+    with pytest.raises(CodexError) as exc_info:
+        await client.run_session(tmp_path, "Return JSON", output_schema={"type": "object"})
+
+    assert exc_info.value.code == "upstream_overloaded_exhausted"
+
+
+@pytest.mark.parametrize("sandbox", ["workspace-write", "workspace_write"])
+def test_sdk_client_converts_sandbox_profile_to_pinned_sdk_enum(tmp_path: Path, sandbox: str) -> None:
+    client = CodexSdkClient(CodexConfig(sandbox=sandbox))
+
+    kwargs = client._thread_kwargs(tmp_path)
+
+    from openai_codex import Sandbox
+
+    assert kwargs["sandbox"] is Sandbox.workspace_write
+
+
+@pytest.mark.asyncio
+async def test_turn_backend_preserves_codex_error_code() -> None:
+    class FailingClient:
+        async def run_session(self, *_args, **_kwargs):
+            raise CodexError("upstream_overloaded_exhausted", "Codex upstream returned HTTP 502")
+
+    with pytest.raises(TurnBackendError, match="upstream_overloaded_exhausted:Codex upstream returned HTTP 502") as exc_info:
+        await TurnBackend(FailingClient()).plan(Path.cwd(), "Return a plan")
+
+    assert exc_info.value.code == "upstream_overloaded_exhausted"
