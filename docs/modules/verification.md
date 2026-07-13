@@ -1,7 +1,8 @@
 # Module baseline: `verification`
 
-Status: target verification baseline amended by accepted ADR-0006 on
-2026-07-13. Newly named suites are plan requirements until implemented.
+Status: verification baseline amended by ADR-0006 on 2026-07-13. The local
+boundary suites are implemented; real OAuth/Linear/Performer acceptance remains
+external evidence.
 
 ## Purpose
 
@@ -30,6 +31,12 @@ It records OAuth, Linear, Performer, and Overall reports under one `run_id`;
 phase-only invocations remain diagnostic and are not acceptance evidence.
 `tools/linear_fixture.py` owns project/issue/child reads and sanitized GraphQL
 errors.
+
+The Performer phase starts installed `performer control`, validates status and
+manual Check through `performer_api`, and runs installed plan/execute/gate turn
+processes with one temporary copy of the approved seed. Its fake executable
+coverage lives in `tests/test_real_flow.py`; passing that local test does not
+replace a real provider run.
 
 Do not report a real Linear/OAuth/Performer flow as passed until a scoped test
 project has executed the actual product path and its report contains the

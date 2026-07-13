@@ -36,6 +36,12 @@ It never reads `~/.codex`, uploads provider credential files, or places a token
 in Podium. Any provider-owned refresh remains inside the staged context on the
 Conductor machine.
 
+During the Performer phase the runner executes `performer.status`, a manual
+`performer.check`, and one fenced plan/execute/gate sequence. It archives the
+closed control frames plus each turn request, result, and sanitized process log,
+then removes the temporary backend context. A failed Check or invalid result
+fails the phase immediately with a stable outer error code.
+
 When Podium requires an existing browser session, use the browser skill on the
 Podium page to issue same-origin `fetch` requests for the public OAuth/project/
 runtime/managed-run responses and save a JSON object containing `base_url`,

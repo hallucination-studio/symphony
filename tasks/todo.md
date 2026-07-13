@@ -83,16 +83,16 @@ continued. Detailed contracts and commands are in `tasks/plan.md`.
 
 ## Phase 4: Real E2E and active docs
 
-- [ ] Rewrite the Performer diagnostic to start installed `performer control`,
+- [x] Rewrite the Performer diagnostic to start installed `performer control`,
       obtain capabilities, run manual Check, and run plan/execute/gate through
       installed Performer turn commands.
-- [ ] Share one approved staged per-batch provider context across control and
+- [x] Share one approved staged per-batch provider context across control and
       turns; never import provider SDKs or parse provider auth/config in tools.
-- [ ] Retain stale fencing, duplicate-result, immediate failure, secret/path,
+- [x] Retain stale fencing, duplicate-result, immediate failure, secret/path,
       and required-artifact checks.
-- [ ] Reconcile README, agent rules, module/security docs, real-flow docs, and
+- [x] Reconcile README, agent rules, module/security docs, real-flow docs, and
       real-E2E design with ADR-0006 while preserving historical ADR rationale.
-- [ ] Run Phase 4 focused tests, documentation searches, `git diff --check`,
+- [x] Run Phase 4 focused tests, documentation searches, `git diff --check`,
       full failure collection, grouped repair, and full rerun.
 - [ ] Run OAuth, Linear, and Performer diagnostics consecutively with no fixes
       between them; collect and group the complete failure set.

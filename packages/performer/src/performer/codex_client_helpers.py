@@ -67,6 +67,8 @@ def _classify_sdk_exception(exc: BaseException) -> _SdkErrorClassification:
     inferred_http_status = http_status or _http_status_from_error_text(str(exc))
     if inferred_http_status in {429, 500, 502, 503, 504} or _looks_like_upstream_overload(str(exc)):
         return _SdkErrorClassification("upstream_overloaded", inferred_http_status)
+    if _looks_like_auth_failure(str(exc)):
+        return _SdkErrorClassification("codex_auth_failed", inferred_http_status)
     class_name = type(exc).__name__
     if class_name == "RetryLimitExceededError":
         return _SdkErrorClassification("upstream_overloaded", inferred_http_status)
@@ -164,6 +166,20 @@ def _looks_like_upstream_overload(value: str) -> bool:
             "upstream overloaded",
             "temporarily unavailable",
             "gateway timeout",
+        )
+    )
+
+
+def _looks_like_auth_failure(value: str) -> bool:
+    lowered = value.lower()
+    return any(
+        marker in lowered
+        for marker in (
+            "authentication",
+            "not authenticated",
+            "unauthorized",
+            "api key",
+            "credential rejected",
         )
     )
 

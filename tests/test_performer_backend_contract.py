@@ -672,14 +672,14 @@ async def test_codex_check_applies_turn_timeout_without_provider_details(
 
 
 @pytest.mark.asyncio
-async def test_codex_check_logs_sanitized_generic_failure(
+async def test_codex_check_surfaces_sanitized_authentication_category(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     sentinel = "provider-check-secret-sentinel"
 
     class Sdk:
         async def thread_start(self, **_kwargs: Any) -> Any:
-            raise RuntimeError(f"provider failed token={sentinel}")
+            raise RuntimeError(f"authentication failed token={sentinel}")
 
         async def close(self) -> None:
             return None
@@ -692,6 +692,9 @@ async def test_codex_check_logs_sanitized_generic_failure(
     assert result.readiness is not None and result.readiness.status == "failed"
     assert result.readiness.error is not None
     assert result.readiness.error.error_code == "performer_check_failed"
+    assert result.readiness.error.sanitized_reason == (
+        "Codex Check failed: Codex authentication failed."
+    )
     evidence = str(result.to_dict()) + caplog.text
     assert sentinel not in evidence
     assert "performer_check_failed" in caplog.text

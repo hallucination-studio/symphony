@@ -16,15 +16,31 @@ import json
 import os
 from pathlib import Path
 import re
+import select
 import shutil
+import struct
 import subprocess
 import sys
+import tempfile
 import time
 from typing import Any, Iterable
 from urllib.parse import urlparse
 from uuid import uuid4
 
 import httpx
+from performer_api import (
+    CONTROL_PROTOCOL_VERSION,
+    PerformerControlEvent,
+    PerformerControlRequest,
+    PerformerControlResult,
+    PerformerTurnRequest,
+    PerformerTurnResult,
+    RuntimePolicy,
+    Task,
+    TURN_PROTOCOL_VERSION,
+    TurnContext,
+    canonical_sha256,
+)
 
 try:  # package import for pytest; top-level fallback for ``python tools/real_flow.py``
     from .linear_fixture import LinearFixture, LinearFixtureError, required_environment
@@ -50,6 +66,23 @@ _GENERIC_SECRET_LITERAL = re.compile(r"(?i)(?:raw[-_ ]?secret|private[-_ ]?key|p
 _AUTH_PATH = re.compile(r"(?i)(?:^|[/\\])auth\.json(?:$|[/\\])")
 _CODEX_HOME_PATH = re.compile(r"(?i)(?:^|[/\\])\.codex(?:$|[/\\])")
 _BROWSER_OBSERVATION_MAX_BYTES = 4 * 1024 * 1024
+_CONTROL_METADATA_MAX_BYTES = 256 * 1024
+_PERFORMER_SEED_FILES = ("config.toml", "auth.json", "version.json", "models_cache.json")
+_PERFORMER_ENV_KEYS = ("HOME", "PATH", "LANG", "LC_ALL", "TMPDIR", "CODEX_SDK_CODEX_BIN")
+_REAL_EXECUTION_POLICY = {
+    "version": 1,
+    "model": "gpt-5.4",
+    "model_provider": "openai",
+    "approval_mode": "auto_review",
+    "reasoning_effort": "high",
+    "reasoning_summary": "auto",
+    "sandbox": {"plan": "read_only", "execute": "workspace_write", "gate": "read_only"},
+    "initialize_timeout_ms": 5_000,
+    "turn_timeout_ms": 3_600_000,
+    "initialize_max_attempts": 4,
+    "overload_max_attempts": 5,
+}
+_REAL_TURN_POLICY_SHA256 = canonical_sha256({"version": 1, "mode": "real_e2e"})
 
 # Browser evidence is deliberately a closed public projection.  This is the
 # union of fields emitted by the Podium public auth/project/runtime views; an
@@ -1067,8 +1100,21 @@ def _select_backlog_state(states: list[dict[str, str]]) -> dict[str, str]:
 
 def _git_workspace(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["git", "init", "--quiet", str(path)], check=False, capture_output=True, text=True, timeout=10)
+    subprocess.run(
+        ["git", "init", "--quiet", str(path)],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
     (path / "README.md").write_text("Symphony real E2E disposable workspace.\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "-C", str(path), "add", "--", "README.md"],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
 
 
 def _artifact_paths(paths: Any) -> list[str]:
@@ -1215,37 +1261,636 @@ def _materialize_fixture_repository(context: _RunContext, fixture_paths: dict[st
     return True, str(repository), ""
 
 
+class _PerformerDiagnosticError(RuntimeError):
+    def __init__(self, code: str, reason: str) -> None:
+        super().__init__(reason)
+        self.code = code
+
+
+def _installed_performer_command() -> tuple[str, ...]:
+    sibling = Path(sys.executable).with_name("performer")
+    if sibling.is_file() and os.access(sibling, os.X_OK):
+        return (str(sibling),)
+    return (sys.executable, "-m", "performer.cli")
+
+
+@contextmanager
+def _staged_performer_environment(context: _RunContext) -> Iterable[dict[str, str]]:
+    raw_seed = str(context.settings.get("codex_seed") or "").strip()
+    try:
+        seed = Path(raw_seed).expanduser().resolve(strict=True)
+    except OSError as exc:
+        raise _PerformerDiagnosticError(
+            "performer_seed_unavailable",
+            "The approved staged Performer seed is unavailable.",
+        ) from exc
+    default_codex_home = (Path.home() / ".codex").resolve(strict=False)
+    if not seed.is_dir() or seed == default_codex_home:
+        raise _PerformerDiagnosticError(
+            "performer_seed_forbidden",
+            "The real diagnostic requires an explicit staged seed outside the default provider home.",
+        )
+    missing = [name for name in ("config.toml", "auth.json") if not (seed / name).is_file()]
+    if missing:
+        raise _PerformerDiagnosticError(
+            "performer_seed_incomplete",
+            "The approved staged Performer seed is missing a required file.",
+        )
+
+    with tempfile.TemporaryDirectory(prefix=f"symphony-{context.run_id}-") as temporary:
+        staged = Path(temporary) / "backend-context"
+        staged.mkdir(mode=0o700)
+        for name in _PERFORMER_SEED_FILES:
+            source = seed / name
+            if source.is_file():
+                shutil.copy2(source, staged / name)
+        environment = {
+            key: str(os.environ[key])
+            for key in _PERFORMER_ENV_KEYS
+            if os.environ.get(key)
+        }
+        environment["CODEX_HOME"] = str(staged)
+        yield environment
+
+
+def _control_frame(request: PerformerControlRequest) -> bytes:
+    encoded = json.dumps(
+        request.to_dict(),
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    if not encoded or len(encoded) > _CONTROL_METADATA_MAX_BYTES:
+        raise _PerformerDiagnosticError(
+            "performer_control_request_invalid",
+            "The Performer control request exceeded its bounded frame.",
+        )
+    return struct.pack(">I", len(encoded)) + encoded
+
+
+def _read_control_result(
+    process: subprocess.Popen[bytes],
+    request: PerformerControlRequest,
+    *,
+    timeout: float,
+    frames: list[dict[str, Any]],
+) -> PerformerControlResult:
+    if process.stdout is None:
+        raise _PerformerDiagnosticError(
+            "performer_control_start_failed",
+            "The Performer control process did not expose stdout.",
+        )
+    deadline = time.monotonic() + max(0.1, timeout)
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or not select.select([process.stdout], [], [], remaining)[0]:
+            raise _PerformerDiagnosticError(
+                "performer_control_timeout",
+                "The Performer control process did not return before the diagnostic deadline.",
+            )
+        line = process.stdout.readline()
+        if not line:
+            raise _PerformerDiagnosticError(
+                "performer_control_process_exited",
+                "The Performer control process exited before returning a result.",
+            )
+        try:
+            frame = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise _PerformerDiagnosticError(
+                "performer_control_protocol_invalid",
+                "The Performer control process returned invalid JSON.",
+            ) from exc
+        if not isinstance(frame, dict) or set(frame) != {"frame_kind", "payload"}:
+            raise _PerformerDiagnosticError(
+                "performer_control_protocol_invalid",
+                "The Performer control process returned an invalid frame.",
+            )
+        payload = frame.get("payload")
+        if not isinstance(payload, dict):
+            raise _PerformerDiagnosticError(
+                "performer_control_protocol_invalid",
+                "The Performer control process returned an invalid payload.",
+            )
+        frames.append(_sanitize_value(frame))
+        if frame.get("frame_kind") == "control.event":
+            event = PerformerControlEvent.from_dict(payload)
+            if event.request_id != request.request_id or event.operation != request.operation:
+                raise _PerformerDiagnosticError(
+                    "performer_control_protocol_invalid",
+                    "The Performer control event did not match its request.",
+                )
+            continue
+        if frame.get("frame_kind") != "control.result":
+            raise _PerformerDiagnosticError(
+                "performer_control_protocol_invalid",
+                "The Performer control process returned an unsupported frame.",
+            )
+        result = PerformerControlResult.from_dict(payload)
+        if result.request_id != request.request_id or result.operation != request.operation:
+            raise _PerformerDiagnosticError(
+                "performer_control_protocol_invalid",
+                "The Performer control result did not match its request.",
+            )
+        return result
+
+
+def _exchange_control(
+    process: subprocess.Popen[bytes],
+    request: PerformerControlRequest,
+    *,
+    timeout: float,
+    frames: list[dict[str, Any]],
+) -> PerformerControlResult:
+    if process.stdin is None:
+        raise _PerformerDiagnosticError(
+            "performer_control_start_failed",
+            "The Performer control process did not expose stdin.",
+        )
+    try:
+        process.stdin.write(_control_frame(request))
+        process.stdin.flush()
+    except OSError as exc:
+        raise _PerformerDiagnosticError(
+            "performer_control_process_exited",
+            "The Performer control process rejected its request.",
+        ) from exc
+    return _read_control_result(process, request, timeout=timeout, frames=frames)
+
+
+def _stop_control_process(process: subprocess.Popen[bytes]) -> bytes:
+    if process.stdin is not None:
+        try:
+            process.stdin.close()
+        except OSError:
+            pass
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+    return process.stderr.read() if process.stderr is not None else b""
+
+
+def _sanitize_performer_output(value: bytes, environment: dict[str, str]) -> str:
+    text = value.decode("utf-8", errors="replace")
+    staged_home = environment.get("CODEX_HOME", "")
+    if staged_home:
+        text = text.replace(staged_home, "[REDACTED_PATH]")
+    return str(_sanitize_value(text))
+
+
+def _performer_turn_request(
+    context: _RunContext,
+    workspace: Path,
+    kind: str,
+    *,
+    task: Task | None = None,
+    thread_id: str = "",
+    evidence: dict[str, Any] | None = None,
+) -> PerformerTurnRequest:
+    policy = RuntimePolicy.from_dict(_REAL_EXECUTION_POLICY)
+    return PerformerTurnRequest(
+        protocol_version=TURN_PROTOCOL_VERSION,
+        context=TurnContext(
+            context.run_id,
+            task.id if task is not None else "",
+            f"{kind}-1",
+            {"plan": 1, "execute": 2, "gate": 3}[kind],
+            kind,
+        ),
+        performer_kind="codex",
+        performer_binding_id="real-e2e-binding",
+        binding_generation=1,
+        execution_policy=policy.to_dict(),
+        execution_policy_sha256=canonical_sha256(policy.to_dict()),
+        turn_policy_sha256=_REAL_TURN_POLICY_SHA256,
+        workspace_path=str(workspace),
+        thread_id=thread_id,
+        issue_description=(
+            "Exercise the installed Performer boundary in a disposable Git workspace. "
+            "Return exactly one task that appends an accepted marker to README.md, "
+            "touches only README.md, and verifies with git diff --check."
+            if kind == "plan"
+            else ""
+        ),
+        task=task,
+        evidence=evidence,
+    )
+
+
+def _run_installed_turn(
+    command: tuple[str, ...],
+    environment: dict[str, str],
+    request: PerformerTurnRequest,
+    root: Path,
+    *,
+    timeout: float,
+) -> tuple[PerformerTurnResult, list[str]]:
+    root.mkdir(parents=True, exist_ok=True)
+    request_path = root / "request.json"
+    result_path = root / "result.json"
+    log_path = root / "performer.log"
+    request_path.write_text(json.dumps(request.to_dict(), sort_keys=True), encoding="utf-8")
+    try:
+        completed = subprocess.run(
+            [
+                *command,
+                "--turn-request-path",
+                str(request_path),
+                "--turn-result-path",
+                str(result_path),
+            ],
+            env=environment,
+            check=False,
+            capture_output=True,
+            timeout=max(0.1, timeout),
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise _PerformerDiagnosticError(
+            "performer_turn_invocation_failed",
+            "The installed Performer turn process could not complete.",
+        ) from exc
+    log_path.write_text(
+        json.dumps(
+            _sanitize_value(
+                {
+                    "exit_code": completed.returncode,
+                    "stdout": _sanitize_performer_output(completed.stdout, environment),
+                    "stderr": _sanitize_performer_output(completed.stderr, environment),
+                }
+            ),
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    if completed.returncode != 0 or not result_path.is_file():
+        raise _PerformerDiagnosticError(
+            "performer_turn_failed",
+            "The installed Performer turn process failed without a valid result.",
+        )
+    try:
+        payload = json.loads(result_path.read_text(encoding="utf-8"))
+        result = PerformerTurnResult.from_dict(payload)
+    except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
+        raise _PerformerDiagnosticError(
+            "performer_turn_result_invalid",
+            "The installed Performer turn result failed validation.",
+        ) from exc
+    mismatch = request.context.mismatch_reason(result.context)
+    if mismatch is not None:
+        raise _PerformerDiagnosticError(mismatch, "The installed Performer turn result was stale.")
+    return result, [str(request_path), str(result_path), str(log_path)]
+
+
 def _run_performer_phase(context: _RunContext) -> dict[str, Any]:
     if context.offline:
         return _offline_phase(context, "performer")
 
     checks: list[dict[str, Any]] = []
     failures: list[dict[str, Any]] = []
-    observations = {
+    artifacts: list[str] = []
+    observations: dict[str, Any] = {
         "boundary": "installed_performer_control_and_turn_processes",
         "provider_owned_state_in_conductor": False,
     }
+    performer_root = context.artifact_root / "performer"
+    workspace = performer_root / "workspace"
+    turns_root = performer_root / "turns"
+    control_frames_path = performer_root / "control-frames.json"
+    control_log_path = performer_root / "control.log"
+    performer_root.mkdir(parents=True, exist_ok=True)
+    _git_workspace(workspace)
+    command = _installed_performer_command()
+    current_check = "performer_control_status"
+
+    try:
+        with _staged_performer_environment(context) as environment:
+            try:
+                process = subprocess.Popen(
+                    [*command, "control", "--performer-kind", "codex"],
+                    env=environment,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    bufsize=0,
+                )
+            except OSError as exc:
+                raise _PerformerDiagnosticError(
+                    "performer_control_start_failed",
+                    "The installed Performer control process could not start.",
+                ) from exc
+
+            control_frames: list[dict[str, Any]] = []
+            control_stderr = b""
+            phase_completed = False
+            try:
+                status_request = PerformerControlRequest(
+                    protocol_version=CONTROL_PROTOCOL_VERSION,
+                    request_id="real-status-1",
+                    operation="performer.status",
+                    performer_kind="codex",
+                    arguments={},
+                    secret_input=None,
+                )
+                status = _exchange_control(
+                    process,
+                    status_request,
+                    timeout=context.timeout,
+                    frames=control_frames,
+                )
+                capabilities = status.capabilities
+                status_ok = (
+                    status.status == "succeeded"
+                    and capabilities is not None
+                    and capabilities.check_supported
+                    and set(capabilities.turn_kinds) == {"plan", "execute", "gate"}
+                    and status.account is not None
+                    and status.account.status == "authenticated"
+                )
+                if not status_ok:
+                    raise _PerformerDiagnosticError(
+                        "performer_status_not_ready",
+                        "The installed Performer status did not expose the required authenticated capabilities.",
+                    )
+                _append_check(
+                    checks,
+                    failures,
+                    name=current_check,
+                    passed=True,
+                    group="performer",
+                    error_code="performer_status_not_ready",
+                    reason="The installed Performer status was unavailable.",
+                    observations={
+                        "performer_kind": capabilities.performer_kind,
+                        "capability_version": capabilities.capability_version,
+                        "account_status": status.account.status,
+                    },
+                )
+
+                current_check = "performer_manual_check"
+                policy = RuntimePolicy.from_dict(_REAL_EXECUTION_POLICY)
+                policy_hash = canonical_sha256(policy.to_dict())
+                check_request = PerformerControlRequest(
+                    protocol_version=CONTROL_PROTOCOL_VERSION,
+                    request_id="real-check-1",
+                    operation="performer.check",
+                    performer_kind="codex",
+                    arguments={
+                        "binding_generation": 1,
+                        "execution_policy": policy.to_dict(),
+                        "execution_policy_sha256": policy_hash,
+                    },
+                    secret_input=None,
+                )
+                checked = _exchange_control(
+                    process,
+                    check_request,
+                    timeout=context.timeout,
+                    frames=control_frames,
+                )
+                check_ok = (
+                    checked.status == "succeeded"
+                    and checked.check is not None
+                    and checked.check.status == "passed"
+                    and checked.readiness is not None
+                    and checked.readiness.is_compatible(
+                        performer_kind="codex",
+                        binding_generation=1,
+                        capability_version=capabilities.capability_version,
+                        execution_policy_sha256=policy_hash,
+                    )
+                )
+                if not check_ok:
+                    readiness_error = (
+                        checked.readiness.error
+                        if checked.readiness is not None
+                        else None
+                    )
+                    adapter_reason = (
+                        _sanitize_reason(readiness_error.sanitized_reason)
+                        if readiness_error is not None
+                        else ""
+                    )
+                    raise _PerformerDiagnosticError(
+                        "performer_check_failed",
+                        (
+                            f"The installed Performer manual Check failed: {adapter_reason}"
+                            if adapter_reason
+                            else "The installed Performer manual Check did not produce compatible readiness."
+                        ),
+                    )
+                _append_check(
+                    checks,
+                    failures,
+                    name=current_check,
+                    passed=True,
+                    group="performer",
+                    error_code="performer_check_failed",
+                    reason="The installed Performer manual Check failed.",
+                    observations={
+                        "status": checked.check.status,
+                        "readiness": checked.readiness.status,
+                        "execution_policy_sha256": policy_hash,
+                    },
+                )
+
+                current_check = "performer_plan_turn"
+                plan_request = _performer_turn_request(context, workspace, "plan")
+                plan_result, plan_artifacts = _run_installed_turn(
+                    command,
+                    environment,
+                    plan_request,
+                    turns_root / "plan",
+                    timeout=context.timeout,
+                )
+                artifacts.extend(plan_artifacts)
+                if plan_result.plan is None or len(plan_result.plan.tasks) != 1:
+                    raise _PerformerDiagnosticError(
+                        "performer_plan_invalid",
+                        "The real diagnostic plan must contain exactly one bounded task.",
+                    )
+                task = plan_result.plan.tasks[0]
+                if task.files_likely_touched != ["README.md"] or task.verification_commands != ["git diff --check"]:
+                    raise _PerformerDiagnosticError(
+                        "performer_plan_scope_invalid",
+                        "The real diagnostic plan exceeded its disposable README.md scope.",
+                    )
+                _append_check(
+                    checks,
+                    failures,
+                    name=current_check,
+                    passed=True,
+                    group="performer",
+                    error_code="performer_plan_invalid",
+                    reason="The installed Performer plan turn failed.",
+                    observations={"task_count": 1, "thread_id_present": bool(plan_result.thread_id)},
+                )
+
+                current_check = "performer_execute_turn"
+                execute_request = _performer_turn_request(
+                    context,
+                    workspace,
+                    "execute",
+                    task=task,
+                    thread_id=plan_result.thread_id,
+                )
+                execute_result, execute_artifacts = _run_installed_turn(
+                    command,
+                    environment,
+                    execute_request,
+                    turns_root / "execute",
+                    timeout=context.timeout,
+                )
+                artifacts.extend(execute_artifacts)
+                if execute_result.execute_result is None or execute_result.execute_result.status != "ready_for_gate":
+                    raise _PerformerDiagnosticError(
+                        "performer_execute_failed",
+                        "The installed Performer execute turn did not reach the Gate.",
+                    )
+                _append_check(
+                    checks,
+                    failures,
+                    name=current_check,
+                    passed=True,
+                    group="performer",
+                    error_code="performer_execute_failed",
+                    reason="The installed Performer execute turn failed.",
+                    observations={"changed_files": execute_result.execute_result.changed_files},
+                )
+
+                verification = subprocess.run(
+                    ["git", "-C", str(workspace), "diff", "--check"],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                evidence = {
+                    "commands": [
+                        {
+                            "command": "git diff --check",
+                            "passed": verification.returncode == 0,
+                            "exit_code": verification.returncode,
+                            "output": _sanitize_reason(verification.stdout or verification.stderr or "ok"),
+                        }
+                    ]
+                }
+                if verification.returncode != 0:
+                    raise _PerformerDiagnosticError(
+                        "performer_verification_failed",
+                        "The disposable workspace verification command failed.",
+                    )
+
+                current_check = "performer_gate_turn"
+                gate_request = _performer_turn_request(
+                    context,
+                    workspace,
+                    "gate",
+                    task=task,
+                    thread_id=execute_result.thread_id,
+                    evidence=evidence,
+                )
+                gate_result, gate_artifacts = _run_installed_turn(
+                    command,
+                    environment,
+                    gate_request,
+                    turns_root / "gate",
+                    timeout=context.timeout,
+                )
+                artifacts.extend(gate_artifacts)
+                if gate_result.gate_result is None or not gate_result.gate_result.passed:
+                    raise _PerformerDiagnosticError(
+                        "performer_gate_failed",
+                        "The installed Performer Gate turn did not pass.",
+                    )
+                _append_check(
+                    checks,
+                    failures,
+                    name=current_check,
+                    passed=True,
+                    group="performer",
+                    error_code="performer_gate_failed",
+                    reason="The installed Performer Gate turn failed.",
+                    observations={
+                        "score": gate_result.gate_result.score,
+                        "threshold": gate_result.gate_result.threshold,
+                    },
+                )
+                phase_completed = True
+            finally:
+                control_stderr = _stop_control_process(process)
+                _write_report(control_frames_path, {"frames": control_frames})
+                control_log_path.write_text(
+                    _sanitize_performer_output(control_stderr, environment),
+                    encoding="utf-8",
+                )
+                artifacts.extend((str(control_frames_path), str(control_log_path)))
+                if process.returncode not in {0, None} and phase_completed:
+                    raise _PerformerDiagnosticError(
+                        "performer_control_process_exited",
+                        "The installed Performer control process exited unsuccessfully.",
+                    )
+    except _PerformerDiagnosticError as exc:
+        _append_check(
+            checks,
+            failures,
+            name=current_check,
+            passed=False,
+            group="performer",
+            error_code=exc.code,
+            reason=str(exc),
+            action_required=True,
+            next_action="inspect_performer_diagnostic_artifacts",
+        )
+    except Exception as exc:
+        _append_check(
+            checks,
+            failures,
+            name=current_check,
+            passed=False,
+            group="performer",
+            error_code="performer_diagnostic_failed",
+            reason=_sanitize_reason(exc),
+            action_required=True,
+            next_action="inspect_performer_diagnostic_artifacts",
+        )
+
+    artifacts_ok = bool(artifacts) and not _artifact_has_secret(artifacts)
     _append_check(
         checks,
         failures,
-        name="performer_control_boundary_real_flow",
-        passed=False,
-        group="performer",
-        error_code="performer_control_real_flow_pending",
-        reason=(
-            "The real-flow runner has not yet integrated the installed Performer "
-            "control and turn process boundary."
-        ),
-        observations=observations,
-        next_action="complete_installed_performer_control_and_turn_real_flow_integration",
+        name="performer_artifacts_secret_free",
+        passed=artifacts_ok,
+        group="security",
+        error_code="performer_artifact_secret_detected",
+        reason="A Performer diagnostic artifact was missing or contained secret/provider-home material.",
+        observations={"artifact_count": len(artifacts)},
+        action_required=not artifacts_ok,
+        next_action="remove_secret_or_private_path_from_performer_artifacts",
+    )
+    observations.update(
+        {
+            "control_process_started": any(check["name"] == "performer_control_status" and check["passed"] for check in checks),
+            "manual_check_passed": any(check["name"] == "performer_manual_check" and check["passed"] for check in checks),
+            "turn_kinds_completed": [
+                kind
+                for kind in ("plan", "execute", "gate")
+                if any(check["name"] == f"performer_{kind}_turn" and check["passed"] for check in checks)
+            ],
+        }
     )
     return _phase_report(
         context,
         "performer",
-        "failed",
+        "passed" if not failures else "failed",
         checks=checks,
         failures=failures,
         observations=observations,
+        artifacts=artifacts,
     )
 
 

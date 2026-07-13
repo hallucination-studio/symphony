@@ -4,8 +4,12 @@ import json
 import inspect
 from argparse import Namespace
 from datetime import datetime, timezone
+import os
 from pathlib import Path
+import stat
 import subprocess
+import sys
+import textwrap
 
 import pytest
 
@@ -234,14 +238,43 @@ def test_linear_phase_is_independent_from_podium_and_oauth(monkeypatch, tmp_path
 
 
 def test_real_flow_has_no_active_provider_owned_runtime_path() -> None:
-    source = inspect.getsource(real_flow._run_performer_phase)
+    source = "\n".join(
+        inspect.getsource(value)
+        for value in (
+            real_flow._run_performer_phase,
+            real_flow._staged_performer_environment,
+            real_flow._exchange_control,
+            real_flow._run_installed_turn,
+        )
+    )
 
     assert "performer_api." + "codex_runtime" not in source
     assert "conductor." + "performer_" + "credentials" not in source
     assert "PerformerCredential" + "Slots" not in source
     assert "validate_codex_toml" not in source
-    assert "config.toml" not in source
     assert "codex_home=" not in source
+    assert "openai_" + "codex" not in source
+    assert "from performer " not in source
+    assert "import performer" not in source
+
+
+def test_installed_performer_command_stays_in_the_active_virtualenv(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    interpreter = tmp_path / "python-install" / "python"
+    interpreter.parent.mkdir()
+    interpreter.write_text("", encoding="utf-8")
+    virtualenv_bin = tmp_path / "venv" / "bin"
+    virtualenv_bin.mkdir(parents=True)
+    virtualenv_python = virtualenv_bin / "python"
+    virtualenv_python.symlink_to(interpreter)
+    performer = virtualenv_bin / "performer"
+    performer.write_text("#!/bin/sh\n", encoding="utf-8")
+    performer.chmod(performer.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setattr(real_flow.sys, "executable", str(virtualenv_python))
+
+    assert real_flow._installed_performer_command() == (str(performer),)
 
 
 def test_podium_observer_bounds_external_timeout() -> None:
@@ -411,33 +444,343 @@ def test_authenticated_observer_rejects_symlinked_auth_path(tmp_path: Path) -> N
     assert response.error_code == "browser_session_observation_path_forbidden"
 
 
-def test_performer_phase_fails_closed_while_control_boundary_real_flow_is_pending(
+def _install_real_flow_performer(
     tmp_path: Path,
+    journal: Path,
+    *,
+    check_failure: bool = False,
+) -> Path:
+    performer = tmp_path / "performer"
+    performer.write_text(
+        textwrap.dedent(
+            f"""\
+            #!{sys.executable}
+            import json
+            import os
+            from pathlib import Path
+            import struct
+            import sys
+
+            journal = Path({str(journal)!r})
+            check_failure = {check_failure!r}
+
+            def record(mode):
+                with journal.open("a", encoding="utf-8") as handle:
+                    handle.write(json.dumps({{"mode": mode, "codex_home": os.environ.get("CODEX_HOME", "")}}) + "\\n")
+                print("backend_context=" + os.environ.get("CODEX_HOME", ""), file=sys.stderr, flush=True)
+
+            def emit(payload):
+                print(json.dumps({{"frame_kind": "control.result", "payload": payload}}, separators=(",", ":")), flush=True)
+
+            if sys.argv[1:] == ["control", "--performer-kind", "codex"]:
+                record("control")
+                while True:
+                    header = sys.stdin.buffer.read(4)
+                    if not header:
+                        break
+                    size = struct.unpack(">I", header)[0]
+                    request = json.loads(sys.stdin.buffer.read(size))
+                    operation = request["operation"]
+                    common = {{
+                        "protocol_version": 1,
+                        "request_id": request["request_id"],
+                        "operation": operation,
+                        "status": "succeeded",
+                        "capabilities": None,
+                        "readiness": None,
+                        "account": None,
+                        "login": None,
+                        "configuration": None,
+                        "check": None,
+                        "error": None,
+                    }}
+                    if operation == "performer.status":
+                        common.update({{
+                            "capabilities": {{
+                                "protocol_version": 1,
+                                "capability_version": 1,
+                                "performer_kind": "codex",
+                                "display_name": "Codex",
+                                "turn_kinds": ["plan", "execute", "gate"],
+                                "login_methods": ["device_code", "api_key"],
+                                "supports_session_delete": True,
+                                "editable_settings": ["api_base_url"],
+                                "config_source_visible": True,
+                                "check_supported": True,
+                            }},
+                            "readiness": {{
+                                "performer_kind": "codex",
+                                "binding_generation": 1,
+                                "capability_version": 1,
+                                "execution_policy_sha256": "0" * 64,
+                                "status": "unchecked",
+                                "last_check_status": "none",
+                                "error": None,
+                            }},
+                            "account": {{"status": "authenticated", "display_label": "E2E"}},
+                            "login": {{"status": "idle", "method": None}},
+                        }})
+                    elif operation == "performer.check":
+                        policy_hash = request["arguments"]["execution_policy_sha256"]
+                        print(json.dumps({{
+                            "frame_kind": "control.event",
+                            "payload": {{
+                                "protocol_version": 1,
+                                "request_id": request["request_id"],
+                                "operation": operation,
+                                "sequence": 1,
+                                "event_kind": "control.heartbeat",
+                                "message": "Performer Check is running.",
+                                "verification_url": None,
+                                "user_code": None,
+                                "expires_at": None,
+                            }},
+                        }}, separators=(",", ":")), flush=True)
+                        check_reason = "Codex Check failed: Codex authentication failed." if check_failure else None
+                        common.update({{
+                            "readiness": {{
+                                "performer_kind": "codex",
+                                "binding_generation": 1,
+                                "capability_version": 1,
+                                "execution_policy_sha256": policy_hash,
+                                "status": "failed" if check_failure else "ready",
+                                "last_check_status": "failed" if check_failure else "passed",
+                                "error": {{
+                                    "error_code": "performer_check_failed",
+                                    "sanitized_reason": check_reason,
+                                    "action_required": True,
+                                    "retryable": True,
+                                    "attempt_number": 1,
+                                    "next_action": "Repair Codex authentication and run Check again.",
+                                }} if check_failure else None,
+                            }},
+                            "check": {{
+                                "status": "failed" if check_failure else "passed",
+                                "started_at": "2026-07-13T00:00:00Z",
+                                "finished_at": "2026-07-13T00:00:01Z",
+                                "summary": check_reason or "Performer Check passed.",
+                            }},
+                        }})
+                    emit(common)
+                raise SystemExit(0)
+
+            request_path = Path(sys.argv[sys.argv.index("--turn-request-path") + 1])
+            result_path = Path(sys.argv[sys.argv.index("--turn-result-path") + 1])
+            request = json.loads(request_path.read_text(encoding="utf-8"))
+            kind = request["context"]["turn_kind"]
+            record(kind)
+            result = {{
+                "protocol_version": 1,
+                "context": request["context"],
+                "thread_id": "thread-e2e",
+                "plan": None,
+                "execute_result": None,
+                "gate_result": None,
+                "runtime_wait": None,
+                "events": [],
+            }}
+            task = {{
+                "id": "task-1",
+                "title": "Update the diagnostic workspace",
+                "objective": "Append the accepted marker to README.md.",
+                "acceptance_criteria": ["README.md contains the accepted marker"],
+                "verification_commands": ["git diff --check"],
+                "files_likely_touched": ["README.md"],
+            }}
+            if kind == "plan":
+                result["plan"] = {{
+                    "summary": "Exercise installed Performer turns.",
+                    "tasks": [task],
+                    "risks": [],
+                    "architecture_decisions": [],
+                    "open_questions": [],
+                    "approval_required": False,
+                }}
+            elif kind == "execute":
+                workspace = Path(request["workspace_path"])
+                (workspace / "README.md").write_text("Symphony real E2E disposable workspace.\\naccepted\\n", encoding="utf-8")
+                result["execute_result"] = {{
+                    "status": "ready_for_gate",
+                    "summary": "Updated README.md.",
+                    "changed_files": ["README.md"],
+                    "acceptance_evidence": [{{
+                        "criterion": "README.md contains the accepted marker",
+                        "evidence": "README.md was updated",
+                        "passed": True,
+                    }}],
+                    "blocked_reason": None,
+                }}
+            else:
+                result["gate_result"] = {{
+                    "passed": True,
+                    "score": 4,
+                    "threshold": 3,
+                    "rubric": {{"correctness": {{"score": 4, "weight": 1}}}},
+                    "provenance": [{{"source": "performer", "attempt_id": "gate-1"}}],
+                    "findings": ["The diagnostic task passed."],
+                    "artifact_refs": ["artifact://run-performer/task-1"],
+                }}
+            result_path.write_text(json.dumps(result), encoding="utf-8")
+            """
+        ),
+        encoding="utf-8",
+    )
+    performer.chmod(performer.stat().st_mode | stat.S_IXUSR)
+    return performer
+
+
+def test_performer_phase_uses_one_staged_context_for_installed_control_and_turns(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    for name in ("config.toml", "auth.json", "version.json", "models_cache.json"):
+        (seed / name).write_text("{}", encoding="utf-8")
+    journal = tmp_path / "performer-journal.jsonl"
+    performer = _install_real_flow_performer(tmp_path, journal)
+    monkeypatch.setattr(real_flow, "_installed_performer_command", lambda: (str(performer),))
     context = real_flow._RunContext(
         run_id="run-performer",
         artifact_root=tmp_path / "artifacts",
         output_path=tmp_path / "report.json",
         project_slug="fixture",
-        timeout=0.1,
+        timeout=5,
         offline=False,
-        settings={"podium_url": "http://podium", "project_slug": "fixture"},
+        settings={
+            "podium_url": "http://podium",
+            "project_slug": "fixture",
+            "codex_seed": str(seed),
+        },
+    )
+
+    report = real_flow._run_performer_phase(context)
+
+    assert report["status"] == "passed"
+    assert all(check["passed"] for check in report["checks"])
+    assert {check["name"] for check in report["checks"]} == {
+        "performer_control_status",
+        "performer_manual_check",
+        "performer_plan_turn",
+        "performer_execute_turn",
+        "performer_gate_turn",
+        "performer_artifacts_secret_free",
+    }
+    calls = [json.loads(line) for line in journal.read_text(encoding="utf-8").splitlines()]
+    assert [call["mode"] for call in calls] == ["control", "plan", "execute", "gate"]
+    staged_homes = {call["codex_home"] for call in calls}
+    assert len(staged_homes) == 1
+    assert staged_homes != {str(seed)}
+    staged_home = next(iter(staged_homes))
+    assert not Path(staged_home).exists()
+    for artifact in report["artifacts"]:
+        assert staged_home not in Path(artifact).read_text(encoding="utf-8")
+    assert not real_flow._artifact_has_secret(report["artifacts"])
+
+
+def test_performer_phase_fails_closed_when_the_approved_seed_is_missing(tmp_path: Path) -> None:
+    context = real_flow._RunContext(
+        run_id="run-performer-missing-seed",
+        artifact_root=tmp_path / "artifacts",
+        output_path=tmp_path / "report.json",
+        project_slug="fixture",
+        timeout=1,
+        offline=False,
+        settings={"codex_seed": str(tmp_path / "missing")},
     )
 
     report = real_flow._run_performer_phase(context)
 
     assert report["status"] == "failed"
-    assert [check["name"] for check in report["checks"]] == [
-        "performer_control_boundary_real_flow"
-    ]
-    assert report["failures"][0]["error_code"] == "performer_control_real_flow_pending"
-    assert report["failures"][0]["next_action"] == (
-        "complete_installed_performer_control_and_turn_real_flow_integration"
+    assert report["failures"][0]["error_code"] == "performer_seed_unavailable"
+    assert report["checks"][0]["name"] == "performer_control_status"
+    assert report["checks"][0]["passed"] is False
+
+
+def test_performer_phase_surfaces_safe_check_failure_category(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    for name in ("config.toml", "auth.json"):
+        (seed / name).write_text("{}", encoding="utf-8")
+    journal = tmp_path / "performer-journal.jsonl"
+    performer = _install_real_flow_performer(
+        tmp_path,
+        journal,
+        check_failure=True,
     )
-    assert report["observations"] == {
-        "boundary": "installed_performer_control_and_turn_processes",
-        "provider_owned_state_in_conductor": False,
-    }
+    monkeypatch.setattr(real_flow, "_installed_performer_command", lambda: (str(performer),))
+    context = real_flow._RunContext(
+        run_id="run-check-failure",
+        artifact_root=tmp_path / "artifacts",
+        output_path=tmp_path / "report.json",
+        project_slug="fixture",
+        timeout=5,
+        offline=False,
+        settings={"codex_seed": str(seed)},
+    )
+
+    report = real_flow._run_performer_phase(context)
+
+    assert report["failures"][0]["error_code"] == "performer_check_failed"
+    assert report["failures"][0]["sanitized_reason"] == (
+        "The installed Performer manual Check failed: "
+        "Codex Check failed: Codex authentication failed."
+    )
+
+
+def test_performer_workspace_verification_observes_readme_changes(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    real_flow._git_workspace(workspace)
+
+    (workspace / "README.md").write_text("trailing whitespace  \n", encoding="utf-8")
+
+    verification = subprocess.run(
+        ["git", "-C", str(workspace), "diff", "--check"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert verification.returncode != 0
+
+
+def test_performer_phase_preserves_primary_failure_when_control_cleanup_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    for name in ("config.toml", "auth.json"):
+        (seed / name).write_text("{}", encoding="utf-8")
+
+    class FailedProcess:
+        returncode = 23
+
+    def fail_status(*_args: object, **_kwargs: object) -> None:
+        raise real_flow._PerformerDiagnosticError(
+            "performer_status_not_ready",
+            "The installed Performer status was not ready.",
+        )
+
+    monkeypatch.setattr(real_flow, "_git_workspace", lambda path: path.mkdir(parents=True))
+    monkeypatch.setattr(real_flow.subprocess, "Popen", lambda *_args, **_kwargs: FailedProcess())
+    monkeypatch.setattr(real_flow, "_exchange_control", fail_status)
+    monkeypatch.setattr(real_flow, "_stop_control_process", lambda _process: b"")
+    context = real_flow._RunContext(
+        run_id="run-primary-failure",
+        artifact_root=tmp_path / "artifacts",
+        output_path=tmp_path / "report.json",
+        project_slug="fixture",
+        timeout=1,
+        offline=False,
+        settings={"codex_seed": str(seed)},
+    )
+
+    report = real_flow._run_performer_phase(context)
+
+    assert report["failures"][0]["error_code"] == "performer_status_not_ready"
 
 
 def test_overall_fixtures_have_deterministic_success_rework_and_block_behavior(tmp_path: Path) -> None:

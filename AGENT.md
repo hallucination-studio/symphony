@@ -161,6 +161,17 @@ Run a single Performer managed-run turn only through request/result files:
 .venv/bin/performer --turn-request-path /tmp/turn-request.json --turn-result-path /tmp/turn-result.json
 ```
 
+Run provider-neutral control only through the installed control host:
+
+```bash
+.venv/bin/performer control --performer-kind codex
+```
+
+The real-flow Performer diagnostic owns the framing for that installed process,
+uses only `performer_api` models to validate replies, and shares one temporary
+copy of the approved seed across control, Check, plan, execute, and gate. Do not
+replace it with direct SDK imports or a second diagnostic runner.
+
 Stop local Performer/Conductor processes launched by the Makefile:
 
 ```bash

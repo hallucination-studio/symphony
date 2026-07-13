@@ -159,7 +159,7 @@ when a prerequisite phase failed.
 
 ### 2.4 Batch command contract
 
-The implementation of the runner must extend the existing `tools/real_flow.py`
+The runner implementation extends the existing `tools/real_flow.py`
 parser with exactly this acceptance command; it must not create a second
 entrypoint:
 

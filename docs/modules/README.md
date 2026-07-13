@@ -1,9 +1,9 @@
 # Module Design Baselines
 
 Status: module boundary baseline amended by accepted ADR-0006 on 2026-07-13.
-The corrected provider boundary is target work until the implementation plan
-and verification are complete; a real Linear/OAuth/Performer flow is still an
-external verification step, not an implied pass.
+The corrected provider boundary and local verification are implemented; a real
+Linear/OAuth/Performer flow is still an external verification step, not an
+implied pass.
 
 These documents describe the code that exists now and the hard-cut boundaries
 that future work must preserve. They do not authorize a new feature or hide an

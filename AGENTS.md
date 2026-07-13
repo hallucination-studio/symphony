@@ -36,6 +36,8 @@ Run the services directly:
 
 Real Linear flow is skipped by default; it needs a staged Codex seed and a
 sourced `.env` — see `docs/real-flow.md` and the real-flow section in `AGENT.md`.
+The single runner starts installed Performer control/turn processes; tools must
+not import provider SDKs or parse the staged provider files.
 
 ## Architecture
 

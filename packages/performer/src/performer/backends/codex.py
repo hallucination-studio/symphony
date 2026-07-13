@@ -569,10 +569,12 @@ class CodexBackend:
                 readiness=self._readiness(),
                 check=PerformerCheckOutcome(status="failed", started_at=started, finished_at=_now(), summary=error.sanitized_reason),
             )
-        except Exception:
+        except Exception as exc:
+            classified = _classify_sdk_exception(exc)
+            adapter_reason = _sanitized_sdk_reason(exc, classified)
             error = PerformerControlError(
                 error_code="performer_check_failed",
-                sanitized_reason="Codex Check failed.",
+                sanitized_reason=f"Codex Check failed: {adapter_reason}.",
                 action_required=True,
                 retryable=True,
                 attempt_number=1,

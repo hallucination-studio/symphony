@@ -57,6 +57,13 @@ isolated per-batch context from an approved fixed seed and must reject direct
 ambient `~/.codex` inputs. Missing or invalid backend setup fails closed with a
 generic actionable reason plus a bounded sanitized adapter summary.
 
+The harness copies only `config.toml`, `auth.json`, `version.json`, and
+`models_cache.json` when present, requires the authentication/config seed
+baseline, passes the temporary context only through the installed process
+environment, and deletes it after the Performer phase. Reports contain only
+presence, hashes, normalized results, and sanitized artifact paths, never the
+staged context path or file contents.
+
 ## Error visibility
 
 Security-sensitive failures fail closed but remain observable through the

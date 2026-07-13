@@ -1,7 +1,7 @@
 # Module target: `conductor`
 
-Status: ADR-0006 target boundary accepted on 2026-07-13; implementation is
-tracked in `tasks/plan.md`.
+Status: ADR-0006 boundary implemented and locally verified on 2026-07-13;
+external real-flow acceptance remains tracked in `tasks/plan.md`.
 
 ## Responsibility
 

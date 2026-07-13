@@ -91,6 +91,12 @@ set -a && source .env && set +a
 PYTHONPATH=$(pwd)/tools .venv/bin/python tools/real_flow.py --phase all --project-slug "$SYMPHONY_E2E_PROJECT_SLUG" --out .test-real-flow/batch-report.json
 ```
 
+The Performer phase copies only the approved staged seed files into one
+isolated per-batch context, starts installed `performer control`, runs an
+explicit manual Check, and then runs plan, execute, and gate through installed
+one-shot Performer processes using that same context. The runner never imports
+a provider SDK or reads the ambient `~/.codex` home.
+
 ## Run Conductor
 
 ```bash
