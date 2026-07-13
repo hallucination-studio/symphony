@@ -9,7 +9,7 @@ from conductor.conductor_podium_sync import (
     _profile_from_command,
     _validate_project_configure_command,
 )
-from performer_api.codex_runtime import PerformerProfileConfig, RuntimePolicyError
+from performer_api.runtime_policy import PerformerProfileConfig, RuntimePolicyError
 
 
 EXECUTION_POLICY = {

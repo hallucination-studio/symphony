@@ -10,7 +10,7 @@ from typing import Any
 
 import httpx
 
-from performer_api.codex_runtime import PerformerProfileConfig, RuntimePolicyError
+from performer_api.runtime_policy import PerformerProfileConfig, RuntimePolicyError
 
 from .models import ConductorServiceError, InstanceCreateRequest, InstancePatchRequest
 from .conductor_smoke_protocol import SmokeCommandError, normalize_smoke_command, sanitize_reason, smoke_result

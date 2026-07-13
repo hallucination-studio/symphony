@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from performer_api.codex_runtime import PerformerProfileConfig
+from performer_api.runtime_policy import PerformerProfileConfig
 
 from conductor.conductor_podium_sync import (
     ConductorPodiumSyncMixin,

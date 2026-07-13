@@ -6,7 +6,7 @@ from pathlib import Path
 import re
 from typing import Any
 
-from performer_api.codex_runtime import PerformerProfileConfig, RuntimePolicyError
+from performer_api.runtime_policy import PerformerProfileConfig, RuntimePolicyError
 
 
 MAX_PROFILE_METADATA_BYTES = 64 * 1024

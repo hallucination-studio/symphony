@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from performer_api.codex_runtime import PerformerProfileConfig, RuntimePolicyError
+from performer_api.runtime_policy import PerformerProfileConfig, RuntimePolicyError
 
 from .performer_profiles import PerformerProfileLoadError
 from .podium_project_binding_creation import (
