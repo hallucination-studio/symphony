@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from performer_api.performer_control import PerformerReadinessState
 from performer_api.workflow import Plan
 
 from .acceptance_evidence import (
@@ -239,6 +240,176 @@ class ConductorStore:
         while port in used:
             port += 1
         return port
+
+    def get_performer_control_state(self) -> dict[str, Any]:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM performer_control_state WHERE id = 1"
+            ).fetchone()
+        if row is None:
+            return self.reset_performer_control_state()
+        return _performer_control_state(row)
+
+    def reset_performer_control_state(self) -> dict[str, Any]:
+        now = utc_now_iso()
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                """
+                INSERT INTO performer_control_state (
+                  id,
+                  performer_kind,
+                  binding_generation,
+                  capability_version,
+                  execution_policy_sha256,
+                  status,
+                  last_check_status,
+                  last_check_started_at,
+                  last_check_finished_at,
+                  error_code,
+                  sanitized_reason,
+                  action_required,
+                  retryable,
+                  attempt_number,
+                  next_action,
+                  updated_at
+                ) VALUES (1, '', 0, 0, '', 'unchecked', 'none', NULL, NULL, '', '', 0, 0, NULL, '', ?)
+                ON CONFLICT(id) DO UPDATE SET
+                  status = 'unchecked',
+                  updated_at = excluded.updated_at
+                """,
+                (now,),
+            )
+            row = connection.execute(
+                "SELECT * FROM performer_control_state WHERE id = 1"
+            ).fetchone()
+        if row is None:
+            raise RuntimeError("performer_control_state_missing")
+        return _performer_control_state(row)
+
+    def ensure_performer_control_identity(
+        self,
+        *,
+        performer_kind: str,
+        binding_generation: int,
+        capability_version: int,
+        execution_policy_sha256: str,
+    ) -> dict[str, Any]:
+        identity = PerformerReadinessState(
+            performer_kind=performer_kind,
+            binding_generation=binding_generation,
+            capability_version=capability_version,
+            execution_policy_sha256=execution_policy_sha256,
+            status="unchecked",
+            last_check_status="none",
+            error=None,
+        )
+        current = self.get_performer_control_state()
+        if all(
+            current[key] == value
+            for key, value in (
+                ("performer_kind", identity.performer_kind),
+                ("binding_generation", identity.binding_generation),
+                ("capability_version", identity.capability_version),
+                ("execution_policy_sha256", identity.execution_policy_sha256),
+            )
+        ):
+            return current
+        now = utc_now_iso()
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                """
+                UPDATE performer_control_state
+                SET performer_kind = ?,
+                    binding_generation = ?,
+                    capability_version = ?,
+                    execution_policy_sha256 = ?,
+                    status = 'unchecked',
+                    last_check_status = 'none',
+                    last_check_started_at = NULL,
+                    last_check_finished_at = NULL,
+                    error_code = '',
+                    sanitized_reason = '',
+                    action_required = 0,
+                    retryable = 0,
+                    attempt_number = NULL,
+                    next_action = '',
+                    updated_at = ?
+                WHERE id = 1
+                """,
+                (
+                    identity.performer_kind,
+                    identity.binding_generation,
+                    identity.capability_version,
+                    identity.execution_policy_sha256,
+                    now,
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM performer_control_state WHERE id = 1"
+            ).fetchone()
+        if row is None:
+            raise RuntimeError("performer_control_state_missing")
+        return _performer_control_state(row)
+
+    def record_performer_readiness(
+        self,
+        readiness: PerformerReadinessState,
+        *,
+        check_started_at: str | None = None,
+        check_finished_at: str | None = None,
+    ) -> dict[str, Any]:
+        if not isinstance(readiness, PerformerReadinessState):
+            raise TypeError("readiness must be PerformerReadinessState")
+        error = readiness.error
+        now = utc_now_iso()
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                """
+                UPDATE performer_control_state
+                SET performer_kind = ?,
+                    binding_generation = ?,
+                    capability_version = ?,
+                    execution_policy_sha256 = ?,
+                    status = ?,
+                    last_check_status = ?,
+                    last_check_started_at = COALESCE(?, last_check_started_at),
+                    last_check_finished_at = COALESCE(?, last_check_finished_at),
+                    error_code = ?,
+                    sanitized_reason = ?,
+                    action_required = ?,
+                    retryable = ?,
+                    attempt_number = ?,
+                    next_action = ?,
+                    updated_at = ?
+                WHERE id = 1
+                """,
+                (
+                    readiness.performer_kind,
+                    readiness.binding_generation,
+                    readiness.capability_version,
+                    readiness.execution_policy_sha256,
+                    readiness.status,
+                    readiness.last_check_status,
+                    check_started_at,
+                    check_finished_at,
+                    error.error_code if error is not None else "",
+                    error.sanitized_reason if error is not None else "",
+                    int(error.action_required) if error is not None else 0,
+                    int(error.retryable) if error is not None else 0,
+                    error.attempt_number if error is not None else None,
+                    error.next_action if error is not None else "",
+                    now,
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM performer_control_state WHERE id = 1"
+            ).fetchone()
+        if row is None:
+            raise RuntimeError("performer_control_state_missing")
+        return _performer_control_state(row)
 
     def create_run(self, parent_issue_id: str, issue_identifier: str, *, instance_id: str) -> dict[str, Any]:
         with self.connect() as connection:
@@ -1058,8 +1229,31 @@ class ConductorStore:
                   created_at TEXT NOT NULL,
                   PRIMARY KEY (run_id, task_id, attempt_id, artifact_ref)
                 );
+                CREATE TABLE IF NOT EXISTS performer_control_state (
+                  id INTEGER PRIMARY KEY CHECK (id = 1),
+                  performer_kind TEXT NOT NULL,
+                  binding_generation INTEGER NOT NULL,
+                  capability_version INTEGER NOT NULL,
+                  execution_policy_sha256 TEXT NOT NULL,
+                  status TEXT NOT NULL CHECK (
+                    status IN ('unchecked', 'checking', 'ready', 'failed')
+                  ),
+                  last_check_status TEXT NOT NULL CHECK (
+                    last_check_status IN ('none', 'passed', 'failed')
+                  ),
+                  last_check_started_at TEXT,
+                  last_check_finished_at TEXT,
+                  error_code TEXT NOT NULL,
+                  sanitized_reason TEXT NOT NULL,
+                  action_required INTEGER NOT NULL CHECK (action_required IN (0, 1)),
+                  retryable INTEGER NOT NULL CHECK (retryable IN (0, 1)),
+                  attempt_number INTEGER,
+                  next_action TEXT NOT NULL,
+                  updated_at TEXT NOT NULL
+                );
                 """
             )
+        self.reset_performer_control_state()
 
 
 def _run(row: sqlite3.Row) -> dict[str, Any]:
@@ -1075,6 +1269,29 @@ def _task(row: sqlite3.Row) -> dict[str, Any]:
 
 def _attempt_dict(row: sqlite3.Row) -> dict[str, Any]:
     return {key: row[key] for key in row.keys()} | {"result": _load(row["result_json"])}
+
+
+def _performer_control_state(row: sqlite3.Row) -> dict[str, Any]:
+    error_code = str(row["error_code"] or "")
+    sanitized_reason = str(row["sanitized_reason"] or "")
+    next_action = str(row["next_action"] or "")
+    return {
+        "performer_kind": str(row["performer_kind"]),
+        "binding_generation": int(row["binding_generation"]),
+        "capability_version": int(row["capability_version"]),
+        "execution_policy_sha256": str(row["execution_policy_sha256"]),
+        "status": str(row["status"]),
+        "last_check_status": str(row["last_check_status"]),
+        "last_check_started_at": row["last_check_started_at"],
+        "last_check_finished_at": row["last_check_finished_at"],
+        "error_code": error_code or None,
+        "sanitized_reason": sanitized_reason or None,
+        "action_required": bool(row["action_required"]),
+        "retryable": bool(row["retryable"]),
+        "attempt_number": row["attempt_number"],
+        "next_action": next_action or None,
+        "updated_at": str(row["updated_at"]),
+    }
 
 
 __all__ = ["ConductorStore", "StaleAttemptError"]
