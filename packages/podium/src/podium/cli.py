@@ -63,7 +63,7 @@ async def async_main(argv: list[str] | None = None) -> int:
         debug_auth=os.environ.get("PODIUM_DEBUG_AUTH", "").strip().lower() in {"1", "true", "yes", "on"},
     )
     try:
-        config = uvicorn.Config(app, host=args.host, port=args.port)
+        config = uvicorn.Config(app, host=args.host, port=args.port, access_log=False)
         server = uvicorn.Server(config)
         await server.serve()
     finally:

@@ -69,29 +69,86 @@ def register_linear_oauth_routes(
 
     @app.get("/api/v1/linear/oauth/callback")
     async def linear_callback(request: Request) -> Response:
+        callback_id = secrets.token_urlsafe(12)
         callback_state = str(request.query_params.get("state") or "")
         if not callback_state:
+            _log_callback(
+                logging.WARNING,
+                callback_id=callback_id,
+                outcome="rejected",
+                error_code="missing_state",
+                sanitized_reason="OAuth callback state was missing",
+                action_required="restart_authorization",
+                retryable=True,
+                next_action="restart_authorization",
+            )
             return error_response(400, "missing_state", "Missing state parameter")
         state_record = await state.consume_linear_oauth_state(callback_state)
         if state_record is None:
+            _log_callback(
+                logging.WARNING,
+                callback_id=callback_id,
+                outcome="rejected",
+                error_code="invalid_state",
+                sanitized_reason="OAuth callback state was invalid or expired",
+                action_required="restart_authorization",
+                retryable=True,
+                next_action="restart_authorization",
+            )
             return error_response(400, "invalid_state", "Invalid or expired state parameter")
+        user_id = str(state_record["workspace_id"])
         config = await state.get_linear_application_config(str(state_record["application_config_id"]))
         if not _state_matches_config(state_record, config):
+            _log_callback(
+                logging.WARNING,
+                callback_id=callback_id,
+                workspace_id=user_id,
+                outcome="rejected",
+                error_code="stale_application_config",
+                sanitized_reason="OAuth application configuration changed",
+                action_required="restart_authorization",
+                retryable=True,
+                next_action="restart_authorization",
+            )
             return error_response(400, "stale_application_config", "OAuth application configuration changed")
         denied = str(request.query_params.get("error") or "")
         if denied:
-            await _record_denied_callback(
+            installation_id = await _record_denied_callback(
                 state,
-                user_id=str(state_record["workspace_id"]),
+                user_id=user_id,
                 config=config,
+            )
+            _log_callback(
+                logging.INFO,
+                callback_id=callback_id,
+                workspace_id=user_id,
+                installation_id=installation_id,
+                outcome="denied",
+                error_code="linear_oauth_denied",
+                sanitized_reason="Linear authorization was not approved",
+                action_required="reauthorize",
+                retryable=False,
+                next_action="reauthorize",
             )
             return _setup_redirect("denied", "linear_oauth_denied")
         code = str(request.query_params.get("code") or "")
         if not code:
+            _log_callback(
+                logging.WARNING,
+                callback_id=callback_id,
+                workspace_id=user_id,
+                outcome="rejected",
+                error_code="missing_code",
+                sanitized_reason="OAuth authorization code was missing",
+                action_required="restart_authorization",
+                retryable=True,
+                next_action="restart_authorization",
+            )
             return _setup_redirect("error", "missing_code")
         return await _complete_callback(
             state=state,
-            user_id=str(state_record["workspace_id"]),
+            user_id=user_id,
+            callback_id=callback_id,
             code=code,
             code_verifier=str(state_record["code_verifier"]),
             config=config,
@@ -132,7 +189,7 @@ async def _record_denied_callback(
     *,
     user_id: str,
     config: dict[str, Any],
-) -> None:
+) -> str:
     rejection = LinearInstallationRejected(
         "linear_oauth_denied",
         "Linear authorization was not approved",
@@ -144,12 +201,14 @@ async def _record_denied_callback(
         rejection=rejection,
     )
     await state.save_linear_installation_record(record)
+    return str(record["id"])
 
 
 async def _complete_callback(
     *,
     state: Any,
     user_id: str,
+    callback_id: str,
     code: str,
     code_verifier: str,
     config: dict[str, Any],
@@ -181,21 +240,98 @@ async def _complete_callback(
             rejection=rejection,
         )
         await state.save_linear_installation_record(record)
-        LOGGER.error(
-            "event=podium_linear_oauth_callback_rejected workspace_id=%s installation_id=%s "
-            "error_type=LinearInstallationRejected error_code=%s sanitized_reason=%s "
-            "action_required=%s retryable=%s next_action=%s",
-            user_id,
-            installation_id,
-            rejection.code,
-            rejection.reason,
-            rejection.next_action,
-            str(rejection.retryable).lower(),
-            rejection.next_action,
+        _log_callback(
+            logging.ERROR,
+            callback_id=callback_id,
+            workspace_id=user_id,
+            installation_id=installation_id,
+            outcome="rejected",
+            error_type="LinearInstallationRejected",
+            error_code=rejection.code,
+            sanitized_reason=rejection.reason,
+            action_required=rejection.next_action,
+            retryable=rejection.retryable,
+            next_action=rejection.next_action,
+        )
+        return _setup_redirect("error", rejection.code)
+    except Exception:
+        rejection = LinearInstallationRejected(
+            "linear_oauth_callback_failed",
+            "Linear OAuth callback failed",
+            retryable=True,
+            next_action="retry_authorization",
+        )
+        record = rejected_installation(
+            user_id=user_id,
+            application=config,
+            installation_id=installation_id,
+            rejection=rejection,
+        )
+        await state.save_linear_installation_record(record)
+        _log_callback(
+            logging.ERROR,
+            callback_id=callback_id,
+            workspace_id=user_id,
+            installation_id=installation_id,
+            outcome="failed",
+            error_type="OAuthCallbackError",
+            error_code=rejection.code,
+            sanitized_reason=rejection.reason,
+            action_required=rejection.next_action,
+            retryable=True,
+            next_action=rejection.next_action,
         )
         return _setup_redirect("error", rejection.code)
     await state.mark_linear_connected(user_id)
+    _log_callback(
+        logging.INFO,
+        callback_id=callback_id,
+        workspace_id=user_id,
+        installation_id=installation_id,
+        outcome="connected",
+        error_code="none",
+        sanitized_reason="Linear OAuth callback completed",
+        action_required="review_projects",
+        retryable=False,
+        next_action="review_projects",
+    )
     return _setup_redirect("connected")
+
+
+def _log_callback(
+    level: int,
+    *,
+    callback_id: str,
+    outcome: str,
+    error_code: str,
+    sanitized_reason: str,
+    action_required: str,
+    retryable: bool,
+    next_action: str,
+    workspace_id: str = "",
+    installation_id: str = "",
+    error_type: str = "none",
+) -> None:
+    fields = [
+        "event=podium_linear_oauth_callback_completed",
+        f"callback_id={callback_id}",
+    ]
+    if workspace_id:
+        fields.append(f"workspace_id={workspace_id}")
+    if installation_id:
+        fields.append(f"installation_id={installation_id}")
+    fields.extend(
+        (
+            f"outcome={outcome}",
+            f"error_type={error_type}",
+            f"error_code={error_code}",
+            f"sanitized_reason={sanitized_reason}",
+            f"action_required={action_required}",
+            f"retryable={str(retryable).lower()}",
+            f"next_action={next_action}",
+        )
+    )
+    LOGGER.log(level, " ".join(fields))
 
 
 async def _exchange(

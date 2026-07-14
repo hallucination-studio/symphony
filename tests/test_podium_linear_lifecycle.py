@@ -370,6 +370,7 @@ async def test_reauthorization_rejection_leaves_active_installation_unchanged(
     response = await _complete_callback(
         state=state,
         user_id="user-1",
+        callback_id="callback-1",
         code="sentinel-code",
         code_verifier="sentinel-verifier",
         config={
@@ -418,7 +419,7 @@ async def test_reauthorization_rejection_leaves_active_installation_unchanged(
     assert public is not None
     assert public["error_code"] == "linear_bound_project_missing"
     assert any(
-        "event=podium_linear_oauth_callback_rejected" in message
+        "event=podium_linear_oauth_callback_completed" in message
         and "error_code=linear_bound_project_missing" in message
         for message in caplog.messages
     )
