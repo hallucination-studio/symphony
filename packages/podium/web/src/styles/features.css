@@ -350,6 +350,13 @@
   gap: var(--space-3);
 }
 
+.installation-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
 @media (max-width: 520px) {
   .application-source-control {
     grid-template-columns: 1fr;

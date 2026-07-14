@@ -3,6 +3,7 @@ import { act, renderHook, waitFor } from "@testing-library/react";
 import type { PropsWithChildren } from "react";
 import { afterEach, expect, it, vi } from "vitest";
 import {
+  useDisconnectLinear,
   usePerformerControl,
   usePerformerStatus,
   useSelectLinearProjects,
@@ -25,10 +26,10 @@ function setup() {
   return { queryClient, Wrapper };
 }
 
-function mockFetch(body: unknown) {
+function mockFetch(body: unknown, status = 200) {
   global.fetch = vi.fn().mockResolvedValue({
-    ok: true,
-    status: 200,
+    ok: status >= 200 && status < 300,
+    status,
     text: async () => JSON.stringify(body),
   } as Response);
 }
@@ -83,6 +84,59 @@ it("invalidates every readiness view after project selection changes", async () 
   });
 
   await act(() => result.current.mutateAsync(["project-1"]));
+
+  for (const key of keys) {
+    expect(queryClient.getQueryState(key)?.isInvalidated).toBe(true);
+  }
+});
+
+it("invalidates every Linear lifecycle view after disconnect", async () => {
+  mockFetch({ state: "disconnected" });
+  const { queryClient, Wrapper } = setup();
+  const keys = [
+    ["bootstrap"],
+    ["linear", "installations"],
+    ["linear", "projects"],
+    ["runtimes"],
+    ["runtime-status"],
+    ["smoke-check"],
+  ];
+  for (const key of keys) queryClient.setQueryData(key, { stale: false });
+  const { result } = renderHook(() => useDisconnectLinear(), {
+    wrapper: Wrapper,
+  });
+
+  await act(() => result.current.mutateAsync());
+
+  for (const key of keys) {
+    expect(queryClient.getQueryState(key)?.isInvalidated).toBe(true);
+  }
+});
+
+it("invalidates every Linear lifecycle view after a durable mutation failure", async () => {
+  mockFetch({
+    error: {
+      code: "linear_token_revocation_failed",
+      message: "Linear credential revocation failed",
+    },
+  }, 502);
+  const { queryClient, Wrapper } = setup();
+  const keys = [
+    ["bootstrap"],
+    ["linear", "installations"],
+    ["linear", "projects"],
+    ["runtimes"],
+    ["runtime-status"],
+    ["smoke-check"],
+  ];
+  for (const key of keys) queryClient.setQueryData(key, { stale: false });
+  const { result } = renderHook(() => useDisconnectLinear(), {
+    wrapper: Wrapper,
+  });
+
+  await act(async () => {
+    await result.current.mutateAsync().catch(() => undefined);
+  });
 
   for (const key of keys) {
     expect(queryClient.getQueryState(key)?.isInvalidated).toBe(true);

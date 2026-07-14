@@ -324,4 +324,52 @@ describe("SetupPage linear step", () => {
     expect(assign).toHaveBeenCalledWith("https://linear.example/oauth");
     assign.mockRestore();
   });
+
+  it("reauthorizes a connected custom application without re-entering its secret", async () => {
+    mockApi.bootstrap.mockResolvedValue(bootstrap("scope_selection", ["linear_connect"]));
+    mockApi.linearApplication.mockResolvedValue({
+      application: {
+        source: "custom",
+        client_id: "custom-client",
+        callback_url: "https://podium.example/api/v1/linear/oauth/callback",
+      },
+    });
+    mockApi.startLinear.mockResolvedValue({
+      authorization_url: "https://linear.example/oauth",
+    });
+    const assign = vi
+      .spyOn(navigation, "assignLocation")
+      .mockImplementation(() => undefined);
+
+    renderWithProviders(<SetupPage />, { route: "/setup/linear", path: "/setup/:step" });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Reauthorize Linear" }));
+
+    await waitFor(() => expect(mockApi.startLinear).toHaveBeenCalled());
+    expect(assign).toHaveBeenCalledWith("https://linear.example/oauth");
+    expect(screen.getByLabelText("Client secret")).toHaveValue("");
+    expect(mockApi.saveLinearApplication).not.toHaveBeenCalled();
+    assign.mockRestore();
+  });
+
+  it("does not reauthorize the persisted default application from an unsaved custom form", async () => {
+    mockApi.bootstrap.mockResolvedValue(bootstrap("scope_selection", ["linear_connect"]));
+    renderWithProviders(<SetupPage />, { route: "/setup/linear", path: "/setup/:step" });
+
+    fireEvent.click(await screen.findByRole("radio", { name: "Own application" }));
+
+    expect(screen.queryByRole("button", { name: "Reauthorize Linear" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save and authorize" })).toBeInTheDocument();
+  });
+
+  it("identifies every custom application form field", async () => {
+    mockApi.bootstrap.mockResolvedValue(bootstrap("linear_connect", []));
+    renderWithProviders(<SetupPage />, { route: "/setup/linear", path: "/setup/:step" });
+
+    fireEvent.click(await screen.findByRole("radio", { name: "Own application" }));
+
+    expect(screen.getByLabelText("Client ID")).toHaveAttribute("name", "linear-client-id");
+    expect(screen.getByLabelText("Client secret")).toHaveAttribute("name", "linear-client-secret");
+    expect(screen.getByLabelText("Callback URL")).toHaveAttribute("name", "linear-callback-url");
+  });
 });

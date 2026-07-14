@@ -35,12 +35,13 @@ export function LinearApplicationSetup({ linear }: { linear: LinearStatus }) {
       <ApplicationSourceControl mode={controller.mode} disabled={busy} onChange={controller.selectMode} />
       {controller.mode === "default" ? (
         <DefaultApplicationPanel
-          connected={linear.state === "connected"}
+          connected={linear.state !== "not_connected"}
           loading={controller.switching || controller.authorizing}
           onAuthorize={controller.authorize}
         />
       ) : (
         <CustomApplicationForm
+          connected={linear.state !== "not_connected" && controller.application.source === "custom"}
           clientId={controller.clientId}
           clientSecret={controller.clientSecret}
           callbackUrl={controller.application.callback_url}
@@ -48,10 +49,14 @@ export function LinearApplicationSetup({ linear }: { linear: LinearStatus }) {
           loading={controller.saving || controller.authorizing}
           onClientIdChange={controller.setClientId}
           onClientSecretChange={controller.setClientSecret}
+          onReauthorize={controller.authorize}
           onSubmit={controller.saveAndAuthorize}
         />
       )}
-      <LinearInstallationStatus installations={installationsQuery.data} />
+      <LinearInstallationStatus
+        installations={installationsQuery.data}
+        onReauthorize={controller.authorize}
+      />
     </div>
   );
 }
@@ -196,7 +201,7 @@ function DefaultApplicationPanel({
         </div>
         <StatusBadge status="healthy" label="Ready" />
       </div>
-      <Button onClick={onAuthorize} loading={loading}>
+      <Button variant={connected ? "secondary" : "primary"} onClick={onAuthorize} loading={loading}>
         {t(connected ? "Reauthorize Linear" : "Authorize Linear")}
       </Button>
     </div>
@@ -204,6 +209,7 @@ function DefaultApplicationPanel({
 }
 
 function CustomApplicationForm({
+  connected,
   clientId,
   clientSecret,
   callbackUrl,
@@ -211,8 +217,10 @@ function CustomApplicationForm({
   loading,
   onClientIdChange,
   onClientSecretChange,
+  onReauthorize,
   onSubmit,
 }: {
+  connected: boolean;
   clientId: string;
   clientSecret: string;
   callbackUrl: string;
@@ -220,6 +228,7 @@ function CustomApplicationForm({
   loading: boolean;
   onClientIdChange: (value: string) => void;
   onClientSecretChange: (value: string) => void;
+  onReauthorize: () => void;
   onSubmit: (event: FormEvent) => void;
 }) {
   const { t } = useI18n();
@@ -227,18 +236,25 @@ function CustomApplicationForm({
     <form className="application-mode-panel" onSubmit={onSubmit}>
       <label className="field">
         <span className="field-label">{t("Client ID")}</span>
-        <input className="text-input" aria-label={t("Client ID")} value={clientId} onChange={(event) => onClientIdChange(event.target.value)} />
+        <input id="linear-client-id" name="linear-client-id" className="text-input" aria-label={t("Client ID")} value={clientId} onChange={(event) => onClientIdChange(event.target.value)} />
       </label>
       <label className="field">
         <span className="field-label">{t("Client secret")}</span>
-        <input className="text-input" type="password" autoComplete="off" aria-label={t("Client secret")} value={clientSecret} onChange={(event) => onClientSecretChange(event.target.value)} />
+        <input id="linear-client-secret" name="linear-client-secret" className="text-input" type="password" autoComplete="off" aria-label={t("Client secret")} value={clientSecret} onChange={(event) => onClientSecretChange(event.target.value)} />
       </label>
       <label className="field">
         <span className="field-label">{t("Callback URL")}</span>
-        <input className="text-input readonly-input code" aria-label={t("Callback URL")} value={callbackUrl} readOnly />
+        <input id="linear-callback-url" name="linear-callback-url" className="text-input readonly-input code" aria-label={t("Callback URL")} value={callbackUrl} readOnly />
       </label>
       {error ? <p className="field-error" role="alert">{error}</p> : null}
-      <Button type="submit" loading={loading}>{t("Save and authorize")}</Button>
+      <div className="installation-actions">
+        <Button type="submit" loading={loading}>{t("Save and authorize")}</Button>
+        {connected ? (
+          <Button type="button" variant="secondary" onClick={onReauthorize} loading={loading}>
+            {t("Reauthorize Linear")}
+          </Button>
+        ) : null}
+      </div>
     </form>
   );
 }

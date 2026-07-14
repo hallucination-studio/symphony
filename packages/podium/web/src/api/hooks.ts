@@ -240,6 +240,44 @@ export function useStartLinear() {
   });
 }
 
+function useInvalidateLinearLifecycle() {
+  const qc = useQueryClient();
+  return async () => {
+    await Promise.all([
+      qc.invalidateQueries({ queryKey: ["bootstrap"] }),
+      qc.invalidateQueries({ queryKey: ["linear", "installations"] }),
+      qc.invalidateQueries({ queryKey: ["linear", "projects"] }),
+      qc.invalidateQueries({ queryKey: ["runtimes"] }),
+      qc.invalidateQueries({ queryKey: ["runtime-status"] }),
+      qc.invalidateQueries({ queryKey: ["smoke-check"] }),
+    ]);
+  };
+}
+
+export function useAdvanceLinearCutover() {
+  const invalidate = useInvalidateLinearLifecycle();
+  return useMutation({
+    mutationFn: () => api.advanceLinearCutover(),
+    onSettled: invalidate,
+  });
+}
+
+export function useDisconnectLinear() {
+  const invalidate = useInvalidateLinearLifecycle();
+  return useMutation({
+    mutationFn: () => api.disconnectLinear(),
+    onSettled: invalidate,
+  });
+}
+
+export function useRetryLinearRevocation() {
+  const invalidate = useInvalidateLinearLifecycle();
+  return useMutation({
+    mutationFn: (installationId: string) => api.retryLinearRevocation(installationId),
+    onSettled: invalidate,
+  });
+}
+
 export function useSelectLinearProjects() {
   const qc = useQueryClient();
   return useMutation({

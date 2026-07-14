@@ -66,6 +66,64 @@ describe("api client", () => {
     );
   });
 
+  it("advances Linear cutover through the exact lifecycle endpoint", async () => {
+    const body = {
+      cutover_state: "waiting_for_drain",
+      active: null,
+      candidate: null,
+      retirement_error: false,
+    };
+    const fetchMock = mockFetch(200, body);
+    global.fetch = fetchMock;
+
+    const result = await api.advanceLinearCutover();
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/linear/installations/cutover",
+      expect.objectContaining({ method: "POST", credentials: "include" }),
+    );
+    expect(result).toEqual(body);
+  });
+
+  it("disconnects the current Linear installation with DELETE", async () => {
+    const fetchMock = mockFetch(200, { state: "disconnected" });
+    global.fetch = fetchMock;
+
+    await api.disconnectLinear();
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/linear/installations/current",
+      expect.objectContaining({ method: "DELETE", credentials: "include" }),
+    );
+  });
+
+  it("retries revocation for the exact installation id", async () => {
+    const fetchMock = mockFetch(200, { state: "disconnected" });
+    global.fetch = fetchMock;
+
+    await api.retryLinearRevocation("installation 1");
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/linear/installations/installation%201/revoke",
+      expect.objectContaining({ method: "POST", credentials: "include" }),
+    );
+  });
+
+  it("keeps a sanitized Linear next action on API errors", async () => {
+    global.fetch = mockFetch(409, {
+      error: {
+        code: "linear_disconnect_in_use",
+        message: "Unbind active projects before disconnecting Linear",
+        next_action: "unbind_projects",
+      },
+    });
+
+    await expect(api.disconnectLinear()).rejects.toMatchObject({
+      code: "linear_disconnect_in_use",
+      nextAction: "unbind_projects",
+    });
+  });
+
   it("lists Linear projects through the closed canonical projects endpoint", async () => {
     const fetchMock = mockFetch(200, {
       projects: [

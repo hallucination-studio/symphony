@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { Button } from "./Button";
+import { Button, LinkButton } from "./Button";
 
 export type ActionTone = "info" | "warning" | "critical" | "success";
 
@@ -14,6 +14,7 @@ export function ActionPanel({
   description,
   actionLabel,
   onAction,
+  actionTo,
   actionLoading,
 }: {
   tone?: ActionTone;
@@ -21,6 +22,7 @@ export function ActionPanel({
   description?: ReactNode;
   actionLabel?: string;
   onAction?: () => void;
+  actionTo?: string;
   actionLoading?: boolean;
 }) {
   return (
@@ -31,15 +33,19 @@ export function ActionPanel({
           <div className="action-panel-description">{description}</div>
         ) : null}
       </div>
-      {actionLabel && onAction ? (
+      {actionLabel && (onAction || actionTo) ? (
         <div className="action-panel-actions">
-          <Button
-            variant={tone === "critical" ? "danger" : "primary"}
-            onClick={onAction}
-            loading={actionLoading}
-          >
-            {actionLabel}
-          </Button>
+          {actionTo ? (
+            <LinkButton to={actionTo}>{actionLabel}</LinkButton>
+          ) : (
+            <Button
+              variant={tone === "critical" ? "danger" : "primary"}
+              onClick={onAction}
+              loading={actionLoading}
+            >
+              {actionLabel}
+            </Button>
+          )}
         </div>
       ) : null}
     </div>

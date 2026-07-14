@@ -6,6 +6,7 @@ import type {
   EnrollmentToken,
   InstanceLogs,
   LinearApplication,
+  LinearCutoverResult,
   LinearInstallations,
   LinearProjects,
   OnboardingProgress,
@@ -33,12 +34,14 @@ import type {
 export class ApiError extends Error {
   status: number;
   code?: string;
+  nextAction?: string;
 
-  constructor(status: number, message: string, code?: string) {
+  constructor(status: number, message: string, code?: string, nextAction?: string) {
     super(message);
     this.name = "ApiError";
     this.status = status;
     this.code = code;
+    this.nextAction = nextAction;
   }
 }
 
@@ -61,11 +64,14 @@ async function request<T>(
   const data = text ? JSON.parse(text) : {};
 
   if (!response.ok) {
-    const err = (data as { error?: { code?: string; message?: string } }).error;
+    const err = (data as {
+      error?: { code?: string; message?: string; next_action?: string };
+    }).error;
     throw new ApiError(
       response.status,
       err?.message ?? `Request failed: ${response.status}`,
       err?.code,
+      err?.next_action,
     );
   }
 
@@ -132,6 +138,21 @@ export const api = {
 
   linearInstallations(): Promise<LinearInstallations> {
     return request("/api/v1/linear/installations");
+  },
+
+  advanceLinearCutover(): Promise<LinearCutoverResult> {
+    return request("/api/v1/linear/installations/cutover", { method: "POST" });
+  },
+
+  disconnectLinear(): Promise<{ state: string }> {
+    return request("/api/v1/linear/installations/current", { method: "DELETE" });
+  },
+
+  retryLinearRevocation(installationId: string): Promise<{ state: string }> {
+    return request(
+      `/api/v1/linear/installations/${encodeURIComponent(installationId)}/revoke`,
+      { method: "POST" },
+    );
   },
 
   // ===== Onboarding / workspace =====

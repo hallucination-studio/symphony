@@ -44,6 +44,7 @@ export interface LinearApplication {
 }
 
 export interface LinearInstallation {
+  id: string;
   state: string;
   actor: string;
   linear_organization_id?: string;
@@ -52,6 +53,10 @@ export interface LinearInstallation {
   scope: string[];
   expires_at?: string | null;
   sanitized_reason?: string;
+  error_code?: string;
+  retryable?: boolean;
+  action_required?: string;
+  next_action?: string;
   reconciliation_state?: string;
   reconciliation_error?: string;
 }
@@ -60,6 +65,13 @@ export interface LinearInstallations {
   active: LinearInstallation | null;
   candidate: LinearInstallation | null;
   revocation: LinearInstallation | null;
+}
+
+export interface LinearCutoverResult {
+  cutover_state: string;
+  active: LinearInstallation | null;
+  candidate: LinearInstallation | null;
+  retirement_error: boolean;
 }
 
 export interface Bootstrap {
