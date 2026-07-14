@@ -180,12 +180,19 @@ export interface ConductorBinding {
 }
 
 export interface ConductorRecord {
+  id: string;
   conductor_id: string;
+  name: string;
+  public_id: string;
+  enrollment_state: "pending" | "enrolled";
   hostname: string;
   label: string;
   version: string;
+  service_identity: string;
+  data_root: string;
   online: boolean;
   last_report_at?: string | null;
+  binding: ConductorBinding | null;
   bindings: ConductorBinding[];
 }
 
@@ -300,7 +307,12 @@ export interface EnrollmentToken {
   // Backend-composed install one-liner; never hardcoded in the frontend.
   install_command: string;
   expires_at?: string | null;
+  conductor: Omit<ConductorRecord, "conductor_id" | "label" | "bindings">;
 }
+
+export type EnrollmentTokenRequest =
+  | { name?: string; conductor_id?: never }
+  | { name?: never; conductor_id: string };
 
 // Closed, provider-neutral browser projections of Performer live-control
 // contracts. Provider SDK objects and provider-owned configuration keys never

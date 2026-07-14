@@ -20,17 +20,27 @@ export function ConductorCard({
   conductor,
   selectedId,
   onSelect,
+  onContinueInstall,
 }: {
   conductor: ConductorRecord;
   selectedId: string | null;
   onSelect: (performer: ConductorBinding) => void;
+  onContinueInstall?: () => void;
 }) {
-  const heading = conductor.label || conductor.hostname || conductor.conductor_id;
+  const { t } = useI18n();
+  const heading = conductor.name && conductor.public_id
+    ? `${conductor.name}-${conductor.public_id}`
+    : conductor.label || conductor.hostname || conductor.conductor_id;
   const reported = conductor.last_report_at
     ? relativeTime(conductor.last_report_at)
     : null;
-  const version = conductor.version ? `v${conductor.version}` : null;
-  const { t } = useI18n();
+  const version = conductor.version ? `v${conductor.version}` : t("version unknown");
+  const host = conductor.hostname || (
+    conductor.enrollment_state === "pending" ? t("Host pending") : t("Host not reported")
+  );
+  const status = conductor.enrollment_state === "pending"
+    ? "pending"
+    : conductor.online ? "online" : "offline";
 
   return (
     <Card>
@@ -38,19 +48,30 @@ export function ConductorCard({
         <div>
           <div className="conductor-name">{heading}</div>
           <div className="conductor-sub">
+            {host}
+            {" · "}
             {version}
-            {version ? null : t("version unknown")}
             {" · "}
             {reported ? t("reported {time}", { time: reported }) : t("no report yet")}
           </div>
         </div>
-        <StatusBadge status={conductor.online ? "online" : "offline"} />
+        <div className="conductor-statuses">
+          <StatusBadge status={status} />
+          {conductor.bindings.length === 0 ? (
+            <StatusBadge status="not_started" label={t("Unbound")} />
+          ) : null}
+        </div>
       </div>
 
       {conductor.bindings.length === 0 ? (
-        <p className="conductor-empty muted">
-          {t("No Performers configured on this Conductor yet.")}
-        </p>
+        <div className="conductor-empty conductor-empty-actions muted">
+          <span>{t("No Performers configured on this Conductor yet.")}</span>
+          {conductor.enrollment_state === "pending" && onContinueInstall ? (
+            <button type="button" className="link-button" onClick={onContinueInstall}>
+              {t("Continue install")}
+            </button>
+          ) : null}
+        </div>
       ) : (
         <ul className="performer-list">
           {conductor.bindings.map((performer) => (
@@ -292,14 +313,14 @@ export function ReconnectDrawer({
               token={enrollment.token}
               expiresLabel={enrollment.expiresLabel}
               phase={enrollment.phase}
-              onRegenerate={enrollment.regenerate}
+              onRegenerate={() => void enrollment.regenerate()}
               regenerating={enrollment.regenerating}
             />
           ) : (
             <button
               type="button"
               className="link-button"
-              onClick={enrollment.regenerate}
+              onClick={() => void enrollment.regenerate()}
               disabled={enrollment.regenerating}
             >
               {enrollment.regenerating

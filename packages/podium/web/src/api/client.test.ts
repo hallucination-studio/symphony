@@ -232,6 +232,71 @@ describe("api client", () => {
     });
   });
 
+  it("reserves a named Conductor with the exact enrollment request body", async () => {
+    const fetchMock = mockFetch(200, {
+      enrollment_token: "transient-token",
+      install_command: "install transient-token",
+      expires_at: "2026-07-14T12:00:00Z",
+      conductor: {
+        id: "conductor-1",
+        name: "Bach",
+        public_id: "k7m3p2",
+        enrollment_state: "pending",
+        hostname: "",
+        version: "",
+        service_identity: "symphony-conductor-k7m3p2",
+        data_root: "",
+        online: false,
+        last_report_at: null,
+        binding: null,
+      },
+    });
+    global.fetch = fetchMock;
+
+    await api.enrollmentToken({ name: "Bach" });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/onboarding/runtime/enrollment-token",
+      expect.objectContaining({
+        method: "POST",
+        credentials: "include",
+        body: JSON.stringify({ name: "Bach" }),
+      }),
+    );
+  });
+
+  it("regenerates a command for the exact reserved Conductor", async () => {
+    const fetchMock = mockFetch(200, {
+      enrollment_token: "replacement-token",
+      install_command: "install replacement-token",
+      conductor: {
+        id: "conductor-1",
+        name: "Bach",
+        public_id: "k7m3p2",
+        enrollment_state: "pending",
+        hostname: "",
+        version: "",
+        service_identity: "symphony-conductor-k7m3p2",
+        data_root: "",
+        online: false,
+        last_report_at: null,
+        binding: null,
+      },
+    });
+    global.fetch = fetchMock;
+
+    await api.enrollmentToken({ conductor_id: "conductor-1" });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/onboarding/runtime/enrollment-token",
+      expect.objectContaining({
+        method: "POST",
+        credentials: "include",
+        body: JSON.stringify({ conductor_id: "conductor-1" }),
+      }),
+    );
+  });
+
   it("login POSTs email + password + injected turnstile_token", async () => {
     const fetchMock = mockFetch(200, {
       user: { id: "user_1", email: "a@b.com" },

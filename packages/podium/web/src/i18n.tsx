@@ -13,6 +13,18 @@ export type Locale = "en" | "zh";
 const STORAGE_KEY = "podium.locale";
 
 const ZH_TRANSLATIONS: Record<string, string> = {
+  "Add Conductor": "添加 Conductor",
+  "Conductor name": "Conductor 名称",
+  "Continue Conductor installation": "继续安装 Conductor",
+  "Continue install": "继续安装",
+  "Creates a replacement single-use command for this pending Conductor.": "为此等待中的 Conductor 生成新的单次安装命令。",
+  "Host not reported": "主机尚未上报",
+  "Host pending": "等待主机接入",
+  "Runtime connected": "运行时已连接",
+  "The Conductor is online and ready for the next step.": "Conductor 已在线，可以进入下一步。",
+  "The Conductor is online and remains unbound until you bind a project.": "Conductor 已在线，在你绑定项目之前会保持未绑定状态。",
+  "Unbound": "未绑定",
+  "Use one ASCII word, starting with a letter, up to 16 characters.": "使用一个以字母开头、最长 16 个字符的 ASCII 单词。",
   "Application identity and scopes": "应用身份和权限范围",
   "Bind each selected project to an online Conductor.": "将每个已选项目绑定到在线的 Conductor。",
   "Binding identity": "绑定身份",

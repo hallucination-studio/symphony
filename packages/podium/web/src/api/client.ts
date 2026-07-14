@@ -4,6 +4,7 @@ import type {
   ConductorRecord,
   EnrollmentStatus,
   EnrollmentToken,
+  EnrollmentTokenRequest,
   InstanceLogs,
   LinearApplication,
   LinearCutoverResult,
@@ -186,9 +187,10 @@ export const api = {
     });
   },
 
-  enrollmentToken(): Promise<EnrollmentToken> {
+  enrollmentToken(input: EnrollmentTokenRequest = {}): Promise<EnrollmentToken> {
     return request<EnrollmentToken>("/api/v1/onboarding/runtime/enrollment-token", {
       method: "POST",
+      body: JSON.stringify(input),
     });
   },
 

@@ -151,7 +151,7 @@ Managed Podium endpoints include:
 - `POST /api/v1/auth/login`
 - `POST /api/v1/auth/logout`
 - `GET /api/v1/auth/me`
-- `POST /api/v1/runtime/enrollment-tokens`
+- `POST /api/v1/onboarding/runtime/enrollment-token`
 - `POST /api/v1/runtime/enroll`
 - `POST /api/v1/runtime/dispatches/lease`
 - `POST /api/v1/runtime/dispatches/ack`

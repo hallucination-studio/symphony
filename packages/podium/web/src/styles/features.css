@@ -878,6 +878,14 @@
   border-bottom: 1px solid var(--color-border);
 }
 
+.conductor-statuses {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
 .conductor-name {
   font-weight: 600;
   font-size: 15px;
@@ -892,6 +900,17 @@
 .conductor-empty {
   padding: var(--space-4) 0 0;
   font-size: 14px;
+}
+
+.conductor-empty-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+
+.runtime-install-section {
+  margin-top: var(--space-5);
 }
 
 .performer-list {

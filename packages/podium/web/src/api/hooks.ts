@@ -7,6 +7,7 @@ import { useCallback, useEffect, useState } from "react";
 import { api } from "./client";
 import type {
   AuthenticationChallenge,
+  EnrollmentTokenRequest,
   LinearProject,
   PerformerControlEnvelope,
   PerformerDeviceLoginRequest,
@@ -54,10 +55,11 @@ export function useLinearInstallations() {
   });
 }
 
-export function useRuntimes() {
+export function useRuntimes(enabled = true) {
   return useQuery({
     queryKey: ["runtimes"],
     queryFn: () => api.runtimes(),
+    enabled,
     // Conductors report metrics/queue/logs on a short cycle; keep the view live.
     refetchInterval: 5000,
   });
@@ -341,9 +343,18 @@ export function useSaveRepository() {
 }
 
 export function useEnrollmentToken() {
-  return useMutation({
-    mutationFn: () => api.enrollmentToken(),
-  });
+  const [isPending, setIsPending] = useState(false);
+
+  const generate = useCallback(async (input: EnrollmentTokenRequest = {}) => {
+    setIsPending(true);
+    try {
+      return await api.enrollmentToken(input);
+    } finally {
+      setIsPending(false);
+    }
+  }, []);
+
+  return { generate, isPending };
 }
 
 export function useRunSmokeCheck() {

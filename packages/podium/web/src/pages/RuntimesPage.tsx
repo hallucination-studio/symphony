@@ -4,6 +4,7 @@ import { PageHeader, QueryState } from "../components/PageState";
 import { Card } from "../components/Card";
 import { EmptyState } from "../components/EmptyState";
 import { StatusBadge } from "../components/StatusBadge";
+import { Button } from "../components/Button";
 import { relativeTime } from "../lib/format";
 import type { ConductorBinding, ConductorRecord, RuntimeRecord } from "../api/types";
 import { useI18n } from "../i18n";
@@ -12,6 +13,7 @@ import {
   ReconnectDrawer,
 } from "./RuntimesPage.components";
 import { RuntimesPerformerDrawer } from "./RuntimesPerformerDrawer";
+import { RuntimesAddConductorDrawer } from "./RuntimesAddConductorDrawer";
 
 interface SelectedPerformer {
   conductor: ConductorRecord;
@@ -24,6 +26,7 @@ export default function RuntimesPage() {
   const runtimes = data?.runtimes ?? [];
   const [selected, setSelected] = useState<SelectedPerformer | null>(null);
   const [reconnect, setReconnect] = useState<RuntimeRecord | null>(null);
+  const [installing, setInstalling] = useState<ConductorRecord | "new" | null>(null);
 
   // Conductors that have never posted a report show only as bare runtimes;
   // surface those separately so the operator can still reconnect them.
@@ -34,19 +37,21 @@ export default function RuntimesPage() {
 
   return (
     <>
-      <PageHeader
-        title={t("Runtimes")}
-        description={t("Conductors on your machines and the Performers they operate.")}
-      />
+      <div className="runtimes-heading">
+        <PageHeader
+          title={t("Runtimes")}
+          description={t("Conductors on your machines and the Performers they operate.")}
+        />
+        <Button type="button" onClick={() => setInstalling("new")}>
+          {t("Add Conductor")}
+        </Button>
+      </div>
       <QueryState isLoading={isLoading} error={error}>
         {isEmpty ? (
           <Card>
             <EmptyState
-              icon="🖥️"
               title={t("No runtimes yet")}
               description={t("Install your first Conductor to start operating Performers.")}
-              actionLabel={t("Install a runtime")}
-              actionTo="/setup/runtime"
             />
           </Card>
         ) : (
@@ -57,6 +62,7 @@ export default function RuntimesPage() {
                 conductor={conductor}
                 selectedId={selected?.performer.id ?? null}
                 onSelect={(performer) => setSelected({ conductor, performer })}
+                onContinueInstall={() => setInstalling(conductor)}
               />
             ))}
             {unreported.length > 0 ? (
@@ -102,6 +108,12 @@ export default function RuntimesPage() {
       ) : null}
       {reconnect ? (
         <ReconnectDrawer runtime={reconnect} onClose={() => setReconnect(null)} />
+      ) : null}
+      {installing ? (
+        <RuntimesAddConductorDrawer
+          conductor={installing === "new" ? null : installing}
+          onClose={() => setInstalling(null)}
+        />
       ) : null}
     </>
   );

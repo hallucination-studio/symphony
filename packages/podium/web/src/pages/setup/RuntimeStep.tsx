@@ -11,7 +11,7 @@ export function RuntimeStep({
   onNext,
   onBack,
 }: StepProps) {
-  const enrollment = useEnrollment({ pollRuntimeStatus: true });
+  const enrollment = useEnrollment({ pollRuntimes: true });
   const { t } = useI18n();
 
   return (
@@ -26,7 +26,13 @@ export function RuntimeStep({
       nextDisabled={!enrollment.isOnline}
       hideNext={!enrollment.token && !enrollment.isOnline}
     >
-      {!enrollment.command || !enrollment.token ? (
+      {enrollment.isOnline ? (
+        <ActionPanel
+          tone="success"
+          title={t("Runtime connected")}
+          description={t("The Conductor is online and ready for the next step.")}
+        />
+      ) : !enrollment.command || !enrollment.token ? (
         <ActionPanel
           tone="info"
           title={t("Generate an install command")}

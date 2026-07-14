@@ -134,11 +134,20 @@ def _enrollment_app(runtime_ids: list[str], podium_base_url: str) -> FastAPI:
     class State:
         def __init__(self) -> None:
             self.index = 0
+            self.conductors: dict[str, dict[str, str]] = {}
 
         async def reserve_conductor(self, _workspace_id: str, name: str) -> dict[str, str]:
             conductor_record = {"id": runtime_ids[self.index], "name": name}
             self.index += 1
+            self.conductors[str(conductor_record["id"])] = conductor_record
             return conductor_record
+
+        async def conductor_for_user(
+            self,
+            conductor_id: str,
+            _workspace_id: str,
+        ) -> dict[str, str] | None:
+            return self.conductors.get(conductor_id)
 
         async def save_enrollment_token(self, *_args: object, **_kwargs: object) -> None:
             return None
@@ -152,10 +161,12 @@ def _enrollment_app(runtime_ids: list[str], podium_base_url: str) -> FastAPI:
     def error_response(status: int, code: str, message: str) -> JSONResponse:
         return JSONResponse({"error": {"code": code, "message": message}}, status_code=status)
 
+    state = State()
     app = FastAPI()
+    app.state.enrollment_test_state = state
     _register_onboarding_enrollment_route(
         app,
-        state=State(),
+        state=state,
         require_user=require_user,
         podium_base_url=podium_base_url,
         error_response=error_response,
@@ -588,6 +599,69 @@ async def test_generated_command_quotes_the_configured_podium_url() -> None:
     command = response.json()["install_command"]
     assert f"curl -fsSL '{podium_url}/install.sh'" in command
     assert f"--podium-url '{podium_url}'" in command
+
+
+@pytest.mark.anyio
+async def test_regenerated_command_reuses_the_reserved_conductor_identity() -> None:
+    app = _enrollment_app(["runtime-1", "runtime-2"], "https://podium.example")
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        created = await client.post(
+            "/api/v1/onboarding/runtime/enrollment-token",
+            json={"name": "First"},
+        )
+        regenerated = await client.post(
+            "/api/v1/onboarding/runtime/enrollment-token",
+            json={"conductor_id": "runtime-1"},
+        )
+        second = await client.post(
+            "/api/v1/onboarding/runtime/enrollment-token",
+            json={"name": "Second"},
+        )
+
+    assert created.status_code == 200
+    assert regenerated.status_code == 200
+    assert second.status_code == 200
+    assert created.json()["conductor"]["id"] == "runtime-1"
+    assert regenerated.json()["conductor"]["id"] == "runtime-1"
+    assert second.json()["conductor"]["id"] == "runtime-2"
+    assert regenerated.json()["enrollment_token"] != created.json()["enrollment_token"]
+    assert regenerated.headers["cache-control"] == "no-store"
+
+
+@pytest.mark.anyio
+async def test_regeneration_rejects_ambiguous_unknown_and_enrolled_identities() -> None:
+    app = _enrollment_app(["runtime-1"], "https://podium.example")
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        ambiguous = await client.post(
+            "/api/v1/onboarding/runtime/enrollment-token",
+            json={"name": "First", "conductor_id": "runtime-1"},
+        )
+        unknown = await client.post(
+            "/api/v1/onboarding/runtime/enrollment-token",
+            json={"conductor_id": "missing"},
+        )
+        await client.post(
+            "/api/v1/onboarding/runtime/enrollment-token",
+            json={"name": "First"},
+        )
+        app.state.enrollment_test_state.conductors["runtime-1"]["enrollment_state"] = "enrolled"
+        enrolled = await client.post(
+            "/api/v1/onboarding/runtime/enrollment-token",
+            json={"conductor_id": "runtime-1"},
+        )
+
+    assert ambiguous.status_code == 400
+    assert ambiguous.json()["error"]["code"] == "invalid_enrollment_request"
+    assert unknown.status_code == 404
+    assert unknown.json()["error"]["code"] == "conductor_not_found"
+    assert enrolled.status_code == 409
+    assert enrolled.json()["error"]["code"] == "conductor_already_enrolled"
 
 
 def test_unknown_option_does_not_echo_untrusted_input(tmp_path: Path) -> None:

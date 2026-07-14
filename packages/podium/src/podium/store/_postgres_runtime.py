@@ -21,20 +21,30 @@ class PgRuntimeMixin:
         conductor_id: str,
         expires_at: str,
     ) -> None:
-        await self.pool.execute(
-            """
-            INSERT INTO enrollment_tokens (token_hash, conductor_id, used, expires_at, created_at)
-            VALUES ($1,$2,FALSE,$3::timestamptz,now())
-            ON CONFLICT (token_hash) DO UPDATE SET
-              conductor_id = EXCLUDED.conductor_id,
-              used = FALSE,
-              expires_at = EXCLUDED.expires_at,
-              created_at = now()
-            """,
-            token_hash,
-            conductor_id,
-            _pg_datetime(expires_at),
-        )
+        async with self.pool.acquire() as connection:
+            async with connection.transaction():
+                await connection.execute(
+                    "SELECT id FROM conductors WHERE id = $1 FOR UPDATE",
+                    conductor_id,
+                )
+                await connection.execute(
+                    "UPDATE enrollment_tokens SET used = TRUE WHERE conductor_id = $1 AND used = FALSE",
+                    conductor_id,
+                )
+                await connection.execute(
+                    """
+                    INSERT INTO enrollment_tokens (token_hash, conductor_id, used, expires_at, created_at)
+                    VALUES ($1,$2,FALSE,$3::timestamptz,now())
+                    ON CONFLICT (token_hash) DO UPDATE SET
+                      conductor_id = EXCLUDED.conductor_id,
+                      used = FALSE,
+                      expires_at = EXCLUDED.expires_at,
+                      created_at = now()
+                    """,
+                    token_hash,
+                    conductor_id,
+                    _pg_datetime(expires_at),
+                )
 
     async def consume_enrollment_token(self, token_hash: str) -> tuple[dict[str, Any] | None, str | None]:
         async with self.pool.acquire() as connection:

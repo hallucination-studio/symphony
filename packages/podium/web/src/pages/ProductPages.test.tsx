@@ -4,6 +4,7 @@ import { renderWithProviders } from "../test/utils";
 import HomePage from "./HomePage";
 import ManagedRunsPage from "./ManagedRunsPage";
 import IntegrationsPage from "./IntegrationsPage";
+import RuntimesPage from "./RuntimesPage";
 import { api } from "../api/client";
 import type { Bootstrap } from "../api/types";
 
@@ -13,24 +14,30 @@ vi.mock("../api/client", async (importOriginal) => {
     ...actual,
     api: {
       bootstrap: vi.fn(),
+      startLinear: vi.fn(),
       managedRuns: vi.fn(),
       smokeCheckResult: vi.fn(),
       linearApplication: vi.fn(),
       linearInstallations: vi.fn(),
       linearProjects: vi.fn(),
       selectLinearProjects: vi.fn(),
+      runtimes: vi.fn(),
+      enrollmentToken: vi.fn(),
     },
   };
 });
 
 const mockApi = api as unknown as {
   bootstrap: ReturnType<typeof vi.fn>;
+  startLinear: ReturnType<typeof vi.fn>;
   managedRuns: ReturnType<typeof vi.fn>;
   smokeCheckResult: ReturnType<typeof vi.fn>;
   linearApplication: ReturnType<typeof vi.fn>;
   linearInstallations: ReturnType<typeof vi.fn>;
   linearProjects: ReturnType<typeof vi.fn>;
   selectLinearProjects: ReturnType<typeof vi.fn>;
+  runtimes: ReturnType<typeof vi.fn>;
+  enrollmentToken: ReturnType<typeof vi.fn>;
 };
 
 function bootstrap(overrides: Partial<Bootstrap> = {}): Bootstrap {
@@ -123,6 +130,7 @@ describe("product pages", () => {
       ],
     });
     mockApi.selectLinearProjects.mockResolvedValue({ projects: [] });
+    mockApi.runtimes.mockResolvedValue({ conductors: [], runtimes: [] });
   });
 
   it("renders the current onboarding action", async () => {
@@ -185,4 +193,154 @@ describe("product pages", () => {
       ]),
     );
   });
+
+  it("adds multiple named Conductors from Runtimes without revisiting Linear", async () => {
+    const conductors: ReturnType<typeof conductorRecord>[] = [];
+    mockApi.runtimes.mockImplementation(async () => ({ conductors, runtimes: [] }));
+    mockApi.enrollmentToken.mockImplementation(async ({
+      name,
+      conductor_id: conductorId,
+    }: { name?: string; conductor_id?: string }) => {
+      const existing = conductors.find((row) => row.id === conductorId);
+      const index = existing ? conductors.indexOf(existing) + 1 : conductors.length + 1;
+      const conductor = existing ?? conductorRecord({
+        id: `conductor-${index}`,
+        name: name!,
+        publicId: index === 1 ? "k7m3p2" : "v9d4s1",
+        enrollmentState: "pending",
+        online: false,
+      });
+      if (!existing) conductors.push(conductor);
+      return {
+        enrollment_token: `secret-token-${index}`,
+        install_command: `install secret-token-${index}`,
+        expires_at: "2026-07-14T12:00:00Z",
+        conductor: {
+          id: conductor.id,
+          name: conductor.name,
+          public_id: conductor.public_id,
+          enrollment_state: conductor.enrollment_state,
+          hostname: conductor.hostname,
+          version: conductor.version,
+          service_identity: conductor.service_identity,
+          data_root: conductor.data_root,
+          online: conductor.online,
+          last_report_at: conductor.last_report_at,
+          binding: conductor.binding,
+        },
+      };
+    });
+
+    renderWithProviders(<RuntimesPage />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Add Conductor" }));
+    fireEvent.change(screen.getByLabelText("Conductor name"), {
+      target: { value: "Bach" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Generate install command" }));
+    expect(await screen.findByText("install secret-token-1")).toBeInTheDocument();
+    expect(mockApi.enrollmentToken).toHaveBeenLastCalledWith({ name: "Bach" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Continue install" }));
+    fireEvent.click(screen.getByRole("button", { name: "Generate install command" }));
+    expect(mockApi.enrollmentToken).toHaveBeenLastCalledWith({
+      conductor_id: "conductor-1",
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+
+    fireEvent.click(await screen.findByRole("button", { name: "Add Conductor" }));
+    expect(screen.queryByText("install secret-token-1")).not.toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Conductor name"), {
+      target: { value: "Mozart" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Generate install command" }));
+    expect(await screen.findByText("install secret-token-2")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+
+    expect(await screen.findByText("Bach-k7m3p2")).toBeInTheDocument();
+    expect(screen.getByText("Mozart-v9d4s1")).toBeInTheDocument();
+    expect(mockApi.startLinear).not.toHaveBeenCalled();
+  });
+
+  it("distinguishes pending, online, offline, and unbound Conductors", async () => {
+    mockApi.runtimes.mockResolvedValue({
+      conductors: [
+        conductorRecord({
+          id: "pending",
+          name: "Bach",
+          publicId: "k7m3p2",
+          enrollmentState: "pending",
+          online: false,
+        }),
+        conductorRecord({
+          id: "online",
+          name: "Mozart",
+          publicId: "v9d4s1",
+          enrollmentState: "enrolled",
+          online: true,
+          hostname: "studio-mac",
+          version: "1.2.3",
+        }),
+        conductorRecord({
+          id: "offline",
+          name: "Ravel",
+          publicId: "p4c8n6",
+          enrollmentState: "enrolled",
+          online: false,
+          hostname: "build-host",
+          version: "1.2.2",
+        }),
+      ],
+      runtimes: [],
+    });
+
+    renderWithProviders(<RuntimesPage />);
+
+    expect(await screen.findByText("Bach-k7m3p2")).toBeInTheDocument();
+    expect(screen.getByText("Mozart-v9d4s1")).toBeInTheDocument();
+    expect(screen.getByText("Ravel-p4c8n6")).toBeInTheDocument();
+    expect(screen.getByText(/studio-mac.*v1.2.3/i)).toBeInTheDocument();
+    expect(screen.getByText(/build-host.*v1.2.2/i)).toBeInTheDocument();
+    expect(screen.getByText("Pending")).toBeInTheDocument();
+    expect(screen.getByText("Online")).toBeInTheDocument();
+    expect(screen.getByText("Offline")).toBeInTheDocument();
+    expect(screen.getAllByText("Unbound")).toHaveLength(3);
+    expect(screen.getByRole("button", { name: "Add Conductor" })).toBeInTheDocument();
+  });
 });
+
+function conductorRecord({
+  id,
+  name,
+  publicId,
+  enrollmentState,
+  online,
+  hostname = "",
+  version = "",
+}: {
+  id: string;
+  name: string;
+  publicId: string;
+  enrollmentState: "pending" | "enrolled";
+  online: boolean;
+  hostname?: string;
+  version?: string;
+}) {
+  return {
+    id,
+    conductor_id: id,
+    name,
+    public_id: publicId,
+    enrollment_state: enrollmentState,
+    hostname,
+    label: name,
+    version,
+    service_identity: `symphony-conductor-${publicId}`,
+    data_root: "",
+    online,
+    last_report_at: null,
+    binding: null,
+    bindings: [],
+  };
+}

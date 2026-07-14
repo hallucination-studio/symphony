@@ -258,12 +258,19 @@ describe("RuntimesPerformerDrawer", () => {
 
 function conductor() {
   return {
+    id: "conductor-1",
     conductor_id: "conductor-1",
+    name: "Bach",
+    public_id: "k7m3p2",
+    enrollment_state: "enrolled" as const,
     hostname: "studio-mac",
     label: "Studio",
     version: "1.0.0",
+    service_identity: "symphony-conductor-k7m3p2",
+    data_root: "/srv/conductor",
     online: true,
     last_report_at: "2026-07-13T10:00:00Z",
+    binding: null,
     bindings: [],
   };
 }

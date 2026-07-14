@@ -4,6 +4,7 @@ import type { PropsWithChildren } from "react";
 import { afterEach, expect, it, vi } from "vitest";
 import {
   useDisconnectLinear,
+  useEnrollmentToken,
   usePerformerControl,
   usePerformerStatus,
   useSelectLinearProjects,
@@ -209,6 +210,39 @@ it("keeps config source in hook-local transient state and clears it", async () =
   expect(result.current.configurationSource).toBeNull();
   unmount();
   expect(queryClient.getMutationCache().getAll()).toHaveLength(0);
+});
+
+it("never places enrollment secrets in the React Query caches", async () => {
+  const sentinel = "enrollment-cache-sentinel";
+  mockFetch({
+    enrollment_token: sentinel,
+    install_command: `install ${sentinel}`,
+    expires_at: "2026-07-14T12:00:00Z",
+    conductor: {
+      id: "conductor-1",
+      name: "Bach",
+      public_id: "k7m3p2",
+      enrollment_state: "pending",
+      hostname: "",
+      version: "",
+      service_identity: "symphony-conductor-k7m3p2",
+      data_root: "",
+      online: false,
+      last_report_at: null,
+      binding: null,
+    },
+  });
+  const { queryClient, Wrapper } = setup();
+  const { result, unmount } = renderHook(() => useEnrollmentToken(), {
+    wrapper: Wrapper,
+  });
+
+  await act(() => result.current.generate({ name: "Bach" }));
+
+  expect(queryClient.getMutationCache().getAll()).toHaveLength(0);
+  expect(JSON.stringify(queryClient.getQueryCache().getAll())).not.toContain(sentinel);
+  unmount();
+  expect(JSON.stringify(queryClient.getMutationCache().getAll())).not.toContain(sentinel);
 });
 
 it("clears a stale device challenge before another login method", async () => {

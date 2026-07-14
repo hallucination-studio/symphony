@@ -77,13 +77,30 @@ def _register_onboarding_enrollment_route(
                 "legacy_runtime_profile_field",
                 "managed_run_profile is not accepted during Conductor enrollment",
             )
-        try:
-            conductor = await state.reserve_conductor(
-                workspace_id,
-                str(payload.get("name") or "") if isinstance(payload, dict) else "",
+        payload = payload if isinstance(payload, dict) else {}
+        conductor_id = str(payload.get("conductor_id") or "")
+        requested_name = str(payload.get("name") or "")
+        if conductor_id and requested_name:
+            return error_response(
+                400,
+                "invalid_enrollment_request",
+                "Provide either a Conductor name or conductor_id, not both",
             )
-        except ConductorIdentityError as exc:
-            return error_response(409 if exc.code == "conductor_name_taken" else 400, exc.code, exc.reason)
+        if conductor_id:
+            conductor = await state.conductor_for_user(conductor_id, workspace_id)
+            if conductor is None:
+                return error_response(404, "conductor_not_found", "Conductor not found")
+            if str(conductor.get("enrollment_state") or "pending") != "pending":
+                return error_response(
+                    409,
+                    "conductor_already_enrolled",
+                    "Only a pending Conductor can receive a replacement enrollment command",
+                )
+        else:
+            try:
+                conductor = await state.reserve_conductor(workspace_id, requested_name)
+            except ConductorIdentityError as exc:
+                return error_response(409 if exc.code == "conductor_name_taken" else 400, exc.code, exc.reason)
         token = secrets.token_urlsafe(32)
         token_hash = hash_secret(token)
         expires_at = datetime.now(timezone.utc) + timedelta(hours=1)
@@ -105,7 +122,8 @@ def _register_onboarding_enrollment_route(
                 "install_command": install_command,
                 "expires_at": expires_at.isoformat().replace("+00:00", "Z"),
                 "conductor": await state.conductor_public(conductor),
-            }
+            },
+            headers={"Cache-Control": "no-store"},
         )
 
 

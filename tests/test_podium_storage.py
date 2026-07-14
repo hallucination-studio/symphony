@@ -339,6 +339,23 @@ class _RecordingPool:
     async def execute(self, statement: str, *args: Any) -> None:
         self.calls.append((statement, args))
 
+    def acquire(self) -> _AsyncContext:
+        return _AsyncContext(self)
+
+    def transaction(self) -> _AsyncContext:
+        return _AsyncContext(None)
+
+
+class _AsyncContext:
+    def __init__(self, value: Any) -> None:
+        self.value = value
+
+    async def __aenter__(self) -> Any:
+        return self.value
+
+    async def __aexit__(self, *_args: Any) -> None:
+        return None
+
 
 @pytest.mark.anyio
 async def test_enrollment_token_is_owned_by_conductor() -> None:
@@ -352,10 +369,14 @@ async def test_enrollment_token_is_owned_by_conductor() -> None:
         expires_at="2026-07-12T00:00:00+00:00",
     )
 
-    statement, args = pool.calls[0]
-    assert "runtime_group_id" not in statement
-    assert "conductor_id" in statement
-    assert _placeholder_numbers(statement) == list(range(1, len(args) + 1))
+    lock, invalidate, insert = pool.calls
+    assert "FOR UPDATE" in lock[0]
+    assert lock[1] == ("conductor-1",)
+    assert "SET used = TRUE" in invalidate[0]
+    assert invalidate[1] == ("conductor-1",)
+    assert "runtime_group_id" not in insert[0]
+    assert "conductor_id" in insert[0]
+    assert _placeholder_numbers(insert[0]) == list(range(1, len(insert[1]) + 1))
 
 
 @pytest.mark.anyio

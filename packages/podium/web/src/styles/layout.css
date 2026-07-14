@@ -169,6 +169,17 @@
   color: var(--color-text-muted);
 }
 
+.runtimes-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+
+.runtimes-heading .page-header {
+  flex: 1;
+}
+
 .auth-layout {
   min-height: 100vh;
   display: grid;

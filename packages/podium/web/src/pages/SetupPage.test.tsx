@@ -21,6 +21,7 @@ vi.mock("../api/client", async (importOriginal) => {
       selectLinearProjects: vi.fn(),
       saveRepository: vi.fn(),
       enrollmentToken: vi.fn(),
+      runtimes: vi.fn(),
       runtimeStatus: vi.fn(),
       runSmokeCheck: vi.fn(),
       smokeCheckResult: vi.fn(),
@@ -66,8 +67,10 @@ describe("SetupPage repository step", () => {
       install_command:
         "curl -fsSL https://podium.example/install.sh | bash -s -- --enrollment-token tok",
       expires_at: "2026-07-02T12:00:00Z",
+      conductor: enrollmentConductor(),
     });
     mockApi.runtimeStatus.mockResolvedValue({ online_count: 0 });
+    mockApi.runtimes.mockResolvedValue({ conductors: [], runtimes: [] });
   });
 
   it("submits a local_path mapping and advances to the runtime step", async () => {
@@ -228,11 +231,13 @@ describe("SetupPage runtime step", () => {
       ]),
     );
     mockApi.runtimeStatus.mockResolvedValue({ online_count: 0 });
+    mockApi.runtimes.mockResolvedValue({ conductors: [], runtimes: [] });
     mockApi.enrollmentToken.mockResolvedValue({
       enrollment_token: "tok",
       install_command:
         "curl -fsSL https://podium.example/install.sh | bash -s -- --enrollment-token tok",
       expires_at: "2026-07-02T12:00:00Z",
+      conductor: enrollmentConductor(),
     });
   });
 
@@ -253,17 +258,22 @@ describe("SetupPage runtime step", () => {
   });
 
   it("updates the install command when regenerated", async () => {
+    let resolveReplacement: ((value: {
+      enrollment_token: string;
+      install_command: string;
+      expires_at: string;
+      conductor: Record<string, unknown>;
+    }) => void) | undefined;
     mockApi.enrollmentToken
       .mockResolvedValueOnce({
         enrollment_token: "tok-1",
         install_command: "install --token tok-1",
         expires_at: "2026-07-02T12:00:00Z",
+        conductor: enrollmentConductor(),
       })
-      .mockResolvedValueOnce({
-        enrollment_token: "tok-2",
-        install_command: "install --token tok-2",
-        expires_at: "2026-07-02T13:00:00Z",
-      });
+      .mockImplementationOnce(() => new Promise((resolve) => {
+        resolveReplacement = resolve;
+      }));
 
     renderWithProviders(<SetupPage />, {
       route: "/setup/runtime",
@@ -276,9 +286,32 @@ describe("SetupPage runtime step", () => {
     expect(await screen.findByText("install --token tok-1")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: /regenerate command/i }));
+    expect(screen.queryByText("install --token tok-1")).not.toBeInTheDocument();
+    resolveReplacement?.({
+      enrollment_token: "tok-2",
+      install_command: "install --token tok-2",
+      expires_at: "2026-07-02T13:00:00Z",
+      conductor: enrollmentConductor(),
+    });
     expect(await screen.findByText("install --token tok-2")).toBeInTheDocument();
   });
 });
+
+function enrollmentConductor() {
+  return {
+    id: "conductor-1",
+    name: "Bach",
+    public_id: "k7m3p2",
+    enrollment_state: "pending",
+    hostname: "",
+    version: "",
+    service_identity: "symphony-conductor-k7m3p2",
+    data_root: "",
+    online: false,
+    last_report_at: null,
+    binding: null,
+  };
+}
 
 describe("SetupPage linear step", () => {
   beforeEach(() => {
