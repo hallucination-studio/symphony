@@ -68,7 +68,4 @@ def _register_onboarding_smoke_routes(
         if user is None:
             return error_response(401, "unauthorized", "Unauthorized")
         user_id = str(user["id"])
-        result = await state.get_smoke_result(user_id)
-        if result is None:
-            return error_response(404, "smoke_result_not_found", "No smoke result recorded")
-        return JSONResponse(result)
+        return JSONResponse(await state.get_smoke_result(user_id))

@@ -201,8 +201,8 @@ export const api = {
     return request("/api/v1/onboarding/smoke-check", { method: "POST" });
   },
 
-  smokeCheckResult(): Promise<SmokeCheckResult> {
-    return request<SmokeCheckResult>("/api/v1/onboarding/smoke-check/result");
+  smokeCheckResult(): Promise<SmokeCheckResult | null> {
+    return request<SmokeCheckResult | null>("/api/v1/onboarding/smoke-check/result");
   },
 
   runtimes(): Promise<{ runtimes: RuntimeRecord[]; conductors?: ConductorRecord[] }> {

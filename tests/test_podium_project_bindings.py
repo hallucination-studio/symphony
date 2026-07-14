@@ -351,6 +351,31 @@ async def test_retired_onboarding_repository_route_and_state_mutation_are_absent
 
 
 @pytest.mark.anyio
+async def test_missing_smoke_result_is_an_empty_success_response() -> None:
+    class SmokeState:
+        async def get_smoke_result(self, _workspace_id: str) -> None:
+            return None
+
+    app = FastAPI()
+
+    async def require_user(_request: Request) -> dict[str, str]:
+        return {"id": "user-1"}
+
+    register_onboarding_routes(
+        app,
+        state=SmokeState(),
+        require_user=require_user,
+        error_response=error_response,
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/api/v1/onboarding/smoke-check/result")
+
+    assert response.status_code == 200
+    assert response.json() is None
+
+
+@pytest.mark.anyio
 async def test_runtime_status_does_not_own_onboarding_completion() -> None:
     class RuntimeStatusStore:
         async def list_conductors_for_user(self, _workspace_id: str) -> list[dict[str, Any]]:
