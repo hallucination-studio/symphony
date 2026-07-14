@@ -33,7 +33,7 @@ workspace scope. Project selection is a later Podium routing decision, not a
 project-level OAuth installation.
 
 Podium creates a hashed, one-time, short-lived OAuth state bound to the Podium
-workspace, return location, and immutable application config id and version.
+workspace and immutable application config id and version.
 Authorization uses `S256` PKCE. The callback rejects expired, consumed, unknown,
 or configuration-stale state, and token exchange uses the exact config version
 that started authorization.
@@ -61,6 +61,14 @@ switches atomically before retiring the old credentials. Different Linear
 organization identity is rejected until an operator performs an explicit reset
 or migration. A failed candidate never replaces the active installation.
 
+Reauthorization does not disconnect the current installation first. The
+replacement must retain access to every actively bound project; inaccessible
+unbound selections are reviewed after activation. An operator may disconnect
+and revoke an installation only after active project bindings and managed work
+are cleared. Successful disconnect deactivates the installation and clears its
+selected projects. Revocation failure remains durable and visible with an
+idempotent Retry revocation action rather than being reported as disconnected.
+
 ## Token Lifecycle
 
 Linear access tokens expire after 24 hours and refresh tokens rotate. A central
@@ -87,6 +95,12 @@ Project selection does not mutate `ProjectUpdateInput.memberIds`. Workspace and
 team access granted by Linear remain the permission boundary. Podium verifies
 that each selected project is readable and writable, then records routing scope
 and health.
+
+Project selection is independent from authorization. Adding another accessible
+project through Integrations does not repeat OAuth or disturb existing bindings;
+it reopens only its missing Conductor, binding, and smoke readiness work. An
+unbound project may be deselected directly; a bound project must be unbound
+first.
 
 Each selected project may have at most one active Conductor. Each Conductor may
 bind exactly one selected project and one repository mapping. The project

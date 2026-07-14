@@ -6,18 +6,32 @@ customer-facing scope without claiming unimplemented reporting detail.
 ## Purpose
 
 Podium Web is the secret-safe browser surface for onboarding a workspace,
-connecting Linear, enrolling and binding a Conductor, checking smoke status,
+connecting Linear, selecting projects, enrolling and binding Conductors,
+checking smoke status,
 and observing current runtime and managed-run state. Podium serves it as a BFF
 and committed static bundle.
+
+Setup composes the same lifecycle APIs as the permanent management surfaces.
+It resumes at the first incomplete readiness step across all selected projects:
+Linear, Projects, Conductors, project/repository bindings, then Smoke. Completed
+Linear authorization remains complete when a project or Conductor is added.
+
+Integrations owns ongoing Linear application selection, authorization health,
+project selection, reauthorization, and disconnect/revoke. Runtimes owns adding
+and observing isolated Conductors. One project has at most one active binding;
+one Conductor binds one project and one repository. A host may run multiple
+Conductors when their identity, data root, port, credentials, and logs are
+isolated.
 
 ## Retained surfaces
 
 - Session registration, sign-in, sign-out, account identity, locale, redirects,
   and Turnstile configuration.
-- Default or customer-owned Linear application selection, OAuth connection,
-  project scope, repository mapping, enrollment, binding, and smoke actions.
-- Runtime inventory, online/heartbeat state, cached instance logs, and the
-  install/reconnect path.
+- Default or customer-owned Linear application selection, OAuth connection and
+  reauthorization, multi-project selection, disconnect/revoke, repository
+  mapping, enrollment, binding, and smoke actions.
+- Runtime inventory, online/heartbeat state, cached instance logs, and permanent
+  Add Conductor/install/reconnect paths.
 - Managed-run parent and work-item state, active work item, thread id,
   `gate_status`, and sanitized blocking reason.
 

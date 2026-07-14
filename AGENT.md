@@ -17,6 +17,13 @@ Symphony is one product, not four unrelated projects. The repository remains `sy
 - `performer_api` is limited to shared Managed Run wire contracts: plans,
   work items/results, turn contexts, runtime policy/profiles, and validation.
 
+A Podium workspace may select multiple Linear projects, while one project has
+at most one active Conductor binding. Multiple isolated Conductors may run on
+one host for different projects. Setup is only the readiness composition;
+Integrations owns ongoing Linear authorization/project management and Runtimes
+owns ongoing Conductor installation/binding. Adding either resource does not
+repeat an otherwise healthy Linear authorization.
+
 Package boundaries are runtime boundaries, not product boundaries. Keep user-facing language anchored in Symphony as the whole system, with Podium, Conductor, and Performer as roles inside that system.
 
 Current hard renames:

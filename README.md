@@ -58,6 +58,22 @@ Dispatch routing is based on Linear organization, stable project id, installed
 app user, selected scope, single-project Conductor binding, active state,
 and blockers. Project labels and human assignee are not workflow routing truth.
 
+## Podium Lifecycle
+
+One Linear authorization may expose many projects. Selecting another accessible
+project does not repeat OAuth; it reopens only the Conductor, binding, and smoke
+work required for that project. Each selected project has at most one active
+Conductor, and each Conductor binds exactly one project and one repository.
+Multiple isolated Conductors may run on one host with separate identities, data
+roots, ports, credentials, and logs.
+
+Setup is a readiness wizard that resumes at the first incomplete step across
+all selected projects. Integrations remains the durable surface for Linear
+authorization, project selection, reauthorization, and disconnect/revoke.
+Runtimes remains the durable surface for adding Conductors after initial setup.
+Reauthorization preserves the active installation until its replacement is
+accepted; active bindings prevent unsafe project removal or disconnect.
+
 ## Install
 
 ```bash
