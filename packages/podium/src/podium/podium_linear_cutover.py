@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from .linear_token_service import LinearTokenUnavailable
+from .podium_linear_projects import bound_project_access_rejection
 from .podium_shared import managed_run_view_matches_binding, utc_now_iso
+
+LOGGER = logging.getLogger(__name__)
 
 
 class LinearCutoverError(RuntimeError):
@@ -24,11 +28,7 @@ class PodiumLinearCutoverMixin:
                 return {"cutover_state": "waiting_for_drain", "active": active, "candidate": candidate}
             bindings = await self.store.list_project_bindings_for_user(user_id)
             if not bindings:
-                await self.store.switch_workspace_installation(
-                    user_id,
-                    str(candidate["id"]),
-                    str(candidate["app_user_id"]),
-                )
+                await self._switch_candidate_installation(user_id, candidate)
                 retirement_error = not await self._retire_linear_credentials(active)
                 return {
                     "cutover_state": "switched",
@@ -51,11 +51,7 @@ class PodiumLinearCutoverMixin:
         bindings = await self.store.list_project_bindings_for_user(user_id)
         if not all(_binding_prepared(binding, candidate) for binding in bindings):
             return {"cutover_state": "waiting_for_conductors", "active": active, "candidate": candidate}
-        await self.store.switch_workspace_installation(
-            user_id,
-            str(candidate["id"]),
-            str(candidate["app_user_id"]),
-        )
+        await self._switch_candidate_installation(user_id, candidate)
         retirement_error = not await self._retire_linear_credentials(active)
         switched_bindings = await self.store.list_project_bindings_for_user(user_id)
         for binding in switched_bindings:
@@ -73,6 +69,49 @@ class PodiumLinearCutoverMixin:
             "candidate": None,
             "retirement_error": retirement_error,
         }
+
+    async def _switch_candidate_installation(
+        self,
+        user_id: str,
+        candidate: dict[str, Any],
+    ) -> None:
+        reauthorized_projects = self.linear_projects_for_reauthorization(
+            user_id,
+            candidate,
+        )
+        blocked = await self.store.switch_workspace_installation(
+            user_id,
+            str(candidate["id"]),
+            str(candidate["app_user_id"]),
+            reauthorized_projects,
+        )
+        if blocked:
+            rejection = bound_project_access_rejection(blocked)
+            await self.save_linear_installation_record(
+                {
+                    **candidate,
+                    "state": "failed",
+                    "error_code": rejection.code,
+                    "sanitized_reason": rejection.reason,
+                    "retryable": False,
+                    "action_required": rejection.next_action,
+                    "next_action": rejection.next_action,
+                    "updated_at": utc_now_iso(),
+                }
+            )
+            LOGGER.error(
+                "event=podium_linear_cutover_rejected workspace_id=%s installation_id=%s "
+                "error_type=LinearCutoverError error_code=%s sanitized_reason=%s "
+                "action_required=%s retryable=false next_action=%s",
+                user_id,
+                candidate.get("id"),
+                rejection.code,
+                rejection.reason,
+                rejection.next_action,
+                rejection.next_action,
+            )
+            raise LinearCutoverError(rejection.code, rejection.reason)
+        await self.require_linear_project_review(user_id)
 
     async def _retire_linear_credentials(self, installation: dict[str, Any]) -> bool:
         try:

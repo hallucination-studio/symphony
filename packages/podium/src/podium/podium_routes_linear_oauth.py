@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import secrets
 import urllib.parse
 from typing import Any, Awaitable, Callable
@@ -18,9 +19,11 @@ from .linear_installation_acceptance import (
     rejected_installation,
 )
 from .podium_linear_installations import LinearApplicationNotConfigured, LinearApplicationVersionConflict
+from .podium_linear_projects import bound_project_access_rejection
 
 RequireUser = Callable[[Request], Awaitable[dict[str, Any] | None]]
 ErrorResponse = Callable[[int, str, str], JSONResponse]
+LOGGER = logging.getLogger(__name__)
 
 def register_linear_oauth_routes(
     app: FastAPI,
@@ -169,6 +172,7 @@ async def _complete_callback(
         active = await state.get_active_linear_installation(user_id)
         _validate_organization(active, record)
         await state.validate_candidate_project_access(user_id, record)
+        await _save_accepted_installation(state, user_id, active, config, record)
     except LinearInstallationRejected as rejection:
         record = rejected_installation(
             user_id=user_id,
@@ -177,8 +181,19 @@ async def _complete_callback(
             rejection=rejection,
         )
         await state.save_linear_installation_record(record)
+        LOGGER.error(
+            "event=podium_linear_oauth_callback_rejected workspace_id=%s installation_id=%s "
+            "error_type=LinearInstallationRejected error_code=%s sanitized_reason=%s "
+            "action_required=%s retryable=%s next_action=%s",
+            user_id,
+            installation_id,
+            rejection.code,
+            rejection.reason,
+            rejection.next_action,
+            str(rejection.retryable).lower(),
+            rejection.next_action,
+        )
         return _setup_redirect("error", rejection.code)
-    await _save_accepted_installation(state, user_id, active, config, record)
     await state.mark_linear_connected(user_id)
     return _setup_redirect("connected")
 
@@ -239,9 +254,20 @@ async def _save_accepted_installation(
     )
     if same_identity:
         record.update({"id": active["id"], "active": True, "state": "ready", "created_at": active["created_at"]})
+        reauthorized_projects = state.linear_projects_for_reauthorization(
+            user_id,
+            record,
+        )
+        blocked = await state.save_linear_installation_record(
+            record,
+            reauthorized_projects=reauthorized_projects,
+        )
+        if blocked:
+            raise bound_project_access_rejection(blocked)
+        await state.require_linear_project_review(user_id)
     else:
         record.update({"state": "draining", "next_action": "drain_managed_runs", "action_required": "wait"})
-    await state.save_linear_installation_record(record)
+        await state.save_linear_installation_record(record)
 
 
 def _validate_organization(active: dict[str, Any] | None, record: dict[str, Any]) -> None:

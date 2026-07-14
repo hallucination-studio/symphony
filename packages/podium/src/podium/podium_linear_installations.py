@@ -102,11 +102,19 @@ class PodiumLinearInstallationsMixin:
         verifier_enc = str(row.pop("code_verifier_enc"))
         return {**row, "code_verifier": self.decrypt_secret(verifier_enc)}
 
-    async def save_linear_installation_record(self, installation: dict[str, Any]) -> None:
+    async def save_linear_installation_record(
+        self,
+        installation: dict[str, Any],
+        *,
+        reauthorized_projects: list[dict[str, Any]] | None = None,
+    ) -> list[str]:
         row = dict(installation)
         row["access_token_enc"] = self.encrypt_secret(str(row.pop("access_token", "")))
         row["refresh_token_enc"] = self.encrypt_secret(str(row.pop("refresh_token", "")))
-        await self.store.save_workspace_installation(row)
+        return await self.store.save_workspace_installation(
+            row,
+            reauthorized_projects=reauthorized_projects,
+        )
 
     async def get_active_linear_installation(self, user_id: str) -> dict[str, Any] | None:
         row = await self.store.get_active_workspace_installation(user_id)

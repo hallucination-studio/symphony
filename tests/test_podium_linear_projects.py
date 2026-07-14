@@ -89,13 +89,14 @@ class SelectionConnection:
         return AsyncContext()
 
     async def fetch(self, statement: str, *_args: Any) -> list[dict[str, str]]:
-        self.events.append(f"fetch:{statement.strip().split()[1]}")
         if "FROM linear_selected_projects" in statement:
+            self.events.append("fetch:selected")
             return [
                 {"linear_project_id": "project-1"},
                 {"linear_project_id": "project-2"},
             ]
         if "FROM project_bindings" in statement:
+            self.events.append("fetch:bindings")
             return [{"linear_project_id": "project-1"}]
         raise AssertionError(f"Unexpected query: {statement}")
 
@@ -243,6 +244,82 @@ async def test_project_selection_transaction_does_not_delete_bound_project() -> 
     assert blocked == ["project-1"]
     assert connection.events[0] == "execute:linear-project-selection:user-1"
     assert not any("DELETE FROM linear_selected_projects" in sql for sql, _args in connection.executed)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("operation", ["save", "switch"])
+async def test_reauthorization_transaction_rejects_bound_project_before_activation(
+    operation: str,
+) -> None:
+    connection = SelectionConnection()
+    store = PgLinearMixin()
+    store.pool = SelectionPool(connection)  # type: ignore[attr-defined]
+    selected_projects = [
+        {
+            "linear_organization_id": "organization-1",
+            "linear_project_id": "project-2",
+            "project_slug": "two",
+            "project_name": "Two",
+            "access_state": "ready",
+        }
+    ]
+
+    if operation == "save":
+        blocked = await store.save_workspace_installation(
+            {"id": "installation-active", "user_id": "user-1"},
+            reauthorized_projects=selected_projects,
+        )
+    else:
+        blocked = await store.switch_workspace_installation(
+            "user-1",
+            "installation-candidate",
+            "app-user-2",
+            selected_projects,
+        )
+
+    assert blocked == ["project-1"]
+    assert connection.events[0] == "execute:linear-project-selection:user-1"
+    assert not any(
+        "linear_workspace_installations" in sql or "DELETE FROM linear_selected_projects" in sql
+        for sql, _args in connection.executed
+    )
+
+
+@pytest.mark.anyio
+async def test_reauthorization_transaction_reloads_selection_after_lock() -> None:
+    connection = SelectionConnection()
+    store = PgLinearMixin()
+    store.pool = SelectionPool(connection)  # type: ignore[attr-defined]
+    accessible_projects = [
+        {
+            "linear_organization_id": "organization-1",
+            "linear_project_id": project_id,
+            "project_slug": project_id,
+            "project_name": project_id,
+            "access_state": "ready",
+        }
+        for project_id in ("project-1", "project-2")
+    ]
+
+    blocked = await store.switch_workspace_installation(
+        "user-1",
+        "installation-candidate",
+        "app-user-2",
+        accessible_projects,
+    )
+
+    assert blocked == []
+    assert connection.events[:3] == [
+        "execute:linear-project-selection:user-1",
+        "fetch:selected",
+        "fetch:bindings",
+    ]
+    inserted_project_ids = [
+        str(args[2])
+        for sql, args in connection.executed
+        if "INSERT INTO linear_selected_projects" in sql
+    ]
+    assert inserted_project_ids == ["project-1", "project-2"]
 
 
 @pytest.mark.anyio

@@ -53,6 +53,13 @@ class PodiumStateBaseMixin:
                 await self.persist_onboarding_state(workspace_id, row)
         return row
 
+    async def require_linear_project_review(self, workspace_id: str) -> None:
+        row = await self.load_onboarding_state(workspace_id)
+        completed = row.setdefault("completed_steps", [])
+        if "scope_selection" in completed:
+            completed.remove("scope_selection")
+            await self.persist_onboarding_state(workspace_id, row)
+
     async def onboarding_progress(self, workspace_id: str) -> dict[str, Any]:
         row = await self.load_onboarding_state(workspace_id)
         completed = list(row.get("completed_steps") or [])

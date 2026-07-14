@@ -12,6 +12,14 @@ class LinearProjectSelectionError(RuntimeError):
         self.reason = reason
 
 
+def bound_project_access_rejection(project_ids: list[str]) -> LinearInstallationRejected:
+    missing = ", ".join(sorted(project_ids))
+    return LinearInstallationRejected(
+        "linear_bound_project_missing",
+        f"The replacement application cannot access bound Linear projects: {missing}",
+    )
+
+
 class PodiumLinearProjectsMixin:
     async def list_selected_linear_projects(self, user_id: str) -> list[dict[str, Any]]:
         return await self.store.list_selected_linear_projects(user_id)
@@ -92,14 +100,25 @@ class PodiumLinearProjectsMixin:
         user_id: str,
         candidate: dict[str, Any],
     ) -> None:
-        selected = await self.list_selected_linear_projects(user_id)
-        if not selected:
+        bindings = await self.store.list_project_bindings_for_user(user_id)
+        bound_project_ids = {
+            str(binding.get("linear_project_id") or "")
+            for binding in bindings
+            if binding.get("active", True)
+        }
+        if not bound_project_ids:
             return
+        selected = await self.list_selected_linear_projects(user_id)
         selected_organization_ids = {
-            str(row.get("linear_organization_id") or "") for row in selected
+            str(row.get("linear_organization_id") or "")
+            for row in selected
+            if str(row.get("linear_project_id") or "") in bound_project_ids
         }
         candidate_organization_id = str(candidate.get("linear_organization_id") or "")
-        if selected_organization_ids != {candidate_organization_id}:
+        if (
+            selected_organization_ids
+            and selected_organization_ids != {candidate_organization_id}
+        ):
             raise LinearInstallationRejected(
                 "linear_organization_mismatch",
                 "The replacement application authorized a different Linear organization",
@@ -109,13 +128,26 @@ class PodiumLinearProjectsMixin:
             for project in candidate.get("projects") or []
             if isinstance(project, dict)
         }
-        missing = sorted(
-            str(row.get("linear_project_id") or "")
-            for row in selected
-            if str(row.get("linear_project_id") or "") not in accessible
-        )
+        missing = sorted(bound_project_ids - accessible)
         if missing:
-            raise LinearInstallationRejected(
-                "linear_selected_project_missing",
-                f"The replacement application cannot access selected Linear projects: {', '.join(missing)}",
-            )
+            raise bound_project_access_rejection(missing)
+
+    def linear_projects_for_reauthorization(
+        self,
+        user_id: str,
+        installation: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        return [
+            {
+                "user_id": user_id,
+                "linear_organization_id": str(
+                    installation.get("linear_organization_id") or ""
+                ),
+                "linear_project_id": str(project.get("id") or ""),
+                "project_slug": str(project.get("slug_id") or ""),
+                "project_name": str(project.get("name") or ""),
+                "access_state": "ready",
+            }
+            for project in installation.get("projects") or []
+            if isinstance(project, dict)
+        ]

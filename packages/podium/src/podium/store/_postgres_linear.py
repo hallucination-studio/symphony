@@ -75,48 +75,28 @@ class PgLinearMixin:
         )
         return str(value) if value else None
 
-    async def save_workspace_installation(self, installation: dict[str, Any]) -> None:
-        await self.pool.execute(
-            """
-            INSERT INTO linear_workspace_installations (
-              id, user_id, application_config_id, application_config_version, application_source,
-              state, active, access_token_enc, refresh_token_enc, token_type, actor, scope, expires_at,
-              linear_organization_id, organization_url_key, organization_name, app_user_id, projects_json,
-              reconciliation_state, last_reconciliation_at, reconciliation_error_code,
-              reconciliation_error, reconciliation_retry_count, reconciliation_next_retry_at,
-              error_code, sanitized_reason, retryable,
-              action_required, next_action, created_at, updated_at
-            ) VALUES (
-              $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13::timestamptz,$14,$15,$16,$17,
-              $18::jsonb,$19,$20::timestamptz,$21,$22,$23,$24::timestamptz,$25,$26,$27,$28,$29,
-              $30::timestamptz,$31::timestamptz
-            )
-            ON CONFLICT (id) DO UPDATE SET
-              application_config_id = EXCLUDED.application_config_id,
-              application_config_version = EXCLUDED.application_config_version,
-              application_source = EXCLUDED.application_source,
-              state = EXCLUDED.state, active = EXCLUDED.active,
-              access_token_enc = EXCLUDED.access_token_enc,
-              refresh_token_enc = EXCLUDED.refresh_token_enc,
-              token_type = EXCLUDED.token_type, actor = EXCLUDED.actor,
-              scope = EXCLUDED.scope, expires_at = EXCLUDED.expires_at,
-              linear_organization_id = EXCLUDED.linear_organization_id,
-              organization_url_key = EXCLUDED.organization_url_key,
-              organization_name = EXCLUDED.organization_name,
-              app_user_id = EXCLUDED.app_user_id, projects_json = EXCLUDED.projects_json,
-              error_code = EXCLUDED.error_code,
-              sanitized_reason = EXCLUDED.sanitized_reason, retryable = EXCLUDED.retryable,
-              action_required = EXCLUDED.action_required, next_action = EXCLUDED.next_action,
-              reconciliation_state = EXCLUDED.reconciliation_state,
-              last_reconciliation_at = EXCLUDED.last_reconciliation_at,
-              reconciliation_error_code = EXCLUDED.reconciliation_error_code,
-              reconciliation_error = EXCLUDED.reconciliation_error,
-              reconciliation_retry_count = EXCLUDED.reconciliation_retry_count,
-              reconciliation_next_retry_at = EXCLUDED.reconciliation_next_retry_at,
-              updated_at = EXCLUDED.updated_at
-            """,
-            *_installation_values(installation),
-        )
+    async def save_workspace_installation(
+        self,
+        installation: dict[str, Any],
+        *,
+        reauthorized_projects: list[dict[str, Any]] | None = None,
+    ) -> list[str]:
+        if reauthorized_projects is None:
+            await _save_workspace_installation_on(self.pool, installation)
+            return []
+        user_id = str(installation["user_id"])
+        async with self.pool.acquire() as connection:
+            async with connection.transaction():
+                await lock_advisory_keys(connection, project_selection_lock_key(user_id))
+                blocked = await _reconcile_selected_linear_projects_on(
+                    connection,
+                    user_id,
+                    reauthorized_projects,
+                )
+                if blocked:
+                    return blocked
+                await _save_workspace_installation_on(connection, installation)
+        return []
 
     async def update_workspace_installation_reconciliation(
         self,
@@ -176,9 +156,18 @@ class PgLinearMixin:
         user_id: str,
         installation_id: str,
         app_user_id: str,
-    ) -> None:
+        reauthorized_projects: list[dict[str, Any]],
+    ) -> list[str]:
         async with self.pool.acquire() as connection:
             async with connection.transaction():
+                await lock_advisory_keys(connection, project_selection_lock_key(user_id))
+                blocked = await _reconcile_selected_linear_projects_on(
+                    connection,
+                    user_id,
+                    reauthorized_projects,
+                )
+                if blocked:
+                    return blocked
                 await connection.execute(
                     """
                     UPDATE linear_workspace_installations
@@ -214,6 +203,7 @@ class PgLinearMixin:
                     installation_id,
                     app_user_id,
                 )
+        return []
 
     async def get_active_workspace_installation(self, user_id: str) -> dict[str, Any] | None:
         row = await self.pool.fetchrow(
@@ -247,39 +237,7 @@ class PgLinearMixin:
         async with self.pool.acquire() as connection:
             async with connection.transaction():
                 await lock_advisory_keys(connection, project_selection_lock_key(user_id))
-                requested_ids = [str(project["linear_project_id"]) for project in projects]
-                bound_rows = await connection.fetch(
-                    """
-                    SELECT linear_project_id FROM project_bindings
-                    WHERE user_id = $1
-                      AND active = TRUE
-                      AND NOT (linear_project_id = ANY($2::text[]))
-                    ORDER BY linear_project_id
-                    FOR UPDATE
-                    """,
-                    user_id,
-                    requested_ids,
-                )
-                blocked = [str(row["linear_project_id"]) for row in bound_rows]
-                if blocked:
-                    return blocked
-                await connection.execute("DELETE FROM linear_selected_projects WHERE user_id = $1", user_id)
-                for project in projects:
-                    await connection.execute(
-                        """
-                        INSERT INTO linear_selected_projects (
-                          user_id, linear_organization_id, linear_project_id,
-                          project_slug, project_name, access_state, updated_at
-                        ) VALUES ($1,$2,$3,$4,$5,$6,now())
-                        """,
-                        user_id,
-                        str(project["linear_organization_id"]),
-                        str(project["linear_project_id"]),
-                        str(project["project_slug"]),
-                        str(project["project_name"]),
-                        str(project["access_state"]),
-                    )
-        return []
+                return await _replace_selected_linear_projects_on(connection, user_id, projects)
 
     async def list_selected_linear_projects(self, user_id: str) -> list[dict[str, Any]]:
         rows = await self.pool.fetch(
@@ -354,6 +312,148 @@ class PgLinearMixin:
             str(event.get("reason") or ""),
             _pg_json(event.get("metadata") or {}),
             _pg_datetime(event.get("timestamp") or event.get("created_at") or ""),
+        )
+
+
+async def _save_workspace_installation_on(
+    connection: Any,
+    installation: dict[str, Any],
+) -> None:
+    await connection.execute(
+        """
+        INSERT INTO linear_workspace_installations (
+          id, user_id, application_config_id, application_config_version, application_source,
+          state, active, access_token_enc, refresh_token_enc, token_type, actor, scope, expires_at,
+          linear_organization_id, organization_url_key, organization_name, app_user_id, projects_json,
+          reconciliation_state, last_reconciliation_at, reconciliation_error_code,
+          reconciliation_error, reconciliation_retry_count, reconciliation_next_retry_at,
+          error_code, sanitized_reason, retryable,
+          action_required, next_action, created_at, updated_at
+        ) VALUES (
+          $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13::timestamptz,$14,$15,$16,$17,
+          $18::jsonb,$19,$20::timestamptz,$21,$22,$23,$24::timestamptz,$25,$26,$27,$28,$29,
+          $30::timestamptz,$31::timestamptz
+        )
+        ON CONFLICT (id) DO UPDATE SET
+          application_config_id = EXCLUDED.application_config_id,
+          application_config_version = EXCLUDED.application_config_version,
+          application_source = EXCLUDED.application_source,
+          state = EXCLUDED.state, active = EXCLUDED.active,
+          access_token_enc = EXCLUDED.access_token_enc,
+          refresh_token_enc = EXCLUDED.refresh_token_enc,
+          token_type = EXCLUDED.token_type, actor = EXCLUDED.actor,
+          scope = EXCLUDED.scope, expires_at = EXCLUDED.expires_at,
+          linear_organization_id = EXCLUDED.linear_organization_id,
+          organization_url_key = EXCLUDED.organization_url_key,
+          organization_name = EXCLUDED.organization_name,
+          app_user_id = EXCLUDED.app_user_id, projects_json = EXCLUDED.projects_json,
+          error_code = EXCLUDED.error_code,
+          sanitized_reason = EXCLUDED.sanitized_reason, retryable = EXCLUDED.retryable,
+          action_required = EXCLUDED.action_required, next_action = EXCLUDED.next_action,
+          reconciliation_state = EXCLUDED.reconciliation_state,
+          last_reconciliation_at = EXCLUDED.last_reconciliation_at,
+          reconciliation_error_code = EXCLUDED.reconciliation_error_code,
+          reconciliation_error = EXCLUDED.reconciliation_error,
+          reconciliation_retry_count = EXCLUDED.reconciliation_retry_count,
+          reconciliation_next_retry_at = EXCLUDED.reconciliation_next_retry_at,
+          updated_at = EXCLUDED.updated_at
+        """,
+        *_installation_values(installation),
+    )
+
+
+async def _replace_selected_linear_projects_on(
+    connection: Any,
+    user_id: str,
+    projects: list[dict[str, Any]],
+) -> list[str]:
+    requested_ids = [str(project["linear_project_id"]) for project in projects]
+    bound_rows = await connection.fetch(
+        """
+        SELECT linear_project_id FROM project_bindings
+        WHERE user_id = $1
+          AND active = TRUE
+          AND NOT (linear_project_id = ANY($2::text[]))
+        ORDER BY linear_project_id
+        FOR UPDATE
+        """,
+        user_id,
+        requested_ids,
+    )
+    blocked = [str(row["linear_project_id"]) for row in bound_rows]
+    if blocked:
+        return blocked
+    await _write_selected_linear_projects_on(connection, user_id, projects)
+    return []
+
+
+async def _reconcile_selected_linear_projects_on(
+    connection: Any,
+    user_id: str,
+    accessible_projects: list[dict[str, Any]],
+) -> list[str]:
+    selected_rows = await connection.fetch(
+        """
+        SELECT linear_project_id FROM linear_selected_projects
+        WHERE user_id = $1
+        ORDER BY linear_project_id
+        FOR UPDATE
+        """,
+        user_id,
+    )
+    bound_rows = await connection.fetch(
+        """
+        SELECT linear_project_id FROM project_bindings
+        WHERE user_id = $1 AND active = TRUE
+        ORDER BY linear_project_id
+        FOR UPDATE
+        """,
+        user_id,
+    )
+    selected_project_ids = {str(row["linear_project_id"]) for row in selected_rows}
+    bound_project_ids = {str(row["linear_project_id"]) for row in bound_rows}
+    accessible_by_id = {
+        str(project["linear_project_id"]): project
+        for project in accessible_projects
+    }
+    accessible_project_ids = set(accessible_by_id)
+    blocked = sorted(bound_project_ids - accessible_project_ids)
+    if blocked:
+        return blocked
+    retained_project_ids = sorted(
+        (selected_project_ids | bound_project_ids) & accessible_project_ids
+    )
+    await _write_selected_linear_projects_on(
+        connection,
+        user_id,
+        [accessible_by_id[project_id] for project_id in retained_project_ids],
+    )
+    return []
+
+
+async def _write_selected_linear_projects_on(
+    connection: Any,
+    user_id: str,
+    projects: list[dict[str, Any]],
+) -> None:
+    await connection.execute(
+        "DELETE FROM linear_selected_projects WHERE user_id = $1",
+        user_id,
+    )
+    for project in projects:
+        await connection.execute(
+            """
+            INSERT INTO linear_selected_projects (
+              user_id, linear_organization_id, linear_project_id,
+              project_slug, project_name, access_state, updated_at
+            ) VALUES ($1,$2,$3,$4,$5,$6,now())
+            """,
+            user_id,
+            str(project["linear_organization_id"]),
+            str(project["linear_project_id"]),
+            str(project["project_slug"]),
+            str(project["project_name"]),
+            str(project["access_state"]),
         )
 
 
