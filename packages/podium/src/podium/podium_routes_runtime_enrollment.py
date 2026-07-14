@@ -92,11 +92,12 @@ def _register_onboarding_enrollment_route(
             conductor_id=str(conductor["id"]),
             expires_at=expires_at,
         )
+        install_url = shlex_quote(f"{podium_base_url}/install.sh")
+        podium_url = shlex_quote(podium_base_url)
         install_command = (
+            f"curl -fsSL {install_url} | "
             f"PODIUM_ENROLLMENT_TOKEN={shlex_quote(token)} "
-            f"curl -fsSL {podium_base_url}/install.sh | "
-            f"PODIUM_ENROLLMENT_TOKEN={shlex_quote(token)} "
-            f"bash -s -- --podium-url {podium_base_url}"
+            f"bash -s -- --podium-url {podium_url}"
         )
         return JSONResponse(
             {
