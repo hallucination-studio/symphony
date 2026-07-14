@@ -21,11 +21,13 @@ export function ConductorCard({
   selectedId,
   onSelect,
   onContinueInstall,
+  onBind,
 }: {
   conductor: ConductorRecord;
   selectedId: string | null;
   onSelect: (performer: ConductorBinding) => void;
   onContinueInstall?: () => void;
+  onBind?: () => void;
 }) {
   const { t } = useI18n();
   const heading = conductor.name && conductor.public_id
@@ -66,11 +68,23 @@ export function ConductorCard({
       {conductor.bindings.length === 0 ? (
         <div className="conductor-empty conductor-empty-actions muted">
           <span>{t("No Performers configured on this Conductor yet.")}</span>
-          {conductor.enrollment_state === "pending" && onContinueInstall ? (
-            <button type="button" className="link-button" onClick={onContinueInstall}>
-              {t("Continue install")}
-            </button>
-          ) : null}
+          <div className="conductor-card-actions">
+            {conductor.enrollment_state === "pending" && onContinueInstall ? (
+              <button type="button" className="link-button" onClick={onContinueInstall}>
+                {t("Continue install")}
+              </button>
+            ) : null}
+            {conductor.enrollment_state === "enrolled" && conductor.online && onBind ? (
+              <button
+                type="button"
+                className="link-button"
+                onClick={onBind}
+                aria-label={t("Bind project with {target}", { target: heading })}
+              >
+                {t("Bind project")}
+              </button>
+            ) : null}
+          </div>
         </div>
       ) : (
         <ul className="performer-list">

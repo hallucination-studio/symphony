@@ -102,11 +102,29 @@ export interface LinearProjects {
 
 export type RepositoryMode = "local_path" | "git_url";
 
-export type ValidationState = "pending" | "valid" | "invalid";
+export interface RepositorySource {
+  mode: RepositoryMode;
+  value: string;
+}
 
-export interface RepositoryMapping {
-  validation_state: ValidationState;
-  validation_message?: string | null;
+export interface BindConductorRequest {
+  linear_project_id: string;
+  repository: RepositorySource;
+}
+
+export interface ProjectBinding {
+  id: string;
+  conductor_id: string;
+  linear_project_id: string;
+  project_name: string;
+  project_slug: string;
+  state: "pending_ack" | "ready" | "failed" | "pending_unbind" | "unbound";
+  config_version: number;
+  acknowledged_config_version: number;
+  error_code: string;
+  sanitized_reason: string;
+  next_action: string;
+  repository: RepositorySource;
 }
 
 export type SmokeCheckStatus = "running" | "passed" | "failed";
@@ -152,8 +170,7 @@ export interface RuntimeRecord {
 // One enrolled Performer: a single project-scoped execution binding a
 // Conductor operates. The backend contract calls this a "binding"; the UI
 // speaks of it as a Performer, which matches the `performer` package role.
-export interface ConductorBinding {
-  id: string;
+export interface ConductorBinding extends ProjectBinding {
   instance_id: string;
   name: string;
   linear_project: string;

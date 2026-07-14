@@ -3,7 +3,11 @@ from __future__ import annotations
 import hmac
 from typing import Any
 
-from .podium_project_bindings import ProjectBindingError
+from .podium_project_bindings import (
+    ProjectBindingError,
+    _binding_error_code,
+    _binding_failure_reason,
+)
 from .podium_shared import bearer_token, hash_secret, utc_now_iso
 
 
@@ -199,6 +203,11 @@ class PodiumRuntimeMixin:
             "mode": "git_url" if source_type == "git" else source_type,
             "value": str(source.get("value") or ""),
         }
+        payload["next_action"] = {
+            "pending_ack": "wait_for_conductor_ack",
+            "pending_unbind": "wait_for_conductor_unbind",
+            "failed": "retry_project_binding_report",
+        }.get(str(binding.get("state") or ""), "")
         return payload
 
     async def conductor_belongs_to_user(self, conductor_id: str, user_id: str) -> bool:
@@ -227,13 +236,32 @@ class PodiumRuntimeMixin:
         status: str,
         result: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
-        return await self.store.ack_runtime_command(
+        project_binding_failure = None
+        if status == "failed":
+            failure_result = result or {}
+            error_code = _binding_error_code(failure_result)
+            project_binding_failure = {
+                "error_code": error_code,
+                "sanitized_reason": _binding_failure_reason(failure_result, error_code),
+                "updated_at": utc_now_iso(),
+            }
+        command = await self.store.ack_runtime_command(
             runtime_id,
             command_id,
             fencing_token,
             status=status,
             result=result,
+            project_binding_failure=project_binding_failure,
         )
+        if command is not None and "_project_binding_failure" in command:
+            failed = command.pop("_project_binding_failure")
+            self.log_project_binding_command_failure(
+                runtime_id,
+                command.get("command") if isinstance(command.get("command"), dict) else {},
+                result or {},
+                failed if isinstance(failed, dict) else None,
+            )
+        return command
 
     async def runtime_for_bearer(self, authorization: str) -> dict[str, Any] | None:
         token = bearer_token(authorization)

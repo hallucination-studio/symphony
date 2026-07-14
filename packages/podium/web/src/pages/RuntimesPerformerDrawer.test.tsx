@@ -278,6 +278,9 @@ function conductor() {
 function performer() {
   return {
     id: "binding-1",
+    conductor_id: "conductor-1",
+    linear_project_id: "project-1",
+    project_name: "Primary Performer",
     instance_id: "instance-1",
     name: "Primary Performer",
     linear_project: "project-1",
@@ -285,6 +288,13 @@ function performer() {
     agent_app_user_id: "app-1",
     managed_run_profile: "default",
     process_status: "ready",
+    state: "ready" as const,
+    config_version: 1,
+    acknowledged_config_version: 1,
+    error_code: "",
+    sanitized_reason: "",
+    next_action: "",
+    repository: { mode: "local_path" as const, value: "/srv/project" },
     constraint_labels: ["symphony:managed"],
   };
 }

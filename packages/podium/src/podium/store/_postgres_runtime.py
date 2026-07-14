@@ -11,6 +11,7 @@ from ._postgres_records import (
     _record_to_runtime,
     _record_to_runtime_command,
 )
+from ._postgres_project_replacements import _record_project_binding_failure_on
 
 
 class PgRuntimeMixin:
@@ -242,6 +243,7 @@ class PgRuntimeMixin:
         *,
         status: str,
         result: dict[str, Any] | None = None,
+        project_binding_failure: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         if status not in {"completed", "failed"}:
             raise ValueError("invalid_runtime_command_status")
@@ -263,6 +265,22 @@ class PgRuntimeMixin:
                 lease_expired = row["lease_expires_at"] is None or row["lease_expires_at"] <= datetime.now(timezone.utc)
                 if row["status"] != "leased" or int(row["fencing_token"] or 0) != fencing_token or lease_expired:
                     return {**_record_to_runtime_command(row), "_ack_error": "stale_runtime_command_lease"}
+                command_payload = _record_to_runtime_command(row)["command"]
+                binding_failure: dict[str, Any] | bool | None = None
+                if (
+                    status == "failed"
+                    and project_binding_failure is not None
+                    and command_payload.get("type") == "project.configure"
+                ):
+                    binding_failure = await _record_project_binding_failure_on(
+                        connection,
+                        str(command_payload.get("binding_id") or ""),
+                        conductor_id=runtime_id,
+                        expected_config_version=int(command_payload.get("config_version") or 0),
+                        error_code=str(project_binding_failure["error_code"]),
+                        sanitized_reason=str(project_binding_failure["sanitized_reason"]),
+                        updated_at=str(project_binding_failure["updated_at"]),
+                    ) or False
                 updated = await connection.fetchrow(
                     """
                     UPDATE runtime_commands
@@ -275,4 +293,9 @@ class PgRuntimeMixin:
                     status,
                     _pg_json(result or {}),
                 )
-        return _record_to_runtime_command(updated) if updated is not None else None
+        if updated is None:
+            return None
+        acknowledged = _record_to_runtime_command(updated)
+        if binding_failure is not None:
+            acknowledged["_project_binding_failure"] = binding_failure
+        return acknowledged

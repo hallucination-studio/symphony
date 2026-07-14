@@ -47,10 +47,10 @@ export const STEP_DEFS: StepDef[] = [
   },
   {
     key: "repository_mapping",
-    title: "Map repository",
+    title: "Bind projects",
     description:
-      "Tell Podium where your code lives so runtimes can check it out.",
-    ctaLabel: "Map repository",
+      "Pair each selected Linear project with one Conductor and repository.",
+    ctaLabel: "Bind projects",
     path: "repository",
   },
   {

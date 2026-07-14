@@ -14,6 +14,7 @@ import {
 } from "./RuntimesPage.components";
 import { RuntimesPerformerDrawer } from "./RuntimesPerformerDrawer";
 import { RuntimesAddConductorDrawer } from "./RuntimesAddConductorDrawer";
+import { RuntimesBindProjectDrawer } from "./RuntimesBindProjectDrawer";
 
 interface SelectedPerformer {
   conductor: ConductorRecord;
@@ -27,6 +28,7 @@ export default function RuntimesPage() {
   const [selected, setSelected] = useState<SelectedPerformer | null>(null);
   const [reconnect, setReconnect] = useState<RuntimeRecord | null>(null);
   const [installing, setInstalling] = useState<ConductorRecord | "new" | null>(null);
+  const [binding, setBinding] = useState<ConductorRecord | null>(null);
 
   // Conductors that have never posted a report show only as bare runtimes;
   // surface those separately so the operator can still reconnect them.
@@ -63,6 +65,7 @@ export default function RuntimesPage() {
                 selectedId={selected?.performer.id ?? null}
                 onSelect={(performer) => setSelected({ conductor, performer })}
                 onContinueInstall={() => setInstalling(conductor)}
+                onBind={() => setBinding(conductor)}
               />
             ))}
             {unreported.length > 0 ? (
@@ -113,6 +116,12 @@ export default function RuntimesPage() {
         <RuntimesAddConductorDrawer
           conductor={installing === "new" ? null : installing}
           onClose={() => setInstalling(null)}
+        />
+      ) : null}
+      {binding ? (
+        <RuntimesBindProjectDrawer
+          conductor={binding}
+          onClose={() => setBinding(null)}
         />
       ) : null}
     </>

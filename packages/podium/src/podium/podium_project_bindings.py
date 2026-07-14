@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from performer_api.runtime_policy import PerformerProfileConfig, RuntimePolicyError
 
 from .performer_profiles import PerformerProfileLoadError
+from .podium_smoke_checks import sanitize_reason
 from .podium_project_binding_creation import (
     ProjectBindingError,
     build_project_binding,
@@ -81,7 +83,61 @@ class PodiumProjectBindingsMixin:
             await self.store.upsert_project_binding(failed)
             raise ProjectBindingError(exc.code, exc.reason) from exc
         await self.enqueue_runtime_command(conductor_id, command)
+        LOGGER.info(
+            "event=project_binding_requested conductor_id=%s linear_project_id=%s binding_id=%s "
+            "config_version=%s state=pending_ack",
+            conductor_id,
+            binding.get("linear_project_id"),
+            binding.get("id"),
+            binding.get("config_version"),
+        )
         return binding
+
+    def log_project_binding_command_failure(
+        self,
+        conductor_id: str,
+        command: dict[str, Any],
+        result: dict[str, Any],
+        failed: dict[str, Any] | None,
+    ) -> None:
+        binding_id = str(command.get("binding_id") or "")
+        config_version = int(command.get("config_version") or 0)
+        if not binding_id or config_version <= 0:
+            LOGGER.error(
+                "event=project_binding_failed conductor_id=%s binding_id=%s config_version=%s "
+                "error_type=RuntimeError error_code=project_configure_command_invalid "
+                "sanitized_reason=Project_configure_command_identity_is_invalid "
+                "action_required=inspect_podium_state retryable=false next_action=repair_binding_command",
+                conductor_id,
+                binding_id or "-",
+                config_version,
+            )
+            return
+        error_code = _binding_error_code(result)
+        sanitized_reason = _binding_failure_reason(result, error_code)
+        if failed is None:
+            LOGGER.warning(
+                "event=project_binding_failure_ignored conductor_id=%s binding_id=%s config_version=%s "
+                "error_code=stale_project_binding_failure sanitized_reason=Project_binding_failure_is_stale "
+                "action_required=false retryable=false next_action=none",
+                conductor_id,
+                binding_id,
+                config_version,
+            )
+            return
+        LOGGER.error(
+            "event=project_binding_failed conductor_id=%s instance_id=%s linear_project_id=%s "
+            "binding_id=%s config_version=%s error_type=RuntimeCommandError error_code=%s "
+            "sanitized_reason=%s action_required=fix_project_binding retryable=true "
+            "next_action=retry_project_binding_report",
+            conductor_id,
+            failed.get("instance_id"),
+            failed.get("linear_project_id"),
+            binding_id,
+            config_version,
+            error_code,
+            sanitized_reason.replace(" ", "_"),
+        )
 
     async def begin_project_unbind(
         self,
@@ -301,7 +357,16 @@ class PodiumProjectBindingsMixin:
             ) from exc
         await self.store.upsert_project_binding(ready)
         await self.complete_project_replacement(ready)
-        await self._mark_onboarding(str(binding.get("user_id") or ""), "repository_mapping")
+        await self.onboarding_progress(str(binding.get("user_id") or ""))
+        LOGGER.info(
+            "event=project_binding_ready conductor_id=%s instance_id=%s linear_project_id=%s "
+            "binding_id=%s config_version=%s state=ready",
+            conductor_id,
+            ready.get("instance_id"),
+            ready.get("linear_project_id"),
+            ready.get("id"),
+            version,
+        )
         return ready
 
     async def acknowledge_candidate_installation(
@@ -360,3 +425,13 @@ class PodiumProjectBindingsMixin:
             error.reason,
         )
         await self.fail_project_replacement_for_binding(failed, error.code, error.reason)
+
+
+def _binding_error_code(result: dict[str, Any]) -> str:
+    candidate = str(result.get("error_code") or result.get("reason") or "project_configure_failed")
+    return candidate if re.fullmatch(r"[a-z][a-z0-9_]{0,63}", candidate) else "project_configure_failed"
+
+
+def _binding_failure_reason(result: dict[str, Any], error_code: str) -> str:
+    reason = str(result.get("sanitized_reason") or result.get("reason") or error_code)
+    return sanitize_reason(reason)

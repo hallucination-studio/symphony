@@ -3,6 +3,7 @@ import { act, renderHook, waitFor } from "@testing-library/react";
 import type { PropsWithChildren } from "react";
 import { afterEach, expect, it, vi } from "vitest";
 import {
+  useBindConductor,
   useDisconnectLinear,
   useEnrollmentToken,
   usePerformerControl,
@@ -85,6 +86,34 @@ it("invalidates every readiness view after project selection changes", async () 
   });
 
   await act(() => result.current.mutateAsync(["project-1"]));
+
+  for (const key of keys) {
+    expect(queryClient.getQueryState(key)?.isInvalidated).toBe(true);
+  }
+});
+
+it("invalidates every binding readiness view after binding creation", async () => {
+  mockFetch({ binding: { id: "binding-1", state: "pending_ack" } });
+  const { queryClient, Wrapper } = setup();
+  const keys = [
+    ["bootstrap"],
+    ["linear", "projects"],
+    ["runtimes"],
+    ["runtime-status"],
+    ["smoke-check"],
+  ];
+  for (const key of keys) queryClient.setQueryData(key, { stale: false });
+  const { result } = renderHook(() => useBindConductor(), {
+    wrapper: Wrapper,
+  });
+
+  await act(() => result.current.mutateAsync({
+    conductorId: "conductor-1",
+    input: {
+      linear_project_id: "project-1",
+      repository: { mode: "local_path", value: "/srv/repo" },
+    },
+  }));
 
   for (const key of keys) {
     expect(queryClient.getQueryState(key)?.isInvalidated).toBe(true);

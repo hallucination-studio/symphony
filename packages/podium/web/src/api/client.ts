@@ -1,5 +1,6 @@
 import type {
   AuthUser,
+  BindConductorRequest,
   Bootstrap,
   ConductorRecord,
   EnrollmentStatus,
@@ -10,7 +11,6 @@ import type {
   LinearCutoverResult,
   LinearInstallations,
   LinearProjects,
-  OnboardingProgress,
   ManagedRunsReport,
   PerformerAccountState,
   PerformerCapabilities,
@@ -26,8 +26,7 @@ import type {
   PerformerReadinessState,
   PerformerStatus,
   PodiumConfig,
-  RepositoryMapping,
-  RepositoryMode,
+  ProjectBinding,
   RuntimeRecord,
   SmokeCheckResult,
 } from "./types";
@@ -177,13 +176,13 @@ export const api = {
     return parseLinearProjects(response);
   },
 
-  saveRepository(
-    mode: RepositoryMode,
-    value: string,
-  ): Promise<{ repository: RepositoryMapping; onboarding: OnboardingProgress }> {
-    return request("/api/v1/onboarding/repository", {
-      method: "POST",
-      body: JSON.stringify({ mode, value }),
+  bindConductor(
+    conductorId: string,
+    input: BindConductorRequest,
+  ): Promise<{ binding: ProjectBinding }> {
+    return request(`/api/v1/conductors/${encodeURIComponent(conductorId)}/binding`, {
+      method: "PUT",
+      body: JSON.stringify(input),
     });
   },
 

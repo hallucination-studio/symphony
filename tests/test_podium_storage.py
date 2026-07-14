@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any
 
@@ -31,6 +32,94 @@ from podium.store._postgres_schema_statements import POSTGRES_SCHEMA_STATEMENTS
 
 def _placeholder_numbers(statement: str) -> list[int]:
     return sorted({int(value) for value in re.findall(r"\$(\d+)", statement)})
+
+
+@pytest.mark.anyio
+async def test_failed_project_configure_ack_updates_binding_in_the_ack_transaction() -> None:
+    now = datetime.now(timezone.utc)
+    command_row = {
+        "id": 7,
+        "runtime_id": "conductor-1",
+        "command_json": json.dumps({
+            "type": "project.configure",
+            "binding_id": "binding-1",
+            "config_version": 3,
+        }),
+        "created_at": now,
+        "status": "leased",
+        "lease_expires_at": now + timedelta(minutes=5),
+        "fencing_token": 4,
+        "completed_at": None,
+        "result_json": {},
+    }
+    events: list[str] = []
+
+    class Transaction:
+        async def __aenter__(self) -> None:
+            events.append("transaction:enter")
+
+        async def __aexit__(self, *_args: object) -> None:
+            events.append("transaction:exit")
+
+    class Connection:
+        def transaction(self) -> Transaction:
+            return Transaction()
+
+        async def fetchrow(self, statement: str, *_args: Any) -> dict[str, Any] | None:
+            if "FROM runtime_commands" in statement:
+                events.append("command:lock")
+                return command_row
+            if "UPDATE project_bindings" in statement:
+                events.append("binding:fail")
+                return None
+            if "UPDATE runtime_commands" in statement:
+                events.append("command:ack")
+                return {
+                    **command_row,
+                    "status": "failed",
+                    "lease_expires_at": None,
+                    "completed_at": now,
+                    "result_json": {"reason": "project_config_apply_failed"},
+                }
+            raise AssertionError(f"Unexpected query: {statement}")
+
+    class Acquire:
+        async def __aenter__(self) -> Connection:
+            return connection
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+    class Pool:
+        def acquire(self) -> Acquire:
+            return Acquire()
+
+    connection = Connection()
+    store = SimpleNamespace(pool=Pool())
+
+    acknowledged = await PgRuntimeMixin.ack_runtime_command(
+        store,
+        "conductor-1",
+        7,
+        4,
+        status="failed",
+        result={"reason": "project_config_apply_failed"},
+        project_binding_failure={
+            "error_code": "project_config_apply_failed",
+            "sanitized_reason": "Conductor rejected project configuration",
+            "updated_at": "2026-07-14T12:00:00Z",
+        },
+    )
+
+    assert acknowledged is not None
+    assert acknowledged["_project_binding_failure"] is False
+    assert events == [
+        "transaction:enter",
+        "command:lock",
+        "binding:fail",
+        "command:ack",
+        "transaction:exit",
+    ]
 
 
 def _binding() -> dict[str, Any]:

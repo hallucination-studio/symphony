@@ -74,6 +74,20 @@ class PodiumStateBaseMixin:
                 break
         if online_runtime and "runtime_enrollment" not in completed:
             completed.append("runtime_enrollment")
+        selected_projects = {
+            str(project.get("linear_project_id") or "")
+            for project in await self.store.list_selected_linear_projects(workspace_id)
+        }
+        ready_projects = {
+            str(binding.get("linear_project_id") or "")
+            for binding in await self.store.list_project_bindings_for_user(workspace_id)
+            if binding.get("active", True) and str(binding.get("state") or "") == "ready"
+        }
+        repository_ready = bool(selected_projects) and selected_projects <= ready_projects
+        if repository_ready and "repository_mapping" not in completed:
+            completed.append("repository_mapping")
+        elif not repository_ready and "repository_mapping" in completed:
+            completed.remove("repository_mapping")
         ordered = [step for step in ONBOARDING_STEPS if step in completed]
         current_step = "complete"
         for step in ONBOARDING_STEPS:
@@ -83,15 +97,6 @@ class PodiumStateBaseMixin:
         row["completed_steps"] = ordered
         await self.persist_onboarding_state(workspace_id, row)
         return {"current_step": current_step, "completed_steps": ordered, "next_action": None if current_step == "complete" else current_step}
-
-    async def save_onboarding_repository(self, workspace_id: str, mode: str, value: str) -> dict[str, Any]:
-        row = await self.load_onboarding_state(workspace_id)
-        row.setdefault("metadata", {})["repository"] = {"mode": mode, "value": value}
-        completed = row.setdefault("completed_steps", [])
-        if "repository_mapping" not in completed:
-            completed.append("repository_mapping")
-        await self.persist_onboarding_state(workspace_id, row)
-        return await self.onboarding_progress(workspace_id)
 
     async def mark_linear_connected(self, workspace_id: str) -> dict[str, Any]:
         await self._mark_onboarding(workspace_id, "linear_connect")

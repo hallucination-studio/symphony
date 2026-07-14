@@ -23,6 +23,7 @@ vi.mock("../api/client", async (importOriginal) => {
       selectLinearProjects: vi.fn(),
       runtimes: vi.fn(),
       enrollmentToken: vi.fn(),
+      bindConductor: vi.fn(),
     },
   };
 });
@@ -38,6 +39,7 @@ const mockApi = api as unknown as {
   selectLinearProjects: ReturnType<typeof vi.fn>;
   runtimes: ReturnType<typeof vi.fn>;
   enrollmentToken: ReturnType<typeof vi.fn>;
+  bindConductor: ReturnType<typeof vi.fn>;
 };
 
 function bootstrap(overrides: Partial<Bootstrap> = {}): Bootstrap {
@@ -307,6 +309,63 @@ describe("product pages", () => {
     expect(screen.getByText("Offline")).toBeInTheDocument();
     expect(screen.getAllByText("Unbound")).toHaveLength(3);
     expect(screen.getByRole("button", { name: "Add Conductor" })).toBeInTheDocument();
+  });
+
+  it("binds an online unbound Conductor with the shared project form", async () => {
+    const conductor = conductorRecord({
+      id: "conductor-1",
+      name: "Bach",
+      publicId: "k7m3p2",
+      enrollmentState: "enrolled",
+      online: true,
+      hostname: "studio-mac",
+      version: "1.2.3",
+    });
+    mockApi.runtimes.mockResolvedValue({ conductors: [conductor], runtimes: [] });
+    mockApi.linearProjects.mockResolvedValue({
+      projects: [{
+        id: "project-1",
+        name: "Platform",
+        slug_id: "platform",
+        selected: true,
+        access_state: "ready",
+        bound: false,
+      }],
+    });
+    mockApi.bindConductor.mockResolvedValue({
+      binding: {
+        id: "binding-1",
+        conductor_id: "conductor-1",
+        linear_project_id: "project-1",
+        project_name: "Platform",
+        project_slug: "platform",
+        state: "pending_ack",
+        config_version: 1,
+        acknowledged_config_version: 0,
+        error_code: "",
+        sanitized_reason: "",
+        next_action: "wait_for_conductor_ack",
+        repository: { mode: "local_path", value: "/srv/repo" },
+      },
+    });
+
+    renderWithProviders(<RuntimesPage />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Bind project with Bach-k7m3p2" }));
+    fireEvent.change(await screen.findByLabelText("Linear project"), {
+      target: { value: "project-1" },
+    });
+    fireEvent.change(screen.getByPlaceholderText("/srv/projects/repository"), {
+      target: { value: "/srv/repo" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Bind project to Bach-k7m3p2" }));
+
+    await waitFor(() => {
+      expect(mockApi.bindConductor).toHaveBeenCalledWith("conductor-1", {
+        linear_project_id: "project-1",
+        repository: { mode: "local_path", value: "/srv/repo" },
+      });
+    });
   });
 });
 

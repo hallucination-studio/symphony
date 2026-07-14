@@ -11,6 +11,35 @@ from ._postgres_project_unbind import (
 from ._postgres_records import _pg_datetime, _record_to_project_binding
 
 
+async def _record_project_binding_failure_on(
+    connection: Any,
+    binding_id: str,
+    *,
+    conductor_id: str,
+    expected_config_version: int,
+    error_code: str,
+    sanitized_reason: str,
+    updated_at: str,
+) -> dict[str, Any] | None:
+    row = await connection.fetchrow(
+        """
+        UPDATE project_bindings SET
+          state = 'failed', error_code = $4, sanitized_reason = $5,
+          updated_at = $6::timestamptz
+        WHERE id = $1 AND conductor_id = $2 AND active = TRUE
+          AND state = 'pending_ack' AND config_version = $3
+        RETURNING *
+        """,
+        binding_id,
+        conductor_id,
+        expected_config_version,
+        error_code,
+        sanitized_reason,
+        _pg_datetime(updated_at),
+    )
+    return _record_to_project_binding(row) if row is not None else None
+
+
 class PgProjectReplacementsMixin:
     async def create_project_binding(
         self,

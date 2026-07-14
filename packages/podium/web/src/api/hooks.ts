@@ -7,11 +7,11 @@ import { useCallback, useEffect, useState } from "react";
 import { api } from "./client";
 import type {
   AuthenticationChallenge,
+  BindConductorRequest,
   EnrollmentTokenRequest,
   LinearProject,
   PerformerControlEnvelope,
   PerformerDeviceLoginRequest,
-  RepositoryMode,
 } from "./types";
 
 export function useBootstrap() {
@@ -333,12 +333,25 @@ export function useLinearProjectSelection(enabled = true) {
   };
 }
 
-export function useSaveRepository() {
-  const invalidate = useInvalidateOnboarding();
+export function useBindConductor() {
+  const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ mode, value }: { mode: RepositoryMode; value: string }) =>
-      api.saveRepository(mode, value),
-    onSuccess: invalidate,
+    mutationFn: ({
+      conductorId,
+      input,
+    }: {
+      conductorId: string;
+      input: BindConductorRequest;
+    }) => api.bindConductor(conductorId, input),
+    onSuccess: async () => {
+      await Promise.all([
+        qc.invalidateQueries({ queryKey: ["bootstrap"] }),
+        qc.invalidateQueries({ queryKey: ["linear", "projects"] }),
+        qc.invalidateQueries({ queryKey: ["runtimes"] }),
+        qc.invalidateQueries({ queryKey: ["runtime-status"] }),
+        qc.invalidateQueries({ queryKey: ["smoke-check"] }),
+      ]);
+    },
   });
 }
 

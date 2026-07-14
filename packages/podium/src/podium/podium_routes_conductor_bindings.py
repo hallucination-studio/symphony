@@ -90,13 +90,26 @@ def _register_conductor_bind_route(
         user = await require_user(request)
         if user is None:
             return error_response(401, "unauthorized", "Unauthorized")
-        payload = await request.json()
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = None
+        if not isinstance(payload, dict) or set(payload) != {"linear_project_id", "repository"}:
+            return error_response(400, "invalid_project_binding", "Project binding body is invalid")
+        repository = payload.get("repository")
+        if (
+            not isinstance(payload.get("linear_project_id"), str)
+            or not str(payload["linear_project_id"]).strip()
+            or not isinstance(repository, dict)
+            or set(repository) != {"mode", "value"}
+        ):
+            return error_response(400, "invalid_project_binding", "Project binding body is invalid")
         try:
             binding = await state.bind_conductor_project(
                 str(user["id"]),
                 conductor_id,
-                linear_project_id=str(payload.get("linear_project_id") or ""),
-                repository=payload.get("repository") if isinstance(payload.get("repository"), dict) else {},
+                linear_project_id=str(payload["linear_project_id"]).strip(),
+                repository=repository,
             )
         except ProjectBindingError as exc:
             status = 404 if exc.code == "conductor_not_found" else 409

@@ -19,7 +19,7 @@ vi.mock("../api/client", async (importOriginal) => {
       selectDefaultLinearApplication: vi.fn(),
       linearProjects: vi.fn(),
       selectLinearProjects: vi.fn(),
-      saveRepository: vi.fn(),
+      bindConductor: vi.fn(),
       enrollmentToken: vi.fn(),
       runtimes: vi.fn(),
       runtimeStatus: vi.fn(),
@@ -50,113 +50,154 @@ function bootstrap(
   };
 }
 
-const advancedOnboarding = {
-  current_step: "runtime_enrollment",
-  completed_steps: ["linear_connect", "scope_selection", "repository_mapping"],
-  next_action: "",
-} satisfies Bootstrap["onboarding"];
-
 describe("SetupPage repository step", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockApi.bootstrap.mockResolvedValue(
       bootstrap("repository_mapping", ["linear_connect", "scope_selection"]),
     );
-    mockApi.enrollmentToken.mockResolvedValue({
-      enrollment_token: "tok",
-      install_command:
-        "curl -fsSL https://podium.example/install.sh | bash -s -- --enrollment-token tok",
-      expires_at: "2026-07-02T12:00:00Z",
-      conductor: enrollmentConductor(),
+    mockApi.linearProjects.mockResolvedValue({
+      projects: [linearProject("project-1", "Platform")],
     });
-    mockApi.runtimeStatus.mockResolvedValue({ online_count: 0 });
-    mockApi.runtimes.mockResolvedValue({ conductors: [], runtimes: [] });
+    mockApi.runtimes.mockResolvedValue({
+      conductors: [runtimeConductor("conductor-1", [])],
+      runtimes: [],
+    });
+    mockApi.bindConductor.mockResolvedValue({
+      binding: projectBinding("pending_ack"),
+    });
   });
 
-  it("submits a local_path mapping and advances to the runtime step", async () => {
-    mockApi.saveRepository.mockResolvedValue({
-      repository: { mode: "local_path", value: "/srv/repo", validation_state: "valid" },
-      onboarding: advancedOnboarding,
-    });
-
+  it("submits the exact project, Conductor, and repository binding", async () => {
     renderWithProviders(<SetupPage />, { route: "/setup/repository", path: "/setup/:step" });
 
-    const input = await screen.findByPlaceholderText(
-      "/home/agent/projects/my-repo",
-    );
+    fireEvent.change(await screen.findByLabelText("Conductor"), {
+      target: { value: "conductor-1" },
+    });
+    const input = screen.getByPlaceholderText("/srv/projects/repository");
     fireEvent.change(input, { target: { value: "/srv/repo" } });
-    fireEvent.click(screen.getByRole("button", { name: /save and continue/i }));
+    fireEvent.click(screen.getByRole("button", { name: "Bind project Platform" }));
 
     await waitFor(() =>
-      expect(mockApi.saveRepository).toHaveBeenCalledWith(
-        "local_path",
-        "/srv/repo",
-      ),
+      expect(mockApi.bindConductor).toHaveBeenCalledWith("conductor-1", {
+        linear_project_id: "project-1",
+        repository: { mode: "local_path", value: "/srv/repo" },
+      }),
     );
-    expect(
-      await screen.findByText("Generate an install command"),
-    ).toBeInTheDocument();
   });
 
-  it("submits a git_url mapping", async () => {
-    mockApi.saveRepository.mockResolvedValue({
-      repository: {
-        mode: "git_url",
-        value: "https://example.com/r.git",
-        validation_state: "valid",
-      },
-      onboarding: advancedOnboarding,
+  it("rejects an invalid Git URL without calling the API", async () => {
+    renderWithProviders(<SetupPage />, { route: "/setup/repository", path: "/setup/:step" });
+
+    fireEvent.change(await screen.findByLabelText("Conductor"), {
+      target: { value: "conductor-1" },
     });
-
-    renderWithProviders(<SetupPage />, { route: "/setup/repository", path: "/setup/:step" });
-
-    fireEvent.click(await screen.findByText("Clone from a Git URL"));
-    const input = screen.getByPlaceholderText(
-      "https://github.com/acme/my-repo.git",
-    );
-    fireEvent.change(input, { target: { value: "https://example.com/r.git" } });
-    fireEvent.click(screen.getByRole("button", { name: /save and continue/i }));
-
-    await waitFor(() =>
-      expect(mockApi.saveRepository).toHaveBeenCalledWith(
-        "git_url",
-        "https://example.com/r.git",
-      ),
-    );
-  });
-
-  it("shows a client-side error for an invalid git URL without calling the API", async () => {
-    renderWithProviders(<SetupPage />, { route: "/setup/repository", path: "/setup/:step" });
-
-    fireEvent.click(await screen.findByText("Clone from a Git URL"));
-    const input = screen.getByPlaceholderText(
-      "https://github.com/acme/my-repo.git",
-    );
+    fireEvent.change(screen.getByLabelText("Repository source"), {
+      target: { value: "git_url" },
+    });
+    const input = screen.getByPlaceholderText("https://github.com/acme/repository.git");
     fireEvent.change(input, { target: { value: "not-a-url" } });
-    fireEvent.click(screen.getByRole("button", { name: /save and continue/i }));
+    fireEvent.click(screen.getByRole("button", { name: "Bind project Platform" }));
 
-    expect(
-      await screen.findByText(/Git URL must start with/i),
-    ).toBeInTheDocument();
-    expect(mockApi.saveRepository).not.toHaveBeenCalled();
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Git URL must start with https:// or git@.",
+    );
+    expect(mockApi.bindConductor).not.toHaveBeenCalled();
   });
 
-  it("surfaces a backend invalid_mode error", async () => {
-    mockApi.saveRepository.mockRejectedValue(
-      new ApiError(400, "bad mode", "invalid_mode"),
+  it.each([
+    ["conductor_already_bound", "Conductor already has a project binding"],
+    ["linear_project_already_bound", "Linear project already has an active Conductor"],
+  ])("surfaces the %s binding uniqueness conflict", async (code, message) => {
+    mockApi.bindConductor.mockRejectedValue(
+      new ApiError(409, message, code),
     );
+    renderWithProviders(<SetupPage />, { route: "/setup/repository", path: "/setup/:step" });
+
+    fireEvent.change(await screen.findByLabelText("Conductor"), {
+      target: { value: "conductor-1" },
+    });
+    const input = screen.getByPlaceholderText("/srv/projects/repository");
+    fireEvent.change(input, { target: { value: "/srv/repo" } });
+    fireEvent.click(screen.getByRole("button", { name: "Bind project Platform" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      `${code}: ${message}`,
+    );
+  });
+
+  it("gives each project binding action a distinct accessible name", async () => {
+    mockApi.linearProjects.mockResolvedValue({
+      projects: [
+        linearProject("project-1", "Platform"),
+        linearProject("project-2", "Operations"),
+      ],
+    });
+    mockApi.runtimes.mockResolvedValue({
+      conductors: [
+        runtimeConductor("conductor-1", []),
+        runtimeConductor("conductor-2", []),
+      ],
+      runtimes: [],
+    });
 
     renderWithProviders(<SetupPage />, { route: "/setup/repository", path: "/setup/:step" });
 
-    const input = await screen.findByPlaceholderText(
-      "/home/agent/projects/my-repo",
-    );
-    fireEvent.change(input, { target: { value: "/srv/repo" } });
-    fireEvent.click(screen.getByRole("button", { name: /save and continue/i }));
+    expect(await screen.findByRole("button", { name: "Bind project Platform" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Bind project Operations" })).toBeInTheDocument();
+  });
 
-    expect(
-      await screen.findByText(/repository mode isn't supported/i),
-    ).toBeInTheDocument();
+  it("recovers pending and failed binding state from Runtimes", async () => {
+    mockApi.linearProjects.mockResolvedValue({
+      projects: [linearProject("project-1", "Platform", true)],
+    });
+    mockApi.runtimes.mockResolvedValue({
+      conductors: [runtimeConductor("conductor-1", [projectBinding("failed")])],
+      runtimes: [],
+    });
+
+    renderWithProviders(<SetupPage />, { route: "/setup/repository", path: "/setup/:step" });
+
+    expect(await screen.findByText("Binding failed")).toBeInTheDocument();
+    expect(screen.getByText("project_config_apply_failed")).toBeInTheDocument();
+    expect(screen.getByText(/Conductor rejected project configuration/)).toBeInTheDocument();
+    expect(screen.getByText(/retry_project_binding_report/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Continue to smoke check" })).toBeDisabled();
+  });
+
+  it("enables smoke only after every selected project is ready", async () => {
+    mockApi.linearProjects.mockResolvedValue({
+      projects: [
+        linearProject("project-1", "Platform", true),
+        linearProject("project-2", "Operations", true),
+      ],
+    });
+    mockApi.runtimes.mockResolvedValue({
+      conductors: [
+        runtimeConductor("conductor-1", [projectBinding("ready", "project-1")]),
+        runtimeConductor("conductor-2", [projectBinding("pending_ack", "project-2")]),
+      ],
+      runtimes: [],
+    });
+
+    const rendered = renderWithProviders(<SetupPage />, { route: "/setup/repository", path: "/setup/:step" });
+
+    expect(await screen.findByText("Binding ready")).toBeInTheDocument();
+    expect(screen.getByText("Waiting for Conductor")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Continue to smoke check" })).toBeDisabled();
+
+    mockApi.runtimes.mockResolvedValue({
+      conductors: [
+        runtimeConductor("conductor-1", [projectBinding("ready", "project-1")]),
+        runtimeConductor("conductor-2", [projectBinding("ready", "project-2")]),
+      ],
+      runtimes: [],
+    });
+    rendered.unmount();
+    renderWithProviders(<SetupPage />, { route: "/setup/repository", path: "/setup/:step" });
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Continue to smoke check" })).toBeEnabled();
+    });
   });
 });
 
@@ -310,6 +351,63 @@ function enrollmentConductor() {
     online: false,
     last_report_at: null,
     binding: null,
+  };
+}
+
+function linearProject(id: string, name: string, bound = false) {
+  return {
+    id,
+    name,
+    slug_id: id,
+    selected: true,
+    access_state: "ready",
+    bound,
+  };
+}
+
+function runtimeConductor(id: string, bindings: ReturnType<typeof projectBinding>[]) {
+  return {
+    id,
+    conductor_id: id,
+    name: id === "conductor-1" ? "Bach" : "Mozart",
+    public_id: id === "conductor-1" ? "k7m3p2" : "v9d4s1",
+    enrollment_state: "enrolled",
+    hostname: `${id}-host`,
+    label: id,
+    version: "1.0.0",
+    service_identity: `symphony-${id}`,
+    data_root: `/srv/${id}`,
+    online: true,
+    last_report_at: "2026-07-14T12:00:00Z",
+    binding: bindings[0] ?? null,
+    bindings,
+  };
+}
+
+function projectBinding(
+  state: "pending_ack" | "ready" | "failed",
+  projectId = "project-1",
+) {
+  return {
+    id: `binding-${projectId}`,
+    conductor_id: projectId === "project-1" ? "conductor-1" : "conductor-2",
+    linear_project_id: projectId,
+    project_name: projectId === "project-1" ? "Platform" : "Operations",
+    project_slug: projectId,
+    instance_id: `instance-${projectId}`,
+    name: projectId,
+    linear_project: projectId,
+    agent_app_user_id: "agent-1",
+    managed_run_profile: "default",
+    process_status: state === "ready" ? "ready" : "",
+    state,
+    config_version: 1,
+    acknowledged_config_version: state === "ready" ? 1 : 0,
+    error_code: state === "failed" ? "project_config_apply_failed" : "",
+    sanitized_reason: state === "failed" ? "Conductor rejected project configuration" : "",
+    next_action: state === "failed" ? "retry_project_binding_report" : state === "pending_ack" ? "wait_for_conductor_ack" : "",
+    repository: { mode: "local_path", value: "/srv/repo" },
+    constraint_labels: [],
   };
 }
 

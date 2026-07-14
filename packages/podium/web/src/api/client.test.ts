@@ -214,21 +214,45 @@ describe("api client", () => {
     expect(result.conductors[0].managed_runs.runs?.[0]?.run_id).toBe("run-1");
   });
 
-  it("saveRepository POSTs a JSON body without workspace_id", async () => {
-    const fetchMock = mockFetch(200, {
-      repository: { mode: "git_url", value: "https://example.com/repo.git" },
-      onboarding: { current_step: "runtime_enrollment", steps: [] },
+  it("bindConductor PUTs the exact project and repository body", async () => {
+    const fetchMock = mockFetch(202, {
+      binding: {
+        id: "binding-1",
+        conductor_id: "conductor-1",
+        linear_project_id: "project-1",
+        project_name: "Platform",
+        project_slug: "platform",
+        state: "pending_ack",
+        config_version: 1,
+        acknowledged_config_version: 0,
+        error_code: "",
+        sanitized_reason: "",
+        next_action: "wait_for_conductor_ack",
+        repository: { mode: "git_url", value: "https://example.com/repo.git" },
+      },
     });
     global.fetch = fetchMock;
 
-    await api.saveRepository("git_url", "https://example.com/repo.git");
+    await api.bindConductor("conductor-1", {
+      linear_project_id: "project-1",
+      repository: {
+        mode: "git_url",
+        value: "https://example.com/repo.git",
+      },
+    });
 
     const [, init] = fetchMock.mock.calls[0];
-    expect(init.method).toBe("POST");
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      "/api/v1/conductors/conductor-1/binding",
+    );
+    expect(init.method).toBe("PUT");
     expect(init.credentials).toBe("include");
     expect(JSON.parse(init.body)).toEqual({
-      mode: "git_url",
-      value: "https://example.com/repo.git",
+      linear_project_id: "project-1",
+      repository: {
+        mode: "git_url",
+        value: "https://example.com/repo.git",
+      },
     });
   });
 
@@ -372,15 +396,21 @@ describe("api client", () => {
 
   it("throws ApiError with the backend error code on failure", async () => {
     global.fetch = mockFetch(400, {
-      error: { code: "invalid_mode", message: "bad mode" },
+      error: { code: "invalid_repository", message: "bad repository" },
     });
 
-    await expect(api.saveRepository("git_url", "x")).rejects.toMatchObject({
+    await expect(api.bindConductor("conductor-1", {
+      linear_project_id: "project-1",
+      repository: { mode: "git_url", value: "x" },
+    })).rejects.toMatchObject({
       status: 400,
-      code: "invalid_mode",
+      code: "invalid_repository",
     });
     await expect(
-      api.saveRepository("git_url", "x"),
+      api.bindConductor("conductor-1", {
+        linear_project_id: "project-1",
+        repository: { mode: "git_url", value: "x" },
+      }),
     ).rejects.toBeInstanceOf(ApiError);
   });
 

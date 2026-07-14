@@ -80,7 +80,16 @@ class FakeRuntimeState:
                 "result": result or {},
             }
         )
-        return {"id": command_id, "status": status, "result": result or {}}
+        return {
+            "id": command_id,
+            "status": status,
+            "result": result or {},
+            "command": {
+                "type": "project.configure",
+                "binding_id": "binding-1",
+                "config_version": 2,
+            },
+        }
 
     async def submit_smoke_check_result(
         self,
@@ -221,6 +230,39 @@ async def test_runtime_command_ack_records_a_failed_smoke_result(
     assert runtime_state.acks[-1]["result"]["podium_smoke"] == {
         "status": "failed",
         "smoke_check_id": "smoke-1",
+    }
+
+
+@pytest.mark.anyio
+async def test_failed_project_configure_ack_is_forwarded_once(
+    runtime_app: FastAPI,
+    runtime_state: FakeRuntimeState,
+) -> None:
+    result = {
+        "command_type": "project.configure",
+        "status": "rejected",
+        "reason": "project_config_apply_failed",
+    }
+    transport = httpx.ASGITransport(app=runtime_app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/api/v1/runtime/commands/ack",
+            headers={"Authorization": "Bearer runtime-token"},
+            json={
+                "command_id": 7,
+                "fencing_token": 3,
+                "status": "failed",
+                "result": result,
+            },
+        )
+
+    assert response.status_code == 200
+    assert runtime_state.acks[-1] == {
+        "runtime_id": "runtime-1",
+        "command_id": 7,
+        "fencing_token": 3,
+        "status": "failed",
+        "result": result,
     }
 
 
