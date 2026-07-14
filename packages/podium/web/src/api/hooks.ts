@@ -7,6 +7,7 @@ import { useCallback, useEffect, useState } from "react";
 import { api } from "./client";
 import type {
   AuthenticationChallenge,
+  LinearProject,
   PerformerControlEnvelope,
   PerformerDeviceLoginRequest,
   RepositoryMode,
@@ -28,10 +29,10 @@ export function useConfig() {
   });
 }
 
-export function useLinearScope(enabled = true) {
+export function useLinearProjects(enabled = true) {
   return useQuery({
-    queryKey: ["linear", "scope"],
-    queryFn: () => api.linearScope(),
+    queryKey: ["linear", "projects"],
+    queryFn: () => api.linearProjects(),
     enabled,
     retry: false,
   });
@@ -239,13 +240,57 @@ export function useStartLinear() {
   });
 }
 
-export function useSaveScope() {
-  const invalidate = useInvalidateOnboarding();
+export function useSelectLinearProjects() {
+  const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ teams, projects }: { teams: string[]; projects: string[] }) =>
-      api.saveScope(teams, projects),
-    onSuccess: invalidate,
+    mutationFn: (projectIds: string[]) => api.selectLinearProjects(projectIds),
+    onSuccess: async () => {
+      await Promise.all([
+        qc.invalidateQueries({ queryKey: ["bootstrap"] }),
+        qc.invalidateQueries({ queryKey: ["linear", "projects"] }),
+        qc.invalidateQueries({ queryKey: ["runtimes"] }),
+        qc.invalidateQueries({ queryKey: ["runtime-status"] }),
+        qc.invalidateQueries({ queryKey: ["smoke-check"] }),
+      ]);
+    },
   });
+}
+
+export function useLinearProjectSelection(enabled = true) {
+  const query = useLinearProjects(enabled);
+  const mutation = useSelectLinearProjects();
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const projects = query.data?.projects ?? [];
+
+  useEffect(() => {
+    if (!query.data) return;
+    setSelected(new Set(
+      query.data.projects
+        .filter((project) => project.selected || project.bound)
+        .map((project) => project.id),
+    ));
+  }, [query.data]);
+
+  function toggle(project: LinearProject) {
+    if (project.bound) return;
+    setSelected((current) => {
+      const next = new Set(current);
+      if (next.has(project.id)) next.delete(project.id);
+      else next.add(project.id);
+      return next;
+    });
+  }
+
+  return {
+    query,
+    projects,
+    selected,
+    toggle,
+    selectAll: () => setSelected(new Set(projects.map((project) => project.id))),
+    save: () => mutation.mutateAsync([...selected].sort()),
+    saving: mutation.isPending,
+    canSave: selected.size > 0,
+  };
 }
 
 export function useSaveRepository() {

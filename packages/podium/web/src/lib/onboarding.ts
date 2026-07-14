@@ -39,10 +39,10 @@ export const STEP_DEFS: StepDef[] = [
   },
   {
     key: "scope_selection",
-    title: "Choose scope",
+    title: "Choose projects",
     description:
-      "Pick the teams and projects Podium is allowed to act on. Start narrow — you can widen later.",
-    ctaLabel: "Select scope",
+      "Select the Linear projects Symphony may operate. You can manage this selection later from Integrations.",
+    ctaLabel: "Select projects",
     path: "scope",
   },
   {

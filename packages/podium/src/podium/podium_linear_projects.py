@@ -27,6 +27,11 @@ class PodiumLinearProjectsMixin:
             str(row.get("linear_project_id") or "")
             for row in await self.list_selected_linear_projects(user_id)
         }
+        bound_project_ids = {
+            str(row.get("linear_project_id") or "")
+            for row in await self.store.list_project_bindings_for_user(user_id)
+            if row.get("active", True)
+        }
         return [
             {
                 "id": str(project.get("id") or ""),
@@ -34,6 +39,7 @@ class PodiumLinearProjectsMixin:
                 "slug_id": str(project.get("slug_id") or ""),
                 "selected": str(project.get("id") or "") in selected,
                 "access_state": "ready",
+                "bound": str(project.get("id") or "") in bound_project_ids,
             }
             for project in installation.get("projects") or []
             if isinstance(project, dict)
@@ -72,7 +78,12 @@ class PodiumLinearProjectsMixin:
             }
             for project_id in sorted(project_ids)
         ]
-        await self.store.replace_selected_linear_projects(user_id, rows)
+        bound_removals = await self.store.replace_selected_linear_projects(user_id, rows)
+        if bound_removals:
+            raise LinearProjectSelectionError(
+                "linear_project_bound",
+                "Unbind the active Conductor before removing a Linear project",
+            )
         await self._mark_onboarding(user_id, "scope_selection")
         return await self.linear_projects_public(user_id)
 

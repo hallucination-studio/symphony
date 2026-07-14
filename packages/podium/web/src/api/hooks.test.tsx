@@ -2,7 +2,11 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import type { PropsWithChildren } from "react";
 import { afterEach, expect, it, vi } from "vitest";
-import { usePerformerControl, usePerformerStatus } from "./hooks";
+import {
+  usePerformerControl,
+  usePerformerStatus,
+  useSelectLinearProjects,
+} from "./hooks";
 
 const originalFetch = global.fetch;
 
@@ -61,6 +65,28 @@ it("caches only sanitized Performer status data", async () => {
   expect(queryClient.getQueryData(["performer", "conductor-1", "status"]))
     .toMatchObject({ capabilities: { performer_kind: "codex" } });
   expect(queryClient.getMutationCache().getAll()).toHaveLength(0);
+});
+
+it("invalidates every readiness view after project selection changes", async () => {
+  mockFetch({ projects: [] });
+  const { queryClient, Wrapper } = setup();
+  const keys = [
+    ["bootstrap"],
+    ["linear", "projects"],
+    ["runtimes"],
+    ["runtime-status"],
+    ["smoke-check"],
+  ];
+  for (const key of keys) queryClient.setQueryData(key, { stale: false });
+  const { result } = renderHook(() => useSelectLinearProjects(), {
+    wrapper: Wrapper,
+  });
+
+  await act(() => result.current.mutateAsync(["project-1"]));
+
+  for (const key of keys) {
+    expect(queryClient.getQueryState(key)?.isInvalidated).toBe(true);
+  }
 });
 
 it("never places an API key in query data or mutation variables", async () => {

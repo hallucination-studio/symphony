@@ -1,8 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { screen } from "@testing-library/react";
+import { fireEvent, screen, waitFor } from "@testing-library/react";
 import { renderWithProviders } from "../test/utils";
 import HomePage from "./HomePage";
 import ManagedRunsPage from "./ManagedRunsPage";
+import IntegrationsPage from "./IntegrationsPage";
 import { api } from "../api/client";
 import type { Bootstrap } from "../api/types";
 
@@ -14,6 +15,10 @@ vi.mock("../api/client", async (importOriginal) => {
       bootstrap: vi.fn(),
       managedRuns: vi.fn(),
       smokeCheckResult: vi.fn(),
+      linearApplication: vi.fn(),
+      linearInstallations: vi.fn(),
+      linearProjects: vi.fn(),
+      selectLinearProjects: vi.fn(),
     },
   };
 });
@@ -22,6 +27,10 @@ const mockApi = api as unknown as {
   bootstrap: ReturnType<typeof vi.fn>;
   managedRuns: ReturnType<typeof vi.fn>;
   smokeCheckResult: ReturnType<typeof vi.fn>;
+  linearApplication: ReturnType<typeof vi.fn>;
+  linearInstallations: ReturnType<typeof vi.fn>;
+  linearProjects: ReturnType<typeof vi.fn>;
+  selectLinearProjects: ReturnType<typeof vi.fn>;
 };
 
 function bootstrap(overrides: Partial<Bootstrap> = {}): Bootstrap {
@@ -81,6 +90,39 @@ describe("product pages", () => {
     vi.clearAllMocks();
     mockApi.managedRuns.mockResolvedValue({ conductors: [] });
     mockApi.smokeCheckResult.mockRejectedValue(new Error("404"));
+    mockApi.linearApplication.mockResolvedValue({
+      application: {
+        source: "default",
+        client_id: "default-client",
+        callback_url: "https://podium.example/api/v1/linear/oauth/callback",
+      },
+    });
+    mockApi.linearInstallations.mockResolvedValue({
+      active: null,
+      candidate: null,
+      revocation: null,
+    });
+    mockApi.linearProjects.mockResolvedValue({
+      projects: [
+        {
+          id: "project-1",
+          name: "Platform",
+          slug_id: "platform",
+          selected: true,
+          access_state: "ready",
+          bound: true,
+        },
+        {
+          id: "project-2",
+          name: "Applications",
+          slug_id: "applications",
+          selected: false,
+          access_state: "ready",
+          bound: false,
+        },
+      ],
+    });
+    mockApi.selectLinearProjects.mockResolvedValue({ projects: [] });
   });
 
   it("renders the current onboarding action", async () => {
@@ -124,5 +166,23 @@ describe("product pages", () => {
     expect(screen.getByText("LIN-123")).toBeInTheDocument();
     expect(screen.getByText("Implement workflow")).toBeInTheDocument();
     expect(screen.getByText("red passing")).toBeInTheDocument();
+  });
+
+  it("manages the same multi-project selection from Integrations", async () => {
+    mockApi.bootstrap.mockResolvedValue(bootstrap());
+
+    renderWithProviders(<IntegrationsPage />);
+
+    expect(await screen.findByText("Linear projects")).toBeInTheDocument();
+    expect(screen.getByRole("checkbox", { name: /platform/i })).toBeDisabled();
+    fireEvent.click(screen.getByRole("checkbox", { name: /applications/i }));
+    fireEvent.click(screen.getByRole("button", { name: /save projects/i }));
+
+    await waitFor(() =>
+      expect(mockApi.selectLinearProjects).toHaveBeenCalledWith([
+        "project-1",
+        "project-2",
+      ]),
+    );
   });
 });

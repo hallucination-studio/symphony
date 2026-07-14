@@ -17,8 +17,8 @@ vi.mock("../api/client", async (importOriginal) => {
       linearInstallations: vi.fn(),
       saveLinearApplication: vi.fn(),
       selectDefaultLinearApplication: vi.fn(),
-      linearScope: vi.fn(),
-      saveScope: vi.fn(),
+      linearProjects: vi.fn(),
+      selectLinearProjects: vi.fn(),
       saveRepository: vi.fn(),
       enrollmentToken: vi.fn(),
       runtimeStatus: vi.fn(),
@@ -154,6 +154,66 @@ describe("SetupPage repository step", () => {
     expect(
       await screen.findByText(/repository mode isn't supported/i),
     ).toBeInTheDocument();
+  });
+});
+
+describe("SetupPage project step", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockApi.bootstrap.mockResolvedValue(
+      bootstrap("scope_selection", ["linear_connect"]),
+    );
+    mockApi.linearProjects.mockResolvedValue({
+      projects: [
+        {
+          id: "project-1",
+          name: "Bound project",
+          slug_id: "bound",
+          selected: true,
+          access_state: "ready",
+          bound: true,
+        },
+        {
+          id: "project-2",
+          name: "Available project",
+          slug_id: "available",
+          selected: false,
+          access_state: "ready",
+          bound: false,
+        },
+      ],
+    });
+    mockApi.selectLinearProjects.mockResolvedValue({ projects: [] });
+  });
+
+  it("keeps bound projects selected and supports selecting all projects", async () => {
+    renderWithProviders(<SetupPage />, { route: "/setup/scope", path: "/setup/:step" });
+
+    const bound = await screen.findByRole("checkbox", { name: /bound project/i });
+    const available = screen.getByRole("checkbox", { name: /available project/i });
+    expect(bound).toBeChecked();
+    expect(bound).toBeDisabled();
+    expect(available).not.toBeChecked();
+
+    fireEvent.click(screen.getByRole("button", { name: /select all/i }));
+    expect(available).toBeChecked();
+    fireEvent.click(screen.getByRole("button", { name: /save and continue/i }));
+
+    await waitFor(() =>
+      expect(mockApi.selectLinearProjects).toHaveBeenCalledWith([
+        "project-1",
+        "project-2",
+      ]),
+    );
+  });
+
+  it("shows a project-specific load failure", async () => {
+    mockApi.linearProjects.mockRejectedValue(new Error("offline"));
+
+    renderWithProviders(<SetupPage />, { route: "/setup/scope", path: "/setup/:step" });
+
+    expect(await screen.findByText("Couldn't load Linear projects")).toBeInTheDocument();
+    expect(screen.queryByText("Couldn't load Linear scope")).not.toBeInTheDocument();
   });
 });
 

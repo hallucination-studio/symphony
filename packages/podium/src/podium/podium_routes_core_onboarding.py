@@ -17,7 +17,7 @@ def register_onboarding_routes(
     error_response: ErrorResponse,
 ) -> None:
     _register_onboarding_status_routes(app, state=state, require_user=require_user, error_response=error_response)
-    _register_onboarding_setup_routes(app, state=state, require_user=require_user, error_response=error_response)
+    _register_onboarding_repository_route(app, state=state, require_user=require_user, error_response=error_response)
     _register_onboarding_smoke_routes(app, state=state, require_user=require_user, error_response=error_response)
 
 
@@ -51,19 +51,9 @@ def _register_onboarding_status_routes(
         )
 
 
-def _register_onboarding_setup_routes(
+def _register_onboarding_repository_route(
     app: FastAPI, *, state: Any, require_user: RequireUser, error_response: ErrorResponse
 ) -> None:
-    @app.post("/api/v1/onboarding/scope")
-    async def onboarding_scope(request: Request) -> JSONResponse:
-        user = await require_user(request)
-        if user is None:
-            return error_response(401, "unauthorized", "Unauthorized")
-        payload = await request.json()
-        user_id = str(user["id"])
-        progress = await state.save_onboarding_scope(user_id, payload.get("teams"), payload.get("projects"))
-        return JSONResponse({"onboarding": progress})
-
     @app.post("/api/v1/onboarding/repository")
     async def onboarding_repository(request: Request) -> JSONResponse:
         user = await require_user(request)

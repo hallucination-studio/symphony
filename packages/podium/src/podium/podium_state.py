@@ -14,7 +14,6 @@ from fastapi import Response
 from .config import PodiumConfig
 from .podium_shared import hash_secret, utc_now_iso
 
-LINEAR_SCOPE_QUERY = "query { teams { nodes { id name key } } projects { nodes { id name } } }"
 LINEAR_GRAPHQL_URL = "https://api.linear.app/graphql"
 ONBOARDING_STEPS = [
     "linear_connect",
@@ -77,15 +76,6 @@ class PodiumStateBaseMixin:
         row["completed_steps"] = ordered
         await self.persist_onboarding_state(workspace_id, row)
         return {"current_step": current_step, "completed_steps": ordered, "next_action": None if current_step == "complete" else current_step}
-
-    async def save_onboarding_scope(self, workspace_id: str, teams: Any, projects: Any) -> dict[str, Any]:
-        row = await self.load_onboarding_state(workspace_id)
-        row.setdefault("metadata", {})["scope"] = {"teams": teams, "projects": projects}
-        completed = row.setdefault("completed_steps", [])
-        if "scope_selection" not in completed:
-            completed.append("scope_selection")
-        await self.persist_onboarding_state(workspace_id, row)
-        return await self.onboarding_progress(workspace_id)
 
     async def save_onboarding_repository(self, workspace_id: str, mode: str, value: str) -> dict[str, Any]:
         row = await self.load_onboarding_state(workspace_id)

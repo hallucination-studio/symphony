@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from typing import Any
 
+from ._postgres_project_unbind import lock_advisory_keys, project_selection_lock_key
 from ._postgres_records import _pg_datetime, _pg_json, _pg_json_value
 
 
@@ -238,9 +239,30 @@ class PgLinearMixin:
         )
         return [_workspace_installation(row) for row in rows]
 
-    async def replace_selected_linear_projects(self, user_id: str, projects: list[dict[str, Any]]) -> None:
+    async def replace_selected_linear_projects(
+        self,
+        user_id: str,
+        projects: list[dict[str, Any]],
+    ) -> list[str]:
         async with self.pool.acquire() as connection:
             async with connection.transaction():
+                await lock_advisory_keys(connection, project_selection_lock_key(user_id))
+                requested_ids = [str(project["linear_project_id"]) for project in projects]
+                bound_rows = await connection.fetch(
+                    """
+                    SELECT linear_project_id FROM project_bindings
+                    WHERE user_id = $1
+                      AND active = TRUE
+                      AND NOT (linear_project_id = ANY($2::text[]))
+                    ORDER BY linear_project_id
+                    FOR UPDATE
+                    """,
+                    user_id,
+                    requested_ids,
+                )
+                blocked = [str(row["linear_project_id"]) for row in bound_rows]
+                if blocked:
+                    return blocked
                 await connection.execute("DELETE FROM linear_selected_projects WHERE user_id = $1", user_id)
                 for project in projects:
                     await connection.execute(
@@ -257,6 +279,7 @@ class PgLinearMixin:
                         str(project["project_name"]),
                         str(project["access_state"]),
                     )
+        return []
 
     async def list_selected_linear_projects(self, user_id: str) -> list[dict[str, Any]]:
         rows = await self.pool.fetch(

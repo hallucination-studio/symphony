@@ -66,6 +66,71 @@ describe("api client", () => {
     );
   });
 
+  it("lists Linear projects through the closed canonical projects endpoint", async () => {
+    const fetchMock = mockFetch(200, {
+      projects: [
+        {
+          id: "project-1",
+          name: "Platform",
+          slug_id: "platform",
+          selected: true,
+          access_state: "ready",
+          bound: true,
+        },
+      ],
+    });
+    global.fetch = fetchMock;
+
+    const result = await api.linearProjects();
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/linear/projects",
+      expect.objectContaining({ credentials: "include" }),
+    );
+    expect(result.projects[0]).toEqual({
+      id: "project-1",
+      name: "Platform",
+      slug_id: "platform",
+      selected: true,
+      access_state: "ready",
+      bound: true,
+    });
+  });
+
+  it("selects Linear projects with the exact project_ids request body", async () => {
+    const fetchMock = mockFetch(200, { projects: [] });
+    global.fetch = fetchMock;
+
+    await api.selectLinearProjects(["project-1", "project-2"]);
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/linear/projects",
+      expect.objectContaining({
+        method: "PUT",
+        credentials: "include",
+        body: JSON.stringify({ project_ids: ["project-1", "project-2"] }),
+      }),
+    );
+  });
+
+  it("rejects Linear project responses with undeclared fields", async () => {
+    global.fetch = mockFetch(200, {
+      projects: [
+        {
+          id: "project-1",
+          name: "Platform",
+          slug_id: "platform",
+          selected: true,
+          access_state: "ready",
+          bound: false,
+          token: "must-not-pass",
+        },
+      ],
+    });
+
+    await expect(api.linearProjects()).rejects.toThrow("unknown field");
+  });
+
   it("managedRuns requests every project Conductor managed runs view", async () => {
     const fetchMock = mockFetch(200, {
       conductors: [

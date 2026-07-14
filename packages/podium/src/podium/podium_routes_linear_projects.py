@@ -37,17 +37,25 @@ def register_linear_project_routes(
         user = await require_user(request)
         if user is None:
             return error_response(401, "unauthorized", "Unauthorized")
-        payload = await request.json()
-        raw_ids = payload.get("project_ids") if isinstance(payload, dict) else None
-        if not isinstance(raw_ids, list) or any(not isinstance(value, str) for value in raw_ids):
-            return error_response(400, "invalid_linear_projects", "project_ids must be a list of strings")
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = None
+        if not isinstance(payload, dict) or set(payload) != {"project_ids"}:
+            return error_response(400, "invalid_linear_projects", "Body must contain only project_ids")
+        raw_ids = payload["project_ids"]
+        if (
+            not isinstance(raw_ids, list)
+            or any(not isinstance(value, str) or not value.strip() for value in raw_ids)
+        ):
+            return error_response(400, "invalid_linear_projects", "project_ids must be a list of non-empty strings")
         try:
             projects = await state.select_linear_projects(
                 str(user["id"]),
-                [value.strip() for value in raw_ids if value.strip()],
+                [value.strip() for value in raw_ids],
             )
         except LinearProjectSelectionError as exc:
-            return error_response(400, exc.code, exc.reason)
+            return error_response(409 if exc.code == "linear_project_bound" else 400, exc.code, exc.reason)
         except SecretDecryptionError:
             return error_response(500, "linear_installation_secret_unreadable", "Linear installation could not be decrypted")
         return JSONResponse({"projects": projects})

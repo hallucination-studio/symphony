@@ -75,14 +75,17 @@ export interface PodiumConfig {
   };
 }
 
-export interface LinearScopeEntity {
+export interface LinearProject {
   id: string;
   name: string;
+  slug_id: string;
+  selected: boolean;
+  access_state: "ready";
+  bound: boolean;
 }
 
-export interface LinearScope {
-  teams: LinearScopeEntity[];
-  projects: LinearScopeEntity[];
+export interface LinearProjects {
+  projects: LinearProject[];
 }
 
 export type RepositoryMode = "local_path" | "git_url";

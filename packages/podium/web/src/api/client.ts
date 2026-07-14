@@ -7,7 +7,7 @@ import type {
   InstanceLogs,
   LinearApplication,
   LinearInstallations,
-  LinearScope,
+  LinearProjects,
   OnboardingProgress,
   ManagedRunsReport,
   PerformerAccountState,
@@ -143,18 +143,16 @@ export const api = {
     return request("/api/v1/linear/installations/oauth", { method: "POST" });
   },
 
-  linearScope(): Promise<LinearScope> {
-    return request<LinearScope>("/api/v1/onboarding/linear/scope");
+  async linearProjects(): Promise<LinearProjects> {
+    return parseLinearProjects(await request<unknown>("/api/v1/linear/projects"));
   },
 
-  saveScope(
-    teams: string[],
-    projects: string[],
-  ): Promise<{ onboarding: OnboardingProgress }> {
-    return request("/api/v1/onboarding/scope", {
-      method: "POST",
-      body: JSON.stringify({ teams, projects }),
+  async selectLinearProjects(projectIds: string[]): Promise<LinearProjects> {
+    const response = await request<unknown>("/api/v1/linear/projects", {
+      method: "PUT",
+      body: JSON.stringify({ project_ids: projectIds }),
     });
+    return parseLinearProjects(response);
   },
 
   saveRepository(
@@ -467,6 +465,26 @@ function parseEvents(value: unknown): PerformerControlEvent[] {
     }
     return parsed;
   });
+}
+
+function parseLinearProjects(value: unknown): LinearProjects {
+  const envelope = exactObject(value, ["projects"]);
+  if (!Array.isArray(envelope.projects)) throw new Error("invalid projects");
+  return {
+    projects: envelope.projects.map((value) => {
+      const project = exactObject(value, [
+        "id", "name", "slug_id", "selected", "access_state", "bound",
+      ]);
+      return {
+        id: identifier(project.id, "project id"),
+        name: safeString(project.name, "project name", 200),
+        slug_id: safeString(project.slug_id, "project slug", 200),
+        selected: boolean(project.selected, "project selected"),
+        access_state: closedString(project.access_state, ["ready"] as const, "project access_state"),
+        bound: boolean(project.bound, "project bound"),
+      };
+    }),
+  };
 }
 
 function parseCapabilities(value: unknown): PerformerCapabilities {

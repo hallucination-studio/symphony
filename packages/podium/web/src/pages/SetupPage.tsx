@@ -37,7 +37,7 @@ export default function SetupPage() {
     <>
       <PageHeader
         title={t("Setup")}
-        description={t("Connect Linear, choose scope, map a repository, install a runtime, and verify.")}
+        description={t("Connect Linear, choose projects, map a repository, install a runtime, and verify.")}
       />
       <QueryState isLoading={bootstrap.isLoading} error={bootstrap.error}>
         {bootstrap.data ? <SetupBody data={bootstrap.data} /> : null}

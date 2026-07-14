@@ -218,6 +218,10 @@ def target_lock_key(conductor_id: str) -> str:
     return f"project-binding-target:{conductor_id}"
 
 
+def project_selection_lock_key(user_id: str) -> str:
+    return f"linear-project-selection:{user_id}"
+
+
 async def lock_advisory_keys(connection: Any, *keys: str) -> None:
     for key in sorted(set(keys)):
         await connection.execute(

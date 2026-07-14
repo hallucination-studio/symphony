@@ -399,6 +399,25 @@
   margin-bottom: var(--space-4);
 }
 
+.scope-toolbar {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-4);
+  margin-bottom: var(--space-3);
+}
+
+.scope-toolbar .scope-section-title {
+  margin-top: 0;
+}
+
+.scope-summary {
+  margin: var(--space-1) 0 0;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-caption);
+  line-height: var(--line-height-caption);
+}
+
 .scope-section-title {
   font-size: 12px;
   font-weight: 600;
@@ -417,8 +436,31 @@
   cursor: pointer;
 }
 
-.scope-item:hover {
+.scope-item:hover:not([data-disabled="true"]) {
   background: var(--color-bg);
+}
+
+.scope-item[data-disabled="true"] {
+  cursor: not-allowed;
+  color: var(--color-text-muted);
+}
+
+.scope-item-copy {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+}
+
+.scope-item-name {
+  color: var(--color-text);
+  font-weight: var(--font-weight-title);
+}
+
+.scope-item-slug {
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-caption);
 }
 
 .install-card {

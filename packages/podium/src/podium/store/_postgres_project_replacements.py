@@ -3,7 +3,11 @@ from __future__ import annotations
 from typing import Any
 
 from ._postgres_dispatch import _upsert_project_binding_on
-from ._postgres_project_unbind import lock_advisory_keys, target_lock_key
+from ._postgres_project_unbind import (
+    lock_advisory_keys,
+    project_selection_lock_key,
+    target_lock_key,
+)
 from ._postgres_records import _pg_datetime, _record_to_project_binding
 
 
@@ -22,9 +26,21 @@ class PgProjectReplacementsMixin:
                 await lock_advisory_keys(
                     connection,
                     str(binding["id"]),
+                    project_selection_lock_key(user_id),
                     target_lock_key(conductor_id),
                     f"project-binding-project:{user_id}:{linear_project_id}",
                 )
+                selected = await connection.fetchrow(
+                    """
+                    SELECT linear_project_id FROM linear_selected_projects
+                    WHERE user_id = $1 AND linear_project_id = $2
+                    FOR UPDATE
+                    """,
+                    user_id,
+                    linear_project_id,
+                )
+                if selected is None:
+                    return None, "linear_project_not_selected"
                 reservation = await connection.fetchrow(
                     """
                     SELECT id FROM project_bindings
