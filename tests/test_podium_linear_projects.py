@@ -114,8 +114,15 @@ class SelectionPool:
 
 
 class BindingConnection:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        selected: bool = False,
+        active_installation: bool = True,
+    ) -> None:
         self.executed: list[tuple[str, tuple[Any, ...]]] = []
+        self.selected = selected
+        self.active_installation = active_installation
 
     def transaction(self) -> AsyncContext:
         return AsyncContext()
@@ -125,7 +132,9 @@ class BindingConnection:
 
     async def fetchrow(self, statement: str, *_args: Any) -> dict[str, Any] | None:
         if "FROM linear_selected_projects" in statement:
-            return None
+            return {"linear_project_id": "project-1"} if self.selected else None
+        if "FROM linear_workspace_installations" in statement:
+            return {"id": "installation-1"} if self.active_installation else None
         if statement.lstrip().startswith("INSERT INTO project_bindings"):
             raise AssertionError("unselected project reached binding insert")
         return None
@@ -323,6 +332,26 @@ async def test_reauthorization_transaction_reloads_selection_after_lock() -> Non
 
 
 @pytest.mark.anyio
+async def test_disconnect_transaction_rechecks_active_bindings_before_deactivation() -> None:
+    connection = SelectionConnection()
+    store = PgLinearMixin()
+    store.pool = SelectionPool(connection)  # type: ignore[attr-defined]
+
+    disconnected, blocked = await store.disconnect_workspace_installation(
+        "user-1",
+        "installation-1",
+    )
+
+    assert disconnected is False
+    assert blocked == ["project-1"]
+    assert connection.events[0] == "execute:linear-project-selection:user-1"
+    assert not any(
+        "UPDATE linear_workspace_installations" in sql
+        for sql, _args in connection.executed
+    )
+
+
+@pytest.mark.anyio
 async def test_binding_transaction_rechecks_project_selection_after_lock() -> None:
     connection = BindingConnection()
     store = PgProjectReplacementsMixin()
@@ -348,6 +377,30 @@ async def test_binding_transaction_rechecks_project_selection_after_lock() -> No
         args == ("linear-project-selection:user-1",)
         for _statement, args in connection.executed
     )
+
+
+@pytest.mark.anyio
+async def test_binding_transaction_rechecks_active_installation_after_lock() -> None:
+    connection = BindingConnection(selected=True, active_installation=False)
+    store = PgProjectReplacementsMixin()
+    store.pool = SelectionPool(connection)  # type: ignore[attr-defined]
+    binding = build_project_binding(
+        "user-1",
+        "conductor-1",
+        project={
+            "linear_project_id": "project-1",
+            "project_name": "One",
+            "project_slug": "one",
+        },
+        installation={"id": "installation-1", "app_user_id": "agent-1"},
+        repository={"mode": "git_url", "value": "https://example.invalid/repo.git"},
+        prior_bindings=[],
+    )
+
+    created, conflict = await store.create_project_binding(binding)
+
+    assert created is None
+    assert conflict == "linear_installation_required"
 
 
 @pytest.mark.anyio

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+from contextlib import asynccontextmanager
 from typing import Any
 
 import httpx
@@ -176,6 +178,20 @@ class AcceptedInstallationState:
         self.saved: list[dict[str, Any]] = []
         self.reconciled: list[tuple[str, str]] = []
         self.review_required: list[str] = []
+        self.active: dict[str, Any] | None = None
+        self.store = self
+        self.token_lock = asyncio.Lock()
+
+    @asynccontextmanager
+    async def linear_installation_token_lock(self, _installation_id: str):
+        async with self.token_lock:
+            yield
+
+    async def get_active_linear_installation(
+        self,
+        _user_id: str,
+    ) -> dict[str, Any] | None:
+        return dict(self.active) if self.active is not None else None
 
     async def get_linear_application_config(self, _config_id: str) -> dict[str, str]:
         return {"client_id": "same-client" if self.same_identity else "old-client"}
@@ -223,6 +239,7 @@ async def test_only_immediately_activated_reauthorization_reconciles_projects(
         "app_user_id": "app-user-1" if same_identity else "app-user-2",
     }
     config = {"client_id": "same-client"}
+    state.active = dict(active)
 
     await _save_accepted_installation(state, "user-1", active, config, record)
 
@@ -254,6 +271,7 @@ async def test_same_identity_reauthorization_rejects_before_replacing_active() -
         "linear_organization_id": "organization-1",
         "app_user_id": "app-user-1",
     }
+    state.active = dict(active)
 
     with pytest.raises(LinearInstallationRejected) as raised:
         await _save_accepted_installation(
@@ -267,6 +285,44 @@ async def test_same_identity_reauthorization_rejects_before_replacing_active() -
     assert raised.value.code == "linear_bound_project_missing"
     assert state.saved == []
     assert state.review_required == []
+
+
+@pytest.mark.anyio
+async def test_same_identity_reauthorization_does_not_revive_disconnected_installation() -> None:
+    state = AcceptedInstallationState(same_identity=True)
+    active = {
+        "id": "installation-active",
+        "application_config_id": "app-old",
+        "linear_organization_id": "organization-1",
+        "app_user_id": "app-user-1",
+        "created_at": "2026-07-14T00:00:00Z",
+    }
+    state.active = dict(active)
+    record = {
+        "id": "installation-new",
+        "linear_organization_id": "organization-1",
+        "app_user_id": "app-user-1",
+    }
+
+    await state.token_lock.acquire()
+    save = asyncio.create_task(
+        _save_accepted_installation(
+            state,
+            "user-1",
+            active,
+            {"client_id": "same-client"},
+            record,
+        )
+    )
+    await asyncio.sleep(0)
+    state.active = None
+    state.token_lock.release()
+
+    with pytest.raises(LinearInstallationRejected) as raised:
+        await save
+
+    assert raised.value.code == "linear_reauthorization_required"
+    assert state.saved == []
 
 
 class RejectedCallbackState:
@@ -383,6 +439,12 @@ class CutoverStore:
     def __init__(self, *, blocked_projects: list[str] | None = None) -> None:
         self.switched = False
         self.blocked_projects = blocked_projects or []
+        self.token_lock = asyncio.Lock()
+
+    @asynccontextmanager
+    async def linear_installation_token_lock(self, _installation_id: str):
+        async with self.token_lock:
+            yield
 
     async def list_project_bindings_for_user(self, _user_id: str) -> list[dict[str, Any]]:
         return []
@@ -472,6 +534,22 @@ async def test_candidate_cutover_rejects_before_switching_active_installation(
         and "error_code=linear_bound_project_missing" in message
         for message in caplog.messages
     )
+
+
+@pytest.mark.anyio
+async def test_candidate_cutover_does_not_switch_after_active_installation_changes() -> None:
+    state = CutoverState()
+    await state.store.token_lock.acquire()
+    cutover = asyncio.create_task(state.advance_linear_installation_cutover("user-1"))
+    await asyncio.sleep(0)
+    state.active = {"id": "installation-other"}
+    state.store.token_lock.release()
+
+    with pytest.raises(LinearCutoverError) as raised:
+        await cutover
+
+    assert raised.value.code == "linear_cutover_not_available"
+    assert state.store.switched is False
 
 
 @pytest.mark.anyio

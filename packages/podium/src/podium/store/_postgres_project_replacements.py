@@ -41,6 +41,17 @@ class PgProjectReplacementsMixin:
                 )
                 if selected is None:
                     return None, "linear_project_not_selected"
+                installation = await connection.fetchrow(
+                    """
+                    SELECT id FROM linear_workspace_installations
+                    WHERE user_id = $1 AND id = $2 AND active = TRUE
+                    FOR UPDATE
+                    """,
+                    user_id,
+                    str(binding.get("installation_id") or ""),
+                )
+                if installation is None:
+                    return None, "linear_installation_required"
                 reservation = await connection.fetchrow(
                     """
                     SELECT id FROM project_bindings

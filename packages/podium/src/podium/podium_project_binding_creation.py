@@ -70,6 +70,7 @@ def project_binding_conflict(code: str) -> ProjectBindingError:
         "conductor_already_bound": "Conductor already has a project binding",
         "linear_project_already_bound": "Linear project already has an active Conductor",
         "linear_project_not_selected": "Linear project is not selected",
+        "linear_installation_required": "An active Linear installation is required",
     }
     return ProjectBindingError(code, reasons.get(code, "Project binding conflict"))
 

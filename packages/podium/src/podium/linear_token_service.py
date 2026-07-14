@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, NoReturn
 
 import httpx
 
@@ -15,13 +15,22 @@ from .podium_shared import utc_now_iso
 LOGGER = logging.getLogger(__name__)
 REFRESH_SKEW = timedelta(minutes=5)
 LINEAR_REVOKE_URL = "https://api.linear.app/oauth/revoke"
+DISCONNECT_BOUND_REASON = "Unbind active projects before disconnecting Linear"
+DISCONNECT_WORK_REASON = "Wait for managed work to finish before disconnecting Linear"
 
 
 class LinearTokenUnavailable(RuntimeError):
-    def __init__(self, code: str, reason: str) -> None:
+    def __init__(
+        self,
+        code: str,
+        reason: str,
+        *,
+        next_action: str = "",
+    ) -> None:
         super().__init__(reason)
         self.code = code
         self.reason = reason
+        self.next_action = next_action
 
 
 class PodiumLinearTokenMixin:
@@ -50,7 +59,10 @@ class PodiumLinearTokenMixin:
     async def _refresh_linear_access_token(self, installation: dict[str, Any]) -> str:
         application = await self.get_linear_application_config(str(installation["application_config_id"]))
         if application is None:
-            await self.mark_linear_reauthorization_required(installation, "linear_application_missing")
+            await self._mark_linear_reauthorization_required_locked(
+                installation,
+                "linear_application_missing",
+            )
             raise LinearTokenUnavailable("linear_reauthorization_required", "Linear application is unavailable")
         try:
             hook = getattr(self, "linear_token_refresh", None)
@@ -61,7 +73,10 @@ class PodiumLinearTokenMixin:
             )
             metadata = _validated_refresh(payload, installation)
         except Exception as exc:
-            await self.mark_linear_reauthorization_required(installation, "linear_token_refresh_failed")
+            await self._mark_linear_reauthorization_required_locked(
+                installation,
+                "linear_token_refresh_failed",
+            )
             LOGGER.error(
                 "event=linear_token_refresh_failed installation_id=%s error_type=%s error_code=linear_reauthorization_required "
                 "sanitized_reason=Linear_token_refresh_failed action_required=reauthorize retryable=false next_action=reauthorize",
@@ -88,6 +103,27 @@ class PodiumLinearTokenMixin:
         return str(updated["access_token"])
 
     async def mark_linear_reauthorization_required(self, installation: dict[str, Any], cause: str) -> None:
+        installation_id = str(installation.get("id") or "")
+        async with self.store.linear_installation_token_lock(installation_id):
+            current = await self.get_active_linear_installation(
+                str(installation.get("user_id") or "")
+            )
+            if current is None or str(current.get("id") or "") != installation_id:
+                LOGGER.warning(
+                    "event=linear_reauthorization_marker_ignored installation_id=%s "
+                    "error_code=linear_installation_inactive sanitized_reason=Linear_installation_is_not_active "
+                    "action_required=none retryable=false next_action=none cause=%s",
+                    installation_id,
+                    cause,
+                )
+                return
+            await self._mark_linear_reauthorization_required_locked(current, cause)
+
+    async def _mark_linear_reauthorization_required_locked(
+        self,
+        installation: dict[str, Any],
+        cause: str,
+    ) -> None:
         await self.save_linear_installation_record(
             {
                 **installation,
@@ -149,58 +185,123 @@ class PodiumLinearTokenMixin:
             raise
 
     async def disconnect_linear_installation(self, user_id: str) -> dict[str, Any]:
-        installation = await self.get_active_linear_installation(user_id)
-        if installation is None:
-            return {"state": "disconnected"}
-        await self.store.disconnect_workspace_installation(user_id, str(installation["id"]))
-        disconnected = {**installation, "active": False, "state": "disconnected", "updated_at": utc_now_iso()}
-        await self._revoke_linear_credentials(disconnected)
-        return {"state": "disconnected"}
+        while True:
+            installation = await self.get_active_linear_installation(user_id)
+            if installation is None:
+                return {"state": "disconnected"}
+            installation_id = str(installation["id"])
+            async with self.store.linear_installation_token_lock(installation_id):
+                current = await self.get_active_linear_installation(user_id)
+                if current is None:
+                    return {"state": "disconnected"}
+                if str(current.get("id") or "") != installation_id:
+                    continue
+                bindings = await self.store.list_project_bindings_for_user(user_id)
+                if bindings:
+                    self._raise_disconnect_blocked(
+                        current,
+                        DISCONNECT_BOUND_REASON,
+                        "unbind_projects",
+                    )
+                if await self._workspace_has_active_work(user_id):
+                    self._raise_disconnect_blocked(
+                        current,
+                        DISCONNECT_WORK_REASON,
+                        "wait_for_managed_work",
+                    )
+                disconnected, blocked = await self.store.disconnect_workspace_installation(
+                    user_id,
+                    installation_id,
+                )
+                if blocked:
+                    self._raise_disconnect_blocked(
+                        current,
+                        DISCONNECT_BOUND_REASON,
+                        "unbind_projects",
+                    )
+                if not disconnected:
+                    continue
+                await self._revoke_linear_credentials(
+                    {
+                        **current,
+                        "active": False,
+                        "state": "disconnected",
+                        "updated_at": utc_now_iso(),
+                    },
+                    clear_selected_projects=True,
+                )
+                LOGGER.info(
+                    "event=linear_installation_disconnected workspace_id=%s installation_id=%s",
+                    user_id,
+                    installation_id,
+                )
+                return {"state": "disconnected"}
 
     async def retry_linear_revocation(self, user_id: str, installation_id: str) -> dict[str, Any]:
         installation = await self.get_linear_installation_record(user_id, installation_id)
         state = str((installation or {}).get("state") or "")
+        if (
+            installation is not None
+            and not installation.get("active")
+            and state in {"disconnected", "retired"}
+            and not installation.get("access_token")
+            and not installation.get("refresh_token")
+        ):
+            return {"state": state}
         if installation is None or not state.endswith("_revocation_failed"):
             raise LinearTokenUnavailable("linear_revocation_not_retryable", "Linear revocation is not retryable")
         target_state = state.removesuffix("_revocation_failed")
-        await self._revoke_linear_credentials({**installation, "state": target_state, "active": False})
+        await self._revoke_linear_credentials(
+            {**installation, "state": target_state, "active": False},
+            clear_selected_projects=target_state == "disconnected",
+        )
         return {"state": target_state}
 
-    async def _revoke_linear_credentials(self, installation: dict[str, Any]) -> None:
+    async def _revoke_linear_credentials(
+        self,
+        installation: dict[str, Any],
+        *,
+        clear_selected_projects: bool = False,
+    ) -> None:
         hook = getattr(self, "linear_token_revoke", None)
         target_state = str(installation.get("state") or "disconnected")
-        for field, hint in (("refresh_token", "refresh_token"), ("access_token", "access_token")):
-            token = str(installation.get(field) or "")
+        first_failure: Exception | None = None
+        for token_kind in ("refresh_token", "access_token"):
+            token = str(installation.get(token_kind) or "")
             if not token:
                 continue
             try:
                 if hook is not None:
-                    await invoke_hook(hook, token, hint)
+                    await invoke_hook(hook, token, token_kind)
                 else:
-                    await revoke_linear_token(token, hint)
+                    await revoke_linear_token(token, token_kind)
             except Exception as exc:
-                failed = {
-                    **installation,
-                    "state": f"{target_state}_revocation_failed",
-                    "error_code": "linear_token_revocation_failed",
-                    "sanitized_reason": "Linear credential revocation failed",
-                    "retryable": True,
-                    "action_required": "retry_revocation",
-                    "next_action": "retry_revocation",
-                    "updated_at": utc_now_iso(),
-                }
-                await self.save_linear_installation_record(failed)
-                LOGGER.error(
-                    "event=linear_token_revocation_failed installation_id=%s error_type=%s error_code=linear_token_revocation_failed "
-                    "sanitized_reason=Linear_credential_revocation_failed action_required=retry_revocation retryable=true next_action=retry_revocation",
-                    installation.get("id"),
-                    type(exc).__name__,
-                )
-                raise LinearTokenUnavailable(
-                    "linear_token_revocation_failed",
-                    "Linear credential revocation failed",
-                ) from exc
-        await self.save_linear_installation_record(
+                if first_failure is None:
+                    first_failure = exc
+        if first_failure is not None:
+            failed = {
+                **installation,
+                "state": f"{target_state}_revocation_failed",
+                "error_code": "linear_token_revocation_failed",
+                "sanitized_reason": "Linear credential revocation failed",
+                "retryable": True,
+                "action_required": "retry_revocation",
+                "next_action": "retry_revocation",
+                "updated_at": utc_now_iso(),
+            }
+            await self.save_linear_installation_record(failed)
+            LOGGER.error(
+                "event=linear_token_revocation_failed installation_id=%s error_type=%s error_code=linear_token_revocation_failed "
+                "sanitized_reason=Linear_credential_revocation_failed action_required=retry_revocation retryable=true next_action=retry_revocation",
+                installation.get("id"),
+                type(first_failure).__name__,
+            )
+            raise LinearTokenUnavailable(
+                "linear_token_revocation_failed",
+                "Linear credential revocation failed",
+                next_action="retry_revocation",
+            ) from first_failure
+        blocked = await self.save_linear_installation_record(
             {
                 **installation,
                 "access_token": "",
@@ -211,7 +312,40 @@ class PodiumLinearTokenMixin:
                 "action_required": "",
                 "next_action": "",
                 "updated_at": utc_now_iso(),
-            }
+            },
+            reauthorized_projects=[] if clear_selected_projects else None,
+        )
+        if blocked:
+            self._raise_disconnect_blocked(
+                installation,
+                DISCONNECT_BOUND_REASON,
+                "unbind_projects",
+            )
+        LOGGER.info(
+            "event=linear_token_revocation_completed installation_id=%s target_state=%s",
+            installation.get("id"),
+            target_state,
+        )
+
+    def _raise_disconnect_blocked(
+        self,
+        installation: dict[str, Any],
+        reason: str,
+        next_action: str,
+    ) -> NoReturn:
+        LOGGER.warning(
+            "event=linear_disconnect_blocked installation_id=%s error_type=LinearTokenUnavailable "
+            "error_code=linear_disconnect_in_use sanitized_reason=%s action_required=%s "
+            "retryable=false next_action=%s",
+            installation.get("id"),
+            reason.replace(" ", "_"),
+            next_action,
+            next_action,
+        )
+        raise LinearTokenUnavailable(
+            "linear_disconnect_in_use",
+            reason,
+            next_action=next_action,
         )
 
 

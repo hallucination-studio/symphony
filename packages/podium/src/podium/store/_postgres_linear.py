@@ -17,16 +17,37 @@ class PgLinearMixin:
             finally:
                 await connection.execute("SELECT pg_advisory_unlock(hashtext($1))", installation_id)
 
-    async def disconnect_workspace_installation(self, user_id: str, installation_id: str) -> None:
-        await self.pool.execute(
-            """
-            UPDATE linear_workspace_installations
-            SET active = FALSE, state = 'disconnected', updated_at = now()
-            WHERE user_id = $1 AND id = $2 AND active = TRUE
-            """,
-            user_id,
-            installation_id,
-        )
+    async def disconnect_workspace_installation(
+        self,
+        user_id: str,
+        installation_id: str,
+    ) -> tuple[bool, list[str]]:
+        async with self.pool.acquire() as connection:
+            async with connection.transaction():
+                await lock_advisory_keys(connection, project_selection_lock_key(user_id))
+                bound_rows = await connection.fetch(
+                    """
+                    SELECT linear_project_id FROM project_bindings
+                    WHERE user_id = $1 AND active = TRUE
+                    ORDER BY linear_project_id
+                    FOR UPDATE
+                    """,
+                    user_id,
+                )
+                blocked = [str(row["linear_project_id"]) for row in bound_rows]
+                if blocked:
+                    return False, blocked
+                disconnected = await connection.fetchrow(
+                    """
+                    UPDATE linear_workspace_installations
+                    SET active = FALSE, state = 'disconnected', updated_at = now()
+                    WHERE user_id = $1 AND id = $2 AND active = TRUE
+                    RETURNING id
+                    """,
+                    user_id,
+                    installation_id,
+                )
+        return disconnected is not None, []
 
     async def save_linear_application_config(self, config: dict[str, Any]) -> None:
         await self.pool.execute(

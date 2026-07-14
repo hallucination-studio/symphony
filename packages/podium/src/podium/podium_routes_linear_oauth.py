@@ -253,17 +253,32 @@ async def _save_accepted_installation(
         and active.get("app_user_id") == record.get("app_user_id")
     )
     if same_identity:
-        record.update({"id": active["id"], "active": True, "state": "ready", "created_at": active["created_at"]})
-        reauthorized_projects = state.linear_projects_for_reauthorization(
-            user_id,
-            record,
-        )
-        blocked = await state.save_linear_installation_record(
-            record,
-            reauthorized_projects=reauthorized_projects,
-        )
-        if blocked:
-            raise bound_project_access_rejection(blocked)
+        active_id = str(active["id"])
+        async with state.store.linear_installation_token_lock(active_id):
+            current = await state.get_active_linear_installation(user_id)
+            if current is None or str(current.get("id") or "") != active_id:
+                raise LinearInstallationRejected(
+                    "linear_reauthorization_required",
+                    "Linear authorization changed before replacement completed",
+                )
+            record.update(
+                {
+                    "id": active_id,
+                    "active": True,
+                    "state": "ready",
+                    "created_at": current["created_at"],
+                }
+            )
+            reauthorized_projects = state.linear_projects_for_reauthorization(
+                user_id,
+                record,
+            )
+            blocked = await state.save_linear_installation_record(
+                record,
+                reauthorized_projects=reauthorized_projects,
+            )
+            if blocked:
+                raise bound_project_access_rejection(blocked)
         await state.require_linear_project_review(user_id)
     else:
         record.update({"state": "draining", "next_action": "drain_managed_runs", "action_required": "wait"})

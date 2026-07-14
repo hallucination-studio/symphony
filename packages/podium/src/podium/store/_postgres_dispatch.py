@@ -142,6 +142,13 @@ class PgDispatchMixin:
         )
         return [_record_to_project_binding(row) for row in rows]
 
+    async def list_all_project_bindings_for_user(self, user_id: str) -> list[dict[str, Any]]:
+        rows = await self.pool.fetch(
+            "SELECT * FROM project_bindings WHERE user_id = $1 ORDER BY id",
+            user_id,
+        )
+        return [_record_to_project_binding(row) for row in rows]
+
     async def count_open_dispatches_for_user(self, user_id: str) -> int:
         value = await self.pool.fetchval(
             """

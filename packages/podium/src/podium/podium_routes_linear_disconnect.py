@@ -27,6 +27,17 @@ def register_linear_disconnect_route(
         try:
             result = await state.disconnect_linear_installation(str(user["id"]))
         except LinearTokenUnavailable as exc:
+            if exc.code == "linear_disconnect_in_use":
+                return JSONResponse(
+                    {
+                        "error": {
+                            "code": exc.code,
+                            "message": exc.reason,
+                            "next_action": exc.next_action,
+                        }
+                    },
+                    status_code=409,
+                )
             return error_response(502, exc.code, exc.reason)
         return JSONResponse(result)
 
