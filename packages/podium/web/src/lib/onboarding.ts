@@ -46,20 +46,20 @@ export const STEP_DEFS: StepDef[] = [
     path: "scope",
   },
   {
+    key: "runtime_enrollment",
+    title: "Install Conductors",
+    description:
+      "Install enough Conductors for the selected projects that do not have a binding yet.",
+    ctaLabel: "Install Conductors",
+    path: "runtime",
+  },
+  {
     key: "repository_mapping",
     title: "Bind projects",
     description:
       "Pair each selected Linear project with one Conductor and repository.",
     ctaLabel: "Bind projects",
     path: "repository",
-  },
-  {
-    key: "runtime_enrollment",
-    title: "Install runtime",
-    description:
-      "Run one install command on the machine that will execute agent work.",
-    ctaLabel: "Install runtime",
-    path: "runtime",
   },
   {
     key: "smoke_check",

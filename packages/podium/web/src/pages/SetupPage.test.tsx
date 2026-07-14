@@ -194,9 +194,13 @@ describe("SetupPage repository step", () => {
       runtimes: [],
     });
     rendered.unmount();
+    const bootstrapCallsBeforeReady = mockApi.bootstrap.mock.calls.length;
     renderWithProviders(<SetupPage />, { route: "/setup/repository", path: "/setup/:step" });
     await waitFor(() => {
       expect(screen.getByRole("button", { name: "Continue to smoke check" })).toBeEnabled();
+    });
+    await waitFor(() => {
+      expect(mockApi.bootstrap.mock.calls.length).toBeGreaterThan(bootstrapCallsBeforeReady + 1);
     });
   });
 });
@@ -268,9 +272,11 @@ describe("SetupPage runtime step", () => {
       bootstrap("runtime_enrollment", [
         "linear_connect",
         "scope_selection",
-        "repository_mapping",
       ]),
     );
+    mockApi.linearProjects.mockResolvedValue({
+      projects: [linearProject("project-1", "Platform")],
+    });
     mockApi.runtimeStatus.mockResolvedValue({ online_count: 0 });
     mockApi.runtimes.mockResolvedValue({ conductors: [], runtimes: [] });
     mockApi.enrollmentToken.mockResolvedValue({
@@ -335,6 +341,236 @@ describe("SetupPage runtime step", () => {
       conductor: enrollmentConductor(),
     });
     expect(await screen.findByText("install --token tok-2")).toBeInTheDocument();
+  });
+
+  it("keeps a newly generated command when its pending Conductor appears", async () => {
+    mockApi.runtimes
+      .mockResolvedValueOnce({ conductors: [], runtimes: [] })
+      .mockResolvedValue({
+        conductors: [{
+          ...runtimeConductor("conductor-1", []),
+          enrollment_state: "pending",
+          online: false,
+        }],
+        runtimes: [],
+      });
+    mockApi.enrollmentToken.mockResolvedValue({
+      enrollment_token: "tok-pending",
+      install_command: "install --token tok-pending",
+      expires_at: "2026-07-02T12:00:00Z",
+      conductor: enrollmentConductor(),
+    });
+
+    renderWithProviders(<SetupPage />, {
+      route: "/setup/runtime",
+      path: "/setup/:step",
+    });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Generate install command" }));
+
+    expect(await screen.findByText("install --token tok-pending")).toBeInTheDocument();
+  });
+
+  it("requires enough online unbound Conductors for every missing project binding", async () => {
+    mockApi.linearProjects.mockResolvedValue({
+      projects: [
+        linearProject("project-1", "Platform"),
+        linearProject("project-2", "Operations"),
+      ],
+    });
+
+    renderWithProviders(<SetupPage />, {
+      route: "/setup/runtime",
+      path: "/setup/:step",
+    });
+
+    expect(await screen.findByText("2 Conductors still required")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Continue to project binding" })).toBeDisabled();
+  });
+
+  it("uses singular copy when one Conductor is still required", async () => {
+    renderWithProviders(<SetupPage />, {
+      route: "/setup/runtime",
+      path: "/setup/:step",
+    });
+
+    expect(await screen.findByText("1 Conductor still required")).toBeInTheDocument();
+  });
+
+  it("resumes a pending Conductor instead of reserving another identity", async () => {
+    mockApi.runtimes.mockResolvedValue({
+      conductors: [{
+        ...runtimeConductor("conductor-1", []),
+        enrollment_state: "pending",
+        online: false,
+      }],
+      runtimes: [],
+    });
+
+    renderWithProviders(<SetupPage />, {
+      route: "/setup/runtime",
+      path: "/setup/:step",
+    });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Generate install command" }));
+
+    await waitFor(() => {
+      expect(mockApi.enrollmentToken).toHaveBeenCalledWith({
+        conductor_id: "conductor-1",
+      });
+    });
+  });
+
+  it("advances only after enough online unbound Conductors are available", async () => {
+    mockApi.linearProjects.mockResolvedValue({
+      projects: [
+        linearProject("project-1", "Platform"),
+        linearProject("project-2", "Operations"),
+      ],
+    });
+    mockApi.runtimes.mockResolvedValue({
+      conductors: [
+        runtimeConductor("conductor-1", []),
+        runtimeConductor("conductor-2", []),
+      ],
+      runtimes: [],
+    });
+
+    renderWithProviders(<SetupPage />, {
+      route: "/setup/runtime",
+      path: "/setup/:step",
+    });
+
+    expect(await screen.findByText("Enough Conductors connected")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Continue to project binding" })).toBeEnabled();
+    await waitFor(() => expect(mockApi.bootstrap.mock.calls.length).toBeGreaterThan(1));
+  });
+});
+
+describe("SetupPage navigation", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockApi.bootstrap.mockResolvedValue(
+      bootstrap("runtime_enrollment", ["linear_connect", "scope_selection"]),
+    );
+    mockApi.linearProjects.mockResolvedValue({
+      projects: [linearProject("project-1", "Platform")],
+    });
+    mockApi.runtimes.mockResolvedValue({ conductors: [], runtimes: [] });
+    mockApi.runtimeStatus.mockResolvedValue({ online_count: 0 });
+    mockApi.linearApplication.mockResolvedValue({
+      application: {
+        source: "default",
+        client_id: "default-client",
+        callback_url: "https://podium.example/api/v1/linear/oauth/callback",
+      },
+    });
+    mockApi.linearInstallations.mockResolvedValue({ active: null, candidate: null, revocation: null });
+    mockApi.smokeCheckResult.mockResolvedValue(null);
+  });
+
+  it.each([
+    ["linear_connect", [], "Connect Linear"],
+    ["scope_selection", ["linear_connect"], "Choose projects"],
+    ["runtime_enrollment", ["linear_connect", "scope_selection"], "Install Conductors"],
+    ["repository_mapping", ["linear_connect", "scope_selection", "runtime_enrollment"], "Bind projects"],
+    ["smoke_check", ["linear_connect", "scope_selection", "runtime_enrollment", "repository_mapping"], "Run smoke check"],
+  ] satisfies Array<[OnboardingStepKey, OnboardingStepKey[], string]>)(
+    "resumes %s as the first incomplete step after refresh",
+    async (current, completed, heading) => {
+      mockApi.bootstrap.mockResolvedValue(bootstrap(current, completed));
+
+      renderWithProviders(<SetupPage />, {
+        route: "/setup",
+        path: "/setup",
+      });
+
+      expect(await screen.findByRole("heading", { name: heading })).toBeInTheDocument();
+    },
+  );
+
+  it("orders runtime installation before project binding", async () => {
+    renderWithProviders(<SetupPage />, {
+      route: "/setup/runtime",
+      path: "/setup/:step",
+    });
+
+    const stepLabels = (await screen.findAllByRole("button"))
+      .map((button) => button.textContent ?? "")
+      .filter((label) => label.includes("Install") || label.includes("Bind"));
+    expect(stepLabels.slice(0, 2)).toEqual([
+      expect.stringContaining("Install Conductors"),
+      expect.stringContaining("Bind projects"),
+    ]);
+  });
+
+  it("redirects a future setup URL to the first incomplete step", async () => {
+    renderWithProviders(<SetupPage />, {
+      route: "/setup/smoke-check",
+      path: "/setup/:step",
+    });
+
+    expect(await screen.findByRole("heading", { name: "Install Conductors" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Run smoke check" })).not.toBeInTheDocument();
+  });
+
+  it("redirects an unknown setup URL to the first incomplete step", async () => {
+    renderWithProviders(<SetupPage />, {
+      route: "/setup/not-a-step",
+      path: "/setup/:step",
+    });
+
+    expect(await screen.findByRole("heading", { name: "Install Conductors" })).toBeInTheDocument();
+  });
+
+  it("resumes Runtime after a project is added without reopening Linear", async () => {
+    mockApi.bootstrap.mockResolvedValue(
+      bootstrap("runtime_enrollment", ["linear_connect", "scope_selection"]),
+    );
+    mockApi.linearProjects.mockResolvedValue({
+      projects: [
+        linearProject("project-1", "Platform"),
+        linearProject("project-2", "Operations"),
+      ],
+    });
+
+    renderWithProviders(<SetupPage />, {
+      route: "/setup",
+      path: "/setup",
+    });
+
+    expect(await screen.findByRole("heading", { name: "Install Conductors" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "✓ Connect Linear" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "✓ Choose projects" })).toBeEnabled();
+    expect(screen.getByText("2 Conductors still required")).toBeInTheDocument();
+  });
+
+  it("keeps completed earlier steps available for review", async () => {
+    mockApi.linearApplication.mockResolvedValue({
+      application: {
+        source: "default",
+        client_id: "default-client",
+        callback_url: "https://podium.example/api/v1/linear/oauth/callback",
+      },
+    });
+    mockApi.linearInstallations.mockResolvedValue({ active: null, candidate: null, revocation: null });
+
+    renderWithProviders(<SetupPage />, {
+      route: "/setup/linear",
+      path: "/setup/:step",
+    });
+
+    expect(await screen.findByRole("heading", { name: "Connect Linear" })).toBeInTheDocument();
+  });
+
+  it("disables navigation to steps after the first incomplete step", async () => {
+    renderWithProviders(<SetupPage />, {
+      route: "/setup/runtime",
+      path: "/setup/:step",
+    });
+
+    expect(await screen.findByRole("button", { name: /Bind projects/ })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /Run smoke check/ })).toBeDisabled();
   });
 });
 

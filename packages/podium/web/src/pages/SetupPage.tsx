@@ -1,4 +1,4 @@
-import { useNavigate, useParams } from "react-router-dom";
+import { Navigate, useNavigate, useParams } from "react-router-dom";
 import { useBootstrap } from "../api/hooks";
 import { PageHeader, QueryState } from "../components/PageState";
 import {
@@ -54,9 +54,17 @@ function SetupBody({ data }: { data: Bootstrap }) {
   // Resolve the active sub-view: explicit :step param, else resume at the
   // step the backend says is current.
   const resume = activeStep(data.onboarding);
-  const currentPath = params.step ?? resume?.path ?? STEP_DEFS[0].path;
-  const currentDef =
-    STEP_DEFS.find((s) => s.path === currentPath) ?? STEP_DEFS[0];
+  const requestedDef = STEP_DEFS.find((step) => step.path === params.step);
+  const resumeIndex = resume ? STEP_DEFS.findIndex((step) => step.key === resume.key) : STEP_DEFS.length - 1;
+  const requestedIndex = requestedDef ? STEP_DEFS.indexOf(requestedDef) : -1;
+  const futureStepRequested = data.onboarding.current_step !== "complete"
+    && requestedIndex > resumeIndex;
+
+  if (params.step && (!requestedDef || futureStepRequested)) {
+    return <Navigate to={`/setup/${resume?.path ?? STEP_DEFS[0].path}`} replace />;
+  }
+
+  const currentDef = requestedDef ?? resume ?? STEP_DEFS[0];
   const currentIndex = STEP_DEFS.findIndex((s) => s.path === currentDef.path);
 
   function goToStep(index: number) {
@@ -122,6 +130,7 @@ function SetupNav({
               ? "setup-nav-item active"
               : "setup-nav-item"
           }
+          disabled={step.status === "not_started"}
           onClick={() => onSelect(step.path)}
         >
           <span className="setup-nav-indicator" data-status={step.status}>

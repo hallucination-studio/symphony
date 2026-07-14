@@ -63,31 +63,78 @@ class PodiumStateBaseMixin:
     async def onboarding_progress(self, workspace_id: str) -> dict[str, Any]:
         row = await self.load_onboarding_state(workspace_id)
         completed = list(row.get("completed_steps") or [])
-        conductors = await self.store.list_conductors_for_user(workspace_id)
-        online_runtime = False
-        for conductor in conductors:
-            if (
-                conductor.get("enrollment_state") == "enrolled"
-                and await self.is_runtime_online(str(conductor["id"]))
-            ):
-                online_runtime = True
-                break
-        if online_runtime and "runtime_enrollment" not in completed:
-            completed.append("runtime_enrollment")
         selected_projects = {
             str(project.get("linear_project_id") or "")
             for project in await self.store.list_selected_linear_projects(workspace_id)
         }
+        bindings = [
+            binding
+            for binding in await self.store.list_project_bindings_for_user(workspace_id)
+            if binding.get("active", True)
+        ]
+        bound_projects = {
+            str(binding.get("linear_project_id") or "") for binding in bindings
+        }
+        bound_conductors = {
+            str(binding.get("conductor_id") or "") for binding in bindings
+        }
+        conductors = await self.store.list_conductors_for_user(workspace_id)
+        available_conductors = 0
+        for conductor in conductors:
+            if (
+                str(conductor.get("id") or "") not in bound_conductors
+                and conductor.get("enrollment_state") == "enrolled"
+                and await self.is_runtime_online(str(conductor["id"]))
+            ):
+                available_conductors += 1
+        missing_binding_count = len(selected_projects - bound_projects)
+        runtime_ready = bool(selected_projects) and available_conductors >= missing_binding_count
+        if runtime_ready and "runtime_enrollment" not in completed:
+            completed.append("runtime_enrollment")
+        elif not runtime_ready and "runtime_enrollment" in completed:
+            completed.remove("runtime_enrollment")
         ready_projects = {
             str(binding.get("linear_project_id") or "")
-            for binding in await self.store.list_project_bindings_for_user(workspace_id)
-            if binding.get("active", True) and str(binding.get("state") or "") == "ready"
+            for binding in bindings
+            if str(binding.get("state") or "") == "ready"
         }
         repository_ready = bool(selected_projects) and selected_projects <= ready_projects
         if repository_ready and "repository_mapping" not in completed:
             completed.append("repository_mapping")
         elif not repository_ready and "repository_mapping" in completed:
             completed.remove("repository_mapping")
+        smoke_result = await self.store.get_smoke_result(workspace_id) or {}
+        smoke_rows = [
+            row for row in smoke_result.get("conductors") or [] if isinstance(row, dict)
+        ]
+        current_smoke_bindings = {
+            (
+                str(binding.get("linear_project_id") or ""),
+                str(binding.get("id") or ""),
+                int(binding.get("config_version") or 0),
+            )
+            for binding in bindings
+            if str(binding.get("state") or "") == "ready"
+            and str(binding.get("linear_project_id") or "") in selected_projects
+        }
+        recorded_smoke_bindings = {
+            (
+                str(smoke.get("linear_project_id") or ""),
+                str(smoke.get("binding_id") or ""),
+                int(smoke.get("binding_config_version") or 0),
+            )
+            for smoke in smoke_rows
+        }
+        smoke_ready = bool(
+            repository_ready
+            and smoke_result.get("status") == "passed"
+            and len(smoke_rows) == len(current_smoke_bindings)
+            and recorded_smoke_bindings == current_smoke_bindings
+        )
+        if smoke_ready and "smoke_check" not in completed:
+            completed.append("smoke_check")
+        elif not smoke_ready and "smoke_check" in completed:
+            completed.remove("smoke_check")
         ordered = [step for step in ONBOARDING_STEPS if step in completed]
         current_step = "complete"
         for step in ONBOARDING_STEPS:
@@ -102,19 +149,7 @@ class PodiumStateBaseMixin:
         await self._mark_onboarding(workspace_id, "linear_connect")
         return await self.onboarding_progress(workspace_id)
 
-    async def mark_runtime_enrolled(self, workspace_id: str) -> dict[str, Any]:
-        await self._mark_onboarding(workspace_id, "runtime_enrollment")
-        return await self.onboarding_progress(workspace_id)
-
     async def sync_smoke_onboarding(self, workspace_id: str) -> dict[str, Any]:
-        result = await self.store.get_smoke_result(workspace_id) or {}
-        row = await self.load_onboarding_state(workspace_id)
-        completed = row.setdefault("completed_steps", [])
-        if result.get("status") == "passed" and "smoke_check" not in completed:
-            completed.append("smoke_check")
-        elif result.get("status") != "passed" and "smoke_check" in completed:
-            completed.remove("smoke_check")
-        await self.persist_onboarding_state(workspace_id, row)
         return await self.onboarding_progress(workspace_id)
 
     async def get_smoke_result(self, workspace_id: str) -> dict[str, Any] | None:

@@ -9,7 +9,10 @@ from fastapi.responses import JSONResponse
 
 from podium.podium_routes_conductor_bindings import register_conductor_binding_routes
 from podium.podium_routes_core_onboarding import register_onboarding_routes
-from podium.podium_routes_runtime_enrollment import register_runtime_identity_routes
+from podium.podium_routes_runtime_enrollment import (
+    _register_onboarding_runtime_status_route,
+    register_runtime_identity_routes,
+)
 from podium.podium_project_bindings import PodiumProjectBindingsMixin, ProjectBindingError
 from podium.podium_runtime import PodiumRuntimeMixin
 from podium.podium_state import PodiumStateBaseMixin
@@ -148,12 +151,28 @@ class OnboardingStore:
             {"linear_project_id": "project-2"},
         ]
         self.bindings = [
-            {"linear_project_id": "project-1", "state": "ready", "active": True},
-            {"linear_project_id": "project-2", "state": "pending_ack", "active": True},
+            {
+                "id": "binding-1",
+                "linear_project_id": "project-1",
+                "conductor_id": "conductor-1",
+                "config_version": 1,
+                "state": "ready",
+                "active": True,
+            },
+            {
+                "id": "binding-2",
+                "linear_project_id": "project-2",
+                "conductor_id": "conductor-2",
+                "config_version": 1,
+                "state": "pending_ack",
+                "active": True,
+            },
         ]
         self.conductors = [
             {"id": "conductor-1", "enrollment_state": "enrolled"},
+            {"id": "conductor-2", "enrollment_state": "enrolled"},
         ]
+        self.smoke_result: dict[str, Any] | None = None
 
     async def get_onboarding_state(self, _workspace_id: str) -> dict[str, Any]:
         return self.row
@@ -174,6 +193,9 @@ class OnboardingStore:
 
     async def list_conductors_for_user(self, _workspace_id: str) -> list[dict[str, Any]]:
         return self.conductors
+
+    async def get_smoke_result(self, _workspace_id: str) -> dict[str, Any] | None:
+        return self.smoke_result
 
 
 class OnboardingState(PodiumStateBaseMixin):
@@ -201,6 +223,110 @@ async def test_repository_completion_requires_ready_bindings_for_every_selected_
 
 
 @pytest.mark.anyio
+async def test_runtime_completion_requires_one_conductor_for_each_missing_binding() -> None:
+    state = OnboardingState()
+    state.store.bindings = [state.store.bindings[0]]
+    state.store.conductors = [state.store.conductors[0]]
+
+    missing = await state.onboarding_progress("user-1")
+
+    assert missing["current_step"] == "runtime_enrollment"
+    assert "runtime_enrollment" not in missing["completed_steps"]
+    assert "repository_mapping" not in missing["completed_steps"]
+
+    state.store.conductors.append(
+        {"id": "conductor-2", "enrollment_state": "enrolled"}
+    )
+    enough = await state.onboarding_progress("user-1")
+
+    assert enough["current_step"] == "repository_mapping"
+    assert "runtime_enrollment" in enough["completed_steps"]
+
+
+@pytest.mark.anyio
+async def test_adding_a_project_reopens_only_downstream_setup_work() -> None:
+    state = OnboardingState()
+    state.store.row["completed_steps"] = [
+        "linear_connect",
+        "scope_selection",
+        "runtime_enrollment",
+        "repository_mapping",
+        "smoke_check",
+    ]
+    state.store.bindings[1]["state"] = "ready"
+    state.store.selected.append({"linear_project_id": "project-3"})
+
+    progress = await state.onboarding_progress("user-1")
+
+    assert progress["current_step"] == "runtime_enrollment"
+    assert progress["completed_steps"] == ["linear_connect", "scope_selection"]
+
+
+@pytest.mark.anyio
+async def test_adding_a_project_uses_spare_capacity_without_reopening_linear() -> None:
+    state = OnboardingState()
+    state.store.row["completed_steps"] = [
+        "linear_connect",
+        "scope_selection",
+        "runtime_enrollment",
+        "repository_mapping",
+        "smoke_check",
+    ]
+    state.store.bindings[1]["state"] = "ready"
+    state.store.selected.append({"linear_project_id": "project-3"})
+    state.store.conductors.append(
+        {"id": "conductor-3", "enrollment_state": "enrolled"}
+    )
+
+    progress = await state.onboarding_progress("user-1")
+
+    assert progress["current_step"] == "repository_mapping"
+    assert progress["completed_steps"] == [
+        "linear_connect",
+        "scope_selection",
+        "runtime_enrollment",
+    ]
+
+
+@pytest.mark.anyio
+async def test_smoke_completion_matches_current_binding_identity_and_version() -> None:
+    state = OnboardingState()
+    state.store.row["completed_steps"] = [
+        "linear_connect",
+        "scope_selection",
+        "runtime_enrollment",
+        "repository_mapping",
+        "smoke_check",
+    ]
+    state.store.bindings[1]["state"] = "ready"
+    state.store.smoke_result = {
+        "status": "passed",
+        "conductors": [
+            {
+                "linear_project_id": "project-1",
+                "binding_id": "binding-1",
+                "binding_config_version": 1,
+            },
+            {
+                "linear_project_id": "project-2",
+                "binding_id": "binding-2",
+                "binding_config_version": 1,
+            },
+        ],
+    }
+
+    complete = await state.onboarding_progress("user-1")
+
+    assert complete["current_step"] == "complete"
+
+    state.store.bindings[1]["config_version"] = 2
+    stale = await state.onboarding_progress("user-1")
+
+    assert stale["current_step"] == "smoke_check"
+    assert "smoke_check" not in stale["completed_steps"]
+
+
+@pytest.mark.anyio
 async def test_retired_onboarding_repository_route_and_state_mutation_are_absent() -> None:
     app = FastAPI()
 
@@ -222,6 +348,47 @@ async def test_retired_onboarding_repository_route_and_state_mutation_are_absent
 
     assert response.status_code == 404
     assert not hasattr(OnboardingState(), "save_onboarding_repository")
+
+
+@pytest.mark.anyio
+async def test_runtime_status_does_not_own_onboarding_completion() -> None:
+    class RuntimeStatusStore:
+        async def list_conductors_for_user(self, _workspace_id: str) -> list[dict[str, Any]]:
+            return [{"id": "conductor-1", "enrollment_state": "enrolled"}]
+
+    class RuntimeStatusState:
+        def __init__(self) -> None:
+            self.store = RuntimeStatusStore()
+            self.marked = False
+
+        async def runtime_presence_snapshot(self, _runtime_ids: list[str]) -> dict[str, Any]:
+            return {"conductor-1": {"online": True}}
+
+        async def has_pending_enrollment(self, _conductor_id: str) -> bool:
+            return False
+
+        async def mark_runtime_enrolled(self, _workspace_id: str) -> None:
+            self.marked = True
+
+    state = RuntimeStatusState()
+    app = FastAPI()
+
+    async def require_user(_request: Request) -> dict[str, str]:
+        return {"id": "user-1"}
+
+    _register_onboarding_runtime_status_route(
+        app,
+        state=state,
+        require_user=require_user,
+        error_response=error_response,
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/api/v1/onboarding/runtime/status")
+
+    assert response.status_code == 200
+    assert response.json()["online_count"] == 1
+    assert state.marked is False
 
 
 class RuntimeProjectionState(PodiumRuntimeMixin):

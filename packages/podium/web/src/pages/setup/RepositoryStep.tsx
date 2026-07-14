@@ -1,3 +1,5 @@
+import { useEffect, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { useLinearProjects, useRuntimes } from "../../api/hooks";
 import { QueryState } from "../../components/PageState";
 import { SetupStepShell } from "../../components/SetupStepShell";
@@ -18,12 +20,24 @@ export function RepositoryStep({
 }: StepProps) {
   const projects = useLinearProjects();
   const runtimes = useRuntimes();
+  const queryClient = useQueryClient();
+  const [advancing, setAdvancing] = useState(false);
   const { t } = useI18n();
   const selectedProjects = projects.data?.projects.filter((project) => project.selected) ?? [];
   const conductors = runtimes.data?.conductors ?? [];
   const allReady = selectedProjects.length > 0 && selectedProjects.every(
     (project) => bindingForProject(conductors, project.id)?.state === "ready",
   );
+
+  useEffect(() => {
+    if (allReady) void queryClient.invalidateQueries({ queryKey: ["bootstrap"] });
+  }, [allReady, queryClient]);
+
+  async function continueToSmoke() {
+    setAdvancing(true);
+    await queryClient.invalidateQueries({ queryKey: ["bootstrap"] });
+    onNext();
+  }
 
   return (
     <SetupStepShell
@@ -32,9 +46,10 @@ export function RepositoryStep({
       title="Bind projects"
       description="Pair every selected Linear project with one online Conductor and repository."
       onBack={onBack}
-      onNext={onNext}
+      onNext={continueToSmoke}
       nextLabel="Continue to smoke check"
       nextDisabled={!allReady}
+      nextLoading={advancing}
     >
       <QueryState
         isLoading={projects.isLoading || runtimes.isLoading}

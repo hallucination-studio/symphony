@@ -10,6 +10,7 @@ import { ApiError } from "../api/client";
 import { ActionPanel } from "../components/ActionPanel";
 import { Button } from "../components/Button";
 import { useI18n } from "../i18n";
+import { isConductorAvailableForBinding } from "../lib/projectBindings";
 
 export function ProjectBindingForm({
   projects,
@@ -28,7 +29,7 @@ export function ProjectBindingForm({
   const fieldId = useId();
   const bind = useBindConductor();
   const eligibleProjects = projects.filter((project) => project.selected && !project.bound);
-  const eligibleConductors = conductors.filter(isEligibleConductor);
+  const eligibleConductors = conductors.filter(isConductorAvailableForBinding);
   const fixedProject = eligibleProjects.find((project) => project.id === fixedProjectId);
   const fixedConductor = eligibleConductors.find((conductor) => conductor.id === fixedConductorId);
   const [projectId, setProjectId] = useState(fixedProjectId ?? "");
@@ -218,10 +219,4 @@ export function ProjectBindingStatus({ binding }: { binding: ProjectBinding }) {
       description={t("The binding is saved. Waiting for the exact project and repository acknowledgement.")}
     />
   );
-}
-
-function isEligibleConductor(conductor: ConductorRecord): boolean {
-  return conductor.enrollment_state === "enrolled"
-    && conductor.online
-    && conductor.bindings.length === 0;
 }

@@ -149,8 +149,6 @@ def _register_onboarding_runtime_status_route(
             if await state.has_pending_enrollment(str(row.get("id") or "")):
                 token_pending = True
                 break
-        if online:
-            await state.mark_runtime_enrolled(workspace_id)
         return JSONResponse(
             {
                 "workspace_id": workspace_id,
