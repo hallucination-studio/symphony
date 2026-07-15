@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Protocol
 
+from .local_runtime_server import LocalRuntimeServer
+
 from .store.failures import BackgroundFailure, FailureRepository
 from .store.linear import LinearRepository
 from .store.sqlite import SQLiteStore
@@ -54,7 +56,13 @@ class LifecycleSnapshot:
 
 
 class DesktopLifecycle:
-    def __init__(self, data_root: Path, *, jobs: tuple[BackgroundJob, ...] = ()) -> None:
+    def __init__(
+        self,
+        data_root: Path,
+        *,
+        jobs: tuple[BackgroundJob, ...] = (),
+        local_runtime_server: LocalRuntimeServer | None = None,
+    ) -> None:
         self.data_root = data_root
         self.jobs = jobs
         self.paths: DesktopPaths | None = None
@@ -63,6 +71,7 @@ class DesktopLifecycle:
         self.snapshot = LifecycleSnapshot("starting", "unknown")
         self.accepting_work = False
         self._started_jobs: list[BackgroundJob] = []
+        self.local_runtime_server = local_runtime_server
 
     def start(self) -> LifecycleSnapshot:
         stage = "paths"
@@ -94,11 +103,27 @@ class DesktopLifecycle:
         return self.snapshot
 
     def shutdown(self) -> LifecycleSnapshot:
-        if self.store is None and not self._started_jobs and self.snapshot.status == "stopped":
+        if (
+            self.store is None
+            and not self._started_jobs
+            and self.snapshot.status == "stopped"
+        ):
             return self.snapshot
         self.accepting_work = False
         self.snapshot = LifecycleSnapshot("stopping", self.snapshot.installation_status)
         errors: list[Exception] = []
+        if self.local_runtime_server is not None:
+            try:
+                self.local_runtime_server.close_all()
+            except Exception as error:
+                errors.append(error)
+                LOGGER.error(
+                    "event=podium_local_runtime_shutdown_failed error_type=%s "
+                    "error_code=podium_local_runtime_shutdown_failed "
+                    "sanitized_reason=local_runtime_shutdown_failed "
+                    "action_required=true retryable=false next_action=restart_desktop",
+                    type(error).__name__,
+                )
         for job in reversed(self._started_jobs):
             try:
                 job.stop()
@@ -151,7 +176,8 @@ class DesktopLifecycle:
     def _record_background_failure(self, failure: BackgroundFailure) -> None:
         if self.store is None:
             self._observe_failure(
-                "podium_database_unavailable", "database_unavailable",
+                "podium_database_unavailable",
+                "database_unavailable",
                 next_action="repair_application_data",
             )
             LOGGER.error(
@@ -165,7 +191,8 @@ class DesktopLifecycle:
             FailureRepository(self.store.connection).save(failure)
         except Exception as error:
             self._observe_failure(
-                "podium_database_write_failed", "database_write_failed",
+                "podium_database_write_failed",
+                "database_write_failed",
                 next_action="repair_application_data",
             )
             LOGGER.error(
