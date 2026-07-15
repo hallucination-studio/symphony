@@ -40,8 +40,27 @@ def dispatch_command(
         if not isinstance(input_value, dict) or input_value:
             raise CommandError("desktop_command_input_invalid", "command_input_invalid")
         return asdict(lifecycle.snapshot)
+    from .desktop_commands_conductors import (
+        CONDUCTOR_COMMANDS,
+        dispatch_conductor_command,
+    )
     from .desktop_commands_linear import LINEAR_COMMANDS, dispatch_linear_command
 
+    if command in CONDUCTOR_COMMANDS:
+        if lifecycle.store is None:
+            raise CommandError(
+                "desktop_lifecycle_unavailable",
+                "lifecycle_unavailable",
+                action_required=True,
+                next_action="restart_desktop",
+            )
+        from .store.bindings import BindingRepository
+
+        return dispatch_conductor_command(
+            command,
+            input_value,
+            BindingRepository(lifecycle.store.connection),
+        )
     if command not in LINEAR_COMMANDS:
         raise CommandError("desktop_command_unsupported", "command_unsupported")
     if lifecycle.linear_authorization is None:

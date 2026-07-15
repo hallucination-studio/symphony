@@ -156,3 +156,15 @@ POLLING_DISPATCH_STATEMENTS = (
 PROJECT_CATALOG_STATEMENTS = (
     "ALTER TABLE linear_projects DROP COLUMN selected",
 )
+
+CREATE_CONDUCTOR_STATEMENTS = (
+    "ALTER TABLE conductor_bindings ADD COLUMN repository_path TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE conductor_bindings ADD COLUMN data_root_key TEXT NOT NULL DEFAULT ''",
+    """ALTER TABLE conductor_bindings ADD COLUMN desired_state TEXT NOT NULL
+    DEFAULT 'running' CHECK (desired_state = 'running')""",
+    """ALTER TABLE conductor_bindings ADD COLUMN observed_state TEXT NOT NULL
+    DEFAULT 'pending' CHECK (observed_state = 'pending')""",
+    """CREATE UNIQUE INDEX active_binding_repository_unique
+    ON conductor_bindings(repository_path)
+    WHERE active = 1 AND repository_path != ''""",
+)

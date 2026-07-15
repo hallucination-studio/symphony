@@ -6,6 +6,7 @@ from typing import Any
 from .desktop_app import DesktopLifecycle
 from .desktop_commands import CommandError, dispatch_command
 from .desktop_commands_linear import LINEAR_COMMANDS
+from .desktop_commands_conductors import CONDUCTOR_COMMANDS
 from .desktop_protocol import PROTOCOL_VERSION, ProtocolError
 
 REQUEST_KINDS = frozenset({"handshake", "health", "shutdown", "command"})
@@ -65,7 +66,9 @@ def _handle_command(
     raw_command = payload["command"]
     command = (
         raw_command
-        if raw_command == "lifecycle.snapshot" or raw_command in LINEAR_COMMANDS
+        if raw_command == "lifecycle.snapshot"
+        or raw_command in LINEAR_COMMANDS
+        or raw_command in CONDUCTOR_COMMANDS
         else "unknown"
     )
     response: dict[str, Any] = {

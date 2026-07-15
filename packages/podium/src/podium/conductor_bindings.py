@@ -32,6 +32,10 @@ class DesiredBinding:
     conductor_id: str
     generation: int
     active: bool = True
+    repository_path: str = ""
+    data_root_key: str = ""
+    desired_state: str = "running"
+    observed_state: str = "pending"
 
     def __post_init__(self) -> None:
         _identifier(self.binding_id, "binding_id_invalid")
@@ -40,6 +44,14 @@ class DesiredBinding:
         _positive_int(self.generation, "binding_generation_invalid")
         if not isinstance(self.active, bool):
             raise ValueError("binding_active_invalid")
+        if not isinstance(self.repository_path, str) or "\x00" in self.repository_path:
+            raise ValueError("binding_repository_invalid")
+        if self.data_root_key:
+            _identifier(self.data_root_key, "binding_data_root_key_invalid")
+        if self.desired_state != "running":
+            raise ValueError("binding_desired_state_invalid")
+        if self.observed_state != "pending":
+            raise ValueError("binding_observed_state_invalid")
 
     @property
     def desired_revision(self) -> int:

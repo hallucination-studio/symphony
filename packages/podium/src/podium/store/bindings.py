@@ -66,9 +66,64 @@ class BindingRepository:
                 ),
             )
 
+    def create(self, binding: DesiredBinding) -> None:
+        if (
+            binding.generation != 1
+            or not binding.active
+            or not binding.repository_path
+            or not binding.data_root_key
+        ):
+            raise BindingConflict("binding_create_invalid")
+        with self.connection:
+            self.connection.execute("BEGIN IMMEDIATE")
+            project = self.connection.execute(
+                """SELECT project.project_id
+                FROM linear_projects AS project
+                JOIN linear_installations AS installation
+                  ON installation.installation_id = project.installation_id
+                WHERE project.project_id = ? AND installation.status = 'connected'""",
+                (binding.project_id,),
+            ).fetchone()
+            if project is None:
+                raise BindingConflict("binding_project_unavailable")
+            conflict = self.connection.execute(
+                """SELECT project_id, conductor_id, repository_path
+                FROM conductor_bindings
+                WHERE active = 1 AND (
+                    project_id = ? OR conductor_id = ? OR repository_path = ?
+                ) LIMIT 1""",
+                (
+                    binding.project_id,
+                    binding.conductor_id,
+                    binding.repository_path,
+                ),
+            ).fetchone()
+            if conflict is not None:
+                if conflict["project_id"] == binding.project_id:
+                    code = "active_project_binding_conflict"
+                elif conflict["conductor_id"] == binding.conductor_id:
+                    code = "active_conductor_binding_conflict"
+                else:
+                    code = "active_repository_binding_conflict"
+                raise BindingConflict(code)
+            self.connection.execute(
+                """INSERT INTO conductor_bindings (
+                    binding_id, project_id, conductor_id, generation, active,
+                    repository_path, data_root_key, desired_state, observed_state
+                ) VALUES (?, ?, ?, 1, 1, ?, ?, 'running', 'pending')""",
+                (
+                    binding.binding_id,
+                    binding.project_id,
+                    binding.conductor_id,
+                    binding.repository_path,
+                    binding.data_root_key,
+                ),
+            )
+
     def get(self, binding_id: str) -> DesiredBinding | None:
         row = self.connection.execute(
-            """SELECT binding_id, project_id, conductor_id, generation, active
+            """SELECT binding_id, project_id, conductor_id, generation, active,
+            repository_path, data_root_key, desired_state, observed_state
             FROM conductor_bindings WHERE binding_id = ?""",
             (binding_id,),
         ).fetchone()
@@ -76,7 +131,8 @@ class BindingRepository:
 
     def active(self) -> list[DesiredBinding]:
         rows = self.connection.execute(
-            """SELECT binding_id, project_id, conductor_id, generation, active
+            """SELECT binding_id, project_id, conductor_id, generation, active,
+            repository_path, data_root_key, desired_state, observed_state
             FROM conductor_bindings WHERE active = 1 ORDER BY binding_id"""
         ).fetchall()
         return [_binding(row) for row in rows]
@@ -89,4 +145,8 @@ def _binding(row: sqlite3.Row) -> DesiredBinding:
         conductor_id=row["conductor_id"],
         generation=row["generation"],
         active=bool(row["active"]),
+        repository_path=row["repository_path"],
+        data_root_key=row["data_root_key"],
+        desired_state=row["desired_state"],
+        observed_state=row["observed_state"],
     )

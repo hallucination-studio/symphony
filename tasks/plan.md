@@ -812,9 +812,9 @@ Description：接收 Tauri native picker 内部提供的 project id + canonical 
 
 Dependencies：3.9、2.3、2.6。
 
-Files：packages/podium/src/podium/desktop_commands_conductors.py、conductor_bindings.py、store/bindings.py、store/migrations.py、tests/test_create_conductor.py。
+Files：packages/podium/src/podium/desktop_commands_conductors.py、desktop_commands.py、desktop_health.py、conductor_bindings.py、store/bindings.py、store/migrations.py、store/schema.py、tests/test_create_conductor.py。
 
-Estimated scope：M，5 files。
+Estimated scope：M，8 files。新增的 dispatcher/protocol allowlist/schema 路径仅是让已批准 private command 与 migration 可达的必要 wiring，不增加第二入口或产品行为。
 
 Acceptance：
 
