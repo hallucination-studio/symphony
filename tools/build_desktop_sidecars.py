@@ -14,10 +14,16 @@ class Sidecar(NamedTuple):
     entrypoint: str
     package_path: str
     collected_packages: tuple[str, ...] = ()
+    collected_data_packages: tuple[str, ...] = ()
 
 
 SIDECARS = (
-    Sidecar("podium", "podium.desktop_cli:main", "packages/podium/src"),
+    Sidecar(
+        "podium",
+        "podium.desktop_cli:main",
+        "packages/podium/src",
+        collected_data_packages=("podium",),
+    ),
     Sidecar("conductor", "conductor.conductor_cli:main", "packages/conductor/src"),
     Sidecar(
         "performer",
@@ -84,6 +90,8 @@ def build_sidecars(repo_root: Path, output_dir: Path, target_triple: str) -> Non
             ]
             for package in sidecar.collected_packages:
                 command.extend(("--collect-all", package))
+            for package in sidecar.collected_data_packages:
+                command.extend(("--collect-data", package))
             command.append(str(entrypoint))
             subprocess.run(
                 command,

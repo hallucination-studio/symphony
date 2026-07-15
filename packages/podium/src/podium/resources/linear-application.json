@@ -1,0 +1,5 @@
+{
+  "redirect_uri": "http://127.0.0.1:43821/oauth/linear/callback",
+  "scopes": ["read", "write", "app:assignable"],
+  "actor": "app"
+}

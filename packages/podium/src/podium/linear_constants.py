@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+from .linear_manifest import LINEAR_OAUTH_SCOPES
 
 LINEAR_AUTHORIZE_URL = "https://linear.app/oauth/authorize"
 LINEAR_TOKEN_URL = "https://api.linear.app/oauth/token"
 LINEAR_GRAPHQL_URL = "https://api.linear.app/graphql"
-LINEAR_REQUIRED_SCOPES = frozenset({"read", "write", "app:assignable"})
-LINEAR_DEFAULT_SCOPE = ",".join(sorted(LINEAR_REQUIRED_SCOPES))
+LINEAR_REQUIRED_SCOPES = frozenset(LINEAR_OAUTH_SCOPES)
+LINEAR_DEFAULT_SCOPE = ",".join(LINEAR_OAUTH_SCOPES)
 
 LINEAR_ACCEPTANCE_QUERY = """
 query SymphonyInstallationAcceptance($first: Int!, $after: String) {

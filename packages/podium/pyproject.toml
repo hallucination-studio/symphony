@@ -24,4 +24,4 @@ podium = "podium.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-podium = ["static/**/*"]
+podium = ["resources/*.json", "static/**/*"]

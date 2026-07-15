@@ -73,7 +73,11 @@ The desktop uses one fixed public Linear application manifest with S256 PKCE
 and a fixed loopback callback. The required `LINEAR_CLIENT_ID` process
 environment supplies the release-owned public client id; the UI and databases
 cannot override it, and callback, scopes, and actor remain code-owned. The client
-contains no Linear application secret and offers no custom application form.
+id is not stored in the manifest resource. Python packages and Desktop bundles
+ship the same exact resource containing only the fixed loopback redirect,
+`actor=app`, and scopes `read`, `write`, and `app:assignable`; missing or changed
+resource content fails closed.
+The desktop contains no Linear application secret and offers no custom application form.
 The MVP stores no manifest/config revision and has no application-configuration
 change, migration, candidate, or cutover path.
 

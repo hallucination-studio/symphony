@@ -26,6 +26,9 @@
   },
   "bundle": {
     "active": true,
+    "resources": {
+      "../../src/podium/resources/linear-application.json": "resources/linear-application.json"
+    },
     "externalBin": [
       "binaries/podium",
       "binaries/conductor",

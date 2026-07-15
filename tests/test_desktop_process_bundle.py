@@ -56,6 +56,7 @@ def test_builder_keeps_role_entrypoints_and_package_paths_independent() -> None:
         "packages/performer/src",
     ]
     assert builder.SIDECARS[-1].collected_packages == ("performer", "openai_codex")
+    assert builder.SIDECARS[0].collected_data_packages == ("podium",)
 
 
 def test_builder_names_every_artifact_for_the_requested_target(tmp_path, monkeypatch) -> None:
@@ -87,6 +88,7 @@ def test_builder_names_every_artifact_for_the_requested_target(tmp_path, monkeyp
     ]
     assert "--collect-all" not in commands[0]
     assert "--collect-all" not in commands[1]
+    assert commands[0][commands[0].index("--collect-data") + 1] == "podium"
     collected = [
         commands[2][index + 1]
         for index, value in enumerate(commands[2])
