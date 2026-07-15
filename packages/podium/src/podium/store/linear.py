@@ -161,10 +161,6 @@ class LinearRepository:
             )
             if cursor.rowcount != 1:
                 raise ValueError("linear_installation_not_found")
-            self.connection.execute(
-                "UPDATE linear_projects SET selected = 0 WHERE installation_id = ?",
-                (installation_id,),
-            )
 
     def ensure_disconnect_allowed(self, installation_id: str) -> None:
         blocked = self.connection.execute(
@@ -273,10 +269,32 @@ class LinearRepository:
                 for project in projects
             ):
                 raise ProjectSelectionConflict("linear_project_installation_mismatch")
-            self.connection.execute(
-                "DELETE FROM linear_projects WHERE installation_id = ? AND selected = 0",
-                (installation_id,),
-            )
+            discovered_ids = {project.project_id for project in projects}
+            bound_ids = {
+                row["project_id"]
+                for row in self.connection.execute(
+                    """SELECT binding.project_id
+                    FROM conductor_bindings AS binding
+                    JOIN linear_projects AS project
+                      ON project.project_id = binding.project_id
+                    WHERE project.installation_id = ? AND binding.active = 1""",
+                    (installation_id,),
+                )
+            }
+            if not bound_ids <= discovered_ids:
+                raise ProjectSelectionConflict("linear_bound_project_access_missing")
+            if discovered_ids:
+                placeholders = ",".join("?" for _ in discovered_ids)
+                self.connection.execute(
+                    f"""DELETE FROM linear_projects
+                    WHERE installation_id = ? AND project_id NOT IN ({placeholders})""",
+                    (installation_id, *discovered_ids),
+                )
+            else:
+                self.connection.execute(
+                    "DELETE FROM linear_projects WHERE installation_id = ?",
+                    (installation_id,),
+                )
             for project in projects:
                 self.connection.execute(
                     """INSERT INTO linear_projects (
@@ -303,51 +321,17 @@ class LinearRepository:
                     (installation_id, *clear_error_codes),
                 )
 
-    def replace_selection(
-        self,
-        installation_id: str,
-        project_ids: Iterable[str],
-        *,
-        protected_project_ids: Iterable[str],
-    ) -> None:
-        selected = set(project_ids)
-        protected = set(protected_project_ids)
-        with self.connection:
-            self.connection.execute("BEGIN IMMEDIATE")
-            current = {
-                row[0]
-                for row in self.connection.execute(
-                    """SELECT project_id FROM linear_projects
-                    WHERE installation_id = ? AND selected = 1""",
-                    (installation_id,),
-                )
-            }
-            if (current - selected) & protected:
-                raise ProjectSelectionConflict("linear_project_bound")
-            known = {
-                row[0]
-                for row in self.connection.execute(
-                    "SELECT project_id FROM linear_projects WHERE installation_id = ?",
-                    (installation_id,),
-                )
-            }
-            if not selected <= known:
-                raise ProjectSelectionConflict("linear_project_not_found")
-            self.connection.execute(
-                "UPDATE linear_projects SET selected = 0 WHERE installation_id = ?",
-                (installation_id,),
-            )
-            self.connection.executemany(
-                "UPDATE linear_projects SET selected = 1 WHERE project_id = ?",
-                ((project_id,) for project_id in selected),
-            )
-
     def projects(self, installation_id: str | None = None) -> list[ProjectRecord]:
-        where = "" if installation_id is None else "WHERE installation_id = ?"
+        where = "" if installation_id is None else "WHERE project.installation_id = ?"
         parameters = () if installation_id is None else (installation_id,)
         rows = self.connection.execute(
-            f"""SELECT project_id, installation_id, organization_id, team_id, name, slug,
-            selected FROM linear_projects {where} ORDER BY project_id""",
+            f"""SELECT project.project_id, project.installation_id,
+            project.organization_id, project.team_id, project.name, project.slug,
+            CASE WHEN binding.binding_id IS NULL THEN 0 ELSE 1 END AS bound
+            FROM linear_projects AS project
+            LEFT JOIN conductor_bindings AS binding
+              ON binding.project_id = project.project_id AND binding.active = 1
+            {where} ORDER BY project.project_id""",
             parameters,
         ).fetchall()
         return [
@@ -358,7 +342,7 @@ class LinearRepository:
                 team_id=row["team_id"],
                 name=row["name"],
                 slug=row["slug"],
-                selected=bool(row["selected"]),
+                bound=bool(row["bound"]),
             )
             for row in rows
         ]

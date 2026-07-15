@@ -5,7 +5,9 @@ from pathlib import Path
 
 import pytest
 
+from podium.conductor_bindings import DesiredBinding
 from podium.linear_models import InstallationMetadata, InstallationStatus, LinearProject
+from podium.store.bindings import BindingRepository
 from podium.store.linear import LinearCredentials, LinearRepository, ProjectSelectionConflict
 from podium.store.migrations import MIGRATIONS, apply_migrations
 from podium.store.sqlite import SQLiteStore
@@ -104,7 +106,7 @@ def test_installation_rejects_an_unsanitized_error_reason() -> None:
         )
 
 
-def test_projects_reopen_with_stable_identity_and_bound_selection_protection(
+def test_projects_reopen_with_stable_identity_and_bound_state(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "podium.db"
@@ -117,25 +119,25 @@ def test_projects_reopen_with_stable_identity_and_bound_selection_protection(
             LinearProject("project-2", "organization-1", "team-1", "Agents", "agents"),
         ),
     )
-    linear.replace_selection("installation-1", ("project-1",), protected_project_ids=())
+    BindingRepository(store.connection).save(
+        DesiredBinding("binding-1", "project-1", "conductor-1", 1)
+    )
     store.close()
 
     reopened = SQLiteStore(path)
     reopened.initialize()
     linear = LinearRepository(reopened.connection)
-    assert [(record.project_id, record.selected) for record in linear.projects()] == [
+    assert [(record.project_id, record.bound) for record in linear.projects()] == [
         ("project-1", True),
         ("project-2", False),
     ]
 
-    with pytest.raises(ProjectSelectionConflict, match="linear_project_bound"):
-        linear.replace_selection(
-            "installation-1", (), protected_project_ids=("project-1",)
-        )
-    assert linear.projects()[0].selected is True
+    with pytest.raises(ProjectSelectionConflict, match="bound_project_access_missing"):
+        linear.replace_projects("installation-1", ())
+    assert linear.projects()[0].bound is True
 
 
-def test_project_scope_conflicts_and_failed_selection_roll_back(tmp_path: Path) -> None:
+def test_project_scope_conflicts_roll_back(tmp_path: Path) -> None:
     store, linear = repository(tmp_path / "podium.db")
     linear.save_installation(metadata())
     other = InstallationMetadata(
@@ -151,7 +153,6 @@ def test_project_scope_conflicts_and_failed_selection_roll_back(tmp_path: Path) 
         "installation-1",
         (LinearProject("project-1", "organization-1", "team-1", "Runtime", "runtime"),),
     )
-    linear.replace_selection("installation-1", ("project-1",), protected_project_ids=())
 
     with pytest.raises(ProjectSelectionConflict, match="organization_mismatch"):
         linear.replace_projects(
@@ -163,13 +164,8 @@ def test_project_scope_conflicts_and_failed_selection_roll_back(tmp_path: Path) 
             "installation-2",
             (LinearProject("project-1", "organization-2", "team-2", "Moved", "moved"),),
         )
-    with pytest.raises(ProjectSelectionConflict, match="linear_project_not_found"):
-        linear.replace_selection(
-            "installation-1", ("missing",), protected_project_ids=()
-        )
-
-    assert [(row.project_id, row.installation_id, row.selected) for row in linear.projects()] == [
-        ("project-1", "installation-1", True)
+    assert [(row.project_id, row.installation_id, row.bound) for row in linear.projects()] == [
+        ("project-1", "installation-1", False)
     ]
 
 

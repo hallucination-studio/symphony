@@ -152,3 +152,7 @@ POLLING_DISPATCH_STATEMENTS = (
         next_attempt_at INTEGER
     )""",
 )
+
+PROJECT_CATALOG_STATEMENTS = (
+    "ALTER TABLE linear_projects DROP COLUMN selected",
+)

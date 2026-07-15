@@ -26,4 +26,4 @@ class ProjectRecord:
     team_id: str
     name: str
     slug: str
-    selected: bool
+    bound: bool

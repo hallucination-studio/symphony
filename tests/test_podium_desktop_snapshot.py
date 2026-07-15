@@ -53,9 +53,6 @@ def seed_bound_runtime(
         "installation-1",
         [LinearProject("project-1", "organization-1", "team-1", "Project", "project")],
     )
-    linear.replace_selection(
-        "installation-1", ["project-1"], protected_project_ids=[]
-    )
     binding = DesiredBinding("binding-1", "project-1", "conductor-1", 3)
     BindingRepository(store.connection).save(binding)
     RuntimeReportRepository(store.connection).save(
@@ -271,19 +268,22 @@ def test_maximum_snapshot_page_fits_the_desktop_frame(tmp_path: Path) -> None:
     seed_bound_runtime(store, heartbeat_at=100)
     linear = LinearRepository(store.connection)
     projects = [
-        LinearProject(
-            f"project-{index}-" + "p" * 180,
-            "organization-1",
-            "team-1",
-            f"Project {index}",
-            f"project-{index}",
-        )
-        for index in range(2, 26)
+        LinearProject("project-1", "organization-1", "team-1", "Project", "project"),
+        *[
+            LinearProject(
+                f"project-{index}-" + "p" * 180,
+                "organization-1",
+                "team-1",
+                f"Project {index}",
+                f"project-{index}",
+            )
+            for index in range(2, 26)
+        ],
     ]
     linear.replace_projects("installation-1", projects)
     bindings = BindingRepository(store.connection)
     failures = FailureRepository(store.connection)
-    for index, project in enumerate(projects, start=2):
+    for index, project in enumerate(projects[1:], start=2):
         bindings.save(
             DesiredBinding(
                 f"binding-{index}-" + "b" * 180,

@@ -194,9 +194,6 @@ async def test_active_binding_blocks_disconnect_before_revocation(tmp_path: Path
         "installation-1",
         [LinearProject("project-1", "organization-1", "team-1", "Project", "project")],
     )
-    repository.replace_selection(
-        "installation-1", ["project-1"], protected_project_ids=[]
-    )
     BindingRepository(store.connection).save(
         DesiredBinding("binding-1", "project-1", "conductor-1", 1, True)
     )
@@ -244,16 +241,13 @@ async def test_revocation_failure_preserves_pair_and_logs_no_tokens(
 
 
 @pytest.mark.asyncio
-async def test_successful_disconnect_is_atomic_and_clears_selection(tmp_path: Path) -> None:
+async def test_successful_disconnect_is_atomic_and_preserves_catalog(tmp_path: Path) -> None:
     _store, repository, _tokens, lifecycle, revocations = setup(
         tmp_path / "podium.db"
     )
     repository.replace_projects(
         "installation-1",
         [LinearProject("project-1", "organization-1", "team-1", "Project", "project")],
-    )
-    repository.replace_selection(
-        "installation-1", ["project-1"], protected_project_ids=[]
     )
 
     assert await lifecycle.disconnect("installation-1") == {
@@ -263,7 +257,7 @@ async def test_successful_disconnect_is_atomic_and_clears_selection(tmp_path: Pa
     assert len(revocations) == 1
     assert repository.load_credentials("installation-1") is None
     assert repository.installation("installation-1").status is InstallationStatus.DISCONNECTED
-    assert repository.projects("installation-1")[0].selected is False
+    assert repository.projects("installation-1")[0].bound is False
 
 
 @pytest.mark.asyncio
