@@ -5,7 +5,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-from .schema import SQLITE_FEASIBILITY_SCHEMA
+from .migrations import apply_migrations
 
 
 class SQLiteStore:
@@ -24,7 +24,7 @@ class SQLiteStore:
         self.connection.close()
 
     def initialize(self) -> None:
-        self.connection.executescript(SQLITE_FEASIBILITY_SCHEMA)
+        apply_migrations(self.connection)
 
     def add_binding(self, binding_id: str) -> None:
         self.connection.execute("INSERT INTO bindings (id) VALUES (?)", (binding_id,))
