@@ -1,90 +1,77 @@
 from __future__ import annotations
 
-import html
+import math
 import socket
 import time
-from dataclasses import dataclass
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qsl, urlsplit
 
 from .linear_manifest import LINEAR_OAUTH_HOST, LINEAR_OAUTH_PATH, LINEAR_OAUTH_PORT
+from .oauth_callback_page import (
+    CALLBACK_HEADERS,
+    DENIED_PAGE,
+    INVALID_PAGE,
+    SUCCESS_PAGE,
+    callback_response,
+)
+from .oauth_state import OAuthAttemptManager, OAuthCodeExchange
 
-
-@dataclass
-class OAuthState:
-    value: str
-    expires_at: float
-    used: bool = False
-
-    def consume(self, value: str, *, now: float | None = None) -> None:
-        current = time.monotonic() if now is None else now
-        if self.used:
-            raise ValueError("oauth_state_replayed")
-        if current >= self.expires_at:
-            raise ValueError("oauth_state_expired")
-        if value != self.value:
-            raise ValueError("oauth_state_mismatch")
-        self.used = True
-
-
-CALLBACK_HEADERS = {
-    "Cache-Control": "no-store",
-    "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'",
-    "X-Content-Type-Options": "nosniff",
-    "Referrer-Policy": "no-referrer",
-}
-
-
-@dataclass(frozen=True)
-class CallbackResult:
-    code: str
+MAX_CALLBACK_TIMEOUT_SECONDS = 240
+MAX_REQUEST_BYTES = 16 * 1024
+CALLBACK_AUTHORITY = f"{LINEAR_OAUTH_HOST}:{LINEAR_OAUTH_PORT}"
 
 
 class OAuthCallbackListener:
-    def __init__(self, state: OAuthState) -> None:
-        self.state = state
+    def __init__(self, attempts: OAuthAttemptManager) -> None:
+        self.attempts = attempts
         self.socket = socket.socket()
         try:
             self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             self.socket.bind((LINEAR_OAUTH_HOST, LINEAR_OAUTH_PORT))
             self.socket.listen(1)
-        except BaseException:
+        except OSError:
             self.socket.close()
-            raise
+            raise OSError("oauth_callback_port_unavailable") from None
 
-    def receive(self, timeout: float) -> CallbackResult:
+    def receive(self, timeout: float) -> OAuthCodeExchange:
+        if (
+            isinstance(timeout, bool)
+            or not isinstance(timeout, (int, float))
+            or not math.isfinite(timeout)
+            or not 0 < timeout <= MAX_CALLBACK_TIMEOUT_SECONDS
+        ):
+            self.close()
+            raise ValueError("oauth_callback_timeout_invalid")
         deadline = time.monotonic() + timeout
         try:
             self.socket.settimeout(timeout)
-            connection, _ = self.socket.accept()
+            connection, _peer = self.socket.accept()
             with connection:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise TimeoutError("oauth_callback_timeout")
-                connection.settimeout(remaining)
-                try:
-                    result = self._parse_request(_read_request(connection))
-                except ValueError:
-                    connection.sendall(_response("Authorization failed. Return to Podium."))
-                    raise
-                connection.sendall(_response("Authorization complete. Return to Podium."))
-                return result
+                connection.settimeout(max(0.001, deadline - time.monotonic()))
+                return self._handle_connection(connection)
+        except (TimeoutError, socket.timeout):
+            raise TimeoutError("oauth_callback_timeout") from None
         finally:
-            self.socket.close()
+            self.close()
 
-    def _parse_request(self, request: bytes) -> CallbackResult:
+    def close(self) -> None:
+        self.socket.close()
+
+    def _handle_connection(self, connection: socket.socket) -> OAuthCodeExchange:
         try:
-            line = request.split(b"\r\n", 1)[0].decode("ascii")
-            method, target, _ = line.split(" ", 2)
-        except (UnicodeDecodeError, ValueError) as exc:
-            raise ValueError("oauth_callback_request_invalid") from exc
-        parsed = urlsplit(target)
-        if method != "GET" or parsed.path != LINEAR_OAUTH_PATH:
-            raise ValueError("oauth_callback_request_invalid")
-        query = parse_qs(parsed.query, strict_parsing=True)
-        self.state.consume(_single(query, "state"))
-        if "error" in query:
-            raise ValueError(f"oauth_callback_denied:{_single(query, 'error')}")
-        return CallbackResult(code=_single(query, "code"))
+            kind, fields = _parse_request(_read_request(connection))
+            if kind == "denied":
+                self.attempts.consume_denial(fields["state"])
+                _send(connection, DENIED_PAGE)
+                raise ValueError("oauth_callback_denied")
+            result = self.attempts.consume(fields["state"], fields["code"])
+            _send(connection, SUCCESS_PAGE)
+            return result
+        except ValueError as error:
+            if str(error) != "oauth_callback_denied":
+                _send(connection, INVALID_PAGE)
+            raise
+        except (TimeoutError, socket.timeout):
+            raise TimeoutError("oauth_callback_timeout") from None
 
 
 def _read_request(connection: socket.socket) -> bytes:
@@ -92,32 +79,63 @@ def _read_request(connection: socket.socket) -> bytes:
     while b"\r\n\r\n" not in request:
         chunk = connection.recv(4096)
         if not chunk:
-            raise ValueError("oauth_callback_request_incomplete")
+            raise ValueError("oauth_callback_request_invalid")
         request.extend(chunk)
-        if len(request) > 16 * 1024:
-            raise ValueError("oauth_callback_request_too_large")
+        if len(request) > MAX_REQUEST_BYTES:
+            raise ValueError("oauth_callback_request_invalid")
     return bytes(request)
 
 
-def _single(query: dict[str, list[str]], field: str) -> str:
-    values = query.get(field, [])
-    if len(values) != 1 or not values[0]:
-        raise ValueError(f"oauth_callback_{field}_invalid")
-    return values[0]
+def _parse_request(request: bytes) -> tuple[str, dict[str, str]]:
+    try:
+        head = request.split(b"\r\n\r\n", 1)[0].decode("ascii")
+        request_line, *header_lines = head.split("\r\n")
+        method, target, version = request_line.split(" ")
+        headers = _headers(header_lines)
+        parsed = urlsplit(target)
+        pairs = parse_qsl(parsed.query, keep_blank_values=True, strict_parsing=True)
+    except (UnicodeDecodeError, ValueError) as error:
+        raise ValueError("oauth_callback_request_invalid") from error
+    if (
+        method != "GET"
+        or version != "HTTP/1.1"
+        or parsed.scheme
+        or parsed.netloc
+        or parsed.fragment
+        or parsed.path != LINEAR_OAUTH_PATH
+        or headers.get("host") != CALLBACK_AUTHORITY
+    ):
+        raise ValueError("oauth_callback_request_invalid")
+    fields = _unique_query(pairs)
+    if set(fields) == {"state", "code"} and fields["state"] and fields["code"]:
+        return "authorized", fields
+    if set(fields) == {"state", "error"} and fields["state"] and fields["error"]:
+        return "denied", fields
+    raise ValueError("oauth_callback_request_invalid")
 
 
-def _response(message: str) -> bytes:
-    body = (
-        f"<!doctype html><meta charset=utf-8><title>Podium</title>"
-        f"<p>{html.escape(message)}</p>"
-    ).encode()
-    headers = [
-        "HTTP/1.1 200 OK",
-        "Content-Type: text/html; charset=utf-8",
-        *(f"{key}: {value}" for key, value in CALLBACK_HEADERS.items()),
-        f"Content-Length: {len(body)}",
-        "Connection: close",
-        "",
-        "",
-    ]
-    return "\r\n".join(headers).encode() + body
+def _headers(lines: list[str]) -> dict[str, str]:
+    headers: dict[str, str] = {}
+    for line in lines:
+        name, separator, value = line.partition(":")
+        name = name.strip().lower()
+        if not separator or not name or name in headers:
+            raise ValueError("oauth_callback_request_invalid")
+        headers[name] = value.strip()
+    return headers
+
+
+def _unique_query(pairs: list[tuple[str, str]]) -> dict[str, str]:
+    fields: dict[str, str] = {}
+    for key, value in pairs:
+        if key in fields:
+            raise ValueError("oauth_callback_request_invalid")
+        fields[key] = value
+    return fields
+
+
+def _send(connection: socket.socket, body: bytes) -> None:
+    try:
+        connection.sendall(callback_response(body))
+    except OSError:
+        raise OSError("oauth_callback_response_failed") from None

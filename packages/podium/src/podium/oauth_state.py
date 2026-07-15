@@ -52,13 +52,22 @@ class OAuthAttemptManager:
     def consume(self, state: str, code: str) -> OAuthCodeExchange:
         if not _bounded(state, MAX_STATE_LENGTH) or not _bounded(code, MAX_CODE_LENGTH):
             raise ValueError("oauth_attempt_invalid")
+        attempt = self._take(state)
+        return OAuthCodeExchange(attempt.attempt_id, code, attempt.verifier)
+
+    def consume_denial(self, state: str) -> str:
+        return self._take(state).attempt_id
+
+    def _take(self, state: str) -> OAuthAttempt:
+        if not _bounded(state, MAX_STATE_LENGTH):
+            raise ValueError("oauth_attempt_invalid")
         with self._lock:
             attempt = self._attempts.pop(state, None)
         if attempt is None:
             raise ValueError("oauth_attempt_invalid")
         if self._clock() >= attempt.expires_at:
             raise ValueError("oauth_attempt_expired")
-        return OAuthCodeExchange(attempt.attempt_id, code, attempt.verifier)
+        return attempt
 
     def cancel(self, attempt_id: str) -> bool:
         if not _bounded(attempt_id, MAX_STATE_LENGTH):
