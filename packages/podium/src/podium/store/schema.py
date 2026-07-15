@@ -109,3 +109,46 @@ BINDING_REPORT_STATEMENTS = (
         error_code TEXT CHECK (error_code IS NULL OR length(error_code) BETWEEN 1 AND 128)
     )""",
 )
+
+POLLING_DISPATCH_STATEMENTS = (
+    """CREATE TABLE polling_checkpoints (
+        binding_id TEXT PRIMARY KEY REFERENCES conductor_bindings(binding_id) ON DELETE CASCADE,
+        cursor TEXT
+    )""",
+    """CREATE TABLE delegation_epochs (
+        binding_id TEXT NOT NULL REFERENCES conductor_bindings(binding_id) ON DELETE CASCADE,
+        issue_id TEXT NOT NULL,
+        delegated INTEGER NOT NULL CHECK (delegated IN (0, 1)),
+        epoch INTEGER NOT NULL CHECK (epoch >= 0),
+        PRIMARY KEY (binding_id, issue_id)
+    )""",
+    """CREATE TABLE local_dispatches (
+        dispatch_id TEXT PRIMARY KEY,
+        binding_id TEXT NOT NULL REFERENCES conductor_bindings(binding_id) ON DELETE CASCADE,
+        issue_id TEXT NOT NULL,
+        delegation_epoch INTEGER NOT NULL CHECK (delegation_epoch > 0),
+        binding_generation INTEGER NOT NULL CHECK (binding_generation > 0),
+        status TEXT NOT NULL CHECK (status IN ('queued', 'leased', 'acked')),
+        leased_conductor_id TEXT,
+        lease_id TEXT,
+        leased_until INTEGER,
+        fencing_token INTEGER NOT NULL DEFAULT 0 CHECK (fencing_token >= 0),
+        UNIQUE (binding_id, issue_id, delegation_epoch),
+        CHECK (
+            (status = 'queued' AND leased_conductor_id IS NULL AND lease_id IS NULL
+             AND leased_until IS NULL)
+            OR
+            (status IN ('leased', 'acked') AND leased_conductor_id IS NOT NULL
+             AND lease_id IS NOT NULL AND leased_until IS NOT NULL)
+        )
+    )""",
+    """CREATE INDEX local_dispatch_lease_candidates
+    ON local_dispatches(binding_id, status, leased_until, dispatch_id)""",
+    """CREATE TABLE background_failures (
+        failure_id TEXT PRIMARY KEY,
+        retry_count INTEGER NOT NULL CHECK (retry_count >= 0),
+        last_reason TEXT NOT NULL CHECK (length(last_reason) BETWEEN 1 AND 500),
+        next_action TEXT NOT NULL CHECK (length(next_action) BETWEEN 1 AND 128),
+        next_attempt_at INTEGER
+    )""",
+)

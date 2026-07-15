@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from .schema import (
     BINDING_REPORT_STATEMENTS,
     LINEAR_METADATA_STATEMENTS,
+    POLLING_DISPATCH_STATEMENTS,
     SQLITE_SCHEMA_STATEMENTS,
 )
 
@@ -20,6 +21,7 @@ MIGRATIONS = (
     Migration(1, SQLITE_SCHEMA_STATEMENTS),
     Migration(2, LINEAR_METADATA_STATEMENTS),
     Migration(3, BINDING_REPORT_STATEMENTS),
+    Migration(4, POLLING_DISPATCH_STATEMENTS),
 )
 
 
