@@ -136,6 +136,46 @@ class LinearRepository:
             if cursor.rowcount != 1:
                 raise ValueError("linear_installation_not_found")
 
+    def mark_credentials_missing(self, installation_id: str) -> None:
+        self._clear_with_status(
+            installation_id,
+            InstallationStatus.CREDENTIALS_MISSING,
+            "credentials_missing_for_existing_installation",
+        )
+
+    def reset_after_removal(self, installation_id: str) -> None:
+        self._clear_with_status(
+            installation_id, InstallationStatus.DISCONNECTED, None
+        )
+
+    def disconnect(self, installation_id: str) -> None:
+        with self.connection:
+            self.connection.execute("BEGIN IMMEDIATE")
+            self.ensure_disconnect_allowed(installation_id)
+            cursor = self.connection.execute(
+                """UPDATE linear_installations
+                SET access_token = NULL, refresh_token = NULL, expires_at = NULL,
+                    status = 'disconnected', error_code = NULL
+                WHERE installation_id = ?""",
+                (installation_id,),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("linear_installation_not_found")
+            self.connection.execute(
+                "UPDATE linear_projects SET selected = 0 WHERE installation_id = ?",
+                (installation_id,),
+            )
+
+    def ensure_disconnect_allowed(self, installation_id: str) -> None:
+        blocked = self.connection.execute(
+            """SELECT 1 FROM conductor_bindings AS binding
+            JOIN linear_projects AS project ON project.project_id = binding.project_id
+            WHERE project.installation_id = ? AND binding.active = 1 LIMIT 1""",
+            (installation_id,),
+        ).fetchone()
+        if blocked is not None:
+            raise ValueError("linear_disconnect_in_use")
+
     def reject_credentials(self, installation_id: str, error_code: str) -> None:
         if re.fullmatch(r"[a-z][a-z0-9_]*", error_code) is None:
             raise ValueError("linear_error_code_invalid")
@@ -147,6 +187,35 @@ class LinearRepository:
                     status = 'reauthorization_required', error_code = ?
                 WHERE installation_id = ?""",
                 (error_code, installation_id),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("linear_installation_not_found")
+
+    def record_error(self, installation_id: str, error_code: str) -> None:
+        if re.fullmatch(r"[a-z][a-z0-9_]*", error_code) is None:
+            raise ValueError("linear_error_code_invalid")
+        with self.connection:
+            cursor = self.connection.execute(
+                "UPDATE linear_installations SET error_code = ? WHERE installation_id = ?",
+                (error_code, installation_id),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("linear_installation_not_found")
+
+    def _clear_with_status(
+        self,
+        installation_id: str,
+        status: InstallationStatus,
+        error_code: str | None,
+    ) -> None:
+        with self.connection:
+            self.connection.execute("BEGIN IMMEDIATE")
+            cursor = self.connection.execute(
+                """UPDATE linear_installations
+                SET access_token = NULL, refresh_token = NULL, expires_at = NULL,
+                    status = ?, error_code = ?
+                WHERE installation_id = ?""",
+                (status.value, error_code, installation_id),
             )
             if cursor.rowcount != 1:
                 raise ValueError("linear_installation_not_found")

@@ -5,6 +5,7 @@ from typing import Any
 
 from .desktop_app import DesktopLifecycle
 from .desktop_commands import CommandError, dispatch_command
+from .desktop_commands_linear import LINEAR_COMMANDS
 from .desktop_protocol import PROTOCOL_VERSION, ProtocolError
 
 REQUEST_KINDS = frozenset({"handshake", "health", "shutdown", "command"})
@@ -62,7 +63,11 @@ def _handle_command(
     payload: dict[str, Any], lifecycle: DesktopLifecycle | None
 ) -> dict[str, Any]:
     raw_command = payload["command"]
-    command = "lifecycle.snapshot" if raw_command == "lifecycle.snapshot" else "unknown"
+    command = (
+        raw_command
+        if raw_command == "lifecycle.snapshot" or raw_command in LINEAR_COMMANDS
+        else "unknown"
+    )
     response: dict[str, Any] = {
         "kind": "command.result",
         "request_id": payload["request_id"],

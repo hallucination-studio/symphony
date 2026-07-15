@@ -36,8 +36,21 @@ class CommandError(ValueError):
 def dispatch_command(
     command: str, input_value: dict[str, Any], lifecycle: DesktopLifecycle
 ) -> dict[str, Any]:
-    if command != "lifecycle.snapshot":
+    if command == "lifecycle.snapshot":
+        if not isinstance(input_value, dict) or input_value:
+            raise CommandError("desktop_command_input_invalid", "command_input_invalid")
+        return asdict(lifecycle.snapshot)
+    from .desktop_commands_linear import LINEAR_COMMANDS, dispatch_linear_command
+
+    if command not in LINEAR_COMMANDS:
         raise CommandError("desktop_command_unsupported", "command_unsupported")
-    if not isinstance(input_value, dict) or input_value:
-        raise CommandError("desktop_command_input_invalid", "command_input_invalid")
-    return asdict(lifecycle.snapshot)
+    if lifecycle.linear_authorization is None:
+        raise CommandError(
+            "linear_authorization_unavailable",
+            "linear_authorization_unavailable",
+            action_required=True,
+            next_action="restart_desktop",
+        )
+    return dispatch_linear_command(
+        command, input_value, lifecycle.linear_authorization
+    )

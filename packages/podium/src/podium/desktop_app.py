@@ -8,7 +8,12 @@ from pathlib import Path
 from typing import Callable, Protocol
 
 from .store.failures import BackgroundFailure, FailureRepository
+from .store.linear import LinearRepository
 from .store.sqlite import SQLiteStore
+from .linear_disconnect import (
+    LinearAuthorizationLifecycle,
+    default_authorization_lifecycle,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -54,6 +59,7 @@ class DesktopLifecycle:
         self.jobs = jobs
         self.paths: DesktopPaths | None = None
         self.store: SQLiteStore | None = None
+        self.linear_authorization: LinearAuthorizationLifecycle | None = None
         self.snapshot = LifecycleSnapshot("starting", "unknown")
         self.accepting_work = False
         self._started_jobs: list[BackgroundJob] = []
@@ -65,6 +71,9 @@ class DesktopLifecycle:
             stage = "database"
             self.store = SQLiteStore(self.paths.database_path)
             self.store.initialize()
+            self.linear_authorization = default_authorization_lifecycle(
+                LinearRepository(self.store.connection)
+            )
             stage = "installation_state"
             installation_status = self._installation_status()
             self.snapshot = LifecycleSnapshot("starting", installation_status)
@@ -116,6 +125,7 @@ class DesktopLifecycle:
                 )
             finally:
                 self.store = None
+                self.linear_authorization = None
         if errors:
             self.snapshot = LifecycleSnapshot(
                 "failed",
@@ -230,6 +240,7 @@ class DesktopLifecycle:
                     type(close_error).__name__,
                 )
             self.store = None
+            self.linear_authorization = None
         self.accepting_work = False
         error_code = f"podium_{stage}_startup_failed"
         reason = f"{stage}_startup_failed"
