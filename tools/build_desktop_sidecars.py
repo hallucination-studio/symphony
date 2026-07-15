@@ -6,6 +6,26 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from typing import NamedTuple
+
+
+class Sidecar(NamedTuple):
+    name: str
+    entrypoint: str
+    package_path: str
+    collected_packages: tuple[str, ...] = ()
+
+
+SIDECARS = (
+    Sidecar("podium", "podium.desktop_cli:main", "packages/podium/src"),
+    Sidecar("conductor", "conductor.conductor_cli:main", "packages/conductor/src"),
+    Sidecar(
+        "performer",
+        "performer.cli:main",
+        "packages/performer/src",
+        ("performer", "openai_codex"),
+    ),
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -28,25 +48,22 @@ def rust_host_triple() -> str:
     raise RuntimeError("rust_host_triple_missing")
 
 
-def main() -> int:
-    args = parse_args()
-    repo_root = Path(__file__).resolve().parents[1]
-    target_triple = args.target_triple or rust_host_triple()
-    output_dir = args.output_dir or (
-        repo_root / "packages/podium/desktop/src-tauri/binaries"
-    )
-    output_name = f"podium-{target_triple}"
+def build_sidecars(repo_root: Path, output_dir: Path, target_triple: str) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
+    shared_path = repo_root / "packages/performer-api/src"
 
     with tempfile.TemporaryDirectory(prefix="podium-sidecar-build-") as temp_dir:
         temp_root = Path(temp_dir)
-        entrypoint = temp_root / "podium_desktop_entry.py"
-        entrypoint.write_text(
-            "from podium.desktop_cli import main\nraise SystemExit(main())\n",
-            encoding="utf-8",
-        )
-        subprocess.run(
-            [
+        for sidecar in SIDECARS:
+            module, function = sidecar.entrypoint.split(":", maxsplit=1)
+            entrypoint = temp_root / f"{sidecar.name}_desktop_entry.py"
+            entrypoint.write_text(
+                f"from {module} import {function}\nraise SystemExit({function}())\n",
+                encoding="utf-8",
+            )
+            output_name = f"{sidecar.name}-{target_triple}"
+            dist_path = temp_root / f"dist-{sidecar.name}"
+            command = [
                 sys.executable,
                 "-m",
                 "PyInstaller",
@@ -55,19 +72,35 @@ def main() -> int:
                 "--name",
                 output_name,
                 "--distpath",
-                str(temp_root / "dist"),
+                str(dist_path),
                 "--workpath",
-                str(temp_root / "work"),
+                str(temp_root / f"work-{sidecar.name}"),
                 "--specpath",
-                str(temp_root / "spec"),
+                str(temp_root / f"spec-{sidecar.name}"),
                 "--paths",
-                str(repo_root / "packages/podium/src"),
-                str(entrypoint),
-            ],
-            check=True,
-            cwd=repo_root,
-        )
-        shutil.copy2(temp_root / "dist" / output_name, output_dir / output_name)
+                str(repo_root / sidecar.package_path),
+                "--paths",
+                str(shared_path),
+            ]
+            for package in sidecar.collected_packages:
+                command.extend(("--collect-all", package))
+            command.append(str(entrypoint))
+            subprocess.run(
+                command,
+                check=True,
+                cwd=repo_root,
+            )
+            shutil.copy2(dist_path / output_name, output_dir / output_name)
+
+
+def main() -> int:
+    args = parse_args()
+    repo_root = Path(__file__).resolve().parents[1]
+    target_triple = args.target_triple or rust_host_triple()
+    output_dir = args.output_dir or (
+        repo_root / "packages/podium/desktop/src-tauri/binaries"
+    )
+    build_sidecars(repo_root, output_dir, target_triple)
     return 0
 
 

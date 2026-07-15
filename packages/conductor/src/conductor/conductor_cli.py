@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 from pathlib import Path
+import signal
 
 from .conductor_api import ConductorApiServer
 from .conductor_service import ConductorService
@@ -26,10 +27,20 @@ async def run_server(*, host: str, port: int, data_root: Path) -> None:
     server = ConductorApiServer(service)
     await service.start()
     await server.start(host=host, port=port)
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    installed_signals: list[signal.Signals] = []
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(signum, stop.set)
+        except NotImplementedError:
+            continue
+        installed_signals.append(signum)
     try:
-        while True:
-            await asyncio.sleep(3600)
+        await stop.wait()
     finally:
+        for signum in installed_signals:
+            loop.remove_signal_handler(signum)
         await server.stop()
         await service.stop()
 

@@ -26,7 +26,11 @@
   },
   "bundle": {
     "active": true,
-    "externalBin": ["binaries/podium"],
+    "externalBin": [
+      "binaries/podium",
+      "binaries/conductor",
+      "binaries/performer"
+    ],
     "icon": ["icons/icon.png"],
     "targets": "all"
   }
