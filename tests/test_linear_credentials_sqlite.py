@@ -215,10 +215,13 @@ def test_schema_has_only_approved_credential_columns(tmp_path: Path) -> None:
     assert columns == {
         "installation_id",
         "organization_id",
+        "organization_name",
         "app_user_id",
         "granted_scopes",
         "access_token",
         "refresh_token",
         "expires_at",
         "status",
+        "last_verified_at",
+        "error_code",
     }

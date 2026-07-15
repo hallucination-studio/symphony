@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from podium.store.migrations import Migration, apply_migrations
+from podium.store.migrations import MIGRATIONS, Migration, apply_migrations
 from podium.store.schema import SQLITE_FEASIBILITY_SCHEMA
 from podium.store.sqlite import SQLiteStore
 
@@ -22,7 +22,7 @@ def test_fresh_database_applies_every_migration_and_connection_pragma(tmp_path: 
         for row in store.connection.execute(
             "SELECT version FROM schema_migrations ORDER BY version"
         )
-    ] == [1]
+    ] == [migration.version for migration in MIGRATIONS]
 
 
 def test_existing_feasibility_database_upgrades_and_reopens_idempotently(tmp_path: Path) -> None:
@@ -39,7 +39,7 @@ def test_existing_feasibility_database_upgrades_and_reopens_idempotently(tmp_pat
 
     assert [
         row[0] for row in reopened.connection.execute("SELECT version FROM schema_migrations")
-    ] == [1]
+    ] == [migration.version for migration in MIGRATIONS]
 
 
 def test_failed_migration_rolls_back_its_schema_and_version(tmp_path: Path) -> None:

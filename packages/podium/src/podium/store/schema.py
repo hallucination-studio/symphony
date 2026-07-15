@@ -42,3 +42,48 @@ SQLITE_SCHEMA_STATEMENTS = (
 )
 
 SQLITE_FEASIBILITY_SCHEMA = ";\n".join(SQLITE_SCHEMA_STATEMENTS) + ";\n"
+
+LINEAR_METADATA_STATEMENTS = (
+    "ALTER TABLE linear_installations RENAME TO linear_installations_v1",
+    """CREATE TABLE linear_installations (
+        installation_id TEXT PRIMARY KEY,
+        organization_id TEXT NOT NULL,
+        organization_name TEXT NOT NULL DEFAULT '',
+        app_user_id TEXT NOT NULL,
+        granted_scopes TEXT NOT NULL,
+        access_token TEXT,
+        refresh_token TEXT,
+        expires_at INTEGER,
+        status TEXT NOT NULL CHECK (status IN (
+            'connected', 'disconnected',
+            'credentials_missing_for_existing_installation', 'reauthorization_required'
+        )),
+        last_verified_at INTEGER,
+        error_code TEXT,
+        CHECK (
+            (access_token IS NULL AND refresh_token IS NULL AND status != 'connected')
+            OR
+            (access_token IS NOT NULL AND refresh_token IS NOT NULL AND expires_at IS NOT NULL
+             AND length(access_token) > 0 AND length(refresh_token) > 0
+             AND status = 'connected')
+        )
+    )""",
+    """INSERT INTO linear_installations (
+        installation_id, organization_id, app_user_id, granted_scopes,
+        access_token, refresh_token, expires_at, status
+    ) SELECT installation_id, organization_id, app_user_id,
+        '["' || replace(granted_scopes, ',', '","') || '"]',
+        access_token, refresh_token, expires_at, status
+    FROM linear_installations_v1""",
+    "DROP TABLE linear_installations_v1",
+    """CREATE TABLE linear_projects (
+        project_id TEXT PRIMARY KEY,
+        installation_id TEXT NOT NULL REFERENCES linear_installations(installation_id)
+            ON DELETE CASCADE,
+        organization_id TEXT NOT NULL,
+        team_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        slug TEXT NOT NULL,
+        selected INTEGER NOT NULL DEFAULT 0 CHECK (selected IN (0, 1))
+    )""",
+)

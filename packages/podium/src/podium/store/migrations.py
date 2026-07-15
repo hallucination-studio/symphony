@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass
 
-from .schema import SQLITE_SCHEMA_STATEMENTS
+from .schema import LINEAR_METADATA_STATEMENTS, SQLITE_SCHEMA_STATEMENTS
 
 
 @dataclass(frozen=True)
@@ -12,7 +12,10 @@ class Migration:
     statements: tuple[str, ...]
 
 
-MIGRATIONS = (Migration(1, SQLITE_SCHEMA_STATEMENTS),)
+MIGRATIONS = (
+    Migration(1, SQLITE_SCHEMA_STATEMENTS),
+    Migration(2, LINEAR_METADATA_STATEMENTS),
+)
 
 
 def apply_migrations(
