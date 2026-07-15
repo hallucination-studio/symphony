@@ -1,26 +1,18 @@
 from __future__ import annotations
 
-import base64
-import hashlib
-import secrets
 from urllib.parse import urlencode
 
 import httpx
 
 from .linear_constants import LINEAR_AUTHORIZE_URL, LINEAR_DEFAULT_SCOPE, LINEAR_TOKEN_URL
 from .linear_manifest import LINEAR_OAUTH_REDIRECT_URI, linear_oauth_client_id
+from .oauth_state import generate_pkce
 
 LINEAR_REVOKE_URL = "https://api.linear.app/oauth/revoke"
 
 
 def new_pkce() -> tuple[str, str]:
-    verifier = secrets.token_urlsafe(64)
-    challenge = (
-        base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest())
-        .rstrip(b"=")
-        .decode()
-    )
-    return verifier, challenge
+    return generate_pkce()
 
 
 def authorization_url(state: str, challenge: str) -> str:
