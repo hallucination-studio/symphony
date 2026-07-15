@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from podium.store.linear import LinearCredentials, LinearRepository
 from podium.store.sqlite import SQLiteStore
 
 
@@ -12,6 +13,10 @@ def open_store(path: Path) -> SQLiteStore:
     store = SQLiteStore(path)
     store.initialize()
     return store
+
+
+def linear(store: SQLiteStore) -> LinearRepository:
+    return LinearRepository(store.connection)
 
 
 def installation(
@@ -35,15 +40,13 @@ def test_credentials_survive_reopen_restart_and_update(tmp_path: Path) -> None:
     store.close()
 
     restarted = SQLiteStore(path)
-    assert restarted.load_linear_credentials("installation-1") == {
-        "access_token": "access-one",
-        "refresh_token": "refresh-one",
-        "expires_at": 1_800_000_000,
-    }
+    assert linear(restarted).load_credentials("installation-1") == LinearCredentials(
+        "access-one", "refresh-one", 1_800_000_000
+    )
     restarted.close()
 
     updated_application = SQLiteStore(path)
-    assert updated_application.load_linear_credentials("installation-1") is not None
+    assert linear(updated_application).load_credentials("installation-1") is not None
     updated_application.close()
 
 
@@ -56,15 +59,13 @@ def test_replace_pair_is_atomic_on_write_failure(tmp_path: Path) -> None:
     )
 
     with pytest.raises(sqlite3.IntegrityError, match="replacement rejected"):
-        store.replace_linear_credentials(
+        linear(store).replace_credentials(
             "installation-1", "access-two", "refresh-two", expires_at=1_900_000_000
         )
 
-    assert store.load_linear_credentials("installation-1") == {
-        "access_token": "access-one",
-        "refresh_token": "refresh-one",
-        "expires_at": 1_800_000_000,
-    }
+    assert linear(store).load_credentials("installation-1") == LinearCredentials(
+        "access-one", "refresh-one", 1_800_000_000
+    )
 
 
 def test_initial_save_failure_leaves_no_installation(tmp_path: Path) -> None:
@@ -83,9 +84,9 @@ def test_initial_save_failure_leaves_no_installation(tmp_path: Path) -> None:
 def test_clear_pair_is_atomic_and_preserves_public_metadata(tmp_path: Path) -> None:
     store = open_store(tmp_path / "podium.db")
     store.save_linear_installation(**installation())
-    store.clear_linear_credentials("installation-1")
+    linear(store).clear_credentials("installation-1")
 
-    assert store.load_linear_credentials("installation-1") is None
+    assert linear(store).load_credentials("installation-1") is None
     row = store.connection.execute(
         """SELECT organization_id, app_user_id, granted_scopes, status,
         access_token, refresh_token FROM linear_installations WHERE installation_id = ?""",
@@ -111,13 +112,11 @@ def test_clear_failure_preserves_complete_connected_pair(tmp_path: Path) -> None
     )
 
     with pytest.raises(sqlite3.IntegrityError, match="clear rejected"):
-        store.clear_linear_credentials("installation-1")
+        linear(store).clear_credentials("installation-1")
 
-    assert store.load_linear_credentials("installation-1") == {
-        "access_token": "access-one",
-        "refresh_token": "refresh-one",
-        "expires_at": 1_800_000_000,
-    }
+    assert linear(store).load_credentials("installation-1") == LinearCredentials(
+        "access-one", "refresh-one", 1_800_000_000
+    )
     assert store.connection.execute(
         "SELECT status FROM linear_installations WHERE installation_id = ?",
         ("installation-1",),
@@ -129,7 +128,11 @@ def test_empty_or_half_token_pairs_are_rejected(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="linear_credential_pair_invalid"):
         store.save_linear_installation(**installation(access_token=""))
     with pytest.raises(ValueError, match="linear_credential_pair_invalid"):
-        store.replace_linear_credentials("missing", "access", "", expires_at=1)
+        linear(store).replace_credentials("missing", "access", "", expires_at=1)
+    with pytest.raises(ValueError, match="linear_credential_pair_invalid"):
+        linear(store).replace_credentials(
+            "missing", "access", "refresh", expires_at=0
+        )
     with pytest.raises(sqlite3.IntegrityError, match="CHECK constraint failed"):
         store.connection.execute(
             """INSERT INTO linear_installations (
@@ -172,20 +175,24 @@ def test_credential_seam_has_no_forbidden_storage_path(
     store.save_linear_installation(
         **installation("outward-access-sentinel", "outward-refresh-sentinel")
     )
-    store.load_linear_credentials("installation-1")
-    store.replace_linear_credentials(
+    credential = linear(store).load_credentials("installation-1")
+    assert credential is not None
+    assert "outward-access-sentinel" not in repr(credential)
+    assert "outward-refresh-sentinel" not in repr(credential)
+    linear(store).replace_credentials(
         "installation-1",
         "replacement-access-sentinel",
         "replacement-refresh-sentinel",
         expires_at=1_900_000_000,
     )
-    store.clear_linear_credentials("installation-1")
+    linear(store).clear_credentials("installation-1")
 
     root = Path(__file__).parents[1]
     sources = "\n".join(
         (root / relative).read_text()
         for relative in (
             "packages/podium/src/podium/store/sqlite.py",
+            "packages/podium/src/podium/store/linear.py",
             "packages/podium/src/podium/store/schema.py",
         )
     ).lower()
@@ -225,3 +232,11 @@ def test_schema_has_only_approved_credential_columns(tmp_path: Path) -> None:
         "last_verified_at",
         "error_code",
     }
+
+
+def test_generic_sqlite_store_has_no_runtime_credential_seam(tmp_path: Path) -> None:
+    store = open_store(tmp_path / "podium.db")
+
+    assert not hasattr(store, "load_linear_credentials")
+    assert not hasattr(store, "replace_linear_credentials")
+    assert not hasattr(store, "clear_linear_credentials")

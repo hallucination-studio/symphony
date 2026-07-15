@@ -46,7 +46,7 @@ def seed_bound_runtime(
             None,
         )
     )
-    store.replace_linear_credentials(
+    linear.replace_credentials(
         "installation-1", access_token, refresh_token, expires_at=999
     )
     linear.replace_projects(

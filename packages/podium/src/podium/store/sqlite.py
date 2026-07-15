@@ -59,48 +59,6 @@ class SQLiteStore:
                 ),
             )
 
-    def load_linear_credentials(self, installation_id: str) -> dict[str, Any] | None:
-        row = self.connection.execute(
-            """SELECT access_token, refresh_token, expires_at
-            FROM linear_installations
-            WHERE installation_id = ? AND status = 'connected'""",
-            (installation_id,),
-        ).fetchone()
-        return dict(row) if row else None
-
-    def replace_linear_credentials(
-        self,
-        installation_id: str,
-        access_token: str,
-        refresh_token: str,
-        *,
-        expires_at: int,
-    ) -> None:
-        _validate_credential_pair(access_token, refresh_token)
-        with self.connection:
-            self.connection.execute("BEGIN IMMEDIATE")
-            cursor = self.connection.execute(
-                """UPDATE linear_installations
-                SET access_token = ?, refresh_token = ?, expires_at = ?, status = 'connected'
-                WHERE installation_id = ?""",
-                (access_token, refresh_token, expires_at, installation_id),
-            )
-            if cursor.rowcount != 1:
-                raise ValueError("linear_installation_not_found")
-
-    def clear_linear_credentials(self, installation_id: str) -> None:
-        with self.connection:
-            self.connection.execute("BEGIN IMMEDIATE")
-            cursor = self.connection.execute(
-                """UPDATE linear_installations
-                SET access_token = NULL, refresh_token = NULL, expires_at = NULL,
-                    status = 'disconnected'
-                WHERE installation_id = ?""",
-                (installation_id,),
-            )
-            if cursor.rowcount != 1:
-                raise ValueError("linear_installation_not_found")
-
     def state(self, binding_id: str) -> dict[str, Any] | None:
         row = self.connection.execute(
             "SELECT state_json FROM reconciliation_state WHERE binding_id = ?", (binding_id,)

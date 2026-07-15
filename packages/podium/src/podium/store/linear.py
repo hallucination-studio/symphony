@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections.abc import Iterable
+from dataclasses import dataclass, field
 
 from podium.linear_models import InstallationMetadata, InstallationStatus, LinearProject
 
@@ -11,6 +12,13 @@ from .records import InstallationRecord, ProjectRecord
 
 class ProjectSelectionConflict(ValueError):
     pass
+
+
+@dataclass(frozen=True)
+class LinearCredentials:
+    access_token: str = field(repr=False)
+    refresh_token: str = field(repr=False)
+    expires_at: int
 
 
 class LinearRepository:
@@ -77,6 +85,54 @@ class LinearRepository:
             last_verified_at=row["last_verified_at"],
             error_code=row["error_code"],
         )
+
+    def load_credentials(self, installation_id: str) -> LinearCredentials | None:
+        row = self.connection.execute(
+            """SELECT access_token, refresh_token, expires_at
+            FROM linear_installations
+            WHERE installation_id = ? AND status = 'connected'""",
+            (installation_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return LinearCredentials(
+            access_token=row["access_token"],
+            refresh_token=row["refresh_token"],
+            expires_at=row["expires_at"],
+        )
+
+    def replace_credentials(
+        self,
+        installation_id: str,
+        access_token: str,
+        refresh_token: str,
+        *,
+        expires_at: int,
+    ) -> None:
+        _validate_credentials(access_token, refresh_token, expires_at)
+        with self.connection:
+            self.connection.execute("BEGIN IMMEDIATE")
+            cursor = self.connection.execute(
+                """UPDATE linear_installations
+                SET access_token = ?, refresh_token = ?, expires_at = ?, status = 'connected'
+                WHERE installation_id = ?""",
+                (access_token, refresh_token, expires_at, installation_id),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("linear_installation_not_found")
+
+    def clear_credentials(self, installation_id: str) -> None:
+        with self.connection:
+            self.connection.execute("BEGIN IMMEDIATE")
+            cursor = self.connection.execute(
+                """UPDATE linear_installations
+                SET access_token = NULL, refresh_token = NULL, expires_at = NULL,
+                    status = 'disconnected'
+                WHERE installation_id = ?""",
+                (installation_id,),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("linear_installation_not_found")
 
     def replace_projects(
         self, installation_id: str, projects: Iterable[LinearProject]
@@ -189,3 +245,14 @@ class LinearRepository:
             )
             for row in rows
         ]
+
+
+def _validate_credentials(
+    access_token: str, refresh_token: str, expires_at: int
+) -> None:
+    if not isinstance(access_token, str) or not access_token:
+        raise ValueError("linear_credential_pair_invalid")
+    if not isinstance(refresh_token, str) or not refresh_token:
+        raise ValueError("linear_credential_pair_invalid")
+    if isinstance(expires_at, bool) or not isinstance(expires_at, int) or expires_at < 1:
+        raise ValueError("linear_credential_pair_invalid")

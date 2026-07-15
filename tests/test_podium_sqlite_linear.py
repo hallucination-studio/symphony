@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from podium.linear_models import InstallationMetadata, InstallationStatus, LinearProject
-from podium.store.linear import LinearRepository, ProjectSelectionConflict
+from podium.store.linear import LinearCredentials, LinearRepository, ProjectSelectionConflict
 from podium.store.migrations import MIGRATIONS, apply_migrations
 from podium.store.sqlite import SQLiteStore
 
@@ -64,11 +64,9 @@ def test_v1_credentials_and_scopes_survive_the_v2_metadata_upgrade(tmp_path: Pat
     apply_migrations(store.connection)
     linear = LinearRepository(store.connection)
 
-    assert store.load_linear_credentials("installation-1") == {
-        "access_token": "access-one",
-        "refresh_token": "refresh-one",
-        "expires_at": 1_800_000_000,
-    }
+    assert linear.load_credentials("installation-1") == LinearCredentials(
+        "access-one", "refresh-one", 1_800_000_000
+    )
     assert linear.installation("installation-1").granted_scopes == (
         "app:assignable",
         "read",
@@ -178,7 +176,7 @@ def test_project_scope_conflicts_and_failed_selection_roll_back(tmp_path: Path) 
 def test_installation_cannot_move_to_another_organization(tmp_path: Path) -> None:
     store, linear = repository(tmp_path / "podium.db")
     linear.save_installation(metadata())
-    store.replace_linear_credentials(
+    linear.replace_credentials(
         "installation-1", "access-one", "refresh-one", expires_at=1_800_000_000
     )
     linear.replace_projects(
@@ -198,8 +196,6 @@ def test_installation_cannot_move_to_another_organization(tmp_path: Path) -> Non
 
     assert linear.installation("installation-1").organization_id == "organization-1"
     assert linear.projects()[0].organization_id == "organization-1"
-    assert store.load_linear_credentials("installation-1") == {
-        "access_token": "access-one",
-        "refresh_token": "refresh-one",
-        "expires_at": 1_800_000_000,
-    }
+    assert linear.load_credentials("installation-1") == LinearCredentials(
+        "access-one", "refresh-one", 1_800_000_000
+    )
