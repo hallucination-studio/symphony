@@ -1,4 +1,6 @@
 mod podium_process;
+#[cfg(test)]
+mod private_ipc;
 
 use std::sync::{Arc, Mutex};
 
