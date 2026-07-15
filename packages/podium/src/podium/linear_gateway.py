@@ -17,6 +17,18 @@ AccessToken = Callable[[str], Awaitable[str]]
 Transport = Callable[..., Awaitable[dict[str, Any]]]
 
 
+def validate_linear_correlation_id(value: object) -> str:
+    if not isinstance(value, str) or _CORRELATION_ID.fullmatch(value) is None:
+        raise ValueError("linear_correlation_id_invalid")
+    return value
+
+
+def validate_linear_envelope_id(value: object) -> str:
+    if not isinstance(value, str) or _CORRELATION_ID.fullmatch(value) is None:
+        raise ValueError("linear_envelope_id_invalid")
+    return value
+
+
 class LinearGatewayFailure(RuntimeError):
     def __init__(self, code: str, correlation_id: str, *, retryable: bool) -> None:
         super().__init__(code)
@@ -102,16 +114,17 @@ class LinearGateway:
     def _validate_envelope(
         self, installation_id: str, operation: object, correlation_id: str
     ) -> None:
-        if (
-            not isinstance(correlation_id, str)
-            or _CORRELATION_ID.fullmatch(correlation_id) is None
-        ):
+        try:
+            validate_linear_correlation_id(correlation_id)
+        except ValueError:
             self._fail("linear_gateway_envelope_invalid", "invalid", False)
         if (
-            not isinstance(installation_id, str)
-            or _CORRELATION_ID.fullmatch(installation_id) is None
-            or not isinstance(operation, str)
+            not isinstance(operation, str)
         ):
+            self._fail("linear_gateway_envelope_invalid", correlation_id, False)
+        try:
+            validate_linear_envelope_id(installation_id)
+        except ValueError:
             self._fail("linear_gateway_envelope_invalid", correlation_id, False)
 
     def _fail(self, code: str, correlation_id: str, retryable: bool) -> None:

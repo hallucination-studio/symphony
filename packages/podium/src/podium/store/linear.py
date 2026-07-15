@@ -202,6 +202,25 @@ class LinearRepository:
             if cursor.rowcount != 1:
                 raise ValueError("linear_installation_not_found")
 
+    def record_error_if_clear_or_owned(
+        self,
+        installation_id: str,
+        error_code: str,
+        *,
+        owned_codes: Iterable[str],
+    ) -> None:
+        if re.fullmatch(r"[a-z][a-z0-9_]*", error_code) is None:
+            raise ValueError("linear_error_code_invalid")
+        owned_codes = tuple(owned_codes)
+        placeholders = ",".join("?" for _ in owned_codes)
+        with self.connection:
+            self.connection.execute(
+                f"""UPDATE linear_installations SET error_code = ?
+                WHERE installation_id = ?
+                AND (error_code IS NULL OR error_code IN ({placeholders}))""",
+                (error_code, installation_id, *owned_codes),
+            )
+
     def _clear_with_status(
         self,
         installation_id: str,
@@ -221,9 +240,14 @@ class LinearRepository:
                 raise ValueError("linear_installation_not_found")
 
     def replace_projects(
-        self, installation_id: str, projects: Iterable[LinearProject]
+        self,
+        installation_id: str,
+        projects: Iterable[LinearProject],
+        *,
+        clear_error_codes: Iterable[str] = (),
     ) -> None:
         projects = tuple(projects)
+        clear_error_codes = tuple(clear_error_codes)
         with self.connection:
             self.connection.execute("BEGIN IMMEDIATE")
             installation = self.connection.execute(
@@ -270,6 +294,13 @@ class LinearRepository:
                         project.name,
                         project.slug,
                     ),
+                )
+            if clear_error_codes:
+                placeholders = ",".join("?" for _ in clear_error_codes)
+                self.connection.execute(
+                    f"""UPDATE linear_installations SET error_code = NULL
+                    WHERE installation_id = ? AND error_code IN ({placeholders})""",
+                    (installation_id, *clear_error_codes),
                 )
 
     def replace_selection(

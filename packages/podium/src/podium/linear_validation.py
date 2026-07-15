@@ -23,7 +23,23 @@ def validate_projects_variables(variables: object) -> dict[str, Any]:
 
 
 def validate_projects_response(data: object, *, first: int) -> dict[str, Any]:
-    if not isinstance(data, dict) or set(data) != {"projects"}:
+    if not isinstance(data, dict) or set(data) != {
+        "viewer",
+        "organization",
+        "projects",
+    }:
+        raise ValueError("linear_gateway_response_invalid")
+    viewer = data["viewer"]
+    organization = data["organization"]
+    if (
+        not isinstance(viewer, dict)
+        or set(viewer) != {"id", "app"}
+        or not _opaque(viewer["id"])
+        or viewer["app"] is not True
+        or not isinstance(organization, dict)
+        or set(organization) != {"id"}
+        or not _opaque(organization["id"])
+    ):
         raise ValueError("linear_gateway_response_invalid")
     projects = data["projects"]
     if not isinstance(projects, dict) or set(projects) != {"nodes", "pageInfo"}:
@@ -45,21 +61,23 @@ def validate_projects_response(data: object, *, first: int) -> dict[str, Any]:
     if has_next and end_cursor is None:
         raise ValueError("linear_gateway_response_invalid")
     return {
+        "viewer": {"id": viewer["id"], "app": True},
+        "organization": {"id": organization["id"]},
         "nodes": validated,
         "page_info": {"has_next_page": has_next, "end_cursor": end_cursor},
     }
 
 
 def _project(node: object) -> dict[str, str]:
-    if not isinstance(node, dict) or set(node) != {"id", "name"}:
+    if not isinstance(node, dict) or set(node) != {"id", "name", "slugId"}:
         raise ValueError("linear_gateway_response_invalid")
     project_id = node["id"]
     name = node["name"]
-    if (
-        not isinstance(project_id, str)
-        or _OPAQUE_ID.fullmatch(project_id) is None
-        or not isinstance(name, str)
-        or _OPAQUE_ID.fullmatch(name) is None
-    ):
+    slug = node["slugId"]
+    if not _opaque(project_id) or not _opaque(name) or not _opaque(slug):
         raise ValueError("linear_gateway_response_invalid")
-    return {"id": project_id, "name": name}
+    return {"id": project_id, "name": name, "slug": slug}
+
+
+def _opaque(value: object) -> bool:
+    return isinstance(value, str) and _OPAQUE_ID.fullmatch(value) is not None

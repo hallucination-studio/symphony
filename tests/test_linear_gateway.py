@@ -9,8 +9,10 @@ from podium.linear_tokens import LinearTokenFailure
 
 def page(*, has_next: bool = False, cursor: str | None = None):
     return {
+        "viewer": {"id": "app-user-1", "app": True},
+        "organization": {"id": "organization-1"},
         "projects": {
-            "nodes": [{"id": "project-1", "name": "Project"}],
+            "nodes": [{"id": "project-1", "name": "Project", "slugId": "project"}],
             "pageInfo": {"hasNextPage": has_next, "endCursor": cursor},
         }
     }
@@ -36,7 +38,9 @@ async def test_gateway_injects_token_only_into_fixed_operation() -> None:
     )
 
     assert result == {
-        "nodes": [{"id": "project-1", "name": "Project"}],
+        "viewer": {"id": "app-user-1", "app": True},
+        "organization": {"id": "organization-1"},
+        "nodes": [{"id": "project-1", "name": "Project", "slug": "project"}],
         "page_info": {"has_next_page": False, "end_cursor": None},
     }
     assert calls[0]["access_token"] == "access-token-sentinel"
