@@ -141,9 +141,128 @@ fn validate_response(
     });
     if response == &expected {
         Ok(())
+    } else if let Some(observation) = lifecycle_failure(response, kind, request_id) {
+        if observation.status == "degraded" {
+            observation.log("podium_lifecycle_degraded");
+            Ok(())
+        } else {
+            Err(observation.encode())
+        }
     } else {
         Err("podium_sidecar_response_invalid".into())
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct LifecycleObservation {
+    pub(crate) status: String,
+    pub(crate) error_code: String,
+    pub(crate) sanitized_reason: String,
+    pub(crate) action_required: bool,
+    pub(crate) retryable: bool,
+    pub(crate) next_action: String,
+}
+
+impl LifecycleObservation {
+    fn encode(&self) -> String {
+        format!(
+            "podium_lifecycle_observed|{}|{}|{}|{}|{}|{}",
+            self.status,
+            self.error_code,
+            self.sanitized_reason,
+            self.action_required,
+            self.retryable,
+            self.next_action,
+        )
+    }
+
+    pub(crate) fn log(&self, event: &str) {
+        eprintln!(
+            "event={event} error_type=lifecycle status={} error_code={} sanitized_reason={} \
+             action_required={} retryable={} next_action={}",
+            self.status,
+            self.error_code,
+            self.sanitized_reason,
+            self.action_required,
+            self.retryable,
+            self.next_action,
+        );
+    }
+}
+
+fn lifecycle_failure(
+    response: &serde_json::Value,
+    kind: &str,
+    request_id: &str,
+) -> Option<LifecycleObservation> {
+    let object = response.as_object()?;
+    let expected_fields = [
+        "kind",
+        "request_id",
+        "protocol_version",
+        "status",
+        "error_code",
+        "sanitized_reason",
+        "action_required",
+        "retryable",
+        "next_action",
+    ];
+    if object.len() != expected_fields.len()
+        || expected_fields.iter().any(|field| !object.contains_key(*field))
+        || object.get("kind")?.as_str()? != kind
+        || object.get("request_id")?.as_str()? != request_id
+        || object.get("protocol_version")?.as_u64()? != 1
+        || !matches!(object.get("status")?.as_str()?, "failed" | "degraded")
+    {
+        return None;
+    }
+    let error_code = object.get("error_code")?.as_str()?;
+    let reason = object.get("sanitized_reason")?.as_str()?;
+    let next_action = object.get("next_action")?.as_str()?;
+    if !safe_code(error_code, 128) || !safe_code(reason, 500) || !safe_code(next_action, 128) {
+        return None;
+    }
+    Some(LifecycleObservation {
+        status: object.get("status")?.as_str()?.to_owned(),
+        error_code: error_code.to_owned(),
+        sanitized_reason: reason.to_owned(),
+        action_required: object.get("action_required")?.as_bool()?,
+        retryable: object.get("retryable")?.as_bool()?,
+        next_action: next_action.to_owned(),
+    })
+}
+
+pub(crate) fn observed_lifecycle_failure(error: String) -> Option<LifecycleObservation> {
+    let mut fields = error.split('|');
+    if fields.next()? != "podium_lifecycle_observed" {
+        return None;
+    }
+    let observation = LifecycleObservation {
+        status: fields.next()?.to_owned(),
+        error_code: fields.next()?.to_owned(),
+        sanitized_reason: fields.next()?.to_owned(),
+        action_required: fields.next()?.parse().ok()?,
+        retryable: fields.next()?.parse().ok()?,
+        next_action: fields.next()?.to_owned(),
+    };
+    if fields.next().is_some()
+        || !matches!(observation.status.as_str(), "failed" | "degraded")
+        || !safe_code(&observation.error_code, 128)
+        || !safe_code(&observation.sanitized_reason, 500)
+        || !safe_code(&observation.next_action, 128)
+    {
+        return None;
+    }
+    Some(observation)
+}
+
+fn safe_code(value: &str, limit: usize) -> bool {
+    !value.is_empty()
+        && value.len() <= limit
+        && value.as_bytes()[0].is_ascii_lowercase()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
 }
 
 #[cfg(test)]
@@ -186,6 +305,57 @@ mod tests {
         assert_eq!(
             validate_response(&response, "handshake.result", "desktop-start", "ready").unwrap_err(),
             "podium_sidecar_response_invalid"
+        );
+    }
+
+    #[test]
+    fn preserves_a_bounded_lifecycle_failure() {
+        let response = serde_json::json!({
+            "kind": "handshake.result",
+            "request_id": "desktop-start",
+            "protocol_version": 1,
+            "status": "failed",
+            "error_code": "podium_database_startup_failed",
+            "sanitized_reason": "database_startup_failed",
+            "action_required": true,
+            "retryable": false,
+            "next_action": "repair_application_data",
+        });
+
+        assert_eq!(
+            validate_response(&response, "handshake.result", "desktop-start", "ready").unwrap_err(),
+            "podium_lifecycle_observed|failed|podium_database_startup_failed|\
+             database_startup_failed|true|false|repair_application_data"
+        );
+    }
+
+    #[test]
+    fn accepts_and_preserves_a_bounded_degraded_lifecycle() {
+        let response = serde_json::json!({
+            "kind": "handshake.result",
+            "request_id": "desktop-start",
+            "protocol_version": 1,
+            "status": "degraded",
+            "error_code": "linear_polling_failed",
+            "sanitized_reason": "linear_poll_timeout",
+            "action_required": true,
+            "retryable": true,
+            "next_action": "retry_linear_polling",
+        });
+
+        assert!(validate_response(&response, "handshake.result", "desktop-start", "ready").is_ok());
+        let encoded = LifecycleObservation {
+            status: "degraded".into(),
+            error_code: "linear_polling_failed".into(),
+            sanitized_reason: "linear_poll_timeout".into(),
+            action_required: true,
+            retryable: true,
+            next_action: "retry_linear_polling".into(),
+        }
+        .encode();
+        assert_eq!(
+            observed_lifecycle_failure(encoded).unwrap().next_action,
+            "retry_linear_polling"
         );
     }
 
