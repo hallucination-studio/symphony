@@ -85,7 +85,7 @@
 
 ## Phase 4：Podium 与 Conductor 私有边界
 
-- [ ] 4.1 扩展正式 local runtime contracts
+- [x] 4.1 扩展正式 local runtime contracts
 - [ ] 4.2 实现 Podium IPC session registry
 - [ ] 4.3 实现 Podium configure/command dispatcher
 - [ ] Checkpoint 4A：Podium IPC server

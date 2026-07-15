@@ -21,10 +21,21 @@ from performer_api.performer_control import (
 )
 from performer_api.labels import is_managed_project_label, managed_project_label_name
 from performer_api.local_runtime import (
+    ConfigureCommand,
+    DispatchAck,
+    DispatchLease,
+    DrainAck,
+    DrainRequest,
+    GatewayRequest,
+    GatewayResponse,
     LOCAL_RUNTIME_PAYLOAD_KINDS,
     LOCAL_RUNTIME_PROTOCOL_VERSION,
     LocalRuntimeEnvelope,
     LocalRuntimeHandshake,
+    LocalRuntimeContext,
+    PerformerEventMessage,
+    RuntimeReportMessage,
+    parse_local_runtime_message,
 )
 from performer_api.turns import (
     ExecuteResult,
@@ -36,7 +47,11 @@ from performer_api.turns import (
     TURN_PROTOCOL_VERSION,
     TurnContext,
 )
-from performer_api.validation import ContractValidationError, validate_plan
+from performer_api.validation import (
+    ContractValidationError,
+    validate_local_runtime_message,
+    validate_plan,
+)
 from performer_api.workflow import AcceptanceCatalog, Plan, PlanRevision, Task
 
 __all__ = [
@@ -44,13 +59,21 @@ __all__ = [
     "CONTROL_OPERATIONS",
     "CONTROL_PROTOCOL_VERSION",
     "ContractValidationError",
+    "ConfigureCommand",
+    "DispatchAck",
+    "DispatchLease",
+    "DrainAck",
+    "DrainRequest",
     "ExecuteResult",
     "GateResult",
+    "GatewayRequest",
+    "GatewayResponse",
     "is_managed_project_label",
     "LOCAL_RUNTIME_PAYLOAD_KINDS",
     "LOCAL_RUNTIME_PROTOCOL_VERSION",
     "LocalRuntimeEnvelope",
     "LocalRuntimeHandshake",
+    "LocalRuntimeContext",
     "managed_project_label_name",
     "Plan",
     "PlanRevision",
@@ -69,12 +92,16 @@ __all__ = [
     "PerformerTurnEvent",
     "PerformerTurnRequest",
     "PerformerTurnResult",
+    "PerformerEventMessage",
     "RuntimePolicy",
     "RuntimePolicyError",
     "RuntimeWait",
+    "RuntimeReportMessage",
     "Task",
     "TURN_PROTOCOL_VERSION",
     "TurnContext",
     "canonical_sha256",
+    "parse_local_runtime_message",
+    "validate_local_runtime_message",
     "validate_plan",
 ]

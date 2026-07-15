@@ -33,7 +33,9 @@ def validate_plan(payload: dict[str, Any]) -> None:
         raise ContractValidationError("checkpoint groups are not supported")
     unknown = set(payload) - _PLAN_FIELDS
     if unknown:
-        raise ContractValidationError(f"unknown plan fields: {', '.join(sorted(unknown))}")
+        raise ContractValidationError(
+            f"unknown plan fields: {', '.join(sorted(unknown))}"
+        )
     if not str(payload.get("summary") or "").strip():
         raise ContractValidationError("summary is required")
 
@@ -50,7 +52,9 @@ def _validate_task(payload: Any, seen: set[str]) -> None:
         raise ContractValidationError("task must be an object")
     unknown = set(payload) - _TASK_FIELDS
     if unknown:
-        raise ContractValidationError(f"unknown task fields: {', '.join(sorted(unknown))}")
+        raise ContractValidationError(
+            f"unknown task fields: {', '.join(sorted(unknown))}"
+        )
     task_id = str(payload.get("id") or "")
     if not task_id or task_id in seen:
         raise ContractValidationError("task ids must be unique and non-empty")
@@ -59,14 +63,37 @@ def _validate_task(payload: Any, seen: set[str]) -> None:
         if not str(payload.get(field) or "").strip():
             raise ContractValidationError(f"{field} is required")
     criteria = payload.get("acceptance_criteria")
-    if not isinstance(criteria, list) or not 1 <= len(criteria) <= 5 or any(not str(item).strip() for item in criteria):
-        raise ContractValidationError("acceptance_criteria must contain 1 to 5 non-empty items")
+    if (
+        not isinstance(criteria, list)
+        or not 1 <= len(criteria) <= 5
+        or any(not str(item).strip() for item in criteria)
+    ):
+        raise ContractValidationError(
+            "acceptance_criteria must contain 1 to 5 non-empty items"
+        )
     commands = payload.get("verification_commands")
-    if not isinstance(commands, list) or not commands or any(not str(item).strip() for item in commands):
+    if (
+        not isinstance(commands, list)
+        or not commands
+        or any(not str(item).strip() for item in commands)
+    ):
         raise ContractValidationError("verification_commands must contain a command")
     files = payload.get("files_likely_touched")
-    if not isinstance(files, list) or not files or any(not str(item).strip() for item in files):
+    if (
+        not isinstance(files, list)
+        or not files
+        or any(not str(item).strip() for item in files)
+    ):
         raise ContractValidationError("files_likely_touched must contain a path")
 
 
-__all__ = ["ContractValidationError", "validate_plan"]
+def validate_local_runtime_message(payload: dict[str, Any]):
+    from performer_api.local_runtime import parse_local_runtime_message
+
+    try:
+        return parse_local_runtime_message(payload)
+    except ValueError as error:
+        raise ContractValidationError(str(error)) from None
+
+
+__all__ = ["ContractValidationError", "validate_local_runtime_message", "validate_plan"]
