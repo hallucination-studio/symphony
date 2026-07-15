@@ -52,6 +52,36 @@ async def exchange_public_code(
     return payload
 
 
+async def refresh_public_token(
+    refresh_token: str,
+    *,
+    transport: httpx.AsyncBaseTransport | None = None,
+) -> dict[str, object]:
+    async with httpx.AsyncClient(timeout=30, trust_env=False, transport=transport) as client:
+        response = await client.post(
+            LINEAR_TOKEN_URL,
+            data={
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
+                "client_id": linear_oauth_client_id(),
+            },
+        )
+    try:
+        payload = response.json()
+    except ValueError as error:
+        raise ValueError("linear_token_refresh_failed") from error
+    if response.status_code != 200 or not isinstance(payload, dict):
+        code = (
+            "linear_invalid_grant"
+            if response.status_code == 400
+            and isinstance(payload, dict)
+            and payload.get("error") == "invalid_grant"
+            else "linear_token_refresh_failed"
+        )
+        raise ValueError(code)
+    return payload
+
+
 async def revoke_probe_tokens(
     token: dict[str, object],
     *,

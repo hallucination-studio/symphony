@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -114,7 +115,8 @@ class LinearRepository:
             self.connection.execute("BEGIN IMMEDIATE")
             cursor = self.connection.execute(
                 """UPDATE linear_installations
-                SET access_token = ?, refresh_token = ?, expires_at = ?, status = 'connected'
+                SET access_token = ?, refresh_token = ?, expires_at = ?,
+                    status = 'connected', error_code = NULL
                 WHERE installation_id = ?""",
                 (access_token, refresh_token, expires_at, installation_id),
             )
@@ -130,6 +132,21 @@ class LinearRepository:
                     status = 'disconnected'
                 WHERE installation_id = ?""",
                 (installation_id,),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("linear_installation_not_found")
+
+    def reject_credentials(self, installation_id: str, error_code: str) -> None:
+        if re.fullmatch(r"[a-z][a-z0-9_]*", error_code) is None:
+            raise ValueError("linear_error_code_invalid")
+        with self.connection:
+            self.connection.execute("BEGIN IMMEDIATE")
+            cursor = self.connection.execute(
+                """UPDATE linear_installations
+                SET access_token = NULL, refresh_token = NULL, expires_at = NULL,
+                    status = 'reauthorization_required', error_code = ?
+                WHERE installation_id = ?""",
+                (error_code, installation_id),
             )
             if cursor.rowcount != 1:
                 raise ValueError("linear_installation_not_found")
