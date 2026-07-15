@@ -87,3 +87,25 @@ LINEAR_METADATA_STATEMENTS = (
         selected INTEGER NOT NULL DEFAULT 0 CHECK (selected IN (0, 1))
     )""",
 )
+
+BINDING_REPORT_STATEMENTS = (
+    """CREATE TABLE conductor_bindings (
+        binding_id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL REFERENCES linear_projects(project_id) ON DELETE CASCADE,
+        conductor_id TEXT NOT NULL,
+        generation INTEGER NOT NULL CHECK (generation > 0),
+        active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1))
+    )""",
+    """CREATE UNIQUE INDEX active_binding_project_unique
+    ON conductor_bindings(project_id) WHERE active = 1""",
+    """CREATE UNIQUE INDEX active_binding_conductor_unique
+    ON conductor_bindings(conductor_id) WHERE active = 1""",
+    """CREATE TABLE runtime_reports (
+        binding_id TEXT PRIMARY KEY REFERENCES conductor_bindings(binding_id) ON DELETE CASCADE,
+        generation INTEGER NOT NULL CHECK (generation > 0),
+        instance_id TEXT NOT NULL CHECK (length(instance_id) BETWEEN 1 AND 128),
+        status TEXT NOT NULL CHECK (status IN ('starting', 'ready', 'degraded', 'stopped')),
+        heartbeat_at INTEGER NOT NULL CHECK (heartbeat_at >= 0),
+        error_code TEXT CHECK (error_code IS NULL OR length(error_code) BETWEEN 1 AND 128)
+    )""",
+)

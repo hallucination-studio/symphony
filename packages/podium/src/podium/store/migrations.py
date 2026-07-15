@@ -3,7 +3,11 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass
 
-from .schema import LINEAR_METADATA_STATEMENTS, SQLITE_SCHEMA_STATEMENTS
+from .schema import (
+    BINDING_REPORT_STATEMENTS,
+    LINEAR_METADATA_STATEMENTS,
+    SQLITE_SCHEMA_STATEMENTS,
+)
 
 
 @dataclass(frozen=True)
@@ -15,6 +19,7 @@ class Migration:
 MIGRATIONS = (
     Migration(1, SQLITE_SCHEMA_STATEMENTS),
     Migration(2, LINEAR_METADATA_STATEMENTS),
+    Migration(3, BINDING_REPORT_STATEMENTS),
 )
 
 
