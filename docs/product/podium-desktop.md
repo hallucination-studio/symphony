@@ -54,7 +54,7 @@ dispatch, Managed Run, Gate, or provider business logic.
 Podium owns `podium.db` in the OS application-data directory. It is the only
 process that opens the database for writes. The approved schema contains local
 control-plane state: Linear installation metadata and its plaintext
-access/refresh token pair, selected projects, bindings and generations,
+access/refresh token pair, discovered project metadata, desired bindings and generations,
 polling checkpoints, delegation epochs, dispatches, leases, runtime commands,
 bounded reports, failures, and application events.
 
@@ -140,8 +140,26 @@ The transport and control-plane migration preserves:
 The existing React application and `packages/podium/web/DESIGN.md` remain the
 visual source of truth. The full window contains Overview, Linear, Runtimes,
 Performer, and Managed Runs surfaces. Setup follows the first incomplete real
-readiness step: connect Linear, select projects, bind a repository and
-Conductor for each project, validate Performer, then become ready.
+readiness step: connect Linear, create a Conductor by choosing one accessible
+project and one local repository, validate Performer, then become ready.
+
+Project choice is part of **Create Conductor**. Podium does not persist a
+standalone selected-project setup state. One closed create command atomically
+records the desired binding and isolated runtime identity before Desktop starts
+the packaged Conductor. After creation, Desktop reconciles immediately. On
+every later application start it reads all active desired bindings from Podium
+and automatically starts or reconnects their Conductors. Customers do not run
+an installation script or an ambient `conductor` command; checkout commands are
+developer tooling only.
+
+React submits only the chosen project id to the native Create Conductor action.
+Tauri owns the directory picker and forwards its canonical repository result to
+Podium over the bounded command bridge; there is no free-text repository path,
+shell passthrough, or arbitrary file command. Podium atomically persists the
+project, repository, stable Conductor id, generation, isolated data-root key,
+and `desired=running`. Process observation is separate: `pending -> starting ->
+ready | failed`. A failed start keeps the desired binding and a concrete error
+so application restart can reconcile it again.
 
 The first macOS menu-bar popover is read-only except for `Open Podium` and
 `Quit`. It shows bounded health and needs-attention state. Review suggestions
@@ -154,14 +172,15 @@ The user approved these decisions as one scope on 2026-07-15:
 1. Tauri 2 with the existing React and TypeScript UI.
 2. The Podium Python package remains a local sidecar rather than a Rust rewrite.
 3. Desktop supervises one Podium and multiple isolated Conductors.
-4. One local profile connects to one Linear organization and may select many
-   projects.
-5. Each selected project has its own repository binding, Conductor data root,
-   and process.
+4. One local profile connects to one Linear organization and may discover many
+   accessible projects.
+5. Each created Conductor explicitly chooses one unbound project and one local
+   repository and owns an isolated data root and process.
 6. All platforms use inherited private channels first; named endpoints require
    a separately approved fallback.
 7. Closing the main window hides it; explicit Quit performs bounded shutdown.
-8. The first release does not launch at login.
+8. The first release does not launch Podium at OS login. Once the user opens
+   Podium, all active desired Conductors auto-start.
 9. Old Podium/account/PostgreSQL data and old `workflow.db` files are not
    automatically migrated.
 10. macOS has the complete popover; Windows has an equivalent tray; Linux may

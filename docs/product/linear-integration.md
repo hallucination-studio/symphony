@@ -27,7 +27,7 @@ route, or cross-model vocabulary. `[D05] [D06]`
 
 | Field | Record |
 |---|---|
-| `authorized` | Fixed Linear app; S256 PKCE; local callback; plaintext Linear access/refresh tokens in Podium-owned `podium.db`; project selection; outbound polling; current pool/harness; parent/Sub Issue/Human Action/Gate projection; Codex-only closed `performer_event` in Podium. |
+| `authorized` | Fixed Linear app; S256 PKCE; local callback; plaintext Linear access/refresh tokens in Podium-owned `podium.db`; project discovery and project choice during Create Conductor; outbound polling; current pool/harness; parent/Sub Issue/Human Action/Gate projection; Codex-only closed `performer_event` in Podium. |
 | `required_consequences` | Installation metadata and its token pair commit atomically; restart/update reuse the database; installation and credential health remain separate states; all pagination and checkpoints are durable; one delegation epoch creates at most one dispatch; live events are bounded, sanitized, fenced, and advisory; failures remain visible. |
 | `out_of_scope` | Linear app configuration revision, mutation, candidate, cutover, or migration; OS credential store or Keychain; application encryption/key/ciphertext; memory-only credentials; credential migration or dual storage; public ingress; webhook relay; tunnel; custom Linear app form; distributed client secret; personal API key fallback; mention intake; raw Codex streaming; provider choice; second scheduler; pool changes; automatic app removal; and live-event projection into Linear. |
 | `assumptions_requiring_approval` | None. Any inbound architecture, new provider, or new customer control path is a separate product decision. |
@@ -39,7 +39,7 @@ The supported workflow is deliberately short: `[D07]`
 
 1. The customer opens Podium Desktop and chooses **Connect Linear**.
 2. A workspace admin installs the fixed Symphony app.
-3. The customer selects projects and binds one repository/Conductor to each.
+3. The customer creates each Conductor by choosing one accessible project and one local repository; Desktop starts it automatically.
 4. A human delegates a root issue to the Symphony app user.
 5. Podium discovers the delegation by polling and queues one dispatch.
 6. Conductor creates or resumes one Managed Run.
@@ -55,7 +55,7 @@ queue, pool, cursor, or event mapping. **Connected** means all of the following:
 - Podium owns a complete refreshable credential in `podium.db`;
 - `viewer` verifies the expected app actor, organization, app-user id, and
   required scopes;
-- every selected project is accessible to that installation.
+- every project used by an active desired Conductor binding is accessible to that installation.
 
 A Linear **Manage** button proves only that the workspace app already exists.
 It does not prove that this Podium profile owns a credential and is never
@@ -94,7 +94,7 @@ Authority is fixed: `[D03] [D05]`
 
 | Object | Owner | Authority |
 |---|---|---|
-| Linear installation, token, selected projects, polling checkpoint, delegation epoch, dispatch and lease | Podium | Authenticate, observe, deduplicate, route, proxy, and project |
+| Linear installation, token, discovered projects, desired Conductor bindings, polling checkpoint, delegation epoch, dispatch and lease | Podium | Authenticate, observe, deduplicate, route, proxy, and project |
 | Managed Run, approved plan revision, work-item order, runtime wait, verification, Gate and terminal state | Conductor | Decide what work may run and whether it passes |
 | One fenced Codex turn | Performer | Execute the requested turn and return closed contracts |
 | Parent/Sub Issue/Human Action content | Podium projection of Conductor truth | Display and accepted human-action input only |
@@ -143,7 +143,7 @@ The formal flow is: `[D02] [D08]`
 
 Only one authorization attempt may be active. State mismatch, expired state,
 duplicate callback, callback timeout, wrong actor, missing scope, failed
-`viewer`, inaccessible selected project, or unavailable SQLite storage
+`viewer`, inaccessible bound project, or unavailable SQLite storage
 fails closed with a durable sanitized reason. Browser navigation or button text
 never changes connection state. `[D02] [D08]`
 
@@ -229,22 +229,26 @@ dual store, or `installed=true` shortcut for readiness.
 
 ### 5.1 Project binding
 
-Project discovery follows all cursor pages. A customer may select multiple
-projects visible to the installation, but each selected project has at most one
-active Conductor, and each Conductor binds exactly one project and repository.
-Stable Linear ids are routing truth; project names, slugs, human assignees, and
-labels are display metadata. Project selection never mutates project
-membership. `[D01] [D03]`
+Project discovery follows all cursor pages and stores a secret-free catalog.
+There is no standalone selected-project mutation. A customer chooses one
+unbound accessible project and one local repository inside **Create
+Conductor**. The resulting desired binding is the polling/dispatch eligibility
+fact: each project has at most one active Conductor, and each Conductor binds
+exactly one project and repository. Stable Linear ids are routing truth;
+project names and slugs are display metadata. Creating a binding never mutates
+Linear project membership and never repeats OAuth. `[D01] [D03]`
 
-Adding an accessible project does not repeat OAuth. An unbound project may be
-deselected directly; a bound project must be unbound after active work is
-settled. `[D03]`
+After the binding transaction commits, Desktop immediately starts the bundled
+Conductor. On application restart it automatically reconciles every active
+desired binding. Customers do not install Conductors with scripts or ambient
+commands. Process failure preserves desired state and remains visible rather
+than deleting the binding or claiming readiness. `[D03]`
 
 ### 5.2 Reliable outbound polling
 
 Polling is the only production intake path. A new binding performs a complete
 baseline before incremental scans. Incremental scans include delegated and
-no-longer-delegated issues in the selected project so ownership transitions
+no-longer-delegated issues in each actively bound project so ownership transitions
 cannot disappear. Parent/projection issues are excluded before dispatch.
 `[D01] [D03]`
 
@@ -270,7 +274,7 @@ opens a new epoch and may dispatch the same durable Managed Run again.
 The existing pool is unchanged. Podium queues eligible dispatches; the unique
 project-bound Conductor leases them under existing heartbeat, expiry, reclaim,
 and fencing rules. Routing requires the active installation, organization,
-selected project, app user, unique binding, repository, eligible issue,
+bound project, app user, unique binding, repository, eligible issue,
 blockers, and healthy runtime to agree. It never routes by label or human
 assignee. `[D03]`
 
@@ -466,6 +470,9 @@ The polling core is accepted only when:
 - token values exist only in the approved SQLite installation fields and are
   absent from browser/API/Tauri/Conductor/log/report/artifact/Linear output;
 - project and issue queries exhaust all cursor pages;
+- Create Conductor atomically binds one accessible project and one native-picked
+  repository, starts the bundled Conductor immediately, and restores it on
+  Desktop restart without an install script or separate Start step;
 - an atomic checkpoint and delegation epoch produce exactly one dispatch;
 - one real Managed Run shows approved plan, ordered Sub Issues, current task,
   verification, Gate pass or one rework then block, runtime waits, and final

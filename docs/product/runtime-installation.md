@@ -1,43 +1,59 @@
-# Runtime installation
+# Runtime creation and Desktop supervision
 
-## Current installer contract
+## Target contract
 
-Podium serves `/install.sh` for a machine that already has the `conductor`
-command available. The script accepts a one-time enrollment token and Podium
-URL, creates the selected data root, exchanges the token at
-`/api/v1/runtime/enroll`, and writes the enrolled runtime and proxy credentials
-to the local Conductor settings API.
+Podium Desktop owns Conductor creation and process lifecycle. The customer does
+not install, enroll, configure, or start a Conductor with a shell script or
+ambient command.
 
-By default it starts the installed `conductor` command as a detached local
-process on port `8091`, waits for its local HTTP health response, and writes
-its stdout/stderr to `/tmp/podium-conductor-<runtime-id>.log`. `--no-start`
-leaves process startup to the operator.
+The only creation flow is **Create Conductor**:
 
-The generated command can set the data root, Conductor command, and local port.
-The fresh local `workflow.db`, logs, and generic Performer readiness state live
-under that data root; separate Conductors should use separate roots. Provider
-credential/config stores are provider-owned fixed process contexts and are not
-materialized per attempt under Conductor state.
+1. React chooses one unbound project from Podium's accessible Linear catalog.
+2. A native Tauri command opens the directory picker. React never supplies a
+   free-text repository path.
+3. Tauri canonicalizes the chosen existing repository and forwards project id
+   plus repository path to Podium over the private bounded command bridge.
+4. Podium atomically persists one desired binding containing stable Conductor
+   identity, project, repository, generation, isolated data-root key, and
+   `desired=running`.
+5. Desktop immediately starts the target-specific bundled Conductor with its
+   isolated private IPC, data root, and log.
+6. Matching session/configuration ACK and Performer readiness move observed
+   state from `pending` through `starting` to `ready`.
 
-## What the current installer does not do
+The desired binding commits before process start. A failed start records a
+stable observed failure and preserves desired state; it does not create a half
+binding, roll back customer configuration, or claim readiness.
 
-It does not download or verify a runtime package, register `systemd` or
-`launchd`, manage update channels, install a service manager unit, or retain a
-rollback image. Those behaviors must not be documented or relied on until they
-exist in the installer.
+## Application restart
 
-## Binding after enrollment
+Whenever the user opens Podium Desktop, Desktop reads every active desired
+binding and automatically starts or reconnects the matching bundled Conductor.
+Each project/repository owns a separate process, private channel, data root,
+`workflow.db`, and logs. Duplicate active project or Conductor identity fails
+closed before process start.
 
-Enrollment gives Podium an authenticated runtime identity. Podium then sends a
-versioned project configuration through HTTP command polling. Conductor accepts
-one project/repository instance, validates the local repository, acknowledges
-the binding, and thereafter leases dispatches and reports state over HTTP.
-Linear access remains server-side through Podium's proxy; Linear OAuth tokens
-never enter installer output or Conductor configuration.
+Podium does not launch at OS login in the MVP. Auto-start means “start desired
+Conductors when Podium Desktop is running,” not a background daemon or system
+service.
 
-## Secret handling
+## Packaging boundary
 
-Enrollment and proxy tokens are transient setup inputs. The installer must not
-print them; its optional enrollment-result file is created with mode `0600`.
-Operator logs and browser responses expose only sanitized status and identity
-metadata.
+Production resolves Podium, Conductor, and Performer only from the signed
+target-specific Desktop bundle and approved application-data paths. It does not
+use `/install.sh`, enrollment tokens, public runtime URLs, detached ports,
+checkout paths, `PYTHONPATH`, ambient Python, or an ambient `conductor` command.
+`make install`, `make dev`, and direct commands remain repository development
+tools only.
+
+Linear authorization remains inside Podium. Tokens, headers, and credentials
+never enter the native create result, React, Conductor configuration, process
+arguments, logs, or snapshots.
+
+## MVP exclusions
+
+The MVP does not add binding edit/revision UI, remote Conductors, automatic
+repository discovery, system service registration, launch at login, update
+channels, or a second process manager. Existing legacy installer/enrollment
+code is retained only until its ordered Phase 8 deletion and is not an accepted
+target path.

@@ -3,6 +3,15 @@
 `docs/modules/podium-web.md` is the code-level baseline. This page records the
 customer-facing scope without claiming unimplemented reporting detail.
 
+The selection/enrollment/install surfaces below describe the current legacy
+browser product only. ADR-0010 supersedes them for the accepted Desktop target:
+Desktop uses a discovered project catalog and one **Create Conductor** action
+that chooses project + repository, commits a desired binding, and auto-starts
+the bundled Conductor. There is no standalone project selection or customer
+installation script in the target. These legacy surfaces remain documented
+until their ordered Phase 8 deletion rather than being mistaken for Desktop
+requirements.
+
 ## Purpose
 
 Podium Web is the secret-safe browser surface for onboarding a workspace,

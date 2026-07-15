@@ -6,8 +6,8 @@ This file captures repo-specific commands, product boundaries, coding standards,
 
 Symphony is one product, not four unrelated projects. The repository remains `symphony` because the system is the full orchestra:
 
-- `podium` is the SaaS-facing web boundary. It owns authentication, Linear
-  installations, selected projects, Conductor enrollment/binding, dispatch,
+- `podium` is the Desktop-local control-plane and UI boundary. It owns authentication, Linear
+  installations, discovered projects, desired Conductor bindings, dispatch,
   runtime configuration, the Linear proxy, and operator views.
 - `conductor` is the customer-side daemon. One Conductor binds exactly one
   Linear project and one repository, owns that project's durable managed-run
@@ -20,19 +20,22 @@ Symphony is one product, not four unrelated projects. The repository remains `sy
   not own runtime implementation, persistence, Linear calls, secrets, arbitrary
   transport data, or provider-specific types.
 
-A Podium workspace may select multiple Linear projects, while one project has
+A Podium workspace may discover multiple Linear projects, while one project has
 at most one active Conductor binding. Multiple isolated Conductors may run on
-one host for different projects. Setup is only the readiness composition;
-Integrations owns ongoing Linear authorization/project management and Runtimes
-owns ongoing Conductor installation/binding. Adding either resource does not
-repeat an otherwise healthy Linear authorization.
+one host for different projects. Project choice belongs to Create Conductor:
+the customer chooses one accessible project and one repository in a single
+flow, Podium commits the desired binding, and Desktop immediately starts the
+bundled Conductor. Every Desktop start automatically reconciles all active
+desired bindings. Production does not use a Conductor installation script or
+ambient command. Adding a Conductor does not repeat an otherwise healthy Linear
+authorization.
 
 Package boundaries are runtime boundaries, not product boundaries. Keep user-facing language anchored in Symphony as the whole system, with Podium, Conductor, and Performer as roles inside that system.
 
 ## Approved Podium Desktop Target
 
 The accepted target architecture is documented in
-`docs/product/podium-desktop.md`, ADR-0007, ADR-0008, and ADR-0009. Podium
+`docs/product/podium-desktop.md`, ADR-0007, ADR-0008, ADR-0009, and ADR-0010. Podium
 becomes a Tauri-hosted local process using `podium.db`; each isolated Conductor
 retains its own `workflow.db`; Podium and Conductor use private inherited IPC;
 Linear access and refresh tokens persist as plaintext fields in Podium-owned
@@ -296,9 +299,9 @@ A real run must:
    Podium's fixed callback configuration; never inject a human or deployment-
    global access token into the managed path.
 2. Complete the real OAuth callback and record the accepted organization,
-   workspace-specific app user, scopes, token health, and selected project.
-3. Start and bind one isolated Conductor to that project and the real fixture
-   repository before creating the business issue.
+   workspace-specific app user, scopes, token health, and accessible project catalog.
+3. Create one isolated Conductor by choosing that project and the real fixture
+   repository; verify Desktop starts it automatically before creating the business issue.
 4. Create a real Linear business issue after the project binding is ready.
 5. Let fully paginated baseline/incremental polling dispatch the issue exactly
    once for its delegation epoch, then let Conductor operate Performer through
@@ -321,12 +324,14 @@ and the module baselines:
    `actor=app`; verify callback acceptance for actor, scopes, organization,
    workspace-specific app user, token metadata, and fully paginated project
    access. Verify success and denied consent return to `/setup/linear`.
-3. Select the real test project without mutating project `memberIds`.
-4. Create a named Conductor enrollment token, run the generated install command,
-   and verify the isolated runtime enrolls online but unbound.
-5. Bind that Conductor to exactly one selected project and one real fixture
-   repository; verify a second project binding and duplicate active Conductor
-   for the project are rejected.
+3. Open Create Conductor, choose the real test project without mutating project
+   `memberIds`, and choose one real fixture repository through the approved picker.
+4. Submit one closed create command and verify Podium atomically records the
+   desired binding before Desktop automatically starts the bundled Conductor;
+   no enrollment token, generated install command, ambient CLI, or unbound
+   runtime step is allowed.
+5. Verify Desktop restart automatically restores that Conductor and that a
+   second active binding or duplicate active Conductor for the project is rejected.
 6. Verify the exact `symphony:conductor/<Name>-<public-id>` project label, while
    confirming routing uses the durable project binding rather than that label.
 7. Delegate a real Linear issue to the installed workspace app user. Verify a

@@ -14,6 +14,10 @@ gates in this ADR and
 [`podium-desktop.md`](../product/podium-desktop.md) pass. Acceptance of the
 target does not claim that those gates have already passed.
 
+ADR-0010 refines this decision by making project choice part of one Desktop
+Create Conductor flow and replacing customer installation/enrollment scripts
+with immediate and application-start desired-binding reconciliation.
+
 ## Context
 
 Podium currently runs as a SaaS BFF/static host backed by PostgreSQL. Local
@@ -42,8 +46,8 @@ The main constraints are:
 ## Decision
 
 Use Tauri 2 as a native shell around the existing React UI. Tauri supervises a
-local Podium Python sidecar and one isolated Conductor process for each selected
-Linear project/repository binding. Conductor continues to launch installed
+local Podium Python sidecar and one isolated Conductor process for each active
+desired project/repository binding. Conductor continues to launch installed
 Performer control and fenced-turn processes.
 
 Podium uses local SQLite `podium.db` for its control-plane state. Every
@@ -69,7 +73,7 @@ legacy data migration, compatibility adapters, or dual writes.
 
 ### Podium
 
-Owns Linear OAuth/token use, project selection, bindings, polling, delegation
+Owns Linear OAuth/token use, the project catalog, desired bindings, polling, delegation
 epochs, dispatches, `podium.db`, and bounded UI/runtime snapshots. It does not
 own `workflow.db`, Gate decisions, Performer SDKs, or Conductor internals.
 
