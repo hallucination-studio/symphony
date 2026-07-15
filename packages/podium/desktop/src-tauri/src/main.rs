@@ -1,3 +1,4 @@
+mod oauth;
 mod podium_process;
 #[cfg(test)]
 mod private_ipc;
@@ -5,6 +6,9 @@ mod private_ipc;
 use std::sync::{Arc, Mutex};
 
 fn main() {
+    if oauth::fixed_manifest().is_err() {
+        fail("linear_client_id_missing", "linear_client_id_missing");
+    }
     let process = Arc::new(Mutex::new(None));
     let setup_process = Arc::clone(&process);
     let app = tauri::Builder::default()

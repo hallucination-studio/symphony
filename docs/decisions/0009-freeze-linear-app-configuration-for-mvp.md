@@ -32,11 +32,14 @@ The MVP has exactly one fixed Linear app configuration containing:
 
 There is no `manifest_revision`, `application_config_revision`, configuration
 version, candidate configuration, cutover, compatibility branch, or app-config
-migration. UI, environment, and SQLite cannot override or mutate the fixed
-values. Installation records do not persist a configuration revision.
+migration. The required `LINEAR_CLIENT_ID` process environment supplies the
+release-owned public client id; UI and SQLite cannot override or mutate it,
+and callback, actor, and scopes remain code-owned. Installation records do not
+persist a configuration revision.
 
 The installed Python package and Desktop bundle must contain the same exact
-fixed resource. A missing resource or unexpected field/value fails closed. A
+fixed non-client-id resource. A missing client-id environment value, missing
+resource, or unexpected field/value fails closed. A
 future need to change the client id, callback, actor, or scopes requires a new
 product decision and design; the MVP does not pre-build that path.
 

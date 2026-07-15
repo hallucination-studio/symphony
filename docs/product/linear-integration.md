@@ -108,14 +108,17 @@ leave the Managed Run result unchanged. `[D05]`
 
 ### 4.1 Manifest and permissions
 
-Symphony ships one fixed public app configuration with a fixed client id,
-fixed loopback redirect, `actor=app`, S256 PKCE, and exact scopes
+Symphony ships one fixed public app configuration whose public client id comes
+from the required `LINEAR_CLIENT_ID` process environment, with a fixed loopback
+redirect, `actor=app`, S256 PKCE, and exact scopes
 `read`, `write`, and `app:assignable`. The desktop contains no Linear client
 secret and exposes no custom-app form. Workspace installation and later project
 selection are separate operations. `[D02]`
 
-Release configuration, not the browser or environment, owns the client id,
-redirect URI, actor, and scopes. The MVP stores no manifest/config revision and
+The process environment supplies only the release-owned public client id; the
+browser, UI, and SQLite cannot supply or mutate it. Release code owns the
+redirect URI, actor, and scopes. Missing or empty `LINEAR_CLIENT_ID` fails
+readiness. The MVP stores no manifest/config revision and
 has no application-configuration mutation, migration, candidate, cutover, or
 compatibility path. A future change requires a new product decision rather
 than a dormant runtime branch. `[D02]`

@@ -70,8 +70,9 @@ runtime waits, evidence, and manifests. Symphony does not merge or dual-write
 ## Linear authorization and secrets
 
 The desktop uses one fixed public Linear application manifest with S256 PKCE
-and a fixed loopback callback. The UI, environment, and databases cannot
-override or mutate the client id, callback, scopes, or actor. The client
+and a fixed loopback callback. The required `LINEAR_CLIENT_ID` process
+environment supplies the release-owned public client id; the UI and databases
+cannot override it, and callback, scopes, and actor remain code-owned. The client
 contains no Linear application secret and offers no custom application form.
 The MVP stores no manifest/config revision and has no application-configuration
 change, migration, candidate, or cutover path.
