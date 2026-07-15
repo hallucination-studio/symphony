@@ -81,7 +81,7 @@
 - [x] 3.8 实现 project discovery 全分页
 - [x] 3.9 实现 accessible project catalog command
 - [x] 3.10 实现 atomic Create Conductor desired binding
-- [ ] Checkpoint 3C：Linear 项目闭环
+- [x] Checkpoint 3C：Linear 项目闭环（local evidence；real OAuth 保留 Phase 7）
 
 ## Phase 4：Podium 与 Conductor 私有边界
 
