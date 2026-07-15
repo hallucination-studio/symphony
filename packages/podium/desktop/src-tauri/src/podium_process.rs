@@ -56,6 +56,14 @@ impl PodiumProcess {
             .map_err(|error| format!("podium_sidecar_status_failed:{error}"))
     }
 
+    pub(crate) fn command(
+        &mut self,
+        request: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        write_value(&mut self.child, request)?;
+        self.read_response(HANDSHAKE_TIMEOUT)
+    }
+
     fn read_response(&self, timeout: Duration) -> Result<serde_json::Value, String> {
         self.responses
             .recv_timeout(timeout)
@@ -88,12 +96,25 @@ fn sidecar_path() -> Result<PathBuf, String> {
 }
 
 fn write_request(child: &mut Child, kind: &str, request_id: &str) -> Result<(), String> {
-    let body =
-        format!("{{\"kind\":\"{kind}\",\"request_id\":\"{request_id}\",\"protocol_version\":1}}");
+    write_value(
+        child,
+        &serde_json::json!({
+            "kind": kind,
+            "request_id": request_id,
+            "protocol_version": 1,
+        }),
+    )
+}
+
+fn write_value(child: &mut Child, value: &serde_json::Value) -> Result<(), String> {
+    let body = serde_json::to_vec(value).map_err(|_| "podium_sidecar_json_invalid")?;
+    if body.len() > FRAME_LIMIT {
+        return Err("podium_sidecar_frame_too_large".into());
+    }
     let stdin = child.stdin.as_mut().ok_or("podium_sidecar_stdin_missing")?;
     stdin
         .write_all(&(body.len() as u32).to_be_bytes())
-        .and_then(|_| stdin.write_all(body.as_bytes()))
+        .and_then(|_| stdin.write_all(&body))
         .and_then(|_| stdin.flush())
         .map_err(|error| format!("podium_sidecar_write_failed:{error}"))
 }

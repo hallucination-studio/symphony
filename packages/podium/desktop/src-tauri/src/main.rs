@@ -1,3 +1,4 @@
+mod commands;
 pub mod conductor_process;
 mod oauth;
 mod podium_process;
@@ -15,6 +16,8 @@ fn main() {
     let setup_process = Arc::clone(&process);
     let setup_error = Arc::clone(&startup_error);
     let app = tauri::Builder::default()
+        .manage(Arc::clone(&process))
+        .invoke_handler(tauri::generate_handler![commands::podium_command])
         .setup(move |_| {
             let child = podium_process::PodiumProcess::start().map_err(|error| {
                 *setup_error.lock().expect("podium startup error lock poisoned") =
