@@ -39,20 +39,38 @@ impl ConductorProcess {
     }
 
     pub fn shutdown(&mut self) {
-        terminate(&mut self.child);
-        let deadline = Instant::now() + STOP_TIMEOUT;
-        while Instant::now() < deadline {
-            if self.child.try_wait().ok().flatten().is_some() {
-                return;
-            }
-            thread::sleep(STOP_POLL_INTERVAL);
+        if let Err(error_code) = self.shutdown_checked() {
+            eprintln!(
+                "event=conductor_process_shutdown_failed error_type=process_lifecycle \
+                 error_code={error_code} sanitized_reason={error_code} action_required=true \
+                 retryable=false next_action=inspect_desktop_runtime"
+            );
         }
-        self.stop();
     }
 
-    fn stop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+    pub fn shutdown_checked(&mut self) -> Result<(), &'static str> {
+        if self.exited().map_err(|_| "conductor_status_failed")? {
+            return Ok(());
+        }
+        terminate(&mut self.child)?;
+        let deadline = Instant::now() + STOP_TIMEOUT;
+        while Instant::now() < deadline {
+            match self.child.try_wait() {
+                Ok(Some(_)) => return Ok(()),
+                Ok(None) => thread::sleep(STOP_POLL_INTERVAL),
+                Err(_) => return Err("conductor_status_failed"),
+            }
+        }
+        self.stop()
+    }
+
+    fn stop(&mut self) -> Result<(), &'static str> {
+        if self.child.try_wait().map_err(|_| "conductor_status_failed")?.is_some() {
+            return Ok(());
+        }
+        self.child.kill().map_err(|_| "conductor_kill_failed")?;
+        self.child.wait().map_err(|_| "conductor_reap_failed")?;
+        Ok(())
     }
 }
 
@@ -83,17 +101,20 @@ fn sibling_path(desktop_executable: &Path) -> Result<PathBuf, String> {
 }
 
 #[cfg(unix)]
-fn terminate(child: &mut Child) {
+fn terminate(child: &mut Child) -> Result<(), &'static str> {
     // SAFETY: `child.id()` is the live child owned by this supervisor and
     // `SIGTERM` does not borrow memory across the FFI boundary.
     unsafe {
-        libc::kill(child.id() as libc::pid_t, libc::SIGTERM);
+        if libc::kill(child.id() as libc::pid_t, libc::SIGTERM) != 0 {
+            return Err("conductor_terminate_failed");
+        }
     }
+    Ok(())
 }
 
 #[cfg(not(unix))]
-fn terminate(child: &mut Child) {
-    let _ = child.kill();
+fn terminate(child: &mut Child) -> Result<(), &'static str> {
+    child.kill().map_err(|_| "conductor_terminate_failed")
 }
 
 #[cfg(test)]

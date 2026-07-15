@@ -4,6 +4,9 @@ mod oauth;
 mod podium_process;
 #[cfg(test)]
 mod private_ipc;
+mod process_state;
+mod shutdown;
+mod supervisor;
 
 use std::sync::{Arc, Mutex};
 

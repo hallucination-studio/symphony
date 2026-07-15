@@ -41,6 +41,10 @@ class DesiredBinding:
         if not isinstance(self.active, bool):
             raise ValueError("binding_active_invalid")
 
+    @property
+    def desired_revision(self) -> int:
+        return self.generation
+
 
 @dataclass(frozen=True)
 class RuntimeReport:

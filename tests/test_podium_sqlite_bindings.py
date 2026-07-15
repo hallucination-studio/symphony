@@ -79,6 +79,12 @@ def test_binding_generation_increases_and_reopens(tmp_path: Path) -> None:
     assert BindingRepository(reopened.connection).get("binding-1").generation == 2
 
 
+def test_binding_generation_is_the_desired_process_revision() -> None:
+    binding = DesiredBinding("binding-1", "project-1", "conductor-1", 7)
+
+    assert binding.desired_revision == 7
+
+
 def test_stale_reports_cannot_replace_current_safe_report(tmp_path: Path) -> None:
     store, bindings, reports = repositories(tmp_path / "podium.db")
     bindings.save(DesiredBinding("binding-1", "project-1", "conductor-1", 1))
