@@ -20,6 +20,12 @@ from performer_api.performer_control import (
     PerformerSecretInput,
 )
 from performer_api.labels import is_managed_project_label, managed_project_label_name
+from performer_api.local_runtime import (
+    LOCAL_RUNTIME_PAYLOAD_KINDS,
+    LOCAL_RUNTIME_PROTOCOL_VERSION,
+    LocalRuntimeEnvelope,
+    LocalRuntimeHandshake,
+)
 from performer_api.turns import (
     ExecuteResult,
     GateResult,
@@ -41,6 +47,10 @@ __all__ = [
     "ExecuteResult",
     "GateResult",
     "is_managed_project_label",
+    "LOCAL_RUNTIME_PAYLOAD_KINDS",
+    "LOCAL_RUNTIME_PROTOCOL_VERSION",
+    "LocalRuntimeEnvelope",
+    "LocalRuntimeHandshake",
     "managed_project_label_name",
     "Plan",
     "PlanRevision",

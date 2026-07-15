@@ -33,7 +33,7 @@ Linear or provider credentials.
 
 | Module | Owns | Does not own |
 |---|---|---|
-| [`performer-api`](performer-api.md) | Provider-neutral turn/control/capability/readiness JSON contracts | Backend registry, SDK calls, persistence, Linear, HTTP, UI |
+| [`performer-api`](performer-api.md) | Provider-neutral turn/control/capability/readiness and private local-runtime JSON contracts | Backend registry, SDK calls, transport, persistence, Linear, HTTP, UI |
 | [`performer`](performer.md) | Backend interface/registry, provider SDK adapters, control host, fenced turns | Scheduling, Linear, Podium, durable workflow state |
 | [`conductor`](conductor.md) | One bound repository, sequential durable workflow, generic Performer process/readiness coordination, Linear projection, gates | Provider SDKs/controllers, Customer OAuth, browser UI, direct Linear tokens |
 | [`podium`](podium.md) | Auth, Linear control plane, bindings, polling, dispatch, proxy, provider-neutral runtime APIs | Local task execution or provider SDK process management |

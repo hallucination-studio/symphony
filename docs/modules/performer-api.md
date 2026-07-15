@@ -13,6 +13,7 @@ contains only closed JSON models needed across role/process boundaries:
 - execution and turn policy;
 - provider-neutral Performer control request/event/result contracts;
 - capabilities, readiness, and sanitized control errors.
+- private local runtime handshake/envelope identity used across role boundaries.
 
 It does not execute work, select or load a backend implementation, persist
 state, call Linear, make HTTP requests, import a provider SDK, or contain SDK
@@ -33,6 +34,7 @@ performer_api/
   turns.py or performer_turns.py
   runtime_policy.py
   performer_control.py
+  local_runtime.py
   validation.py
 ~~~
 
@@ -55,6 +57,9 @@ compatibility alias remains.
   binding, capability, and policy identity.
 - `PerformerControlError` preserves stable category, sanitized reason,
   action, retryability, attempt number where applicable, and next action.
+- `LocalRuntimeHandshake` and `LocalRuntimeEnvelope` are closed, secret-free
+  identity contracts for private inherited IPC. They define no transport,
+  persistence, Linear behavior, or domain payload.
 
 Logical settings such as `api_base_url` are mapped to provider configuration
 inside Performer. No shared contract exposes provider config keys, JSON-RPC,
