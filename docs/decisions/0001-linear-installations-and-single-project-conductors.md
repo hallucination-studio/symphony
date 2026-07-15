@@ -4,6 +4,11 @@
 
 Accepted
 
+The application-selection, versioned-installation, candidate-cutover, and
+application-replacement portions are superseded by ADR-0007 and ADR-0009. The
+polling, delegation-epoch, project-routing, and one-project Conductor decisions
+remain accepted.
+
 ## Date
 
 2026-07-10

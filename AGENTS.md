@@ -44,10 +44,12 @@ not import provider SDKs or parse the staged provider files.
 Symphony is **one product** split into four Python packages under `packages/`, each a role in the "orchestra". Package boundaries are runtime boundaries, not product boundaries — keep user-facing language anchored on Symphony as the whole system.
 
 The accepted target is [Podium Desktop](docs/product/podium-desktop.md), also
-recorded in ADR-0007: Tauri hosts the existing React UI and a local Podium
-process using `podium.db`; each Conductor retains an isolated `workflow.db`;
-Podium/Conductor use inherited private IPC; Linear tokens remain in Podium
-memory/OS credential storage. This is a target, not a claim about the current
+recorded in ADR-0007, ADR-0008, and ADR-0009: Tauri hosts the existing React UI
+and a local Podium process using `podium.db`; each Conductor retains an
+isolated `workflow.db`; Podium/Conductor use inherited private IPC; Linear
+access and refresh tokens persist as plaintext fields in Podium-owned
+`podium.db`; the MVP fixed Linear app has no configuration revision or mutation
+lifecycle. This is a target, not a claim about the current
 implementation. Existing commands and active-path rules remain authoritative
 until their ordered tasks land, and a failed feasibility proof does not
 authorize an unapproved fallback.
@@ -60,7 +62,7 @@ authorize an unapproved fallback.
   it; it depends on none of them.
 - **`performer`** — the execution worker. It only runs fenced managed-run turns from JSON request/result paths under isolated per-role runtime profiles.
 - **`conductor`** — customer-side local daemon. One Conductor binds exactly one Linear project and one repository, owns that project's durable managed-run state, leases Podium dispatches, starts Performer turns, and connects outbound to Podium as an enrolled runtime. Multiple isolated Conductors may run on one host for different projects.
-- **`podium`** — SaaS control plane + BFF/static host. Owns auth, default and customer-owned Linear application configuration, versioned OAuth installations, selected projects, one-to-one Conductor bindings, dispatch queueing, reliable polling, token refresh, and the Linear proxy.
+- **`podium`** — control plane and UI boundary. Owns the one fixed Linear application installation, selected projects, one-to-one Conductor bindings, dispatch queueing, reliable polling, token refresh, and the Linear proxy.
 
 ### Import-boundary invariant (enforced by tests)
 

@@ -4,6 +4,11 @@
 
 Accepted by the user on 2026-07-15.
 
+The Linear token-persistence portion of this decision was superseded on the
+same date by
+[ADR-0008](0008-store-linear-tokens-in-podium-sqlite.md). This ADR remains the
+record of the broader Desktop, dual-database, and private-IPC decision.
+
 The current SaaS/PostgreSQL implementation remains active until the replacement
 gates in this ADR and
 [`podium-desktop.md`](../product/podium-desktop.md) pass. Acceptance of the

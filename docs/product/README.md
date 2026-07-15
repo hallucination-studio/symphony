@@ -1,16 +1,23 @@
 # Product architecture
 
-These documents describe the accepted target product architecture, not
-historical plans. The compact module baselines in
-[`docs/modules`](../modules/README.md) define the currently implemented
+These documents describe the target product architecture, not historical
+plans. A document's own status is authoritative: targets explicitly marked
+`proposed` are not accepted implementation claims. The compact module baselines
+in [`docs/modules`](../modules/README.md) define the currently implemented
 ownership. The accepted Desktop target and its migration gates are tracked in
-[`podium-desktop.md`](podium-desktop.md) and ADR-0007.
+[`podium-desktop.md`](podium-desktop.md), ADR-0007, ADR-0008, and ADR-0009.
 
 ## Sources of truth
 
 - [`podium-desktop.md`](podium-desktop.md): accepted local
   Desktop/SQLite/private-IPC target and migration gates. Until its replacement
   gates pass, the remaining documents continue to describe the active path.
+- [`ADR-0008`](../decisions/0008-store-linear-tokens-in-podium-sqlite.md):
+  accepted plaintext SQLite persistence for Linear access/refresh tokens; it
+  supersedes only ADR-0007's OS credential-store decision.
+- [`ADR-0009`](../decisions/0009-freeze-linear-app-configuration-for-mvp.md):
+  accepted fixed Linear app configuration with no manifest/config revision,
+  mutation, or migration path in the MVP.
 - [`runtime-pipeline.md`](runtime-pipeline.md): Podium -> Conductor -> Performer.
 - [`pipeline-state.md`](pipeline-state.md): durable run/task/attempt state.
 - [`gates-verification-integration.md`](gates-verification-integration.md):
@@ -18,8 +25,9 @@ ownership. The accepted Desktop target and its migration gates are tracked in
 - [`linear-projection.md`](linear-projection.md): parent/Sub Issue projection.
 - [`runtime-profiles-backends.md`](runtime-profiles-backends.md): shared
   policy/control contracts, Performer backend ownership, and readiness.
-- [`linear-integration.md`](linear-integration.md): OAuth, polling, routing, and
-  the Linear proxy.
+- [`linear-integration.md`](linear-integration.md): accepted fixed-app,
+  polling-only Linear core, Managed Run closure, and Podium-only closed Codex
+  `performer_event` live status.
 - [`podium-web.md`](podium-web.md): unchanged browser business behavior.
 - [`runtime-installation.md`](runtime-installation.md): enrollment and binding.
 - [`security-model.md`](security-model.md): secret and error boundaries.

@@ -2,15 +2,26 @@
 
 ## Credential boundary
 
-Podium is the only product role that stores Linear application credentials and
-workspace installation access/refresh tokens. It encrypts customer-owned
-application secrets and installation tokens at rest, refreshes them server
-side, and injects them only into outbound Linear proxy requests.
+Podium is the only product role that stores or uses Linear installation
+access/refresh tokens. In the accepted Desktop target, the fixed public app has
+no client secret and the token pair is stored as plaintext fields in the
+installation row of Podium-owned `podium.db`. Symphony does not add an OS
+credential-store adapter, application encryption, key management, ciphertext,
+or a memory-only fallback. This is a deliberate local single-user simplicity
+trade-off recorded in ADR-0008.
 
-Browser and Conductor responses never contain Linear access or refresh tokens,
-session-cookie values, passwords, client secrets, raw provider credentials, or
-Authorization headers. Conductor has a scoped Podium runtime credential and a
-scoped proxy credential, not a direct Linear token.
+Podium refreshes and replaces the pair in one SQLite transaction and injects
+the access token only into outbound Linear requests. Normal restart and
+application update reuse the same database. A missing, unreadable, or corrupt
+database fails closed; after restore or reset, any lost credential requires
+authorization again. Failure does not trigger a second credential store or
+automatic migration.
+
+Browser, Tauri, and Conductor responses never contain Linear access or refresh
+tokens, session-cookie values, passwords, client secrets, raw provider
+credentials, or Authorization headers. Conductor has no direct Linear token;
+it requests only allowlisted project-scoped operations through the private
+Podium boundary.
 
 ## OAuth and polling
 
@@ -20,17 +31,19 @@ organization/app user. Polling is project- and installation-scoped, fully
 cursor-paginated, durable, and fail-closed when token refresh or live blocker
 checks fail.
 
-## Runtime enrollment and proxy
+## Private runtime boundary and Linear gateway
 
-Enrollment tokens are one-time, short-lived, and stored hashed. A runtime
-report refreshes the HTTP presence TTL used by Web; there is no WebSocket or
-persisted runtime-group routing system. `runtime_group_id` is a deterministic
-display alias only.
+The Desktop target has no runtime enrollment token, public runtime HTTP
+listener, bearer, cookie, or shared secret. Desktop creates a private channel
+for each expected Podium/Conductor child; the session is bound to process
+identity, instance, project, binding generation, and fencing metadata through
+closed `performer_api` contracts.
 
-Every Conductor Linear operation travels through Podium's authenticated proxy.
-Podium resolves the runtime to its active project binding and installation,
-enforces the project/organization boundary, logs a sanitized audit result, and
-does not fall back to a deployment-wide Linear token.
+Every Conductor Linear operation travels through Podium's allowlisted local
+gateway. Podium resolves the Conductor to its active project binding and
+installation, enforces the project/organization boundary, logs a sanitized
+audit result, injects the Linear access token internally, and does not fall
+back to another token source.
 
 ## Local Performer and provider isolation
 
@@ -48,8 +61,8 @@ untrusted until validated and normalized inside that boundary.
 Secret-bearing controls use stdin/stdout pipes or an equivalent in-memory
 channel. API keys, device secrets, credentials, provider config paths, and raw
 SDK payloads never enter persisted control files, Conductor SQLite, Podium
-PostgreSQL/runtime commands, browser caches/responses, Linear comments, logs,
-or managed-run reports.
+runtime commands, browser caches/responses, Linear comments, logs, or
+managed-run reports.
 
 Production reuses the fixed provider-owned context and does not create
 per-attempt credential/config copies. The real-E2E harness may stage one

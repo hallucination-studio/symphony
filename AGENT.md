@@ -32,10 +32,13 @@ Package boundaries are runtime boundaries, not product boundaries. Keep user-fac
 ## Approved Podium Desktop Target
 
 The accepted target architecture is documented in
-`docs/product/podium-desktop.md` and ADR-0007. Podium becomes a Tauri-hosted
-local process using `podium.db`; each isolated Conductor retains its own
-`workflow.db`; Podium and Conductor use private inherited IPC; Linear tokens
-remain in Podium memory and OS credential storage. PostgreSQL, browser
+`docs/product/podium-desktop.md`, ADR-0007, ADR-0008, and ADR-0009. Podium
+becomes a Tauri-hosted local process using `podium.db`; each isolated Conductor
+retains its own `workflow.db`; Podium and Conductor use private inherited IPC;
+Linear access and refresh tokens persist as plaintext fields in Podium-owned
+`podium.db` so normal restart and application update do not require OAuth
+again. The MVP Linear app configuration is fixed and has no revision or
+mutation lifecycle. PostgreSQL, browser
 accounts, custom Linear applications, public runtime HTTP, Podium bearer
 secrets, and Symphony-owned credential crypto are removed only after
 replacement evidence.
