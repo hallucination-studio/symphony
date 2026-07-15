@@ -14,8 +14,11 @@ Symphony is one product, not four unrelated projects. The repository remains `sy
   state, starts Performer turns, and reports state/events upward to Podium.
 - `performer` is the execution worker. Each short-lived Performer runs exactly
   one fenced managed-run turn from request/result JSON paths.
-- `performer_api` is limited to shared Managed Run wire contracts: plans,
-  work items/results, turn contexts, runtime policy/profiles, and validation.
+- `performer_api` is limited to dependency-free, closed wire contracts shared
+  across role/process boundaries: Managed Run and Performer control contracts,
+  plus approved local runtime DTOs when more than one role needs them. It must
+  not own runtime implementation, persistence, Linear calls, secrets, arbitrary
+  transport data, or provider-specific types.
 
 A Podium workspace may select multiple Linear projects, while one project has
 at most one active Conductor binding. Multiple isolated Conductors may run on
@@ -25,6 +28,22 @@ owns ongoing Conductor installation/binding. Adding either resource does not
 repeat an otherwise healthy Linear authorization.
 
 Package boundaries are runtime boundaries, not product boundaries. Keep user-facing language anchored in Symphony as the whole system, with Podium, Conductor, and Performer as roles inside that system.
+
+## Approved Podium Desktop Target
+
+The accepted target architecture is documented in
+`docs/product/podium-desktop.md` and ADR-0007. Podium becomes a Tauri-hosted
+local process using `podium.db`; each isolated Conductor retains its own
+`workflow.db`; Podium and Conductor use private inherited IPC; Linear tokens
+remain in Podium memory and OS credential storage. PostgreSQL, browser
+accounts, custom Linear applications, public runtime HTTP, Podium bearer
+secrets, and Symphony-owned credential crypto are removed only after
+replacement evidence.
+
+This is an approved target, not the current implementation state. Existing
+commands and active-path documentation remain valid until their ordered tasks
+land. Phase 1 feasibility failures are No-Go results and do not authorize
+fallback behavior or scope expansion.
 
 Current hard renames:
 

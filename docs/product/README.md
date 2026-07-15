@@ -2,12 +2,15 @@
 
 These documents describe the accepted target product architecture, not
 historical plans. The compact module baselines in
-[`docs/modules`](../modules/README.md) define ownership;
-[`tasks/spec.md`](../../tasks/spec.md) defines the workflow contract and
-[`tasks/plan.md`](../../tasks/plan.md) tracks remaining implementation.
+[`docs/modules`](../modules/README.md) define the currently implemented
+ownership. The accepted Desktop target and its migration gates are tracked in
+[`podium-desktop.md`](podium-desktop.md) and ADR-0007.
 
 ## Sources of truth
 
+- [`podium-desktop.md`](podium-desktop.md): accepted local
+  Desktop/SQLite/private-IPC target and migration gates. Until its replacement
+  gates pass, the remaining documents continue to describe the active path.
 - [`runtime-pipeline.md`](runtime-pipeline.md): Podium -> Conductor -> Performer.
 - [`pipeline-state.md`](pipeline-state.md): durable run/task/attempt state.
 - [`gates-verification-integration.md`](gates-verification-integration.md):
