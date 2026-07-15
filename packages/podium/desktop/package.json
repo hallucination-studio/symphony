@@ -4,8 +4,9 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "tauri dev",
-    "build": "tauri build"
+    "build:sidecar": "../../../.venv/bin/python ../../../tools/build_desktop_sidecars.py",
+    "dev": "npm run build:sidecar && tauri dev",
+    "build": "npm run build:sidecar && tauri build"
   },
   "devDependencies": {
     "@tauri-apps/cli": "2.11.4"

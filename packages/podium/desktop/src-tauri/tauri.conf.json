@@ -26,6 +26,7 @@
   },
   "bundle": {
     "active": true,
+    "externalBin": ["binaries/podium"],
     "icon": ["icons/icon.png"],
     "targets": "all"
   }
