@@ -10,6 +10,7 @@ import pytest
 
 from conductor.podium_ipc import inherited_podium_channel, send_handshake
 from performer_api import DrainAck, LocalRuntimeContext
+from performer_api.runtime_policy import PerformerProfileConfig
 from podium.conductor_bindings import DesiredBinding
 from podium.linear_models import InstallationMetadata, InstallationStatus, LinearProject
 from podium.local_runtime_commands import (
@@ -93,10 +94,53 @@ def configured_dispatcher(
     return store, LocalRuntimeCommandDispatcher(bindings, registry), child
 
 
+def profile(*, generation: int = 1) -> PerformerProfileConfig:
+    return PerformerProfileConfig.create(
+        binding_id="binding-1",
+        binding_config_version=generation,
+        performer_binding_id="performer-binding-1",
+        performer_profile_id="performer-profile-1",
+        runtime_profile_id="runtime-profile-1",
+        performer_kind="codex",
+        runtime_kind="codex",
+        execution_policy={
+            "version": 1,
+            "model": "gpt-5.4",
+            "model_provider": "openai",
+            "approval_mode": "auto_review",
+            "reasoning_effort": "high",
+            "reasoning_summary": "auto",
+            "sandbox": {
+                "plan": "read_only",
+                "execute": "workspace_write",
+                "gate": "read_only",
+            },
+            "initialize_timeout_ms": 5_000,
+            "turn_timeout_ms": 3_600_000,
+            "initialize_max_attempts": 4,
+            "overload_max_attempts": 5,
+        },
+        turn_policy={"max_turns": 4},
+    )
+
+
+def configure(
+    dispatcher: LocalRuntimeCommandDispatcher, *, generation: int = 1
+):
+    return dispatcher.configure(
+        "binding-1",
+        "project-slug",
+        "Symphony Project",
+        "app-user-1",
+        profile(generation=generation),
+        policy_revision=3,
+    )
+
+
 def test_configure_is_sent_only_to_the_matching_current_session(tmp_path: Path) -> None:
     store, dispatcher, child = configured_dispatcher(tmp_path, generation=2)
 
-    command = dispatcher.configure("binding-1", "profile-1", policy_revision=3)
+    command = configure(dispatcher, generation=2)
 
     received = read_runtime_message(child)
     assert received == command
@@ -112,7 +156,7 @@ def test_configure_rejects_missing_offline_or_stale_sessions(tmp_path: Path) -> 
     record.state = "offline"
 
     with pytest.raises(ValueError, match="local_runtime_session_not_online"):
-        dispatcher.configure("binding-1", "profile-1", policy_revision=1)
+        configure(dispatcher)
 
     record.state = "online"
     BindingRepository(store.connection).save(
@@ -126,7 +170,7 @@ def test_configure_rejects_missing_offline_or_stale_sessions(tmp_path: Path) -> 
         )
     )
     with pytest.raises(ValueError, match="local_runtime_stale_generation"):
-        dispatcher.configure("binding-1", "profile-1", policy_revision=1)
+        configure(dispatcher)
     child.close()
     store.close()
 
@@ -138,7 +182,7 @@ def test_configure_rejects_repository_path_drift(tmp_path: Path) -> None:
     repository_path.symlink_to(tmp_path, target_is_directory=True)
 
     with pytest.raises(ValueError, match="local_runtime_repository_mismatch"):
-        dispatcher.configure("binding-1", "profile-1", policy_revision=1)
+        configure(dispatcher)
     child.close()
     store.close()
 

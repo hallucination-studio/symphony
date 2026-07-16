@@ -927,14 +927,15 @@ Description：修正 Task 4.1 中不足以驱动现有 Conductor durable binding
 
 Dependencies：4.4。
 
-Files：packages/performer-api/src/performer_api/local_runtime.py、tests/test_local_runtime_contract.py、docs/modules/performer-api.md。
+Files：packages/performer-api/src/performer_api/local_runtime.py、packages/podium/src/podium/local_runtime_commands.py、tests/test_local_runtime_contract.py、tests/test_local_runtime_commands.py、tests/test_conductor_podium_ipc.py。
 
-Estimated scope：S，3 files。
+Estimated scope：M，5 files。
 
 Acceptance：
 
 - Configure exact fields 为 context、canonical repository path、project slug/name、app user id、policy revision 和现有 closed `PerformerProfileConfig`；project id、binding id 和 binding generation 继续只来自 context。
 - `profile.binding_id == context.binding_id`、`profile.binding_config_version == context.binding_generation`，且 MVP `performer_kind/runtime_kind` 都为 fixed `codex` provenance；mismatch、旧 lone `profile_id`、unknown/provider/secret field fail closed。
+- Podium builder 和已有 transport contract tests 在同一提交切换到新 constructor，仓库不保留旧 shape compatibility，也不在 4.5b 前留下 broken consumer。
 - Contract 不增加 token、header、URL、credential reference、provider session/config 字段或第二 version；payload limit 和 wire-safety/package boundary 保持通过。
 
 Verification：Python focused test_local_runtime_contract；wire-safety/package-boundary tests；old-shape rejection scan；Diff。
@@ -947,7 +948,7 @@ Description：让 Podium 从已批准 binding + current closed profile 构造完
 
 Dependencies：4.5a、4.3、4.4。
 
-Files：packages/podium/src/podium/local_runtime_commands.py、packages/conductor/src/conductor/conductor_podium_sync.py、packages/conductor/src/conductor/conductor_service.py、tests/test_conductor_private_configure.py。
+Files：packages/conductor/src/conductor/conductor_podium_sync.py、packages/conductor/src/conductor/conductor_service.py、tests/test_conductor_private_configure.py、docs/modules/performer-api.md。
 
 Estimated scope：M，4 files。
 

@@ -23,6 +23,7 @@ from performer_api import (
     LocalRuntimeEnvelope,
     RuntimeReportMessage,
 )
+from performer_api.runtime_policy import PerformerProfileConfig
 
 
 def identity(*, generation: int = 2) -> LocalRuntimeIdentity:
@@ -45,6 +46,48 @@ def context(correlation_id: str, *, generation: int = 2) -> LocalRuntimeContext:
         value.binding_id,
         value.binding_generation,
         correlation_id,
+    )
+
+
+def profile(*, generation: int = 2) -> PerformerProfileConfig:
+    return PerformerProfileConfig.create(
+        binding_id="binding-1",
+        binding_config_version=generation,
+        performer_binding_id="performer-binding-1",
+        performer_profile_id="performer-profile-1",
+        runtime_profile_id="runtime-profile-1",
+        performer_kind="codex",
+        runtime_kind="codex",
+        execution_policy={
+            "version": 1,
+            "model": "gpt-5.4",
+            "model_provider": "openai",
+            "approval_mode": "auto_review",
+            "reasoning_effort": "high",
+            "reasoning_summary": "auto",
+            "sandbox": {
+                "plan": "read_only",
+                "execute": "workspace_write",
+                "gate": "read_only",
+            },
+            "initialize_timeout_ms": 5_000,
+            "turn_timeout_ms": 3_600_000,
+            "initialize_max_attempts": 4,
+            "overload_max_attempts": 5,
+        },
+        turn_policy={"max_turns": 4},
+    )
+
+
+def configure_message(correlation_id: str, *, generation: int = 2) -> ConfigureCommand:
+    return ConfigureCommand(
+        context(correlation_id, generation=generation),
+        "/workspace/repo",
+        "project-slug",
+        "Symphony Project",
+        "app-user-1",
+        3,
+        profile(generation=generation),
     )
 
 
@@ -80,7 +123,7 @@ def test_identity_rejects_secret_like_log_material(value: str) -> None:
 
 def test_client_receives_configure_and_lease_and_sends_report_and_ack() -> None:
     client, podium = connected_client()
-    configure = ConfigureCommand(context("configure-1"), "/workspace/repo", "profile-1", 3)
+    configure = configure_message("configure-1")
     lease = DispatchLease(context("lease-1"), "dispatch-1", "issue-1", "lease-1", 4, 100)
 
     write_runtime_message(podium, configure)
@@ -102,7 +145,7 @@ def test_client_rejects_stale_or_wrong_session_messages(caplog) -> None:
     client, podium = connected_client()
     write_runtime_message(
         podium,
-        ConfigureCommand(context("configure-old", generation=1), "/workspace/repo", "profile-1", 3),
+        configure_message("configure-old", generation=1),
     )
 
     with caplog.at_level(logging.ERROR):

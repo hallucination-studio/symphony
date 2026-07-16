@@ -5,7 +5,8 @@ from dataclasses import dataclass
 from pathlib import PurePath
 from typing import Any, ClassVar
 
-from performer_api._wire_safety import exact_keys, identifier, positive_int
+from performer_api._wire_safety import exact_keys, identifier, positive_int, safe_text
+from performer_api.runtime_policy import PerformerProfileConfig
 from performer_api.turns import PerformerTurnEvent, TurnContext
 
 LOCAL_RUNTIME_PROTOCOL_VERSION = 1
@@ -52,6 +53,11 @@ def _non_negative(value: Any, field: str) -> int:
 
 def _optional_code(value: Any, field: str = "error_code") -> str:
     return "" if value == "" else identifier(value, field)
+
+
+def _secret_free_identifier(value: Any, field: str) -> str:
+    identifier(value, field)
+    return safe_text(value, field, max_bytes=200)
 
 
 def _bounded(payload: Any) -> Any:
@@ -130,16 +136,22 @@ class LocalRuntimeMessage:
 @dataclass(frozen=True)
 class ConfigureCommand(LocalRuntimeMessage):
     repository_path: str
-    profile_id: str
+    project_slug: str
+    project_name: str
+    app_user_id: str
     policy_revision: int
+    profile: PerformerProfileConfig
     KIND = "configure"
     FIELDS = frozenset(
         {
             "kind",
             "context",
             "repository_path",
-            "profile_id",
+            "project_slug",
+            "project_name",
+            "app_user_id",
             "policy_revision",
+            "profile",
         }
     )
 
@@ -152,16 +164,42 @@ class ConfigureCommand(LocalRuntimeMessage):
             or len(self.repository_path.encode()) > 4096
         ):
             raise ValueError("repository_path is invalid")
-        identifier(self.profile_id, "profile_id")
+        _secret_free_identifier(self.project_slug, "project_slug")
+        safe_text(self.project_name, "project_name", max_bytes=500)
+        _secret_free_identifier(self.app_user_id, "app_user_id")
         positive_int(self.policy_revision, "policy_revision")
+        if not isinstance(self.profile, PerformerProfileConfig):
+            raise ValueError("profile is invalid")
+        if self.profile.binding_id != self.context.binding_id:
+            raise ValueError("profile binding_id does not match context")
+        if self.profile.binding_config_version != self.context.binding_generation:
+            raise ValueError(
+                "profile binding_config_version does not match context"
+            )
+        if self.profile.performer_kind != "codex":
+            raise ValueError("profile performer_kind is invalid")
+        if self.profile.runtime_kind != "codex":
+            raise ValueError("profile runtime_kind is invalid")
+        for field_name in (
+            "binding_id",
+            "performer_binding_id",
+            "performer_profile_id",
+            "runtime_profile_id",
+        ):
+            _secret_free_identifier(
+                getattr(self.profile, field_name), f"profile {field_name}"
+            )
 
     def to_dict(self) -> dict[str, Any]:
         return _bounded(
             {
                 **self._base(),
                 "repository_path": self.repository_path,
-                "profile_id": self.profile_id,
+                "project_slug": self.project_slug,
+                "project_name": self.project_name,
+                "app_user_id": self.app_user_id,
                 "policy_revision": self.policy_revision,
+                "profile": self.profile.to_dict(),
             }
         )
 
@@ -171,8 +209,11 @@ class ConfigureCommand(LocalRuntimeMessage):
         return cls(
             context,
             payload.get("repository_path"),
-            payload.get("profile_id"),
+            payload.get("project_slug"),
+            payload.get("project_name"),
+            payload.get("app_user_id"),
             payload.get("policy_revision"),
+            PerformerProfileConfig.from_dict(payload.get("profile")),
         )
 
 

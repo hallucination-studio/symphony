@@ -16,6 +16,7 @@ from performer_api import (
     LocalRuntimeContext,
     parse_local_runtime_message,
 )
+from performer_api.runtime_policy import PerformerProfileConfig
 
 from .conductor_bindings import DesiredBinding
 from .local_sessions import MAX_LOCAL_FRAME_BYTES, LocalSessionRecord, LocalSessionRegistry
@@ -70,7 +71,14 @@ class LocalRuntimeCommandDispatcher:
         return binding_id not in self._draining
 
     def configure(
-        self, binding_id: str, profile_id: str, *, policy_revision: int
+        self,
+        binding_id: str,
+        project_slug: str,
+        project_name: str,
+        app_user_id: str,
+        profile: PerformerProfileConfig,
+        *,
+        policy_revision: int,
     ) -> ConfigureCommand:
         binding, session = self._current(binding_id)
         try:
@@ -80,7 +88,13 @@ class LocalRuntimeCommandDispatcher:
         if repository_path != binding.repository_path or not Path(repository_path).is_dir():
             raise ValueError("local_runtime_repository_mismatch")
         command = ConfigureCommand(
-            self._context(session), repository_path, profile_id, policy_revision
+            self._context(session),
+            repository_path,
+            project_slug,
+            project_name,
+            app_user_id,
+            policy_revision,
+            profile,
         )
         write_runtime_message(session.session.channel, command)
         LOGGER.info(

@@ -18,6 +18,7 @@ from performer_api.local_runtime import (
     RuntimeReportMessage,
     parse_local_runtime_message,
 )
+from performer_api.runtime_policy import PerformerProfileConfig
 from performer_api.turns import PerformerTurnEvent, TurnContext
 
 
@@ -30,6 +31,48 @@ def context() -> LocalRuntimeContext:
         "binding-1",
         2,
         "correlation-1",
+    )
+
+
+def profile(*, binding_id: str = "binding-1", generation: int = 2) -> PerformerProfileConfig:
+    return PerformerProfileConfig.create(
+        binding_id=binding_id,
+        binding_config_version=generation,
+        performer_binding_id="performer-binding-1",
+        performer_profile_id="performer-profile-1",
+        runtime_profile_id="runtime-profile-1",
+        performer_kind="codex",
+        runtime_kind="codex",
+        execution_policy={
+            "version": 1,
+            "model": "gpt-5.4",
+            "model_provider": "openai",
+            "approval_mode": "auto_review",
+            "reasoning_effort": "high",
+            "reasoning_summary": "auto",
+            "sandbox": {
+                "plan": "read_only",
+                "execute": "workspace_write",
+                "gate": "read_only",
+            },
+            "initialize_timeout_ms": 5_000,
+            "turn_timeout_ms": 3_600_000,
+            "initialize_max_attempts": 4,
+            "overload_max_attempts": 5,
+        },
+        turn_policy={"max_turns": 4},
+    )
+
+
+def configure() -> ConfigureCommand:
+    return ConfigureCommand(
+        context(),
+        "/workspace/repo",
+        "project-slug",
+        "Symphony Project",
+        "app-user-1",
+        3,
+        profile(),
     )
 
 
@@ -101,7 +144,7 @@ def test_envelope_rejects_unknown_kind_and_stale_version() -> None:
 def test_all_closed_runtime_messages_round_trip() -> None:
     turn = TurnContext("run-1", "task-1", "attempt-1", 4, "execute")
     messages = [
-        ConfigureCommand(context(), "/workspace/repo", "profile-1", 3),
+        configure(),
         DrainRequest(context(), 100),
         DrainAck(context(), 100, "drained", "", "none"),
         DispatchLease(context(), "dispatch-1", "issue-1", "lease-1", 5, 100),
@@ -120,6 +163,97 @@ def test_all_closed_runtime_messages_round_trip() -> None:
 
     for message in messages:
         assert parse_local_runtime_message(message.to_dict()) == message
+
+
+def test_configure_uses_one_exact_complete_secret_free_shape() -> None:
+    command = configure()
+
+    assert command.to_dict() == {
+        "kind": "configure",
+        "context": context().to_dict(),
+        "repository_path": "/workspace/repo",
+        "project_slug": "project-slug",
+        "project_name": "Symphony Project",
+        "app_user_id": "app-user-1",
+        "policy_revision": 3,
+        "profile": profile().to_dict(),
+    }
+
+
+@pytest.mark.parametrize(
+    "command,error",
+    [
+        (
+            lambda: ConfigureCommand(
+                context(),
+                "/workspace/repo",
+                "project-slug",
+                "Symphony Project",
+                "app-user-1",
+                3,
+                profile(binding_id="binding-2"),
+            ),
+            "binding_id",
+        ),
+        (
+            lambda: ConfigureCommand(
+                context(),
+                "/workspace/repo",
+                "project-slug",
+                "Symphony Project",
+                "app-user-1",
+                3,
+                profile(generation=3),
+            ),
+            "binding_config_version",
+        ),
+    ],
+)
+def test_configure_rejects_profile_context_mismatch(command, error: str) -> None:
+    with pytest.raises(ValueError, match=error):
+        command()
+
+
+@pytest.mark.parametrize("field", ["performer_kind", "runtime_kind"])
+def test_configure_rejects_non_codex_profile_provenance(field: str) -> None:
+    payload = configure().to_dict()
+    payload["profile"][field] = "other"
+
+    with pytest.raises(ValueError, match=field):
+        parse_local_runtime_message(payload)
+
+
+def test_configure_rejects_the_incomplete_old_shape() -> None:
+    payload = {
+        "kind": "configure",
+        "context": context().to_dict(),
+        "repository_path": "/workspace/repo",
+        "profile_id": "profile-1",
+        "policy_revision": 3,
+    }
+
+    with pytest.raises(ValueError, match="fields are invalid"):
+        parse_local_runtime_message(payload)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda payload: payload.update(
+            {"app_user_id": "abcdefghij.abcdefghij.abcdefghij"}
+        ),
+        lambda payload: payload["profile"].update(
+            {"performer_profile_id": "sk-abcdefghijklmnopqrstuvwxyz123456"}
+        ),
+        lambda payload: payload.update({"project_name": "authorization=secret-value"}),
+    ],
+)
+def test_configure_rejects_secret_like_identity_or_metadata(mutation) -> None:
+    payload = configure().to_dict()
+    mutation(payload)
+
+    with pytest.raises(ValueError, match="secret material"):
+        parse_local_runtime_message(payload)
 
 
 @pytest.mark.parametrize(
