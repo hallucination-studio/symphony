@@ -38,6 +38,8 @@ class WorkflowDriver:
 
     async def drive_once(self) -> dict[str, int]:
         counts = {"started": 0, "applied": 0, "failed": 0}
+        if not getattr(self.service, "accepting_private_turns", True):
+            return counts
         for run in self.store.list_runs():
             try:
                 result = await self._drive_run(run)

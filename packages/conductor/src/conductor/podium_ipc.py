@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import socket
@@ -7,10 +8,14 @@ import struct
 from typing import Any, Protocol
 
 from performer_api import (
+    ConfigureCommand,
+    DispatchAck,
+    DispatchLease,
     DrainAck,
     DrainRequest,
     LocalRuntimeContext,
     LocalRuntimeEnvelope,
+    RuntimeReportMessage,
     parse_local_runtime_message,
 )
 
@@ -20,8 +25,29 @@ MAX_LOCAL_FRAME_BYTES = 16 * 1024
 LOGGER = logging.getLogger(__name__)
 
 
-class DrainHandler(Protocol):
+class PrivateSyncHandler(Protocol):
+    private_sync_failure: dict[str, Any] | None
+
     async def drain_for_podium(self, request: DrainRequest) -> DrainAck: ...
+
+    def apply_private_configure(self, command: ConfigureCommand) -> dict[str, Any]: ...
+
+    def _private_runtime_report(
+        self, context: LocalRuntimeContext
+    ) -> RuntimeReportMessage: ...
+
+    def _apply_private_dispatch(
+        self, lease: DispatchLease, configure_result: dict[str, Any]
+    ) -> DispatchAck: ...
+
+    def _record_private_sync_failure(
+        self,
+        exc: Exception,
+        *,
+        context: LocalRuntimeContext | None = None,
+        lease: DispatchLease | None = None,
+        identity: LocalRuntimeIdentity | None = None,
+    ) -> None: ...
 
 
 def inherited_podium_channel(fd: int) -> socket.socket:
@@ -110,13 +136,59 @@ class LocalRuntimeClient:
             raise
 
     async def handle_drain(
-        self, request: DrainRequest, handler: DrainHandler
+        self, request: DrainRequest, handler: PrivateSyncHandler
     ) -> DrainAck:
         self._require_open()
         self._validate_context(request)
         acknowledgment = await handler.drain_for_podium(request)
         self.send(acknowledgment)
         return acknowledgment
+
+    async def sync_once(self, handler: PrivateSyncHandler) -> dict[str, Any]:
+        context = None
+        lease = None
+        try:
+            command = await asyncio.to_thread(self.receive)
+            context = getattr(command, "context", None)
+            if isinstance(command, DrainRequest):
+                acknowledgment = await self.handle_drain(command, handler)
+                return {"status": acknowledgment.status, "kind": "drain"}
+            if not isinstance(command, ConfigureCommand):
+                raise ValueError("private_sync_command_invalid")
+
+            previous_failure = handler.private_sync_failure
+            configure_result = handler.apply_private_configure(command)
+            if (
+                previous_failure is not None
+                and previous_failure.get("event") == "private_sync_failed"
+                and configure_result.get("status") != "rejected"
+            ):
+                handler.private_sync_failure = previous_failure
+            await asyncio.to_thread(
+                self.send, handler._private_runtime_report(command.context)
+            )
+            if handler.private_sync_failure is previous_failure:
+                handler.private_sync_failure = None
+
+            lease = await asyncio.to_thread(self.receive)
+            if not isinstance(lease, DispatchLease):
+                raise ValueError("private_sync_lease_invalid")
+            context = lease.context
+            acknowledgment = handler._apply_private_dispatch(lease, configure_result)
+            await asyncio.to_thread(self.send, acknowledgment)
+            return {
+                "status": acknowledgment.status,
+                "kind": "dispatch",
+                "dispatch_id": lease.dispatch_id,
+            }
+        except Exception as exc:
+            handler._record_private_sync_failure(
+                exc,
+                context=context,
+                lease=lease if isinstance(lease, DispatchLease) else None,
+                identity=self.identity,
+            )
+            raise
 
     def close(self) -> None:
         if not self.closed:

@@ -97,7 +97,7 @@ async def run_private_runtime(
         )
         service = ConductorService(store=ConductorStore(data_root), data_root=data_root)
         await service.start()
-        await stop.wait()
+        await _run_private_ticks(service, client, stop)
     finally:
         if client is not None:
             client.close()
@@ -106,6 +106,41 @@ async def run_private_runtime(
         loop = asyncio.get_running_loop()
         for signum in installed_signals:
             loop.remove_signal_handler(signum)
+
+
+async def _run_private_ticks(
+    service: ConductorService,
+    client: LocalRuntimeClient,
+    stop: asyncio.Event,
+) -> None:
+    while not stop.is_set():
+        tick = asyncio.create_task(service.private_sync_once(client))
+        stopping = asyncio.create_task(stop.wait())
+        done, _ = await asyncio.wait(
+            {tick, stopping}, return_when=asyncio.FIRST_COMPLETED
+        )
+        if stopping in done:
+            tick.cancel()
+            client.close()
+            try:
+                await tick
+            except asyncio.CancelledError:
+                pass
+            return
+        stopping.cancel()
+        try:
+            await stopping
+        except asyncio.CancelledError:
+            pass
+        try:
+            result = await tick
+        except Exception:
+            if client.closed:
+                raise
+            await asyncio.sleep(0.1)
+            continue
+        if result.get("status") == "accepted":
+            await service.coordinate_background_once()
 
 
 def _install_stop_signals() -> tuple[asyncio.Event, list[signal.Signals]]:

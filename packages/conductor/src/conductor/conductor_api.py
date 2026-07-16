@@ -50,7 +50,6 @@ class ConductorApiServer:
     def __init__(self, service: ConductorService):
         self.service = service
         self._server: asyncio.AbstractServer | None = None
-        self._podium_poll_task: asyncio.Task[None] | None = None
         self._report_tick = 0
         self.port: int | None = None
 
@@ -58,16 +57,8 @@ class ConductorApiServer:
         self._server = await asyncio.start_server(self._handle_connection, host, port)
         socket = self._server.sockets[0]
         self.port = int(socket.getsockname()[1])
-        self._podium_poll_task = asyncio.create_task(self._poll_podium_dispatches())
 
     async def stop(self) -> None:
-        if self._podium_poll_task is not None:
-            self._podium_poll_task.cancel()
-            try:
-                await self._podium_poll_task
-            except asyncio.CancelledError:
-                pass
-            self._podium_poll_task = None
         if self._server is None:
             return
         self._server.close()

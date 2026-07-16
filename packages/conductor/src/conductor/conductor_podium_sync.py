@@ -6,16 +6,29 @@ import logging
 import os
 from pathlib import Path
 import re
+import time
 from typing import Any
 
 import httpx
 
-from performer_api import ConfigureCommand
+from performer_api import (
+    ConfigureCommand,
+    DispatchAck,
+    DispatchLease,
+    LocalRuntimeContext,
+    RuntimeReportMessage,
+)
 from performer_api.runtime_policy import PerformerProfileConfig, RuntimePolicyError
 
-from .models import ConductorServiceError, InstanceCreateRequest, InstancePatchRequest
 from .conductor_smoke_protocol import SmokeCommandError, normalize_smoke_command, sanitize_reason, smoke_result
 from .conductor_service_helpers import _hostname, _linear_agent_app_user_id, _optional_int
+from .models import (
+    ConductorServiceError,
+    InstanceCreateRequest,
+    InstancePatchRequest,
+    LocalRuntimeIdentity,
+)
+from .podium_ipc import LocalRuntimeClient
 from .workflow_driver import WorkflowDriver
 
 
@@ -29,6 +42,17 @@ _MAX_EVIDENCE_ROWS = 8
 _MAX_GATE_NUMBER = 1_000_000
 _REPORT_IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,79}\Z")
 _GATE_FAILURE_CODES = frozenset({"", "verification_command_failed", "codex_gate_failed"})
+_CORRELATION_LOG_FIELDS = (
+    "conductor_id",
+    "project_id",
+    "binding_id",
+    "binding_generation",
+    "correlation_id",
+    "dispatch_id",
+    "lease_id",
+    "fencing_token",
+    "issue_id",
+)
 _BARE_SECRET = re.compile(
     r"(?i)\b(?:sk-[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b"
 )
@@ -85,6 +109,117 @@ class ConductorPodiumSyncMixin:
         if kind == "project.activate_installation":
             return self._handle_installation_activate(command)
         return {"status": "ignored", "reason": "unsupported_command"}
+
+    async def private_sync_once(self, client: LocalRuntimeClient) -> dict[str, Any]:
+        return await client.sync_once(self)
+
+    def _private_runtime_report(
+        self, context: LocalRuntimeContext
+    ) -> RuntimeReportMessage:
+        failure = self.private_sync_failure
+        if failure is None:
+            return RuntimeReportMessage(context, "ready", int(time.time()), "", 0, "none")
+        return RuntimeReportMessage(
+            context,
+            "degraded",
+            int(time.time()),
+            str(failure.get("sanitized_reason") or "private_sync_failed"),
+            1,
+            "retry_private_sync",
+        )
+
+    def _apply_private_dispatch(
+        self,
+        lease: DispatchLease,
+        configure_result: dict[str, Any],
+    ) -> DispatchAck:
+        reason = ""
+        instances = self.store.list_instances()
+        if configure_result.get("status") == "rejected":
+            reason = "private_configure_required"
+        elif not self.accepting_private_turns:
+            reason = "private_admission_closed"
+        elif len(instances) != 1 or instances[0].id != lease.context.instance_id:
+            reason = "private_instance_mismatch"
+        elif lease.leased_until <= int(time.time()):
+            reason = "private_lease_expired"
+        if reason:
+            self._record_private_sync_failure(ValueError(reason))
+            return DispatchAck(
+                lease.context,
+                lease.dispatch_id,
+                lease.lease_id,
+                lease.fencing_token,
+                "rejected",
+                reason,
+            )
+
+        try:
+            run = self.store.create_run(
+                lease.issue_id,
+                lease.issue_id,
+                instance_id=lease.context.instance_id,
+            )
+            payload = dict(run.get("payload") or {})
+            current_token = int(payload.get("dispatch_fencing_token") or 0)
+            if lease.fencing_token < current_token:
+                raise ValueError("stale_dispatch_fencing_token")
+            if lease.fencing_token == current_token and current_token > 0 and (
+                payload.get("dispatch_id") != lease.dispatch_id
+                or payload.get("lease_id") != lease.lease_id
+            ):
+                raise ValueError("private_dispatch_lease_conflict")
+            self.store.update_run_payload(
+                str(run["run_id"]),
+                {
+                    "dispatch_id": lease.dispatch_id,
+                    "lease_id": lease.lease_id,
+                    "dispatch_fencing_token": lease.fencing_token,
+                    "leased_until": lease.leased_until,
+                },
+            )
+        except Exception as exc:
+            raise ValueError(_private_dispatch_error_code(exc)) from None
+        self.private_sync_failure = None
+        return DispatchAck(
+            lease.context,
+            lease.dispatch_id,
+            lease.lease_id,
+            lease.fencing_token,
+            "accepted",
+            "",
+        )
+
+    def _record_private_sync_failure(
+        self,
+        exc: Exception,
+        *,
+        context: LocalRuntimeContext | None = None,
+        lease: DispatchLease | None = None,
+        identity: LocalRuntimeIdentity | None = None,
+    ) -> None:
+        instances = self.store.list_instances()
+        code = _private_sync_error_code(exc)
+        source = context or identity
+        extra = {
+            "conductor_id": getattr(source, "conductor_id", None),
+            "instance_id": getattr(source, "instance_id", None),
+            "project_id": getattr(source, "project_id", None),
+            "binding_id": getattr(source, "binding_id", None),
+            "binding_generation": getattr(source, "binding_generation", None),
+            "correlation_id": getattr(context, "correlation_id", None),
+            "dispatch_id": getattr(lease, "dispatch_id", None),
+            "lease_id": getattr(lease, "lease_id", None),
+            "fencing_token": getattr(lease, "fencing_token", None),
+            "issue_id": getattr(lease, "issue_id", None),
+        }
+        self.private_sync_failure = self._record_managed_run_sync_failure(
+            "private_sync_failed",
+            instances[0] if instances else None,
+            ValueError(code),
+            action_required="retry_private_sync",
+            extra=extra,
+        )
 
     def apply_private_configure(self, command: ConfigureCommand) -> dict[str, Any]:
         if not isinstance(command, ConfigureCommand):
@@ -644,6 +779,22 @@ class ConductorPodiumSyncMixin:
             finding["issue_project"] = getattr(instance, "linear_project", "")
         if extra:
             finding.update({key: value for key, value in extra.items() if value is not None})
+        correlation = " ".join(
+            f"{key}={finding[key]}"
+            for key in _CORRELATION_LOG_FIELDS
+            if key in finding and finding[key] not in {None, ""}
+        )
+        LOGGER.warning(
+            "event=%s severity=warning instance_id=%s error_type=%s "
+            "sanitized_reason=%s action_required=%s retryable=true %s",
+            event,
+            finding.get("instance_id")
+            or (getattr(instance, "id", "-") if instance is not None else "-"),
+            exc.__class__.__name__,
+            reason,
+            action_required,
+            correlation,
+        )
         findings = getattr(self, "_managed_run_reconcile_findings", None)
         if findings is None:
             findings = []
@@ -655,7 +806,7 @@ class ConductorPodiumSyncMixin:
                 "event="
                 f"{event} severity=warning instance_id={getattr(instance, 'id', '')} "
                 f"error_type={exc.__class__.__name__} sanitized_reason={reason} "
-                f"action_required={action_required} retryable=true",
+                f"action_required={action_required} retryable=true {correlation}".rstrip(),
             )
         return finding
 
@@ -765,6 +916,20 @@ def _sanitize_error(exc: Exception | str) -> str:
     text = re.sub(r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]+", r"\1 [REDACTED]", text)
     text = re.sub(r"(?i)\b(access_token|refresh_token|api_key|token|password|client_secret|cookie)=([^ \t,;]+)", r"\1=[REDACTED]", text)
     return text[:500]
+
+
+def _private_dispatch_error_code(exc: Exception) -> str:
+    code = str(exc)
+    if code in {"stale_dispatch_fencing_token", "private_dispatch_lease_conflict"}:
+        return code
+    return "private_dispatch_persist_failed"
+
+
+def _private_sync_error_code(exc: Exception) -> str:
+    code = str(exc)
+    if re.fullmatch(r"(?:podium_ipc|private|stale_dispatch)_[a-z0-9_]+", code):
+        return code
+    return "private_sync_failed"
 
 
 def _project_filters(
