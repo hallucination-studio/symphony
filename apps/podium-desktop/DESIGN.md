@@ -13,6 +13,7 @@ colors:
   primary: "#4f46e5"
   primary-hover: "#4338ca"
   primary-soft: "#eef2ff"
+  overlay: "rgba(24, 24, 27, 0.28)"
   status-completed: "#16a34a"
   status-completed-bg: "#f0fdf4"
   status-in-progress: "#2563eb"

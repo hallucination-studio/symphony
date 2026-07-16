@@ -10,6 +10,7 @@
   --color-accent: #4f46e5;
   --color-accent-hover: #4338ca;
   --color-accent-soft: #eef2ff;
+  --color-overlay: rgba(24, 24, 27, 0.28);
 
   /* Status colors */
   --status-completed: #16a34a;

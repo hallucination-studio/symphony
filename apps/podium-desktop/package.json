@@ -11,12 +11,14 @@
     "build:backend": "tsc -p src-backend/tsconfig.json",
     "typecheck": "tsc -b --pretty false && tsc -p src-backend/tsconfig.json --noEmit",
     "lint": "eslint src src-backend --ext .ts,.tsx --max-warnings 0",
+    "design:lint": "node tools/lint-design.mjs",
     "test": "vitest run",
     "test:host": "cargo test --manifest-path src-tauri/Cargo.toml --",
     "package": "tauri build",
     "tauri": "tauri"
   },
   "dependencies": {
+    "@symphony/contracts": "0.1.0",
     "react": "18.3.1",
     "react-dom": "18.3.1"
   },
