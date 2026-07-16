@@ -60,36 +60,31 @@ permissions, integrations, or migration steps from the target architecture.
 
 ## Repository commands
 
-The checked-in implementation is still in transition. Use the commands that
-exist in the current tree:
+The legacy runtime has been removed. Use the target-workspace commands:
 
 ```bash
 make install
+make build
+make lint
+make typecheck
 make test
+make test-all
 make dev
 make stop
 ```
 
-Focused Python tests need all current package source roots:
+Focused checks:
 
 ```bash
-PYTHONPATH=$(pwd)/packages/performer-api/src:$(pwd)/packages/performer/src:$(pwd)/packages/conductor/src:$(pwd)/packages/podium/src \
-  .venv/bin/python -m pytest path/to/test_file.py -q
+npm test -w @symphony/podium-desktop
+npm run typecheck -w @symphony/conductor
+.venv/bin/python -m pytest apps/performer/tests -q
+cd apps/podium-desktop/src-tauri && cargo test
 ```
 
-Podium web commands:
-
-```bash
-cd packages/podium/web
-npm run dev
-npm run build
-npm run test
-npm run lint
-npm run design:lint
-```
-
-Before any Podium UI change, read `packages/podium/web/DESIGN.md`. Its tokens
-and the matching CSS custom properties are normative.
+Before any Podium UI change, read `apps/podium-desktop/DESIGN.md`. Its visual
+tokens and matching CSS custom properties are normative; architecture and
+product behavior remain owned by `docs/architecture/`.
 
 ## Engineering rules
 
@@ -115,7 +110,7 @@ and the matching CSS custom properties are normative.
   change warrants it.
 - Documentation-only changes must at least verify links, removed-path
   references, and repository status.
-- UI changes must run the relevant web tests, lint, build, and design lint.
+- UI changes must run the relevant Desktop tests, lint, typecheck, and build.
 - Runtime behavior that spans processes or external systems requires evidence
   from the real boundary; local mocks alone are not sufficient.
 - Final reports must state what was changed, exact verification performed, and

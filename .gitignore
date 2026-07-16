@@ -1,4 +1,10 @@
 .venv/
+node_modules/
+dist/
+dist-backend/
+target/
+*.tsbuildinfo
+apps/podium-desktop/src-tauri/gen/
 .env
 workspaces/
 __pycache__/

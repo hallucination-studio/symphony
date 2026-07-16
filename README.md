@@ -37,43 +37,31 @@ Key documents:
 - [Roadmap](docs/architecture/roadmap.md)
 - [Glossary](docs/architecture/glossary.md)
 
-## Current repository commands
+## Repository commands
 
-The checked-in implementation remains in transition. Use the commands provided
-by the current tree while implementing the ordered architecture work.
+The legacy runtime has been removed. The current tree is the Roadmap V1 target
+workspace scaffold.
 
 ```bash
 make install
+make build
+make lint
+make typecheck
 make test
+make test-all
 make dev
 make stop
 ```
 
-Focused Python tests require every current package source root:
+Focused checks:
 
 ```bash
-PYTHONPATH=$(pwd)/packages/performer-api/src:$(pwd)/packages/performer/src:$(pwd)/packages/conductor/src:$(pwd)/packages/podium/src \
-  .venv/bin/python -m pytest path/to/test_file.py -q
+npm test -w @symphony/podium-desktop
+npm run typecheck -w @symphony/conductor
+.venv/bin/python -m pytest apps/performer/tests -q
+cd apps/podium-desktop/src-tauri && cargo test
 ```
 
-Run the current services directly:
-
-```bash
-.venv/bin/performer --turn-request-path /tmp/turn-request.json --turn-result-path /tmp/turn-result.json
-.venv/bin/conductor --port 8081 --data-root ./.conductor
-.venv/bin/podium api --host 127.0.0.1 --port 8090
-```
-
-Podium web development:
-
-```bash
-cd packages/podium/web
-npm run dev
-npm run build
-npm run test
-npm run lint
-npm run design:lint
-```
-
-See [`packages/podium/web/DESIGN.md`](packages/podium/web/DESIGN.md) before
-changing the UI.
+Before changing the UI, read
+[`apps/podium-desktop/DESIGN.md`](apps/podium-desktop/DESIGN.md). It owns visual
+tokens only; product behavior remains owned by `docs/architecture/`.

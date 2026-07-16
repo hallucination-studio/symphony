@@ -1,0 +1,35 @@
+{
+  "name": "@symphony/podium-desktop",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "dev:backend": "tsx src-backend/main.ts",
+    "build": "npm run build:web && npm run build:backend",
+    "build:web": "tsc -b && vite build",
+    "build:backend": "tsc -p src-backend/tsconfig.json",
+    "typecheck": "tsc -b --pretty false && tsc -p src-backend/tsconfig.json --noEmit",
+    "lint": "eslint src src-backend --ext .ts,.tsx --max-warnings 0",
+    "test": "vitest run",
+    "test:host": "cargo test --manifest-path src-tauri/Cargo.toml --",
+    "package": "tauri build",
+    "tauri": "tauri"
+  },
+  "dependencies": {
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.11.4",
+    "@testing-library/jest-dom": "6.6.3",
+    "@testing-library/react": "16.1.0",
+    "@types/node": "22.10.2",
+    "@types/react": "18.3.18",
+    "@types/react-dom": "18.3.5",
+    "@vitejs/plugin-react": "4.3.4",
+    "jsdom": "25.0.1",
+    "vite": "5.4.11",
+    "vitest": "2.1.8"
+  }
+}
