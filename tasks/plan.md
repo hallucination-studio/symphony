@@ -988,9 +988,9 @@ Description：修改真实 tick 入口使用 inherited IPC command/report/lease/
 
 Dependencies：4.5c。
 
-Files：packages/conductor/src/conductor/conductor_api.py、packages/conductor/src/conductor/conductor_podium_sync.py、packages/conductor/src/conductor/conductor_service.py、packages/conductor/src/conductor/podium_ipc.py、tests/test_conductor_private_sync.py。
+Files：packages/conductor/src/conductor/conductor_api.py、packages/conductor/src/conductor/conductor_cli.py、packages/conductor/src/conductor/conductor_podium_sync.py、packages/conductor/src/conductor/conductor_service.py、packages/conductor/src/conductor/podium_ipc.py、packages/conductor/src/conductor/workflow_driver.py、tests/test_conductor_private_sync.py。`conductor_cli.py` 是 Task 4.5c 建立的 private process owner，必须由它启动真实 IPC tick；`workflow_driver.py` 必须在 driver boundary 强制 admission closed，不能只依赖 caller 约定。
 
-Estimated scope：M，5 files。
+Estimated scope：M，7 files。
 
 Acceptance：
 
