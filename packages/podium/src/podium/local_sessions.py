@@ -135,6 +135,8 @@ class LocalSessionRegistry:
         *,
         session_id: str | None = None,
     ) -> LocalSessionRecord:
+        if session_id is not None and session_id in self._records:
+            raise ValueError("local_runtime_duplicate_session")
         if self.active_for_binding(identity.binding_id) is not None:
             raise ValueError("local_runtime_duplicate_binding")
         if any(

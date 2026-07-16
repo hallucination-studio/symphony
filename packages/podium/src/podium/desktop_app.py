@@ -1,13 +1,19 @@
 from __future__ import annotations
 
+from array import array
+import json
 import logging
 import os
+import socket
+import struct
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+import threading
 from typing import Callable, Protocol
 
 from .local_runtime_server import LocalRuntimeServer
+from .local_sessions import LocalSessionIdentity
 
 from .store.failures import BackgroundFailure, FailureRepository
 from .store.linear import LinearRepository
@@ -18,6 +24,19 @@ from .linear_disconnect import (
 )
 
 LOGGER = logging.getLogger(__name__)
+_HANDOFF_FIELDS = frozenset(
+    {
+        "protocol_version",
+        "conductor_id",
+        "instance_id",
+        "project_id",
+        "binding_id",
+        "binding_generation",
+        "session_id",
+        "expected_pid",
+    }
+)
+_MAX_HANDOFF_BYTES = 4 * 1024
 
 
 class BackgroundJob(Protocol):
@@ -26,6 +45,179 @@ class BackgroundJob(Protocol):
     def start(self, report_failure: Callable[[BackgroundFailure], None]) -> None: ...
 
     def stop(self) -> None: ...
+
+
+class DesktopSessionHandoff:
+    name = "desktop_session_handoff"
+
+    def __init__(self, channel: socket.socket, server: LocalRuntimeServer) -> None:
+        self.channel = channel
+        self.server = server
+        self._thread: threading.Thread | None = None
+        self._stopping = False
+
+    def start(self, report_failure: Callable[[BackgroundFailure], None]) -> None:
+        if self._thread is not None:
+            raise RuntimeError("desktop_session_handoff_already_started")
+        self._stopping = False
+        self._thread = threading.Thread(
+            target=self._run,
+            args=(report_failure,),
+            name="podium-session-handoff",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stopping = True
+        self.server.close_all()
+        try:
+            self.channel.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        self.channel.close()
+        thread = self._thread
+        if thread is not None:
+            thread.join(timeout=1)
+            if thread.is_alive():
+                raise RuntimeError("desktop_session_handoff_stop_failed")
+        self._thread = None
+
+    def _run(self, report_failure: Callable[[BackgroundFailure], None]) -> None:
+        while not self._stopping:
+            transferred: socket.socket | None = None
+            session_id = "unknown"
+            try:
+                payload, transferred = _receive_handoff(self.channel)
+                if payload is None:
+                    return
+                _validate_handoff_metadata(payload)
+                session_id = payload["session_id"]
+                identity = LocalSessionIdentity(
+                    payload["conductor_id"],
+                    payload["project_id"],
+                    payload["binding_id"],
+                    payload["binding_generation"],
+                    payload["instance_id"],
+                    payload["expected_pid"],
+                )
+                record = self.server.adopt(
+                    identity, transferred, session_id=session_id
+                )
+                transferred = None
+                self.server.accept(session_id, peer_pid=identity.expected_pid)
+                _write_handoff_result(
+                    self.channel,
+                    {"status": "accepted", "session_id": record.session_id},
+                )
+            except Exception as error:
+                if transferred is not None:
+                    transferred.close()
+                if self._stopping:
+                    return
+                code = _handoff_error_code(error)
+                LOGGER.error(
+                    "event=podium_session_handoff_failed session_id=%s "
+                    "error_type=local_runtime error_code=%s sanitized_reason=%s "
+                    "action_required=true retryable=false "
+                    "next_action=restart_conductor",
+                    session_id,
+                    code,
+                    code,
+                )
+                try:
+                    _write_handoff_result(
+                        self.channel,
+                        {
+                            "status": "rejected",
+                            "session_id": session_id,
+                            "error_code": code,
+                        },
+                    )
+                except OSError:
+                    report_failure(
+                        BackgroundFailure(
+                            "desktop_session_handoff_failed",
+                            1,
+                            "desktop_session_handoff_failed",
+                            "restart_desktop",
+                            None,
+                        )
+                    )
+                    return
+
+
+def _receive_handoff(
+    channel: socket.socket,
+) -> tuple[dict[str, object] | None, socket.socket | None]:
+    fd_size = array("i").itemsize
+    data, ancillary, flags, _ = channel.recvmsg(
+        _MAX_HANDOFF_BYTES + 4, socket.CMSG_SPACE(fd_size)
+    )
+    if not data:
+        return None, None
+    while len(data) < 4:
+        chunk = channel.recv(4 - len(data))
+        if not chunk:
+            raise ValueError("desktop_session_handoff_frame_incomplete")
+        data += chunk
+    size = struct.unpack(">I", data[:4])[0]
+    if size > _MAX_HANDOFF_BYTES:
+        raise ValueError("desktop_session_handoff_frame_too_large")
+    body = data[4:]
+    while len(body) < size:
+        chunk = channel.recv(size - len(body))
+        if not chunk:
+            raise ValueError("desktop_session_handoff_frame_incomplete")
+        body += chunk
+    if len(body) != size:
+        raise ValueError("desktop_session_handoff_frame_invalid")
+    descriptors = array("i")
+    for level, kind, value in ancillary:
+        if level == socket.SOL_SOCKET and kind == socket.SCM_RIGHTS:
+            descriptors.frombytes(value[: len(value) - (len(value) % fd_size)])
+    if flags & socket.MSG_CTRUNC or len(descriptors) != 1:
+        for descriptor in descriptors:
+            os.close(descriptor)
+        raise ValueError("desktop_session_handoff_descriptor_invalid")
+    try:
+        payload = json.loads(body)
+        if not isinstance(payload, dict) or set(payload) != _HANDOFF_FIELDS:
+            raise ValueError("desktop_session_handoff_metadata_invalid")
+        transferred = socket.socket(fileno=descriptors[0])
+        return payload, transferred
+    except Exception:
+        os.close(descriptors[0])
+        raise
+
+
+def _validate_handoff_metadata(payload: dict[str, object]) -> None:
+    if type(payload["protocol_version"]) is not int or payload["protocol_version"] != 1:
+        raise ValueError("desktop_session_handoff_version_invalid")
+    for field in (
+        "conductor_id",
+        "instance_id",
+        "project_id",
+        "binding_id",
+        "session_id",
+    ):
+        if not isinstance(payload[field], str):
+            raise ValueError("desktop_session_handoff_metadata_invalid")
+    for field in ("binding_generation", "expected_pid"):
+        if type(payload[field]) is not int:
+            raise ValueError("desktop_session_handoff_metadata_invalid")
+
+
+def _write_handoff_result(channel: socket.socket, result: dict[str, object]) -> None:
+    body = json.dumps(result, separators=(",", ":")).encode()
+    channel.sendall(struct.pack(">I", len(body)) + body)
+
+
+def _handoff_error_code(error: Exception) -> str:
+    code = str(error)
+    if code.startswith("local_runtime_") or code.startswith("desktop_session_handoff_"):
+        return code
+    return "desktop_session_handoff_failed"
 
 
 @dataclass(frozen=True)
@@ -112,18 +304,6 @@ class DesktopLifecycle:
         self.accepting_work = False
         self.snapshot = LifecycleSnapshot("stopping", self.snapshot.installation_status)
         errors: list[Exception] = []
-        if self.local_runtime_server is not None:
-            try:
-                self.local_runtime_server.close_all()
-            except Exception as error:
-                errors.append(error)
-                LOGGER.error(
-                    "event=podium_local_runtime_shutdown_failed error_type=%s "
-                    "error_code=podium_local_runtime_shutdown_failed "
-                    "sanitized_reason=local_runtime_shutdown_failed "
-                    "action_required=true retryable=false next_action=restart_desktop",
-                    type(error).__name__,
-                )
         for job in reversed(self._started_jobs):
             try:
                 job.stop()
@@ -137,6 +317,18 @@ class DesktopLifecycle:
                     type(error).__name__,
                 )
         self._started_jobs.clear()
+        if self.local_runtime_server is not None:
+            try:
+                self.local_runtime_server.close_all()
+            except Exception as error:
+                errors.append(error)
+                LOGGER.error(
+                    "event=podium_local_runtime_shutdown_failed error_type=%s "
+                    "error_code=podium_local_runtime_shutdown_failed "
+                    "sanitized_reason=local_runtime_shutdown_failed "
+                    "action_required=true retryable=false next_action=restart_desktop",
+                    type(error).__name__,
+                )
         if self.store is not None:
             try:
                 self.store.close()

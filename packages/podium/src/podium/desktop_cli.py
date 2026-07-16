@@ -1,11 +1,21 @@
 from __future__ import annotations
 
+import argparse
+import socket
 import sys
 from typing import BinaryIO
 
-from .desktop_app import DesktopLifecycle, default_data_root
+from .desktop_app import DesktopLifecycle, DesktopSessionHandoff, default_data_root
 from .desktop_health import handle_request
 from .desktop_protocol import ProtocolError, encode_frame, read_frame
+from .local_runtime_server import LocalRuntimeServer
+from .local_sessions import LocalSessionRegistry
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Run the Podium Desktop sidecar")
+    parser.add_argument("--desktop-ipc-fd", type=int)
+    return parser.parse_args(argv)
 
 
 def run_desktop_protocol(
@@ -55,8 +65,22 @@ def run_desktop_protocol(
     return exit_code
 
 
-def main() -> int:
-    lifecycle = DesktopLifecycle(default_data_root())
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    server = None
+    jobs = ()
+    if args.desktop_ipc_fd is not None:
+        if args.desktop_ipc_fd < 0:
+            return 2
+        try:
+            channel = socket.socket(fileno=args.desktop_ipc_fd)
+        except OSError:
+            return 2
+        server = LocalRuntimeServer(LocalSessionRegistry())
+        jobs = (DesktopSessionHandoff(channel, server),)
+    lifecycle = DesktopLifecycle(
+        default_data_root(), jobs=jobs, local_runtime_server=server
+    )
     lifecycle.start()
     return run_desktop_protocol(
         stdin=sys.stdin.buffer,

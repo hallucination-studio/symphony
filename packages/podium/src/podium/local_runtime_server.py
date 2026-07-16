@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import socket
 from uuid import uuid4
 
 from performer_api import LocalRuntimeEnvelope
@@ -39,6 +40,28 @@ class LocalRuntimeServer:
         except Exception:
             session.close()
             os.close(child_fd)
+            raise
+
+    def adopt(
+        self,
+        identity: LocalSessionIdentity,
+        channel: socket.socket,
+        *,
+        session_id: str,
+    ) -> LocalSessionRecord:
+        expected = LocalRuntimeEnvelope(
+            1,
+            identity.instance_id,
+            identity.project_id,
+            identity.binding_generation,
+            session_id,
+            "handshake",
+        )
+        session = PodiumLocalSession(channel, expected)
+        try:
+            return self.registry.register(identity, session, session_id=session_id)
+        except Exception:
+            session.close()
             raise
 
     def accept(

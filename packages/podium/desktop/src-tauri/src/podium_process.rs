@@ -1,8 +1,13 @@
 use std::io::{Read, Write};
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::time::Duration;
+
+#[cfg(unix)]
+use crate::private_ipc::{inherited_channel, DynamicSessionHandoff};
 
 const FRAME_LIMIT: usize = 64 * 1024;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -10,18 +15,36 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 pub struct PodiumProcess {
     child: Child,
     responses: Receiver<Result<serde_json::Value, String>>,
+    #[cfg(unix)]
+    _session_handoff: DynamicSessionHandoff,
 }
 
 impl PodiumProcess {
     pub fn start() -> Result<Self, String> {
+        Self::start_platform()
+    }
+
+    #[cfg(not(unix))]
+    fn start_platform() -> Result<Self, String> {
+        Err("podium_dynamic_session_handoff_unavailable".into())
+    }
+
+    #[cfg(unix)]
+    fn start_platform() -> Result<Self, String> {
+        let (broker, child_broker) =
+            inherited_channel().map_err(|_| "podium_session_handoff_create_failed".to_string())?;
         let mut child = Command::new(sidecar_path()?)
+            .arg("--desktop-ipc-fd")
+            .arg(child_broker.as_raw_fd().to_string())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .spawn()
             .map_err(|error| format!("podium_sidecar_spawn_failed:{error}"))?;
+        drop(child_broker);
         let responses = response_reader(&mut child)?;
-        let mut process = Self { child, responses };
+        let mut process =
+            Self { child, responses, _session_handoff: DynamicSessionHandoff::new(broker) };
         let handshake = write_request(&mut process.child, "handshake", "desktop-start")
             .and_then(|_| process.read_response(HANDSHAKE_TIMEOUT))
             .and_then(|response| {

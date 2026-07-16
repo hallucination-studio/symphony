@@ -97,7 +97,7 @@
 - [x] 4.5d 切换 active sync tick 到 private IPC
 - [x] Checkpoint 4B：基本 IPC 闭环
 
-- [ ] 4.6a 建立 Desktop 到长驻 Podium 的动态 inherited session handoff
+- [x] 4.6a 建立 Desktop 到长驻 Podium 的动态 inherited session handoff
 - [ ] 4.6b 实现 Desktop 多 Conductor auto-start reconciliation
 - [ ] 4.7 实现 scoped Linear gateway contract
 - [ ] 4.8 实现 bounded runtime reports

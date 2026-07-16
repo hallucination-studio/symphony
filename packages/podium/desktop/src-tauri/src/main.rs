@@ -2,7 +2,6 @@ mod commands;
 pub mod conductor_process;
 mod oauth;
 mod podium_process;
-#[cfg(test)]
 mod private_ipc;
 mod process_state;
 mod shutdown;
