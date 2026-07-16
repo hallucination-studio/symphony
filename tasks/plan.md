@@ -921,24 +921,83 @@ Verification：Python focused test_conductor_podium_ipc；package boundary；tok
 
 Commit：feat: connect Conductor through private IPC。
 
-### Task 4.5：切换 active sync 到 private IPC
+### Task 4.5a：修正完整 Configure private contract
 
-Description：让 Conductor tick 使用 IPC command/report/dispatch 顺序，保留旧代码仅作迁移对照。
+Description：修正 Task 4.1 中不足以驱动现有 Conductor durable binding/profile apply 的 Configure DTO；使用一个 exact、secret-free、单版本 contract，不保留旧的最小 `profile_id` wire 兼容分支。
 
 Dependencies：4.4。
 
-Files：packages/conductor/src/conductor/conductor_podium_sync.py、conductor_service.py、podium_ipc.py、tests/test_conductor_private_sync.py。
+Files：packages/performer-api/src/performer_api/local_runtime.py、tests/test_local_runtime_contract.py、docs/modules/performer-api.md。
+
+Estimated scope：S，3 files。
+
+Acceptance：
+
+- Configure exact fields 为 context、canonical repository path、project slug/name、app user id、policy revision 和现有 closed `PerformerProfileConfig`；project id、binding id 和 binding generation 继续只来自 context。
+- `profile.binding_id == context.binding_id`、`profile.binding_config_version == context.binding_generation`，且 MVP `performer_kind/runtime_kind` 都为 fixed `codex` provenance；mismatch、旧 lone `profile_id`、unknown/provider/secret field fail closed。
+- Contract 不增加 token、header、URL、credential reference、provider session/config 字段或第二 version；payload limit 和 wire-safety/package boundary 保持通过。
+
+Verification：Python focused test_local_runtime_contract；wire-safety/package-boundary tests；old-shape rejection scan；Diff。
+
+Commit：fix: complete the private Configure contract。
+
+### Task 4.5b：打通 private Configure 构造与应用
+
+Description：让 Podium 从已批准 binding + current closed profile 构造完整 ConfigureCommand，并让 Conductor 通过 structured DTO 原子应用同一 project/repository/profile generation；此 Task 不切换 tick 入口。
+
+Dependencies：4.5a、4.3、4.4。
+
+Files：packages/podium/src/podium/local_runtime_commands.py、packages/conductor/src/conductor/conductor_podium_sync.py、packages/conductor/src/conductor/conductor_service.py、tests/test_conductor_private_configure.py。
 
 Estimated scope：M，4 files。
 
 Acceptance：
 
-- Tick 顺序为 configure/command -> report -> lease -> ACK，可在任一步重启恢复。
-- HTTP URL/bearer 不在 active branch。
-- Failure 写 Conductor log/state，并通过下一 report 进入 Podium snapshot。
-- Desktop Quit 按规格 7.3 停止新 polling/dispatch/turn、等待每个 active Conductor drain 后再关闭 IPC/SQLite；timeout/result-persistence failure 有界可见且不冒充 clean shutdown。
+- Podium 只为 matching active binding/session/profile 发送 command；canonical repository、context、profile binding/config generation 必须一致。
+- Conductor 直接消费 ConfigureCommand 并复用现有 structured profile validation；same generation exact duplicate 幂等，stale generation/hash drift/repository or project mismatch fail closed，成功状态先写 workflow.db 后返回。
+- 两侧只 import performer-api，不互相 import；failure 写 correlated sanitized log/state，不读取 HTTP URL/bearer 或 provider-specific config。
 
-Verification：Python focused test_conductor_private_sync；restart/failure/order/active-turn drain tests；active-path source search；orphan/failure visibility audit；Diff。
+Verification：Python focused tests/test_conductor_private_configure.py、tests/test_local_runtime_commands.py、tests/test_local_runtime_contract.py；persistence/restart/stale/hash/path tests；package boundary；Diff。
+
+Commit：feat: apply complete Configure commands over IPC。
+
+### Task 4.5c：建立 Conductor inherited IPC bootstrap
+
+Description：让 installed Conductor CLI 从 Desktop 传入的 inherited FD 和 closed identity/handshake metadata 构造 Task 4.4 client；只建立启动入口，不在此 Task 改 tick 行为。
+
+Dependencies：4.5b。
+
+Files：packages/conductor/src/conductor/conductor_cli.py、packages/conductor/src/conductor/models.py、packages/conductor/src/conductor/podium_ipc.py、tests/test_conductor_podium_bootstrap.py。
+
+Estimated scope：M，4 files。
+
+Acceptance：
+
+- CLI 只接受 inherited FD、conductor/instance/project/binding/generation 和 one-shot handshake correlation；exact validation 后才启动 service，FD 不可用、identity/version/generation mismatch fail closed。
+- Bootstrap 不接受 endpoint URL、runtime/proxy token、bearer、cookie、API key、credential path、ambient `PODIUM_*TOKEN` 或 public listener fallback。
+- Startup/handshake failure 形成 correlated sanitized operator log 并有界退出；无 orphan handle/process。
+
+Verification：Python focused tests/test_conductor_podium_bootstrap.py、tests/test_conductor_podium_ipc.py；CLI subprocess/FD inheritance/mismatch/orphan tests；token/env/listener forbidden active-path scan；package boundary；Diff。
+
+Commit：feat: bootstrap Conductor from inherited IPC。
+
+### Task 4.5d：切换 active sync tick 到 private IPC
+
+Description：修改真实 tick 入口使用 inherited IPC command/report/lease/ACK 顺序；旧 HTTP helper 文件/方法只保留作后续删除对照，不再由 active startup/tick branch 调用。
+
+Dependencies：4.5c。
+
+Files：packages/conductor/src/conductor/conductor_api.py、packages/conductor/src/conductor/conductor_podium_sync.py、packages/conductor/src/conductor/conductor_service.py、packages/conductor/src/conductor/podium_ipc.py、tests/test_conductor_private_sync.py。
+
+Estimated scope：M，5 files。
+
+Acceptance：
+
+- 真实 tick 顺序为 configure/drain command -> report -> lease -> durable apply -> ACK；任一步失败或进程重启后可从 Podium lease/Conductor workflow.db state 恢复，不伪造 ACK。
+- Active startup/tick branch 不读取或调用 HTTP URL、bearer、legacy live/command/report/dispatch poll；private client 缺失或关闭时 fail closed 并写 Conductor log/state，下一可用 report 带 bounded sanitized failure。
+- Drain 先关闭 polling/lease/new-turn admission，等待 active result 写入 workflow.db 后 ACK；timeout/result-persistence failure 有界可见且不冒充 clean shutdown，`WorkflowDriver` 在 admission closed 时不得开始新 turn。
+
+Verification：Python focused tests/test_conductor_private_sync.py；restart/failure/order/active-turn drain tests；active startup/tick call-graph search；HTTP/token/env/listener forbidden active-path scan；orphan/failure visibility audit；package boundary；Diff。
 
 Commit：refactor: switch Conductor sync to private IPC。
 
@@ -951,7 +1010,7 @@ Commit：refactor: switch Conductor sync to private IPC。
 
 Description：Create Conductor 提交后立即、并在每次 Desktop 启动时，根据 active desired bindings 自动启动或重新连接多个独立 data root/IPC/log 的 bundled Conductor。
 
-Dependencies：2.7、3.10、4.5。
+Dependencies：2.7、3.10、4.5d。
 
 Files：desktop/src-tauri/src/conductors.rs、supervisor.rs、process_state.rs、desktop/src-tauri/tests/multi_conductor.rs。
 
@@ -973,7 +1032,7 @@ Commit：feat: supervise isolated local Conductors。
 
 Description：允许 Conductor 请求批准的 Linear projection/read operation，但不接收 Linear token。
 
-Dependencies：3.7、4.5。
+Dependencies：3.7、4.5d。
 
 Files：packages/performer-api/src/performer_api/local_runtime.py、packages/podium/src/podium/local_linear_gateway.py、packages/conductor/src/conductor/linear.py、tests/test_conductor_linear_gateway.py。
 
@@ -993,7 +1052,7 @@ Commit：feat: proxy scoped Linear operations locally。
 
 Description：将 Conductor、Performer、Managed Run 和 runtime-wait 状态投影到 Podium read model。
 
-Dependencies：4.5、2.8。
+Dependencies：4.5d、2.8。
 
 Files：packages/conductor/src/conductor/podium_report.py、performer_control.py、packages/podium/src/podium/runtime_reports.py、tests/test_local_runtime_reports.py。
 
@@ -1129,7 +1188,7 @@ Commit：feat: enqueue one dispatch per delegation epoch。
 
 Description：将 eligible dispatch lease 给唯一 matching Conductor session，并应用 ACK。
 
-Dependencies：5.5、4.5。
+Dependencies：5.5、4.5d。
 
 Files：packages/podium/src/podium/local_runtime_dispatch.py、store/dispatch.py、packages/conductor/src/conductor/podium_ipc.py、tests/test_private_dispatch_lease.py。
 
@@ -1980,7 +2039,7 @@ Commit：refactor: remove Podium user and session models。
 
 Description：删除 `conductor_podium_sync` 的 URL/bearer/httpx branch、`ConductorApiServer` loopback listener、host/port CLI 和 instance `http_port` schema；保留 private IPC scheduler、workflow.db 与 installed Performer process boundary。
 
-Dependencies：Checkpoint 8E、Task 4.5、Task 4.7。
+Dependencies：Checkpoint 8E、Task 4.5d、Task 4.7。
 
 Files：packages/conductor/src/conductor/conductor_podium_sync.py、conductor_api.py、conductor_cli.py、conductor_service.py、models.py、store.py、packages/conductor/pyproject.toml、相关 HTTP/sync tests。
 
