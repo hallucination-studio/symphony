@@ -27,7 +27,10 @@ class DrainHandler(Protocol):
 def inherited_podium_channel(fd: int) -> socket.socket:
     if fd < 0:
         raise ValueError("podium_ipc_fd_invalid")
-    return socket.socket(fileno=fd)
+    try:
+        return socket.socket(fileno=fd)
+    except OSError:
+        raise ValueError("podium_ipc_fd_unavailable") from None
 
 
 def send_handshake(channel: socket.socket, envelope: LocalRuntimeEnvelope) -> None:
@@ -77,7 +80,12 @@ class LocalRuntimeClient:
             _log_failure(identity, "podium_ipc_handshake_mismatch")
             channel.close()
             raise ValueError("podium_ipc_handshake_mismatch")
-        send_handshake(channel, handshake)
+        try:
+            send_handshake(channel, handshake)
+        except Exception:
+            _log_failure(identity, "podium_ipc_handshake_failed")
+            channel.close()
+            raise ValueError("podium_ipc_handshake_failed") from None
         return cls(channel, identity)
 
     def receive(self) -> Any:

@@ -7,6 +7,8 @@ from enum import StrEnum
 from typing import Any, Literal
 from uuid import uuid4
 
+from performer_api import LocalRuntimeEnvelope
+
 
 RepoSourceType = Literal["git", "local_path"]
 ProcessStatus = Literal["stopped", "starting", "running", "unhealthy", "exited", "crash_loop"]
@@ -37,6 +39,41 @@ class LocalRuntimeIdentity:
             or self.binding_generation < 1
         ):
             raise ValueError("binding_generation_invalid")
+
+
+@dataclass(frozen=True)
+class LocalRuntimeBootstrap:
+    podium_ipc_fd: int
+    identity: LocalRuntimeIdentity
+    handshake_correlation_id: str
+
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.podium_ipc_fd, bool)
+            or not isinstance(self.podium_ipc_fd, int)
+            or self.podium_ipc_fd < 0
+        ):
+            raise ValueError("podium_ipc_fd_invalid")
+        if self.identity.instance_id in {".", ".."}:
+            raise ValueError("instance_id_invalid")
+        if (
+            not isinstance(self.handshake_correlation_id, str)
+            or _SECRET_IDENTIFIER.search(self.handshake_correlation_id) is not None
+        ):
+            raise ValueError("handshake_correlation_id_invalid")
+        self.handshake
+
+    @property
+    def handshake(self) -> LocalRuntimeEnvelope:
+        identity = self.identity
+        return LocalRuntimeEnvelope(
+            1,
+            identity.instance_id,
+            identity.project_id,
+            identity.binding_generation,
+            self.handshake_correlation_id,
+            "handshake",
+        )
 
 
 def utc_now_iso() -> str:
