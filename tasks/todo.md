@@ -95,7 +95,7 @@
 - [x] 4.5b 打通 private Configure 构造与应用
 - [x] 4.5c 建立 Conductor inherited IPC bootstrap
 - [x] 4.5d 切换 active sync tick 到 private IPC
-- [ ] Checkpoint 4B：基本 IPC 闭环
+- [x] Checkpoint 4B：基本 IPC 闭环
 
 - [ ] 4.6 实现 Desktop 多 Conductor auto-start reconciliation
 - [ ] 4.7 实现 scoped Linear gateway contract
