@@ -822,7 +822,7 @@ Acceptance：
 - Podium transaction 验证 accessible/unbound project、repository/project/conductor uniqueness，并原子创建 stable conductor id、project id、canonical repository、generation=1、isolated data-root key、`desired=running`。
 - Commit 后 observed state 为 pending；不存在 selected-only、repository-only、unbound enrollment 或 half binding。
 - Invalid/cancelled picker 不调用 Podium；transaction failure 不写任何 binding；response/snapshot/log 无 arbitrary path echo、shell、token 或 secret。
-- MVP 不实现 binding edit/revision/delete、安装脚本、enrollment token、ambient CLI 或 process start；auto-start 属于 Task 4.6。
+- MVP 不实现 binding edit/revision/delete、安装脚本、enrollment token、ambient CLI 或 process start；auto-start 属于 Task 4.6b。
 
 Verification：Python create command/transaction/rollback/uniqueness/reopen tests；public browser/HTTP/path echo/install-script forbidden scan；Diff。
 
@@ -1007,15 +1007,36 @@ Commit：refactor: switch Conductor sync to private IPC。
 - 一个 Podium 与一个 Conductor 完成 configure/report/lease/ACK。
 - 无 shared secret、public runtime listener 或跨包 import。
 
-### Task 4.6：实现 Desktop 多 Conductor auto-start reconciliation
+### Task 4.6a：建立 Desktop 到长驻 Podium 的动态 inherited session handoff
+
+Description：补齐 Phase 1 未覆盖的动态跨进程 handoff：Desktop 已启动 Podium sidecar 后，为后续 Conductor 创建独立 inherited channel，并把 Podium endpoint 与 exact identity/session metadata 交给长驻 Podium；不使用 named endpoint、relay transport 或 process-owner fallback。
+
+Dependencies：1.5、4.2、4.5c。
+
+Files：desktop/src-tauri/src/private_ipc.rs、podium_process.rs、packages/podium/src/podium/desktop_cli.py、desktop_app.py、local_runtime_server.py、local_sessions.py、tests/test_desktop_dynamic_sessions.py、desktop/src-tauri/tests/dynamic_sessions.rs。
+
+Estimated scope：M，8 files。
+
+Acceptance：
+
+- Desktop 创建的每个 channel endpoint 只交给对应 Podium/Conductor process，long-lived Podium 无需重启即可登记后续 session；session id/identity/generation/PID exact match。
+- Handoff 使用批准的 inherited OS handle 机制；无 filesystem/network/named listener、relay payload transport、token 或 shared secret。
+- Duplicate/stale/wrong-process handoff fail closed并关闭 handle；failure 有 correlated sanitized log，无 orphan descriptor。
+- macOS/Linux 使用 inherited Unix handle transfer；Windows 使用 inherited/duplicated handle 等价机制，不静默降级。目标实现不可用时是 No-Go，不授权 fallback。
+
+Verification：cargo dynamic-session tests；Python handoff/identity/replay/close tests；cross-process long-lived Podium + sequential two-session proof；listener/token/relay forbidden audit；Diff。
+
+Commit：feat: hand off dynamic inherited sessions。
+
+### Task 4.6b：实现 Desktop 多 Conductor auto-start reconciliation
 
 Description：Create Conductor 提交后立即、并在每次 Desktop 启动时，根据 active desired bindings 自动启动或重新连接多个独立 data root/IPC/log 的 bundled Conductor。
 
-Dependencies：2.7、3.10、4.5d。
+Dependencies：2.7、3.10、4.5d、4.6a。
 
-Files：desktop/src-tauri/src/conductors.rs、supervisor.rs、process_state.rs、desktop/src-tauri/tests/multi_conductor.rs。
+Files：desktop/src-tauri/src/conductors.rs、conductor_process.rs、supervisor.rs、process_state.rs、commands.rs、main.rs、packages/podium/src/podium/desktop_commands_conductors.py、desktop_health.py、tests/test_desktop_conductor_commands.py、desktop/src-tauri/tests/multi_conductor.rs。
 
-Estimated scope：M，4 files。
+Estimated scope：M，10 files。
 
 Acceptance：
 
@@ -1025,7 +1046,7 @@ Acceptance：
 - Start failure 保留 desired binding 并形成可见 failed observed state；下次 Desktop start 自动 reconcile。
 - 一个实例进程退出后的 reconcile 不影响其他实例，Desktop 退出无 orphan；不新增 customer start/stop/restart command，不调用 checkout、安装脚本、ambient PATH/PYTHONPATH 或 ambient `conductor`。
 
-Verification：cargo multi_conductor tests；create-immediate-start/reopen-auto-start/two-Conductor packaged smoke；bundle/path/channel/process/install-script forbidden audit；Diff。
+Verification：cargo multi_conductor tests；Python desired-binding command tests；create-immediate-start/reopen-auto-start/two-Conductor packaged smoke；bundle/path/channel/process/install-script forbidden audit；Diff。
 
 Commit：feat: supervise isolated local Conductors。
 
@@ -1471,7 +1492,7 @@ Commit：feat: choose a project while creating a Conductor。
 
 Description：把 project choice 与 native repository picker 合成一个 Create Conductor action；提交 desired binding 后由 Desktop 自动启动，不显示安装脚本或额外 Start step。
 
-Dependencies：3.10、4.6、6.5。
+Dependencies：3.10、4.6b、6.5。
 
 Files：web/src/pages/CreateConductorForm.tsx、pages/setup/CreateConductorStep.tsx、api/hooks.ts、tests、desktop/src-tauri/src/repository_picker.rs、desktop/src-tauri/capabilities/default.json、desktop/src-tauri/Cargo.toml。
 
@@ -1948,7 +1969,7 @@ Commit：refactor: remove public onboarding and binding routes。
 
 Description：删除 enrollment-token route、runtime enroll、runtime listing/status HTTP slice 和 install.sh generator；Desktop supervisor 与 snapshot 已是唯一创建/观察路径。
 
-Dependencies：8.8、Task 4.6、Checkpoint 6C。
+Dependencies：8.8、Task 4.6b、Checkpoint 6C。
 
 Files：podium_routes_runtime_enrollment.py、podium_install.py、app.py install/route registrations、web enrollment remnants、相关 enrollment tests。
 
