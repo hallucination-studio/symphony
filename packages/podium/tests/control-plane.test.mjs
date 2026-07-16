@@ -1,0 +1,283 @@
+import assert from "node:assert/strict";
+import { mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import test from "node:test";
+
+import { LinearAuthImpl } from "../dist/internal/linear-auth/LinearAuthImpl.js";
+import { ConductorBindingUseCase } from "../dist/internal/conductor-bindings/ConductorBindingUseCase.js";
+import { ProjectCatalogUseCase } from "../dist/internal/project-catalog/ProjectCatalogUseCase.js";
+import { SqlitePodiumStoreImpl } from "../dist/internal/storage/SqlitePodiumStoreImpl.js";
+
+async function createStore() {
+  const directory = await mkdtemp(path.join(tmpdir(), "symphony-podium-"));
+  return new SqlitePodiumStoreImpl(path.join(directory, "podium.db"));
+}
+
+test("OAuth completion consumes state once and persists credentials only in Podium", async () => {
+  const store = await createStore();
+  const tokenClient = {
+    async exchangeAuthorizationCode(input) {
+      assert.equal(input.authorizationCode, "authorization-code");
+      assert.equal(input.codeVerifier, "verifier");
+      return {
+        installationId: "installation-1",
+        organizationId: "organization-1",
+        accessToken: "access-secret",
+        refreshToken: "refresh-secret",
+        expiresAt: "2026-07-17T00:00:00Z",
+      };
+    },
+    async refresh() {
+      throw new Error("not used");
+    },
+  };
+  const auth = new LinearAuthImpl(store, tokenClient, {
+    createId: () => "attempt-1",
+    createSecret: () => "verifier",
+    createState: () => "state-1",
+    now: () => "2026-07-16T00:00:00Z",
+  });
+
+  const attempt = auth.start();
+  assert.deepEqual(attempt, { attemptId: "attempt-1", state: "state-1" });
+
+  const view = await auth.complete({
+    state: "state-1",
+    authorizationCode: "authorization-code",
+  });
+  assert.deepEqual(view, {
+    status: "connected",
+    workspaceName: "organization-1",
+    observedAt: "2026-07-16T00:00:00Z",
+  });
+  assert.equal(store.getLinearInstallation("installation-1")?.accessToken, "access-secret");
+
+  await assert.rejects(
+    auth.complete({ state: "state-1", authorizationCode: "replay" }),
+    /oauth_state_invalid/,
+  );
+  store.close();
+});
+
+test("Project catalog consumes every SDK page", async () => {
+  const store = await createStore();
+  store.saveLinearInstallation({
+    installationId: "installation-1",
+    organizationId: "organization-1",
+    accessToken: "access-secret",
+    refreshToken: "refresh-secret",
+    expiresAt: "2026-07-17T00:00:00Z",
+  });
+  store.saveProject({
+    projectId: "stale-project",
+    installationId: "installation-1",
+    organizationId: "organization-1",
+    name: "Removed",
+    updatedAt: "2026-07-15T00:00:00Z",
+  });
+  const client = {
+    async listProjects({ cursor }) {
+      return cursor
+        ? {
+            items: [
+              {
+                projectId: "project-2",
+                organizationId: "organization-1",
+                name: "Two",
+                updatedAt: "2026-07-16T00:00:01Z",
+              },
+            ],
+            pageInfo: { hasNextPage: false },
+          }
+        : {
+            items: [
+              {
+                projectId: "project-1",
+                organizationId: "organization-1",
+                name: "One",
+                updatedAt: "2026-07-16T00:00:00Z",
+              },
+            ],
+            pageInfo: { hasNextPage: true, endCursor: "next" },
+          };
+    },
+  };
+
+  const projects = await new ProjectCatalogUseCase(store, client).refresh(
+    "installation-1",
+  );
+  assert.deepEqual(
+    projects.map(({ projectId }) => projectId),
+    ["project-1", "project-2"],
+  );
+  store.close();
+});
+
+test("Binding creation labels one Project and rejects a second Binding", async () => {
+  const store = await createStore();
+  store.saveLinearInstallation({
+    installationId: "installation-1",
+    organizationId: "organization-1",
+    accessToken: "access-secret",
+    refreshToken: "refresh-secret",
+    expiresAt: "2026-07-17T00:00:00Z",
+  });
+  store.saveProject({
+    projectId: "project-1",
+    installationId: "installation-1",
+    organizationId: "organization-1",
+    name: "One",
+    updatedAt: "2026-07-16T00:00:00Z",
+  });
+  const labels = [];
+  const client = {
+    async assignConductorProjectLabel(input) {
+      labels.push(input);
+    },
+  };
+  const useCase = new ConductorBindingUseCase(store, client, {
+    createBindingId: () => "binding-1",
+    createConductorId: () => "conductor-1234567890",
+  });
+  const repositoryContext = {
+    repositoryIdentity: "repo-1",
+    repositoryDisplayName: "symphony",
+    repositoryRoot: "/private/repository",
+    baseBranch: "main",
+  };
+
+  const binding = await useCase.create({
+    installationId: "installation-1",
+    projectId: "project-1",
+    repositoryContext,
+  });
+  assert.equal(binding.conductorShortHash.length, 12);
+  assert.deepEqual(labels, [
+    {
+      projectId: "project-1",
+      labelName: `symphony:conductor/${binding.conductorShortHash}`,
+    },
+  ]);
+
+  await assert.rejects(
+    useCase.create({
+      installationId: "installation-1",
+      projectId: "project-1",
+      repositoryContext,
+    }),
+    /conductor_binding_already_exists/,
+  );
+  store.close();
+});
+
+test("Binding creation persists one stopped intent and safely resumes label assignment", async () => {
+  const store = await createStore();
+  store.saveLinearInstallation({
+    installationId: "installation-1",
+    organizationId: "organization-1",
+    accessToken: "access-secret",
+    refreshToken: "refresh-secret",
+    expiresAt: "2026-07-17T00:00:00Z",
+  });
+  store.saveProject({
+    projectId: "project-1",
+    installationId: "installation-1",
+    organizationId: "organization-1",
+    name: "Project",
+    updatedAt: "2026-07-16T00:00:00Z",
+  });
+  let attempts = 0;
+  const useCase = new ConductorBindingUseCase(
+    store,
+    {
+      async assignConductorProjectLabel() {
+        attempts += 1;
+        if (attempts === 1) throw new Error("ambiguous remote failure");
+      },
+    },
+    {
+      createBindingId: () => "binding-1",
+      createConductorId: () => "conductor-1",
+    },
+  );
+  const repositoryContext = {
+    repositoryIdentity: "repository-1",
+    repositoryDisplayName: "Repository",
+    repositoryRoot: "/private/repository",
+    baseBranch: "main",
+  };
+
+  await assert.rejects(
+    useCase.create({
+      installationId: "installation-1",
+      projectId: "project-1",
+      repositoryContext,
+    }),
+    /ambiguous remote failure/,
+  );
+  assert.equal(store.getConductorBinding()?.desiredState, "stopped");
+
+  const recovered = await useCase.create({
+    installationId: "installation-1",
+    projectId: "project-1",
+    repositoryContext,
+  });
+  assert.equal(recovered.bindingId, "binding-1");
+  assert.equal(recovered.desiredState, "running");
+  assert.equal(attempts, 2);
+  store.close();
+});
+
+test("Binding label assignment retries official network errors with bounded backoff", async () => {
+  class NetworkLinearError extends Error {}
+  const store = await createStore();
+  store.saveLinearInstallation({
+    installationId: "installation-1",
+    organizationId: "organization-1",
+    accessToken: "access-secret",
+    refreshToken: "refresh-secret",
+    expiresAt: "2026-07-17T00:00:00Z",
+  });
+  store.saveProject({
+    projectId: "project-1",
+    installationId: "installation-1",
+    organizationId: "organization-1",
+    name: "Project",
+    updatedAt: "2026-07-16T00:00:00Z",
+  });
+  let attempts = 0;
+  const delays = [];
+  const useCase = new ConductorBindingUseCase(
+    store,
+    {
+      async assignConductorProjectLabel() {
+        attempts += 1;
+        if (attempts < 3) throw new NetworkLinearError("connection reset");
+      },
+    },
+    {
+      createBindingId: () => "binding-1",
+      createConductorId: () => "conductor-1",
+      sleep: async (delay) => delays.push(delay),
+      maxAttempts: 3,
+      baseDelayMs: 10,
+    },
+  );
+
+  const binding = await useCase.create({
+    installationId: "installation-1",
+    projectId: "project-1",
+    repositoryContext: {
+      repositoryIdentity: "repository-1",
+      repositoryDisplayName: "Repository",
+      repositoryRoot: "/private/repository",
+      baseBranch: "main",
+    },
+  });
+
+  assert.equal(binding.desiredState, "running");
+  assert.equal(attempts, 3);
+  assert.deepEqual(delays, [10, 20]);
+  store.close();
+});

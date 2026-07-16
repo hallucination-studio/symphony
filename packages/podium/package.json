@@ -8,8 +8,17 @@
   },
   "types": "./dist/public/index.d.ts",
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && mkdir -p dist/internal && cp src/internal/contracts-runtime.mjs dist/internal/contracts-runtime.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "lint": "eslint src --ext .ts --max-warnings 0"
+    "lint": "eslint src --ext .ts --max-warnings 0",
+    "test": "npm run build && node --test tests/*.test.mjs"
+  },
+  "dependencies": {
+    "@symphony/contracts": "0.1.0",
+    "@linear/sdk": "^88.2.0",
+    "better-sqlite3": "^12.11.1"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13"
   }
 }
