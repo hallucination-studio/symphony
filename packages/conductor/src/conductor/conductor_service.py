@@ -107,6 +107,7 @@ class ConductorService(ConductorPodiumSyncMixin):
         self._private_drain_requests: dict[str, DrainRequest] = {}
         self._private_drain_acks: dict[str, DrainAck] = {}
         self.accepting_private_turns = True
+        self.private_sync_failure: dict[str, Any] | None = None
         self.project_label_proxy_factory = self._project_label_proxy
         self.data_root.mkdir(parents=True, exist_ok=True)
 
@@ -496,21 +497,25 @@ class ConductorService(ConductorPodiumSyncMixin):
     def get_instance(self, instance_id: str) -> InstanceRecord | None:
         return self.store.get_instance(instance_id)
 
-    def create_instance(self, request: InstanceCreateRequest) -> InstanceRecord:
+    def create_instance(
+        self, request: InstanceCreateRequest, *, instance_id: str | None = None
+    ) -> InstanceRecord:
         if self.store.list_instances():
             raise ConductorServiceError(
                 "single_project_conductor",
                 "A Conductor may manage exactly one project instance",
             )
-        instance = self._build_instance_candidate(request)
+        instance = self._build_instance_candidate(request, instance_id=instance_id)
         self._materialize_instance(instance)
         self._initialize_workspace(instance)
         self.store.create_instance(instance)
         return instance
 
-    def _build_instance_candidate(self, request: InstanceCreateRequest) -> InstanceRecord:
+    def _build_instance_candidate(
+        self, request: InstanceCreateRequest, *, instance_id: str | None = None
+    ) -> InstanceRecord:
         resolved_repo_path = self._resolve_repo(request.repo_source_type, request.repo_source_value)
-        instance_id = self._allocate_instance_id()
+        instance_id = instance_id or self._allocate_instance_id()
         instance_dir = request.instance_dir or str((self.data_root / "instances" / instance_id).resolve())
         workspace_root = request.workspace_root or str((Path(instance_dir) / "workspace" / "repo").resolve())
         persistence_path = request.persistence_path or str((Path(instance_dir) / "state" / "performer.json").resolve())

@@ -57,9 +57,14 @@ compatibility alias remains.
   binding, capability, and policy identity.
 - `PerformerControlError` preserves stable category, sanitized reason,
   action, retryability, attempt number where applicable, and next action.
-- `LocalRuntimeHandshake` and `LocalRuntimeEnvelope` are closed, secret-free
-  identity contracts for private inherited IPC. They define no transport,
-  persistence, Linear behavior, or domain payload.
+- `LocalRuntimeHandshake`, `LocalRuntimeEnvelope`, and the local runtime message
+  DTOs are closed, secret-free contracts for private inherited IPC. Configure
+  carries exact binding context, canonical repository path, bounded project/app
+  metadata, policy revision, and one validated `PerformerProfileConfig`; its
+  profile binding/config generation must match context and its backend
+  provenance is the fixed `codex` singleton. The DTOs define no transport,
+  persistence, Linear calls, token/header fields, provider session data, or
+  arbitrary domain payload.
 
 Logical settings such as `api_base_url` are mapped to provider configuration
 inside Performer. No shared contract exposes provider config keys, JSON-RPC,

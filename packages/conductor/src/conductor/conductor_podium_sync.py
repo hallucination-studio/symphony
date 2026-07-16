@@ -10,6 +10,7 @@ from typing import Any
 
 import httpx
 
+from performer_api import ConfigureCommand
 from performer_api.runtime_policy import PerformerProfileConfig, RuntimePolicyError
 
 from .models import ConductorServiceError, InstanceCreateRequest, InstancePatchRequest
@@ -55,6 +56,7 @@ _PROJECT_CONFIGURE_KEYS = _PROFILE_COMMAND_KEYS | frozenset(
         "project_slug",
         "project_name",
         "agent_app_user_id",
+        "policy_revision",
         "repository",
     }
 )
@@ -83,6 +85,62 @@ class ConductorPodiumSyncMixin:
         if kind == "project.activate_installation":
             return self._handle_installation_activate(command)
         return {"status": "ignored", "reason": "unsupported_command"}
+
+    def apply_private_configure(self, command: ConfigureCommand) -> dict[str, Any]:
+        if not isinstance(command, ConfigureCommand):
+            raise TypeError("command must be ConfigureCommand")
+        context = command.context
+        profile = command.profile
+        payload = {
+            **profile.to_dict(),
+            "type": "project.configure",
+            "binding_id": context.binding_id,
+            "binding_config_version": context.binding_generation,
+            "performer_binding_generation": context.binding_generation,
+            "linear_project_id": context.project_id,
+            "project_slug": command.project_slug,
+            "project_name": command.project_name,
+            "agent_app_user_id": command.app_user_id,
+            "policy_revision": command.policy_revision,
+            "repository": {"mode": "local_path", "value": command.repository_path},
+        }
+        instances = self.store.list_instances()
+        if instances and instances[0].id != context.instance_id:
+            result = {"status": "rejected", "reason": "conductor_instance_mismatch"}
+        else:
+            result = self._handle_project_configure(payload, instance_id=context.instance_id)
+        if result.get("status") == "rejected":
+            finding = self._record_managed_run_sync_failure(
+                "private_configure_rejected",
+                instances[0] if instances else None,
+                ValueError(str(result.get("reason") or "private_configure_rejected")),
+                action_required="restart_or_fix_binding",
+                extra={
+                    "conductor_id": context.conductor_id,
+                    "instance_id": context.instance_id,
+                    "project_id": context.project_id,
+                    "binding_id": context.binding_id,
+                    "binding_generation": context.binding_generation,
+                    "correlation_id": context.correlation_id,
+                },
+            )
+            self.private_sync_failure = finding
+            return result
+        self.private_sync_failure = None
+        LOGGER.info(
+            "event=conductor_private_configure_applied conductor_id=%s instance_id=%s "
+            "project_id=%s binding_id=%s binding_generation=%s correlation_id=%s "
+            "policy_revision=%s status=%s retryable=false next_action=none",
+            context.conductor_id,
+            context.instance_id,
+            context.project_id,
+            context.binding_id,
+            context.binding_generation,
+            context.correlation_id,
+            command.policy_revision,
+            result.get("status"),
+        )
+        return result
 
     async def handle_smoke_check(self, raw_command: dict[str, Any]) -> dict[str, Any]:
         try:
@@ -138,7 +196,9 @@ class ConductorPodiumSyncMixin:
         instances = self.store.list_instances()
         return instances[0] if len(instances) == 1 else None
 
-    def _handle_project_configure(self, command: dict[str, Any]) -> dict[str, Any]:
+    def _handle_project_configure(
+        self, command: dict[str, Any], *, instance_id: str | None = None
+    ) -> dict[str, Any]:
         project_id = str(command.get("linear_project_id") or "")
         version = _optional_int(command.get("binding_config_version"), 0) or _optional_int(command.get("config_version"), 0) or 0
         repository = command.get("repository") if isinstance(command.get("repository"), dict) else {}
@@ -169,7 +229,8 @@ class ConductorPodiumSyncMixin:
                     repo_source_value=value,
                     linear_project=str(command.get("project_slug") or ""),
                     linear_filters=_project_filters(command, project_id, version, profile),
-                )
+                ),
+                instance_id=instance_id,
             )
         except ConductorServiceError as exc:
             self._record_managed_run_sync_failure(
@@ -715,6 +776,7 @@ def _project_filters(
     return {
         "binding_id": str(command.get("binding_id") or ""),
         "binding_config_version": version,
+        "policy_revision": int(command.get("policy_revision") or 1),
         "linear_project_id": project_id,
         "agent_app_user_id": str(command.get("agent_app_user_id") or ""),
         "performer_binding_id": profile.performer_binding_id,
