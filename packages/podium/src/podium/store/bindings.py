@@ -129,6 +129,10 @@ class BindingRepository:
         ).fetchone()
         return _binding(row) if row is not None else None
 
+    def get_active(self, binding_id: str) -> DesiredBinding | None:
+        binding = self.get(binding_id)
+        return binding if binding is not None and binding.active else None
+
     def active(self) -> list[DesiredBinding]:
         rows = self.connection.execute(
             """SELECT binding_id, project_id, conductor_id, generation, active,

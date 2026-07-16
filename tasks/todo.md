@@ -87,8 +87,8 @@
 
 - [x] 4.1 扩展正式 local runtime contracts
 - [x] 4.2 实现 Podium IPC session registry
-- [ ] 4.3 实现 Podium configure/command dispatcher
-- [ ] Checkpoint 4A：Podium IPC server
+- [x] 4.3 实现 Podium configure/command dispatcher
+- [x] Checkpoint 4A：Podium IPC server
 
 - [ ] 4.4 实现 Conductor IPC transport client
 - [ ] 4.5 切换 active sync 到 private IPC
