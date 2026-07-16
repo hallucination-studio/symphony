@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "symphony-performer"
 version = "0.1.0"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = ["openai-codex==0.1.0b3", "symphony-contracts==0.1.0"]
 
 [project.optional-dependencies]
 test = ["pytest>=8.3,<9"]
