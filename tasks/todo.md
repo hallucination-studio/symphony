@@ -90,7 +90,7 @@
 - [x] 4.3 实现 Podium configure/command dispatcher
 - [x] Checkpoint 4A：Podium IPC server
 
-- [ ] 4.4 实现 Conductor IPC transport client
+- [x] 4.4 实现 Conductor IPC transport client
 - [ ] 4.5 切换 active sync 到 private IPC
 - [ ] Checkpoint 4B：基本 IPC 闭环
 

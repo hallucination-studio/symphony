@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from enum import StrEnum
@@ -9,6 +10,33 @@ from uuid import uuid4
 
 RepoSourceType = Literal["git", "local_path"]
 ProcessStatus = Literal["stopped", "starting", "running", "unhealthy", "exited", "crash_loop"]
+_SECRET_IDENTIFIER = re.compile(
+    r"(?i)(?:sk-[A-Za-z0-9_-]{20,}|"
+    r"[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,})"
+)
+
+
+@dataclass(frozen=True)
+class LocalRuntimeIdentity:
+    conductor_id: str
+    instance_id: str
+    project_id: str
+    binding_id: str
+    binding_generation: int
+
+    def __post_init__(self) -> None:
+        for field_name in ("conductor_id", "instance_id", "project_id", "binding_id"):
+            value = getattr(self, field_name)
+            if not isinstance(value, str) or re.fullmatch(
+                r"[A-Za-z0-9][A-Za-z0-9._:-]{0,199}", value
+            ) is None or _SECRET_IDENTIFIER.search(value) is not None:
+                raise ValueError(f"{field_name}_invalid")
+        if (
+            isinstance(self.binding_generation, bool)
+            or not isinstance(self.binding_generation, int)
+            or self.binding_generation < 1
+        ):
+            raise ValueError("binding_generation_invalid")
 
 
 def utc_now_iso() -> str:
@@ -183,6 +211,7 @@ __all__ = [
     "InstanceCreateRequest",
     "InstancePatchRequest",
     "InstanceRecord",
+    "LocalRuntimeIdentity",
     "ProcessStatus",
     "RepoSourceType",
     "RunState",

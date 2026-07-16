@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 import shutil
+import sqlite3
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +19,7 @@ from performer_api.performer_control import (
     PerformerReadinessState,
 )
 from performer_api.runtime_policy import RuntimePolicy, canonical_sha256
+from performer_api import DrainAck, DrainRequest
 
 from .models import (
     ConductorServiceError,
@@ -51,6 +55,8 @@ WORKSPACE_INIT_EXCLUDES = {
     "node_modules",
     "target",
 }
+
+LOGGER = logging.getLogger(__name__)
 
 _CONTROL_STDERR_EVENTS = frozenset(
     {"performer_control_operation_failed", "performer_control_protocol_failed"}
@@ -97,6 +103,10 @@ class ConductorService(ConductorPodiumSyncMixin):
         )
         self.acceptance_gate = AcceptanceGate()
         self._smoke_check_lock = asyncio.Lock()
+        self._private_drain_lock = asyncio.Lock()
+        self._private_drain_requests: dict[str, DrainRequest] = {}
+        self._private_drain_acks: dict[str, DrainAck] = {}
+        self.accepting_private_turns = True
         self.project_label_proxy_factory = self._project_label_proxy
         self.data_root.mkdir(parents=True, exist_ok=True)
 
@@ -121,6 +131,73 @@ class ConductorService(ConductorPodiumSyncMixin):
 
     async def stop(self) -> None:
         await self.performer_coordinator.stop()
+
+    async def drain_for_podium(self, request: DrainRequest) -> DrainAck:
+        correlation_id = request.context.correlation_id
+        async with self._private_drain_lock:
+            previous_request = self._private_drain_requests.get(correlation_id)
+            if previous_request is not None and previous_request != request:
+                raise ValueError("podium_ipc_drain_conflict")
+            previous_ack = self._private_drain_acks.get(correlation_id)
+            if previous_ack is not None:
+                return previous_ack
+            self._private_drain_requests[correlation_id] = request
+            self.accepting_private_turns = False
+            try:
+                while self._workflow_has_running_attempts():
+                    if time.time() >= request.deadline_at:
+                        acknowledgment = DrainAck(
+                            request.context,
+                            request.deadline_at,
+                            "failed",
+                            "workflow_result_pending",
+                            "retry_quit",
+                        )
+                        break
+                    await asyncio.sleep(0.01)
+                else:
+                    acknowledgment = DrainAck(
+                        request.context,
+                        request.deadline_at,
+                        "drained",
+                        "",
+                        "none",
+                    )
+            except sqlite3.Error:
+                acknowledgment = DrainAck(
+                    request.context,
+                    request.deadline_at,
+                    "failed",
+                    "workflow_state_unavailable",
+                    "inspect_workflow_db",
+                )
+            self._private_drain_acks[correlation_id] = acknowledgment
+            LOGGER.log(
+                logging.INFO if acknowledgment.status == "drained" else logging.ERROR,
+                "event=conductor_runtime_drain_completed conductor_id=%s instance_id=%s "
+                "project_id=%s binding_id=%s binding_generation=%s correlation_id=%s "
+                "error_code=%s sanitized_reason=%s action_required=%s retryable=%s "
+                "next_action=%s",
+                request.context.conductor_id,
+                request.context.instance_id,
+                request.context.project_id,
+                request.context.binding_id,
+                request.context.binding_generation,
+                correlation_id,
+                acknowledgment.error_code or "none",
+                acknowledgment.error_code or "none",
+                str(acknowledgment.status == "failed").lower(),
+                str(acknowledgment.status == "failed").lower(),
+                acknowledgment.next_action,
+            )
+            return acknowledgment
+
+    def _workflow_has_running_attempts(self) -> bool:
+        with self.store.connect() as connection:
+            row = connection.execute(
+                "SELECT 1 FROM attempts WHERE state = 'running' LIMIT 1"
+            ).fetchone()
+        return row is not None
 
     def _ensure_performer_identity(self, instance: InstanceRecord) -> dict[str, Any]:
         identity = self._performer_identity_for_current_capabilities(instance)
