@@ -1,0 +1,720 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://symphony.local/contracts/podium-conductor.schema.json",
+  "title": "Podium Conductor Protocol V1",
+  "$defs": {
+    "RepositoryContext": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository_handle", "canonical_path", "base_branch"],
+      "properties": {
+        "repository_handle": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
+        "canonical_path": { "$ref": "common.schema.json#/$defs/BoundedPath" },
+        "base_branch": { "$ref": "common.schema.json#/$defs/ShortText" }
+      }
+    },
+    "ConductorHandshakeCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "binding_id",
+        "conductor_id",
+        "conductor_short_hash",
+        "instance_id",
+        "linear_installation_id",
+        "organization_id",
+        "repository"
+      ],
+      "properties": {
+        "kind": { "const": "conductor_handshake" },
+        "binding_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "conductor_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "conductor_short_hash": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "instance_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "linear_installation_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "organization_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "repository": { "$ref": "#/$defs/RepositoryContext" }
+      }
+    },
+    "ConductorHeartbeat": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "binding_id", "instance_id", "occurred_at"],
+      "properties": {
+        "kind": { "const": "conductor_heartbeat" },
+        "binding_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "instance_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "occurred_at": { "$ref": "common.schema.json#/$defs/Timestamp" }
+      }
+    },
+    "ConductorRuntimeReport": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "binding_id", "instance_id", "status", "observed_at"],
+      "properties": {
+        "kind": { "const": "conductor_runtime_report" },
+        "binding_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "instance_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "status": {
+          "enum": [
+            "stopped",
+            "starting",
+            "ready",
+            "recovering",
+            "not-responding",
+            "crashed",
+            "unbound",
+            "project-conflict"
+          ]
+        },
+        "previous_project_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "current_project_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "active_root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "sanitized_summary": { "$ref": "common.schema.json#/$defs/BoundedText" },
+        "observed_at": { "$ref": "common.schema.json#/$defs/Timestamp" }
+      }
+    },
+    "ShutdownConductorCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "binding_id", "instance_id", "deadline_at"],
+      "properties": {
+        "kind": { "const": "shutdown_conductor" },
+        "binding_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "instance_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "deadline_at": { "$ref": "common.schema.json#/$defs/Timestamp" }
+      }
+    },
+    "RemotePrecondition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["expected_issue_id", "expected_updated_at"],
+      "properties": {
+        "expected_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "expected_updated_at": { "$ref": "common.schema.json#/$defs/Timestamp" },
+        "expected_state": { "$ref": "common.schema.json#/$defs/LinearIssueState" },
+        "expected_parent_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "expected_managed_marker": { "$ref": "common.schema.json#/$defs/Identifier" }
+      }
+    },
+    "ProjectPrecondition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "conductor_short_hash",
+        "expected_project_id",
+        "expected_project_updated_at"
+      ],
+      "properties": {
+        "conductor_short_hash": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "expected_project_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "expected_project_updated_at": { "$ref": "common.schema.json#/$defs/Timestamp" }
+      }
+    },
+    "LinearIssueNodeSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "issue_id",
+        "identifier",
+        "project_id",
+        "state",
+        "order",
+        "depth",
+        "title",
+        "description",
+        "updated_at"
+      ],
+      "properties": {
+        "issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "identifier": { "$ref": "common.schema.json#/$defs/ShortText" },
+        "project_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "parent_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "state": { "$ref": "common.schema.json#/$defs/LinearIssueState" },
+        "order": { "type": "number", "minimum": -1000000000, "maximum": 1000000000 },
+        "depth": { "type": "integer", "minimum": 0, "maximum": 32 },
+        "title": { "$ref": "common.schema.json#/$defs/BoundedText" },
+        "description": { "$ref": "common.schema.json#/$defs/BoundedText" },
+        "managed_marker": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "node_kind": { "enum": ["work", "human"] },
+        "human_kind": {
+          "enum": ["plan_approval", "planned_input", "runtime_input"]
+        },
+        "origin": { "enum": ["user", "symphony"] },
+        "completed_input_hash": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "target_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "updated_at": { "$ref": "common.schema.json#/$defs/Timestamp" }
+      }
+    },
+    "RootIssueSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["issue", "is_delegated_to_symphony"],
+      "properties": {
+        "issue": { "$ref": "#/$defs/LinearIssueNodeSnapshot" },
+        "is_delegated_to_symphony": { "type": "boolean" }
+      }
+    },
+    "LinearProjectSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["project_id", "organization_id", "name", "updated_at"],
+      "properties": {
+        "project_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "organization_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "name": { "$ref": "common.schema.json#/$defs/ShortText" },
+        "updated_at": { "$ref": "common.schema.json#/$defs/Timestamp" }
+      }
+    },
+    "ResolvedConductorProject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["project", "conductor_short_hash"],
+      "properties": {
+        "project": { "$ref": "#/$defs/LinearProjectSnapshot" },
+        "conductor_short_hash": { "$ref": "common.schema.json#/$defs/Identifier" }
+      }
+    },
+    "ProjectResolutionResult": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "resolved_project"],
+          "properties": {
+            "kind": { "const": "resolved" },
+            "resolved_project": { "$ref": "#/$defs/ResolvedConductorProject" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind"],
+          "properties": { "kind": { "const": "unbound" } }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "error"],
+          "properties": {
+            "kind": { "const": "conductor_project_ambiguous" },
+            "error": { "$ref": "common.schema.json#/$defs/ProtocolError" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "error"],
+          "properties": {
+            "kind": { "const": "conductor_project_label_conflict" },
+            "error": { "$ref": "common.schema.json#/$defs/ProtocolError" }
+          }
+        }
+      ]
+    },
+    "LinearIssueTreeSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "root_issue_id",
+        "nodes",
+        "root_phase_labels",
+        "root_managed_comments",
+        "human_answers",
+        "observed_at"
+      ],
+      "properties": {
+        "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "nodes": {
+          "type": "array",
+          "maxItems": 512,
+          "items": { "$ref": "#/$defs/LinearIssueNodeSnapshot" }
+        },
+        "root_phase_labels": {
+          "type": "array",
+          "maxItems": 2,
+          "items": {
+            "enum": [
+              "planning",
+              "awaiting-human",
+              "working",
+              "gating",
+              "delivering",
+              "in-review",
+              "blocked",
+              "failed"
+            ]
+          }
+        },
+        "root_managed_comments": {
+          "type": "array",
+          "maxItems": 2,
+          "items": { "$ref": "#/$defs/LinearCommentSnapshot" }
+        },
+        "human_answers": {
+          "type": "array",
+          "maxItems": 512,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["human_issue_id", "comment_id", "answer", "updated_at"],
+            "properties": {
+              "human_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+              "comment_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+              "answer": { "$ref": "common.schema.json#/$defs/BoundedText" },
+              "updated_at": { "$ref": "common.schema.json#/$defs/Timestamp" }
+            }
+          }
+        },
+        "observed_at": { "$ref": "common.schema.json#/$defs/Timestamp" }
+      }
+    },
+    "LinearCommentSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["comment_id", "issue_id", "body", "updated_at"],
+      "properties": {
+        "comment_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "body": { "$ref": "common.schema.json#/$defs/BoundedText" },
+        "managed_marker": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "updated_at": { "$ref": "common.schema.json#/$defs/Timestamp" }
+      }
+    },
+    "RootUsageSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "root_issue_id",
+        "input_tokens",
+        "cached_input_tokens",
+        "output_tokens",
+        "reasoning_output_tokens",
+        "total_tokens",
+        "observed_at"
+      ],
+      "properties": {
+        "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "input_tokens": { "$ref": "common.schema.json#/$defs/NonNegativeInteger" },
+        "cached_input_tokens": { "$ref": "common.schema.json#/$defs/NonNegativeInteger" },
+        "output_tokens": { "$ref": "common.schema.json#/$defs/NonNegativeInteger" },
+        "reasoning_output_tokens": { "$ref": "common.schema.json#/$defs/NonNegativeInteger" },
+        "total_tokens": { "$ref": "common.schema.json#/$defs/NonNegativeInteger" },
+        "observed_at": { "$ref": "common.schema.json#/$defs/Timestamp" }
+      }
+    },
+    "ResolveConductorProjectQuery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "conductor_short_hash"],
+      "properties": {
+        "kind": { "const": "resolve_conductor_project" },
+        "conductor_short_hash": { "$ref": "common.schema.json#/$defs/Identifier" }
+      }
+    },
+    "ListRootIssuesQuery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "project_id", "page"],
+      "properties": {
+        "kind": { "const": "list_root_issues" },
+        "project_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "page": { "$ref": "common.schema.json#/$defs/PageRequest" }
+      }
+    },
+    "GetIssueTreeQuery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "project_id", "root_issue_id", "page"],
+      "properties": {
+        "kind": { "const": "get_issue_tree" },
+        "project_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "page": { "$ref": "common.schema.json#/$defs/PageRequest" }
+      }
+    },
+    "ListRootUsageQuery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "project_id", "page"],
+      "properties": {
+        "kind": { "const": "list_root_usage" },
+        "project_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "page": { "$ref": "common.schema.json#/$defs/PageRequest" }
+      }
+    },
+    "RootIssuesPageResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "items", "page_info"],
+      "properties": {
+        "kind": { "const": "root_issues_page" },
+        "items": {
+          "type": "array",
+          "maxItems": 250,
+          "items": { "$ref": "#/$defs/RootIssueSnapshot" }
+        },
+        "page_info": { "$ref": "common.schema.json#/$defs/PageInfo" }
+      }
+    },
+    "IssueTreePageResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "tree", "page_info"],
+      "properties": {
+        "kind": { "const": "issue_tree_page" },
+        "tree": { "$ref": "#/$defs/LinearIssueTreeSnapshot" },
+        "page_info": { "$ref": "common.schema.json#/$defs/PageInfo" }
+      }
+    },
+    "RootUsagePageResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "items", "page_info"],
+      "properties": {
+        "kind": { "const": "root_usage_page" },
+        "items": {
+          "type": "array",
+          "maxItems": 250,
+          "items": { "$ref": "#/$defs/RootUsageSnapshot" }
+        },
+        "page_info": { "$ref": "common.schema.json#/$defs/PageInfo" }
+      }
+    },
+    "CreateManagedNodeCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "project", "parent_issue_id", "managed_marker", "node_kind", "order", "title", "description"],
+      "properties": {
+        "kind": { "const": "create_managed_node" },
+        "project": { "$ref": "#/$defs/ProjectPrecondition" },
+        "parent_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "managed_marker": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "node_kind": { "enum": ["work", "human"] },
+        "human_kind": {
+          "enum": ["plan_approval", "planned_input", "runtime_input"]
+        },
+        "target_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "order": { "type": "number", "minimum": -1000000000, "maximum": 1000000000 },
+        "title": { "$ref": "common.schema.json#/$defs/BoundedText" },
+        "description": { "$ref": "common.schema.json#/$defs/BoundedText" }
+      },
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["node_kind"],
+          "properties": {
+            "node_kind": { "const": "work" },
+            "human_kind": false,
+            "target_issue_id": false
+          }
+        },
+        {
+          "type": "object",
+          "required": ["human_kind"],
+          "properties": {
+            "node_kind": { "const": "human" },
+            "human_kind": { "const": "plan_approval" },
+            "target_issue_id": false
+          }
+        },
+        {
+          "type": "object",
+          "required": ["human_kind", "target_issue_id"],
+          "properties": {
+            "node_kind": { "const": "human" },
+            "human_kind": { "enum": ["planned_input", "runtime_input"] }
+          }
+        }
+      ]
+    },
+    "UpdateManagedNodeCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "project", "precondition", "node_kind", "title", "description"],
+      "properties": {
+        "kind": { "const": "update_managed_node" },
+        "project": { "$ref": "#/$defs/ProjectPrecondition" },
+        "precondition": { "$ref": "#/$defs/RemotePrecondition" },
+        "node_kind": { "enum": ["work", "human"] },
+        "human_kind": {
+          "enum": ["plan_approval", "planned_input", "runtime_input"]
+        },
+        "target_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "completed_input_hash": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "title": { "$ref": "common.schema.json#/$defs/BoundedText" },
+        "description": { "$ref": "common.schema.json#/$defs/BoundedText" }
+      },
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["node_kind"],
+          "properties": {
+            "node_kind": { "const": "work" },
+            "human_kind": false,
+            "target_issue_id": false
+          }
+        },
+        {
+          "type": "object",
+          "required": ["human_kind"],
+          "properties": {
+            "node_kind": { "const": "human" },
+            "human_kind": { "const": "plan_approval" },
+            "target_issue_id": false,
+            "completed_input_hash": false
+          }
+        },
+        {
+          "type": "object",
+          "required": ["human_kind", "target_issue_id"],
+          "properties": {
+            "node_kind": { "const": "human" },
+            "human_kind": { "enum": ["planned_input", "runtime_input"] },
+            "completed_input_hash": false
+          }
+        }
+      ]
+    },
+    "UpdateIssueStateCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "project", "precondition", "state"],
+      "properties": {
+        "kind": { "const": "update_issue_state" },
+        "project": { "$ref": "#/$defs/ProjectPrecondition" },
+        "precondition": { "$ref": "#/$defs/RemotePrecondition" },
+        "state": { "$ref": "common.schema.json#/$defs/LinearIssueState" }
+      }
+    },
+    "ReorderIssueNodeCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "project", "precondition", "parent_issue_id", "order"],
+      "properties": {
+        "kind": { "const": "reorder_issue_node" },
+        "project": { "$ref": "#/$defs/ProjectPrecondition" },
+        "precondition": { "$ref": "#/$defs/RemotePrecondition" },
+        "parent_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "order": { "type": "number", "minimum": -1000000000, "maximum": 1000000000 }
+      }
+    },
+    "ReplaceRootPhaseLabelCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "project", "precondition", "phase"],
+      "properties": {
+        "kind": { "const": "replace_root_phase_label" },
+        "project": { "$ref": "#/$defs/ProjectPrecondition" },
+        "precondition": { "$ref": "#/$defs/RemotePrecondition" },
+        "phase": {
+          "enum": ["planning", "awaiting-human", "working", "gating", "delivering", "in-review", "blocked", "failed"]
+        }
+      }
+    },
+    "UpsertRootManagedCommentCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "project", "root_precondition", "managed_marker", "body"],
+      "properties": {
+        "kind": { "const": "upsert_root_managed_comment" },
+        "project": { "$ref": "#/$defs/ProjectPrecondition" },
+        "root_precondition": { "$ref": "#/$defs/RemotePrecondition" },
+        "comment_precondition": { "$ref": "#/$defs/RemotePrecondition" },
+        "managed_marker": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "body": { "$ref": "common.schema.json#/$defs/BoundedText" }
+      }
+    },
+    "LinearMutationCommand": {
+      "oneOf": [
+        { "$ref": "#/$defs/CreateManagedNodeCommand" },
+        { "$ref": "#/$defs/UpdateManagedNodeCommand" },
+        { "$ref": "#/$defs/UpdateIssueStateCommand" },
+        { "$ref": "#/$defs/ReorderIssueNodeCommand" },
+        { "$ref": "#/$defs/ReplaceRootPhaseLabelCommand" },
+        { "$ref": "#/$defs/UpsertRootManagedCommentCommand" }
+      ]
+    },
+    "LinearMutationResult": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind"],
+          "properties": {
+            "kind": { "const": "applied" },
+            "issue": { "$ref": "#/$defs/LinearIssueNodeSnapshot" },
+            "comment": { "$ref": "#/$defs/LinearCommentSnapshot" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind"],
+          "properties": {
+            "kind": { "const": "already_applied" },
+            "issue": { "$ref": "#/$defs/LinearIssueNodeSnapshot" },
+            "comment": { "$ref": "#/$defs/LinearCommentSnapshot" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind"],
+          "properties": { "kind": { "const": "linear_precondition_conflict" } }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind"],
+          "properties": { "kind": { "const": "conductor_project_resolution_changed" } }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "error"],
+          "properties": {
+            "kind": { "const": "failed" },
+            "error": { "$ref": "common.schema.json#/$defs/ProtocolError" }
+          }
+        }
+      ]
+    },
+    "ProfileRelayMetadata": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "conductor_id"],
+          "properties": {
+            "kind": { "const": "get_profiles" },
+            "conductor_id": { "$ref": "common.schema.json#/$defs/Identifier" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "conductor_id", "profile_id"],
+          "properties": {
+            "kind": { "enum": ["get_profile_status", "start_chatgpt_login", "activate_profile"] },
+            "conductor_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+            "profile_id": { "$ref": "common.schema.json#/$defs/Identifier" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "conductor_id", "profile_id", "secret_frame_length"],
+          "properties": {
+            "kind": { "const": "set_api_key" },
+            "conductor_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+            "profile_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+            "secret_frame_length": { "type": "integer", "minimum": 1, "maximum": 16384 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "conductor_id", "display_name", "backend_kind", "authentication_method", "codex_turn_settings"],
+          "properties": {
+            "kind": { "const": "create_profile" },
+            "conductor_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+            "display_name": { "$ref": "common.schema.json#/$defs/ShortText" },
+            "backend_kind": { "const": "codex" },
+            "authentication_method": { "enum": ["chatgpt", "api_key"] },
+            "codex_turn_settings": { "$ref": "podium-client.schema.json#/$defs/CodexTurnSettings" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "conductor_id", "profile_id", "display_name", "codex_turn_settings"],
+          "properties": {
+            "kind": { "const": "update_profile" },
+            "conductor_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+            "profile_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+            "display_name": { "$ref": "common.schema.json#/$defs/ShortText" },
+            "codex_turn_settings": { "$ref": "podium-client.schema.json#/$defs/CodexTurnSettings" }
+          }
+        }
+      ]
+    },
+    "ProfileRelayResult": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "profiles"],
+          "properties": {
+            "kind": { "const": "profiles" },
+            "profiles": {
+              "type": "array",
+              "maxItems": 64,
+              "items": { "$ref": "podium-client.schema.json#/$defs/PerformerProfileSummaryView" }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "profile"],
+          "properties": {
+            "kind": { "enum": ["profile_status", "profile_saved", "profile_activated"] },
+            "profile": { "$ref": "podium-client.schema.json#/$defs/PerformerProfileSummaryView" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "profile_id"],
+          "properties": {
+            "kind": { "const": "login_started" },
+            "profile_id": { "$ref": "common.schema.json#/$defs/Identifier" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "error"],
+          "properties": {
+            "kind": { "const": "profile_relay_failed" },
+            "error": { "$ref": "common.schema.json#/$defs/ProtocolError" }
+          }
+        }
+      ]
+    },
+    "PodiumConductorBody": {
+      "oneOf": [
+        { "$ref": "#/$defs/ConductorHandshakeCommand" },
+        { "$ref": "#/$defs/ConductorHeartbeat" },
+        { "$ref": "#/$defs/ConductorRuntimeReport" },
+        { "$ref": "#/$defs/ShutdownConductorCommand" },
+        { "$ref": "#/$defs/ResolveConductorProjectQuery" },
+        { "$ref": "#/$defs/ListRootIssuesQuery" },
+        { "$ref": "#/$defs/GetIssueTreeQuery" },
+        { "$ref": "#/$defs/ListRootUsageQuery" },
+        { "$ref": "#/$defs/ProjectResolutionResult" },
+        { "$ref": "#/$defs/RootIssuesPageResult" },
+        { "$ref": "#/$defs/IssueTreePageResult" },
+        { "$ref": "#/$defs/RootUsagePageResult" },
+        { "$ref": "#/$defs/LinearMutationCommand" },
+        { "$ref": "#/$defs/LinearMutationResult" },
+        { "$ref": "#/$defs/ProfileRelayMetadata" },
+        { "$ref": "#/$defs/ProfileRelayResult" },
+        { "$ref": "common.schema.json#/$defs/ProtocolError" }
+      ]
+    },
+    "PodiumConductorMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocol_version", "request_id", "body"],
+      "properties": {
+        "protocol_version": { "$ref": "common.schema.json#/$defs/ProtocolVersion" },
+        "request_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "body": { "$ref": "#/$defs/PodiumConductorBody" }
+      }
+    }
+  },
+  "$ref": "#/$defs/PodiumConductorMessage"
+}

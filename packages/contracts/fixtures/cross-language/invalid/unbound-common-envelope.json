@@ -1,0 +1,10 @@
+{
+  "schema": "common.schema.json#/$defs/ProtocolEnvelope",
+  "value": {
+    "protocol_version": "1",
+    "request_id": "request-1",
+    "body": {
+      "arbitrary": true
+    }
+  }
+}

@@ -1,0 +1,197 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://symphony.local/contracts/desktop-host.schema.json",
+  "title": "Desktop Host Protocol V1",
+  "$defs": {
+    "OpenExternalUrlCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "attempt_id", "url"],
+      "properties": {
+        "kind": { "const": "open_external_url" },
+        "attempt_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "url": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048,
+          "pattern": "^https://"
+        }
+      }
+    },
+    "SelectRepositoryCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": { "kind": { "const": "select_repository" } }
+    },
+    "RepositoryContextResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "repository_handle",
+        "canonical_path",
+        "display_name",
+        "remote_display",
+        "base_branches"
+      ],
+      "properties": {
+        "kind": { "const": "repository_context" },
+        "repository_handle": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
+        "canonical_path": { "$ref": "common.schema.json#/$defs/BoundedPath" },
+        "display_name": { "$ref": "common.schema.json#/$defs/ShortText" },
+        "remote_display": { "$ref": "common.schema.json#/$defs/ShortText" },
+        "base_branches": {
+          "type": "array",
+          "maxItems": 512,
+          "items": { "$ref": "common.schema.json#/$defs/ShortText" }
+        }
+      }
+    },
+    "ResolveRepositoryCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "repository_handle", "base_branch"],
+      "properties": {
+        "kind": { "const": "resolve_repository" },
+        "repository_handle": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
+        "base_branch": { "$ref": "common.schema.json#/$defs/ShortText" }
+      }
+    },
+    "ReceiveOAuthReturnCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "attempt_id"],
+      "properties": {
+        "kind": { "const": "receive_oauth_return" },
+        "attempt_id": { "$ref": "common.schema.json#/$defs/Identifier" }
+      }
+    },
+    "OAuthReturnResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "attempt_id", "state", "authorization_code"],
+      "properties": {
+        "kind": { "const": "oauth_return" },
+        "attempt_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "state": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
+        "authorization_code": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" }
+      }
+    },
+    "StartConductorCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "binding_id",
+        "conductor_id",
+        "conductor_short_hash",
+        "linear_installation_id",
+        "organization_id",
+        "repository_handle",
+        "repository_root",
+        "base_branch",
+        "conductor_data_root"
+      ],
+      "properties": {
+        "kind": { "const": "start_conductor" },
+        "binding_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "conductor_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "conductor_short_hash": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "linear_installation_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "organization_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "repository_handle": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
+        "repository_root": { "$ref": "common.schema.json#/$defs/BoundedPath" },
+        "base_branch": { "$ref": "common.schema.json#/$defs/ShortText" },
+        "conductor_data_root": { "$ref": "common.schema.json#/$defs/BoundedPath" }
+      }
+    },
+    "StopConductorCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "conductor_id", "deadline_at"],
+      "properties": {
+        "kind": { "const": "stop_conductor" },
+        "conductor_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "deadline_at": { "$ref": "common.schema.json#/$defs/Timestamp" }
+      }
+    },
+    "RestartConductorCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "conductor_id"],
+      "properties": {
+        "kind": { "const": "restart_conductor" },
+        "conductor_id": { "$ref": "common.schema.json#/$defs/Identifier" }
+      }
+    },
+    "HostCommandAccepted": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "command_kind"],
+      "properties": {
+        "kind": { "const": "host_command_accepted" },
+        "command_kind": {
+          "enum": [
+            "open_external_url",
+            "start_conductor",
+            "stop_conductor",
+            "restart_conductor",
+            "process_observed_exit",
+            "shutdown_host"
+          ]
+        }
+      }
+    },
+    "ProcessObservedExit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "binding_id", "instance_id", "observed_at"],
+      "properties": {
+        "kind": { "const": "process_observed_exit" },
+        "binding_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "instance_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "exit_code": { "type": "integer", "minimum": -2147483648, "maximum": 2147483647 },
+        "observed_at": { "$ref": "common.schema.json#/$defs/Timestamp" },
+        "sanitized_reason": { "$ref": "common.schema.json#/$defs/BoundedText" }
+      }
+    },
+    "ShutdownHostCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "deadline_at"],
+      "properties": {
+        "kind": { "const": "shutdown_host" },
+        "deadline_at": { "$ref": "common.schema.json#/$defs/Timestamp" }
+      }
+    },
+    "DesktopHostBody": {
+      "oneOf": [
+        { "$ref": "#/$defs/OpenExternalUrlCommand" },
+        { "$ref": "#/$defs/SelectRepositoryCommand" },
+        { "$ref": "#/$defs/ResolveRepositoryCommand" },
+        { "$ref": "#/$defs/RepositoryContextResult" },
+        { "$ref": "#/$defs/ReceiveOAuthReturnCommand" },
+        { "$ref": "#/$defs/OAuthReturnResult" },
+        { "$ref": "#/$defs/StartConductorCommand" },
+        { "$ref": "#/$defs/StopConductorCommand" },
+        { "$ref": "#/$defs/RestartConductorCommand" },
+        { "$ref": "#/$defs/HostCommandAccepted" },
+        { "$ref": "#/$defs/ProcessObservedExit" },
+        { "$ref": "#/$defs/ShutdownHostCommand" },
+        { "$ref": "common.schema.json#/$defs/ProtocolError" }
+      ]
+    },
+    "DesktopHostMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocol_version", "request_id", "body"],
+      "properties": {
+        "protocol_version": { "$ref": "common.schema.json#/$defs/ProtocolVersion" },
+        "request_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "body": { "$ref": "#/$defs/DesktopHostBody" }
+      }
+    }
+  },
+  "$ref": "#/$defs/DesktopHostMessage"
+}

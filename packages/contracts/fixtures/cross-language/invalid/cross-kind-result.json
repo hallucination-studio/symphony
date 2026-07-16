@@ -1,0 +1,19 @@
+{
+  "schema": "conductor-performer.schema.json#/$defs/PerformerTurnResult",
+  "value": {
+    "protocol_version": "1",
+    "turn_id": "turn-1",
+    "turn_kind": "work",
+    "result_kind": "plan_ready",
+    "root_issue_id": "issue-root",
+    "work_issue_id": "issue-work",
+    "performer_profile_id": "profile-1",
+    "performer_id": "conversation-1",
+    "turn_input_hash": "hash-1",
+    "completed_at": "2026-07-16T00:01:00Z",
+    "body": {
+      "summary": "Plan",
+      "nodes": []
+    }
+  }
+}

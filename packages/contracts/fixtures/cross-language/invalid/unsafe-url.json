@@ -1,0 +1,7 @@
+{
+  "schema": "desktop-host.schema.json#/$defs/OpenExternalUrlCommand",
+  "value": {
+    "kind": "open_external_url",
+    "url": "javascript:alert(1)"
+  }
+}

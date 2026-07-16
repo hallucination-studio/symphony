@@ -1,0 +1,6 @@
+{
+  "schema": "conductor-performer.schema.json#/$defs/PerformerTurnCommand",
+  "value": {
+    "turn_kind": "priority_scheduler"
+  }
+}

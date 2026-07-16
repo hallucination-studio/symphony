@@ -1,0 +1,26 @@
+{
+  "schema": "conductor-performer.schema.json#/$defs/PlanTurnCommand",
+  "value": {
+    "protocol_version": "1",
+    "turn_id": "turn-1",
+    "turn_kind": "plan",
+    "root_issue_id": "issue-root",
+    "performer_profile_id": "profile-1",
+    "codex_turn_settings": {
+      "model": "codex-model",
+      "reasoning_effort": "medium",
+      "is_fast_mode_enabled": false
+    },
+    "turn_input_hash": "hash-1",
+    "workspace_root": "/private/worktree",
+    "started_at": "2026-07-16T00:00:00Z",
+    "hard_deadline_at": "2026-07-16T00:30:00Z",
+    "body": {
+      "root_issue": {
+        "title": "Implement the approved V1 slice",
+        "description": "Follow the architecture."
+      },
+      "current_tree": []
+    }
+  }
+}
