@@ -10,7 +10,7 @@
   - One commit: `test(e2e): establish the fixed V1 runner`
   - Residual verification: 本地 preflight 缺少必需配置，真实 packaged smoke 未运行；fail-closed guard 已验证
 
-- [ ] E1 — S1主业务闭环和两个API Key Profiles
+- [x] E1 — S1主业务闭环和两个API Key Profiles
   - Dependencies: E0
   - Parallel: 可与E2并行实现；真实HELL运行必须串行
   - Covers: A01, A03, A04, A05, A10, A11(PR), A12, A19(API Key), A20, A21, A22, A23, A24
@@ -18,6 +18,7 @@
   - Verify: `npm run test:e2e:scenarios -- --scenario S1 && npm run acceptance:v1 -- --scenario S1 --dry-run && npm run test`
   - Before commit: scope ledger；code-simple；五轴code-review；拒绝V2/ChatGPT扩散；secret scan；`git diff --check`
   - One commit: `test(e2e): prove the fixed V1 root journey`
+  - Residual verification: contract/dry-run implemented；固定 live fixture和真实外部运行按用户授权延后，verdict保持incomplete
 
 - [ ] E2 — S2 Linear权威和S3恢复收敛
   - Dependencies: E0

@@ -71,7 +71,7 @@ export function ConductorsPage({
                   <span>{profile.sanitizedAccountLabel ?? "Account not configured"} · {profile.codexTurnSettings.model} · {labelFromIdentifier(profile.readiness)}</span>
                 </div>
                 <div className="button-row">
-                  <button className="button" onClick={() => setEditProfile(profile)}>Edit settings</button>
+                  <button data-testid="profile-edit" className="button" onClick={() => setEditProfile(profile)}>Edit settings</button>
                   {profile.readiness === "login-required" && profile.authenticationMethod === "chatgpt" && (
                     <button className="button" onClick={() => onCommand({ kind: "start_codex_chatgpt_login", conductorId: conductor.conductorId, profileId: profile.profileId })}>Sign in with ChatGPT</button>
                   )}

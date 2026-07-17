@@ -5,8 +5,6 @@ export function createDesktopClient({
   ui,
   timeoutMs = DEFAULT_TIMEOUT_MS,
 }) {
-  let profileName;
-
   async function waitFor(selector) {
     const element = await browser.$(selector);
     await element.waitForDisplayed({ timeout: timeoutMs });
@@ -18,8 +16,8 @@ export function createDesktopClient({
     return (await browser.$(selector + " option:checked")).getText();
   }
 
-  async function findProfile() {
-    if (!profileName) throw new Error("e2e_profile_not_created");
+  async function findProfile(profileName) {
+    if (!profileName) throw new Error("e2e_profile_name_missing");
     let match;
     await browser.waitUntil(async () => {
       const rows = await browser.$$("[data-testid=profile-row]");
@@ -78,7 +76,6 @@ export function createDesktopClient({
     },
 
     async createApiKeyProfile({ displayName }) {
-      profileName = displayName;
       await ui.click("[data-testid=configure-profile]");
       await waitFor("[data-testid=profile-dialog]");
       await ui.type(
@@ -91,11 +88,11 @@ export function createDesktopClient({
       await ui.click("[data-testid=profile-save]");
       await waitFor("[data-testid=profile-done]");
       await ui.click("[data-testid=profile-done]");
-      await findProfile();
+      await findProfile(displayName);
     },
 
-    async setApiKeyAndActivate(apiKey) {
-      let profile = await findProfile();
+    async setApiKeyAndActivate(apiKey, displayName = "E2E primary") {
+      let profile = await findProfile(displayName);
       await (await profile.$("[data-testid=profile-set-api-key]")).click();
       await waitFor("[data-testid=api-key-dialog]");
       await ui.type("[data-testid=api-key-dialog] [name=apiKey]", apiKey);
@@ -103,12 +100,12 @@ export function createDesktopClient({
       await waitFor("[data-testid=api-key-done]");
       await ui.click("[data-testid=api-key-done]");
 
-      profile = await findProfile();
+      profile = await findProfile(displayName);
       const activate = await profile.$("[data-testid=profile-activate]");
       await activate.waitForDisplayed({ timeout: timeoutMs });
       await activate.click();
       await browser.waitUntil(async () => {
-        const text = await (await findProfile()).getText();
+        const text = await (await findProfile(displayName)).getText();
         return text.includes("Ready") && text.includes("Active for new Roots");
       }, {
         timeout: timeoutMs,
@@ -116,5 +113,45 @@ export function createDesktopClient({
       });
       return { readiness: "ready", isActive: true };
     },
+
+    async updateProfileSettings({ displayName, model, reasoningEffort }) {
+      const profile = await findProfile(displayName);
+      await (await profile.$("[data-testid=profile-edit]")).click();
+      await waitFor("[data-testid=profile-dialog]");
+      await ui.type("[data-testid=profile-dialog] [name=model]", model);
+      await ui.select(
+        "[data-testid=profile-dialog] [name=reasoningEffort]",
+        reasoningLabel(reasoningEffort),
+      );
+      await ui.click("[data-testid=profile-save]");
+      await waitFor("[data-testid=profile-done]");
+      await ui.click("[data-testid=profile-done]");
+      await browser.waitUntil(async () => {
+        const text = await (await findProfile(displayName)).getText();
+        return text.includes(model) && text.includes("Active for new Roots");
+      }, {
+        timeout: timeoutMs,
+        timeoutMsg: "e2e_profile_settings_not_observed",
+      });
+      return {
+        displayName,
+        model,
+        reasoningEffort,
+        fastMode: false,
+      };
+    },
   });
+}
+
+function reasoningLabel(reasoningEffort) {
+  const label = {
+    none: "None",
+    minimal: "Minimal",
+    low: "Low",
+    medium: "Medium",
+    high: "High",
+    xhigh: "Extra high",
+  }[reasoningEffort];
+  if (!label) throw new Error("e2e_reasoning_effort_invalid");
+  return label;
 }

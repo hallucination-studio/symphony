@@ -258,8 +258,43 @@ test("business actions select the allowlisted Project by visible name and keep r
   ]);
 });
 
+test("secondary Profile reuses the bounded secret frame before applying settings", async () => {
+  const calls = [];
+  const actions = createV1BusinessActions({
+    ui: {},
+    client: {
+      async createApiKeyProfile(input) { calls.push(["create", input]); },
+      async setApiKeyAndActivate(secret, displayName) {
+        calls.push(["secret", secret, displayName]);
+      },
+      async updateProfileSettings(input) {
+        calls.push(["settings", input]);
+        return { ...input, fastMode: false };
+      },
+    },
+    runner: new StepRunner({ evidence: [] }),
+    config: { secrets: { openAiApiKey: "bounded-secret" } },
+  });
+
+  await actions.createSecondaryApiKeyProfile({
+    model: "fixture-model",
+    reasoningEffort: "high",
+  });
+
+  assert.deepEqual(calls, [
+    ["create", { displayName: "E2E secondary" }],
+    ["secret", "bounded-secret", "E2E secondary"],
+    ["settings", {
+      displayName: "E2E secondary",
+      model: "fixture-model",
+      reasoningEffort: "high",
+    }],
+  ]);
+});
+
 test("desktop client reacquires the Profile row through secret entry and activation", async () => {
   let profileText = "E2E primary\nNeeds API Key";
+  let updatedModel;
   let rowReads = 0;
   const calls = [];
   const profileRow = () => ({
@@ -295,21 +330,44 @@ test("desktop client reacquires the Profile row through secret entry and activat
     },
   };
   const ui = {
-    async click(selector) { calls.push(["click", selector]); },
-    async type(selector, value) { calls.push(["type", selector, value]); },
+    async click(selector) {
+      calls.push(["click", selector]);
+      if (selector === "[data-testid=profile-save]" && updatedModel) {
+        profileText = `E2E primary\nReady\nActive for new Roots\n${updatedModel}`;
+      }
+    },
+    async type(selector, value) {
+      calls.push(["type", selector, value]);
+      if (selector.includes("[name=model]")) updatedModel = value;
+    },
+    async select(selector, value) { calls.push(["select", selector, value]); },
     async read() { return "Ready"; },
   };
   const client = createDesktopClient({ browser, ui, timeoutMs: 10 });
 
   await client.createApiKeyProfile({ displayName: "E2E primary" });
   assert.deepEqual(
-    await client.setApiKeyAndActivate("bounded-secret"),
+    await client.setApiKeyAndActivate("bounded-secret", "E2E primary"),
     { readiness: "ready", isActive: true },
+  );
+  assert.deepEqual(
+    await client.updateProfileSettings({
+      displayName: "E2E primary",
+      model: "gpt-5.1",
+      reasoningEffort: "xhigh",
+    }),
+    {
+      displayName: "E2E primary",
+      model: "gpt-5.1",
+      reasoningEffort: "xhigh",
+      fastMode: false,
+    },
   );
 
   assert.equal(rowReads >= 3, true);
   assert.equal(calls.some((call) => call.includes("bounded-secret")), true);
   assert.equal(calls.some((call) => call.includes("[data-testid=profile-activate]")), true);
+  assert.equal(calls.some((call) => call.includes("Extra high")), true);
 });
 
 test("verdict keeps automated API-key evidence separate from incomplete full V1 evidence", () => {

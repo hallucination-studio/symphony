@@ -2,6 +2,8 @@
 
 **状态：** E0 已实现；E1-E3 待后续 task 逐项实现。
 
+**执行说明：** 用户批准先完成 E1-E3 的 runner、adapter、dry-run 和 CI 实现，再统一补齐固定 live fixture 并尝试真实外部验收。未真实运行的场景必须保持 incomplete，不得以 contract/mock 结果冒充 passed。
+
 ## 1. 设计
 
 ```text
@@ -69,6 +71,8 @@ git diff --check
 **Commit：** `test(e2e): establish the fixed V1 runner`
 
 ### E1 — 实现 S1 主业务闭环和 Profile验收
+
+**状态：** runner、barrier contract、Desktop双Profile action和dry-run已实现；固定 live fixture与真实外部运行按用户授权延后，未声称passed。
 
 **依赖：** E0。可与 E2并行实现。
 

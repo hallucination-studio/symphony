@@ -22,6 +22,26 @@ export function createV1BusinessActions({ ui, client, runner, config }) {
       await client.createApiKeyProfile({ displayName: "E2E primary" });
       return client.setApiKeyAndActivate(config.secrets.openAiApiKey);
     }, (observation) => observation.readiness === "ready" && observation.isActive === true),
+    createSecondaryApiKeyProfile: ({ model, reasoningEffort }) => run(
+      runner,
+      "secondary-profile-ready",
+      async () => {
+        const displayName = "E2E secondary";
+        await client.createApiKeyProfile({ displayName });
+        await client.setApiKeyAndActivate(
+          config.secrets.openAiApiKey,
+          displayName,
+        );
+        return client.updateProfileSettings({
+          displayName,
+          model,
+          reasoningEffort,
+        });
+      },
+      (observation) => observation.fastMode === false &&
+        observation.model === model &&
+        observation.reasoningEffort === reasoningEffort,
+    ),
   });
 }
 
