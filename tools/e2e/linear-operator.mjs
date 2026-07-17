@@ -169,6 +169,22 @@ const ROOT_DELIVERY_FACTS_QUERY = `
   }
 `;
 
+const PROJECT_USAGE_FACTS_QUERY = `
+  query e2eProjectUsageFacts($projectId: String!) {
+    project(id: $projectId) {
+      issues(first: 250) {
+        nodes {
+          id
+          parent { id }
+          state { name }
+          comments(first: 64) { nodes { body } pageInfo { hasNextPage } }
+        }
+        pageInfo { hasNextPage }
+      }
+    }
+  }
+`;
+
 export function createLinearOperator({
   userApiKey,
   clientId,
@@ -328,6 +344,47 @@ export function createLinearOperator({
         managedCommentCount: managedComments.length,
         duplicateDelivery: managedComments.length > 1,
       };
+    },
+
+    async readProjectUsageFacts(input) {
+      const project = await readProjectContext(input?.projectSlugId);
+      const data = await graphql(operatorApiKey, PROJECT_USAGE_FACTS_QUERY, {
+        projectId: project.projectId,
+      });
+      const issues = connectionNodes(
+        data.project?.issues,
+        "linear_operator_usage_response_invalid",
+      );
+      if (!issues.every(isUsageIssueShape)) {
+        throw new Error("linear_operator_usage_response_invalid");
+      }
+
+      const roots = issues.filter((issue) => issue.parent === null);
+      let usageRootCount = 0;
+      let completedRootCount = 0;
+      let totalTokens = 0;
+      for (const root of roots) {
+        const comments = connectionNodes(
+          root.comments,
+          "linear_operator_usage_response_invalid",
+        );
+        const managedComments = comments
+          .map((comment) => comment.body)
+          .filter(isRootManagedComment);
+        if (managedComments.length === 0) continue;
+        if (managedComments.length !== 1 || !managedCommentFields(managedComments[0])) {
+          throw new Error("linear_operator_usage_response_invalid");
+        }
+        const usage = usageFromManagedComment(managedComments[0]);
+        usageRootCount += 1;
+        totalTokens = safeAdd(
+          totalTokens,
+          usage.totalTokens,
+          "linear_operator_usage_response_invalid",
+        );
+        if (root.state.name === "Done") completedRootCount += 1;
+      }
+      return { completedRootCount, usageRootCount, totalTokens };
     },
 
     async approvePlan(input) {
@@ -704,6 +761,14 @@ function isPlanIssueShape(issue) {
     (issue.subIssueSortOrder === null || Number.isFinite(issue.subIssueSortOrder));
 }
 
+function isUsageIssueShape(issue) {
+  return isObject(issue) &&
+    typeof issue.id === "string" &&
+    isNullableRelation(issue.parent) &&
+    ROOT_STATES.has(issue.state?.name) &&
+    isObject(issue.comments);
+}
+
 function isNamedObject(value) {
   return isObject(value) && typeof value.name === "string";
 }
@@ -902,23 +967,8 @@ function workflowLeafComplete(node) {
 }
 
 function managedCommentFields(body) {
-  const values = new Map();
-  for (const line of body.split("\n").slice(1, -1)) {
-    const separator = line.indexOf(":");
-    if (separator < 1) return false;
-    const key = line.slice(0, separator).trim();
-    const value = line.slice(separator + 1).trim();
-    if (
-      !ROOT_MANAGED_FIELDS.has(key) ||
-      values.has(key) ||
-      !value ||
-      value.length > MAX_TEXT_LENGTH ||
-      /[\r\0]/u.test(value)
-    ) {
-      return false;
-    }
-    values.set(key, value);
-  }
+  const values = managedCommentValues(body);
+  if (!values) return false;
 
   if (!REQUIRED_ROOT_MANAGED_FIELDS.every((key) => {
     const value = values.get(key);
@@ -939,9 +989,59 @@ function managedCommentFields(body) {
   });
 }
 
+function managedCommentValues(body) {
+  if (typeof body !== "string") return undefined;
+  const values = new Map();
+  for (const line of body.split("\n").slice(1, -1)) {
+    const separator = line.indexOf(":");
+    if (separator < 1) return undefined;
+    const key = line.slice(0, separator).trim();
+    const value = line.slice(separator + 1).trim();
+    if (
+      !ROOT_MANAGED_FIELDS.has(key) ||
+      values.has(key) ||
+      !value ||
+      value.length > MAX_TEXT_LENGTH ||
+      /[\r\0]/u.test(value)
+    ) {
+      return undefined;
+    }
+    values.set(key, value);
+  }
+  return values;
+}
+
 function managedCommentHasPullRequest(body) {
   const match = body.match(/^pull_request: ([^\r\n]{1,1024})$/mu);
   return Boolean(match && match[1] !== "none");
+}
+
+function usageFromManagedComment(body) {
+  const values = managedCommentValues(body);
+  if (!values) throw new Error("linear_operator_usage_response_invalid");
+  const read = (key) => {
+    const source = values.get(key);
+    if (!source || !/^\d+$/u.test(source)) {
+      throw new Error("linear_operator_usage_response_invalid");
+    }
+    const value = Number(source);
+    if (!Number.isSafeInteger(value)) {
+      throw new Error("linear_operator_usage_response_invalid");
+    }
+    return value;
+  };
+  const inputTokens = read("usage_input_tokens");
+  const cachedInputTokens = read("usage_cached_input_tokens");
+  if (cachedInputTokens > inputTokens) {
+    throw new Error("linear_operator_usage_response_invalid");
+  }
+  return { totalTokens: read("usage_total_tokens") };
+}
+
+function safeAdd(left, right, code) {
+  const sum = left + right;
+  if (!Number.isSafeInteger(sum)) throw new Error(code);
+  return sum;
 }
 
 function deliveryBranch(body) {

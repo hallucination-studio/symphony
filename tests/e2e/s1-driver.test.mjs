@@ -854,6 +854,68 @@ test("S1 claim driver observes automatic Root completion and rejects duplicate D
   await assert.rejects(duplicate.waitForDelivery(), /s1_delivery_duplicate/u);
 });
 
+test("S1 claim driver reads Overview usage and takes Completed Roots from Linear", async () => {
+  const driver = approvedS1Driver({
+    gateFacts: [{
+      rootId: "root-a", state: "In Progress", phase: "delivering",
+      workDone: true, humanDone: true, reworkCount: 0,
+      gateIssueCount: 0, pullRequestPresent: false,
+    }],
+    deliveryFacts: [{
+      rootId: "root-a", state: "In Review", phase: "in-review",
+      kind: "branch", deliveryBranch: "symphony/runs/hell-1",
+      pullRequestPresent: false, managedCommentCount: 1,
+      duplicateDelivery: false,
+    }],
+    overviewFacts: { completedRootCount: 3, usageRootCount: 2, totalTokens: 30 },
+    overviewUsage: {
+      totalTokens: 30,
+      completedRootCount: 3,
+      secretMatches: 0,
+      pathMatches: 0,
+    },
+  });
+
+  await prepareApprovedDriver(driver);
+  await driver.waitForRootGate();
+  await driver.waitForDelivery();
+  assert.deepEqual(await driver.readOverviewEvidence(), {
+    completedRootsSource: "linear",
+    completedRootCount: 3,
+    totalTokens: 30,
+    secretMatches: 0,
+    pathMatches: 0,
+  });
+});
+
+test("S1 claim driver rejects secret or path leakage from Overview", async () => {
+  const driver = approvedS1Driver({
+    gateFacts: [{
+      rootId: "root-a", state: "In Progress", phase: "delivering",
+      workDone: true, humanDone: true, reworkCount: 0,
+      gateIssueCount: 0, pullRequestPresent: false,
+    }],
+    deliveryFacts: [{
+      rootId: "root-a", state: "In Review", phase: "in-review",
+      kind: "branch", deliveryBranch: "symphony/runs/hell-1",
+      pullRequestPresent: false, managedCommentCount: 1,
+      duplicateDelivery: false,
+    }],
+    overviewFacts: { completedRootCount: 3, usageRootCount: 2, totalTokens: 30 },
+    overviewUsage: {
+      totalTokens: 30,
+      completedRootCount: 3,
+      secretMatches: 1,
+      pathMatches: 1,
+    },
+  });
+
+  await prepareApprovedDriver(driver);
+  await driver.waitForRootGate();
+  await driver.waitForDelivery();
+  await assert.rejects(driver.readOverviewEvidence(), /s1_overview_evidence_invalid/u);
+});
+
 test("Desktop client reads the active Profile and Conductor runtime from the UI", async () => {
   const calls = [];
   const browser = {
@@ -893,10 +955,62 @@ test("Desktop client reads the active Profile and Conductor runtime from the UI"
   assert.deepEqual(calls, [["click", "Conductors"]]);
 });
 
+test("Desktop client reads only safe Overview usage metrics", async () => {
+  const browser = {
+    async $$(selector) {
+      if (selector === '[aria-label="Usage"] article') {
+        return [
+          overviewMetric("Total tokens\n12,480"),
+          overviewMetric("Completed roots\n3"),
+        ];
+      }
+      throw new Error(`unexpected_selector:${selector}`);
+    },
+    async $(selector) {
+      if (selector === '[aria-label="Usage"]') {
+        return { async waitForDisplayed() {} };
+      }
+      throw new Error(`unexpected_selector:${selector}`);
+    },
+  };
+  const client = createDesktopClient({ browser, ui: {}, timeoutMs: 10 });
+
+  assert.deepEqual(await client.readOverviewUsage(), {
+    totalTokens: 12_480,
+    completedRootCount: 3,
+    secretMatches: 0,
+    pathMatches: 0,
+  });
+});
+
+test("Desktop client counts arbitrary absolute paths in Overview text", async () => {
+  const browser = {
+    async $$(selector) {
+      if (selector === '[aria-label="Usage"] article') {
+        return [
+          overviewMetric("Total tokens\n12,480\n/workspace/repository"),
+          overviewMetric("Completed roots\n3"),
+        ];
+      }
+      throw new Error(`unexpected_selector:${selector}`);
+    },
+    async $(selector) {
+      if (selector === '[aria-label="Usage"]') {
+        return { async waitForDisplayed() {} };
+      }
+      throw new Error(`unexpected_selector:${selector}`);
+    },
+  };
+  const client = createDesktopClient({ browser, ui: {}, timeoutMs: 10 });
+
+  assert.deepEqual((await client.readOverviewUsage()).pathMatches, 1);
+});
+
 function desktopObservationClient({
   profile = { readiness: "login-required", isActive: false },
   runtime = { status: "Starting" },
   calls = [],
+  overviewUsage,
 } = {}) {
   return {
     async openConductors() {
@@ -908,6 +1022,9 @@ function desktopObservationClient({
     async readConductorRuntime() {
       return runtime;
     },
+    async readOverviewUsage() {
+      return overviewUsage;
+    },
   };
 }
 
@@ -917,6 +1034,8 @@ function approvedS1Driver({
   deliveryBoundaryResult,
   repositoryPath = "/tmp/e2e-repository",
   useDefaultDelivery = false,
+  overviewFacts = { completedRootCount: 0, totalTokens: 0 },
+  overviewUsage,
 }) {
   let approved = false;
   return createS1ClaimDriver({
@@ -958,6 +1077,9 @@ function approvedS1Driver({
       async readRootDeliveryFacts() {
         return deliveryFacts.shift();
       },
+      async readProjectUsageFacts() {
+        return overviewFacts;
+      },
     },
     git: { async readCommitCount() { return 0; } },
     ...(useDefaultDelivery ? {} : {
@@ -973,6 +1095,7 @@ function approvedS1Driver({
     client: desktopObservationClient({
       profile: { readiness: "ready", isActive: true },
       runtime: { status: "Ready" },
+      overviewUsage,
     }),
     projectSlugId: "8ab43179fb54",
     repositoryPath,
@@ -1040,6 +1163,12 @@ function link(text, calls) {
 }
 
 function profileRow(text) {
+  return {
+    async getText() { return text; },
+  };
+}
+
+function overviewMetric(text) {
   return {
     async getText() { return text; },
   };

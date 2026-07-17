@@ -74,6 +74,7 @@ export function createS1ClaimDriver({
   let planApproved = false;
   let workflowProcessed = false;
   let gatePassed = false;
+  let deliveryReadBack = false;
   return Object.freeze({
     async createRootA() {
       if (createdRoot) throw new Error("s1_root_a_already_created");
@@ -279,12 +280,36 @@ export function createS1ClaimDriver({
           ? "s1_delivery_duplicate"
           : "s1_delivery_boundary_invalid");
       }
+      deliveryReadBack = true;
       return {
         kind: result.kind,
         rootState: result.state,
         phase: result.phase,
         automaticallyCompleted: result.state === "Done",
         duplicateDelivery: result.duplicateDelivery,
+      };
+    },
+
+    async readOverviewEvidence() {
+      if (!deliveryReadBack) throw new Error("s1_delivery_read_back_missing");
+      requireFunction(linear?.readProjectUsageFacts, "s1_linear_read_usage_missing");
+      requireFunction(client?.readOverviewUsage, "s1_client_read_overview_missing");
+      const [linearFacts, overviewView] = await Promise.all([
+        linear.readProjectUsageFacts({ projectSlugId: slugId }),
+        client.readOverviewUsage(),
+      ]);
+      const safeLinear = projectUsageObservation(linearFacts);
+      const safeOverview = overviewUsageObservation(overviewView);
+      if (safeOverview.completedRootCount !== safeLinear.completedRootCount ||
+        safeOverview.secretMatches !== 0 || safeOverview.pathMatches !== 0) {
+        throw new Error("s1_overview_evidence_invalid");
+      }
+      return {
+        completedRootsSource: "linear",
+        completedRootCount: safeLinear.completedRootCount,
+        totalTokens: safeOverview.totalTokens,
+        secretMatches: safeOverview.secretMatches,
+        pathMatches: safeOverview.pathMatches,
       };
     },
   });
@@ -543,6 +568,40 @@ function deliveryObservation(value, rootId) {
     pullRequestPresent: value.pullRequestPresent,
     managedCommentCount: value.managedCommentCount,
     duplicateDelivery: value.duplicateDelivery,
+  };
+}
+
+function projectUsageObservation(value) {
+  if (
+    !isObject(value) ||
+    !nonNegativeInteger(value.completedRootCount) ||
+    !nonNegativeInteger(value.usageRootCount) ||
+    !nonNegativeInteger(value.totalTokens)
+  ) {
+    throw new Error("s1_usage_facts_invalid");
+  }
+  return {
+    completedRootCount: value.completedRootCount,
+    usageRootCount: value.usageRootCount,
+    totalTokens: value.totalTokens,
+  };
+}
+
+function overviewUsageObservation(value) {
+  if (
+    !isObject(value) ||
+    !nonNegativeInteger(value.totalTokens) ||
+    !nonNegativeInteger(value.completedRootCount) ||
+    !nonNegativeInteger(value.secretMatches) ||
+    !nonNegativeInteger(value.pathMatches)
+  ) {
+    throw new Error("s1_overview_usage_invalid");
+  }
+  return {
+    totalTokens: value.totalTokens,
+    completedRootCount: value.completedRootCount,
+    secretMatches: value.secretMatches,
+    pathMatches: value.pathMatches,
   };
 }
 

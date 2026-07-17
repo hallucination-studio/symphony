@@ -618,6 +618,51 @@ test("Linear operator returns sanitized branch or PR Delivery facts", async () =
   });
 });
 
+test("Linear operator returns sanitized Project usage facts from top-level Roots", async () => {
+  let duplicateManagedComment = false;
+  const operator = createLinearOperator({
+    ...credentials,
+    fetch: async (url, init) => {
+      if (url.endsWith("/oauth/token")) {
+        return jsonResponse({ access_token: "app-access-token" });
+      }
+      const body = JSON.parse(init.body);
+      if (body.query.includes("projects")) return jsonResponse({ data: {
+        projects: { nodes: [{
+          id: "project-1",
+          name: "HELL",
+          slugId: "8ab43179fb54",
+          teams: { nodes: [{
+            id: "team-1",
+            states: { nodes: [{ id: "state-todo", name: "Todo" }] },
+          }] },
+        }] },
+      } });
+      const data = usageProjectFacts();
+      if (duplicateManagedComment) {
+        data.project.issues.nodes[0].comments.nodes.push(
+          data.project.issues.nodes[0].comments.nodes[0],
+        );
+      }
+      return jsonResponse({ data });
+    },
+  });
+
+  assert.deepEqual(await operator.readProjectUsageFacts({
+    projectSlugId: "8ab43179fb54",
+  }), {
+    completedRootCount: 2,
+    usageRootCount: 3,
+    totalTokens: 60,
+  });
+
+  duplicateManagedComment = true;
+  await assert.rejects(
+    operator.readProjectUsageFacts({ projectSlugId: "8ab43179fb54" }),
+    /linear_operator_usage_response_invalid/u,
+  );
+});
+
 function planFacts({ approvalState, phase }) {
   return {
     issue: {
@@ -710,6 +755,45 @@ function workflowFacts({
     },
     project: { issues: { nodes: issues, pageInfo: { hasNextPage: false } } },
   };
+}
+
+function usageProjectFacts() {
+  return {
+    project: { issues: { nodes: [
+      usageRootIssue("root-done", "Done", "app-actor-1", 10),
+      usageRootIssue("root-review", "In Review", "app-actor-1", 20),
+      usageRootIssue("root-other", "Done", "other-actor", 30),
+      usageRootIssue("work-child", "Done", "app-actor-1", 40, { id: "root-done" }),
+    ], pageInfo: { hasNextPage: false } } },
+  };
+}
+
+function usageRootIssue(id, state, delegateId, totalTokens, parent = null) {
+  return {
+    id,
+    parent,
+    state: { name: state },
+    delegate: delegateId ? { id: delegateId } : null,
+    comments: {
+      nodes: [{ body: usageComment(totalTokens) }],
+      pageInfo: { hasNextPage: false },
+    },
+  };
+}
+
+function usageComment(totalTokens) {
+  return [
+    "Symphony Root Run",
+    "conductor_id: conductor-1",
+    "performer_profile_id: profile-1",
+    "usage_input_tokens: 10",
+    "usage_cached_input_tokens: 2",
+    "usage_output_tokens: 3",
+    "usage_reasoning_output_tokens: 1",
+    `usage_total_tokens: ${totalTokens}`,
+    "delivery_branch: symphony/runs/hell-1",
+    "<!-- symphony root marker -->",
+  ].join("\n");
 }
 
 function workflowIssue(id, identifier, title, parent, state, sortOrder, subIssueSortOrder, description) {

@@ -46,6 +46,26 @@ export function createDesktopClient({
       return { linear_connection: { status: "connected" } };
     },
 
+    async readOverviewUsage() {
+      await waitFor('[aria-label="Usage"]');
+      const metrics = await browser.$$('[aria-label="Usage"] article');
+      if (metrics.length !== 2) throw new Error("e2e_overview_metrics_missing");
+      const texts = await Promise.all(metrics.map((metric) => metric.getText()));
+      const visibleText = texts.join("\n");
+      return {
+        totalTokens: overviewMetricValue(texts[0], "Total tokens"),
+        completedRootCount: overviewMetricValue(texts[1], "Completed roots"),
+        secretMatches: matches(
+          visibleText,
+          /api[\s_-]?key|access[\s_-]?token|refresh[\s_-]?token|authorization|password|secret|auth\.json|config\.toml|codex_home|performer_id/igu,
+        ),
+        pathMatches: matches(
+          visibleText,
+          /(?:^|\s)(?:\/|[A-Za-z]:[\\/])\S*/gu,
+        ),
+      };
+    },
+
     async openConductors() {
       const links = await browser.$$(".nav-link");
       for (const link of links) {
@@ -194,4 +214,19 @@ function parseProfileObservation(text) {
     readiness: readinessByLabel[readiness],
     isActive: text.includes("Active for new Roots"),
   };
+}
+
+function overviewMetricValue(text, label) {
+  if (typeof text !== "string") throw new Error("e2e_overview_metric_invalid");
+  const match = text.match(new RegExp(`${label}\\s+([\\d,]+)`, "u"));
+  if (!match) throw new Error("e2e_overview_metric_invalid");
+  const value = Number(match[1].replaceAll(",", ""));
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new Error("e2e_overview_metric_invalid");
+  }
+  return value;
+}
+
+function matches(value, pattern) {
+  return value.match(pattern)?.length ?? 0;
 }
