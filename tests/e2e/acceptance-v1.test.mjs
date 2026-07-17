@@ -38,7 +38,7 @@ test("shared acceptance preflight delegates to the fail-closed doctor", () => {
   assert.doesNotMatch(result.stderr, /acceptance_scenario_not_available/u);
 });
 
-test("S1 opt-in remains incomplete until the live fixture and driver exist", () => {
+test("S1 opt-in validates live configuration before starting the runner", () => {
   const result = spawnSync(
     process.execPath,
     ["tools/e2e/acceptance-v1.mjs", "--scenario", "S1"],
@@ -51,8 +51,9 @@ test("S1 opt-in remains incomplete until the live fixture and driver exist", () 
   assert.equal(result.status, 2);
   assert.equal(
     JSON.parse(result.stdout).reason,
-    "s1_live_fixture_and_driver_not_configured",
+    "e2e_configuration_invalid",
   );
+  assert.match(JSON.parse(result.stdout).issues.join(","), /OPENAI_E2E_API_KEY_missing/u);
 });
 
 for (const [scenario, stepCount] of [["S2", 8], ["S3", 4]]) {

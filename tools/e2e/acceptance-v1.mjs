@@ -1,5 +1,9 @@
 import { spawnSync } from "node:child_process";
 
+import {
+  loadDotEnvFile,
+  loadE2EConfig,
+} from "./config.mjs";
 import { s1StepIds } from "./scenario-s1.mjs";
 import { s2StepIds, s3StepIds } from "./scenario-s2-s3.mjs";
 
@@ -21,14 +25,49 @@ function main(arguments_) {
 
   if (!dryRun) {
     const optedIn = process.env[`SYMPHONY_E2E_RUN_${scenario}`] === "1";
-    process.stdout.write(`${JSON.stringify({
-      scenario,
-      status: "blocked",
-      reason: optedIn
-        ? `${scenario.toLowerCase()}_live_fixture_and_driver_not_configured`
-        : `set_SYMPHONY_E2E_RUN_${scenario}_to_1_for_live_mutation`,
-    })}\n`);
-    process.exitCode = 2;
+    if (!optedIn) {
+      process.stdout.write(`${JSON.stringify({
+        scenario,
+        status: "blocked",
+        reason: `set_SYMPHONY_E2E_RUN_${scenario}_to_1_for_live_mutation`,
+      })}\n`);
+      process.exitCode = 2;
+      return;
+    }
+    const config = readLiveConfig();
+    if (!config.ok) {
+      process.stdout.write(`${JSON.stringify({
+        scenario,
+        status: "blocked",
+        reason: config.reason,
+        issues: config.issues,
+      })}\n`);
+      process.exitCode = 2;
+      return;
+    }
+    if (scenario !== "S1") {
+      process.stdout.write(`${JSON.stringify({
+        scenario,
+        status: "blocked",
+        reason: `${scenario.toLowerCase()}_live_runner_not_configured`,
+      })}\n`);
+      process.exitCode = 2;
+      return;
+    }
+    const result = spawnSync(
+      process.platform === "win32" ? "npx.cmd" : "npx",
+      ["wdio", "run", "wdio.conf.mjs"],
+      {
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          SYMPHONY_E2E_SCENARIO: scenario,
+        },
+        stdio: "inherit",
+      },
+    );
+    if (result.error) throw new Error("acceptance_live_runner_start_failed");
+    process.exitCode = result.status ?? 1;
     return;
   }
   process.stdout.write(`${JSON.stringify({
@@ -47,6 +86,20 @@ function runPreflight() {
   });
   if (result.error) throw new Error("acceptance_preflight_start_failed");
   process.exitCode = result.status ?? 1;
+}
+
+function readLiveConfig() {
+  try {
+    return {
+      ok: true,
+      value: loadE2EConfig({ dotenv: loadDotEnvFile() }),
+    };
+  } catch (error) {
+    if (error?.code === "e2e_configuration_invalid" && Array.isArray(error.issues)) {
+      return { ok: false, reason: error.code, issues: [...error.issues] };
+    }
+    return { ok: false, reason: "e2e_configuration_invalid", issues: ["configuration_unreadable"] };
+  }
 }
 
 function option(arguments_, name) {
