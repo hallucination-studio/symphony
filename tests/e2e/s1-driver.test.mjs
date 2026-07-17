@@ -916,6 +916,114 @@ test("S1 claim driver rejects secret or path leakage from Overview", async () =>
   await assert.rejects(driver.readOverviewEvidence(), /s1_overview_evidence_invalid/u);
 });
 
+test("S1 claim driver creates the secondary Profile through the bounded secret boundary", async () => {
+  const calls = [];
+  const driver = approvedS1Driver({
+    gateFacts: [{
+      rootId: "root-a", state: "In Progress", phase: "delivering",
+      workDone: true, humanDone: true, reworkCount: 0,
+      gateIssueCount: 0, pullRequestPresent: false,
+    }],
+    deliveryFacts: [{
+      rootId: "root-a", state: "In Review", phase: "in-review",
+      kind: "branch", deliveryBranch: "symphony/runs/hell-1",
+      pullRequestPresent: false, managedCommentCount: 1,
+      duplicateDelivery: false,
+    }],
+    profileActions: {
+      async createSecondaryApiKeyProfile(input) {
+        calls.push(["secondary-profile", input]);
+        return {
+          displayName: "E2E secondary",
+          model: input.model,
+          reasoningEffort: input.reasoningEffort,
+          fastMode: false,
+        };
+      },
+    },
+    profileBoundary: {
+      async readSecondaryProfileBoundary(input) {
+        calls.push(["profile-boundary", input]);
+        return {
+          sameConductorPid: true,
+          distinctCodexHome: true,
+          secretMatches: 0,
+        };
+      },
+    },
+    secondaryProfile: { model: "fixture-model", reasoningEffort: "high" },
+  });
+
+  await prepareApprovedDriver(driver);
+  await driver.waitForRootGate();
+  await driver.waitForDelivery();
+
+  assert.deepEqual(await driver.createSecondaryProfile(), {
+    readiness: "ready",
+    isActive: true,
+    sameConductorPid: true,
+    distinctCodexHome: true,
+    secretMatches: 0,
+    model: "fixture-model",
+    reasoningEffort: "high",
+    fastMode: false,
+  });
+  assert.deepEqual(calls, [
+    ["secondary-profile", {
+      model: "fixture-model",
+      reasoningEffort: "high",
+    }],
+    ["profile-boundary", {
+      primaryProfileName: "E2E primary",
+      secondaryProfileName: "E2E secondary",
+    }],
+  ]);
+});
+
+test("S1 claim driver stops when the secondary Profile boundary finds a secret", async () => {
+  const driver = approvedS1Driver({
+    gateFacts: [{
+      rootId: "root-a", state: "In Progress", phase: "delivering",
+      workDone: true, humanDone: true, reworkCount: 0,
+      gateIssueCount: 0, pullRequestPresent: false,
+    }],
+    deliveryFacts: [{
+      rootId: "root-a", state: "In Review", phase: "in-review",
+      kind: "branch", deliveryBranch: "symphony/runs/hell-1",
+      pullRequestPresent: false, managedCommentCount: 1,
+      duplicateDelivery: false,
+    }],
+    profileActions: {
+      async createSecondaryApiKeyProfile(input) {
+        return {
+          displayName: "E2E secondary",
+          model: input.model,
+          reasoningEffort: input.reasoningEffort,
+          fastMode: false,
+        };
+      },
+    },
+    profileBoundary: {
+      async readSecondaryProfileBoundary() {
+        return {
+          sameConductorPid: true,
+          distinctCodexHome: true,
+          secretMatches: 1,
+        };
+      },
+    },
+    secondaryProfile: { model: "fixture-model", reasoningEffort: "high" },
+  });
+
+  await prepareApprovedDriver(driver);
+  await driver.waitForRootGate();
+  await driver.waitForDelivery();
+  await assert.rejects(
+    driver.createSecondaryProfile(),
+    /s1_secondary_profile_secret_leak/u,
+  );
+});
+
 test("Desktop client reads the active Profile and Conductor runtime from the UI", async () => {
   const calls = [];
   const browser = {
@@ -1036,6 +1144,9 @@ function approvedS1Driver({
   useDefaultDelivery = false,
   overviewFacts = { completedRootCount: 0, totalTokens: 0 },
   overviewUsage,
+  profileActions,
+  profileBoundary,
+  secondaryProfile,
 }) {
   let approved = false;
   return createS1ClaimDriver({
@@ -1097,6 +1208,9 @@ function approvedS1Driver({
       runtime: { status: "Ready" },
       overviewUsage,
     }),
+    profileActions,
+    profileBoundary,
+    secondaryProfile,
     projectSlugId: "8ab43179fb54",
     repositoryPath,
     baseBranch: "main",

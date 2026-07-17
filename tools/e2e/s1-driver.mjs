@@ -7,6 +7,7 @@ const DEFAULT_POLL_INTERVAL_MS = 1_000;
 const DELIVERY_COMMAND_TIMEOUT_MS = 15_000;
 const ROOT_TITLE = "[E2E] Root A";
 const ROOT_DESCRIPTION = "fixed fixture";
+const SECONDARY_PROFILE = "E2E secondary";
 const RUNTIME_STATUSES = new Set([
   "Stopped",
   "Starting",
@@ -40,6 +41,9 @@ export function createS1ClaimDriver({
   repositoryPath,
   baseBranch,
   githubRepository,
+  profileActions,
+  profileBoundary,
+  secondaryProfile,
   timeoutMs = DEFAULT_TIMEOUT_MS,
   pollIntervalMs = DEFAULT_POLL_INTERVAL_MS,
   now = () => Date.now(),
@@ -312,6 +316,43 @@ export function createS1ClaimDriver({
         pathMatches: safeOverview.pathMatches,
       };
     },
+
+    async createSecondaryProfile() {
+      if (!deliveryReadBack) throw new Error("s1_delivery_read_back_missing");
+      requireFunction(
+        profileActions?.createSecondaryApiKeyProfile,
+        "s1_secondary_profile_action_missing",
+      );
+      requireFunction(
+        profileBoundary?.readSecondaryProfileBoundary,
+        "s1_secondary_profile_boundary_missing",
+      );
+      const settings = secondaryProfileSettings(secondaryProfile);
+      const configured = secondaryProfileObservation(
+        await profileActions.createSecondaryApiKeyProfile(settings),
+        settings,
+      );
+      const view = profileObservation(await client.readProfile(SECONDARY_PROFILE));
+      const boundary = profileBoundaryObservation(
+        await profileBoundary.readSecondaryProfileBoundary({
+          primaryProfileName: profile,
+          secondaryProfileName: SECONDARY_PROFILE,
+        }),
+      );
+      if (boundary.secretMatches !== 0) {
+        throw new Error("s1_secondary_profile_secret_leak");
+      }
+      return {
+        readiness: view.readiness,
+        isActive: view.isActive,
+        sameConductorPid: boundary.sameConductorPid,
+        distinctCodexHome: boundary.distinctCodexHome,
+        secretMatches: boundary.secretMatches,
+        model: configured.model,
+        reasoningEffort: configured.reasoningEffort,
+        fastMode: configured.fastMode,
+      };
+    },
   });
 
   async function readClaimObservation(rootId) {
@@ -435,6 +476,58 @@ function profileObservation(value) {
     throw new Error("s1_profile_observation_invalid");
   }
   return { readiness: value.readiness, isActive: value.isActive };
+}
+
+function secondaryProfileSettings(value) {
+  if (
+    !isObject(value) ||
+    typeof value.model !== "string" ||
+    !value.model ||
+    value.model.length > 256 ||
+    /[\r\n\0]/u.test(value.model) ||
+    !["none", "minimal", "low", "medium", "high", "xhigh"].includes(
+      value.reasoningEffort,
+    )
+  ) {
+    throw new Error("s1_secondary_profile_settings_invalid");
+  }
+  return {
+    model: value.model,
+    reasoningEffort: value.reasoningEffort,
+  };
+}
+
+function secondaryProfileObservation(value, expected) {
+  if (
+    !isObject(value) ||
+    value.displayName !== SECONDARY_PROFILE ||
+    value.model !== expected.model ||
+    value.reasoningEffort !== expected.reasoningEffort ||
+    value.fastMode !== false
+  ) {
+    throw new Error("s1_secondary_profile_settings_invalid");
+  }
+  return {
+    model: expected.model,
+    reasoningEffort: expected.reasoningEffort,
+    fastMode: false,
+  };
+}
+
+function profileBoundaryObservation(value) {
+  if (
+    !isObject(value) ||
+    typeof value.sameConductorPid !== "boolean" ||
+    typeof value.distinctCodexHome !== "boolean" ||
+    !nonNegativeInteger(value.secretMatches)
+  ) {
+    throw new Error("s1_secondary_profile_boundary_invalid");
+  }
+  return {
+    sameConductorPid: value.sameConductorPid,
+    distinctCodexHome: value.distinctCodexHome,
+    secretMatches: value.secretMatches,
+  };
 }
 
 function runtimeObservation(value) {
