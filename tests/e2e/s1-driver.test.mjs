@@ -1024,6 +1024,94 @@ test("S1 claim driver stops when the secondary Profile boundary finds a secret",
   );
 });
 
+test("S1 claim driver creates Root B only after Root A delivery and reads secondary settings", async () => {
+  const calls = [];
+  const driver = approvedS1Driver({
+    gateFacts: [{
+      rootId: "root-a", state: "In Progress", phase: "delivering",
+      workDone: true, humanDone: true, reworkCount: 0,
+      gateIssueCount: 0, pullRequestPresent: false,
+    }],
+    deliveryFacts: [{
+      rootId: "root-a", state: "In Review", phase: "in-review",
+      kind: "branch", deliveryBranch: "symphony/runs/hell-1",
+      pullRequestPresent: false, managedCommentCount: 1,
+      duplicateDelivery: false,
+    }, {
+      rootId: "root-a", state: "In Review", phase: "in-review",
+      kind: "branch", deliveryBranch: "symphony/runs/hell-1",
+      pullRequestPresent: false, managedCommentCount: 1,
+      duplicateDelivery: false,
+    }],
+    rootBClaimFacts: [
+      {
+        rootId: "root-b", state: "Todo", phase: undefined,
+        singletonCount: 0, managedCommentCount: 0,
+        managedCommentReady: false,
+      },
+      {
+        rootId: "root-b", state: "In Progress", phase: "planning",
+        singletonCount: 1, managedCommentCount: 1,
+        managedCommentReady: true, deliveryBranch: "symphony/runs/hell-2",
+      },
+    ],
+    rootB: { title: "[E2E] Root B", description: "secondary fixture" },
+    profileActions: {
+      async createSecondaryApiKeyProfile(input) {
+        return {
+          displayName: "E2E secondary",
+          model: input.model,
+          reasoningEffort: input.reasoningEffort,
+          fastMode: false,
+        };
+      },
+    },
+    profileBoundary: {
+      async readSecondaryProfileBoundary() {
+        return {
+          sameConductorPid: true,
+          distinctCodexHome: true,
+          secretMatches: 0,
+        };
+      },
+    },
+    rootBProbe: {
+      async readRootBInvocation(input) {
+        calls.push(input);
+        return {
+          rootATerminal: true,
+          rootAProfileUnchanged: true,
+          rootBUsesSecondary: true,
+          settingsApplied: true,
+          fastMode: false,
+        };
+      },
+    },
+    secondaryProfile: { model: "fixture-model", reasoningEffort: "high" },
+  });
+
+  await prepareApprovedDriver(driver);
+  await driver.waitForRootGate();
+  await driver.waitForDelivery();
+  await driver.createSecondaryProfile();
+
+  assert.deepEqual(await driver.createRootB(), {
+    rootId: "root-b",
+    rootATerminal: true,
+    rootAProfileUnchanged: true,
+    rootBUsesSecondary: true,
+    settingsApplied: true,
+    fastMode: false,
+  });
+  assert.deepEqual(calls, [{
+    rootAId: "root-a",
+    rootBId: "root-b",
+    secondaryProfileName: "E2E secondary",
+    model: "fixture-model",
+    reasoningEffort: "high",
+  }]);
+});
+
 test("Desktop client reads the active Profile and Conductor runtime from the UI", async () => {
   const calls = [];
   const browser = {
@@ -1147,14 +1235,29 @@ function approvedS1Driver({
   profileActions,
   profileBoundary,
   secondaryProfile,
+  rootB,
+  rootBClaimFacts = [],
+  rootBProbe,
 }) {
   let approved = false;
   return createS1ClaimDriver({
     linear: {
-      async createAndDelegateRoot() {
+      async createAndDelegateRoot(input) {
+        if (rootB && input.title === rootB.title) {
+          return {
+            rootId: "root-b",
+            identifier: "HELL-2",
+            projectId: "project-1",
+            projectName: "HELL",
+            state: "Todo",
+            delegated: true,
+            readBack: true,
+          };
+        }
         return { rootId: "root-a", delegated: true, readBack: true };
       },
-      async readRootClaimFacts() {
+      async readRootClaimFacts(input) {
+        if (input.rootId === "root-b") return rootBClaimFacts.shift();
         return {
           rootId: "root-a", state: "In Progress", phase: "planning",
           singletonCount: 1, managedCommentCount: 1, managedCommentReady: true,
@@ -1211,6 +1314,8 @@ function approvedS1Driver({
     profileActions,
     profileBoundary,
     secondaryProfile,
+    rootB,
+    rootBProbe,
     projectSlugId: "8ab43179fb54",
     repositoryPath,
     baseBranch: "main",

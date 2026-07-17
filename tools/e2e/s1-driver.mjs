@@ -44,6 +44,8 @@ export function createS1ClaimDriver({
   profileActions,
   profileBoundary,
   secondaryProfile,
+  rootB,
+  rootBProbe,
   timeoutMs = DEFAULT_TIMEOUT_MS,
   pollIntervalMs = DEFAULT_POLL_INTERVAL_MS,
   now = () => Date.now(),
@@ -79,6 +81,8 @@ export function createS1ClaimDriver({
   let workflowProcessed = false;
   let gatePassed = false;
   let deliveryReadBack = false;
+  let secondaryProfileReady = false;
+  let createdRootB;
   return Object.freeze({
     async createRootA() {
       if (createdRoot) throw new Error("s1_root_a_already_created");
@@ -333,6 +337,9 @@ export function createS1ClaimDriver({
         settings,
       );
       const view = profileObservation(await client.readProfile(SECONDARY_PROFILE));
+      if (view.readiness !== "ready" || view.isActive !== true) {
+        throw new Error("s1_secondary_profile_not_ready");
+      }
       const boundary = profileBoundaryObservation(
         await profileBoundary.readSecondaryProfileBoundary({
           primaryProfileName: profile,
@@ -342,6 +349,7 @@ export function createS1ClaimDriver({
       if (boundary.secretMatches !== 0) {
         throw new Error("s1_secondary_profile_secret_leak");
       }
+      secondaryProfileReady = true;
       return {
         readiness: view.readiness,
         isActive: view.isActive,
@@ -353,12 +361,74 @@ export function createS1ClaimDriver({
         fastMode: configured.fastMode,
       };
     },
+
+    async createRootB() {
+      if (!deliveryReadBack) throw new Error("s1_delivery_read_back_missing");
+      if (!secondaryProfileReady) {
+        throw new Error("s1_secondary_profile_missing");
+      }
+      if (createdRootB) throw new Error("s1_root_b_already_created");
+      requireFunction(linear?.readRootDeliveryFacts, "s1_linear_read_delivery_missing");
+      requireFunction(linear?.createAndDelegateRoot, "s1_linear_create_root_missing");
+      requireFunction(rootBProbe?.readRootBInvocation, "s1_root_b_probe_missing");
+      const rootAFacts = deliveryObservation(
+        await linear.readRootDeliveryFacts({
+          projectSlugId: slugId,
+          rootId: claimedRoot.rootId,
+        }),
+        claimedRoot.rootId,
+      );
+      const rootATerminal = ["In Review", "Done"].includes(rootAFacts.state) &&
+        rootAFacts.phase === "in-review" &&
+        rootAFacts.duplicateDelivery === false;
+      if (!rootATerminal) throw new Error("s1_root_a_not_terminal");
+
+      const input = rootBInput(rootB);
+      const created = rootObservation(
+        await linear.createAndDelegateRoot({
+          projectSlugId: slugId,
+          title: input.title,
+          description: input.description,
+        }),
+      );
+      if (created.state !== "Todo") {
+        throw new Error("s1_root_b_create_read_back_invalid");
+      }
+      if (created.rootId === claimedRoot.rootId) {
+        throw new Error("s1_root_b_duplicate_root_a");
+      }
+      createdRootB = created;
+      const claimed = await pollUntil(
+        () => readClaimObservation(created.rootId, SECONDARY_PROFILE),
+        claimReady,
+        "s1_root_b_claim_timeout",
+      );
+      const settings = secondaryProfileSettings(secondaryProfile);
+      const probe = rootBProbeObservation(
+        await rootBProbe.readRootBInvocation({
+          rootAId: claimedRoot.rootId,
+          rootBId: created.rootId,
+          secondaryProfileName: SECONDARY_PROFILE,
+          model: settings.model,
+          reasoningEffort: settings.reasoningEffort,
+        }),
+      );
+      return {
+        rootId: created.rootId,
+        rootATerminal: rootATerminal && probe.rootATerminal,
+        rootAProfileUnchanged: probe.rootAProfileUnchanged,
+        rootBUsesSecondary: probe.rootBUsesSecondary &&
+          claimed.profileReadiness === "ready" && claimed.profileIsActive === true,
+        settingsApplied: probe.settingsApplied,
+        fastMode: probe.fastMode,
+      };
+    },
   });
 
-  async function readClaimObservation(rootId) {
+  async function readClaimObservation(rootId, profileName = profile) {
     const [facts, profileView, runtimeView] = await Promise.all([
       linear.readRootClaimFacts({ projectSlugId: slugId, rootId }),
-      client.readProfile(profile),
+      client.readProfile(profileName),
       client.readConductorRuntime(),
     ]);
     const safeFacts = claimFacts(facts, rootId);
@@ -435,6 +505,14 @@ function rootObservation(value) {
     ...optionalReturnedText(value, "state"),
     delegated: true,
     readBack: true,
+  };
+}
+
+function rootBInput(value) {
+  if (!isObject(value)) throw new Error("s1_root_b_input_invalid");
+  return {
+    title: requiredText(value.title, "s1_root_b_title_invalid"),
+    description: requiredText(value.description, "s1_root_b_description_invalid"),
   };
 }
 
@@ -527,6 +605,26 @@ function profileBoundaryObservation(value) {
     sameConductorPid: value.sameConductorPid,
     distinctCodexHome: value.distinctCodexHome,
     secretMatches: value.secretMatches,
+  };
+}
+
+function rootBProbeObservation(value) {
+  if (
+    !isObject(value) ||
+    typeof value.rootATerminal !== "boolean" ||
+    typeof value.rootAProfileUnchanged !== "boolean" ||
+    typeof value.rootBUsesSecondary !== "boolean" ||
+    typeof value.settingsApplied !== "boolean" ||
+    typeof value.fastMode !== "boolean"
+  ) {
+    throw new Error("s1_root_b_probe_invalid");
+  }
+  return {
+    rootATerminal: value.rootATerminal,
+    rootAProfileUnchanged: value.rootAProfileUnchanged,
+    rootBUsesSecondary: value.rootBUsesSecondary,
+    settingsApplied: value.settingsApplied,
+    fastMode: value.fastMode,
   };
 }
 
