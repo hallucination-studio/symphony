@@ -658,6 +658,69 @@ test("S1 claim driver stops workflow evidence when Human is bypassed", async () 
   });
 });
 
+test("S1 claim driver waits for Root Gate pass before delivery", async () => {
+  const gateFacts = [
+    {
+      rootId: "root-a", state: "In Progress", phase: "gating",
+      workDone: false, humanDone: true, reworkCount: 0,
+      gateIssueCount: 0, pullRequestPresent: false,
+    },
+    {
+      rootId: "root-a", state: "In Progress", phase: "delivering",
+      workDone: true, humanDone: true, reworkCount: 0,
+      gateIssueCount: 0, pullRequestPresent: false,
+    },
+  ];
+  const driver = approvedS1Driver({ gateFacts });
+
+  await prepareApprovedDriver(driver);
+  assert.deepEqual(await driver.waitForRootGate(), {
+    rootId: "root-a",
+    status: "passed",
+    deliveryStartedBeforePass: false,
+    reworkCount: 0,
+    gateIssueCount: 0,
+  });
+});
+
+test("S1 claim driver stops Root Gate failure and flags delivery before pass", async () => {
+  const failedGate = approvedS1Driver({
+    gateFacts: [{
+      rootId: "root-a", state: "In Progress", phase: "working",
+      workDone: true, humanDone: true, reworkCount: 1,
+      gateIssueCount: 1, pullRequestPresent: false,
+    }],
+  });
+  await prepareApprovedDriver(failedGate);
+  assert.deepEqual(await failedGate.waitForRootGate(), {
+    rootId: "root-a",
+    status: "failed",
+    deliveryStartedBeforePass: false,
+    reworkCount: 1,
+    gateIssueCount: 1,
+  });
+
+  const deliveredEarly = approvedS1Driver({
+    gateFacts: [{
+      rootId: "root-a", state: "In Progress", phase: "gating",
+      workDone: false, humanDone: true, reworkCount: 0,
+      gateIssueCount: 0, pullRequestPresent: true,
+    }, {
+      rootId: "root-a", state: "In Progress", phase: "delivering",
+      workDone: true, humanDone: true, reworkCount: 0,
+      gateIssueCount: 0, pullRequestPresent: true,
+    }],
+  });
+  await prepareApprovedDriver(deliveredEarly);
+  assert.deepEqual(await deliveredEarly.waitForRootGate(), {
+    rootId: "root-a",
+    status: "passed",
+    deliveryStartedBeforePass: true,
+    reworkCount: 0,
+    gateIssueCount: 0,
+  });
+});
+
 test("Desktop client reads the active Profile and Conductor runtime from the UI", async () => {
   const calls = [];
   const browser = {
@@ -713,6 +776,68 @@ function desktopObservationClient({
       return runtime;
     },
   };
+}
+
+function approvedS1Driver({ gateFacts }) {
+  let approved = false;
+  return createS1ClaimDriver({
+    linear: {
+      async createAndDelegateRoot() {
+        return { rootId: "root-a", delegated: true, readBack: true };
+      },
+      async readRootClaimFacts() {
+        return {
+          rootId: "root-a", state: "In Progress", phase: "planning",
+          singletonCount: 1, managedCommentCount: 1, managedCommentReady: true,
+          deliveryBranch: "symphony/runs/hell-1",
+        };
+      },
+      async readRootPlanFacts() {
+        return {
+          rootId: "root-a", state: "In Progress",
+          phase: approved ? "working" : "awaiting-human",
+          treeMatches: true, planApprovalCount: 1,
+          planApprovalState: approved ? "Done" : "In Progress",
+          planApprovalReady: !approved, plannedRootInputReady: true,
+          workStates: ["Todo"], workStarted: false,
+        };
+      },
+      async approvePlan() {
+        approved = true;
+        return { rootId: "root-a", approvalState: "Done", readBack: true };
+      },
+      async readRootWorkflowFacts() {
+        return {
+          rootId: "root-a", phase: "gating", ordered: true,
+          activeWorkLeafCount: 0, unansweredHumanAdvanced: false,
+          workflowComplete: true,
+        };
+      },
+      async readRootGateFacts() {
+        return gateFacts.shift();
+      },
+    },
+    git: { async readCommitCount() { return 0; } },
+    client: desktopObservationClient({
+      profile: { readiness: "ready", isActive: true },
+      runtime: { status: "Ready" },
+    }),
+    projectSlugId: "8ab43179fb54",
+    repositoryPath: "/tmp/e2e-repository",
+    baseBranch: "main",
+    now: () => 0,
+    sleep: async () => undefined,
+    timeoutMs: 100,
+    pollIntervalMs: 5,
+  });
+}
+
+async function prepareApprovedDriver(driver) {
+  await driver.createRootA();
+  await driver.waitForClaim();
+  await driver.waitForPlan();
+  await driver.approvePlan();
+  await driver.processWorkflow();
 }
 
 function stableLinear({ deliveryBranch }) {

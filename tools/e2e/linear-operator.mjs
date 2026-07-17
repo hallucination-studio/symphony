@@ -242,6 +242,28 @@ export function createLinearOperator({
       return workflowFacts(rootId, snapshot.facts, snapshot.planNodes);
     },
 
+    async readRootGateFacts(input) {
+      const rootId = required(input?.rootId, "linear_operator_root_id_invalid");
+      const project = await readProjectContext(input?.projectSlugId);
+      const snapshot = await readRootPlanSnapshot(rootId, project.projectId);
+      const projection = workflowProjection(rootId, snapshot.planNodes);
+      const workLeaves = projection.leaves.filter((node) => node.humanKind === undefined);
+      const humanLeaves = projection.leaves.filter((node) => node.humanKind !== undefined);
+      const reworkNodes = snapshot.planNodes.filter(
+        (node) => node.managedMarker === `${rootId}:root-gate-rework`,
+      );
+      return {
+        rootId,
+        state: snapshot.facts.state,
+        phase: snapshot.facts.phase,
+        workDone: workLeaves.every((node) => node.state === "Done"),
+        humanDone: humanLeaves.every((node) => node.state === "Done"),
+        reworkCount: reworkNodes.length,
+        gateIssueCount: reworkNodes.length,
+        pullRequestPresent: snapshot.pullRequestPresent,
+      };
+    },
+
     async approvePlan(input) {
       const rootId = required(input?.rootId, "linear_operator_root_id_invalid");
       const project = await readProjectContext(input?.projectSlugId);
@@ -390,6 +412,9 @@ export function createLinearOperator({
       },
       approvalId: approval?.id,
       planNodes,
+      pullRequestPresent: managedComments.length === 1 &&
+        managedCommentFields(managedComments[0]) &&
+        managedCommentHasPullRequest(managedComments[0]),
     };
   }
 
@@ -717,22 +742,7 @@ function plannedRootInputHash(body) {
 }
 
 function workflowFacts(rootId, planFacts, planNodes) {
-  const workflowNodes = planNodes.filter(
-    (node) => node.id !== rootId && node.humanKind !== "plan_approval",
-  );
-  const byId = new Map(planNodes.map((node) => [node.id, node]));
-  const activeNodes = workflowNodes.filter((node) =>
-    hasNoCanceledAncestor(node, byId),
-  );
-  const nodesWithChildren = new Set(
-    workflowNodes
-      .filter((node) => node.parentId !== undefined)
-      .map((node) => node.parentId),
-  );
-  const leaves = activeNodes.filter((node) =>
-    !activeNodes.some((child) => child.parentId === node.id) &&
-    !nodesWithChildren.has(node.id),
-  );
+  const { workflowNodes, leaves, nodesWithChildren } = workflowProjection(rootId, planNodes);
   const humanHasChildren = workflowNodes.some((node) =>
     node.humanKind !== undefined && nodesWithChildren.has(node.id),
   );
@@ -762,6 +772,26 @@ function workflowFacts(rootId, planFacts, planNodes) {
     unansweredHumanAdvanced,
     workflowComplete,
   };
+}
+
+function workflowProjection(rootId, planNodes) {
+  const workflowNodes = planNodes.filter(
+    (node) => node.id !== rootId && node.humanKind !== "plan_approval",
+  );
+  const byId = new Map(planNodes.map((node) => [node.id, node]));
+  const activeNodes = workflowNodes.filter((node) =>
+    hasNoCanceledAncestor(node, byId),
+  );
+  const nodesWithChildren = new Set(
+    workflowNodes
+      .filter((node) => node.parentId !== undefined)
+      .map((node) => node.parentId),
+  );
+  const leaves = activeNodes.filter((node) =>
+    !activeNodes.some((child) => child.parentId === node.id) &&
+    !nodesWithChildren.has(node.id),
+  );
+  return { workflowNodes, leaves, nodesWithChildren };
 }
 
 function hasNoCanceledAncestor(node, byId) {
@@ -841,6 +871,11 @@ function managedCommentFields(body) {
     const value = values.get(key);
     return /^\d+$/u.test(value) && Number.isSafeInteger(Number(value));
   });
+}
+
+function managedCommentHasPullRequest(body) {
+  const match = body.match(/^pull_request: ([^\r\n]{1,1024})$/mu);
+  return Boolean(match && match[1] !== "none");
 }
 
 function deliveryBranch(body) {

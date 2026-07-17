@@ -65,6 +65,7 @@ export function createS1ClaimDriver({
   let createdRoot;
   let claimedRoot;
   let planApproved = false;
+  let workflowProcessed = false;
   return Object.freeze({
     async createRootA() {
       if (createdRoot) throw new Error("s1_root_a_already_created");
@@ -169,11 +170,60 @@ export function createS1ClaimDriver({
           value.activeWorkLeafCount > 1,
         "s1_workflow_timeout",
       );
+      if (!result.ordered || result.unansweredHumanAdvanced ||
+        !result.workflowComplete || result.maxConcurrentTurns > 1) {
+        return {
+          rootId: claimedRoot.rootId,
+          ordered: result.ordered,
+          maxConcurrentTurns: result.maxConcurrentTurns,
+          unansweredHumanAdvanced: result.unansweredHumanAdvanced,
+        };
+      }
+      workflowProcessed = true;
       return {
         rootId: claimedRoot.rootId,
         ordered: result.ordered,
         maxConcurrentTurns: result.maxConcurrentTurns,
         unansweredHumanAdvanced: result.unansweredHumanAdvanced,
+      };
+    },
+
+    async waitForRootGate() {
+      if (!workflowProcessed) throw new Error("s1_workflow_not_processed");
+      requireFunction(linear?.readRootGateFacts, "s1_linear_read_gate_missing");
+      let deliveryStartedBeforePass = false;
+      const result = await pollUntil(
+        async () => {
+          const facts = rootGateObservation(
+            await linear.readRootGateFacts({
+              projectSlugId: slugId,
+              rootId: claimedRoot.rootId,
+            }),
+            claimedRoot.rootId,
+          );
+          if (facts.phase !== "delivering") {
+            deliveryStartedBeforePass ||= facts.pullRequestPresent;
+          }
+          const passed = facts.phase === "delivering" &&
+            facts.workDone && facts.humanDone &&
+            facts.reworkCount === 0 && facts.gateIssueCount === 0;
+          const failed = facts.phase === "working" &&
+            facts.reworkCount > 0;
+          return {
+            ...facts,
+            status: passed ? "passed" : failed ? "failed" : "waiting",
+            deliveryStartedBeforePass,
+          };
+        },
+        (value) => value.status !== "waiting",
+        "s1_root_gate_timeout",
+      );
+      return {
+        rootId: claimedRoot.rootId,
+        status: result.status,
+        deliveryStartedBeforePass: result.deliveryStartedBeforePass,
+        reworkCount: result.reworkCount,
+        gateIssueCount: result.gateIssueCount,
       };
     },
   });
@@ -373,6 +423,34 @@ function workflowObservation(value, rootId) {
     activeWorkLeafCount: value.activeWorkLeafCount,
     unansweredHumanAdvanced: value.unansweredHumanAdvanced,
     workflowComplete: value.workflowComplete,
+  };
+}
+
+function rootGateObservation(value, rootId) {
+  if (
+    !isObject(value) ||
+    value.rootId !== rootId ||
+    typeof value.state !== "string" ||
+    !ROOT_STATES.has(value.state) ||
+    typeof value.phase !== "string" ||
+    !ROOT_PHASES.has(value.phase) ||
+    typeof value.workDone !== "boolean" ||
+    typeof value.humanDone !== "boolean" ||
+    !nonNegativeInteger(value.reworkCount) ||
+    !nonNegativeInteger(value.gateIssueCount) ||
+    typeof value.pullRequestPresent !== "boolean"
+  ) {
+    throw new Error("s1_root_gate_facts_invalid");
+  }
+  return {
+    rootId,
+    state: value.state,
+    phase: value.phase,
+    workDone: value.workDone,
+    humanDone: value.humanDone,
+    reworkCount: value.reworkCount,
+    gateIssueCount: value.gateIssueCount,
+    pullRequestPresent: value.pullRequestPresent,
   };
 }
 

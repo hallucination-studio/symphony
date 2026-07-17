@@ -454,6 +454,91 @@ test("Linear operator returns sanitized ordered Workflow facts and detects Human
   });
 });
 
+test("Linear operator returns Root Gate facts without exposing delivery content", async () => {
+  let phase = "gating";
+  let firstWorkState = "In Review";
+  let secondWorkState = "In Review";
+  let rework = false;
+  let pullRequest = false;
+  const operator = createLinearOperator({
+    ...credentials,
+    fetch: async (_url, init) => {
+      const body = JSON.parse(init.body);
+      if (body.query.includes("projects")) return jsonResponse({ data: {
+        projects: { nodes: [{
+          id: "project-1",
+          name: "HELL",
+          slugId: "8ab43179fb54",
+          teams: { nodes: [{
+            id: "team-1",
+            states: { nodes: [{ id: "state-todo", name: "Todo" }] },
+          }] },
+        }] },
+      } });
+      return jsonResponse({ data: workflowFacts({
+        phase,
+        humanState: "Done",
+        firstWorkState,
+        secondWorkState,
+        rework,
+        pullRequest,
+      }) });
+    },
+  });
+
+  assert.deepEqual(await operator.readRootGateFacts({
+    projectSlugId: "8ab43179fb54",
+    rootId: "issue-1",
+  }), {
+    rootId: "issue-1",
+    state: "In Progress",
+    phase: "gating",
+    workDone: false,
+    humanDone: true,
+    reworkCount: 0,
+    gateIssueCount: 0,
+    pullRequestPresent: false,
+  });
+
+  phase = "delivering";
+  firstWorkState = "Done";
+  secondWorkState = "Done";
+  assert.deepEqual(await operator.readRootGateFacts({
+    projectSlugId: "8ab43179fb54",
+    rootId: "issue-1",
+  }), {
+    rootId: "issue-1",
+    state: "In Progress",
+    phase: "delivering",
+    workDone: true,
+    humanDone: true,
+    reworkCount: 0,
+    gateIssueCount: 0,
+    pullRequestPresent: false,
+  });
+
+  phase = "working";
+  rework = true;
+  pullRequest = true;
+  assert.deepEqual(await operator.readRootGateFacts({
+    projectSlugId: "8ab43179fb54",
+    rootId: "issue-1",
+  }), {
+    rootId: "issue-1",
+    state: "In Progress",
+    phase: "working",
+    workDone: false,
+    humanDone: true,
+    reworkCount: 1,
+    gateIssueCount: 1,
+    pullRequestPresent: true,
+  });
+  assert.doesNotMatch(JSON.stringify(await operator.readRootGateFacts({
+    projectSlugId: "8ab43179fb54",
+    rootId: "issue-1",
+  })), /https|conductor|performer|description|findings/u);
+});
+
 function planFacts({ approvalState, phase }) {
   return {
     issue: {
@@ -501,7 +586,39 @@ function planFacts({ approvalState, phase }) {
   };
 }
 
-function workflowFacts({ phase, humanState, secondWorkState }) {
+function workflowFacts({
+  phase,
+  humanState,
+  firstWorkState = "In Review",
+  secondWorkState,
+  rework = false,
+  pullRequest = false,
+}) {
+  const rootComment = [
+    "Symphony Root Run",
+    "conductor_id: conductor-1",
+    "performer_profile_id: profile-1",
+    "usage_input_tokens: 0",
+    "usage_cached_input_tokens: 0",
+    "usage_output_tokens: 0",
+    "usage_reasoning_output_tokens: 0",
+    "usage_total_tokens: 0",
+    "planned_root_input_hash: abc123",
+    "delivery_branch: symphony/runs/hell-1",
+    ...(pullRequest ? ["pull_request: https://github.com/acme/repo/pull/1"] : []),
+    "<!-- symphony root marker -->",
+  ].join("\n");
+  const issues = [
+      workflowIssue("issue-1", "HELL-1", "Root A", null, "In Progress", 0, null, "Root description"),
+      workflowIssue("work-1", "HELL-2", "First work", { id: "issue-1" }, firstWorkState, 1, 1, "First work\n\n<!-- symphony managed marker\nmanaged_marker: issue-1:work-1\n-->\n\n<!-- symphony work metadata\nkind: work\norigin: symphony\ncompleted_input_hash: hash-1\n-->",),
+      workflowIssue("human-1", "HELL-3", "Need input", { id: "issue-1" }, humanState, 2, 2, "Human\n\n<!-- symphony managed marker\nmanaged_marker: issue-1:human-1\nkind: human\nhuman_kind: planned_input\ntarget_issue_id: work-2\n-->",),
+      workflowIssue("work-2", "HELL-4", "Second work", { id: "issue-1" }, secondWorkState, 3, 3, "Second work\n\n<!-- symphony managed marker\nmanaged_marker: issue-1:work-2\n-->\n\n<!-- symphony work metadata\nkind: work\norigin: symphony\ncompleted_input_hash: hash-2\n-->",),
+      workflowIssue("group-1", "HELL-5", "Canceled group", { id: "issue-1" }, phase === "delivering" ? "Done" : "Todo", 4, 4, "Canceled group"),
+      workflowIssue("work-3", "HELL-6", "Canceled child", { id: "group-1" }, "Canceled", 1, 1, "Canceled child\n\n<!-- symphony managed marker\nmanaged_marker: issue-1:work-3\n-->\n\n<!-- symphony work metadata\nkind: work\norigin: symphony\ncompleted_input_hash: none\n-->",),
+    ];
+  if (rework) {
+    issues.push(workflowIssue("rework-1", "HELL-7", "[Rework] Root Gate Findings", { id: "issue-1" }, "Todo", 5, 5, "Findings\n\n<!-- symphony managed marker\nmanaged_marker: issue-1:root-gate-rework\n-->\n\n<!-- symphony work metadata\nkind: work\norigin: symphony\ncompleted_input_hash: none\n-->",));
+  }
   return {
     issue: {
       id: "issue-1",
@@ -509,18 +626,9 @@ function workflowFacts({ phase, humanState, secondWorkState }) {
       parent: null,
       state: { name: "In Progress" },
       labels: { nodes: [{ name: `symphony:run/${phase}` }], pageInfo: { hasNextPage: false } },
-      comments: { nodes: [{
-        body: "Symphony Root Run\nconductor_id: conductor-1\nperformer_profile_id: profile-1\nusage_input_tokens: 0\nusage_cached_input_tokens: 0\nusage_output_tokens: 0\nusage_reasoning_output_tokens: 0\nusage_total_tokens: 0\nplanned_root_input_hash: abc123\ndelivery_branch: symphony/runs/hell-1\n<!-- symphony root marker -->",
-      }], pageInfo: { hasNextPage: false } },
+      comments: { nodes: [{ body: rootComment }], pageInfo: { hasNextPage: false } },
     },
-    project: { issues: { nodes: [
-      workflowIssue("issue-1", "HELL-1", "Root A", null, "In Progress", 0, null, "Root description"),
-      workflowIssue("work-1", "HELL-2", "First work", { id: "issue-1" }, "In Review", 1, 1, "First work\n\n<!-- symphony managed marker\nmanaged_marker: issue-1:work-1\n-->\n\n<!-- symphony work metadata\nkind: work\norigin: symphony\ncompleted_input_hash: hash-1\n-->",),
-      workflowIssue("human-1", "HELL-3", "Need input", { id: "issue-1" }, humanState, 2, 2, "Human\n\n<!-- symphony managed marker\nmanaged_marker: issue-1:human-1\nkind: human\nhuman_kind: planned_input\ntarget_issue_id: work-2\n-->",),
-      workflowIssue("work-2", "HELL-4", "Second work", { id: "issue-1" }, secondWorkState, 3, 3, "Second work\n\n<!-- symphony managed marker\nmanaged_marker: issue-1:work-2\n-->\n\n<!-- symphony work metadata\nkind: work\norigin: symphony\ncompleted_input_hash: hash-2\n-->",),
-      workflowIssue("group-1", "HELL-5", "Canceled group", { id: "issue-1" }, "Todo", 4, 4, "Canceled group"),
-      workflowIssue("work-3", "HELL-6", "Canceled child", { id: "group-1" }, "Canceled", 1, 1, "Canceled child\n\n<!-- symphony managed marker\nmanaged_marker: issue-1:work-3\n-->\n\n<!-- symphony work metadata\nkind: work\norigin: symphony\ncompleted_input_hash: none\n-->",),
-    ], pageInfo: { hasNextPage: false } } },
+    project: { issues: { nodes: issues, pageInfo: { hasNextPage: false } } },
   };
 }
 
