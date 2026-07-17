@@ -1,6 +1,41 @@
 const LINEAR_GRAPHQL_URL = "https://api.linear.app/graphql";
 const LINEAR_OAUTH_TOKEN_URL = "https://api.linear.app/oauth/token";
 const MAX_TEXT_LENGTH = 16_384;
+const ROOT_PHASES = new Set([
+  "planning",
+  "awaiting-human",
+  "working",
+  "gating",
+  "delivering",
+  "in-review",
+  "blocked",
+  "failed",
+]);
+const ROOT_MANAGED_FIELDS = new Set([
+  "conductor_id",
+  "performer_profile_id",
+  "performer_id",
+  "planned_root_input_hash",
+  "usage_input_tokens",
+  "usage_cached_input_tokens",
+  "usage_output_tokens",
+  "usage_reasoning_output_tokens",
+  "usage_total_tokens",
+  "last_usage_turn_id",
+  "delivery_branch",
+  "pull_request",
+  "last_error",
+]);
+const REQUIRED_ROOT_MANAGED_FIELDS = [
+  "conductor_id",
+  "performer_profile_id",
+  "usage_input_tokens",
+  "usage_cached_input_tokens",
+  "usage_output_tokens",
+  "usage_reasoning_output_tokens",
+  "usage_total_tokens",
+  "delivery_branch",
+];
 
 const PROJECT_CONTEXT_QUERY = `
   query e2eProjectContext {
@@ -57,6 +92,31 @@ const ROOT_QUERY = `
   }
 `;
 
+const ROOT_CLAIM_FACTS_QUERY = `
+  query e2eRootClaimFacts($rootId: String!, $projectId: String!) {
+    issue(id: $rootId) {
+      id
+      identifier
+      project { id }
+      parent { id }
+      state { name }
+      labels(first: 64) { nodes { name } pageInfo { hasNextPage } }
+      comments(first: 64) { nodes { body } pageInfo { hasNextPage } }
+    }
+    project(id: $projectId) {
+      issues(first: 250) {
+        nodes {
+          id
+          parent { id }
+          state { name }
+          delegate { id }
+        }
+        pageInfo { hasNextPage }
+      }
+    }
+  }
+`;
+
 export function createLinearOperator({
   userApiKey,
   clientId,
@@ -75,6 +135,58 @@ export function createLinearOperator({
         projectId: project.projectId,
         projectName: project.projectName,
         appActorReady: true,
+      };
+    },
+
+    async readRootClaimFacts(input) {
+      const rootId = required(input?.rootId, "linear_operator_root_id_invalid");
+      const project = await readProjectContext(input?.projectSlugId);
+      const appActorId = await readAppActorId();
+      const data = await graphql(operatorApiKey, ROOT_CLAIM_FACTS_QUERY, {
+        rootId,
+        projectId: project.projectId,
+      });
+      const issue = data.issue;
+      const projectIssues = connectionNodes(data.project?.issues);
+      const labels = connectionNodes(issue?.labels);
+      const comments = connectionNodes(issue?.comments);
+      if (!isRootIssueShape(issue, rootId, project.projectId)) {
+        throw new Error("linear_operator_root_response_invalid");
+      }
+      if (!labels.every((label) => isNamedObject(label)) ||
+        !comments.every((comment) => isBodyObject(comment)) ||
+        !projectIssues.every(isProjectIssueShape)) {
+        throw new Error("linear_operator_root_response_invalid");
+      }
+
+      const phaseLabels = labels
+        .map((label) => label.name)
+        .filter((name) => name.startsWith("symphony:run/"));
+      const phase = phaseLabels.length === 1
+        ? phaseLabels[0].slice("symphony:run/".length)
+        : undefined;
+      if (phase !== undefined && !ROOT_PHASES.has(phase)) {
+        throw new Error("linear_operator_root_response_invalid");
+      }
+      const managedComments = comments
+        .map((comment) => comment.body)
+        .filter(isRootManagedComment);
+      const activeDelegatedRoots = projectIssues.filter((candidate) =>
+        !candidate?.parent?.id &&
+        candidate?.state?.name === "In Progress" &&
+        candidate?.delegate?.id === appActorId,
+      );
+      const managedComment = managedComments[0];
+      const managedCommentReady = managedComments.length === 1 && managedCommentFields(managedComment);
+
+      return {
+        rootId,
+        state: issue.state?.name,
+        phase,
+        singletonCount: activeDelegatedRoots.length,
+        managedCommentCount: managedComments.length,
+        managedCommentReady,
+        ...(managedCommentReady ? { deliveryBranch: deliveryBranch(managedComment) } : {}),
       };
     },
 
@@ -265,6 +377,94 @@ function assertRoot(root, project, errorCode) {
   ) {
     throw new Error(errorCode);
   }
+}
+
+function isRootManagedComment(body) {
+  return typeof body === "string" &&
+    body.startsWith("Symphony Root Run\n") &&
+    body.endsWith("<!-- symphony root marker -->");
+}
+
+function connectionNodes(connection) {
+  if (!connection || !Array.isArray(connection.nodes) || connection.pageInfo?.hasNextPage !== false) {
+    throw new Error("linear_operator_root_response_invalid");
+  }
+  return connection.nodes;
+}
+
+function isRootIssueShape(issue, rootId, projectId) {
+  return isObject(issue) &&
+    issue.id === rootId &&
+    issue.project?.id === projectId &&
+    issue.parent === null &&
+    typeof issue.state?.name === "string";
+}
+
+function isProjectIssueShape(issue) {
+  return isObject(issue) &&
+    typeof issue.id === "string" &&
+    isNullableRelation(issue.parent) &&
+    isNullableRelation(issue.delegate) &&
+    typeof issue.state?.name === "string";
+}
+
+function isNamedObject(value) {
+  return isObject(value) && typeof value.name === "string";
+}
+
+function isBodyObject(value) {
+  return isObject(value) && typeof value.body === "string";
+}
+
+function isNullableRelation(value) {
+  return value === null || (isObject(value) && typeof value.id === "string");
+}
+
+function isObject(value) {
+  return value !== null && typeof value === "object";
+}
+
+function managedCommentFields(body) {
+  const values = new Map();
+  for (const line of body.split("\n").slice(1, -1)) {
+    const separator = line.indexOf(":");
+    if (separator < 1) return false;
+    const key = line.slice(0, separator).trim();
+    const value = line.slice(separator + 1).trim();
+    if (
+      !ROOT_MANAGED_FIELDS.has(key) ||
+      values.has(key) ||
+      !value ||
+      value.length > MAX_TEXT_LENGTH ||
+      /[\r\0]/u.test(value)
+    ) {
+      return false;
+    }
+    values.set(key, value);
+  }
+
+  if (!REQUIRED_ROOT_MANAGED_FIELDS.every((key) => {
+    const value = values.get(key);
+    return value && value !== "none";
+  })) {
+    return false;
+  }
+  if (!/^delivery_branch: [A-Za-z0-9._/-]{1,128}$/mu.test(body)) return false;
+  return [
+    "usage_input_tokens",
+    "usage_cached_input_tokens",
+    "usage_output_tokens",
+    "usage_reasoning_output_tokens",
+    "usage_total_tokens",
+  ].every((key) => {
+    const value = values.get(key);
+    return /^\d+$/u.test(value) && Number.isSafeInteger(Number(value));
+  });
+}
+
+function deliveryBranch(body) {
+  const match = body.match(/^delivery_branch: ([A-Za-z0-9._/-]{1,128})$/mu);
+  return match?.[1];
 }
 
 function required(value, code) {
