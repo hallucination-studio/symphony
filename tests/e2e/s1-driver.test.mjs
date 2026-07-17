@@ -1087,6 +1087,12 @@ test("S1 claim driver creates Root B only after Root A delivery and reads second
         };
       },
     },
+    secretBoundary: {
+      async audit(input) {
+        calls.push(["secret-boundary", input]);
+        return { secretMatches: 0, codexOwnedFilesTouched: false };
+      },
+    },
     secondaryProfile: { model: "fixture-model", reasoningEffort: "high" },
   });
 
@@ -1103,13 +1109,31 @@ test("S1 claim driver creates Root B only after Root A delivery and reads second
     settingsApplied: true,
     fastMode: false,
   });
+  assert.deepEqual(await driver.auditSecretBoundary(), {
+    secretMatches: 0,
+    codexOwnedFilesTouched: false,
+  });
   assert.deepEqual(calls, [{
     rootAId: "root-a",
     rootBId: "root-b",
     secondaryProfileName: "E2E secondary",
     model: "fixture-model",
     reasoningEffort: "high",
-  }]);
+  }, ["secret-boundary", {
+    rootAId: "root-a",
+    rootBId: "root-b",
+  }]]);
+});
+
+test("S1 claim driver stops on final secret or Codex-owned file boundary failures", async () => {
+  for (const [auditResult, errorCode] of [
+    [{ secretMatches: 1, codexOwnedFilesTouched: false }, "s1_secret_boundary_secret_leak"],
+    [{ secretMatches: 0, codexOwnedFilesTouched: true }, "s1_codex_owned_files_touched"],
+  ]) {
+    const driver = rootBReadyDriver(auditResult);
+    await prepareRootB(driver);
+    await assert.rejects(driver.auditSecretBoundary(), new RegExp(errorCode, "u"));
+  }
 });
 
 test("Desktop client reads the active Profile and Conductor runtime from the UI", async () => {
@@ -1238,6 +1262,7 @@ function approvedS1Driver({
   rootB,
   rootBClaimFacts = [],
   rootBProbe,
+  secretBoundary,
 }) {
   let approved = false;
   return createS1ClaimDriver({
@@ -1316,6 +1341,7 @@ function approvedS1Driver({
     secondaryProfile,
     rootB,
     rootBProbe,
+    secretBoundary,
     projectSlugId: "8ab43179fb54",
     repositoryPath,
     baseBranch: "main",
@@ -1332,6 +1358,77 @@ async function prepareApprovedDriver(driver) {
   await driver.waitForPlan();
   await driver.approvePlan();
   await driver.processWorkflow();
+}
+
+function rootBReadyDriver(auditResult) {
+  return approvedS1Driver({
+    gateFacts: [{
+      rootId: "root-a", state: "In Progress", phase: "delivering",
+      workDone: true, humanDone: true, reworkCount: 0,
+      gateIssueCount: 0, pullRequestPresent: false,
+    }],
+    deliveryFacts: [{
+      rootId: "root-a", state: "In Review", phase: "in-review",
+      kind: "branch", deliveryBranch: "symphony/runs/hell-1",
+      pullRequestPresent: false, managedCommentCount: 1,
+      duplicateDelivery: false,
+    }, {
+      rootId: "root-a", state: "In Review", phase: "in-review",
+      kind: "branch", deliveryBranch: "symphony/runs/hell-1",
+      pullRequestPresent: false, managedCommentCount: 1,
+      duplicateDelivery: false,
+    }],
+    rootBClaimFacts: [{
+      rootId: "root-b", state: "In Progress", phase: "planning",
+      singletonCount: 1, managedCommentCount: 1,
+      managedCommentReady: true, deliveryBranch: "symphony/runs/hell-2",
+    }],
+    rootB: { title: "[E2E] Root B", description: "secondary fixture" },
+    profileActions: {
+      async createSecondaryApiKeyProfile(input) {
+        return {
+          displayName: "E2E secondary",
+          model: input.model,
+          reasoningEffort: input.reasoningEffort,
+          fastMode: false,
+        };
+      },
+    },
+    profileBoundary: {
+      async readSecondaryProfileBoundary() {
+        return {
+          sameConductorPid: true,
+          distinctCodexHome: true,
+          secretMatches: 0,
+        };
+      },
+    },
+    rootBProbe: {
+      async readRootBInvocation() {
+        return {
+          rootATerminal: true,
+          rootAProfileUnchanged: true,
+          rootBUsesSecondary: true,
+          settingsApplied: true,
+          fastMode: false,
+        };
+      },
+    },
+    secretBoundary: {
+      async audit() {
+        return auditResult;
+      },
+    },
+    secondaryProfile: { model: "fixture-model", reasoningEffort: "high" },
+  });
+}
+
+async function prepareRootB(driver) {
+  await prepareApprovedDriver(driver);
+  await driver.waitForRootGate();
+  await driver.waitForDelivery();
+  await driver.createSecondaryProfile();
+  await driver.createRootB();
 }
 
 function stableLinear({ deliveryBranch }) {

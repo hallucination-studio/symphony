@@ -46,6 +46,7 @@ export function createS1ClaimDriver({
   secondaryProfile,
   rootB,
   rootBProbe,
+  secretBoundary,
   timeoutMs = DEFAULT_TIMEOUT_MS,
   pollIntervalMs = DEFAULT_POLL_INTERVAL_MS,
   now = () => Date.now(),
@@ -423,6 +424,24 @@ export function createS1ClaimDriver({
         fastMode: probe.fastMode,
       };
     },
+
+    async auditSecretBoundary() {
+      if (!createdRootB) throw new Error("s1_root_b_missing");
+      requireFunction(secretBoundary?.audit, "s1_secret_boundary_missing");
+      const observation = secretBoundaryObservation(
+        await secretBoundary.audit({
+          rootAId: claimedRoot.rootId,
+          rootBId: createdRootB.rootId,
+        }),
+      );
+      if (observation.secretMatches !== 0) {
+        throw new Error("s1_secret_boundary_secret_leak");
+      }
+      if (observation.codexOwnedFilesTouched) {
+        throw new Error("s1_codex_owned_files_touched");
+      }
+      return observation;
+    },
   });
 
   async function readClaimObservation(rootId, profileName = profile) {
@@ -625,6 +644,20 @@ function rootBProbeObservation(value) {
     rootBUsesSecondary: value.rootBUsesSecondary,
     settingsApplied: value.settingsApplied,
     fastMode: value.fastMode,
+  };
+}
+
+function secretBoundaryObservation(value) {
+  if (
+    !isObject(value) ||
+    !nonNegativeInteger(value.secretMatches) ||
+    typeof value.codexOwnedFilesTouched !== "boolean"
+  ) {
+    throw new Error("s1_secret_boundary_invalid");
+  }
+  return {
+    secretMatches: value.secretMatches,
+    codexOwnedFilesTouched: value.codexOwnedFilesTouched,
   };
 }
 
