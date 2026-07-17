@@ -28,7 +28,7 @@
     "e2e:doctor": "node tools/e2e/doctor.mjs",
     "e2e:build": "node tools/e2e/build.mjs",
     "test:e2e:runner": "node --test tests/e2e/runner.test.mjs tests/e2e/production-negative-controls.test.mjs",
-    "test:e2e:scenarios": "node --test tests/e2e/acceptance-v1.test.mjs tests/e2e/scenario-*.test.mjs",
+    "test:e2e:scenarios": "node tools/e2e/scenario-test-runner.mjs",
     "e2e:ui-smoke": "node tools/e2e/ui-smoke.mjs",
     "acceptance:v1": "node tools/e2e/acceptance-v1.mjs",
     "acceptance:collect": "node tests/acceptance/v1-cli.mjs collect",

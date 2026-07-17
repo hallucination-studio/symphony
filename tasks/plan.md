@@ -96,6 +96,8 @@ git diff --check
 
 ### E2 — 实现 S2 Linear权威和 S3恢复收敛验收
 
+**状态：** S2八个独立Root probes、S3四个恢复步骤、fail-fast contract和dry-run已实现；固定 live fixture与真实外部运行按用户授权延后，未声称passed。
+
 **依赖：** E0。可与 E1并行实现。
 
 严格实现 `tasks/spec.md#5-固定场景` 的 S2八个 probes和 S3四个恢复步骤。每个 probe

@@ -20,7 +20,7 @@
   - One commit: `test(e2e): prove the fixed V1 root journey`
   - Residual verification: contract/dry-run implemented；固定 live fixture和真实外部运行按用户授权延后，verdict保持incomplete
 
-- [ ] E2 — S2 Linear权威和S3恢复收敛
+- [x] E2 — S2 Linear权威和S3恢复收敛
   - Dependencies: E0
   - Parallel: 可与E1并行实现；真实HELL运行必须串行
   - Covers: A02, A06–A09, A11(branch), A13–A18
@@ -28,6 +28,7 @@
   - Verify: `npm run test:e2e:scenarios -- --scenario S2 && npm run test:e2e:scenarios -- --scenario S3 && npm run acceptance:v1 -- --scenario S2 --dry-run && npm run acceptance:v1 -- --scenario S3 --dry-run && npm run test`
   - Before commit: scope ledger；code-simple；五轴code-review；probe/fault/log review；拒绝checkpoint/journal；`git diff --check`
   - One commit: `test(e2e): prove V1 authority and recovery`
+  - Residual verification: S2/S3 contract和dry-run已实现；固定 live probe/fault fixture与真实外部运行按用户授权延后
 
 - [ ] E3 — Linux CI、本地Linux/macOS入口、并行准备/采证和双层verdict
   - Dependencies: E1, E2
