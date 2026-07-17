@@ -64,6 +64,7 @@ export function createS1ClaimDriver({
 
   let createdRoot;
   let claimedRoot;
+  let planApproved = false;
   return Object.freeze({
     async createRootA() {
       if (createdRoot) throw new Error("s1_root_a_already_created");
@@ -133,12 +134,46 @@ export function createS1ClaimDriver({
           value.planApprovalState === "Done",
         "s1_plan_approval_timeout",
       );
+      planApproved = true;
       return {
         rootId: claimedRoot.rootId,
         approvalState: facts.planApprovalState,
         phase: facts.phase,
         workStarted: facts.workStarted,
         readBack: true,
+      };
+    },
+
+    async processWorkflow() {
+      if (!planApproved) throw new Error("s1_plan_not_approved");
+      requireFunction(linear?.readRootWorkflowFacts, "s1_linear_read_workflow_missing");
+      let maxConcurrentTurns = 0;
+      const result = await pollUntil(
+        async () => {
+          const facts = workflowObservation(
+            await linear.readRootWorkflowFacts({
+              projectSlugId: slugId,
+              rootId: claimedRoot.rootId,
+            }),
+            claimedRoot.rootId,
+          );
+          maxConcurrentTurns = Math.max(
+            maxConcurrentTurns,
+            facts.activeWorkLeafCount,
+          );
+          return { ...facts, maxConcurrentTurns };
+        },
+        (value) => value.workflowComplete ||
+          !value.ordered ||
+          value.unansweredHumanAdvanced ||
+          value.activeWorkLeafCount > 1,
+        "s1_workflow_timeout",
+      );
+      return {
+        rootId: claimedRoot.rootId,
+        ordered: result.ordered,
+        maxConcurrentTurns: result.maxConcurrentTurns,
+        unansweredHumanAdvanced: result.unansweredHumanAdvanced,
       };
     },
   });
@@ -315,6 +350,29 @@ function planObservation(value, rootId) {
     plannedRootInputReady: value.plannedRootInputReady,
     workStates: [...value.workStates],
     workStarted: value.workStarted,
+  };
+}
+
+function workflowObservation(value, rootId) {
+  if (
+    !isObject(value) ||
+    value.rootId !== rootId ||
+    typeof value.phase !== "string" ||
+    !ROOT_PHASES.has(value.phase) ||
+    typeof value.ordered !== "boolean" ||
+    !nonNegativeInteger(value.activeWorkLeafCount) ||
+    typeof value.unansweredHumanAdvanced !== "boolean" ||
+    typeof value.workflowComplete !== "boolean"
+  ) {
+    throw new Error("s1_workflow_facts_invalid");
+  }
+  return {
+    rootId,
+    phase: value.phase,
+    ordered: value.ordered,
+    activeWorkLeafCount: value.activeWorkLeafCount,
+    unansweredHumanAdvanced: value.unansweredHumanAdvanced,
+    workflowComplete: value.workflowComplete,
   };
 }
 

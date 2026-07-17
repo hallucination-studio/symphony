@@ -235,6 +235,13 @@ export function createLinearOperator({
       return (await readRootPlanSnapshot(rootId, project.projectId)).facts;
     },
 
+    async readRootWorkflowFacts(input) {
+      const rootId = required(input?.rootId, "linear_operator_root_id_invalid");
+      const project = await readProjectContext(input?.projectSlugId);
+      const snapshot = await readRootPlanSnapshot(rootId, project.projectId);
+      return workflowFacts(rootId, snapshot.facts, snapshot.planNodes);
+    },
+
     async approvePlan(input) {
       const rootId = required(input?.rootId, "linear_operator_root_id_invalid");
       const project = await readProjectContext(input?.projectSlugId);
@@ -382,6 +389,7 @@ export function createLinearOperator({
         workStarted: workStates.some((state) => !WORK_NOT_STARTED_STATES.has(state)),
       },
       approvalId: approval?.id,
+      planNodes,
     };
   }
 
@@ -663,12 +671,16 @@ function planNode(issue) {
   if (metadata.invalid) throw new Error("linear_operator_plan_metadata_invalid");
   return {
     id: issue.id,
+    identifier: issue.identifier,
     parentId: issue.parent?.id,
     title: issue.title,
     state: issue.state.name,
     order: issue.subIssueSortOrder ?? issue.sortOrder,
     ...(metadata.humanKind ? { humanKind: metadata.humanKind } : {}),
     ...(metadata.managedMarker ? { managedMarker: metadata.managedMarker } : {}),
+    ...(metadata.completedInputHash
+      ? { completedInputHash: metadata.completedInputHash }
+      : {}),
   };
 }
 
@@ -687,8 +699,13 @@ function parsePlanNodeMetadata(description) {
     if ((human[2] === "plan_approval") !== (human[3] === "none")) return { invalid: true };
     return { managedMarker: human[1], humanKind: human[2] };
   }
-  const work = description.match(/\n*<!-- symphony managed marker\nmanaged_marker: ([A-Za-z0-9][A-Za-z0-9._:/-]{0,127})\n-->\s*\n*<!-- symphony work metadata\nkind: work\norigin: (?:user|symphony)\ncompleted_input_hash: (?:[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}|none)\n-->\s*$/u);
-  if (work) return { managedMarker: work[1] };
+  const work = description.match(/\n*<!-- symphony managed marker\nmanaged_marker: ([A-Za-z0-9][A-Za-z0-9._:/-]{0,127})\n-->\s*\n*<!-- symphony work metadata\nkind: work\norigin: (?:user|symphony)\ncompleted_input_hash: ([A-Za-z0-9][A-Za-z0-9._:/-]{0,127}|none)\n-->\s*$/u);
+  if (work) {
+    return {
+      managedMarker: work[1],
+      ...(work[2] !== "none" ? { completedInputHash: work[2] } : {}),
+    };
+  }
   if (description.includes("symphony managed marker") || description.includes("symphony work metadata")) {
     return { invalid: true };
   }
@@ -697,6 +714,95 @@ function parsePlanNodeMetadata(description) {
 
 function plannedRootInputHash(body) {
   return /^planned_root_input_hash: [A-Za-z0-9._:/-]{1,128}$/mu.test(body);
+}
+
+function workflowFacts(rootId, planFacts, planNodes) {
+  const workflowNodes = planNodes.filter(
+    (node) => node.id !== rootId && node.humanKind !== "plan_approval",
+  );
+  const byId = new Map(planNodes.map((node) => [node.id, node]));
+  const activeNodes = workflowNodes.filter((node) =>
+    hasNoCanceledAncestor(node, byId),
+  );
+  const nodesWithChildren = new Set(
+    workflowNodes
+      .filter((node) => node.parentId !== undefined)
+      .map((node) => node.parentId),
+  );
+  const leaves = activeNodes.filter((node) =>
+    !activeNodes.some((child) => child.parentId === node.id) &&
+    !nodesWithChildren.has(node.id),
+  );
+  const humanHasChildren = workflowNodes.some((node) =>
+    node.humanKind !== undefined && nodesWithChildren.has(node.id),
+  );
+  const ordered = typeof planFacts.phase === "string" &&
+    ROOT_PHASES.has(planFacts.phase) &&
+    planFacts.treeMatches === true &&
+    siblingOrdersAreUnique(workflowNodes) &&
+    !humanHasChildren &&
+    leafProgressIsOrdered(leaves);
+  const unansweredHumanAdvanced = leaves.some((node, index) =>
+    node.humanKind !== undefined &&
+    !["Done", "Canceled"].includes(node.state) &&
+    leaves.slice(index + 1).some((later) =>
+      later.humanKind === undefined && !WORK_NOT_STARTED_STATES.has(later.state),
+    ),
+  );
+  const activeWorkLeafCount = leaves.filter((node) =>
+    node.humanKind === undefined && node.state === "In Progress",
+  ).length;
+  const workflowComplete = planFacts.phase === "gating" &&
+    leaves.every(workflowLeafComplete);
+  return {
+    rootId,
+    phase: planFacts.phase,
+    ordered,
+    activeWorkLeafCount,
+    unansweredHumanAdvanced,
+    workflowComplete,
+  };
+}
+
+function hasNoCanceledAncestor(node, byId) {
+  const visited = new Set();
+  let current = node;
+  while (current.parentId !== undefined) {
+    if (visited.has(current.id)) return false;
+    visited.add(current.id);
+    const parent = byId.get(current.parentId);
+    if (!parent) return false;
+    if (parent.state === "Canceled") return false;
+    current = parent;
+  }
+  return node.state !== "Canceled";
+}
+
+function siblingOrdersAreUnique(nodes) {
+  const orders = new Map();
+  for (const node of nodes) {
+    const parentId = node.parentId ?? null;
+    const values = orders.get(parentId) ?? new Set();
+    if (values.has(node.order)) return false;
+    values.add(node.order);
+    orders.set(parentId, values);
+  }
+  return true;
+}
+
+function leafProgressIsOrdered(leaves) {
+  let pending = false;
+  for (const leaf of leaves) {
+    if (pending && !WORK_NOT_STARTED_STATES.has(leaf.state)) return false;
+    if (!workflowLeafComplete(leaf)) pending = true;
+  }
+  return true;
+}
+
+function workflowLeafComplete(node) {
+  if (node.humanKind !== undefined) return node.state === "Done";
+  return ["In Review", "Done"].includes(node.state) &&
+    Boolean(node.completedInputHash);
 }
 
 function managedCommentFields(body) {

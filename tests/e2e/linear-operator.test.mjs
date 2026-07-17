@@ -388,6 +388,72 @@ test("Linear operator approves only the Plan Approval Node and reads back workin
   });
 });
 
+test("Linear operator returns sanitized ordered Workflow facts and detects Human bypass", async () => {
+  let phase = "awaiting-human";
+  let humanState = "In Progress";
+  let secondWorkState = "Todo";
+  const operator = createLinearOperator({
+    ...credentials,
+    fetch: async (_url, init) => {
+      const body = JSON.parse(init.body);
+      if (body.query.includes("projects")) return jsonResponse({ data: {
+        projects: { nodes: [{
+          id: "project-1",
+          name: "HELL",
+          slugId: "8ab43179fb54",
+          teams: { nodes: [{
+            id: "team-1",
+            states: { nodes: [{ id: "state-todo", name: "Todo" }] },
+          }] },
+        }] },
+      } });
+      return jsonResponse({ data: workflowFacts({ phase, humanState, secondWorkState }) });
+    },
+  });
+
+  assert.deepEqual(await operator.readRootWorkflowFacts({
+    projectSlugId: "8ab43179fb54",
+    rootId: "issue-1",
+  }), {
+    rootId: "issue-1",
+    phase: "awaiting-human",
+    ordered: true,
+    activeWorkLeafCount: 0,
+    unansweredHumanAdvanced: false,
+    workflowComplete: false,
+  });
+
+  secondWorkState = "In Progress";
+  const bypass = await operator.readRootWorkflowFacts({
+    projectSlugId: "8ab43179fb54",
+    rootId: "issue-1",
+  });
+  assert.deepEqual(bypass, {
+    rootId: "issue-1",
+    phase: "awaiting-human",
+    ordered: false,
+    activeWorkLeafCount: 1,
+    unansweredHumanAdvanced: true,
+    workflowComplete: false,
+  });
+  assert.doesNotMatch(JSON.stringify(bypass), /Plan summary|conductor|performer|description|hash-1/u);
+
+  humanState = "Done";
+  secondWorkState = "In Review";
+  phase = "gating";
+  assert.deepEqual(await operator.readRootWorkflowFacts({
+    projectSlugId: "8ab43179fb54",
+    rootId: "issue-1",
+  }), {
+    rootId: "issue-1",
+    phase: "gating",
+    ordered: true,
+    activeWorkLeafCount: 0,
+    unansweredHumanAdvanced: false,
+    workflowComplete: true,
+  });
+});
+
 function planFacts({ approvalState, phase }) {
   return {
     issue: {
@@ -433,6 +499,33 @@ function planFacts({ approvalState, phase }) {
       },
     ], pageInfo: { hasNextPage: false } } },
   };
+}
+
+function workflowFacts({ phase, humanState, secondWorkState }) {
+  return {
+    issue: {
+      id: "issue-1",
+      project: { id: "project-1" },
+      parent: null,
+      state: { name: "In Progress" },
+      labels: { nodes: [{ name: `symphony:run/${phase}` }], pageInfo: { hasNextPage: false } },
+      comments: { nodes: [{
+        body: "Symphony Root Run\nconductor_id: conductor-1\nperformer_profile_id: profile-1\nusage_input_tokens: 0\nusage_cached_input_tokens: 0\nusage_output_tokens: 0\nusage_reasoning_output_tokens: 0\nusage_total_tokens: 0\nplanned_root_input_hash: abc123\ndelivery_branch: symphony/runs/hell-1\n<!-- symphony root marker -->",
+      }], pageInfo: { hasNextPage: false } },
+    },
+    project: { issues: { nodes: [
+      workflowIssue("issue-1", "HELL-1", "Root A", null, "In Progress", 0, null, "Root description"),
+      workflowIssue("work-1", "HELL-2", "First work", { id: "issue-1" }, "In Review", 1, 1, "First work\n\n<!-- symphony managed marker\nmanaged_marker: issue-1:work-1\n-->\n\n<!-- symphony work metadata\nkind: work\norigin: symphony\ncompleted_input_hash: hash-1\n-->",),
+      workflowIssue("human-1", "HELL-3", "Need input", { id: "issue-1" }, humanState, 2, 2, "Human\n\n<!-- symphony managed marker\nmanaged_marker: issue-1:human-1\nkind: human\nhuman_kind: planned_input\ntarget_issue_id: work-2\n-->",),
+      workflowIssue("work-2", "HELL-4", "Second work", { id: "issue-1" }, secondWorkState, 3, 3, "Second work\n\n<!-- symphony managed marker\nmanaged_marker: issue-1:work-2\n-->\n\n<!-- symphony work metadata\nkind: work\norigin: symphony\ncompleted_input_hash: hash-2\n-->",),
+      workflowIssue("group-1", "HELL-5", "Canceled group", { id: "issue-1" }, "Todo", 4, 4, "Canceled group"),
+      workflowIssue("work-3", "HELL-6", "Canceled child", { id: "group-1" }, "Canceled", 1, 1, "Canceled child\n\n<!-- symphony managed marker\nmanaged_marker: issue-1:work-3\n-->\n\n<!-- symphony work metadata\nkind: work\norigin: symphony\ncompleted_input_hash: none\n-->",),
+    ], pageInfo: { hasNextPage: false } } },
+  };
+}
+
+function workflowIssue(id, identifier, title, parent, state, sortOrder, subIssueSortOrder, description) {
+  return { id, identifier, title, description, parent, state: { name: state }, sortOrder, subIssueSortOrder };
 }
 
 test("Linear operator rejects incomplete paginated Root claim facts", async () => {

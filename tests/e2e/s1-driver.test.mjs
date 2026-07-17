@@ -520,6 +520,144 @@ test("S1 claim driver approves the Plan only after working read-back", async () 
   });
 });
 
+test("S1 claim driver waits for ordered workflow completion and records one lane", async () => {
+  const workflowFacts = [
+    {
+      rootId: "root-a",
+      phase: "working",
+      ordered: true,
+      activeWorkLeafCount: 1,
+      unansweredHumanAdvanced: false,
+      workflowComplete: false,
+    },
+    {
+      rootId: "root-a",
+      phase: "gating",
+      ordered: true,
+      activeWorkLeafCount: 0,
+      unansweredHumanAdvanced: false,
+      workflowComplete: true,
+    },
+  ];
+  let approved = false;
+  const driver = createS1ClaimDriver({
+    linear: {
+      async createAndDelegateRoot() {
+        return { rootId: "root-a", delegated: true, readBack: true };
+      },
+      async readRootClaimFacts() {
+        return {
+          rootId: "root-a", state: "In Progress", phase: "planning",
+          singletonCount: 1, managedCommentCount: 1, managedCommentReady: true,
+          deliveryBranch: "symphony/runs/hell-1",
+        };
+      },
+      async readRootPlanFacts() {
+        return {
+          rootId: "root-a", state: "In Progress",
+          phase: approved ? "working" : "awaiting-human",
+          treeMatches: true, planApprovalCount: 1,
+          planApprovalState: approved ? "Done" : "In Progress",
+          planApprovalReady: !approved, plannedRootInputReady: true,
+          workStates: ["Todo"], workStarted: false,
+        };
+      },
+      async approvePlan() {
+        approved = true;
+        return { rootId: "root-a", approvalState: "Done", readBack: true };
+      },
+      async readRootWorkflowFacts() {
+        return workflowFacts.shift();
+      },
+    },
+    git: { async readCommitCount() { return 0; } },
+    client: desktopObservationClient({
+      profile: { readiness: "ready", isActive: true },
+      runtime: { status: "Ready" },
+    }),
+    projectSlugId: "8ab43179fb54",
+    repositoryPath: "/tmp/e2e-repository",
+    baseBranch: "main",
+    now: () => 0,
+    sleep: async () => undefined,
+    timeoutMs: 100,
+    pollIntervalMs: 5,
+  });
+
+  await driver.createRootA();
+  await driver.waitForClaim();
+  await driver.waitForPlan();
+  await driver.approvePlan();
+  assert.deepEqual(await driver.processWorkflow(), {
+    rootId: "root-a",
+    ordered: true,
+    maxConcurrentTurns: 1,
+    unansweredHumanAdvanced: false,
+  });
+});
+
+test("S1 claim driver stops workflow evidence when Human is bypassed", async () => {
+  let approved = false;
+  const driver = createS1ClaimDriver({
+    linear: {
+      async createAndDelegateRoot() {
+        return { rootId: "root-a", delegated: true, readBack: true };
+      },
+      async readRootClaimFacts() {
+        return {
+          rootId: "root-a", state: "In Progress", phase: "planning",
+          singletonCount: 1, managedCommentCount: 1, managedCommentReady: true,
+          deliveryBranch: "symphony/runs/hell-1",
+        };
+      },
+      async readRootPlanFacts() {
+        return {
+          rootId: "root-a", state: "In Progress",
+          phase: approved ? "working" : "awaiting-human",
+          treeMatches: true, planApprovalCount: 1,
+          planApprovalState: approved ? "Done" : "In Progress",
+          planApprovalReady: !approved, plannedRootInputReady: true,
+          workStates: ["Todo"], workStarted: false,
+        };
+      },
+      async approvePlan() {
+        approved = true;
+        return { rootId: "root-a", approvalState: "Done", readBack: true };
+      },
+      async readRootWorkflowFacts() {
+        return {
+          rootId: "root-a", phase: "awaiting-human", ordered: false,
+          activeWorkLeafCount: 1, unansweredHumanAdvanced: true,
+          workflowComplete: false,
+        };
+      },
+    },
+    git: { async readCommitCount() { return 0; } },
+    client: desktopObservationClient({
+      profile: { readiness: "ready", isActive: true },
+      runtime: { status: "Ready" },
+    }),
+    projectSlugId: "8ab43179fb54",
+    repositoryPath: "/tmp/e2e-repository",
+    baseBranch: "main",
+    now: () => 0,
+    sleep: async () => undefined,
+    timeoutMs: 100,
+    pollIntervalMs: 5,
+  });
+
+  await driver.createRootA();
+  await driver.waitForClaim();
+  await driver.waitForPlan();
+  await driver.approvePlan();
+  assert.deepEqual(await driver.processWorkflow(), {
+    rootId: "root-a",
+    ordered: false,
+    maxConcurrentTurns: 1,
+    unansweredHumanAdvanced: true,
+  });
+});
+
 test("Desktop client reads the active Profile and Conductor runtime from the UI", async () => {
   const calls = [];
   const browser = {
