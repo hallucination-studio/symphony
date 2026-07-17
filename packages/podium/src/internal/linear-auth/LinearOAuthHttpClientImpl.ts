@@ -25,7 +25,11 @@ export class LinearOAuthHttpClientImpl implements LinearOAuthClientInterface {
     url.searchParams.set("client_id", this.config.clientId);
     url.searchParams.set("redirect_uri", this.config.redirectUri);
     url.searchParams.set("response_type", "code");
-    url.searchParams.set("scope", "read,write,issues:create,comments:create");
+    url.searchParams.set("actor", "app");
+    url.searchParams.set(
+      "scope",
+      "read,write,issues:create,comments:create,app:assignable",
+    );
     url.searchParams.set("state", input.state);
     url.searchParams.set("code_challenge", input.codeChallenge);
     url.searchParams.set("code_challenge_method", "S256");
