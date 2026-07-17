@@ -156,6 +156,19 @@ const ROOT_PLAN_FACTS_QUERY = `
   }
 `;
 
+const ROOT_DELIVERY_FACTS_QUERY = `
+  query e2eRootDeliveryFacts($rootId: String!, $projectId: String!) {
+    issue(id: $rootId) {
+      id
+      project { id }
+      parent { id }
+      state { name }
+      labels(first: 64) { nodes { name } pageInfo { hasNextPage } }
+      comments(first: 64) { nodes { body } pageInfo { hasNextPage } }
+    }
+  }
+`;
+
 export function createLinearOperator({
   userApiKey,
   clientId,
@@ -261,6 +274,59 @@ export function createLinearOperator({
         reworkCount: reworkNodes.length,
         gateIssueCount: reworkNodes.length,
         pullRequestPresent: snapshot.pullRequestPresent,
+      };
+    },
+
+    async readRootDeliveryFacts(input) {
+      const rootId = required(input?.rootId, "linear_operator_root_id_invalid");
+      const project = await readProjectContext(input?.projectSlugId);
+      const data = await graphql(operatorApiKey, ROOT_DELIVERY_FACTS_QUERY, {
+        rootId,
+        projectId: project.projectId,
+      });
+      const issue = data.issue;
+      const labels = connectionNodes(
+        issue?.labels,
+        "linear_operator_delivery_response_invalid",
+      );
+      const comments = connectionNodes(
+        issue?.comments,
+        "linear_operator_delivery_response_invalid",
+      );
+      if (!isRootIssueShape(issue, rootId, project.projectId) ||
+        !labels.every(isNamedObject) ||
+        !comments.every(isBodyObject)) {
+        throw new Error("linear_operator_delivery_response_invalid");
+      }
+      const phaseLabels = labels
+        .map((label) => label.name)
+        .filter((name) => name.startsWith("symphony:run/"));
+      const phase = phaseLabels.length === 1
+        ? phaseLabels[0].slice("symphony:run/".length)
+        : undefined;
+      if (phase !== undefined && !ROOT_PHASES.has(phase)) {
+        throw new Error("linear_operator_delivery_response_invalid");
+      }
+      const managedComments = comments
+        .map((comment) => comment.body)
+        .filter(isRootManagedComment);
+      const managedCommentReady = managedComments.length === 1 &&
+        managedCommentFields(managedComments[0]);
+      const branch = managedCommentReady
+        ? deliveryBranch(managedComments[0])
+        : undefined;
+      const pullRequestPresent = managedCommentReady &&
+        managedCommentHasPullRequest(managedComments[0]);
+      return {
+        rootId,
+        state: issue.state.name,
+        phase,
+        ...(branch
+          ? { kind: pullRequestPresent ? "pull_request" : "branch", deliveryBranch: branch }
+          : {}),
+        pullRequestPresent,
+        managedCommentCount: managedComments.length,
+        duplicateDelivery: managedComments.length > 1,
       };
     },
 

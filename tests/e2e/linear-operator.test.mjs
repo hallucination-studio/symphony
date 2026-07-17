@@ -539,6 +539,85 @@ test("Linear operator returns Root Gate facts without exposing delivery content"
   })), /https|conductor|performer|description|findings/u);
 });
 
+test("Linear operator returns sanitized branch or PR Delivery facts", async () => {
+  let phase = "delivering";
+  let rootState = "In Progress";
+  let pullRequest = false;
+  let duplicateManagedComment = false;
+  const operator = createLinearOperator({
+    ...credentials,
+    fetch: async (_url, init) => {
+      const body = JSON.parse(init.body);
+      if (body.query.includes("projects")) return jsonResponse({ data: {
+        projects: { nodes: [{
+          id: "project-1",
+          name: "HELL",
+          slugId: "8ab43179fb54",
+          teams: { nodes: [{
+            id: "team-1",
+            states: { nodes: [{ id: "state-todo", name: "Todo" }] },
+          }] },
+        }] },
+      } });
+      const data = workflowFacts({
+        phase,
+        rootState,
+        humanState: "Done",
+        secondWorkState: "Done",
+        pullRequest,
+      });
+      if (duplicateManagedComment) {
+        data.issue.comments.nodes.push(data.issue.comments.nodes[0]);
+      }
+      return jsonResponse({ data });
+    },
+  });
+
+  assert.deepEqual(await operator.readRootDeliveryFacts({
+    projectSlugId: "8ab43179fb54",
+    rootId: "issue-1",
+  }), {
+    rootId: "issue-1",
+    state: "In Progress",
+    phase: "delivering",
+    kind: "branch",
+    deliveryBranch: "symphony/runs/hell-1",
+    pullRequestPresent: false,
+    managedCommentCount: 1,
+    duplicateDelivery: false,
+  });
+
+  phase = "in-review";
+  rootState = "In Review";
+  pullRequest = true;
+  assert.deepEqual(await operator.readRootDeliveryFacts({
+    projectSlugId: "8ab43179fb54",
+    rootId: "issue-1",
+  }), {
+    rootId: "issue-1",
+    state: "In Review",
+    phase: "in-review",
+    kind: "pull_request",
+    deliveryBranch: "symphony/runs/hell-1",
+    pullRequestPresent: true,
+    managedCommentCount: 1,
+    duplicateDelivery: false,
+  });
+
+  duplicateManagedComment = true;
+  assert.deepEqual(await operator.readRootDeliveryFacts({
+    projectSlugId: "8ab43179fb54",
+    rootId: "issue-1",
+  }), {
+    rootId: "issue-1",
+    state: "In Review",
+    phase: "in-review",
+    managedCommentCount: 2,
+    pullRequestPresent: false,
+    duplicateDelivery: true,
+  });
+});
+
 function planFacts({ approvalState, phase }) {
   return {
     issue: {
@@ -588,6 +667,7 @@ function planFacts({ approvalState, phase }) {
 
 function workflowFacts({
   phase,
+  rootState = "In Progress",
   humanState,
   firstWorkState = "In Review",
   secondWorkState,
@@ -609,7 +689,7 @@ function workflowFacts({
     "<!-- symphony root marker -->",
   ].join("\n");
   const issues = [
-      workflowIssue("issue-1", "HELL-1", "Root A", null, "In Progress", 0, null, "Root description"),
+      workflowIssue("issue-1", "HELL-1", "Root A", null, rootState, 0, null, "Root description"),
       workflowIssue("work-1", "HELL-2", "First work", { id: "issue-1" }, firstWorkState, 1, 1, "First work\n\n<!-- symphony managed marker\nmanaged_marker: issue-1:work-1\n-->\n\n<!-- symphony work metadata\nkind: work\norigin: symphony\ncompleted_input_hash: hash-1\n-->",),
       workflowIssue("human-1", "HELL-3", "Need input", { id: "issue-1" }, humanState, 2, 2, "Human\n\n<!-- symphony managed marker\nmanaged_marker: issue-1:human-1\nkind: human\nhuman_kind: planned_input\ntarget_issue_id: work-2\n-->",),
       workflowIssue("work-2", "HELL-4", "Second work", { id: "issue-1" }, secondWorkState, 3, 3, "Second work\n\n<!-- symphony managed marker\nmanaged_marker: issue-1:work-2\n-->\n\n<!-- symphony work metadata\nkind: work\norigin: symphony\ncompleted_input_hash: hash-2\n-->",),
@@ -624,7 +704,7 @@ function workflowFacts({
       id: "issue-1",
       project: { id: "project-1" },
       parent: null,
-      state: { name: "In Progress" },
+      state: { name: rootState },
       labels: { nodes: [{ name: `symphony:run/${phase}` }], pageInfo: { hasNextPage: false } },
       comments: { nodes: [{ body: rootComment }], pageInfo: { hasNextPage: false } },
     },

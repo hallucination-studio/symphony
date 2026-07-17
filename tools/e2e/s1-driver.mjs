@@ -4,6 +4,7 @@ import { promisify } from "node:util";
 const execFileAsync = promisify(execFile);
 const DEFAULT_TIMEOUT_MS = 120_000;
 const DEFAULT_POLL_INTERVAL_MS = 1_000;
+const DELIVERY_COMMAND_TIMEOUT_MS = 15_000;
 const ROOT_TITLE = "[E2E] Root A";
 const ROOT_DESCRIPTION = "fixed fixture";
 const RUNTIME_STATUSES = new Set([
@@ -34,9 +35,11 @@ export function createS1ClaimDriver({
   linear,
   client,
   git,
+  delivery,
   projectSlugId,
   repositoryPath,
   baseBranch,
+  githubRepository,
   timeoutMs = DEFAULT_TIMEOUT_MS,
   pollIntervalMs = DEFAULT_POLL_INTERVAL_MS,
   now = () => Date.now(),
@@ -61,11 +64,16 @@ export function createS1ClaimDriver({
   requireFunction(now, "s1_clock_missing");
   requireFunction(sleep, "s1_sleep_missing");
   const readCommitCount = git?.readCommitCount ?? readGitCommitCount;
+  if (delivery !== undefined) {
+    requireFunction(delivery?.readDelivery, "s1_delivery_read_missing");
+  }
+  const readDelivery = delivery?.readDelivery ?? readDeliveryBoundary;
 
   let createdRoot;
   let claimedRoot;
   let planApproved = false;
   let workflowProcessed = false;
+  let gatePassed = false;
   return Object.freeze({
     async createRootA() {
       if (createdRoot) throw new Error("s1_root_a_already_created");
@@ -218,12 +226,65 @@ export function createS1ClaimDriver({
         (value) => value.status !== "waiting",
         "s1_root_gate_timeout",
       );
-      return {
+      const observation = {
         rootId: claimedRoot.rootId,
         status: result.status,
         deliveryStartedBeforePass: result.deliveryStartedBeforePass,
         reworkCount: result.reworkCount,
         gateIssueCount: result.gateIssueCount,
+      };
+      gatePassed = observation.status === "passed";
+      return observation;
+    },
+
+    async waitForDelivery() {
+      if (!gatePassed) throw new Error("s1_root_gate_not_passed");
+      requireFunction(linear?.readRootDeliveryFacts, "s1_linear_read_delivery_missing");
+      const result = await pollUntil(
+        async () => {
+          const facts = deliveryObservation(
+            await linear.readRootDeliveryFacts({
+              projectSlugId: slugId,
+              rootId: claimedRoot.rootId,
+            }),
+            claimedRoot.rootId,
+          );
+          const duplicate = facts.duplicateDelivery;
+          const terminal = facts.phase === "in-review" &&
+            ["In Review", "Done"].includes(facts.state);
+          const delivered = terminal && facts.kind !== undefined &&
+            facts.managedCommentCount === 1;
+          const boundary = delivered
+            ? await readDelivery({
+              repositoryPath,
+              githubRepository,
+              kind: facts.kind,
+              deliveryBranch: facts.deliveryBranch,
+            })
+            : undefined;
+          const boundaryReady = boundary?.branchPresent === true &&
+            (facts.kind !== "pull_request" || boundary.pullRequestCount === 1);
+          return {
+            ...facts,
+            status: duplicate || (terminal && (!delivered || !boundaryReady))
+              ? "invalid"
+              : delivered ? "ready" : "waiting",
+          };
+        },
+        (value) => value.status !== "waiting",
+        "s1_delivery_timeout",
+      );
+      if (result.status === "invalid") {
+        throw new Error(result.duplicateDelivery
+          ? "s1_delivery_duplicate"
+          : "s1_delivery_boundary_invalid");
+      }
+      return {
+        kind: result.kind,
+        rootState: result.state,
+        phase: result.phase,
+        automaticallyCompleted: result.state === "Done",
+        duplicateDelivery: result.duplicateDelivery,
       };
     },
   });
@@ -279,7 +340,7 @@ export function createS1ClaimDriver({
 
   async function pollUntil(read, ready, timeoutCode) {
     const deadline = now() + timeoutMs;
-    while (true) {
+    for (;;) {
       const observation = await read();
       if (ready(observation)) return observation;
       const remaining = deadline - now();
@@ -454,6 +515,37 @@ function rootGateObservation(value, rootId) {
   };
 }
 
+function deliveryObservation(value, rootId) {
+  if (
+    !isObject(value) ||
+    value.rootId !== rootId ||
+    typeof value.state !== "string" ||
+    !ROOT_STATES.has(value.state) ||
+    typeof value.phase !== "string" ||
+    !ROOT_PHASES.has(value.phase) ||
+    (value.kind !== undefined && !["pull_request", "branch"].includes(value.kind)) ||
+    (value.deliveryBranch !== undefined &&
+      !/^[A-Za-z0-9._/-]{1,128}$/u.test(value.deliveryBranch)) ||
+    typeof value.pullRequestPresent !== "boolean" ||
+    !nonNegativeInteger(value.managedCommentCount) ||
+    typeof value.duplicateDelivery !== "boolean"
+  ) {
+    throw new Error("s1_delivery_facts_invalid");
+  }
+  return {
+    rootId,
+    state: value.state,
+    phase: value.phase,
+    ...(value.kind !== undefined ? { kind: value.kind } : {}),
+    ...(value.deliveryBranch !== undefined
+      ? { deliveryBranch: value.deliveryBranch }
+      : {}),
+    pullRequestPresent: value.pullRequestPresent,
+    managedCommentCount: value.managedCommentCount,
+    duplicateDelivery: value.duplicateDelivery,
+  };
+}
+
 function planReady(value) {
   return value.state === "In Progress" &&
     value.phase === "awaiting-human" &&
@@ -516,6 +608,83 @@ async function readGitCommitCount({ repositoryPath, baseBranch, deliveryBranch }
   const count = Number(output);
   if (!Number.isSafeInteger(count)) throw new Error("s1_git_commit_count_invalid");
   return count;
+}
+
+async function readDeliveryBoundary({
+  repositoryPath,
+  githubRepository,
+  kind,
+  deliveryBranch,
+}) {
+  const repository = requiredText(repositoryPath, "s1_repository_path_missing");
+  const branch = gitRef(deliveryBranch, "s1_delivery_branch_invalid");
+  if (kind !== "branch" && kind !== "pull_request") {
+    throw new Error("s1_delivery_kind_invalid");
+  }
+  await readGitBranch(repository, branch);
+  if (kind === "branch") return { branchPresent: true, pullRequestCount: 0 };
+  const remoteRepository = githubRepositoryRef(
+    githubRepository,
+    "s1_github_repository_missing",
+  );
+  let result;
+  try {
+    result = await execFileAsync(
+      "gh",
+      [
+        "pr", "list",
+        "--repo", remoteRepository,
+        "--head", branch,
+        "--state", "all",
+        "--json", "number",
+        "--limit", "10",
+      ],
+      {
+        encoding: "utf8",
+        maxBuffer: 16_384,
+        timeout: DELIVERY_COMMAND_TIMEOUT_MS,
+      },
+    );
+  } catch {
+    throw new Error("s1_github_delivery_read_failed");
+  }
+  let pullRequests;
+  try {
+    pullRequests = JSON.parse(result.stdout);
+  } catch {
+    throw new Error("s1_github_delivery_response_invalid");
+  }
+  if (!Array.isArray(pullRequests) || pullRequests.length > 10 ||
+    !pullRequests.every((pullRequest) =>
+      isObject(pullRequest) && Number.isSafeInteger(pullRequest.number) &&
+      pullRequest.number > 0,
+    )) {
+    throw new Error("s1_github_delivery_response_invalid");
+  }
+  return { branchPresent: true, pullRequestCount: pullRequests.length };
+}
+
+async function readGitBranch(repositoryPath, branch) {
+  try {
+    await execFileAsync(
+      "git",
+      ["-C", repositoryPath, "show-ref", "--verify", `refs/heads/${branch}`],
+      {
+        encoding: "utf8",
+        maxBuffer: 16_384,
+        timeout: DELIVERY_COMMAND_TIMEOUT_MS,
+      },
+    );
+  } catch {
+    throw new Error("s1_delivery_branch_read_failed");
+  }
+}
+
+function githubRepositoryRef(value, code) {
+  if (typeof value !== "string" || !/^[^/\s]{1,100}\/[^/\s]{1,100}$/u.test(value)) {
+    throw new Error(code);
+  }
+  return value;
 }
 
 function gitRef(value, code) {

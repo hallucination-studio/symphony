@@ -721,6 +721,139 @@ test("S1 claim driver stops Root Gate failure and flags delivery before pass", a
   });
 });
 
+test("S1 claim driver waits for Delivery read-back and preserves branch or PR kind", async () => {
+  const driver = approvedS1Driver({
+    gateFacts: [{
+      rootId: "root-a", state: "In Progress", phase: "delivering",
+      workDone: true, humanDone: true, reworkCount: 0,
+      gateIssueCount: 0, pullRequestPresent: false,
+    }],
+    deliveryFacts: [{
+      rootId: "root-a", state: "In Progress", phase: "delivering",
+      kind: "branch", deliveryBranch: "symphony/runs/hell-1",
+      pullRequestPresent: false, managedCommentCount: 1,
+      duplicateDelivery: false,
+    }, {
+      rootId: "root-a", state: "In Review", phase: "in-review",
+      kind: "pull_request", deliveryBranch: "symphony/runs/hell-1",
+      pullRequestPresent: true, managedCommentCount: 1,
+      duplicateDelivery: false,
+    }],
+  });
+
+  await prepareApprovedDriver(driver);
+  await driver.waitForRootGate();
+  assert.deepEqual(await driver.waitForDelivery(), {
+    kind: "pull_request",
+    rootState: "In Review",
+    phase: "in-review",
+    automaticallyCompleted: false,
+    duplicateDelivery: false,
+  });
+});
+
+test("S1 claim driver fails closed when Delivery read-back finds multiple PRs", async () => {
+  const driver = approvedS1Driver({
+    gateFacts: [{
+      rootId: "root-a", state: "In Progress", phase: "delivering",
+      workDone: true, humanDone: true, reworkCount: 0,
+      gateIssueCount: 0, pullRequestPresent: false,
+    }],
+    deliveryFacts: [{
+      rootId: "root-a", state: "In Review", phase: "in-review",
+      kind: "pull_request", deliveryBranch: "symphony/runs/hell-1",
+      pullRequestPresent: true, managedCommentCount: 1,
+      duplicateDelivery: false,
+    }],
+    deliveryBoundaryResult: { branchPresent: true, pullRequestCount: 2 },
+  });
+
+  await prepareApprovedDriver(driver);
+  await driver.waitForRootGate();
+  await assert.rejects(driver.waitForDelivery(), /s1_delivery_boundary_invalid/u);
+});
+
+test("S1 claim driver reads a delivered branch through the default Git boundary", async () => {
+  const repositoryPath = mkdtempSync(path.join(tmpdir(), "symphony-s1-delivery-"));
+  try {
+    runGit(repositoryPath, ["init", "--quiet", "--initial-branch", "main"]);
+    runGit(repositoryPath, ["config", "user.email", "e2e@example.invalid"]);
+    runGit(repositoryPath, ["config", "user.name", "Symphony E2E"]);
+    writeFileSync(path.join(repositoryPath, "fixture.txt"), "base\n");
+    runGit(repositoryPath, ["add", "fixture.txt"]);
+    runGit(repositoryPath, ["commit", "--quiet", "-m", "base"]);
+    runGit(repositoryPath, ["branch", "symphony/runs/hell-1"]);
+
+    const driver = approvedS1Driver({
+      gateFacts: [{
+        rootId: "root-a", state: "In Progress", phase: "delivering",
+        workDone: true, humanDone: true, reworkCount: 0,
+        gateIssueCount: 0, pullRequestPresent: false,
+      }],
+      deliveryFacts: [{
+        rootId: "root-a", state: "In Review", phase: "in-review",
+        kind: "branch", deliveryBranch: "symphony/runs/hell-1",
+        pullRequestPresent: false, managedCommentCount: 1,
+        duplicateDelivery: false,
+      }],
+      repositoryPath,
+      useDefaultDelivery: true,
+    });
+
+    await prepareApprovedDriver(driver);
+    await driver.waitForRootGate();
+    assert.deepEqual(await driver.waitForDelivery(), {
+      kind: "branch",
+      rootState: "In Review",
+      phase: "in-review",
+      automaticallyCompleted: false,
+      duplicateDelivery: false,
+    });
+  } finally {
+    rmSync(repositoryPath, { recursive: true, force: true });
+  }
+});
+
+test("S1 claim driver observes automatic Root completion and rejects duplicate Delivery", async () => {
+  const automaticDone = approvedS1Driver({
+    gateFacts: [{
+      rootId: "root-a", state: "In Progress", phase: "delivering",
+      workDone: true, humanDone: true, reworkCount: 0,
+      gateIssueCount: 0, pullRequestPresent: false,
+    }],
+    deliveryFacts: [{
+      rootId: "root-a", state: "Done", phase: "in-review",
+      kind: "branch", deliveryBranch: "symphony/runs/hell-1",
+      pullRequestPresent: false, managedCommentCount: 1,
+      duplicateDelivery: false,
+    }],
+  });
+  await prepareApprovedDriver(automaticDone);
+  await automaticDone.waitForRootGate();
+  assert.deepEqual(await automaticDone.waitForDelivery(), {
+    kind: "branch",
+    rootState: "Done",
+    phase: "in-review",
+    automaticallyCompleted: true,
+    duplicateDelivery: false,
+  });
+
+  const duplicate = approvedS1Driver({
+    gateFacts: [{
+      rootId: "root-a", state: "In Progress", phase: "delivering",
+      workDone: true, humanDone: true, reworkCount: 0,
+      gateIssueCount: 0, pullRequestPresent: false,
+    }],
+    deliveryFacts: [{
+      rootId: "root-a", state: "In Review", phase: "in-review",
+      pullRequestPresent: false, managedCommentCount: 2, duplicateDelivery: true,
+    }],
+  });
+  await prepareApprovedDriver(duplicate);
+  await duplicate.waitForRootGate();
+  await assert.rejects(duplicate.waitForDelivery(), /s1_delivery_duplicate/u);
+});
+
 test("Desktop client reads the active Profile and Conductor runtime from the UI", async () => {
   const calls = [];
   const browser = {
@@ -778,7 +911,13 @@ function desktopObservationClient({
   };
 }
 
-function approvedS1Driver({ gateFacts }) {
+function approvedS1Driver({
+  gateFacts,
+  deliveryFacts = [],
+  deliveryBoundaryResult,
+  repositoryPath = "/tmp/e2e-repository",
+  useDefaultDelivery = false,
+}) {
   let approved = false;
   return createS1ClaimDriver({
     linear: {
@@ -816,14 +955,27 @@ function approvedS1Driver({ gateFacts }) {
       async readRootGateFacts() {
         return gateFacts.shift();
       },
+      async readRootDeliveryFacts() {
+        return deliveryFacts.shift();
+      },
     },
     git: { async readCommitCount() { return 0; } },
+    ...(useDefaultDelivery ? {} : {
+      delivery: {
+        async readDelivery({ kind }) {
+          return deliveryBoundaryResult ?? {
+            branchPresent: true,
+            pullRequestCount: kind === "pull_request" ? 1 : 0,
+          };
+        },
+      },
+    }),
     client: desktopObservationClient({
       profile: { readiness: "ready", isActive: true },
       runtime: { status: "Ready" },
     }),
     projectSlugId: "8ab43179fb54",
-    repositoryPath: "/tmp/e2e-repository",
+    repositoryPath,
     baseBranch: "main",
     now: () => 0,
     sleep: async () => undefined,
