@@ -10,6 +10,9 @@ function createTauriUi(platform, browser) {
     async select(selector, value) {
       await (await browser.$(selector)).selectByVisibleText(value);
     },
+    async selectFirst(selector) {
+      await (await browser.$(selector)).selectByIndex(0);
+    },
     async read(selector) {
       return (await browser.$(selector)).getText();
     },

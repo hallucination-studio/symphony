@@ -46,10 +46,9 @@ export function createDesktopClient({
       return { linear_connection: { status: "connected" } };
     },
 
-    async readSelectedProject(expectedName) {
+    async readSelectedProject() {
       return {
         projectName: await selectedText("[data-testid=project-select]"),
-        expectedName,
       };
     },
 

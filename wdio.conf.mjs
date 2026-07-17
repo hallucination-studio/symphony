@@ -28,8 +28,7 @@ export const config = {
     env: {
       LINEAR_CLIENT_ID: e2e.secrets.linearClientId,
       LINEAR_CLIENT_SECRET: e2e.secrets.linearClientSecret,
-      SYMPHONY_E2E_PROJECT_SLUG: e2e.project.slug,
-      SYMPHONY_E2E_EXPECTED_PROJECT_NAME: e2e.project.name,
+      SYMPHONY_E2E_PROJECT_SLUG_ID: e2e.project.slugId,
       SYMPHONY_E2E_REPOSITORY_PATH: e2e.repository.path,
       LINEAR_E2E_USER_API_KEY: undefined,
       OPENAI_E2E_API_KEY: undefined,

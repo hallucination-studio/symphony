@@ -49,3 +49,11 @@ test("Roadmap E2E workflow maps secrets without embedding credential values", as
   }
   assert.doesNotMatch(source, /(?:sk|lin_api|lin_oauth)[-_][A-Za-z0-9_-]{8,}/u);
 });
+
+test("Roadmap E2E workflow identifies the fixed Project by slugId", async () => {
+  const source = await readFile(workflowPath, "utf8");
+
+  assert.match(source, /SYMPHONY_E2E_PROJECT_SLUG_ID: \$\{\{ vars\.SYMPHONY_E2E_PROJECT_SLUG_ID \}\}/u);
+  assert.doesNotMatch(source, /SYMPHONY_E2E_EXPECTED_PROJECT_NAME/u);
+  assert.doesNotMatch(source, /SYMPHONY_E2E_PROJECT_SLUG:/u);
+});

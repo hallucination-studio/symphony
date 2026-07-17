@@ -20,8 +20,7 @@ export interface E2EPodiumServiceComposition {
 export async function createE2EPodiumServiceComposition(input: {
   linearClientId: string;
   linearClientSecret: string;
-  projectSlug: string;
-  projectName: string;
+  projectSlugId: string;
   fetch?: typeof globalThis.fetch;
   now?: () => string;
   createLinearSdk?: (
@@ -35,8 +34,7 @@ export async function createE2EPodiumServiceComposition(input: {
     input.linearClientSecret,
     "e2e_linear_client_secret_invalid",
   );
-  const projectSlug = required(input.projectSlug, "e2e_linear_project_slug_invalid");
-  const projectName = required(input.projectName, "e2e_linear_project_name_invalid");
+  const projectSlugId = required(input.projectSlugId, "e2e_linear_project_slug_id_invalid");
   const fetch = input.fetch ?? globalThis.fetch;
   const accessToken = await requestAppToken(fetch, linearClientId, linearClientSecret);
   const organizationId = await (
@@ -55,15 +53,14 @@ export async function createE2EPodiumServiceComposition(input: {
   const projects = await new ProjectCatalogUseCase(store, sdk).refresh(
     INSTALLATION_ID,
   );
-  if (
-    !projects.some(
-      (project) =>
-        project.slugId === projectSlug && project.name === projectName,
-    )
-  ) {
+  const allowlistedProject = projects.find(
+    (project) => project.slugId === projectSlugId,
+  );
+  if (!allowlistedProject) {
     store.close();
     throw new Error("e2e_linear_project_not_allowlisted");
   }
+  store.replaceProjects(INSTALLATION_ID, [allowlistedProject]);
 
   const now = input.now ?? (() => new Date().toISOString());
   const oauthHttp = new LinearOAuthHttpClientImpl({

@@ -12,8 +12,7 @@ test("E2E composition keeps one client-credentials token in a shared in-memory P
   const composition = await createE2EPodiumServiceComposition({
     linearClientId: "client-id",
     linearClientSecret: "client-secret",
-    projectSlug: "8ab43179fb54",
-    projectName: "HELL",
+    projectSlugId: "8ab43179fb54",
     fetch: async (_url, init) => {
       tokenRequests.push(new URLSearchParams(init.body));
       return new Response(JSON.stringify({
@@ -33,8 +32,14 @@ test("E2E composition keeps one client-credentials token in a shared in-memory P
             items: [{
               projectId: "project-1",
               organizationId,
-              name: "HELL",
+              name: "renamed-project",
               slugId: "8ab43179fb54",
+              updatedAt: "2026-07-17T00:00:00.000Z",
+            }, {
+              projectId: "project-2",
+              organizationId,
+              name: "other-project",
+              slugId: "other-project-slug",
               updatedAt: "2026-07-17T00:00:00.000Z",
             }],
             pageInfo: { hasNextPage: false },
@@ -78,7 +83,7 @@ test("E2E composition keeps one client-credentials token in a shared in-memory P
   assert.deepEqual(overview.projects.map(({ project_id, name }) => ({
     project_id,
     name,
-  })), [{ project_id: "project-1", name: "HELL" }]);
+  })), [{ project_id: "project-1", name: "renamed-project" }]);
   assert.doesNotMatch(JSON.stringify(overview), /app-access-token|client-secret/);
 
   await client.command({
@@ -121,8 +126,7 @@ test("E2E composition rejects Project allowlist drift before creating services",
     createE2EPodiumServiceComposition({
       linearClientId: "client-id",
       linearClientSecret: "client-secret",
-      projectSlug: "8ab43179fb54",
-      projectName: "HELL",
+      projectSlugId: "8ab43179fb54",
       fetch: async () => new Response(JSON.stringify({
         access_token: "app-access-token",
         expires_in: 3600,

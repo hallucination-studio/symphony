@@ -37,8 +37,7 @@ function validEnvironment(repositoryPath) {
     LINEAR_E2E_USER_API_KEY: "linear-user-key",
     OPENAI_E2E_API_KEY: "openai-key",
     SYMPHONY_E2E_GITHUB_TOKEN: "github-token",
-    SYMPHONY_E2E_PROJECT_SLUG: E2E_NON_SECRET_DEFAULTS.projectSlug,
-    SYMPHONY_E2E_EXPECTED_PROJECT_NAME: E2E_NON_SECRET_DEFAULTS.projectName,
+    SYMPHONY_E2E_PROJECT_SLUG_ID: E2E_NON_SECRET_DEFAULTS.projectSlugId,
     SYMPHONY_E2E_REPOSITORY_PATH: repositoryPath,
     SYMPHONY_E2E_GITHUB_REPOSITORY: "acme/symphony-e2e",
     SYMPHONY_E2E_GITHUB_BASE_BRANCH: "main",
@@ -49,7 +48,7 @@ test("loads the same dotenv shape as CI environment variables and never summariz
   const root = await mkdtemp(path.join(tmpdir(), "symphony-e2e-config-"));
   const repository = path.join(root, "repository");
   const environment = validEnvironment(repository);
-  const dotenv = parseDotEnv("OPENAI_E2E_API_KEY=from-file\nSYMPHONY_E2E_PROJECT_SLUG=" + environment.SYMPHONY_E2E_PROJECT_SLUG + "\n");
+  const dotenv = parseDotEnv("OPENAI_E2E_API_KEY=from-file\nSYMPHONY_E2E_PROJECT_SLUG_ID=" + environment.SYMPHONY_E2E_PROJECT_SLUG_ID + "\n");
 
   assert.equal(dotenv.OPENAI_E2E_API_KEY, "from-file");
   const config = loadE2EConfig({
@@ -61,7 +60,7 @@ test("loads the same dotenv shape as CI environment variables and never summariz
   });
 
   assert.equal(config.secrets.openAiApiKey, "openai-key");
-  assert.equal(config.project.slug, E2E_NON_SECRET_DEFAULTS.projectSlug);
+  assert.equal(config.project.slugId, E2E_NON_SECRET_DEFAULTS.projectSlugId);
   assert.equal(config.repository.path, repository);
   const summary = JSON.stringify(summarizeConfig(config));
   assert.equal(summary.includes("openai-key"), false);
@@ -72,13 +71,27 @@ test("preflight configuration rejects missing secrets and project drift", async 
   const root = await mkdtemp(path.join(tmpdir(), "symphony-e2e-config-"));
   const environment = validEnvironment(path.join(root, "repository"));
   delete environment.OPENAI_E2E_API_KEY;
-  environment.SYMPHONY_E2E_PROJECT_SLUG = "wrong-project";
+  environment.SYMPHONY_E2E_PROJECT_SLUG_ID = "wrong-project";
 
   assert.throws(
     () => loadE2EConfig({ environment, cwd: root, platform: "linux", pathExists: () => true }),
     (error) => error.code === "e2e_configuration_invalid" &&
       error.issues.includes("OPENAI_E2E_API_KEY_missing") &&
-      error.issues.includes("project_slug_not_allowlisted"),
+      error.issues.includes("project_slug_id_not_allowlisted"),
+  );
+});
+
+test("preflight ignores the retired Project name and slug variable names", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "symphony-e2e-config-"));
+  const environment = validEnvironment(path.join(root, "repository"));
+  delete environment.SYMPHONY_E2E_PROJECT_SLUG_ID;
+  environment.SYMPHONY_E2E_PROJECT_SLUG = E2E_NON_SECRET_DEFAULTS.projectSlugId;
+  environment.SYMPHONY_E2E_EXPECTED_PROJECT_NAME = "renamed-project";
+
+  assert.throws(
+    () => loadE2EConfig({ environment, cwd: root, platform: "linux", pathExists: () => true }),
+    (error) => error.code === "e2e_configuration_invalid" &&
+      error.issues.includes("project_slug_id_missing"),
   );
 });
 
@@ -206,6 +219,7 @@ test("Linux and macOS adapters expose the same UI action contract", async () => 
       click: async () => calls.push(["click", selector]),
       setValue: async (value) => calls.push(["type", selector, value]),
       selectByVisibleText: async (value) => calls.push(["select", selector, value]),
+      selectByIndex: async (value) => calls.push(["select-first", selector, value]),
       getText: async () => "Connected",
     }),
   };
@@ -215,27 +229,31 @@ test("Linux and macOS adapters expose the same UI action contract", async () => 
     await ui.click("[data-testid=linear-status]");
     await ui.type("[name=project]", "HELL");
     await ui.select("[name=branch]", "main");
+    await ui.selectFirst("[name=project]");
     assert.equal(await ui.read("[data-testid=linear-status]"), "Connected");
   }
   assert.equal(linux.platform, "linux");
   assert.equal(mac.platform, "darwin");
-  assert.equal(calls.length, 6);
+  assert.equal(calls.length, 8);
 });
 
-test("business actions select the allowlisted Project by visible name and keep repository paths out of UI observations", async () => {
+test("business actions select the only allowlisted Project and keep repository paths out of UI observations", async () => {
   const calls = [];
   const actions = createV1BusinessActions({
     ui: {
       async select(selector, value) {
         calls.push(["select", selector, value]);
       },
+      async selectFirst(selector) {
+        calls.push(["select-first", selector]);
+      },
       async click(selector) {
         calls.push(["click", selector]);
       },
     },
     client: {
-      async readSelectedProject(projectName) {
-        return { projectName };
+      async readSelectedProject() {
+        return { projectName: "renamed-project" };
       },
       async selectRepository() {
         return { repositoryPathAccepted: true };
@@ -243,7 +261,7 @@ test("business actions select the allowlisted Project by visible name and keep r
     },
     runner: new StepRunner({ evidence: [] }),
     config: {
-      project: { slug: "8ab43179fb54", name: "HELL" },
+      project: { slugId: "8ab43179fb54" },
       repository: { path: "/must-not-cross-browser-boundary" },
       github: { baseBranch: "main" },
     },
@@ -253,7 +271,7 @@ test("business actions select the allowlisted Project by visible name and keep r
   await actions.selectRepository();
 
   assert.deepEqual(calls, [
-    ["select", "[data-testid=project-select]", "HELL"],
+    ["select-first", "[data-testid=project-select]"],
     ["click", "[data-testid=choose-repository]"],
   ]);
 });

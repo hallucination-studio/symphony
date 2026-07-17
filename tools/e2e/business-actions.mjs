@@ -2,10 +2,10 @@ export function createV1BusinessActions({ ui, client, runner, config }) {
   return Object.freeze({
     startClient: () => run(runner, "start-client", () => client.start(), { status: "started" }),
     waitForConnected: () => run(runner, "linear-connected", () => client.waitForOverview(), (view) => view.linear_connection?.status === "connected"),
-    selectProject: (projectName = config.project.name) => run(runner, "select-project", async () => {
-      await ui.select("[data-testid=project-select]", projectName);
-      return client.readSelectedProject(projectName);
-    }, (observation) => observation.projectName === projectName),
+    selectProject: () => run(runner, "select-project", async () => {
+      await ui.selectFirst("[data-testid=project-select]");
+      return client.readSelectedProject();
+    }, (observation) => typeof observation.projectName === "string" && observation.projectName.length > 0),
     selectRepository: () => run(runner, "select-repository", async () => {
       await ui.click("[data-testid=choose-repository]");
       return client.selectRepository();

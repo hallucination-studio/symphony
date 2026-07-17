@@ -2,8 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 
 export const E2E_NON_SECRET_DEFAULTS = Object.freeze({
-  projectSlug: "8ab43179fb54",
-  projectName: "HELL",
+  projectSlugId: "8ab43179fb54",
   linearMaxAttempts: 5,
   linearBackoffBaseMs: 1000,
   linearBackoffMaxMs: 16000,
@@ -44,13 +43,12 @@ export function loadE2EConfig({
     if (!value(key)) issues.push(key + "_missing");
   }
 
-  const projectSlug = value("SYMPHONY_E2E_PROJECT_SLUG");
-  const projectName = value("SYMPHONY_E2E_EXPECTED_PROJECT_NAME");
+  const projectSlugId = value("SYMPHONY_E2E_PROJECT_SLUG_ID");
   const repositoryPath = value("SYMPHONY_E2E_REPOSITORY_PATH");
   const githubRepository = value("SYMPHONY_E2E_GITHUB_REPOSITORY");
   const githubBaseBranch = value("SYMPHONY_E2E_GITHUB_BASE_BRANCH");
-  if (projectSlug !== E2E_NON_SECRET_DEFAULTS.projectSlug) issues.push("project_slug_not_allowlisted");
-  if (projectName !== E2E_NON_SECRET_DEFAULTS.projectName) issues.push("project_name_not_allowlisted");
+  if (!projectSlugId) issues.push("project_slug_id_missing");
+  else if (projectSlugId !== E2E_NON_SECRET_DEFAULTS.projectSlugId) issues.push("project_slug_id_not_allowlisted");
   if (!repositoryPath) issues.push("repository_path_missing");
   if (!githubRepository || !/^[^/]+\/[^/]+$/u.test(githubRepository)) issues.push("github_repository_invalid");
   if (!githubBaseBranch || !/^[A-Za-z0-9._/-]{1,128}$/u.test(githubBaseBranch)) issues.push("github_base_branch_invalid");
@@ -71,7 +69,7 @@ export function loadE2EConfig({
     platform,
     cwd: path.resolve(cwd),
     secrets: Object.freeze(secrets),
-    project: Object.freeze({ slug: projectSlug, name: projectName }),
+    project: Object.freeze({ slugId: projectSlugId }),
     repository: Object.freeze({ path: path.resolve(repositoryPath) }),
     github: Object.freeze({ repository: githubRepository, baseBranch: githubBaseBranch }),
     retry: Object.freeze({

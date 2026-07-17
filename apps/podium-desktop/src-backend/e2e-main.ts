@@ -19,13 +19,9 @@ const createE2EComposition: PodiumBackendCompositionFactory = async ({
       environment.LINEAR_CLIENT_SECRET,
       "e2e_linear_client_secret_missing",
     ),
-    projectSlug: required(
-      environment.SYMPHONY_E2E_PROJECT_SLUG,
-      "e2e_linear_project_slug_missing",
-    ),
-    projectName: required(
-      environment.SYMPHONY_E2E_EXPECTED_PROJECT_NAME,
-      "e2e_linear_project_name_missing",
+    projectSlugId: required(
+      environment.SYMPHONY_E2E_PROJECT_SLUG_ID,
+      "e2e_linear_project_slug_id_missing",
     ),
   });
   return {
