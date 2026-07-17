@@ -12,6 +12,7 @@ const ROOT_PHASES = new Set([
   "failed",
 ]);
 const ROOT_STATES = new Set(["Todo", "In Progress", "In Review", "Done", "Canceled"]);
+const WORK_NOT_STARTED_STATES = new Set(["Todo", "Canceled"]);
 const ROOT_MANAGED_FIELDS = new Set([
   "conductor_id",
   "performer_profile_id",
@@ -73,6 +74,15 @@ const CREATE_ROOT_MUTATION = `
 
 const DELEGATE_ROOT_MUTATION = `
   mutation e2eIssueUpdate($issueId: String!, $input: IssueUpdateInput!) {
+    issueUpdate(id: $issueId, input: $input) {
+      success
+      issue { id }
+    }
+  }
+`;
+
+const APPROVE_PLAN_MUTATION = `
+  mutation e2eIssueUpdatePlanApproval($issueId: String!, $input: IssueUpdateInput!) {
     issueUpdate(id: $issueId, input: $input) {
       success
       issue { id }
@@ -222,76 +232,44 @@ export function createLinearOperator({
     async readRootPlanFacts(input) {
       const rootId = required(input?.rootId, "linear_operator_root_id_invalid");
       const project = await readProjectContext(input?.projectSlugId);
-      const data = await graphql(operatorApiKey, ROOT_PLAN_FACTS_QUERY, {
-        rootId,
-        projectId: project.projectId,
-      });
-      const issue = data.issue;
-      const projectIssues = connectionNodes(
-        data.project?.issues,
-        "linear_operator_plan_response_invalid",
-      );
-      const labels = connectionNodes(
-        issue?.labels,
-        "linear_operator_plan_response_invalid",
-      );
-      const comments = connectionNodes(
-        issue?.comments,
-        "linear_operator_plan_response_invalid",
-      );
-      if (!isRootPlanIssueShape(issue, rootId, project.projectId)) {
-        throw new Error("linear_operator_plan_response_invalid");
-      }
+      return (await readRootPlanSnapshot(rootId, project.projectId)).facts;
+    },
+
+    async approvePlan(input) {
+      const rootId = required(input?.rootId, "linear_operator_root_id_invalid");
+      const project = await readProjectContext(input?.projectSlugId);
+      const before = await readRootPlanSnapshot(rootId, project.projectId);
       if (
-        !labels.every(isNamedObject) ||
-        !comments.every(isBodyObject) ||
-        !projectIssues.every(isPlanIssueShape)
+        before.facts.phase !== "awaiting-human" ||
+        before.facts.planApprovalReady !== true ||
+        before.facts.workStarted !== false ||
+        !before.approvalId
       ) {
-        throw new Error("linear_operator_plan_response_invalid");
+        throw new Error("linear_operator_plan_approval_precondition_failed");
       }
 
-      const phaseLabels = labels
-        .map((label) => label.name)
-        .filter((name) => name.startsWith("symphony:run/"));
-      const phase = phaseLabels.length === 1
-        ? phaseLabels[0].slice("symphony:run/".length)
-        : undefined;
-      if (phase !== undefined && !ROOT_PHASES.has(phase)) {
-        throw new Error("linear_operator_plan_response_invalid");
+      const doneStateId = stateIdFor(project, "Done");
+      const data = await graphql(operatorApiKey, APPROVE_PLAN_MUTATION, {
+        issueId: before.approvalId,
+        input: { stateId: doneStateId },
+      });
+      if (data.issueUpdate?.success !== true) {
+        throw new Error("linear_operator_plan_approval_update_failed");
       }
 
-      const tree = rootPlanTree(projectIssues, rootId);
-      const planNodes = tree.map(planNode);
-      const approvalNodes = planNodes.filter(
-        (node) => node.humanKind === "plan_approval",
-      );
-      const approval = approvalNodes[0];
-      const managedComments = comments
-        .map((comment) => comment.body)
-        .filter(isRootManagedComment);
-      const planApprovalReady = approvalNodes.length === 1 &&
-        approval.parentId === rootId &&
-        !planNodes.some((node) => node.parentId === approval.id) &&
-        approval.title === "[Human Action] Approve Plan" &&
-        approval.state === "In Progress" &&
-        approval.managedMarker === `${rootId}:plan-approval`;
-
+      const after = await readRootPlanSnapshot(rootId, project.projectId);
+      if (
+        after.facts.planApprovalState !== "Done" ||
+        after.facts.workStarted !== false
+      ) {
+        throw new Error("linear_operator_plan_approval_read_back_failed");
+      }
       return {
         rootId,
-        state: issue.state.name,
-        phase,
-        treeMatches: treeMatches(planNodes, rootId),
-        planApprovalCount: approvalNodes.length,
-        ...(approval ? { planApprovalState: approval.state } : {}),
-        planApprovalReady,
-        plannedRootInputReady: managedComments.length === 1 &&
-          managedCommentFields(managedComments[0]) &&
-          plannedRootInputHash(managedComments[0]),
-        workStarted: planNodes.some((node) =>
-          node.id !== rootId &&
-          node.humanKind !== "plan_approval" &&
-          !["Todo", "Canceled"].includes(node.state),
-        ),
+        approvalState: after.facts.planApprovalState,
+        phase: after.facts.phase,
+        workStarted: after.facts.workStarted,
+        readBack: true,
       };
     },
 
@@ -330,6 +308,83 @@ export function createLinearOperator({
     };
   }
 
+  async function readRootPlanSnapshot(rootId, projectId) {
+    const data = await graphql(operatorApiKey, ROOT_PLAN_FACTS_QUERY, {
+      rootId,
+      projectId,
+    });
+    const issue = data.issue;
+    const projectIssues = connectionNodes(
+      data.project?.issues,
+      "linear_operator_plan_response_invalid",
+    );
+    const labels = connectionNodes(
+      issue?.labels,
+      "linear_operator_plan_response_invalid",
+    );
+    const comments = connectionNodes(
+      issue?.comments,
+      "linear_operator_plan_response_invalid",
+    );
+    if (!isRootPlanIssueShape(issue, rootId, projectId)) {
+      throw new Error("linear_operator_plan_response_invalid");
+    }
+    if (
+      !labels.every(isNamedObject) ||
+      !comments.every(isBodyObject) ||
+      !projectIssues.every(isPlanIssueShape)
+    ) {
+      throw new Error("linear_operator_plan_response_invalid");
+    }
+
+    const phaseLabels = labels
+      .map((label) => label.name)
+      .filter((name) => name.startsWith("symphony:run/"));
+    const phase = phaseLabels.length === 1
+      ? phaseLabels[0].slice("symphony:run/".length)
+      : undefined;
+    if (phase !== undefined && !ROOT_PHASES.has(phase)) {
+      throw new Error("linear_operator_plan_response_invalid");
+    }
+
+    const tree = rootPlanTree(projectIssues, rootId);
+    const planNodes = tree.map(planNode);
+    const approvalNodes = planNodes.filter(
+      (node) => node.humanKind === "plan_approval",
+    );
+    const approval = approvalNodes[0];
+    const managedComments = comments
+      .map((comment) => comment.body)
+      .filter(isRootManagedComment);
+    const planApprovalReady = approvalNodes.length === 1 &&
+      approval.parentId === rootId &&
+      !planNodes.some((node) => node.parentId === approval.id) &&
+      approval.title === "[Human Action] Approve Plan" &&
+      approval.state === "In Progress" &&
+      approval.managedMarker === `${rootId}:plan-approval`;
+    const workStates = planNodes
+      .filter((node) => node.id !== rootId && node.humanKind === undefined)
+      .map((node) => node.state);
+
+    return {
+      facts: {
+        rootId,
+        state: issue.state.name,
+        phase,
+        treeMatches: treeMatches(planNodes, rootId),
+        planApprovalCount: approvalNodes.length,
+        ...(approval ? { planApprovalState: approval.state } : {}),
+        planApprovalReady,
+        plannedRootInputReady: managedComments.length === 1 &&
+          managedCommentFields(managedComments[0]) &&
+          plannedRootInputHash(managedComments[0]),
+        workStates,
+        workStarted: workStates.some((state) => !WORK_NOT_STARTED_STATES.has(state)),
+      },
+      approvalId: approval?.id,
+    };
+  }
+
   async function readProjectContext(projectSlugId) {
     const slugId = required(projectSlugId, "linear_operator_project_slug_id_invalid");
     const data = await graphql(operatorApiKey, PROJECT_CONTEXT_QUERY);
@@ -340,11 +395,14 @@ export function createLinearOperator({
     if (matches.length !== 1) throw new Error("linear_operator_project_ambiguous");
 
     const project = matches[0];
-    const todoStates = (project.teams?.nodes ?? []).flatMap((team) =>
-      (team?.states?.nodes ?? [])
-        .filter((state) => state?.name === "Todo")
-        .map((state) => ({ teamId: team.id, stateId: state.id })),
+    const states = (project.teams?.nodes ?? []).flatMap((team) =>
+      (team?.states?.nodes ?? []).map((state) => ({
+        teamId: team.id,
+        stateId: state.id,
+        name: state.name,
+      })),
     );
+    const todoStates = states.filter((state) => state.name === "Todo");
     if (todoStates.length === 0) throw new Error("linear_operator_todo_state_missing");
     if (todoStates.length !== 1) throw new Error("linear_operator_todo_state_ambiguous");
     if (!project.id || typeof project.name !== "string") {
@@ -355,7 +413,21 @@ export function createLinearOperator({
       projectName: project.name,
       teamId: todoStates[0].teamId,
       stateId: todoStates[0].stateId,
+      states,
     };
+  }
+
+  function stateIdFor(project, stateName) {
+    const matches = project.states.filter((state) =>
+      state.teamId === project.teamId && state.name === stateName,
+    );
+    if (matches.length === 0) {
+      throw new Error(`linear_operator_${stateName.toLowerCase()}_state_missing`);
+    }
+    if (matches.length !== 1) {
+      throw new Error(`linear_operator_${stateName.toLowerCase()}_state_ambiguous`);
+    }
+    return matches[0].stateId;
   }
 
   async function readAppActorId() {

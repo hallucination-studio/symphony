@@ -1,3 +1,7 @@
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+
+const execFileAsync = promisify(execFile);
 const DEFAULT_TIMEOUT_MS = 120_000;
 const DEFAULT_POLL_INTERVAL_MS = 1_000;
 const ROOT_TITLE = "[E2E] Root A";
@@ -14,6 +18,7 @@ const RUNTIME_STATUSES = new Set([
 ]);
 const READY_RUNTIME_STATUSES = new Set(["Ready", "Recovering"]);
 const ROOT_STATES = new Set(["Todo", "In Progress", "In Review", "Done", "Canceled"]);
+const WORK_NOT_STARTED_STATES = new Set(["Todo", "Canceled"]);
 const ROOT_PHASES = new Set([
   "planning",
   "awaiting-human",
@@ -28,7 +33,10 @@ const ROOT_PHASES = new Set([
 export function createS1ClaimDriver({
   linear,
   client,
+  git,
   projectSlugId,
+  repositoryPath,
+  baseBranch,
   timeoutMs = DEFAULT_TIMEOUT_MS,
   pollIntervalMs = DEFAULT_POLL_INTERVAL_MS,
   now = () => Date.now(),
@@ -47,8 +55,12 @@ export function createS1ClaimDriver({
   if (!Number.isSafeInteger(pollIntervalMs) || pollIntervalMs < 1) {
     throw new Error("s1_claim_poll_interval_invalid");
   }
+  if (git !== undefined) {
+    requireFunction(git?.readCommitCount, "s1_git_read_commit_count_missing");
+  }
   requireFunction(now, "s1_clock_missing");
   requireFunction(sleep, "s1_sleep_missing");
+  const readCommitCount = git?.readCommitCount ?? readGitCommitCount;
 
   let createdRoot;
   let claimedRoot;
@@ -90,6 +102,45 @@ export function createS1ClaimDriver({
         "s1_plan_timeout",
       );
     },
+
+    async observePlanBarrier() {
+      return readPlanBarrier();
+    },
+
+    async approvePlan() {
+      if (!claimedRoot?.rootId) throw new Error("s1_root_claim_missing");
+      requireFunction(linear?.approvePlan, "s1_linear_approve_plan_missing");
+      requireFunction(linear?.readRootPlanFacts, "s1_linear_read_plan_missing");
+      const barrier = await readPlanBarrier();
+      if (!barrier.stable) throw new Error("s1_plan_approval_precondition_failed");
+      const mutation = await linear.approvePlan({
+        projectSlugId: slugId,
+        rootId: claimedRoot.rootId,
+      });
+      if (!isObject(mutation) || mutation.rootId !== claimedRoot.rootId ||
+        mutation.approvalState !== "Done" || mutation.readBack !== true) {
+        throw new Error("s1_plan_approval_read_back_invalid");
+      }
+      const facts = await pollUntil(
+        async () => planObservation(
+          await linear.readRootPlanFacts({
+            projectSlugId: slugId,
+            rootId: claimedRoot.rootId,
+          }),
+          claimedRoot.rootId,
+        ),
+        (value) => value.phase === "working" && value.workStarted === false &&
+          value.planApprovalState === "Done",
+        "s1_plan_approval_timeout",
+      );
+      return {
+        rootId: claimedRoot.rootId,
+        approvalState: facts.planApprovalState,
+        phase: facts.phase,
+        workStarted: facts.workStarted,
+        readBack: true,
+      };
+    },
   });
 
   async function readClaimObservation(rootId) {
@@ -106,6 +157,38 @@ export function createS1ClaimDriver({
       profileReadiness: safeProfile.readiness,
       profileIsActive: safeProfile.isActive,
       runtimeStatus: safeRuntime.status,
+    };
+  }
+
+  async function readPlanBarrier() {
+    if (!claimedRoot?.rootId) throw new Error("s1_root_claim_missing");
+    requireFunction(linear?.readRootPlanFacts, "s1_linear_read_plan_missing");
+    const facts = planObservation(
+      await linear.readRootPlanFacts({
+        projectSlugId: slugId,
+        rootId: claimedRoot.rootId,
+      }),
+      claimedRoot.rootId,
+    );
+    const deliveryBranch = requiredText(
+      claimedRoot.deliveryBranch,
+      "s1_delivery_branch_missing",
+    );
+    const commitCount = await readCommitCount({
+      repositoryPath: requiredText(repositoryPath, "s1_repository_path_missing"),
+      baseBranch: requiredText(baseBranch, "s1_base_branch_missing"),
+      deliveryBranch,
+    });
+    if (!nonNegativeInteger(commitCount)) {
+      throw new Error("s1_git_commit_count_invalid");
+    }
+    return {
+      rootId: claimedRoot.rootId,
+      stable: planReady(facts) && commitCount === 0,
+      phase: facts.phase,
+      workStates: facts.workStates,
+      workStarted: facts.workStarted,
+      commitCount,
     };
   }
 
@@ -212,6 +295,9 @@ function planObservation(value, rootId) {
     (value.planApprovalState !== undefined && !ROOT_STATES.has(value.planApprovalState)) ||
     typeof value.planApprovalReady !== "boolean" ||
     typeof value.plannedRootInputReady !== "boolean" ||
+    !Array.isArray(value.workStates) ||
+    value.workStates.length > 250 ||
+    !value.workStates.every((state) => ROOT_STATES.has(state)) ||
     typeof value.workStarted !== "boolean"
   ) {
     throw new Error("s1_plan_facts_invalid");
@@ -227,6 +313,7 @@ function planObservation(value, rootId) {
       : {}),
     planApprovalReady: value.planApprovalReady,
     plannedRootInputReady: value.plannedRootInputReady,
+    workStates: [...value.workStates],
     workStarted: value.workStarted,
   };
 }
@@ -239,6 +326,7 @@ function planReady(value) {
     value.planApprovalState === "In Progress" &&
     value.planApprovalReady === true &&
     value.plannedRootInputReady === true &&
+    value.workStates.every((state) => WORK_NOT_STARTED_STATES.has(state)) &&
     value.workStarted === false;
 }
 
@@ -271,4 +359,32 @@ function requireFunction(value, code) {
 
 function isObject(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+async function readGitCommitCount({ repositoryPath, baseBranch, deliveryBranch }) {
+  const repository = requiredText(repositoryPath, "s1_repository_path_missing");
+  const base = gitRef(baseBranch, "s1_base_branch_invalid");
+  const delivery = gitRef(deliveryBranch, "s1_delivery_branch_invalid");
+  let result;
+  try {
+    result = await execFileAsync(
+      "git",
+      ["-C", repository, "rev-list", "--count", `${base}..${delivery}`],
+      { encoding: "utf8", maxBuffer: 16_384 },
+    );
+  } catch {
+    throw new Error("s1_git_commit_count_read_failed");
+  }
+  const output = result.stdout.trim();
+  if (!/^\d+$/u.test(output)) throw new Error("s1_git_commit_count_invalid");
+  const count = Number(output);
+  if (!Number.isSafeInteger(count)) throw new Error("s1_git_commit_count_invalid");
+  return count;
+}
+
+function gitRef(value, code) {
+  if (typeof value !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$/u.test(value)) {
+    throw new Error(code);
+  }
+  return value;
 }

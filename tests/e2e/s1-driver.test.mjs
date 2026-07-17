@@ -1,4 +1,8 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import test from "node:test";
 
 import { createDesktopClient } from "../../tools/e2e/desktop-client.mjs";
@@ -178,6 +182,7 @@ test("S1 claim driver waits for the Plan barrier without starting Work", async (
       planApprovalCount: 0,
       planApprovalReady: false,
       plannedRootInputReady: false,
+      workStates: [],
       workStarted: false,
     },
     {
@@ -189,6 +194,7 @@ test("S1 claim driver waits for the Plan barrier without starting Work", async (
       planApprovalState: "In Progress",
       planApprovalReady: true,
       plannedRootInputReady: true,
+      workStates: ["Todo"],
       workStarted: false,
     },
   ];
@@ -234,6 +240,7 @@ test("S1 claim driver waits for the Plan barrier without starting Work", async (
     planApprovalState: "In Progress",
     planApprovalReady: true,
     plannedRootInputReady: true,
+    workStates: ["Todo"],
     workStarted: false,
   });
 });
@@ -265,6 +272,7 @@ test("S1 claim driver stops when Plan evidence shows Work already started", asyn
           planApprovalState: "In Progress",
           planApprovalReady: true,
           plannedRootInputReady: true,
+          workStates: ["In Progress"],
           workStarted: true,
         };
       },
@@ -283,6 +291,233 @@ test("S1 claim driver stops when Plan evidence shows Work already started", asyn
   await driver.createRootA();
   await driver.waitForClaim();
   await assert.rejects(driver.waitForPlan(), /s1_plan_timeout/u);
+});
+
+test("S1 claim driver observes a stable Plan barrier before approval", async () => {
+  const calls = [];
+  const driver = createS1ClaimDriver({
+    linear: {
+      async createAndDelegateRoot() {
+        return { rootId: "root-a", delegated: true, readBack: true };
+      },
+      async readRootClaimFacts() {
+        return {
+          rootId: "root-a",
+          state: "In Progress",
+          phase: "planning",
+          singletonCount: 1,
+          managedCommentCount: 1,
+          managedCommentReady: true,
+          deliveryBranch: "symphony/runs/hell-1",
+        };
+      },
+      async readRootPlanFacts() {
+        return {
+          rootId: "root-a",
+          state: "In Progress",
+          phase: "awaiting-human",
+          treeMatches: true,
+          planApprovalCount: 1,
+          planApprovalState: "In Progress",
+          planApprovalReady: true,
+          plannedRootInputReady: true,
+          workStates: ["Todo", "Canceled"],
+          workStarted: false,
+        };
+      },
+    },
+    git: {
+      async readCommitCount(input) {
+        calls.push(input);
+        return 0;
+      },
+    },
+    client: desktopObservationClient({
+      profile: { readiness: "ready", isActive: true },
+      runtime: { status: "Ready" },
+    }),
+    projectSlugId: "8ab43179fb54",
+    repositoryPath: "/tmp/e2e-repository",
+    baseBranch: "main",
+  });
+
+  await driver.createRootA();
+  await driver.waitForClaim();
+  await driver.waitForPlan();
+  assert.deepEqual(await driver.observePlanBarrier(), {
+    rootId: "root-a",
+    stable: true,
+    phase: "awaiting-human",
+    workStates: ["Todo", "Canceled"],
+    workStarted: false,
+    commitCount: 0,
+  });
+  assert.deepEqual(calls, [{
+    repositoryPath: "/tmp/e2e-repository",
+    baseBranch: "main",
+    deliveryBranch: "symphony/runs/hell-1",
+  }]);
+});
+
+test("S1 claim driver rejects a Plan barrier with a started Work or commit", async () => {
+  const driver = createS1ClaimDriver({
+    linear: {
+      async createAndDelegateRoot() {
+        return { rootId: "root-a", delegated: true, readBack: true };
+      },
+      async readRootClaimFacts() {
+        return {
+          rootId: "root-a",
+          state: "In Progress",
+          phase: "planning",
+          singletonCount: 1,
+          managedCommentCount: 1,
+          managedCommentReady: true,
+          deliveryBranch: "symphony/runs/hell-1",
+        };
+      },
+      async readRootPlanFacts() {
+        return {
+          rootId: "root-a",
+          state: "In Progress",
+          phase: "awaiting-human",
+          treeMatches: true,
+          planApprovalCount: 1,
+          planApprovalState: "In Progress",
+          planApprovalReady: true,
+          plannedRootInputReady: true,
+          workStates: ["In Progress"],
+          workStarted: true,
+        };
+      },
+    },
+    git: { async readCommitCount() { return 1; } },
+    client: desktopObservationClient({
+      profile: { readiness: "ready", isActive: true },
+      runtime: { status: "Ready" },
+    }),
+    projectSlugId: "8ab43179fb54",
+    repositoryPath: "/tmp/e2e-repository",
+    baseBranch: "main",
+  });
+
+  await driver.createRootA();
+  await driver.waitForClaim();
+  assert.deepEqual(await driver.observePlanBarrier(), {
+    rootId: "root-a",
+    stable: false,
+    phase: "awaiting-human",
+    workStates: ["In Progress"],
+    workStarted: true,
+    commitCount: 1,
+  });
+});
+
+test("S1 claim driver reads the real delivery branch commit count", async () => {
+  const repositoryPath = mkdtempSync(path.join(tmpdir(), "symphony-s1-git-"));
+  try {
+    runGit(repositoryPath, ["init", "--quiet", "--initial-branch", "main"]);
+    runGit(repositoryPath, ["config", "user.email", "e2e@example.invalid"]);
+    runGit(repositoryPath, ["config", "user.name", "Symphony E2E"]);
+    writeFileSync(path.join(repositoryPath, "fixture.txt"), "base\n");
+    runGit(repositoryPath, ["add", "fixture.txt"]);
+    runGit(repositoryPath, ["commit", "--quiet", "-m", "base"]);
+    runGit(repositoryPath, ["branch", "symphony/runs/hell-1"]);
+
+    const driver = createS1ClaimDriver({
+      linear: stableLinear({ deliveryBranch: "symphony/runs/hell-1" }),
+      client: desktopObservationClient({
+        profile: { readiness: "ready", isActive: true },
+        runtime: { status: "Ready" },
+      }),
+      projectSlugId: "8ab43179fb54",
+      repositoryPath,
+      baseBranch: "main",
+    });
+
+    await driver.createRootA();
+    await driver.waitForClaim();
+    assert.equal((await driver.observePlanBarrier()).commitCount, 0);
+
+    runGit(repositoryPath, ["switch", "symphony/runs/hell-1"]);
+    writeFileSync(path.join(repositoryPath, "fixture.txt"), "work\n");
+    runGit(repositoryPath, ["add", "fixture.txt"]);
+    runGit(repositoryPath, ["commit", "--quiet", "-m", "work"]);
+    const afterCommit = await driver.observePlanBarrier();
+    assert.deepEqual({ stable: afterCommit.stable, commitCount: afterCommit.commitCount }, {
+      stable: false,
+      commitCount: 1,
+    });
+  } finally {
+    rmSync(repositoryPath, { recursive: true, force: true });
+  }
+});
+
+test("S1 claim driver approves the Plan only after working read-back", async () => {
+  let approved = false;
+  const driver = createS1ClaimDriver({
+    linear: {
+      async createAndDelegateRoot() {
+        return { rootId: "root-a", delegated: true, readBack: true };
+      },
+      async readRootClaimFacts() {
+        return {
+          rootId: "root-a",
+          state: "In Progress",
+          phase: "planning",
+          singletonCount: 1,
+          managedCommentCount: 1,
+          managedCommentReady: true,
+          deliveryBranch: "symphony/runs/hell-1",
+        };
+      },
+      async readRootPlanFacts() {
+        return {
+          rootId: "root-a",
+          state: "In Progress",
+          phase: approved ? "working" : "awaiting-human",
+          treeMatches: true,
+          planApprovalCount: 1,
+          planApprovalState: approved ? "Done" : "In Progress",
+          planApprovalReady: !approved,
+          plannedRootInputReady: true,
+          workStates: ["Todo"],
+          workStarted: false,
+        };
+      },
+      async approvePlan(input) {
+        assert.deepEqual(input, {
+          projectSlugId: "8ab43179fb54",
+          rootId: "root-a",
+        });
+        approved = true;
+        return { rootId: "root-a", approvalState: "Done", readBack: true };
+      },
+    },
+    git: { async readCommitCount() { return 0; } },
+    client: desktopObservationClient({
+      profile: { readiness: "ready", isActive: true },
+      runtime: { status: "Ready" },
+    }),
+    projectSlugId: "8ab43179fb54",
+    repositoryPath: "/tmp/e2e-repository",
+    baseBranch: "main",
+    now: () => 0,
+    sleep: async () => undefined,
+    timeoutMs: 100,
+    pollIntervalMs: 5,
+  });
+
+  await driver.createRootA();
+  await driver.waitForClaim();
+  await driver.waitForPlan();
+  assert.deepEqual(await driver.approvePlan(), {
+    rootId: "root-a",
+    approvalState: "Done",
+    phase: "working",
+    workStarted: false,
+    readBack: true,
+  });
 });
 
 test("Desktop client reads the active Profile and Conductor runtime from the UI", async () => {
@@ -340,6 +575,46 @@ function desktopObservationClient({
       return runtime;
     },
   };
+}
+
+function stableLinear({ deliveryBranch }) {
+  return {
+    async createAndDelegateRoot() {
+      return { rootId: "root-a", delegated: true, readBack: true };
+    },
+    async readRootClaimFacts() {
+      return {
+        rootId: "root-a",
+        state: "In Progress",
+        phase: "planning",
+        singletonCount: 1,
+        managedCommentCount: 1,
+        managedCommentReady: true,
+        deliveryBranch,
+      };
+    },
+    async readRootPlanFacts() {
+      return {
+        rootId: "root-a",
+        state: "In Progress",
+        phase: "awaiting-human",
+        treeMatches: true,
+        planApprovalCount: 1,
+        planApprovalState: "In Progress",
+        planApprovalReady: true,
+        plannedRootInputReady: true,
+        workStates: ["Todo"],
+        workStarted: false,
+      };
+    },
+  };
+}
+
+function runGit(repositoryPath, arguments_) {
+  return execFileSync("git", ["-C", repositoryPath, ...arguments_], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
 }
 
 function link(text, calls) {
