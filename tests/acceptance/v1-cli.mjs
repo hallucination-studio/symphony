@@ -5,6 +5,7 @@ import path from "node:path";
 
 import { evaluateV1Evidence, hashEvidence } from "./v1-evaluator.mjs";
 import { V1_ACCEPTANCE_REGISTRY } from "./v1-registry.mjs";
+import { createRoadmapV1Verdict } from "./v1-verdict.mjs";
 
 export const ACCEPTANCE_TOOL_VERSION = "1";
 
@@ -70,8 +71,7 @@ async function collect(arguments_) {
     currentToolVersions: tools,
     currentTreeClean: cleanTree,
   });
-  process.stdout.write(`${JSON.stringify(verdict, null, 2)}\n`);
-  process.exitCode = 1;
+  process.stdout.write(`${JSON.stringify(createRoadmapV1Verdict(verdict), null, 2)}\n`);
 }
 
 async function evaluate(arguments_) {
@@ -84,7 +84,7 @@ async function evaluate(arguments_) {
     currentToolVersions: toolVersions(),
     currentTreeClean: cleanTree,
   });
-  process.stdout.write(`${JSON.stringify(verdict, null, 2)}\n`);
+  process.stdout.write(`${JSON.stringify(createRoadmapV1Verdict(verdict), null, 2)}\n`);
   if (verdict.status !== "passed") process.exitCode = 1;
 }
 

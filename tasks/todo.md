@@ -30,13 +30,14 @@
   - One commit: `test(e2e): prove V1 authority and recovery`
   - Residual verification: S2/S3 contract和dry-run已实现；固定 live probe/fault fixture与真实外部运行按用户授权延后
 
-- [ ] E3 — Linux CI、本地Linux/macOS入口、并行准备/采证和双层verdict
+- [x] E3 — Linux CI、本地Linux/macOS入口、并行准备/采证和双层verdict
   - Dependencies: E1, E2
   - Execution: prepare/read-only checks并行；S1→S2→S3真实mutation串行；stable-barrier evidence并行
   - Verdict: automated API Key E2E可passed；full Roadmap V1因ChatGPT live login未测保持incomplete
   - Verify: `npm run e2e:doctor && npm run test:acceptance && npm run acceptance:v1 -- --preflight && npm run acceptance:evaluate && npm run lint && npm run typecheck && npm run test && npm run build && npm run package`，再批准一次真实Linux workflow
   - Before commit: scope ledger；code-simple；五轴code-review；least privilege；secret scan；`git diff --check`
   - One commit: `ci(e2e): run the fixed V1 journey on Linux`
+  - Residual verification: workflow与verdict contract已实现；Environment reviewer、固定 live fixture和首次真实Linux run按用户授权延后
 
 ## 全局停止条件
 

@@ -123,6 +123,8 @@ git diff --check
 
 ### E3 — 接入 Linux CI、本地入口和验收 verdict
 
+**状态：** manual Linux workflow、Environment/concurrency、shared preflight、串行S1-S3、always-run sanitized evidence/cleanup和双层verdict已实现；首次真实Linux run按用户授权延后。
+
 **依赖：** E1、E2。
 
 **包含：**

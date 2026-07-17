@@ -31,3 +31,15 @@ test("E2E runner never treats a production binary as an E2E binary", async () =>
   assert.match(source, /SYMPHONY_E2E_RUN_UI/);
   assert.match(source, /packaged mutation remains opt-in/i);
 });
+
+test("WDIO app process explicitly drops operator and Provider secrets", async () => {
+  const source = await readFile("wdio.conf.mjs", "utf8");
+  for (const key of [
+    "LINEAR_E2E_USER_API_KEY",
+    "OPENAI_E2E_API_KEY",
+    "SYMPHONY_E2E_GITHUB_TOKEN",
+    "GH_TOKEN",
+  ]) {
+    assert.match(source, new RegExp(`${key}: undefined`));
+  }
+});

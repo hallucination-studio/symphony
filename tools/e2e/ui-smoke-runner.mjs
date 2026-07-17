@@ -15,7 +15,10 @@ export async function runPackagedSmoke({
   evidence = [],
 } = {}) {
   const config = loadE2EConfig({ environment, dotenv });
-  const lock = await acquireGlobalLock({ paths: { lock: lockPathForConfig(config.cwd) } }, { runId: randomUUID() });
+  const lock = await acquireGlobalLock(
+    { paths: { lock: lockPathForConfig(config.cwd) } },
+    { runId: environment.SYMPHONY_E2E_RUN_ID ?? randomUUID() },
+  );
   try {
     const ui = config.platform === "darwin"
       ? createMacTauriUi({ browser })

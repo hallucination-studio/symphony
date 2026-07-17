@@ -1,6 +1,6 @@
 # Spec: Roadmap V1 固定场景 E2E
 
-**状态：** E0 基础设施已实现；真实 Linear/GitHub/Codex 验收仍须通过 preflight 后显式运行。
+**状态：** E0-E3 E2E实现已完成；固定 live fixture、GitHub Environment配置和真实 Linear/GitHub/Codex验收按用户授权统一延后，且仍须通过preflight后显式运行。
 
 ## 1. 目标
 

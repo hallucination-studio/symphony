@@ -26,6 +26,18 @@ test("S1 live command is opt-in and fails closed before loading credentials", ()
   assert.equal(JSON.parse(result.stdout).status, "blocked");
 });
 
+test("shared acceptance preflight delegates to the fail-closed doctor", () => {
+  const result = spawnSync(
+    process.execPath,
+    ["tools/e2e/acceptance-v1.mjs", "--preflight"],
+    { encoding: "utf8", env: {} },
+  );
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /e2e_configuration_invalid/u);
+  assert.doesNotMatch(result.stderr, /acceptance_scenario_not_available/u);
+});
+
 test("S1 opt-in remains incomplete until the live fixture and driver exist", () => {
   const result = spawnSync(
     process.execPath,
