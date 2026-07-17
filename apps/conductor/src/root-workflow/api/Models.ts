@@ -67,6 +67,10 @@ export interface RootRunView {
   resolvedProjectId: string;
   phaseLabels: RootPhase[];
   managedComment?: RootManagedComment;
+  managedCommentRemote?: {
+    commentId: string;
+    updatedAt: string;
+  };
   profile?: {
     profileId: string;
     readiness: "login-required" | "ready" | "invalid";
@@ -79,6 +83,7 @@ export type RootAction =
   | { kind: "plan_root"; reason?: "root_input_changed" }
   | { kind: "wait_human"; nodeId: string }
   | { kind: "execute_work"; nodeId: string }
+  | { kind: "finalize_work"; nodeId: string }
   | { kind: "run_root_gate" }
   | { kind: "deliver_root" }
   | { kind: "repair_root_phase"; phase: RootPhase }

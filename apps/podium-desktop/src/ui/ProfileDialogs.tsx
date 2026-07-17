@@ -4,14 +4,15 @@ import type {
   CodexTurnSettings,
   CommandHandler,
   DesktopCommandResult,
+  PerformerProfileSummaryView,
   SecretHandler,
 } from "./types";
 
 type SubmissionStatus = "editing" | "pending" | "confirmed" | "error";
 
-export function ProfileDialog({ conductorId, onClose, onCommand }: { conductorId: string; onClose: () => void; onCommand: CommandHandler }) {
-  const [authenticationMethod, setAuthenticationMethod] = useState<"chatgpt" | "api_key">("chatgpt");
-  const [isFastModeEnabled, setIsFastModeEnabled] = useState(true);
+export function ProfileDialog({ conductorId, profile, onClose, onCommand }: { conductorId: string; profile?: PerformerProfileSummaryView; onClose: () => void; onCommand: CommandHandler }) {
+  const [authenticationMethod, setAuthenticationMethod] = useState<"chatgpt" | "api_key">(profile?.authenticationMethod ?? "chatgpt");
+  const [isFastModeEnabled, setIsFastModeEnabled] = useState(profile?.codexTurnSettings.isFastModeEnabled ?? true);
   const [status, setStatus] = useState<SubmissionStatus>("editing");
   const dialogRef = useRef<HTMLElement>(null);
   useDialogFocus(dialogRef, onClose);
@@ -21,20 +22,31 @@ export function ProfileDialog({ conductorId, onClose, onCommand }: { conductorId
     form.reset();
     setStatus("pending");
     try {
-      const result = await onCommand({
-        kind: "create_performer_profile",
-        conductorId,
-        displayName: String(formData.get("displayName") ?? ""),
-        authenticationMethod,
-        codexTurnSettings: {
+      const codexTurnSettings = {
           model: String(formData.get("model") ?? ""),
           reasoningEffort: String(
             formData.get("reasoningEffort"),
           ) as CodexTurnSettings["reasoningEffort"],
           isFastModeEnabled:
             authenticationMethod === "chatgpt" && isFastModeEnabled,
-        },
-      });
+        };
+      const result = await onCommand(
+        profile
+          ? {
+              kind: "update_performer_profile",
+              conductorId,
+              profileId: profile.profileId,
+              displayName: String(formData.get("displayName") ?? ""),
+              codexTurnSettings,
+            }
+          : {
+              kind: "create_performer_profile",
+              conductorId,
+              displayName: String(formData.get("displayName") ?? ""),
+              authenticationMethod,
+              codexTurnSettings,
+            },
+      );
       setStatus(statusFromResult(result));
     } catch {
       setStatus("error");
@@ -43,20 +55,20 @@ export function ProfileDialog({ conductorId, onClose, onCommand }: { conductorId
 
   return (
     <DialogFrame dialogRef={dialogRef} labelId="profile-title">
-      <h2 id="profile-title">Configure Codex profile</h2>
+      <h2 id="profile-title">{profile ? "Edit Codex profile" : "Configure Codex profile"}</h2>
       {status === "pending" && <StatusMessage title="Waiting for Conductor confirmation" body="Settings remain unchanged until Conductor accepts them." />}
       {status === "confirmed" && <StatusMessage title="Profile confirmed" body="Complete login, then activate it for new Roots." action={<button className="button primary" onClick={onClose}>Done</button>} />}
       {status === "error" && <StatusMessage isError title="Profile was not created" body="Conductor rejected the change. Review the settings and try again." action={<button className="button" onClick={() => setStatus("editing")}>Try again</button>} />}
       {status === "editing" && (
         <form onSubmit={(event) => { event.preventDefault(); void submit(event.currentTarget); }}>
-          <label>Display name<input name="displayName" required defaultValue="Codex" /></label>
-          <fieldset>
+          <label>Display name<input name="displayName" required defaultValue={profile?.displayName ?? "Codex"} /></label>
+          {!profile && <fieldset>
             <legend>Authentication</legend>
             <label><input type="radio" name="authentication" checked={authenticationMethod === "chatgpt"} onChange={() => setAuthenticationMethod("chatgpt")} /> Sign in with ChatGPT</label>
             <label><input type="radio" name="authentication" aria-label="Use API Key" checked={authenticationMethod === "api_key"} onChange={() => { setAuthenticationMethod("api_key"); setIsFastModeEnabled(false); }} /> Use API Key</label>
-          </fieldset>
-          <label>Model<input name="model" required defaultValue="gpt-5" /></label>
-          <label>Reasoning effort<select name="reasoningEffort" aria-label="Reasoning effort" defaultValue="high"><option value="none">None</option><option value="minimal">Minimal</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="xhigh">Extra high</option></select></label>
+          </fieldset>}
+          <label>Model<input name="model" required defaultValue={profile?.codexTurnSettings.model ?? "gpt-5"} /></label>
+          <label>Reasoning effort<select name="reasoningEffort" aria-label="Reasoning effort" defaultValue={profile?.codexTurnSettings.reasoningEffort ?? "high"}><option value="none">None</option><option value="minimal">Minimal</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="xhigh">Extra high</option></select></label>
           <label><input type="checkbox" aria-label="Fast mode" checked={isFastModeEnabled} disabled={authenticationMethod === "api_key"} onChange={(event) => setIsFastModeEnabled(event.target.checked)} /> Fast mode</label>
           <p className="quiet">{authenticationMethod === "api_key" ? "Fast unavailable for API Key Profiles." : "Fast applies on the next Turn."}</p>
           <div className="button-row"><button className="button" type="button" onClick={onClose}>Cancel</button><button className="button primary" type="submit">Save profile</button></div>

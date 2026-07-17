@@ -56,6 +56,7 @@ export type LinearMutationCommand =
       precondition: RemotePrecondition;
       title: string;
       description: string;
+      completedInputHash?: string;
     })
   | (MutationBase & {
       kind: "update_issue_state";

@@ -1,4 +1,6 @@
-import Database from "better-sqlite3";
+import { createRequire } from "node:module";
+
+import type Database from "better-sqlite3";
 
 import type { ConductorBindingStoreInterface } from "../conductor-bindings/api/ConductorBindingStoreInterface.js";
 import type { LinearInstallationStoreInterface } from "../linear-auth/api/LinearInstallationStoreInterface.js";
@@ -21,9 +23,9 @@ export class SqlitePodiumStoreImpl
   readonly #database: Database.Database;
 
   constructor(databasePath: string) {
-    this.#database = new Database(databasePath);
-    this.#database.pragma("journal_mode = WAL");
-    this.#database.pragma("foreign_keys = ON");
+    this.#database = openDatabase(databasePath);
+    this.#database.exec("PRAGMA journal_mode = WAL");
+    this.#database.exec("PRAGMA foreign_keys = ON");
     this.#createSchema();
   }
 
@@ -50,6 +52,7 @@ export class SqlitePodiumStoreImpl
         conductor_short_hash TEXT NOT NULL UNIQUE,
         linear_installation_id TEXT NOT NULL,
         organization_id TEXT NOT NULL,
+        repository_handle TEXT NOT NULL,
         repository_identity TEXT NOT NULL,
         repository_display_name TEXT NOT NULL,
         repository_root TEXT NOT NULL,
@@ -75,6 +78,11 @@ export class SqlitePodiumStoreImpl
         created_at TEXT NOT NULL
       );
     `);
+    this.#ensureColumn(
+      "conductor_bindings",
+      "repository_handle",
+      "TEXT NOT NULL DEFAULT 'legacy-repository-handle'",
+    );
   }
 
   saveLinearInstallation(installation: LinearInstallation): void {
@@ -121,6 +129,16 @@ export class SqlitePodiumStoreImpl
           refreshToken: row.refresh_token,
           expiresAt: row.expires_at,
         }
+      : undefined;
+  }
+
+  getOnlyLinearInstallation(): LinearInstallation | undefined {
+    const rows = this.#database
+      .prepare("SELECT installation_id FROM linear_installations ORDER BY installation_id LIMIT 2")
+      .all() as Array<{ installation_id: string }>;
+    if (rows.length > 1) throw new Error("linear_installation_ambiguous");
+    return rows[0]
+      ? this.getLinearInstallation(rows[0].installation_id)
       : undefined;
   }
 
@@ -213,9 +231,9 @@ export class SqlitePodiumStoreImpl
       .prepare(`
         INSERT INTO conductor_bindings (
           binding_id, conductor_id, conductor_short_hash, linear_installation_id,
-          organization_id, repository_identity, repository_display_name,
+          organization_id, repository_handle, repository_identity, repository_display_name,
           repository_root, base_branch, desired_state
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(binding_id) DO UPDATE SET
           desired_state = excluded.desired_state
       `)
@@ -225,6 +243,7 @@ export class SqlitePodiumStoreImpl
         binding.conductorShortHash,
         binding.linearInstallationId,
         binding.organizationId,
+        binding.repositoryContext.repositoryHandle,
         binding.repositoryContext.repositoryIdentity,
         binding.repositoryContext.repositoryDisplayName,
         binding.repositoryContext.repositoryRoot,
@@ -243,6 +262,7 @@ export class SqlitePodiumStoreImpl
           conductor_short_hash: string;
           linear_installation_id: string;
           organization_id: string;
+          repository_handle: string;
           repository_identity: string;
           repository_display_name: string;
           repository_root: string;
@@ -252,6 +272,7 @@ export class SqlitePodiumStoreImpl
       | undefined;
     if (!row) return undefined;
     const repositoryContext: RepositoryContext = {
+      repositoryHandle: row.repository_handle,
       repositoryIdentity: row.repository_identity,
       repositoryDisplayName: row.repository_display_name,
       repositoryRoot: row.repository_root,
@@ -382,7 +403,32 @@ export class SqlitePodiumStoreImpl
     return names.map(({ name }) => name);
   }
 
+  #ensureColumn(table: string, column: string, definition: string): void {
+    const columns = this.#database
+      .prepare(`PRAGMA table_info(${table})`)
+      .all() as Array<{ name: string }>;
+    if (!columns.some(({ name }) => name === column)) {
+      this.#database.exec(
+        `ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`,
+      );
+    }
+  }
+
   close(): void {
     this.#database.close();
   }
+}
+
+function openDatabase(databasePath: string): Database.Database {
+  const require = createRequire(import.meta.url);
+  if ("Bun" in globalThis) {
+    const moduleName = ["bun", "sqlite"].join(":");
+    const { Database: BunDatabase } = require(moduleName) as {
+      Database: new (path: string) => Database.Database;
+    };
+    return new BunDatabase(databasePath);
+  }
+  const moduleName = ["better", "sqlite3"].join("-");
+  const BetterSqliteDatabase = require(moduleName) as typeof Database;
+  return new BetterSqliteDatabase(databasePath);
 }

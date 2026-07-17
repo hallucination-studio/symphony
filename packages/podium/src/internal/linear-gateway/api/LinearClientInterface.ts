@@ -89,6 +89,20 @@ export interface LinearClientInterface {
     limit: number;
   }): Promise<{
     nodes: import("../types.js").LinearIssueValue[];
+    rootPhaseLabels: string[];
+    rootManagedComments: Array<{
+      commentId: string;
+      issueId: string;
+      updatedAt: string;
+      managedMarker: string;
+      body: string;
+    }>;
+    humanAnswers: Array<{
+      humanIssueId: string;
+      commentId: string;
+      answer: string;
+      updatedAt: string;
+    }>;
     observedAt: string;
     pageInfo: PageInfo;
   }>;

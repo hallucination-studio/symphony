@@ -1,4 +1,4 @@
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 use url::Url;
 
@@ -15,21 +15,22 @@ pub enum OAuthReturnError {
 #[derive(Debug, PartialEq, Eq)]
 pub struct OAuthReturn {
     pub attempt_id: String,
+    pub state: String,
     pub authorization_code: String,
 }
 
 #[derive(Default)]
 pub struct OAuthReturnRegistry {
-    pending: Mutex<HashSet<String>>,
+    pending: Mutex<HashMap<String, String>>,
     completed: Mutex<VecDeque<OAuthReturn>>,
 }
 
 impl OAuthReturnRegistry {
-    pub fn register(&self, attempt_id: &str) -> Result<(), OAuthReturnError> {
-        if !is_identifier(attempt_id) {
+    pub fn register(&self, attempt_id: &str, state: &str) -> Result<(), OAuthReturnError> {
+        if !is_identifier(attempt_id) || !is_opaque(state) {
             return Err(OAuthReturnError::InvalidAttemptId);
         }
-        if !self.pending.lock().unwrap().insert(attempt_id.to_owned()) {
+        if self.pending.lock().unwrap().insert(state.to_owned(), attempt_id.to_owned()).is_some() {
             return Err(OAuthReturnError::AttemptAlreadyRegistered);
         }
         Ok(())
@@ -55,12 +56,15 @@ impl OAuthReturnRegistry {
         }
         let authorization_code =
             code.filter(|value| !value.is_empty()).ok_or(OAuthReturnError::MissingParameter)?;
-        let attempt_id =
+        let state =
             state.filter(|value| !value.is_empty()).ok_or(OAuthReturnError::MissingParameter)?;
-        if !self.pending.lock().unwrap().remove(&attempt_id) {
-            return Err(OAuthReturnError::UnknownOrConsumedAttempt);
-        }
-        Ok(OAuthReturn { attempt_id, authorization_code })
+        let attempt_id = self
+            .pending
+            .lock()
+            .unwrap()
+            .remove(&state)
+            .ok_or(OAuthReturnError::UnknownOrConsumedAttempt)?;
+        Ok(OAuthReturn { attempt_id, state, authorization_code })
     }
 
     pub fn receive_for_backend(&self, callback: &str) -> Result<(), OAuthReturnError> {
@@ -82,6 +86,10 @@ fn is_identifier(value: &str) -> bool {
         })
 }
 
+fn is_opaque(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 512 && !value.chars().any(char::is_whitespace)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -89,17 +97,18 @@ mod tests {
     #[test]
     fn accepts_only_the_fixed_callback_and_matching_one_shot_state() {
         let returns = OAuthReturnRegistry::default();
-        returns.register("attempt-1").unwrap();
+        returns.register("attempt-1", "state-1").unwrap();
 
         let result = returns
-            .receive("symphony://oauth/linear/callback?code=opaque-code&state=attempt-1")
+            .receive("symphony://oauth/linear/callback?code=opaque-code&state=state-1")
             .unwrap();
 
         assert_eq!(result.attempt_id, "attempt-1");
+        assert_eq!(result.state, "state-1");
         assert_eq!(result.authorization_code, "opaque-code");
         assert_eq!(
             returns
-                .receive("symphony://oauth/linear/callback?code=again&state=attempt-1")
+                .receive("symphony://oauth/linear/callback?code=again&state=state-1")
                 .unwrap_err(),
             OAuthReturnError::UnknownOrConsumedAttempt
         );
@@ -108,7 +117,7 @@ mod tests {
     #[test]
     fn rejects_wrong_origin_state_and_token_fields() {
         let returns = OAuthReturnRegistry::default();
-        returns.register("attempt-1").unwrap();
+        returns.register("attempt-1", "state-1").unwrap();
 
         assert_eq!(
             returns.receive("https://oauth/linear/callback?code=x&state=attempt-1").unwrap_err(),
@@ -131,17 +140,16 @@ mod tests {
     #[test]
     fn queues_a_valid_return_only_for_the_private_backend_boundary() {
         let returns = OAuthReturnRegistry::default();
-        returns.register("attempt-1").unwrap();
+        returns.register("attempt-1", "state-1").unwrap();
         returns
-            .receive_for_backend(
-                "symphony://oauth/linear/callback?code=opaque-code&state=attempt-1",
-            )
+            .receive_for_backend("symphony://oauth/linear/callback?code=opaque-code&state=state-1")
             .unwrap();
 
         assert_eq!(
             returns.take_for_backend().unwrap(),
             OAuthReturn {
                 attempt_id: "attempt-1".to_owned(),
+                state: "state-1".to_owned(),
                 authorization_code: "opaque-code".to_owned(),
             }
         );
@@ -152,7 +160,10 @@ mod tests {
     fn rejects_attempt_ids_outside_the_closed_contract_shape() {
         let returns = OAuthReturnRegistry::default();
 
-        assert_eq!(returns.register(" attempt"), Err(OAuthReturnError::InvalidAttemptId));
-        assert_eq!(returns.register("attempt?secret"), Err(OAuthReturnError::InvalidAttemptId));
+        assert_eq!(returns.register(" attempt", "state"), Err(OAuthReturnError::InvalidAttemptId));
+        assert_eq!(
+            returns.register("attempt?secret", "state"),
+            Err(OAuthReturnError::InvalidAttemptId)
+        );
     }
 }

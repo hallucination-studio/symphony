@@ -41,6 +41,13 @@ export class LinearSdkImpl implements LinearClientInterface {
     this.#client = client ?? new LinearClient({ accessToken });
   }
 
+  static async discoverOrganizationId(accessToken: string): Promise<string> {
+    const client = new LinearClient({ accessToken });
+    const organization = await client.organization;
+    if (!organization.id) throw new Error("linear_organization_missing");
+    return organization.id;
+  }
+
   async listProjects(input: {
     cursor?: string;
     limit: number;
@@ -269,7 +276,7 @@ export class LinearSdkImpl implements LinearClientInterface {
               ...command,
               managedMarker,
             },
-            parsed.completedInputHash,
+            command.completedInputHash ?? parsed.completedInputHash,
           ),
         });
         return;
@@ -321,6 +328,8 @@ export class LinearSdkImpl implements LinearClientInterface {
         return value.title === command.title &&
           value.description === command.description &&
           value.managedMarker === command.precondition.expectedManagedMarker &&
+          (command.completedInputHash === undefined ||
+            value.completedInputHash === command.completedInputHash) &&
           managedNodeMatches(value, command)
           ? { issue: value }
           : undefined;
@@ -405,6 +414,20 @@ export class LinearSdkImpl implements LinearClientInterface {
     limit: number;
   }): Promise<{
     nodes: LinearIssueValue[];
+    rootPhaseLabels: string[];
+    rootManagedComments: Array<{
+      commentId: string;
+      issueId: string;
+      updatedAt: string;
+      managedMarker: string;
+      body: string;
+    }>;
+    humanAnswers: Array<{
+      humanIssueId: string;
+      commentId: string;
+      answer: string;
+      updatedAt: string;
+    }>;
     observedAt: string;
     pageInfo: PageInfo;
   }> {
@@ -415,11 +438,51 @@ export class LinearSdkImpl implements LinearClientInterface {
     }
     const nodes: LinearIssueValue[] = [];
     await collectTree(root, input.projectId, 0, nodes);
+    const labels = await allNodes(root.labels({ first: PAGE_LIMIT }), 64);
+    const rootPhaseLabels = labels
+      .filter(({ name }) => name.startsWith(ROOT_PHASE_PREFIX))
+      .map(({ name }) => name.slice(ROOT_PHASE_PREFIX.length));
+    if (rootPhaseLabels.length > 2) {
+      throw new Error("linear_root_phase_labels_too_many");
+    }
+    const comments = await this.#rootManagedComments(input.rootIssueId);
+    if (comments.length > 2) {
+      throw new Error("linear_root_comments_too_many");
+    }
     return {
       nodes,
+      rootPhaseLabels,
+      rootManagedComments: comments.map((comment) => ({
+        commentId: comment.id,
+        issueId: input.rootIssueId,
+        updatedAt: comment.updatedAt.toISOString(),
+        managedMarker: rootCommentMarker(input.rootIssueId),
+        body: comment.body,
+      })),
+      humanAnswers: await this.#humanAnswers(nodes),
       observedAt: new Date().toISOString(),
       pageInfo: { hasNextPage: false },
     };
+  }
+
+  async #humanAnswers(nodes: LinearIssueValue[]) {
+    const answers = [];
+    for (const node of nodes) {
+      if (node.nodeKind !== "human" || node.state !== "Done") continue;
+      const issue = await this.#client.issue(node.issueId);
+      const comments = await allNodes(issue.comments({ first: PAGE_LIMIT }), 64);
+      for (const comment of comments) {
+        const answer = comment.body.trim();
+        if (!answer) continue;
+        answers.push({
+          humanIssueId: node.issueId,
+          commentId: comment.id,
+          answer,
+          updatedAt: comment.updatedAt.toISOString(),
+        });
+      }
+    }
+    return answers;
   }
 
   async listRootUsage(input: {

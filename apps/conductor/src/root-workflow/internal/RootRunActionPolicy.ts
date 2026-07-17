@@ -44,6 +44,15 @@ export function computeRootAction(view: RootRunView): RootAction {
   }
 
   const phase = view.phaseLabels[0];
+  if (
+    phase === "blocked" &&
+    view.managedComment.lastError?.startsWith("linear_mutation_blocked:")
+  ) {
+    return {
+      kind: "blocked_root",
+      reason: view.managedComment.lastError,
+    };
+  }
   if (phase === "planning") return { kind: "plan_root" };
   if (phase === "delivering") return { kind: "deliver_root" };
   if (phase === "in-review" || phase === "failed") return { kind: "idle_root" };

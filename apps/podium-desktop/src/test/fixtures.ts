@@ -10,6 +10,11 @@ export const connectedOverview: DesktopOverviewView = {
     workspaceName: "Acme",
     observedAt: "2026-07-16T09:45:00+08:00",
   },
+  projects: [{
+    projectId: "project-1",
+    name: "Symphony",
+    observedAt: "2026-07-16T09:45:00+08:00",
+  }],
   nextAction: {
     kind: "approve_plan",
     summary: "Approve the current plan",

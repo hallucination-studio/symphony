@@ -13,14 +13,16 @@ export function SetupView({
   onCommand,
   onSecret,
   onChooseRepository,
+  onBeginCreateConductor,
 }: {
   state: DesktopState;
   onCommand: CommandHandler;
   onSecret: SecretHandler;
   onChooseRepository: () => Promise<RepositorySelection | undefined>;
+  onBeginCreateConductor: () => void;
 }) {
   const headingRef = useRef<HTMLHeadingElement>(null);
-  const [projectId, setProjectId] = useState(state.kind === "conductor-setup" ? state.projects?.[0]?.id ?? "" : "");
+  const [projectId, setProjectId] = useState(state.kind === "conductor-setup" ? state.projects[0]?.id ?? "" : "");
   const [repository, setRepository] = useState<RepositorySelection>();
   const [error, setError] = useState<string>();
   const [isCreating, setIsCreating] = useState(false);
@@ -84,8 +86,9 @@ export function SetupView({
   if (state.kind === "conductor-setup") {
     return (
       <main className="setup-layout"><section className="setup-card"><p className="eyebrow">Setup · 2 of 3</p><h1>Create Conductor</h1><p>Select one Project, a Git repository, and its base branch. Repository selection uses the native picker.</p>
-        <label>Linear Project<select value={projectId} onChange={(event) => setProjectId(event.target.value)}>{state.projects?.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label>
+        <label>Linear Project<select value={projectId} onChange={(event) => setProjectId(event.target.value)}>{state.projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label>
         <button className="button full-width" onClick={() => void chooseRepository()}>Choose Git repository</button>
+        {repository && <label>Base branch<select value={repository.baseBranch} onChange={(event) => setRepository({ ...repository, baseBranch: event.target.value })}>{repository.baseBranches.map((branch) => <option key={branch} value={branch}>{branch}</option>)}</select></label>}
         {repository && <p className="selection-summary">{repository.displayName} · {repository.baseBranch}</p>}
         {error && <p role="alert">{error}</p>}
         <button className="button primary full-width" disabled={!projectId || !repository || isCreating} onClick={() => void createConductor()}>{isCreating ? "Creating…" : "Create Conductor"}</button>
@@ -105,6 +108,7 @@ export function SetupView({
         onSelect={() => undefined}
         onCommand={onCommand}
         onSecret={onSecret}
+        onBeginCreateConductor={onBeginCreateConductor}
       />
     </main>
   );

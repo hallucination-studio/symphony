@@ -109,9 +109,14 @@ export interface DesktopViewInterface {
 export interface DesktopOverviewInput {
   now: string;
   linear_connection: LinearConnectionView;
+  projects: ReadonlyArray<{
+    project_id: string;
+    name: string;
+    observed_at: string;
+  }>;
   conductors: ReadonlyArray<ConductorSummaryView>;
   profiles: ReadonlyArray<PerformerProfileSummaryView>;
-  active_nodes: ReadonlyArray<WorkflowNodeView>;
+  active_roots: ReadonlyArray<RootSummaryView>;
   review_roots: ReadonlyArray<RootSummaryView>;
   completed_root_count: number;
   usage: PerformerUsageInput;

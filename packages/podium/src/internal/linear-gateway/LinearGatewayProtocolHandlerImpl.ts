@@ -134,6 +134,13 @@ export class LinearGatewayProtocolHandlerImpl {
     }
   }
 
+  async resolveProject(conductorShortHash: string) {
+    if (!identifier(conductorShortHash, 128)) {
+      throw new Error("linear_conductor_short_hash_invalid");
+    }
+    return this.client.readProjectResolution({ conductorShortHash });
+  }
+
   async listAllRootIssues(projectId: string): Promise<RootIssueValue[]> {
     const list = this.client.listRootIssues;
     const items: RootIssueValue[] = [];
@@ -162,10 +169,42 @@ export class LinearGatewayProtocolHandlerImpl {
   async getCompleteIssueTree(
     projectId: string,
     rootIssueId: string,
-  ): Promise<{ rootIssueId: string; nodes: LinearIssueValue[]; observedAt: string }> {
+  ): Promise<{
+    rootIssueId: string;
+    nodes: LinearIssueValue[];
+    rootPhaseLabels: string[];
+    rootManagedComments: Array<{
+      commentId: string;
+      issueId: string;
+      updatedAt: string;
+      managedMarker: string;
+      body: string;
+    }>;
+    humanAnswers: Array<{
+      humanIssueId: string;
+      commentId: string;
+      answer: string;
+      updatedAt: string;
+    }>;
+    observedAt: string;
+  }> {
     const getTree = this.client.getIssueTree;
     const nodes: LinearIssueValue[] = [];
     let observedAt = "";
+    let rootPhaseLabels: string[] = [];
+    let rootManagedComments: Array<{
+      commentId: string;
+      issueId: string;
+      updatedAt: string;
+      managedMarker: string;
+      body: string;
+    }> = [];
+    let humanAnswers: Array<{
+      humanIssueId: string;
+      commentId: string;
+      answer: string;
+      updatedAt: string;
+    }> = [];
     let cursor: string | undefined;
     do {
       const page = await getTree.call(this.client, {
@@ -190,12 +229,74 @@ export class LinearGatewayProtocolHandlerImpl {
         }
       }
       observedAt = page.observedAt;
+      if (
+        !Array.isArray(page.rootPhaseLabels) ||
+        page.rootPhaseLabels.length > 2 ||
+        page.rootPhaseLabels.some((phase) => !rootPhase(phase))
+      ) {
+        throw new Error("linear_root_phase_labels_invalid");
+      }
+      if (
+        !Array.isArray(page.rootManagedComments) ||
+        page.rootManagedComments.length > 2 ||
+        page.rootManagedComments.some(
+          (comment) =>
+            comment.issueId !== rootIssueId ||
+            !identifier(comment.commentId, 128) ||
+            !identifier(comment.managedMarker, 128) ||
+            !timestamp(comment.updatedAt) ||
+            typeof comment.body !== "string" ||
+            codePointLength(comment.body) > 16_384,
+        )
+      ) {
+        throw new Error("linear_root_managed_comments_invalid");
+      }
+      rootPhaseLabels = [...page.rootPhaseLabels];
+      rootManagedComments = page.rootManagedComments.map((comment) => ({
+        ...comment,
+      }));
+      if (
+        !Array.isArray(page.humanAnswers) ||
+        page.humanAnswers.length > MAX_TREE_NODES ||
+        page.humanAnswers.some(
+          (answer) =>
+            !identifier(answer.humanIssueId, 128) ||
+            !identifier(answer.commentId, 128) ||
+            !timestamp(answer.updatedAt) ||
+            typeof answer.answer !== "string" ||
+            answer.answer.trim().length === 0 ||
+            codePointLength(answer.answer) > 16_384,
+        )
+      ) {
+        throw new Error("linear_human_answers_invalid");
+      }
+      humanAnswers = page.humanAnswers.map((answer) => ({ ...answer }));
       cursor = nextCursor(page.pageInfo);
     } while (cursor);
     if (!nodes.some(({ issueId }) => issueId === rootIssueId)) {
       throw new Error("linear_tree_root_missing");
     }
-    return { rootIssueId, nodes, observedAt };
+    for (const answer of humanAnswers) {
+      const human = nodes.find(({ issueId }) => issueId === answer.humanIssueId);
+      if (!human || human.nodeKind !== "human" || human.state !== "Done") {
+        throw new Error("linear_human_answer_owner_invalid");
+      }
+      if (
+        humanAnswers.filter(
+          ({ humanIssueId }) => humanIssueId === answer.humanIssueId,
+        ).length !== 1
+      ) {
+        throw new Error("linear_human_answer_ambiguous");
+      }
+    }
+    return {
+      rootIssueId,
+      nodes,
+      rootPhaseLabels,
+      rootManagedComments,
+      humanAnswers,
+      observedAt,
+    };
   }
 
   async listAllRootUsage(projectId: string): Promise<RootUsageValue[]> {
@@ -457,6 +558,19 @@ function linearIssueState(value: string | undefined): boolean {
     value === "In Review" ||
     value === "Done" ||
     value === "Canceled"
+  );
+}
+
+function rootPhase(value: string): boolean {
+  return (
+    value === "planning" ||
+    value === "awaiting-human" ||
+    value === "working" ||
+    value === "gating" ||
+    value === "delivering" ||
+    value === "in-review" ||
+    value === "blocked" ||
+    value === "failed"
   );
 }
 

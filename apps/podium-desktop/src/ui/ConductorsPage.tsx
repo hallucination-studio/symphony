@@ -3,7 +3,7 @@ import { useState } from "react";
 import { EmptyState, PageHeading, StatusBadge } from "./components";
 import { labelFromIdentifier } from "./format";
 import { ApiKeyDialog, ProfileDialog } from "./ProfileDialogs";
-import type { CommandHandler, ConductorDetailView, ConductorSummaryView, SecretHandler } from "./types";
+import type { CommandHandler, ConductorDetailView, ConductorSummaryView, PerformerProfileSummaryView, SecretHandler } from "./types";
 
 export function ConductorsPage({
   conductors,
@@ -12,7 +12,7 @@ export function ConductorsPage({
   onSelect,
   onCommand,
   onSecret,
-  onBeginCreateConductor = () => undefined,
+  onBeginCreateConductor,
 }: {
   conductors: ConductorSummaryView[];
   detail: ConductorDetailView | undefined;
@@ -20,9 +20,10 @@ export function ConductorsPage({
   onSelect: (id: string) => void;
   onCommand: CommandHandler;
   onSecret: SecretHandler;
-  onBeginCreateConductor?: () => void;
+  onBeginCreateConductor: () => void;
 }) {
   const [showProfile, setShowProfile] = useState(false);
+  const [editProfile, setEditProfile] = useState<PerformerProfileSummaryView>();
   const [secretProfileId, setSecretProfileId] = useState<string>();
   if (!detail) {
     return (
@@ -70,6 +71,7 @@ export function ConductorsPage({
                   <span>{profile.sanitizedAccountLabel ?? "Account not configured"} · {profile.codexTurnSettings.model} · {labelFromIdentifier(profile.readiness)}</span>
                 </div>
                 <div className="button-row">
+                  <button className="button" onClick={() => setEditProfile(profile)}>Edit settings</button>
                   {profile.readiness === "login-required" && profile.authenticationMethod === "chatgpt" && (
                     <button className="button" onClick={() => onCommand({ kind: "start_codex_chatgpt_login", conductorId: conductor.conductorId, profileId: profile.profileId })}>Sign in with ChatGPT</button>
                   )}
@@ -87,6 +89,7 @@ export function ConductorsPage({
         <section className="panel"><h2>Recent runtime events</h2>{detail.events.length ? detail.events.map((event) => <p key={event.occurredAt}>{event.summary}</p>) : <p className="quiet">No recent events.</p>}</section>
       </div>
       {showProfile && <ProfileDialog conductorId={conductor.conductorId} onClose={() => setShowProfile(false)} onCommand={onCommand} />}
+      {editProfile && <ProfileDialog conductorId={conductor.conductorId} profile={editProfile} onClose={() => setEditProfile(undefined)} onCommand={onCommand} />}
       {secretProfileId && <ApiKeyDialog conductorId={conductor.conductorId} profileId={secretProfileId} onClose={() => setSecretProfileId(undefined)} onSecret={onSecret} />}
     </>
   );

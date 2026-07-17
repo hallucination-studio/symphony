@@ -103,6 +103,7 @@ export interface RepositorySelection {
   repositoryHandle: string;
   displayName: string;
   baseBranch: string;
+  baseBranches: string[];
 }
 
 export interface PerformerProfileSummaryView {
@@ -119,6 +120,7 @@ export interface PerformerProfileSummaryView {
 export interface DesktopOverviewView {
   nextAction?: NextActionView;
   linearConnection: LinearConnectionView;
+  projects: { projectId: string; name: string; observedAt: string }[];
   conductors: ConductorSummaryView[];
   activeRoots: RootSummaryView[];
   reviewRoots: RootSummaryView[];
@@ -145,7 +147,7 @@ export interface RootDetailView {
 export type DesktopState =
   | { kind: "loading"; objectLabel?: string }
   | { kind: "linear-setup" }
-  | { kind: "conductor-setup"; projects?: { id: string; name: string }[] }
+  | { kind: "conductor-setup"; projects: { id: string; name: string }[] }
   | { kind: "profile-setup"; conductorDetail: ConductorDetailView }
   | {
       kind: "ready";
@@ -168,6 +170,13 @@ export type DesktopCommand =
       conductorId: string;
       displayName: string;
       authenticationMethod: "chatgpt" | "api_key";
+      codexTurnSettings: CodexTurnSettings;
+    }
+  | {
+      kind: "update_performer_profile";
+      conductorId: string;
+      profileId: string;
+      displayName: string;
       codexTurnSettings: CodexTurnSettings;
     }
   | { kind: "start_codex_chatgpt_login"; conductorId: string; profileId: string }

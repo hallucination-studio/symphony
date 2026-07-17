@@ -1,17 +1,18 @@
 import type { RootAction, WorkflowNode } from "../../root-workflow/api/Models.js";
 
 export function selectWorkflowLeaf(nodes: WorkflowNode[]): RootAction {
-  const activeLeaves = nodes.filter(
+  const activeNodes = activeWorkflowNodes(nodes);
+  const activeLeaves = activeNodes.filter(
     (node) =>
       node.state === "In Progress" &&
-      !hasChildren(node.issueId, nodes) &&
+      !hasChildren(node.issueId, activeNodes) &&
       node.humanKind !== "plan_approval",
   );
   if (activeLeaves.length > 1) {
     return { kind: "blocked_root", reason: "multiple_active_leaves" };
   }
   const childrenByParent = new Map<string | null, WorkflowNode[]>();
-  for (const node of nodes) {
+  for (const node of activeNodes) {
     const siblings = childrenByParent.get(node.parentIssueId) ?? [];
     siblings.push(node);
     childrenByParent.set(node.parentIssueId, siblings);
@@ -63,6 +64,13 @@ export function selectWorkflowLeaf(nodes: WorkflowNode[]): RootAction {
         }
         continue;
       }
+      if (
+        node.state === "In Progress" &&
+        node.currentInputHash &&
+        node.currentInputHash === node.completedInputHash
+      ) {
+        return { kind: "finalize_work", nodeId: node.issueId };
+      }
       return { kind: "execute_work", nodeId: node.issueId };
     }
     return undefined;
@@ -74,4 +82,23 @@ function hasChildren(issueId: string, nodes: WorkflowNode[]) {
   return nodes.some(
     (node) => node.parentIssueId === issueId && node.state !== "Canceled",
   );
+}
+
+export function activeWorkflowNodes(nodes: WorkflowNode[]): WorkflowNode[] {
+  const byId = new Map(nodes.map((node) => [node.issueId, node]));
+  return nodes.filter((node) => {
+    const visited = new Set<string>();
+    let current: WorkflowNode | undefined = node;
+    while (current) {
+      if (current.state === "Canceled") return false;
+      if (visited.has(current.issueId)) {
+        throw new Error("workflow_tree_cycle");
+      }
+      visited.add(current.issueId);
+      current = current.parentIssueId
+        ? byId.get(current.parentIssueId)
+        : undefined;
+    }
+    return true;
+  });
 }

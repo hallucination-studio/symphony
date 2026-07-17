@@ -222,11 +222,17 @@ test("issue tree reads all pages and validates root parent depth and order", asy
         return cursor
           ? {
               nodes: [{ ...issue("child-1", "project-1"), parentIssueId: "root-1", depth: 1, order: 2 }],
+              rootPhaseLabels: ["planning"],
+              rootManagedComments: [],
+              humanAnswers: [],
               observedAt: "2026-07-16T00:00:01Z",
               pageInfo: { hasNextPage: false },
             }
           : {
               nodes: [issue("root-1", "project-1")],
+              rootPhaseLabels: ["planning"],
+              rootManagedComments: [],
+              humanAnswers: [],
               observedAt: "2026-07-16T00:00:00Z",
               pageInfo: { hasNextPage: true, endCursor: "tree-next" },
             };
@@ -238,6 +244,29 @@ test("issue tree reads all pages and validates root parent depth and order", asy
   const tree = await handler.getCompleteIssueTree("project-1", "root-1");
   assert.equal(tree.nodes.length, 2);
   assert.equal(tree.observedAt, "2026-07-16T00:00:01Z");
+});
+
+test("issue tree rejects invalid Root managed-state facts", async () => {
+  const handler = new LinearGatewayProtocolHandlerImpl(
+    {
+      async getIssueTree() {
+        return {
+          nodes: [issue("root-1", "project-1")],
+          rootPhaseLabels: ["invented-phase"],
+          rootManagedComments: [],
+          humanAnswers: [],
+          observedAt: "2026-07-16T00:00:00Z",
+          pageInfo: { hasNextPage: false },
+        };
+      },
+    },
+    { sleep: async () => undefined, maxAttempts: 1, baseDelayMs: 10 },
+  );
+
+  await assert.rejects(
+    handler.getCompleteIssueTree("project-1", "root-1"),
+    /linear_root_phase_labels_invalid/,
+  );
 });
 
 test("ambiguous update reads back desired remote state before retry", async () => {

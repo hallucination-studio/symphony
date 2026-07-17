@@ -146,10 +146,27 @@ test("Tree traversal selects the first deepest incomplete leaf in Linear order",
   });
   assert.deepEqual(
     selectWorkflowLeaf([
+      node("committed", null, 1, "work", "In Progress", {
+        currentInputHash: "current",
+        completedInputHash: "current",
+      }),
+    ]),
+    { kind: "finalize_work", nodeId: "committed" },
+  );
+  assert.deepEqual(
+    selectWorkflowLeaf([
       node("first", null, 1, "work", "Todo"),
       node("second", null, 1, "work", "Todo"),
     ]),
     { kind: "blocked_root", reason: "linear_sibling_order_ambiguous" },
+  );
+  assert.deepEqual(
+    selectWorkflowLeaf([
+      node("canceled-group", null, 1, "work", "Canceled"),
+      node("ignored-active", "canceled-group", 1, "work", "In Progress"),
+      node("current", null, 2, "work", "Todo"),
+    ]),
+    { kind: "execute_work", nodeId: "current" },
   );
 });
 

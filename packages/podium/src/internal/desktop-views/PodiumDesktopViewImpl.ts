@@ -16,8 +16,9 @@ export class PodiumDesktopViewImpl implements DesktopViewInterface {
     const view = {
       ...(nextAction ? { next_action: nextAction } : {}),
       linear_connection: input.linear_connection,
+      projects: input.projects,
       conductors: input.conductors,
-      active_roots: input.active_nodes,
+      active_roots: input.active_roots,
       review_roots: input.review_roots.map((root) => ({
         root_issue_id: root.root_issue_id,
         identifier: root.identifier,

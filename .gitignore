@@ -5,6 +5,7 @@ dist-backend/
 target/
 *.tsbuildinfo
 apps/podium-desktop/src-tauri/gen/
+apps/podium-desktop/src-tauri/binaries/
 .env
 workspaces/
 __pycache__/

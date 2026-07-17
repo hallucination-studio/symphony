@@ -11,6 +11,7 @@ export type ConductorRuntimeStatus =
   | "crashed";
 
 export interface RepositoryContext {
+  repositoryHandle: string;
   repositoryIdentity: string;
   repositoryDisplayName: string;
   repositoryRoot: string;

@@ -4,7 +4,7 @@ import type {
 } from "../api/Models.js";
 
 export type PlanOperation =
-  | { kind: "preserve"; issueId: string }
+  | { kind: "preserve"; issueId: string; clientNodeKey: string }
   | { kind: "cancel"; issueId: string }
   | {
       kind: "create";
@@ -45,23 +45,30 @@ export function reconcilePlan(input: {
       .filter((issueId): issueId is string => Boolean(issueId)),
   );
   const operations: PlanOperation[] = [];
+  const cancellations: PlanOperation[] = [];
   const currentById = new Map(
     input.current.map((node) => [node.issueId, node]),
   );
 
   for (const current of input.current) {
     if (
-      current.origin === "user" ||
-      current.state === "In Review" ||
-      current.state === "Done"
+      !referenced.has(current.issueId) &&
+      (current.origin === "user" ||
+        current.state === "In Review" ||
+        current.state === "Done")
     ) {
-      operations.push({ kind: "preserve", issueId: current.issueId });
+      operations.push({
+        kind: "preserve",
+        issueId: current.issueId,
+        clientNodeKey: current.issueId,
+      });
     } else if (
       current.origin === "symphony" &&
+      (current.state === "Todo" || current.state === "In Progress") &&
       !referenced.has(current.issueId) &&
       current.humanKind !== "plan_approval"
     ) {
-      operations.push({ kind: "cancel", issueId: current.issueId });
+      cancellations.push({ kind: "cancel", issueId: current.issueId });
     }
   }
 
@@ -74,6 +81,11 @@ export function reconcilePlan(input: {
           existing.state === "In Review" ||
           existing.state === "Done")
       ) {
+        operations.push({
+          kind: "preserve",
+          issueId: existing.issueId,
+          clientNodeKey: planned.clientNodeKey,
+        });
         continue;
       }
       if (
@@ -123,6 +135,7 @@ export function reconcilePlan(input: {
       operations.push(operation);
     }
   }
+  operations.push(...cancellations);
   return {
     operations,
     approval: {

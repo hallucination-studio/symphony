@@ -6,6 +6,7 @@ export interface PerformerInvocation {
   environment?: NodeJS.ProcessEnv;
   workingDirectory?: string;
   deadlineMs: number;
+  stdin?: Uint8Array;
 }
 
 export class GlobalPerformerLane {
@@ -45,11 +46,20 @@ export class GlobalPerformerLane {
       const child = spawn(invocation.executable, invocation.arguments, {
         cwd: invocation.workingDirectory,
         env: invocation.environment,
-        stdio: ["ignore", "pipe", "pipe"],
+        stdio: [invocation.stdin ? "pipe" : "ignore", "pipe", "pipe"],
       });
+      if (invocation.stdin && child.stdin) {
+        child.stdin.end(invocation.stdin);
+      }
       this.#active = child;
       const stdout: Buffer[] = [];
       const stderr: Buffer[] = [];
+      if (!child.stdout || !child.stderr) {
+        child.kill("SIGKILL");
+        this.#active = undefined;
+        reject(new Error("performer_process_stream_missing"));
+        return;
+      }
       child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
       child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
       let forceKill: NodeJS.Timeout | undefined;

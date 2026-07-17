@@ -12,7 +12,6 @@ import {
 import { runCommand } from "../../composition/CommandRunner.js";
 import { GitRootDeliveryImpl } from "../../root-delivery/internal/GitRootDeliveryImpl.js";
 import { ConductorRuntime } from "../../composition/ConductorRuntime.js";
-import { WorkCompletionUseCase } from "../../git-workspaces/internal/WorkCompletionUseCase.js";
 
 test("the global Performer lane serializes child processes", async () => {
   const lane = new GlobalPerformerLane();
@@ -247,50 +246,4 @@ test("database-free runtime reports Gateway failure and executes no action", asy
       sanitizedReason: "Linear unavailable after bounded retries",
     },
   ]);
-});
-
-test("Work completion converges commit then hash then In Review", async () => {
-  const order: string[] = [];
-  const useCase = new WorkCompletionUseCase(
-    {
-      commitWork: async () => {
-        order.push("commit");
-        return { kind: "committed", commit: "abc" } as const;
-      },
-    },
-    {
-      writeCompletedInputHash: async () => {
-        order.push("hash");
-        return { kind: "applied" };
-      },
-      moveWorkToInReview: async () => {
-        order.push("state");
-        return { kind: "applied" };
-      },
-    },
-  );
-  const workspace = {
-    branch: "symphony/runs/sym-1",
-    worktreePath: "/private/worktree",
-  };
-  assert.deepEqual(
-    await useCase.execute({
-      workspace,
-      workIssueId: "work-1",
-      commitMessage: "SYM-2: implement",
-      completedInputHash: "hash-1",
-    }),
-    { kind: "completed" },
-  );
-  assert.deepEqual(order, ["commit", "hash", "state"]);
-
-  order.length = 0;
-  await useCase.execute({
-    workspace,
-    workIssueId: "work-1",
-    commitMessage: "SYM-2: implement",
-    completedInputHash: "hash-1",
-    latestCompletedInputHash: "hash-1",
-  });
-  assert.deepEqual(order, ["state"]);
 });

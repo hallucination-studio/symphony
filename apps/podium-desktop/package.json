@@ -9,6 +9,7 @@
     "build": "npm run build:web && npm run build:backend",
     "build:web": "tsc -b && vite build",
     "build:backend": "tsc -p src-backend/tsconfig.json",
+    "build:sidecars": "node tools/build-sidecars.mjs",
     "typecheck": "tsc -b --pretty false && tsc -p src-backend/tsconfig.json --noEmit",
     "lint": "eslint src src-backend --ext .ts,.tsx --max-warnings 0",
     "design:lint": "node tools/lint-design.mjs",
@@ -19,6 +20,8 @@
   },
   "dependencies": {
     "@symphony/contracts": "0.1.0",
+    "@symphony/podium": "0.1.0",
+    "@tauri-apps/api": "^2.8.0",
     "react": "18.3.1",
     "react-dom": "18.3.1"
   },

@@ -40,7 +40,11 @@ test("OAuth completion consumes state once and persists credentials only in Podi
   });
 
   const attempt = auth.start();
-  assert.deepEqual(attempt, { attemptId: "attempt-1", state: "state-1" });
+  assert.deepEqual(attempt, {
+    attemptId: "attempt-1",
+    state: "state-1",
+    codeChallenge: "iMnq5o6zALKXGivsnlom_0F5_WYda32GHkxlV7mq7hQ",
+  });
 
   const view = await auth.complete({
     state: "state-1",
@@ -141,6 +145,7 @@ test("Binding creation labels one Project and rejects a second Binding", async (
     createConductorId: () => "conductor-1234567890",
   });
   const repositoryContext = {
+    repositoryHandle: "repo-handle-1",
     repositoryIdentity: "repo-1",
     repositoryDisplayName: "symphony",
     repositoryRoot: "/private/repository",
@@ -202,6 +207,7 @@ test("Binding creation persists one stopped intent and safely resumes label assi
     },
   );
   const repositoryContext = {
+    repositoryHandle: "repo-handle-1",
     repositoryIdentity: "repository-1",
     repositoryDisplayName: "Repository",
     repositoryRoot: "/private/repository",
@@ -269,6 +275,7 @@ test("Binding label assignment retries official network errors with bounded back
     installationId: "installation-1",
     projectId: "project-1",
     repositoryContext: {
+      repositoryHandle: "repo-handle-1",
       repositoryIdentity: "repository-1",
       repositoryDisplayName: "Repository",
       repositoryRoot: "/private/repository",

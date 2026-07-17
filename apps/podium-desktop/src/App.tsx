@@ -13,23 +13,24 @@ import type {
 } from "./ui/types";
 import { WorkPage } from "./ui/WorkPage";
 
-const noCommand: CommandHandler = async () => ({ kind: "accepted" });
-const noSecret: SecretHandler = async () => ({ kind: "accepted" });
-
 export function App({
-  initialState = { kind: "loading" },
-  onCommand = noCommand,
-  onSecret = noSecret,
-  onChooseRepository = async () => undefined,
-  onBeginCreateConductor = () => undefined,
-  onOpenExternal = () => undefined,
+  initialState,
+  onCommand,
+  onSecret,
+  onChooseRepository,
+  onBeginCreateConductor,
+  onOpenExternal,
+  onSelectRoot,
+  onSelectConductor,
 }: {
-  initialState?: DesktopState;
-  onCommand?: CommandHandler;
-  onSecret?: SecretHandler;
-  onChooseRepository?: () => Promise<RepositorySelection | undefined>;
-  onBeginCreateConductor?: () => void;
-  onOpenExternal?: (url: string) => void;
+  initialState: DesktopState;
+  onCommand: CommandHandler;
+  onSecret: SecretHandler;
+  onChooseRepository: () => Promise<RepositorySelection | undefined>;
+  onBeginCreateConductor: () => void;
+  onOpenExternal: (url: string) => void;
+  onSelectRoot: (rootId: string) => Promise<void>;
+  onSelectConductor: (conductorId: string) => Promise<void>;
 }) {
   const [page, setPage] = useState<Page>("overview");
   const [rootId, setRootId] = useState<string>();
@@ -47,6 +48,7 @@ export function App({
         onCommand={onCommand}
         onSecret={onSecret}
         onChooseRepository={onChooseRepository}
+        onBeginCreateConductor={onBeginCreateConductor}
       />
     );
   }
@@ -68,7 +70,10 @@ export function App({
           roots={[...overview.activeRoots, ...overview.reviewRoots]}
           detail={rootId && rootDetail?.summary.rootIssueId === rootId ? rootDetail : undefined}
           headingRef={headingRef}
-          onSelect={setRootId}
+          onSelect={(nextRootId) => {
+            setRootId(nextRootId);
+            void onSelectRoot(nextRootId);
+          }}
           onOpenExternal={onOpenExternal}
         />
       )}
@@ -77,7 +82,10 @@ export function App({
           conductors={overview.conductors}
           detail={conductorId && conductorDetail?.summary.conductorId === conductorId ? conductorDetail : undefined}
           headingRef={headingRef}
-          onSelect={setConductorId}
+          onSelect={(nextConductorId) => {
+            setConductorId(nextConductorId);
+            void onSelectConductor(nextConductorId);
+          }}
           onCommand={onCommand}
           onSecret={onSecret}
           onBeginCreateConductor={onBeginCreateConductor}

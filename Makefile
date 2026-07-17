@@ -8,7 +8,7 @@ install:
 	npm install
 	@test -x $(PYTHON) || python3 -m venv $(VENV)
 	$(PIP) install -e packages/contracts
-	$(PIP) install -e 'apps/performer[test]'
+	$(PIP) install -e 'apps/performer[test,build]'
 
 build: install
 	npm run build

@@ -97,6 +97,31 @@ export function parseRootManagedComment(
   return { ok: true, value };
 }
 
+export function serializeRootManagedComment(value: RootManagedComment): string {
+  const lines = [
+    "Symphony Root Run",
+    `conductor_id: ${field(value.conductorId)}`,
+    `performer_profile_id: ${field(value.performerProfileId)}`,
+    ...(value.performerId ? [`performer_id: ${field(value.performerId)}`] : []),
+    ...(value.plannedRootInputHash
+      ? [`planned_root_input_hash: ${field(value.plannedRootInputHash)}`]
+      : []),
+    `usage_input_tokens: ${value.usage.inputTokens}`,
+    `usage_cached_input_tokens: ${value.usage.cachedInputTokens}`,
+    `usage_output_tokens: ${value.usage.outputTokens}`,
+    `usage_reasoning_output_tokens: ${value.usage.reasoningOutputTokens}`,
+    `usage_total_tokens: ${value.usage.totalTokens}`,
+    ...(value.lastUsageTurnId
+      ? [`last_usage_turn_id: ${field(value.lastUsageTurnId)}`]
+      : []),
+    `delivery_branch: ${field(value.deliveryBranch)}`,
+    ...(value.pullRequest ? [`pull_request: ${field(value.pullRequest)}`] : []),
+    ...(value.lastError ? [`last_error: ${field(value.lastError)}`] : []),
+    rootMarker,
+  ];
+  return lines.join("\n");
+}
+
 export function parseWorkDescription(source: string): ParseResult<{
   businessDescription: string;
   managedMarker?: string;
@@ -200,6 +225,14 @@ function hash(value: unknown) {
   return createHash("sha256")
     .update(JSON.stringify(value))
     .digest("hex");
+}
+
+function field(value: string): string {
+  const normalized = value.trim();
+  if (!normalized || normalized.length > 2048 || /[\r\n]/.test(normalized)) {
+    throw new Error("root_managed_field_invalid");
+  }
+  return normalized;
 }
 
 function required(values: Map<string, string>, key: string): ParseResult<string> {

@@ -1,8 +1,7 @@
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
-use std::process::Command;
+use std::process::{Child, Command};
 use std::time::Duration;
-use tokio::process::{Child, Command as TokioCommand};
 use tokio::time::Instant;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -30,9 +29,9 @@ impl ManagedProcess {
                 Ok(())
             });
         }
-        let child = TokioCommand::from(command).spawn().map_err(|_| ProcessError::SpawnFailed)?;
+        let child = command.spawn().map_err(|_| ProcessError::SpawnFailed)?;
         #[cfg(unix)]
-        let process_group_id = child.id().ok_or(ProcessError::SpawnFailed)? as i32;
+        let process_group_id = child.id() as i32;
         Ok(Self {
             child,
             #[cfg(unix)]
@@ -40,8 +39,8 @@ impl ManagedProcess {
         })
     }
 
-    pub async fn observed_exit(&mut self) -> Result<Option<i32>, ProcessError> {
-        let status = self.child.wait().await.map_err(|_| ProcessError::WaitFailed)?;
+    pub fn observed_exit(&mut self) -> Result<Option<i32>, ProcessError> {
+        let status = self.child.wait().map_err(|_| ProcessError::WaitFailed)?;
         #[cfg(unix)]
         if process_group_exists(self.process_group_id)? {
             return Err(ProcessError::ProcessTreeStillRunning);
@@ -49,11 +48,22 @@ impl ManagedProcess {
         Ok(status.code())
     }
 
+    pub fn try_observed_exit(&mut self) -> Result<Option<Option<i32>>, ProcessError> {
+        let Some(status) = self.child.try_wait().map_err(|_| ProcessError::WaitFailed)? else {
+            return Ok(None);
+        };
+        #[cfg(unix)]
+        if process_group_exists(self.process_group_id)? {
+            return Err(ProcessError::ProcessTreeStillRunning);
+        }
+        Ok(Some(status.code()))
+    }
+
     pub async fn shutdown_by(&mut self, deadline: Instant) -> Result<Option<i32>, ProcessError> {
         #[cfg(unix)]
         signal_group(self.process_group_id, libc::SIGTERM)?;
         #[cfg(not(unix))]
-        self.child.start_kill().map_err(|_| ProcessError::SignalFailed)?;
+        self.child.kill().map_err(|_| ProcessError::SignalFailed)?;
 
         let mut exit_code = None;
         while Instant::now() < deadline {
@@ -78,7 +88,7 @@ impl ManagedProcess {
         #[cfg(unix)]
         signal_group(self.process_group_id, libc::SIGKILL)?;
         #[cfg(not(unix))]
-        self.child.start_kill().map_err(|_| ProcessError::SignalFailed)?;
+        self.child.kill().map_err(|_| ProcessError::SignalFailed)?;
         let forced_deadline = Instant::now() + Duration::from_secs(1);
         loop {
             if exit_code.is_none() {
@@ -167,7 +177,7 @@ mod tests {
             command.args(["-c", "exit 7"]);
             let mut process = ManagedProcess::spawn(command).unwrap();
 
-            assert_eq!(process.observed_exit().await.unwrap(), Some(7));
+            assert_eq!(process.observed_exit().unwrap(), Some(7));
         });
     }
 
@@ -179,7 +189,7 @@ mod tests {
             command.args(["-c", "sleep 30 &"]);
             let mut process = ManagedProcess::spawn(command).unwrap();
 
-            assert_eq!(process.observed_exit().await, Err(ProcessError::ProcessTreeStillRunning));
+            assert_eq!(process.observed_exit(), Err(ProcessError::ProcessTreeStillRunning));
             assert!(process.shutdown_within(Duration::from_millis(100)).await.is_ok());
         });
     }

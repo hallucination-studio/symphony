@@ -23,10 +23,10 @@
     "test:architecture": "node --test tests/architecture/*.test.mjs",
     "test:contracts": "node --test tests/contracts/*.test.mjs",
     "test:host": "npm run test:host -w @symphony/podium-desktop --",
-    "test:integration": "node --test tests/integration/*.test.mjs",
+    "test:integration": "node --test tests/integration/*.test.mjs tests/integration/*/*.test.mjs",
     "test:acceptance": "node --test tests/acceptance/*.test.mjs",
     "test:typescript": "npm test --workspaces --if-present",
-    "test": "npm run test:architecture && npm run test:contracts && npm run test:typescript",
+    "test": "npm run test:architecture && npm run test:contracts && npm run test:typescript && npm run test:integration",
     "package": "npm run package -w @symphony/podium-desktop"
   },
   "devDependencies": {

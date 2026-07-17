@@ -1,4 +1,5 @@
 import { podiumError } from "../errors.js";
+import { createHash } from "node:crypto";
 import type { LinearInstallationStoreInterface } from "./api/LinearInstallationStoreInterface.js";
 import type { LinearOAuthClientInterface } from "./api/LinearOAuthClientInterface.js";
 
@@ -16,16 +17,23 @@ export class LinearAuthImpl {
     private readonly dependencies: AuthDependencies,
   ) {}
 
-  start(): { attemptId: string; state: string } {
+  start(): { attemptId: string; state: string; codeChallenge: string } {
     const attemptId = this.dependencies.createId();
     const state = this.dependencies.createState();
+    const codeVerifier = this.dependencies.createSecret();
     this.store.saveOAuthAttempt({
       attemptId,
       state,
-      codeVerifier: this.dependencies.createSecret(),
+      codeVerifier,
       createdAt: this.dependencies.now(),
     });
-    return { attemptId, state };
+    return {
+      attemptId,
+      state,
+      codeChallenge: createHash("sha256")
+        .update(codeVerifier)
+        .digest("base64url"),
+    };
   }
 
   async complete(input: {

@@ -12,5 +12,8 @@
     "test": "tsx --test \"src/**/*.test.ts\"",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint src --ext .ts --max-warnings 0"
+  },
+  "dependencies": {
+    "@symphony/contracts": "0.1.0"
   }
 }

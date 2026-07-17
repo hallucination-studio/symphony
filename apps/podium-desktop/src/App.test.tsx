@@ -1,12 +1,39 @@
 import { fireEvent, render, screen, within } from "@testing-library/react";
+import type { ComponentProps } from "react";
 import { expect, test, vi } from "vitest";
 
-import { App } from "./App";
+import { App as DesktopApp } from "./App";
 import {
   connectedOverview,
   conductorDetail,
   rootDetail,
 } from "./test/fixtures";
+
+type AppProps = ComponentProps<typeof DesktopApp>;
+
+function App({
+  initialState,
+  onCommand = async () => ({ kind: "accepted" }),
+  onSecret = async () => ({ kind: "accepted" }),
+  onChooseRepository = async () => undefined,
+  onBeginCreateConductor = () => undefined,
+  onOpenExternal = () => undefined,
+  onSelectRoot = async () => undefined,
+  onSelectConductor = async () => undefined,
+}: Pick<AppProps, "initialState"> & Partial<Omit<AppProps, "initialState">>) {
+  return (
+    <DesktopApp
+      initialState={initialState}
+      onCommand={onCommand}
+      onSecret={onSecret}
+      onChooseRepository={onChooseRepository}
+      onBeginCreateConductor={onBeginCreateConductor}
+      onOpenExternal={onOpenExternal}
+      onSelectRoot={onSelectRoot}
+      onSelectConductor={onSelectConductor}
+    />
+  );
+}
 
 test("shows conditional Linear setup without persistent navigation", () => {
   render(<App initialState={{ kind: "linear-setup" }} />);
@@ -41,6 +68,7 @@ test("creates a Conductor only after Project and native repository selection", a
         repositoryHandle: "repo-handle",
         displayName: "acme/symphony",
         baseBranch: "main",
+        baseBranches: ["main"],
       })}
     />,
   );
@@ -55,6 +83,7 @@ test("creates a Conductor only after Project and native repository selection", a
       repositoryHandle: "repo-handle",
       displayName: "acme/symphony",
       baseBranch: "main",
+      baseBranches: ["main"],
     },
   });
 });
@@ -77,6 +106,7 @@ test("prevents duplicate Conductor creation while confirmation is pending", asyn
         repositoryHandle: "repo-handle",
         displayName: "acme/symphony",
         baseBranch: "main",
+        baseBranches: ["main"],
       })}
     />,
   );

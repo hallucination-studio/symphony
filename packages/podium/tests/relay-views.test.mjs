@@ -39,6 +39,7 @@ test("overview composes one Next Action and safe fresh profile usage and Root su
   const overview = view.overview({
     now: "2026-07-16T00:01:00Z",
     linear_connection: { status: "connected", workspace_name: "Workspace", observed_at: "2026-07-16T00:00:59Z" },
+    projects: [],
     conductors: [],
     profiles: [{
       profile_id: "profile-1",
@@ -53,15 +54,12 @@ test("overview composes one Next Action and safe fresh profile usage and Root su
       is_active: true,
       observed_at: "2026-07-16T00:00:59Z",
     }],
-    active_nodes: [{
-      issue_id: "w1",
-      kind: "work_leaf",
-      state: "In Progress",
-      order: 1,
-      depth: 1,
+    active_roots: [{
+      root_issue_id: "r1",
+      identifier: "SYM-1",
+      status: "Working",
       title: "Active",
-      is_canceled: false,
-      is_current: true,
+      observed_at: "2026-07-16T00:00:58Z",
     }],
     review_roots: [
       { root_issue_id: "r2", identifier: "SYM-2", title: "Review", status: "in-review", observed_at: "2026-07-16T00:00:57Z" },
@@ -86,9 +84,10 @@ test("overview selects the documented single Next Action priority", () => {
       status: "connected",
       observed_at: "2026-07-16T00:00:59Z",
     },
+    projects: [],
     conductors: [],
     profiles: [],
-    active_nodes: [],
+    active_roots: [],
     review_roots: [],
     completed_root_count: 0,
     usage: {
