@@ -1,13 +1,13 @@
 import type { JsonValue } from "../../public/DesktopViewInterface.js";
 import type { PodiumConductorServices } from "../../public/PodiumConductorProtocolHandler.js";
 import { LinearGatewayProtocolHandlerImpl } from "../linear-gateway/LinearGatewayProtocolHandlerImpl.js";
-import { LinearSdkImpl } from "../linear-gateway/internal/LinearSdkImpl.js";
+import type { LinearClientInterface } from "../linear-gateway/api/LinearClientInterface.js";
 import type {
   LinearIssueState,
   LinearIssueValue,
   LinearMutationCommand,
 } from "../linear-gateway/types.js";
-import { SqlitePodiumStoreImpl } from "../storage/SqlitePodiumStoreImpl.js";
+import type { PodiumConductorStoreInterface } from "./PodiumStoreInterfaces.js";
 
 type Body = Record<string, JsonValue> & { kind: string };
 
@@ -15,14 +15,14 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
   #activeInstanceId: string | undefined;
 
   constructor(
-    private readonly store: SqlitePodiumStoreImpl,
+    private readonly store: PodiumConductorStoreInterface,
     private readonly options: {
       now(): string;
       sleep(delayMs: number): Promise<void>;
       createLinearSdk(
         accessToken: string,
         organizationId: string,
-      ): LinearSdkImpl;
+      ): LinearClientInterface;
     },
   ) {}
 
@@ -62,7 +62,7 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
     if (!this.#activeInstanceId) throw new Error("conductor_handshake_required");
     const binding = this.store.getConductorBinding();
     if (!binding) throw new Error("conductor_binding_missing");
-    const installation = this.store.getLinearInstallation(
+    const installation = this.store.getLinearCredential(
       binding.linearInstallationId,
     );
     if (!installation) throw new Error("linear_installation_missing");

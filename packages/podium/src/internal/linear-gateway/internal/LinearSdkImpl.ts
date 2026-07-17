@@ -73,6 +73,7 @@ export class LinearSdkImpl implements LinearClientInterface {
         projectId: project.id,
         organizationId: this.organizationId,
         name: project.name,
+        slugId: project.slugId,
         updatedAt: project.updatedAt.toISOString(),
       })),
       pageInfo: pageInfo(page.pageInfo),

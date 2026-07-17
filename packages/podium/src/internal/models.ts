@@ -18,10 +18,13 @@ export interface RepositoryContext {
   baseBranch: string;
 }
 
-export interface LinearInstallation {
+export interface LinearCredential {
   installationId: string;
   organizationId: string;
   accessToken: string;
+}
+
+export interface LinearInstallation extends LinearCredential {
   refreshToken: string;
   expiresAt: string;
 }
@@ -31,6 +34,7 @@ export interface ProjectCatalogEntry {
   installationId: string;
   organizationId: string;
   name: string;
+  slugId?: string;
   updatedAt: string;
 }
 

@@ -31,6 +31,7 @@ export function OverviewPage({
               <dt>Linear</dt>
               <dd>
                 <StatusBadge
+                  testId="linear-status"
                   label={view.linearConnection.status === "connected" ? "Connected" : "Reconnect required"}
                   tone={view.linearConnection.status === "connected" ? "positive" : "negative"}
                 />

@@ -21,6 +21,11 @@ where
     R: Runtime,
     F: FnOnce(Result<Option<RepositoryContext>, RepositoryError>) + Send + 'static,
 {
+    #[cfg(feature = "e2e")]
+    if let Some(path) = std::env::var_os("SYMPHONY_E2E_REPOSITORY_PATH") {
+        callback(inspect_selection(Some(PathBuf::from(path))));
+        return;
+    }
     app.dialog().file().pick_folder(move |selection| {
         let selected_path = selection
             .map(|path| path.into_path().map_err(|_| RepositoryError::InvalidSelectedPath))

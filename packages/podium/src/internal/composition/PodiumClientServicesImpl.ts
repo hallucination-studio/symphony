@@ -4,6 +4,7 @@ import type { JsonValue } from "../../public/DesktopViewInterface.js";
 import type { ConductorSummaryView } from "../../public/DesktopViewInterface.js";
 import type { PodiumClientServices } from "../../public/PodiumClientProtocolHandler.js";
 import type { PodiumDesktopHostPorts } from "../../public/PodiumDesktopHostPorts.js";
+import type { LinearClientInterface } from "../linear-gateway/api/LinearClientInterface.js";
 import { ConductorBindingUseCase } from "../conductor-bindings/ConductorBindingUseCase.js";
 import { PodiumDesktopViewImpl } from "../desktop-views/PodiumDesktopViewImpl.js";
 import { LinearAuthImpl } from "../linear-auth/LinearAuthImpl.js";
@@ -11,7 +12,8 @@ import { LinearOAuthHttpClientImpl } from "../linear-auth/LinearOAuthHttpClientI
 import { LinearGatewayProtocolHandlerImpl } from "../linear-gateway/LinearGatewayProtocolHandlerImpl.js";
 import { LinearSdkImpl } from "../linear-gateway/internal/LinearSdkImpl.js";
 import { ProjectCatalogUseCase } from "../project-catalog/ProjectCatalogUseCase.js";
-import { SqlitePodiumStoreImpl } from "../storage/SqlitePodiumStoreImpl.js";
+import type { LinearInstallationStoreInterface } from "../linear-auth/api/LinearInstallationStoreInterface.js";
+import type { PodiumClientStoreInterface } from "./PodiumStoreInterfaces.js";
 
 type Body = Record<string, JsonValue> & { kind: string };
 
@@ -19,20 +21,25 @@ export class PodiumClientServicesImpl implements PodiumClientServices {
   readonly #view = new PodiumDesktopViewImpl({ staleAfterMs: 60_000 });
 
   constructor(
-    private readonly store: SqlitePodiumStoreImpl,
+    private readonly store: PodiumClientStoreInterface,
     private readonly oauth: LinearAuthImpl,
     private readonly oauthHttp: LinearOAuthHttpClientImpl,
     private readonly host: PodiumDesktopHostPorts,
     private readonly now: () => string,
+    private readonly createLinearSdk: (
+      accessToken: string,
+      organizationId: string,
+    ) => LinearClientInterface = (accessToken, organizationId) =>
+      new LinearSdkImpl(accessToken, organizationId),
   ) {}
 
   async completeOAuth(input: { state: string; authorizationCode: string }) {
     const connection = await this.oauth.complete(input);
-    const installation = this.store.getOnlyLinearInstallation();
+    const installation = this.store.getOnlyLinearCredential();
     if (!installation) throw new Error("linear_installation_missing");
     await new ProjectCatalogUseCase(
       this.store,
-      new LinearSdkImpl(
+      this.createLinearSdk(
         installation.accessToken,
         installation.organizationId,
       ),
@@ -137,7 +144,7 @@ export class PodiumClientServicesImpl implements PodiumClientServices {
   }
 
   async #createConductor(body: Body): Promise<JsonValue> {
-    const installation = this.store.getOnlyLinearInstallation();
+    const installation = this.store.getOnlyLinearCredential();
     if (!installation) throw new Error("linear_installation_missing");
     const repositoryBody = record(body.repository, "repository_selection_invalid");
     const repositoryHandle = requiredString(
@@ -148,7 +155,7 @@ export class PodiumClientServicesImpl implements PodiumClientServices {
       repositoryHandle,
       requiredString(repositoryBody.base_branch, "repository_base_branch_missing"),
     );
-    const sdk = new LinearSdkImpl(
+    const sdk = this.createLinearSdk(
       installation.accessToken,
       installation.organizationId,
     );
@@ -202,7 +209,7 @@ export class PodiumClientServicesImpl implements PodiumClientServices {
 
   async #overview(): Promise<JsonValue> {
     const now = this.now();
-    const installation = this.store.getOnlyLinearInstallation();
+    const installation = this.store.getOnlyLinearCredential();
     const binding = this.store.getConductorBinding();
     const observation = binding
       ? this.store.getRuntimeObservation(binding.bindingId)
@@ -340,7 +347,7 @@ export class PodiumClientServicesImpl implements PodiumClientServices {
   }
 
   async #rootDetail(rootIssueId: string): Promise<JsonValue> {
-    const installation = this.store.getOnlyLinearInstallation();
+    const installation = this.store.getOnlyLinearCredential();
     const binding = this.store.getConductorBinding();
     if (!installation || !binding) throw new Error("conductor_binding_missing");
     const observation = this.store.getRuntimeObservation(binding.bindingId);
@@ -388,7 +395,7 @@ export class PodiumClientServicesImpl implements PodiumClientServices {
     organizationId: string;
   }) {
     return new LinearGatewayProtocolHandlerImpl(
-      new LinearSdkImpl(installation.accessToken, installation.organizationId),
+      this.createLinearSdk(installation.accessToken, installation.organizationId),
       {
         maxAttempts: 4,
         baseDelayMs: 250,
@@ -407,7 +414,7 @@ export class PodiumClientServicesImpl implements PodiumClientServices {
 }
 
 export function createLinearAuth(
-  store: SqlitePodiumStoreImpl,
+  store: LinearInstallationStoreInterface,
   oauthHttp: LinearOAuthHttpClientImpl,
   now: () => string,
 ) {
@@ -451,8 +458,8 @@ function profileCommand(body: Body) {
 }
 
 function conductorSummary(
-  binding: NonNullable<ReturnType<SqlitePodiumStoreImpl["getConductorBinding"]>>,
-  observation: ReturnType<SqlitePodiumStoreImpl["getRuntimeObservation"]>,
+  binding: NonNullable<ReturnType<PodiumClientStoreInterface["getConductorBinding"]>>,
+  observation: ReturnType<PodiumClientStoreInterface["getRuntimeObservation"]>,
   now: string,
 ): ConductorSummaryView {
   const status = observation
@@ -477,7 +484,7 @@ function conductorSummary(
 }
 
 function runtimeViewStatus(
-  status: NonNullable<ReturnType<SqlitePodiumStoreImpl["getRuntimeObservation"]>>["status"],
+  status: NonNullable<ReturnType<PodiumClientStoreInterface["getRuntimeObservation"]>>["status"],
 ): ConductorSummaryView["status"] {
   if (status === "not-responding") return "not_responding";
   if (status === "project-conflict") return "project_conflict";

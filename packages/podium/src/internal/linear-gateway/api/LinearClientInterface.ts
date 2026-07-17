@@ -7,6 +7,7 @@ export interface LinearProjectValue {
   projectId: string;
   organizationId: string;
   name: string;
+  slugId?: string;
   updatedAt: string;
 }
 

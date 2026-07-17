@@ -30,11 +30,16 @@ fn open_external_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
 }
 
 fn main() {
-    let app = tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .manage(Arc::new(OAuthReturnRegistry::default()))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_deep_link::init())
-        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_opener::init());
+    #[cfg(feature = "e2e")]
+    let builder = builder
+        .plugin(tauri_plugin_wdio::init())
+        .plugin(tauri_plugin_wdio_webdriver::init());
+    let app = builder
         .invoke_handler(tauri::generate_handler![
             podium_client_request,
             select_repository_context,

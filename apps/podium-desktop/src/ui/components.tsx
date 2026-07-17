@@ -61,9 +61,9 @@ export function PageHeading({
   );
 }
 
-export function StatusBadge({ label, tone }: { label: string; tone?: string }) {
+export function StatusBadge({ label, tone, testId }: { label: string; tone?: string; testId?: string }) {
   return (
-    <span className="status-badge" data-tone={tone ?? "neutral"}>
+    <span className="status-badge" data-tone={tone ?? "neutral"} {...(testId ? { "data-testid": testId } : {})}>
       <span aria-hidden="true" className="status-dot" />
       {label}
     </span>

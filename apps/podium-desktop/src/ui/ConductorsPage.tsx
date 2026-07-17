@@ -52,7 +52,7 @@ export function ConductorsPage({
       <PageHeading title={conductor.displayName} description={`${conductor.projectName ?? "Unbound"} · ${conductor.repositoryDisplayName ?? "Repository unavailable"}`} headingRef={headingRef} />
       <div className="page-stack">
         <section className="panel action-row">
-          <div><h2>Runtime</h2><StatusBadge label={labelFromIdentifier(conductor.status)} /></div>
+          <div><h2>Runtime</h2><StatusBadge testId="conductor-runtime-status" label={labelFromIdentifier(conductor.status)} /></div>
           <div className="button-row">
             <button className="button" onClick={() => onCommand({ kind: "stop_conductor", conductorId: conductor.conductorId })}>Stop</button>
             <button className="button primary" onClick={() => onCommand({ kind: "restart_conductor", conductorId: conductor.conductorId })}>Restart</button>
@@ -61,11 +61,11 @@ export function ConductorsPage({
         <section className="panel">
           <div className="section-heading">
             <h2>Performer Profiles</h2>
-            <button className="button primary" onClick={() => setShowProfile(true)}>Configure profile</button>
+            <button data-testid="configure-profile" className="button primary" onClick={() => setShowProfile(true)}>Configure profile</button>
           </div>
           <ul className="plain-list">
             {detail.profiles.map((profile) => (
-              <li key={profile.profileId}>
+              <li data-testid="profile-row" key={profile.profileId}>
                 <div>
                   <strong>{profile.displayName}{profile.isActive ? " · Active for new Roots" : ""}</strong>
                   <span>{profile.sanitizedAccountLabel ?? "Account not configured"} · {profile.codexTurnSettings.model} · {labelFromIdentifier(profile.readiness)}</span>
@@ -76,10 +76,10 @@ export function ConductorsPage({
                     <button className="button" onClick={() => onCommand({ kind: "start_codex_chatgpt_login", conductorId: conductor.conductorId, profileId: profile.profileId })}>Sign in with ChatGPT</button>
                   )}
                   {profile.readiness === "login-required" && profile.authenticationMethod === "api_key" && (
-                    <button className="button" onClick={() => setSecretProfileId(profile.profileId)}>Set API Key</button>
+                    <button data-testid="profile-set-api-key" className="button" onClick={() => setSecretProfileId(profile.profileId)}>Set API Key</button>
                   )}
                   {!profile.isActive && profile.readiness === "ready" && (
-                    <button className="button" onClick={() => onCommand({ kind: "activate_performer_profile", conductorId: conductor.conductorId, profileId: profile.profileId })}>Activate</button>
+                    <button data-testid="profile-activate" className="button" onClick={() => onCommand({ kind: "activate_performer_profile", conductorId: conductor.conductorId, profileId: profile.profileId })}>Activate</button>
                   )}
                 </div>
               </li>

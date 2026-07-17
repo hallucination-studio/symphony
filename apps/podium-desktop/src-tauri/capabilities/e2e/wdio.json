@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "e2e-wdio",
+  "description": "E2E-only WebdriverIO capability set",
+  "windows": ["main"],
+  "permissions": ["core:default", "wdio:default", "wdio-webdriver:default"]
+}

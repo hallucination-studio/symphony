@@ -13,10 +13,24 @@ import {
   PodiumConductorProtocolHandler,
   type PodiumDesktopHostPorts,
   type PodiumClientServices,
+  type PodiumConductorServices,
 } from "@symphony/podium";
 import { FramedProtocolPeer } from "./FramedProtocolPeer.js";
 
 const MAX_FRAME_BYTES = 1_048_576;
+
+export interface PodiumBackendComposition {
+  conductorServices: PodiumConductorServices;
+  createClientServices(
+    host: PodiumDesktopHostPorts,
+  ): PodiumClientServices | Promise<PodiumClientServices>;
+  close(): void;
+}
+
+export type PodiumBackendCompositionFactory = (input: {
+  environment: NodeJS.ProcessEnv;
+  dataRoot: string;
+}) => PodiumBackendComposition | Promise<PodiumBackendComposition>;
 
 export async function servePodiumClient(
   services: PodiumClientServices,
@@ -75,7 +89,11 @@ export async function servePodiumClient(
   }
 }
 
-export async function runPodiumBackend(environment = process.env) {
+export async function runPodiumBackend(
+  environment = process.env,
+  createComposition: PodiumBackendCompositionFactory =
+    createProductionComposition,
+) {
   const dataRoot = required(environment.SYMPHONY_PODIUM_DATA_ROOT, "podium_data_root_missing");
   const conductorFd = positiveInteger(
     environment.SYMPHONY_CONDUCTOR_IPC_FD,
@@ -89,9 +107,7 @@ export async function runPodiumBackend(environment = process.env) {
   const conductorOutput = streamOutput(conductorFd);
   const hostInput = streamInput(hostFd);
   const hostOutput = streamOutput(hostFd);
-  const conductorOwner = createPodiumConductorServices({
-    databasePath: path.join(dataRoot, "podium.db"),
-  });
+  const composition = await createComposition({ environment, dataRoot });
   const conductorPeer = new FramedProtocolPeer(
     conductorInput,
     conductorOutput,
@@ -99,7 +115,7 @@ export async function runPodiumBackend(environment = process.env) {
       decode: decodePodiumConductorPodiumConductorMessage,
       secretLength: profileSecretLength,
       handleRequest: (body, secret) =>
-        new PodiumConductorProtocolHandler(conductorOwner.services).handle(
+        new PodiumConductorProtocolHandler(composition.conductorServices).handle(
           {
             protocol_version: "1",
             request_id: "conductor-incoming",
@@ -118,7 +134,7 @@ export async function runPodiumBackend(environment = process.env) {
     async handleRequest(body) {
       const event = object(body, "host_event_invalid");
       if (event.kind === "process_observed_exit") {
-        conductorOwner.services.observeExit({
+        composition.conductorServices.observeExit({
           bindingId: requiredString(event.binding_id, "binding_id_missing"),
           instanceId: requiredString(event.instance_id, "instance_id_missing"),
           observedAt: requiredString(event.observed_at, "observed_at_missing"),
@@ -148,23 +164,52 @@ export async function runPodiumBackend(environment = process.env) {
     },
   });
   const host = hostPorts(hostPeer, conductorPeer, dataRoot);
-  const clientOwner = createPodiumClientServices({
-    databasePath: path.join(dataRoot, "podium.db"),
-    linearClientId: required(environment.SYMPHONY_LINEAR_CLIENT_ID, "linear_client_id_missing"),
-    linearClientSecret: required(
-      environment.SYMPHONY_LINEAR_CLIENT_SECRET,
-      "linear_client_secret_missing",
-    ),
-    linearRedirectUri: "symphony://oauth/linear/callback",
-    host,
-  });
-  clientServices.current = clientOwner.services;
   try {
-    await servePodiumClient(clientOwner.services, process.stdin, process.stdout);
+    clientServices.current = await composition.createClientServices(host);
+    await servePodiumClient(
+      clientServices.current,
+      process.stdin,
+      process.stdout,
+    );
   } finally {
-    clientOwner.close();
-    conductorOwner.close();
+    composition.close();
   }
+}
+
+async function createProductionComposition({
+  environment,
+  dataRoot,
+}: {
+  environment: NodeJS.ProcessEnv;
+  dataRoot: string;
+}): Promise<PodiumBackendComposition> {
+  const conductorOwner = createPodiumConductorServices({
+    databasePath: path.join(dataRoot, "podium.db"),
+  });
+  let clientOwner: ReturnType<typeof createPodiumClientServices> | undefined;
+  return {
+    conductorServices: conductorOwner.services,
+    createClientServices(host) {
+      clientOwner = createPodiumClientServices({
+        databasePath: path.join(dataRoot, "podium.db"),
+        linearClientId: required(
+          environment.SYMPHONY_LINEAR_CLIENT_ID,
+          "linear_client_id_missing",
+        ),
+        linearClientSecret: required(
+          environment.SYMPHONY_LINEAR_CLIENT_SECRET,
+          "linear_client_secret_missing",
+        ),
+        linearRedirectUri: "symphony://oauth/linear/callback",
+        host,
+      });
+      return clientOwner.services;
+    },
+    close() {
+      clientOwner?.close();
+      conductorOwner.close();
+    },
+  };
 }
 
 function frameFailure(code: string) {
@@ -337,8 +382,10 @@ function positiveInteger(value: string | undefined, code: string) {
   return number;
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
-  runPodiumBackend().catch((error) => {
+export function runPodiumBackendEntrypoint(
+  createComposition?: PodiumBackendCompositionFactory,
+): void {
+  runPodiumBackend(process.env, createComposition).catch((error) => {
     process.stderr.write(
       `${JSON.stringify({
         event: "podium_backend_start_failed",
@@ -354,4 +401,8 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     );
     process.exitCode = 1;
   });
+}
+
+if (import.meta.url === `file://${process.argv[1]}`) {
+  runPodiumBackendEntrypoint();
 }

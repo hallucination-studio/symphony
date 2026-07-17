@@ -79,7 +79,7 @@ export class ConductorBindingUseCase {
         { actionRequired: "use_existing_binding" },
       );
     }
-    const installation = this.store.getLinearInstallation(input.installationId);
+    const installation = this.store.getLinearCredential(input.installationId);
     const project = this.store.getProject(input.projectId);
     if (
       !installation ||

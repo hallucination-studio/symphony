@@ -1,11 +1,11 @@
 import type {
   ConductorBinding,
-  LinearInstallation,
+  LinearCredential,
   ProjectCatalogEntry,
 } from "../../models.js";
 
 export interface ConductorBindingStoreInterface {
-  getLinearInstallation(installationId: string): LinearInstallation | undefined;
+  getLinearCredential(installationId: string): LinearCredential | undefined;
   getProject(projectId: string): ProjectCatalogEntry | undefined;
   saveConductorBinding(binding: ConductorBinding): void;
   getConductorBinding(): ConductorBinding | undefined;

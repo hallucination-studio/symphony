@@ -23,4 +23,9 @@ skills-lock.json
 .test-real-flow
 .test/
 tmp
-tasks/
+tasks/*
+!tasks/*.md
+!tasks/scope-ledgers/
+!tasks/scope-ledgers/*.md
+!tasks/reviews/
+!tasks/reviews/*.md

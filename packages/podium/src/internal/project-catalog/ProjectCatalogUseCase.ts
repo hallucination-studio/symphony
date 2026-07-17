@@ -1,4 +1,4 @@
-import type { LinearInstallationStoreInterface } from "../linear-auth/api/LinearInstallationStoreInterface.js";
+import type { LinearCredentialStoreInterface } from "../linear-auth/api/LinearCredentialStoreInterface.js";
 import type { LinearClientInterface } from "../linear-gateway/api/LinearClientInterface.js";
 import type { ProjectCatalogEntry } from "../models.js";
 
@@ -6,12 +6,12 @@ const PAGE_LIMIT = 250;
 
 export class ProjectCatalogUseCase {
   constructor(
-    private readonly store: LinearInstallationStoreInterface,
+    private readonly store: LinearCredentialStoreInterface,
     private readonly client: Pick<LinearClientInterface, "listProjects">,
   ) {}
 
   async refresh(installationId: string): Promise<ProjectCatalogEntry[]> {
-    const installation = this.store.getLinearInstallation(installationId);
+    const installation = this.store.getLinearCredential(installationId);
     if (!installation) throw new Error("linear_installation_missing");
 
     const projects: ProjectCatalogEntry[] = [];

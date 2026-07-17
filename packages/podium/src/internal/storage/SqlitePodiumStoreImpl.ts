@@ -132,6 +132,10 @@ export class SqlitePodiumStoreImpl
       : undefined;
   }
 
+  getLinearCredential(installationId: string): LinearInstallation | undefined {
+    return this.getLinearInstallation(installationId);
+  }
+
   getOnlyLinearInstallation(): LinearInstallation | undefined {
     const rows = this.#database
       .prepare("SELECT installation_id FROM linear_installations ORDER BY installation_id LIMIT 2")
@@ -140,6 +144,10 @@ export class SqlitePodiumStoreImpl
     return rows[0]
       ? this.getLinearInstallation(rows[0].installation_id)
       : undefined;
+  }
+
+  getOnlyLinearCredential(): LinearInstallation | undefined {
+    return this.getOnlyLinearInstallation();
   }
 
   saveProject(project: ProjectCatalogEntry): void {
