@@ -46,6 +46,31 @@ export function createDesktopClient({
       return { linear_connection: { status: "connected" } };
     },
 
+    async openConductors() {
+      const links = await browser.$$(".nav-link");
+      for (const link of links) {
+        if ((await link.getText()).trim() === "Conductors") {
+          await link.click();
+          await waitFor("[data-testid=conductor-runtime-status]");
+          return { page: "conductors" };
+        }
+      }
+      throw new Error("e2e_conductors_navigation_missing");
+    },
+
+    async readProfile(displayName) {
+      const row = await findProfile(displayName);
+      return parseProfileObservation(await row.getText());
+    },
+
+    async readConductorRuntime() {
+      const status = (await (await waitFor(
+        "[data-testid=conductor-runtime-status]",
+      )).getText()).trim();
+      if (!status) throw new Error("e2e_conductor_runtime_status_missing");
+      return { status };
+    },
+
     async readSelectedProject() {
       return {
         projectName: await selectedText("[data-testid=project-select]"),
@@ -153,4 +178,20 @@ function reasoningLabel(reasoningEffort) {
   }[reasoningEffort];
   if (!label) throw new Error("e2e_reasoning_effort_invalid");
   return label;
+}
+
+function parseProfileObservation(text) {
+  const readiness = text.match(
+    /(?:^|[·\n])\s*(Ready|Invalid|Login-Required)(?=\s*(?:[·\n]|$))/u,
+  )?.[1];
+  const readinessByLabel = {
+    Ready: "ready",
+    Invalid: "invalid",
+    "Login-Required": "login-required",
+  };
+  if (!readiness) throw new Error("e2e_profile_readiness_missing");
+  return {
+    readiness: readinessByLabel[readiness],
+    isActive: text.includes("Active for new Roots"),
+  };
 }
