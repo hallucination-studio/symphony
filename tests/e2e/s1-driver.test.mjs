@@ -82,7 +82,7 @@ test("S1 claim driver waits for Linear claim and combines safe Desktop observati
       calls,
     }),
     projectSlugId: "8ab43179fb54",
-    now: () => (nowCalls++ === 0 ? 0 : 10),
+    now: () => [0, 10, 20][nowCalls++] ?? 20,
     sleep: async (delayMs) => calls.push(["sleep", delayMs]),
     pollIntervalMs: 5,
     timeoutMs: 100,
@@ -166,6 +166,123 @@ test("S1 claim driver rejects malformed external claim facts", async () => {
 
   await driver.createRootA();
   await assert.rejects(driver.waitForClaim(), /s1_claim_facts_invalid/u);
+});
+
+test("S1 claim driver waits for the Plan barrier without starting Work", async () => {
+  const planFacts = [
+    {
+      rootId: "root-a",
+      state: "In Progress",
+      phase: "planning",
+      treeMatches: false,
+      planApprovalCount: 0,
+      planApprovalReady: false,
+      plannedRootInputReady: false,
+      workStarted: false,
+    },
+    {
+      rootId: "root-a",
+      state: "In Progress",
+      phase: "awaiting-human",
+      treeMatches: true,
+      planApprovalCount: 1,
+      planApprovalState: "In Progress",
+      planApprovalReady: true,
+      plannedRootInputReady: true,
+      workStarted: false,
+    },
+  ];
+  let nowCalls = 0;
+  const driver = createS1ClaimDriver({
+    linear: {
+      async createAndDelegateRoot() {
+        return { rootId: "root-a", delegated: true, readBack: true };
+      },
+      async readRootClaimFacts() {
+        return {
+          rootId: "root-a",
+          state: "In Progress",
+          phase: "planning",
+          singletonCount: 1,
+          managedCommentCount: 1,
+          managedCommentReady: true,
+        };
+      },
+      async readRootPlanFacts() {
+        return planFacts.shift();
+      },
+    },
+    client: desktopObservationClient({
+      profile: { readiness: "ready", isActive: true },
+      runtime: { status: "Ready" },
+    }),
+    projectSlugId: "8ab43179fb54",
+    now: () => (nowCalls++ === 0 ? 0 : 10),
+    sleep: async () => undefined,
+    timeoutMs: 100,
+    pollIntervalMs: 5,
+  });
+
+  await driver.createRootA();
+  await driver.waitForClaim();
+  assert.deepEqual(await driver.waitForPlan(), {
+    rootId: "root-a",
+    state: "In Progress",
+    phase: "awaiting-human",
+    treeMatches: true,
+    planApprovalCount: 1,
+    planApprovalState: "In Progress",
+    planApprovalReady: true,
+    plannedRootInputReady: true,
+    workStarted: false,
+  });
+});
+
+test("S1 claim driver stops when Plan evidence shows Work already started", async () => {
+  let nowCalls = 0;
+  const driver = createS1ClaimDriver({
+    linear: {
+      async createAndDelegateRoot() {
+        return { rootId: "root-a", delegated: true, readBack: true };
+      },
+      async readRootClaimFacts() {
+        return {
+          rootId: "root-a",
+          state: "In Progress",
+          phase: "planning",
+          singletonCount: 1,
+          managedCommentCount: 1,
+          managedCommentReady: true,
+        };
+      },
+      async readRootPlanFacts() {
+        return {
+          rootId: "root-a",
+          state: "In Progress",
+          phase: "awaiting-human",
+          treeMatches: true,
+          planApprovalCount: 1,
+          planApprovalState: "In Progress",
+          planApprovalReady: true,
+          plannedRootInputReady: true,
+          workStarted: true,
+        };
+      },
+    },
+    client: desktopObservationClient({
+      profile: { readiness: "ready", isActive: true },
+      runtime: { status: "Ready" },
+    }),
+    projectSlugId: "8ab43179fb54",
+    now: () => [0, 10, 20][nowCalls++] ?? 20,
+    sleep: async () => undefined,
+    timeoutMs: 5,
+    pollIntervalMs: 1,
+  });
+
+  await driver.createRootA();
+  await driver.waitForClaim();
+  await assert.rejects(driver.waitForPlan(), /s1_plan_timeout/u);
 });
 
 test("Desktop client reads the active Profile and Conductor runtime from the UI", async () => {

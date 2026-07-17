@@ -51,6 +51,7 @@ export function createS1ClaimDriver({
   requireFunction(sleep, "s1_sleep_missing");
 
   let createdRoot;
+  let claimedRoot;
   return Object.freeze({
     async createRootA() {
       if (createdRoot) throw new Error("s1_root_a_already_created");
@@ -66,15 +67,28 @@ export function createS1ClaimDriver({
     async waitForClaim() {
       if (!createdRoot?.rootId) throw new Error("s1_root_a_missing");
       await client.openConductors();
-      const deadline = now() + timeoutMs;
-      while (true) {
-        const observation = await readClaimObservation(createdRoot.rootId);
-        if (claimReady(observation)) return observation;
-        const remaining = deadline - now();
-        if (remaining < 1) break;
-        await sleep(Math.min(pollIntervalMs, remaining));
-      }
-      throw new Error("s1_root_claim_timeout");
+      claimedRoot = await pollUntil(
+        () => readClaimObservation(createdRoot.rootId),
+        claimReady,
+        "s1_root_claim_timeout",
+      );
+      return claimedRoot;
+    },
+
+    async waitForPlan() {
+      if (!claimedRoot?.rootId) throw new Error("s1_root_claim_missing");
+      requireFunction(linear?.readRootPlanFacts, "s1_linear_read_plan_missing");
+      return pollUntil(
+        async () => planObservation(
+          await linear.readRootPlanFacts({
+            projectSlugId: slugId,
+            rootId: claimedRoot.rootId,
+          }),
+          claimedRoot.rootId,
+        ),
+        planReady,
+        "s1_plan_timeout",
+      );
     },
   });
 
@@ -93,6 +107,18 @@ export function createS1ClaimDriver({
       profileIsActive: safeProfile.isActive,
       runtimeStatus: safeRuntime.status,
     };
+  }
+
+  async function pollUntil(read, ready, timeoutCode) {
+    const deadline = now() + timeoutMs;
+    while (true) {
+      const observation = await read();
+      if (ready(observation)) return observation;
+      const remaining = deadline - now();
+      if (remaining < 1) break;
+      await sleep(Math.min(pollIntervalMs, remaining));
+    }
+    throw new Error(timeoutCode);
   }
 }
 
@@ -173,6 +199,47 @@ function claimReady(value) {
     value.profileReadiness === "ready" &&
     value.profileIsActive === true &&
     READY_RUNTIME_STATUSES.has(value.runtimeStatus);
+}
+
+function planObservation(value, rootId) {
+  if (
+    !isObject(value) ||
+    value.rootId !== rootId ||
+    !ROOT_STATES.has(value.state) ||
+    (value.phase !== undefined && !ROOT_PHASES.has(value.phase)) ||
+    typeof value.treeMatches !== "boolean" ||
+    !nonNegativeInteger(value.planApprovalCount) ||
+    (value.planApprovalState !== undefined && !ROOT_STATES.has(value.planApprovalState)) ||
+    typeof value.planApprovalReady !== "boolean" ||
+    typeof value.plannedRootInputReady !== "boolean" ||
+    typeof value.workStarted !== "boolean"
+  ) {
+    throw new Error("s1_plan_facts_invalid");
+  }
+  return {
+    rootId,
+    state: value.state,
+    phase: value.phase,
+    treeMatches: value.treeMatches,
+    planApprovalCount: value.planApprovalCount,
+    ...(value.planApprovalState !== undefined
+      ? { planApprovalState: value.planApprovalState }
+      : {}),
+    planApprovalReady: value.planApprovalReady,
+    plannedRootInputReady: value.plannedRootInputReady,
+    workStarted: value.workStarted,
+  };
+}
+
+function planReady(value) {
+  return value.state === "In Progress" &&
+    value.phase === "awaiting-human" &&
+    value.treeMatches === true &&
+    value.planApprovalCount === 1 &&
+    value.planApprovalState === "In Progress" &&
+    value.planApprovalReady === true &&
+    value.plannedRootInputReady === true &&
+    value.workStarted === false;
 }
 
 function nonNegativeInteger(value) {

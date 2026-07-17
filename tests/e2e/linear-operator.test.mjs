@@ -255,6 +255,88 @@ test("Linear operator returns sanitized Root claim facts from Linear", async () 
   assert.doesNotMatch(JSON.stringify(facts), /performer|conductor-1|profile-1/u);
 });
 
+test("Linear operator returns sanitized Root Plan facts from Linear", async () => {
+  const operator = createLinearOperator({
+    ...credentials,
+    fetch: async (_url, init) => {
+      const body = JSON.parse(init.body);
+      if (body.query.includes("projects")) return jsonResponse({ data: {
+        projects: { nodes: [{
+          id: "project-1",
+          name: "HELL",
+          slugId: "8ab43179fb54",
+          teams: { nodes: [{
+            id: "team-1",
+            states: { nodes: [{ id: "state-todo", name: "Todo" }] },
+          }] },
+        }] },
+      } });
+      return jsonResponse({ data: {
+        issue: {
+          id: "issue-1",
+          project: { id: "project-1" },
+          parent: null,
+          state: { name: "In Progress" },
+          labels: { nodes: [{ name: "symphony:run/awaiting-human" }], pageInfo: { hasNextPage: false } },
+          comments: { nodes: [{
+            body: "Symphony Root Run\nconductor_id: conductor-1\nperformer_profile_id: profile-1\nusage_input_tokens: 0\nusage_cached_input_tokens: 0\nusage_output_tokens: 0\nusage_reasoning_output_tokens: 0\nusage_total_tokens: 0\nplanned_root_input_hash: abc123\ndelivery_branch: symphony/runs/hell-1\n<!-- symphony root marker -->",
+          }], pageInfo: { hasNextPage: false } },
+        },
+        project: { issues: { nodes: [
+          {
+            id: "issue-1",
+            identifier: "HELL-1",
+            title: "Root A",
+            description: "Root description",
+            parent: null,
+            state: { name: "In Progress" },
+            sortOrder: 0,
+            subIssueSortOrder: null,
+          },
+          {
+            id: "work-1",
+            identifier: "HELL-2",
+            title: "Implement work",
+            description: "Work description\n\n<!-- symphony managed marker\nmanaged_marker: issue-1:turn-1:work-1\n-->\n\n<!-- symphony work metadata\nkind: work\norigin: symphony\ncompleted_input_hash: none\n-->",
+            parent: { id: "issue-1" },
+            state: { name: "Todo" },
+            sortOrder: 1,
+            subIssueSortOrder: 1,
+          },
+          {
+            id: "approval-1",
+            identifier: "HELL-3",
+            title: "[Human Action] Approve Plan",
+            description: "Plan summary\n\n<!-- symphony managed marker\nmanaged_marker: issue-1:plan-approval\nkind: human\nhuman_kind: plan_approval\ntarget_issue_id: none\n-->",
+            parent: { id: "issue-1" },
+            state: { name: "In Progress" },
+            sortOrder: 2,
+            subIssueSortOrder: 2,
+          },
+        ], pageInfo: { hasNextPage: false } } },
+      } });
+    },
+  });
+
+  const facts = await operator.readRootPlanFacts({
+    projectSlugId: "8ab43179fb54",
+    rootId: "issue-1",
+  });
+
+  assert.deepEqual(facts, {
+    rootId: "issue-1",
+    state: "In Progress",
+    phase: "awaiting-human",
+    treeMatches: true,
+    planApprovalCount: 1,
+    planApprovalState: "In Progress",
+    planApprovalReady: true,
+    plannedRootInputReady: true,
+    workStarted: false,
+  });
+  assert.doesNotMatch(JSON.stringify(facts), /Plan summary|conductor|performer|description/u);
+});
+
 test("Linear operator rejects incomplete paginated Root claim facts", async () => {
   const operator = createLinearOperator({
     ...credentials,

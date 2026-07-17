@@ -11,6 +11,7 @@ const ROOT_PHASES = new Set([
   "blocked",
   "failed",
 ]);
+const ROOT_STATES = new Set(["Todo", "In Progress", "In Review", "Done", "Canceled"]);
 const ROOT_MANAGED_FIELDS = new Set([
   "conductor_id",
   "performer_profile_id",
@@ -117,6 +118,34 @@ const ROOT_CLAIM_FACTS_QUERY = `
   }
 `;
 
+const ROOT_PLAN_FACTS_QUERY = `
+  query e2eRootPlanFacts($rootId: String!, $projectId: String!) {
+    issue(id: $rootId) {
+      id
+      project { id }
+      parent { id }
+      state { name }
+      labels(first: 64) { nodes { name } pageInfo { hasNextPage } }
+      comments(first: 64) { nodes { body } pageInfo { hasNextPage } }
+    }
+    project(id: $projectId) {
+      issues(first: 250) {
+        nodes {
+          id
+          identifier
+          title
+          description
+          parent { id }
+          state { name }
+          sortOrder
+          subIssueSortOrder
+        }
+        pageInfo { hasNextPage }
+      }
+    }
+  }
+`;
+
 export function createLinearOperator({
   userApiKey,
   clientId,
@@ -187,6 +216,82 @@ export function createLinearOperator({
         managedCommentCount: managedComments.length,
         managedCommentReady,
         ...(managedCommentReady ? { deliveryBranch: deliveryBranch(managedComment) } : {}),
+      };
+    },
+
+    async readRootPlanFacts(input) {
+      const rootId = required(input?.rootId, "linear_operator_root_id_invalid");
+      const project = await readProjectContext(input?.projectSlugId);
+      const data = await graphql(operatorApiKey, ROOT_PLAN_FACTS_QUERY, {
+        rootId,
+        projectId: project.projectId,
+      });
+      const issue = data.issue;
+      const projectIssues = connectionNodes(
+        data.project?.issues,
+        "linear_operator_plan_response_invalid",
+      );
+      const labels = connectionNodes(
+        issue?.labels,
+        "linear_operator_plan_response_invalid",
+      );
+      const comments = connectionNodes(
+        issue?.comments,
+        "linear_operator_plan_response_invalid",
+      );
+      if (!isRootPlanIssueShape(issue, rootId, project.projectId)) {
+        throw new Error("linear_operator_plan_response_invalid");
+      }
+      if (
+        !labels.every(isNamedObject) ||
+        !comments.every(isBodyObject) ||
+        !projectIssues.every(isPlanIssueShape)
+      ) {
+        throw new Error("linear_operator_plan_response_invalid");
+      }
+
+      const phaseLabels = labels
+        .map((label) => label.name)
+        .filter((name) => name.startsWith("symphony:run/"));
+      const phase = phaseLabels.length === 1
+        ? phaseLabels[0].slice("symphony:run/".length)
+        : undefined;
+      if (phase !== undefined && !ROOT_PHASES.has(phase)) {
+        throw new Error("linear_operator_plan_response_invalid");
+      }
+
+      const tree = rootPlanTree(projectIssues, rootId);
+      const planNodes = tree.map(planNode);
+      const approvalNodes = planNodes.filter(
+        (node) => node.humanKind === "plan_approval",
+      );
+      const approval = approvalNodes[0];
+      const managedComments = comments
+        .map((comment) => comment.body)
+        .filter(isRootManagedComment);
+      const planApprovalReady = approvalNodes.length === 1 &&
+        approval.parentId === rootId &&
+        !planNodes.some((node) => node.parentId === approval.id) &&
+        approval.title === "[Human Action] Approve Plan" &&
+        approval.state === "In Progress" &&
+        approval.managedMarker === `${rootId}:plan-approval`;
+
+      return {
+        rootId,
+        state: issue.state.name,
+        phase,
+        treeMatches: treeMatches(planNodes, rootId),
+        planApprovalCount: approvalNodes.length,
+        ...(approval ? { planApprovalState: approval.state } : {}),
+        planApprovalReady,
+        plannedRootInputReady: managedComments.length === 1 &&
+          managedCommentFields(managedComments[0]) &&
+          plannedRootInputHash(managedComments[0]),
+        workStarted: planNodes.some((node) =>
+          node.id !== rootId &&
+          node.humanKind !== "plan_approval" &&
+          !["Todo", "Canceled"].includes(node.state),
+        ),
       };
     },
 
@@ -385,9 +490,9 @@ function isRootManagedComment(body) {
     body.endsWith("<!-- symphony root marker -->");
 }
 
-function connectionNodes(connection) {
+function connectionNodes(connection, errorCode = "linear_operator_root_response_invalid") {
   if (!connection || !Array.isArray(connection.nodes) || connection.pageInfo?.hasNextPage !== false) {
-    throw new Error("linear_operator_root_response_invalid");
+    throw new Error(errorCode);
   }
   return connection.nodes;
 }
@@ -408,6 +513,26 @@ function isProjectIssueShape(issue) {
     typeof issue.state?.name === "string";
 }
 
+function isRootPlanIssueShape(issue, rootId, projectId) {
+  return isObject(issue) &&
+    issue.id === rootId &&
+    issue.project?.id === projectId &&
+    issue.parent === null &&
+    ROOT_STATES.has(issue.state?.name);
+}
+
+function isPlanIssueShape(issue) {
+  return isObject(issue) &&
+    typeof issue.id === "string" &&
+    typeof issue.identifier === "string" &&
+    typeof issue.title === "string" &&
+    (typeof issue.description === "string" || issue.description === null) &&
+    isNullableRelation(issue.parent) &&
+    ROOT_STATES.has(issue.state?.name) &&
+    Number.isFinite(issue.sortOrder) &&
+    (issue.subIssueSortOrder === null || Number.isFinite(issue.subIssueSortOrder));
+}
+
 function isNamedObject(value) {
   return isObject(value) && typeof value.name === "string";
 }
@@ -422,6 +547,84 @@ function isNullableRelation(value) {
 
 function isObject(value) {
   return value !== null && typeof value === "object";
+}
+
+function rootPlanTree(issues, rootId) {
+  const byId = new Map();
+  for (const issue of issues) {
+    if (byId.has(issue.id)) throw new Error("linear_operator_plan_tree_invalid");
+    byId.set(issue.id, issue);
+  }
+  if (!byId.has(rootId)) throw new Error("linear_operator_plan_tree_root_missing");
+
+  const childrenByParent = new Map();
+  for (const issue of issues) {
+    if (!issue.parent?.id) continue;
+    const children = childrenByParent.get(issue.parent.id) ?? [];
+    children.push(issue);
+    childrenByParent.set(issue.parent.id, children);
+  }
+  const result = [];
+  const visiting = new Set();
+  function visit(issueId) {
+    if (visiting.has(issueId)) throw new Error("linear_operator_plan_tree_cycle");
+    const issue = byId.get(issueId);
+    if (!issue) throw new Error("linear_operator_plan_parent_missing");
+    visiting.add(issueId);
+    result.push(issue);
+    const children = [...(childrenByParent.get(issueId) ?? [])].sort(comparePlanIssue);
+    for (const child of children) visit(child.id);
+    visiting.delete(issueId);
+  }
+  visit(rootId);
+  return result;
+}
+
+function comparePlanIssue(left, right) {
+  return (left.subIssueSortOrder ?? left.sortOrder) -
+    (right.subIssueSortOrder ?? right.sortOrder) ||
+    left.identifier.localeCompare(right.identifier);
+}
+
+function planNode(issue) {
+  const metadata = parsePlanNodeMetadata(issue.description ?? "");
+  if (metadata.invalid) throw new Error("linear_operator_plan_metadata_invalid");
+  return {
+    id: issue.id,
+    parentId: issue.parent?.id,
+    title: issue.title,
+    state: issue.state.name,
+    order: issue.subIssueSortOrder ?? issue.sortOrder,
+    ...(metadata.humanKind ? { humanKind: metadata.humanKind } : {}),
+    ...(metadata.managedMarker ? { managedMarker: metadata.managedMarker } : {}),
+  };
+}
+
+function treeMatches(nodes, rootId) {
+  const byId = new Set(nodes.map((node) => node.id));
+  const root = nodes.find((node) => node.id === rootId);
+  return root?.parentId === undefined && nodes.every((node) =>
+    node.id === rootId ||
+    (typeof node.parentId === "string" && byId.has(node.parentId) && Number.isFinite(node.order)),
+  );
+}
+
+function parsePlanNodeMetadata(description) {
+  const human = description.match(/\n*<!-- symphony managed marker\nmanaged_marker: ([A-Za-z0-9][A-Za-z0-9._:/-]{0,127})\nkind: human\nhuman_kind: (plan_approval|planned_input|runtime_input)\ntarget_issue_id: ([A-Za-z0-9][A-Za-z0-9._:/-]{0,127}|none)\n-->\s*$/u);
+  if (human) {
+    if ((human[2] === "plan_approval") !== (human[3] === "none")) return { invalid: true };
+    return { managedMarker: human[1], humanKind: human[2] };
+  }
+  const work = description.match(/\n*<!-- symphony managed marker\nmanaged_marker: ([A-Za-z0-9][A-Za-z0-9._:/-]{0,127})\n-->\s*\n*<!-- symphony work metadata\nkind: work\norigin: (?:user|symphony)\ncompleted_input_hash: (?:[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}|none)\n-->\s*$/u);
+  if (work) return { managedMarker: work[1] };
+  if (description.includes("symphony managed marker") || description.includes("symphony work metadata")) {
+    return { invalid: true };
+  }
+  return {};
+}
+
+function plannedRootInputHash(body) {
+  return /^planned_root_input_hash: [A-Za-z0-9._:/-]{1,128}$/mu.test(body);
 }
 
 function managedCommentFields(body) {
