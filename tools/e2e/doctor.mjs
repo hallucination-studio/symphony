@@ -6,15 +6,26 @@ import {
   loadE2EConfig,
   summarizeConfig,
 } from "./config.mjs";
+import { createLinearOperator } from "./linear-operator.mjs";
 
 const config = loadE2EConfig({ dotenv: loadDotEnvFile() });
 const repository = inspectRepository(config.repository.path);
 if (!repository.remote.includes(config.github.repository)) throw failure("repository_remote_not_allowlisted");
 if (!repository.branches.includes(config.github.baseBranch)) throw failure("repository_base_branch_missing");
+const linear = await createLinearOperator({
+  userApiKey: config.secrets.linearUserApiKey,
+  clientId: config.secrets.linearClientId,
+  clientSecret: config.secrets.linearClientSecret,
+}).preflight({ projectSlugId: config.project.slugId });
 
 process.stdout.write(JSON.stringify({
   status: "ready",
   config: summarizeConfig(config),
+  linear: {
+    projectId: linear.projectId,
+    projectName: linear.projectName,
+    appActorReady: linear.appActorReady,
+  },
   repository: {
     remote: repository.remote,
     baseBranch: config.github.baseBranch,
