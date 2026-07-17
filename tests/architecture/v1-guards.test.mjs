@@ -102,6 +102,35 @@ test("negative controls reject browser secrets and arbitrary provider config", (
   assertViolationCases(cases);
 });
 
+test("negative controls reject every explicitly excluded V1 product concept", () => {
+  const names = [
+    "ParallelPerformerLane",
+    "PlanRevisionStore",
+    "WorkflowCheckpoint",
+    "DispatchQueue",
+    "OperationJournal",
+    "VerificationResult",
+    "DeliveryManifest",
+    "AcceptanceEvidence",
+    "DeliveryReceipt",
+    "ClaudeBackend",
+    "SecondProviderRegistry",
+    "WebApplication",
+    "EncryptedProfileStore",
+    "ProfileDatabase",
+    "AutomaticMergePolicy",
+    "AutomaticRootDoneAction",
+    "CompatibilityShim",
+  ];
+  assertViolationCases(
+    names.map((name) => [
+      "apps/conductor/src/bad.ts",
+      `class ${name} {}`,
+      "future_product_scope",
+    ]),
+  );
+});
+
 test("safe explanatory vocabulary does not trigger implementation guards", () => {
   assert.deepEqual(
     inspectAuthoredFile(

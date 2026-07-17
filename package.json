@@ -25,6 +25,8 @@
     "test:host": "npm run test:host -w @symphony/podium-desktop --",
     "test:integration": "node --test tests/integration/*.test.mjs tests/integration/*/*.test.mjs",
     "test:acceptance": "node --test tests/acceptance/*.test.mjs",
+    "acceptance:collect": "node tests/acceptance/v1-cli.mjs collect",
+    "acceptance:evaluate": "node tests/acceptance/v1-cli.mjs evaluate",
     "test:typescript": "npm test --workspaces --if-present",
     "test": "npm run test:architecture && npm run test:contracts && npm run test:typescript && npm run test:integration",
     "package": "npm run package -w @symphony/podium-desktop"

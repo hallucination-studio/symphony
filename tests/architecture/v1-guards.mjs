@@ -288,6 +288,20 @@ export function inspectAuthoredFile(file, source) {
     );
   }
 
+  if (
+    /(?:class|interface|type|function|const)\s+\w*(?:ParallelPerformer|PlanRevision|SourceRevision|CommentRevision|WorkflowCheckpoint|DispatchQueue|OperationJournal|Verification|Manifest|Evidence|DeliveryReceipt|ClaudeBackend|SecondProvider|WebApplication|WebServer|EncryptedProfile|ProfileDatabase|AutomaticMerge|AutomaticRootDone|CompatibilityShim)\w*/.test(
+      source,
+    )
+  ) {
+    violations.push(
+      violation(
+        normalizedFile,
+        "future_product_scope",
+        "V1 implementation cannot prebuild explicitly excluded product concepts",
+      ),
+    );
+  }
+
   return violations;
 }
 
