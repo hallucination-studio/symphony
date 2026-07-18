@@ -44,24 +44,24 @@ test("core live credentials are scoped to input validation and live run steps", 
   assert.equal(cleanupOffset > runOffset, true);
   for (const name of [
     "SYMPHONY_E2E_LINEAR_DEV_TOKEN",
+    "LINEAR_CLIENT_ID",
     "SYMPHONY_E2E_CODEX_API_KEY",
+    "SYMPHONY_E2E_CODEX_BASE_URL",
+    "SYMPHONY_E2E_CODEX_MODEL",
   ]) {
     const pattern = new RegExp(`${name}: \\$\\{\\{ secrets\\.${name} \\}\\}`, "u");
     assert.match(validationStep, pattern);
     assert.match(runStep, pattern);
   }
   for (const name of [
-    "LINEAR_CLIENT_ID",
     "SYMPHONY_E2E_PROJECT_SLUG_ID",
-    "SYMPHONY_E2E_CODEX_BASE_URL",
-    "SYMPHONY_E2E_CODEX_MODEL",
     "SYMPHONY_E2E_CODEX_ALLOWED_HOSTS",
   ]) {
     const pattern = new RegExp(`${name}: \\$\\{\\{ vars\\.${name} \\}\\}`, "u");
     assert.match(validationStep, pattern);
     assert.match(runStep, pattern);
   }
-  assert.doesNotMatch(source, /LINEAR_CLIENT_ID: \$\{\{ secrets\./u);
+  assert.doesNotMatch(source, /(?:LINEAR_CLIENT_ID|SYMPHONY_E2E_CODEX_(?:BASE_URL|MODEL)): \$\{\{ vars\./u);
   assert.doesNotMatch(source.slice(cleanupOffset), /secrets\./u);
   assert.doesNotMatch(source, /&core-live-inputs|\*core-live-inputs/u);
   assert.doesNotMatch(source, /(?:sk|lin_api|lin_oauth)[-_][A-Za-z0-9_-]{8,}/u);

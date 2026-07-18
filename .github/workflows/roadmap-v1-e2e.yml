@@ -38,21 +38,21 @@ jobs:
       - name: Validate core live inputs
         env:
           SYMPHONY_E2E_LINEAR_DEV_TOKEN: ${{ secrets.SYMPHONY_E2E_LINEAR_DEV_TOKEN }}
-          LINEAR_CLIENT_ID: ${{ vars.LINEAR_CLIENT_ID }}
+          LINEAR_CLIENT_ID: ${{ secrets.LINEAR_CLIENT_ID }}
           SYMPHONY_E2E_PROJECT_SLUG_ID: ${{ vars.SYMPHONY_E2E_PROJECT_SLUG_ID }}
           SYMPHONY_E2E_CODEX_API_KEY: ${{ secrets.SYMPHONY_E2E_CODEX_API_KEY }}
-          SYMPHONY_E2E_CODEX_BASE_URL: ${{ vars.SYMPHONY_E2E_CODEX_BASE_URL }}
-          SYMPHONY_E2E_CODEX_MODEL: ${{ vars.SYMPHONY_E2E_CODEX_MODEL }}
+          SYMPHONY_E2E_CODEX_BASE_URL: ${{ secrets.SYMPHONY_E2E_CODEX_BASE_URL }}
+          SYMPHONY_E2E_CODEX_MODEL: ${{ secrets.SYMPHONY_E2E_CODEX_MODEL }}
           SYMPHONY_E2E_CODEX_ALLOWED_HOSTS: ${{ vars.SYMPHONY_E2E_CODEX_ALLOWED_HOSTS }}
         run: npm run e2e:doctor
       - name: Run core live E2E
         env:
           SYMPHONY_E2E_LINEAR_DEV_TOKEN: ${{ secrets.SYMPHONY_E2E_LINEAR_DEV_TOKEN }}
-          LINEAR_CLIENT_ID: ${{ vars.LINEAR_CLIENT_ID }}
+          LINEAR_CLIENT_ID: ${{ secrets.LINEAR_CLIENT_ID }}
           SYMPHONY_E2E_PROJECT_SLUG_ID: ${{ vars.SYMPHONY_E2E_PROJECT_SLUG_ID }}
           SYMPHONY_E2E_CODEX_API_KEY: ${{ secrets.SYMPHONY_E2E_CODEX_API_KEY }}
-          SYMPHONY_E2E_CODEX_BASE_URL: ${{ vars.SYMPHONY_E2E_CODEX_BASE_URL }}
-          SYMPHONY_E2E_CODEX_MODEL: ${{ vars.SYMPHONY_E2E_CODEX_MODEL }}
+          SYMPHONY_E2E_CODEX_BASE_URL: ${{ secrets.SYMPHONY_E2E_CODEX_BASE_URL }}
+          SYMPHONY_E2E_CODEX_MODEL: ${{ secrets.SYMPHONY_E2E_CODEX_MODEL }}
           SYMPHONY_E2E_CODEX_ALLOWED_HOSTS: ${{ vars.SYMPHONY_E2E_CODEX_ALLOWED_HOSTS }}
         run: npm run e2e:core-live
       - name: Cleanup run-owned state
