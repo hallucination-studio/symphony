@@ -6,7 +6,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from performer.backends.codex.codex_backend_impl import CodexBackendImpl, ProviderBackendError
+from performer.backends.codex.codex_backend_impl import (
+    GATE_SCHEMA,
+    PLAN_SCHEMA,
+    WORK_SCHEMA,
+    CodexBackendImpl,
+    ProviderBackendError,
+)
 
 
 class FakeThread:
@@ -70,6 +76,73 @@ def test_plan_maps_public_settings_and_read_only_sandbox(plan_command):
     assert kwargs["cwd"] == plan_command["workspace_root"]
     assert kwargs["output_schema"]["required"] == ["summary", "nodes"]
     assert outcome["usage"]["total_tokens"] == 23
+
+
+def test_provider_output_schemas_use_the_supported_strict_subset():
+    for schema in (PLAN_SCHEMA, WORK_SCHEMA, GATE_SCHEMA):
+        _assert_strict_schema(schema)
+
+
+def test_plan_drops_nullable_provider_fields_before_returning_business_body(plan_command):
+    response = {
+        "summary": "Planned",
+        "nodes": [
+            {
+                "client_node_key": "work-1",
+                "parent_client_node_key": None,
+                "kind": "work",
+                "order": 1,
+                "title": "Implement",
+                "description": "Make the change.",
+                "existing_issue_id": None,
+                "target_client_node_key": None,
+            }
+        ],
+    }
+
+    outcome = CodexBackendImpl(FakeCodex(FakeThread(response=response))).run_turn(
+        plan_command
+    )
+
+    assert outcome["body"]["nodes"] == [
+        {
+            "client_node_key": "work-1",
+            "kind": "work",
+            "order": 1,
+            "title": "Implement",
+            "description": "Make the change.",
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    ("turn_kind", "response", "expected"),
+    [
+        ("work", {"summary": "Done", "sanitized_prompt": None}, {"summary": "Done"}),
+        (
+            "work",
+            {"summary": None, "sanitized_prompt": "Choose a target."},
+            {"sanitized_prompt": "Choose a target."},
+        ),
+        (
+            "root_gate",
+            {"summary": "Passed", "findings": None},
+            {"summary": "Passed"},
+        ),
+    ],
+)
+def test_nullable_provider_variants_are_closed_before_business_validation(
+    plan_command, turn_kind, response, expected
+):
+    command = deepcopy(plan_command)
+    command["turn_kind"] = turn_kind
+    command["performer_id"] = "thread-1"
+
+    outcome = CodexBackendImpl(FakeCodex(FakeThread(response=response))).run_turn(
+        command
+    )
+
+    assert outcome["body"] == expected
 
 
 def test_work_resumes_exact_id_and_uses_workspace_write(plan_command):
@@ -206,3 +279,18 @@ def test_provider_failure_preserves_bounded_sanitized_sdk_reason(plan_command):
     assert "401" in raised.value.sanitized_reason
     assert "private-token" not in raised.value.sanitized_reason
     assert len(raised.value.sanitized_reason) <= 1_024
+
+
+def _assert_strict_schema(value):
+    if isinstance(value, list):
+        for item in value:
+            _assert_strict_schema(item)
+        return
+    if not isinstance(value, dict):
+        return
+    assert not ({"oneOf", "allOf", "not", "maxLength", "maxItems"} & set(value))
+    if value.get("type") == "object":
+        assert value.get("additionalProperties") is False
+        assert set(value.get("required", [])) == set(value.get("properties", {}))
+    for item in value.values():
+        _assert_strict_schema(item)

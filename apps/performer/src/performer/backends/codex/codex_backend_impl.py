@@ -19,23 +19,31 @@ PLAN_SCHEMA = {
     "additionalProperties": False,
     "required": ["summary", "nodes"],
     "properties": {
-        "summary": {"type": "string", "maxLength": 16384},
+        "summary": {"type": "string"},
         "nodes": {
             "type": "array",
-            "maxItems": 512,
             "items": {
                 "type": "object",
                 "additionalProperties": False,
-                "required": ["client_node_key", "kind", "order", "title", "description"],
+                "required": [
+                    "client_node_key",
+                    "parent_client_node_key",
+                    "kind",
+                    "order",
+                    "title",
+                    "description",
+                    "existing_issue_id",
+                    "target_client_node_key",
+                ],
                 "properties": {
                     "client_node_key": {"type": "string"},
-                    "parent_client_node_key": {"type": "string"},
+                    "parent_client_node_key": {"type": ["string", "null"]},
                     "kind": {"enum": ["work", "human"]},
                     "order": {"type": "number"},
                     "title": {"type": "string"},
                     "description": {"type": "string"},
-                    "existing_issue_id": {"type": "string"},
-                    "target_client_node_key": {"type": "string"},
+                    "existing_issue_id": {"type": ["string", "null"]},
+                    "target_client_node_key": {"type": ["string", "null"]},
                 },
             },
         },
@@ -44,30 +52,23 @@ PLAN_SCHEMA = {
 WORK_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
+    "required": ["summary", "sanitized_prompt"],
     "properties": {
-        "summary": {"type": "string", "maxLength": 16384},
-        "sanitized_prompt": {"type": "string", "maxLength": 16384},
+        "summary": {"type": ["string", "null"]},
+        "sanitized_prompt": {"type": ["string", "null"]},
     },
-    "oneOf": [
-        {"required": ["summary"]},
-        {"required": ["sanitized_prompt"]},
-    ],
 }
 GATE_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
+    "required": ["summary", "findings"],
     "properties": {
-        "summary": {"type": "string", "maxLength": 16384},
+        "summary": {"type": "string"},
         "findings": {
-            "type": "array",
-            "maxItems": 128,
-            "items": {"type": "string", "maxLength": 16384},
+            "type": ["array", "null"],
+            "items": {"type": "string"},
         },
     },
-    "oneOf": [
-        {"required": ["summary"], "not": {"required": ["findings"]}},
-        {"required": ["summary", "findings"]},
-    ],
 }
 
 CODEX_BASE_URL_ENVIRONMENT_KEY = "SYMPHONY_CODEX_BASE_URL"
@@ -174,6 +175,7 @@ class CodexBackendImpl:
                 retryable=True,
                 action_required="Retry the Turn.",
             ) from exc
+        body = _drop_null_fields(body)
         if not _valid_body(kind, body):
             raise ProviderBackendError(
                 "The Provider returned invalid structured output.",
@@ -204,17 +206,34 @@ def _prompt(command: dict[str, Any]) -> str:
     )
     kind = command["turn_kind"]
     instruction = {
-        "plan": "Produce only a proposed issue-tree plan; do not modify files.",
+        "plan": (
+            "Produce only a proposed issue-tree plan; do not modify files. Include every "
+            "node field and use null for inapplicable parent, existing-issue, and target keys."
+        ),
         "work": (
             "Work only on the supplied leaf in the supplied workspace. Return a concise "
-            "completion summary, or sanitized_prompt when human input is required."
+            "completion summary, or sanitized_prompt when human input is required. Set the "
+            "unused field to null."
         ),
         "root_gate": (
             "Review the supplied completed tree and workspace without modifying files. "
-            "Return pass summary or failure summary with findings."
+            "Return a summary and set findings to null when passing, or to a non-empty "
+            "array when failing."
         ),
     }[kind]
     return f"{boundaries}{instruction}\nINPUT:\n{json.dumps(command['body'], ensure_ascii=False)}"
+
+
+def _drop_null_fields(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: _drop_null_fields(item)
+            for key, item in value.items()
+            if item is not None
+        }
+    if isinstance(value, list):
+        return [_drop_null_fields(item) for item in value]
+    return value
 
 
 def _valid_body(kind: str, body: Any) -> bool:
