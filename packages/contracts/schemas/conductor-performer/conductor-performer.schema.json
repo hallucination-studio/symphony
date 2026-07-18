@@ -218,6 +218,23 @@
     "PlannedWorkflowNode": {
       "type": "object",
       "additionalProperties": false,
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["kind"],
+          "properties": {
+            "kind": { "const": "work" },
+            "target_client_node_key": false
+          }
+        },
+        {
+          "type": "object",
+          "required": ["kind", "target_client_node_key"],
+          "properties": {
+            "kind": { "const": "human" }
+          }
+        }
+      ],
       "required": ["client_node_key", "kind", "order", "title", "description"],
       "properties": {
         "client_node_key": { "$ref": "common.schema.json#/$defs/Identifier" },

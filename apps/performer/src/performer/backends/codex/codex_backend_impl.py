@@ -208,7 +208,9 @@ def _prompt(command: dict[str, Any]) -> str:
     instruction = {
         "plan": (
             "Produce only a proposed issue-tree plan; do not modify files. Include every "
-            "node field and use null for inapplicable parent, existing-issue, and target keys."
+            "node field and use null for inapplicable parent, existing-issue, and target keys. "
+            "A human node is only for input required before a work node and must target that "
+            "work node; never use a human node to represent the Root or executable work."
         ),
         "work": (
             "Work only on the supplied leaf in the supplied workspace. Return a concise "
@@ -245,6 +247,7 @@ def _valid_body(kind: str, body: Any) -> bool:
             keys == {"summary", "nodes"}
             and isinstance(body["summary"], str)
             and isinstance(body["nodes"], list)
+            and all(_valid_plan_node(node) for node in body["nodes"])
         )
     if kind == "work":
         return (keys == {"summary"} and isinstance(body["summary"], str)) or (
@@ -255,6 +258,16 @@ def _valid_body(kind: str, body: Any) -> bool:
         and isinstance(body["summary"], str)
         and isinstance(body["findings"], list)
         and all(isinstance(item, str) for item in body["findings"])
+    )
+
+
+def _valid_plan_node(node: Any) -> bool:
+    if not isinstance(node, dict):
+        return False
+    kind = node.get("kind")
+    target = node.get("target_client_node_key")
+    return (kind == "work" and target is None) or (
+        kind == "human" and isinstance(target, str)
     )
 
 

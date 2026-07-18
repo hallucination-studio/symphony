@@ -69,12 +69,13 @@ def test_plan_maps_public_settings_and_read_only_sandbox(plan_command):
 
     assert outcome["performer_id"] == "thread-1"
     assert len(sdk.started) == 1
-    _, kwargs = sdk.thread.calls[0]
+    prompt, kwargs = sdk.thread.calls[0]
     assert kwargs["model"] == "gpt-5.2-codex"
     assert kwargs["effort"] == "high"
     assert kwargs["sandbox"] == "read-only"
     assert kwargs["cwd"] == plan_command["workspace_root"]
     assert kwargs["output_schema"]["required"] == ["summary", "nodes"]
+    assert "must target that work node" in prompt
     assert outcome["usage"]["total_tokens"] == 23
 
 
@@ -113,6 +114,29 @@ def test_plan_drops_nullable_provider_fields_before_returning_business_body(plan
             "description": "Make the change.",
         }
     ]
+
+
+def test_plan_rejects_human_node_without_a_work_target(plan_command):
+    response = {
+        "summary": "Ask a human to implement the Root.",
+        "nodes": [
+            {
+                "client_node_key": "human-1",
+                "parent_client_node_key": None,
+                "kind": "human",
+                "order": 1,
+                "title": "Implement the Root",
+                "description": "Complete the requested work.",
+                "existing_issue_id": None,
+                "target_client_node_key": None,
+            }
+        ],
+    }
+
+    with pytest.raises(ProviderBackendError, match="invalid structured output"):
+        CodexBackendImpl(FakeCodex(FakeThread(response=response))).run_turn(
+            plan_command
+        )
 
 
 @pytest.mark.parametrize(
