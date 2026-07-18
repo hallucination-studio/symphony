@@ -34,8 +34,9 @@ Podium backend response 事件；证据写入 `.test/e2e-desktop-shell/`，其 v
 - 由 runner 通过生成的闭合 IPC contract 连接真实 Podium 与 Conductor；
 - 通过 Conductor 现有 Profile command 和 bounded secret frame 创建、登录并
   activate 一个 API Key Performer Profile；
-- 每次创建独立 Linear Project、Root、app data、`CODEX_HOME`、Git repository
-  和 evidence directory；
+- 默认创建独立 Linear Project；显式指定 Project slug 时使用并保留现有 Project，
+  两种模式都创建本 run Root、app data、`CODEX_HOME`、Git repository 和 evidence
+  directory；
 - 执行真实 Plan、Work、Root Gate 和本地 branch delivery，并验证 Linear 最终
   为 In Review / `in-review`；
 - 在受保护、串行化、仅可信 ref 可执行的 GitHub Actions job 中运行同一场景；
@@ -116,8 +117,9 @@ OAuth refresh token，以及把 Linear credential 传给 Conductor。单元或 c
 10. 观察 Root Gate 成功、本地 branch delivery、Root In Review 和
     `in-review` phase；
 11. 从交付 branch 读取目标文件并核对精确 marker；
-12. 终止全部子进程，只清理由本 run marker 管理的 Project 内 issues、Project、
-    Project Label 和本地资源；所有 cleanup 完成后才写入最终脱敏 evidence。
+12. 终止全部子进程；temporary 模式清理由本 run marker 管理的 Project 内 issues、
+    Project、Project Label 和本地资源，retained 模式保留 Project 与全部 issues、只
+    删除本 run Project Label；所有 cleanup 完成后才写入最终脱敏 evidence。
 
 任何 startup、protocol、process exit、timeout、cleanup 或 secret audit 失败都使
 场景失败。不得以 dry-run、合成 observation、mock SDK 输出或“blocked artifact”
@@ -168,6 +170,17 @@ OAuth refresh token，以及把 Linear credential 传给 Conductor。单元或 c
 - `SYMPHONY_E2E_CODEX_BASE_URL`；
 - `SYMPHONY_E2E_CODEX_MODEL`。
 
+可选输入 `SYMPHONY_E2E_PROJECT_SLUG_ID` 启用 retained Project 模式：runner
+解析并使用该现有 Project，不创建或 archive Project，不 archive 其中任何既有或
+本 run 创建的 issue。Project 中原有 Roots 继续按真实 Conductor 规则参与调度；
+runner verdict 只观察本 run marker Root 的 descendants。结束时只删除本 run 创建的
+Conductor Project Label，并清理进程与本地资源。该模式用于 debug、样式检查和
+benchmark；不得在运行前停用或清理已有 Roots，它们作为真实负载参与调度，并可能
+增加本 run Root 的等待时间。
+
+未配置该变量时使用默认 temporary Project 模式：每次创建独立 Project，结束时按
+issues → Project → Project Label 的依赖顺序完整 archive/delete。
+
 `LINEAR_CLIENT_SECRET` 不属于 core live 输入，runner 不得读取或传递它。不得加载
 `.env` 或静态 Performer 文件。base URL 允许 HTTP 或 HTTPS，不得包含
 userinfo、query 或 fragment；CI 中 host 必须在 workflow 配置的 allowlist 中。
@@ -196,10 +209,12 @@ secret-free contract/unit tests 和 Desktop smoke，不运行 core live。受保
 - stdout/stderr、request/result、Profile files 和 evidence 必须用已知 secret
   canary 扫描；不得上传 `CODEX_HOME`、app data、repository 或原始 backend log；
 - 每步有 deadline，首个失败停止后续 mutation；异常文本归一化为稳定 code；
-- cleanup 必须幂等，只 archive/delete 精确匹配当前 managed marker 的资源，并按
-  Project 内 issues → Project → Project Label 的顺序处理 Linear 依赖；
+- cleanup 必须幂等；temporary 模式只 archive/delete 精确匹配当前 managed marker
+  的资源，并按 Project 内 issues → Project → Project Label 的顺序处理 Linear 依赖；
+  retained 模式不得 archive Project 或其中任何 issue；
   `cleanup_completed` 是 live verdict 的必需证据，任一 cleanup 失败都会使其失败；
-- 下次运行在 mutation 前 reconcile 同一测试 authority 留下的 stale managed run；
+- 下次运行在 mutation 前 reconcile 同一测试 authority 留下的 stale temporary run
+  和 Project Label，不清理 retained Project 中的 Roots；
 - runner 必须在成功和失败路径有界关闭 Podium、Conductor、Performer 和 IPC。
 
 ## 8. 完成标准

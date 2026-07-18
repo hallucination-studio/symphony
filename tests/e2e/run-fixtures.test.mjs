@@ -129,6 +129,55 @@ test("Linear fixture creates one exactly marked Project, label, and delegated Ro
   assert.doesNotMatch(JSON.stringify(fixture), /development-secret/u);
 });
 
+test("Linear fixture binds a retained Project by slug without creating or archiving it", async () => {
+  const operations = [];
+  const operator = createRunScopedLinearOperator({
+    developmentToken: "development-secret",
+    fetch: async (_url, init) => {
+      const request = JSON.parse(init.body);
+      operations.push(request.query.match(/CoreLive[A-Za-z]+/u)?.[0]);
+      if (request.query.includes("CoreLiveProjectBySlug")) return response({ data: {
+        projects: { nodes: [{
+          id: "retained-project",
+          name: "Debug Project",
+          slugId: "debug-slug",
+          updatedAt: "2026-07-18T00:00:00.000Z",
+          teams: { nodes: [{ id: "team-1" }], pageInfo: { hasNextPage: false } },
+          labels: { nodes: [], pageInfo: { hasNextPage: false } },
+        }], pageInfo: { hasNextPage: false } },
+      } });
+      if (request.query.includes("CoreLiveLabel")) return response({ data: {
+        projectLabelCreate: { success: true, projectLabel: { id: "label-1", name: "symphony:conductor/abc123def456" } },
+      } });
+      if (request.query.includes("CoreLiveAttachLabel")) return response({ data: {
+        projectAddLabel: { success: true, project: { id: "retained-project" } },
+      } });
+      if (request.query.includes("CoreLiveDeleteLabel")) return response({ data: {
+        projectLabelDelete: { success: true },
+      } });
+      throw new Error("unexpected operation");
+    },
+  });
+  const lock = { runId: "run-1", released: false };
+  const project = await operator.createProject({
+    lock,
+    runId: "run-1",
+    conductorShortHash: "abc123def456",
+    projectSlugId: "debug-slug",
+    preflight: { teamId: "team-1" },
+  });
+
+  assert.equal(project.retainProject, true);
+  assert.equal(project.projectId, "retained-project");
+  await operator.cleanup({ lock, runId: "run-1", ...project });
+  assert.deepEqual(operations, [
+    "CoreLiveProjectBySlug",
+    "CoreLiveLabel",
+    "CoreLiveAttachLabel",
+    "CoreLiveDeleteLabel",
+  ]);
+});
+
 test("Linear fixture rejects mutation without the exact acquired lock", async () => {
   let calls = 0;
   const operator = createRunScopedLinearOperator({
@@ -250,6 +299,8 @@ test("run state and Plan approval map only Linear facts", async () => {
           comments: { nodes: [{ body: "performer_id: conversation-1\ndelivery_branch: symphony/runs/run-1\n<!-- symphony root marker -->" }], pageInfo: { hasNextPage: false } },
         },
         project: { issues: { nodes: [
+          { id: "other-approval", title: "Other approval", description: "human_kind: plan_approval", parent: { id: "other-root" }, state: { name: "Done" } },
+          { id: "other-work", title: "Other work", description: "kind: work", parent: { id: "other-root" }, state: { name: "In Progress" } },
           { id: "approval-1", title: "[Human Action] Approve Plan", description: "human_kind: plan_approval", parent: { id: "root-1" }, state: { name: approved ? "Done" : "In Progress" } },
           { id: "work-1", title: "Create marker", description: "kind: work", parent: { id: "root-1" }, state: { name: "Todo" } },
         ], pageInfo: { hasNextPage: false } } },

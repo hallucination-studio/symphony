@@ -61,10 +61,15 @@ export async function runCoreLiveE2E({
       lock,
       runId,
       conductorShortHash: ids.conductorShortHash,
+      projectSlugId: config.linear.projectSlugId,
       preflight,
     });
     evidence.push({ step: "project_created", status: "passed" });
-    log({ event: "e2e_step_completed", step: "project_created" });
+    log({
+      event: "e2e_step_completed",
+      step: "project_created",
+      project_mode: project.retainProject ? "retained" : "temporary",
+    });
 
     log({ event: "e2e_step_started", step: "podium_bootstrap" });
     const databasePath = path.join(scope.appDataRoot, "podium.db");
@@ -164,6 +169,8 @@ export async function runCoreLiveE2E({
     result = Object.freeze({
       status: "passed",
       runId,
+      projectMode: project.retainProject ? "retained" : "temporary",
+      projectSlugId: project.projectSlugId,
       rootIdentifier: fixture.rootIdentifier,
       profileId: profile.profileId,
       performerResumed: true,
@@ -175,6 +182,14 @@ export async function runCoreLiveE2E({
   } catch (error) {
     result = { status: "failed", runId, reason: sanitize(error), evidence };
     log({ event: "e2e_run_failed", reason: result.reason });
+  }
+
+  if (project?.retainProject && fixture) {
+    log({
+      event: "e2e_debug_resources_retained",
+      project_slug_id: project.projectSlugId,
+      root_identifier: fixture.rootIdentifier,
+    });
   }
 
   const finalResult = await finalizeCoreLiveResult({
@@ -200,6 +215,9 @@ export async function cleanupCoreLiveResources(
       projectId: project.projectId,
       labelId: project.labelId,
       marker: project.marker,
+      ...(typeof project.retainProject === "boolean"
+        ? { retainProject: project.retainProject }
+        : {}),
     })],
     [Boolean(scope), "run_scope", "e2e_run_scope_cleanup_failed", () => cleanupScope(scope)],
     [Boolean(lock), "lock", "e2e_lock_release_failed", () => lock.release()],

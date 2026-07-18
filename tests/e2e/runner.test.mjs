@@ -43,6 +43,20 @@ test("loads the five pipeline inputs and summarizes only secret presence", () =>
   assert.match(summary, /"codexApiKey":true/u);
 });
 
+test("loads an optional retained Linear Project slug without making it a secret", () => {
+  const environment = {
+    ...validEnvironment(),
+    SYMPHONY_E2E_PROJECT_SLUG_ID: "project-debug-123",
+  };
+
+  const config = loadE2EConfig({ environment, platform: "linux" });
+  assert.deepEqual(config.linear, {
+    clientId: "linear-client-id",
+    projectSlugId: "project-debug-123",
+  });
+  assert.equal(summarizeConfig(config).linear.projectSlugId, "project-debug-123");
+});
+
 test("configuration reports stable missing-input codes without values", () => {
   const environment = validEnvironment();
   delete environment.SYMPHONY_E2E_CODEX_API_KEY;

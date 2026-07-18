@@ -52,6 +52,7 @@ test("core live credentials are scoped to input validation and live run steps", 
   }
   for (const name of [
     "LINEAR_CLIENT_ID",
+    "SYMPHONY_E2E_PROJECT_SLUG_ID",
     "SYMPHONY_E2E_CODEX_BASE_URL",
     "SYMPHONY_E2E_CODEX_MODEL",
     "SYMPHONY_E2E_CODEX_ALLOWED_HOSTS",
