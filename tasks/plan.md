@@ -161,13 +161,13 @@ Task 1: authoritative test contract
 ### Phase 3: Retirement before automation
 
 - [x] Task 9: Remove the alternate credentialed/Desktop E2E runtime.
-- [ ] Task 10: Remove hermetic automation while preserving Desktop smoke.
+- [x] Task 10: Remove hermetic automation while preserving Desktop smoke.
 
 ### Checkpoint: One E2E route
 
-- [ ] No alternate Podium composition, Desktop E2E backend, S1/S2/S3 runtime,
+- [x] No alternate Podium composition, Desktop E2E backend, S1/S2/S3 runtime,
       hermetic runner, or hermetic workflow remains.
-- [ ] The Desktop shell smoke uses the production binary, is secret-free, and
+- [x] The Desktop shell smoke uses the production binary, is secret-free, and
       cannot produce core live evidence.
 
 ### Phase 4: Automation and final verification

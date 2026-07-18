@@ -48,11 +48,6 @@ export function summarizeConfig(config) {
   });
 }
 
-// Retained until the alternate Desktop runner is removed; it intentionally performs no I/O.
-export function loadDotEnvFile() {
-  return Object.freeze({});
-}
-
 export function createChildEnvironment({
   environment = process.env,
   allowedKeys = DEFAULT_CHILD_ENVIRONMENT_KEYS,

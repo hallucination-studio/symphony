@@ -16,6 +16,14 @@ core live E2E 绕过 Podium Desktop、Tauri/WebView 和 Linear OAuth。另保留
 无 secret 的 Desktop smoke，用于证明应用 shell 能启动；该 smoke 不证明
 workflow、Linear 或 Provider 行为。
 
+Desktop smoke 的唯一命令是 `npm run desktop-shell-smoke`。它构建 production
+`main.rs`、production frontend、production backend `main.ts` 和 production
+sidecars，不增加 E2E feature、capability、WebDriver 或 alternate composition。
+运行时使用隔离的 HOME 和每次生成的惰性 OAuth 配置值，不读取任何 workflow
+credential。runner 只接受 production host 输出的一次性 WebView loaded 和首次
+Podium backend response 事件；证据写入 `.test/e2e-desktop-shell/`，其 verdict
+不能满足 core live verdict。
+
 ## 2. 范围记录
 
 ### `authorized`

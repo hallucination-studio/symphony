@@ -8,8 +8,16 @@ test("production source does not compile E2E seams into the Podium Desktop host"
   assert.equal(source.includes("SYMPHONY_E2E_LINEAR_ACCESS_TOKEN"), false);
   assert.equal(source.includes("e2e_repository"), false);
   const repositorySource = await readFile("apps/podium-desktop/src-tauri/src/repository_context.rs", "utf8");
-  assert.match(repositorySource, /#\[cfg\(feature = "e2e"\)\]/u);
-  assert.match(repositorySource, /SYMPHONY_E2E_REPOSITORY_PATH/u);
+  assert.doesNotMatch(repositorySource, /#\[cfg\(feature = "e2e"\)\]/u);
+  assert.doesNotMatch(repositorySource, /SYMPHONY_E2E_REPOSITORY_PATH/u);
+  const hostBuild = await readFile("apps/podium-desktop/src-tauri/build.rs", "utf8");
+  assert.match(hostBuild, /tauri_build::build\(\)/u);
+  assert.doesNotMatch(hostBuild, /feature|capabilities/u);
+  const cargoManifest = await readFile(
+    "apps/podium-desktop/src-tauri/Cargo.toml",
+    "utf8",
+  );
+  assert.doesNotMatch(cargoManifest, /desktop-smoke|tauri-plugin-wdio/u);
   const backendSource = await readFile("apps/podium-desktop/src-backend/main.ts", "utf8");
   assert.doesNotMatch(
     backendSource,
@@ -71,20 +79,25 @@ test("superseded S1/S2/S3 acceptance entrypoints are absent", async () => {
   );
 });
 
-test("E2E runner never treats a production binary as an E2E binary", async () => {
-  const source = await readFile("tools/e2e/ui-smoke.mjs", "utf8");
-  assert.match(source, /SYMPHONY_E2E_RUN_UI/);
-  assert.match(source, /packaged mutation remains opt-in/i);
-});
-
-test("WDIO app process explicitly drops operator and Provider secrets", async () => {
-  const source = await readFile("wdio.conf.mjs", "utf8");
-  for (const key of [
-    "LINEAR_E2E_USER_API_KEY",
-    "OPENAI_E2E_API_KEY",
-    "SYMPHONY_E2E_GITHUB_TOKEN",
-    "GH_TOKEN",
+test("superseded hermetic and credentialed Desktop automation is absent", async () => {
+  for (const path of [
+    "tools/e2e/business-actions.mjs",
+    "tools/e2e/desktop-client.mjs",
+    "tools/e2e/hermetic-desktop.mjs",
+    "tools/e2e/ui-adapters.mjs",
+    "tools/e2e/ui-smoke-runner.mjs",
+    "tools/e2e/ui-smoke.mjs",
+    "tools/e2e/verdict.mjs",
+    "wdio.conf.mjs",
+    "wdio.desktop-shell.conf.mjs",
+    "wdio.hermetic.conf.mjs",
+    "apps/podium-desktop/src-tauri/capabilities/e2e/wdio.json",
+    "apps/podium-desktop/src-tauri/capabilities/desktop-smoke/wdio.json",
   ]) {
-    assert.match(source, new RegExp(`${key}: undefined`));
+    await assert.rejects(access(path), { code: "ENOENT" });
   }
+
+  const manifest = JSON.parse(await readFile("package.json", "utf8"));
+  assert.equal(manifest.devDependencies.webdriverio, undefined);
+  assert.equal(manifest.devDependencies["@wdio/tauri-service"], undefined);
 });

@@ -342,17 +342,17 @@ reported as core workflow evidence.
 
 **Acceptance criteria:**
 
-- [ ] No `e2e:hermetic`, hermetic WDIO configuration, hermetic artifact, or
+- [x] No `e2e:hermetic`, hermetic WDIO configuration, hermetic artifact, or
       secret-free fake-Linear workflow claim remains.
-- [ ] Desktop smoke starts the production Desktop binary without live tokens
+- [x] Desktop smoke starts the production Desktop binary without live tokens
       and has a separate command, verdict, and artifact name.
-- [ ] The core live verdict and Desktop smoke verdict cannot satisfy each
+- [x] The core live verdict and Desktop smoke verdict cannot satisfy each
       other's required evidence.
 
 **Verification:**
 
-- [ ] Run Desktop smoke runner contract tests and `npm run test:e2e:runner`.
-- [ ] Run stale-reference searches across `package.json`, `Makefile`, workflows,
+- [x] Run Desktop smoke runner contract tests and `npm run test:e2e:runner`.
+- [x] Run stale-reference searches across `package.json`, `Makefile`, workflows,
       README, docs, tests, and tools.
 
 **Dependencies:** Task 9
@@ -369,9 +369,9 @@ reported as core workflow evidence.
 
 ## Checkpoint C: One E2E route
 
-- [ ] No alternate Podium composition, Desktop E2E backend, S1/S2/S3 runtime,
+- [x] No alternate Podium composition, Desktop E2E backend, S1/S2/S3 runtime,
       hermetic runner, or hermetic workflow remains.
-- [ ] Desktop smoke is secret-free, starts production artifacts, and cannot
+- [x] Desktop smoke is secret-free, starts production artifacts, and cannot
       satisfy the core live verdict.
 
 ## Task 11: Add local and protected CI entrypoints

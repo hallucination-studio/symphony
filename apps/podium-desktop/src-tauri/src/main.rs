@@ -1,17 +1,25 @@
-use std::sync::Arc;
+use std::io::Write;
+use std::sync::{Arc, Once};
 use symphony_podium_desktop::desktop_controller::DesktopController;
 use symphony_podium_desktop::oauth_return::OAuthReturnRegistry;
 use symphony_podium_desktop::repository_context::RepositoryContext;
-use tauri::{Manager, State};
+use tauri::{webview::PageLoadEvent, Manager, State};
 use tauri_plugin_deep_link::DeepLinkExt;
 use tauri_plugin_opener::OpenerExt;
+
+const WEBVIEW_LOADED_EVENT: &str = "desktop_webview_loaded";
+const PODIUM_BACKEND_RESPONDED_EVENT: &str = "desktop_podium_backend_responded";
+static WEBVIEW_LOADED: Once = Once::new();
+static PODIUM_BACKEND_RESPONDED: Once = Once::new();
 
 #[tauri::command]
 fn podium_client_request(
     controller: State<'_, Arc<DesktopController>>,
     frame: Vec<u8>,
 ) -> Result<Vec<u8>, String> {
-    controller.client_request(&frame).map_err(|error| format!("{error:?}"))
+    let response = controller.client_request(&frame).map_err(|error| format!("{error:?}"))?;
+    PODIUM_BACKEND_RESPONDED.call_once(|| emit_startup_event(PODIUM_BACKEND_RESPONDED_EVENT));
+    Ok(response)
 }
 
 #[tauri::command]
@@ -31,14 +39,15 @@ fn open_external_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
 
 fn main() {
     let builder = tauri::Builder::default()
+        .on_page_load(|webview, payload| {
+            if webview.label() == "main" && payload.event() == PageLoadEvent::Finished {
+                WEBVIEW_LOADED.call_once(|| emit_startup_event(WEBVIEW_LOADED_EVENT));
+            }
+        })
         .manage(Arc::new(OAuthReturnRegistry::default()))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_opener::init());
-    #[cfg(feature = "e2e")]
-    let builder = builder
-        .plugin(tauri_plugin_wdio::init())
-        .plugin(tauri_plugin_wdio_webdriver::init());
     let app = builder
         .invoke_handler(tauri::generate_handler![
             podium_client_request,
@@ -78,4 +87,13 @@ fn main() {
             }
         }
     });
+}
+
+fn emit_startup_event(event: &'static str) {
+    let message = serde_json::json!({
+        "schema_version": 1,
+        "component": "podium-desktop",
+        "event": event,
+    });
+    let _ = writeln!(std::io::stdout().lock(), "{message}");
 }
