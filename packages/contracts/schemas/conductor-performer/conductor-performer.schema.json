@@ -466,10 +466,33 @@
             {
               "type": "object",
               "additionalProperties": false,
+              "required": ["kind", "error_code", "sanitized_summary", "retryable"],
+              "properties": {
+                "kind": { "const": "error_raised" },
+                "error_code": { "$ref": "common.schema.json#/$defs/Identifier" },
+                "sanitized_summary": { "$ref": "common.schema.json#/$defs/BoundedText" },
+                "retryable": { "type": "boolean" }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
               "required": ["kind", "usage"],
               "properties": {
                 "kind": { "const": "usage_updated" },
                 "usage": { "$ref": "#/$defs/PerformerTurnUsageSnapshot" }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["kind", "result_kind", "sanitized_summary"],
+              "properties": {
+                "kind": { "const": "turn_completed" },
+                "result_kind": {
+                  "enum": ["plan_ready", "work_completed", "human_input_required", "root_gate_passed", "root_gate_failed"]
+                },
+                "sanitized_summary": { "$ref": "common.schema.json#/$defs/BoundedText" }
               }
             },
             {

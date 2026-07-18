@@ -526,6 +526,37 @@
         "body": { "$ref": "common.schema.json#/$defs/BoundedText" }
       }
     },
+    "TurnEventKey": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 145,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}:(0|[1-9][0-9]{0,15})$"
+    },
+    "ProjectRootCommentCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "project", "root_issue_id", "body"],
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["comment_id"],
+          "properties": { "event_key": false }
+        },
+        {
+          "type": "object",
+          "required": ["event_key"],
+          "properties": { "comment_id": false }
+        }
+      ],
+      "properties": {
+        "kind": { "const": "project_root_comment" },
+        "project": { "$ref": "#/$defs/ProjectPrecondition" },
+        "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "event_key": { "$ref": "#/$defs/TurnEventKey" },
+        "comment_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "body": { "$ref": "common.schema.json#/$defs/BoundedText" }
+      }
+    },
     "LinearMutationCommand": {
       "oneOf": [
         { "$ref": "#/$defs/CreateManagedNodeCommand" },
@@ -533,7 +564,8 @@
         { "$ref": "#/$defs/UpdateIssueStateCommand" },
         { "$ref": "#/$defs/ReorderIssueNodeCommand" },
         { "$ref": "#/$defs/ReplaceRootPhaseLabelCommand" },
-        { "$ref": "#/$defs/UpsertRootManagedCommentCommand" }
+        { "$ref": "#/$defs/UpsertRootManagedCommentCommand" },
+        { "$ref": "#/$defs/ProjectRootCommentCommand" }
       ]
     },
     "LinearMutationResult": {

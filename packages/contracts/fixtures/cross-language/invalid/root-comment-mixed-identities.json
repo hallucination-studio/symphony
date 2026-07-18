@@ -1,0 +1,15 @@
+{
+  "schema": "podium-conductor.schema.json#/$defs/ProjectRootCommentCommand",
+  "value": {
+    "kind": "project_root_comment",
+    "project": {
+      "conductor_short_hash": "abc123",
+      "expected_project_id": "project-1",
+      "expected_project_updated_at": "2026-07-16T00:00:00Z"
+    },
+    "root_issue_id": "root-1",
+    "comment_id": "comment-1",
+    "event_key": "turn-1:1",
+    "body": "Ambiguous comment mutation."
+  }
+}

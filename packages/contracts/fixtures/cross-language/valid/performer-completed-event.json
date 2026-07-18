@@ -1,0 +1,15 @@
+{
+  "schema": "conductor-performer.schema.json#/$defs/PerformerTurnEvent",
+  "value": {
+    "protocol_version": "1",
+    "turn_id": "turn-1",
+    "root_issue_id": "root-1",
+    "sequence": 5,
+    "occurred_at": "2026-07-16T00:06:00Z",
+    "body": {
+      "kind": "turn_completed",
+      "result_kind": "plan_ready",
+      "sanitized_summary": "The Performer Turn completed."
+    }
+  }
+}
