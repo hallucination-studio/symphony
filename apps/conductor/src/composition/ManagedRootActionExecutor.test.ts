@@ -69,17 +69,19 @@ test("Work Result cannot commit after the Linear Work input changes", async () =
       turns: {
         async run() {
           return {
-            protocol_version: "1",
-            turn_id: "turn-1",
-            turn_kind: "work",
-            result_kind: "work_completed",
-            root_issue_id: "root-1",
-            work_issue_id: "work-1",
-            performer_profile_id: "profile-1",
-            performer_id: "conversation-1",
-            turn_input_hash: "initial-input",
-            body: { summary: "done" },
-            completed_at: "2026-07-17T00:00:01Z",
+            result: {
+              protocol_version: "1",
+              turn_id: "turn-1",
+              turn_kind: "work",
+              result_kind: "work_completed",
+              root_issue_id: "root-1",
+              work_issue_id: "work-1",
+              performer_profile_id: "profile-1",
+              performer_id: "conversation-1",
+              turn_input_hash: "initial-input",
+              body: { summary: "done" },
+              completed_at: "2026-07-17T00:00:01Z",
+            },
           };
         },
       },
@@ -99,6 +101,101 @@ test("Work Result cannot commit after the Linear Work input changes", async () =
     /stale_performer_result/,
   );
   assert.equal(commits, 0);
+});
+
+test("Root Result rejects changed workflow authority facts", async (context) => {
+  const scenarios: Array<[
+    string,
+    (view: RootRunView) => void,
+  ]> = [
+    ["Root input", (view) => {
+      view.root.title = "Changed Root";
+    }],
+    ["Root state", (view) => {
+      view.root.state = "Done";
+    }],
+    ["phase", (view) => {
+      view.phaseLabels = ["blocked"];
+    }],
+    ["Tree", (view) => {
+      view.workflowNodes.push({
+        issueId: "work-new",
+        identifier: "SYM-3",
+        parentIssueId: "root-1",
+        siblingOrder: 1,
+        kind: "work",
+        state: "Todo",
+        title: "New Work",
+        description: "Added during the Turn",
+        updatedAt: "2026-07-17T00:00:01Z",
+      });
+    }],
+    ["ownership", (view) => {
+      view.conductorId = "conductor-other";
+    }],
+    ["Project resolution", (view) => {
+      view.resolvedProjectId = "project-other";
+    }],
+    ["Profile identity", (view) => {
+      view.managedComment!.performerProfileId = "profile-other";
+    }],
+    ["Profile readiness", (view) => {
+      view.profile!.readiness = "login-required";
+    }],
+  ];
+
+  for (const [name, change] of scenarios) {
+    await context.test(name, async () => {
+      const initial = runningRootView();
+      initial.workflowNodes = [];
+      initial.phaseLabels = ["planning"];
+      const changed = structuredClone(initial);
+      const executor = createExecutor(async () => ({ kind: "applied" }), {
+        gateway: {
+          async profileReadiness() {
+            return "ready" as const;
+          },
+          projectPrecondition() {
+            return {
+              conductor_short_hash: "abc123",
+              expected_project_id: "project-1",
+              expected_project_updated_at: "2026-07-17T00:00:00Z",
+            };
+          },
+          async mutate() {
+            return { kind: "applied" };
+          },
+          async reconstruct() {
+            return changed;
+          },
+        },
+        turns: {
+          async run() {
+            change(changed);
+            return {
+              result: {
+                protocol_version: "1",
+                turn_id: "turn-1",
+                turn_kind: "plan",
+                result_kind: "plan_ready",
+                root_issue_id: "root-1",
+                performer_profile_id: "profile-1",
+                performer_id: "conversation-1",
+                turn_input_hash: hashRootInput(initial.root),
+                body: { summary: "Plan", nodes: [] },
+                completed_at: "2026-07-17T00:00:01Z",
+              },
+            };
+          },
+        },
+      });
+
+      await assert.rejects(
+        executor.execute(initial, { kind: "plan_root" }),
+        /stale_performer_result/u,
+      );
+    });
+  }
 });
 
 test("persisted Work hash advances In Progress to In Review without another Turn", async () => {
@@ -286,16 +383,18 @@ test("repeated Root Gate failure updates and reopens one stable Rework node", as
           ).map(({ issue_id }) => issue_id),
         );
         return {
-          protocol_version: "1",
-          turn_id: command.turn_id,
-          turn_kind: "root_gate",
-          result_kind: "root_gate_failed",
-          root_issue_id: "root-1",
-          performer_profile_id: "profile-1",
-          performer_id: "conversation-1",
-          turn_input_hash: command.turn_input_hash,
-          body: { summary: "Fix the gate" },
-          completed_at: "2026-07-17T00:00:03Z",
+          result: {
+            protocol_version: "1",
+            turn_id: command.turn_id,
+            turn_kind: "root_gate",
+            result_kind: "root_gate_failed",
+            root_issue_id: "root-1",
+            performer_profile_id: "profile-1",
+            performer_id: "conversation-1",
+            turn_input_hash: command.turn_input_hash,
+            body: { summary: "Fix the gate" },
+            completed_at: "2026-07-17T00:00:03Z",
+          },
         };
       },
     },
@@ -331,19 +430,16 @@ test("repeated Root Gate failure updates and reopens one stable Rework node", as
   );
 });
 
-test("retryable Performer failures are logged and terminal failure reaches the Root comment", async () => {
+test("Performer continuous status upserts the Primary comment while the Turn runs", async () => {
   const view = runningRootView();
-  view.workflowNodes = [];
-  view.phaseLabels = ["planning"];
-  const warnings: unknown[] = [];
-  const commentBodies: string[] = [];
-  const executor = createExecutor(async (body) => {
-    const mutation = body as Record<string, unknown>;
-    if (mutation.kind === "upsert_root_managed_comment") {
-      commentBodies.push(String(mutation.body));
-    }
-    return { kind: "applied" };
-  }, {
+  const remote = structuredClone(view);
+  const primaryCommands: Array<Record<string, unknown>> = [];
+  let resolveLiveStatuses: (() => void) | undefined;
+  const liveStatuses = new Promise<void>((resolve) => {
+    resolveLiveStatuses = resolve;
+  });
+  let turnRunning = false;
+  const executor = createExecutor(async () => ({ kind: "applied" }), {
     gateway: {
       async profileReadiness() {
         return "ready" as const;
@@ -357,64 +453,173 @@ test("retryable Performer failures are logged and terminal failure reaches the R
       },
       async mutate(body: unknown) {
         const mutation = body as Record<string, unknown>;
-        if (mutation.kind === "upsert_root_managed_comment") {
-          commentBodies.push(String(mutation.body));
+        if (
+          mutation.kind === "project_root_comment" &&
+          mutation.comment_id === "comment-1"
+        ) {
+          primaryCommands.push(mutation);
+          remote.root.updatedAt =
+            `2026-07-17T00:00:0${primaryCommands.length}Z`;
+          remote.managedCommentRemote!.updatedAt =
+            `2026-07-17T00:00:0${primaryCommands.length}Z`;
+          if (primaryCommands.length <= 4) {
+            assert.equal(turnRunning, true);
+          }
+          if (primaryCommands.length === 4) resolveLiveStatuses?.();
         }
         return { kind: "applied" };
       },
       async reconstruct() {
-        return view;
+        return remote;
+      },
+    },
+    turns: {
+      async run(input: { onEvent?(event: Record<string, unknown>): void }) {
+        assert.ok(input.onEvent, "Conductor must subscribe before starting the Turn");
+        turnRunning = true;
+        const bodies = [
+          { kind: "turn_started" },
+          { kind: "progress", stage: "editing" },
+          {
+            kind: "usage_updated",
+            usage: {
+              input_tokens: 10,
+              cached_input_tokens: 4,
+              output_tokens: 1,
+              reasoning_output_tokens: 1,
+              total_tokens: 11,
+            },
+          },
+          { kind: "heartbeat" },
+        ];
+        bodies.forEach((body, sequence) => input.onEvent?.({
+          protocol_version: "1",
+          turn_id: "turn-1",
+          root_issue_id: "root-1",
+          work_issue_id: "work-1",
+          sequence,
+          occurred_at: `2026-07-17T00:00:0${sequence}Z`,
+          body,
+        }));
+        await liveStatuses;
+        turnRunning = false;
+        return {
+          result: {
+            protocol_version: "1",
+            turn_id: "turn-1",
+            turn_kind: "work",
+            result_kind: "work_completed",
+            root_issue_id: "root-1",
+            work_issue_id: "work-1",
+            performer_profile_id: "profile-1",
+            performer_id: "conversation-1",
+            turn_input_hash: "initial-input",
+            body: { summary: "done" },
+            usage: {
+              input_tokens: 10,
+              cached_input_tokens: 4,
+              output_tokens: 1,
+              reasoning_output_tokens: 1,
+              total_tokens: 11,
+            },
+            completed_at: "2026-07-17T00:00:04Z",
+          },
+        };
+      },
+    },
+    git: {
+      async ensureWorkspace() {
+        return { branch: "symphony/runs/sym-1", worktreePath: "/worktree" };
+      },
+      async commitWork() {},
+    },
+  });
+
+  await executor.execute(view, { kind: "execute_work", nodeId: "work-1" });
+
+  assert.equal(primaryCommands.length, 5);
+  assert.deepEqual(
+    primaryCommands.slice(0, 4).map(({ body }) =>
+      /turn_status: ([^\n]+)/u.exec(String(body))?.[1]),
+    ["turn_started", "editing", "usage_updated", "heartbeat"],
+  );
+  assert.ok(primaryCommands.every((command) =>
+    command.comment_id === "comment-1" &&
+    command.event_key === undefined &&
+    command.root_precondition === undefined &&
+    command.comment_precondition === undefined));
+  assert.match(String(primaryCommands[4]!.body), /turn_status: heartbeat/u);
+  assert.match(String(primaryCommands[4]!.body), /usage_total_tokens: 11/u);
+});
+
+test("a Turn without status events records usage from the fresh Primary comment", async () => {
+  const view = runningRootView();
+  const remote = structuredClone(view);
+  remote.managedComment!.usage.inputTokens = 5;
+  remote.managedComment!.usage.totalTokens = 5;
+  const primaryBodies: string[] = [];
+  const executor = createExecutor(async () => ({ kind: "applied" }), {
+    gateway: {
+      async profileReadiness() {
+        return "ready" as const;
+      },
+      projectPrecondition() {
+        return {
+          conductor_short_hash: "abc123",
+          expected_project_id: "project-1",
+          expected_project_updated_at: "2026-07-17T00:00:00Z",
+        };
+      },
+      async mutate(body: unknown) {
+        const mutation = body as Record<string, unknown>;
+        if (mutation.kind === "project_root_comment") {
+          primaryBodies.push(String(mutation.body));
+        }
+        return { kind: "applied" };
+      },
+      async reconstruct() {
+        return remote;
       },
     },
     turns: {
       async run() {
         return {
-          protocol_version: "1",
-          turn_id: "turn-1",
-          turn_kind: "plan",
-          result_kind: "turn_failed",
-          root_issue_id: "root-1",
-          performer_profile_id: "profile-1",
-          performer_id: "conversation-1",
-          turn_input_hash: hashRootInput(view.root),
-          body: {
-            error_code: "provider_turn_failed",
-            sanitized_reason: "WebSocket closed before response.completed",
-            retryable: true,
-            action_required: "Retry the Turn.",
+          result: {
+            protocol_version: "1",
+            turn_id: "turn-1",
+            turn_kind: "work",
+            result_kind: "work_completed",
+            root_issue_id: "root-1",
+            work_issue_id: "work-1",
+            performer_profile_id: "profile-1",
+            performer_id: "conversation-1",
+            turn_input_hash: "initial-input",
+            body: { summary: "done" },
+            usage: {
+              input_tokens: 10,
+              cached_input_tokens: 4,
+              output_tokens: 1,
+              reasoning_output_tokens: 1,
+              total_tokens: 11,
+            },
+            completed_at: "2026-07-17T00:00:04Z",
           },
-          completed_at: "2026-07-17T00:00:01Z",
         };
       },
     },
-    reportTurnRetry: (warning: unknown) => warnings.push(warning),
+    git: {
+      async ensureWorkspace() {
+        return { branch: "symphony/runs/sym-1", worktreePath: "/worktree" };
+      },
+      async commitWork() {},
+    },
   });
 
-  await assert.rejects(
-    executor.execute(view, { kind: "plan_root" }),
-    /provider_turn_failed/u,
-  );
-  assert.deepEqual(warnings, [
-    {
-      attempt: 1,
-      errorCode: "provider_turn_failed",
-      sanitizedReason: "WebSocket closed before response.completed",
-    },
-    {
-      attempt: 2,
-      errorCode: "provider_turn_failed",
-      sanitizedReason: "WebSocket closed before response.completed",
-    },
-    {
-      attempt: 3,
-      errorCode: "provider_turn_failed",
-      sanitizedReason: "WebSocket closed before response.completed",
-    },
-  ]);
-  assert.ok(commentBodies.some((body) =>
-    body.includes(
-      "last_error: performer_retry_exhausted:WebSocket closed before response.completed",
-    )));
+  await executor.execute(view, { kind: "execute_work", nodeId: "work-1" });
+
+  assert.equal(primaryBodies.length, 1);
+  assert.match(primaryBodies[0]!, /usage_input_tokens: 15/u);
+  assert.match(primaryBodies[0]!, /usage_total_tokens: 16/u);
 });
 
 function createExecutor(

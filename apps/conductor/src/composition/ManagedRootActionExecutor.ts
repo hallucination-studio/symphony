@@ -235,6 +235,7 @@ export class ManagedRootActionExecutor implements RuntimeActionExecutor {
       },
       command,
       ["plan_ready", "turn_failed", "turn_canceled"],
+      view,
       async () => {
         await this.#confirmWorkspace(view, workspace);
         return this.#freshForResult(view, {
@@ -244,7 +245,12 @@ export class ManagedRootActionExecutor implements RuntimeActionExecutor {
       },
     );
     let freshAfterTurn = validated;
-    await this.#recordUsage(freshAfterTurn, managed, result, turnId);
+    await this.#recordUsage(
+      freshAfterTurn,
+      freshAfterTurn.managedComment ?? managed,
+      result,
+      turnId,
+    );
     freshAfterTurn = await this.#freshForResult(view, {
       rootInputHash: turnInputHash,
       workflowSnapshot: workflowSnapshot(view.workflowNodes),
@@ -343,6 +349,7 @@ export class ManagedRootActionExecutor implements RuntimeActionExecutor {
         "turn_failed",
         "turn_canceled",
       ],
+      current,
       async () => {
         await this.#confirmWorkspace(current, workspace);
         return this.#freshForResult(current, {
@@ -353,7 +360,12 @@ export class ManagedRootActionExecutor implements RuntimeActionExecutor {
       },
     );
     let freshAfterTurn = validated;
-    await this.#recordUsage(freshAfterTurn, managed, result, turnId);
+    await this.#recordUsage(
+      freshAfterTurn,
+      freshAfterTurn.managedComment ?? managed,
+      result,
+      turnId,
+    );
     freshAfterTurn = await this.#freshForResult(current, {
       workIssueId: node.issueId,
       workInputHash: turnInputHash,
@@ -474,6 +486,7 @@ export class ManagedRootActionExecutor implements RuntimeActionExecutor {
         "turn_failed",
         "turn_canceled",
       ],
+      view,
       async () => {
         await this.#confirmWorkspace(view, workspace);
         return this.#freshForResult(view, {
@@ -483,7 +496,12 @@ export class ManagedRootActionExecutor implements RuntimeActionExecutor {
       },
     );
     let freshAfterTurn = validated;
-    await this.#recordUsage(freshAfterTurn, managed, result, turnId);
+    await this.#recordUsage(
+      freshAfterTurn,
+      freshAfterTurn.managedComment ?? managed,
+      result,
+      turnId,
+    );
     freshAfterTurn = await this.#freshForResult(view, {
       rootInputHash: turnInputHash,
       workflowSnapshot: workflowSnapshot(view.workflowNodes),
@@ -824,7 +842,7 @@ export class ManagedRootActionExecutor implements RuntimeActionExecutor {
   ): Promise<void> {
     if (!result.usage || managed.lastUsageTurnId === turnId) return;
     try {
-      await this.#updateManagedComment(view, {
+      await this.#projectManagedStatus(view, {
         ...clearLastError(managed),
         usage: addUsage(managed.usage, result.usage),
         lastUsageTurnId: turnId,
@@ -852,6 +870,21 @@ export class ManagedRootActionExecutor implements RuntimeActionExecutor {
         expected_managed_marker: `${view.root.issueId}:root-comment`,
       },
       managed_marker: `${view.root.issueId}:root-comment`,
+      body: serializeRootManagedComment(managed),
+    });
+  }
+
+  async #projectManagedStatus(
+    view: RootRunView,
+    managed: RootManagedComment,
+  ) {
+    const remote = view.managedCommentRemote;
+    if (!remote) throw new Error("root_managed_comment_remote_missing");
+    await this.#mutate({
+      kind: "project_root_comment",
+      project: this.options.gateway.projectPrecondition(),
+      root_issue_id: view.root.issueId,
+      comment_id: remote.commentId,
       body: serializeRootManagedComment(managed),
     });
   }
@@ -916,17 +949,41 @@ export class ManagedRootActionExecutor implements RuntimeActionExecutor {
     input: Parameters<PerformerTurnProcessImpl["run"]>[0],
     command: RecordValue,
     expected: string[],
+    statusView: RootRunView,
     validate: () => Promise<RootRunView>,
   ): Promise<{ result: RecordValue; fresh: RootRunView }> {
+    let projectedManaged = statusView.managedComment;
+    let hasProjectedStatus = false;
     for (let attempt = 1; attempt <= 4; attempt += 1) {
-      const result = record(await this.options.turns.run(input));
+      let projection = Promise.resolve();
+      const execution = await this.options.turns.run({
+        ...input,
+        onEvent: (value) => {
+          projection = projection.then(async () => {
+            const nextManaged = await this.#projectTurnStatus(
+              value,
+              statusView,
+              projectedManaged,
+            );
+            hasProjectedStatus ||= nextManaged !== projectedManaged;
+            projectedManaged = nextManaged;
+          });
+        },
+      }).finally(async () => {
+        await projection;
+      });
+      const result = record(execution.result);
       assertTurnResult(command, result, expected);
       const fresh = await validate();
+      const projectedFresh: RootRunView =
+        !hasProjectedStatus || projectedManaged === undefined
+        ? fresh
+        : { ...fresh, managedComment: projectedManaged };
       if (result.result_kind !== "turn_failed") {
-        return { result, fresh };
+        return { result, fresh: projectedFresh };
       }
       const body = record(result.body);
-      if (body.retryable !== true) return { result, fresh };
+      if (body.retryable !== true) return { result, fresh: projectedFresh };
       const code = text(body.error_code, "performer_turn_failed");
       const reason = text(body.sanitized_reason, code);
       if (attempt === 4) {
@@ -946,6 +1003,41 @@ export class ManagedRootActionExecutor implements RuntimeActionExecutor {
     throw new Error("performer_retry_unreachable");
   }
 
+  async #projectTurnStatus(
+    value: JsonValue,
+    view: RootRunView,
+    managed: RootManagedComment | undefined,
+  ): Promise<RootManagedComment | undefined> {
+    const event = record(value);
+    const body = record(event.body);
+    const turnId = text(event.turn_id, "performer_event_turn_id_invalid");
+    const sequence = number(event.sequence, "performer_event_sequence_invalid");
+    const rootIssueId = text(event.root_issue_id, "performer_event_root_id_invalid");
+    if (rootIssueId !== view.root.issueId) {
+      throw new Error("performer_event_root_id_mismatch");
+    }
+    if (
+      body.kind === "warning_raised" ||
+      body.kind === "error_raised" ||
+      body.kind === "turn_completed"
+    ) {
+      return managed;
+    }
+    if (!managed || !view.managedCommentRemote) return managed;
+    const turnStatus = body.kind === "progress"
+      ? text(body.stage, "performer_progress_stage_invalid")
+      : text(body.kind, "performer_event_kind_invalid");
+    const updated = {
+      ...managed,
+      turnId,
+      turnStatus,
+      turnEventSequence: sequence,
+      turnStatusUpdatedAt: text(event.occurred_at, "performer_event_timestamp_invalid"),
+    };
+    await this.#projectManagedStatus(view, updated);
+    return updated;
+  }
+
   async #freshForResult(
     original: RootRunView,
     expected: {
@@ -958,7 +1050,6 @@ export class ManagedRootActionExecutor implements RuntimeActionExecutor {
     const fresh = await this.options.gateway.reconstruct(original.root.issueId);
     if (
       fresh.root.state !== original.root.state ||
-      fresh.root.updatedAt !== original.root.updatedAt ||
       JSON.stringify(fresh.phaseLabels) !==
         JSON.stringify(original.phaseLabels) ||
       fresh.root.state === "Done" ||
