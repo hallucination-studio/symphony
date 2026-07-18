@@ -8,9 +8,7 @@ import type {
 } from "../../root-workflow/api/Models.js";
 import {
   hashWorkInput,
-  parseHumanDescription,
   parseRootManagedComment,
-  parseWorkDescription,
 } from "../../root-workflow/api/index.js";
 
 type JsonValue =
@@ -306,8 +304,16 @@ function workflowNode(
   answer?: string,
 ): WorkflowNode {
   if (node.node_kind === "human") {
-    const parsed = parseHumanDescription(node.description);
-    if (!parsed.ok) throw new Error(parsed.error);
+    const targetIsInvalid = node.human_kind === "plan_approval"
+      ? node.target_issue_id !== undefined
+      : node.target_issue_id === undefined;
+    if (
+      !node.managed_marker ||
+      !node.human_kind ||
+      targetIsInvalid
+    ) {
+      throw new Error("human_managed_marker_invalid");
+    }
     return {
       issueId: node.issue_id,
       identifier: node.identifier,
@@ -317,20 +323,18 @@ function workflowNode(
           : node.parent_issue_id ?? null,
       siblingOrder: node.order,
       kind: "human",
-      humanKind: parsed.value.humanKind,
+      humanKind: node.human_kind,
       state: node.state,
       title: node.title,
-      description: parsed.value.businessDescription,
+      description: node.description,
       updatedAt: node.updated_at,
-      managedMarker: parsed.value.managedMarker,
-      ...(parsed.value.targetIssueId
-        ? { targetIssueId: parsed.value.targetIssueId }
+      managedMarker: node.managed_marker,
+      ...(node.target_issue_id
+        ? { targetIssueId: node.target_issue_id }
         : {}),
       ...(answer ? { answer } : {}),
     };
   }
-  const parsed = parseWorkDescription(node.description);
-  if (!parsed.ok) throw new Error(parsed.error);
   const work: WorkflowNode = {
     issueId: node.issue_id,
     identifier: node.identifier,
@@ -342,14 +346,14 @@ function workflowNode(
     kind: "work",
     state: node.state,
     title: node.title,
-    description: parsed.value.businessDescription,
+    description: node.description,
     updatedAt: node.updated_at,
-    ...(parsed.value.origin ? { origin: parsed.value.origin } : {}),
-    ...(parsed.value.managedMarker
-      ? { managedMarker: parsed.value.managedMarker }
+    ...(node.origin ? { origin: node.origin } : {}),
+    ...(node.managed_marker
+      ? { managedMarker: node.managed_marker }
       : {}),
-    ...(parsed.value.completedInputHash
-      ? { completedInputHash: parsed.value.completedInputHash }
+    ...(node.completed_input_hash
+      ? { completedInputHash: node.completed_input_hash }
       : {}),
   };
   return work;

@@ -78,6 +78,9 @@ test("Gateway reconstructs Root ownership, phase, Profile, and managed Work", as
   assert.equal(view.managedComment?.performerProfileId, "profile-1");
   assert.equal(view.profile?.readiness, "ready");
   assert.equal(view.workflowNodes[0]?.origin, "symphony");
+  assert.equal(view.workflowNodes[0]?.managedMarker, "root-1:work-1");
+  assert.equal(view.workflowNodes[0]?.completedInputHash, "hash-1");
+  assert.equal(view.workflowNodes[0]?.description, "Implement");
   assert.equal(view.workflowNodes[0]?.parentIssueId, null);
   assert.deepEqual(
     requests.map(({ kind }) => kind),
@@ -117,8 +120,7 @@ test("Gateway includes the explicit Done Human comment in the target Work hash",
           order: 0,
           depth: 1,
           title: "[Human Action] Choose mode",
-          description:
-            "Use strict mode\n<!-- symphony managed marker\nmanaged_marker: root-1:human-1\nkind: human\nhuman_kind: planned_input\ntarget_issue_id: work-1\n-->",
+          description: "Use strict mode",
           managed_marker: "root-1:human-1",
           node_kind: "human",
           human_kind: "planned_input",
@@ -143,6 +145,10 @@ test("Gateway includes the explicit Done Human comment in the target Work hash",
   assert.equal(
     view.workflowNodes.find(({ issueId }) => issueId === "human-1")?.answer,
     "Strict mode",
+  );
+  assert.equal(
+    view.workflowNodes.find(({ issueId }) => issueId === "human-1")?.description,
+    "Use strict mode",
   );
   assert.match(
     view.workflowNodes.find(({ issueId }) => issueId === "work-1")
@@ -213,10 +219,11 @@ function tree() {
           order: 1,
           depth: 1,
           title: "Work",
-          description: "Implement\n<!-- symphony managed marker\nmanaged_marker: root-1:work-1\n-->\n<!-- symphony work metadata\nkind: work\norigin: symphony\ncompleted_input_hash: none\n-->",
+          description: "Implement",
           managed_marker: "root-1:work-1",
           node_kind: "work",
           origin: "symphony",
+          completed_input_hash: "hash-1",
           updated_at: observedAt,
         },
       ],
