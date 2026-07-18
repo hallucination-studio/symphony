@@ -20,9 +20,12 @@ import type {
 
 const PAGE_LIMIT = 250;
 const MAX_TREE_NODES = 512;
+const MAX_ROOT_COMMENTS = 4_096;
 const CONDUCTOR_LABEL_PREFIX = "symphony:conductor/";
 const ROOT_PHASE_PREFIX = "symphony:run/";
 const ROOT_MARKER = "<!-- symphony root marker -->";
+const TURN_EVENT_MARKER =
+  /\n*<!-- symphony turn event\nevent_key: ([A-Za-z0-9][A-Za-z0-9._:/-]{0,127}:(?:0|[1-9][0-9]{0,15}))\n-->\s*$/;
 const MANAGED_IDENTITY_MARKER =
   /\n*<!-- symphony managed marker\nmanaged_marker: ([A-Za-z0-9][A-Za-z0-9._:/-]{0,127})\n-->\s*$/;
 const HUMAN_MARKER =
@@ -321,6 +324,9 @@ export class LinearSdkImpl implements LinearClientInterface {
       case "upsert_root_managed_comment":
         await this.#upsertRootComment(command);
         return;
+      case "project_root_comment":
+        await this.#projectRootComment(command);
+        return;
     }
   }
 
@@ -399,6 +405,33 @@ export class LinearSdkImpl implements LinearClientInterface {
               ),
             }
           : undefined;
+      }
+      case "project_root_comment": {
+        const issue = await this.#client.issue(command.rootIssueId);
+        const value = await issueValue(issue);
+        if (value.projectId !== command.project.expectedProjectId) return undefined;
+        if (command.commentId) {
+          const comment = await this.#client.comment({ id: command.commentId });
+          return isPrimaryCommentForRoot(
+            comment,
+            command.rootIssueId,
+            command.body,
+          ) &&
+            comment.body === command.body
+            ? { issue: value }
+            : undefined;
+        }
+        if (command.eventKey === undefined) return undefined;
+        const comments = await this.#rootComments(issue);
+        const matches = timelineComments(comments, command.eventKey);
+        if (matches.length > 1) {
+          throw new Error("linear_turn_event_comment_ambiguous");
+        }
+        if (matches[0] && matches[0].body !== command.body) {
+          throw new Error("linear_turn_event_comment_mismatch");
+        }
+        if (matches.length !== 1) return undefined;
+        return { issue: value };
       }
     }
   }
@@ -571,9 +604,50 @@ export class LinearSdkImpl implements LinearClientInterface {
     });
   }
 
+  async #projectRootComment(
+    command: Extract<LinearMutationCommand, { kind: "project_root_comment" }>,
+  ) {
+    const issue = await this.#client.issue(command.rootIssueId);
+    const value = await issueValue(issue);
+    if (value.projectId !== command.project.expectedProjectId) {
+      throw new Error("linear_project_mismatch");
+    }
+    if (command.commentId) {
+      const comment = await this.#client.comment({ id: command.commentId });
+      if (!isPrimaryCommentForRoot(comment, command.rootIssueId, command.body)) {
+        throw new Error("linear_root_comment_identity_mismatch");
+      }
+      await this.#client.updateComment(command.commentId, { body: command.body });
+      return;
+    }
+    if (command.eventKey === undefined) {
+      throw new Error("linear_root_comment_identity_missing");
+    }
+    if (command.body.match(TURN_EVENT_MARKER)?.[1] !== command.eventKey) {
+      throw new Error("linear_turn_event_marker_invalid");
+    }
+    const comments = await this.#rootComments(issue);
+    const matches = timelineComments(comments, command.eventKey);
+    if (matches.length > 1) throw new Error("linear_turn_event_comment_ambiguous");
+    if (matches[0]) {
+      if (matches[0].body !== command.body) {
+        throw new Error("linear_turn_event_comment_mismatch");
+      }
+      throw preconditionConflictError();
+    }
+    await this.#client.createComment({ issueId: command.rootIssueId, body: command.body });
+  }
+
+  async #rootComments(issue: Issue): Promise<Comment[]> {
+    return allNodes(
+      issue.comments({ first: PAGE_LIMIT }),
+      MAX_ROOT_COMMENTS,
+    );
+  }
+
   async #rootManagedComments(issueId: string): Promise<Comment[]> {
     const issue = await this.#client.issue(issueId);
-    const comments = await allNodes(issue.comments({ first: PAGE_LIMIT }), 64);
+    const comments = await this.#rootComments(issue);
     return comments.filter(({ body }) => body.endsWith(ROOT_MARKER));
   }
 
@@ -654,6 +728,22 @@ export class LinearSdkImpl implements LinearClientInterface {
     }
     return label;
   }
+}
+
+function isPrimaryCommentForRoot(
+  comment: Comment | undefined,
+  rootIssueId: string,
+  nextBody: string,
+): comment is Comment {
+  return comment?.issueId === rootIssueId &&
+    comment.body.endsWith(ROOT_MARKER) &&
+    nextBody.endsWith(ROOT_MARKER);
+}
+
+function timelineComments(comments: Comment[], eventKey: string): Comment[] {
+  return comments.filter(({ body }) =>
+    body.match(TURN_EVENT_MARKER)?.[1] === eventKey
+  );
 }
 
 function clientOptions(credential: LinearSdkCredential):

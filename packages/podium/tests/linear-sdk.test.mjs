@@ -13,6 +13,28 @@ function connection(nodes) {
   };
 }
 
+function paginatedConnection(pages) {
+  let page = 0;
+  return {
+    nodes: [...pages[0]],
+    pageInfo: { hasNextPage: pages.length > 1, endCursor: undefined },
+    async fetchNext() {
+      page += 1;
+      this.nodes.push(...pages[page]);
+      this.pageInfo.hasNextPage = page < pages.length - 1;
+      return this;
+    },
+  };
+}
+
+function commentPages(comments) {
+  const pages = [];
+  for (let index = 0; index < comments.length; index += 64) {
+    pages.push(comments.slice(index, index + 64));
+  }
+  return pages.length > 0 ? pages : [[]];
+}
+
 function issue(input) {
   const value = {
     id: input.id,
@@ -217,6 +239,190 @@ test("official SDK adapter serializes Human kind and target without title infere
   assert.equal(outcome.issue.targetIssueId, "work-1");
   assert.equal(outcome.issue.description, "Confirm the input");
 });
+
+test("official SDK adapter appends and reads back a Root event after 65 comments", async () => {
+  const comments = Array.from({ length: 65 }, (_, index) => ({
+    id: `user-comment-${index}`,
+    body: `User comment ${index}`,
+  }));
+  const root = issue({ id: "root-1" });
+  root.comments = async () => paginatedConnection(commentPages(comments));
+  const sdk = {
+    issue: async () => root,
+    async createComment({ issueId, body }) {
+      assert.equal(issueId, "root-1");
+      comments.push({ id: "comment-1", body });
+      return { success: true, commentId: "comment-1" };
+    },
+  };
+  const adapter = new LinearSdkImpl({ kind: "oauth", token: "token" }, "organization-1", sdk);
+  const eventKey = `${"turn".repeat(32)}:9007199254740991`;
+  const command = rootCommentCommand({ eventKey });
+
+  await adapter.executeMutation(command);
+
+  assert.equal(comments.length, 66);
+  assert.ok(await adapter.readMutationOutcome(command));
+  await assert.rejects(adapter.executeMutation(command), /precondition/u);
+});
+
+test("official SDK adapter upserts the Primary comment by direct id lookup", async () => {
+  const comment = {
+    id: "comment-1",
+    issueId: "root-1",
+    body: "Symphony Root Run\nturn_status: planning\n<!-- symphony root marker -->",
+    updatedAt: new Date("2026-07-16T00:00:00Z"),
+  };
+  const root = issue({ id: "root-1" });
+  root.comments = async () => {
+    throw new Error("Primary ID-upsert must not scan Root comments");
+  };
+  let lookups = 0;
+  const sdk = {
+    issue: async () => root,
+    async comment({ id }) {
+      assert.equal(id, "comment-1");
+      lookups += 1;
+      return comment;
+    },
+    async updateComment(commentId, { body }) {
+      assert.equal(commentId, "comment-1");
+      comment.body = body;
+      return { success: true };
+    },
+  };
+  const adapter = new LinearSdkImpl({ kind: "oauth", token: "token" }, "organization-1", sdk);
+  const command = rootCommentCommand({ commentId: "comment-1" });
+
+  await adapter.executeMutation(command);
+
+  assert.match(comment.body, /turn_status: working/u);
+  assert.ok(await adapter.readMutationOutcome(command));
+  assert.equal(lookups, 2);
+});
+
+test("official SDK adapter rejects an invalid Primary comment identity", async () => {
+  const root = issue({ id: "root-1" });
+  const command = rootCommentCommand({ commentId: "comment-1" });
+  const cases = [
+    { comment: undefined, command },
+    {
+      comment: {
+        issueId: "root-other",
+        body: "Symphony Root Run\n<!-- symphony root marker -->",
+      },
+      command,
+    },
+    {
+      comment: { issueId: "root-1", body: "A user comment" },
+      command,
+    },
+    {
+      comment: {
+        issueId: "root-1",
+        body: "Symphony Root Run\n<!-- symphony root marker -->",
+      },
+      command: {
+        ...command,
+        body: "Timeline\n\n<!-- symphony turn event\nevent_key: turn-1:1\n-->",
+      },
+    },
+  ];
+
+  for (const testCase of cases) {
+    const sdk = {
+      issue: async () => root,
+      comment: async () => testCase.comment && ({
+        id: "comment-1",
+        updatedAt: new Date("2026-07-16T00:00:00Z"),
+        ...testCase.comment,
+      }),
+      updateComment: async () => assert.fail("invalid comment was updated"),
+    };
+    const adapter = new LinearSdkImpl(
+      { kind: "oauth", token: "token" },
+      "organization-1",
+      sdk,
+    );
+
+    await assert.rejects(
+      adapter.executeMutation(testCase.command),
+      /linear_root_comment_identity_mismatch/u,
+    );
+  }
+});
+
+test("official SDK adapter rejects mismatched and ambiguous Timeline markers", async () => {
+  const command = rootCommentCommand({ eventKey: "turn-1:1" });
+  const mismatched = {
+    id: "comment-1",
+    body: "Different body\n\n<!-- symphony turn event\nevent_key: turn-1:1\n-->",
+  };
+
+  for (const comments of [[mismatched], [mismatched, { ...mismatched, id: "comment-2" }]]) {
+    const root = issue({ id: "root-1" });
+    root.comments = async () => paginatedConnection(commentPages(comments));
+    const sdk = {
+      issue: async () => root,
+      createComment: async () => assert.fail("duplicate Timeline comment was created"),
+    };
+    const adapter = new LinearSdkImpl(
+      { kind: "oauth", token: "token" },
+      "organization-1",
+      sdk,
+    );
+
+    await assert.rejects(
+      adapter.executeMutation(command),
+      comments.length === 1
+        ? /linear_turn_event_comment_mismatch/u
+        : /linear_turn_event_comment_ambiguous/u,
+    );
+  }
+});
+
+test("official SDK adapter discovers the Primary comment after 65 user comments", async () => {
+  const comments = [
+    ...Array.from({ length: 65 }, (_, index) => ({
+      id: `user-comment-${index}`,
+      body: `User comment ${index}`,
+      updatedAt: new Date("2026-07-16T00:00:00Z"),
+    })),
+    {
+      id: "primary-comment",
+      body: "Symphony Root Run\n<!-- symphony root marker -->",
+      updatedAt: new Date("2026-07-16T00:00:00Z"),
+    },
+  ];
+  const root = issue({ id: "root-1" });
+  root.comments = async () => paginatedConnection(commentPages(comments));
+  const adapter = new LinearSdkImpl(
+    { kind: "oauth", token: "token" },
+    "organization-1",
+    { issue: async () => root },
+  );
+
+  assert.equal(
+    (await adapter.readRootManagedComment("root-1")).commentId,
+    "primary-comment",
+  );
+});
+
+function rootCommentCommand(identity) {
+  return {
+    kind: "project_root_comment",
+    project: {
+      conductorShortHash: "abc123",
+      expectedProjectId: "project-1",
+      expectedProjectUpdatedAt: "2026-07-16T00:00:00Z",
+    },
+    rootIssueId: "root-1",
+    body: identity.commentId
+      ? "Symphony Root Run\nturn_status: working\n<!-- symphony root marker -->"
+      : `Provider failed.\n\n<!-- symphony turn event\nevent_key: ${identity.eventKey}\n-->`,
+    ...identity,
+  };
+}
 
 test("Project label assignment rejects a conflicting Conductor label introduced before read-back", async () => {
   let added = false;

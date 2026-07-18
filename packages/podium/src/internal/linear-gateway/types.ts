@@ -88,7 +88,15 @@ export type LinearMutationCommand =
       commentPrecondition?: RemotePrecondition;
       managedMarker: string;
       body: string;
-    });
+    })
+  | (MutationBase & {
+      kind: "project_root_comment";
+      rootIssueId: string;
+      body: string;
+    } & (
+      | { commentId: string; eventKey?: never }
+      | { eventKey: string; commentId?: never }
+    ));
 
 export interface LinearIssueValue {
   issueId: string;
