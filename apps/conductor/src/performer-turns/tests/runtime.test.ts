@@ -43,6 +43,36 @@ test("the global Performer lane serializes child processes", async () => {
   ]);
 });
 
+test("the global Performer lane drains stdout before process exit", async () => {
+  const lane = new GlobalPerformerLane();
+  let observed: (() => void) | undefined;
+  const stdoutObserved = new Promise<void>((resolve) => {
+    observed = resolve;
+  });
+  let processSettled = false;
+  const running = lane.run({
+    executable: process.execPath,
+    arguments: [
+      "-e",
+      "process.stdout.write('event\\n');setTimeout(() => {}, 50)",
+    ],
+    deadlineMs: 1_000,
+    onStdout() {
+      observed?.();
+    },
+  });
+  void running.finally(() => {
+    processSettled = true;
+  });
+
+  await Promise.race([
+    stdoutObserved,
+    running.then(() => assert.fail("process exited before stdout was observed")),
+  ]);
+  assert.equal(processSettled, false);
+  assert.equal((await running).stdout, "event\n");
+});
+
 test("stopping the Performer lane is bounded and rejects queued Turns", async () => {
   const lane = new GlobalPerformerLane();
   const active = lane.run({

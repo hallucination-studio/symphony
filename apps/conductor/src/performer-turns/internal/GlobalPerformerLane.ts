@@ -7,6 +7,7 @@ export interface PerformerInvocation {
   workingDirectory?: string;
   deadlineMs: number;
   stdin?: Uint8Array;
+  onStdout?(chunk: Uint8Array): void;
 }
 
 export class GlobalPerformerLane {
@@ -60,7 +61,10 @@ export class GlobalPerformerLane {
         reject(new Error("performer_process_stream_missing"));
         return;
       }
-      child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
+      child.stdout.on("data", (chunk: Buffer) => {
+        stdout.push(chunk);
+        invocation.onStdout?.(chunk);
+      });
       child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
       let forceKill: NodeJS.Timeout | undefined;
       let terminalTimeout: NodeJS.Timeout | undefined;
@@ -89,7 +93,7 @@ export class GlobalPerformerLane {
         this.#active = undefined;
         reject(error);
       });
-      child.once("exit", (code, signal) => {
+      child.once("close", (code, signal) => {
         clearTimers();
         this.#active = undefined;
         if (settled) return;
