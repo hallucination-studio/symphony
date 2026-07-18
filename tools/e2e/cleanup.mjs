@@ -1,13 +1,13 @@
 import { readFile, unlink } from "node:fs/promises";
 
-import { lockPathForConfig } from "./global-lock.mjs";
+import { coreLiveLockRoot, lockPathForConfig } from "./global-lock.mjs";
 
 const runId = process.env.SYMPHONY_E2E_RUN_ID;
 if (!runId || !/^[A-Za-z0-9._-]{1,128}$/u.test(runId)) {
   throw new Error("e2e_cleanup_run_id_invalid");
 }
 
-const lockPath = lockPathForConfig(process.cwd());
+const lockPath = lockPathForConfig(coreLiveLockRoot());
 const owner = await readOwner(lockPath);
 if (owner === runId) {
   await unlink(lockPath);

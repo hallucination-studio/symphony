@@ -1,8 +1,9 @@
 VENV := .venv
 PYTHON := $(VENV)/bin/python
 PIP := $(PYTHON) -m pip
+E2E_SECRET_FREE := env -u SYMPHONY_E2E_LINEAR_DEV_TOKEN -u SYMPHONY_E2E_CODEX_API_KEY
 
-.PHONY: install build lint typecheck test test-all dev stop
+.PHONY: install build lint typecheck test test-all e2e dev stop
 
 install:
 	npm install
@@ -28,6 +29,13 @@ test: install
 	cd apps/podium-desktop/src-tauri && cargo test
 
 test-all: lint typecheck build test
+
+e2e:
+	$(E2E_SECRET_FREE) $(MAKE) install
+	$(E2E_SECRET_FREE) npm run build -w @symphony/podium
+	$(E2E_SECRET_FREE) npm run build -w @symphony/conductor
+	$(E2E_SECRET_FREE) npm run test:e2e:runner
+	npm run e2e:core-live
 
 dev: install
 	npm run dev -w @symphony/podium-desktop

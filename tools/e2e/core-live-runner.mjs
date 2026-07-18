@@ -1,7 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { mkdir, writeFile } from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 
@@ -9,7 +8,7 @@ import { createChildEnvironment, loadE2EConfig } from "./config.mjs";
 import { createProductionPodiumConductorOwner, startConductorHarness } from "./conductor-harness.mjs";
 import { provisionApiKeyProfile } from "./conductor-profile.mjs";
 import { coreLiveStepIds, evaluateCoreLiveEvidence } from "./core-live-verdict.mjs";
-import { acquireGlobalLock, lockPathForConfig } from "./global-lock.mjs";
+import { acquireGlobalLock, coreLiveLockRoot, lockPathForConfig } from "./global-lock.mjs";
 import {
   cleanupRunScope,
   createRunScope,
@@ -21,18 +20,20 @@ const execute = promisify(execFile);
 
 export async function runCoreLiveE2E({
   environment = process.env,
-  runId = `run-${randomUUID()}`,
+  runId = environment.SYMPHONY_E2E_RUN_ID ?? `run-${randomUUID()}`,
   timeoutMs = 30 * 60_000,
   pollIntervalMs = 2_000,
 } = {}) {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(runId)) {
+    throw stableError("e2e_run_id_invalid");
+  }
   const config = loadE2EConfig({ environment });
   const linear = createRunScopedLinearOperator({
     developmentToken: config.secrets.linearDevToken,
   });
   const preflight = await linear.preflight();
-  const lockRoot = path.join(os.tmpdir(), "symphony-core-live-global");
   const lock = await acquireGlobalLock(
-    { paths: { lock: lockPathForConfig(lockRoot) } },
+    { paths: { lock: lockPathForConfig(coreLiveLockRoot()) } },
     { runId },
   );
   let scope;

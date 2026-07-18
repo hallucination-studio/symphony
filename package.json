@@ -25,6 +25,7 @@
     "test:host": "npm run test:host -w @symphony/podium-desktop --",
     "test:integration": "node --test tests/integration/*.test.mjs tests/integration/*/*.test.mjs",
     "e2e:doctor": "node tools/e2e/doctor.mjs",
+    "e2e:core-live": "node tools/e2e/core-live-entry.mjs",
     "test:e2e:runner": "node --test tests/e2e/*.test.mjs",
     "desktop-shell-smoke:build": "node tools/e2e/desktop-shell-build.mjs",
     "desktop-shell-smoke": "npm run desktop-shell-smoke:build && node tools/e2e/desktop-shell-smoke.mjs",

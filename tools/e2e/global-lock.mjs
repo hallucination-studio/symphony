@@ -1,5 +1,10 @@
 import { mkdir, open, unlink } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
+
+export function coreLiveLockRoot() {
+  return path.join(os.tmpdir(), "symphony-core-live-global");
+}
 
 export function lockPathForConfig(root) {
   return path.join(root, ".symphony-e2e.lock");

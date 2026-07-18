@@ -384,20 +384,20 @@ and cleanup.
 
 **Acceptance criteria:**
 
-- [ ] `npm run e2e:core-live` is the only credentialed E2E entrypoint and uses
+- [x] `npm run e2e:core-live` is the only credentialed E2E entrypoint and uses
       the same runner locally and in CI.
-- [ ] GitHub Actions maps secrets only on preflight/run steps, uses a protected
+- [x] GitHub Actions maps secrets only on preflight/run steps, uses a protected
       environment and `cancel-in-progress: false`, and never exposes them to a
       pull-request job.
-- [ ] Workflow artifacts are allowlisted, unique, bounded-retention, and fail
+- [x] Workflow artifacts are allowlisted, unique, bounded-retention, and fail
       when expected evidence is absent.
 
 **Verification:**
 
-- [ ] Run `npm run test:e2e:runner` including workflow contract tests.
+- [x] Run `npm run test:e2e:runner` including workflow contract tests.
 - [ ] Execute the protected GitHub Actions workflow once and record its run URL
       outside the repository artifact set.
-- [ ] Confirm cleanup runs under `if: always()` and remains idempotent.
+- [x] Confirm cleanup runs under `if: always()` and remains idempotent.
 
 **Dependencies:** Task 10
 

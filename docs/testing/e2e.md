@@ -170,9 +170,16 @@ OAuth refresh token，以及把 Linear credential 传给 Conductor。单元或 c
 userinfo、query 或 fragment，且 host 必须在 workflow 配置的 allowlist 中。
 runner 必须为每类子进程构造显式环境 allowlist，默认不继承两个 token。
 
+本机唯一 credentialed 入口是 `npm run e2e:core-live`；`make e2e` 只负责安装、
+按 Podium → Conductor 顺序构建、运行 secret-free runner contracts，再调用同一
+入口。Make 前置步骤显式移除两项 secret，只有最终 live 命令可读取它们。两种
+入口都从当前 shell 读取上述四项输入，不读取 `.env`。
+
 GitHub Actions 只能从受保护 Environment 向可信 ref 注入 secrets，使用全局
 concurrency 防止共享 Linear authority 并发执行。pull request merge gate 运行
-secret-free contract/unit tests 和 Desktop smoke，不运行 core live。
+secret-free contract/unit tests 和 Desktop smoke，不运行 core live。受保护的 live
+入口是 `.github/workflows/roadmap-v1-e2e.yml`，只允许在 `main` 上手动执行，并调用
+与本机相同的 `npm run e2e:core-live`。
 
 ## 7. Evidence 与清理
 

@@ -33,6 +33,7 @@ test("core live topology uses production boundaries and state-based completion",
   assert.match(source, /phase === "in-review"/u);
   assert.match(source, /e2e-result\.txt/u);
   assert.match(source, /completed\.performerId !== plan\.performerId/u);
+  assert.match(source, /environment\.SYMPHONY_E2E_RUN_ID/u);
   assert.doesNotMatch(source, /@symphony\/podium\/e2e|e2e-main|performer\.json/u);
   assert.doesNotMatch(source, /SYMPHONY_E2E_LINEAR_DEV_TOKEN.*additions/su);
 });
