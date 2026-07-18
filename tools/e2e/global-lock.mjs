@@ -18,12 +18,16 @@ export async function acquireGlobalLock(config, owner) {
     }
     throw new Error("e2e_lock_create_failed");
   }
-  return {
+  const ownerState = {
+    runId: owner.runId,
+    released: false,
     async release() {
       await handle.close();
       await unlink(config.paths.lock).catch((error) => {
         if (error?.code !== "ENOENT") throw new Error("e2e_lock_release_failed");
       });
+      ownerState.released = true;
     },
   };
+  return ownerState;
 }

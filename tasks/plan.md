@@ -146,7 +146,7 @@ Task 1: authoritative test contract
 
 - [x] Task 5: Start real Podium services and a real Conductor process.
 - [x] Task 6: Provision and activate the real API Key Profile.
-- [ ] Task 7: Create and reconcile run-scoped Linear and Git fixtures.
+- [x] Task 7: Create and reconcile run-scoped Linear and Git fixtures.
 - [ ] Task 8: Complete one real Plan/Work/Gate/delivery scenario.
 
 ### Checkpoint: Local core live

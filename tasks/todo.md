@@ -228,17 +228,17 @@ marker and reconciles stale prior runs before mutation.
 
 **Acceptance criteria:**
 
-- [ ] Every run starts with a unique Project, Root marker, app-data root,
+- [x] Every run starts with a unique Project, Root marker, app-data root,
       `CODEX_HOME`, repository, base branch, and evidence directory.
-- [ ] Preflight proves the token's organization/scopes and performs no mutation
+- [x] Preflight proves the token's organization/scopes and performs no mutation
       before the global/local lock is acquired.
-- [ ] Cleanup is idempotent, never uses fuzzy deletion, and can archive a stale
+- [x] Cleanup is idempotent, never uses fuzzy deletion, and can archive a stale
       interrupted run without touching unrelated Linear data.
 
 **Verification:**
 
-- [ ] Run Linear operator, global lock, Git fixture, and cleanup contract tests.
-- [ ] Run dry-run/preflight with mutation counters and confirm zero mutations
+- [x] Run Linear operator, global lock, Git fixture, and cleanup contract tests.
+- [x] Run dry-run/preflight with mutation counters and confirm zero mutations
       before lock acquisition.
 
 **Dependencies:** Tasks 3 and 5
