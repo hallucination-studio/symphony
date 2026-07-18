@@ -797,7 +797,8 @@ async function mutationTarget(issue: Issue) {
 }
 
 async function issueValue(issue: Issue, depth = 0): Promise<LinearIssueValue> {
-  const state = issue.state ? await issue.state : undefined;
+  const statePromise = issue.state;
+  const state = statePromise ? await statePromise : undefined;
   const managed = parseManagedDescription(issue.description ?? "");
   return {
     issueId: issue.id,

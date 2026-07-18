@@ -152,6 +152,35 @@ test("official SDK adapter resolves the unique Project label and reads complete 
   ]);
 });
 
+test("official SDK adapter reads each lazy issue state exactly once", async () => {
+  const root = issue({ id: "root-1" });
+  let stateReads = 0;
+  Object.defineProperty(root, "state", {
+    get() {
+      stateReads += 1;
+      if (stateReads > 1) throw new Error("issue_state_read_twice");
+      return Promise.resolve({ id: "state-todo", name: "Todo" });
+    },
+  });
+  const sdk = {
+    issue: async () => root,
+  };
+  const adapter = new LinearSdkImpl(
+    { kind: "oauth", token: "token" },
+    "organization-1",
+    sdk,
+  );
+
+  const tree = await adapter.getIssueTree({
+    projectId: "project-1",
+    rootIssueId: "root-1",
+    limit: 250,
+  });
+
+  assert.equal(tree.nodes[0].state, "Todo");
+  assert.equal(stateReads, 1);
+});
+
 test("official SDK adapter creates a managed node and proves it by exact Marker read-back", async () => {
   const parent = issue({ id: "root-1" });
   let created;
