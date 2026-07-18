@@ -49,6 +49,9 @@ function issue(input) {
     subIssueSortOrder: input.parentId ? (input.order ?? 1) : undefined,
     updatedAt: new Date("2026-07-16T00:00:00Z"),
     state: Promise.resolve({ id: "state-todo", name: "Todo" }),
+    team: Promise.resolve({
+      states: async () => connection([{ id: "state-todo", name: "Todo" }]),
+    }),
     children: async () => connection(input.children ?? []),
     comments: async () => connection([]),
     labels: async () => connection([]),
@@ -152,9 +155,11 @@ test("official SDK adapter resolves the unique Project label and reads complete 
 test("official SDK adapter creates a managed node and proves it by exact Marker read-back", async () => {
   const parent = issue({ id: "root-1" });
   let created;
+  let createdInput;
   const sdk = {
     issue: async () => parent,
     async createIssue(input) {
+      createdInput = input;
       created = issue({
         id: "work-1",
         parentId: "root-1",
@@ -192,6 +197,7 @@ test("official SDK adapter creates a managed node and proves it by exact Marker 
   assert.equal(outcome.issue.description, "Implement it");
   assert.equal(outcome.issue.nodeKind, "work");
   assert.equal(outcome.issue.origin, "symphony");
+  assert.equal(createdInput.stateId, "state-todo");
 });
 
 test("official SDK adapter serializes Human kind and target without title inference", async () => {

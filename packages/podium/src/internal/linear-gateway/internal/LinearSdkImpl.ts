@@ -270,6 +270,7 @@ export class LinearSdkImpl implements LinearClientInterface {
             command.description,
             command,
           ),
+          stateId: await this.#stateId(parent, "Todo"),
           subIssueSortOrder: command.order,
         });
         if (!payload.success || !payload.issueId) {
@@ -304,12 +305,9 @@ export class LinearSdkImpl implements LinearClientInterface {
       }
       case "update_issue_state": {
         const issue = await this.#client.issue(command.precondition.expectedIssueId);
-        if (!issue.team) throw new Error("linear_issue_team_missing");
-        const team = await issue.team;
-        const states = await allNodes(team.states({ first: PAGE_LIMIT }), 64);
-        const matches = states.filter(({ name }) => name === command.state);
-        if (matches.length !== 1) throw new Error("linear_state_ambiguous");
-        await this.#client.updateIssue(issue.id, { stateId: matches[0]!.id });
+        await this.#client.updateIssue(issue.id, {
+          stateId: await this.#stateId(issue, command.state),
+        });
         return;
       }
       case "reorder_issue_node":
@@ -328,6 +326,15 @@ export class LinearSdkImpl implements LinearClientInterface {
         await this.#projectRootComment(command);
         return;
     }
+  }
+
+  async #stateId(issue: Issue, state: LinearIssueState): Promise<string> {
+    if (!issue.team) throw new Error("linear_issue_team_missing");
+    const team = await issue.team;
+    const states = await allNodes(team.states({ first: PAGE_LIMIT }), 64);
+    const matches = states.filter(({ name }) => name === state);
+    if (matches.length !== 1) throw new Error("linear_state_ambiguous");
+    return matches[0]!.id;
   }
 
   async readMutationOutcome(
