@@ -41,6 +41,29 @@ test("Linear fixture preflight proves authority without mutation", async () => {
   assert.equal(mutationCount, 0);
 });
 
+test("Linear fixture logs sanitized GraphQL failure details by operation", async () => {
+  const events = [];
+  const operator = createRunScopedLinearOperator({
+    developmentToken: "development-secret",
+    log: (event) => events.push(event),
+    fetch: async () => response({ errors: [{
+      message: "Cannot delegate development-secret",
+      path: ["issueCreate"],
+      extensions: { code: "INPUT_ERROR" },
+    }] }, 400),
+  });
+
+  await assert.rejects(operator.preflight(), /linear_fixture_http_400/u);
+  assert.deepEqual(events, [{
+    event: "e2e_linear_graphql_failed",
+    operation: "CoreLivePreflight",
+    http_status: 400,
+    error_codes: ["INPUT_ERROR"],
+    error_messages: ["Cannot delegate [REDACTED]"],
+    error_paths: ["issueCreate"],
+  }]);
+});
+
 test("Linear fixture creates one exactly marked Project, label, and delegated Root after lock", async () => {
   const requests = [];
   const operator = createRunScopedLinearOperator({

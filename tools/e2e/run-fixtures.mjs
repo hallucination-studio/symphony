@@ -9,7 +9,11 @@ const LINEAR_GRAPHQL_URL = "https://api.linear.app/graphql";
 const RUN_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const MARKER = /<!-- symphony core live e2e\nrun_id: ([A-Za-z0-9][A-Za-z0-9._-]{0,127})\n-->/u;
 
-export function createRunScopedLinearOperator({ developmentToken, fetch = globalThis.fetch }) {
+export function createRunScopedLinearOperator({
+  developmentToken,
+  fetch = globalThis.fetch,
+  log = () => {},
+}) {
   if (!developmentToken) throw stableError("linear_development_token_missing");
   if (typeof fetch !== "function") throw stableError("linear_fixture_fetch_invalid");
 
@@ -253,6 +257,7 @@ export function createRunScopedLinearOperator({ developmentToken, fetch = global
   }
 
   async function graphql(query, variables = {}) {
+    const operation = query.match(/(?:query|mutation)\s+([A-Za-z0-9_]+)/u)?.[1] ?? "unknown";
     let response;
     try {
       response = await fetch(LINEAR_GRAPHQL_URL, {
@@ -261,14 +266,34 @@ export function createRunScopedLinearOperator({ developmentToken, fetch = global
         body: JSON.stringify({ query, variables }),
       });
     } catch {
+      log({ event: "e2e_linear_request_failed", operation });
       throw stableError("linear_fixture_request_failed");
     }
-    if (!response.ok) throw stableError(`linear_fixture_http_${response.status}`);
     let body;
-    try { body = await response.json(); } catch { throw stableError("linear_fixture_response_invalid"); }
-    if (body?.errors?.length || !body?.data) throw stableError("linear_fixture_graphql_failed");
+    try { body = await response.json(); } catch {
+      log({ event: "e2e_linear_response_invalid", operation, http_status: response.status });
+      throw stableError("linear_fixture_response_invalid");
+    }
+    if (!response.ok || body?.errors?.length || !body?.data) {
+      const errors = Array.isArray(body?.errors) ? body.errors : [];
+      log({
+        event: "e2e_linear_graphql_failed",
+        operation,
+        http_status: response.status,
+        error_codes: errors.map((error) => String(error?.extensions?.code ?? "unknown")),
+        error_messages: errors.map((error) => redactLinearMessage(error?.message, developmentToken)),
+        error_paths: errors.map((error) => Array.isArray(error?.path) ? error.path.join(".") : "unknown"),
+      });
+      if (!response.ok) throw stableError(`linear_fixture_http_${response.status}`);
+      throw stableError("linear_fixture_graphql_failed");
+    }
     return body.data;
   }
+}
+
+function redactLinearMessage(value, developmentToken) {
+  if (typeof value !== "string") return "unknown";
+  return value.slice(0, 4_096).replaceAll(developmentToken, "[REDACTED]");
 }
 
 export async function createRunScopedGitFixture({ runId, parentDirectory } = {}) {

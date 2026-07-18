@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 
+import { createE2ELogger } from "./logging.mjs";
+
 const MAX_FRAME_BYTES = 1_048_576;
 const SECRET_KEYS = new Set([
   "SYMPHONY_E2E_LINEAR_DEV_TOKEN",
@@ -29,13 +31,16 @@ export async function startConductorHarness({
   startupTimeoutMs = 30_000,
   shutdownTimeoutMs = 5_000,
   spawnProcess = spawn,
+  log,
 }) {
   validateEnvironment(environment);
+  const emit = log ?? createE2ELogger({ runId: environment.SYMPHONY_INSTANCE_ID });
   const child = spawnProcess(executable, arguments_, {
     cwd,
     env: environment,
     stdio: ["ignore", "pipe", "pipe", "pipe"],
   });
+  emit({ event: "e2e_child_started", component: "conductor" });
   const channel = child.stdio?.[3];
   if (!channel?.readable || !channel?.writable) {
     child.kill("SIGKILL");
@@ -53,11 +58,12 @@ export async function startConductorHarness({
   const exit = deferred();
   child.once("error", () => fail("conductor_process_start_failed"));
   child.once("exit", (code, signal) => {
+    emit({ event: "e2e_child_exited", component: "conductor", exit_code: code, signal });
     exit.resolve({ code, signal });
     if (!closed && !firstFailure) fail("conductor_process_exited");
   });
-  child.stdout?.on("data", () => {});
-  child.stderr?.on("data", () => {});
+  forwardChildStream(child.stdout, "stdout");
+  forwardChildStream(child.stderr, "stderr");
   channel.on("data", (chunk) => {
     buffer = Buffer.concat([buffer, Buffer.from(chunk)]);
     processing = processing
@@ -183,6 +189,7 @@ export async function startConductorHarness({
 
   function fail(code) {
     if (firstFailure) return;
+    emit({ event: "e2e_child_failed", component: "conductor", reason: code });
     firstFailure = stableError(code);
     handshake.reject(firstFailure);
     for (const request of pending.values()) {
@@ -195,6 +202,25 @@ export async function startConductorHarness({
       entry.waiter.reject(firstFailure);
     }
     observationWaiters.clear();
+  }
+
+  function forwardChildStream(stream, streamName) {
+    if (!stream) return;
+    let pendingLine = "";
+    stream.setEncoding?.("utf8");
+    stream.on("data", (chunk) => {
+      pendingLine += String(chunk);
+      const lines = pendingLine.split("\n");
+      pendingLine = lines.pop() ?? "";
+      for (const line of lines) {
+        emit({ event: "e2e_child_log", component: "conductor", stream: streamName, message: line });
+      }
+    });
+    stream.on("end", () => {
+      if (pendingLine) {
+        emit({ event: "e2e_child_log", component: "conductor", stream: streamName, message: pendingLine });
+      }
+    });
   }
 
 }

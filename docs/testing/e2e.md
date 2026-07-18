@@ -184,6 +184,11 @@ secret-free contract/unit tests 和 Desktop smoke，不运行 core live。受保
 
 ## 7. Evidence 与清理
 
+- runner 默认向 stderr 输出逐行 JSON 日志，每行包含 timestamp、run_id 和稳定 event；
+- step 开始/完成/失败、Conductor stdout/stderr/exit、Profile control 命令、Linear
+  GraphQL 错误和每项 cleanup 均实时输出；最终机器可读 verdict 单独写入 stdout；
+- 日志只包含 allowlisted 诊断字段，不包含 request variables、authorization header、
+  secret frame 或 Profile credential；已知 secret 在序列化前递归脱敏；
 - evidence 只包含 run ID、步骤状态、计数、公开 Linear identifier、Git ref、
   稳定 reason code 和相对路径；
 - stdout/stderr、request/result、Profile files 和 evidence 必须用已知 secret

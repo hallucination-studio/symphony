@@ -15,6 +15,7 @@ test("production harness observes a real Conductor handshake and shuts down boun
   skip: !existsSync("packages/podium/dist/internal/storage/SqlitePodiumStoreImpl.js") ||
     !existsSync("apps/conductor/dist/main.js"),
 }, async () => {
+  const logs = [];
   const { SqlitePodiumStoreImpl } = await import(
     "../../packages/podium/dist/internal/storage/SqlitePodiumStoreImpl.js"
   );
@@ -67,11 +68,16 @@ test("production harness observes a real Conductor handshake and shuts down boun
     environment,
     startupTimeoutMs: 5_000,
     shutdownTimeoutMs: 1_000,
+    log: (event) => logs.push(event),
   });
 
   assert.deepEqual(harness.observations[0], { kind: "conductor_handshake" });
   assert.equal(JSON.stringify(environment).includes("test-only-token"), false);
   await harness.close();
+  assert.equal(logs.some(({ event }) => event === "e2e_child_started"), true);
+  assert.equal(logs.some(({ event, stream }) => event === "e2e_child_log" && stream === "stdout"), true);
+  assert.equal(logs.some(({ event }) => event === "e2e_child_exited"), true);
+  assert.equal(JSON.stringify(logs).includes("test-only-token"), false);
 });
 
 test("real Conductor reports ready with an unbound generated-protocol result", async () => {

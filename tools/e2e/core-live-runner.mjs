@@ -9,6 +9,7 @@ import { createProductionPodiumConductorOwner, startConductorHarness } from "./c
 import { provisionApiKeyProfile } from "./conductor-profile.mjs";
 import { coreLiveStepIds, evaluateCoreLiveEvidence } from "./core-live-verdict.mjs";
 import { acquireGlobalLock, coreLiveLockRoot, lockPathForConfig } from "./global-lock.mjs";
+import { createE2ELogger } from "./logging.mjs";
 import {
   cleanupRunScope,
   createRunScope,
@@ -28,10 +29,15 @@ export async function runCoreLiveE2E({
     throw stableError("e2e_run_id_invalid");
   }
   const config = loadE2EConfig({ environment });
+  const log = createE2ELogger({ runId, secrets: Object.values(config.secrets) });
+  log({ event: "e2e_run_started" });
   const linear = createRunScopedLinearOperator({
     developmentToken: config.secrets.linearDevToken,
+    log,
   });
+  log({ event: "e2e_step_started", step: "preflight" });
   const preflight = await linear.preflight();
+  log({ event: "e2e_step_completed", step: "preflight" });
   const lock = await acquireGlobalLock(
     { paths: { lock: lockPathForConfig(coreLiveLockRoot()) } },
     { runId },
@@ -46,7 +52,10 @@ export async function runCoreLiveE2E({
   try {
     scope = await createRunScope({ runId });
     const git = await createRunScopedGitFixture({ runId, parentDirectory: scope.root });
+    log({ event: "e2e_step_started", step: "stale_reconciliation" });
     await linear.reconcileStaleRuns({ lock, currentRunId: runId });
+    log({ event: "e2e_step_completed", step: "stale_reconciliation" });
+    log({ event: "e2e_step_started", step: "project_created" });
     project = await linear.createProject({
       lock,
       runId,
@@ -54,7 +63,9 @@ export async function runCoreLiveE2E({
       preflight,
     });
     evidence.push({ step: "project_created", status: "passed" });
+    log({ event: "e2e_step_completed", step: "project_created" });
 
+    log({ event: "e2e_step_started", step: "podium_bootstrap" });
     const databasePath = path.join(scope.appDataRoot, "podium.db");
     const installation = await bootstrapPodiumState({
       databasePath,
@@ -64,24 +75,32 @@ export async function runCoreLiveE2E({
       git,
       ids,
     });
+    log({ event: "e2e_step_completed", step: "podium_bootstrap" });
     const podium = await createProductionPodiumConductorOwner({ databasePath });
+    log({ event: "e2e_step_started", step: "conductor_handshake" });
     harness = await startConductorHarness({
       podium,
       environment: createConductorEnvironment({ environment, config, scope, git, installation, ids }),
       startupTimeoutMs: 30_000,
       shutdownTimeoutMs: 5_000,
+      log,
     });
     evidence.push({ step: "conductor_handshake", status: "passed" });
+    log({ event: "e2e_step_completed", step: "conductor_handshake" });
 
     const apiKey = new TextEncoder().encode(config.secrets.codexApiKey);
+    log({ event: "e2e_step_started", step: "profile_active" });
     const profile = await provisionApiKeyProfile({
       harness,
       conductorId: ids.conductorId,
       model: config.codex.model,
       apiKey,
+      log,
     });
     evidence.push({ step: "profile_active", status: "passed" });
+    log({ event: "e2e_step_completed", step: "profile_active" });
 
+    log({ event: "e2e_step_started", step: "root_created" });
     fixture = await linear.createRoot({
       lock,
       runId,
@@ -94,7 +113,9 @@ export async function runCoreLiveE2E({
       ].join(" "),
     });
     evidence.push({ step: "root_created", status: "passed", rootIdentifier: fixture.rootIdentifier });
+    log({ event: "e2e_step_completed", step: "root_created", root_identifier: fixture.rootIdentifier });
 
+    log({ event: "e2e_step_started", step: "plan_ready" });
     const plan = await pollUntil(
       () => linear.readRunState({ fixture }),
       (state) => state.phase === "awaiting-human" &&
@@ -107,6 +128,8 @@ export async function runCoreLiveE2E({
       { timeoutMs, pollIntervalMs, code: "e2e_plan_timeout" },
     );
     evidence.push({ step: "plan_ready", status: "passed" });
+    log({ event: "e2e_step_completed", step: "plan_ready" });
+    log({ event: "e2e_step_started", step: "plan_approved" });
     await linear.approvePlan({
       lock,
       runId,
@@ -115,7 +138,9 @@ export async function runCoreLiveE2E({
       approvalId: plan.approvalId,
     });
     evidence.push({ step: "plan_approved", status: "passed" });
+    log({ event: "e2e_step_completed", step: "plan_approved" });
 
+    log({ event: "e2e_step_started", step: "root_completion" });
     const completed = await pollUntil(
       () => linear.readRunState({ fixture }),
       (state) => state.rootState === "In Review" && state.phase === "in-review" && Boolean(state.deliveryBranch),
@@ -133,6 +158,7 @@ export async function runCoreLiveE2E({
       { step: "branch_delivered", status: "passed", branch: completed.deliveryBranch },
       { step: "linear_in_review", status: "passed" },
     );
+    log({ event: "e2e_step_completed", step: "root_completion" });
 
     result = Object.freeze({
       status: "passed",
@@ -147,40 +173,45 @@ export async function runCoreLiveE2E({
     });
   } catch (error) {
     result = { status: "failed", runId, reason: sanitize(error), evidence };
+    log({ event: "e2e_run_failed", reason: result.reason });
   }
 
   const finalResult = await finalizeCoreLiveResult({
     result,
-    cleanup: () => cleanupCoreLiveResources({ harness, linear, lock, runId, project, scope }),
+    cleanup: () => cleanupCoreLiveResources({ harness, linear, lock, runId, project, scope }, { log }),
     write: (value) => writeEvidence(runId, value, config.secrets),
   });
   if (finalResult.status === "failed") throw stableError(finalResult.reason);
+  log({ event: "e2e_run_completed", status: "passed" });
   return finalResult;
 }
 
 export async function cleanupCoreLiveResources(
   { harness, linear, lock, runId, project, scope },
-  { cleanupScope = cleanupRunScope } = {},
+  { cleanupScope = cleanupRunScope, log = () => {} } = {},
 ) {
   const failures = [];
   const actions = [
-    [Boolean(harness), "e2e_conductor_cleanup_failed", () => harness.close()],
-    [Boolean(project), "e2e_linear_cleanup_failed", () => linear.cleanup({
+    [Boolean(harness), "conductor", "e2e_conductor_cleanup_failed", () => harness.close()],
+    [Boolean(project), "linear", "e2e_linear_cleanup_failed", () => linear.cleanup({
       lock,
       runId,
       projectId: project.projectId,
       labelId: project.labelId,
       marker: project.marker,
     })],
-    [Boolean(scope), "e2e_run_scope_cleanup_failed", () => cleanupScope(scope)],
-    [Boolean(lock), "e2e_lock_release_failed", () => lock.release()],
+    [Boolean(scope), "run_scope", "e2e_run_scope_cleanup_failed", () => cleanupScope(scope)],
+    [Boolean(lock), "lock", "e2e_lock_release_failed", () => lock.release()],
   ];
-  for (const [enabled, code, action] of actions) {
+  for (const [enabled, resource, code, action] of actions) {
     if (!enabled) continue;
+    log({ event: "e2e_cleanup_started", resource });
     try {
       await action();
+      log({ event: "e2e_cleanup_completed", resource });
     } catch {
       failures.push(code);
+      log({ event: "e2e_cleanup_failed", resource, reason: code });
     }
   }
   return Object.freeze(failures);

@@ -8,10 +8,12 @@ export async function provisionApiKeyProfile({
   displayName = "Core live E2E",
   reasoningEffort = "medium",
   wait = (delayMs) => new Promise((resolve) => setTimeout(resolve, delayMs)),
+  log = () => {},
 }) {
   validateInput({ harness, conductorId, model, apiKey, displayName, reasoningEffort });
   let profileId;
   try {
+    log({ event: "e2e_profile_command_started", command: "create_profile" });
     const saved = await harness.request({
       kind: "create_profile",
       conductor_id: conductorId,
@@ -24,28 +26,33 @@ export async function provisionApiKeyProfile({
         is_fast_mode_enabled: false,
       },
     });
-    profileId = profile(saved, "profile_saved").profile_id;
+    profileId = profile(saved, "profile_saved", log).profile_id;
+    log({ event: "e2e_profile_command_completed", command: "create_profile" });
+    log({ event: "e2e_profile_command_started", command: "set_api_key" });
     const status = await harness.request({
       kind: "set_api_key",
       conductor_id: conductorId,
       profile_id: profileId,
       secret_frame_length: apiKey.byteLength,
     }, apiKey);
-    let current = profile(status, "profile_status");
+    let current = profile(status, "profile_status", log);
+    log({ event: "e2e_profile_command_completed", command: "set_api_key" });
     for (let attempt = 1; current.readiness !== "ready" && attempt < READINESS_ATTEMPTS; attempt += 1) {
       await wait(250);
       current = profile(await harness.request({
         kind: "get_profile_status",
         conductor_id: conductorId,
         profile_id: profileId,
-      }), "profile_status");
+      }), "profile_status", log);
     }
     if (current.readiness !== "ready") throw stableError("e2e_profile_not_ready");
+    log({ event: "e2e_profile_command_started", command: "activate_profile" });
     const activated = profile(await harness.request({
       kind: "activate_profile",
       conductor_id: conductorId,
       profile_id: profileId,
-    }), "profile_activated");
+    }), "profile_activated", log);
+    log({ event: "e2e_profile_command_completed", command: "activate_profile" });
     if (!activated.is_active || activated.readiness !== "ready") {
       throw stableError("e2e_profile_activation_failed");
     }
@@ -62,8 +69,13 @@ export async function provisionApiKeyProfile({
   }
 }
 
-function profile(result, expectedKind) {
+function profile(result, expectedKind, log) {
   if (result?.kind !== expectedKind || !result.profile || typeof result.profile !== "object") {
+    log({
+      event: "e2e_profile_response_rejected",
+      expected_kind: expectedKind,
+      actual_kind: typeof result?.kind === "string" ? result.kind : "missing",
+    });
     throw stableError("e2e_profile_response_invalid");
   }
   const value = result.profile;
