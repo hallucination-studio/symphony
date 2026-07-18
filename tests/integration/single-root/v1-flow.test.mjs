@@ -50,32 +50,38 @@ test("one Root closes claim through Plan, approved Work, Gate, and In Review del
         };
         if (command.turn_kind === "plan") {
           return {
-            ...common,
-            result_kind: "plan_ready",
-            body: {
-              summary: "Implement and verify V1",
-              nodes: [{
-                client_node_key: "work-1",
-                kind: "work",
-                order: 1,
-                title: "Implement V1",
-                description: "Close the approved slice.",
-              }],
+            result: {
+              ...common,
+              result_kind: "plan_ready",
+              body: {
+                summary: "Implement and verify V1",
+                nodes: [{
+                  client_node_key: "work-1",
+                  kind: "work",
+                  order: 1,
+                  title: "Implement V1",
+                  description: "Close the approved slice.",
+                }],
+              },
             },
           };
         }
         if (command.turn_kind === "work") {
           return {
-            ...common,
-            work_issue_id: command.work_issue_id,
-            result_kind: "work_completed",
-            body: { summary: "Implemented" },
+            result: {
+              ...common,
+              work_issue_id: command.work_issue_id,
+              result_kind: "work_completed",
+              body: { summary: "Implemented" },
+            },
           };
         }
         return {
-          ...common,
-          result_kind: "root_gate_passed",
-          body: { summary: "Gate passed" },
+          result: {
+            ...common,
+            result_kind: "root_gate_passed",
+            body: { summary: "Gate passed" },
+          },
         };
       },
     },
