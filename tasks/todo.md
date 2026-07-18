@@ -113,18 +113,18 @@ API key, or Codex file write.
 
 **Acceptance criteria:**
 
-- [ ] Profile control and every Turn use the same validated
+- [x] Profile control and every Turn use the same validated
       `openai_base_url` override when configured and the SDK default when absent.
-- [ ] Performer rejects unsafe URLs before SDK startup and never logs the full
+- [x] Performer rejects unsafe URLs before SDK startup and never logs the full
       configured URL if it contains unexpected sensitive material.
-- [ ] No Symphony code reads or writes `CODEX_HOME/config.toml` or `auth.json`.
+- [x] No Symphony code reads or writes `CODEX_HOME/config.toml` or `auth.json`.
 
 **Verification:**
 
-- [ ] Run `.venv/bin/python -m pytest apps/performer/tests -q`.
-- [ ] Run `npm run typecheck -w @symphony/conductor` and its focused process
+- [x] Run `.venv/bin/python -m pytest apps/performer/tests -q`.
+- [x] Run `npm run typecheck -w @symphony/conductor` and its focused process
       tests.
-- [ ] Assert the SDK is built with public `CodexConfig` rather than private
+- [x] Assert the SDK is built with public `CodexConfig` rather than private
       members or CLI/file manipulation.
 
 **Dependencies:** Task 1
@@ -141,11 +141,11 @@ API key, or Codex file write.
 
 ## Checkpoint A: Production prerequisites
 
-- [ ] Tasks 1-4 focused tests pass.
-- [ ] No token appears in Conductor runtime configuration or generated
+- [x] Tasks 1-4 focused tests pass.
+- [x] No token appears in Conductor runtime configuration or generated
       contracts.
-- [ ] No E2E-only composition has been added.
-- [ ] Review the credential migration and base URL threat model before building
+- [x] No E2E-only composition has been added.
+- [x] Review the credential migration and base URL threat model before building
       the live harness.
 
 ## Task 5: Build the production core process harness

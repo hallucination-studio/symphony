@@ -13,6 +13,10 @@ import { ConductorProfileRelayHandler } from "./performer-profiles/internal/Cond
 import { PerformerProfileControlProcessImpl } from "./performer-profiles/internal/PerformerProfileControlProcessImpl.js";
 import { GlobalPerformerLane } from "./performer-turns/internal/GlobalPerformerLane.js";
 import { PerformerTurnProcessImpl } from "./performer-turns/internal/PerformerTurnProcessImpl.js";
+import {
+  performerProcessEnvironment,
+  validateCodexBaseUrl,
+} from "./performer-turns/internal/PerformerProcessEnvironment.js";
 import { InheritedProtocolClient } from "./private-ipc/InheritedProtocolClient.js";
 import { GitRootDeliveryImpl } from "./root-delivery/internal/GitRootDeliveryImpl.js";
 
@@ -38,7 +42,7 @@ export async function runConductor(environment = process.env): Promise<void> {
     profiles,
     {
       executable: config.performerExecutable,
-      environment: () => ({}),
+      environment: () => performerProcessEnvironment(config.codexBaseUrl),
       deadlineMs: 120_000,
     },
   );
@@ -95,7 +99,10 @@ export async function runConductor(environment = process.env): Promise<void> {
     turns: new PerformerTurnProcessImpl(performerLane, {
       runtimeRoot: path.join(config.dataRoot, "turns"),
       executable: config.performerExecutable,
-      environment: (profileId) => ({ CODEX_HOME: profiles.codexHome(profileId) }),
+      environment: (profileId) => performerProcessEnvironment(
+        config.codexBaseUrl,
+        { CODEX_HOME: profiles.codexHome(profileId) },
+      ),
       deadlineMs: 30 * 60_000,
     }),
     delivery: new GitRootDeliveryImpl(),
@@ -207,6 +214,7 @@ function runtimeConfig(environment: NodeJS.ProcessEnv) {
     baseBranch: required(environment.SYMPHONY_BASE_BRANCH, "base_branch_missing"),
     dataRoot: required(environment.SYMPHONY_CONDUCTOR_DATA_ROOT, "conductor_data_root_missing"),
     performerExecutable: environment.SYMPHONY_PERFORMER_EXECUTABLE ?? "performer",
+    codexBaseUrl: validateCodexBaseUrl(environment.SYMPHONY_CODEX_BASE_URL),
     cycleDelayMs: environment.SYMPHONY_CYCLE_DELAY_MS
       ? positiveInteger(environment.SYMPHONY_CYCLE_DELAY_MS, "cycle_delay_invalid")
       : 1_000,

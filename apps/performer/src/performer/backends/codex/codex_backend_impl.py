@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
 from typing import Any
+from urllib.parse import urlsplit
 
-from openai_codex import Codex, Sandbox
+from openai_codex import Codex, CodexConfig, Sandbox
 
 from performer.backends.provider_backend_interface import (
     ProviderBackendError,
@@ -66,6 +68,37 @@ GATE_SCHEMA = {
         {"required": ["summary", "findings"]},
     ],
 }
+
+CODEX_BASE_URL_ENVIRONMENT_KEY = "SYMPHONY_CODEX_BASE_URL"
+
+
+def create_sdk(environment: dict[str, str] | None = None) -> Codex:
+    source = os.environ if environment is None else environment
+    base_url = source.get(CODEX_BASE_URL_ENVIRONMENT_KEY)
+    if base_url is None:
+        return Codex()
+    _validate_base_url(base_url)
+    override = f"openai_base_url={json.dumps(base_url)}"
+    return Codex(CodexConfig(config_overrides=(override,)))
+
+
+def _validate_base_url(value: str) -> None:
+    if any(ord(character) < 32 or ord(character) == 127 for character in value):
+        raise ValueError("codex_base_url_invalid")
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError as error:
+        raise ValueError("codex_base_url_invalid") from error
+    if parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise ValueError("codex_base_url_invalid")
+    if not parsed.hostname or parsed.path.startswith("//") or (
+        port is None and parsed.netloc.endswith(":")
+    ):
+        raise ValueError("codex_base_url_invalid")
+    loopback = parsed.hostname in {"localhost", "127.0.0.1", "::1"}
+    if parsed.scheme != "https" and not (parsed.scheme == "http" and loopback):
+        raise ValueError("codex_base_url_invalid")
 
 
 class CodexBackendImpl:

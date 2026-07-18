@@ -5,9 +5,7 @@ import json
 import sys
 from pathlib import Path
 
-from openai_codex import Codex
-
-from performer.backends.codex.codex_backend_impl import CodexBackendImpl
+from performer.backends.codex.codex_backend_impl import CodexBackendImpl, create_sdk
 from performer.profile_control.host import ProfileControlHost
 from performer.turn_protocol.host import TurnFileHost
 from performer.turn_runtime.runtime import TurnRuntime
@@ -20,7 +18,10 @@ def main() -> None:
     parser.add_argument("--event-path", type=Path)
     parser.add_argument("--profile-control", action="store_true")
     args = parser.parse_args()
-    sdk = Codex()
+    try:
+        sdk = create_sdk()
+    except ValueError as error:
+        raise SystemExit(str(error)) from None
     if args.profile_control:
         metadata_line = sys.stdin.buffer.readline(65537)
         if not metadata_line.endswith(b"\n") or len(metadata_line) > 65536:

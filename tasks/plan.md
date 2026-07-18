@@ -133,13 +133,13 @@ Task 1: authoritative test contract
 - [x] Task 1: Replace the E2E specification with the core live contract.
 - [x] Task 2: Define the pipeline-only runner input and secret boundary.
 - [x] Task 3: Add a real Podium development-token installation kind.
-- [ ] Task 4: Configure the Codex endpoint through Performer process input.
+- [x] Task 4: Configure the Codex endpoint through Performer process input.
 
 ### Checkpoint: Production boundaries
 
-- [ ] Podium tests prove tokens do not cross into Conductor.
-- [ ] Performer tests prove base URL mapping without Codex file edits.
-- [ ] Runner contract tests prove secrets are absent from child environments,
+- [x] Podium tests prove tokens do not cross into Conductor.
+- [x] Performer tests prove base URL mapping without Codex file edits.
+- [x] Runner contract tests prove secrets are absent from child environments,
       metadata, and evidence.
 
 ### Phase 2: Small real Root
