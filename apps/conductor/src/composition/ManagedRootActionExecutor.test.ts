@@ -3,6 +3,7 @@ import test from "node:test";
 
 import { ManagedRootActionExecutor } from "./ManagedRootActionExecutor.js";
 import type { RootRunView } from "../root-workflow/api/Models.js";
+import { hashRootInput } from "../root-workflow/api/index.js";
 
 test("claim orders managed comment before Root state", async () => {
   const mutations: Array<Record<string, unknown>> = [];
@@ -328,6 +329,90 @@ test("repeated Root Gate failure updates and reopens one stable Rework node", as
         !ids.includes("canceled-descendant"),
     ),
   );
+});
+
+test("retryable Performer failures are logged and projected to the Root comment", async () => {
+  const view = runningRootView();
+  view.workflowNodes = [];
+  view.phaseLabels = ["planning"];
+  const warnings: unknown[] = [];
+  const commentBodies: string[] = [];
+  const executor = createExecutor(async (body) => {
+    const mutation = body as Record<string, unknown>;
+    if (mutation.kind === "upsert_root_managed_comment") {
+      commentBodies.push(String(mutation.body));
+    }
+    return { kind: "applied" };
+  }, {
+    gateway: {
+      async profileReadiness() {
+        return "ready" as const;
+      },
+      projectPrecondition() {
+        return {
+          conductor_short_hash: "abc123",
+          expected_project_id: "project-1",
+          expected_project_updated_at: "2026-07-17T00:00:00Z",
+        };
+      },
+      async mutate(body: unknown) {
+        const mutation = body as Record<string, unknown>;
+        if (mutation.kind === "upsert_root_managed_comment") {
+          commentBodies.push(String(mutation.body));
+        }
+        return { kind: "applied" };
+      },
+      async reconstruct() {
+        return view;
+      },
+    },
+    turns: {
+      async run() {
+        return {
+          protocol_version: "1",
+          turn_id: "turn-1",
+          turn_kind: "plan",
+          result_kind: "turn_failed",
+          root_issue_id: "root-1",
+          performer_profile_id: "profile-1",
+          performer_id: "conversation-1",
+          turn_input_hash: hashRootInput(view.root),
+          body: {
+            error_code: "provider_turn_failed",
+            sanitized_reason: "WebSocket closed before response.completed",
+            retryable: true,
+            action_required: "Retry the Turn.",
+          },
+          completed_at: "2026-07-17T00:00:01Z",
+        };
+      },
+    },
+    reportTurnRetry: (warning: unknown) => warnings.push(warning),
+  });
+
+  await assert.rejects(
+    executor.execute(view, { kind: "plan_root" }),
+    /provider_turn_failed/u,
+  );
+  assert.deepEqual(warnings, [
+    {
+      attempt: 1,
+      errorCode: "provider_turn_failed",
+      sanitizedReason: "WebSocket closed before response.completed",
+    },
+    {
+      attempt: 2,
+      errorCode: "provider_turn_failed",
+      sanitizedReason: "WebSocket closed before response.completed",
+    },
+    {
+      attempt: 3,
+      errorCode: "provider_turn_failed",
+      sanitizedReason: "WebSocket closed before response.completed",
+    },
+  ]);
+  assert.ok(commentBodies.some((body) =>
+    body.includes("last_error: WebSocket closed before response.completed")));
 });
 
 function createExecutor(

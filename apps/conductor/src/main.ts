@@ -117,6 +117,19 @@ export async function runConductor(environment = process.env): Promise<void> {
         sanitized_reason: code,
       });
     },
+    reportTurnRetry(warning) {
+      logEvent("warning", "performer_turn_retry", {
+        conductor_id: config.conductorId,
+        binding_id: config.bindingId,
+        instance_id: config.instanceId,
+        attempt: String(warning.attempt),
+        error_code: warning.errorCode,
+        sanitized_reason: warning.sanitizedReason,
+        ...(warning.retryProjectionErrorCode
+          ? { projection_error_code: warning.retryProjectionErrorCode }
+          : {}),
+      });
+    },
   });
   const report = async (body: JsonValue) => {
     await protocol.request({

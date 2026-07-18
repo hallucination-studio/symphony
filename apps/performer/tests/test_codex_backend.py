@@ -182,3 +182,27 @@ def test_turn_deadline_interrupts_the_public_sdk_handle(plan_command):
         CodexBackendImpl(sdk).run_turn(plan_command)
 
     assert handle.interrupted is True
+
+
+def test_provider_failure_preserves_bounded_sanitized_sdk_reason(plan_command):
+    class FailedHandle:
+        def run(self):
+            raise RuntimeError(
+                "unexpected status 401 for Authorization: Bearer private-token "
+                + "x" * 5_000
+            )
+
+        def interrupt(self):
+            pass
+
+    thread = FakeThread()
+    thread.turn = lambda *_args, **_kwargs: FailedHandle()
+
+    with pytest.raises(ProviderBackendError) as raised:
+        CodexBackendImpl(FakeCodex(thread)).run_turn(plan_command)
+
+    assert raised.value.code == "provider_turn_failed"
+    assert "RuntimeError" in raised.value.sanitized_reason
+    assert "401" in raised.value.sanitized_reason
+    assert "private-token" not in raised.value.sanitized_reason
+    assert len(raised.value.sanitized_reason) <= 1_024

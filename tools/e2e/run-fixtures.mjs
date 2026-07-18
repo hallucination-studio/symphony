@@ -397,8 +397,22 @@ export function createRunScopedLinearOperator({
       throw stableError("linear_fixture_request_failed");
     }
     let body;
-    try { body = await response.json(); } catch {
-      log({ event: "e2e_linear_response_invalid", operation, http_status: response.status });
+    let responseText;
+    try {
+      if (typeof response.text === "function") {
+        responseText = await response.text();
+        body = JSON.parse(responseText);
+      } else {
+        body = await response.json();
+      }
+    } catch {
+      log({
+        event: "e2e_linear_response_invalid",
+        operation,
+        http_status: response.status,
+        content_type: response.headers?.get?.("content-type") ?? "unknown",
+        response_body: redactLinearMessage(responseText ?? "unavailable", developmentToken),
+      });
       throw stableError("linear_fixture_response_invalid");
     }
     if (!response.ok || body?.errors?.length || !body?.data) {
@@ -420,7 +434,7 @@ export function createRunScopedLinearOperator({
 
 function redactLinearMessage(value, developmentToken) {
   if (typeof value !== "string") return "unknown";
-  return value.slice(0, 4_096).replaceAll(developmentToken, "[REDACTED]");
+  return value.replaceAll(developmentToken, "[REDACTED]").slice(0, 4_096);
 }
 
 export async function createRunScopedGitFixture({ runId, parentDirectory } = {}) {

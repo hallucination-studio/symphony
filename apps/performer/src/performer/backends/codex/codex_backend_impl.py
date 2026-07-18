@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -161,7 +162,7 @@ class CodexBackendImpl:
             handle.interrupt()
             raise
         except Exception as exc:
-            raise ProviderBackendError("The Provider Turn failed.") from exc
+            raise ProviderBackendError(_provider_failure_reason(exc)) from exc
         if str(result.status) not in {"completed", "TurnStatus.completed"} or result.error:
             raise ProviderBackendError("The Provider did not complete the Turn.")
         try:
@@ -236,6 +237,18 @@ def _valid_body(kind: str, body: Any) -> bool:
         and isinstance(body["findings"], list)
         and all(isinstance(item, str) for item in body["findings"])
     )
+
+
+def _provider_failure_reason(error: Exception) -> str:
+    detail = f"{type(error).__name__}: {error}"
+    detail = re.sub(
+        r"(?i)(authorization\s*:\s*bearer\s+)[^\s,;]+",
+        r"\1[REDACTED]",
+        detail,
+    )
+    detail = re.sub(r"(?i)\bbearer\s+[^\s,;]+", "Bearer [REDACTED]", detail)
+    detail = re.sub(r"(?i)\bsk-[A-Za-z0-9._-]+", "[REDACTED]", detail)
+    return f"The Provider Turn failed: {detail}"[:1_024]
 
 
 def _usage(usage: Any) -> dict[str, int] | None:

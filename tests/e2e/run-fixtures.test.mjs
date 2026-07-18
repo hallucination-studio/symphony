@@ -67,6 +67,27 @@ test("Linear fixture logs sanitized GraphQL failure details by operation", async
   }]);
 });
 
+test("Linear fixture logs a bounded sanitized non-JSON response body", async () => {
+  const events = [];
+  const operator = createRunScopedLinearOperator({
+    developmentToken: "development-secret",
+    applicationClientId: "client-1",
+    log: (event) => events.push(event),
+    fetch: async () => new Response(
+      `upstream unavailable development-secret ${"x".repeat(5_000)}`,
+      { status: 503, headers: { "content-type": "text/plain; charset=utf-8" } },
+    ),
+  });
+
+  await assert.rejects(operator.preflight(), /linear_fixture_response_invalid/u);
+  assert.equal(events[0].event, "e2e_linear_response_invalid");
+  assert.equal(events[0].operation, "CoreLivePreflight");
+  assert.equal(events[0].http_status, 503);
+  assert.equal(events[0].content_type, "text/plain; charset=utf-8");
+  assert.match(events[0].response_body, /^upstream unavailable \[REDACTED\]/u);
+  assert.equal(events[0].response_body.length, 4_096);
+});
+
 test("Linear fixture rejects an ambiguous Application app user before mutation", async () => {
   const data = preflightData();
   data.users.nodes.push({
