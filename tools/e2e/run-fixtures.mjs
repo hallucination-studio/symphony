@@ -20,7 +20,13 @@ export function createRunScopedLinearOperator({ developmentToken, fetch = global
           organization { id }
           viewer { id }
           teams(first: 50) {
-            nodes { id states(first: 100) { nodes { id name } } }
+            nodes {
+              id
+              states(first: 100) {
+                nodes { id name }
+                pageInfo { hasNextPage }
+              }
+            }
             pageInfo { hasNextPage }
           }
         }
