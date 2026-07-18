@@ -127,6 +127,45 @@ export async function runConductor(environment = process.env): Promise<void> {
         sanitized_reason: warning.sanitizedReason,
       });
     },
+    reportTurnObservation(observation) {
+      const correlation = {
+        conductor_id: config.conductorId,
+        binding_id: config.bindingId,
+        instance_id: config.instanceId,
+        turn_id: observation.turnId,
+        root_issue_id: observation.rootIssueId,
+        ...(observation.workIssueId
+          ? { work_issue_id: observation.workIssueId }
+          : {}),
+        sequence: String(observation.sequence),
+        event_kind: observation.eventKind,
+      };
+      if (observation.observationKind === "failure") {
+        logEvent("warning", "performer_turn_observation_failed", {
+          ...correlation,
+          error_code: observation.failureCode,
+          sanitized_reason: observation.sanitizedReason,
+        });
+        return;
+      }
+      logEvent(
+        observation.eventKind === "warning_raised" ||
+          observation.eventKind === "error_raised"
+          ? "warning"
+          : "info",
+        "performer_turn_event",
+        {
+          ...correlation,
+          ...(observation.code ? { event_code: observation.code } : {}),
+          ...(observation.retryable === undefined
+            ? {}
+            : { retryable: String(observation.retryable) }),
+          ...(observation.sanitizedReason
+            ? { sanitized_reason: observation.sanitizedReason }
+            : {}),
+        },
+      );
+    },
   });
   const report = async (body: JsonValue) => {
     await protocol.request({

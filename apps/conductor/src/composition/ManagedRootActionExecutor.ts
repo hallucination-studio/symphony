@@ -22,6 +22,13 @@ import {
   serializeRootManagedComment,
 } from "../root-workflow/api/index.js";
 import type { RuntimeActionExecutor } from "./ConductorRuntime.js";
+import {
+  performerTurnObservation,
+  turnObservationFailure,
+  type TurnEventObservation,
+  type TurnObservation,
+  type TurnObservationFailureCode,
+} from "./PerformerTurnObservation.js";
 
 type RecordValue = Record<string, JsonValue>;
 
@@ -65,6 +72,7 @@ export class ManagedRootActionExecutor implements RuntimeActionExecutor {
         errorCode: string;
         sanitizedReason: string;
       }): void;
+      reportTurnObservation?(observation: TurnObservation): void;
     },
   ) {}
 
@@ -96,7 +104,11 @@ export class ManagedRootActionExecutor implements RuntimeActionExecutor {
           : "failed";
       try {
         const fresh = await this.options.gateway.reconstruct(view.root.issueId);
-        if (fresh.managedComment && fresh.managedCommentRemote) {
+        if (
+          !(error instanceof TurnResultError) &&
+          fresh.managedComment &&
+          fresh.managedCommentRemote
+        ) {
           await this.#updateManagedComment(fresh, {
             ...fresh.managedComment,
             lastError:
@@ -960,13 +972,13 @@ export class ManagedRootActionExecutor implements RuntimeActionExecutor {
         ...input,
         onEvent: (value) => {
           projection = projection.then(async () => {
-            const nextManaged = await this.#projectTurnStatus(
+            const projected = await this.#projectTurnObservation(
               value,
               statusView,
               projectedManaged,
             );
-            hasProjectedStatus ||= nextManaged !== projectedManaged;
-            projectedManaged = nextManaged;
+            hasProjectedStatus ||= projected.statusProjected;
+            projectedManaged = projected.managed;
           });
         },
       }).finally(async () => {
@@ -1003,39 +1015,82 @@ export class ManagedRootActionExecutor implements RuntimeActionExecutor {
     throw new Error("performer_retry_unreachable");
   }
 
-  async #projectTurnStatus(
+  async #projectTurnObservation(
     value: JsonValue,
     view: RootRunView,
     managed: RootManagedComment | undefined,
-  ): Promise<RootManagedComment | undefined> {
-    const event = record(value);
-    const body = record(event.body);
-    const turnId = text(event.turn_id, "performer_event_turn_id_invalid");
-    const sequence = number(event.sequence, "performer_event_sequence_invalid");
-    const rootIssueId = text(event.root_issue_id, "performer_event_root_id_invalid");
-    if (rootIssueId !== view.root.issueId) {
+  ): Promise<{
+    managed: RootManagedComment | undefined;
+    statusProjected: boolean;
+  }> {
+    const event = performerTurnObservation(value);
+    if (event.observation.rootIssueId !== view.root.issueId) {
       throw new Error("performer_event_root_id_mismatch");
     }
-    if (
-      body.kind === "warning_raised" ||
-      body.kind === "error_raised" ||
-      body.kind === "turn_completed"
-    ) {
-      return managed;
+    this.#reportTurnObservation(event.observation);
+    try {
+      if (event.projection.kind === "timeline") {
+        await this.#mutate({
+          kind: "project_root_comment",
+          project: this.options.gateway.projectPrecondition(),
+          root_issue_id: event.observation.rootIssueId,
+          event_key: event.projection.eventKey,
+          body: event.projection.body,
+        });
+        return { managed, statusProjected: false };
+      }
+      if (!managed || !view.managedCommentRemote) {
+        return { managed, statusProjected: false };
+      }
+      const updated = {
+        ...managed,
+        turnId: event.observation.turnId,
+        turnStatus: event.projection.turnStatus,
+        turnEventSequence: event.observation.sequence,
+        turnStatusUpdatedAt: event.projection.occurredAt,
+      };
+      await this.#projectManagedStatus(view, updated);
+      return { managed: updated, statusProjected: true };
+    } catch (error) {
+      this.#reportTurnObservationFailure(
+        event.observation,
+        "turn_event_projection_failed",
+        error,
+      );
+      return { managed, statusProjected: false };
     }
-    if (!managed || !view.managedCommentRemote) return managed;
-    const turnStatus = body.kind === "progress"
-      ? text(body.stage, "performer_progress_stage_invalid")
-      : text(body.kind, "performer_event_kind_invalid");
-    const updated = {
-      ...managed,
-      turnId,
-      turnStatus,
-      turnEventSequence: sequence,
-      turnStatusUpdatedAt: text(event.occurred_at, "performer_event_timestamp_invalid"),
-    };
-    await this.#projectManagedStatus(view, updated);
-    return updated;
+  }
+
+  #reportTurnObservation(
+    observation: TurnEventObservation,
+  ): void {
+    try {
+      this.options.reportTurnObservation?.(observation);
+    } catch (error) {
+      this.#reportTurnObservationFailure(
+        observation,
+        "turn_event_log_failed",
+        error,
+      );
+    }
+  }
+
+  #reportTurnObservationFailure(
+    observation: TurnEventObservation,
+    failureCode: TurnObservationFailureCode,
+    error: unknown,
+  ): void {
+    try {
+      this.options.reportTurnObservation?.(
+        turnObservationFailure(
+          observation,
+          failureCode,
+          errorCode(error),
+        ),
+      );
+    } catch {
+      // Observation reporting cannot change the Performer Result path.
+    }
   }
 
   async #freshForResult(
