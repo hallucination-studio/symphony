@@ -87,6 +87,7 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
       case "reorder_issue_node":
       case "replace_root_phase_label":
       case "upsert_root_managed_comment":
+      case "project_root_comment":
         return mutationResult(
           await gateway.mutate(mutationCommand(body)),
         ) as unknown as JsonValue;
@@ -435,8 +436,29 @@ function mutationCommand(body: Body): LinearMutationCommand {
         managedMarker: requiredString(body.managed_marker, "linear_managed_marker_missing"),
         body: requiredString(body.body, "linear_comment_body_missing"),
       };
+    case "project_root_comment":
+      return {
+        ...common,
+        kind: body.kind,
+        rootIssueId: requiredString(body.root_issue_id, "linear_root_issue_id_missing"),
+        ...rootCommentIdentity(body),
+        body: requiredString(body.body, "linear_comment_body_missing"),
+      };
   }
   throw new Error("linear_mutation_kind_unsupported");
+}
+
+function rootCommentIdentity(body: Body):
+  | { commentId: string; eventKey?: never }
+  | { eventKey: string; commentId?: never } {
+  const hasCommentId = body.comment_id !== undefined;
+  const hasEventKey = body.event_key !== undefined;
+  if (hasCommentId === hasEventKey) {
+    throw new Error("linear_root_comment_identity_invalid");
+  }
+  return hasCommentId
+    ? { commentId: requiredString(body.comment_id, "linear_comment_id_invalid") }
+    : { eventKey: requiredString(body.event_key, "linear_event_key_invalid") };
 }
 
 function mutationResult(result: Awaited<ReturnType<LinearGatewayProtocolHandlerImpl["mutate"]>>) {

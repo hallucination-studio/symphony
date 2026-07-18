@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { PodiumConductorServicesImpl } from "../dist/internal/composition/PodiumConductorServicesImpl.js";
 import { LinearGatewayProtocolHandlerImpl } from "../dist/internal/linear-gateway/LinearGatewayProtocolHandlerImpl.js";
 
 function project() {
@@ -9,6 +10,51 @@ function project() {
     expectedProjectId: "project-1",
     expectedProjectUpdatedAt: "2026-07-16T00:00:00Z",
   };
+}
+
+async function createConductorServices(linearSdk) {
+  const binding = {
+    bindingId: "binding-1",
+    conductorId: "conductor-1",
+    conductorShortHash: "abc123",
+    linearInstallationId: "installation-1",
+    organizationId: "organization-1",
+    repositoryContext: {
+      repositoryHandle: "repo-1",
+      repositoryIdentity: "repository-1",
+      repositoryDisplayName: "symphony",
+      repositoryRoot: "/repository",
+      baseBranch: "main",
+    },
+    desiredState: "running",
+  };
+  const services = new PodiumConductorServicesImpl(
+    {
+      getConductorBinding: () => binding,
+      getLinearCredential: () => ({}),
+      saveRuntimeObservation() {},
+    },
+    {
+      now: () => "2026-07-16T00:00:00Z",
+      sleep: async () => undefined,
+      createLinearSdk: () => linearSdk,
+    },
+  );
+  await services.handle({
+    kind: "conductor_handshake",
+    binding_id: binding.bindingId,
+    instance_id: "instance-1",
+    conductor_id: binding.conductorId,
+    conductor_short_hash: binding.conductorShortHash,
+    linear_installation_id: binding.linearInstallationId,
+    organization_id: binding.organizationId,
+    repository: {
+      repository_handle: binding.repositoryContext.repositoryHandle,
+      canonical_path: binding.repositoryContext.repositoryRoot,
+      base_branch: binding.repositoryContext.baseBranch,
+    },
+  });
+  return services;
 }
 
 test("mutation conflict rereads and never executes stale state", async () => {
@@ -609,6 +655,167 @@ test("ambiguous Root comment mutation uses exact outcome read-back", async () =>
 
   assert.equal(result.kind, "already_applied");
   assert.equal(attempts, 1);
+});
+
+test("Podium-Conductor maps only the selected Root comment identity", async () => {
+  const observed = [];
+  const services = await createConductorServices({
+    async readProjectResolution() {
+      return {
+        kind: "resolved",
+        projectId: "project-1",
+        updatedAt: "2026-07-16T00:00:00Z",
+      };
+    },
+    async readMutationOutcome(command) {
+      observed.push(command);
+      return {};
+    },
+  });
+  const common = {
+    kind: "project_root_comment",
+    project: {
+      conductor_short_hash: "abc123",
+      expected_project_id: "project-1",
+      expected_project_updated_at: "2026-07-16T00:00:00Z",
+    },
+    root_issue_id: "root-1",
+  };
+
+  await services.handle({
+    ...common,
+    comment_id: "comment-1",
+    body: "Primary status",
+  });
+  await services.handle({
+    ...common,
+    event_key: "turn-1:2",
+    body: "Completed.\n\n<!-- symphony turn event\nevent_key: turn-1:2\n-->",
+  });
+
+  assert.deepEqual(observed, [
+    {
+      kind: "project_root_comment",
+      project: project(),
+      rootIssueId: "root-1",
+      commentId: "comment-1",
+      body: "Primary status",
+    },
+    {
+      kind: "project_root_comment",
+      project: project(),
+      rootIssueId: "root-1",
+      eventKey: "turn-1:2",
+      body: "Completed.\n\n<!-- symphony turn event\nevent_key: turn-1:2\n-->",
+    },
+  ]);
+});
+
+test("Podium-Conductor rejects mixed Root comment identities", async () => {
+  const services = await createConductorServices({});
+
+  await assert.rejects(
+    services.handle({
+      kind: "project_root_comment",
+      project: {
+        conductor_short_hash: "abc123",
+        expected_project_id: "project-1",
+        expected_project_updated_at: "2026-07-16T00:00:00Z",
+      },
+      root_issue_id: "root-1",
+      comment_id: "comment-1",
+      event_key: "turn-1:2",
+      body: "Completed.",
+    }),
+    /linear_root_comment_identity_invalid/u,
+  );
+});
+
+test("ambiguous Root event append reads back the exact event before retry", async () => {
+  let attempts = 0;
+  let outcomeReads = 0;
+  const command = {
+    kind: "project_root_comment",
+    project: project(),
+    rootIssueId: "root-1",
+    eventKey: "turn-1:7",
+    body: "Provider failed.\n\n<!-- symphony turn event\nevent_key: turn-1:7\n-->",
+  };
+  const handler = new LinearGatewayProtocolHandlerImpl(
+    {
+      async readProjectResolution() {
+        return {
+          kind: "resolved",
+          projectId: "project-1",
+          updatedAt: "2026-07-16T00:00:00Z",
+        };
+      },
+      async readMutationOutcome(candidate) {
+        outcomeReads += 1;
+        assert.deepEqual(candidate, command);
+        return attempts === 0
+          ? undefined
+          : {
+              issue: {
+                issueId: "root-1",
+                updatedAt: "2026-07-16T00:00:01Z",
+              },
+            };
+      },
+      async executeMutation() {
+        attempts += 1;
+        const error = new Error("connection lost after append");
+        error.retryable = true;
+        error.ambiguous = true;
+        throw error;
+      },
+    },
+    { sleep: async () => undefined, maxAttempts: 3, baseDelayMs: 10 },
+  );
+
+  const result = await handler.mutate(command);
+
+  assert.equal(result.kind, "already_applied");
+  assert.equal(attempts, 1);
+  assert.equal(outcomeReads, 2);
+});
+
+test("a repeated Root event append is deduplicated before mutation", async () => {
+  let attempts = 0;
+  const handler = new LinearGatewayProtocolHandlerImpl(
+    {
+      async readProjectResolution() {
+        return {
+          kind: "resolved",
+          projectId: "project-1",
+          updatedAt: "2026-07-16T00:00:00Z",
+        };
+      },
+      async readMutationOutcome() {
+        return {
+          issue: {
+            issueId: "root-1",
+            updatedAt: "2026-07-16T00:00:00Z",
+          },
+        };
+      },
+      async executeMutation() {
+        attempts += 1;
+      },
+    },
+    { sleep: async () => undefined, maxAttempts: 3, baseDelayMs: 10 },
+  );
+
+  const result = await handler.mutate({
+    kind: "project_root_comment",
+    project: project(),
+    rootIssueId: "root-1",
+    eventKey: "turn-1:1",
+    body: "Provider failed.\n\n<!-- symphony turn event\nevent_key: turn-1:1\n-->",
+  });
+
+  assert.equal(result.kind, "already_applied");
+  assert.equal(attempts, 0);
 });
 
 test("official SDK network errors trigger bounded retry and precondition reread", async () => {

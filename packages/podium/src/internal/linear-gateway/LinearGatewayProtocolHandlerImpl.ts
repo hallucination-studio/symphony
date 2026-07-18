@@ -409,7 +409,8 @@ export class LinearGatewayProtocolHandlerImpl {
   ): Promise<LinearMutationResult | undefined> {
     if (
       command.kind !== "create_managed_node" &&
-      command.kind !== "upsert_root_managed_comment"
+      command.kind !== "upsert_root_managed_comment" &&
+      command.kind !== "project_root_comment"
     ) {
       return undefined;
     }
