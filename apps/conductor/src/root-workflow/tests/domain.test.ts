@@ -42,10 +42,25 @@ last_usage_turn_id: none
 delivery_branch: symphony/runs/sym-1
 pull_request: none
 last_error: none
+turn_id: turn-1
+turn_status: analyzing
+turn_event_sequence: 3
+turn_status_updated_at: 2026-07-16T00:00:01Z
 <!-- symphony root marker -->`);
   assert.equal(parsed.ok, true);
   if (!parsed.ok) return;
   assert.equal(parsed.value.performerProfileId, "profile-1");
+  assert.deepEqual({
+    turnId: parsed.value.turnId,
+    turnStatus: parsed.value.turnStatus,
+    turnEventSequence: parsed.value.turnEventSequence,
+    turnStatusUpdatedAt: parsed.value.turnStatusUpdatedAt,
+  }, {
+    turnId: "turn-1",
+    turnStatus: "analyzing",
+    turnEventSequence: 3,
+    turnStatusUpdatedAt: "2026-07-16T00:00:01Z",
+  });
 
   const work = parseWorkDescription(`Business requirement.
 

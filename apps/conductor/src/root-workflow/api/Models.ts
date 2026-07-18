@@ -32,6 +32,10 @@ export interface RootManagedComment {
   deliveryBranch: string;
   pullRequest?: string;
   lastError?: string;
+  turnId?: string;
+  turnStatus?: string;
+  turnEventSequence?: number;
+  turnStatusUpdatedAt?: string;
   usage: {
     inputTokens: number;
     cachedInputTokens: number;

@@ -18,6 +18,10 @@ const rootFields = new Set([
   "delivery_branch",
   "pull_request",
   "last_error",
+  "turn_id",
+  "turn_status",
+  "turn_event_sequence",
+  "turn_status_updated_at",
 ]);
 const workMetadataPattern =
   /\n*<!-- symphony work metadata\nkind: ([^\n]+)\norigin: ([^\n]+)\ncompleted_input_hash: ([^\n]+)\n-->\s*$/;
@@ -89,6 +93,21 @@ export function parseRootManagedComment(
   );
   assignOptional(value, "pullRequest", optional(values, "pull_request"));
   assignOptional(value, "lastError", optional(values, "last_error"));
+  assignOptional(value, "turnId", optional(values, "turn_id"));
+  assignOptional(value, "turnStatus", optional(values, "turn_status"));
+  assignOptional(
+    value,
+    "turnStatusUpdatedAt",
+    optional(values, "turn_status_updated_at"),
+  );
+  const turnEventSequence = optionalNonNegativeInteger(
+    values,
+    "turn_event_sequence",
+  );
+  if (!turnEventSequence.ok) return turnEventSequence;
+  if (turnEventSequence.value !== undefined) {
+    value.turnEventSequence = turnEventSequence.value;
+  }
   assignOptional(
     value,
     "lastUsageTurnId",
@@ -117,6 +136,14 @@ export function serializeRootManagedComment(value: RootManagedComment): string {
     `delivery_branch: ${field(value.deliveryBranch)}`,
     ...(value.pullRequest ? [`pull_request: ${field(value.pullRequest)}`] : []),
     ...(value.lastError ? [`last_error: ${field(value.lastError)}`] : []),
+    ...(value.turnId ? [`turn_id: ${field(value.turnId)}`] : []),
+    ...(value.turnStatus ? [`turn_status: ${field(value.turnStatus)}`] : []),
+    ...(value.turnEventSequence !== undefined
+      ? [`turn_event_sequence: ${value.turnEventSequence}`]
+      : []),
+    ...(value.turnStatusUpdatedAt
+      ? [`turn_status_updated_at: ${field(value.turnStatusUpdatedAt)}`]
+      : []),
     rootMarker,
   ];
   return lines.join("\n");
@@ -259,6 +286,14 @@ function nonNegativeInteger(
   return Number.isSafeInteger(number)
     ? { ok: true, value: number }
     : { ok: false, error: `invalid:${key}` };
+}
+
+function optionalNonNegativeInteger(
+  values: Map<string, string>,
+  key: string,
+): ParseResult<number | undefined> {
+  if (!values.has(key)) return { ok: true, value: undefined };
+  return nonNegativeInteger(values, key);
 }
 
 function assignOptional<T extends object, K extends keyof T>(
