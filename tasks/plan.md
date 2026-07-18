@@ -28,8 +28,8 @@ secret-free native Desktop smoke remains responsible for the Desktop shell.
 - Run the same core live command locally and in a protected, serialized GitHub
   Actions workflow.
 - Retire the superseded E2E entrypoint, E2E Podium compositions, fake Linear
-  client, temporary Store, and hermetic WebdriverIO automation after the live
-  replacement passes.
+  client, temporary Store, and hermetic WebdriverIO automation before exposing
+  the core live local or CI entrypoint.
 
 ### `required_consequences`
 
@@ -119,9 +119,11 @@ Task 1: authoritative test contract
                     |
            Task 8: small Root live scenario
                     |
-           Task 9: local and GitHub Actions entrypoints
+           Task 9: remove alternate credentialed/Desktop E2E
                     |
-          Tasks 10-11: retire superseded paths
+           Task 10: remove hermetic automation and preserve shell smoke
+                    |
+           Task 11: local and GitHub Actions entrypoints
                     |
            Task 12: full verification and review
 ```
@@ -156,11 +158,21 @@ Task 1: authoritative test contract
 - [ ] Linear ends in the documented In Review/in-review state.
 - [ ] Sanitized evidence contains no known secret or absolute private path.
 
-### Phase 3: Automation and retirement
+### Phase 3: Retirement before automation
 
-- [ ] Task 9: Add the local command and protected GitHub Actions job.
-- [ ] Task 10: Remove the alternate E2E runtime and Podium compositions.
-- [ ] Task 11: Remove hermetic automation while preserving Desktop smoke.
+- [x] Task 9: Remove the alternate credentialed/Desktop E2E runtime.
+- [ ] Task 10: Remove hermetic automation while preserving Desktop smoke.
+
+### Checkpoint: One E2E route
+
+- [ ] No alternate Podium composition, Desktop E2E backend, S1/S2/S3 runtime,
+      hermetic runner, or hermetic workflow remains.
+- [ ] The Desktop shell smoke uses the production binary, is secret-free, and
+      cannot produce core live evidence.
+
+### Phase 4: Automation and final verification
+
+- [ ] Task 11: Add the local command and protected GitHub Actions job.
 - [ ] Task 12: Run broad verification and complete the final review.
 
 ## Risks and Mitigations

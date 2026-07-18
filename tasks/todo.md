@@ -298,76 +298,42 @@ Work and Root Gate, and verifies local branch delivery.
 - [ ] Cleanup succeeds when the scenario passes and when it is interrupted.
 - [ ] No secret canary or private absolute path exists in evidence.
 
-## Task 9: Add local and protected CI entrypoints
+## Task 9: Remove the alternate credentialed/Desktop E2E runtime
 
-**Description:** Expose one stable local command and repurpose the existing
-manual Roadmap workflow to run exactly that command in a protected GitHub
-Environment. Keep secret-free contract tests on pull requests, serialize live
-runs, and always collect sanitized evidence and cleanup.
+**Description:** Before adding a core live command or workflow, remove the old
+credentialed Desktop S1/S2/S3 runtime, static acceptance evidence pipeline,
+Podium Desktop E2E backend, temporary Store, fake Linear composition, and the
+package/build surfaces that make that route callable.
 
 **Acceptance criteria:**
 
-- [ ] `npm run e2e:core-live` is the only credentialed core entrypoint and uses
-      the same runner locally and in CI.
-- [ ] GitHub Actions maps secrets only on preflight/run steps, uses a protected
-      environment and `cancel-in-progress: false`, and never exposes them to a
-      pull-request job.
-- [ ] Workflow artifacts are allowlisted, unique, bounded-retention, and fail
-      when expected evidence is absent.
+- [x] Production has one Podium backend entrypoint and one production service
+      composition.
+- [x] No package exports an E2E Podium composition, fake Linear client, or
+      temporary credential Store.
+- [x] No `acceptance:v1`, S1/S2/S3 runtime, Desktop E2E build branch, or static
+      Roadmap verdict collector remains, and negative controls fail if one is
+      reintroduced.
 
 **Verification:**
 
-- [ ] Run `npm run test:e2e:runner` including workflow contract tests.
-- [ ] Execute the protected GitHub Actions workflow once and record its run URL
-      outside the repository artifact set.
-- [ ] Confirm cleanup runs under `if: always()` and remains idempotent.
+- [x] Run Podium, Desktop backend, build, architecture, and focused E2E tests.
+- [x] Run `rg -n "acceptance:v1|e2e-main|createE2EPodium|TemporaryPodiumStore|scenario-s[123]|s1-driver" apps packages tests tools package.json .github` and inspect every remaining reference.
 
 **Dependencies:** Task 8
-
-**Files likely touched:**
-
-- `package.json`
-- `Makefile`
-- `.github/workflows/roadmap-v1-e2e.yml`
-- `.github/workflows/quality.yml`
-- `tests/e2e/ci-workflow.test.mjs`
-
-**Estimated scope:** Medium
-
-## Task 10: Remove the alternate E2E runtime
-
-**Description:** After the core live scenario passes, remove the Podium Desktop
-E2E entrypoint, temporary Store, hermetic Linear client, and all package exports
-that preserve those alternate runtime paths. Build-selection cleanup belongs to
-Task 11 so this remains one bounded package/runtime slice.
-
-**Acceptance criteria:**
-
-- [ ] Production has one Podium backend entrypoint and one production service
-      composition.
-- [ ] No package exports an E2E Podium composition, fake Linear client, or
-      temporary credential Store.
-- [ ] Negative controls fail if an alternate entrypoint/composition is added
-      again.
-
-**Verification:**
-
-- [ ] Run Podium, Desktop backend, build, and production-negative-control tests.
-- [ ] Run `rg -n "e2e-main|createHermeticE2E|createE2EPodium|TemporaryPodiumStore" apps packages tests tools` and inspect every remaining reference.
-
-**Dependencies:** Task 9
 
 **Files likely touched:**
 
 - `apps/podium-desktop/src-backend/e2e-main.ts`
 - `packages/podium/src/e2e/index.ts`
 - `packages/podium/src/e2e/createE2EPodiumServiceComposition.ts`
-- `packages/podium/src/e2e/createHermeticE2EPodiumServiceComposition.ts`
 - `packages/podium/src/e2e/TemporaryPodiumStore.ts`
+- `tools/e2e/acceptance-v1.mjs`
+- `tests/acceptance/`
 
 **Estimated scope:** Medium
 
-## Task 11: Remove hermetic automation and preserve Desktop smoke
+## Task 10: Remove hermetic automation and preserve Desktop smoke
 
 **Description:** Delete the hermetic WebdriverIO runner/config/tests and remove
 its package/Makefile/workflow commands. Keep a clearly named, secret-free native
@@ -389,7 +355,7 @@ reported as core workflow evidence.
 - [ ] Run stale-reference searches across `package.json`, `Makefile`, workflows,
       README, docs, tests, and tools.
 
-**Dependencies:** Task 10
+**Dependencies:** Task 9
 
 **Files likely touched:**
 
@@ -398,6 +364,49 @@ reported as core workflow evidence.
 - `tests/e2e/hermetic-runner.test.mjs`
 - `wdio.hermetic.conf.mjs`
 - `apps/podium-desktop/tools/build-sidecars.mjs`
+
+**Estimated scope:** Medium
+
+## Checkpoint C: One E2E route
+
+- [ ] No alternate Podium composition, Desktop E2E backend, S1/S2/S3 runtime,
+      hermetic runner, or hermetic workflow remains.
+- [ ] Desktop smoke is secret-free, starts production artifacts, and cannot
+      satisfy the core live verdict.
+
+## Task 11: Add local and protected CI entrypoints
+
+**Description:** After all superseded workflow E2E routes are absent, expose
+one stable local command and repurpose the manual Roadmap workflow to run that
+same command in a protected GitHub Environment. Keep secret-free contract tests
+on pull requests, serialize live runs, and always collect sanitized evidence
+and cleanup.
+
+**Acceptance criteria:**
+
+- [ ] `npm run e2e:core-live` is the only credentialed E2E entrypoint and uses
+      the same runner locally and in CI.
+- [ ] GitHub Actions maps secrets only on preflight/run steps, uses a protected
+      environment and `cancel-in-progress: false`, and never exposes them to a
+      pull-request job.
+- [ ] Workflow artifacts are allowlisted, unique, bounded-retention, and fail
+      when expected evidence is absent.
+
+**Verification:**
+
+- [ ] Run `npm run test:e2e:runner` including workflow contract tests.
+- [ ] Execute the protected GitHub Actions workflow once and record its run URL
+      outside the repository artifact set.
+- [ ] Confirm cleanup runs under `if: always()` and remains idempotent.
+
+**Dependencies:** Task 10
+
+**Files likely touched:**
+
+- `package.json`
+- `Makefile`
+- `.github/workflows/roadmap-v1-e2e.yml`
+- `tests/e2e/ci-workflow.test.mjs`
 
 **Estimated scope:** Medium
 
@@ -427,7 +436,7 @@ Do not mark this task complete from mocked runner tests alone.
 - [ ] `.venv/bin/python -m pytest apps/performer/tests -q`
 - [ ] `cd apps/podium-desktop/src-tauri && cargo test`
 
-**Dependencies:** Tasks 9, 10, and 11
+**Dependencies:** Task 11
 
 **Files likely touched:**
 
@@ -437,7 +446,7 @@ Do not mark this task complete from mocked runner tests alone.
 
 **Estimated scope:** Small
 
-## Checkpoint C: Complete
+## Checkpoint D: Complete
 
 - [ ] Core live E2E is green locally and in the protected workflow.
 - [ ] Desktop smoke is green and makes no live workflow claim.

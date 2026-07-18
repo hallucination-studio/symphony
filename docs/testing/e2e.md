@@ -31,8 +31,8 @@ workflow、Linear 或 Provider 行为。
 - 执行真实 Plan、Work、Root Gate 和本地 branch delivery，并验证 Linear 最终
   为 In Review / `in-review`；
 - 在受保护、串行化、仅可信 ref 可执行的 GitHub Actions job 中运行同一场景；
-- 替换并最终删除旧 E2E entrypoint、E2E Podium composition、fake Linear
-  client、temporary Store 和 hermetic workflow automation。
+- 不维护旧 E2E entrypoint、E2E Podium composition、fake Linear client、
+  temporary Store 或 hermetic workflow automation。
 
 ### `required_consequences`
 

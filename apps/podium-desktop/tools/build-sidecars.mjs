@@ -10,11 +10,7 @@ const binaries = path.join(desktopRoot, "src-tauri", "binaries");
 await mkdir(binaries, { recursive: true });
 buildWorkspaceDependencies();
 compile(
-  path.join(
-    desktopRoot,
-    "src-backend",
-    process.env.SYMPHONY_E2E_BUILD === "1" ? "e2e-main.ts" : "main.ts",
-  ),
+  path.join(desktopRoot, "src-backend", "main.ts"),
   path.join(binaries, `podium-backend-${target}`),
 );
 compile(

@@ -4,8 +4,7 @@
   "version": "0.1.0",
   "type": "module",
   "exports": {
-    ".": "./dist/public/index.js",
-    "./e2e": "./dist/e2e/index.js"
+    ".": "./dist/public/index.js"
   },
   "types": "./dist/public/index.d.ts",
   "scripts": {
