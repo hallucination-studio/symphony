@@ -24,7 +24,7 @@ test("Linear fixture preflight proves authority without mutation", async () => {
       assert.equal(init.headers.authorization, "development-secret");
       assert.match(
         request.query.replace(/\s+/gu, " "),
-        /states\(first: 100\) \{ nodes \{ id name \} pageInfo \{ hasNextPage \} \}/u,
+        /states\(first: 50\) \{ nodes \{ id name \} pageInfo \{ hasNextPage \} \}/u,
       );
       return response({ data: preflightData() });
     },
