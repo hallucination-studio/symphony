@@ -331,7 +331,7 @@ test("repeated Root Gate failure updates and reopens one stable Rework node", as
   );
 });
 
-test("retryable Performer failures are logged and projected to the Root comment", async () => {
+test("retryable Performer failures are logged and terminal failure reaches the Root comment", async () => {
   const view = runningRootView();
   view.workflowNodes = [];
   view.phaseLabels = ["planning"];
@@ -412,7 +412,9 @@ test("retryable Performer failures are logged and projected to the Root comment"
     },
   ]);
   assert.ok(commentBodies.some((body) =>
-    body.includes("last_error: WebSocket closed before response.completed")));
+    body.includes(
+      "last_error: performer_retry_exhausted:WebSocket closed before response.completed",
+    )));
 });
 
 function createExecutor(

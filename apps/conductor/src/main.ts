@@ -125,9 +125,6 @@ export async function runConductor(environment = process.env): Promise<void> {
         attempt: String(warning.attempt),
         error_code: warning.errorCode,
         sanitized_reason: warning.sanitizedReason,
-        ...(warning.retryProjectionErrorCode
-          ? { projection_error_code: warning.retryProjectionErrorCode }
-          : {}),
       });
     },
   });

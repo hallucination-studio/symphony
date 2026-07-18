@@ -64,7 +64,6 @@ export class ManagedRootActionExecutor implements RuntimeActionExecutor {
         attempt: number;
         errorCode: string;
         sanitizedReason: string;
-        retryProjectionErrorCode?: string;
       }): void;
     },
   ) {}
@@ -937,22 +936,10 @@ export class ManagedRootActionExecutor implements RuntimeActionExecutor {
           "blocked",
         );
       }
-      let retryProjectionErrorCode: string | undefined;
-      if (fresh.managedComment && fresh.managedCommentRemote) {
-        try {
-          await this.#updateManagedComment(fresh, {
-            ...fresh.managedComment,
-            lastError: reason,
-          });
-        } catch (error) {
-          retryProjectionErrorCode = errorCode(error);
-        }
-      }
       this.options.reportTurnRetry?.({
         attempt,
         errorCode: code,
         sanitizedReason: reason,
-        ...(retryProjectionErrorCode ? { retryProjectionErrorCode } : {}),
       });
       await this.options.sleep(250 * 2 ** (attempt - 1));
     }
