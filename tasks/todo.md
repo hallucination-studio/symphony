@@ -1,456 +1,427 @@
-# Core Live E2E Tasks
+# Real-time Root Managed Comment Tasks
 
-## Task 1: Replace the authoritative E2E contract
+## Working Rules
 
-**Description:** Rewrite the operational E2E specification around one core
-live scenario. Remove claims that a hermetic Desktop composition is the product
-E2E, state that OAuth and Desktop UI are excluded, and define the real
-Podium/Conductor/Performer/Linear/Codex/Git evidence boundary.
+- One task equals one commit. Stage only the files listed for that task.
+- The current staged/unstaged implementation is raw material, not a commit.
+- Write the failing behavior test before changing production behavior.
+- Run focused checks first and the task's broader checks before committing.
+- Do not keep `turn-events.ndjson`, `--event-path`, a returned `events` array,
+  or any other compatibility event route.
+- Do not expose a Linear comment ID to Performer.
+- Do not print tokens, credentials, raw Provider errors, or request bodies.
+
+## Task 1: Persist Primary Status Turn observation fields
+
+**Status:** Complete in commit `887fbba`.
+
+**Description:** Extend the existing Primary Status Comment model so Conductor
+can persist the latest correlated Turn ID, display status, event sequence, and
+status timestamp without introducing a second state store.
 
 **Acceptance criteria:**
 
-- [x] `docs/testing/e2e.md` contains the repository scope record and the exact
-      core live topology approved in `tasks/plan.md`.
-- [x] Every Roadmap V1 item is marked `covered`, `partially covered`, or
-      `deferred`; no fake or dry-run observation is called live evidence.
-- [x] The document forbids E2E compositions, fake Linear clients, static
-      Performer files, fake refresh tokens, and Linear credentials in Conductor.
+- [x] All four fields are optional so existing managed comments remain valid.
+- [x] `turn_event_sequence` accepts only a non-negative integer.
+- [x] Parsing and serialization preserve the observation fields.
 
 **Verification:**
 
-- [x] Check links and stale terminology with
-      `rg -n "hermetic|e2e-main|TemporaryPodiumStore|fake Linear" docs README.md`.
-- [x] Run `npm run test:architecture`.
+- [x] `npx tsx --test --test-name-pattern='managed state parsers' apps/conductor/src/root-workflow/tests/domain.test.ts`
+- [x] `npm run typecheck -w @symphony/conductor`
 
 **Dependencies:** None
 
-**Files likely touched:**
+**Files:**
 
-- `docs/testing/e2e.md`
-- `README.md`
-- `tests/e2e/acceptance-v1.test.mjs`
+- `apps/conductor/src/root-workflow/api/Models.ts`
+- `apps/conductor/src/root-workflow/internal/ManagedState.ts`
+- `apps/conductor/src/root-workflow/tests/domain.test.ts`
 
-**Estimated scope:** Medium
+**Estimated scope:** Small
 
-## Task 2: Define pipeline-only inputs and secret handling
+**Commit:** `feat: persist Root Turn observation status`
 
-**Description:** Replace the old OAuth/user-key configuration with one closed
-environment contract for the core runner. The runner captures secrets once,
-reports presence only, validates non-secret endpoint/model values, and creates
-explicit child-process environment allowlists.
+## Task 2: Replace the architecture source of truth
 
-**Acceptance criteria:**
-
-- [x] Required inputs are `SYMPHONY_E2E_LINEAR_DEV_TOKEN`,
-      `SYMPHONY_E2E_CODEX_API_KEY`, `SYMPHONY_E2E_CODEX_BASE_URL`, and
-      `SYMPHONY_E2E_CODEX_MODEL`; no `.env` file is required or loaded.
-- [x] Base URL validation rejects non-HTTPS CI URLs, credentials, query,
-      fragment, control characters, and hosts outside the configured allowlist.
-- [x] Config summaries and errors expose only stable codes and secret-presence
-      booleans; child environments omit both tokens by default.
-
-**Verification:**
-
-- [x] Run the focused config/runner tests under `tests/e2e/`.
-- [x] Run `npm run test:e2e:runner` with an empty environment and verify it
-      fails closed without printing supplied canaries.
-
-**Dependencies:** Task 1
-
-**Files likely touched:**
-
-- `tools/e2e/config.mjs`
-- `tools/e2e/doctor.mjs`
-- `tests/e2e/runner.test.mjs`
-- `tests/e2e/hermetic-config.test.mjs`
-
-**Estimated scope:** Medium
-
-## Task 3: Add a real Podium development-token installation
-
-**Description:** Model a Linear Application development token as a first-class
-Podium credential kind instead of fabricating OAuth refresh fields. Provide a
-bounded bootstrap function used before the production Podium services start,
-validate the token against Linear, discover its organization, and persist it in
-the real SQLite Store.
+**Description:** Rewrite the approved target architecture around one Primary
+Status Comment, append-only Timeline Comments, and one live stdout event route.
+Remove language that permits process-exit event replay or treats Timeline data
+as workflow state.
 
 **Acceptance criteria:**
 
-- [x] Podium stores a discriminated OAuth or development-token installation;
-      development-token records contain no refresh-token placeholder.
-- [x] The bootstrap validates organization identity and token usability through
-      the real `LinearSdkImpl`, then production client/conductor services read
-      the same credential abstraction.
-- [x] Refresh remains OAuth-only, and expired/invalid development tokens fail
-      closed with sanitized errors.
+- [ ] Root architecture defines the Primary comment as the first
+      Symphony-managed Root comment and records its Linear comment ID.
+- [ ] Performer Event architecture maps continuous events to ID-upsert and
+      warning/error/completion to event-key append.
+- [ ] The glossary uses one unambiguous vocabulary and the docs explicitly
+      exclude observation comments from revisions, hashes, stale checks, and
+      scheduling.
 
 **Verification:**
 
-- [x] Run `npm test -w @symphony/podium`.
-- [x] Run the relevant storage migration and Linear credential negative tests.
-- [x] Confirm generated/public contracts contain no token or credential kind
-      unless explicitly required by an existing Podium boundary.
+- [ ] `npm run test:architecture`
+- [ ] `rg -n "event-path|turn-events|replay|last_error" docs/architecture`
+- [ ] Check all changed architecture links.
 
 **Dependencies:** Task 1
 
-**Files likely touched:**
+**Files:**
 
-- `packages/podium/src/internal/models.ts`
-- `packages/podium/src/internal/storage/SqlitePodiumStoreImpl.ts`
-- `packages/podium/src/public/createPodiumConductorServices.ts`
-- `packages/podium/src/public/bootstrapDevelopmentTokenInstallation.ts`
-- `packages/podium/tests/storage.test.mjs`
+- `docs/architecture/root-issue.md`
+- `docs/architecture/performer-events.md`
+- `docs/architecture/glossary.md`
 
 **Estimated scope:** Medium
 
-## Task 4: Pass the Codex endpoint through Performer process configuration
+**Commit:** `docs: define Root status and Timeline comments`
 
-**Description:** Add one production-supported base URL input that Conductor
-forwards unchanged to both Profile control and Turn Performer processes.
-Performer validates it and constructs the pinned SDK with a public
-`CodexConfig` override. Do not add a Profile field, provider map, environment
-API key, or Codex file write.
+## Task 3: Close the event and comment mutation contracts
+
+**Description:** Define closed generated unions for Performer observations and
+for the two Podium-Conductor Root comment mutation variants. The contract must
+make `comment_id` and `event_key` mutually exclusive and support the maximum
+legal Turn ID plus sequence suffix.
 
 **Acceptance criteria:**
 
-- [x] Profile control and every Turn use the same validated
-      `openai_base_url` override when configured and the SDK default when absent.
-- [x] Performer rejects unsafe URLs before SDK startup and never logs the full
-      configured URL if it contains unexpected sensitive material.
-- [x] No Symphony code reads or writes `CODEX_HOME/config.toml` or `auth.json`.
+- [ ] Performer events include `error_raised` and `turn_completed` with only
+      bounded, sanitized fields; comment identity is absent.
+- [ ] Root comment mutation requires exactly one of `comment_id` or
+      `event_key`; append keys accept every valid `turn_id:sequence`.
+- [ ] TypeScript, Python, and Rust generated outputs match the schemas and
+      invalid mixed/missing variants are rejected.
 
 **Verification:**
 
-- [x] Run `.venv/bin/python -m pytest apps/performer/tests -q`.
-- [x] Run `npm run typecheck -w @symphony/conductor` and its focused process
-      tests.
-- [x] Assert the SDK is built with public `CodexConfig` rather than private
-      members or CLI/file manipulation.
+- [ ] `npm run contracts:generate`
+- [ ] `npm run contracts:check`
+- [ ] `npm run test:contracts`
+- [ ] `npm run contracts:validate:typescript`
 
-**Dependencies:** Task 1
+**Dependencies:** Task 2
+
+**Files:**
+
+- `packages/contracts/schemas/conductor-performer/conductor-performer.schema.json`
+- `packages/contracts/schemas/podium-conductor/podium-conductor.schema.json`
+- `packages/contracts/generated/typescript/contracts.ts`
+- `packages/contracts/generated/python/contracts.py`
+- `packages/contracts/generated/rust/src/lib.rs`
+
+**Estimated scope:** Medium; three files are generated outputs
+
+**Commit:** `feat: define Root comment projection contracts`
+
+## Checkpoint A: Contract
+
+- [ ] Tasks 2-3 are committed separately and focused checks pass.
+- [ ] No Performer contract contains Linear types, comment IDs, SDK objects, or
+      arbitrary metadata.
+- [ ] The human approves the event-to-comment mapping before runtime work.
+
+## Task 4: Add a bounded Performer stdout event decoder
+
+**Description:** Add the Conductor-owned streaming boundary that accepts stdout
+chunks, frames newline-delimited JSON, validates the generated Event contract,
+and checks Turn/Root/Work/sequence correlation before delivery.
+
+**Acceptance criteria:**
+
+- [ ] Frames split across chunks and multiple frames in one chunk decode in
+      order without corrupting Unicode.
+- [ ] Byte count, frame size, frame count, and incomplete terminal frames are
+      bounded; malformed or uncorrelated frames become sanitized observation
+      violations.
+- [ ] `GlobalPerformerLane` drains stdout while the child runs and does not wait
+      for process exit before invoking the decoder.
+
+**Verification:**
+
+- [ ] Run the focused event stream and Global Performer lane tests.
+- [ ] `npm run typecheck -w @symphony/conductor`
+- [ ] `npm run lint -w @symphony/conductor`
+
+**Dependencies:** Task 3
 
 **Files likely touched:**
 
-- `apps/performer/src/performer/__main__.py`
-- `apps/performer/src/performer/backends/codex/codex_backend_impl.py`
-- `apps/performer/tests/test_codex_backend.py`
-- `apps/conductor/src/main.ts`
+- `apps/conductor/src/performer-turns/internal/GlobalPerformerLane.ts`
+- `apps/conductor/src/performer-turns/internal/PerformerEventStreamDecoder.ts`
+- `apps/conductor/src/performer-turns/tests/event-stream.test.ts`
+
+**Estimated scope:** Medium
+
+**Commit:** `feat: decode live Performer event frames`
+
+## Task 5: Switch Performer Turns to the single live event route
+
+**Description:** Make Turn-mode Performer stdout emit only flushed closed Event
+frames and connect them to the decoder through `PerformerTurnProcessImpl`.
+Remove the event file, event-path argument, post-exit collector, and returned
+events array. Result publication remains atomic and authoritative.
+
+**Acceptance criteria:**
+
+- [ ] `turn_started` is observed before the fake child is released in a
+      synchronization-barrier test.
+- [ ] Same-Turn retries receive the next in-memory sequence start without an
+      event file; a new Turn starts at zero.
+- [ ] Successful Result publication precedes `turn_completed`; failed Results
+      emit `error_raised`; process/result errors remain sanitized and bounded.
+
+**Verification:**
+
+- [ ] `npm test -w @symphony/conductor -- --test-name-pattern='Performer process'`
+- [ ] `.venv/bin/python -m pytest apps/performer/tests/test_turn_host.py -q`
+- [ ] `.venv/bin/python -m pytest apps/performer/tests -q`
+- [ ] `rg -n "event-path|turn-events|events:" apps/conductor apps/performer`
+
+**Dependencies:** Task 4
+
+**Files likely touched:**
+
+- `apps/conductor/src/performer-turns/internal/PerformerTurnProcessImpl.ts`
 - `apps/conductor/src/performer-turns/tests/process.test.ts`
+- `apps/performer/src/performer/__main__.py`
+- `apps/performer/src/performer/turn_protocol/host.py`
+- `apps/performer/tests/test_turn_host.py`
 
 **Estimated scope:** Medium
 
-## Checkpoint A: Production prerequisites
+**Commit:** `feat: stream Performer events during Turns`
 
-- [x] Tasks 1-4 focused tests pass.
-- [x] No token appears in Conductor runtime configuration or generated
-      contracts.
-- [x] No E2E-only composition has been added.
-- [x] Review the credential migration and base URL threat model before building
-      the live harness.
+## Task 6: Implement the two Linear SDK comment modes
 
-## Task 5: Build the production core process harness
-
-**Description:** Replace the Desktop-driven live driver with one runner-owned
-transport harness. It bootstraps the real Podium Store/services, starts the
-actual Conductor executable with inherited IPC, connects production protocol
-handlers, observes the real handshake, and owns bounded shutdown. The harness
-may adapt transport only; it must not implement Gateway or workflow behavior.
+**Description:** Implement Primary Status upsert and Timeline append in the
+Podium-owned Linear SDK adapter. ID-upsert must use a targeted comment lookup;
+append must use an exact hidden marker and bounded pagination for idempotent
+read-back.
 
 **Acceptance criteria:**
 
-- [x] A test run reaches a real Conductor `ready`/`unbound` observation through
-      generated framed contracts and production Podium handlers.
-- [x] Linear token bytes are supplied only to Podium bootstrap and are absent
-      from Conductor arguments, environment, frames, logs, and evidence.
-- [x] Startup, protocol, process-exit, timeout, and shutdown failures are
-      bounded and represented by sanitized stable codes.
+- [ ] ID-upsert rejects a missing comment, another Root's comment, a user
+      comment, or a body with a different managed identity.
+- [ ] Event-key append creates once, reports an exact matching body as already
+      applied, and rejects an ambiguous or mismatched existing marker.
+- [ ] More than 64 Root comments do not break Primary lookup, Timeline
+      deduplication, or Root Primary discovery; all scans remain bounded.
 
 **Verification:**
 
-- [x] Run focused harness and inherited-protocol tests.
-- [x] Run `npm run test:e2e:runner`.
-- [x] Negative controls reject imports from `@symphony/podium/e2e`, fake
-      `LinearClientInterface` implementations, and `e2e-main.ts`.
+- [ ] `npm test -w @symphony/podium -- --test-name-pattern='Root comment'`
+- [ ] Run SDK tests covering 65+ comments and ambiguous mutation read-back.
+- [ ] `npm run typecheck -w @symphony/podium`
 
-**Dependencies:** Tasks 2, 3, and 4
+**Dependencies:** Task 3
 
 **Files likely touched:**
 
-- `tools/e2e/core-live-runner.mjs`
-- `tools/e2e/conductor-harness.mjs`
-- `tools/e2e/step-runner.mjs`
-- `tests/e2e/core-live-runner.test.mjs`
-- `tests/e2e/production-negative-controls.test.mjs`
+- `packages/podium/src/internal/linear-gateway/types.ts`
+- `packages/podium/src/internal/linear-gateway/internal/LinearSdkImpl.ts`
+- `packages/podium/tests/linear-sdk.test.mjs`
 
 **Estimated scope:** Medium
 
-## Task 6: Provision the real Performer Profile through Conductor
+**Commit:** `feat: project Root comments through Linear SDK`
 
-**Description:** Have the live runner send existing closed Profile commands to
-Conductor: create one API Key Profile, deliver the pipeline token through the
-bounded secret frame, observe SDK readiness, and activate the Profile. Profile
-metadata is generated in memory and no Performer configuration file is used.
+## Task 7: Expose comment projection through Podium-Conductor
+
+**Description:** Map the generated exclusive union through Podium's production
+Conductor services and retry protocol. Preserve exact idempotent outcome
+read-back for ambiguous Linear responses without adding a generic metadata API.
 
 **Acceptance criteria:**
 
-- [x] The Profile is created with `backendKind=codex`, `api_key`, configured
-      model, bounded reasoning effort, and Fast disabled.
-- [x] `set_api_key` reaches `Codex.login_api_key`, readiness becomes `ready`,
-      and activation is reported by Conductor before any Root is created.
-- [x] The API key appears only in the runner's secret buffer, bounded protocol
-      frames, and Codex-owned state; buffers are cleared after use.
+- [ ] Podium maps the `comment_id` variant only to Primary upsert and the
+      `event_key` variant only to Timeline append.
+- [ ] Ambiguous append retries read back the exact event marker/body before
+      returning `already_applied`.
+- [ ] Project resolution remains the only project precondition; observation
+      mutations require no Root or comment revision precondition.
 
 **Verification:**
 
-- [x] Run Conductor Profile relay/control tests and Performer Profile control
-      tests.
-- [x] Run a canary-based scan over captured stdout/stderr, request/result
-      files, Profile files, and runner evidence.
+- [ ] `npm test -w @symphony/podium -- --test-name-pattern='Root event'`
+- [ ] `npm test -w @symphony/podium`
+- [ ] `npm run typecheck -w @symphony/podium`
 
-**Dependencies:** Task 5
+**Dependencies:** Tasks 3 and 6
 
 **Files likely touched:**
 
-- `tools/e2e/conductor-profile.mjs`
-- `tools/e2e/conductor-harness.mjs`
-- `tests/e2e/conductor-profile.test.mjs`
-- `apps/conductor/src/performer-profiles/tests/control-process.test.ts`
+- `packages/podium/src/internal/composition/PodiumConductorServicesImpl.ts`
+- `packages/podium/src/internal/linear-gateway/LinearGatewayProtocolHandlerImpl.ts`
+- `packages/podium/tests/linear-gateway.test.mjs`
 
 **Estimated scope:** Medium
 
-## Task 7: Create run-scoped Linear and Git fixtures
+**Commit:** `feat: expose Root comment projection to Conductor`
 
-**Description:** Use the same development-token authority outside Symphony to
-create one uniquely marked Linear Project and Root, and create one clean local
-Git repository. Attach the Conductor Project Label required for real project
-resolution. Cleanup archives only resources carrying the current managed run
-marker and reconciles stale prior runs before mutation.
+## Checkpoint B: Production boundaries
+
+- [ ] Tasks 4-7 are committed separately and all focused checks pass.
+- [ ] No event file or batch replay route remains.
+- [ ] A Primary update cannot overwrite a user comment.
+- [ ] Timeline idempotency remains correct above 64 comments.
+
+## Task 8: Project live status to the Primary comment ID
+
+**Description:** Subscribe before each Performer process starts and serialize
+continuous observations onto the saved Primary Status Comment ID. Merge the
+latest successful status projection in memory so final usage/recovery updates
+cannot overwrite it with the pre-Turn snapshot.
 
 **Acceptance criteria:**
 
-- [x] Every run starts with a unique Project, Root marker, app-data root,
-      `CODEX_HOME`, repository, base branch, and evidence directory.
-- [x] Preflight proves the token's organization/scopes and performs no mutation
-      before the global/local lock is acquired.
-- [x] Cleanup is idempotent, never uses fuzzy deletion, and can archive a stale
-      interrupted run without touching unrelated Linear data.
+- [ ] Start/progress/usage/heartbeat events update the same `comment_id` while
+      the Performer process is still running.
+- [ ] No status write carries a comment revision or forces a Root snapshot
+      refresh; Root comment `updatedAt` changes alone do not stale the Result.
+- [ ] Root input, state, phase, tree, ownership, profile, and Work input changes
+      still reject stale Results.
 
 **Verification:**
 
-- [x] Run Linear operator, global lock, Git fixture, and cleanup contract tests.
-- [x] Run dry-run/preflight with mutation counters and confirm zero mutations
-      before lock acquisition.
+- [ ] Run the synchronization-barrier status projection test.
+- [ ] Run stale Root/Work Result regression tests.
+- [ ] `npm test -w @symphony/conductor`
+- [ ] `npm run typecheck -w @symphony/conductor`
 
-**Dependencies:** Tasks 3 and 5
+**Dependencies:** Tasks 5 and 7
 
 **Files likely touched:**
 
-- `tools/e2e/linear-operator.mjs`
-- `tools/e2e/git-fixture.mjs`
-- `tools/e2e/global-lock.mjs`
-- `tools/e2e/cleanup.mjs`
-- `tests/e2e/cleanup.test.mjs`
+- `apps/conductor/src/composition/ManagedRootActionExecutor.ts`
+- `apps/conductor/src/composition/ManagedRootActionExecutor.test.ts`
 
 **Estimated scope:** Medium
 
-## Task 8: Complete one small real Root
+**Commit:** `feat: update live Root Turn status by comment ID`
 
-**Description:** Compose the harness, Profile, and fixtures into the first
-authoritative core live scenario. The Root asks Codex to create a file whose
-content includes the exact run marker. The scenario waits for Plan, approves
-the generated plan through Linear, lets separate Performer processes execute
-Work and Root Gate, and verifies local branch delivery.
+## Task 9: Append Timeline events and isolate observation failures
 
-**Acceptance criteria:**
-
-- [ ] A real Plan creates a bounded Linear issue tree and persists one opaque
-      `performer_id` before Work begins.
-- [ ] A real Work Turn changes the run-scoped repository, a later real Turn
-      resumes the same `performer_id`, and Root Gate passes before delivery.
-- [ ] The delivered branch contains the expected marker, Linear ends in Root
-      `In Review` plus phase `in-review`, and Symphony does not mark the Root
-      Done.
-
-**Verification:**
-
-- [x] Run the scenario in dry-run mode and assert its fixed state transitions.
-- [ ] Run the credentialed local command once against the dedicated test
-      workspace and configured Codex endpoint.
-- [x] Evaluate sanitized evidence independently from runner exit status.
-
-**Dependencies:** Tasks 6 and 7
-
-**Files likely touched:**
-
-- `tools/e2e/core-live-scenario.mjs`
-- `tools/e2e/core-live-runner.mjs`
-- `tools/e2e/verdict.mjs`
-- `tests/e2e/core-live-scenario.test.mjs`
-- `tests/e2e/acceptance-v1.test.mjs`
-
-**Estimated scope:** Medium
-
-## Checkpoint B: Local core live
-
-- [ ] One local credentialed run completes successfully.
-- [ ] Plan, Work, and Gate are separate real Performer processes.
-- [ ] `performer_id`, Linear state, Git state, and Profile readiness converge.
-- [ ] Cleanup succeeds when the scenario passes and when it is interrupted.
-- [ ] No secret canary or private absolute path exists in evidence.
-
-## Task 9: Remove the alternate credentialed/Desktop E2E runtime
-
-**Description:** Before adding a core live command or workflow, remove the old
-credentialed Desktop S1/S2/S3 runtime, static acceptance evidence pipeline,
-Podium Desktop E2E backend, temporary Store, fake Linear composition, and the
-package/build surfaces that make that route callable.
+**Description:** Map warning, error, and Turn completion events to append-only
+Timeline Comments. Make logging and Linear projection best-effort observations
+that never replace or invalidate the closed Result path.
 
 **Acceptance criteria:**
 
-- [x] Production has one Podium backend entrypoint and one production service
-      composition.
-- [x] No package exports an E2E Podium composition, fake Linear client, or
-      temporary credential Store.
-- [x] No `acceptance:v1`, S1/S2/S3 runtime, Desktop E2E build branch, or static
-      Roadmap verdict collector remains, and negative controls fail if one is
-      reintroduced.
+- [ ] Each Timeline body contains a user-readable sanitized summary and exact
+      hidden `turn_id:sequence` marker; duplicate consumption appends once.
+- [ ] `error_raised` and `turn_completed` never overwrite Primary status or
+      `last_error`; completion text says Performer Turn, not Root completion.
+- [ ] Projection/logging failure emits one structured correlated warning and
+      does not change a valid Result, retry decision, or workflow mutation.
 
 **Verification:**
 
-- [x] Run Podium, Desktop backend, build, architecture, and focused E2E tests.
-- [x] Run `rg -n "acceptance:v1|e2e-main|createE2EPodium|TemporaryPodiumStore|scenario-s[123]|s1-driver" apps packages tests tools package.json .github` and inspect every remaining reference.
+- [ ] Run error, completion, retry, duplicate, and projection-failure tests.
+- [ ] Spot-check structured logs for Turn, Root, optional Work, sequence, kind,
+      code, retryability, and sanitized reason.
+- [ ] `npm test -w @symphony/conductor`
+- [ ] `make lint`
 
 **Dependencies:** Task 8
 
 **Files likely touched:**
 
-- `apps/podium-desktop/src-backend/e2e-main.ts`
-- `packages/podium/src/e2e/index.ts`
-- `packages/podium/src/e2e/createE2EPodiumServiceComposition.ts`
-- `packages/podium/src/e2e/TemporaryPodiumStore.ts`
-- `tools/e2e/acceptance-v1.mjs`
-- `tests/acceptance/`
+- `apps/conductor/src/composition/ManagedRootActionExecutor.ts`
+- `apps/conductor/src/composition/ManagedRootActionExecutor.test.ts`
+- `apps/conductor/src/main.ts`
 
 **Estimated scope:** Medium
 
-## Task 10: Remove hermetic automation and preserve Desktop smoke
+**Commit:** `feat: append Root Turn Timeline events`
 
-**Description:** Delete the hermetic WebdriverIO runner/config/tests and remove
-its package/Makefile/workflow commands. Keep a clearly named, secret-free native
-Desktop smoke that verifies only WebView/Tauri/sidecar startup and cannot be
-reported as core workflow evidence.
+## Checkpoint C: Runtime behavior
+
+- [ ] Tasks 8-9 are committed separately and Conductor tests pass.
+- [ ] A failed Performer process can still expose already emitted error events.
+- [ ] Observation failures cannot become workflow failures.
+- [ ] Secret scans find no credential or raw Provider payload in comments or
+      logs.
+
+## Task 10: Add real Linear comment evidence to core-live E2E
+
+**Description:** Extend the existing live verdict with a final real Linear read
+that proves one Primary managed comment remains and successful Turns append
+deduplicated completion Timeline Comments. Do not add an E2E-specific mutation
+or fake event route.
 
 **Acceptance criteria:**
 
-- [x] No `e2e:hermetic`, hermetic WDIO configuration, hermetic artifact, or
-      secret-free fake-Linear workflow claim remains.
-- [x] Desktop smoke starts the production Desktop binary without live tokens
-      and has a separate command, verdict, and artifact name.
-- [x] The core live verdict and Desktop smoke verdict cannot satisfy each
-      other's required evidence.
+- [ ] Live evidence finds exactly one Root Primary marker and no duplicate
+      Primary comments after multiple Turns.
+- [ ] Every observed completion Timeline marker has a unique
+      `turn_id:sequence` key and a bounded sanitized body.
+- [ ] Evidence records only counts, public identifiers, event kinds, and
+      stable keys; no comment bodies containing user/provider content are
+      uploaded.
 
 **Verification:**
 
-- [x] Run Desktop smoke runner contract tests and `npm run test:e2e:runner`.
-- [x] Run stale-reference searches across `package.json`, `Makefile`, workflows,
-      README, docs, tests, and tools.
+- [ ] `npm run test:e2e:runner`
+- [ ] Run focused Linear operator and verdict tests.
+- [ ] `npm run e2e:core-live` against real Linear/Codex and retain the sanitized
+      result path.
 
 **Dependencies:** Task 9
 
 **Files likely touched:**
 
-- `tools/e2e/hermetic-desktop.mjs`
-- `tests/e2e/hermetic-desktop.spec.mjs`
-- `tests/e2e/hermetic-runner.test.mjs`
-- `wdio.hermetic.conf.mjs`
-- `apps/podium-desktop/tools/build-sidecars.mjs`
+- `tools/e2e/linear-operator.mjs`
+- `tools/e2e/core-live-runner.mjs`
+- `tools/e2e/core-live-verdict.mjs`
+- `tests/e2e/linear-operator.test.mjs`
+- `tests/e2e/core-live-verdict.test.mjs`
 
 **Estimated scope:** Medium
 
-## Checkpoint C: One E2E route
+**Commit:** `test: verify Root comments in core live E2E`
 
-- [x] No alternate Podium composition, Desktop E2E backend, S1/S2/S3 runtime,
-      hermetic runner, or hermetic workflow remains.
-- [x] Desktop smoke is secret-free, starts production artifacts, and cannot
-      satisfy the core live verdict.
+## Task 11: Complete verification and create the PR
 
-## Task 11: Add local and protected CI entrypoints
-
-**Description:** After all superseded workflow E2E routes are absent, expose
-one stable local command and repurpose the manual Roadmap workflow to run that
-same command in a protected GitHub Environment. Keep secret-free contract tests
-on pull requests, serialize live runs, and always collect sanitized evidence
-and cleanup.
+**Description:** Review the complete diff, run the repository-wide gates, then
+run the real local E2E before pushing. Create the PR only after local success
+and observe the protected GitHub Actions workflow to a terminal result.
 
 **Acceptance criteria:**
 
-- [x] `npm run e2e:core-live` is the only credentialed E2E entrypoint and uses
-      the same runner locally and in CI.
-- [x] GitHub Actions maps secrets only on preflight/run steps, uses a protected
-      environment and `cancel-in-progress: false`, and never exposes them to a
-      pull-request job.
-- [x] Workflow artifacts are allowlisted, unique, bounded-retention, and fail
-      when expected evidence is absent.
+- [ ] No old event transport, duplicate comment model, dead helper, unstaged
+      generated output, or secret appears in the final diff.
+- [ ] All repository checks and local core-live E2E pass from the committed
+      branch.
+- [ ] The PR is created with exact verification evidence and the protected live
+      workflow reaches a terminal result; follow-up fixes remain one task per
+      commit.
 
 **Verification:**
 
-- [x] Run `npm run test:e2e:runner` including workflow contract tests.
-- [ ] Execute the protected GitHub Actions workflow once and record its run URL
-      outside the repository artifact set.
-- [x] Confirm cleanup runs under `if: always()` and remains idempotent.
+- [ ] `npm run contracts:check`
+- [ ] `make lint`
+- [ ] `make typecheck`
+- [ ] `make test-all`
+- [ ] `make build`
+- [ ] `git diff --check`
+- [ ] `npm run e2e:core-live`
+- [ ] Review GitHub Actions logs and sanitized artifacts without exposing
+      secrets.
 
 **Dependencies:** Task 10
 
-**Files likely touched:**
+**Files likely touched:** None unless verification finds a scoped defect
 
-- `package.json`
-- `Makefile`
-- `.github/workflows/roadmap-v1-e2e.yml`
-- `tests/e2e/ci-workflow.test.mjs`
+**Estimated scope:** Medium operational task
 
-**Estimated scope:** Medium
+**Commit:** None unless a verified defect requires its own fix commit
 
-## Task 12: Verify and review the completed replacement
+## Completion Checklist
 
-**Description:** Run focused checks first, then the repository-wide suite, one
-local live run, and one protected CI live run. Review architecture ownership,
-secret handling, failure semantics, test validity, and removal of the old path.
-Do not mark this task complete from mocked runner tests alone.
-
-**Acceptance criteria:**
-
-- [ ] All focused and broad checks pass with no skipped live requirement.
-- [ ] Local and CI evidence independently prove the same real small Root.
-- [x] A five-axis review finds no unresolved critical/high issue and documents
-      remaining external-service/cost risk.
-
-**Verification:**
-
-- [x] `make lint`
-- [x] `make typecheck`
-- [x] `make test-all`
-- [x] `make build`
-- [x] `npm run test:e2e:runner`
-- [ ] `npm run e2e:core-live`
-- [x] `npm audit --registry=https://registry.npmjs.org`
-- [x] `.venv/bin/python -m pytest apps/performer/tests -q`
-- [x] `cd apps/podium-desktop/src-tauri && cargo test`
-- [x] Verify root build, typecheck, and TypeScript test order from a clean
-      checkout with no pre-existing workspace `dist` output.
-
-**Dependencies:** Task 11
-
-**Files likely touched:**
-
-- `tasks/todo.md`
-- `docs/testing/e2e.md`
-- Sanitized evidence under the documented ignored `.test/` path
-
-**Estimated scope:** Small
-
-## Checkpoint D: Complete
-
-- [ ] Core live E2E is green locally and in the protected workflow.
-- [x] Desktop smoke is green and makes no live workflow claim.
-- [x] Old hermetic and E2E-composition paths are absent.
-- [x] Repository-wide checks and final review are complete.
+- [ ] Every task satisfies its acceptance criteria and the repository
+      Definition of Done.
+- [ ] Tasks 2-10 each map to one atomic commit.
+- [ ] One live event path and two Root comment modes are the only supported
+      implementation.
+- [ ] Local and GitHub Actions core-live runs both pass.
