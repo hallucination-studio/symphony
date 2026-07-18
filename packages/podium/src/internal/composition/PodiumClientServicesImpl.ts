@@ -13,6 +13,7 @@ import { LinearGatewayProtocolHandlerImpl } from "../linear-gateway/LinearGatewa
 import { LinearSdkImpl } from "../linear-gateway/internal/LinearSdkImpl.js";
 import { ProjectCatalogUseCase } from "../project-catalog/ProjectCatalogUseCase.js";
 import type { LinearInstallationStoreInterface } from "../linear-auth/api/LinearInstallationStoreInterface.js";
+import type { LinearInstallation } from "../models.js";
 import type { PodiumClientStoreInterface } from "./PodiumStoreInterfaces.js";
 
 type Body = Record<string, JsonValue> & { kind: string };
@@ -27,10 +28,11 @@ export class PodiumClientServicesImpl implements PodiumClientServices {
     private readonly host: PodiumDesktopHostPorts,
     private readonly now: () => string,
     private readonly createLinearSdk: (
-      accessToken: string,
-      organizationId: string,
-    ) => LinearClientInterface = (accessToken, organizationId) =>
-      new LinearSdkImpl(accessToken, organizationId),
+      installation: LinearInstallation,
+    ) => LinearClientInterface = (installation) => new LinearSdkImpl(
+      { kind: installation.kind, token: installation.accessToken },
+      installation.organizationId,
+    ),
   ) {}
 
   async completeOAuth(input: { state: string; authorizationCode: string }) {
@@ -39,10 +41,7 @@ export class PodiumClientServicesImpl implements PodiumClientServices {
     if (!installation) throw new Error("linear_installation_missing");
     await new ProjectCatalogUseCase(
       this.store,
-      this.createLinearSdk(
-        installation.accessToken,
-        installation.organizationId,
-      ),
+      this.createLinearSdk(installation),
     ).refresh(installation.installationId);
     return connection;
   }
@@ -155,10 +154,7 @@ export class PodiumClientServicesImpl implements PodiumClientServices {
       repositoryHandle,
       requiredString(repositoryBody.base_branch, "repository_base_branch_missing"),
     );
-    const sdk = this.createLinearSdk(
-      installation.accessToken,
-      installation.organizationId,
-    );
+    const sdk = this.createLinearSdk(installation);
     const binding = await new ConductorBindingUseCase(this.store, sdk, {
       createBindingId: randomUUID,
       createConductorId: randomUUID,
@@ -390,12 +386,9 @@ export class PodiumClientServicesImpl implements PodiumClientServices {
     return Array.isArray(result.profiles) ? result.profiles as never[] : [];
   }
 
-  #gateway(installation: {
-    accessToken: string;
-    organizationId: string;
-  }) {
+  #gateway(installation: LinearInstallation) {
     return new LinearGatewayProtocolHandlerImpl(
-      this.createLinearSdk(installation.accessToken, installation.organizationId),
+      this.createLinearSdk(installation),
       {
         maxAttempts: 4,
         baseDelayMs: 250,

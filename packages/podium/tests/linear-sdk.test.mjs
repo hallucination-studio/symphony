@@ -34,6 +34,27 @@ function issue(input) {
   return value;
 }
 
+test("official SDK adapter maps each Podium credential kind to the correct Authorization scheme", async (t) => {
+  const observed = [];
+  t.mock.method(globalThis, "fetch", async (_url, init) => {
+    observed.push(new Headers(init.headers).get("authorization"));
+    return new Response(JSON.stringify({ errors: [{ message: "stop after observing auth" }] }), {
+      status: 500,
+      headers: { "content-type": "application/json" },
+    });
+  });
+
+  for (const credential of [
+    { kind: "oauth", token: "oauth-canary" },
+    { kind: "development_token", token: "development-canary" },
+  ]) {
+    const adapter = new LinearSdkImpl(credential, "organization-1");
+    await assert.rejects(adapter.listProjects({ limit: 1 }));
+  }
+
+  assert.deepEqual(observed, ["Bearer oauth-canary", "development-canary"]);
+});
+
 test("official SDK adapter resolves the unique Project label and reads complete Root trees", async () => {
   const child = issue({ id: "work-1", parentId: "root-1", order: 2 });
   const root = issue({
@@ -63,7 +84,7 @@ test("official SDK adapter resolves the unique Project label and reads complete 
     project: async () => project,
     issue: async (id) => (id === "root-1" ? root : child),
   };
-  const adapter = new LinearSdkImpl("token", "organization-1", sdk);
+  const adapter = new LinearSdkImpl({ kind: "oauth", token: "token" }, "organization-1", sdk);
 
   assert.deepEqual(await adapter.readProjectResolution({
     conductorShortHash: "abc123",
@@ -107,7 +128,7 @@ test("official SDK adapter creates a managed node and proves it by exact Marker 
       return connection(created ? [created] : []);
     },
   };
-  const adapter = new LinearSdkImpl("token", "organization-1", sdk);
+  const adapter = new LinearSdkImpl({ kind: "oauth", token: "token" }, "organization-1", sdk);
   const command = {
     kind: "create_managed_node",
     nodeKind: "work",
@@ -152,7 +173,7 @@ test("official SDK adapter serializes Human kind and target without title infere
       return connection(created ? [created] : []);
     },
   };
-  const adapter = new LinearSdkImpl("token", "organization-1", sdk);
+  const adapter = new LinearSdkImpl({ kind: "oauth", token: "token" }, "organization-1", sdk);
   const command = {
     kind: "create_managed_node",
     nodeKind: "human",
@@ -213,7 +234,7 @@ test("Project label assignment rejects a conflicting Conductor label introduced 
       return { success: true };
     },
   };
-  const adapter = new LinearSdkImpl("token", "organization-1", sdk);
+  const adapter = new LinearSdkImpl({ kind: "oauth", token: "token" }, "organization-1", sdk);
 
   await assert.rejects(
     adapter.assignConductorProjectLabel({
@@ -248,7 +269,7 @@ test("Project label assignment rejects a Conductor label already attached elsewh
       return { success: true };
     },
   };
-  const adapter = new LinearSdkImpl("token", "organization-1", sdk);
+  const adapter = new LinearSdkImpl({ kind: "oauth", token: "token" }, "organization-1", sdk);
 
   await assert.rejects(
     adapter.assignConductorProjectLabel({

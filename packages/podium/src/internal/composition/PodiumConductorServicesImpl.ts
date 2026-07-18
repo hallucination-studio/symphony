@@ -7,6 +7,7 @@ import type {
   LinearIssueValue,
   LinearMutationCommand,
 } from "../linear-gateway/types.js";
+import type { LinearInstallation } from "../models.js";
 import type { PodiumConductorStoreInterface } from "./PodiumStoreInterfaces.js";
 
 type Body = Record<string, JsonValue> & { kind: string };
@@ -19,10 +20,7 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
     private readonly options: {
       now(): string;
       sleep(delayMs: number): Promise<void>;
-      createLinearSdk(
-        accessToken: string,
-        organizationId: string,
-      ): LinearClientInterface;
+      createLinearSdk(installation: LinearInstallation): LinearClientInterface;
     },
   ) {}
 
@@ -67,10 +65,7 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
     );
     if (!installation) throw new Error("linear_installation_missing");
     const gateway = new LinearGatewayProtocolHandlerImpl(
-      this.options.createLinearSdk(
-        installation.accessToken,
-        installation.organizationId,
-      ),
+      this.options.createLinearSdk(installation),
       {
         maxAttempts: 4,
         baseDelayMs: 250,

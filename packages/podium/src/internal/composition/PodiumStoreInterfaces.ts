@@ -1,6 +1,6 @@
 import type {
   ConductorBinding,
-  LinearCredential,
+  LinearInstallation,
   ProjectCatalogEntry,
   RuntimeObservation,
 } from "../models.js";
@@ -11,7 +11,7 @@ import type { RuntimeObservationStoreInterface } from "../runtime-observations/a
 export interface PodiumClientStoreInterface
   extends ConductorBindingStoreInterface,
     LinearCredentialStoreInterface {
-  getOnlyLinearCredential(): LinearCredential | undefined;
+  getOnlyLinearCredential(): LinearInstallation | undefined;
   getConductorBinding(): ConductorBinding | undefined;
   getRuntimeObservation(bindingId: string): RuntimeObservation | undefined;
   getProject(projectId: string): ProjectCatalogEntry | undefined;

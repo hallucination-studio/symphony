@@ -30,19 +30,32 @@ const HUMAN_MARKER =
 const WORK_METADATA =
   /\n*<!-- symphony work metadata\nkind: work\norigin: (user|symphony)\ncompleted_input_hash: ([A-Za-z0-9][A-Za-z0-9._:/-]{0,127}|none)\n-->\s*$/;
 
+export type LinearSdkCredential =
+  | { kind: "oauth"; token: string }
+  | { kind: "development_token"; token: string };
+
 export class LinearSdkImpl implements LinearClientInterface {
   readonly #client: LinearClient;
 
   constructor(
-    accessToken: string,
+    credential: LinearSdkCredential,
     private readonly organizationId: string,
     client?: LinearClient,
   ) {
-    this.#client = client ?? new LinearClient({ accessToken });
+    this.#client = client ?? new LinearClient(clientOptions(credential));
   }
 
   static async discoverOrganizationId(accessToken: string): Promise<string> {
     const client = new LinearClient({ accessToken });
+    const organization = await client.organization;
+    if (!organization.id) throw new Error("linear_organization_missing");
+    return organization.id;
+  }
+
+  static async discoverDevelopmentTokenOrganizationId(
+    developmentToken: string,
+  ): Promise<string> {
+    const client = new LinearClient({ apiKey: developmentToken });
     const organization = await client.organization;
     if (!organization.id) throw new Error("linear_organization_missing");
     return organization.id;
@@ -637,6 +650,14 @@ export class LinearSdkImpl implements LinearClientInterface {
     }
     return label;
   }
+}
+
+function clientOptions(credential: LinearSdkCredential):
+  | { accessToken: string }
+  | { apiKey: string } {
+  return credential.kind === "oauth"
+    ? { accessToken: credential.token }
+    : { apiKey: credential.token };
 }
 
 async function collectTree(

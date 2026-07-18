@@ -20,8 +20,10 @@ export function createPodiumConductorServices(input: {
       sleep:
         input.sleep ??
         ((delayMs) => new Promise((resolve) => setTimeout(resolve, delayMs))),
-      createLinearSdk: (accessToken, organizationId) =>
-        new LinearSdkImpl(accessToken, organizationId),
+      createLinearSdk: (installation) => new LinearSdkImpl(
+        { kind: installation.kind, token: installation.accessToken },
+        installation.organizationId,
+      ),
     }),
     close: () => store.close(),
   };

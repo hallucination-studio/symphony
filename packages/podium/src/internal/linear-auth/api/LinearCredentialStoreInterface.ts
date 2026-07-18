@@ -1,12 +1,12 @@
 import type {
-  LinearCredential,
+  LinearInstallation,
   ProjectCatalogEntry,
 } from "../../models.js";
 
 export interface LinearCredentialStoreInterface {
   getLinearCredential(
     installationId: string,
-  ): LinearCredential | undefined;
+  ): LinearInstallation | undefined;
   replaceProjects(
     installationId: string,
     projects: ReadonlyArray<ProjectCatalogEntry>,

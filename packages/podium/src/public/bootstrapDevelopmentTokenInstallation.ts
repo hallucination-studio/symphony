@@ -13,7 +13,8 @@ export async function bootstrapDevelopmentTokenInstallation(input: {
 }): Promise<DevelopmentTokenInstallationView> {
   if (!input.developmentToken) throw new Error("linear_development_token_missing");
   const discoverOrganizationId =
-    input.discoverOrganizationId ?? LinearSdkImpl.discoverOrganizationId;
+    input.discoverOrganizationId ??
+    LinearSdkImpl.discoverDevelopmentTokenOrganizationId;
   let organizationId: string;
   try {
     organizationId = await discoverOrganizationId(input.developmentToken);
