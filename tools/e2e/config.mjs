@@ -87,7 +87,9 @@ function validateBaseUrl(rawValue, { ci, allowedCodexHosts, issues }) {
     issues.push("codex_base_url_invalid");
     return undefined;
   }
-  if (ci && url.protocol !== "https:") issues.push("codex_base_url_https_required");
+  if (url.protocol !== "https:" && url.protocol !== "http:") {
+    issues.push("codex_base_url_protocol_invalid");
+  }
   if (url.username || url.password) issues.push("codex_base_url_credentials_forbidden");
   if (url.search) issues.push("codex_base_url_query_forbidden");
   if (url.hash) issues.push("codex_base_url_fragment_forbidden");

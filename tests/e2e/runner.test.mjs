@@ -54,11 +54,11 @@ test("configuration reports stable missing-input codes without values", () => {
 });
 
 for (const [baseUrl, issue] of [
-  ["http://codex.example.test/v1", "codex_base_url_https_required"],
   ["https://user:pass@codex.example.test/v1", "codex_base_url_credentials_forbidden"],
   ["https://codex.example.test/v1?q=secret", "codex_base_url_query_forbidden"],
   ["https://codex.example.test/v1#secret", "codex_base_url_fragment_forbidden"],
   ["https://codex.example.test/v1\nmalformed", "codex_base_url_control_character"],
+  ["ftp://codex.example.test/v1", "codex_base_url_protocol_invalid"],
   ["https://other.example.test/v1", "codex_base_url_host_not_allowlisted"],
 ]) {
   test(`CI rejects unsafe Codex base URL: ${issue}`, () => {
@@ -76,6 +76,20 @@ for (const [baseUrl, issue] of [
     );
   });
 }
+
+test("CI permits an allowlisted HTTP Codex base URL", () => {
+  const environment = {
+    ...validEnvironment(),
+    CI: "true",
+    SYMPHONY_E2E_CODEX_BASE_URL: "http://codex.example.test/v1",
+    SYMPHONY_E2E_CODEX_ALLOWED_HOSTS: "codex.example.test",
+  };
+
+  assert.equal(
+    loadE2EConfig({ environment, platform: "linux" }).codex.baseUrl,
+    "http://codex.example.test/v1",
+  );
+});
 
 test("child environments are explicit allowlists and omit both E2E secrets", () => {
   const environment = {

@@ -167,8 +167,8 @@ OAuth refresh token，以及把 Linear credential 传给 Conductor。单元或 c
 - `SYMPHONY_E2E_CODEX_BASE_URL`；
 - `SYMPHONY_E2E_CODEX_MODEL`。
 
-不得加载 `.env` 或静态 Performer 文件。CI 中 base URL 必须为 HTTPS、不得包含
-userinfo、query 或 fragment，且 host 必须在 workflow 配置的 allowlist 中。
+不得加载 `.env` 或静态 Performer 文件。base URL 允许 HTTP 或 HTTPS，不得包含
+userinfo、query 或 fragment；CI 中 host 必须在 workflow 配置的 allowlist 中。
 runner 必须为每类子进程构造显式环境 allowlist，默认不继承两个 token。
 
 本机唯一 credentialed 入口是 `npm run e2e:core-live`；`make e2e` 只负责安装、

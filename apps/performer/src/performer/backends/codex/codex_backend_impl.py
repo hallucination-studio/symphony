@@ -96,8 +96,7 @@ def _validate_base_url(value: str) -> None:
         port is None and parsed.netloc.endswith(":")
     ):
         raise ValueError("codex_base_url_invalid")
-    loopback = parsed.hostname in {"localhost", "127.0.0.1", "::1"}
-    if parsed.scheme != "https" and not (parsed.scheme == "http" and loopback):
+    if parsed.scheme not in {"http", "https"}:
         raise ValueError("codex_base_url_invalid")
 
 
