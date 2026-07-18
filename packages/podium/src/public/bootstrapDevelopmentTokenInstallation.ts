@@ -9,9 +9,11 @@ export interface DevelopmentTokenInstallationView {
 export async function bootstrapDevelopmentTokenInstallation(input: {
   databasePath: string;
   developmentToken: string;
+  delegateActorId: string;
   discoverOrganizationId?: (accessToken: string) => Promise<string>;
 }): Promise<DevelopmentTokenInstallationView> {
   if (!input.developmentToken) throw new Error("linear_development_token_missing");
+  if (!input.delegateActorId) throw new Error("linear_development_token_actor_missing");
   const discoverOrganizationId =
     input.discoverOrganizationId ??
     LinearSdkImpl.discoverDevelopmentTokenOrganizationId;
@@ -30,6 +32,7 @@ export async function bootstrapDevelopmentTokenInstallation(input: {
       kind: "development_token",
       installationId,
       organizationId,
+      delegateActorId: input.delegateActorId,
       accessToken: input.developmentToken,
     });
   } finally {

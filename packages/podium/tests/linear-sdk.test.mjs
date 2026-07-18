@@ -46,13 +46,31 @@ test("official SDK adapter maps each Podium credential kind to the correct Autho
 
   for (const credential of [
     { kind: "oauth", token: "oauth-canary" },
-    { kind: "development_token", token: "development-canary" },
+    { kind: "development_token", token: "development-canary", delegateActorId: "app-user" },
   ]) {
     const adapter = new LinearSdkImpl(credential, "organization-1");
     await assert.rejects(adapter.listProjects({ limit: 1 }));
   }
 
   assert.deepEqual(observed, ["Bearer oauth-canary", "development-canary"]);
+});
+
+test("development-token SDK uses the persisted app user for Root delegation", async () => {
+  const root = issue({ id: "root-1", delegateId: "app-user" });
+  const sdk = {
+    viewer: Promise.resolve({ id: "human-viewer" }),
+    project: async () => ({
+      issues: async () => connection([root]),
+    }),
+  };
+  const adapter = new LinearSdkImpl({
+    kind: "development_token",
+    token: "token",
+    delegateActorId: "app-user",
+  }, "organization-1", sdk);
+
+  const roots = await adapter.listRootIssues({ projectId: "project-1", limit: 250 });
+  assert.equal(roots.items[0].isDelegatedToSymphony, true);
 });
 
 test("official SDK adapter resolves the unique Project label and reads complete Root trees", async () => {

@@ -32,10 +32,11 @@ const WORK_METADATA =
 
 export type LinearSdkCredential =
   | { kind: "oauth"; token: string }
-  | { kind: "development_token"; token: string };
+  | { kind: "development_token"; token: string; delegateActorId: string };
 
 export class LinearSdkImpl implements LinearClientInterface {
   readonly #client: LinearClient;
+  readonly #delegateActorId: string | undefined;
 
   constructor(
     credential: LinearSdkCredential,
@@ -43,6 +44,9 @@ export class LinearSdkImpl implements LinearClientInterface {
     client?: LinearClient,
   ) {
     this.#client = client ?? new LinearClient(clientOptions(credential));
+    this.#delegateActorId = credential.kind === "development_token"
+      ? credential.delegateActorId
+      : undefined;
   }
 
   static async discoverOrganizationId(accessToken: string): Promise<string> {
@@ -409,13 +413,13 @@ export class LinearSdkImpl implements LinearClientInterface {
       first: input.limit,
       ...(input.cursor ? { after: input.cursor } : {}),
     });
-    const viewer = await this.#client.viewer;
+    const delegateActorId = this.#delegateActorId ?? (await this.#client.viewer).id;
     const items: RootIssueValue[] = [];
     for (const issue of page.nodes) {
       if (issue.projectId !== input.projectId || issue.parentId) continue;
       items.push({
         issue: await issueValue(issue, 0),
-        isDelegatedToSymphony: issue.delegateId === viewer.id,
+        isDelegatedToSymphony: issue.delegateId === delegateActorId,
       });
     }
     return { items, pageInfo: pageInfo(page.pageInfo) };

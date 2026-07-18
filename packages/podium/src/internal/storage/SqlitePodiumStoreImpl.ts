@@ -36,6 +36,7 @@ export class SqlitePodiumStoreImpl
         organization_id TEXT NOT NULL,
         credential_kind TEXT NOT NULL CHECK (credential_kind IN ('oauth', 'development_token')),
         access_token TEXT NOT NULL,
+        delegate_actor_id TEXT,
         refresh_token TEXT,
         expires_at TEXT,
         CHECK (
@@ -84,6 +85,7 @@ export class SqlitePodiumStoreImpl
       );
     `);
     this.#migrateLinearInstallations();
+    this.#ensureColumn("linear_installations", "delegate_actor_id", "TEXT");
     this.#ensureColumn(
       "conductor_bindings",
       "repository_handle",
@@ -96,12 +98,13 @@ export class SqlitePodiumStoreImpl
       .prepare(`
         INSERT INTO linear_installations (
           installation_id, organization_id, credential_kind, access_token,
-          refresh_token, expires_at
-        ) VALUES (?, ?, ?, ?, ?, ?)
+          delegate_actor_id, refresh_token, expires_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(installation_id) DO UPDATE SET
           organization_id = excluded.organization_id,
           credential_kind = excluded.credential_kind,
           access_token = excluded.access_token,
+          delegate_actor_id = excluded.delegate_actor_id,
           refresh_token = excluded.refresh_token,
           expires_at = excluded.expires_at
       `)
@@ -110,6 +113,7 @@ export class SqlitePodiumStoreImpl
         installation.organizationId,
         installation.kind,
         installation.accessToken,
+        installation.kind === "development_token" ? installation.delegateActorId : null,
         installation.kind === "oauth" ? installation.refreshToken : null,
         installation.kind === "oauth" ? installation.expiresAt : null,
       );
@@ -119,7 +123,7 @@ export class SqlitePodiumStoreImpl
     const row = this.#database
       .prepare(`
         SELECT installation_id, organization_id, credential_kind, access_token,
-               refresh_token, expires_at
+               delegate_actor_id, refresh_token, expires_at
         FROM linear_installations WHERE installation_id = ?
       `)
       .get(installationId) as
@@ -128,17 +132,21 @@ export class SqlitePodiumStoreImpl
           organization_id: string;
           credential_kind: "oauth" | "development_token";
           access_token: string;
+          delegate_actor_id: string | null;
           refresh_token: string | null;
           expires_at: string | null;
         }
       | undefined;
     if (!row) return undefined;
     if (row.credential_kind === "development_token") {
-      if (row.refresh_token || row.expires_at) throw new Error("linear_installation_record_invalid");
+      if (row.refresh_token || row.expires_at || !row.delegate_actor_id) {
+        throw new Error("linear_installation_record_invalid");
+      }
       return {
         kind: "development_token",
         installationId: row.installation_id,
         organizationId: row.organization_id,
+        delegateActorId: row.delegate_actor_id,
         accessToken: row.access_token,
       };
     }

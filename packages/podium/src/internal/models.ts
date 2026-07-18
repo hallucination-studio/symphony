@@ -32,6 +32,7 @@ export interface OAuthLinearInstallation extends LinearCredential {
 
 export interface DevelopmentTokenInstallation extends LinearCredential {
   kind: "development_token";
+  delegateActorId: string;
 }
 
 export type LinearInstallation = OAuthLinearInstallation | DevelopmentTokenInstallation;

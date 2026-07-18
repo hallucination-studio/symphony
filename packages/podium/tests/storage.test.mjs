@@ -147,6 +147,7 @@ test("development-token installation persists without OAuth placeholders", async
   const result = await bootstrapDevelopmentTokenInstallation({
     databasePath,
     developmentToken: "development-secret",
+    delegateActorId: "app-user-1",
     discoverOrganizationId: async (token) => {
       assert.equal(token, "development-secret");
       return "organization-1";
@@ -162,6 +163,7 @@ test("development-token installation persists without OAuth placeholders", async
     kind: "development_token",
     installationId: "development-token:organization-1",
     organizationId: "organization-1",
+    delegateActorId: "app-user-1",
     accessToken: "development-secret",
   });
   store.close();
@@ -199,6 +201,7 @@ test("legacy OAuth installation schema migrates without losing credentials", asy
     kind: "development_token",
     installationId: "development-token:organization-1",
     organizationId: "organization-1",
+    delegateActorId: "app-user-1",
     accessToken: "development-secret",
   });
   store.close();
@@ -211,6 +214,7 @@ test("development-token bootstrap fails closed with sanitized errors", async () 
     bootstrapDevelopmentTokenInstallation({
       databasePath: path.join(directory, "podium.db"),
       developmentToken: secret,
+      delegateActorId: "app-user-1",
       discoverOrganizationId: async () => { throw new Error(secret); },
     }),
     (error) => error.message === "linear_development_token_invalid" &&

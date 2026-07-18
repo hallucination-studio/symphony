@@ -21,7 +21,13 @@ export function createPodiumConductorServices(input: {
         input.sleep ??
         ((delayMs) => new Promise((resolve) => setTimeout(resolve, delayMs))),
       createLinearSdk: (installation) => new LinearSdkImpl(
-        { kind: installation.kind, token: installation.accessToken },
+        installation.kind === "development_token"
+          ? {
+              kind: installation.kind,
+              token: installation.accessToken,
+              delegateActorId: installation.delegateActorId,
+            }
+          : { kind: installation.kind, token: installation.accessToken },
         installation.organizationId,
       ),
     }),

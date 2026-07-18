@@ -71,6 +71,7 @@ test("development-token installations never enter the OAuth refresh flow", async
     kind: "development_token",
     installationId: "development-token:organization-1",
     organizationId: "organization-1",
+    delegateActorId: "app-user-1",
     accessToken: "development-secret",
   });
   let refreshCalls = 0;

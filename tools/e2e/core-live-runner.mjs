@@ -242,7 +242,11 @@ export async function finalizeCoreLiveResult({ result, cleanup, write }) {
 
 async function bootstrapPodiumState({ databasePath, developmentToken, preflight, project, git, ids }) {
   const { bootstrapDevelopmentTokenInstallation } = await import("@symphony/podium");
-  const installation = await bootstrapDevelopmentTokenInstallation({ databasePath, developmentToken });
+  const installation = await bootstrapDevelopmentTokenInstallation({
+    databasePath,
+    developmentToken,
+    delegateActorId: preflight.actorId,
+  });
   if (installation.organizationId !== preflight.organizationId) {
     throw stableError("e2e_linear_organization_mismatch");
   }

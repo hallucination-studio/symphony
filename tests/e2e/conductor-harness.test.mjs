@@ -27,6 +27,7 @@ test("production harness observes a real Conductor handshake and shuts down boun
     kind: "development_token",
     installationId: "development-token:organization-1",
     organizationId: "organization-1",
+    delegateActorId: "app-user-1",
     accessToken: "test-only-token",
   });
   store.saveConductorBinding({

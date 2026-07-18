@@ -30,7 +30,13 @@ export class PodiumClientServicesImpl implements PodiumClientServices {
     private readonly createLinearSdk: (
       installation: LinearInstallation,
     ) => LinearClientInterface = (installation) => new LinearSdkImpl(
-      { kind: installation.kind, token: installation.accessToken },
+      installation.kind === "development_token"
+        ? {
+            kind: installation.kind,
+            token: installation.accessToken,
+            delegateActorId: installation.delegateActorId,
+          }
+        : { kind: installation.kind, token: installation.accessToken },
       installation.organizationId,
     ),
   ) {}
