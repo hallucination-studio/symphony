@@ -87,7 +87,6 @@ test("local entrypoint builds without passing pipeline secrets to the build", as
     "npm run build -w @symphony/podium",
     "npm run build -w @symphony/conductor",
     "npm run test:e2e:runner",
-    "npm run e2e:core-live",
   ];
   const makeOffsets = makeCommands.map((command) => makefile.indexOf(command));
   assert.equal(makeOffsets.every((offset) => offset >= 0), true);
@@ -104,7 +103,12 @@ test("local entrypoint builds without passing pipeline secrets to the build", as
       new RegExp(`\\$\\(E2E_SECRET_FREE\\) ${command.replaceAll("/", "\\/")}`, "u"),
     );
   }
-  assert.match(makeTarget, /\n\tnpm run e2e:core-live\n/u);
+  assert.match(
+    makefile,
+    /E2E_LIVE := node --env-file-if-exists=\.env tools\/e2e\/core-live-entry\.mjs/u,
+  );
+  assert.match(makeTarget, /\n\t\$\(E2E_LIVE\)\n/u);
+  assert.doesNotMatch(makeTarget, /E2E_SECRET_FREE.*\$\(E2E_LIVE\)/u);
   assert.match(entry, /"@symphony\/podium",\s*"@symphony\/conductor"/u);
   assert.match(entry, /spawnSync\(npm, \["run", "build", "-w", workspace\]/u);
   assert.match(entry, /env: createChildEnvironment\(\)/u);
