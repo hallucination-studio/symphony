@@ -273,10 +273,10 @@ Work and Root Gate, and verifies local branch delivery.
 
 **Verification:**
 
-- [ ] Run the scenario in dry-run mode and assert its fixed state transitions.
+- [x] Run the scenario in dry-run mode and assert its fixed state transitions.
 - [ ] Run the credentialed local command once against the dedicated test
       workspace and configured Codex endpoint.
-- [ ] Evaluate sanitized evidence independently from runner exit status.
+- [x] Evaluate sanitized evidence independently from runner exit status.
 
 **Dependencies:** Tasks 6 and 7
 

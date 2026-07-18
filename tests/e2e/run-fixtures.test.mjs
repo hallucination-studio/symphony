@@ -31,6 +31,7 @@ test("Linear fixture preflight proves authority without mutation", async () => {
     actorId: "actor-1",
     teamId: "team-1",
     stateId: "state-todo",
+    doneStateId: "state-done",
     mutationCount: 0,
   });
   assert.equal(mutationCount, 0);
@@ -123,6 +124,59 @@ test("stale reconciliation archives only projects with another exact managed mar
   assert.deepEqual(archived, ["stale"]);
 });
 
+test("run state and Plan approval map only Linear facts", async () => {
+  let approved = false;
+  const operator = createRunScopedLinearOperator({
+    developmentToken: "development-secret",
+    fetch: async (_url, init) => {
+      const request = JSON.parse(init.body);
+      if (request.query.includes("CoreLiveApprove")) {
+        approved = true;
+        assert.deepEqual(request.variables, {
+          issueId: "approval-1",
+          input: { stateId: "state-done" },
+        });
+        return response({ data: { issueUpdate: { success: true, issue: { id: "approval-1" } } } });
+      }
+      return response({ data: {
+        issue: {
+          id: "root-1",
+          state: { name: approved ? "In Progress" : "In Progress" },
+          labels: { nodes: [{ name: approved ? "symphony:run/working" : "symphony:run/awaiting-human" }], pageInfo: { hasNextPage: false } },
+          comments: { nodes: [{ body: "performer_id: conversation-1\ndelivery_branch: symphony/runs/run-1\n<!-- symphony root marker -->" }], pageInfo: { hasNextPage: false } },
+        },
+        project: { issues: { nodes: [
+          { id: "approval-1", title: "[Human Action] Approve Plan", description: "human_kind: plan_approval", parent: { id: "root-1" }, state: { name: approved ? "Done" : "In Progress" } },
+          { id: "work-1", title: "Create marker", description: "kind: work", parent: { id: "root-1" }, state: { name: "Todo" } },
+        ], pageInfo: { hasNextPage: false } } },
+      } });
+    },
+  });
+  const fixture = { rootId: "root-1", projectId: "project-1" };
+  const before = await operator.readRunState({ fixture });
+  assert.deepEqual(before, {
+    rootState: "In Progress",
+    phase: "awaiting-human",
+    approvalId: "approval-1",
+    approvalState: "In Progress",
+    planApprovalCount: 1,
+    treeMatches: true,
+    workStates: ["Todo"],
+    performerId: "conversation-1",
+    deliveryBranch: "symphony/runs/run-1",
+    reworkCount: 0,
+  });
+  const after = await operator.approvePlan({
+    lock: { runId: "run-1", released: false },
+    runId: "run-1",
+    fixture,
+    preflight: { doneStateId: "state-done" },
+    approvalId: "approval-1",
+  });
+  assert.equal(after.approvalState, "Done");
+  assert.equal(after.phase, "working");
+});
+
 test("Git fixture creates a clean unique main repository", async () => {
   const parent = await mkdtemp(path.join(os.tmpdir(), "symphony-git-fixture-"));
   const fixture = await createRunScopedGitFixture({ runId: "run-1", parentDirectory: parent });
@@ -168,7 +222,10 @@ function preflightData() {
     organization: { id: "organization-1" },
     viewer: { id: "actor-1" },
     teams: {
-      nodes: [{ id: "team-1", states: { nodes: [{ id: "state-todo", name: "Todo" }], pageInfo: { hasNextPage: false } } }],
+      nodes: [{ id: "team-1", states: { nodes: [
+        { id: "state-todo", name: "Todo" },
+        { id: "state-done", name: "Done" },
+      ], pageInfo: { hasNextPage: false } } }],
       pageInfo: { hasNextPage: false },
     },
   };
