@@ -22,6 +22,7 @@ conductor-data
 skills-lock.json
 .test-real-flow
 .test/
+logs/
 tmp
 tasks/*
 !tasks/*.md
