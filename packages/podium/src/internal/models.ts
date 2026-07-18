@@ -24,10 +24,17 @@ export interface LinearCredential {
   accessToken: string;
 }
 
-export interface LinearInstallation extends LinearCredential {
+export interface OAuthLinearInstallation extends LinearCredential {
+  kind: "oauth";
   refreshToken: string;
   expiresAt: string;
 }
+
+export interface DevelopmentTokenInstallation extends LinearCredential {
+  kind: "development_token";
+}
+
+export type LinearInstallation = OAuthLinearInstallation | DevelopmentTokenInstallation;
 
 export interface ProjectCatalogEntry {
   projectId: string;

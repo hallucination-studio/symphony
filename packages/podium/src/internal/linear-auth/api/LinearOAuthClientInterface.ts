@@ -1,12 +1,12 @@
-import type { LinearInstallation } from "../../models.js";
+import type { OAuthLinearInstallation } from "../../models.js";
 
 export interface LinearOAuthClientInterface {
   exchangeAuthorizationCode(input: {
     authorizationCode: string;
     codeVerifier: string;
-  }): Promise<LinearInstallation>;
+  }): Promise<OAuthLinearInstallation>;
 
   refresh(input: {
     refreshToken: string;
-  }): Promise<Omit<LinearInstallation, "installationId" | "organizationId">>;
+  }): Promise<Omit<OAuthLinearInstallation, "installationId" | "organizationId">>;
 }

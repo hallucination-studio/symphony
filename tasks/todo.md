@@ -76,19 +76,19 @@ the real SQLite Store.
 
 **Acceptance criteria:**
 
-- [ ] Podium stores a discriminated OAuth or development-token installation;
+- [x] Podium stores a discriminated OAuth or development-token installation;
       development-token records contain no refresh-token placeholder.
-- [ ] The bootstrap validates organization identity and token usability through
+- [x] The bootstrap validates organization identity and token usability through
       the real `LinearSdkImpl`, then production client/conductor services read
       the same credential abstraction.
-- [ ] Refresh remains OAuth-only, and expired/invalid development tokens fail
+- [x] Refresh remains OAuth-only, and expired/invalid development tokens fail
       closed with sanitized errors.
 
 **Verification:**
 
-- [ ] Run `npm test -w @symphony/podium`.
-- [ ] Run the relevant storage migration and Linear credential negative tests.
-- [ ] Confirm generated/public contracts contain no token or credential kind
+- [x] Run `npm test -w @symphony/podium`.
+- [x] Run the relevant storage migration and Linear credential negative tests.
+- [x] Confirm generated/public contracts contain no token or credential kind
       unless explicitly required by an existing Podium boundary.
 
 **Dependencies:** Task 1

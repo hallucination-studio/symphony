@@ -34,9 +34,14 @@ export class SqlitePodiumStoreImpl
       CREATE TABLE IF NOT EXISTS linear_installations (
         installation_id TEXT PRIMARY KEY,
         organization_id TEXT NOT NULL,
+        credential_kind TEXT NOT NULL CHECK (credential_kind IN ('oauth', 'development_token')),
         access_token TEXT NOT NULL,
-        refresh_token TEXT NOT NULL,
-        expires_at TEXT NOT NULL
+        refresh_token TEXT,
+        expires_at TEXT,
+        CHECK (
+          (credential_kind = 'oauth' AND refresh_token IS NOT NULL AND expires_at IS NOT NULL)
+          OR (credential_kind = 'development_token' AND refresh_token IS NULL AND expires_at IS NULL)
+        )
       );
       CREATE TABLE IF NOT EXISTS project_catalog (
         project_id TEXT PRIMARY KEY,
@@ -78,6 +83,7 @@ export class SqlitePodiumStoreImpl
         created_at TEXT NOT NULL
       );
     `);
+    this.#migrateLinearInstallations();
     this.#ensureColumn(
       "conductor_bindings",
       "repository_handle",
@@ -89,10 +95,12 @@ export class SqlitePodiumStoreImpl
     this.#database
       .prepare(`
         INSERT INTO linear_installations (
-          installation_id, organization_id, access_token, refresh_token, expires_at
-        ) VALUES (?, ?, ?, ?, ?)
+          installation_id, organization_id, credential_kind, access_token,
+          refresh_token, expires_at
+        ) VALUES (?, ?, ?, ?, ?, ?)
         ON CONFLICT(installation_id) DO UPDATE SET
           organization_id = excluded.organization_id,
+          credential_kind = excluded.credential_kind,
           access_token = excluded.access_token,
           refresh_token = excluded.refresh_token,
           expires_at = excluded.expires_at
@@ -100,36 +108,49 @@ export class SqlitePodiumStoreImpl
       .run(
         installation.installationId,
         installation.organizationId,
+        installation.kind,
         installation.accessToken,
-        installation.refreshToken,
-        installation.expiresAt,
+        installation.kind === "oauth" ? installation.refreshToken : null,
+        installation.kind === "oauth" ? installation.expiresAt : null,
       );
   }
 
   getLinearInstallation(installationId: string): LinearInstallation | undefined {
     const row = this.#database
       .prepare(`
-        SELECT installation_id, organization_id, access_token, refresh_token, expires_at
+        SELECT installation_id, organization_id, credential_kind, access_token,
+               refresh_token, expires_at
         FROM linear_installations WHERE installation_id = ?
       `)
       .get(installationId) as
       | {
           installation_id: string;
           organization_id: string;
+          credential_kind: "oauth" | "development_token";
           access_token: string;
-          refresh_token: string;
-          expires_at: string;
+          refresh_token: string | null;
+          expires_at: string | null;
         }
       | undefined;
-    return row
-      ? {
+    if (!row) return undefined;
+    if (row.credential_kind === "development_token") {
+      if (row.refresh_token || row.expires_at) throw new Error("linear_installation_record_invalid");
+      return {
+        kind: "development_token",
+        installationId: row.installation_id,
+        organizationId: row.organization_id,
+        accessToken: row.access_token,
+      };
+    }
+    if (!row.refresh_token || !row.expires_at) throw new Error("linear_installation_record_invalid");
+    return {
+          kind: "oauth",
           installationId: row.installation_id,
           organizationId: row.organization_id,
           accessToken: row.access_token,
           refreshToken: row.refresh_token,
           expiresAt: row.expires_at,
-        }
-      : undefined;
+        };
   }
 
   getLinearCredential(installationId: string): LinearInstallation | undefined {
@@ -409,6 +430,50 @@ export class SqlitePodiumStoreImpl
       `)
       .all() as Array<{ name: string }>;
     return names.map(({ name }) => name);
+  }
+
+  #migrateLinearInstallations(): void {
+    const columns = this.#database
+      .prepare("PRAGMA table_info(linear_installations)")
+      .all() as Array<{ name: string; notnull: 0 | 1 }>;
+    const credentialKind = columns.find(({ name }) => name === "credential_kind");
+    const refreshToken = columns.find(({ name }) => name === "refresh_token");
+    const expiresAt = columns.find(({ name }) => name === "expires_at");
+    if (credentialKind && refreshToken?.notnull === 0 && expiresAt?.notnull === 0) return;
+
+    this.#database.pragma("foreign_keys = OFF");
+    try {
+      this.#database.exec(`
+        BEGIN;
+        CREATE TABLE linear_installations_next (
+          installation_id TEXT PRIMARY KEY,
+          organization_id TEXT NOT NULL,
+          credential_kind TEXT NOT NULL CHECK (credential_kind IN ('oauth', 'development_token')),
+          access_token TEXT NOT NULL,
+          refresh_token TEXT,
+          expires_at TEXT,
+          CHECK (
+            (credential_kind = 'oauth' AND refresh_token IS NOT NULL AND expires_at IS NOT NULL)
+            OR (credential_kind = 'development_token' AND refresh_token IS NULL AND expires_at IS NULL)
+          )
+        );
+        INSERT INTO linear_installations_next (
+          installation_id, organization_id, credential_kind, access_token,
+          refresh_token, expires_at
+        )
+        SELECT installation_id, organization_id, 'oauth', access_token,
+               refresh_token, expires_at
+        FROM linear_installations;
+        DROP TABLE linear_installations;
+        ALTER TABLE linear_installations_next RENAME TO linear_installations;
+        COMMIT;
+      `);
+    } catch (error) {
+      if (this.#database.inTransaction) this.#database.exec("ROLLBACK");
+      throw error;
+    } finally {
+      this.#database.pragma("foreign_keys = ON");
+    }
   }
 
   #ensureColumn(table: string, column: string, definition: string): void {

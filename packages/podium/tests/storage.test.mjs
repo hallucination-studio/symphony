@@ -3,7 +3,9 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
+import Database from "better-sqlite3";
 
+import { bootstrapDevelopmentTokenInstallation } from "../dist/public/index.js";
 import { SqlitePodiumStoreImpl } from "../dist/internal/storage/SqlitePodiumStoreImpl.js";
 import { PodiumConductorServicesImpl } from "../dist/internal/composition/PodiumConductorServicesImpl.js";
 
@@ -12,6 +14,7 @@ test("podium.db persists only approved control-plane facts", async () => {
   const store = new SqlitePodiumStoreImpl(path.join(directory, "podium.db"));
 
   store.saveLinearInstallation({
+    kind: "oauth",
     installationId: "installation-1",
     organizationId: "organization-1",
     accessToken: "access-secret",
@@ -74,6 +77,7 @@ test("Host can acknowledge a Conductor exit before its handshake", async () => {
   const directory = await mkdtemp(path.join(tmpdir(), "symphony-podium-exit-"));
   const store = new SqlitePodiumStoreImpl(path.join(directory, "podium.db"));
   store.saveLinearInstallation({
+    kind: "oauth",
     installationId: "installation-1",
     organizationId: "organization-1",
     accessToken: "access-secret",
@@ -135,4 +139,81 @@ test("Host can acknowledge a Conductor exit before its handshake", async () => {
     /conductor_exit_observation_mismatch/,
   );
   store.close();
+});
+
+test("development-token installation persists without OAuth placeholders", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "symphony-podium-dev-token-"));
+  const databasePath = path.join(directory, "podium.db");
+  const result = await bootstrapDevelopmentTokenInstallation({
+    databasePath,
+    developmentToken: "development-secret",
+    discoverOrganizationId: async (token) => {
+      assert.equal(token, "development-secret");
+      return "organization-1";
+    },
+  });
+
+  assert.deepEqual(result, {
+    installationId: "development-token:organization-1",
+    organizationId: "organization-1",
+  });
+  const store = new SqlitePodiumStoreImpl(databasePath);
+  assert.deepEqual(store.getOnlyLinearInstallation(), {
+    kind: "development_token",
+    installationId: "development-token:organization-1",
+    organizationId: "organization-1",
+    accessToken: "development-secret",
+  });
+  store.close();
+});
+
+test("legacy OAuth installation schema migrates without losing credentials", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "symphony-podium-migration-"));
+  const databasePath = path.join(directory, "podium.db");
+  const database = new Database(databasePath);
+  database.exec(`
+    CREATE TABLE linear_installations (
+      installation_id TEXT PRIMARY KEY,
+      organization_id TEXT NOT NULL,
+      access_token TEXT NOT NULL,
+      refresh_token TEXT NOT NULL,
+      expires_at TEXT NOT NULL
+    );
+    INSERT INTO linear_installations VALUES (
+      'installation-1', 'organization-1', 'access-secret',
+      'refresh-secret', '2026-07-17T00:00:00Z'
+    );
+  `);
+  database.close();
+
+  const store = new SqlitePodiumStoreImpl(databasePath);
+  assert.deepEqual(store.getLinearInstallation("installation-1"), {
+    kind: "oauth",
+    installationId: "installation-1",
+    organizationId: "organization-1",
+    accessToken: "access-secret",
+    refreshToken: "refresh-secret",
+    expiresAt: "2026-07-17T00:00:00Z",
+  });
+  store.saveLinearInstallation({
+    kind: "development_token",
+    installationId: "development-token:organization-1",
+    organizationId: "organization-1",
+    accessToken: "development-secret",
+  });
+  store.close();
+});
+
+test("development-token bootstrap fails closed with sanitized errors", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "symphony-podium-invalid-token-"));
+  const secret = "invalid-development-secret";
+  await assert.rejects(
+    bootstrapDevelopmentTokenInstallation({
+      databasePath: path.join(directory, "podium.db"),
+      developmentToken: secret,
+      discoverOrganizationId: async () => { throw new Error(secret); },
+    }),
+    (error) => error.message === "linear_development_token_invalid" &&
+      !error.message.includes(secret),
+  );
 });

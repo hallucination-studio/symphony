@@ -73,6 +73,13 @@ export class LinearAuthImpl {
         { nextAction: "Reconnect Linear." },
       );
     }
+    if (installation.kind !== "oauth") {
+      throw podiumError(
+        "linear_installation_refresh_unsupported",
+        "This Linear installation does not support token refresh.",
+        { nextAction: "Provide a valid Linear development token." },
+      );
+    }
     const refreshed = await this.client.refresh({
       refreshToken: installation.refreshToken,
     });

@@ -21,6 +21,7 @@ test("OAuth completion consumes state once and persists credentials only in Podi
       assert.equal(input.authorizationCode, "authorization-code");
       assert.equal(input.codeVerifier, "verifier");
       return {
+        kind: "oauth",
         installationId: "installation-1",
         organizationId: "organization-1",
         accessToken: "access-secret",
@@ -64,9 +65,37 @@ test("OAuth completion consumes state once and persists credentials only in Podi
   store.close();
 });
 
+test("development-token installations never enter the OAuth refresh flow", async () => {
+  const store = await createStore();
+  store.saveLinearInstallation({
+    kind: "development_token",
+    installationId: "development-token:organization-1",
+    organizationId: "organization-1",
+    accessToken: "development-secret",
+  });
+  let refreshCalls = 0;
+  const auth = new LinearAuthImpl(store, {
+    async exchangeAuthorizationCode() { throw new Error("unused"); },
+    async refresh() { refreshCalls += 1; throw new Error("must_not_run"); },
+  }, {
+    createId: () => "unused",
+    createSecret: () => "unused",
+    createState: () => "unused",
+    now: () => "2026-07-16T00:00:00Z",
+  });
+
+  await assert.rejects(
+    auth.refresh("development-token:organization-1"),
+    /linear_installation_refresh_unsupported/u,
+  );
+  assert.equal(refreshCalls, 0);
+  store.close();
+});
+
 test("Project catalog consumes every SDK page", async () => {
   const store = await createStore();
   store.saveLinearInstallation({
+    kind: "oauth",
     installationId: "installation-1",
     organizationId: "organization-1",
     accessToken: "access-secret",
@@ -121,6 +150,7 @@ test("Project catalog consumes every SDK page", async () => {
 test("Binding creation labels one Project and rejects a second Binding", async () => {
   const store = await createStore();
   store.saveLinearInstallation({
+    kind: "oauth",
     installationId: "installation-1",
     organizationId: "organization-1",
     accessToken: "access-secret",
@@ -179,6 +209,7 @@ test("Binding creation labels one Project and rejects a second Binding", async (
 test("Binding creation persists one stopped intent and safely resumes label assignment", async () => {
   const store = await createStore();
   store.saveLinearInstallation({
+    kind: "oauth",
     installationId: "installation-1",
     organizationId: "organization-1",
     accessToken: "access-secret",
@@ -239,6 +270,7 @@ test("Binding label assignment retries official network errors with bounded back
   class NetworkLinearError extends Error {}
   const store = await createStore();
   store.saveLinearInstallation({
+    kind: "oauth",
     installationId: "installation-1",
     organizationId: "organization-1",
     accessToken: "access-secret",

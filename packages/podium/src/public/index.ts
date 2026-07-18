@@ -30,3 +30,7 @@ export {
   type PodiumClientServiceOwner,
 } from "./createPodiumClientServices.js";
 export type { PodiumDesktopHostPorts } from "./PodiumDesktopHostPorts.js";
+export {
+  bootstrapDevelopmentTokenInstallation,
+  type DevelopmentTokenInstallationView,
+} from "./bootstrapDevelopmentTokenInstallation.js";

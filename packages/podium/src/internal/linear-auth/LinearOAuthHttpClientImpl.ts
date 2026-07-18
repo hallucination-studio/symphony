@@ -50,6 +50,7 @@ export class LinearOAuthHttpClientImpl implements LinearOAuthClientInterface {
       token.access_token,
     );
     return {
+      kind: "oauth" as const,
       installationId: randomUUID(),
       organizationId,
       accessToken: token.access_token,
@@ -64,6 +65,7 @@ export class LinearOAuthHttpClientImpl implements LinearOAuthClientInterface {
       refresh_token: input.refreshToken,
     });
     return {
+      kind: "oauth" as const,
       accessToken: token.access_token,
       refreshToken: token.refresh_token,
       expiresAt: expiresAt(this.config.now(), token.expires_in),
