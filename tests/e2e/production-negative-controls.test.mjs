@@ -75,7 +75,7 @@ test("superseded S1/S2/S3 acceptance entrypoints are absent", async () => {
   });
   assert.doesNotMatch(
     workflow,
-    /acceptance:v1|SYMPHONY_E2E_RUN_S[123]|LINEAR_CLIENT_ID|xvfb/u,
+    /acceptance:v1|SYMPHONY_E2E_RUN_S[123]|xvfb/u,
   );
 });
 

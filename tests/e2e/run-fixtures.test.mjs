@@ -18,10 +18,12 @@ test("Linear fixture preflight proves authority without mutation", async () => {
   let mutationCount = 0;
   const operator = createRunScopedLinearOperator({
     developmentToken: "development-secret",
+    applicationClientId: "client-1",
     fetch: async (_url, init) => {
       const request = JSON.parse(init.body);
       if (request.query.includes("mutation")) mutationCount += 1;
       assert.equal(init.headers.authorization, "development-secret");
+      assert.deepEqual(request.variables, { clientId: "client-1" });
       assert.match(
         request.query.replace(/\s+/gu, " "),
         /states\(first: 50\) \{ nodes \{ id name \} pageInfo \{ hasNextPage \} \}/u,
@@ -45,6 +47,7 @@ test("Linear fixture logs sanitized GraphQL failure details by operation", async
   const events = [];
   const operator = createRunScopedLinearOperator({
     developmentToken: "development-secret",
+    applicationClientId: "client-1",
     log: (event) => events.push(event),
     fetch: async () => response({ errors: [{
       message: "Cannot delegate development-secret",
@@ -64,10 +67,28 @@ test("Linear fixture logs sanitized GraphQL failure details by operation", async
   }]);
 });
 
+test("Linear fixture rejects an ambiguous Application app user before mutation", async () => {
+  const data = preflightData();
+  data.users.nodes.push({
+    id: "actor-2",
+    name: data.applicationInfo.name,
+    displayName: data.applicationInfo.name,
+    app: true,
+  });
+  const operator = createRunScopedLinearOperator({
+    developmentToken: "development-secret",
+    applicationClientId: "client-1",
+    fetch: async () => response({ data }),
+  });
+
+  await assert.rejects(operator.preflight(), /linear_fixture_preflight_invalid/u);
+});
+
 test("Linear fixture creates one exactly marked Project, label, and delegated Root after lock", async () => {
   const requests = [];
   const operator = createRunScopedLinearOperator({
     developmentToken: "development-secret",
+    applicationClientId: "client-1",
     fetch: async (_url, init) => {
       const request = JSON.parse(init.body);
       requests.push(request);
@@ -289,7 +310,14 @@ test("run scopes isolate app data, CODEX_HOME, evidence, and exact cleanup", asy
 function preflightData() {
   return {
     organization: { id: "organization-1" },
-    viewer: { id: "actor-1" },
+    applicationInfo: { name: "Symphony" },
+    users: {
+      nodes: [
+        { id: "actor-1", name: "Symphony", displayName: "Symphony", app: true },
+        { id: "other-app", name: "Other", displayName: "Other", app: true },
+      ],
+      pageInfo: { hasNextPage: false },
+    },
     teams: {
       nodes: [{ id: "team-1", states: { nodes: [
         { id: "state-todo", name: "Todo" },

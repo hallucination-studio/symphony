@@ -1,5 +1,6 @@
 const INPUT_KEYS = Object.freeze({
   linearDevToken: "SYMPHONY_E2E_LINEAR_DEV_TOKEN",
+  linearClientId: "LINEAR_CLIENT_ID",
   codexApiKey: "SYMPHONY_E2E_CODEX_API_KEY",
   codexBaseUrl: "SYMPHONY_E2E_CODEX_BASE_URL",
   codexModel: "SYMPHONY_E2E_CODEX_MODEL",
@@ -22,16 +23,19 @@ export function loadE2EConfig({
 } = {}) {
   const issues = [];
   const linearDevToken = required(environment, INPUT_KEYS.linearDevToken, "linear_dev_token_missing", issues);
+  const linearClientId = required(environment, INPUT_KEYS.linearClientId, "linear_client_id_missing", issues);
   const codexApiKey = required(environment, INPUT_KEYS.codexApiKey, "codex_api_key_missing", issues);
   const rawBaseUrl = required(environment, INPUT_KEYS.codexBaseUrl, "codex_base_url_missing", issues);
   const model = required(environment, INPUT_KEYS.codexModel, "codex_model_missing", issues);
   const baseUrl = validateBaseUrl(rawBaseUrl, { ci, allowedCodexHosts, issues });
   validateModel(model, issues);
+  validateLinearClientId(linearClientId, issues);
   if (platform !== "darwin" && platform !== "linux") issues.push("platform_not_supported");
   if (issues.length > 0) throw configurationError(issues);
 
   return Object.freeze({
     platform,
+    linear: Object.freeze({ clientId: linearClientId }),
     secrets: Object.freeze({ linearDevToken, codexApiKey }),
     codex: Object.freeze({ baseUrl, model }),
   });
@@ -102,6 +106,12 @@ function validateBaseUrl(rawValue, { ci, allowedCodexHosts, issues }) {
 function validateModel(model, issues) {
   if (model !== undefined && !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(model)) {
     issues.push("codex_model_invalid");
+  }
+}
+
+function validateLinearClientId(value, issues) {
+  if (value !== undefined && !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u.test(value)) {
+    issues.push("linear_client_id_invalid");
   }
 }
 

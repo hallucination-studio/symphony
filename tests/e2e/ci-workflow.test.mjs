@@ -28,7 +28,7 @@ test("core live workflow runs contracts, input validation, and the only credenti
   const offsets = commands.map((command) => source.indexOf(command));
   assert.equal(offsets.every((offset) => offset >= 0), true);
   assert.deepEqual(offsets, [...offsets].sort((left, right) => left - right));
-  assert.doesNotMatch(source, /acceptance:v1|e2e:hermetic|wdio|xvfb|LINEAR_CLIENT/u);
+  assert.doesNotMatch(source, /acceptance:v1|e2e:hermetic|wdio|xvfb/u);
 });
 
 test("core live credentials are scoped to input validation and live run steps", async () => {
@@ -51,6 +51,7 @@ test("core live credentials are scoped to input validation and live run steps", 
     assert.match(runStep, pattern);
   }
   for (const name of [
+    "LINEAR_CLIENT_ID",
     "SYMPHONY_E2E_CODEX_BASE_URL",
     "SYMPHONY_E2E_CODEX_MODEL",
     "SYMPHONY_E2E_CODEX_ALLOWED_HOSTS",
@@ -59,6 +60,7 @@ test("core live credentials are scoped to input validation and live run steps", 
     assert.match(validationStep, pattern);
     assert.match(runStep, pattern);
   }
+  assert.doesNotMatch(source, /LINEAR_CLIENT_ID: \$\{\{ secrets\./u);
   assert.doesNotMatch(source.slice(cleanupOffset), /secrets\./u);
   assert.doesNotMatch(source, /&core-live-inputs|\*core-live-inputs/u);
   assert.doesNotMatch(source, /(?:sk|lin_api|lin_oauth)[-_][A-Za-z0-9_-]{8,}/u);

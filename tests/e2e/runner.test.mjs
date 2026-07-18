@@ -18,13 +18,14 @@ import {
 function validEnvironment() {
   return {
     SYMPHONY_E2E_LINEAR_DEV_TOKEN: "linear-dev-canary",
+    LINEAR_CLIENT_ID: "linear-client-id",
     SYMPHONY_E2E_CODEX_API_KEY: "codex-canary",
     SYMPHONY_E2E_CODEX_BASE_URL: "https://codex.example.test/v1",
     SYMPHONY_E2E_CODEX_MODEL: "codex-test-model",
   };
 }
 
-test("loads the four pipeline inputs and summarizes only secret presence", () => {
+test("loads the five pipeline inputs and summarizes only secret presence", () => {
   const environment = validEnvironment();
   const config = loadE2EConfig({ environment, platform: "linux" });
 
@@ -34,6 +35,7 @@ test("loads the four pipeline inputs and summarizes only secret presence", () =>
     baseUrl: "https://codex.example.test/v1",
     model: "codex-test-model",
   });
+  assert.deepEqual(config.linear, { clientId: "linear-client-id" });
   const summary = JSON.stringify(summarizeConfig(config));
   assert.equal(summary.includes("linear-dev-canary"), false);
   assert.equal(summary.includes("codex-canary"), false);
@@ -124,7 +126,7 @@ test("doctor fails closed without printing a supplied secret canary", () => {
   assert.deepEqual(JSON.parse(result.stderr), {
     status: "failed",
     reason: "e2e_configuration_invalid",
-    issues: ["codex_api_key_missing", "codex_base_url_missing", "codex_model_missing"],
+    issues: ["linear_client_id_missing", "codex_api_key_missing", "codex_base_url_missing", "codex_model_missing"],
   });
 });
 

@@ -33,6 +33,7 @@ export async function runCoreLiveE2E({
   log({ event: "e2e_run_started" });
   const linear = createRunScopedLinearOperator({
     developmentToken: config.secrets.linearDevToken,
+    applicationClientId: config.linear.clientId,
     log,
   });
   log({ event: "e2e_step_started", step: "preflight" });

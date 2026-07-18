@@ -38,6 +38,7 @@ jobs:
       - name: Validate core live inputs
         env:
           SYMPHONY_E2E_LINEAR_DEV_TOKEN: ${{ secrets.SYMPHONY_E2E_LINEAR_DEV_TOKEN }}
+          LINEAR_CLIENT_ID: ${{ vars.LINEAR_CLIENT_ID }}
           SYMPHONY_E2E_CODEX_API_KEY: ${{ secrets.SYMPHONY_E2E_CODEX_API_KEY }}
           SYMPHONY_E2E_CODEX_BASE_URL: ${{ vars.SYMPHONY_E2E_CODEX_BASE_URL }}
           SYMPHONY_E2E_CODEX_MODEL: ${{ vars.SYMPHONY_E2E_CODEX_MODEL }}
@@ -46,6 +47,7 @@ jobs:
       - name: Run core live E2E
         env:
           SYMPHONY_E2E_LINEAR_DEV_TOKEN: ${{ secrets.SYMPHONY_E2E_LINEAR_DEV_TOKEN }}
+          LINEAR_CLIENT_ID: ${{ vars.LINEAR_CLIENT_ID }}
           SYMPHONY_E2E_CODEX_API_KEY: ${{ secrets.SYMPHONY_E2E_CODEX_API_KEY }}
           SYMPHONY_E2E_CODEX_BASE_URL: ${{ vars.SYMPHONY_E2E_CODEX_BASE_URL }}
           SYMPHONY_E2E_CODEX_MODEL: ${{ vars.SYMPHONY_E2E_CODEX_MODEL }}

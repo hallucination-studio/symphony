@@ -163,18 +163,20 @@ OAuth refresh token，以及把 Linear credential 传给 Conductor。单元或 c
 唯一允许的运行输入为：
 
 - `SYMPHONY_E2E_LINEAR_DEV_TOKEN`；
+- `LINEAR_CLIENT_ID`（生成该 development token 的同一 Linear Application）；
 - `SYMPHONY_E2E_CODEX_API_KEY`；
 - `SYMPHONY_E2E_CODEX_BASE_URL`；
 - `SYMPHONY_E2E_CODEX_MODEL`。
 
-不得加载 `.env` 或静态 Performer 文件。base URL 允许 HTTP 或 HTTPS，不得包含
+`LINEAR_CLIENT_SECRET` 不属于 core live 输入，runner 不得读取或传递它。不得加载
+`.env` 或静态 Performer 文件。base URL 允许 HTTP 或 HTTPS，不得包含
 userinfo、query 或 fragment；CI 中 host 必须在 workflow 配置的 allowlist 中。
 runner 必须为每类子进程构造显式环境 allowlist，默认不继承两个 token。
 
 本机唯一 credentialed 入口是 `npm run e2e:core-live`；`make e2e` 只负责安装、
 按 Podium → Conductor 顺序构建、运行 secret-free runner contracts，再调用同一
 入口。Make 前置步骤显式移除两项 secret，只有最终 live 命令可读取它们。两种
-入口都从当前 shell 读取上述四项输入，不读取 `.env`。
+入口都从当前 shell 读取上述五项输入，不读取 `.env`。
 
 GitHub Actions 只能从受保护 Environment 向可信 ref 注入 secrets，使用全局
 concurrency 防止共享 Linear authority 并发执行。pull request merge gate 运行

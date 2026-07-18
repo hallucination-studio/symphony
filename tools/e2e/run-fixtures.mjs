@@ -11,6 +11,7 @@ const MARKER = /<!-- symphony core live e2e\nrun_id: ([A-Za-z0-9][A-Za-z0-9._-]{
 
 export function createRunScopedLinearOperator({
   developmentToken,
+  applicationClientId,
   fetch = globalThis.fetch,
   log = () => {},
 }) {
@@ -20,9 +21,13 @@ export function createRunScopedLinearOperator({
   return Object.freeze({
     async preflight() {
       const data = await graphql(`
-        query CoreLivePreflight {
+        query CoreLivePreflight($clientId: String!) {
           organization { id }
-          viewer { id }
+          applicationInfo(clientId: $clientId) { name }
+          users(first: 250, filter: { app: { eq: true } }) {
+            nodes { id name displayName app }
+            pageInfo { hasNextPage }
+          }
           teams(first: 50) {
             nodes {
               id
@@ -34,8 +39,11 @@ export function createRunScopedLinearOperator({
             pageInfo { hasNextPage }
           }
         }
-      `);
+      `, { clientId: applicationClientId });
       const teams = connection(data.teams, "linear_fixture_teams_invalid");
+      const appUsers = connection(data.users, "linear_fixture_app_users_invalid");
+      const actorCandidates = appUsers.filter((user) => user.app === true &&
+        (user.name === data.applicationInfo?.name || user.displayName === data.applicationInfo?.name));
       const candidates = teams.map((team) => {
         const states = connection(team.states, "linear_fixture_states_invalid");
         return {
@@ -44,12 +52,13 @@ export function createRunScopedLinearOperator({
           doneStateId: states.find(({ name }) => name === "Done")?.id,
         };
       }).filter(({ stateId, doneStateId }) => stateId && doneStateId);
-      if (!data.organization?.id || !data.viewer?.id || candidates.length < 1) {
+      if (!data.organization?.id || !data.applicationInfo?.name ||
+          actorCandidates.length !== 1 || candidates.length < 1) {
         throw stableError("linear_fixture_preflight_invalid");
       }
       return Object.freeze({
         organizationId: data.organization.id,
-        actorId: data.viewer.id,
+        actorId: actorCandidates[0].id,
         ...candidates[0],
         mutationCount: 0,
       });
