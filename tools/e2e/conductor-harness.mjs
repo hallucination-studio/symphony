@@ -213,7 +213,10 @@ async function write(channel, frame, secret) {
   } catch {
     throw stableError("conductor_protocol_write_failed");
   } finally {
-    if (secret) bytes.fill(0);
+    if (secret) {
+      bytes.fill(0);
+      secret.fill(0);
+    }
   }
 }
 

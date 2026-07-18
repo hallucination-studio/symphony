@@ -193,18 +193,18 @@ metadata is generated in memory and no Performer configuration file is used.
 
 **Acceptance criteria:**
 
-- [ ] The Profile is created with `backendKind=codex`, `api_key`, configured
+- [x] The Profile is created with `backendKind=codex`, `api_key`, configured
       model, bounded reasoning effort, and Fast disabled.
-- [ ] `set_api_key` reaches `Codex.login_api_key`, readiness becomes `ready`,
+- [x] `set_api_key` reaches `Codex.login_api_key`, readiness becomes `ready`,
       and activation is reported by Conductor before any Root is created.
-- [ ] The API key appears only in the runner's secret buffer, bounded protocol
+- [x] The API key appears only in the runner's secret buffer, bounded protocol
       frames, and Codex-owned state; buffers are cleared after use.
 
 **Verification:**
 
-- [ ] Run Conductor Profile relay/control tests and Performer Profile control
+- [x] Run Conductor Profile relay/control tests and Performer Profile control
       tests.
-- [ ] Run a canary-based scan over captured stdout/stderr, request/result
+- [x] Run a canary-based scan over captured stdout/stderr, request/result
       files, Profile files, and runner evidence.
 
 **Dependencies:** Task 5
