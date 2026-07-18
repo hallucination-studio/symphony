@@ -62,8 +62,8 @@ export class GlobalPerformerLane {
         return;
       }
       child.stdout.on("data", (chunk: Buffer) => {
-        stdout.push(chunk);
-        invocation.onStdout?.(chunk);
+        if (invocation.onStdout) invocation.onStdout(chunk);
+        else stdout.push(chunk);
       });
       child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
       let forceKill: NodeJS.Timeout | undefined;

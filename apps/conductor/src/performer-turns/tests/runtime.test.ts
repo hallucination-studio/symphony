@@ -70,7 +70,7 @@ test("the global Performer lane drains stdout before process exit", async () => 
     running.then(() => assert.fail("process exited before stdout was observed")),
   ]);
   assert.equal(processSettled, false);
-  assert.equal((await running).stdout, "event\n");
+  assert.equal((await running).stdout, "");
 });
 
 test("stopping the Performer lane is bounded and rejects queued Turns", async () => {

@@ -15,7 +15,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(prog="performer")
     parser.add_argument("--turn-request-path", type=Path)
     parser.add_argument("--turn-result-path", type=Path)
-    parser.add_argument("--event-path", type=Path)
+    parser.add_argument("--event-sequence-start", type=int, default=0)
     parser.add_argument("--profile-control", action="store_true")
     args = parser.parse_args()
     try:
@@ -34,7 +34,9 @@ def main() -> None:
         parser.error("--turn-request-path and --turn-result-path are required")
     runtime = TurnRuntime(CodexBackendImpl(sdk))
     TurnFileHost(runtime.run).run(
-        args.turn_request_path, args.turn_result_path, args.event_path
+        args.turn_request_path,
+        args.turn_result_path,
+        args.event_sequence_start,
     )
 
 
