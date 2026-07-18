@@ -166,6 +166,26 @@ export async function runCoreLiveE2E({
     );
     log({ event: "e2e_step_completed", step: "root_completion" });
 
+    log({ event: "e2e_step_started", step: "root_comments_verified" });
+    const commentEvidence = await linear.readRootCommentEvidence({ fixture });
+    evidence.push({
+      step: "root_comments_verified",
+      status: "passed",
+      primaryCommentId: commentEvidence.primaryCommentId,
+      primaryCommentCount: commentEvidence.primaryCommentCount,
+      timelineEventCount: commentEvidence.timelineEventCount,
+      completionEventCount: commentEvidence.completionEventCount,
+      eventKinds: commentEvidence.eventKinds,
+      eventKeys: commentEvidence.eventKeys,
+    });
+    log({
+      event: "e2e_step_completed",
+      step: "root_comments_verified",
+      primary_comment_count: commentEvidence.primaryCommentCount,
+      timeline_event_count: commentEvidence.timelineEventCount,
+      completion_event_count: commentEvidence.completionEventCount,
+    });
+
     result = Object.freeze({
       status: "passed",
       runId,

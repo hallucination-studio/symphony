@@ -8,6 +8,10 @@ const execute = promisify(execFile);
 const LINEAR_GRAPHQL_URL = "https://api.linear.app/graphql";
 const RUN_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const MARKER = /<!-- symphony core live e2e\nrun_id: ([A-Za-z0-9][A-Za-z0-9._-]{0,127})\n-->/u;
+const ROOT_COMMENT_MARKER = "<!-- symphony root marker -->";
+const TIMELINE_MARKER = /\n*<!-- symphony turn event\nevent_key: ([A-Za-z0-9][A-Za-z0-9._:/-]{0,127}:(?:0|[1-9][0-9]{0,15}))\n-->\s*$/u;
+const TIMELINE_HEADING = /^\*\*Performer (warning|error|Turn completed) \([^\n]{1,160}\)\*\*/u;
+const MAX_COMMENT_LENGTH = 16_384;
 
 export function createRunScopedLinearOperator({
   developmentToken,
@@ -263,6 +267,64 @@ export function createRunScopedLinearOperator({
       });
     },
 
+    async readRootCommentEvidence({ fixture }) {
+      if (!fixture?.rootId || !fixture.projectId) {
+        throw stableError("linear_fixture_comment_evidence_invalid");
+      }
+      const data = await graphql(`
+        query CoreLiveRootComments($rootId: String!) {
+          issue(id: $rootId) {
+            id
+            project { id }
+            comments(first: 250) {
+              nodes { id body }
+              pageInfo { hasNextPage }
+            }
+          }
+        }
+      `, { rootId: fixture.rootId });
+      if (
+        data.issue?.id !== fixture.rootId ||
+        data.issue?.project?.id !== fixture.projectId
+      ) {
+        throw stableError("linear_fixture_comment_evidence_invalid");
+      }
+      const comments = connection(
+        data.issue.comments,
+        "linear_fixture_comment_evidence_invalid",
+      );
+      if (!comments.every((comment) =>
+        typeof comment?.id === "string" && typeof comment.body === "string")) {
+        throw stableError("linear_fixture_comment_evidence_invalid");
+      }
+      const primary = comments.filter(({ body }) =>
+        body.startsWith("Symphony Root Run\n") &&
+        body.endsWith(ROOT_COMMENT_MARKER));
+      const timeline = comments
+        .filter(({ body }) => body.includes("<!-- symphony turn event"))
+        .map(({ body }) => timelineEvidence(body));
+      const eventKeys = timeline.map(({ eventKey }) => eventKey);
+      if (
+        primary.length !== 1 ||
+        primary[0].body.length > MAX_COMMENT_LENGTH ||
+        eventKeys.length !== new Set(eventKeys).size
+      ) {
+        throw stableError("linear_fixture_comment_evidence_invalid");
+      }
+      const eventKinds = [...new Set(timeline.map(({ eventKind }) => eventKind))];
+      return Object.freeze({
+        rootId: fixture.rootId,
+        primaryCommentId: primary[0].id,
+        primaryCommentCount: primary.length,
+        timelineEventCount: timeline.length,
+        completionEventCount: timeline.filter(
+          ({ eventKind }) => eventKind === "turn_completed",
+        ).length,
+        eventKinds,
+        eventKeys,
+      });
+    },
+
     async approvePlan({ lock, runId, fixture, preflight, approvalId }) {
       assertLock(lock, runId);
       if (!approvalId || !preflight.doneStateId) throw stableError("linear_fixture_approval_invalid");
@@ -508,6 +570,25 @@ function field(comment, name) {
   if (typeof comment !== "string") return undefined;
   const match = comment.match(new RegExp(`(?:^|\\n)${name}: ([^\\n]+)`, "u"));
   return match?.[1] && match[1] !== "none" ? match[1] : undefined;
+}
+
+function timelineEvidence(body) {
+  if (body.length > MAX_COMMENT_LENGTH) {
+    throw stableError("linear_fixture_comment_evidence_invalid");
+  }
+  const marker = body.match(TIMELINE_MARKER);
+  const heading = body.match(TIMELINE_HEADING);
+  const eventKind = heading?.[1] === "warning"
+    ? "warning_raised"
+    : heading?.[1] === "error"
+      ? "error_raised"
+      : heading?.[1] === "Turn completed"
+        ? "turn_completed"
+        : undefined;
+  if (!marker?.[1] || !eventKind) {
+    throw stableError("linear_fixture_comment_evidence_invalid");
+  }
+  return { eventKey: marker[1], eventKind };
 }
 
 function assertLock(lock, runId) {

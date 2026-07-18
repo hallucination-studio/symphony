@@ -24,7 +24,7 @@ test("core live dry-run exposes fixed transitions without mutation or credential
 });
 
 test("verdict evaluates evidence independently from the claimed runner status", () => {
-  const evidence = coreLiveStepIds().map((step) => ({ step, status: "passed" }));
+  const evidence = passingEvidence();
   assert.deepEqual(evaluateCoreLiveEvidence({
     status: "failed",
     performerResumed: true,
@@ -32,7 +32,12 @@ test("verdict evaluates evidence independently from the claimed runner status", 
     phase: "in-review",
     deliveryBranch: "symphony/runs/run-1",
     evidence,
-  }), { verdict: "passed", missingSteps: [], converged: true });
+  }), {
+    verdict: "passed",
+    missingSteps: [],
+    converged: true,
+    rootCommentsVerified: true,
+  });
   assert.equal(evaluateCoreLiveEvidence({
     status: "passed",
     performerResumed: false,
@@ -58,3 +63,33 @@ test("cleanup completion is required independent evidence", () => {
     evidence,
   }).missingSteps, ["cleanup_completed"]);
 });
+
+test("verdict independently validates sanitized Root comment evidence", () => {
+  assert.equal(
+    evaluateCoreLiveEvidence({
+      performerResumed: true,
+      rootState: "In Review",
+      phase: "in-review",
+      deliveryBranch: "symphony/runs/run-1",
+      evidence: passingEvidence().map((item) =>
+        item.step === "root_comments_verified"
+          ? { ...item, eventKeys: ["duplicate:1", "duplicate:1"] }
+          : item),
+    }).verdict,
+    "failed",
+  );
+});
+
+function passingEvidence() {
+  return coreLiveStepIds().map((step) => step === "root_comments_verified"
+    ? {
+        step,
+        status: "passed",
+        primaryCommentCount: 1,
+        timelineEventCount: 3,
+        completionEventCount: 3,
+        eventKinds: ["turn_completed"],
+        eventKeys: ["turn-plan:1", "turn-work:2", "turn-gate:3"],
+      }
+    : { step, status: "passed" });
+}

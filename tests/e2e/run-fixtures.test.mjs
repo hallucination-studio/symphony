@@ -353,6 +353,96 @@ test("run state and Plan approval map only Linear facts", async () => {
   assert.equal(after.phase, "working");
 });
 
+test("Linear fixture returns only sanitized Root comment evidence", async () => {
+  const operator = createRunScopedLinearOperator({
+    developmentToken: "development-secret",
+    fetch: async (_url, init) => {
+      const request = JSON.parse(init.body);
+      assert.match(request.query, /CoreLiveRootComments/u);
+      return response({ data: {
+        issue: {
+          id: "root-1",
+          project: { id: "project-1" },
+          comments: { nodes: [
+            {
+              id: "comment-primary",
+              body: "Symphony Root Run\nconductor_id: conductor-1\nperformer_profile_id: profile-1\nusage_input_tokens: 1\nusage_cached_input_tokens: 0\nusage_output_tokens: 1\nusage_reasoning_output_tokens: 0\nusage_total_tokens: 2\ndelivery_branch: symphony/runs/run-1\n<!-- symphony root marker -->",
+            },
+            {
+              id: "comment-complete-1",
+              body: "**Performer Turn completed (plan_ready)**\n\nprivate plan summary\n\n<!-- symphony turn event\nevent_key: turn-plan:1\n-->",
+            },
+            {
+              id: "comment-warning",
+              body: "**Performer warning (provider_reconnected)**\n\nprivate warning\n\n<!-- symphony turn event\nevent_key: turn-work:2\n-->",
+            },
+            {
+              id: "comment-complete-2",
+              body: "**Performer Turn completed (work_completed)**\n\nprivate work summary\n\n<!-- symphony turn event\nevent_key: turn-work:3\n-->",
+            },
+            {
+              id: "comment-complete-3",
+              body: "**Performer Turn completed (root_gate_passed)**\n\nprivate gate summary\n\n<!-- symphony turn event\nevent_key: turn-gate:4\n-->",
+            },
+            { id: "comment-user", body: "User comment" },
+          ], pageInfo: { hasNextPage: false } },
+        },
+      } });
+    },
+  });
+
+  const evidence = await operator.readRootCommentEvidence({
+    fixture: { rootId: "root-1", projectId: "project-1" },
+  });
+
+  assert.deepEqual(evidence, {
+    rootId: "root-1",
+    primaryCommentId: "comment-primary",
+    primaryCommentCount: 1,
+    timelineEventCount: 4,
+    completionEventCount: 3,
+    eventKinds: ["turn_completed", "warning_raised"],
+    eventKeys: ["turn-plan:1", "turn-work:2", "turn-work:3", "turn-gate:4"],
+  });
+  assert.doesNotMatch(
+    JSON.stringify(evidence),
+    /private|summary|conductor-1|profile-1|comment-complete/u,
+  );
+});
+
+test("Linear fixture rejects duplicate Timeline event keys", async () => {
+  const operator = createRunScopedLinearOperator({
+    developmentToken: "development-secret",
+    fetch: async () => response({ data: {
+      issue: {
+        id: "root-1",
+        project: { id: "project-1" },
+        comments: { nodes: [
+          {
+            id: "comment-primary",
+            body: "Symphony Root Run\n<!-- symphony root marker -->",
+          },
+          {
+            id: "comment-event-1",
+            body: "**Performer Turn completed (plan_ready)**\n\nDone.\n\n<!-- symphony turn event\nevent_key: turn-1:1\n-->",
+          },
+          {
+            id: "comment-event-2",
+            body: "**Performer Turn completed (plan_ready)**\n\nDone.\n\n<!-- symphony turn event\nevent_key: turn-1:1\n-->",
+          },
+        ], pageInfo: { hasNextPage: false } },
+      },
+    } }),
+  });
+
+  await assert.rejects(
+    operator.readRootCommentEvidence({
+      fixture: { rootId: "root-1", projectId: "project-1" },
+    }),
+    /linear_fixture_comment_evidence_invalid/u,
+  );
+});
+
 test("Git fixture creates a clean unique main repository", async () => {
   const parent = await mkdtemp(path.join(os.tmpdir(), "symphony-git-fixture-"));
   const fixture = await createRunScopedGitFixture({ runId: "run-1", parentDirectory: parent });
