@@ -41,18 +41,18 @@ explicit child-process environment allowlists.
 
 **Acceptance criteria:**
 
-- [ ] Required inputs are `SYMPHONY_E2E_LINEAR_DEV_TOKEN`,
+- [x] Required inputs are `SYMPHONY_E2E_LINEAR_DEV_TOKEN`,
       `SYMPHONY_E2E_CODEX_API_KEY`, `SYMPHONY_E2E_CODEX_BASE_URL`, and
       `SYMPHONY_E2E_CODEX_MODEL`; no `.env` file is required or loaded.
-- [ ] Base URL validation rejects non-HTTPS CI URLs, credentials, query,
+- [x] Base URL validation rejects non-HTTPS CI URLs, credentials, query,
       fragment, control characters, and hosts outside the configured allowlist.
-- [ ] Config summaries and errors expose only stable codes and secret-presence
+- [x] Config summaries and errors expose only stable codes and secret-presence
       booleans; child environments omit both tokens by default.
 
 **Verification:**
 
-- [ ] Run the focused config/runner tests under `tests/e2e/`.
-- [ ] Run `npm run test:e2e:runner` with an empty environment and verify it
+- [x] Run the focused config/runner tests under `tests/e2e/`.
+- [x] Run `npm run test:e2e:runner` with an empty environment and verify it
       fails closed without printing supplied canaries.
 
 **Dependencies:** Task 1

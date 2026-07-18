@@ -53,7 +53,7 @@ test("S1 opt-in validates live configuration before starting the runner", () => 
     JSON.parse(result.stdout).reason,
     "e2e_configuration_invalid",
   );
-  assert.match(JSON.parse(result.stdout).issues.join(","), /OPENAI_E2E_API_KEY_missing/u);
+  assert.match(JSON.parse(result.stdout).issues.join(","), /codex_api_key_missing/u);
 });
 
 for (const [scenario, stepCount] of [["S2", 8], ["S3", 4]]) {

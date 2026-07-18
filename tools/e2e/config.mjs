@@ -1,133 +1,121 @@
-import { existsSync, readFileSync } from "node:fs";
-import path from "node:path";
-
-export const E2E_NON_SECRET_DEFAULTS = Object.freeze({
-  projectSlugId: "8ab43179fb54",
-  linearMaxAttempts: 5,
-  linearBackoffBaseMs: 1000,
-  linearBackoffMaxMs: 16000,
-  scenarioTimeoutMinutes: 45,
+const INPUT_KEYS = Object.freeze({
+  linearDevToken: "SYMPHONY_E2E_LINEAR_DEV_TOKEN",
+  codexApiKey: "SYMPHONY_E2E_CODEX_API_KEY",
+  codexBaseUrl: "SYMPHONY_E2E_CODEX_BASE_URL",
+  codexModel: "SYMPHONY_E2E_CODEX_MODEL",
 });
 
-const SECRET_KEYS = Object.freeze([
-  "LINEAR_CLIENT_ID",
-  "LINEAR_CLIENT_SECRET",
-  "LINEAR_E2E_USER_API_KEY",
-  "OPENAI_E2E_API_KEY",
-  "SYMPHONY_E2E_GITHUB_TOKEN",
+const DEFAULT_CHILD_ENVIRONMENT_KEYS = Object.freeze([
+  "HOME", "LANG", "LC_ALL", "PATH", "SYSTEMROOT", "TMP", "TMPDIR", "TEMP", "USERPROFILE",
 ]);
 
-export function parseDotEnv(source) {
-  const values = {};
-  for (const [lineNumber, rawLine] of source.split(/\r?\n/u).entries()) {
-    const line = rawLine.trim();
-    if (!line || line.startsWith("#")) continue;
-    const match = line.match(/^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/u);
-    if (!match) throw configurationError(["dotenv_line_invalid_" + (lineNumber + 1)]);
-    values[match[1]] = unquote(match[2]);
-  }
-  return values;
-}
+const SECRET_ENVIRONMENT_KEYS = new Set([
+  INPUT_KEYS.linearDevToken,
+  INPUT_KEYS.codexApiKey,
+]);
 
 export function loadE2EConfig({
   environment = process.env,
-  dotenv = {},
-  cwd = process.cwd(),
   platform = process.platform,
-  pathExists = existsSync,
+  ci = environment.CI === "true",
+  allowedCodexHosts = parseAllowedHosts(environment.SYMPHONY_E2E_CODEX_ALLOWED_HOSTS),
 } = {}) {
-  const value = (key) => environment[key] ?? dotenv[key];
   const issues = [];
-  const secrets = Object.fromEntries(SECRET_KEYS.map((key) => [secretName(key), value(key)]));
-  for (const key of SECRET_KEYS) {
-    if (!value(key)) issues.push(key + "_missing");
-  }
-
-  const projectSlugId = value("SYMPHONY_E2E_PROJECT_SLUG_ID");
-  const repositoryPath = value("SYMPHONY_E2E_REPOSITORY_PATH");
-  const githubRepository = value("SYMPHONY_E2E_GITHUB_REPOSITORY");
-  const githubBaseBranch = value("SYMPHONY_E2E_GITHUB_BASE_BRANCH");
-  if (!projectSlugId) issues.push("project_slug_id_missing");
-  else if (projectSlugId !== E2E_NON_SECRET_DEFAULTS.projectSlugId) issues.push("project_slug_id_not_allowlisted");
-  if (!repositoryPath) issues.push("repository_path_missing");
-  if (!githubRepository || !/^[^/]+\/[^/]+$/u.test(githubRepository)) issues.push("github_repository_invalid");
-  if (!githubBaseBranch || !/^[A-Za-z0-9._/-]{1,128}$/u.test(githubBaseBranch)) issues.push("github_base_branch_invalid");
+  const linearDevToken = required(environment, INPUT_KEYS.linearDevToken, "linear_dev_token_missing", issues);
+  const codexApiKey = required(environment, INPUT_KEYS.codexApiKey, "codex_api_key_missing", issues);
+  const rawBaseUrl = required(environment, INPUT_KEYS.codexBaseUrl, "codex_base_url_missing", issues);
+  const model = required(environment, INPUT_KEYS.codexModel, "codex_model_missing", issues);
+  const baseUrl = validateBaseUrl(rawBaseUrl, { ci, allowedCodexHosts, issues });
+  validateModel(model, issues);
   if (platform !== "darwin" && platform !== "linux") issues.push("platform_not_supported");
-
-  const numbers = {
-    linearMaxAttempts: integer(value("SYMPHONY_E2E_LINEAR_MAX_ATTEMPTS"), E2E_NON_SECRET_DEFAULTS.linearMaxAttempts),
-    linearBackoffBaseMs: integer(value("SYMPHONY_E2E_LINEAR_BACKOFF_BASE_MS"), E2E_NON_SECRET_DEFAULTS.linearBackoffBaseMs),
-    linearBackoffMaxMs: integer(value("SYMPHONY_E2E_LINEAR_BACKOFF_MAX_MS"), E2E_NON_SECRET_DEFAULTS.linearBackoffMaxMs),
-    scenarioTimeoutMinutes: integer(value("SYMPHONY_E2E_SCENARIO_TIMEOUT_MINUTES"), E2E_NON_SECRET_DEFAULTS.scenarioTimeoutMinutes),
-  };
-  if (Object.values(numbers).some((number) => number === undefined || number < 1)) issues.push("numeric_config_invalid");
-  if (numbers.linearBackoffBaseMs > numbers.linearBackoffMaxMs) issues.push("linear_backoff_range_invalid");
-  if (repositoryPath && !pathExists(repositoryPath)) issues.push("repository_path_unavailable");
   if (issues.length > 0) throw configurationError(issues);
 
   return Object.freeze({
     platform,
-    cwd: path.resolve(cwd),
-    secrets: Object.freeze(secrets),
-    project: Object.freeze({ slugId: projectSlugId }),
-    repository: Object.freeze({ path: path.resolve(repositoryPath) }),
-    github: Object.freeze({ repository: githubRepository, baseBranch: githubBaseBranch }),
-    retry: Object.freeze({
-      maxAttempts: numbers.linearMaxAttempts,
-      backoffBaseMs: numbers.linearBackoffBaseMs,
-      backoffMaxMs: numbers.linearBackoffMaxMs,
-    }),
-    scenarioTimeoutMs: numbers.scenarioTimeoutMinutes * 60000,
+    secrets: Object.freeze({ linearDevToken, codexApiKey }),
+    codex: Object.freeze({ baseUrl, model }),
   });
 }
 
-export function loadDotEnvFile(filePath = path.join(process.cwd(), ".env")) {
-  try {
-    return parseDotEnv(readFileSync(filePath, "utf8"));
-  } catch (error) {
-    if (error?.code === "ENOENT") return {};
-    throw configurationError(["dotenv_read_failed"]);
-  }
-}
-
 export function summarizeConfig(config) {
-  return {
+  return Object.freeze({
     platform: config.platform,
-    project: config.project,
-    github: config.github,
-    retry: config.retry,
-    scenarioTimeoutMs: config.scenarioTimeoutMs,
-    secretPresence: Object.fromEntries(Object.keys(config.secrets).map((key) => [key, Boolean(config.secrets[key])])),
-  };
+    codex: Object.freeze({ ...config.codex }),
+    secretPresence: Object.freeze({
+      linearDevToken: Boolean(config.secrets.linearDevToken),
+      codexApiKey: Boolean(config.secrets.codexApiKey),
+    }),
+  });
 }
 
-function secretName(key) {
-  return {
-    LINEAR_CLIENT_ID: "linearClientId",
-    LINEAR_CLIENT_SECRET: "linearClientSecret",
-    LINEAR_E2E_USER_API_KEY: "linearUserApiKey",
-    OPENAI_E2E_API_KEY: "openAiApiKey",
-    SYMPHONY_E2E_GITHUB_TOKEN: "githubToken",
-  }[key];
+// Retained until the alternate Desktop runner is removed; it intentionally performs no I/O.
+export function loadDotEnvFile() {
+  return Object.freeze({});
 }
 
-function integer(raw, fallback) {
-  if (raw === undefined) return fallback;
-  if (!/^\d+$/u.test(raw)) return undefined;
-  const value = Number(raw);
-  return Number.isSafeInteger(value) ? value : undefined;
+export function createChildEnvironment({
+  environment = process.env,
+  allowedKeys = DEFAULT_CHILD_ENVIRONMENT_KEYS,
+  additions = {},
+} = {}) {
+  const childEnvironment = {};
+  for (const key of [...allowedKeys].sort()) {
+    if (SECRET_ENVIRONMENT_KEYS.has(key)) throw configurationError(["child_environment_secret_forbidden"]);
+    if (environment[key] !== undefined) childEnvironment[key] = environment[key];
+  }
+  for (const [key, value] of Object.entries(additions).sort(([left], [right]) => left.localeCompare(right))) {
+    if (SECRET_ENVIRONMENT_KEYS.has(key)) throw configurationError(["child_environment_secret_forbidden"]);
+    if (value !== undefined) childEnvironment[key] = String(value);
+  }
+  return Object.freeze(childEnvironment);
 }
 
-function unquote(value) {
-  if (value.length >= 2 && ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'")))) {
-    return value.slice(1, -1);
+function required(environment, key, issue, issues) {
+  const value = environment[key];
+  if (typeof value !== "string" || value.length === 0) {
+    issues.push(issue);
+    return undefined;
   }
   return value;
+}
+
+function validateBaseUrl(rawValue, { ci, allowedCodexHosts, issues }) {
+  if (rawValue === undefined) return undefined;
+  if (/\p{Cc}/u.test(rawValue)) {
+    issues.push("codex_base_url_control_character");
+    return undefined;
+  }
+  let url;
+  try {
+    url = new URL(rawValue);
+  } catch {
+    issues.push("codex_base_url_invalid");
+    return undefined;
+  }
+  if (ci && url.protocol !== "https:") issues.push("codex_base_url_https_required");
+  if (url.username || url.password) issues.push("codex_base_url_credentials_forbidden");
+  if (url.search) issues.push("codex_base_url_query_forbidden");
+  if (url.hash) issues.push("codex_base_url_fragment_forbidden");
+  if (ci && !allowedCodexHosts.has(url.hostname.toLowerCase())) {
+    issues.push("codex_base_url_host_not_allowlisted");
+  }
+  return url.toString().replace(/\/$/u, "");
+}
+
+function validateModel(model, issues) {
+  if (model !== undefined && !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(model)) {
+    issues.push("codex_model_invalid");
+  }
+}
+
+function parseAllowedHosts(rawValue) {
+  if (typeof rawValue !== "string") return new Set();
+  return new Set(rawValue.split(",").map((host) => host.trim().toLowerCase()).filter(Boolean));
 }
 
 function configurationError(issues) {
   const error = new Error("e2e_configuration_invalid");
   error.code = "e2e_configuration_invalid";
-  error.issues = Object.freeze([...issues]);
+  error.issues = Object.freeze([...new Set(issues)]);
   return error;
 }

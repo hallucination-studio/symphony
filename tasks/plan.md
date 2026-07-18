@@ -131,7 +131,7 @@ Task 1: authoritative test contract
 ### Phase 1: Contract and production prerequisites
 
 - [x] Task 1: Replace the E2E specification with the core live contract.
-- [ ] Task 2: Define the pipeline-only runner input and secret boundary.
+- [x] Task 2: Define the pipeline-only runner input and secret boundary.
 - [ ] Task 3: Add a real Podium development-token installation kind.
 - [ ] Task 4: Configure the Codex endpoint through Performer process input.
 
