@@ -9,6 +9,7 @@ const REQUIRED_STEPS = Object.freeze([
   "root_gate_passed",
   "branch_delivered",
   "linear_in_review",
+  "cleanup_completed",
 ]);
 
 export function evaluateCoreLiveEvidence(result) {

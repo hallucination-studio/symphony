@@ -14,8 +14,8 @@
     "packages/podium"
   ],
   "scripts": {
-    "build": "npm run build --workspaces --if-present",
-    "typecheck": "npm run typecheck --workspaces --if-present",
+    "build": "npm run build -w @symphony/podium && npm run build -w @symphony/conductor && npm run build -w @symphony/podium-desktop",
+    "typecheck": "npm run build -w @symphony/podium && npm run typecheck --workspaces --if-present",
     "lint": "npm run lint --workspaces --if-present",
     "contracts:generate": "tsx packages/contracts/tools/generate.ts",
     "contracts:check": "tsx packages/contracts/tools/generate.ts --check",
@@ -30,7 +30,7 @@
     "desktop-shell-smoke:build": "node tools/e2e/desktop-shell-build.mjs",
     "desktop-shell-smoke": "npm run desktop-shell-smoke:build && node tools/e2e/desktop-shell-smoke.mjs",
     "e2e:cleanup": "node tools/e2e/cleanup.mjs",
-    "test:typescript": "npm test --workspaces --if-present",
+    "test:typescript": "npm test -w @symphony/podium && npm test -w @symphony/conductor && npm test -w @symphony/podium-desktop",
     "test": "npm run test:architecture && npm run test:contracts && npm run test:typescript && npm run test:integration",
     "package": "npm run package -w @symphony/podium-desktop"
   },

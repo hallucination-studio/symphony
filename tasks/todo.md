@@ -421,20 +421,22 @@ Do not mark this task complete from mocked runner tests alone.
 
 - [ ] All focused and broad checks pass with no skipped live requirement.
 - [ ] Local and CI evidence independently prove the same real small Root.
-- [ ] A five-axis review finds no unresolved critical/high issue and documents
+- [x] A five-axis review finds no unresolved critical/high issue and documents
       remaining external-service/cost risk.
 
 **Verification:**
 
-- [ ] `make lint`
-- [ ] `make typecheck`
-- [ ] `make test-all`
-- [ ] `make build`
-- [ ] `npm run test:e2e:runner`
+- [x] `make lint`
+- [x] `make typecheck`
+- [x] `make test-all`
+- [x] `make build`
+- [x] `npm run test:e2e:runner`
 - [ ] `npm run e2e:core-live`
-- [ ] `npm audit --registry=https://registry.npmjs.org`
-- [ ] `.venv/bin/python -m pytest apps/performer/tests -q`
-- [ ] `cd apps/podium-desktop/src-tauri && cargo test`
+- [x] `npm audit --registry=https://registry.npmjs.org`
+- [x] `.venv/bin/python -m pytest apps/performer/tests -q`
+- [x] `cd apps/podium-desktop/src-tauri && cargo test`
+- [x] Verify root build, typecheck, and TypeScript test order from a clean
+      checkout with no pre-existing workspace `dist` output.
 
 **Dependencies:** Task 11
 
@@ -449,6 +451,6 @@ Do not mark this task complete from mocked runner tests alone.
 ## Checkpoint D: Complete
 
 - [ ] Core live E2E is green locally and in the protected workflow.
-- [ ] Desktop smoke is green and makes no live workflow claim.
-- [ ] Old hermetic and E2E-composition paths are absent.
-- [ ] Repository-wide checks and final review are complete.
+- [x] Desktop smoke is green and makes no live workflow claim.
+- [x] Old hermetic and E2E-composition paths are absent.
+- [x] Repository-wide checks and final review are complete.

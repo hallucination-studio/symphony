@@ -42,6 +42,7 @@ export async function runCoreLiveE2E({
   let harness;
   const evidence = [];
   const ids = runIdentifiers(runId);
+  let result;
   try {
     scope = await createRunScope({ runId });
     const git = await createRunScopedGitFixture({ runId, parentDirectory: scope.root });
@@ -133,7 +134,7 @@ export async function runCoreLiveE2E({
       { step: "linear_in_review", status: "passed" },
     );
 
-    const result = Object.freeze({
+    result = Object.freeze({
       status: "passed",
       runId,
       rootIdentifier: fixture.rootIdentifier,
@@ -144,21 +145,67 @@ export async function runCoreLiveE2E({
       deliveryBranch: completed.deliveryBranch,
       evidence,
     });
-    if (evaluateCoreLiveEvidence(result).verdict !== "passed") {
-      throw stableError("e2e_evidence_verdict_failed");
-    }
-    await writeEvidence(runId, result, config.secrets);
-    return result;
   } catch (error) {
-    const result = { status: "failed", runId, reason: sanitize(error), evidence };
-    await writeEvidence(runId, result, config.secrets).catch(() => {});
-    throw stableError(result.reason);
-  } finally {
-    await harness?.close().catch(() => {});
-    if (project) await linear.cleanup({ lock, runId, projectId: project.projectId, marker: project.marker }).catch(() => {});
-    if (scope) await cleanupRunScope(scope).catch(() => {});
-    await lock.release().catch(() => {});
+    result = { status: "failed", runId, reason: sanitize(error), evidence };
   }
+
+  const finalResult = await finalizeCoreLiveResult({
+    result,
+    cleanup: () => cleanupCoreLiveResources({ harness, linear, lock, runId, project, scope }),
+    write: (value) => writeEvidence(runId, value, config.secrets),
+  });
+  if (finalResult.status === "failed") throw stableError(finalResult.reason);
+  return finalResult;
+}
+
+export async function cleanupCoreLiveResources(
+  { harness, linear, lock, runId, project, scope },
+  { cleanupScope = cleanupRunScope } = {},
+) {
+  const failures = [];
+  const actions = [
+    [Boolean(harness), "e2e_conductor_cleanup_failed", () => harness.close()],
+    [Boolean(project), "e2e_linear_cleanup_failed", () => linear.cleanup({
+      lock,
+      runId,
+      projectId: project.projectId,
+      labelId: project.labelId,
+      marker: project.marker,
+    })],
+    [Boolean(scope), "e2e_run_scope_cleanup_failed", () => cleanupScope(scope)],
+    [Boolean(lock), "e2e_lock_release_failed", () => lock.release()],
+  ];
+  for (const [enabled, code, action] of actions) {
+    if (!enabled) continue;
+    try {
+      await action();
+    } catch {
+      failures.push(code);
+    }
+  }
+  return Object.freeze(failures);
+}
+
+export async function finalizeCoreLiveResult({ result, cleanup, write }) {
+  const cleanupFailures = await cleanup();
+  const cleanupPassed = cleanupFailures.length === 0;
+  let finalResult = {
+    ...result,
+    evidence: [
+      ...result.evidence,
+      { step: "cleanup_completed", status: cleanupPassed ? "passed" : "failed" },
+    ],
+  };
+  if (!cleanupPassed) {
+    finalResult.status = "failed";
+    finalResult.cleanupFailures = [...cleanupFailures];
+    if (result.status === "passed") finalResult.reason = cleanupFailures[0];
+  }
+  if (finalResult.status === "passed" && evaluateCoreLiveEvidence(finalResult).verdict !== "passed") {
+    finalResult = { ...finalResult, status: "failed", reason: "e2e_evidence_verdict_failed" };
+  }
+  await write(finalResult);
+  return Object.freeze(finalResult);
 }
 
 async function bootstrapPodiumState({ databasePath, developmentToken, preflight, project, git, ids }) {

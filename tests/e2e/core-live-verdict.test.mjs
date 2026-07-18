@@ -42,3 +42,19 @@ test("verdict evaluates evidence independently from the claimed runner status", 
     evidence,
   }).verdict, "failed");
 });
+
+test("cleanup completion is required independent evidence", () => {
+  assert.equal(coreLiveStepIds().includes("cleanup_completed"), true);
+  const evidence = coreLiveStepIds().map((step) => ({
+    step,
+    status: step === "cleanup_completed" ? "failed" : "passed",
+  }));
+  assert.deepEqual(evaluateCoreLiveEvidence({
+    status: "passed",
+    performerResumed: true,
+    rootState: "In Review",
+    phase: "in-review",
+    deliveryBranch: "symphony/runs/run-1",
+    evidence,
+  }).missingSteps, ["cleanup_completed"]);
+});

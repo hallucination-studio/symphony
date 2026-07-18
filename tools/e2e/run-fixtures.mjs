@@ -48,20 +48,35 @@ export function createRunScopedLinearOperator({ developmentToken, fetch = global
     async reconcileStaleRuns({ lock, currentRunId }) {
       assertLock(lock, currentRunId);
       const data = await graphql(`
-        query CoreLiveManagedProjects {
+        query CoreLiveManagedResources {
           projects(first: 250) {
+            nodes { id description }
+            pageInfo { hasNextPage }
+          }
+          projectLabels(first: 250) {
             nodes { id description }
             pageInfo { hasNextPage }
           }
         }
       `);
       const projects = connection(data.projects, "linear_fixture_projects_invalid");
-      const stale = projects.filter((project) => {
+      const labels = connection(data.projectLabels, "linear_fixture_labels_invalid");
+      const staleProjects = projects.filter((project) => {
         const owner = managedRunId(project.description);
         return owner !== undefined && owner !== currentRunId;
       });
-      for (const project of stale) await archiveProject(project.id);
-      return Object.freeze({ archivedProjectCount: stale.length });
+      const staleLabels = labels.filter((label) => {
+        const owner = managedRunId(label.description);
+        return owner !== undefined && owner !== currentRunId;
+      });
+      await attemptAll([
+        ...staleProjects.map((project) => () => archiveProject(project.id)),
+        ...staleLabels.map((label) => () => deleteProjectLabel(label.id)),
+      ]);
+      return Object.freeze({
+        archivedProjectCount: staleProjects.length,
+        deletedLabelCount: staleLabels.length,
+      });
     },
 
     async create({ lock, runId, conductorShortHash, rootInstruction, preflight }) {
@@ -103,6 +118,7 @@ export function createRunScopedLinearOperator({ developmentToken, fetch = global
       return Object.freeze({
         runId,
         marker,
+        labelId: label.projectLabel.id,
         labelName,
         projectId: project.project.id,
         projectSlugId: project.project.slugId,
@@ -197,11 +213,16 @@ export function createRunScopedLinearOperator({ developmentToken, fetch = global
       return this.readRunState({ fixture });
     },
 
-    async cleanup({ lock, runId, projectId, marker }) {
+    async cleanup({ lock, runId, projectId, labelId, marker }) {
       assertLock(lock, runId);
-      if (marker !== managedMarker(runId) || !projectId) throw stableError("linear_fixture_cleanup_target_invalid");
-      await archiveProject(projectId);
-      return Object.freeze({ archivedProjectCount: 1 });
+      if (marker !== managedMarker(runId) || !projectId || !labelId) {
+        throw stableError("linear_fixture_cleanup_target_invalid");
+      }
+      await attemptAll([
+        () => archiveProject(projectId),
+        () => deleteProjectLabel(labelId),
+      ]);
+      return Object.freeze({ archivedProjectCount: 1, deletedLabelCount: 1 });
     },
   });
 
@@ -212,6 +233,17 @@ export function createRunScopedLinearOperator({ developmentToken, fetch = global
       }
     `, { projectId });
     if (data.projectArchive?.success !== true) throw stableError("linear_fixture_archive_failed");
+  }
+
+  async function deleteProjectLabel(labelId) {
+    const data = await graphql(`
+      mutation CoreLiveDeleteLabel($labelId: String!) {
+        projectLabelDelete(id: $labelId) { success }
+      }
+    `, { labelId });
+    if (data.projectLabelDelete?.success !== true) {
+      throw stableError("linear_fixture_label_delete_failed");
+    }
   }
 
   async function graphql(query, variables = {}) {
@@ -313,6 +345,18 @@ function assertLock(lock, runId) {
 function connection(value, code) {
   if (!Array.isArray(value?.nodes) || value.pageInfo?.hasNextPage !== false) throw stableError(code);
   return value.nodes;
+}
+
+async function attemptAll(actions) {
+  let firstFailure;
+  for (const action of actions) {
+    try {
+      await action();
+    } catch (error) {
+      firstFailure ??= error;
+    }
+  }
+  if (firstFailure) throw firstFailure;
 }
 
 function stableError(code) {

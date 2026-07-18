@@ -70,6 +70,7 @@ test("Linear fixture creates one exactly marked Project, label, and delegated Ro
   });
 
   assert.equal(fixture.marker, managedMarker("run-1"));
+  assert.equal(fixture.labelId, "label-1");
   assert.deepEqual(requests.map(({ query }) =>
     query.match(/CoreLive(?:Label|Project|Root)/u)?.[0]), [
     "CoreLiveLabel", "CoreLiveProject", "CoreLiveRoot",
@@ -99,29 +100,70 @@ test("Linear fixture rejects mutation without the exact acquired lock", async ()
   assert.equal(calls, 0);
 });
 
-test("stale reconciliation archives only projects with another exact managed marker", async () => {
+test("stale reconciliation removes only projects and labels with another exact managed marker", async () => {
   const archived = [];
+  const deletedLabels = [];
   const operator = createRunScopedLinearOperator({
     developmentToken: "development-secret",
     fetch: async (_url, init) => {
       const request = JSON.parse(init.body);
-      if (request.query.includes("CoreLiveManagedProjects")) return response({ data: {
+      if (request.query.includes("CoreLiveManagedResources")) return response({ data: {
         projects: { nodes: [
           { id: "stale", description: managedMarker("old-run") },
           { id: "current", description: managedMarker("run-1") },
           { id: "unmanaged", description: "run_id: old-run" },
         ], pageInfo: { hasNextPage: false } },
+        projectLabels: { nodes: [
+          { id: "stale-label", description: managedMarker("old-run") },
+          { id: "current-label", description: managedMarker("run-1") },
+          { id: "unmanaged-label", description: "run_id: old-run" },
+        ], pageInfo: { hasNextPage: false } },
       } });
-      archived.push(request.variables.projectId);
-      return response({ data: { projectArchive: { success: true } } });
+      if (request.query.includes("CoreLiveArchive")) {
+        archived.push(request.variables.projectId);
+        return response({ data: { projectArchive: { success: true } } });
+      }
+      deletedLabels.push(request.variables.labelId);
+      return response({ data: { projectLabelDelete: { success: true } } });
     },
   });
 
   assert.deepEqual(await operator.reconcileStaleRuns({
     lock: { runId: "run-1", released: false },
     currentRunId: "run-1",
-  }), { archivedProjectCount: 1 });
+  }), { archivedProjectCount: 1, deletedLabelCount: 1 });
   assert.deepEqual(archived, ["stale"]);
+  assert.deepEqual(deletedLabels, ["stale-label"]);
+});
+
+test("Linear cleanup attempts the exact Project and label even when archive fails", async () => {
+  const mutations = [];
+  const operator = createRunScopedLinearOperator({
+    developmentToken: "development-secret",
+    fetch: async (_url, init) => {
+      const request = JSON.parse(init.body);
+      mutations.push({
+        operation: request.query.match(/CoreLive(?:Archive|DeleteLabel)/u)?.[0],
+        variables: request.variables,
+      });
+      if (request.query.includes("CoreLiveArchive")) {
+        return response({ data: { projectArchive: { success: false } } });
+      }
+      return response({ data: { projectLabelDelete: { success: true } } });
+    },
+  });
+
+  await assert.rejects(operator.cleanup({
+    lock: { runId: "run-1", released: false },
+    runId: "run-1",
+    projectId: "project-1",
+    labelId: "label-1",
+    marker: managedMarker("run-1"),
+  }), /linear_fixture_archive_failed/u);
+  assert.deepEqual(mutations, [
+    { operation: "CoreLiveArchive", variables: { projectId: "project-1" } },
+    { operation: "CoreLiveDeleteLabel", variables: { labelId: "label-1" } },
+  ]);
 });
 
 test("run state and Plan approval map only Linear facts", async () => {
