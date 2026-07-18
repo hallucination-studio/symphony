@@ -89,7 +89,7 @@ export function createRunScopedLinearOperator({
         return owner !== undefined && owner !== currentRunId;
       });
       await attemptAll([
-        ...staleProjects.map((project) => () => archiveProject(project.id)),
+        ...staleProjects.map((project) => () => archiveManagedProject(project.id)),
         ...staleLabels.map((label) => () => deleteProjectLabel(label.id)),
       ]);
       return Object.freeze({
@@ -238,12 +238,53 @@ export function createRunScopedLinearOperator({
         throw stableError("linear_fixture_cleanup_target_invalid");
       }
       await attemptAll([
-        () => archiveProject(projectId),
+        () => archiveManagedProject(projectId),
         () => deleteProjectLabel(labelId),
       ]);
       return Object.freeze({ archivedProjectCount: 1, deletedLabelCount: 1 });
     },
   });
+
+  async function archiveManagedProject(projectId) {
+    let firstFailure;
+    let issueIds = [];
+    try {
+      const data = await graphql(`
+        query CoreLiveProjectIssues($projectId: String!) {
+          project(id: $projectId) {
+            issues(first: 250) {
+              nodes { id }
+              pageInfo { hasNextPage }
+            }
+          }
+        }
+      `, { projectId });
+      issueIds = connection(data.project?.issues, "linear_fixture_project_issues_invalid")
+        .map(({ id }) => id);
+    } catch (error) {
+      firstFailure = error;
+    }
+    try {
+      await attemptAll([
+        ...issueIds.map((issueId) => () => archiveIssue(issueId)),
+        () => archiveProject(projectId),
+      ]);
+    } catch (error) {
+      firstFailure ??= error;
+    }
+    if (firstFailure) throw firstFailure;
+  }
+
+  async function archiveIssue(issueId) {
+    const data = await graphql(`
+      mutation CoreLiveArchiveIssue($issueId: String!) {
+        issueArchive(id: $issueId) { success }
+      }
+    `, { issueId });
+    if (data.issueArchive?.success !== true) {
+      throw stableError("linear_fixture_issue_archive_failed");
+    }
+  }
 
   async function archiveProject(projectId) {
     const data = await graphql(`

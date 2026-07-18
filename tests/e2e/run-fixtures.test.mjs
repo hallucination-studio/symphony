@@ -167,6 +167,9 @@ test("stale reconciliation removes only projects and labels with another exact m
           { id: "unmanaged-label", description: "run_id: old-run" },
         ], pageInfo: { hasNextPage: false } },
       } });
+      if (request.query.includes("CoreLiveProjectIssues")) return response({ data: {
+        project: { issues: { nodes: [], pageInfo: { hasNextPage: false } }, },
+      } });
       if (request.query.includes("CoreLiveArchive")) {
         archived.push(request.variables.projectId);
         return response({ data: { projectArchive: { success: true } } });
@@ -184,16 +187,25 @@ test("stale reconciliation removes only projects and labels with another exact m
   assert.deepEqual(deletedLabels, ["stale-label"]);
 });
 
-test("Linear cleanup attempts the exact Project and label even when archive fails", async () => {
+test("Linear cleanup archives every Project issue and attempts every target after a failure", async () => {
   const mutations = [];
   const operator = createRunScopedLinearOperator({
     developmentToken: "development-secret",
     fetch: async (_url, init) => {
       const request = JSON.parse(init.body);
+      if (request.query.includes("CoreLiveProjectIssues")) return response({ data: {
+        project: { issues: {
+          nodes: [{ id: "root-1" }, { id: "work-1" }],
+          pageInfo: { hasNextPage: false },
+        } },
+      } });
       mutations.push({
-        operation: request.query.match(/CoreLive(?:Archive|DeleteLabel)/u)?.[0],
+        operation: request.query.match(/CoreLive(?:ArchiveIssue|Archive|DeleteLabel)/u)?.[0],
         variables: request.variables,
       });
+      if (request.query.includes("CoreLiveArchiveIssue")) {
+        return response({ data: { issueArchive: { success: request.variables.issueId !== "root-1" } } });
+      }
       if (request.query.includes("CoreLiveArchive")) {
         return response({ data: { projectArchive: { success: false } } });
       }
@@ -207,8 +219,10 @@ test("Linear cleanup attempts the exact Project and label even when archive fail
     projectId: "project-1",
     labelId: "label-1",
     marker: managedMarker("run-1"),
-  }), /linear_fixture_archive_failed/u);
+  }), /linear_fixture_issue_archive_failed/u);
   assert.deepEqual(mutations, [
+    { operation: "CoreLiveArchiveIssue", variables: { issueId: "root-1" } },
+    { operation: "CoreLiveArchiveIssue", variables: { issueId: "work-1" } },
     { operation: "CoreLiveArchive", variables: { projectId: "project-1" } },
     { operation: "CoreLiveDeleteLabel", variables: { labelId: "label-1" } },
   ]);

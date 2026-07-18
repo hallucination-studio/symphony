@@ -116,8 +116,8 @@ OAuth refresh token，以及把 Linear credential 传给 Conductor。单元或 c
 10. 观察 Root Gate 成功、本地 branch delivery、Root In Review 和
     `in-review` phase；
 11. 从交付 branch 读取目标文件并核对精确 marker；
-12. 终止全部子进程，只清理由本 run marker 管理的 Project、Project Label 和本地
-    资源；所有 cleanup 完成后才写入最终脱敏 evidence。
+12. 终止全部子进程，只清理由本 run marker 管理的 Project 内 issues、Project、
+    Project Label 和本地资源；所有 cleanup 完成后才写入最终脱敏 evidence。
 
 任何 startup、protocol、process exit、timeout、cleanup 或 secret audit 失败都使
 场景失败。不得以 dry-run、合成 observation、mock SDK 输出或“blocked artifact”
@@ -196,7 +196,8 @@ secret-free contract/unit tests 和 Desktop smoke，不运行 core live。受保
 - stdout/stderr、request/result、Profile files 和 evidence 必须用已知 secret
   canary 扫描；不得上传 `CODEX_HOME`、app data、repository 或原始 backend log；
 - 每步有 deadline，首个失败停止后续 mutation；异常文本归一化为稳定 code；
-- cleanup 必须幂等，只 archive/delete 精确匹配当前 managed marker 的资源；
+- cleanup 必须幂等，只 archive/delete 精确匹配当前 managed marker 的资源，并按
+  Project 内 issues → Project → Project Label 的顺序处理 Linear 依赖；
   `cleanup_completed` 是 live verdict 的必需证据，任一 cleanup 失败都会使其失败；
 - 下次运行在 mutation 前 reconcile 同一测试 authority 留下的 stale managed run；
 - runner 必须在成功和失败路径有界关闭 Podium、Conductor、Performer 和 IPC。
