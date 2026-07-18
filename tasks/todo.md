@@ -158,18 +158,18 @@ may adapt transport only; it must not implement Gateway or workflow behavior.
 
 **Acceptance criteria:**
 
-- [ ] A test run reaches a real Conductor `ready`/`unbound` observation through
+- [x] A test run reaches a real Conductor `ready`/`unbound` observation through
       generated framed contracts and production Podium handlers.
-- [ ] Linear token bytes are supplied only to Podium bootstrap and are absent
+- [x] Linear token bytes are supplied only to Podium bootstrap and are absent
       from Conductor arguments, environment, frames, logs, and evidence.
-- [ ] Startup, protocol, process-exit, timeout, and shutdown failures are
+- [x] Startup, protocol, process-exit, timeout, and shutdown failures are
       bounded and represented by sanitized stable codes.
 
 **Verification:**
 
-- [ ] Run focused harness and inherited-protocol tests.
-- [ ] Run `npm run test:e2e:runner`.
-- [ ] Negative controls reject imports from `@symphony/podium/e2e`, fake
+- [x] Run focused harness and inherited-protocol tests.
+- [x] Run `npm run test:e2e:runner`.
+- [x] Negative controls reject imports from `@symphony/podium/e2e`, fake
       `LinearClientInterface` implementations, and `e2e-main.ts`.
 
 **Dependencies:** Tasks 2, 3, and 4
