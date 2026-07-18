@@ -17,10 +17,12 @@ The repository is moving toward a Linear-authoritative architecture:
 
 ## Architecture
 
-[`docs/architecture/README.md`](docs/architecture/README.md) is the architecture
-entry point and the only design-document set maintained in this repository.
-These documents define the target architecture; they do not claim that every
-target has already been implemented and do not define a migration plan.
+[`docs/architecture/README.md`](docs/architecture/README.md) is the target
+architecture entry point and the only target-architecture design-document set
+maintained in this repository. These documents do not claim that every target
+has already been implemented and do not define a migration plan. Operational
+verification is documented separately in the
+[E2E testing strategy](docs/testing/e2e.md).
 
 Key documents:
 
