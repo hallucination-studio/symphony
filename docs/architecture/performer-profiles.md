@@ -301,7 +301,7 @@ activeProfileId
 Profile Create/Update/Activate不启动SDK，可以在业务Turn运行时提交。Login和Status需要
 启动Performer control process，必须等待Conductor的当前业务Turn结束。
 
-新Root首次claim时，把active Profile写入Root Managed Comment：
+新Root首次claim时，把active Profile写入Root Primary Status Comment：
 
 ```text
 performer_profile_id: <profile-id>
@@ -337,7 +337,7 @@ PerformerTurnCommand.performer_profile_id=<profile-id>
 PerformerTurnCommand.codex_turn_settings=<current settings>
 ```
 
-Result必须回显`performer_profile_id`。Result、Root Managed Comment、原始Command和
+Result必须回显`performer_profile_id`。Result、Root Primary Status Comment、原始Command和
 该Command解析出的Profile目录任一不匹配时，Conductor拒绝Result；校验不读取当前
 `activeProfileId`。
 
@@ -361,7 +361,7 @@ PerformerTurnUsageSnapshot
 `cached_input_tokens`是`input_tokens`的子集，`total_tokens`按SDK语义或
 `input_tokens + output_tokens`计算，不能把cached token重复相加。
 
-每个有效Turn Result可以携带`usage`。Conductor把Root累计值写入Root Managed Comment：
+每个有效Turn Result可以携带`usage`。Conductor把Root累计值写入Root Primary Status Comment：
 
 ```text
 usage_input_tokens

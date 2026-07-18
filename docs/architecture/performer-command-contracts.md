@@ -270,7 +270,7 @@ TurnCanceledResult
 
 Conductor对失败的处理只由这些封闭字段决定：
 
-- `retryable=true`：保留当前phase和业务节点，记录`last_error`并有界重试；
+- `retryable=true`：保留当前phase和业务节点，append对应error Timeline Event并有界重试；
 - `retryable=false`且存在可执行`action_required`：Root进入blocked，等待对应事实修复；
 - 当前Root事实下无法安全继续：Root进入failed，并给出取消或修改Root重新Plan的下一动作。
 

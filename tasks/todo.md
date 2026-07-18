@@ -44,6 +44,8 @@ status timestamp without introducing a second state store.
 
 ## Task 2: Replace the architecture source of truth
 
+**Status:** Complete.
+
 **Description:** Rewrite the approved target architecture around one Primary
 Status Comment, append-only Timeline Comments, and one live stdout event route.
 Remove language that permits process-exit event replay or treats Timeline data
@@ -51,19 +53,19 @@ as workflow state.
 
 **Acceptance criteria:**
 
-- [ ] Root architecture defines the Primary comment as the first
+- [x] Root architecture defines the Primary comment as the first
       Symphony-managed Root comment and records its Linear comment ID.
-- [ ] Performer Event architecture maps continuous events to ID-upsert and
+- [x] Performer Event architecture maps continuous events to ID-upsert and
       warning/error/completion to event-key append.
-- [ ] The glossary uses one unambiguous vocabulary and the docs explicitly
+- [x] The glossary uses one unambiguous vocabulary and the docs explicitly
       exclude observation comments from revisions, hashes, stale checks, and
       scheduling.
 
 **Verification:**
 
-- [ ] `npm run test:architecture`
-- [ ] `rg -n "event-path|turn-events|replay|last_error" docs/architecture`
-- [ ] Check all changed architecture links.
+- [x] `npm run test:architecture`
+- [x] `rg -n "event-path|turn-events|replay|last_error" docs/architecture`
+- [x] Check all changed architecture links.
 
 **Dependencies:** Task 1
 

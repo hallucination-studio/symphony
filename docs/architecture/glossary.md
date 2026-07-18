@@ -72,7 +72,9 @@ baseBranch
 | Root Run View | `RootRunView` | 从Linear、Git和Performer ID重建的当前内存视图 |
 | Root Phase | `RootPhase` | planning、awaiting-human、working、gating、delivering、in-review、blocked、failed |
 | Root Phase Label | `RootPhaseLabel` | Linear上的`symphony:run/*` Label |
-| Root Managed Comment | `RootManagedCommentSnapshot` | Root中唯一的Symphony comment，保存恢复和交付字段 |
+| Root Managed Comment | 领域概念 | Symphony在Root下管理的用户可见comment，分为Primary Status与Timeline两类 |
+| Root Primary Status Comment | `RootManagedCommentSnapshot` | claim时创建的第一条Symphony-managed Root comment；保存恢复字段并按comment ID实时upsert观察状态 |
+| Root Timeline Comment | `LinearCommentSnapshot` | warning、error、Turn complete等离散事件append出的受管comment，以`turn_id:sequence`去重且不进入`RootRunView`工作流事实 |
 | Root Action | `RootAction` | Conductor计算出的closed scheduling decision |
 | Next Action View | `NextActionView` | Desktop向用户展示的下一动作，不是Workflow命令 |
 
@@ -183,10 +185,13 @@ LinearMutationCommand
   | ReorderIssueNodeCommand
   | ReplaceRootPhaseLabelCommand
   | UpsertRootManagedCommentCommand
+  | ProjectRootCommentCommand
 ```
 
 不使用含义不完整的`RootProjectionCommand`或只有字符串variant的
 `LinearIssueMutationCommand`作为public contract。
+`ProjectRootCommentCommand`是closed exclusive union：`comment_id` variant upsert
+Root Primary Status Comment，`event_key` variant append Root Timeline Comment。
 
 ## 8. Conductor模块与能力
 
@@ -263,8 +268,10 @@ PerformerProfileProtocolHandlerImpl
 | Turn Started Event | `PerformerTurnStartedEvent` | Performer Turn已经开始 |
 | Progress Event | `PerformerProgressEvent` | Provider-neutral进度阶段 |
 | Warning Event | `PerformerWarningRaisedEvent` | 需要记录的脱敏warning |
+| Error Event | `PerformerErrorRaisedEvent` | 需要用户关注的脱敏Turn error观察，不代替`TurnFailedResult` |
 | Usage Updated Event | `PerformerUsageUpdatedEvent` | 当前Turn的best-effort token usage观察 |
 | Heartbeat Event | `PerformerHeartbeatEvent` | 当前Turn仍存活 |
+| Turn Completed Event | `PerformerTurnCompletedEvent` | closed Result发布后的Turn completion观察，不表达Root完成 |
 | Provider Backend | `ProviderBackendInterface` | Performer内部Provider能力边界 |
 | Codex Backend | `CodexBackendImpl` | 当前唯一Provider实现 |
 
@@ -328,7 +335,7 @@ CodexLoginFailedEvent
 | Remote Branch Delivery | `RemoteBranchDeliveryResult` | 已push但没有PR |
 | Local Branch Delivery | `LocalBranchDeliveryResult` | 无法push时保留local branch |
 
-不使用`Delivery Receipt`；交付事实来自Git和Root Managed Comment。
+不使用`Delivery Receipt`；交付事实来自Git和Root Primary Status Comment。
 
 ## 11. Podium与Desktop
 

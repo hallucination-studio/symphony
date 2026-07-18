@@ -38,7 +38,8 @@ Conductor TypeScript daemon
 - Root Run不是本地Aggregate，而是一个Root Issue的可重建运行生命周期；
 - Linear Project上的Conductor Project Label用于解析Resolved Conductor Project；
 - Root上的Root Phase Label保存`RootPhase`；
-- Root Managed Comment保存opaque `performer_id`、最新已Plan的Root input hash和交付信息；
+- Root Primary Status Comment保存opaque `performer_id`、最新已Plan的Root input hash、
+  交付信息和最新Turn观察；warning、error和Turn completion append为Root Timeline Comment；
 - Work Managed Metadata保存最新已完成的Work input hash；Root变化重做Plan，Work Leaf变化只重跑该Work；
 - 一个Root对应一个deterministic delivery branch和一个worktree；
 - Work Group只负责分组，只有最深层Work Leaf执行；
@@ -65,14 +66,14 @@ Conductor TypeScript daemon
 | Root工作流结构 | Linear Issue Tree | Conductor |
 | 当前执行节点 | 唯一`In Progress`叶子节点 | Conductor |
 | Workflow Node kind | Managed Marker或Work Managed Metadata；无Managed Marker的用户Sub Issue默认Work Node | Conductor |
-| Provider Conversation | Root Managed Comment中的`performer_id` | Performer |
-| Root使用的Profile | Root Managed Comment中的`performer_profile_id` | Conductor |
+| Provider Conversation | Root Primary Status Comment中的`performer_id` | Performer |
+| Root使用的Profile | Root Primary Status Comment中的`performer_profile_id` | Conductor |
 | Profile定义与active Profile | Conductor `performer-profiles/profiles.json` | Conductor |
 | Codex auth/session/config state | Profile独立`CODEX_HOME` | Codex SDK / Performer |
-| 最新已消费需求位置 | Root Managed Comment与Work Managed Metadata中的覆盖式input hash | Conductor |
-| Token usage | Root Managed Comment中的累计SDK usage | Conductor |
+| 最新已消费需求位置 | Root Primary Status Comment与Work Managed Metadata中的覆盖式input hash | Conductor |
+| Token usage | Root Primary Status Comment中的累计SDK usage | Conductor |
 | 代码与已完成修改 | Git branch/worktree/commits | Conductor |
-| Root Delivery | Git remote、`gh`与Root Managed Comment | Conductor |
+| Root Delivery | Git remote、`gh`与Root Primary Status Comment | Conductor |
 
 Conductor内存中的`RootRunView`、`LinearIssueTreeSnapshot`和调度结果都可以丢弃。
 下一轮重新读取Linear和Git即可重建。
@@ -131,7 +132,7 @@ Conductor重启：
 read conductor identity + repository from Podium
 -> resolve the unique Project carrying its Conductor Project Label
 -> fetch candidate Roots through LinearGatewayInterface
--> read Root Phase Label + Root Managed Comment
+-> read Root Phase Label + Root Primary Status Comment
 -> resolve performer_profile_id to its CODEX_HOME
 -> fetch complete Issue Tree with parent/order/state
 -> derive branch/worktree path from Root identity

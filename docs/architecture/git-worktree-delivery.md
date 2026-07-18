@@ -41,7 +41,7 @@ Conductor拥有：
 - branch/worktree命名、创建、发现和清理；
 - Work完成后的commit；
 - push、`gh`检查和PR创建；
-- Root Delivery信息写回Root Managed Comment。
+- Root Delivery信息写回Root Primary Status Comment。
 
 Performer只拥有给定worktree中的文件修改。Performer不得：
 
@@ -67,7 +67,7 @@ Worktree路径固定从Root issue ID推导。名称不使用Issue title或Commen
 1. 验证Conductor Binding中的Repository Context和base branch；
 2. 从base branch创建deterministic run branch；
 3. 为该branch创建worktree；
-4. 把branch写入Root Managed Comment；
+4. 把branch写入Root Primary Status Comment；
 5. 才启动Plan Turn。
 
 重启时不读取workspace receipt：

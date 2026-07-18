@@ -103,7 +103,7 @@ local optimistic commit。`UpdatePerformerProfileCommand`不能修改`backendKin
 
 ### Conductor-Performer Protocol
 
-通过request/result文件和可选Event stream传输三种Turn：
+通过request/result文件和唯一stdout Event stream传输三种Turn：
 
 ```text
 PlanTurnCommand
@@ -113,7 +113,8 @@ RootGateTurnCommand
 
 Command、Result、`TurnCanceledResult`和Envelope的唯一事实源是
 [Performer Turn Command与Result契约](performer-command-contracts.md)。Event的唯一
-事实源是[Performer Event设计](performer-events.md)。
+事实源是[Performer Event设计](performer-events.md)。Turn stdout只允许newline-delimited
+closed Event frames；不使用Event文件、Result旁路events数组或退出后批量回放。
 
 Profile登录和status使用独立`PerformerProfileControlProtocol`：
 
@@ -154,7 +155,7 @@ LinearMutationResult
 `expected_project_id`，作为Resolved Conductor Project的远端precondition；目标架构
 不创建Conductor Binding版本对象。
 
-每个修改已有Issue、Comment或Label的Command还必须携带它实际依赖的远端
+每个修改已有Issue、Comment或Label的业务Command还必须携带它实际依赖的远端
 precondition：
 
 ```text
@@ -168,6 +169,17 @@ expected_managed_marker?
 Gateway只在precondition仍成立时执行mutation；不成立返回
 `linear_precondition_conflict`，Conductor丢弃旧Snapshot并重新计算。用户把Root或Work
 置为Done/Canceled、修改parent或更新内容后，旧Command不能覆盖该变化。
+
+Root observation comment projection是明确例外，不依赖Root或comment revision：
+
+- 带`comment_id`的variant只upsert Root Primary Status Comment；Podium按ID读取comment，
+  验证它属于目标Root，且旧body与新body拥有同一Primary managed identity；
+- 不带`comment_id`的variant append Root Timeline Comment，必须带
+  `event_key = turn_id:sequence`和匹配的hidden marker；
+- 同event key和同body的read-back返回`already_applied`，不创建第二条comment。
+
+两种variant仍验证Resolved Conductor Project。它们不刷新Root snapshot，不进入
+workflow revision或stale Result判断。
 
 create Command使用稳定Managed Marker作为幂等键。timeout或连接中断后先按Managed Marker
 read-back，确认远端不存在时才重试create。

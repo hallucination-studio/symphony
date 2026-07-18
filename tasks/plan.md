@@ -151,7 +151,7 @@ Task 5 + Task 7
 ### Phase 1: Define one model
 
 - [x] Task 1: Persist Primary Status Turn observation fields.
-- [ ] Task 2: Replace the architecture text with the two comment modes and one
+- [x] Task 2: Replace the architecture text with the two comment modes and one
       live event route.
 - [ ] Task 3: Close and generate the Performer Event and Root comment mutation
       contracts.

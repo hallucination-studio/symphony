@@ -33,7 +33,7 @@ performer_id: opaque string
 约束：
 
 - ID由Backend产生；
-- Root Managed Comment保存；
+- Root Primary Status Comment保存；
 - Conductor只转发；
 - Provider-specific parsing只在对应`*BackendImpl`；
 - ID必须是identifier，不得包含credential；
@@ -168,9 +168,15 @@ Event是best-effort：
 - Turn started；
 - progress stage；
 - warning；
-- heartbeat。
+- sanitized error；
+- usage checkpoint；
+- heartbeat；
+- closed Result发布后的Turn completion。
 
 Event丢失不改变Result。Performer不因Event transport失败而停止Provider Turn。
+Turn stdout是唯一Event transport，并只输出newline-delimited closed Event frames；stderr
+承载脱敏诊断，Result文件承载唯一业务结果。Performer不写Event文件，也不在Result旁路
+返回events数组。
 
 Profile control使用独立closed Event：
 

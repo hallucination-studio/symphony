@@ -81,8 +81,9 @@ V1不追求多Root公平性、并行Turn或第二Provider。
 - 通过`PerformerProfileControlInterface`启动SDK登录/status；
 - full-read一个Root及其完整Tree；
 - 每轮按`symphony:conductor/<short-hash>`解析当前Project；
-- 维护一个Root Phase Label和一条Root Managed Comment；
-- 使用Root Managed Comment和Work Managed Metadata中的覆盖式input hash识别内容变化；
+- 维护一个Root Phase Label和一条Root Primary Status Comment；离散Turn事件append
+  Root Timeline Comments；
+- 使用Root Primary Status Comment和Work Managed Metadata中的覆盖式input hash识别内容变化；
 - depth-first ordered leaf traversal；
 - 每次一个Python Performer Turn；
 - deterministic branch/worktree；
@@ -108,7 +109,8 @@ V1不追求多Root公平性、并行Turn或第二Provider。
 - Work Nodes/Human Nodes都使用Sub Issue表达；
 - Root Gate不创建Issue；
 - Plan Approval Node使用受管Human Node表达；
-- branch、PR、`performer_profile_id`、`performer_id`、usage和错误写Root Managed Comment；
+- branch、PR、`performer_profile_id`、`performer_id`和usage写Root Primary Status
+  Comment；warning、error和Turn completion append Root Timeline Comments；
 - Work最新完成input hash写该Work Managed Metadata。
 
 ## 5. V1明确不做
@@ -196,7 +198,8 @@ V1架构只有在以下事实可被证明时才算闭环：
 
 1. Linear Token只在Podium，Conductor通过Gateway完成Linear读写；
 2. Conductor Project Label唯一解析到Resolved Conductor Project，Label变化后下个Turn边界切换Project；
-3. 一个Root只产生一个Root Managed Comment、Root Phase Label、branch和worktree；
+3. 一个Root只产生一个Root Primary Status Comment、Root Phase Label、branch和worktree；
+   Timeline Comments按`turn_id:sequence`append且不重复；
 4. Plan生成的嵌套Tree与Linear parent/order一致；
 5. 未批准Plan不会执行Work；
 6. 用户新增或重排Sub Issue后，下一个Turn使用最新Tree；
