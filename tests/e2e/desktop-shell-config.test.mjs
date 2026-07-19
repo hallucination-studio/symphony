@@ -83,3 +83,10 @@ test("quality workflow uses the repository-pinned Rust toolchain", async () => {
   assert.equal(workflow.match(/dtolnay\/rust-toolchain@1\.91\.0/gu)?.length, 2);
   assert.doesNotMatch(workflow, /dtolnay\/rust-toolchain@stable/u);
 });
+
+test("repository owns the Rust formatting policy used by quality", async () => {
+  const policy = await readFile("rustfmt.toml", "utf8");
+  assert.match(policy, /^edition = "2021"$/mu);
+  assert.match(policy, /^max_width = 100$/mu);
+  assert.match(policy, /^use_small_heuristics = "Max"$/mu);
+});
