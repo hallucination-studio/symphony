@@ -3,7 +3,7 @@ import test from "node:test";
 import {
   findArchitectureViolations,
   inspectAuthoredFile,
-} from "./v1-guards.mjs";
+} from "./roadmap-guards.mjs";
 
 const root = process.cwd();
 
@@ -18,7 +18,7 @@ function assertViolationCases(cases) {
   }
 }
 
-test("authored source and schemas obey the static V1 guards", async () => {
+test("authored source and schemas obey the static Roadmap 2 guards", async () => {
   assert.deepEqual(await findArchitectureViolations(root), []);
 });
 
@@ -59,12 +59,13 @@ test("negative controls reject SDK ownership and cross-role imports", () => {
   assertViolationCases(cases);
 });
 
-test("negative controls reject Conductor persistence and future scheduling", () => {
+test("negative controls reject Conductor persistence", () => {
   const cases = [
     ["apps/conductor/src/workflow-db.ts", "export const database = true;", "conductor_persistence"],
     ["apps/conductor/src/main.ts", 'import Database from "better-sqlite3";', "conductor_persistence"],
-    ["apps/conductor/src/main.ts", "class LinearPriorityRootSchedulingPolicyImpl {}", "future_scope"],
-    ["apps/conductor/src/main.ts", "class BlockerSchedulingPolicyImpl {}", "future_scope"],
+    ["apps/conductor/src/main.ts", "class RootCheckpoint {}", "conductor_persistence"],
+    ["apps/conductor/src/main.ts", "class DispatchQueue {}", "conductor_persistence"],
+    ["apps/conductor/src/main.ts", "class OperationJournal {}", "conductor_persistence"],
     [
       "apps/conductor/src/main.ts",
       'readFile(path.join(process.env.CODEX_HOME, "auth.json"));',
@@ -78,6 +79,27 @@ test("negative controls reject Conductor persistence and future scheduling", () 
   ];
 
   assertViolationCases(cases);
+});
+
+test("approved Roadmap 2 scheduling vocabulary is inside the active boundary", () => {
+  const cases = [
+    [
+      "apps/conductor/src/root-scheduling/internal/LinearPriorityRootSchedulingPolicyImpl.ts",
+      "export class LinearPriorityRootSchedulingPolicyImpl {}",
+    ],
+    [
+      "apps/conductor/src/root-scheduling/internal/BlockerSchedulingPolicyImpl.ts",
+      "export class BlockerSchedulingPolicyImpl {}",
+    ],
+    [
+      "apps/conductor/src/root-discovery/MultiRootDiscoveryPolicy.ts",
+      "export class MultiRootDiscoveryPolicy {}",
+    ],
+  ];
+
+  for (const [file, source] of cases) {
+    assert.deepEqual(inspectAuthoredFile(file, source), []);
+  }
 });
 
 test("negative controls reject browser secrets and arbitrary provider config", () => {
@@ -102,7 +124,7 @@ test("negative controls reject browser secrets and arbitrary provider config", (
   assertViolationCases(cases);
 });
 
-test("negative controls reject every explicitly excluded V1 product concept", () => {
+test("negative controls reject every concept outside the Roadmap 2 boundary", () => {
   const names = [
     "ParallelPerformerLane",
     "PlanRevisionStore",
@@ -129,6 +151,12 @@ test("negative controls reject every explicitly excluded V1 product concept", ()
       "future_product_scope",
     ]),
   );
+  const violation = inspectAuthoredFile(
+    "apps/conductor/src/bad.ts",
+    "class ParallelPerformerLane {}",
+  ).find(({ code }) => code === "future_product_scope");
+  assert.match(violation?.summary ?? "", /Roadmap 2/u);
+  assert.doesNotMatch(violation?.summary ?? "", /V1/u);
 });
 
 test("safe explanatory vocabulary does not trigger implementation guards", () => {

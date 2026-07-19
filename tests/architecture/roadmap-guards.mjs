@@ -183,27 +183,16 @@ export function inspectAuthoredFile(file, source) {
           specifier,
         ),
       ) ||
-      /new\s+(?:Database|Sqlite|Queue|Journal|Checkpoint)\b/.test(source)
-    ) {
-      violations.push(
-        violation(
-          normalizedFile,
-          "conductor_persistence",
-          "Conductor must remain database, queue, checkpoint, and journal free",
-        ),
-      );
-    }
-    if (
-      /(?:priority|blocker|fairness|multi[-_]?root)/i.test(normalizedFile) ||
-      /(?:class|interface|type|function|const)\s+\w*(?:PriorityRootScheduling|BlockerScheduling|FairRootScheduling|MultiRootScheduling)\w*/.test(
+      /new\s+(?:Database|Sqlite|Queue|Journal|Checkpoint)\b/.test(source) ||
+      /(?:class|interface|type|function|const)\s+\w*(?:Database|Sqlite|Queue|Journal|Checkpoint)\w*/.test(
         source,
       )
     ) {
       violations.push(
         violation(
           normalizedFile,
-          "future_scope",
-          "V2+ scheduling vocabulary is forbidden in V1 implementation",
+          "conductor_persistence",
+          "Conductor must remain database, queue, checkpoint, and journal free",
         ),
       );
     }
@@ -297,7 +286,7 @@ export function inspectAuthoredFile(file, source) {
       violation(
         normalizedFile,
         "future_product_scope",
-        "V1 implementation cannot prebuild explicitly excluded product concepts",
+        "Roadmap 2 implementation cannot prebuild concepts outside the active boundary",
       ),
     );
   }
