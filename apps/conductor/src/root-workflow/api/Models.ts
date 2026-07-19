@@ -5,6 +5,19 @@ export type LinearIssueState =
   | "Done"
   | "Canceled";
 
+export type LinearPriority =
+  | "urgent"
+  | "high"
+  | "normal"
+  | "low"
+  | "no_priority";
+
+export interface LinearBlockerSnapshot {
+  sourceIssueId: string;
+  targetIssueId: string;
+  targetState: LinearIssueState;
+}
+
 export type RootPhase =
   | "planning"
   | "awaiting-human"
@@ -22,6 +35,16 @@ export interface RootIssue {
   title: string;
   description: string;
   updatedAt: string;
+}
+
+export interface DiscoveredRoot extends RootIssue {
+  projectId: string;
+  parentIssueId: string | null;
+  isDelegatedToSymphony: boolean;
+  managedConductorId?: string;
+  priority: LinearPriority;
+  order: number;
+  blockers: LinearBlockerSnapshot[];
 }
 
 export interface RootManagedComment {

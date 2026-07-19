@@ -1,6 +1,7 @@
-import { discoverV1Root } from "../root-discovery/SingleRootDiscoveryPolicy.js";
+import { discoverCurrentRoots } from "../root-discovery/MultiRootDiscoveryPolicy.js";
 import {
   computeRootAction,
+  type DiscoveredRoot,
   type RootRunView,
 } from "../root-workflow/api/index.js";
 
@@ -10,14 +11,7 @@ export interface RuntimeGateway {
     | { kind: "unbound" | "ambiguous" | "label_conflict" }
   >;
   listRoots(projectId: string): Promise<
-    Array<
-      RootRunView["root"] & {
-        projectId: string;
-        parentIssueId: string | null;
-        isDelegatedToSymphony: boolean;
-        managedConductorId?: string;
-      }
-    >
+    DiscoveredRoot[]
   >;
   reconstruct(rootId: string): Promise<RootRunView>;
 }
@@ -52,22 +46,38 @@ export class ConductorRuntime {
         });
         return;
       }
-      const roots = await this.gateway.listRoots(project.projectId);
-      const selection = discoverV1Root({
-        project,
-        roots,
+      const roots = discoverCurrentRoots({
+        projectId: project.projectId,
+        roots: await this.gateway.listRoots(project.projectId),
         conductorId: this.conductorId,
       });
-      if (selection.kind === "conductor_wait") {
+      const owned = roots.filter(
+        ({ managedConductorId }) => managedConductorId === this.conductorId,
+      );
+      let selected: DiscoveredRoot | undefined;
+      if (owned.length === 1) {
+        selected = owned[0];
+      } else if (roots.length === 1) {
+        selected = roots[0];
+      }
+      if (!selected) {
+        let reason: "multiple_active_roots" | "no_eligible_root" | "multiple_eligible_roots";
+        if (owned.length > 1) {
+          reason = "multiple_active_roots";
+        } else if (roots.length === 0) {
+          reason = "no_eligible_root";
+        } else {
+          reason = "multiple_eligible_roots";
+        }
         await this.reporter.report({
-          status: selection.reason === "no_eligible_root" ? "ready" : "blocked",
-          ...(selection.reason === "no_eligible_root"
+          status: reason === "no_eligible_root" ? "ready" : "blocked",
+          ...(reason === "no_eligible_root"
             ? {}
-            : { sanitizedReason: selection.reason }),
+            : { sanitizedReason: reason }),
         });
         return;
       }
-      const view = await this.gateway.reconstruct(selection.rootId);
+      const view = await this.gateway.reconstruct(selected.issueId);
       const action = computeRootAction(view);
       await this.executor.execute(view, action);
       await this.reporter.report({

@@ -1,7 +1,9 @@
 import type { RuntimeGateway } from "../../composition/ConductorRuntime.js";
 import type { PerformerProfileStoreInterface } from "../../performer-profiles/api/PerformerProfileStoreInterface.js";
 import type {
+  DiscoveredRoot,
   LinearIssueState,
+  LinearPriority,
   RootPhase,
   RootRunView,
   WorkflowNode,
@@ -98,38 +100,63 @@ export class PodiumLinearGatewayClientImpl implements RuntimeGateway {
 
   async listRoots(projectId: string) {
     this.#assertProject(projectId);
-    const response = record(
-      await this.#request({
-        kind: "list_root_issues",
-        project_id: projectId,
-        page: { limit: 250 },
-      }),
-    );
-    if (response.kind !== "root_issues_page") throw protocolError(response);
-    const items = array(response.items, "linear_roots_invalid");
-    const roots = [];
-    for (const value of items) {
-      const item = record(value);
-      const issue = wireIssue(item.issue);
-      const state = await this.#managedState(projectId, issue.issue_id);
-      roots.push({
-        issueId: issue.issue_id,
-        identifier: issue.identifier,
-        state: issue.state,
-        title: issue.title,
-        description: issue.description,
-        updatedAt: issue.updated_at,
-        projectId,
-        parentIssueId: null,
-        isDelegatedToSymphony: boolean(
-          item.is_delegated_to_symphony,
-          "linear_delegation_invalid",
-        ),
-        ...(state.managedComment
-          ? { managedConductorId: state.managedComment.conductorId }
-          : {}),
-      });
-    }
+    const roots: DiscoveredRoot[] = [];
+    const cursors = new Set<string>();
+    let cursor: string | undefined;
+    do {
+      const response = record(
+        await this.#request({
+          kind: "list_root_issues",
+          project_id: projectId,
+          page: {
+            limit: 250,
+            ...(cursor ? { cursor } : {}),
+          },
+        }),
+      );
+      if (response.kind !== "root_issues_page") throw protocolError(response);
+      const items = array(response.items, "linear_roots_invalid");
+      for (const value of items) {
+        const item = record(value);
+        const issue = wireIssue(item.issue);
+        const state = await this.#managedState(projectId, issue.issue_id);
+        roots.push({
+          issueId: issue.issue_id,
+          identifier: issue.identifier,
+          state: issue.state,
+          title: issue.title,
+          description: issue.description,
+          updatedAt: issue.updated_at,
+          projectId: issue.project_id,
+          parentIssueId: issue.parent_issue_id ?? null,
+          isDelegatedToSymphony: boolean(
+            item.is_delegated_to_symphony,
+            "linear_delegation_invalid",
+          ),
+          priority: linearPriority(item.priority),
+          order: issue.order,
+          blockers: array(item.blockers, "linear_blockers_invalid").map(
+            (blocker) => linearBlocker(issue.issue_id, blocker),
+          ),
+          ...(state.managedComment
+            ? { managedConductorId: state.managedComment.conductorId }
+            : {}),
+        });
+        if (roots.length > 512) throw new Error("linear_roots_too_many");
+      }
+      const pageInfo = record(response.page_info);
+      const hasNextPage = boolean(
+        pageInfo.has_next_page,
+        "linear_page_info_invalid",
+      );
+      cursor = hasNextPage
+        ? string(pageInfo.end_cursor, "linear_page_cursor_missing")
+        : undefined;
+      if (cursor) {
+        if (cursors.has(cursor)) throw new Error("linear_page_cursor_repeated");
+        cursors.add(cursor);
+      }
+    } while (cursor);
     return roots;
   }
 
@@ -384,6 +411,52 @@ function string(value: JsonValue | undefined, code: string): string {
 function boolean(value: JsonValue | undefined, code: string): boolean {
   if (typeof value !== "boolean") throw new Error(code);
   return value;
+}
+
+function linearPriority(value: JsonValue | undefined): LinearPriority {
+  if (
+    value === "urgent" ||
+    value === "high" ||
+    value === "normal" ||
+    value === "low" ||
+    value === "no_priority"
+  ) {
+    return value;
+  }
+  throw new Error("linear_priority_invalid");
+}
+
+function linearBlocker(rootIssueId: string, value: JsonValue) {
+  const blocker = record(value);
+  const sourceIssueId = string(
+    blocker.source_issue_id,
+    "linear_blocker_source_invalid",
+  );
+  const targetIssueId = string(
+    blocker.target_issue_id,
+    "linear_blocker_target_invalid",
+  );
+  if (sourceIssueId !== rootIssueId || targetIssueId === rootIssueId) {
+    throw new Error("linear_blocker_relation_invalid");
+  }
+  return {
+    sourceIssueId,
+    targetIssueId,
+    targetState: linearIssueState(blocker.target_state),
+  };
+}
+
+function linearIssueState(value: JsonValue | undefined): LinearIssueState {
+  if (
+    value === "Todo" ||
+    value === "In Progress" ||
+    value === "In Review" ||
+    value === "Done" ||
+    value === "Canceled"
+  ) {
+    return value;
+  }
+  throw new Error("linear_issue_state_invalid");
 }
 
 function rootPhase(value: JsonValue): RootPhase {

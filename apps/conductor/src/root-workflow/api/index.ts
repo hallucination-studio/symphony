@@ -13,4 +13,4 @@ export {
   activeWorkflowNodes,
   selectWorkflowLeaf,
 } from "../../linear-tree/internal/LinearDepthFirstTreeTraversalPolicy.js";
-export { discoverV1Root } from "../../root-discovery/SingleRootDiscoveryPolicy.js";
+export { discoverCurrentRoots } from "../../root-discovery/MultiRootDiscoveryPolicy.js";

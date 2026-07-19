@@ -5,7 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import {
   computeRootAction,
-  discoverV1Root,
+  discoverCurrentRoots,
   hashRootInput,
   hashWorkInput,
   parseHumanDescription,
@@ -185,28 +185,36 @@ test("Tree traversal selects the first deepest incomplete leaf in Linear order",
   );
 });
 
-test("V1 Root discovery resumes one owned Root or claims exactly one candidate", () => {
+test("Root discovery returns every owned or delegated current Root without selecting one", () => {
   const candidate = {
     ...root,
     projectId: "project-1",
     parentIssueId: null,
     isDelegatedToSymphony: true,
+    priority: "normal" as const,
+    order: 1,
+    blockers: [],
   };
   assert.deepEqual(
-    discoverV1Root({
-      project: { kind: "resolved", projectId: "project-1" },
-      roots: [candidate],
+    discoverCurrentRoots({
+      projectId: "project-1",
+      roots: [
+        candidate,
+        { ...candidate, issueId: "root-owned", isDelegatedToSymphony: false, managedConductorId: "conductor-1" },
+        { ...candidate, issueId: "root-other-project", projectId: "project-2" },
+        { ...candidate, issueId: "root-descendant", parentIssueId: "parent-1" },
+        { ...candidate, issueId: "root-done", state: "Done" },
+        { ...candidate, issueId: "root-undelegated", isDelegatedToSymphony: false },
+        { ...candidate, issueId: "root-owned-elsewhere", managedConductorId: "conductor-2" },
+      ],
       conductorId: "conductor-1",
     }),
-    { kind: "claim_root", rootId: "root-1" },
-  );
-  assert.deepEqual(
-    discoverV1Root({
-      project: { kind: "resolved", projectId: "project-1" },
-      roots: [candidate, { ...candidate, issueId: "root-2" }],
-      conductorId: "conductor-1",
-    }),
-    { kind: "conductor_wait", reason: "multiple_eligible_roots" },
+    [candidate, {
+      ...candidate,
+      issueId: "root-owned",
+      isDelegatedToSymphony: false,
+      managedConductorId: "conductor-1",
+    }],
   );
 });
 

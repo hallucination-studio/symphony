@@ -196,12 +196,21 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
     gateway: LinearGatewayProtocolHandlerImpl,
     body: Body,
   ): Promise<JsonValue> {
-    const items = await gateway.listAllRootIssues(
-      requiredString(body.project_id, "linear_project_id_missing"),
-    );
+    const pageRequest = recordValue(body.page, "linear_page_missing");
+    const limit = requiredNumber(pageRequest.limit, "linear_page_limit_missing");
+    if (!Number.isInteger(limit) || limit < 1 || limit > 250) {
+      throw new Error("linear_page_limit_invalid");
+    }
+    const page = await gateway.listRootIssuesPage({
+      projectId: requiredString(body.project_id, "linear_project_id_missing"),
+      limit,
+      ...(typeof pageRequest.cursor === "string"
+        ? { cursor: pageRequest.cursor }
+        : {}),
+    });
     return {
       kind: "root_issues_page",
-      items: items.map((root) => ({
+      items: page.items.map((root) => ({
         issue: issueSnapshot(root.issue),
         is_delegated_to_symphony: root.isDelegatedToSymphony,
         priority: root.priority,
@@ -211,7 +220,12 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
           target_state: blocker.targetState,
         })),
       })),
-      page_info: { has_next_page: false },
+      page_info: {
+        has_next_page: page.pageInfo.hasNextPage,
+        ...(page.pageInfo.endCursor
+          ? { end_cursor: page.pageInfo.endCursor }
+          : {}),
+      },
     };
   }
 

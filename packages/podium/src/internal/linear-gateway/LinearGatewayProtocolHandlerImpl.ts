@@ -142,29 +142,41 @@ export class LinearGatewayProtocolHandlerImpl {
   }
 
   async listAllRootIssues(projectId: string): Promise<RootIssueValue[]> {
-    const list = this.client.listRootIssues;
     const items: RootIssueValue[] = [];
     let cursor: string | undefined;
     do {
-      const page = await list.call(this.client, {
+      const page = await this.listRootIssuesPage({
         projectId,
         ...(cursor ? { cursor } : {}),
         limit: 250,
       });
-      for (const item of page.items) {
-        validateIssue(item.issue, projectId);
-        if (item.issue.parentIssueId !== undefined || item.issue.depth !== 0) {
-          throw new Error("linear_root_shape_invalid");
-        }
-        validateRootScheduling(item);
-        items.push(item);
-        if (items.length > MAX_ROOTS) {
-          throw new Error("linear_root_collection_too_large");
-        }
+      items.push(...page.items);
+      if (items.length > MAX_ROOTS) {
+        throw new Error("linear_root_collection_too_large");
       }
       cursor = nextCursor(page.pageInfo);
     } while (cursor);
     return items;
+  }
+
+  async listRootIssuesPage(input: {
+    projectId: string;
+    cursor?: string;
+    limit: number;
+  }) {
+    const page = await this.client.listRootIssues(input);
+    if (page.items.length > input.limit) {
+      throw new Error("linear_root_page_too_large");
+    }
+    for (const item of page.items) {
+      validateIssue(item.issue, input.projectId);
+      if (item.issue.parentIssueId !== undefined || item.issue.depth !== 0) {
+        throw new Error("linear_root_shape_invalid");
+      }
+      validateRootScheduling(item);
+    }
+    nextCursor(page.pageInfo);
+    return page;
   }
 
   async getCompleteIssueTree(

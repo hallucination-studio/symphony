@@ -270,7 +270,7 @@ test("gateway reads fully paginate and reject cross-project issue data", async (
   await assert.rejects(invalid.listAllRootIssues("project-1"), /linear_project_mismatch/);
 });
 
-test("Root scheduling gateway maps every SDK page without making eligibility decisions", async () => {
+test("Root scheduling gateway preserves each bounded SDK page without making eligibility decisions", async () => {
   const services = await createConductorServices({
     async listRootIssues({ cursor }) {
       return cursor
@@ -306,61 +306,30 @@ test("Root scheduling gateway maps every SDK page without making eligibility dec
     },
   });
 
-  const result = await services.handle({
+  const first = await services.handle({
     kind: "list_root_issues",
     project_id: "project-1",
     page: { limit: 250 },
   });
-
-  assert.deepEqual(result, {
-    kind: "root_issues_page",
-    items: [
-      {
-        issue: {
-          issue_id: "root-1",
-          identifier: "ROOT-1",
-          project_id: "project-1",
-          state: "Todo",
-          order: 12.5,
-          depth: 0,
-          title: "Title",
-          description: "",
-          updated_at: "2026-07-16T00:00:00Z",
-        },
-        is_delegated_to_symphony: true,
-        priority: "urgent",
-        blockers: [
-          {
-            source_issue_id: "root-1",
-            target_issue_id: "blocker-done",
-            target_state: "Done",
-          },
-          {
-            source_issue_id: "root-1",
-            target_issue_id: "blocker-active",
-            target_state: "In Progress",
-          },
-        ],
-      },
-      {
-        issue: {
-          issue_id: "root-2",
-          identifier: "ROOT-2",
-          project_id: "project-1",
-          state: "Todo",
-          order: 1,
-          depth: 0,
-          title: "Title",
-          description: "",
-          updated_at: "2026-07-16T00:00:00Z",
-        },
-        is_delegated_to_symphony: false,
-        priority: "low",
-        blockers: [],
-      },
-    ],
-    page_info: { has_next_page: false },
+  const second = await services.handle({
+    kind: "list_root_issues",
+    project_id: "project-1",
+    page: { limit: 250, cursor: "next" },
   });
+
+  assert.equal(first.kind, "root_issues_page");
+  assert.equal(first.items.length, 1);
+  assert.equal(first.items[0].priority, "urgent");
+  assert.equal(first.items[0].issue.order, 12.5);
+  assert.deepEqual(first.items[0].blockers.map(({ target_state }) => target_state), [
+    "Done",
+    "In Progress",
+  ]);
+  assert.deepEqual(first.page_info, { has_next_page: true, end_cursor: "next" });
+  assert.equal(second.items.length, 1);
+  assert.equal(second.items[0].issue.issue_id, "root-2");
+  assert.equal(second.items[0].priority, "low");
+  assert.deepEqual(second.page_info, { has_next_page: false });
 });
 
 test("Root scheduling gateway rejects malformed closed values", async () => {

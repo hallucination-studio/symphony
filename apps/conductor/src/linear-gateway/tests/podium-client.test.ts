@@ -30,7 +30,12 @@ test("Gateway reconstructs Root ownership, phase, Profile, and managed Work", as
         if (kind === "list_root_issues") {
           return {
             kind: "root_issues_page",
-            items: [{ issue: root(), is_delegated_to_symphony: true }],
+            items: [{
+              issue: root(),
+              is_delegated_to_symphony: true,
+              priority: "normal",
+              blockers: [],
+            }],
             page_info: { has_next_page: false },
           };
         }
@@ -86,6 +91,91 @@ test("Gateway reconstructs Root ownership, phase, Profile, and managed Work", as
     requests.map(({ kind }) => kind),
     ["resolve_conductor_project", "list_root_issues", "get_issue_tree", "get_issue_tree"],
   );
+});
+
+test("Root discovery consumes 251 Roots across pages and discards the cursor", async () => {
+  const listCursors: Array<unknown> = [];
+  const gateway = new PodiumLinearGatewayClientImpl(
+    "abc123",
+    {
+      async request({ body }) {
+        const request = body as Record<string, unknown>;
+        if (request.kind === "resolve_conductor_project") {
+          return {
+            kind: "resolved",
+            resolved_project: {
+              conductor_short_hash: "abc123",
+              project: {
+                project_id: "project-1",
+                organization_id: "organization-1",
+                name: "Symphony",
+                updated_at: observedAt,
+              },
+            },
+          };
+        }
+        if (request.kind === "list_root_issues") {
+          const page = request.page as Record<string, unknown>;
+          listCursors.push(page.cursor);
+          if (listCursors.length === 3) throw new Error("cursor_discard_proved");
+          const start = page.cursor === "page-2" ? 250 : 0;
+          const count = start === 0 ? 250 : 1;
+          return {
+            kind: "root_issues_page",
+            items: Array.from({ length: count }, (_, offset) => {
+              const index = start + offset;
+              return {
+                issue: {
+                  ...root(`root-${index}`),
+                  ...(index === 0 ? { project_id: "project-2" } : {}),
+                  ...(index === 1 ? { parent_issue_id: "parent-1" } : {}),
+                },
+                is_delegated_to_symphony: true,
+                priority: "high",
+                blockers: [],
+              };
+            }),
+            page_info: start === 0
+              ? { has_next_page: true, end_cursor: "page-2" }
+              : { has_next_page: false },
+          };
+        }
+        const rootId = request.root_issue_id as string;
+        return {
+          kind: "issue_tree_page",
+          tree: {
+            root_issue_id: rootId,
+            nodes: [root(rootId)],
+            root_phase_labels: [],
+            root_managed_comments: [],
+            human_answers: [],
+            observed_at: observedAt,
+          },
+          page_info: { has_next_page: false },
+        };
+      },
+    },
+    {
+      async list() { return { profiles: [] }; },
+      create() { throw new Error("unused"); },
+      update() { throw new Error("unused"); },
+      activate() { throw new Error("unused"); },
+      codexHome() { return "/not-observed"; },
+    },
+    { timeoutMs: 1_000, async profileReadiness() { return "ready"; } },
+  );
+  await gateway.resolveProject();
+
+  const roots = await gateway.listRoots("project-1");
+
+  assert.equal(roots.length, 251);
+  assert.equal(roots[0]?.issueId, "root-0");
+  assert.equal(roots[0]?.projectId, "project-2");
+  assert.equal(roots[1]?.parentIssueId, "parent-1");
+  assert.equal(roots[250]?.issueId, "root-250");
+  assert.deepEqual(listCursors, [undefined, "page-2"]);
+  await assert.rejects(gateway.listRoots("project-1"), /cursor_discard_proved/u);
+  assert.deepEqual(listCursors, [undefined, "page-2", undefined]);
 });
 
 test("Gateway blocks ambiguous Root Managed Comments", async () => {
@@ -189,10 +279,10 @@ function gatewayFor(treeResponse: ReturnType<typeof tree>) {
   );
 }
 
-function root() {
+function root(issueId = "root-1") {
   return {
-    issue_id: "root-1",
-    identifier: "SYM-1",
+    issue_id: issueId,
+    identifier: issueId.toUpperCase(),
     project_id: "project-1",
     state: "In Progress",
     order: 0,
