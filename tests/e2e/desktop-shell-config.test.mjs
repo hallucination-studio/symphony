@@ -72,3 +72,13 @@ test("quality workflow keeps Desktop shell evidence separate from core live evid
   assert.match(smokeJob, /name: desktop-shell-smoke-/u);
   assert.doesNotMatch(smokeJob, /e2e-hermetic|e2e-core-live|secrets\./u);
 });
+
+test("quality workflow uses the repository-pinned Rust toolchain", async () => {
+  const [workflow, toolchain] = await Promise.all([
+    readFile(".github/workflows/quality.yml", "utf8"),
+    readFile("rust-toolchain.toml", "utf8"),
+  ]);
+  assert.match(toolchain, /channel = "1\.91\.0"/u);
+  assert.equal(workflow.match(/dtolnay\/rust-toolchain@1\.91\.0/gu)?.length, 2);
+  assert.doesNotMatch(workflow, /dtolnay\/rust-toolchain@stable/u);
+});
