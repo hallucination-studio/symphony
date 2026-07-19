@@ -147,13 +147,33 @@
         "updated_at": { "$ref": "common.schema.json#/$defs/Timestamp" }
       }
     },
+    "LinearPriority": {
+      "type": "string",
+      "enum": ["urgent", "high", "normal", "low", "no_priority"]
+    },
+    "LinearBlockerSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_issue_id", "target_issue_id", "target_state"],
+      "properties": {
+        "source_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "target_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "target_state": { "$ref": "common.schema.json#/$defs/LinearIssueState" }
+      }
+    },
     "RootIssueSnapshot": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["issue", "is_delegated_to_symphony"],
+      "required": ["issue", "is_delegated_to_symphony", "priority", "blockers"],
       "properties": {
         "issue": { "$ref": "#/$defs/LinearIssueNodeSnapshot" },
-        "is_delegated_to_symphony": { "type": "boolean" }
+        "is_delegated_to_symphony": { "type": "boolean" },
+        "priority": { "$ref": "#/$defs/LinearPriority" },
+        "blockers": {
+          "type": "array",
+          "maxItems": 512,
+          "items": { "$ref": "#/$defs/LinearBlockerSnapshot" }
+        }
       }
     },
     "LinearProjectSnapshot": {

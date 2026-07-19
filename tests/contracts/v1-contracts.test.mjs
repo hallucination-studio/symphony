@@ -84,6 +84,39 @@ test("the schemas include only the approved V1 protocol vocabulary", async () =>
   }
 });
 
+test("Roadmap 2 Root scheduling facts are closed and bounded", async () => {
+  const schema = await loadSchema("podium-conductor");
+  const root = schema.$defs.RootIssueSnapshot;
+  const issue = schema.$defs.LinearIssueNodeSnapshot;
+  const priority = schema.$defs.LinearPriority;
+  const blocker = schema.$defs.LinearBlockerSnapshot;
+
+  assert.ok(root.required.includes("priority"));
+  assert.ok(root.required.includes("blockers"));
+  assert.equal(root.properties.priority.$ref, "#/$defs/LinearPriority");
+  assert.deepEqual(priority.enum, [
+    "urgent",
+    "high",
+    "normal",
+    "low",
+    "no_priority",
+  ]);
+  assert.equal(root.properties.blockers.maxItems, 512);
+  assert.equal(
+    root.properties.blockers.items.$ref,
+    "#/$defs/LinearBlockerSnapshot",
+  );
+  assert.equal(issue.properties.order.type, "number");
+  assert.equal(issue.properties.order.minimum, -1000000000);
+  assert.equal(issue.properties.order.maximum, 1000000000);
+  assert.equal(blocker.additionalProperties, false);
+  assert.deepEqual(blocker.required, [
+    "source_issue_id",
+    "target_issue_id",
+    "target_state",
+  ]);
+});
+
 test("generation is deterministic and check mode detects drift", async () => {
   const first = run("npm", ["run", "contracts:generate"]);
   assert.equal(first.status, 0, first.stderr);

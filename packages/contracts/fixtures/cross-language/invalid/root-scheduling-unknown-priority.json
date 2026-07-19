@@ -1,0 +1,19 @@
+{
+  "schema": "podium-conductor.schema.json#/$defs/RootIssueSnapshot",
+  "value": {
+    "issue": {
+      "issue_id": "root-1",
+      "identifier": "SYM-1",
+      "project_id": "project-1",
+      "state": "Todo",
+      "order": 1,
+      "depth": 0,
+      "title": "Root",
+      "description": "Root description",
+      "updated_at": "2026-07-19T00:00:00Z"
+    },
+    "is_delegated_to_symphony": true,
+    "priority": "critical",
+    "blockers": []
+  }
+}
