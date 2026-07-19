@@ -49,6 +49,7 @@ def _validate_base_url(value: str) -> None:
 class CodexBackendImpl:
     def __init__(self, sdk: Any | None = None) -> None:
         self._sdk = sdk or Codex()
+        self._opened_thread: Any | None = None
 
     def open_conversation(self, command: dict[str, Any]) -> dict[str, Any]:
         settings = command["codex_turn_settings"]
@@ -77,6 +78,7 @@ class CodexBackendImpl:
                 retryable=False,
                 action_required="Check the Provider integration.",
             )
+        self._opened_thread = thread
         return {"performer_id": performer_id}
 
     def run_root_turn(self, command: dict[str, Any]) -> dict[str, Any]:
@@ -95,11 +97,30 @@ class CodexBackendImpl:
             raise
         except Exception as exc:
             raise ProviderBackendError(
-                "The Provider conversation could not be resumed.",
+                _provider_failure_reason(exc),
                 code="provider_conversation_resume_failed",
                 retryable=True,
                 action_required="Retry the Root Turn.",
             ) from exc
+        return self._run_thread_turn(thread, command, sandbox, service_tier)
+
+    def run_opened_root_turn(self, command: dict[str, Any]) -> dict[str, Any]:
+        thread = self._opened_thread
+        if thread is None or getattr(thread, "id", None) != command["performer_id"]:
+            raise ProviderConversationUnavailable("conversation_not_found")
+        self._opened_thread = None
+        sandbox = _execution_sandbox(command)
+        service_tier = self._service_tier(command["codex_turn_settings"])
+        return self._run_thread_turn(thread, command, sandbox, service_tier)
+
+    def _run_thread_turn(
+        self,
+        thread: Any,
+        command: dict[str, Any],
+        sandbox: Sandbox,
+        service_tier: str | None,
+    ) -> dict[str, Any]:
+        settings = command["codex_turn_settings"]
         handle = thread.turn(
             _root_prompt(command),
             cwd=command["workspace_root"],

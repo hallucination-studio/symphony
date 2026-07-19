@@ -72,12 +72,38 @@ def test_root_turn_only_resumes_supplied_conversation(root_command):
     assert outcome["yield_reason"] == "agent_finished"
 
 
+def test_first_root_turn_uses_the_side_effect_free_opened_thread(root_command):
+    sdk = FakeCodex()
+    backend = CodexBackendImpl(sdk)
+    opened = backend.open_conversation({
+        "codex_turn_settings": root_command["codex_turn_settings"],
+    })
+    command = {**root_command, "performer_id": opened["performer_id"]}
+
+    outcome = backend.run_opened_root_turn(command)
+
+    assert sdk.resumed == []
+    assert sdk.thread.calls
+    assert outcome["yield_reason"] == "agent_finished"
+
+
 def test_root_turn_preserves_explicit_conversation_loss(root_command):
     class LostConversation(FakeCodex):
         def thread_resume(self, thread_id, **kwargs):
             raise ProviderConversationUnavailable("conversation_not_found")
     with pytest.raises(ProviderConversationUnavailable):
         CodexBackendImpl(LostConversation()).run_root_turn(root_command)
+
+
+def test_root_turn_reports_sanitized_resume_failure(root_command):
+    class FailedResume(FakeCodex):
+        def thread_resume(self, thread_id, **kwargs):
+            raise RuntimeError("resume rejected for Bearer sk-private-canary")
+    with pytest.raises(ProviderBackendError) as raised:
+        CodexBackendImpl(FailedResume()).run_root_turn(root_command)
+    assert raised.value.code == "provider_conversation_resume_failed"
+    assert "RuntimeError: resume rejected" in raised.value.sanitized_reason
+    assert "sk-private-canary" not in raised.value.sanitized_reason
 
 
 @pytest.mark.parametrize("field", ["command_allowlist", "command_denylist"])

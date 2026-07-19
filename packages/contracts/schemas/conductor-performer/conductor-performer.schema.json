@@ -219,6 +219,20 @@
         }
       ]
     },
+    "FirstRootTurnStart": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocol_version", "turn_id", "root_issue_id", "performer_profile_id", "performer_id", "context_digest", "result_path"],
+      "properties": {
+        "protocol_version": { "$ref": "common.schema.json#/$defs/ProtocolVersion" },
+        "turn_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "performer_profile_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "performer_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "context_digest": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "result_path": { "$ref": "common.schema.json#/$defs/BoundedPath" }
+      }
+    },
     "AgentRootContextPayload": {
       "type": "object",
       "additionalProperties": false,

@@ -14,6 +14,7 @@ def validate(name: str, value: Any) -> Any:
         labels = {
             "OpenRootConversationCommand": "Open Root Conversation command",
             "OpenRootConversationResult": "Open Root Conversation result",
+            "FirstRootTurnStart": "First Root Turn start",
             "RootTurnCommand": "Root Turn command",
             "RootTurnResult": "Root Turn result",
             "RootTurnEvent": "Root Turn event",

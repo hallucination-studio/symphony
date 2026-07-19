@@ -5,7 +5,7 @@ export interface PerformerInvocationControl {
   writeStdin(value: Uint8Array): void;
   closeStdin(): void;
   extraStreams: Duplex[];
-  markReady?(): void;
+  markReady?(deadlineMs?: number): void;
 }
 
 export interface PerformerInvocation {
@@ -114,9 +114,9 @@ export class GlobalPerformerLane {
           },
           closeStdin() { child.stdin?.end(); },
           extraStreams,
-          markReady() {
+          markReady(deadlineMs = invocation.deadlineMs) {
             if (deadline) clearTimeout(deadline);
-            deadline = setTimeout(expire, invocation.deadlineMs);
+            deadline = setTimeout(expire, deadlineMs);
           },
         });
       }

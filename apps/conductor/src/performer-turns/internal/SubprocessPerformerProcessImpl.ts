@@ -1,6 +1,7 @@
 import {
   decodeConductorPerformerOpenRootConversationCommand,
   decodeConductorPerformerOpenRootConversationResult,
+  decodeConductorPerformerFirstRootTurnStart,
   decodeConductorPerformerRootTurnCommand,
   decodeConductorPerformerRootTurnEvent,
   decodeConductorPerformerRootTurnResult,
@@ -26,9 +27,19 @@ import {
 
 type JsonRecord = { [key: string]: JsonValue };
 const MAX_EVENT_BYTES = 1_048_576;
+const FIRST_TURN_HANDOFF_DEADLINE_MS = 300_000;
+
+interface PendingBootstrap {
+  profileId: string;
+  performerId: string;
+  control: PerformerInvocationControl;
+  process: Promise<unknown>;
+  setOnStdout(handler: (chunk: Uint8Array) => void): void;
+}
 
 export class SubprocessPerformerProcessImpl implements PerformerProcessInterface {
   readonly #activeBrokers = new Set<BrokerBridge>();
+  #pendingBootstrap: PendingBootstrap | undefined;
   constructor(
     private readonly lane: Pick<GlobalPerformerLane, "run" | "cancelAndReap">,
     private readonly options: {
@@ -56,16 +67,42 @@ export class SubprocessPerformerProcessImpl implements PerformerProcessInterface
       encoding: "utf8",
       mode: 0o600,
     });
-    await this.lane.run({
+    if (this.#pendingBootstrap) {
+      this.#pendingBootstrap.control.closeStdin();
+      await this.#pendingBootstrap.process.catch(() => undefined);
+      this.#pendingBootstrap = undefined;
+    }
+    let control: PerformerInvocationControl | undefined;
+    let processDone = false;
+    let processError: unknown;
+    let onStdout: (chunk: Uint8Array) => void = () => undefined;
+    const process = this.lane.run({
       executable: this.options.executable,
       arguments: [
         "--open-conversation-request-path", requestPath,
         "--open-conversation-result-path", resultPath,
       ],
-      environment: this.options.environment(input.profileId),
+      environment: bootstrapEnvironment(
+        this.options.environment(input.profileId),
+        this.options.executable,
+      ),
       deadlineMs: this.options.startupDeadlineMs,
-    });
-    const result = await readJson(resultPath, "performer_conversation_result");
+      startupDeadlineMs: this.options.startupDeadlineMs,
+      extraPipeCount: 2,
+      onStarted(value) { control = value; },
+      onStdout(chunk) { onStdout(chunk); },
+    }).then(
+      (value) => { processDone = true; return value; },
+      (error) => { processDone = true; processError = error; throw error; },
+    );
+    // The successful bootstrap deliberately remains alive for the first Turn.
+    process.catch(() => undefined);
+    const result = await waitForJson(
+      resultPath,
+      "performer_conversation_result",
+      () => ({ done: processDone, error: processError }),
+      this.options.startupDeadlineMs,
+    );
     const decoded = decodeConductorPerformerOpenRootConversationResult(
       result as JsonValue,
     ) as unknown as JsonRecord;
@@ -73,6 +110,21 @@ export class SubprocessPerformerProcessImpl implements PerformerProcessInterface
       if (decoded[field] !== command[field]) {
         throw new Error("performer_conversation_result_correlation_invalid");
       }
+    }
+    if (typeof decoded.performer_id === "string") {
+      if (!control || processDone) {
+        throw processError ?? new Error("performer_bootstrap_process_exited");
+      }
+      control.markReady?.(FIRST_TURN_HANDOFF_DEADLINE_MS);
+      this.#pendingBootstrap = {
+        profileId: input.profileId,
+        performerId: decoded.performer_id,
+        control,
+        process,
+        setOnStdout(handler) { onStdout = handler; },
+      };
+    } else {
+      await process;
     }
     return { result: decoded as JsonValue };
   }
@@ -100,7 +152,7 @@ export class SubprocessPerformerProcessImpl implements PerformerProcessInterface
       if (event.body && (event.body as JsonRecord).kind === "protocol_ready") {
         if (!contextSent && control) {
           contextSent = true;
-          control.markReady?.();
+          control.markReady?.(limits.max_wall_time_ms as number);
           control.writeStdin(Buffer.from(JSON.stringify(command)));
           control.closeStdin();
         }
@@ -109,31 +161,61 @@ export class SubprocessPerformerProcessImpl implements PerformerProcessInterface
     }, (code) => input.onEventViolation?.(code));
 
     try {
-      await this.lane.run({
-        executable: this.options.executable,
-        arguments: correlationArguments(command, resultPath),
-        environment: turnEnvironment(
-          this.options.environment(input.profileId),
-          this.options.executable,
-          command,
-        ),
-        workingDirectory: input.workspaceRoot,
-        deadlineMs: limits.max_wall_time_ms as number,
-        startupDeadlineMs: this.options.startupDeadlineMs,
-        extraPipeCount: 2,
-        onStarted: (value) => {
-          control = value;
-          if (value.extraStreams.length === 2) {
-            broker = new BrokerBridge(
-              value.extraStreams[0]!,
-              value.extraStreams[1]!,
-              input.broker.execute.bind(input.broker),
-            );
-            this.#activeBrokers.add(broker);
-          }
-        },
-        onStdout(chunk) { events.write(chunk); },
-      });
+      const pending = this.#pendingBootstrap;
+      if (pending) {
+        this.#pendingBootstrap = undefined;
+        if (pending.profileId !== input.profileId
+          || pending.performerId !== command.performer_id) {
+          pending.control.closeStdin();
+          await pending.process.catch(() => undefined);
+          throw new Error("performer_bootstrap_correlation_invalid");
+        }
+        control = pending.control;
+        pending.setOnStdout((chunk) => events.write(chunk));
+        if (control.extraStreams.length !== 2) {
+          control.closeStdin();
+          await pending.process.catch(() => undefined);
+          throw new Error("performer_process_stream_missing");
+        }
+        broker = new BrokerBridge(
+          control.extraStreams[0]!, control.extraStreams[1]!,
+          input.broker.execute.bind(input.broker),
+        );
+        this.#activeBrokers.add(broker);
+        const start = decodeConductorPerformerFirstRootTurnStart({
+          ...Object.fromEntries(correlationFields.map((field) => [field, command[field]])),
+          result_path: resultPath,
+        } as JsonValue);
+        control.markReady?.(this.options.startupDeadlineMs);
+        control.writeStdin(Buffer.from(`${JSON.stringify(start)}\n`));
+        await pending.process;
+      } else {
+        await this.lane.run({
+          executable: this.options.executable,
+          arguments: correlationArguments(command, resultPath),
+          environment: turnEnvironment(
+            this.options.environment(input.profileId),
+            this.options.executable,
+            command,
+          ),
+          workingDirectory: input.workspaceRoot,
+          deadlineMs: limits.max_wall_time_ms as number,
+          startupDeadlineMs: this.options.startupDeadlineMs,
+          extraPipeCount: 2,
+          onStarted: (value) => {
+            control = value;
+            if (value.extraStreams.length === 2) {
+              broker = new BrokerBridge(
+                value.extraStreams[0]!,
+                value.extraStreams[1]!,
+                input.broker.execute.bind(input.broker),
+              );
+              this.#activeBrokers.add(broker);
+            }
+          },
+          onStdout(chunk) { events.write(chunk); },
+        });
+      }
     } finally {
       events.end();
       broker?.close();
@@ -166,10 +248,42 @@ export class SubprocessPerformerProcessImpl implements PerformerProcessInterface
     return { result: corrected as JsonValue };
   }
 
+  async abandonRootConversation(performerId: string) {
+    const pending = this.#pendingBootstrap;
+    if (!pending || pending.performerId !== performerId) return;
+    this.#pendingBootstrap = undefined;
+    pending.control.closeStdin();
+    await pending.process.catch(() => undefined);
+  }
+
   cancelAndReap() {
+    this.#pendingBootstrap = undefined;
     for (const broker of this.#activeBrokers) broker.cancel();
     return this.lane.cancelAndReap(this.options.cancellationGraceMs);
   }
+}
+
+async function waitForJson(
+  file: string,
+  prefix: string,
+  processState: () => { done: boolean; error: unknown },
+  deadlineMs: number,
+): Promise<unknown> {
+  const expiresAt = Date.now() + deadlineMs;
+  while (Date.now() < expiresAt) {
+    try {
+      return JSON.parse(await readFile(file, "utf8"));
+    } catch (error) {
+      if (!(error instanceof Error && "code" in error
+        && (error as NodeJS.ErrnoException).code === "ENOENT")) {
+        throw new Error(`${prefix}_json_invalid`);
+      }
+    }
+    const state = processState();
+    if (state.done) throw state.error ?? new Error(`${prefix}_missing`);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`${prefix}_timeout`);
 }
 
 function turnEnvironment(
@@ -188,6 +302,20 @@ function turnEnvironment(
     SYMPHONY_TURN_ID: command.turn_id as string,
     SYMPHONY_ROOT_ISSUE_ID: command.root_issue_id as string,
     SYMPHONY_PERFORMER_ID: command.performer_id as string,
+  };
+}
+
+function bootstrapEnvironment(
+  base: NodeJS.ProcessEnv,
+  executable: string,
+): NodeJS.ProcessEnv {
+  const executableDirectory = path.dirname(path.resolve(executable));
+  return {
+    ...base,
+    PATH: base.PATH
+      ? `${executableDirectory}${path.delimiter}${base.PATH}`
+      : `${executableDirectory}${path.delimiter}/usr/bin${path.delimiter}/bin`,
+    SYMPHONY_AGENT_COMMAND_CATALOG: JSON.stringify(agentCommandCliMap()),
   };
 }
 

@@ -79,6 +79,14 @@ test("one Root persists its Conversation before one V3 business Turn", async () 
     broker: ({ turnId }) => createBroker(turnId),
     performer: { async runRootTurn(input) {
       order.push("turn-process"); commands.push(input.command);
+      if (commands.length === 1) {
+        await input.broker.execute({ protocol_version: "1", request_id: "broker-first",
+          turn_id: input.command.turn_id, root_issue_id: "root-1",
+          performer_id: "conversation-1", command: "linear.issue.create_child",
+          args: { parent_issue_id: "root-1", kind: "human", title: "Approval",
+            description: "Confirm the plan", write_id: "human-write",
+            expected_remote_version: "version-1", expected_git_head: "abc" } });
+      }
       return performer.runRootTurn(input);
     } },
     observe: async () => { order.push("observe"); },
@@ -87,7 +95,7 @@ test("one Root persists its Conversation before one V3 business Turn", async () 
       maxContextBytes: 65_536, maxBrokerCalls: 10, maxMutations: 8 },
   });
   const humanYield = await turns.run("root-1");
-  assert.equal(humanYield.kind, "completed");
+  assert.equal(humanYield.kind, "completed", JSON.stringify(humanYield));
   assert.equal(humanYield.result.yield_reason, "waiting_human");
   assert.deepEqual(view.workflowNodes, [humanNode("In Progress")]);
   assert.deepEqual(await turns.run("root-1"), {
@@ -179,6 +187,9 @@ let input = "";
 process.stdin.on("data", (chunk) => input += chunk);
 process.stdin.on("end", () => {
   const command = JSON.parse(input);
+  process.env.SYMPHONY_TURN_ID = command.turn_id;
+  process.env.SYMPHONY_ROOT_ISSUE_ID = command.root_issue_id;
+  process.env.SYMPHONY_PERFORMER_ID = command.performer_id;
   const invoked = spawnSync("symphony", ["linear", "status", "set", "--args-json",
     JSON.stringify({ issue_id: "root-1", status: "In Progress",
       expected_remote_version: "version-1", expected_git_head: "abc" })],
@@ -251,15 +262,33 @@ if (args.includes("--open-conversation-request-path")) {
     protocol_version: command.protocol_version, request_id: command.request_id,
     performer_profile_id: command.performer_profile_id, performer_id: "conversation-1",
     completed_at: "2026-07-19T00:00:01Z" }));
-  process.exit(0);
 }
-const correlation = { protocol_version: "1", turn_id: get("--turn-id"),
-  root_issue_id: get("--root-issue-id"), performer_profile_id: get("--performer-profile-id"),
-  performer_id: get("--performer-id"), context_digest: get("--context-digest") };
-process.stdout.write(JSON.stringify({ ...correlation, sequence: 0,
-  occurred_at: "2026-07-19T00:00:01Z", body: { kind: "protocol_ready" } }) + "\\n");
+let correlation = args.includes("--open-conversation-request-path") ? undefined : {
+  protocol_version: "1", turn_id: get("--turn-id"), root_issue_id: get("--root-issue-id"),
+  performer_profile_id: get("--performer-profile-id"), performer_id: get("--performer-id"),
+  context_digest: get("--context-digest") };
+let resultPath = get("--root-turn-result-path");
 let input = "";
-process.stdin.on("data", (chunk) => input += chunk);
+let startBuffer = "";
+function ready() {
+  process.stdout.write(JSON.stringify({ ...correlation, sequence: 0,
+    occurred_at: "2026-07-19T00:00:01Z", body: { kind: "protocol_ready" } }) + "\\n");
+}
+if (correlation) ready();
+process.stdin.on("data", (chunk) => {
+  if (correlation) { input += chunk; return; }
+  startBuffer += chunk;
+  const newline = startBuffer.indexOf("\\n");
+  if (newline < 0) return;
+  const start = JSON.parse(startBuffer.slice(0, newline));
+  correlation = { protocol_version: start.protocol_version, turn_id: start.turn_id,
+    root_issue_id: start.root_issue_id, performer_profile_id: start.performer_profile_id,
+    performer_id: start.performer_id, context_digest: start.context_digest };
+  resultPath = start.result_path;
+  input += startBuffer.slice(newline + 1);
+  startBuffer = "";
+  ready();
+});
 process.stdin.on("end", () => {
   const command = JSON.parse(input);
   if (!command.root_context.markdown.includes("## trusted_harness") ||
@@ -268,11 +297,7 @@ process.stdin.on("end", () => {
     process.exit(4);
   }
   const awaitingHuman = !command.root_context.json.includes('"answer":"Approved"');
-  const commands = awaitingHuman ? [
-    [["linear", "issue", "create-child"], { parent_issue_id: "root-1", kind: "human",
-      title: "Approval", description: "Confirm the plan", write_id: "human-write",
-      expected_remote_version: "version-1", expected_git_head: "abc" }],
-  ] : [
+  const commands = awaitingHuman ? [] : [
     [["linear", "issue", "create-child"], { parent_issue_id: "root-1", kind: "work",
       title: "Implementation", description: "Build the change", write_id: "work-write",
       expected_remote_version: "version-1", expected_git_head: "abc" }],
@@ -299,7 +324,6 @@ process.stdin.on("end", () => {
       context_bytes: Buffer.byteLength(command.root_context.json) +
         Buffer.byteLength(command.root_context.markdown), provider_tokens: 0,
       broker_calls: 0, mutations: 0 } };
-  const resultPath = get("--root-turn-result-path");
   fs.writeFileSync(resultPath + ".tmp", JSON.stringify(result));
   fs.renameSync(resultPath + ".tmp", resultPath);
 });

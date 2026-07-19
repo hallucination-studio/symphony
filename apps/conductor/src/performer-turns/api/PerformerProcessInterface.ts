@@ -18,6 +18,7 @@ export interface PerformerProcessInterface {
     profileId: string;
     command: JsonValue;
   }): Promise<{ result: JsonValue }>;
+  abandonRootConversation(performerId: string): Promise<void>;
   runRootTurn(input: PerformerRootTurnInput): Promise<{ result: JsonValue }>;
   cancelAndReap(): Promise<void>;
 }

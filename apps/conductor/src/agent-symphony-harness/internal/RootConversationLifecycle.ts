@@ -35,7 +35,8 @@ interface ClaimDependencies {
       baseBranch: string;
     }): Promise<GitWorkspace>;
   };
-  performer: Pick<PerformerProcessInterface, "openRootConversation">;
+  performer: Pick<PerformerProcessInterface, "openRootConversation">
+    & Partial<Pick<PerformerProcessInterface, "abandonRootConversation">>;
   claims: {
     compareAndSetClaim(input: {
       rootIssueId: string;
@@ -144,10 +145,12 @@ export class RootConversationLifecycle {
       managedComment,
     });
     if (claim !== "applied") {
+      await this.dependencies.performer.abandonRootConversation?.(performerId);
       return { kind: "abandoned", reason: "root_claim_conflict" };
     }
     const fresh = await this.dependencies.claims.reconstruct(view.root.issueId);
     if (!claimReadBackMatches(fresh, view, managedComment, workspace)) {
+      await this.dependencies.performer.abandonRootConversation?.(performerId);
       return { kind: "abandoned", reason: "root_claim_read_back_mismatch" };
     }
     return {
@@ -240,10 +243,12 @@ export class RootConversationLifecycle {
       performerId,
     });
     if (outcome !== "applied") {
+      await this.dependencies.performer.abandonRootConversation?.(performerId);
       return { kind: "abandoned", reason: "root_conversation_replace_conflict" };
     }
     const fresh = await this.dependencies.claims.reconstruct(view.root.issueId);
     if (!replacementReadBackMatches(fresh, view, profile.profileId, performerId)) {
+      await this.dependencies.performer.abandonRootConversation?.(performerId);
       return { kind: "abandoned", reason: "root_conversation_read_back_mismatch" };
     }
     return {

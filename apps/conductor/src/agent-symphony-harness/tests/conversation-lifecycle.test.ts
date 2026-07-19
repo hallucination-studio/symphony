@@ -23,17 +23,20 @@ test("claim requires the active Profile to be ready before workspace or bootstra
   assert.equal(bootstrapCalls, 0);
 });
 
-test("Conversation pointer CAS conflict abandons a harmless orphan bootstrap", async () => {
+test("Conversation pointer CAS conflict reaps the orphan bootstrap", async () => {
   let reconstructCalls = 0;
+  let abandoned: string | undefined;
   const lifecycle = createLifecycle({
     claimOutcome: "conflict",
     onReconstruct: () => { reconstructCalls += 1; },
+    onAbandon: (performerId) => { abandoned = performerId; },
   });
 
   const result = await lifecycle.claim(unclaimedView());
 
   assert.deepEqual(result, { kind: "abandoned", reason: "root_claim_conflict" });
   assert.equal(reconstructCalls, 0);
+  assert.equal(abandoned, "conversation-1");
 });
 
 test("claim persists and reads back the exact Conversation pointer before a Turn permit", async () => {
@@ -85,6 +88,7 @@ function createLifecycle(options: {
   onBootstrap?(): void;
   onClaim?(performerId: string): void;
   onReconstruct?(): void;
+  onAbandon?(performerId: string): void;
 } = {}) {
   return new RootConversationLifecycle({
     conductorId: "conductor-1",
@@ -124,6 +128,9 @@ function createLifecycle(options: {
           performer_profile_id: "profile-1", performer_id: "conversation-1",
           completed_at: "2026-07-19T00:00:01Z",
         } };
+      },
+      async abandonRootConversation(performerId) {
+        options.onAbandon?.(performerId);
       },
     },
     claims: {

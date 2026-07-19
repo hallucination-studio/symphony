@@ -10,12 +10,34 @@ import type { PerformerInvocation } from "../internal/GlobalPerformerLane.js";
 import { SubprocessPerformerProcessImpl } from "../internal/SubprocessPerformerProcessImpl.js";
 import { GlobalPerformerLane } from "../internal/GlobalPerformerLane.js";
 
-test("Performer process bootstraps without Root workspace or command channel", async () => {
+test("Performer bootstrap returns its pointer and stays alive for the first Root Turn", async () => {
   const runtimeRoot = await mkdtemp(path.join(os.tmpdir(), "symphony-v3-open-"));
   let invocation: PerformerInvocation | undefined;
+  let processExited = false;
+  const deadlines: number[] = [];
   const processBoundary = createProcess(runtimeRoot, {
     async run(value) {
       invocation = value;
+      const writes: Uint8Array[] = [];
+      let finish: (() => void) | undefined;
+      const running = new Promise<void>((resolve) => { finish = resolve; });
+      value.onStarted?.({
+        extraStreams: [new PassThrough(), new PassThrough()],
+        markReady(deadlineMs) { deadlines.push(deadlineMs ?? -1); },
+        closeStdin() {},
+        writeStdin(bytes) {
+          writes.push(bytes);
+          if (writes.length === 1) {
+            const start = JSON.parse(Buffer.from(bytes).toString("utf8"));
+            value.onStdout?.(rootEvent(start, 0, { kind: "protocol_ready" }));
+          } else {
+            const command = JSON.parse(Buffer.from(bytes).toString("utf8"));
+            const start = JSON.parse(Buffer.from(writes[0]!).toString("utf8"));
+            void writeFile(start.result_path, JSON.stringify(rootResult(command)))
+              .then(() => finish?.());
+          }
+        },
+      });
       const resultIndex = value.arguments.indexOf("--open-conversation-result-path");
       await writeFile(value.arguments[resultIndex + 1]!, JSON.stringify({
         protocol_version: "1",
@@ -24,6 +46,8 @@ test("Performer process bootstraps without Root workspace or command channel", a
         performer_id: "conversation-1",
         completed_at: "2026-07-19T00:00:00Z",
       }));
+      await running;
+      processExited = true;
       return { stdout: "", stderr: "" };
     },
   });
@@ -44,13 +68,25 @@ test("Performer process bootstraps without Root workspace or command channel", a
   });
 
   assert.equal((output.result as { performer_id: string }).performer_id, "conversation-1");
+  assert.equal(processExited, false);
+  assert.deepEqual(deadlines, [300_000]);
   assert.equal(invocation?.workingDirectory, undefined);
-  assert.equal(invocation?.extraPipeCount, undefined);
+  assert.equal(invocation?.extraPipeCount, 2);
   const requestIndex = invocation!.arguments.indexOf("--open-conversation-request-path");
   const request = JSON.parse(await readFile(invocation!.arguments[requestIndex + 1]!, "utf8"));
   assert.equal("root_context" in request, false);
   assert.equal("workspace_root" in request, false);
   assert.equal("command_channel" in request, false);
+
+  const turn = await processBoundary.runRootTurn({
+    profileId: "profile-1",
+    workspaceRoot: runtimeRoot,
+    command: rootCommand(runtimeRoot),
+    broker: { execute: async () => ({ status: "read" }) },
+  });
+  assert.equal((turn.result as { result_kind: string }).result_kind, "root_turn_completed");
+  assert.equal(processExited, true);
+  assert.deepEqual(deadlines, [300_000, 1_000, 60_000]);
 });
 
 test("Performer process sends Root context only after protocol readiness", async () => {
