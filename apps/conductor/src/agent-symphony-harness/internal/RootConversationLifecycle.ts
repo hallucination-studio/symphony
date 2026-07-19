@@ -3,6 +3,7 @@ import type { JsonValue } from "@symphony/contracts";
 import type { GitWorkspace } from "../../git-workspaces/api/GitWorkspaceInterface.js";
 import type { PerformerProcessInterface } from "../../performer-turns/api/PerformerProcessInterface.js";
 import type {
+  RootRetryBlock,
   V3RootManagedComment,
   V3RootRunView,
 } from "../../root-workflow/api/Models.js";
@@ -23,7 +24,10 @@ interface ClaimDependencies {
   now(): string;
   requestId(): string;
   bootstrapDeadlineMs: number;
-  profiles: { activeReadyProfile(): Promise<ClaimProfile | undefined> };
+  profiles: {
+    activeReadyProfile(): Promise<ClaimProfile | undefined>;
+    fixedReadyProfile?(profileId: string): Promise<ClaimProfile | undefined>;
+  };
   workspaces: {
     ensureWorkspace(input: {
       rootIssueId: string;
@@ -41,6 +45,28 @@ interface ClaimDependencies {
       expectedManagedComment: "none";
       managedComment: V3RootManagedComment;
     }): Promise<"applied" | "conflict">;
+    compareAndSetConversation?(input: {
+      rootIssueId: string;
+      resolvedProjectId: string;
+      expectedRootUpdatedAt: string;
+      expectedCommentUpdatedAt: string;
+      expectedPerformerId?: string;
+      performerId: string;
+    }): Promise<"applied" | "conflict">;
+    writeRetryBlock?(input: {
+      rootIssueId: string;
+      resolvedProjectId: string;
+      expectedRootUpdatedAt: string;
+      expectedCommentUpdatedAt: string;
+      expectedPerformerId?: string;
+      retryBlock: RootRetryBlock;
+    }): Promise<"applied" | "conflict">;
+    appendRetryProblem?(input: {
+      rootIssueId: string;
+      writeId: string;
+      failureCode: string;
+      observedAt: string;
+    }): Promise<void>;
     reconstruct(rootIssueId: string): Promise<V3RootRunView>;
   };
 }
@@ -125,6 +151,125 @@ export class RootConversationLifecycle {
       },
     };
   }
+
+  async retry(
+    view: V3RootRunView,
+    unavailablePerformerId?: string,
+  ): Promise<RootClaimResult> {
+    const managed = view.managedComment;
+    const remote = view.managedCommentRemote;
+    if (!managed || !remote || managed.conductorId !== this.dependencies.conductorId
+      || view.root.state === "Done" || view.root.state === "Canceled") {
+      return { kind: "abandoned", reason: "root_retry_precondition_changed" };
+    }
+    if (managed.retryBlock) {
+      return { kind: "rejected", reason: "root_retry_blocked" };
+    }
+    if (unavailablePerformerId !== undefined
+      && managed.performerId !== unavailablePerformerId) {
+      return { kind: "abandoned", reason: "root_conversation_stale" };
+    }
+    const profile = await this.dependencies.profiles.fixedReadyProfile?.(
+      managed.performerProfileId,
+    );
+    if (!profile || profile.readiness !== "ready"
+      || profile.profileId !== managed.performerProfileId) {
+      return { kind: "rejected", reason: "performer_profile_not_ready" };
+    }
+    const requestId = this.dependencies.requestId();
+    const observedAt = this.dependencies.now();
+    const bootstrap = await this.dependencies.performer.openRootConversation({
+      profileId: profile.profileId,
+      command: openCommand(
+        profile,
+        requestId,
+        observedAt,
+        this.dependencies.bootstrapDeadlineMs,
+      ),
+    });
+    const performerId = openedPerformerId(bootstrap.result, requestId, profile.profileId);
+    if (!performerId) {
+      const failureCode = openFailureCode(bootstrap.result, requestId, profile.profileId);
+      const retryBlock: RootRetryBlock = {
+        ...(managed.performerId ? { expectedPerformerId: managed.performerId } : {}),
+        failureCode,
+        observedAt,
+      };
+      const outcome = await this.dependencies.claims.writeRetryBlock?.({
+        rootIssueId: view.root.issueId,
+        resolvedProjectId: view.resolvedProjectId,
+        expectedRootUpdatedAt: view.root.updatedAt,
+        expectedCommentUpdatedAt: remote.updatedAt,
+        ...(managed.performerId
+          ? { expectedPerformerId: managed.performerId }
+          : {}),
+        retryBlock,
+      });
+      if (outcome !== "applied") {
+        return { kind: "abandoned", reason: "root_retry_block_conflict" };
+      }
+      await this.dependencies.claims.appendRetryProblem?.({
+        rootIssueId: view.root.issueId,
+        writeId: `root-retry:${view.root.issueId}:${observedAt}`,
+        failureCode,
+        observedAt,
+      });
+      const blocked = await this.dependencies.claims.reconstruct(view.root.issueId);
+      if (!retryBlockMatches(blocked, retryBlock)) {
+        return { kind: "abandoned", reason: "root_retry_block_read_back_mismatch" };
+      }
+      return { kind: "rejected", reason: "root_retry_blocked" };
+    }
+    const outcome = await this.dependencies.claims.compareAndSetConversation?.({
+      rootIssueId: view.root.issueId,
+      resolvedProjectId: view.resolvedProjectId,
+      expectedRootUpdatedAt: view.root.updatedAt,
+      expectedCommentUpdatedAt: remote.updatedAt,
+      ...(managed.performerId
+        ? { expectedPerformerId: managed.performerId }
+        : {}),
+      performerId,
+    });
+    if (outcome !== "applied") {
+      return { kind: "abandoned", reason: "root_conversation_replace_conflict" };
+    }
+    const fresh = await this.dependencies.claims.reconstruct(view.root.issueId);
+    if (!replacementReadBackMatches(fresh, view, profile.profileId, performerId)) {
+      return { kind: "abandoned", reason: "root_conversation_read_back_mismatch" };
+    }
+    return {
+      kind: "ready",
+      permit: {
+        rootIssueId: view.root.issueId,
+        performerProfileId: profile.profileId,
+        performerId,
+        workspace: {
+          branch: fresh.gitWorkspace!.branch,
+          worktreePath: fresh.gitWorkspace!.worktreePath,
+          rootIssueId: view.root.issueId,
+        },
+      },
+    };
+  }
+}
+
+function openCommand(
+  profile: ClaimProfile,
+  requestId: string,
+  startedAt: string,
+  deadlineMs: number,
+): JsonValue {
+  return {
+    protocol_version: "1",
+    request_id: requestId,
+    performer_profile_id: profile.profileId,
+    codex_turn_settings: {
+      model: profile.codexTurnSettings.model,
+      reasoning_effort: profile.codexTurnSettings.reasoningEffort,
+      is_fast_mode_enabled: profile.codexTurnSettings.isFastModeEnabled,
+    },
+    hard_deadline_at: new Date(Date.parse(startedAt) + deadlineMs).toISOString(),
+  };
 }
 
 function openedPerformerId(
@@ -139,6 +284,45 @@ function openedPerformerId(
       && typeof result.performer_id === "string"
     ? result.performer_id
     : undefined;
+}
+
+function openFailureCode(value: JsonValue, requestId: string, profileId: string): string {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return "conversation_open_result_invalid";
+  }
+  const result = value as Record<string, JsonValue>;
+  return result.request_id === requestId
+      && result.performer_profile_id === profileId
+      && typeof result.error_code === "string"
+    ? result.error_code
+    : "conversation_open_result_invalid";
+}
+
+function retryBlockMatches(view: V3RootRunView, expected: RootRetryBlock): boolean {
+  const actual = view.managedComment?.retryBlock;
+  return actual?.expectedPerformerId === expected.expectedPerformerId
+    && actual?.failureCode === expected.failureCode
+    && actual?.observedAt === expected.observedAt;
+}
+
+function replacementReadBackMatches(
+  fresh: V3RootRunView,
+  original: V3RootRunView,
+  profileId: string,
+  performerId: string,
+): boolean {
+  return fresh.root.issueId === original.root.issueId
+    && fresh.root.state !== "Done"
+    && fresh.root.state !== "Canceled"
+    && fresh.resolvedProjectId === original.resolvedProjectId
+    && fresh.managedComment?.conductorId === original.managedComment?.conductorId
+    && fresh.managedComment?.performerProfileId === profileId
+    && fresh.managedComment?.performerId === performerId
+    && fresh.managedComment.retryBlock === undefined
+    && fresh.profile?.profileId === profileId
+    && fresh.profile.readiness === "ready"
+    && fresh.gitWorkspace?.branch === original.gitWorkspace?.branch
+    && fresh.gitWorkspace?.worktreePath === original.gitWorkspace?.worktreePath;
 }
 
 function claimReadBackMatches(
