@@ -10,11 +10,49 @@ const schemaRoot = path.join(root, "packages/contracts/schemas");
 const generatedRoot = path.join(root, "packages/contracts/generated");
 const protocolFamilies = [
   "common",
+  "agent-command",
   "podium-client",
   "desktop-host",
   "podium-conductor",
   "conductor-performer",
 ];
+
+test("Agent commands are Root-scoped, closed, and bounded", async () => {
+  const schema = await loadSchema("agent-command");
+  const commands = schema.$defs.AgentCommandRequest.oneOf;
+  assert.equal(commands.length, 12);
+
+  for (const { $ref } of commands) {
+    const command = schema.$defs[$ref.split("/").at(-1)];
+    const envelope = command.$ref
+      ? schema.$defs[command.$ref.split("/").at(-1)]
+      : command;
+    assert.equal(envelope.additionalProperties, false);
+    assert.deepEqual(envelope.required.slice(0, 5), [
+      "protocol_version",
+      "request_id",
+      "turn_id",
+      "root_issue_id",
+      "performer_id",
+    ]);
+  }
+
+  for (const definition of ["CreateChildArgs", "CreateCommentArgs"]) {
+    assert.ok(schema.$defs[definition].required.includes("write_id"));
+  }
+  for (const definition of [
+    "CreateChildArgs",
+    "UpdateIssueArgs",
+    "SetStatusArgs",
+    "SetAssigneeArgs",
+    "SetLabelArgs",
+    "CreateCommentArgs",
+  ]) {
+    assert.ok(schema.$defs[definition].required.includes("expected_git_head"));
+  }
+  assert.equal(schema.$defs.LinearReadArgs.properties.limit.maximum, 100);
+  assert.equal(schema.$defs.CommandProblem.properties.next_steps.maxItems, 8);
+});
 
 async function loadSchema(family) {
   const schemaPath = path.join(schemaRoot, family, `${family}.schema.json`);
