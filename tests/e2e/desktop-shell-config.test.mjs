@@ -79,6 +79,7 @@ test("quality workflow uses the repository-pinned Rust toolchain", async () => {
     readFile("rust-toolchain.toml", "utf8"),
   ]);
   assert.match(toolchain, /channel = "1\.91\.0"/u);
+  assert.doesNotMatch(toolchain, /^components\s*=/mu);
   assert.equal(workflow.match(/dtolnay\/rust-toolchain@1\.91\.0/gu)?.length, 2);
   assert.doesNotMatch(workflow, /dtolnay\/rust-toolchain@stable/u);
 });
