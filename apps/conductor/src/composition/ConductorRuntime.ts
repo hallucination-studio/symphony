@@ -1,7 +1,9 @@
 import { discoverCurrentRoots } from "../root-discovery/MultiRootDiscoveryPolicy.js";
+import type { RootSchedulingPolicyInterface } from "../root-scheduling/api/RootSchedulingPolicyInterface.js";
 import {
   computeRootAction,
   type DiscoveredRoot,
+  type RootAction,
   type RootRunView,
 } from "../root-workflow/api/index.js";
 
@@ -32,6 +34,7 @@ export class ConductorRuntime {
   constructor(
     private readonly conductorId: string,
     private readonly gateway: RuntimeGateway,
+    private readonly scheduling: RootSchedulingPolicyInterface,
     private readonly executor: RuntimeActionExecutor,
     private readonly reporter: RuntimeReporter,
   ) {}
@@ -51,41 +54,31 @@ export class ConductorRuntime {
         roots: await this.gateway.listRoots(project.projectId),
         conductorId: this.conductorId,
       });
-      const owned = roots.filter(
-        ({ managedConductorId }) => managedConductorId === this.conductorId,
-      );
-      let selected: DiscoveredRoot | undefined;
-      if (owned.length === 1) {
-        selected = owned[0];
-      } else if (roots.length === 1) {
-        selected = roots[0];
+      const candidates: Array<{
+        view: RootRunView;
+        action: RootAction;
+      }> = [];
+      for (const root of this.scheduling.orderEligible(roots)) {
+        const view = await this.gateway.reconstruct(root.issueId);
+        candidates.push({ view, action: computeRootAction(view) });
       }
+      const selected = candidates.find(({ action }) => isRunnable(action));
       if (!selected) {
-        let reason: "multiple_active_roots" | "no_eligible_root" | "multiple_eligible_roots";
-        if (owned.length > 1) {
-          reason = "multiple_active_roots";
-        } else if (roots.length === 0) {
-          reason = "no_eligible_root";
-        } else {
-          reason = "multiple_eligible_roots";
-        }
+        const blocked = candidates.find(
+          ({ action }) => action.kind === "blocked_root",
+        );
         await this.reporter.report({
-          status: reason === "no_eligible_root" ? "ready" : "blocked",
-          ...(reason === "no_eligible_root"
-            ? {}
-            : { sanitizedReason: reason }),
+          status: blocked ? "blocked" : "ready",
+          ...(blocked && blocked.action.kind === "blocked_root"
+            ? { sanitizedReason: blocked.action.reason }
+            : {}),
         });
         return;
       }
-      const view = await this.gateway.reconstruct(selected.issueId);
-      const action = computeRootAction(view);
-      await this.executor.execute(view, action);
+      await this.executor.execute(selected.view, selected.action);
       await this.reporter.report({
-        status: action.kind === "blocked_root" ? "blocked" : "ready",
-        ...(action.kind === "blocked_root"
-          ? { sanitizedReason: action.reason }
-          : {}),
-        rootId: view.root.issueId,
+        status: "ready",
+        rootId: selected.view.root.issueId,
       });
     } catch (error) {
       await this.reporter.report({
@@ -94,6 +87,14 @@ export class ConductorRuntime {
       });
     }
   }
+}
+
+function isRunnable(action: RootAction): boolean {
+  return (
+    action.kind !== "wait_human" &&
+    action.kind !== "idle_root" &&
+    action.kind !== "blocked_root"
+  );
 }
 
 function sanitize(error: unknown) {

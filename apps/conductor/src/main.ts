@@ -19,6 +19,7 @@ import {
 } from "./performer-turns/internal/PerformerProcessEnvironment.js";
 import { InheritedProtocolClient } from "./private-ipc/InheritedProtocolClient.js";
 import { GitRootDeliveryImpl } from "./root-delivery/internal/GitRootDeliveryImpl.js";
+import { LinearPriorityRootSchedulingPolicyImpl } from "./root-scheduling/internal/LinearPriorityRootSchedulingPolicyImpl.js";
 
 type JsonValue =
   | null
@@ -196,6 +197,7 @@ export async function runConductor(environment = process.env): Promise<void> {
   const runtime = new ConductorRuntime(
     config.conductorId,
     gateway,
+    new LinearPriorityRootSchedulingPolicyImpl(),
     executor,
     {
       async report(value) {

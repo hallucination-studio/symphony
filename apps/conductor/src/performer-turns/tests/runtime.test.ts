@@ -12,6 +12,7 @@ import {
 import { runCommand } from "../../composition/CommandRunner.js";
 import { GitRootDeliveryImpl } from "../../root-delivery/internal/GitRootDeliveryImpl.js";
 import { ConductorRuntime } from "../../composition/ConductorRuntime.js";
+import { LinearPriorityRootSchedulingPolicyImpl } from "../../root-scheduling/internal/LinearPriorityRootSchedulingPolicyImpl.js";
 
 test("the global Performer lane serializes child processes", async () => {
   const lane = new GlobalPerformerLane();
@@ -257,6 +258,7 @@ test("database-free runtime reports Gateway failure and executes no action", asy
         throw new Error("not reached");
       },
     },
+    new LinearPriorityRootSchedulingPolicyImpl(),
     {
       execute: async () => {
         executed = true;
