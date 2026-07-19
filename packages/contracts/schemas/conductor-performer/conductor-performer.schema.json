@@ -2,7 +2,45 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://symphony.local/contracts/conductor-performer.schema.json",
   "title": "Conductor Performer Protocol V1",
-  "$defs": {
+ "$defs": {
+    "AgentCommandRule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["executable", "argv_prefix"],
+      "properties": {
+        "executable": { "$ref": "common.schema.json#/$defs/ShortText" },
+        "argv_prefix": {
+          "type": "array",
+          "maxItems": 16,
+          "items": { "$ref": "common.schema.json#/$defs/ShortText" }
+        }
+      }
+    },
+    "AgentExecutionPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "$comment": "Command denylist rules take precedence over command allowlist rules.",
+      "required": ["sandbox_mode", "command_allowlist", "command_denylist"],
+      "properties": {
+        "sandbox_mode": {
+          "enum": ["read_only", "workspace_write", "unrestricted"],
+          "default": "workspace_write"
+        },
+        "command_allowlist": {
+          "type": "array",
+          "maxItems": 64,
+          "default": [],
+          "items": { "$ref": "#/$defs/AgentCommandRule" }
+        },
+        "command_denylist": {
+          "type": "array",
+          "maxItems": 64,
+          "default": [],
+          "items": { "$ref": "#/$defs/AgentCommandRule" }
+        }
+      }
+    },
+
     "CodexTurnSettings": {
       "type": "object",
       "additionalProperties": false,

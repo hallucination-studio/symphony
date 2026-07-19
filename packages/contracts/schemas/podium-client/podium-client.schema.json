@@ -2,7 +2,45 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://symphony.local/contracts/podium-client.schema.json",
   "title": "Podium Client Protocol V1",
-  "$defs": {
+ "$defs": {
+    "AgentCommandRule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["executable", "argv_prefix"],
+      "properties": {
+        "executable": { "$ref": "common.schema.json#/$defs/ShortText" },
+        "argv_prefix": {
+          "type": "array",
+          "maxItems": 16,
+          "items": { "$ref": "common.schema.json#/$defs/ShortText" }
+        }
+      }
+    },
+    "AgentExecutionPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "$comment": "Command denylist rules take precedence over command allowlist rules.",
+      "required": ["sandbox_mode", "command_allowlist", "command_denylist"],
+      "properties": {
+        "sandbox_mode": {
+          "enum": ["read_only", "workspace_write", "unrestricted"],
+          "default": "workspace_write"
+        },
+        "command_allowlist": {
+          "type": "array",
+          "maxItems": 64,
+          "default": [],
+          "items": { "$ref": "#/$defs/AgentCommandRule" }
+        },
+        "command_denylist": {
+          "type": "array",
+          "maxItems": 64,
+          "default": [],
+          "items": { "$ref": "#/$defs/AgentCommandRule" }
+        }
+      }
+    },
+
     "TargetConductor": {
       "type": "object",
       "additionalProperties": false,
@@ -110,7 +148,8 @@
         "display_name",
         "backend_kind",
         "authentication_method",
-        "codex_turn_settings"
+        "codex_turn_settings",
+        "execution_policy"
       ],
       "properties": {
         "kind": { "const": "create_performer_profile" },
@@ -118,7 +157,8 @@
         "display_name": { "$ref": "common.schema.json#/$defs/ShortText" },
         "backend_kind": { "const": "codex" },
         "authentication_method": { "enum": ["chatgpt", "api_key"] },
-        "codex_turn_settings": { "$ref": "#/$defs/CodexTurnSettings" }
+        "codex_turn_settings": { "$ref": "#/$defs/CodexTurnSettings" },
+        "execution_policy": { "$ref": "#/$defs/AgentExecutionPolicy" }
       }
     },
     "UpdatePerformerProfileCommand": {
@@ -129,14 +169,16 @@
         "conductor_id",
         "profile_id",
         "display_name",
-        "codex_turn_settings"
+        "codex_turn_settings",
+        "execution_policy"
       ],
       "properties": {
         "kind": { "const": "update_performer_profile" },
         "conductor_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "profile_id": { "$ref": "common.schema.json#/$defs/Identifier" },
         "display_name": { "$ref": "common.schema.json#/$defs/ShortText" },
-        "codex_turn_settings": { "$ref": "#/$defs/CodexTurnSettings" }
+        "codex_turn_settings": { "$ref": "#/$defs/CodexTurnSettings" },
+        "execution_policy": { "$ref": "#/$defs/AgentExecutionPolicy" }
       }
     },
     "StartCodexChatGPTLoginCommand": {
@@ -214,6 +256,7 @@
         "display_name",
         "authentication_method",
         "codex_turn_settings",
+        "execution_policy",
         "readiness",
         "is_active",
         "observed_at"
@@ -223,6 +266,7 @@
         "display_name": { "$ref": "common.schema.json#/$defs/ShortText" },
         "authentication_method": { "enum": ["chatgpt", "api_key"] },
         "codex_turn_settings": { "$ref": "#/$defs/CodexTurnSettings" },
+        "execution_policy": { "$ref": "#/$defs/AgentExecutionPolicy" },
         "readiness": { "enum": ["login-required", "ready", "invalid"] },
         "is_active": { "type": "boolean" },
         "sanitized_account_label": { "$ref": "common.schema.json#/$defs/ShortText" },

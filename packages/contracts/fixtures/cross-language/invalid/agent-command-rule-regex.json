@@ -1,0 +1,8 @@
+{
+  "schema": "podium-client.schema.json#/$defs/AgentCommandRule",
+  "value": {
+    "executable": "git",
+    "argv_prefix": ["status"],
+    "regex": "git .*"
+  }
+}

@@ -679,26 +679,28 @@
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["kind", "conductor_id", "display_name", "backend_kind", "authentication_method", "codex_turn_settings"],
+          "required": ["kind", "conductor_id", "display_name", "backend_kind", "authentication_method", "codex_turn_settings", "execution_policy"],
           "properties": {
             "kind": { "const": "create_profile" },
             "conductor_id": { "$ref": "common.schema.json#/$defs/Identifier" },
             "display_name": { "$ref": "common.schema.json#/$defs/ShortText" },
             "backend_kind": { "const": "codex" },
             "authentication_method": { "enum": ["chatgpt", "api_key"] },
-            "codex_turn_settings": { "$ref": "podium-client.schema.json#/$defs/CodexTurnSettings" }
+            "codex_turn_settings": { "$ref": "podium-client.schema.json#/$defs/CodexTurnSettings" },
+            "execution_policy": { "$ref": "podium-client.schema.json#/$defs/AgentExecutionPolicy" }
           }
         },
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["kind", "conductor_id", "profile_id", "display_name", "codex_turn_settings"],
+          "required": ["kind", "conductor_id", "profile_id", "display_name", "codex_turn_settings", "execution_policy"],
           "properties": {
             "kind": { "const": "update_profile" },
             "conductor_id": { "$ref": "common.schema.json#/$defs/Identifier" },
             "profile_id": { "$ref": "common.schema.json#/$defs/Identifier" },
             "display_name": { "$ref": "common.schema.json#/$defs/ShortText" },
-            "codex_turn_settings": { "$ref": "podium-client.schema.json#/$defs/CodexTurnSettings" }
+            "codex_turn_settings": { "$ref": "podium-client.schema.json#/$defs/CodexTurnSettings" },
+            "execution_policy": { "$ref": "podium-client.schema.json#/$defs/AgentExecutionPolicy" }
           }
         }
       ]

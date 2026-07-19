@@ -1,0 +1,18 @@
+{
+  "schema": "podium-client.schema.json#/$defs/AgentExecutionPolicy",
+  "value": {
+    "sandbox_mode": "workspace_write",
+    "command_allowlist": [
+      {
+        "executable": "git",
+        "argv_prefix": ["status"]
+      }
+    ],
+    "command_denylist": [
+      {
+        "executable": "git",
+        "argv_prefix": ["push", "--force"]
+      }
+    ]
+  }
+}

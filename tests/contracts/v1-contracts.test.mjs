@@ -123,6 +123,62 @@ test("Roadmap 2 Root scheduling facts are closed and bounded", async () => {
   ]);
 });
 
+test("Agent execution policies are closed, bounded, and shared by Profile contracts", async () => {
+  const performer = await loadSchema("conductor-performer");
+  const client = await loadSchema("podium-client");
+  const relay = await loadSchema("podium-conductor");
+
+  for (const schema of [performer, client]) {
+    const policy = schema.$defs.AgentExecutionPolicy;
+    const rule = schema.$defs.AgentCommandRule;
+    assert.equal(policy.additionalProperties, false);
+    assert.deepEqual(policy.required, [
+      "sandbox_mode",
+      "command_allowlist",
+      "command_denylist",
+    ]);
+    assert.deepEqual(policy.properties.sandbox_mode.enum, [
+      "read_only",
+      "workspace_write",
+      "unrestricted",
+    ]);
+    assert.equal(policy.properties.sandbox_mode.default, "workspace_write");
+    assert.deepEqual(policy.properties.command_allowlist.default, []);
+    assert.deepEqual(policy.properties.command_denylist.default, []);
+    assert.match(policy.$comment, /denylist rules take precedence/u);
+    assert.equal(policy.properties.command_allowlist.maxItems, 64);
+    assert.equal(policy.properties.command_denylist.maxItems, 64);
+    assert.equal(rule.additionalProperties, false);
+    assert.deepEqual(rule.required, ["executable", "argv_prefix"]);
+    assert.equal(rule.properties.argv_prefix.maxItems, 16);
+  }
+
+  for (const name of [
+    "CreatePerformerProfileCommand",
+    "UpdatePerformerProfileCommand",
+    "PerformerProfileSummaryView",
+  ]) {
+    const definition = client.$defs[name];
+    assert.ok(definition.required.includes("execution_policy"));
+    assert.equal(
+      definition.properties.execution_policy.$ref,
+      "#/$defs/AgentExecutionPolicy",
+    );
+  }
+
+  const relayVariants = relay.$defs.ProfileRelayMetadata.oneOf;
+  for (const kind of ["create_profile", "update_profile"]) {
+    const variant = relayVariants.find(({ properties }) =>
+      properties.kind?.const === kind
+    );
+    assert.ok(variant.required.includes("execution_policy"));
+    assert.equal(
+      variant.properties.execution_policy.$ref,
+      "podium-client.schema.json#/$defs/AgentExecutionPolicy",
+    );
+  }
+});
+
 test("generation is deterministic and check mode detects drift", async () => {
   const first = run("npm", ["run", "contracts:generate"]);
   assert.equal(first.status, 0, first.stderr);
