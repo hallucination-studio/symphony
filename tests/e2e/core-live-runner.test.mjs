@@ -74,6 +74,9 @@ test("core live topology uses production boundaries and state-based completion",
   assert.match(source, /completed\.performerId !== plan\.performerId/u);
   assert.match(source, /readRootCommentEvidence/u);
   assert.match(source, /root_comments_verified/u);
+  const conductorSource = await readFile("apps/conductor/src/main.ts", "utf8");
+  assert.match(conductorSource, /event_code: body\.code/u);
+  assert.match(conductorSource, /sanitized_reason: body\.sanitized_summary/u);
   assert.match(source, /environment\.SYMPHONY_E2E_RUN_ID/u);
   assert.doesNotMatch(source, /@symphony\/podium\/e2e|e2e-main|performer\.json/u);
   assert.doesNotMatch(source, /SYMPHONY_E2E_LINEAR_DEV_TOKEN.*additions/su);

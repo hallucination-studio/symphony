@@ -25,6 +25,11 @@ export async function provisionApiKeyProfile({
         reasoning_effort: reasoningEffort,
         is_fast_mode_enabled: false,
       },
+      execution_policy: {
+        sandbox_mode: "workspace_write",
+        command_allowlist: [],
+        command_denylist: [],
+      },
     });
     profileId = profile(saved, "profile_saved", log).profile_id;
     log({ event: "e2e_profile_command_completed", command: "create_profile" });

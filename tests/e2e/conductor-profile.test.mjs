@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { decodePodiumConductorPodiumConductorMessage } from "@symphony/contracts";
+
 import { provisionApiKeyProfile } from "../../tools/e2e/conductor-profile.mjs";
 
 test("Profile provisioning uses only closed commands and a bounded secret frame", async () => {
@@ -47,6 +49,16 @@ test("Profile provisioning uses only closed commands and a bounded secret frame"
   assert.deepEqual(calls.map(({ body }) => body.kind), [
     "create_profile", "set_api_key", "activate_profile",
   ]);
+  assert.deepEqual(calls[0].body.execution_policy, {
+    sandbox_mode: "workspace_write",
+    command_allowlist: [],
+    command_denylist: [],
+  });
+  assert.doesNotThrow(() => decodePodiumConductorPodiumConductorMessage({
+    protocol_version: "1",
+    request_id: "request-1",
+    body: calls[0].body,
+  }));
   assert.equal(calls[1].secretLength, "codex-secret-canary".length);
   assert.equal(JSON.stringify(calls).includes("codex-secret-canary"), false);
   assert.deepEqual([...secret], Array(secret.length).fill(0));

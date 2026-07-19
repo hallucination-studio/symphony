@@ -224,6 +224,10 @@ export async function runConductor(environment = process.env): Promise<void> {
               root_issue_id: String(event.root_issue_id),
               performer_id: String(event.performer_id),
               event_kind: kind,
+              ...(typeof body.code === "string" ? { event_code: body.code } : {}),
+              ...(typeof body.sanitized_summary === "string"
+                ? { sanitized_reason: body.sanitized_summary }
+                : {}),
             });
           },
         });
