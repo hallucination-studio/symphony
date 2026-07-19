@@ -249,26 +249,36 @@ test("Linear fixture configures multi-Root scheduling only through Linear facts"
 
 test("Linear fixture binds a retained Project by slug without creating or archiving it", async () => {
   const operations = [];
+  const requests = [];
   const operator = createRunScopedLinearOperator({
     developmentToken: "development-secret",
     fetch: async (_url, init) => {
       const request = JSON.parse(init.body);
+      requests.push(request);
       operations.push(request.query.match(/CoreLive[A-Za-z]+/u)?.[0]);
       if (request.query.includes("CoreLiveProjectBySlug")) return response({ data: {
-        projects: { nodes: [{
+        project: {
           id: "retained-project",
           name: "Debug Project",
           slugId: "debug-slug",
           updatedAt: "2026-07-18T00:00:00.000Z",
           teams: { nodes: [{ id: "team-1" }], pageInfo: { hasNextPage: false } },
           labels: { nodes: [], pageInfo: { hasNextPage: false } },
-        }], pageInfo: { hasNextPage: false } },
+        },
       } });
       if (request.query.includes("CoreLiveLabel")) return response({ data: {
         projectLabelCreate: { success: true, projectLabel: { id: "label-1", name: "symphony:conductor/abc123def456" } },
       } });
       if (request.query.includes("CoreLiveAttachLabel")) return response({ data: {
-        projectAddLabel: { success: true, project: { id: "retained-project" } },
+        projectAddLabel: { success: true },
+      } });
+      if (request.query.includes("CoreLiveAttachedLabelReadback")) return response({ data: {
+        project: {
+          labels: {
+            nodes: [{ id: "label-1" }],
+            pageInfo: { hasNextPage: false },
+          },
+        },
       } });
       if (request.query.includes("CoreLiveDeleteLabel")) return response({ data: {
         projectLabelDelete: { success: true },
@@ -287,11 +297,15 @@ test("Linear fixture binds a retained Project by slug without creating or archiv
 
   assert.equal(project.retainProject, true);
   assert.equal(project.projectId, "retained-project");
+  assert.match(requests[0].query, /project\(id: \$projectId\)/u);
+  assert.doesNotMatch(requests[0].query, /projects\(first:/u);
+  assert.deepEqual(requests[0].variables, { projectId: "debug-slug" });
   await operator.cleanup({ lock, runId: "run-1", ...project });
   assert.deepEqual(operations, [
     "CoreLiveProjectBySlug",
     "CoreLiveLabel",
     "CoreLiveAttachLabel",
+    "CoreLiveAttachedLabelReadback",
     "CoreLiveDeleteLabel",
   ]);
 });

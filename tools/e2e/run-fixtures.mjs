@@ -134,12 +134,45 @@ export function createRunScopedLinearOperator({
           mutation CoreLiveAttachLabel($projectId: String!, $labelId: String!) {
             projectAddLabel(id: $projectId, labelId: $labelId) {
               success
-              project { id }
             }
           }
         `, { projectId: retainedProject.id, labelId: label.projectLabel.id });
         const attached = attachedData.projectAddLabel;
-        if (attached?.success !== true || attached.project?.id !== retainedProject.id) {
+        if (attached?.success !== true) {
+          log({
+            event: "e2e_linear_fixture_rejected",
+            operation: "CoreLiveAttachLabel",
+            success: false,
+          });
+          await deleteProjectLabel(label.projectLabel.id).catch(() => {});
+          throw stableError("linear_fixture_project_label_attach_failed");
+        }
+        let attachedLabels;
+        try {
+          const readbackData = await graphql(`
+            query CoreLiveAttachedLabelReadback($projectId: String!) {
+              project(id: $projectId) {
+                labels(first: 64) {
+                  nodes { id }
+                  pageInfo { hasNextPage }
+                }
+              }
+            }
+          `, { projectId: retainedProject.id });
+          attachedLabels = connection(
+            readbackData.project?.labels,
+            "linear_fixture_project_labels_invalid",
+          );
+        } catch (error) {
+          await deleteProjectLabel(label.projectLabel.id).catch(() => {});
+          throw error;
+        }
+        if (!attachedLabels.some(({ id }) => id === label.projectLabel.id)) {
+          log({
+            event: "e2e_linear_fixture_rejected",
+            operation: "CoreLiveAttachedLabelReadback",
+            label_attached: false,
+          });
           await deleteProjectLabel(label.projectLabel.id).catch(() => {});
           throw stableError("linear_fixture_project_label_attach_failed");
         }
@@ -476,24 +509,21 @@ export function createRunScopedLinearOperator({
 
   async function resolveRetainedProject(projectSlugId, teamId) {
     const data = await graphql(`
-      query CoreLiveProjectBySlug {
-        projects(first: 250) {
-          nodes {
-            id
-            name
-            slugId
-            updatedAt
-            teams(first: 50) { nodes { id } pageInfo { hasNextPage } }
-            labels(first: 64) { nodes { name } pageInfo { hasNextPage } }
-          }
-          pageInfo { hasNextPage }
+      query CoreLiveProjectBySlug($projectId: String!) {
+        project(id: $projectId) {
+          id
+          name
+          slugId
+          updatedAt
+          teams(first: 50) { nodes { id } pageInfo { hasNextPage } }
+          labels(first: 64) { nodes { name } pageInfo { hasNextPage } }
         }
       }
-    `);
-    const projects = connection(data.projects, "linear_fixture_projects_invalid")
-      .filter(({ slugId }) => slugId === projectSlugId);
-    if (projects.length !== 1) throw stableError("linear_fixture_project_slug_invalid");
-    const project = projects[0];
+    `, { projectId: projectSlugId });
+    const project = data.project;
+    if (!project || project.slugId !== projectSlugId) {
+      throw stableError("linear_fixture_project_slug_invalid");
+    }
     const teams = connection(project.teams, "linear_fixture_project_teams_invalid");
     const labels = connection(project.labels, "linear_fixture_project_labels_invalid");
     if (!teams.some(({ id }) => id === teamId) ||
