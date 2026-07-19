@@ -236,6 +236,9 @@
     "AgentCommandResult": {
       "oneOf": [
         { "$ref": "#/$defs/AgentCommandSucceeded" },
+        { "$ref": "#/$defs/AgentCommandConflict" },
+        { "$ref": "#/$defs/AgentCommandUnconfirmed" },
+        { "$ref": "#/$defs/AgentCommandRejected" },
         { "$ref": "#/$defs/AgentCommandFailed" }
       ]
     },
@@ -251,6 +254,59 @@
         "performer_id": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
         "status": { "enum": ["applied", "already_applied", "read"] },
         "summary": { "$ref": "common.schema.json#/$defs/BoundedText" }
+      }
+    },
+    "AgentCommandConflict": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocol_version", "request_id", "turn_id", "root_issue_id", "performer_id", "status", "problem"],
+      "properties": {
+        "protocol_version": { "$ref": "common.schema.json#/$defs/ProtocolVersion" },
+        "request_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "turn_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "performer_id": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
+        "status": { "const": "conflict" },
+        "problem": { "$ref": "#/$defs/CommandProblem" }
+      }
+    },
+    "AgentCommandReadBackTarget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "issue_id"],
+      "properties": {
+        "kind": { "enum": ["issue", "comment_write"] },
+        "issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "write_id": { "$ref": "common.schema.json#/$defs/Identifier" }
+      }
+    },
+    "AgentCommandUnconfirmed": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocol_version", "request_id", "turn_id", "root_issue_id", "performer_id", "status", "problem", "read_back_target"],
+      "properties": {
+        "protocol_version": { "$ref": "common.schema.json#/$defs/ProtocolVersion" },
+        "request_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "turn_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "performer_id": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
+        "status": { "const": "write_unconfirmed" },
+        "problem": { "$ref": "#/$defs/CommandProblem" },
+        "read_back_target": { "$ref": "#/$defs/AgentCommandReadBackTarget" }
+      }
+    },
+    "AgentCommandRejected": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocol_version", "request_id", "turn_id", "root_issue_id", "performer_id", "status", "problem"],
+      "properties": {
+        "protocol_version": { "$ref": "common.schema.json#/$defs/ProtocolVersion" },
+        "request_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "turn_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "performer_id": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
+        "status": { "const": "rejected" },
+        "problem": { "$ref": "#/$defs/CommandProblem" }
       }
     },
     "AgentCommandFailed": {

@@ -636,6 +636,15 @@
         {
           "type": "object",
           "additionalProperties": false,
+          "required": ["kind", "read_back_target"],
+          "properties": {
+            "kind": { "const": "write_unconfirmed" },
+            "read_back_target": { "$ref": "#/$defs/LinearMutationReadBackTarget" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
           "required": ["kind", "error"],
           "properties": {
             "kind": { "const": "failed" },
@@ -643,6 +652,15 @@
           }
         }
       ]
+    },
+    "LinearMutationReadBackTarget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "target_id"],
+      "properties": {
+        "kind": { "enum": ["issue", "managed_marker", "comment_write"] },
+        "target_id": { "$ref": "common.schema.json#/$defs/Identifier" }
+      }
     },
     "ProfileRelayMetadata": {
       "oneOf": [

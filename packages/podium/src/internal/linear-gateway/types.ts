@@ -161,4 +161,11 @@ export type LinearMutationResult =
   | { kind: "already_applied"; issue?: LinearIssueValue }
   | { kind: "linear_precondition_conflict" }
   | { kind: "conductor_project_resolution_changed" }
+  | {
+      kind: "write_unconfirmed";
+      readBackTarget: {
+        kind: "issue" | "managed_marker" | "comment_write";
+        targetId: string;
+      };
+    }
   | { kind: "failed"; error: ProtocolError };

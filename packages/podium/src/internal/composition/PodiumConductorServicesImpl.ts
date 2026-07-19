@@ -512,6 +512,15 @@ function mutationResult(result: Awaited<ReturnType<LinearGatewayProtocolHandlerI
       },
     };
   }
+  if (result.kind === "write_unconfirmed") {
+    return {
+      kind: result.kind,
+      read_back_target: {
+        kind: result.readBackTarget.kind,
+        target_id: result.readBackTarget.targetId,
+      },
+    };
+  }
   return {
     kind: result.kind,
     ...("issue" in result && result.issue

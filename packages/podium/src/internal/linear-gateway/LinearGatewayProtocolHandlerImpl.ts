@@ -396,10 +396,16 @@ export class LinearGatewayProtocolHandlerImpl {
           } catch (readBackError) {
             if (attempt === this.retry.maxAttempts) {
               return {
-                kind: "failed",
-                error: protocolFailure(readBackError),
+                kind: "write_unconfirmed",
+                readBackTarget: mutationReadBackTarget(command),
               };
             }
+          }
+          if (attempt === this.retry.maxAttempts) {
+            return {
+              kind: "write_unconfirmed",
+              readBackTarget: mutationReadBackTarget(command),
+            };
           }
         }
         if (!isRetryable || attempt === this.retry.maxAttempts) {
@@ -513,6 +519,22 @@ export class LinearGatewayProtocolHandlerImpl {
     }
     return undefined;
   }
+}
+
+function mutationReadBackTarget(command: LinearMutationCommand) {
+  if (command.kind === "create_managed_node" || command.kind === "upsert_root_managed_comment") {
+    return { kind: "managed_marker" as const, targetId: command.managedMarker };
+  }
+  if (command.kind === "project_root_comment") {
+    return {
+      kind: "comment_write" as const,
+      targetId: command.commentId ?? command.eventKey,
+    };
+  }
+  return {
+    kind: "issue" as const,
+    targetId: command.precondition.expectedIssueId,
+  };
 }
 
 function nextCursor(pageInfo: { hasNextPage: boolean; endCursor?: string }): string | undefined {

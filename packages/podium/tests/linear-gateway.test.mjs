@@ -619,7 +619,10 @@ test("successful SDK mutation is not applied until read-back proves the outcome"
     state: "In Progress",
   });
 
-  assert.equal(result.kind, "failed");
+  assert.deepEqual(result, {
+    kind: "write_unconfirmed",
+    readBackTarget: { kind: "issue", targetId: "issue-1" },
+  });
   assert.equal(attempts, 2);
 });
 
@@ -875,6 +878,44 @@ test("ambiguous Root comment mutation uses exact outcome read-back", async () =>
 
   assert.equal(result.kind, "already_applied");
   assert.equal(attempts, 1);
+});
+
+test("ambiguous mutation returns a closed read-back target when confirmation is exhausted", async () => {
+  let attempts = 0;
+  const handler = new LinearGatewayProtocolHandlerImpl(
+    {
+      async readProjectResolution() {
+        return { kind: "resolved", projectId: "project-1", updatedAt: "2026-07-16T00:00:00Z" };
+      },
+      async readMutationTarget() {
+        return { issueId: "root-1", updatedAt: "2026-07-16T00:00:00Z" };
+      },
+      async readRootManagedComment() { return undefined; },
+      async executeMutation() {
+        attempts += 1;
+        const error = new Error("timeout");
+        error.retryable = true;
+        error.ambiguous = true;
+        throw error;
+      },
+      async readMutationOutcome() { return undefined; },
+    },
+    { sleep: async () => undefined, maxAttempts: 3, baseDelayMs: 1 },
+  );
+
+  const result = await handler.mutate({
+    kind: "upsert_root_managed_comment",
+    project: project(),
+    rootPrecondition: { expectedIssueId: "root-1", expectedUpdatedAt: "2026-07-16T00:00:00Z" },
+    managedMarker: "root-1:root-comment",
+    body: "bounded",
+  });
+
+  assert.deepEqual(result, {
+    kind: "write_unconfirmed",
+    readBackTarget: { kind: "managed_marker", targetId: "root-1:root-comment" },
+  });
+  assert.equal(attempts, 3);
 });
 
 test("Podium-Conductor maps only the selected Root comment identity", async () => {
