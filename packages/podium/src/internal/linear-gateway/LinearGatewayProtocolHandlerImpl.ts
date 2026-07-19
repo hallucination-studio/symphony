@@ -437,6 +437,7 @@ export class LinearGatewayProtocolHandlerImpl {
   ): Promise<LinearMutationResult | undefined> {
     if (
       command.kind !== "create_managed_node" &&
+      command.kind !== "create_issue_comment" &&
       command.kind !== "upsert_root_managed_comment" &&
       command.kind !== "project_root_comment"
     ) {
@@ -453,6 +454,10 @@ export class LinearGatewayProtocolHandlerImpl {
       return outcome
         ? { kind: "already_applied", ...outcome }
         : { kind: "linear_precondition_conflict" };
+    }
+    if (command.kind === "create_issue_comment") {
+      const outcome = await this.client.readMutationOutcome(command);
+      return outcome ? { kind: "already_applied", ...outcome } : undefined;
     }
     const outcome = await this.client.readMutationOutcome(command);
     return outcome ? { kind: "already_applied", ...outcome } : undefined;
@@ -539,6 +544,9 @@ function mutationReadBackTarget(command: LinearMutationCommand) {
       kind: "comment_write" as const,
       targetId: command.commentId ?? command.eventKey,
     };
+  }
+  if (command.kind === "create_issue_comment") {
+    return { kind: "comment_write" as const, targetId: command.writeId };
   }
   return {
     kind: "issue" as const,

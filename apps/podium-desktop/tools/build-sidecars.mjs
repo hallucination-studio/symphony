@@ -17,7 +17,18 @@ compile(
   path.join(workspaceRoot, "apps", "conductor", "src", "main.ts"),
   path.join(binaries, `conductor-${target}`),
 );
-buildPerformer(path.join(binaries, `performer-${target}`));
+buildPythonSidecar(
+  path.join(binaries, `performer-${target}`),
+  path.join(workspaceRoot, "apps", "performer", "src", "performer", "__main__.py"),
+  "performer-sidecar",
+);
+buildPythonSidecar(
+  path.join(binaries, `symphony-${target}`),
+  path.join(
+    workspaceRoot, "apps", "performer", "src", "performer", "command_broker", "cli.py",
+  ),
+  "command-broker-sidecar",
+);
 
 function buildWorkspaceDependencies() {
   const result = spawnSync(
@@ -46,14 +57,14 @@ function compile(entrypoint, output) {
   }
 }
 
-function buildPerformer(output) {
+function buildPythonSidecar(output, entrypoint, workName) {
   const pyinstaller = path.join(
     workspaceRoot,
     ".venv",
     "bin",
     process.platform === "win32" ? "pyinstaller.exe" : "pyinstaller",
   );
-  const work = path.join(workspaceRoot, "tmp", "performer-sidecar");
+  const work = path.join(workspaceRoot, "tmp", workName);
   const result = spawnSync(
     pyinstaller,
     [
@@ -67,18 +78,13 @@ function buildPerformer(output) {
       work,
       "--specpath",
       work,
-      path.join(
-        workspaceRoot,
-        "apps",
-        "performer",
-        "src",
-        "performer",
-        "__main__.py",
-      ),
+      entrypoint,
     ],
     { cwd: workspaceRoot, stdio: "inherit" },
   );
-  if (result.status !== 0) throw new Error("performer_sidecar_build_failed");
+  if (result.status !== 0) {
+    throw new Error(`python_sidecar_build_failed:${path.basename(output)}`);
+  }
 }
 
 function rustTarget() {

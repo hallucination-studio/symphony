@@ -5,12 +5,43 @@ import test from "node:test";
 
 import {
   cleanupCoreLiveResources,
+  createRuntimeEvidenceTracker,
   createTurnLaneTracker,
   finalizeCoreLiveResult,
   pollUntil,
 } from "../../tools/e2e/core-live-runner.mjs";
 
-test("core live runner fails closed before mutation without the four pipeline inputs", () => {
+test("runtime evidence reports bounded step durations and private Linear request counts", () => {
+  let now = 10;
+  const tracker = createRuntimeEvidenceTracker(() => {}, () => now);
+  tracker.log({ event: "e2e_step_started", step: "discovery" });
+  tracker.log({ event: "e2e_conductor_request", request_kind: "list_root_issues" });
+  tracker.log({ event: "e2e_conductor_request", request_kind: "get_issue_tree" });
+  tracker.log({ event: "e2e_child_log", component: "conductor", message: JSON.stringify({
+    event: "agent_broker_result", command: "git.commit", status: "applied",
+    root_issue_id: "root-1", turn_id: "turn-1", performer_id: "conversation-1",
+  }) });
+  tracker.log({ event: "e2e_child_log", component: "conductor", message: JSON.stringify({
+    event: "root_discovery_evidence", root_header_count: 251,
+    list_page_count: 2, get_issue_tree_count: 0,
+  }) });
+  now = 35;
+  tracker.log({ event: "e2e_step_completed", step: "discovery" });
+  assert.deepEqual(tracker.evidence(), {
+    stepDurationsMs: { discovery: 25 },
+    requestCounts: { list_root_issues: 1, get_issue_tree: 1 },
+    stepRequestCounts: { discovery: { list_root_issues: 1, get_issue_tree: 1 } },
+    brokerResults: [{ command: "git.commit", status: "applied", rootIssueId: "root-1",
+      turnId: "turn-1", performerId: "conversation-1" }],
+    discoveryObservations: 1,
+    maxRootHeaderCount: 251,
+    totalDiscoveryListPages: 2,
+    discoveryTreeRequests: 0,
+    totalRequests: 2,
+  });
+});
+
+test("core live runner reports unverified before mutation without required inputs", () => {
   const canary = "linear-core-live-canary";
   const result = spawnSync(process.execPath, ["tools/e2e/core-live-runner.mjs"], {
     encoding: "utf8",
@@ -25,7 +56,7 @@ test("core live runner fails closed before mutation without the four pipeline in
   assert.equal(result.stdout, "");
   assert.doesNotMatch(result.stderr, new RegExp(canary, "u"));
   assert.deepEqual(JSON.parse(result.stderr), {
-    status: "failed",
+    status: "unverified",
     reason: "e2e_configuration_invalid",
   });
 });
@@ -89,6 +120,17 @@ test("Turn lane evidence is derived from correlated Conductor events", () => {
     maxActiveTurns: 2,
     activeTurnCount: 0,
   });
+  assert.equal(tracker.observedConversation("root-a", "conversation-a"), true);
+  assert.equal(tracker.completedTurn("root-a", "conversation-a", "turn-a"), true);
+  assert.equal(tracker.completedTurn("root-a", "conversation-b", "turn-a"), false);
+});
+
+test("Turn lane pointer evidence requires the first Turn to use the read-back Conversation", () => {
+  const tracker = createTurnLaneTracker(() => {});
+  tracker.log(childEvent("turn-old", "turn_started", "root-a", "conversation-old"));
+  tracker.log(childEvent("turn-current", "turn_started", "root-a", "conversation-current"));
+  assert.equal(tracker.observedConversation("root-a", "conversation-current"), false);
+  assert.equal(tracker.observedConversation("root-a", "conversation-old"), true);
 });
 
 test("core live cleanup attempts every acquired resource and reports stable failures", async () => {
@@ -193,7 +235,12 @@ test("root workspace commands build Podium before Desktop consumes its dist cont
   assert.equal(testTypescript.indexOf(desktopTest) > testTypescript.indexOf(podiumTest), true);
 });
 
-function childEvent(turnId, eventKind) {
+function childEvent(
+  turnId,
+  eventKind,
+  rootIssueId = turnId.replace("turn", "root"),
+  performerId = turnId.replace("turn", "conversation"),
+) {
   return {
     event: "e2e_child_log",
     component: "conductor",
@@ -201,6 +248,8 @@ function childEvent(turnId, eventKind) {
     message: JSON.stringify({
       event: "performer_turn_event",
       turn_id: turnId,
+      root_issue_id: rootIssueId,
+      performer_id: performerId,
       event_kind: eventKind,
     }),
   };

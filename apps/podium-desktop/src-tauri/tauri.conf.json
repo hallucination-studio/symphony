@@ -33,7 +33,12 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "externalBin": ["binaries/podium-backend", "binaries/conductor", "binaries/performer"],
+    "externalBin": [
+      "binaries/podium-backend",
+      "binaries/conductor",
+      "binaries/performer",
+      "binaries/symphony"
+    ],
     "icon": ["icons/icon.png"]
   }
 }

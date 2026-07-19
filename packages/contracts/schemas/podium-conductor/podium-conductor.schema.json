@@ -537,6 +537,41 @@
         "state": { "$ref": "common.schema.json#/$defs/LinearIssueState" }
       }
     },
+    "UpdateIssueAssigneeCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "project", "precondition", "assignee_id"],
+      "properties": {
+        "kind": { "const": "update_issue_assignee" },
+        "project": { "$ref": "#/$defs/ProjectPrecondition" },
+        "precondition": { "$ref": "#/$defs/RemotePrecondition" },
+        "assignee_id": { "$ref": "common.schema.json#/$defs/Identifier" }
+      }
+    },
+    "UpdateIssueLabelCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "project", "precondition", "label", "operation"],
+      "properties": {
+        "kind": { "const": "update_issue_label" },
+        "project": { "$ref": "#/$defs/ProjectPrecondition" },
+        "precondition": { "$ref": "#/$defs/RemotePrecondition" },
+        "label": { "$ref": "common.schema.json#/$defs/ShortText" },
+        "operation": { "enum": ["add", "remove"] }
+      }
+    },
+    "CreateIssueCommentCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "project", "precondition", "write_id", "body"],
+      "properties": {
+        "kind": { "const": "create_issue_comment" },
+        "project": { "$ref": "#/$defs/ProjectPrecondition" },
+        "precondition": { "$ref": "#/$defs/RemotePrecondition" },
+        "write_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "body": { "$ref": "common.schema.json#/$defs/BoundedText" }
+      }
+    },
     "ReorderIssueNodeCommand": {
       "type": "object",
       "additionalProperties": false,
@@ -611,6 +646,9 @@
         { "$ref": "#/$defs/CreateManagedNodeCommand" },
         { "$ref": "#/$defs/UpdateManagedNodeCommand" },
         { "$ref": "#/$defs/UpdateIssueStateCommand" },
+        { "$ref": "#/$defs/UpdateIssueAssigneeCommand" },
+        { "$ref": "#/$defs/UpdateIssueLabelCommand" },
+        { "$ref": "#/$defs/CreateIssueCommentCommand" },
         { "$ref": "#/$defs/ReorderIssueNodeCommand" },
         { "$ref": "#/$defs/ReplaceRootPhaseLabelCommand" },
         { "$ref": "#/$defs/UpsertRootManagedCommentCommand" },

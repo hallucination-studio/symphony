@@ -8,22 +8,46 @@ const now = "2026-07-19T00:00:00Z";
 
 test("V3 gateway reconstructs closed Root facts and performs no discovery Tree reads", async () => {
   const requests: string[] = [];
+  const discovery: unknown[] = [];
   const gateway = createGateway(async (body) => {
     requests.push(body.kind as string);
     if (body.kind === "resolve_conductor_project") return resolved();
-    if (body.kind === "list_root_issues") return rootsPage();
+    if (body.kind === "list_root_issues") {
+      const page = body.page as { cursor?: string };
+      return page.cursor ? rootsPage(1, 251) : rootsPage(250, 1, true);
+    }
     return treePage();
-  });
+  }, (evidence) => discovery.push(evidence));
   await gateway.resolveProject();
   const roots = await gateway.listRoots("project-1");
+  assert.equal(roots.length, 251);
   assert.equal(roots[0]?.managedConductorId, "conductor-1");
-  assert.deepEqual(requests, ["resolve_conductor_project", "list_root_issues"]);
+  assert.deepEqual(requests, [
+    "resolve_conductor_project", "list_root_issues", "list_root_issues",
+  ]);
+  assert.deepEqual(discovery, [{ rootHeaderCount: 251, listPageCount: 2,
+    getIssueTreeCount: 0 }]);
 
   const view = await gateway.reconstructV3("root-1");
   assert.equal(view.managedComment?.performerId, "conversation-1");
   assert.equal(view.profile?.readiness, "ready");
   assert.equal(view.workflowTreeComplete, true);
-  assert.deepEqual(requests, ["resolve_conductor_project", "list_root_issues", "get_issue_tree"]);
+  assert.deepEqual(requests, ["resolve_conductor_project", "list_root_issues",
+    "list_root_issues", "get_issue_tree"]);
+});
+
+test("V3 gateway discovery evidence measures an actual nested Tree request", async () => {
+  const discovery: unknown[] = [];
+  const gateway = createGateway(async (body) => {
+    if (body.kind === "resolve_conductor_project") return resolved();
+    if (body.kind === "get_issue_tree") return treePage();
+    await gateway.reconstructV3("root-1");
+    return rootsPage();
+  }, (evidence) => discovery.push(evidence));
+  await gateway.resolveProject();
+  await gateway.listRoots("project-1");
+  assert.deepEqual(discovery, [{ rootHeaderCount: 1, listPageCount: 1,
+    getIssueTreeCount: 1 }]);
 });
 
 test("V3 gateway claim uses exact Root CAS and closed Primary Comment", async () => {
@@ -52,7 +76,53 @@ test("V3 gateway rejects ambiguous Primary Comments", async () => {
   await assert.rejects(gateway.reconstructV3("root-1"), /root_managed_comment_ambiguous/u);
 });
 
-function createGateway(request: (body: Record<string, unknown>) => Promise<unknown>) {
+test("V3 gateway maps every public Agent Linear write to a closed Podium mutation", async () => {
+  const mutations: Record<string, unknown>[] = [];
+  const gateway = createGateway(async (body) => {
+    if (body.kind === "resolve_conductor_project") return resolved();
+    mutations.push(body);
+    return { kind: "applied" };
+  });
+  await gateway.resolveProject();
+  const common = { expected_remote_version: now, expected_git_head: "abc" };
+  for (const [command, args] of [
+    ["linear.issue.create_child", { ...common, parent_issue_id: "root-1", kind: "work",
+      title: "Work", description: "Build it", write_id: "write-1" }],
+    ["linear.issue.create_child", { ...common, parent_issue_id: "root-1", kind: "rework",
+      title: "[Rework] Root Gate Findings", description: "Fix findings",
+      write_id: "write-rework" }],
+    ["linear.assignee.set", { ...common, issue_id: "work-1", assignee_id: "user-1" }],
+    ["linear.label.set", { ...common, issue_id: "work-1", label: "Ready",
+      operation: "add" }],
+    ["linear.comment.create", { ...common, issue_id: "work-1", body: "Progress",
+      write_id: "write-2" }],
+  ] as const) {
+    assert.equal((await gateway.mutate({ rootIssueId: "root-1", command, args })).kind,
+      "applied");
+  }
+  assert.deepEqual(mutations.map(({ kind }) => kind), [
+    "create_managed_node", "create_managed_node", "update_issue_assignee", "update_issue_label",
+    "create_issue_comment",
+  ]);
+  assert.equal(mutations[0]?.managed_marker, "write-1");
+  assert.equal(mutations[1]?.node_kind, "work");
+  assert.equal(mutations[1]?.title, "[Rework] Root Gate Findings");
+  assert.deepEqual(mutations[2]?.precondition, {
+    expected_issue_id: "work-1", expected_updated_at: now,
+  });
+  assert.equal(mutations[3]?.operation, "add");
+  assert.deepEqual(mutations[4]?.precondition, {
+    expected_issue_id: "work-1", expected_updated_at: now,
+  });
+  assert.equal(mutations[4]?.write_id, "write-2");
+});
+
+function createGateway(
+  request: (body: Record<string, unknown>) => Promise<unknown>,
+  observeDiscovery?: (evidence: {
+    rootHeaderCount: number; listPageCount: number; getIssueTreeCount: number;
+  }) => void,
+) {
   return new PodiumLinearGatewayClientImpl("abc123", {
     async request({ body }) { return await request(body as Record<string, unknown>) as never; },
   }, {
@@ -65,6 +135,7 @@ function createGateway(request: (body: Record<string, unknown>) => Promise<unkno
     create() { throw new Error("unused"); }, update() { throw new Error("unused"); },
     activate() { throw new Error("unused"); }, codexHome() { return "/profiles/1"; },
   }, { timeoutMs: 1_000, conductorId: "conductor-1",
+    ...(observeDiscovery ? { observeDiscovery } : {}),
     async profileReadiness() { return "ready"; },
     async gitWorkspaceFacts() { return { branch: "symphony/runs/root-1",
       worktreePath: "/work/root-1", head: "abc", status: [] }; } });
@@ -74,9 +145,13 @@ function resolved() { return { kind: "resolved", resolved_project: {
   conductor_short_hash: "abc123", project: { project_id: "project-1",
     organization_id: "org-1", name: "Symphony", updated_at: now } } }; }
 
-function rootsPage() { return { kind: "root_issues_page", items: [{ issue: root(),
-  is_delegated_to_symphony: true, priority: "normal", blockers: [],
-  root_managed_comments: [comment()] }], page_info: { has_next_page: false } }; }
+function rootsPage(count = 1, start = 1, hasNextPage = false) {
+  return { kind: "root_issues_page", items: Array.from(
+  { length: count }, (_, index) => { const issueId = `root-${index + start}`; return {
+    issue: root(issueId), is_delegated_to_symphony: true, priority: "normal", blockers: [],
+    root_managed_comments: [comment(`comment-${index + 1}`, issueId)],
+  }; }), page_info: { has_next_page: hasNextPage,
+    ...(hasNextPage ? { end_cursor: "page-2" } : {}) } }; }
 
 function treePage(comments = [comment()]) { return { kind: "issue_tree_page", tree: {
   root_issue_id: "root-1", nodes: [root(), { ...root("work-1"), identifier: "SYM-2",
@@ -92,6 +167,6 @@ function root(issueId = "root-1") { return { issue_id: issueId,
 function managed() { return { conductorId: "conductor-1", performerProfileId: "profile-1",
   performerId: "conversation-1", deliveryBranch: "symphony/runs/root-1" }; }
 
-function comment(commentId = "comment-1") { return { comment_id: commentId,
-  issue_id: "root-1", managed_marker: "root-1:root-comment", updated_at: now,
+function comment(commentId = "comment-1", issueId = "root-1") { return { comment_id: commentId,
+  issue_id: issueId, managed_marker: `${issueId}:root-comment`, updated_at: now,
   body: serializeV3RootManagedComment(managed()) }; }

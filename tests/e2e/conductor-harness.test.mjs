@@ -133,7 +133,7 @@ test("real Conductor reports ready with an unbound generated-protocol result", a
   );
   assert.deepEqual(observation, {
     kind: "conductor_runtime_report",
-    status: "ready",
+    status: "recovering",
     sanitizedSummary: "project_unbound",
   });
   await harness.close();

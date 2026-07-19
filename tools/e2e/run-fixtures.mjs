@@ -8,7 +8,7 @@ const execute = promisify(execFile);
 const LINEAR_GRAPHQL_URL = "https://api.linear.app/graphql";
 const RUN_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const MARKER = /<!-- symphony core live e2e\nrun_id: ([A-Za-z0-9][A-Za-z0-9._-]{0,127})\n-->/u;
-const ROOT_COMMENT_MARKER = "<!-- symphony root marker -->";
+const ROOT_COMMENT_MARKER = "<!-- symphony root\n";
 const TIMELINE_MARKER = /\n*<!-- symphony turn event\nevent_key: ([A-Za-z0-9][A-Za-z0-9._:/-]{0,127}:(?:0|[1-9][0-9]{0,15}))\n-->\s*$/u;
 const TIMELINE_HEADING = /^\*\*Performer (warning|error|Turn completed) \([^\n]{1,160}\)\*\*/u;
 const MAX_COMMENT_LENGTH = 16_384;
@@ -367,7 +367,8 @@ export function createRunScopedLinearOperator({
       const work = treeIssues.filter(({ description }) =>
         typeof description === "string" && description.includes("kind: work"));
       const managedComment = comments.map(({ body }) => body)
-        .find((body) => typeof body === "string" && body.includes("<!-- symphony root marker -->"));
+        .find((body) => typeof body === "string" && body.startsWith("Symphony\n") &&
+          body.includes(ROOT_COMMENT_MARKER) && body.endsWith("\n-->"));
       const phaseLabels = labels.map(({ name }) => name).filter((name) => name.startsWith("symphony:run/"));
       return Object.freeze({
         rootState: data.issue?.state?.name,
@@ -416,8 +417,8 @@ export function createRunScopedLinearOperator({
         throw stableError("linear_fixture_comment_evidence_invalid");
       }
       const primary = comments.filter(({ body }) =>
-        body.startsWith("Symphony Root Run\n") &&
-        body.endsWith(ROOT_COMMENT_MARKER));
+        body.startsWith("Symphony\n") && body.includes(ROOT_COMMENT_MARKER) &&
+        body.endsWith("\n-->"));
       const timeline = comments
         .filter(({ body }) => body.includes("<!-- symphony turn event"))
         .map(({ body }) => timelineEvidence(body));

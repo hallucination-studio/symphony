@@ -61,6 +61,12 @@ export function summarizeConfig(config) {
   });
 }
 
+export function isMissingInputConfiguration(error) {
+  return error?.code === "e2e_configuration_invalid" &&
+    Array.isArray(error.issues) && error.issues.length > 0 &&
+    error.issues.every((issue) => typeof issue === "string" && issue.endsWith("_missing"));
+}
+
 export function createChildEnvironment({
   environment = process.env,
   allowedKeys = DEFAULT_CHILD_ENVIRONMENT_KEYS,

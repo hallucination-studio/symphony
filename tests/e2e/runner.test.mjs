@@ -138,7 +138,7 @@ test("doctor fails closed without printing a supplied secret canary", () => {
   assert.equal(result.stdout, "");
   assert.doesNotMatch(result.stderr, new RegExp(canary, "u"));
   assert.deepEqual(JSON.parse(result.stderr), {
-    status: "failed",
+    status: "unverified",
     reason: "e2e_configuration_invalid",
     issues: ["linear_client_id_missing", "codex_api_key_missing", "codex_base_url_missing", "codex_model_missing"],
   });

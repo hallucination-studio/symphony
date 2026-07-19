@@ -94,6 +94,12 @@ export function agentCommandHelp(): string {
     .join("\n\n");
 }
 
+export function agentCommandCliMap(): Readonly<Record<string, string>> {
+  return Object.freeze(Object.fromEntries(
+    definitions.map(({ cli, name }) => [cli, name]),
+  ));
+}
+
 export function agentCommandExamples(): readonly AgentCommand[] {
   return definitions.map(({ name, exampleArgs }) => ({
     protocol_version: "1",

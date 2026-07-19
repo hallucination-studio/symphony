@@ -1,6 +1,10 @@
 import { spawnSync } from "node:child_process";
 
-import { createChildEnvironment, loadE2EConfig } from "./config.mjs";
+import {
+  createChildEnvironment,
+  isMissingInputConfiguration,
+  loadE2EConfig,
+} from "./config.mjs";
 import { runCoreLiveE2E } from "./core-live-runner.mjs";
 
 const BUILD_WORKSPACES = Object.freeze([
@@ -34,7 +38,10 @@ if (arguments_.length === 1 && arguments_[0] === "--dry-run") {
     const result = await runCoreLiveE2E();
     process.stdout.write(`${JSON.stringify(result)}\n`);
   } catch (error) {
-    process.stderr.write(`${JSON.stringify({ status: "failed", reason: sanitize(error) })}\n`);
+    process.stderr.write(`${JSON.stringify({
+      status: isMissingInputConfiguration(error) ? "unverified" : "failed",
+      reason: sanitize(error),
+    })}\n`);
     process.exitCode = 2;
   }
 }

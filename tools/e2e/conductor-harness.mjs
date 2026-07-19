@@ -165,6 +165,10 @@ export async function startConductorHarness({
         waiting.resolve(message.body);
         continue;
       }
+      emit({
+        event: "e2e_conductor_request",
+        request_kind: message.body?.kind ?? "unknown",
+      });
       const response = await podium.handler.handle(message);
       const body = response?.body;
       if (body?.code) throw stableError("conductor_handshake_rejected");

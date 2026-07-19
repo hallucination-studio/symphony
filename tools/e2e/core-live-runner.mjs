@@ -4,7 +4,11 @@ import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 
-import { createChildEnvironment, loadE2EConfig } from "./config.mjs";
+import {
+  createChildEnvironment,
+  isMissingInputConfiguration,
+  loadE2EConfig,
+} from "./config.mjs";
 import { createProductionPodiumConductorOwner, startConductorHarness } from "./conductor-harness.mjs";
 import { provisionApiKeyProfile } from "./conductor-profile.mjs";
 import { coreLiveStepIds, evaluateCoreLiveEvidence } from "./core-live-verdict.mjs";
@@ -24,6 +28,9 @@ const DEFAULT_RUN_TIMEOUT_MS = 20 * 60_000;
 export function createTurnLaneTracker(log) {
   const active = new Set();
   const observed = new Set();
+  const turnOwners = new Map();
+  const completed = new Set();
+  const firstConversationByRoot = new Map();
   let maxActiveTurns = 0;
   return Object.freeze({
     log(event) {
@@ -46,10 +53,22 @@ export function createTurnLaneTracker(log) {
       ) return;
       if (value.event_kind === "turn_started") {
         observed.add(value.turn_id);
+        if (typeof value.root_issue_id === "string" && typeof value.performer_id === "string" &&
+          !turnOwners.has(value.turn_id)) {
+          turnOwners.set(value.turn_id, Object.freeze({
+            rootIssueId: value.root_issue_id,
+            performerId: value.performer_id,
+          }));
+        }
+        if (typeof value.root_issue_id === "string" && typeof value.performer_id === "string"
+          && !firstConversationByRoot.has(value.root_issue_id)) {
+          firstConversationByRoot.set(value.root_issue_id, value.performer_id);
+        }
         active.add(value.turn_id);
         maxActiveTurns = Math.max(maxActiveTurns, active.size);
       } else if (value.event_kind === "turn_completed") {
         active.delete(value.turn_id);
+        if (turnOwners.has(value.turn_id)) completed.add(value.turn_id);
       }
     },
     evidence() {
@@ -59,7 +78,101 @@ export function createTurnLaneTracker(log) {
         activeTurnCount: active.size,
       });
     },
+    observedConversation(rootIssueId, performerId) {
+      return firstConversationByRoot.get(rootIssueId) === performerId;
+    },
+    completedTurn(rootIssueId, performerId, turnId) {
+      const owner = turnOwners.get(turnId);
+      return completed.has(turnId) && owner?.rootIssueId === rootIssueId &&
+        owner?.performerId === performerId;
+    },
   });
+}
+
+export function createRuntimeEvidenceTracker(log, now = Date.now) {
+  const started = new Map();
+  const stepDurationsMs = {};
+  const requestCounts = {};
+  const stepRequestCounts = {};
+  const brokerResults = [];
+  let discoveryObservations = 0;
+  let maxRootHeaderCount = 0;
+  let totalDiscoveryListPages = 0;
+  let discoveryTreeRequests = 0;
+  let activeStep;
+  let totalRequests = 0;
+  return Object.freeze({
+    log(event) {
+      log(event);
+      if (event?.event === "e2e_step_started" && typeof event.step === "string") {
+        started.set(event.step, now());
+        activeStep = event.step;
+      } else if (event?.event === "e2e_step_completed" && typeof event.step === "string") {
+        const value = started.get(event.step);
+        if (value !== undefined) {
+          stepDurationsMs[event.step] = Math.max(0, Math.round(now() - value));
+          started.delete(event.step);
+        }
+        if (activeStep === event.step) activeStep = undefined;
+      } else if (event?.event === "e2e_conductor_request"
+        && typeof event.request_kind === "string") {
+        totalRequests += 1;
+        requestCounts[event.request_kind] = (requestCounts[event.request_kind] ?? 0) + 1;
+        if (activeStep) {
+          const counts = stepRequestCounts[activeStep] ?? {};
+          counts[event.request_kind] = (counts[event.request_kind] ?? 0) + 1;
+          stepRequestCounts[activeStep] = counts;
+        }
+      } else if (event?.event === "e2e_child_log" && event.component === "conductor"
+        && typeof event.message === "string") {
+        try {
+          const value = JSON.parse(event.message);
+          if (value?.event === "agent_broker_result"
+            && typeof value.command === "string" && typeof value.status === "string"
+            && typeof value.root_issue_id === "string" && typeof value.turn_id === "string"
+            && typeof value.performer_id === "string") {
+            brokerResults.push(Object.freeze({ command: value.command, status: value.status,
+              rootIssueId: value.root_issue_id, turnId: value.turn_id,
+              performerId: value.performer_id }));
+          } else if (value?.event === "root_discovery_evidence") {
+            const counts = [value.root_header_count, value.list_page_count,
+              value.get_issue_tree_count].map(nonNegativeInteger);
+            if (counts.every((item) => item !== undefined)) {
+              discoveryObservations += 1;
+              maxRootHeaderCount = Math.max(maxRootHeaderCount, counts[0]);
+              totalDiscoveryListPages += counts[1];
+              discoveryTreeRequests += counts[2];
+            }
+          }
+        } catch {
+          // Non-JSON child output is not evidence.
+        }
+      }
+    },
+    evidence() {
+      return Object.freeze({
+        stepDurationsMs: Object.freeze({ ...stepDurationsMs }),
+        requestCounts: Object.freeze({ ...requestCounts }),
+        stepRequestCounts: Object.freeze(Object.fromEntries(
+          Object.entries(stepRequestCounts).map(([step, counts]) =>
+            [step, Object.freeze({ ...counts })]),
+        )),
+        brokerResults: Object.freeze([...brokerResults]),
+        discoveryObservations,
+        maxRootHeaderCount,
+        totalDiscoveryListPages,
+        discoveryTreeRequests,
+        totalRequests,
+      });
+    },
+  });
+}
+
+function nonNegativeInteger(value) {
+  const parsed = typeof value === "string" && /^(?:0|[1-9][0-9]*)$/u.test(value)
+    ? Number(value)
+    : value;
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : undefined;
 }
 
 export async function runCoreLiveE2E({
@@ -76,7 +189,9 @@ export async function runCoreLiveE2E({
   }
   const config = loadE2EConfig({ environment });
   const deadline = Date.now() + timeoutMs;
-  const log = createE2ELogger({ runId, secrets: Object.values(config.secrets) });
+  const baseLog = createE2ELogger({ runId, secrets: Object.values(config.secrets) });
+  const runtimeEvidence = createRuntimeEvidenceTracker(baseLog);
+  const log = runtimeEvidence.log;
   const turnLane = createTurnLaneTracker(log);
   log({ event: "e2e_run_started" });
   const linear = createRunScopedLinearOperator({
@@ -211,6 +326,15 @@ export async function runCoreLiveE2E({
       { deadline, pollIntervalMs },
     );
     evidence.push({
+      step: "conversation_pointer_verified",
+      status: "passed",
+      pointerReadBack: Boolean(blockerPlan.performerId),
+      firstTurnUsedPointer: turnLane.observedConversation(
+        blocker.rootIssueId,
+        blockerPlan.performerId,
+      ),
+    });
+    evidence.push({
       step: "blocker_order_verified",
       status: "passed",
       blockerPlanned: true,
@@ -269,6 +393,8 @@ export async function runCoreLiveE2E({
       newWinnerSelected: true,
       previousWinnerUntouched: true,
     });
+    log({ event: "e2e_step_completed", step: "multi_root_scheduling" });
+    log({ event: "e2e_step_started", step: "root_completion" });
 
     const yieldedCompleted = await waitForRootCompletion({
       linear,
@@ -310,15 +436,50 @@ export async function runCoreLiveE2E({
       observedTurnCount: laneEvidence.observedTurnCount,
       maxActiveTurns: laneEvidence.maxActiveTurns,
     });
+    const runtimeFacts = runtimeEvidence.evidence();
+    const correlatedBrokerResults = runtimeFacts.brokerResults
+      .filter(({ status, rootIssueId, performerId, turnId }) =>
+        (status === "applied" || status === "already_applied") &&
+        rootIssueId === yielded.rootIssueId && performerId === yieldedCompleted.performerId &&
+        turnLane.completedTurn(rootIssueId, performerId, turnId));
+    const appliedBrokerCommands = correlatedBrokerResults.map(({ command }) => command);
+    const commandsByTurn = Map.groupBy(correlatedBrokerResults, ({ turnId }) => turnId);
+    const deliveryTurn = [...commandsByTurn.entries()].find(([, commands]) =>
+      commands.some(({ command }) => command === "git.commit") &&
+      commands.some(({ command }) => command === "root.deliver"));
+    const linearReadBack = appliedBrokerCommands.some((command) => command.startsWith("linear."));
+    const gitReadBack = deliveryTurn?.[1].some(({ command }) => command === "git.commit") === true;
+    const deliveryReadBack = deliveryTurn?.[1].some(({ command }) => command === "root.deliver") === true;
+    if (!linearReadBack || !gitReadBack || !deliveryReadBack) {
+      throw stableError("e2e_broker_write_evidence_missing");
+    }
     evidence.push(
-      { step: "work_completed", status: "passed" },
-      { step: "root_gate_passed", status: "passed" },
+      { step: "work_completed", status: "passed",
+        workNodeCount: yieldedCompleted.workStates.length,
+        allWorkDone: yieldedCompleted.workStates.every((state) => state === "Done") },
+      { step: "root_gate_passed", status: "passed",
+        reworkCount: yieldedCompleted.reworkCount,
+        phase: yieldedCompleted.phase },
       {
         step: "branch_delivered",
         status: "passed",
         branchCount: 1,
+        deliveryBranch: yieldedCompleted.deliveryBranch,
+        deliveredMarkerReadBack: true,
       },
-      { step: "linear_in_review", status: "passed" },
+      { step: "linear_in_review", status: "passed",
+        rootState: yieldedCompleted.rootState, phase: yieldedCompleted.phase },
+      { step: "broker_writes_verified", status: "passed",
+        linearReadBack, gitReadBack, deliveryReadBack,
+        rootIssueId: yielded.rootIssueId,
+        performerId: yieldedCompleted.performerId,
+        correlatedTurnIds: [...commandsByTurn.keys()],
+        deliveryTurnId: deliveryTurn?.[0],
+        turnCommands: [...commandsByTurn].map(([turnId, commands]) => ({
+          turnId,
+          commands: [...new Set(commands.map(({ command }) => command))],
+        })),
+        appliedCommands: [...new Set(appliedBrokerCommands)] },
     );
     log({ event: "e2e_step_completed", step: "root_completion" });
 
@@ -352,13 +513,22 @@ export async function runCoreLiveE2E({
       timeline_event_count: eventKeys.length,
     });
 
+    const requests = runtimeEvidence.evidence();
+    evidence.push({
+      step: "request_budget_verified",
+      status: "passed",
+      ...requests,
+    });
+
     result = Object.freeze({
       status: "passed",
       runId,
       projectMode: project.retainProject ? "retained" : "temporary",
       projectSlugId: project.projectSlugId,
       rootIdentifier: yielded.rootIdentifier,
+      rootIssueId: yielded.rootIssueId,
       profileId: profile.profileId,
+      performerId: yieldedCompleted.performerId,
       performerResumed: yieldedCompleted.performerId === yieldedPlan.performerId,
       rootState: yieldedCompleted.rootState,
       phase: yieldedCompleted.phase,
@@ -692,7 +862,10 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   } else runCoreLiveE2E()
     .then((result) => process.stdout.write(`${JSON.stringify(result)}\n`))
     .catch((error) => {
-      process.stderr.write(`${JSON.stringify({ status: "failed", reason: sanitize(error) })}\n`);
+      process.stderr.write(`${JSON.stringify({
+        status: isMissingInputConfiguration(error) ? "unverified" : "failed",
+        reason: sanitize(error),
+      })}\n`);
       process.exitCode = 2;
     });
 }

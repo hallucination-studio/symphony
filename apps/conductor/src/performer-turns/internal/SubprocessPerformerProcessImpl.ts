@@ -18,6 +18,11 @@ import type {
   GlobalPerformerLane,
   PerformerInvocationControl,
 } from "./GlobalPerformerLane.js";
+import {
+  agentCommandCliMap,
+  dispatchAgentCommand,
+  parseAgentCommand,
+} from "../../agent-symphony-harness/internal/AgentCommandRegistry.js";
 
 type JsonRecord = { [key: string]: JsonValue };
 const MAX_EVENT_BYTES = 1_048_576;
@@ -107,7 +112,11 @@ export class SubprocessPerformerProcessImpl implements PerformerProcessInterface
       await this.lane.run({
         executable: this.options.executable,
         arguments: correlationArguments(command, resultPath),
-        environment: this.options.environment(input.profileId),
+        environment: turnEnvironment(
+          this.options.environment(input.profileId),
+          this.options.executable,
+          command,
+        ),
         workingDirectory: input.workspaceRoot,
         deadlineMs: limits.max_wall_time_ms as number,
         startupDeadlineMs: this.options.startupDeadlineMs,
@@ -145,13 +154,41 @@ export class SubprocessPerformerProcessImpl implements PerformerProcessInterface
         throw new Error("performer_result_correlation_invalid");
       }
     }
-    return { result: result as JsonValue };
+    const observed = broker?.usage() ?? { brokerCalls: 0, mutations: 0 };
+    const corrected = decodeConductorPerformerRootTurnResult({
+      ...result,
+      turn_usage: {
+        ...(result.turn_usage as JsonRecord),
+        broker_calls: observed.brokerCalls,
+        mutations: observed.mutations,
+      },
+    } as JsonValue);
+    return { result: corrected as JsonValue };
   }
 
   cancelAndReap() {
     for (const broker of this.#activeBrokers) broker.cancel();
     return this.lane.cancelAndReap(this.options.cancellationGraceMs);
   }
+}
+
+function turnEnvironment(
+  base: NodeJS.ProcessEnv,
+  executable: string,
+  command: JsonRecord,
+): NodeJS.ProcessEnv {
+  const executableDirectory = path.dirname(path.resolve(executable));
+  const searchPath = base.PATH
+    ? `${executableDirectory}${path.delimiter}${base.PATH}`
+    : `${executableDirectory}${path.delimiter}/usr/bin${path.delimiter}/bin`;
+  return {
+    ...base,
+    PATH: searchPath,
+    SYMPHONY_AGENT_COMMAND_CATALOG: JSON.stringify(agentCommandCliMap()),
+    SYMPHONY_TURN_ID: command.turn_id as string,
+    SYMPHONY_ROOT_ISSUE_ID: command.root_issue_id as string,
+    SYMPHONY_PERFORMER_ID: command.performer_id as string,
+  };
 }
 
 const correlationFields = [
@@ -245,6 +282,8 @@ class BrokerBridge {
   #chain = Promise.resolve();
   #accepting = true;
   #totalBytes = 0;
+  #brokerCalls = 0;
+  #mutations = 0;
 
   constructor(
     private readonly requests: Duplex,
@@ -255,6 +294,10 @@ class BrokerBridge {
   }
 
   cancel() { this.#accepting = false; }
+
+  usage() {
+    return { brokerCalls: this.#brokerCalls, mutations: this.#mutations };
+  }
 
   close() {
     this.#accepting = false;
@@ -284,6 +327,14 @@ class BrokerBridge {
       request = JSON.parse(Buffer.from(frame).toString("utf8"));
     } catch {
       return;
+    }
+    this.#brokerCalls += 1;
+    try {
+      if (dispatchAgentCommand(parseAgentCommand(request)).mutation) {
+        this.#mutations += 1;
+      }
+    } catch {
+      // The scoped broker produces the closed rejection for malformed requests.
     }
     let result: JsonValue;
     try {

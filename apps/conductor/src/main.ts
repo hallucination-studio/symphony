@@ -11,6 +11,7 @@ import { RootConversationLifecycle } from "./agent-symphony-harness/internal/Roo
 import { RootRetryBlockCommandHandler } from "./agent-symphony-harness/internal/RootRetryBlockCommandHandler.js";
 import { RunAgentRootTurnUseCase } from "./agent-symphony-harness/internal/RunAgentRootTurnUseCase.js";
 import { ScopedAgentCommandBrokerImpl } from "./agent-symphony-harness/internal/ScopedAgentCommandBrokerImpl.js";
+import { parseAgentCommand } from "./agent-symphony-harness/internal/AgentCommandRegistry.js";
 import { TurnCommandBudget } from "./agent-symphony-harness/internal/TurnCommandBudget.js";
 import { NativeGitWorkspaceImpl } from "./git-workspaces/internal/NativeGitWorkspaceImpl.js";
 import { PodiumLinearGatewayClientImpl } from "./linear-gateway/internal/PodiumLinearGatewayClientImpl.js";
@@ -92,6 +93,13 @@ export async function runConductor(environment = process.env): Promise<void> {
     {
       timeoutMs: 30_000,
       conductorId: config.conductorId,
+      observeDiscovery(evidence) {
+        logEvent("info", "root_discovery_evidence", {
+          root_header_count: String(evidence.rootHeaderCount),
+          list_page_count: String(evidence.listPageCount),
+          get_issue_tree_count: String(evidence.getIssueTreeCount),
+        });
+      },
       async gitWorkspaceFacts({ rootIssueId, branch }) {
         const workspace = { rootIssueId, branch,
           worktreePath: path.join(config.dataRoot, "worktrees", rootIssueId) };
@@ -172,7 +180,7 @@ export async function runConductor(environment = process.env): Promise<void> {
     broker({ turnId, view, performerId }) {
       const workspace = view.gitWorkspace && { rootIssueId: view.root.issueId,
         branch: view.gitWorkspace.branch, worktreePath: view.gitWorkspace.worktreePath };
-      return new ScopedAgentCommandBrokerImpl({
+      const scoped = new ScopedAgentCommandBrokerImpl({
         conductorId: config.conductorId, turnId, rootIssueId: view.root.issueId,
         performerId, linear: gateway, git, delivery,
         ...(workspace ? { workspace } : {}),
@@ -182,8 +190,45 @@ export async function runConductor(environment = process.env): Promise<void> {
           checksDigest: digest([]) },
         budget: new TurnCommandBudget(limits),
       });
+      return {
+        async execute(value: unknown) {
+          const result = await scoped.execute(value);
+          try {
+            const command = parseAgentCommand(value);
+            const output = result as Record<string, JsonValue>;
+            logEvent("info", "agent_broker_result", {
+              turn_id: turnId,
+              root_issue_id: view.root.issueId,
+              performer_id: performerId,
+              command: command.command,
+              status: typeof output.status === "string" ? output.status : "failed",
+            });
+          } catch {
+            // Invalid model output is rejected by the broker and is not echoed to logs.
+          }
+          return result;
+        },
+      };
     },
-    performer,
+    performer: {
+      runRootTurn(input) {
+        return performer.runRootTurn({
+          ...input,
+          onEvent(event) {
+            const body = event.body;
+            if (!body || typeof body !== "object" || Array.isArray(body)) return;
+            const kind = body.kind;
+            if (typeof kind !== "string") return;
+            logEvent("info", "performer_turn_event", {
+              turn_id: String(event.turn_id),
+              root_issue_id: String(event.root_issue_id),
+              performer_id: String(event.performer_id),
+              event_kind: kind,
+            });
+          },
+        });
+      },
+    },
     async observe({ freshView, result }) {
       if (result && typeof result === "object" && !Array.isArray(result)
         && result.result_kind === "root_conversation_unavailable") {

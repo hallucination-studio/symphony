@@ -14,6 +14,7 @@ build = ["pyinstaller==6.16.0"]
 
 [project.scripts]
 performer = "performer.__main__:main"
+symphony = "performer.command_broker.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

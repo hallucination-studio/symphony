@@ -414,7 +414,7 @@ test("run state and Plan approval map only Linear facts", async () => {
           id: "root-1",
           state: { name: approved ? "In Progress" : "In Progress" },
           labels: { nodes: [{ name: approved ? "symphony:run/working" : "symphony:run/awaiting-human" }], pageInfo: { hasNextPage: false } },
-          comments: { nodes: [{ body: "performer_id: conversation-1\ndelivery_branch: symphony/runs/run-1\n<!-- symphony root marker -->" }], pageInfo: { hasNextPage: false } },
+          comments: { nodes: [{ body: "Symphony\nConductor: conductor-1\nPerformer profile: profile-1\nConversation: active\nActivity: none\nEvidence: current Linear and Git read-back\nObserved at: none\nBranch: symphony/runs/run-1\nPull request: none\nCurrent problem: none\n\n<!-- symphony root\nconductor_id: conductor-1\nperformer_profile_id: profile-1\nperformer_id: conversation-1\ndelivery_branch: symphony/runs/run-1\npull_request: none\nretry_blocked: false\nretry_expected_performer_id: none\nretry_failure_code: none\nretry_observed_at: none\n-->" }], pageInfo: { hasNextPage: false } },
         },
         project: { issues: { nodes: [
           { id: "other-approval", title: "Other approval", description: "human_kind: plan_approval", parent: { id: "other-root" }, state: { name: "Done" } },
@@ -463,7 +463,7 @@ test("Linear fixture returns only sanitized Root comment evidence", async () => 
           comments: { nodes: [
             {
               id: "comment-primary",
-              body: "Symphony Root Run\nconductor_id: conductor-1\nperformer_profile_id: profile-1\nusage_input_tokens: 1\nusage_cached_input_tokens: 0\nusage_output_tokens: 1\nusage_reasoning_output_tokens: 0\nusage_total_tokens: 2\ndelivery_branch: symphony/runs/run-1\n<!-- symphony root marker -->",
+              body: "Symphony\nConductor: conductor-1\nPerformer profile: profile-1\nConversation: active\nActivity: none\nEvidence: current Linear and Git read-back\nObserved at: none\nBranch: symphony/runs/run-1\nPull request: none\nCurrent problem: none\n\n<!-- symphony root\nconductor_id: conductor-1\nperformer_profile_id: profile-1\nperformer_id: conversation-1\ndelivery_branch: symphony/runs/run-1\npull_request: none\nretry_blocked: false\nretry_expected_performer_id: none\nretry_failure_code: none\nretry_observed_at: none\n-->",
             },
             {
               id: "comment-complete-1",
@@ -517,7 +517,7 @@ test("Linear fixture rejects duplicate Timeline event keys", async () => {
         comments: { nodes: [
           {
             id: "comment-primary",
-            body: "Symphony Root Run\n<!-- symphony root marker -->",
+            body: "Symphony\n<!-- symphony root\nconductor_id: conductor-1\nperformer_profile_id: profile-1\nperformer_id: conversation-1\ndelivery_branch: symphony/runs/run-1\npull_request: none\nretry_blocked: false\nretry_expected_performer_id: none\nretry_failure_code: none\nretry_observed_at: none\n-->",
           },
           {
             id: "comment-event-1",

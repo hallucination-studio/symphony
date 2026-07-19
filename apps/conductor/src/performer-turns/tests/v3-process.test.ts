@@ -86,6 +86,36 @@ test("Performer process sends Root context only after protocol readiness", async
   assert.equal((output.result as { result_kind: string }).result_kind, "root_turn_completed");
 });
 
+test("Performer process gives only the current Turn a closed broker CLI environment", async () => {
+  const runtimeRoot = await mkdtemp(path.join(os.tmpdir(), "symphony-v3-turn-"));
+  const command = rootCommand(runtimeRoot);
+  let environment: NodeJS.ProcessEnv | undefined;
+  const processBoundary = createProcess(runtimeRoot, {
+    async run(invocation) {
+      environment = invocation.environment;
+      invocation.onStarted?.({ writeStdin() {}, closeStdin() {}, extraStreams: [] });
+      invocation.onStdout?.(rootEvent(command, 0, { kind: "protocol_ready" }));
+      await writeFile(resultPath(invocation), JSON.stringify(rootResult(command)));
+      return { stdout: "", stderr: "" };
+    },
+  });
+
+  await processBoundary.runRootTurn({
+    profileId: "profile-1", workspaceRoot: runtimeRoot, command,
+    broker: { execute: async () => ({ status: "read" }) },
+  });
+
+  assert.equal(environment?.SYMPHONY_TURN_ID, "turn-1");
+  assert.equal(environment?.SYMPHONY_ROOT_ISSUE_ID, "root-1");
+  assert.equal(environment?.SYMPHONY_PERFORMER_ID, "conversation-1");
+  assert.equal(environment?.PATH?.split(path.delimiter)[0], process.cwd());
+  assert.deepEqual(
+    JSON.parse(environment?.SYMPHONY_AGENT_COMMAND_CATALOG ?? "null")["linear status set"],
+    "linear.status.set",
+  );
+  assert.equal("SYMPHONY_E2E_CODEX_API_KEY" in environment!, false);
+});
+
 test("Performer process rejects oversized context before spawn", async () => {
   const runtimeRoot = await mkdtemp(path.join(os.tmpdir(), "symphony-v3-turn-"));
   const command = rootCommand(runtimeRoot);
@@ -196,26 +226,42 @@ test("Performer process brokers one private framed command on inherited FDs", as
       const received = new Promise<void>((resolve) => responses.once("data", (chunk) => {
         response = JSON.parse(chunk.toString("utf8")); resolve();
       }));
-      requests.write(`${JSON.stringify({ request_id: "broker-1" })}\n`);
+      requests.write(`${JSON.stringify({
+        protocol_version: "1", request_id: "broker-1", turn_id: "turn-1",
+        root_issue_id: "root-1", performer_id: "conversation-1",
+        command: "linear.status.set", args: {
+          issue_id: "root-1", status: "In Progress",
+          expected_remote_version: "version-1", expected_git_head: "abc123",
+        },
+      })}\n`);
       await received;
       await writeFile(resultPath(invocation), JSON.stringify(rootResult(command)));
       return { stdout: "", stderr: "" };
     },
   });
 
-  await processBoundary.runRootTurn({
+  const output = await processBoundary.runRootTurn({
     profileId: "profile-1",
     workspaceRoot: runtimeRoot,
     command,
     broker: {
       async execute(value) {
         brokerCalls.push(value);
-        return { status: "read", summary: "Fresh Root facts." };
+        const request = value as Record<string, JsonValue>;
+        return {
+          protocol_version: request.protocol_version!, request_id: request.request_id!,
+          turn_id: request.turn_id!, root_issue_id: request.root_issue_id!,
+          performer_id: request.performer_id!, status: "applied", summary: "Mutation applied.",
+        };
       },
     },
   });
-  assert.deepEqual(brokerCalls, [{ request_id: "broker-1" }]);
-  assert.deepEqual(response, { status: "read", summary: "Fresh Root facts." });
+  assert.equal(brokerCalls.length, 1);
+  assert.equal((response as { status: string }).status, "applied");
+  assert.deepEqual((output.result as { turn_usage: object }).turn_usage, {
+    wall_time_ms: 10, context_bytes: 25, provider_tokens: 0,
+    broker_calls: 1, mutations: 1,
+  });
 });
 
 test("cancellation rejects new broker calls before process termination", async () => {

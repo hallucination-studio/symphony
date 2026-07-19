@@ -29,6 +29,8 @@ const ROOT_PHASE_PREFIX = "symphony:run/";
 const ROOT_MARKER_START = "<!-- symphony root\n";
 const TURN_EVENT_MARKER =
   /\n*<!-- symphony turn event\nevent_key: ([A-Za-z0-9][A-Za-z0-9._:/-]{0,127}:(?:0|[1-9][0-9]{0,15}))\n-->\s*$/;
+const AGENT_WRITE_MARKER =
+  /\n*<!-- symphony agent write\nwrite_id: ([A-Za-z0-9][A-Za-z0-9._:/-]{0,127})\n-->\s*$/;
 const MANAGED_IDENTITY_MARKER =
   /\n*<!-- symphony managed marker\nmanaged_marker: ([A-Za-z0-9][A-Za-z0-9._:/-]{0,127})\n-->\s*$/;
 const HUMAN_MARKER =
@@ -313,6 +315,37 @@ export class LinearSdkImpl implements LinearClientInterface {
         });
         return;
       }
+      case "update_issue_assignee":
+        await this.#client.updateIssue(command.precondition.expectedIssueId, {
+          assigneeId: command.assigneeId,
+        });
+        return;
+      case "update_issue_label": {
+        const issueId = command.precondition.expectedIssueId;
+        const issue = await this.#client.issue(issueId);
+        const labels = await allNodes(issue.labels({ first: PAGE_LIMIT }), 64);
+        const matches = labels.filter(({ name }) => name === command.label);
+        if (matches.length > 1) throw new Error("linear_issue_label_ambiguous");
+        if (command.operation === "remove") {
+          if (matches[0]) await this.#client.issueRemoveLabel(issueId, matches[0].id);
+          return;
+        }
+        const label = await this.#uniqueIssueLabel(command.label, issue.teamId);
+        if (!labels.some(({ id }) => id === label.id)) {
+          await this.#client.issueAddLabel(issueId, label.id);
+        }
+        return;
+      }
+      case "create_issue_comment": {
+        if (command.body.match(AGENT_WRITE_MARKER)?.[1] !== command.writeId) {
+          throw new Error("linear_agent_comment_marker_invalid");
+        }
+        await this.#client.createComment({
+          issueId: command.precondition.expectedIssueId,
+          body: command.body,
+        });
+        return;
+      }
       case "reorder_issue_node":
         await this.#client.updateIssue(command.precondition.expectedIssueId, {
           parentId: command.parentIssueId,
@@ -375,6 +408,34 @@ export class LinearSdkImpl implements LinearClientInterface {
         return issue.state === command.state
           ? { issue }
           : undefined;
+      }
+      case "update_issue_assignee": {
+        const issue = await this.#client.issue(command.precondition.expectedIssueId);
+        return issue.assigneeId === command.assigneeId
+          ? { issue: await issueValue(issue) }
+          : undefined;
+      }
+      case "update_issue_label": {
+        const issue = await this.#client.issue(command.precondition.expectedIssueId);
+        const labels = await allNodes(issue.labels({ first: PAGE_LIMIT }), 64);
+        const present = labels.some(({ name }) => name === command.label);
+        return present === (command.operation === "add")
+          ? { issue: await issueValue(issue) }
+          : undefined;
+      }
+      case "create_issue_comment": {
+        if (command.body.match(AGENT_WRITE_MARKER)?.[1] !== command.writeId) {
+          return undefined;
+        }
+        const issue = await this.#client.issue(command.precondition.expectedIssueId);
+        const comments = await this.#rootComments(issue);
+        const matches = comments.filter(({ body }) =>
+          body.match(AGENT_WRITE_MARKER)?.[1] === command.writeId);
+        if (matches.length > 1) throw new Error("linear_agent_comment_ambiguous");
+        if (matches[0] && matches[0].body !== command.body) {
+          throw new Error("linear_agent_comment_mismatch");
+        }
+        return matches.length === 1 ? { issue: await issueValue(issue) } : undefined;
       }
       case "reorder_issue_node": {
         const issue = await issueValue(

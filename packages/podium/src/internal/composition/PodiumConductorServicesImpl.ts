@@ -92,6 +92,9 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
       case "create_managed_node":
       case "update_managed_node":
       case "update_issue_state":
+      case "update_issue_assignee":
+      case "update_issue_label":
+      case "create_issue_comment":
       case "reorder_issue_node":
       case "replace_root_phase_label":
       case "upsert_root_managed_comment":
@@ -464,6 +467,23 @@ function mutationCommand(body: Body): LinearMutationCommand {
         precondition: remotePrecondition(body.precondition),
         state: requiredState(body.state),
       };
+    case "update_issue_assignee":
+      return {
+        ...common, kind: body.kind, precondition: remotePrecondition(body.precondition),
+        assigneeId: requiredString(body.assignee_id, "linear_assignee_id_missing"),
+      };
+    case "update_issue_label":
+      return {
+        ...common, kind: body.kind, precondition: remotePrecondition(body.precondition),
+        label: requiredString(body.label, "linear_label_missing"),
+        operation: requiredLabelOperation(body.operation),
+      };
+    case "create_issue_comment":
+      return {
+        ...common, kind: body.kind, precondition: remotePrecondition(body.precondition),
+        writeId: requiredString(body.write_id, "linear_write_id_missing"),
+        body: requiredString(body.body, "linear_comment_body_missing"),
+      };
     case "reorder_issue_node":
       return {
         ...common,
@@ -606,6 +626,13 @@ function requiredNodeKind(value: JsonValue | undefined) {
 function requiredHumanKind(value: string) {
   if (value === "plan_approval" || value === "planned_input" || value === "runtime_input") return value;
   throw new Error("linear_human_kind_invalid");
+}
+
+function requiredLabelOperation(value: JsonValue | undefined): "add" | "remove" {
+  if (value !== "add" && value !== "remove") {
+    throw new Error("linear_label_operation_invalid");
+  }
+  return value;
 }
 
 function requiredState(value: JsonValue | undefined): LinearIssueState {

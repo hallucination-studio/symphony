@@ -77,6 +77,23 @@ export type LinearMutationCommand =
       state: LinearIssueState;
     })
   | (MutationBase & {
+      kind: "update_issue_assignee";
+      precondition: RemotePrecondition;
+      assigneeId: string;
+    })
+  | (MutationBase & {
+      kind: "update_issue_label";
+      precondition: RemotePrecondition;
+      label: string;
+      operation: "add" | "remove";
+    })
+  | (MutationBase & {
+      kind: "create_issue_comment";
+      precondition: RemotePrecondition;
+      writeId: string;
+      body: string;
+    })
+  | (MutationBase & {
       kind: "reorder_issue_node";
       precondition: RemotePrecondition;
       parentIssueId: string;

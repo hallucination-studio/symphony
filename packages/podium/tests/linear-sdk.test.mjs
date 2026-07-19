@@ -533,6 +533,54 @@ test("official SDK adapter serializes Human kind and target without title infere
   assert.equal(outcome.issue.description, "Confirm the input");
 });
 
+test("official SDK adapter reads back Agent assignee, label, and targeted comment writes", async () => {
+  const labels = [];
+  const comments = [];
+  const ready = {
+    id: "label-ready", name: "Ready", isGroup: false,
+    archivedAt: undefined, retiredById: undefined, teamId: "team-1",
+    organization: Promise.resolve({ id: "organization-1" }),
+  };
+  const work = issue({ id: "work-1", parentId: "root-1" });
+  work.assigneeId = undefined;
+  work.labels = async () => connection(labels);
+  work.comments = async () => connection(comments);
+  const sdk = {
+    issue: async () => work,
+    async updateIssue(_id, input) { Object.assign(work, input); },
+    issueLabels: async () => connection([ready]),
+    async issueAddLabel(_issueId, labelId) {
+      if (labelId === ready.id) labels.push(ready);
+    },
+    async issueRemoveLabel() { labels.length = 0; },
+    async createComment({ issueId, body }) {
+      assert.equal(issueId, "work-1");
+      comments.push({ id: "comment-1", issueId, body });
+      return { success: true, commentId: "comment-1" };
+    },
+  };
+  const adapter = new LinearSdkImpl({ kind: "oauth", token: "token" },
+    "organization-1", sdk);
+  const project = { conductorShortHash: "abc123", expectedProjectId: "project-1",
+    expectedProjectUpdatedAt: "2026-07-16T00:00:00Z" };
+  const precondition = { expectedIssueId: "work-1",
+    expectedUpdatedAt: "2026-07-16T00:00:00Z" };
+  const commands = [
+    { kind: "update_issue_assignee", project, precondition, assigneeId: "user-1" },
+    { kind: "update_issue_label", project, precondition, label: "Ready", operation: "add" },
+    { kind: "create_issue_comment", project, precondition, writeId: "write-1",
+      body: "Progress\n\n<!-- symphony agent write\nwrite_id: write-1\n-->" },
+  ];
+
+  for (const command of commands) {
+    await adapter.executeMutation(command);
+    assert.ok(await adapter.readMutationOutcome(command));
+  }
+  assert.equal(work.assigneeId, "user-1");
+  assert.deepEqual(labels.map(({ name }) => name), ["Ready"]);
+  assert.equal(comments.length, 1);
+});
+
 test("official SDK adapter appends and reads back a Root event after 65 comments", async () => {
   const comments = Array.from({ length: 65 }, (_, index) => ({
     id: `user-comment-${index}`,

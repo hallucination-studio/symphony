@@ -52,6 +52,11 @@ export class PodiumLinearGatewayClientImpl implements V3RuntimeGateway, LinearGa
   #sequence = 0;
   #projectId: string | undefined;
   #projectUpdatedAt: string | undefined;
+  #activeDiscovery: {
+    rootHeaderCount: number;
+    listPageCount: number;
+    getIssueTreeCount: number;
+  } | undefined;
   readonly #rootBlockers = new Map<string, DiscoveredRoot["blockers"]>();
 
   constructor(
@@ -61,6 +66,11 @@ export class PodiumLinearGatewayClientImpl implements V3RuntimeGateway, LinearGa
     private readonly options: {
       timeoutMs: number;
       conductorId?: string;
+      observeDiscovery?(evidence: {
+        rootHeaderCount: number;
+        listPageCount: number;
+        getIssueTreeCount: number;
+      }): void;
       gitWorkspaceFacts?(input: {
         rootIssueId: string; rootIdentifier: string; branch: string;
       }): Promise<V3RootRunView["gitWorkspace"]>;
@@ -105,6 +115,10 @@ export class PodiumLinearGatewayClientImpl implements V3RuntimeGateway, LinearGa
 
   async listRoots(projectId: string) {
     this.#assertProject(projectId);
+    if (this.#activeDiscovery) throw new Error("linear_discovery_overlap");
+    const discovery = { rootHeaderCount: 0, listPageCount: 0, getIssueTreeCount: 0 };
+    this.#activeDiscovery = discovery;
+    try {
     const roots: DiscoveredRoot[] = [];
     const cursors = new Set<string>();
     let cursor: string | undefined;
@@ -167,7 +181,12 @@ export class PodiumLinearGatewayClientImpl implements V3RuntimeGateway, LinearGa
         cursors.add(cursor);
       }
     } while (cursor);
+    discovery.rootHeaderCount = roots.length;
+    this.options.observeDiscovery?.({ ...discovery });
     return roots;
+    } finally {
+      this.#activeDiscovery = undefined;
+    }
   }
 
   async reconstructV3(rootId: string): Promise<V3RootRunView> {
@@ -345,15 +364,45 @@ export class PodiumLinearGatewayClientImpl implements V3RuntimeGateway, LinearGa
       expected_updated_at: requiredString(args.expected_remote_version),
     });
     let command: JsonValue;
-    if (input.command === "linear.status.set") {
+    if (input.command === "linear.issue.create_child") {
+      const kind = requiredString(args.kind);
+      command = { kind: "create_managed_node", project,
+        parent_issue_id: requiredString(args.parent_issue_id),
+        managed_marker: requiredString(args.write_id),
+        node_kind: kind === "human" ? "human" : "work",
+        ...(kind === "human" ? { human_kind: "plan_approval" } : {}),
+        order: 0, title: requiredString(args.title),
+        description: requiredString(args.description) };
+    } else if (input.command === "linear.issue.update") {
+      const issueId = requiredString(args.issue_id);
+      const view = await this.reconstructV3(input.rootIssueId);
+      const node = view.workflowNodes.find(({ issueId: candidate }) => candidate === issueId);
+      if (!node?.managedMarker) return { kind: "rejected" as const,
+        code: "linear_target_not_managed", summary: "Only managed workflow nodes can be updated." };
+      command = { kind: "update_managed_node", project,
+        precondition: { ...precondition(issueId), expected_managed_marker: node.managedMarker },
+        node_kind: node.kind,
+        ...(node.kind === "human" ? { human_kind: node.humanKind,
+          ...(node.targetIssueId ? { target_issue_id: node.targetIssueId } : {}) } : {}),
+        title: typeof args.title === "string" ? args.title : node.title,
+        description: typeof args.description === "string" ? args.description : node.description };
+    } else if (input.command === "linear.status.set") {
       command = { kind: "update_issue_state", project,
         precondition: precondition(requiredString(args.issue_id)),
         state: requiredString(args.status) };
+    } else if (input.command === "linear.assignee.set") {
+      command = { kind: "update_issue_assignee", project,
+        precondition: precondition(requiredString(args.issue_id)),
+        assignee_id: requiredString(args.assignee_id) };
+    } else if (input.command === "linear.label.set") {
+      command = { kind: "update_issue_label", project,
+        precondition: precondition(requiredString(args.issue_id)),
+        label: requiredString(args.label), operation: requiredString(args.operation) };
     } else if (input.command === "linear.comment.create") {
-      command = { kind: "project_root_comment", project,
-        root_issue_id: input.rootIssueId,
-        event_key: `${requiredString(args.write_id)}:0`,
-        body: `${requiredString(args.body)}\n\n<!-- symphony turn event\nevent_key: ${requiredString(args.write_id)}:0\n-->` };
+      const writeId = requiredString(args.write_id);
+      command = { kind: "create_issue_comment", project,
+        precondition: precondition(requiredString(args.issue_id)), write_id: writeId,
+        body: `${requiredString(args.body)}\n\n<!-- symphony agent write\nwrite_id: ${writeId}\n-->` };
     } else {
       return { kind: "rejected" as const, code: "linear_command_unsupported",
         summary: "The requested Linear mutation is not supported." };
@@ -364,7 +413,11 @@ export class PodiumLinearGatewayClientImpl implements V3RuntimeGateway, LinearGa
     if (result.kind === "linear_precondition_conflict") return { kind: "conflict" as const, summary: "Linear precondition changed." };
     if (result.kind === "write_unconfirmed") return {
       kind: "unconfirmed" as const, summary: "Mutation requires read-back.",
-      read_back_target: { kind: "issue" as const, issue_id: requiredString(args.issue_id ?? input.rootIssueId) },
+      read_back_target: input.command === "linear.comment.create"
+        ? { kind: "comment_write" as const, issue_id: requiredString(args.issue_id),
+          write_id: requiredString(args.write_id) }
+        : { kind: "issue" as const,
+          issue_id: requiredString(args.issue_id ?? args.parent_issue_id ?? input.rootIssueId) },
     };
     return { kind: "failed" as const, code: "linear_mutation_failed", summary: "Linear mutation failed." };
   }
@@ -407,6 +460,10 @@ export class PodiumLinearGatewayClientImpl implements V3RuntimeGateway, LinearGa
   }
 
   #request(body: JsonValue) {
+    if (this.#activeDiscovery && body && typeof body === "object" && !Array.isArray(body)) {
+      if (body.kind === "list_root_issues") this.#activeDiscovery.listPageCount += 1;
+      if (body.kind === "get_issue_tree") this.#activeDiscovery.getIssueTreeCount += 1;
+    }
     this.#sequence += 1;
     return this.protocol.request({
       requestId: `conductor-${this.#sequence}`,

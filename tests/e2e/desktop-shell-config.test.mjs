@@ -52,6 +52,9 @@ test("Desktop shell smoke uses production entrypoints without workflow credentia
     await readFile("apps/podium-desktop/src-tauri/tauri.conf.json", "utf8"),
   );
   assert.equal(productionConfig.app.withGlobalTauri, undefined);
+  assert.equal(productionConfig.bundle.externalBin.includes("binaries/performer"), true);
+  assert.equal(productionConfig.bundle.externalBin.includes("binaries/symphony"), true);
+  assert.match(sources[0], /command_broker["',\s]+cli\.py/u);
 });
 
 test("quality workflow keeps Desktop shell evidence separate from core live evidence", async () => {
