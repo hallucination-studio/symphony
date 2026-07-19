@@ -135,6 +135,15 @@ export interface RootIssueValue {
   isDelegatedToSymphony: boolean;
   priority: LinearPriority;
   blockers: LinearBlockerValue[];
+  rootManagedComments: RootManagedCommentValue[];
+}
+
+export interface RootManagedCommentValue {
+  commentId: string;
+  issueId: string;
+  updatedAt: string;
+  managedMarker: string;
+  body: string;
 }
 
 export interface RootUsageValue {

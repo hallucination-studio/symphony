@@ -469,15 +469,17 @@ export class LinearSdkImpl implements LinearClientInterface {
       roots,
       ROOT_READ_CONCURRENCY,
       async ({ issue, priority }) => {
-        const [value, blockers] = await Promise.all([
+        const [value, blockers, rootManagedComments] = await Promise.all([
           issueValue(issue, 0),
           blockerValues(issue),
+          this.#rootManagedCommentValues(issue),
         ]);
         return {
           issue: value,
           isDelegatedToSymphony: issue.delegateId === delegateActorId,
           priority,
           blockers,
+          rootManagedComments,
         };
       },
     );
@@ -522,20 +524,11 @@ export class LinearSdkImpl implements LinearClientInterface {
     if (rootPhaseLabels.length > 2) {
       throw new Error("linear_root_phase_labels_too_many");
     }
-    const comments = await this.#rootManagedComments(input.rootIssueId);
-    if (comments.length > 2) {
-      throw new Error("linear_root_comments_too_many");
-    }
+    const rootManagedComments = await this.#rootManagedCommentValues(root);
     return {
       nodes,
       rootPhaseLabels,
-      rootManagedComments: comments.map((comment) => ({
-        commentId: comment.id,
-        issueId: input.rootIssueId,
-        updatedAt: comment.updatedAt.toISOString(),
-        managedMarker: rootCommentMarker(input.rootIssueId),
-        body: comment.body,
-      })),
+      rootManagedComments,
       humanAnswers: await this.#humanAnswers(nodes),
       observedAt: new Date().toISOString(),
       pageInfo: { hasNextPage: false },
@@ -570,7 +563,7 @@ export class LinearSdkImpl implements LinearClientInterface {
     const roots = await this.listRootIssues(input);
     const items: RootUsageValue[] = [];
     for (const root of roots.items) {
-      const comments = await this.#rootManagedComments(root.issue.issueId);
+      const comments = root.rootManagedComments;
       if (comments.length === 0) continue;
       if (comments.length !== 1) throw new Error("linear_root_comment_ambiguous");
       items.push(parseUsage(root.issue.issueId, comments[0]!));
@@ -675,6 +668,21 @@ export class LinearSdkImpl implements LinearClientInterface {
     const issue = await this.#client.issue(issueId);
     const comments = await this.#rootComments(issue);
     return comments.filter(({ body }) => body.endsWith(ROOT_MARKER));
+  }
+
+  async #rootManagedCommentValues(issue: Issue) {
+    const comments = (await this.#rootComments(issue))
+      .filter(({ body }) => body.endsWith(ROOT_MARKER));
+    if (comments.length > 2) {
+      throw new Error("linear_root_comments_too_many");
+    }
+    return comments.map((comment) => ({
+      commentId: comment.id,
+      issueId: issue.id,
+      updatedAt: comment.updatedAt.toISOString(),
+      managedMarker: rootCommentMarker(issue.id),
+      body: comment.body,
+    }));
   }
 
   async #projectLabelsNamed(name: string): Promise<ProjectLabel[]> {
@@ -938,7 +946,10 @@ function managedNodeMatches(
   );
 }
 
-function parseUsage(rootIssueId: string, comment: Comment): RootUsageValue {
+function parseUsage(
+  rootIssueId: string,
+  comment: { body: string; updatedAt: Date | string },
+): RootUsageValue {
   const values = new Map<string, string>();
   for (const line of comment.body.split("\n")) {
     const separator = line.indexOf(":");
@@ -964,7 +975,9 @@ function parseUsage(rootIssueId: string, comment: Comment): RootUsageValue {
     outputTokens: read("usage_output_tokens"),
     reasoningOutputTokens: read("usage_reasoning_output_tokens"),
     totalTokens: read("usage_total_tokens"),
-    observedAt: comment.updatedAt.toISOString(),
+    observedAt: typeof comment.updatedAt === "string"
+      ? comment.updatedAt
+      : comment.updatedAt.toISOString(),
   };
 }
 

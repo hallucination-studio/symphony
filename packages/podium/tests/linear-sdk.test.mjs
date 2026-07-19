@@ -184,6 +184,96 @@ test("Root scheduling reads candidate facts with bounded concurrency", async () 
   assert.ok(observedConcurrency <= 8);
 });
 
+test("Root usage reuses the Primary comments fetched with Root headers", async () => {
+  let commentReads = 0;
+  const primaryComment = {
+    id: "primary-comment",
+    body: [
+      "usage_input_tokens: 10",
+      "usage_cached_input_tokens: 2",
+      "usage_output_tokens: 3",
+      "usage_reasoning_output_tokens: 1",
+      "usage_total_tokens: 13",
+      "<!-- symphony root marker -->",
+    ].join("\n"),
+    updatedAt: new Date("2026-07-16T00:00:00Z"),
+  };
+  const root = issue({ id: "root-1" });
+  root.comments = async () => {
+    commentReads += 1;
+    return connection([primaryComment]);
+  };
+  const sdk = {
+    viewer: Promise.resolve({ id: "app-user" }),
+    project: async () => ({ issues: async () => connection([root]) }),
+    issue: async () => root,
+  };
+  const adapter = new LinearSdkImpl(
+    { kind: "oauth", token: "token" },
+    "organization-1",
+    sdk,
+  );
+
+  const roots = await adapter.listRootIssues({
+    projectId: "project-1",
+    limit: 250,
+  });
+  assert.deepEqual(roots.items[0].rootManagedComments, [{
+    commentId: "primary-comment",
+    issueId: "root-1",
+    updatedAt: "2026-07-16T00:00:00.000Z",
+    managedMarker: "root-1:root-comment",
+    body: primaryComment.body,
+  }]);
+
+  commentReads = 0;
+  const result = await adapter.listRootUsage({
+    projectId: "project-1",
+    limit: 250,
+  });
+
+  assert.equal(commentReads, 1);
+  assert.deepEqual(result.items, [{
+    rootIssueId: "root-1",
+    inputTokens: 10,
+    cachedInputTokens: 2,
+    outputTokens: 3,
+    reasoningOutputTokens: 1,
+    totalTokens: 13,
+    observedAt: "2026-07-16T00:00:00.000Z",
+  }]);
+});
+
+test("Root usage fails closed when header Primary comments are ambiguous", async () => {
+  const root = issue({ id: "root-1" });
+  root.comments = async () => connection([
+    {
+      id: "primary-1",
+      body: "First\n<!-- symphony root marker -->",
+      updatedAt: new Date("2026-07-16T00:00:00Z"),
+    },
+    {
+      id: "primary-2",
+      body: "Second\n<!-- symphony root marker -->",
+      updatedAt: new Date("2026-07-16T00:00:00Z"),
+    },
+  ]);
+  const sdk = {
+    viewer: Promise.resolve({ id: "app-user" }),
+    project: async () => ({ issues: async () => connection([root]) }),
+  };
+  const adapter = new LinearSdkImpl(
+    { kind: "oauth", token: "token" },
+    "organization-1",
+    sdk,
+  );
+
+  await assert.rejects(
+    adapter.listRootUsage({ projectId: "project-1", limit: 250 }),
+    /linear_root_comment_ambiguous/u,
+  );
+});
+
 test("Root scheduling reads every blocker page and target state outside the candidate set", async () => {
   const doneBlocker = issue({ id: "external-done" });
   doneBlocker.state = Promise.resolve({ id: "state-done", name: "Done" });
