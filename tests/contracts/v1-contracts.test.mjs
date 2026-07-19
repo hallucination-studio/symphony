@@ -220,6 +220,37 @@ test("Agent execution policies are closed, bounded, and shared by Profile contra
   }
 });
 
+test("V3 bootstrap and Root Turn contracts are side-effect-free and Root-only", async () => {
+  const schema = await loadSchema("conductor-performer");
+  const bootstrap = schema.$defs.OpenRootConversationCommand;
+  assert.deepEqual(bootstrap.required, [
+    "protocol_version", "request_id", "performer_profile_id", "codex_turn_settings", "hard_deadline_at",
+  ]);
+  for (const forbidden of ["root_issue_id", "root_context", "workspace_root", "command_channel"]) {
+    assert.equal(bootstrap.properties[forbidden], undefined);
+  }
+
+  const rootTurn = schema.$defs.RootTurnCommand;
+  for (const forbidden of ["turn_kind", "work_issue_id", "target_issue_id"]) {
+    assert.equal(rootTurn.properties[forbidden], undefined);
+  }
+  assert.deepEqual(Object.keys(schema.$defs.RootTurnLimits.properties), [
+    "max_wall_time_ms", "max_context_bytes", "max_broker_calls", "max_mutations",
+  ]);
+  assert.deepEqual(schema.$defs.RootTurnLimits.required, [
+    "max_wall_time_ms", "max_context_bytes", "max_broker_calls", "max_mutations",
+  ]);
+  assert.equal(schema.$defs.RootTurnResult.properties.turn_usage.$ref, "#/$defs/RootTurnUsage");
+  for (const forbidden of ["next_state", "target_issue_id", "work_issue_id", "commit", "pull_request"]) {
+    assert.equal(schema.$defs.RootTurnResult.properties[forbidden], undefined);
+  }
+  assert.doesNotMatch(JSON.stringify(schema.$defs.RootTurnEvent), /usage_updated|provider_tokens/u);
+  assert.doesNotMatch(
+    JSON.stringify(schema.$defs.ConductorPerformerMessage),
+    /OpenRootConversation|RootTurn/u,
+  );
+});
+
 test("generation is deterministic and check mode detects drift", async () => {
   const first = run("npm", ["run", "contracts:generate"]);
   assert.equal(first.status, 0, first.stderr);

@@ -1,0 +1,14 @@
+{
+  "schema": "conductor-performer.schema.json#/$defs/RootTurnEvent",
+  "value": {
+    "protocol_version": "1",
+    "turn_id": "turn-1",
+    "root_issue_id": "root-1",
+    "performer_profile_id": "profile-1",
+    "performer_id": "conversation-1",
+    "context_digest": "abc123",
+    "sequence": 1,
+    "occurred_at": "2026-07-19T11:01:00Z",
+    "body": { "kind": "usage_updated", "provider_tokens": 100 }
+  }
+}

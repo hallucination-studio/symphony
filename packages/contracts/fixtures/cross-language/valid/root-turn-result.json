@@ -1,0 +1,16 @@
+{
+  "schema": "conductor-performer.schema.json#/$defs/RootTurnResult",
+  "value": {
+    "protocol_version": "1",
+    "turn_id": "turn-1",
+    "root_issue_id": "root-1",
+    "performer_profile_id": "profile-1",
+    "performer_id": "conversation-1",
+    "context_digest": "abc123",
+    "result_kind": "root_turn_completed",
+    "completed_at": "2026-07-19T11:05:00Z",
+    "bounded_summary": "Turn completed.",
+    "yield_reason": "agent_finished",
+    "turn_usage": { "wall_time_ms": 300000, "context_bytes": 1024, "provider_tokens": 1200, "broker_calls": 5, "mutations": 2 }
+  }
+}

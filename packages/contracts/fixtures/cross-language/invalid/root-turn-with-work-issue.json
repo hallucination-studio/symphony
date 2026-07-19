@@ -1,0 +1,19 @@
+{
+  "schema": "conductor-performer.schema.json#/$defs/RootTurnCommand",
+  "value": {
+    "protocol_version": "1",
+    "turn_id": "turn-1",
+    "root_issue_id": "root-1",
+    "work_issue_id": "work-1",
+    "performer_profile_id": "profile-1",
+    "performer_id": "conversation-1",
+    "codex_turn_settings": { "model": "gpt-5.4", "reasoning_effort": "high", "is_fast_mode_enabled": false },
+    "execution_policy": { "sandbox_mode": "workspace_write", "command_allowlist": [], "command_denylist": [] },
+    "root_context": { "json": "{}", "markdown": "context" },
+    "context_digest": "abc123",
+    "command_channel": { "kind": "inherited_framed_channel", "request_fd": 3, "response_fd": 4 },
+    "workspace_root": "/workspace/root-1",
+    "started_at": "2026-07-19T11:00:00Z",
+    "turn_limits": { "max_wall_time_ms": 600000, "max_context_bytes": 1048576, "max_broker_calls": 100, "max_mutations": 20 }
+  }
+}
