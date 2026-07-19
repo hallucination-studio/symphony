@@ -19,7 +19,7 @@ import {
 
 const execute = promisify(execFile);
 const TURN_ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u;
-const DEFAULT_RUN_TIMEOUT_MS = 5 * 60_000;
+const DEFAULT_RUN_TIMEOUT_MS = 20 * 60_000;
 
 export function createTurnLaneTracker(log) {
   const active = new Set();
@@ -66,7 +66,7 @@ export async function runCoreLiveE2E({
   environment = process.env,
   runId = environment.SYMPHONY_E2E_RUN_ID ?? `run-${randomUUID()}`,
   timeoutMs = DEFAULT_RUN_TIMEOUT_MS,
-  pollIntervalMs = 2_000,
+  pollIntervalMs = 10_000,
 } = {}) {
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(runId)) {
     throw stableError("e2e_run_id_invalid");

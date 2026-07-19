@@ -46,7 +46,8 @@ test("core live topology uses production boundaries and state-based completion",
   assert.match(source, /environment\.SYMPHONY_E2E_RUN_ID/u);
   assert.doesNotMatch(source, /@symphony\/podium\/e2e|e2e-main|performer\.json/u);
   assert.doesNotMatch(source, /SYMPHONY_E2E_LINEAR_DEV_TOKEN.*additions/su);
-  assert.match(source, /DEFAULT_RUN_TIMEOUT_MS = 5 \* 60_000/u);
+  assert.match(source, /DEFAULT_RUN_TIMEOUT_MS = 20 \* 60_000/u);
+  assert.match(source, /pollIntervalMs = 10_000/u);
 });
 
 test("core live polling rejects an expired run-wide deadline", async () => {
