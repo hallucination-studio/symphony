@@ -23,6 +23,7 @@ import type {
 const PAGE_LIMIT = 250;
 const MAX_TREE_NODES = 512;
 const MAX_ROOT_COMMENTS = 4_096;
+const ROOT_READ_CONCURRENCY = 8;
 const CONDUCTOR_LABEL_PREFIX = "symphony:conductor/";
 const ROOT_PHASE_PREFIX = "symphony:run/";
 const ROOT_MARKER = "<!-- symphony root marker -->";
@@ -456,19 +457,30 @@ export class LinearSdkImpl implements LinearClientInterface {
       ...(input.cursor ? { after: input.cursor } : {}),
     });
     const delegateActorId = this.#delegateActorId ?? (await this.#client.viewer).id;
-    const items: RootIssueValue[] = [];
-    for (const issue of page.nodes) {
+    const roots = page.nodes.flatMap((issue) => {
       if (issue.projectId !== input.projectId) {
         throw new Error("linear_root_project_mismatch");
       }
-      if (issue.parentId) continue;
-      items.push({
-        issue: await issueValue(issue, 0),
-        isDelegatedToSymphony: issue.delegateId === delegateActorId,
-        priority: linearPriority(issue.priority),
-        blockers: await blockerValues(issue),
-      });
-    }
+      return issue.parentId
+        ? []
+        : [{ issue, priority: linearPriority(issue.priority) }];
+    });
+    const items = await mapConcurrent(
+      roots,
+      ROOT_READ_CONCURRENCY,
+      async ({ issue, priority }) => {
+        const [value, blockers] = await Promise.all([
+          issueValue(issue, 0),
+          blockerValues(issue),
+        ]);
+        return {
+          issue: value,
+          isDelegatedToSymphony: issue.delegateId === delegateActorId,
+          priority,
+          blockers,
+        };
+      },
+    );
     return { items, pageInfo: pageInfo(page.pageInfo) };
   }
 
@@ -1032,6 +1044,27 @@ async function allNodes<Node>(
   }
   if (connection.nodes.length > maximum) throw new Error("linear_collection_too_large");
   return connection.nodes;
+}
+
+async function mapConcurrent<Input, Output>(
+  values: Input[],
+  concurrency: number,
+  map: (value: Input) => Promise<Output>,
+): Promise<Output[]> {
+  const results = new Array<Output>(values.length);
+  let nextIndex = 0;
+  const workers = Array.from(
+    { length: Math.min(concurrency, values.length) },
+    async () => {
+      while (nextIndex < values.length) {
+        const index = nextIndex;
+        nextIndex += 1;
+        results[index] = await map(values[index]!);
+      }
+    },
+  );
+  await Promise.all(workers);
+  return results;
 }
 
 function pageInfo(value: {

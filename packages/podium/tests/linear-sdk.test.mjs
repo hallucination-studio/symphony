@@ -148,6 +148,42 @@ test("Root scheduling maps every Linear priority and preserves Root sort order",
   );
 });
 
+test("Root scheduling reads candidate facts with bounded concurrency", async () => {
+  let releaseReads;
+  const readsReleased = new Promise((resolve) => { releaseReads = resolve; });
+  let activeReads = 0;
+  let maxActiveReads = 0;
+  const roots = Array.from({ length: 12 }, (_, index) => {
+    const root = issue({ id: `root-${index}` });
+    root.inverseRelations = async () => {
+      activeReads += 1;
+      maxActiveReads = Math.max(maxActiveReads, activeReads);
+      await readsReleased;
+      activeReads -= 1;
+      return connection([]);
+    };
+    return root;
+  });
+  const sdk = {
+    viewer: Promise.resolve({ id: "app-user" }),
+    project: async () => ({ issues: async () => connection(roots) }),
+  };
+  const adapter = new LinearSdkImpl(
+    { kind: "oauth", token: "token" },
+    "organization-1",
+    sdk,
+  );
+
+  const pending = adapter.listRootIssues({ projectId: "project-1", limit: 250 });
+  await new Promise((resolve) => setImmediate(resolve));
+  const observedConcurrency = maxActiveReads;
+  releaseReads();
+  await pending;
+
+  assert.ok(observedConcurrency > 1);
+  assert.ok(observedConcurrency <= 8);
+});
+
 test("Root scheduling reads every blocker page and target state outside the candidate set", async () => {
   const doneBlocker = issue({ id: "external-done" });
   doneBlocker.state = Promise.resolve({ id: "state-done", name: "Done" });
