@@ -47,7 +47,8 @@ export class AgentRootContextBuilder {
       dto,
       json,
       markdown,
-      contextBytes: Buffer.byteLength(markdown, "utf8"),
+      contextBytes: Buffer.byteLength(json, "utf8")
+        + Buffer.byteLength(markdown, "utf8"),
       contextDigest: createHash("sha256").update(markdown, "utf8").digest("hex"),
     };
   }

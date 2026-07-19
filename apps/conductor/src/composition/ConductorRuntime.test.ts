@@ -1,13 +1,59 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { ConductorRuntime } from "./ConductorRuntime.js";
+import { ConductorRuntime, V3ConductorRuntime } from "./ConductorRuntime.js";
 import { LinearPriorityRootSchedulingPolicyImpl } from "../root-scheduling/internal/LinearPriorityRootSchedulingPolicyImpl.js";
 import { hashRootInput } from "../root-workflow/api/index.js";
 import type {
   DiscoveredRoot,
   RootRunView,
+  V3RootRunView,
 } from "../root-workflow/api/Models.js";
+
+test("V3 scheduling skips a waiting Root and starts exactly one runnable Root", async () => {
+  const waiting = discoveredRoot("root-waiting-v3", "urgent", 1, "In Progress");
+  const runnable = discoveredRoot("root-runnable-v3", "high", 2, "In Progress");
+  const alsoRunnable = discoveredRoot("root-also-runnable-v3", "low", 3, "In Progress");
+  const assessed: string[] = [];
+  const started: string[] = [];
+  const runtime = new V3ConductorRuntime(
+    "conductor-1",
+    {
+      async resolveProject() {
+        return { kind: "resolved" as const, projectId: "project-1" };
+      },
+      async listRoots() {
+        return [waiting, runnable, alsoRunnable];
+      },
+      async reconstructV3(rootId) {
+        return v3View(rootId, rootId === waiting.issueId);
+      },
+    },
+    new LinearPriorityRootSchedulingPolicyImpl(),
+    {
+      assessRoot(view) {
+        assessed.push(view.root.issueId);
+        return {
+          rootIssueId: view.root.issueId,
+          readiness: view.workflowNodes.length === 0 ? "runnable" : "waiting_human",
+        };
+      },
+      async claimRoot() {
+        throw new Error("claim_not_expected");
+      },
+      async runRootTurn(rootIssueId) {
+        started.push(rootIssueId);
+        return { kind: "completed", result: null };
+      },
+    },
+    { async report() {} },
+  );
+
+  await runtime.cycle();
+
+  assert.deepEqual(assessed, [waiting.issueId, runnable.issueId]);
+  assert.deepEqual(started, [runnable.issueId]);
+});
 
 test("multi-Root runtime starts exactly one highest-ranked runnable action", async () => {
   const roots = [
@@ -283,6 +329,37 @@ function discoveredRoot(
     priority,
     order,
     blockers: [],
+  };
+}
+
+function v3View(rootIssueId: string, waiting: boolean): V3RootRunView {
+  return {
+    root: {
+      issueId: rootIssueId,
+      identifier: rootIssueId.toUpperCase(),
+      state: "In Progress",
+      title: rootIssueId,
+      description: "",
+      updatedAt: "2026-07-19T00:00:00Z",
+    },
+    conductorId: "conductor-1",
+    resolvedProjectId: "project-1",
+    workflowNodes: waiting
+      ? [{
+          issueId: `${rootIssueId}-human`,
+          identifier: "SYM-H",
+          parentIssueId: rootIssueId,
+          siblingOrder: 0,
+          kind: "human",
+          state: "In Progress",
+          title: "Input",
+          description: "",
+          updatedAt: "2026-07-19T00:00:00Z",
+        }]
+      : [],
+    workflowTreeComplete: true,
+    blockerRelations: [],
+    attentionProblems: [],
   };
 }
 

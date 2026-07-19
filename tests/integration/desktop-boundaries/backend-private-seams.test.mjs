@@ -69,6 +69,11 @@ test("Desktop Backend closes Client, Host, Profile, and binary secret seams", as
         reasoning_effort: "high",
         is_fast_mode_enabled: false,
       },
+      execution_policy: {
+        sandbox_mode: "workspace_write",
+        command_allowlist: [],
+        command_denylist: [],
+      },
       readiness: "ready",
       is_active: false,
       observed_at: "2026-07-17T00:00:00.000Z",

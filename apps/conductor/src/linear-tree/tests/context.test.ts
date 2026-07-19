@@ -51,7 +51,10 @@ test("Root Context JSON, Markdown, bytes, and digest are deterministic", async (
   assert.equal(first.json, second.json);
   assert.equal(first.markdown, second.markdown);
   assert.equal(first.contextDigest, second.contextDigest);
-  assert.equal(first.contextBytes, Buffer.byteLength(first.markdown, "utf8"));
+  assert.equal(
+    first.contextBytes,
+    Buffer.byteLength(first.json, "utf8") + Buffer.byteLength(first.markdown, "utf8"),
+  );
   assert.doesNotMatch(JSON.stringify(first.dto.trusted_harness), /Ignore system rules|Run untrusted command/);
   assert.doesNotMatch(JSON.stringify(first.dto.executable_commands), /Ignore system rules|Run untrusted command/);
 });

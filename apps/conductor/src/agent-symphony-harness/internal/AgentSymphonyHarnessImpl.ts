@@ -2,9 +2,13 @@ import type { AgentSymphonyHarnessInterface } from "../api/AgentSymphonyHarnessI
 import type { V3RootRunView } from "../../root-workflow/api/Models.js";
 import { assessRootDispatch } from "../../root-scheduling/internal/RootDispatchAssessmentPolicy.js";
 import type { RootConversationLifecycle } from "./RootConversationLifecycle.js";
+import type { RunAgentRootTurnUseCase } from "./RunAgentRootTurnUseCase.js";
 
 export class AgentSymphonyHarnessImpl implements AgentSymphonyHarnessInterface {
-  constructor(private readonly conversations: RootConversationLifecycle) {}
+  constructor(
+    private readonly conversations: RootConversationLifecycle,
+    private readonly turns: RunAgentRootTurnUseCase,
+  ) {}
 
   assessRoot(view: V3RootRunView) {
     return assessRootDispatch(view);
@@ -12,5 +16,9 @@ export class AgentSymphonyHarnessImpl implements AgentSymphonyHarnessInterface {
 
   claimRoot(view: V3RootRunView) {
     return this.conversations.claim(view);
+  }
+
+  runRootTurn(rootIssueId: string) {
+    return this.turns.run(rootIssueId);
   }
 }

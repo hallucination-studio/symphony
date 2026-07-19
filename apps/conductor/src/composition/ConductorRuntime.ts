@@ -1,10 +1,12 @@
 import { discoverCurrentRoots } from "../root-discovery/MultiRootDiscoveryPolicy.js";
+import type { AgentSymphonyHarnessInterface } from "../agent-symphony-harness/api/AgentSymphonyHarnessInterface.js";
 import type { RootSchedulingPolicyInterface } from "../root-scheduling/api/RootSchedulingPolicyInterface.js";
 import {
   computeRootAction,
   type DiscoveredRoot,
   type RootAction,
   type RootRunView,
+  type V3RootRunView,
 } from "../root-workflow/api/index.js";
 
 export interface RuntimeGateway {
@@ -16,6 +18,58 @@ export interface RuntimeGateway {
     DiscoveredRoot[]
   >;
   reconstruct(rootId: string): Promise<RootRunView>;
+}
+
+export interface V3RuntimeGateway {
+  resolveProject(): ReturnType<RuntimeGateway["resolveProject"]>;
+  listRoots(projectId: string): Promise<DiscoveredRoot[]>;
+  reconstructV3(rootId: string): Promise<V3RootRunView>;
+}
+
+export class V3ConductorRuntime {
+  constructor(
+    private readonly conductorId: string,
+    private readonly gateway: V3RuntimeGateway,
+    private readonly scheduling: RootSchedulingPolicyInterface,
+    private readonly harness: AgentSymphonyHarnessInterface,
+    private readonly reporter: RuntimeReporter,
+  ) {}
+
+  async cycle() {
+    try {
+      const project = await this.gateway.resolveProject();
+      if (project.kind !== "resolved") {
+        await this.reporter.report({
+          status: "blocked", sanitizedReason: `project_${project.kind}`,
+        });
+        return;
+      }
+      const roots = discoverCurrentRoots({
+        projectId: project.projectId,
+        roots: await this.gateway.listRoots(project.projectId),
+        conductorId: this.conductorId,
+      });
+      const scheduling = this.scheduling.evaluate(roots);
+      for (const root of scheduling.orderedEligible) {
+        const candidate = await this.gateway.reconstructV3(root.issueId);
+        if (this.harness.assessRoot(candidate).readiness !== "runnable") continue;
+        const result = await this.harness.runRootTurn(root.issueId);
+        await this.reporter.report({
+          status: result.kind === "failed" ? "blocked" : "ready",
+          rootId: root.issueId,
+          ...(result.kind === "failed"
+            ? { sanitizedReason: result.sanitizedFailure }
+            : {}),
+        });
+        return;
+      }
+      await this.reporter.report({ status: "ready" });
+    } catch (error) {
+      await this.reporter.report({
+        status: "blocked", sanitizedReason: sanitize(error),
+      });
+    }
+  }
 }
 
 export interface RuntimeActionExecutor {
