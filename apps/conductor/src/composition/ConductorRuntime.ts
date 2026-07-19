@@ -54,10 +54,10 @@ export class ConductorRuntime {
         roots: await this.gateway.listRoots(project.projectId),
         conductorId: this.conductorId,
       });
-      const candidates: Array<{
+      let blockedCandidate: {
         view: RootRunView;
-        action: RootAction;
-      }> = [];
+        action: Extract<RootAction, { kind: "blocked_root" }>;
+      } | undefined;
       const scheduling = this.scheduling.evaluate(roots);
       for (const blocked of scheduling.blocked) {
         await this.reporter.report({
@@ -68,29 +68,28 @@ export class ConductorRuntime {
       }
       for (const root of scheduling.orderedEligible) {
         const view = await this.gateway.reconstruct(root.issueId);
-        candidates.push({ view, action: computeRootAction(view) });
-      }
-      const selected = candidates.find(({ action }) => isRunnable(action));
-      if (!selected) {
-        const blocked = candidates.find(
-          ({ action }) => action.kind === "blocked_root",
-        );
-        if (blocked?.action.kind === "blocked_root") {
+        const action = computeRootAction(view);
+        if (isRunnable(action)) {
+          await this.executor.execute(view, action);
           await this.reporter.report({
-            status: "blocked",
-            sanitizedReason: blocked.action.reason,
-            rootId: blocked.view.root.issueId,
+            status: "ready",
+            rootId: view.root.issueId,
           });
-        } else if (scheduling.blocked.length === 0) {
-          await this.reporter.report({ status: "ready" });
+          return;
         }
-        return;
+        if (!blockedCandidate && action.kind === "blocked_root") {
+          blockedCandidate = { view, action };
+        }
       }
-      await this.executor.execute(selected.view, selected.action);
-      await this.reporter.report({
-        status: "ready",
-        rootId: selected.view.root.issueId,
-      });
+      if (blockedCandidate) {
+        await this.reporter.report({
+          status: "blocked",
+          sanitizedReason: blockedCandidate.action.reason,
+          rootId: blockedCandidate.view.root.issueId,
+        });
+      } else if (scheduling.blocked.length === 0) {
+        await this.reporter.report({ status: "ready" });
+      }
     } catch (error) {
       await this.reporter.report({
         status: "blocked",

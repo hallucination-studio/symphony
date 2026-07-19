@@ -15,13 +15,17 @@ test("multi-Root runtime starts exactly one highest-ranked runnable action", asy
     discoveredRoot("root-urgent", "urgent", 2, "Todo"),
   ];
   const starts: string[] = [];
+  const reconstructed: string[] = [];
   let signalStarted: (() => void) | undefined;
   let releaseExecution: (() => void) | undefined;
   const started = new Promise<void>((resolve) => { signalStarted = resolve; });
   const released = new Promise<void>((resolve) => { releaseExecution = resolve; });
   const runtime = new ConductorRuntime(
     "conductor-1",
-    gateway(roots, (root) => unclaimedView(root)),
+    gateway(roots, (root) => {
+      reconstructed.push(root.issueId);
+      return unclaimedView(root);
+    }),
     new LinearPriorityRootSchedulingPolicyImpl(),
     {
       async execute(view) {
@@ -39,6 +43,7 @@ test("multi-Root runtime starts exactly one highest-ranked runnable action", asy
   releaseExecution?.();
   await cycle;
   assert.deepEqual(starts, ["root-urgent"]);
+  assert.deepEqual(reconstructed, ["root-urgent"]);
 });
 
 test("multi-Root runtime lets waiting Human yield to runnable Work", async () => {
