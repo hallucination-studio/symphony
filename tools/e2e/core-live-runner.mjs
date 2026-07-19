@@ -19,6 +19,7 @@ import {
 
 const execute = promisify(execFile);
 const TURN_ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u;
+const DEFAULT_RUN_TIMEOUT_MS = 5 * 60_000;
 
 export function createTurnLaneTracker(log) {
   const active = new Set();
@@ -64,13 +65,17 @@ export function createTurnLaneTracker(log) {
 export async function runCoreLiveE2E({
   environment = process.env,
   runId = environment.SYMPHONY_E2E_RUN_ID ?? `run-${randomUUID()}`,
-  timeoutMs = 30 * 60_000,
+  timeoutMs = DEFAULT_RUN_TIMEOUT_MS,
   pollIntervalMs = 2_000,
 } = {}) {
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(runId)) {
     throw stableError("e2e_run_id_invalid");
   }
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > DEFAULT_RUN_TIMEOUT_MS) {
+    throw stableError("e2e_run_timeout_invalid");
+  }
   const config = loadE2EConfig({ environment });
+  const deadline = Date.now() + timeoutMs;
   const log = createE2ELogger({ runId, secrets: Object.values(config.secrets) });
   const turnLane = createTurnLaneTracker(log);
   log({ event: "e2e_run_started" });
@@ -81,6 +86,7 @@ export async function runCoreLiveE2E({
   });
   log({ event: "e2e_step_started", step: "preflight" });
   const preflight = await linear.preflight();
+  assertRunActive(deadline);
   log({ event: "e2e_step_completed", step: "preflight" });
   const lock = await acquireGlobalLock(
     { paths: { lock: lockPathForConfig(coreLiveLockRoot()) } },
@@ -98,6 +104,7 @@ export async function runCoreLiveE2E({
     const git = await createRunScopedGitFixture({ runId, parentDirectory: scope.root });
     log({ event: "e2e_step_started", step: "stale_reconciliation" });
     await linear.reconcileStaleRuns({ lock, currentRunId: runId });
+    assertRunActive(deadline);
     log({ event: "e2e_step_completed", step: "stale_reconciliation" });
     log({ event: "e2e_step_started", step: "project_created" });
     project = await linear.createProject({
@@ -107,6 +114,7 @@ export async function runCoreLiveE2E({
       projectSlugId: config.linear.projectSlugId,
       preflight,
     });
+    assertRunActive(deadline);
     evidence.push({ step: "project_created", status: "passed" });
     log({
       event: "e2e_step_completed",
@@ -124,6 +132,7 @@ export async function runCoreLiveE2E({
       git,
       ids,
     });
+    assertRunActive(deadline);
     log({ event: "e2e_step_completed", step: "podium_bootstrap" });
     const podium = await createProductionPodiumConductorOwner({ databasePath });
 
@@ -159,6 +168,7 @@ export async function runCoreLiveE2E({
       rootInstruction: rootInstruction("e2e-yielded.txt", `${runId}:yielded\n`),
     });
     await linear.createBlockerRelation({ lock, runId, blocker, dependent });
+    assertRunActive(deadline);
     fixtures = [blocker, yielded, dependent];
     evidence.push({
       step: "root_created",
@@ -176,6 +186,7 @@ export async function runCoreLiveE2E({
       shutdownTimeoutMs: 5_000,
       log: turnLane.log,
     });
+    assertRunActive(deadline);
     evidence.push({ step: "conductor_handshake", status: "passed" });
     log({ event: "e2e_step_completed", step: "conductor_handshake" });
 
@@ -188,6 +199,7 @@ export async function runCoreLiveE2E({
       apiKey,
       log,
     });
+    assertRunActive(deadline);
     evidence.push({ step: "profile_active", status: "passed" });
     log({ event: "e2e_step_completed", step: "profile_active" });
 
@@ -196,7 +208,7 @@ export async function runCoreLiveE2E({
       () => readRootStates(linear, [blocker, dependent]),
       ([blockerState, dependentState]) =>
         planReady(blockerState) && rootUntouched(dependentState),
-      { timeoutMs, pollIntervalMs, code: "e2e_blocker_order_timeout" },
+      { deadline, pollIntervalMs },
     );
     evidence.push({
       step: "blocker_order_verified",
@@ -209,7 +221,7 @@ export async function runCoreLiveE2E({
       () => readRootStates(linear, [blocker, yielded]),
       ([blockerState, yieldedState]) =>
         planReady(blockerState) && planReady(yieldedState),
-      { timeoutMs, pollIntervalMs, code: "e2e_human_yield_timeout" },
+      { deadline, pollIntervalMs },
     );
     evidence.push({
       step: "human_yield_verified",
@@ -241,14 +253,14 @@ export async function runCoreLiveE2E({
         approvalId: yieldedPlan.approvalId,
       }),
     ]);
+    assertRunActive(deadline);
     await pollUntil(
       () => readRootStates(linear, [blocker, yielded]),
       ([blockerState, yieldedState]) =>
         rootWorkUntouched(blockerState) && rootAdvancedPastApproval(yieldedState),
       {
-        timeoutMs,
+        deadline,
         pollIntervalMs,
-        code: "e2e_priority_refresh_timeout",
       },
     );
     evidence.push({
@@ -265,9 +277,10 @@ export async function runCoreLiveE2E({
       git,
       filename: "e2e-yielded.txt",
       expected: `${runId}:yielded\n`,
-      timeoutMs,
+      deadline,
       pollIntervalMs,
     });
+    assertRunActive(deadline);
     await linear.completeRoot({
       lock,
       runId,
@@ -277,7 +290,7 @@ export async function runCoreLiveE2E({
     const dependentPlan = await pollUntil(
       () => linear.readRunState({ fixture: dependent }),
       planReady,
-      { timeoutMs, pollIntervalMs, code: "e2e_dependent_plan_timeout" },
+      { deadline, pollIntervalMs },
     );
     evidence.push(
       { step: "plan_ready", status: "passed" },
@@ -314,6 +327,7 @@ export async function runCoreLiveE2E({
       fixtures.map((candidate) =>
         linear.readRootCommentEvidence({ fixture: candidate })),
     );
+    assertRunActive(deadline);
     const eventKeys = rootComments.flatMap((item) => item.eventKeys);
     evidence.push({
       step: "root_comments_verified",
@@ -504,14 +518,36 @@ function runIdentifiers(runId) {
   });
 }
 
-async function pollUntil(read, accepted, { timeoutMs, pollIntervalMs, code }) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const value = await read();
+export async function pollUntil(read, accepted, { deadline, pollIntervalMs }) {
+  while (true) {
+    const value = await beforeDeadline(read, deadline);
     if (accepted(value)) return value;
-    await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) throw stableError("e2e_run_timeout");
+    await new Promise((resolve) => setTimeout(resolve, Math.min(pollIntervalMs, remainingMs)));
   }
-  throw stableError(code);
+}
+
+function assertRunActive(deadline) {
+  if (Date.now() >= deadline) throw stableError("e2e_run_timeout");
+}
+
+async function beforeDeadline(action, deadline) {
+  assertRunActive(deadline);
+  let timer;
+  try {
+    return await Promise.race([
+      action(),
+      new Promise((_, reject) => {
+        timer = setTimeout(
+          () => reject(stableError("e2e_run_timeout")),
+          deadline - Date.now(),
+        );
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function rootInstruction(filename, content) {
@@ -570,7 +606,7 @@ async function waitForRootCompletion({
   git,
   filename,
   expected,
-  timeoutMs,
+  deadline,
   pollIntervalMs,
 }) {
   const completed = await pollUntil(
@@ -579,7 +615,7 @@ async function waitForRootCompletion({
       state.rootState === "In Review" &&
       state.phase === "in-review" &&
       Boolean(state.deliveryBranch),
-    { timeoutMs, pollIntervalMs, code: "e2e_root_completion_timeout" },
+    { deadline, pollIntervalMs },
   );
   if (completed.performerId !== plan.performerId) {
     throw stableError("e2e_performer_resume_mismatch");

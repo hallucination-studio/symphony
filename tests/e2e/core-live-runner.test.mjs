@@ -7,6 +7,7 @@ import {
   cleanupCoreLiveResources,
   createTurnLaneTracker,
   finalizeCoreLiveResult,
+  pollUntil,
 } from "../../tools/e2e/core-live-runner.mjs";
 
 test("core live runner fails closed before mutation without the four pipeline inputs", () => {
@@ -45,6 +46,33 @@ test("core live topology uses production boundaries and state-based completion",
   assert.match(source, /environment\.SYMPHONY_E2E_RUN_ID/u);
   assert.doesNotMatch(source, /@symphony\/podium\/e2e|e2e-main|performer\.json/u);
   assert.doesNotMatch(source, /SYMPHONY_E2E_LINEAR_DEV_TOKEN.*additions/su);
+  assert.match(source, /DEFAULT_RUN_TIMEOUT_MS = 5 \* 60_000/u);
+});
+
+test("core live polling rejects an expired run-wide deadline", async () => {
+  let reads = 0;
+  await assert.rejects(
+    pollUntil(
+      async () => { reads += 1; return true; },
+      Boolean,
+      { deadline: Date.now() - 1, pollIntervalMs: 1 },
+    ),
+    /e2e_run_timeout/u,
+  );
+  assert.equal(reads, 0);
+});
+
+test("core live polling does not wait past the run-wide deadline for a stalled read", async () => {
+  const startedAt = Date.now();
+  await assert.rejects(
+    pollUntil(
+      () => new Promise(() => {}),
+      Boolean,
+      { deadline: startedAt + 20, pollIntervalMs: 1 },
+    ),
+    /e2e_run_timeout/u,
+  );
+  assert.ok(Date.now() - startedAt < 200);
 });
 
 test("Turn lane evidence is derived from correlated Conductor events", () => {

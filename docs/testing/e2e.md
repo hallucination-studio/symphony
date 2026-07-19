@@ -211,7 +211,8 @@ secret-free contract/unit tests 和 Desktop smoke，不运行 core live。受保
   稳定 reason code 和相对路径；
 - stdout/stderr、request/result、Profile files 和 evidence 必须用已知 secret
   canary 扫描；不得上传 `CODEX_HOME`、app data、repository 或原始 backend log；
-- 每步有 deadline，首个失败停止后续 mutation；异常文本归一化为稳定 code；
+- 整个 core live 场景共享一个最长 5 分钟的 deadline，而不是每步重新计时；超时返回
+  `e2e_run_timeout` 并停止后续 mutation，异常文本归一化为稳定 code；
 - cleanup 必须幂等；temporary 模式只 archive/delete 精确匹配当前 managed marker
   的资源，并按 Project 内 issues → Project → Project Label 的顺序处理 Linear 依赖；
   retained 模式不得 archive Project 或其中任何 issue；
