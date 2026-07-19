@@ -4,12 +4,15 @@ import test from "node:test";
 
 const workflowPath = ".github/workflows/roadmap-v1-e2e.yml";
 
-test("core live workflow is manual, protected, Linux, and globally serialized", async () => {
+test("core live workflow runs for same-repository PRs and protected manual main dispatches", async () => {
   const source = await readFile(workflowPath, "utf8");
   assert.match(source, /workflow_dispatch:/u);
-  assert.doesNotMatch(source, /^\s+(?:push|pull_request|schedule):/mu);
+  assert.match(source, /pull_request:\n\s+branches: \[main\]\n\s+types: \[opened, synchronize, reopened\]/u);
+  assert.doesNotMatch(source, /^\s+(?:push|schedule):/mu);
   assert.match(source, /runs-on: ubuntu-24\.04/u);
-  assert.match(source, /if: github\.ref == 'refs\/heads\/main'/u);
+  assert.match(source, /github\.event_name == 'workflow_dispatch' && github\.ref == 'refs\/heads\/main'/u);
+  assert.match(source, /github\.event_name == 'pull_request'/u);
+  assert.match(source, /github\.event\.pull_request\.head\.repo\.full_name == github\.repository/u);
   assert.match(source, /environment: roadmap-v1-e2e/u);
   assert.match(source, /group: symphony-core-live-e2e/u);
   assert.match(source, /cancel-in-progress: false/u);

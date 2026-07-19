@@ -2,6 +2,9 @@ name: Core Live E2E
 
 on:
   workflow_dispatch:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
 
 permissions:
   contents: read
@@ -12,7 +15,7 @@ concurrency:
 
 jobs:
   core-live:
-    if: github.ref == 'refs/heads/main'
+    if: (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-24.04
     environment: roadmap-v1-e2e
     timeout-minutes: 60
