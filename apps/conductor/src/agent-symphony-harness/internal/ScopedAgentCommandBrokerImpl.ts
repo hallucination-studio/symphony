@@ -1,19 +1,38 @@
 import type { JsonValue } from "@symphony/contracts";
 import type { LinearGatewayInterface, LinearRootScopeSnapshot } from "../../linear-gateway/api/LinearGatewayInterface.js";
+import type { GitWorkspace, GitWorkspaceInterface } from "../../git-workspaces/api/GitWorkspaceInterface.js";
+import type { RootDeliveryInterface } from "../../root-delivery/api/RootDeliveryInterface.js";
 import type { AgentCommandBrokerInterface, AgentCommandResult } from "../api/AgentCommandBrokerInterface.js";
-import { parseAgentCommand, type AgentCommand } from "./AgentCommandRegistry.js";
+import { dispatchAgentCommand, parseAgentCommand, type AgentCommand } from "./AgentCommandRegistry.js";
+import { TurnCommandBudget } from "./TurnCommandBudget.js";
+
+interface BrokerOptions {
+  conductorId: string;
+  turnId: string;
+  rootIssueId: string;
+  performerId: string;
+  linear: LinearGatewayInterface;
+  readGitHead(): Promise<string>;
+  workspace?: GitWorkspace;
+  git?: GitWorkspaceInterface;
+  delivery?: RootDeliveryInterface;
+  deliveryContext?: {
+    baseBranch: string;
+    title: string;
+    body: string;
+    treeDigest: string;
+    checksDigest: string;
+  };
+  budget?: TurnCommandBudget;
+}
 
 export class ScopedAgentCommandBrokerImpl implements AgentCommandBrokerInterface {
-  constructor(private readonly options: {
-    conductorId: string;
-    turnId: string;
-    rootIssueId: string;
-    performerId: string;
-    linear: LinearGatewayInterface;
-    readGitHead(): Promise<string>;
-  }) {}
+  constructor(private readonly options: BrokerOptions) {}
 
   async execute(value: unknown): Promise<AgentCommandResult> {
+    if (this.options.budget && !this.options.budget.consumeCall()) {
+      return failureEnvelope(value, "rejected", "command_limit_reached", "The Root Turn broker-call limit was reached.");
+    }
     let command: AgentCommand;
     try {
       command = parseAgentCommand(value);
@@ -21,13 +40,17 @@ export class ScopedAgentCommandBrokerImpl implements AgentCommandBrokerInterface
       return failureEnvelope(value, "rejected", "agent_command_invalid", sanitize(error));
     }
     const correlation = envelope(command);
+    const metadata = dispatchAgentCommand(command);
+    if (metadata.mutation && this.options.budget && !this.options.budget.consumeMutation()) {
+      return rejected(correlation, "mutation_limit_reached", "The Root Turn mutation limit was reached.");
+    }
     try {
-      if (!command.command.startsWith("linear.")) {
-        return rejected(correlation, "agent_command_not_linear", "This broker slice accepts only Linear commands.");
-      }
       const scope = await this.options.linear.readFreshRootScope(this.options.rootIssueId);
       const reason = this.#scopeRejection(command, scope);
       if (reason) return rejected(correlation, reason, "Command authority changed; read the current Root facts.");
+      if (command.command.startsWith("git.") || command.command === "root.deliver") {
+        return this.#executeGitOrDelivery(command);
+      }
       if (command.command === "linear.read") {
         const args = command.args;
         const issueId = requiredString(args.issue_id);
@@ -88,6 +111,83 @@ export class ScopedAgentCommandBrokerImpl implements AgentCommandBrokerInterface
         problem: problem("linear_command_failed", sanitize(error), false, ["Read current Root facts before retrying."]),
       };
     }
+  }
+
+  async #executeGitOrDelivery(command: AgentCommand): Promise<AgentCommandResult> {
+    const correlation = envelope(command);
+    const { git, workspace } = this.options;
+    if (!git || !workspace) return rejected(correlation, "git_workspace_unavailable", "Root Git workspace is unavailable.");
+    if (command.command === "git.status") {
+      return { ...correlation, status: "read", summary: boundedJson(await git.inspect(workspace) as unknown as JsonValue) };
+    }
+    if (command.command === "git.diff") {
+      return { ...correlation, status: "read", summary: boundedJson(await git.diff(workspace, {
+        staged: command.args.staged === true,
+        ...(typeof command.args.path === "string" ? { path: command.args.path } : {}),
+      }) as unknown as JsonValue) };
+    }
+    if (command.command === "git.checks") {
+      const names = command.args.check_names === undefined ? [] : requiredStrings(command.args.check_names);
+      return { ...correlation, status: "read", summary: boundedJson(await git.checks(workspace, names) as unknown as JsonValue) };
+    }
+    if (command.command === "git.commit") {
+      const targetId = requiredString(command.args.issue_id);
+      const current = await this.options.linear.readFreshRootScope(this.options.rootIssueId);
+      const reason = this.#scopeRejection(command, current);
+      if (reason) return rejected(correlation, reason, "Command authority changed before commit.");
+      const issue = scopedIssue(current, targetId);
+      if (!issue) return rejected(correlation, "linear_target_out_of_scope", "Commit Issue is outside the current Root Tree.");
+      if (issue.updated_at !== command.args.expected_remote_version) return conflict(correlation, "linear_remote_version_changed", "Commit Issue version changed.");
+      const expectedHead = requiredString(command.args.expected_head);
+      if (await this.options.readGitHead() !== expectedHead) return conflict(correlation, "git_head_changed", "Root worktree HEAD changed.");
+      let result;
+      try {
+        result = await git.commit({
+          workspace,
+          rootIssueId: command.root_issue_id,
+          issueId: targetId,
+          allowedIssueIds: current.issues.map(({ issue_id }) => issue_id),
+          issueIdentifier: issue.identifier ?? issue.issue_id,
+          expectedHead,
+        });
+      } catch (error) {
+        if (error instanceof Error && error.message === "git_commit_unconfirmed") {
+          return {
+            ...correlation,
+            status: "write_unconfirmed",
+            problem: problem("write_unconfirmed", "Git commit outcome could not be confirmed.", true, ["Read the current Git HEAD before deciding whether to retry."]),
+            read_back_target: { kind: "git_head", issue_id: command.root_issue_id, expected_head: expectedHead },
+          };
+        }
+        throw error;
+      }
+      return { ...correlation, status: "applied", summary: boundedJson(result as unknown as JsonValue) };
+    }
+    const delivery = this.options.delivery;
+    const context = this.options.deliveryContext;
+    if (!delivery || !context) return rejected(correlation, "root_delivery_unavailable", "Root delivery is unavailable.");
+    const current = await this.options.linear.readFreshRootScope(this.options.rootIssueId);
+    const reason = this.#scopeRejection(command, current);
+    if (reason) return rejected(correlation, reason, "Command authority changed before delivery.");
+    const root = scopedIssue(current, command.root_issue_id);
+    if (!root || root.updated_at !== command.args.expected_root_version) return conflict(correlation, "linear_remote_version_changed", "Root version changed.");
+    const expectedHead = requiredString(command.args.expected_head);
+    if (await this.options.readGitHead() !== expectedHead) return conflict(correlation, "git_head_changed", "Root worktree HEAD changed.");
+    const result = await delivery.deliver({
+      rootIssueId: command.root_issue_id,
+      workspace,
+      baseBranch: context.baseBranch,
+      title: context.title,
+      body: context.body,
+      expected: {
+        root_version: requiredString(command.args.expected_root_version),
+        performer_id: command.performer_id,
+        tree_digest: context.treeDigest,
+        git_head: expectedHead,
+        checks_digest: context.checksDigest,
+      },
+    });
+    return { ...correlation, status: "applied", summary: boundedJson(result as unknown as JsonValue) };
   }
 
   #scopeRejection(command: AgentCommand, scope: LinearRootScopeSnapshot) {

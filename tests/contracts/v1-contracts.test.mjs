@@ -54,6 +54,7 @@ test("Agent commands are Root-scoped, closed, and bounded", async () => {
   assert.equal(schema.$defs.CommandProblem.properties.next_steps.maxItems, 8);
   assert.equal(schema.$defs.AgentCommandResult.oneOf.length, 5);
   assert.ok(schema.$defs.AgentCommandUnconfirmed.required.includes("read_back_target"));
+  assert.ok(schema.$defs.GitCommitArgs.required.includes("expected_remote_version"));
 });
 
 async function loadSchema(family) {

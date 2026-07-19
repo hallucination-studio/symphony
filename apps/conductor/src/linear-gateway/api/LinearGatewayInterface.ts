@@ -7,6 +7,7 @@ export interface LinearRootScopeSnapshot {
   terminal: boolean;
   issues: Array<{
     issue_id: string;
+    identifier?: string;
     updated_at: string;
     parent_issue_id?: string;
   }>;

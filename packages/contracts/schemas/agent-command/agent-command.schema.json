@@ -117,10 +117,10 @@
     "GitCommitArgs": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["issue_id", "message", "expected_head"],
+      "required": ["issue_id", "expected_remote_version", "expected_head"],
       "properties": {
         "issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "message": { "$ref": "common.schema.json#/$defs/BoundedText" },
+        "expected_remote_version": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
         "expected_head": { "$ref": "common.schema.json#/$defs/Identifier" }
       }
     },
@@ -274,10 +274,27 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["kind", "issue_id"],
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": { "kind": { "const": "issue" }, "write_id": false, "expected_head": false }
+        },
+        {
+          "type": "object",
+          "required": ["write_id"],
+          "properties": { "kind": { "const": "comment_write" }, "expected_head": false }
+        },
+        {
+          "type": "object",
+          "required": ["expected_head"],
+          "properties": { "kind": { "const": "git_head" }, "write_id": false }
+        }
+      ],
       "properties": {
-        "kind": { "enum": ["issue", "comment_write"] },
+        "kind": { "enum": ["issue", "comment_write", "git_head"] },
         "issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
-        "write_id": { "$ref": "common.schema.json#/$defs/Identifier" }
+        "write_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "expected_head": { "$ref": "common.schema.json#/$defs/Identifier" }
       }
     },
     "AgentCommandUnconfirmed": {

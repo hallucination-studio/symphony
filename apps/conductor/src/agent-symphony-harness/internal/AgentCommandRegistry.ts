@@ -36,7 +36,7 @@ const definitions = [
   define("git.status", "git status", "Read bounded status for the current Root worktree.", false, "gitStatus", "EmptyArgs", {}),
   define("git.diff", "git diff", "Read a bounded diff from the current Root worktree.", false, "gitDiff", "GitDiffArgs", { staged: false }),
   define("git.checks", "git checks", "Run declared checks in the current Root worktree.", false, "gitChecks", "GitChecksArgs", { check_names: ["test"] }),
-  define("git.commit", "git commit", "Create an identity-checked commit at the expected HEAD.", true, "gitCommit", "GitCommitArgs", { issue_id: "root-1", message: "feat: implement scoped change", expected_head: "abc123" }),
+  define("git.commit", "git commit", "Create an identity-checked commit at the expected HEAD.", true, "gitCommit", "GitCommitArgs", { issue_id: "root-1", expected_remote_version: "version-1", expected_head: "abc123" }),
   define("root.deliver", "root deliver", "Request preconditioned delivery for the current Root.", true, "rootDeliver", "RootDeliverArgs", { expected_head: "abc123", expected_root_version: "version-1" }),
 ] as const satisfies readonly CommandDefinition[];
 

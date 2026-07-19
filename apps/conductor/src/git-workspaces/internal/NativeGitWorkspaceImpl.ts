@@ -15,6 +15,7 @@ export class NativeGitWorkspaceImpl implements GitWorkspaceInterface {
     private readonly repositoryRoot: string,
     private readonly worktreeRoot: string,
     private readonly checkCommands: Readonly<Record<string, readonly [string, string[]]>> = {},
+    private readonly commitRunner: typeof runCommand = runCommand,
   ) {}
 
   async ensureWorkspace(input: {
@@ -59,14 +60,18 @@ export class NativeGitWorkspaceImpl implements GitWorkspaceInterface {
     };
   }
 
-  async diff(workspace: GitWorkspace, options: { staged?: boolean } = {}) {
+  async diff(workspace: GitWorkspace, options: { staged?: boolean; path?: string } = {}) {
     await this.#assertWorkspaceIdentity(workspace);
+    if (options.path !== undefined && !safeRelativePath(options.path)) {
+      throw new Error("git_diff_path_out_of_scope");
+    }
     const result = await runCommand("git", [
       "-C",
       workspace.worktreePath,
       "diff",
       "--no-ext-diff",
       ...(options.staged ? ["--cached"] : []),
+      ...(options.path ? ["--", options.path] : []),
     ]);
     const cap = 65_536;
     const bytes = Buffer.byteLength(result.stdout, "utf8");
@@ -112,7 +117,20 @@ export class NativeGitWorkspaceImpl implements GitWorkspaceInterface {
     await this.#assertWorkspaceIdentity(input.workspace);
     const snapshot = await this.inspect(input.workspace);
     if (snapshot.head !== input.expectedHead) throw new Error("git_commit_head_stale");
-    return this.commitWork(input.workspace, `${input.issueIdentifier}: Symphony work`);
+    const message = `${input.issueIdentifier}: Symphony work`;
+    await runCommand("git", ["-C", input.workspace.worktreePath, "add", "--all"]);
+    const status = await runCommand("git", ["-C", input.workspace.worktreePath, "status", "--porcelain"]);
+    if (!status.stdout.trim()) return { kind: "no_changes" as const, commit: snapshot.head };
+    try {
+      await this.commitRunner("git", ["-C", input.workspace.worktreePath, "commit", "-m", message]);
+    } catch (error) {
+      const readBack = await this.#readCommitOutcome(input.workspace, input.expectedHead, message);
+      if (readBack) return { kind: "committed" as const, commit: readBack };
+      throw error;
+    }
+    const readBack = await this.#readCommitOutcome(input.workspace, input.expectedHead, message);
+    if (!readBack) throw new Error("git_commit_unconfirmed");
+    return { kind: "committed" as const, commit: readBack };
   }
 
   async commitWork(workspace: GitWorkspace, message: string) {
@@ -207,6 +225,21 @@ export class NativeGitWorkspaceImpl implements GitWorkspaceInterface {
       throw new Error("git_workspace_identity_conflict");
     }
   }
+
+  async #readCommitOutcome(workspace: GitWorkspace, previousHead: string, message: string) {
+    try {
+      const [head, subject] = await Promise.all([
+        runCommand("git", ["-C", workspace.worktreePath, "rev-parse", "HEAD"]),
+        runCommand("git", ["-C", workspace.worktreePath, "log", "-1", "--format=%s"]),
+      ]);
+      const currentHead = head.stdout.trim();
+      return currentHead !== previousHead && subject.stdout.trim() === message
+        ? currentHead
+        : undefined;
+    } catch {
+      throw new Error("git_commit_unconfirmed");
+    }
+  }
 }
 
 function boundedLines(value: string, cap: number): BoundedGitItems<string> {
@@ -222,4 +255,9 @@ function truncateUtf8(value: string, cap: number): string {
   const bytes = Buffer.from(value, "utf8");
   if (bytes.length <= cap) return value;
   return bytes.subarray(0, cap).toString("utf8").replace(/\uFFFD$/u, "");
+}
+
+function safeRelativePath(value: string) {
+  if (!value || value.includes("\0") || path.isAbsolute(value)) return false;
+  return !value.split(/[\\/]/u).some((part) => part === "..");
 }
