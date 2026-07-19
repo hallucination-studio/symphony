@@ -1,0 +1,7 @@
+{
+  "schema": "podium-client.schema.json#/$defs/ConnectLinearCommand",
+  "value": {
+    "kind": "connect_linear",
+    "token": "must-not-cross"
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "schema": "podium-conductor.schema.json#/$defs/UpdateIssueStateCommand",
+  "value": {
+    "kind": "update_issue_state",
+    "project": {
+      "conductor_short_hash": "abc123",
+      "expected_project_id": "project-1",
+      "expected_project_updated_at": "2026-07-16T00:00:00Z"
+    },
+    "precondition": {
+      "expected_updated_at": "2026-07-16T00:00:00Z"
+    },
+    "state": "In Review"
+  }
+}

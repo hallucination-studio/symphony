@@ -1,0 +1,4 @@
+{
+  "schema": "common.schema.json#/$defs/Timestamp",
+  "value": "not-a-timestamp-value"
+}

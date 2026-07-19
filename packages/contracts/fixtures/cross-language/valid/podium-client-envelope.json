@@ -1,0 +1,10 @@
+{
+  "schema": "podium-client.schema.json#/$defs/PodiumClientMessage",
+  "value": {
+    "protocol_version": "1",
+    "request_id": "request-1",
+    "body": {
+      "kind": "connect_linear"
+    }
+  }
+}

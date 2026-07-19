@@ -1,0 +1,543 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://symphony.local/contracts/podium-client.schema.json",
+  "title": "Podium Client Protocol V1",
+  "$defs": {
+    "TargetConductor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["conductor_id"],
+      "properties": {
+        "conductor_id": { "$ref": "common.schema.json#/$defs/Identifier" }
+      }
+    },
+    "RepositorySelection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository_handle", "display_name", "base_branch"],
+      "properties": {
+        "repository_handle": { "$ref": "common.schema.json#/$defs/OpaqueIdentifier" },
+        "display_name": { "$ref": "common.schema.json#/$defs/ShortText" },
+        "base_branch": { "$ref": "common.schema.json#/$defs/ShortText" }
+      }
+    },
+    "CodexTurnSettings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["model", "reasoning_effort", "is_fast_mode_enabled"],
+      "properties": {
+        "model": { "$ref": "common.schema.json#/$defs/ShortText" },
+        "reasoning_effort": {
+          "enum": ["none", "minimal", "low", "medium", "high", "xhigh"]
+        },
+        "is_fast_mode_enabled": { "type": "boolean" }
+      }
+    },
+    "ConnectLinearCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": { "kind": { "const": "connect_linear" } }
+    },
+    "ReconnectLinearCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": { "kind": { "const": "reconnect_linear" } }
+    },
+    "CreateConductorCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "project_id", "repository"],
+      "properties": {
+        "kind": { "const": "create_conductor" },
+        "project_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "repository": { "$ref": "#/$defs/RepositorySelection" }
+      }
+    },
+    "StartConductorCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "conductor_id"],
+      "properties": {
+        "kind": { "const": "start_conductor" },
+        "conductor_id": { "$ref": "common.schema.json#/$defs/Identifier" }
+      }
+    },
+    "StopConductorCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "conductor_id"],
+      "properties": {
+        "kind": { "const": "stop_conductor" },
+        "conductor_id": { "$ref": "common.schema.json#/$defs/Identifier" }
+      }
+    },
+    "RestartConductorCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "conductor_id"],
+      "properties": {
+        "kind": { "const": "restart_conductor" },
+        "conductor_id": { "$ref": "common.schema.json#/$defs/Identifier" }
+      }
+    },
+    "GetPerformerProfilesQuery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "conductor_id"],
+      "properties": {
+        "kind": { "const": "get_performer_profiles" },
+        "conductor_id": { "$ref": "common.schema.json#/$defs/Identifier" }
+      }
+    },
+    "GetPerformerProfileStatusQuery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "conductor_id", "profile_id"],
+      "properties": {
+        "kind": { "const": "get_performer_profile_status" },
+        "conductor_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "profile_id": { "$ref": "common.schema.json#/$defs/Identifier" }
+      }
+    },
+    "CreatePerformerProfileCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "conductor_id",
+        "display_name",
+        "backend_kind",
+        "authentication_method",
+        "codex_turn_settings"
+      ],
+      "properties": {
+        "kind": { "const": "create_performer_profile" },
+        "conductor_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "display_name": { "$ref": "common.schema.json#/$defs/ShortText" },
+        "backend_kind": { "const": "codex" },
+        "authentication_method": { "enum": ["chatgpt", "api_key"] },
+        "codex_turn_settings": { "$ref": "#/$defs/CodexTurnSettings" }
+      }
+    },
+    "UpdatePerformerProfileCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "conductor_id",
+        "profile_id",
+        "display_name",
+        "codex_turn_settings"
+      ],
+      "properties": {
+        "kind": { "const": "update_performer_profile" },
+        "conductor_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "profile_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "display_name": { "$ref": "common.schema.json#/$defs/ShortText" },
+        "codex_turn_settings": { "$ref": "#/$defs/CodexTurnSettings" }
+      }
+    },
+    "StartCodexChatGPTLoginCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "conductor_id", "profile_id"],
+      "properties": {
+        "kind": { "const": "start_codex_chatgpt_login" },
+        "conductor_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "profile_id": { "$ref": "common.schema.json#/$defs/Identifier" }
+      }
+    },
+    "SetCodexApiKeyCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "conductor_id",
+        "profile_id",
+        "secret_frame_length"
+      ],
+      "properties": {
+        "kind": { "const": "set_codex_api_key" },
+        "conductor_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "profile_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "secret_frame_length": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16384
+        }
+      }
+    },
+    "ActivatePerformerProfileCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "conductor_id", "profile_id"],
+      "properties": {
+        "kind": { "const": "activate_performer_profile" },
+        "conductor_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "profile_id": { "$ref": "common.schema.json#/$defs/Identifier" }
+      }
+    },
+    "NextActionView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "summary", "impact", "action_label"],
+      "properties": {
+        "kind": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "summary": { "$ref": "common.schema.json#/$defs/BoundedText" },
+        "impact": { "$ref": "common.schema.json#/$defs/BoundedText" },
+        "action_label": { "$ref": "common.schema.json#/$defs/ShortText" },
+        "linear_url": {
+          "type": "string",
+          "maxLength": 2048,
+          "pattern": "^https://"
+        }
+      }
+    },
+    "LinearConnectionView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "observed_at"],
+      "properties": {
+        "status": { "enum": ["disconnected", "connected", "reconnect_required", "failed"] },
+        "workspace_name": { "$ref": "common.schema.json#/$defs/ShortText" },
+        "observed_at": { "$ref": "common.schema.json#/$defs/Timestamp" },
+        "error": { "$ref": "common.schema.json#/$defs/ProtocolError" }
+      }
+    },
+    "PerformerProfileSummaryView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "profile_id",
+        "display_name",
+        "authentication_method",
+        "codex_turn_settings",
+        "readiness",
+        "is_active",
+        "observed_at"
+      ],
+      "properties": {
+        "profile_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "display_name": { "$ref": "common.schema.json#/$defs/ShortText" },
+        "authentication_method": { "enum": ["chatgpt", "api_key"] },
+        "codex_turn_settings": { "$ref": "#/$defs/CodexTurnSettings" },
+        "readiness": { "enum": ["login-required", "ready", "invalid"] },
+        "is_active": { "type": "boolean" },
+        "sanitized_account_label": { "$ref": "common.schema.json#/$defs/ShortText" },
+        "observed_at": { "$ref": "common.schema.json#/$defs/Timestamp" }
+      }
+    },
+    "PerformerProfileDetailView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["summary"],
+      "properties": {
+        "summary": { "$ref": "#/$defs/PerformerProfileSummaryView" },
+        "sanitized_last_error": { "$ref": "common.schema.json#/$defs/BoundedText" },
+        "next_action": { "$ref": "#/$defs/NextActionView" }
+      }
+    },
+    "PerformerUsageView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "input_tokens",
+        "cached_input_tokens",
+        "output_tokens",
+        "reasoning_output_tokens",
+        "total_tokens",
+        "completed_root_count",
+        "observed_at",
+        "is_stale"
+      ],
+      "properties": {
+        "input_tokens": { "$ref": "common.schema.json#/$defs/NonNegativeInteger" },
+        "cached_input_tokens": { "$ref": "common.schema.json#/$defs/NonNegativeInteger" },
+        "output_tokens": { "$ref": "common.schema.json#/$defs/NonNegativeInteger" },
+        "reasoning_output_tokens": { "$ref": "common.schema.json#/$defs/NonNegativeInteger" },
+        "total_tokens": { "$ref": "common.schema.json#/$defs/NonNegativeInteger" },
+        "completed_root_count": { "$ref": "common.schema.json#/$defs/NonNegativeInteger" },
+        "observed_at": { "$ref": "common.schema.json#/$defs/Timestamp" },
+        "is_stale": { "type": "boolean" }
+      }
+    },
+    "ConductorSummaryView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["conductor_id", "display_name", "status", "observed_at"],
+      "properties": {
+        "conductor_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "display_name": { "$ref": "common.schema.json#/$defs/ShortText" },
+        "status": {
+          "enum": ["stopped", "starting", "ready", "recovering", "not_responding", "crashed", "unbound", "project_conflict"]
+        },
+        "project_name": { "$ref": "common.schema.json#/$defs/ShortText" },
+        "repository_display_name": { "$ref": "common.schema.json#/$defs/ShortText" },
+        "base_branch": { "$ref": "common.schema.json#/$defs/ShortText" },
+        "observed_at": { "$ref": "common.schema.json#/$defs/Timestamp" }
+      }
+    },
+    "RootSummaryView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["root_issue_id", "identifier", "title", "status", "observed_at"],
+      "properties": {
+        "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "identifier": { "$ref": "common.schema.json#/$defs/ShortText" },
+        "title": { "$ref": "common.schema.json#/$defs/BoundedText" },
+        "status": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "current_node_summary": { "$ref": "common.schema.json#/$defs/BoundedText" },
+        "linear_url": {
+          "type": "string",
+          "maxLength": 2048,
+          "pattern": "^https://"
+        },
+        "observed_at": { "$ref": "common.schema.json#/$defs/Timestamp" }
+      }
+    },
+    "RuntimeEventView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["event_kind", "summary", "occurred_at"],
+      "properties": {
+        "event_kind": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "summary": { "$ref": "common.schema.json#/$defs/BoundedText" },
+        "occurred_at": { "$ref": "common.schema.json#/$defs/Timestamp" }
+      }
+    },
+    "WorkflowNodeView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "issue_id",
+        "kind",
+        "state",
+        "order",
+        "depth",
+        "title",
+        "is_canceled"
+      ],
+      "properties": {
+        "issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "parent_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "kind": {
+          "enum": [
+            "work_group",
+            "work_leaf",
+            "plan_approval",
+            "planned_input",
+            "runtime_input"
+          ]
+        },
+        "state": { "$ref": "common.schema.json#/$defs/LinearIssueState" },
+        "order": { "type": "number", "minimum": -1000000000, "maximum": 1000000000 },
+        "depth": { "type": "integer", "minimum": 0, "maximum": 32 },
+        "title": { "$ref": "common.schema.json#/$defs/BoundedText" },
+        "is_canceled": { "type": "boolean" },
+        "is_current": { "type": "boolean" },
+        "waiting_reason": { "$ref": "common.schema.json#/$defs/BoundedText" }
+      }
+    },
+    "AttentionItemView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["object_kind", "summary", "impact", "observed_at"],
+      "properties": {
+        "object_kind": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "summary": { "$ref": "common.schema.json#/$defs/BoundedText" },
+        "impact": { "$ref": "common.schema.json#/$defs/BoundedText" },
+        "observed_at": { "$ref": "common.schema.json#/$defs/Timestamp" },
+        "next_action": { "$ref": "#/$defs/NextActionView" }
+      }
+    },
+    "ProjectSummaryView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["project_id", "name", "observed_at"],
+      "properties": {
+        "project_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "name": { "$ref": "common.schema.json#/$defs/ShortText" },
+        "observed_at": { "$ref": "common.schema.json#/$defs/Timestamp" }
+      }
+    },
+    "DesktopOverviewView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "linear_connection",
+        "conductors",
+        "active_roots",
+        "review_roots",
+        "recent_problems",
+        "usage",
+        "observed_at"
+      ],
+      "properties": {
+        "next_action": { "$ref": "#/$defs/NextActionView" },
+        "linear_connection": { "$ref": "#/$defs/LinearConnectionView" },
+        "projects": {
+          "type": "array",
+          "maxItems": 512,
+          "items": { "$ref": "#/$defs/ProjectSummaryView" }
+        },
+        "conductors": {
+          "type": "array",
+          "maxItems": 64,
+          "items": { "$ref": "#/$defs/ConductorSummaryView" }
+        },
+        "active_roots": {
+          "type": "array",
+          "maxItems": 64,
+          "items": { "$ref": "#/$defs/RootSummaryView" }
+        },
+        "review_roots": {
+          "type": "array",
+          "maxItems": 64,
+          "items": { "$ref": "#/$defs/RootSummaryView" }
+        },
+        "recent_problems": {
+          "type": "array",
+          "maxItems": 64,
+          "items": { "$ref": "#/$defs/AttentionItemView" }
+        },
+        "usage": { "$ref": "#/$defs/PerformerUsageView" },
+        "observed_at": { "$ref": "common.schema.json#/$defs/Timestamp" }
+      }
+    },
+    "ConductorDetailView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["summary", "profiles", "events"],
+      "properties": {
+        "summary": { "$ref": "#/$defs/ConductorSummaryView" },
+        "profiles": {
+          "type": "array",
+          "maxItems": 64,
+          "items": { "$ref": "#/$defs/PerformerProfileSummaryView" }
+        },
+        "events": {
+          "type": "array",
+          "maxItems": 128,
+          "items": { "$ref": "#/$defs/RuntimeEventView" }
+        },
+        "next_action": { "$ref": "#/$defs/NextActionView" }
+      }
+    },
+    "RootDetailView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["summary", "workflow_nodes", "usage", "events"],
+      "properties": {
+        "summary": { "$ref": "#/$defs/RootSummaryView" },
+        "workflow_nodes": {
+          "type": "array",
+          "maxItems": 512,
+          "items": { "$ref": "#/$defs/WorkflowNodeView" }
+        },
+        "usage": { "$ref": "#/$defs/PerformerUsageView" },
+        "events": {
+          "type": "array",
+          "maxItems": 128,
+          "items": { "$ref": "#/$defs/RuntimeEventView" }
+        },
+        "next_action": { "$ref": "#/$defs/NextActionView" }
+      }
+    },
+    "GetDesktopOverviewQuery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": { "kind": { "const": "get_desktop_overview" } }
+    },
+    "GetConductorDetailQuery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "conductor_id"],
+      "properties": {
+        "kind": { "const": "get_conductor_detail" },
+        "conductor_id": { "$ref": "common.schema.json#/$defs/Identifier" }
+      }
+    },
+    "GetRootDetailQuery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "root_issue_id"],
+      "properties": {
+        "kind": { "const": "get_root_detail" },
+        "root_issue_id": { "$ref": "common.schema.json#/$defs/Identifier" }
+      }
+    },
+    "CommandAcceptedResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "command_kind", "status"],
+      "properties": {
+        "kind": { "const": "command_accepted" },
+        "command_kind": {
+          "enum": [
+            "connect_linear",
+            "reconnect_linear",
+            "create_conductor",
+            "start_conductor",
+            "stop_conductor",
+            "restart_conductor",
+            "create_performer_profile",
+            "update_performer_profile",
+            "start_codex_chatgpt_login",
+            "set_codex_api_key",
+            "activate_performer_profile"
+          ]
+        },
+        "status": { "enum": ["accepted", "starting", "stopping"] }
+      }
+    },
+    "PodiumClientBody": {
+      "oneOf": [
+        { "$ref": "#/$defs/ConnectLinearCommand" },
+        { "$ref": "#/$defs/ReconnectLinearCommand" },
+        { "$ref": "#/$defs/CreateConductorCommand" },
+        { "$ref": "#/$defs/StartConductorCommand" },
+        { "$ref": "#/$defs/StopConductorCommand" },
+        { "$ref": "#/$defs/RestartConductorCommand" },
+        { "$ref": "#/$defs/GetPerformerProfilesQuery" },
+        { "$ref": "#/$defs/GetPerformerProfileStatusQuery" },
+        { "$ref": "#/$defs/CreatePerformerProfileCommand" },
+        { "$ref": "#/$defs/UpdatePerformerProfileCommand" },
+        { "$ref": "#/$defs/StartCodexChatGPTLoginCommand" },
+        { "$ref": "#/$defs/SetCodexApiKeyCommand" },
+        { "$ref": "#/$defs/ActivatePerformerProfileCommand" },
+        { "$ref": "#/$defs/GetDesktopOverviewQuery" },
+        { "$ref": "#/$defs/GetConductorDetailQuery" },
+        { "$ref": "#/$defs/GetRootDetailQuery" },
+        { "$ref": "#/$defs/CommandAcceptedResult" },
+        { "$ref": "#/$defs/DesktopOverviewView" },
+        { "$ref": "#/$defs/ConductorDetailView" },
+        { "$ref": "#/$defs/RootDetailView" },
+        { "$ref": "#/$defs/LinearConnectionView" },
+        { "$ref": "#/$defs/ConductorSummaryView" },
+        { "$ref": "#/$defs/RootSummaryView" },
+        { "$ref": "#/$defs/AttentionItemView" },
+        { "$ref": "#/$defs/ProjectSummaryView" },
+        { "$ref": "#/$defs/RuntimeEventView" },
+        { "$ref": "#/$defs/NextActionView" },
+        { "$ref": "#/$defs/PerformerProfileSummaryView" },
+        { "$ref": "#/$defs/PerformerProfileDetailView" },
+        { "$ref": "#/$defs/PerformerUsageView" },
+        { "$ref": "common.schema.json#/$defs/ProtocolError" }
+      ]
+    },
+    "PodiumClientMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocol_version", "request_id", "body"],
+      "properties": {
+        "protocol_version": { "$ref": "common.schema.json#/$defs/ProtocolVersion" },
+        "request_id": { "$ref": "common.schema.json#/$defs/Identifier" },
+        "body": { "$ref": "#/$defs/PodiumClientBody" }
+      }
+    }
+  },
+  "$ref": "#/$defs/PodiumClientMessage"
+}

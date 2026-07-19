@@ -1,149 +1,117 @@
 # AGENTS.md
 
-This file provides guidance to Codex (Codex.ai/code) when working with code in this repository.
+This file contains the repository-wide working rules for coding agents.
 
-## Companion docs
+## Sources of truth
 
-- `AGENT.md` (hardlinked as `agent.md`) is the detailed operating guide: product boundaries, code standards, real-run testing rules, the acceptance-scoring rubric, and Linear test-project tooling. Read it for anything involving orchestration, acceptance, or real Linear runs — those rules are mandatory and not repeated here.
-- `README.md` documents the runtime flow, the Conductor/Podium API surfaces, and configuration.
-- `packages/podium/web/DESIGN.md` is the visual-identity source of truth for the Podium web UI (see below).
+- [`docs/architecture/README.md`](docs/architecture/README.md) is the entry
+  point for the approved target architecture.
+- The files under `docs/architecture/` own their named concerns. Follow their
+  documented boundaries and do not create a second description of the same
+  design elsewhere.
+- The architecture is a target proposal, not a claim that the current
+  implementation already matches it and not an implicit migration plan.
+- `README.md` is an operational repository entry point, not an architecture
+  authority.
+- Do not add ADR, AHR, `docs/decisions`, legacy product-design, or legacy
+  module-baseline documents unless the user explicitly asks for them. Update
+  the appropriate `docs/architecture/` source-of-truth document instead.
 
-## Commands
+## Target architecture invariants
 
-```bash
-make install        # create .venv and install all four packages editable
-make test           # full pytest suite (sets PYTHONPATH across all package srcs)
-make dev            # run Conductor on :8081 with data-root ./.conductor
-make stop           # kill Makefile-launched Conductor/Performer processes
-```
+- Symphony is one product with four responsibilities: Podium Desktop, Podium,
+  Conductor, and Performer.
+- Podium Desktop, Podium, and Conductor target TypeScript; Performer remains a
+  Python process; the Desktop host uses Tauri/Rust.
+- Linear Issue Tree is workflow authority. Conductor must not introduce a
+  workflow database, queue, checkpoint store, or mirrored Work Node state.
+- Podium owns Linear OAuth, tokens, project catalog, bindings, the Linear SDK,
+  and `podium.db`. Linear SDK types and credentials must not cross into
+  Conductor.
+- Conductor resolves its project through the Conductor Project Label, rebuilds
+  root state from Linear and Git, schedules roots and leaves, manages Git
+  worktrees, and launches one Performer process per Turn.
+- Performer exclusively owns Provider SDK integrations and resumes the
+  Provider conversation through the opaque `performer_id`.
+- Performer Profiles belong to Conductor, use isolated `CODEX_HOME`
+  directories, and are controlled through the approved profile-control
+  boundary. Symphony must not read or rewrite Codex-owned configuration files.
+- Cross-process communication uses closed, versioned schemas and generated
+  types. Roles depend on contracts and interfaces, never another role's
+  implementation.
+- Public boundaries use the naming and module rules in
+  `docs/architecture/code-organization.md`; business vocabulary follows
+  `docs/architecture/glossary.md`.
 
-`make test` is the canonical way to run tests because pytest needs every package's `src/` on `PYTHONPATH`. To run a single test file or case, reuse that same path prefix:
+## Scope discipline
 
-```bash
-PYTHONPATH=$(pwd)/packages/performer-api/src:$(pwd)/packages/performer/src:$(pwd)/packages/conductor/src:$(pwd)/packages/podium/src \
-  .venv/bin/python -m pytest tests/test_conductor_workflow.py tests/test_workflow_driver.py tests/test_podium_runtime_polling.py -q
-# single case: use the same prefix and a module-owned test, for example
-PYTHONPATH=... .venv/bin/python -m pytest tests/test_conductor_workflow.py::test_parent_done_after_all_tasks -q
-```
+For every non-trivial slice, record:
 
-Run the services directly:
+- `authorized`
+- `required_consequences`
+- `out_of_scope`
+- `assumptions_requiring_approval`
+- `deferred_ideas`
 
-```bash
-.venv/bin/performer --turn-request-path /tmp/turn-request.json --turn-result-path /tmp/turn-result.json
-.venv/bin/conductor --port 8081 --data-root ./.conductor
-.venv/bin/podium api --host 127.0.0.1 --port 8090
-```
+Production work starts only when `assumptions_requiring_approval` is empty.
+Prefer the smallest change that satisfies the authorized outcome. Do not infer
+new product behavior, durable state, APIs, configuration, compatibility paths,
+permissions, integrations, or migration steps from the target architecture.
 
-Real Linear flow is skipped by default; it needs a staged Codex seed and a
-sourced `.env` — see `docs/real-flow.md` and the real-flow section in `AGENT.md`.
-The single runner starts installed Performer control/turn processes; tools must
-not import provider SDKs or parse the staged provider files.
+## Repository commands
 
-## Architecture
-
-Symphony is **one product** split into four Python packages under `packages/`, each a role in the "orchestra". Package boundaries are runtime boundaries, not product boundaries — keep user-facing language anchored on Symphony as the whole system.
-
-The accepted target is [Podium Desktop](docs/product/podium-desktop.md), also
-recorded in ADR-0007, ADR-0008, ADR-0009, and ADR-0010: Tauri hosts the existing React UI
-and a local Podium process using `podium.db`; each Conductor retains an
-isolated `workflow.db`; Podium/Conductor use inherited private IPC; Linear
-access and refresh tokens persist as plaintext fields in Podium-owned
-`podium.db`; the MVP fixed Linear app has no configuration revision or mutation
-lifecycle. This is a target, not a claim about the current
-implementation. Existing commands and active-path rules remain authoritative
-until their ordered tasks land, and a failed feasibility proof does not
-authorize an unapproved fallback.
-
-- **`performer-api`** — dependency-free closed wire contracts shared across
-  role/process boundaries: Managed Run and Performer control contracts, plus
-  approved local runtime DTOs when more than one role needs them. It contains
-  no runtime implementation, persistence, Linear calls, secrets, arbitrary
-  transport data, or provider-specific types. The other three may depend on
-  it; it depends on none of them.
-- **`performer`** — the execution worker. It only runs fenced managed-run turns from JSON request/result paths under isolated per-role runtime profiles.
-- **`conductor`** — customer-side local daemon. One Conductor binds exactly one Linear project and one repository, owns that project's durable managed-run state, leases Podium dispatches, starts Performer turns, and communicates through the Desktop-created inherited private channel as the expected bound process. Multiple isolated Conductors may run on one host for different projects.
-- **`podium`** — control plane and UI boundary. Owns the one fixed Linear application installation, discovered project catalog, one-to-one desired Conductor bindings, dispatch queueing, reliable polling, token refresh, and the Linear proxy. Project choice occurs inside Create Conductor; Desktop immediately starts the bundled process and reconciles active bindings on every app start, without a customer installation script.
-
-### Import-boundary invariant (enforced by tests)
-
-The package-boundary test fails the build if these are violated:
-
-- `performer_api` must not import `performer`, `conductor`, or `podium`.
-- `performer`, `conductor`, `podium` may import `performer_api`.
-- `performer`, `conductor`, `podium` must **not** import each other.
-
-Conductor is the only local process manager for Performer, and it launches it via the installed `performer` command (or repo-local fallback), never by importing Performer internals. When more than one role needs a contract, put it in `performer_api`.
-
-Provider isolation is also a hard build invariant:
-
-- Provider SDK dependencies/imports, generated provider types, authentication
-  and configuration logic, provider session/login handles, provider response
-  parsing, and provider-specific request types may exist only in
-  Performer-owned backend implementation modules.
-- Conductor and Podium must not depend on provider SDKs or implement
-  provider-specific controllers.
-- Conductor consumes only closed `performer_api` contracts and invokes
-  installed Performer control/turn subprocesses. The internal
-  `PerformerBackend` Protocol/ABC and explicit backend registry belong only to
-  the Performer package.
-
-### Managed dispatch flow
-
-The runtime path is polling-only: a Linear issue is delegated to the installed Symphony app user → installation/project-scoped baseline or incremental polling discovers it through full cursor pagination → Podium transactionally records the issue, delegation epoch, dispatch, and checkpoint → Podium matches the active installation and unique project/Conductor binding → that Conductor leases the dispatch → Conductor commits or resumes one durable managed run → Performer runs one fenced managed-run turn. Dispatch routing is by organization, project binding, app user, active state, and blockers, never project labels or human assignee.
-
-### Error visibility invariant
-
-Do not hide runtime defects, failed attempts, backend setup errors, verifier failures, integration conflicts, polling/proxy failures, or E2E managed-run failures. A failure is not handled unless it is visible in the right product surface and in test evidence.
-
-- Product code must fail closed **and** make the reason observable. If Conductor, Performer, or Podium catches an exception, the sanitized reason must be recorded in durable state, surfaced through the relevant API/view, and written to an operator-visible log plus the relevant Linear wait surface when human action is required.
-- Do not swallow exceptions with empty `except`, silent retries, indefinite polling, or generic `"failed"` states. Retries must preserve the latest sanitized error, retry count, and next action. Terminal failures must have a concrete reason such as `performer_backend_setup_failed`, `performer_check_required`, `stale_fencing_token`, `gate_failed`, or `LINEAR_SYNC_CONFLICT`.
-- E2E and real-run tools must print or record obvious failures immediately. If a managed-run turn fails, a work item blocks due to backend/runtime setup, a proxy call times out, or a required artifact is missing, the tool must emit a failing check with the concrete reason and write artifacts before continuing or exiting. Waiting until a global timeout while the underlying error is already known is a test bug.
-- Browser/API responses and Podium managed-runs views must stay sanitized, but sanitization must not erase the existence, category, or actionable summary of an error. Never expose secrets, tokens, cookies, passwords, raw profile secrets, or Linear tokens.
-- Linear comments used by tests must be explicit about intent. Managed-run human-action resumes happen through recorded managed-run state; runtime wait resumes happen through their recorded runtime wait channel. Negative probes or diagnostic comments must identify themselves as such and must not look like business instructions.
-- Tests should assert error visibility, not just error handling. When adding failure-path behavior, include coverage that the error appears in the managed-runs view/report/log/evidence surface that an operator or acceptance run would actually inspect.
-
-### Logging design invariant
-
-Logs are a product surface for operators and acceptance runs, not a best-effort debug dump. Any runtime orchestration change must preserve clear, correlated, sanitized logs across Podium, Conductor, and Performer.
-
-- Use structured, single-line log events. Prefer `event=<name> key=value ...` or JSON where the surrounding logger already uses JSON. Free-form prose is allowed only in a `message` or `summary` field.
-- Every orchestration log must include the IDs needed to join it to durable state when those IDs exist: `runtime_group_id`, `runtime_id` or `conductor_id`, `instance_id`, `run_id`, `work_item_id`, `turn_id`, `turn_kind`, `lease_id`, `fencing_token`, `issue_id`/`issue_identifier`, `policy_revision`, `plan_version`, `result_path`, `request_path`, and `linear_projection_id`.
-- Event names are stable API-adjacent vocabulary. Use lower-snake-case names prefixed by subsystem when useful, for example `podium_dispatch_queued`, `conductor_dispatch_leased`, `managed_run_plan_committed`, `managed_run_turn_started`, `performer_backend_invoked`, `managed_run_result_collected`, `managed_run_human_wait_created`, and `linear_projection_updated`.
-- Log lifecycle transitions at `info`: polling page/checkpoint committed, delegation epoch opened/closed, dispatch queued/leased/acked, runtime config accepted/rejected, plan committed/revised, work item became ready, turn requested/started/heartbeat/completed, lease heartbeat/reclaim, result file detected/collected/applied, manifest published, Linear projection created/updated, human wait created/resolved, and process start/exit.
-- Log progress heartbeats at `info` often enough that a real run never appears dead for more than one minute. A running attempt should show either a fresh lease heartbeat, process heartbeat, backend progress event, result collection event, or durable state transition. If no stdout is expected from a backend, Conductor must still log that the attempt is alive and what it is waiting for.
-- Log recoverable problems at `warning`: stale results, stale fencing tokens, retryable Podium/Linear proxy failures, missing optional artifacts, skipped dispatches with a concrete reason, config version rejection, no eligible ordered task, and ignored human-action signals with a concrete reason.
-- Log terminal or human-action-causing failures at `error`: backend setup failure, missing per-role profile, fixed backend-context setup failure, Performer control/turn invocation failure, invalid managed-run JSON after retries, gate execution failure, verifier artifact/hash mismatch, integration conflict, unrecoverable Podium/Linear proxy failure, and any exception that changes run/work-item/turn state.
-- Standard failure fields are `error_type`, `error_code`, `sanitized_reason`, `action_required`, `retryable`, `attempt_number`, and `next_action`. Do not emit only `failed=true`; the log must explain what failed and what the system did next.
-- Never log secrets or raw credentials. Redact tokens, cookies, passwords, client secrets, raw runtime profile secrets, Authorization headers, and Linear tokens. Sanitization must keep the error category and actionable summary intact; `[REDACTED]` is acceptable for secret values, not for the entire error.
-- Real-run Codex configuration must be injected through one fixed staged context created for that E2E batch and shared by installed Performer control/turn processes. The E2E runner must not default to or accept `~/.codex` as a runtime input. If local Codex credentials are needed, copy only the approved seed files (`config.toml`, `auth.json`, `version.json`, `models_cache.json`) into a fixed seed directory first, set `SYMPHONY_E2E_CODEX_HOME_SEED` to that copied directory, and let the runner stage one isolated per-batch copy from there. Podium runtime config, Conductor runtime profiles, logs, reports, and evidence artifacts must not directly reference or expose `~/.codex` or link to a directory containing `auth.json`.
-- Do not rely on stdout only. Performer stdout/stderr must be captured into the instance log generation with stream labels and attempt correlation. Conductor must also persist scheduler/backend failures that happen before a Performer process starts. Podium must log polling/proxy/config/report failures with correlation IDs.
-- Linear is an operator-visible surface during managed E2E. When Symphony takes ownership of a delegated issue, creates a managed-run plan, starts a turn, waits on Codex approval/tool input, blocks on human action, or hits an integration conflict, the Linear projection, work-item state, or runtime wait child issue must make that state visible without requiring local log access. Do not spam per-line backend output into Linear.
-- Logs must not be the only source of truth. Every logged terminal failure must also appear in durable managed-run state and the relevant API/report view. Conversely, any durable terminal failure should have a corresponding log event unless logging itself failed.
-- Real-run tools must archive relevant logs as artifacts on early exit or failure: Podium log, Conductor log, per-instance Performer logs, managed-runs view/report JSON, turn request/result JSON, and Linear projection evidence. A real E2E report with a failure count but no linked runtime logs is incomplete evidence.
-- Tests must cover log visibility for new failure paths. Prefer assertions on event name, correlation IDs, sanitized reason, and durable-state/API parity over brittle full-line string comparisons.
-- Anti-patterns: empty `except` blocks, background tasks that only fail in debug logs, retry loops with no visible counter or last error, "waiting" output with no correlation ID, multiline unstructured tracebacks as the only record, printing secrets before redaction, hiding subprocess stdout/stderr in memory, and tests that pass after a known failure is only visible by manually inspecting a temp directory.
-
-### Podium web frontend
-
-`packages/podium/web/` is a Vite + React + TS SPA, built into `packages/podium/src/podium/static/` (committed so Podium serves the UI out of the box). Podium is BFF + static host in one service. Hard invariant: **Linear access/refresh tokens, session cookies, passwords, and client secrets never reach browser responses** — tokens are injected server-side into outbound `Authorization` headers only.
+The legacy runtime has been removed. Use the target-workspace commands:
 
 ```bash
-cd packages/podium/web
-npm run dev          # Vite dev server
-npm run build        # tsc -b && vite build (output goes to the committed static dir)
-npm run test         # vitest run
-npm run lint         # eslint . --max-warnings 0
-npm run design:lint  # lint DESIGN.md against the @google/design.md spec
+make install
+make build
+make lint
+make typecheck
+make test
+make test-all
+make dev
+make stop
 ```
 
-**Before making any UI change, read `packages/podium/web/DESIGN.md` and follow it.** Its YAML tokens are normative and mirror the CSS custom properties in `src/styles/tokens.css` (`--color-*`, `--space-*`, `--radius-*`, `--font-*`); consume those variables rather than hardcoding hex/px/radii. If a needed value isn't a token, add it to DESIGN.md and `tokens.css` first, then keep `npm run design:lint` clean (0 errors/0 warnings).
+Focused checks:
 
-## Conventions
+```bash
+npm test -w @symphony/podium-desktop
+npm run typecheck -w @symphony/conductor
+.venv/bin/python -m pytest apps/performer/tests -q
+cd apps/podium-desktop/src-tauri && cargo test
+```
 
-- This is a hard break from the old `symphony` package/CLI — do not add compatibility shims for old `symphony` imports, commands, labels, or state/log files unless explicitly asked.
-- Do not infer or expand product scope from what seems useful, conventional, or future-proof. Default to the smallest behavior-preserving change. Any assumption that would add or change customer-visible behavior, workflow branches, public/API contracts, durable state, configuration, integrations, permissions/cost, compatibility, or product vocabulary requires explicit user approval before implementation.
-- For every non-trivial slice, record a scope ledger with `authorized`, `required_consequences`, `out_of_scope`, `assumptions_requiring_approval`, and `deferred_ideas`. Production work may start only when `assumptions_requiring_approval` is empty; untraceable behavior is `UNAPPROVED_SCOPE_EXPANSION` and blocks completion.
-- The runtime architecture source of truth is split across `docs/product/runtime-pipeline.md`, `docs/product/pipeline-state.md`, `docs/product/gates-verification-integration.md`, `docs/product/linear-projection.md`, and `docs/product/runtime-profiles-backends.md`. Do not add legacy scheduling or retired workflow-file execution instructions.
-- Runtime approval, permission, and tool-input waits must be projected to Linear as runtime wait state and as node metadata (`operator_status: waiting_for_runtime_input`, `operator_wait_kind`, and a Runtime Wait block), including `[Human Action]` child issues when that wait flow uses them. Local stdout/logs alone are not an acceptable operator signal.
-- Secrets flow through `$VAR` indirection (e.g. `$PODIUM_PROXY_TOKEN`); values are validated but never printed in responses, logs, or API output.
-- Prefer small role-owned modules over large cross-role files, and use the existing structured models/parsers instead of ad hoc string manipulation for workflow config, persisted state, ops snapshots, and Linear data.
+Before any Podium UI change, read `apps/podium-desktop/DESIGN.md`. Its visual
+tokens and matching CSS custom properties are normative; architecture and
+product behavior remain owned by `docs/architecture/`.
+
+## Engineering rules
+
+- Preserve role and import boundaries even while the implementation is being
+  migrated.
+- Keep SDK objects, database records, process handles, secrets, and arbitrary
+  metadata out of public contracts.
+- Never expose tokens, cookies, passwords, client secrets, API keys,
+  authorization headers, or raw profile credentials in browser responses,
+  logs, fixtures, or final answers.
+- Fail closed with a sanitized, actionable reason. Do not swallow exceptions,
+  hide failed attempts, or leave indefinite retries without visible progress.
+- Use structured, correlated logs for orchestration changes and keep durable
+  state/API visibility consistent with terminal failures.
+- Use small role-owned modules and existing structured models rather than
+  ad-hoc dictionaries or string parsing.
+- Do not add compatibility shims for retired Symphony packages, commands,
+  labels, state, or documents unless explicitly authorized.
+
+## Verification
+
+- Run the narrowest relevant checks first, then the broader suite when the
+  change warrants it.
+- Documentation-only changes must at least verify links, removed-path
+  references, and repository status.
+- UI changes must run the relevant Desktop tests, lint, typecheck, and build.
+- Runtime behavior that spans processes or external systems requires evidence
+  from the real boundary; local mocks alone are not sufficient.
+- Final reports must state what was changed, exact verification performed, and
+  any residual risk or unverified behavior.

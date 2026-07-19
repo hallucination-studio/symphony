@@ -1,4 +1,11 @@
 .venv/
+node_modules/
+dist/
+dist-backend/
+target/
+*.tsbuildinfo
+apps/podium-desktop/src-tauri/gen/
+apps/podium-desktop/src-tauri/binaries/
 .env
 workspaces/
 __pycache__/
@@ -15,5 +22,10 @@ conductor-data
 skills-lock.json
 .test-real-flow
 .test/
+logs/
 tmp
-tasks/
+tasks/*
+!tasks/scope-ledgers/
+!tasks/scope-ledgers/*.md
+!tasks/reviews/
+!tasks/reviews/*.md

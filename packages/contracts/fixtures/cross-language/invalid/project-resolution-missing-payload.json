@@ -1,0 +1,6 @@
+{
+  "schema": "podium-conductor.schema.json#/$defs/ProjectResolutionResult",
+  "value": {
+    "kind": "resolved"
+  }
+}
