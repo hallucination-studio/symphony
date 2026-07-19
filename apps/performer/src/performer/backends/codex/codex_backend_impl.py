@@ -108,7 +108,7 @@ class CodexBackendImpl:
 
     def run_turn(self, command: dict[str, Any]) -> dict[str, Any]:
         kind = command["turn_kind"]
-        sandbox = Sandbox.workspace_write if kind == "work" else Sandbox.read_only
+        sandbox = _execution_sandbox(command, kind)
         settings = command["codex_turn_settings"]
         if (
             settings["is_fast_mode_enabled"]
@@ -224,6 +224,45 @@ def _prompt(command: dict[str, Any]) -> str:
         ),
     }[kind]
     return f"{boundaries}{instruction}\nINPUT:\n{json.dumps(command['body'], ensure_ascii=False)}"
+
+
+def _execution_sandbox(command: dict[str, Any], turn_kind: str) -> Sandbox:
+    policy = command.get("execution_policy")
+    if policy is None:
+        return Sandbox.workspace_write if turn_kind == "work" else Sandbox.read_only
+    if not isinstance(policy, dict) or set(policy) != {
+        "sandbox_mode",
+        "command_allowlist",
+        "command_denylist",
+    }:
+        raise _unsupported_execution_policy()
+    allowlist = policy["command_allowlist"]
+    denylist = policy["command_denylist"]
+    if not isinstance(allowlist, list) or not isinstance(denylist, list):
+        raise _unsupported_execution_policy()
+    if allowlist or denylist:
+        raise _unsupported_execution_policy(
+            "This Codex SDK cannot apply command rules for a Turn."
+        )
+    sandbox = {
+        "read_only": Sandbox.read_only,
+        "workspace_write": Sandbox.workspace_write,
+        "unrestricted": Sandbox.full_access,
+    }.get(policy["sandbox_mode"])
+    if sandbox is None:
+        raise _unsupported_execution_policy()
+    return sandbox
+
+
+def _unsupported_execution_policy(
+    reason: str = "The execution policy is unsupported.",
+) -> ProviderBackendError:
+    return ProviderBackendError(
+        reason,
+        code="performer_profile_setting_unsupported",
+        retryable=False,
+        action_required="Edit the Profile to use supported execution settings.",
+    )
 
 
 def _drop_null_fields(value: Any) -> Any:

@@ -5,6 +5,7 @@ from unittest.mock import patch
 import pytest
 
 from performer.backends.codex.codex_backend_impl import create_sdk
+from openai_codex import Sandbox
 
 
 def test_configured_base_url_uses_public_codex_config() -> None:
@@ -49,3 +50,9 @@ def test_http_with_an_explicit_port_is_available() -> None:
     assert codex.call_args.args[0].config_overrides == (
         'openai_base_url="http://localhost:8080/v1"',
     )
+
+
+def test_pinned_sdk_exposes_all_product_sandbox_presets() -> None:
+    assert Sandbox.read_only.value == "read-only"
+    assert Sandbox.workspace_write.value == "workspace-write"
+    assert Sandbox.full_access.value == "full-access"

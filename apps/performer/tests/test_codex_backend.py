@@ -192,6 +192,68 @@ def test_work_resumes_exact_id_and_uses_workspace_write(plan_command):
     assert sdk.thread.calls[0][1]["sandbox"] == "workspace-write"
 
 
+@pytest.mark.parametrize(
+    ("sandbox_mode", "expected"),
+    [
+        ("read_only", "read-only"),
+        ("workspace_write", "workspace-write"),
+        ("unrestricted", "full-access"),
+    ],
+)
+def test_execution_policy_maps_public_sandbox_on_start_and_turn(
+    plan_command, sandbox_mode, expected
+):
+    command = deepcopy(plan_command)
+    command["execution_policy"] = {
+        "sandbox_mode": sandbox_mode,
+        "command_allowlist": [],
+        "command_denylist": [],
+    }
+    sdk = FakeCodex()
+
+    CodexBackendImpl(sdk).run_turn(command)
+
+    assert sdk.started[0]["sandbox"] == expected
+    assert sdk.thread.calls[0][1]["sandbox"] == expected
+
+
+def test_execution_policy_maps_public_sandbox_on_resume(plan_command):
+    command = deepcopy(plan_command)
+    command["performer_id"] = "opaque-id"
+    command["execution_policy"] = {
+        "sandbox_mode": "read_only",
+        "command_allowlist": [],
+        "command_denylist": [],
+    }
+    sdk = FakeCodex(FakeThread("opaque-id"))
+
+    CodexBackendImpl(sdk).run_turn(command)
+
+    assert sdk.resumed[0][1]["sandbox"] == "read-only"
+    assert sdk.thread.calls[0][1]["sandbox"] == "read-only"
+
+
+@pytest.mark.parametrize("list_name", ["command_allowlist", "command_denylist"])
+def test_nonempty_command_rules_fail_before_provider_work(plan_command, list_name):
+    command = deepcopy(plan_command)
+    command["execution_policy"] = {
+        "sandbox_mode": "workspace_write",
+        "command_allowlist": [],
+        "command_denylist": [],
+    }
+    command["execution_policy"][list_name] = [
+        {"executable": "git", "argv_prefix": ["status"]}
+    ]
+    sdk = FakeCodex()
+
+    with pytest.raises(ProviderBackendError) as raised:
+        CodexBackendImpl(sdk).run_turn(command)
+
+    assert raised.value.code == "performer_profile_setting_unsupported"
+    assert sdk.started == []
+    assert sdk.resumed == []
+
+
 def test_unresumable_id_never_starts_replacement(plan_command):
     command = deepcopy(plan_command)
     command["performer_id"] = "lost-id"
