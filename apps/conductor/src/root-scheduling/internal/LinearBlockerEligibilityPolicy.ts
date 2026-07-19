@@ -2,7 +2,13 @@ import type { DiscoveredRoot } from "../../root-workflow/api/Models.js";
 
 export function blockerEligibleRoots(
   roots: readonly DiscoveredRoot[],
-): DiscoveredRoot[] {
+): {
+  eligible: DiscoveredRoot[];
+  blocked: Array<{
+    root: DiscoveredRoot;
+    reason: "root_dependency_cycle" | "root_unresolved_blocker";
+  }>;
+} {
   const rootIds = new Set(roots.map(({ issueId }) => issueId));
   const graph = new Map(
     roots.map((root) => [
@@ -13,11 +19,24 @@ export function blockerEligibleRoots(
     ]),
   );
   const cycleMembers = findCycleMembers(graph);
-  return roots.filter(
-    (root) =>
-      !cycleMembers.has(root.issueId) &&
-      root.blockers.every(({ targetState }) => targetState === "Done"),
-  );
+  const blocked: Array<{
+    root: DiscoveredRoot;
+    reason: "root_dependency_cycle" | "root_unresolved_blocker";
+  }> = [];
+  for (const root of roots) {
+    if (cycleMembers.has(root.issueId)) {
+      blocked.push({ root, reason: "root_dependency_cycle" });
+    } else if (
+      root.blockers.some(({ targetState }) => targetState !== "Done")
+    ) {
+      blocked.push({ root, reason: "root_unresolved_blocker" });
+    }
+  }
+  const blockedIds = new Set(blocked.map(({ root }) => root.issueId));
+  return {
+    eligible: roots.filter(({ issueId }) => !blockedIds.has(issueId)),
+    blocked,
+  };
 }
 
 function findCycleMembers(

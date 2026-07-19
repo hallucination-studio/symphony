@@ -15,8 +15,9 @@ const PRIORITY_ORDER: Record<LinearPriority, number> = {
 
 export class LinearPriorityRootSchedulingPolicyImpl
 implements RootSchedulingPolicyInterface {
-  orderEligible(roots: readonly DiscoveredRoot[]): DiscoveredRoot[] {
-    return blockerEligibleRoots(roots).sort((left, right) => {
+  evaluate(roots: readonly DiscoveredRoot[]) {
+    const result = blockerEligibleRoots(roots);
+    const orderedEligible = result.eligible.sort((left, right) => {
       const priority = PRIORITY_ORDER[left.priority] - PRIORITY_ORDER[right.priority];
       if (priority !== 0) return priority;
       const order = left.order - right.order;
@@ -25,5 +26,6 @@ implements RootSchedulingPolicyInterface {
       if (left.identifier > right.identifier) return 1;
       return 0;
     });
+    return { orderedEligible, blocked: result.blocked };
   }
 }

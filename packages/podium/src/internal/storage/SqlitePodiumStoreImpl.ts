@@ -10,6 +10,7 @@ import type {
   OAuthAttempt,
   ProjectCatalogEntry,
   RepositoryContext,
+  RootRuntimeObservation,
   RuntimeObservation,
 } from "../models.js";
 import type { RuntimeObservationStoreInterface } from "../runtime-observations/api/RuntimeObservationStoreInterface.js";
@@ -75,6 +76,14 @@ export class SqlitePodiumStoreImpl
         sanitized_summary TEXT NOT NULL,
         last_resolved_project_id TEXT,
         project_resolution_conflict TEXT,
+        FOREIGN KEY (binding_id) REFERENCES conductor_bindings(binding_id)
+      );
+      CREATE TABLE IF NOT EXISTS root_runtime_observations (
+        binding_id TEXT NOT NULL,
+        root_issue_id TEXT NOT NULL,
+        observed_at TEXT NOT NULL,
+        sanitized_summary TEXT NOT NULL,
+        PRIMARY KEY (binding_id, root_issue_id),
         FOREIGN KEY (binding_id) REFERENCES conductor_bindings(binding_id)
       );
       CREATE TABLE IF NOT EXISTS oauth_attempts (
@@ -390,6 +399,52 @@ export class SqlitePodiumStoreImpl
         ? { projectResolutionConflict: row.project_resolution_conflict }
         : {}),
     };
+  }
+
+  saveRootRuntimeObservation(observation: RootRuntimeObservation): void {
+    this.#database
+      .prepare(`
+        INSERT INTO root_runtime_observations (
+          binding_id, root_issue_id, observed_at, sanitized_summary
+        ) VALUES (?, ?, ?, ?)
+        ON CONFLICT(binding_id, root_issue_id) DO UPDATE SET
+          observed_at = excluded.observed_at,
+          sanitized_summary = excluded.sanitized_summary
+      `)
+      .run(
+        observation.bindingId,
+        observation.rootIssueId,
+        observation.observedAt,
+        observation.sanitizedSummary,
+      );
+  }
+
+  getRootRuntimeObservation(
+    bindingId: string,
+    rootIssueId: string,
+  ): RootRuntimeObservation | undefined {
+    const row = this.#database
+      .prepare(`
+        SELECT binding_id, root_issue_id, observed_at, sanitized_summary
+        FROM root_runtime_observations
+        WHERE binding_id = ? AND root_issue_id = ?
+      `)
+      .get(bindingId, rootIssueId) as
+      | {
+          binding_id: string;
+          root_issue_id: string;
+          observed_at: string;
+          sanitized_summary: string;
+        }
+      | undefined;
+    return row
+      ? {
+          bindingId: row.binding_id,
+          rootIssueId: row.root_issue_id,
+          observedAt: row.observed_at,
+          sanitizedSummary: row.sanitized_summary,
+        }
+      : undefined;
   }
 
   saveOAuthAttempt(attempt: OAuthAttempt): void {

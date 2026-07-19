@@ -159,6 +159,87 @@ for (const phase of ["gating", "delivering"] as const) {
   });
 }
 
+test("Root scheduling conflict reports every dependency-cycle member", async () => {
+  const first = discoveredRoot("root-cycle-a", "urgent", 1, "In Progress");
+  const second = discoveredRoot("root-cycle-b", "high", 1, "In Progress");
+  first.blockers = [{
+    sourceIssueId: first.issueId,
+    targetIssueId: second.issueId,
+    targetState: "Done",
+  }];
+  second.blockers = [{
+    sourceIssueId: second.issueId,
+    targetIssueId: first.issueId,
+    targetState: "Done",
+  }];
+  const reports: Array<{
+    status: string;
+    sanitizedReason?: string;
+    rootId?: string;
+  }> = [];
+  let executions = 0;
+  const runtime = new ConductorRuntime(
+    "conductor-1",
+    gateway([first, second], (root) => activeView(root, "working")),
+    new LinearPriorityRootSchedulingPolicyImpl(),
+    { async execute() { executions += 1; } },
+    { async report(value) { reports.push(value); } },
+  );
+
+  await runtime.cycle();
+
+  assert.equal(executions, 0);
+  assert.deepEqual(reports, [
+    {
+      status: "blocked",
+      sanitizedReason: "root_dependency_cycle",
+      rootId: "root-cycle-a",
+    },
+    {
+      status: "blocked",
+      sanitizedReason: "root_dependency_cycle",
+      rootId: "root-cycle-b",
+    },
+  ]);
+});
+
+test("Root scheduling conflict associates multiple active Work with its Root", async () => {
+  const root = discoveredRoot("root-conflict", "urgent", 1, "In Progress");
+  const reports: Array<{
+    status: string;
+    sanitizedReason?: string;
+    rootId?: string;
+  }> = [];
+  const runtime = new ConductorRuntime(
+    "conductor-1",
+    gateway([root], (candidate) => ({
+      ...activeView(candidate, "working"),
+      workflowNodes: [0, 1].map((order) => ({
+        issueId: `${candidate.issueId}-work-${order}`,
+        identifier: `SYM-W${order}`,
+        parentIssueId: null,
+        siblingOrder: order,
+        kind: "work" as const,
+        state: "In Progress" as const,
+        title: `Work ${order}`,
+        description: "",
+        updatedAt: candidate.updatedAt,
+      })),
+    })),
+    new LinearPriorityRootSchedulingPolicyImpl(),
+    { async execute() { throw new Error("must_not_execute"); } },
+    { async report(value) { reports.push(value); } },
+  );
+
+  await runtime.cycle();
+
+  assert.deepEqual(reports, [{
+    status: "blocked",
+    sanitizedReason: "multiple_active_leaves",
+    rootId: "root-conflict",
+  }]);
+});
+
 function gateway(
   roots: DiscoveredRoot[],
   reconstruct: (root: DiscoveredRoot) => RootRunView,

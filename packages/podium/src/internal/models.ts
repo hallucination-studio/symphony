@@ -65,6 +65,13 @@ export interface RuntimeObservation {
   projectResolutionConflict?: string;
 }
 
+export interface RootRuntimeObservation {
+  bindingId: string;
+  rootIssueId: string;
+  observedAt: string;
+  sanitizedSummary: string;
+}
+
 export interface OAuthAttempt {
   attemptId: string;
   codeVerifier: string;

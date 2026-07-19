@@ -16,7 +16,7 @@ test("Root scheduling orders every Priority, Linear order, and identifier tie", 
   ];
 
   assert.deepEqual(
-    policy.orderEligible(roots).map(({ issueId }) => issueId),
+    policy.evaluate(roots).orderedEligible.map(({ issueId }) => issueId),
     [
       "urgent",
       "high",
@@ -57,7 +57,7 @@ test("Root scheduling excludes unresolved external and transitive blockers", () 
   ];
 
   assert.deepEqual(
-    policy.orderEligible(roots).map(({ issueId }) => issueId),
+    policy.evaluate(roots).orderedEligible.map(({ issueId }) => issueId),
     ["external-done", "chain-c"],
   );
 });
@@ -81,7 +81,7 @@ test("Root scheduling excludes self-cycles and every member of a multi-Root cycl
   ];
 
   assert.deepEqual(
-    policy.orderEligible(roots).map(({ issueId }) => issueId),
+    policy.evaluate(roots).orderedEligible.map(({ issueId }) => issueId),
     ["ready"],
   );
 });

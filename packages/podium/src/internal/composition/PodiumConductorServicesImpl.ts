@@ -131,23 +131,33 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
         : body.kind === "conductor_handshake"
           ? "starting"
           : "ready";
+    const observedAt =
+      typeof body.observed_at === "string"
+        ? body.observed_at
+        : typeof body.occurred_at === "string"
+          ? body.occurred_at
+          : this.options.now();
+    const sanitizedSummary =
+      typeof body.sanitized_summary === "string"
+        ? body.sanitized_summary
+        : `conductor_${status.replaceAll("-", "_")}`;
     this.store.saveRuntimeObservation({
       bindingId: binding.bindingId,
       status,
-      observedAt:
-        typeof body.observed_at === "string"
-          ? body.observed_at
-          : typeof body.occurred_at === "string"
-            ? body.occurred_at
-            : this.options.now(),
-      sanitizedSummary:
-        typeof body.sanitized_summary === "string"
-          ? body.sanitized_summary
-          : `conductor_${status.replaceAll("-", "_")}`,
+      observedAt,
+      sanitizedSummary,
       ...(typeof body.current_project_id === "string"
         ? { lastResolvedProjectId: body.current_project_id }
         : {}),
     });
+    if (typeof body.active_root_issue_id === "string") {
+      this.store.saveRootRuntimeObservation({
+        bindingId: binding.bindingId,
+        rootIssueId: body.active_root_issue_id,
+        observedAt,
+        sanitizedSummary,
+      });
+    }
     return {
       kind: "conductor_runtime_report",
       binding_id: binding.bindingId,

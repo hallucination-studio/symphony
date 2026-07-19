@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { PodiumConductorServicesImpl } from "../dist/internal/composition/PodiumConductorServicesImpl.js";
+import { PodiumClientServicesImpl } from "../dist/internal/composition/PodiumClientServicesImpl.js";
 import { LinearGatewayProtocolHandlerImpl } from "../dist/internal/linear-gateway/LinearGatewayProtocolHandlerImpl.js";
 
 function project() {
@@ -33,6 +34,7 @@ async function createConductorServices(linearSdk) {
       getConductorBinding: () => binding,
       getLinearCredential: () => ({}),
       saveRuntimeObservation() {},
+      saveRootRuntimeObservation() {},
     },
     {
       now: () => "2026-07-16T00:00:00Z",
@@ -431,6 +433,82 @@ test("issue tree rejects invalid Root managed-state facts", async () => {
     handler.getCompleteIssueTree("project-1", "root-1"),
     /linear_root_phase_labels_invalid/,
   );
+});
+
+test("affected Root detail projects its sanitized scheduling observation", async () => {
+  const binding = {
+    bindingId: "binding-1",
+    conductorId: "conductor-1",
+    conductorShortHash: "abc123",
+    linearInstallationId: "installation-1",
+    organizationId: "organization-1",
+    repositoryContext: {
+      repositoryHandle: "repo-1",
+      repositoryIdentity: "repository-1",
+      repositoryDisplayName: "symphony",
+      repositoryRoot: "/repository",
+      baseBranch: "main",
+    },
+    desiredState: "running",
+  };
+  const services = new PodiumClientServicesImpl(
+    {
+      getOnlyLinearCredential: () => ({
+        kind: "development_token",
+        installationId: "installation-1",
+        organizationId: "organization-1",
+        delegateActorId: "app-user",
+        accessToken: "not-observed",
+      }),
+      getConductorBinding: () => binding,
+      getRuntimeObservation: () => ({
+        bindingId: "binding-1",
+        status: "ready",
+        observedAt: "2026-07-19T00:00:00Z",
+        sanitizedSummary: "conductor_ready",
+        lastResolvedProjectId: "project-1",
+      }),
+      getRootRuntimeObservation: (_bindingId, rootIssueId) =>
+        rootIssueId === "root-1"
+          ? {
+              bindingId: "binding-1",
+              rootIssueId,
+              observedAt: "2026-07-19T00:00:01Z",
+              sanitizedSummary: "root_dependency_cycle",
+            }
+          : undefined,
+    },
+    {},
+    {},
+    {},
+    () => "2026-07-19T00:00:02Z",
+    () => ({
+      async getIssueTree() {
+        return {
+          nodes: [issue("root-1", "project-1")],
+          rootPhaseLabels: ["blocked"],
+          rootManagedComments: [],
+          humanAnswers: [],
+          observedAt: "2026-07-19T00:00:01Z",
+          pageInfo: { hasNextPage: false },
+        };
+      },
+      async listRootUsage() {
+        return { items: [], pageInfo: { hasNextPage: false } };
+      },
+    }),
+  );
+
+  const detail = await services.query({
+    kind: "get_root_detail",
+    root_issue_id: "root-1",
+  });
+
+  assert.deepEqual(detail.events, [{
+    event_kind: "root_scheduling_observation",
+    summary: "root_dependency_cycle",
+    occurred_at: "2026-07-19T00:00:01Z",
+  }]);
 });
 
 test("ambiguous update reads back desired remote state before retry", async () => {

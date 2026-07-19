@@ -50,6 +50,39 @@ test("podium.db persists only approved control-plane facts", async () => {
     sanitizedSummary: "Ready",
     lastResolvedProjectId: "project-1",
   });
+  const services = new PodiumConductorServicesImpl(store, {
+    now: () => "2026-07-16T00:00:04Z",
+    sleep: async () => undefined,
+    createLinearSdk: () => { throw new Error("unused"); },
+  });
+  await services.handle({
+    kind: "conductor_handshake",
+    binding_id: "binding-1",
+    instance_id: "instance-1",
+    conductor_id: "conductor-1",
+    conductor_short_hash: "abc123",
+    linear_installation_id: "installation-1",
+    organization_id: "organization-1",
+    repository: {
+      repository_handle: "repo-handle-1",
+      canonical_path: "/private/repository",
+      base_branch: "main",
+    },
+  });
+  for (const [rootIssueId, occurredAt] of [
+    ["root-1", "2026-07-16T00:00:02Z"],
+    ["root-2", "2026-07-16T00:00:03Z"],
+  ]) {
+    await services.handle({
+      kind: "conductor_runtime_report",
+      binding_id: "binding-1",
+      instance_id: "instance-1",
+      status: "ready",
+      active_root_issue_id: rootIssueId,
+      occurred_at: occurredAt,
+      sanitized_summary: "root_dependency_cycle",
+    });
+  }
 
   assert.equal(
     store.getLinearInstallation("installation-1")?.accessToken,
@@ -61,12 +94,21 @@ test("podium.db persists only approved control-plane facts", async () => {
     "main",
   );
   assert.equal(store.getRuntimeObservation("binding-1")?.status, "ready");
+  assert.equal(
+    store.getRootRuntimeObservation("binding-1", "root-1")?.sanitizedSummary,
+    "root_dependency_cycle",
+  );
+  assert.equal(
+    store.getRootRuntimeObservation("binding-1", "root-2")?.observedAt,
+    "2026-07-16T00:00:03Z",
+  );
 
   assert.deepEqual(store.listTableNames(), [
     "conductor_bindings",
     "linear_installations",
     "oauth_attempts",
     "project_catalog",
+    "root_runtime_observations",
     "runtime_observations",
   ]);
 

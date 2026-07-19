@@ -365,6 +365,10 @@ export class PodiumClientServicesImpl implements PodiumClientServices {
     if (!root) throw new Error("linear_tree_root_missing");
     const usage = (await gateway.listAllRootUsage(observation.lastResolvedProjectId))
       .find(({ rootIssueId: candidate }) => candidate === rootIssueId);
+    const rootObservation = this.store.getRootRuntimeObservation(
+      binding.bindingId,
+      rootIssueId,
+    );
     return {
       summary: rootSummary(root, tree.observedAt),
       workflow_nodes: tree.nodes
@@ -380,7 +384,13 @@ export class PodiumClientServicesImpl implements PodiumClientServices {
         observed_at: usage?.observedAt ?? tree.observedAt,
         is_stale: false,
       },
-      events: [],
+      events: rootObservation
+        ? [{
+            event_kind: "root_scheduling_observation",
+            summary: rootObservation.sanitizedSummary,
+            occurred_at: rootObservation.observedAt,
+          }]
+        : [],
     };
   }
 

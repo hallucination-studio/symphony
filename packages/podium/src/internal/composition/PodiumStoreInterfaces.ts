@@ -2,6 +2,7 @@ import type {
   ConductorBinding,
   LinearInstallation,
   ProjectCatalogEntry,
+  RootRuntimeObservation,
   RuntimeObservation,
 } from "../models.js";
 import type { ConductorBindingStoreInterface } from "../conductor-bindings/api/ConductorBindingStoreInterface.js";
@@ -14,6 +15,10 @@ export interface PodiumClientStoreInterface
   getOnlyLinearCredential(): LinearInstallation | undefined;
   getConductorBinding(): ConductorBinding | undefined;
   getRuntimeObservation(bindingId: string): RuntimeObservation | undefined;
+  getRootRuntimeObservation(
+    bindingId: string,
+    rootIssueId: string,
+  ): RootRuntimeObservation | undefined;
   getProject(projectId: string): ProjectCatalogEntry | undefined;
 }
 

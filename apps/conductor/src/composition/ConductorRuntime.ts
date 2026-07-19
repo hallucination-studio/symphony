@@ -58,7 +58,15 @@ export class ConductorRuntime {
         view: RootRunView;
         action: RootAction;
       }> = [];
-      for (const root of this.scheduling.orderEligible(roots)) {
+      const scheduling = this.scheduling.evaluate(roots);
+      for (const blocked of scheduling.blocked) {
+        await this.reporter.report({
+          status: "blocked",
+          sanitizedReason: blocked.reason,
+          rootId: blocked.root.issueId,
+        });
+      }
+      for (const root of scheduling.orderedEligible) {
         const view = await this.gateway.reconstruct(root.issueId);
         candidates.push({ view, action: computeRootAction(view) });
       }
@@ -67,12 +75,15 @@ export class ConductorRuntime {
         const blocked = candidates.find(
           ({ action }) => action.kind === "blocked_root",
         );
-        await this.reporter.report({
-          status: blocked ? "blocked" : "ready",
-          ...(blocked && blocked.action.kind === "blocked_root"
-            ? { sanitizedReason: blocked.action.reason }
-            : {}),
-        });
+        if (blocked?.action.kind === "blocked_root") {
+          await this.reporter.report({
+            status: "blocked",
+            sanitizedReason: blocked.action.reason,
+            rootId: blocked.view.root.issueId,
+          });
+        } else if (scheduling.blocked.length === 0) {
+          await this.reporter.report({ status: "ready" });
+        }
         return;
       }
       await this.executor.execute(selected.view, selected.action);
