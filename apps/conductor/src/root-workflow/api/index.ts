@@ -4,7 +4,9 @@ export {
   hashWorkInput,
   parseHumanDescription,
   parseRootManagedComment,
+  parseV3RootManagedComment,
   serializeRootManagedComment,
+  serializeV3RootManagedComment,
   parseWorkDescription,
 } from "../internal/ManagedState.js";
 export { computeRootAction } from "../internal/RootRunActionPolicy.js";

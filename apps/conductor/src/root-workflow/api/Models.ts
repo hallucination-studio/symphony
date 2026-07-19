@@ -69,6 +69,21 @@ export interface RootManagedComment {
   lastUsageTurnId?: string;
 }
 
+export interface RootRetryBlock {
+  expectedPerformerId?: string;
+  failureCode: string;
+  observedAt: string;
+}
+
+export interface V3RootManagedComment {
+  conductorId: string;
+  performerProfileId: string;
+  performerId?: string;
+  deliveryBranch: string;
+  pullRequest?: string;
+  retryBlock?: RootRetryBlock;
+}
+
 export interface WorkflowNode {
   issueId: string;
   identifier: string;
@@ -103,6 +118,58 @@ export interface RootRunView {
     readiness: "login-required" | "ready" | "invalid";
   };
   workflowNodes: WorkflowNode[];
+}
+
+export type RootAttentionProblem =
+  | "ownership_conflict"
+  | "project_resolution_changed"
+  | "tree_conflict"
+  | "git_identity_conflict"
+  | "facts_changed";
+
+export interface RootActivityProjection {
+  activity: "waiting" | "working" | "failed" | "delivered";
+  evidence: string[];
+  observedAt: string;
+}
+
+export interface RootGitWorkspaceFact {
+  branch: string;
+  worktreePath: string;
+  head: string;
+  status: string[];
+}
+
+export interface RootDeliveryFact {
+  kind: "pull_request" | "remote_branch" | "local_branch";
+  branch: string;
+  head: string;
+  url?: string;
+}
+
+export interface V3RootRunView {
+  root: RootIssue;
+  conductorId: string;
+  resolvedProjectId: string;
+  managedComment?: V3RootManagedComment;
+  managedCommentRemote?: { commentId: string; updatedAt: string };
+  activityProjection?: RootActivityProjection;
+  profile?: {
+    profileId: string;
+    readiness: "login-required" | "ready" | "invalid";
+  };
+  workflowNodes: WorkflowNode[];
+  workflowTreeComplete: boolean;
+  blockerRelations: LinearBlockerSnapshot[];
+  gitWorkspace?: RootGitWorkspaceFact;
+  delivery?: RootDeliveryFact;
+  attentionProblems: RootAttentionProblem[];
+}
+
+export interface RootDispatchAssessment {
+  rootIssueId: string;
+  readiness: "runnable" | "waiting_human" | "needs_attention" | "terminal";
+  sanitizedReason?: string;
 }
 
 export type RootAction =

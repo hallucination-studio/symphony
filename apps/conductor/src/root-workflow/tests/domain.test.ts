@@ -10,6 +10,8 @@ import {
   hashWorkInput,
   parseHumanDescription,
   parseRootManagedComment,
+  parseV3RootManagedComment,
+  serializeV3RootManagedComment,
   parseWorkDescription,
   reconcilePlan,
   selectWorkflowLeaf,
@@ -133,6 +135,33 @@ target_issue_id: none
         humanKind: "plan_approval",
       },
     },
+  );
+});
+
+test("managed state V3 marker contains only durable Root identity and retry facts", () => {
+  const value = {
+    conductorId: "conductor-1",
+    performerProfileId: "profile-1",
+    performerId: "conversation-1",
+    deliveryBranch: "symphony/runs/sym-1",
+    pullRequest: "https://example.test/pr/1",
+    retryBlock: {
+      expectedPerformerId: "conversation-1",
+      failureCode: "provider_conversation_open_failed",
+      observedAt: "2026-07-19T00:00:00Z",
+    },
+  };
+  const rendered = serializeV3RootManagedComment(value);
+
+  assert.deepEqual(parseV3RootManagedComment(rendered), { ok: true, value });
+  assert.match(rendered, /Conversation: action required/u);
+  assert.match(rendered, /Activity: failed/u);
+  for (const forbidden of ["phase", "current_leaf", "attempt", "accepted_result"] ) {
+    assert.equal(rendered.includes(forbidden), false);
+  }
+  assert.deepEqual(
+    parseV3RootManagedComment(rendered.replace("retry_observed_at: 2026-07-19T00:00:00Z", "retry_observed_at: none")),
+    { ok: false, error: "root_retry_block_invalid" },
   );
 });
 
