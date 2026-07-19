@@ -29,10 +29,13 @@ This file contains the repository-wide working rules for coding agents.
   and `podium.db`. Linear SDK types and credentials must not cross into
   Conductor.
 - Conductor resolves its project through the Conductor Project Label, rebuilds
-  root state from Linear and Git, schedules roots and leaves, manages Git
-  worktrees, and launches one Performer process per Turn.
+  root state from Linear and Git, schedules Root Issues, manages one Git
+  worktree per Root, and launches one Performer process per Root Turn. Leaves
+  remain visible work structure inside the Root and are not dispatch units.
 - Performer exclusively owns Provider SDK integrations and resumes the
-  Provider conversation through the opaque `performer_id`.
+  Root conversation through the current opaque `performer_id`. If that
+  conversation is unavailable, Conductor preserves Linear/Git facts and
+  retries the entire Root with a new conversation.
 - Performer Profiles belong to Conductor, use isolated `CODEX_HOME`
   directories, and are controlled through the approved profile-control
   boundary. Symphony must not read or rewrite Codex-owned configuration files.
