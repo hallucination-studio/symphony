@@ -3,6 +3,10 @@ const REQUIRED_STEPS = Object.freeze([
   "conductor_handshake",
   "profile_active",
   "root_created",
+  "blocker_order_verified",
+  "human_yield_verified",
+  "priority_refresh_verified",
+  "single_turn_lane_verified",
   "plan_ready",
   "plan_approved",
   "work_completed",
@@ -14,27 +18,29 @@ const REQUIRED_STEPS = Object.freeze([
 ]);
 
 export function evaluateCoreLiveEvidence(result) {
-  const observed = new Map(
+  const evidence = new Map(
     Array.isArray(result?.evidence)
-      ? result.evidence.map((item) => [item?.step, item?.status])
+      ? result.evidence.map((item) => [item?.step, item])
       : [],
   );
-  const missing = REQUIRED_STEPS.filter((step) => observed.get(step) !== "passed");
+  const missing = REQUIRED_STEPS.filter(
+    (step) => evidence.get(step)?.status !== "passed",
+  );
   const converged = result?.performerResumed === true &&
     result?.rootState === "In Review" &&
     result?.phase === "in-review" &&
     typeof result?.deliveryBranch === "string" && result.deliveryBranch.length > 0;
-  const commentEvidence = Array.isArray(result?.evidence)
-    ? result.evidence.find((item) => item?.step === "root_comments_verified")
-    : undefined;
+  const commentEvidence = evidence.get("root_comments_verified");
   const eventKeys = commentEvidence?.eventKeys;
   const eventKinds = commentEvidence?.eventKinds;
   const rootCommentsVerified =
-    commentEvidence?.primaryCommentCount === 1 &&
+    Number.isSafeInteger(commentEvidence?.rootCount) &&
+    commentEvidence.rootCount >= 3 &&
+    commentEvidence?.primaryCommentCount === commentEvidence.rootCount &&
     Number.isSafeInteger(commentEvidence?.timelineEventCount) &&
     commentEvidence.timelineEventCount >= 3 &&
     Number.isSafeInteger(commentEvidence?.completionEventCount) &&
-    commentEvidence.completionEventCount >= 3 &&
+    commentEvidence.completionEventCount >= commentEvidence.rootCount + 2 &&
     commentEvidence.completionEventCount <= commentEvidence.timelineEventCount &&
     Array.isArray(eventKeys) &&
     eventKeys.length === commentEvidence.timelineEventCount &&
@@ -48,14 +54,32 @@ export function evaluateCoreLiveEvidence(result) {
       kind === "warning_raised" ||
       kind === "error_raised" ||
       kind === "turn_completed");
+  const blocker = evidence.get("blocker_order_verified");
+  const humanYield = evidence.get("human_yield_verified");
+  const priorityRefresh = evidence.get("priority_refresh_verified");
+  const lane = evidence.get("single_turn_lane_verified");
+  const multiRootSchedulingVerified =
+    blocker?.blockerPlanned === true &&
+    blocker?.dependentUntouched === true &&
+    humanYield?.waitingRootUnchanged === true &&
+    humanYield?.yieldedRootPlanned === true &&
+    priorityRefresh?.newWinnerSelected === true &&
+    priorityRefresh?.previousWinnerUntouched === true &&
+    Number.isSafeInteger(lane?.observedTurnCount) &&
+    lane.observedTurnCount >= 5 &&
+    lane?.maxActiveTurns === 1;
   return Object.freeze({
     verdict:
-      missing.length === 0 && converged && rootCommentsVerified
+      missing.length === 0 &&
+      converged &&
+      rootCommentsVerified &&
+      multiRootSchedulingVerified
         ? "passed"
         : "failed",
     missingSteps: Object.freeze(missing),
     converged,
     rootCommentsVerified,
+    multiRootSchedulingVerified,
   });
 }
 

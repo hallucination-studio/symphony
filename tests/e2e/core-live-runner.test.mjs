@@ -5,6 +5,7 @@ import test from "node:test";
 
 import {
   cleanupCoreLiveResources,
+  createTurnLaneTracker,
   finalizeCoreLiveResult,
 } from "../../tools/e2e/core-live-runner.mjs";
 
@@ -36,13 +37,29 @@ test("core live topology uses production boundaries and state-based completion",
   assert.match(source, /provisionApiKeyProfile/u);
   assert.match(source, /rootState === "In Review"/u);
   assert.match(source, /phase === "in-review"/u);
-  assert.match(source, /e2e-result\.txt/u);
+  assert.match(source, /e2e-dependent\.txt/u);
+  assert.match(source, /createBlockerRelation/u);
   assert.match(source, /completed\.performerId !== plan\.performerId/u);
   assert.match(source, /readRootCommentEvidence/u);
   assert.match(source, /root_comments_verified/u);
   assert.match(source, /environment\.SYMPHONY_E2E_RUN_ID/u);
   assert.doesNotMatch(source, /@symphony\/podium\/e2e|e2e-main|performer\.json/u);
   assert.doesNotMatch(source, /SYMPHONY_E2E_LINEAR_DEV_TOKEN.*additions/su);
+});
+
+test("Turn lane evidence is derived from correlated Conductor events", () => {
+  const tracker = createTurnLaneTracker(() => {});
+  tracker.log(childEvent("turn-a", "turn_started"));
+  tracker.log(childEvent("turn-b", "turn_started"));
+  tracker.log(childEvent("turn-a", "turn_completed"));
+  tracker.log(childEvent("turn-b", "turn_completed"));
+  tracker.log({ event: "e2e_child_log", message: "not-json" });
+
+  assert.deepEqual(tracker.evidence(), {
+    observedTurnCount: 2,
+    maxActiveTurns: 2,
+    activeTurnCount: 0,
+  });
 });
 
 test("core live cleanup attempts every acquired resource and reports stable failures", async () => {
@@ -146,3 +163,16 @@ test("root workspace commands build Podium before Desktop consumes its dist cont
   assert.equal(testTypescript.indexOf(podiumTest) >= 0, true);
   assert.equal(testTypescript.indexOf(desktopTest) > testTypescript.indexOf(podiumTest), true);
 });
+
+function childEvent(turnId, eventKind) {
+  return {
+    event: "e2e_child_log",
+    component: "conductor",
+    stream: "stdout",
+    message: JSON.stringify({
+      event: "performer_turn_event",
+      turn_id: turnId,
+      event_kind: eventKind,
+    }),
+  };
+}

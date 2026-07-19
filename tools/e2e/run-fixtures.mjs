@@ -183,9 +183,26 @@ export function createRunScopedLinearOperator({
       });
     },
 
-    async createRoot({ lock, runId, rootInstruction, preflight, project }) {
+    async createRoot({
+      lock,
+      runId,
+      rootName = runId,
+      rootInstruction,
+      priority,
+      sortOrder,
+      preflight,
+      project,
+    }) {
       assertLock(lock, runId);
-      if (project?.runId !== runId || project.marker !== managedMarker(runId)) {
+      if (
+        project?.runId !== runId ||
+        project.marker !== managedMarker(runId) ||
+        typeof rootName !== "string" ||
+        !/^[A-Za-z0-9][A-Za-z0-9._ -]{0,63}$/u.test(rootName) ||
+        (priority !== undefined &&
+          (!Number.isSafeInteger(priority) || priority < 0 || priority > 4)) ||
+        (sortOrder !== undefined && !Number.isFinite(sortOrder))
+      ) {
         throw stableError("linear_fixture_project_invalid");
       }
       const issueData = await graphql(`
@@ -197,8 +214,12 @@ export function createRunScopedLinearOperator({
         projectId: project.projectId,
         stateId: preflight.stateId,
         delegateId: preflight.actorId,
-        title: `[Core Live E2E] ${runId}`,
+        title: `[Core Live E2E] ${rootName}`,
         description: `${rootInstruction}\n\n${project.marker}`,
+        ...(priority === undefined ? {} : { priority }),
+        ...(sortOrder === undefined
+          ? {}
+          : { sortOrder, preserveSortOrderOnCreate: true }),
       } });
       const issue = issueData.issueCreate;
       if (issue?.success !== true || !issue.issue?.id || !issue.issue.identifier) {
@@ -210,6 +231,103 @@ export function createRunScopedLinearOperator({
         rootId: issue.issue.id,
         rootIdentifier: issue.issue.identifier,
       });
+    },
+
+    async createBlockerRelation({ lock, runId, blocker, dependent }) {
+      assertLock(lock, runId);
+      assertRelatedFixtures(runId, blocker, dependent);
+      const data = await graphql(`
+        mutation CoreLiveBlocker($input: IssueRelationCreateInput!) {
+          issueRelationCreate(input: $input) {
+            success
+            issueRelation {
+              id
+              type
+              issue { id }
+              relatedIssue { id }
+            }
+          }
+        }
+      `, { input: {
+        issueId: blocker.rootId,
+        relatedIssueId: dependent.rootId,
+        type: "blocks",
+      } });
+      const relation = data.issueRelationCreate;
+      if (
+        relation?.success !== true ||
+        relation.issueRelation?.type !== "blocks" ||
+        relation.issueRelation.issue?.id !== blocker.rootId ||
+        relation.issueRelation.relatedIssue?.id !== dependent.rootId
+      ) {
+        throw stableError("linear_fixture_blocker_create_failed");
+      }
+      return Object.freeze({ relationId: relation.issueRelation.id });
+    },
+
+    async updateRootScheduling({ lock, runId, fixture, priority, sortOrder }) {
+      assertLock(lock, runId);
+      assertRelatedFixtures(runId, fixture, fixture);
+      if (
+        !Number.isSafeInteger(priority) || priority < 0 || priority > 4 ||
+        !Number.isFinite(sortOrder)
+      ) {
+        throw stableError("linear_fixture_scheduling_update_invalid");
+      }
+      const data = await graphql(`
+        mutation CoreLiveSchedulingUpdate(
+          $issueId: String!,
+          $input: IssueUpdateInput!
+        ) {
+          issueUpdate(id: $issueId, input: $input) {
+            success
+            issue { id priority sortOrder }
+          }
+        }
+      `, {
+        issueId: fixture.rootId,
+        input: { priority, sortOrder },
+      });
+      const updated = data.issueUpdate;
+      if (
+        updated?.success !== true ||
+        updated.issue?.id !== fixture.rootId ||
+        updated.issue.priority !== priority ||
+        updated.issue.sortOrder !== sortOrder
+      ) {
+        throw stableError("linear_fixture_scheduling_update_failed");
+      }
+      return Object.freeze({ priority, sortOrder });
+    },
+
+    async completeRoot({ lock, runId, fixture, doneStateId }) {
+      assertLock(lock, runId);
+      assertRelatedFixtures(runId, fixture, fixture);
+      if (typeof doneStateId !== "string" || doneStateId.length === 0) {
+        throw stableError("linear_fixture_root_completion_invalid");
+      }
+      const data = await graphql(`
+        mutation CoreLiveCompleteRoot(
+          $issueId: String!,
+          $input: IssueUpdateInput!
+        ) {
+          issueUpdate(id: $issueId, input: $input) {
+            success
+            issue { id state { name } }
+          }
+        }
+      `, {
+        issueId: fixture.rootId,
+        input: { stateId: doneStateId },
+      });
+      if (
+        data.issueUpdate?.success !== true ||
+        data.issueUpdate.issue?.id !== fixture.rootId ||
+        data.issueUpdate.issue.state?.name !== "Done"
+      ) {
+        throw stableError("linear_fixture_root_completion_failed");
+      }
+      return Object.freeze({ rootState: "Done" });
     },
 
     async readRunState({ fixture }) {
@@ -593,6 +711,20 @@ function timelineEvidence(body) {
 
 function assertLock(lock, runId) {
   if (!lock || lock.runId !== runId || lock.released === true) throw stableError("e2e_lock_required");
+}
+
+function assertRelatedFixtures(runId, first, second) {
+  if (
+    !first?.rootId ||
+    !second?.rootId ||
+    first.runId !== runId ||
+    second.runId !== runId ||
+    first.projectId !== second.projectId ||
+    first.marker !== managedMarker(runId) ||
+    second.marker !== managedMarker(runId)
+  ) {
+    throw stableError("linear_fixture_root_relation_invalid");
+  }
 }
 
 function connection(value, code) {

@@ -18,6 +18,48 @@ import {
 } from "./run-fixtures.mjs";
 
 const execute = promisify(execFile);
+const TURN_ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u;
+
+export function createTurnLaneTracker(log) {
+  const active = new Set();
+  const observed = new Set();
+  let maxActiveTurns = 0;
+  return Object.freeze({
+    log(event) {
+      log(event);
+      if (
+        event?.event !== "e2e_child_log" ||
+        event.component !== "conductor" ||
+        (event.stream !== "stdout" && event.stream !== "stderr") ||
+        typeof event.message !== "string"
+      ) return;
+      let value;
+      try {
+        value = JSON.parse(event.message);
+      } catch {
+        return;
+      }
+      if (
+        value?.event !== "performer_turn_event" ||
+        !TURN_ID.test(value.turn_id ?? "")
+      ) return;
+      if (value.event_kind === "turn_started") {
+        observed.add(value.turn_id);
+        active.add(value.turn_id);
+        maxActiveTurns = Math.max(maxActiveTurns, active.size);
+      } else if (value.event_kind === "turn_completed") {
+        active.delete(value.turn_id);
+      }
+    },
+    evidence() {
+      return Object.freeze({
+        observedTurnCount: observed.size,
+        maxActiveTurns,
+        activeTurnCount: active.size,
+      });
+    },
+  });
+}
 
 export async function runCoreLiveE2E({
   environment = process.env,
@@ -30,6 +72,7 @@ export async function runCoreLiveE2E({
   }
   const config = loadE2EConfig({ environment });
   const log = createE2ELogger({ runId, secrets: Object.values(config.secrets) });
+  const turnLane = createTurnLaneTracker(log);
   log({ event: "e2e_run_started" });
   const linear = createRunScopedLinearOperator({
     developmentToken: config.secrets.linearDevToken,
@@ -45,7 +88,7 @@ export async function runCoreLiveE2E({
   );
   let scope;
   let project;
-  let fixture;
+  let fixtures = [];
   let harness;
   const evidence = [];
   const ids = runIdentifiers(runId);
@@ -83,13 +126,55 @@ export async function runCoreLiveE2E({
     });
     log({ event: "e2e_step_completed", step: "podium_bootstrap" });
     const podium = await createProductionPodiumConductorOwner({ databasePath });
+
+    log({ event: "e2e_step_started", step: "root_created" });
+    const blocker = await linear.createRoot({
+      lock,
+      runId,
+      rootName: boundedRootName(runId, "blocker"),
+      preflight,
+      project,
+      priority: 4,
+      sortOrder: 20,
+      rootInstruction: rootInstruction("e2e-blocker.txt", `${runId}:blocker\n`),
+    });
+    const dependent = await linear.createRoot({
+      lock,
+      runId,
+      rootName: boundedRootName(runId, "dependent"),
+      preflight,
+      project,
+      priority: 1,
+      sortOrder: 10,
+      rootInstruction: rootInstruction("e2e-dependent.txt", `${runId}:dependent\n`),
+    });
+    const yielded = await linear.createRoot({
+      lock,
+      runId,
+      rootName: boundedRootName(runId, "yielded"),
+      preflight,
+      project,
+      priority: 0,
+      sortOrder: 30,
+      rootInstruction: rootInstruction("e2e-yielded.txt", `${runId}:yielded\n`),
+    });
+    await linear.createBlockerRelation({ lock, runId, blocker, dependent });
+    fixtures = [blocker, yielded, dependent];
+    evidence.push({
+      step: "root_created",
+      status: "passed",
+      rootCount: fixtures.length,
+      rootIdentifiers: fixtures.map(({ rootIdentifier }) => rootIdentifier),
+    });
+    log({ event: "e2e_step_completed", step: "root_created", root_count: fixtures.length });
+
     log({ event: "e2e_step_started", step: "conductor_handshake" });
     harness = await startConductorHarness({
       podium,
       environment: createConductorEnvironment({ environment, config, scope, git, installation, ids }),
       startupTimeoutMs: 30_000,
       shutdownTimeoutMs: 5_000,
-      log,
+      log: turnLane.log,
     });
     evidence.push({ step: "conductor_handshake", status: "passed" });
     log({ event: "e2e_step_completed", step: "conductor_handshake" });
@@ -106,84 +191,151 @@ export async function runCoreLiveE2E({
     evidence.push({ step: "profile_active", status: "passed" });
     log({ event: "e2e_step_completed", step: "profile_active" });
 
-    log({ event: "e2e_step_started", step: "root_created" });
-    fixture = await linear.createRoot({
+    log({ event: "e2e_step_started", step: "multi_root_scheduling" });
+    const [blockerPlan] = await pollUntil(
+      () => readRootStates(linear, [blocker, dependent]),
+      ([blockerState, dependentState]) =>
+        planReady(blockerState) && rootUntouched(dependentState),
+      { timeoutMs, pollIntervalMs, code: "e2e_blocker_order_timeout" },
+    );
+    evidence.push({
+      step: "blocker_order_verified",
+      status: "passed",
+      blockerPlanned: true,
+      dependentUntouched: true,
+    });
+
+    const [waitingBlocker, yieldedPlan] = await pollUntil(
+      () => readRootStates(linear, [blocker, yielded]),
+      ([blockerState, yieldedState]) =>
+        planReady(blockerState) && planReady(yieldedState),
+      { timeoutMs, pollIntervalMs, code: "e2e_human_yield_timeout" },
+    );
+    evidence.push({
+      step: "human_yield_verified",
+      status: "passed",
+      waitingRootUnchanged: waitingBlocker.approvalState === "In Progress",
+      yieldedRootPlanned: true,
+    });
+
+    await linear.updateRootScheduling({
       lock,
       runId,
-      preflight,
-      project,
-      rootInstruction: [
-        "Create a file named e2e-result.txt at the repository root.",
-        `Its content must be exactly ${JSON.stringify(`${runId}\n`)}.`,
-        "Make no other changes.",
-      ].join(" "),
+      fixture: yielded,
+      priority: 1,
+      sortOrder: -10,
     });
-    evidence.push({ step: "root_created", status: "passed", rootIdentifier: fixture.rootIdentifier });
-    log({ event: "e2e_step_completed", step: "root_created", root_identifier: fixture.rootIdentifier });
-
-    log({ event: "e2e_step_started", step: "plan_ready" });
-    const plan = await pollUntil(
-      () => linear.readRunState({ fixture }),
-      (state) => state.phase === "awaiting-human" &&
-        state.approvalState === "In Progress" &&
-        state.planApprovalCount === 1 &&
-        state.treeMatches === true &&
-        state.workStates.length > 0 &&
-        state.workStates.every((workState) => ["Todo", "Canceled"].includes(workState)) &&
-        Boolean(state.performerId),
-      { timeoutMs, pollIntervalMs, code: "e2e_plan_timeout" },
+    await Promise.all([
+      linear.approvePlan({
+        lock,
+        runId,
+        fixture: blocker,
+        preflight,
+        approvalId: blockerPlan.approvalId,
+      }),
+      linear.approvePlan({
+        lock,
+        runId,
+        fixture: yielded,
+        preflight,
+        approvalId: yieldedPlan.approvalId,
+      }),
+    ]);
+    await pollUntil(
+      () => readRootStates(linear, [blocker, yielded]),
+      ([blockerState, yieldedState]) =>
+        rootWorkUntouched(blockerState) && rootAdvancedPastApproval(yieldedState),
+      {
+        timeoutMs,
+        pollIntervalMs,
+        code: "e2e_priority_refresh_timeout",
+      },
     );
-    evidence.push({ step: "plan_ready", status: "passed" });
-    log({ event: "e2e_step_completed", step: "plan_ready" });
-    log({ event: "e2e_step_started", step: "plan_approved" });
-    await linear.approvePlan({
+    evidence.push({
+      step: "priority_refresh_verified",
+      status: "passed",
+      newWinnerSelected: true,
+      previousWinnerUntouched: true,
+    });
+
+    const yieldedCompleted = await waitForRootCompletion({
+      linear,
+      fixture: yielded,
+      plan: yieldedPlan,
+      git,
+      filename: "e2e-yielded.txt",
+      expected: `${runId}:yielded\n`,
+      timeoutMs,
+      pollIntervalMs,
+    });
+    await linear.completeRoot({
       lock,
       runId,
-      fixture,
-      preflight,
-      approvalId: plan.approvalId,
+      fixture: blocker,
+      doneStateId: preflight.doneStateId,
     });
-    evidence.push({ step: "plan_approved", status: "passed" });
-    log({ event: "e2e_step_completed", step: "plan_approved" });
-
-    log({ event: "e2e_step_started", step: "root_completion" });
-    const completed = await pollUntil(
-      () => linear.readRunState({ fixture }),
-      (state) => state.rootState === "In Review" && state.phase === "in-review" && Boolean(state.deliveryBranch),
-      { timeoutMs, pollIntervalMs, code: "e2e_root_completion_timeout" },
+    const dependentPlan = await pollUntil(
+      () => linear.readRunState({ fixture: dependent }),
+      planReady,
+      { timeoutMs, pollIntervalMs, code: "e2e_dependent_plan_timeout" },
     );
-    if (completed.performerId !== plan.performerId) throw stableError("e2e_performer_resume_mismatch");
-    if (completed.reworkCount !== 0 || completed.workStates.some((state) => state !== "Done")) {
-      throw stableError("e2e_workflow_incomplete");
+    evidence.push(
+      { step: "plan_ready", status: "passed" },
+      { step: "plan_approved", status: "passed" },
+    );
+    const laneEvidence = turnLane.evidence();
+    if (
+      laneEvidence.activeTurnCount !== 0 ||
+      laneEvidence.maxActiveTurns !== 1 ||
+      laneEvidence.observedTurnCount < 5
+    ) {
+      throw stableError("e2e_single_turn_lane_invalid");
     }
-    const delivered = await readDeliveredMarker(git.repositoryRoot, completed.deliveryBranch);
-    if (delivered !== `${runId}\n`) throw stableError("e2e_delivery_marker_mismatch");
+    evidence.push({
+      step: "single_turn_lane_verified",
+      status: "passed",
+      observedTurnCount: laneEvidence.observedTurnCount,
+      maxActiveTurns: laneEvidence.maxActiveTurns,
+    });
     evidence.push(
       { step: "work_completed", status: "passed" },
       { step: "root_gate_passed", status: "passed" },
-      { step: "branch_delivered", status: "passed", branch: completed.deliveryBranch },
+      {
+        step: "branch_delivered",
+        status: "passed",
+        branchCount: 1,
+      },
       { step: "linear_in_review", status: "passed" },
     );
     log({ event: "e2e_step_completed", step: "root_completion" });
 
     log({ event: "e2e_step_started", step: "root_comments_verified" });
-    const commentEvidence = await linear.readRootCommentEvidence({ fixture });
+    const rootComments = await Promise.all(
+      fixtures.map((candidate) =>
+        linear.readRootCommentEvidence({ fixture: candidate })),
+    );
+    const eventKeys = rootComments.flatMap((item) => item.eventKeys);
     evidence.push({
       step: "root_comments_verified",
       status: "passed",
-      primaryCommentId: commentEvidence.primaryCommentId,
-      primaryCommentCount: commentEvidence.primaryCommentCount,
-      timelineEventCount: commentEvidence.timelineEventCount,
-      completionEventCount: commentEvidence.completionEventCount,
-      eventKinds: commentEvidence.eventKinds,
-      eventKeys: commentEvidence.eventKeys,
+      rootCount: rootComments.length,
+      primaryCommentCount: rootComments.reduce(
+        (total, item) => total + item.primaryCommentCount,
+        0,
+      ),
+      timelineEventCount: eventKeys.length,
+      completionEventCount: rootComments.reduce(
+        (total, item) => total + item.completionEventCount,
+        0,
+      ),
+      eventKinds: [...new Set(rootComments.flatMap((item) => item.eventKinds))],
+      eventKeys,
     });
     log({
       event: "e2e_step_completed",
       step: "root_comments_verified",
-      primary_comment_count: commentEvidence.primaryCommentCount,
-      timeline_event_count: commentEvidence.timelineEventCount,
-      completion_event_count: commentEvidence.completionEventCount,
+      root_count: rootComments.length,
+      timeline_event_count: eventKeys.length,
     });
 
     result = Object.freeze({
@@ -191,12 +343,12 @@ export async function runCoreLiveE2E({
       runId,
       projectMode: project.retainProject ? "retained" : "temporary",
       projectSlugId: project.projectSlugId,
-      rootIdentifier: fixture.rootIdentifier,
+      rootIdentifier: yielded.rootIdentifier,
       profileId: profile.profileId,
-      performerResumed: true,
-      rootState: completed.rootState,
-      phase: completed.phase,
-      deliveryBranch: completed.deliveryBranch,
+      performerResumed: yieldedCompleted.performerId === yieldedPlan.performerId,
+      rootState: yieldedCompleted.rootState,
+      phase: yieldedCompleted.phase,
+      deliveryBranch: yieldedCompleted.deliveryBranch,
       evidence,
     });
   } catch (error) {
@@ -204,11 +356,11 @@ export async function runCoreLiveE2E({
     log({ event: "e2e_run_failed", reason: result.reason });
   }
 
-  if (project?.retainProject && fixture) {
+  if (project?.retainProject && fixtures.length > 0) {
     log({
       event: "e2e_debug_resources_retained",
       project_slug_id: project.projectSlugId,
-      root_identifier: fixture.rootIdentifier,
+      root_identifiers: fixtures.map(({ rootIdentifier }) => rootIdentifier),
     });
   }
 
@@ -337,7 +489,7 @@ function createConductorEnvironment({ environment, config, scope, git, installat
     SYMPHONY_CONDUCTOR_DATA_ROOT: scope.conductorDataRoot,
     SYMPHONY_PERFORMER_EXECUTABLE: path.resolve(".venv/bin/performer"),
     SYMPHONY_CODEX_BASE_URL: config.codex.baseUrl,
-    SYMPHONY_CYCLE_DELAY_MS: "1000",
+    SYMPHONY_CYCLE_DELAY_MS: "5000",
   } });
 }
 
@@ -362,9 +514,97 @@ async function pollUntil(read, accepted, { timeoutMs, pollIntervalMs, code }) {
   throw stableError(code);
 }
 
-async function readDeliveredMarker(repositoryRoot, branch) {
+function rootInstruction(filename, content) {
+  return [
+    `Create a file named ${filename} at the repository root.`,
+    `Its content must be exactly ${JSON.stringify(content)}.`,
+    "Make no other changes.",
+    "Create a plan with exactly one Work node that performs this change; do not add a separate verification Work node.",
+  ].join(" ");
+}
+
+function boundedRootName(runId, role) {
+  return `${runId.slice(0, 48)} ${role}`;
+}
+
+function readRootStates(linear, fixtures) {
+  return Promise.all(
+    fixtures.map((fixture) => linear.readRunState({ fixture })),
+  );
+}
+
+function planReady(state) {
+  return state?.phase === "awaiting-human" &&
+    state.approvalState === "In Progress" &&
+    state.planApprovalCount === 1 &&
+    state.treeMatches === true &&
+    rootWorkUntouched(state) &&
+    Boolean(state.performerId);
+}
+
+function rootUntouched(state) {
+  return state?.rootState === "Todo" &&
+    state.phase === undefined &&
+    state.planApprovalCount === 0 &&
+    state.performerId === undefined;
+}
+
+function rootWorkUntouched(state) {
+  return Array.isArray(state?.workStates) &&
+    state.workStates.length > 0 &&
+    state.workStates.every((value) => value === "Todo" || value === "Canceled");
+}
+
+function rootAdvancedPastApproval(state) {
+  return state?.phase === "working" ||
+    state?.phase === "gating" ||
+    state?.phase === "delivering" ||
+    state?.phase === "in-review" ||
+    state?.workStates?.some((value) => value !== "Todo" && value !== "Canceled");
+}
+
+async function waitForRootCompletion({
+  linear,
+  fixture,
+  plan,
+  git,
+  filename,
+  expected,
+  timeoutMs,
+  pollIntervalMs,
+}) {
+  const completed = await pollUntil(
+    () => linear.readRunState({ fixture }),
+    (state) =>
+      state.rootState === "In Review" &&
+      state.phase === "in-review" &&
+      Boolean(state.deliveryBranch),
+    { timeoutMs, pollIntervalMs, code: "e2e_root_completion_timeout" },
+  );
+  if (completed.performerId !== plan.performerId) {
+    throw stableError("e2e_performer_resume_mismatch");
+  }
+  if (
+    completed.reworkCount !== 0 ||
+    completed.workStates.some((state) => state !== "Done")
+  ) {
+    throw stableError("e2e_workflow_incomplete");
+  }
+  const delivered = await readDeliveredMarker(
+    git.repositoryRoot,
+    completed.deliveryBranch,
+    filename,
+  );
+  if (delivered !== expected) throw stableError("e2e_delivery_marker_mismatch");
+  return completed;
+}
+
+async function readDeliveredMarker(repositoryRoot, branch, filename) {
+  if (!/^e2e-[a-z]+\.txt$/u.test(filename)) {
+    throw stableError("e2e_delivery_marker_invalid");
+  }
   try {
-    const { stdout } = await execute("git", ["-C", repositoryRoot, "show", `${branch}:e2e-result.txt`], {
+    const { stdout } = await execute("git", ["-C", repositoryRoot, "show", `${branch}:${filename}`], {
       encoding: "utf8",
       timeout: 15_000,
     });

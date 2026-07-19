@@ -150,6 +150,103 @@ test("Linear fixture creates one exactly marked Project, label, and delegated Ro
   assert.doesNotMatch(JSON.stringify(fixture), /development-secret/u);
 });
 
+test("Linear fixture configures multi-Root scheduling only through Linear facts", async () => {
+  const requests = [];
+  const operator = createRunScopedLinearOperator({
+    developmentToken: "development-secret",
+    fetch: async (_url, init) => {
+      const request = JSON.parse(init.body);
+      requests.push(request);
+      if (request.query.includes("CoreLiveRoot")) return response({ data: {
+        issueCreate: { success: true, issue: { id: "root-blocker", identifier: "SYM-10" } },
+      } });
+      if (request.query.includes("CoreLiveBlocker")) return response({ data: {
+        issueRelationCreate: {
+          success: true,
+          issueRelation: {
+            id: "relation-1",
+            type: "blocks",
+            issue: { id: "root-blocker" },
+            relatedIssue: { id: "root-dependent" },
+          },
+        },
+      } });
+      if (request.query.includes("CoreLiveSchedulingUpdate")) return response({ data: {
+        issueUpdate: {
+          success: true,
+          issue: { id: "root-blocker", priority: 1, sortOrder: -10 },
+        },
+      } });
+      if (request.query.includes("CoreLiveCompleteRoot")) return response({ data: {
+        issueUpdate: {
+          success: true,
+          issue: { id: "root-blocker", state: { name: "Done" } },
+        },
+      } });
+      throw new Error("unexpected operation");
+    },
+  });
+  const lock = { runId: "run-1", released: false };
+  const project = {
+    runId: "run-1",
+    marker: managedMarker("run-1"),
+    projectId: "project-1",
+  };
+  const blocker = await operator.createRoot({
+    lock,
+    runId: "run-1",
+    rootName: "blocker",
+    rootInstruction: "Create blocker.txt.",
+    priority: 4,
+    sortOrder: 20,
+    preflight: { teamId: "team-1", stateId: "state-todo", actorId: "actor-1" },
+    project,
+  });
+  const dependent = { ...blocker, rootId: "root-dependent", rootIdentifier: "SYM-11" };
+
+  await operator.createBlockerRelation({ lock, runId: "run-1", blocker, dependent });
+  await operator.updateRootScheduling({
+    lock,
+    runId: "run-1",
+    fixture: blocker,
+    priority: 1,
+    sortOrder: -10,
+  });
+  await operator.completeRoot({
+    lock,
+    runId: "run-1",
+    fixture: blocker,
+    doneStateId: "state-done",
+  });
+
+  assert.deepEqual(requests.map(({ variables }) => variables), [
+    { input: {
+      teamId: "team-1",
+      projectId: "project-1",
+      stateId: "state-todo",
+      delegateId: "actor-1",
+      title: "[Core Live E2E] blocker",
+      description: `Create blocker.txt.\n\n${managedMarker("run-1")}`,
+      priority: 4,
+      sortOrder: 20,
+      preserveSortOrderOnCreate: true,
+    } },
+    { input: {
+      issueId: "root-blocker",
+      relatedIssueId: "root-dependent",
+      type: "blocks",
+    } },
+    {
+      issueId: "root-blocker",
+      input: { priority: 1, sortOrder: -10 },
+    },
+    {
+      issueId: "root-blocker",
+      input: { stateId: "state-done" },
+    },
+  ]);
+});
+
 test("Linear fixture binds a retained Project by slug without creating or archiving it", async () => {
   const operations = [];
   const operator = createRunScopedLinearOperator({

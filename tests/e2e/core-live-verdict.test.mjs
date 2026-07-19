@@ -37,6 +37,7 @@ test("verdict evaluates evidence independently from the claimed runner status", 
     missingSteps: [],
     converged: true,
     rootCommentsVerified: true,
+    multiRootSchedulingVerified: true,
   });
   assert.equal(evaluateCoreLiveEvidence({
     status: "passed",
@@ -80,16 +81,58 @@ test("verdict independently validates sanitized Root comment evidence", () => {
   );
 });
 
+test("verdict rejects claimed success when multi-Root lane evidence overlaps", () => {
+  assert.equal(
+    evaluateCoreLiveEvidence({
+      performerResumed: true,
+      rootState: "In Review",
+      phase: "in-review",
+      deliveryBranch: "symphony/runs/run-1",
+      evidence: passingEvidence().map((item) =>
+        item.step === "single_turn_lane_verified"
+          ? { ...item, maxActiveTurns: 2 }
+          : item),
+    }).verdict,
+    "failed",
+  );
+});
+
 function passingEvidence() {
-  return coreLiveStepIds().map((step) => step === "root_comments_verified"
-    ? {
+  return coreLiveStepIds().map((step) => {
+    if (step === "root_comments_verified") return {
         step,
         status: "passed",
-        primaryCommentCount: 1,
-        timelineEventCount: 3,
-        completionEventCount: 3,
+        rootCount: 3,
+        primaryCommentCount: 3,
+        timelineEventCount: 5,
+        completionEventCount: 5,
         eventKinds: ["turn_completed"],
-        eventKeys: ["turn-plan:1", "turn-work:2", "turn-gate:3"],
-      }
-    : { step, status: "passed" });
+        eventKeys: Array.from({ length: 5 }, (_, index) => `turn-${index}:1`),
+      };
+    if (step === "blocker_order_verified") return {
+      step,
+      status: "passed",
+      blockerPlanned: true,
+      dependentUntouched: true,
+    };
+    if (step === "human_yield_verified") return {
+      step,
+      status: "passed",
+      waitingRootUnchanged: true,
+      yieldedRootPlanned: true,
+    };
+    if (step === "priority_refresh_verified") return {
+      step,
+      status: "passed",
+      newWinnerSelected: true,
+      previousWinnerUntouched: true,
+    };
+    if (step === "single_turn_lane_verified") return {
+      step,
+      status: "passed",
+      observedTurnCount: 5,
+      maxActiveTurns: 1,
+    };
+    return { step, status: "passed" };
+  });
 }
