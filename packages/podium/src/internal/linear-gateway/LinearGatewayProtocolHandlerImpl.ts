@@ -156,6 +156,7 @@ export class LinearGatewayProtocolHandlerImpl {
         if (item.issue.parentIssueId !== undefined || item.issue.depth !== 0) {
           throw new Error("linear_root_shape_invalid");
         }
+        validateRootScheduling(item);
         items.push(item);
         if (items.length > MAX_ROOTS) {
           throw new Error("linear_root_collection_too_large");
@@ -534,6 +535,30 @@ function validateIssue(issue: LinearIssueValue, projectId: string): void {
   }
 }
 
+function validateRootScheduling(root: RootIssueValue): void {
+  if (
+    typeof root.isDelegatedToSymphony !== "boolean" ||
+    !linearPriority(root.priority) ||
+    !Array.isArray(root.blockers) ||
+    root.blockers.length > MAX_TREE_NODES
+  ) {
+    throw new Error("linear_root_scheduling_invalid");
+  }
+  for (const blocker of root.blockers) {
+    const value = errorRecord(blocker);
+    if (
+      value.sourceIssueId !== root.issue.issueId ||
+      typeof value.targetIssueId !== "string" ||
+      !identifier(value.targetIssueId, 128) ||
+      value.targetIssueId === root.issue.issueId ||
+      typeof value.targetState !== "string" ||
+      !linearIssueState(value.targetState)
+    ) {
+      throw new Error("linear_root_scheduling_invalid");
+    }
+  }
+}
+
 function identifier(value: string | undefined, maximum: number): boolean {
   return (
     typeof value === "string" &&
@@ -559,6 +584,16 @@ function linearIssueState(value: string | undefined): boolean {
     value === "In Review" ||
     value === "Done" ||
     value === "Canceled"
+  );
+}
+
+function linearPriority(value: string | undefined): boolean {
+  return (
+    value === "urgent" ||
+    value === "high" ||
+    value === "normal" ||
+    value === "low" ||
+    value === "no_priority"
   );
 }
 

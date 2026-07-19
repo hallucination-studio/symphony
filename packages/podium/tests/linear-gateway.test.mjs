@@ -228,6 +228,8 @@ test("gateway reads fully paginate and reject cross-project issue data", async (
               items: [{
                 issue: issue("root-2", "project-1"),
                 isDelegatedToSymphony: true,
+                priority: "high",
+                blockers: [],
               }],
               pageInfo: { hasNextPage: false },
             }
@@ -235,6 +237,8 @@ test("gateway reads fully paginate and reject cross-project issue data", async (
               items: [{
                 issue: issue("root-1", "project-1"),
                 isDelegatedToSymphony: true,
+                priority: "urgent",
+                blockers: [],
               }],
               pageInfo: { hasNextPage: true, endCursor: "next" },
             };
@@ -251,7 +255,12 @@ test("gateway reads fully paginate and reject cross-project issue data", async (
     {
       async listRootIssues() {
         return {
-          items: [{ issue: issue("root-x", "project-other"), isDelegatedToSymphony: true }],
+          items: [{
+            issue: issue("root-x", "project-other"),
+            isDelegatedToSymphony: true,
+            priority: "normal",
+            blockers: [],
+          }],
           pageInfo: { hasNextPage: false },
         };
       },
@@ -259,6 +268,146 @@ test("gateway reads fully paginate and reject cross-project issue data", async (
     { sleep: async () => undefined, maxAttempts: 1, baseDelayMs: 10 },
   );
   await assert.rejects(invalid.listAllRootIssues("project-1"), /linear_project_mismatch/);
+});
+
+test("Root scheduling gateway maps every SDK page without making eligibility decisions", async () => {
+  const services = await createConductorServices({
+    async listRootIssues({ cursor }) {
+      return cursor
+        ? {
+            items: [{
+              issue: issue("root-2", "project-1"),
+              isDelegatedToSymphony: false,
+              priority: "low",
+              blockers: [],
+            }],
+            pageInfo: { hasNextPage: false },
+          }
+        : {
+            items: [{
+              issue: { ...issue("root-1", "project-1"), order: 12.5 },
+              isDelegatedToSymphony: true,
+              priority: "urgent",
+              blockers: [
+                {
+                  sourceIssueId: "root-1",
+                  targetIssueId: "blocker-done",
+                  targetState: "Done",
+                },
+                {
+                  sourceIssueId: "root-1",
+                  targetIssueId: "blocker-active",
+                  targetState: "In Progress",
+                },
+              ],
+            }],
+            pageInfo: { hasNextPage: true, endCursor: "next" },
+          };
+    },
+  });
+
+  const result = await services.handle({
+    kind: "list_root_issues",
+    project_id: "project-1",
+    page: { limit: 250 },
+  });
+
+  assert.deepEqual(result, {
+    kind: "root_issues_page",
+    items: [
+      {
+        issue: {
+          issue_id: "root-1",
+          identifier: "ROOT-1",
+          project_id: "project-1",
+          state: "Todo",
+          order: 12.5,
+          depth: 0,
+          title: "Title",
+          description: "",
+          updated_at: "2026-07-16T00:00:00Z",
+        },
+        is_delegated_to_symphony: true,
+        priority: "urgent",
+        blockers: [
+          {
+            source_issue_id: "root-1",
+            target_issue_id: "blocker-done",
+            target_state: "Done",
+          },
+          {
+            source_issue_id: "root-1",
+            target_issue_id: "blocker-active",
+            target_state: "In Progress",
+          },
+        ],
+      },
+      {
+        issue: {
+          issue_id: "root-2",
+          identifier: "ROOT-2",
+          project_id: "project-1",
+          state: "Todo",
+          order: 1,
+          depth: 0,
+          title: "Title",
+          description: "",
+          updated_at: "2026-07-16T00:00:00Z",
+        },
+        is_delegated_to_symphony: false,
+        priority: "low",
+        blockers: [],
+      },
+    ],
+    page_info: { has_next_page: false },
+  });
+});
+
+test("Root scheduling gateway rejects malformed closed values", async () => {
+  const valid = {
+    issue: issue("root-1", "project-1"),
+    isDelegatedToSymphony: true,
+    priority: "normal",
+    blockers: [],
+  };
+  const invalidRoots = [
+    { ...valid, priority: undefined },
+    { ...valid, blockers: undefined },
+    {
+      ...valid,
+      blockers: [{
+        sourceIssueId: "wrong-root",
+        targetIssueId: "blocker-1",
+        targetState: "Done",
+      }],
+    },
+    {
+      ...valid,
+      blockers: [{
+        sourceIssueId: "root-1",
+        targetIssueId: "blocker-1",
+        targetState: "Unknown",
+      }],
+    },
+  ];
+
+  for (const root of invalidRoots) {
+    const handler = new LinearGatewayProtocolHandlerImpl(
+      {
+        async listRootIssues() {
+          return {
+            items: [root],
+            pageInfo: { hasNextPage: false },
+          };
+        },
+      },
+      { sleep: async () => undefined, maxAttempts: 1, baseDelayMs: 10 },
+    );
+    await assert.rejects(
+      handler.listAllRootIssues("project-1"),
+      /linear_root_scheduling_invalid/u,
+    );
+  }
 });
 
 test("issue tree reads all pages and validates root parent depth and order", async () => {

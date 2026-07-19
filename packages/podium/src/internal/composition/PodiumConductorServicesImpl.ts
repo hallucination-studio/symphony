@@ -204,6 +204,12 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
       items: items.map((root) => ({
         issue: issueSnapshot(root.issue),
         is_delegated_to_symphony: root.isDelegatedToSymphony,
+        priority: root.priority,
+        blockers: root.blockers.map((blocker) => ({
+          source_issue_id: blocker.sourceIssueId,
+          target_issue_id: blocker.targetIssueId,
+          target_state: blocker.targetState,
+        })),
       })),
       page_info: { has_next_page: false },
     };
