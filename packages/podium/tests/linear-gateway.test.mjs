@@ -232,6 +232,7 @@ test("gateway reads fully paginate and reject cross-project issue data", async (
                 isDelegatedToSymphony: true,
                 priority: "high",
                 blockers: [],
+                rootManagedComments: [],
               }],
               pageInfo: { hasNextPage: false },
             }
@@ -241,6 +242,7 @@ test("gateway reads fully paginate and reject cross-project issue data", async (
                 isDelegatedToSymphony: true,
                 priority: "urgent",
                 blockers: [],
+                rootManagedComments: [],
               }],
               pageInfo: { hasNextPage: true, endCursor: "next" },
             };
@@ -262,6 +264,7 @@ test("gateway reads fully paginate and reject cross-project issue data", async (
             isDelegatedToSymphony: true,
             priority: "normal",
             blockers: [],
+            rootManagedComments: [],
           }],
           pageInfo: { hasNextPage: false },
         };
@@ -282,6 +285,7 @@ test("Root scheduling gateway preserves each bounded SDK page without making eli
               isDelegatedToSymphony: false,
               priority: "low",
               blockers: [],
+              rootManagedComments: [],
             }],
             pageInfo: { hasNextPage: false },
           }
@@ -302,6 +306,13 @@ test("Root scheduling gateway preserves each bounded SDK page without making eli
                   targetState: "In Progress",
                 },
               ],
+              rootManagedComments: [{
+                commentId: "comment-1",
+                issueId: "root-1",
+                updatedAt: "2026-07-16T00:00:00Z",
+                managedMarker: "root-1:root-comment",
+                body: "Symphony Root Run\n<!-- symphony root marker -->",
+              }],
             }],
             pageInfo: { hasNextPage: true, endCursor: "next" },
           };
@@ -327,6 +338,7 @@ test("Root scheduling gateway preserves each bounded SDK page without making eli
     "Done",
     "In Progress",
   ]);
+  assert.equal(first.items[0].root_managed_comments[0].comment_id, "comment-1");
   assert.deepEqual(first.page_info, { has_next_page: true, end_cursor: "next" });
   assert.equal(second.items.length, 1);
   assert.equal(second.items[0].issue.issue_id, "root-2");
@@ -340,10 +352,22 @@ test("Root scheduling gateway rejects malformed closed values", async () => {
     isDelegatedToSymphony: true,
     priority: "normal",
     blockers: [],
+    rootManagedComments: [],
   };
   const invalidRoots = [
     { ...valid, priority: undefined },
     { ...valid, blockers: undefined },
+    { ...valid, rootManagedComments: undefined },
+    {
+      ...valid,
+      rootManagedComments: [{
+        commentId: "comment-1",
+        issueId: "root-other",
+        updatedAt: "2026-07-16T00:00:00Z",
+        managedMarker: "root-other:root-comment",
+        body: "Symphony Root Run\n<!-- symphony root marker -->",
+      }],
+    },
     {
       ...valid,
       blockers: [{

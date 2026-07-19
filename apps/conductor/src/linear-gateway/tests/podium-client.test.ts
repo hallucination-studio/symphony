@@ -35,6 +35,7 @@ test("Gateway reconstructs Root ownership, phase, Profile, and managed Work", as
               is_delegated_to_symphony: true,
               priority: "normal",
               blockers: [],
+              root_managed_comments: [managedComment()],
             }],
             page_info: { has_next_page: false },
           };
@@ -89,12 +90,13 @@ test("Gateway reconstructs Root ownership, phase, Profile, and managed Work", as
   assert.equal(view.workflowNodes[0]?.parentIssueId, null);
   assert.deepEqual(
     requests.map(({ kind }) => kind),
-    ["resolve_conductor_project", "list_root_issues", "get_issue_tree", "get_issue_tree"],
+    ["resolve_conductor_project", "list_root_issues", "get_issue_tree"],
   );
 });
 
 test("Root discovery consumes 251 Roots across pages and discards the cursor", async () => {
   const listCursors: Array<unknown> = [];
+  let treeReads = 0;
   const gateway = new PodiumLinearGatewayClientImpl(
     "abc123",
     {
@@ -133,6 +135,11 @@ test("Root discovery consumes 251 Roots across pages and discards the cursor", a
                 is_delegated_to_symphony: true,
                 priority: "high",
                 blockers: [],
+                root_managed_comments: index === 1
+                  ? [managedComment("comment-current", `root-${index}`, "conductor-1")]
+                  : index === 2
+                    ? [managedComment("comment-other", `root-${index}`, "conductor-2")]
+                    : [],
               };
             }),
             page_info: start === 0
@@ -140,6 +147,7 @@ test("Root discovery consumes 251 Roots across pages and discards the cursor", a
               : { has_next_page: false },
           };
         }
+        treeReads += 1;
         const rootId = request.root_issue_id as string;
         return {
           kind: "issue_tree_page",
@@ -172,7 +180,11 @@ test("Root discovery consumes 251 Roots across pages and discards the cursor", a
   assert.equal(roots[0]?.issueId, "root-0");
   assert.equal(roots[0]?.projectId, "project-2");
   assert.equal(roots[1]?.parentIssueId, "parent-1");
+  assert.equal(roots[0]?.managedConductorId, undefined);
+  assert.equal(roots[1]?.managedConductorId, "conductor-1");
+  assert.equal(roots[2]?.managedConductorId, "conductor-2");
   assert.equal(roots[250]?.issueId, "root-250");
+  assert.equal(treeReads, 0);
   assert.deepEqual(listCursors, [undefined, "page-2"]);
   await assert.rejects(gateway.listRoots("project-1"), /cursor_discard_proved/u);
   assert.deepEqual(listCursors, [undefined, "page-2", undefined]);
@@ -326,12 +338,16 @@ function tree() {
   };
 }
 
-function managedComment(commentId = "comment-1") {
+function managedComment(
+  commentId = "comment-1",
+  issueId = "root-1",
+  conductorId = "conductor-1",
+) {
   return {
     comment_id: commentId,
-    issue_id: "root-1",
-    managed_marker: "root-1:root-comment",
+    issue_id: issueId,
+    managed_marker: `${issueId}:root-comment`,
     updated_at: observedAt,
-    body: "Symphony Root Run\nconductor_id: conductor-1\nperformer_profile_id: profile-1\nusage_input_tokens: 0\nusage_cached_input_tokens: 0\nusage_output_tokens: 0\nusage_reasoning_output_tokens: 0\nusage_total_tokens: 0\ndelivery_branch: symphony/root-1\n<!-- symphony root marker -->",
+    body: `Symphony Root Run\nconductor_id: ${conductorId}\nperformer_profile_id: profile-1\nusage_input_tokens: 0\nusage_cached_input_tokens: 0\nusage_output_tokens: 0\nusage_reasoning_output_tokens: 0\nusage_total_tokens: 0\ndelivery_branch: symphony/${issueId}\n<!-- symphony root marker -->`,
   };
 }

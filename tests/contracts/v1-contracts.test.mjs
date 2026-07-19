@@ -93,6 +93,7 @@ test("Roadmap 2 Root scheduling facts are closed and bounded", async () => {
 
   assert.ok(root.required.includes("priority"));
   assert.ok(root.required.includes("blockers"));
+  assert.ok(root.required.includes("root_managed_comments"));
   assert.equal(root.properties.priority.$ref, "#/$defs/LinearPriority");
   assert.deepEqual(priority.enum, [
     "urgent",
@@ -105,6 +106,11 @@ test("Roadmap 2 Root scheduling facts are closed and bounded", async () => {
   assert.equal(
     root.properties.blockers.items.$ref,
     "#/$defs/LinearBlockerSnapshot",
+  );
+  assert.equal(root.properties.root_managed_comments.maxItems, 2);
+  assert.equal(
+    root.properties.root_managed_comments.items.$ref,
+    "#/$defs/LinearCommentSnapshot",
   );
   assert.equal(issue.properties.order.type, "number");
   assert.equal(issue.properties.order.minimum, -1000000000);

@@ -164,7 +164,13 @@
     "RootIssueSnapshot": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["issue", "is_delegated_to_symphony", "priority", "blockers"],
+      "required": [
+        "issue",
+        "is_delegated_to_symphony",
+        "priority",
+        "blockers",
+        "root_managed_comments"
+      ],
       "properties": {
         "issue": { "$ref": "#/$defs/LinearIssueNodeSnapshot" },
         "is_delegated_to_symphony": { "type": "boolean" },
@@ -173,6 +179,11 @@
           "type": "array",
           "maxItems": 512,
           "items": { "$ref": "#/$defs/LinearBlockerSnapshot" }
+        },
+        "root_managed_comments": {
+          "type": "array",
+          "maxItems": 2,
+          "items": { "$ref": "#/$defs/LinearCommentSnapshot" }
         }
       }
     },

@@ -229,6 +229,13 @@ export class PodiumConductorServicesImpl implements PodiumConductorServices {
           target_issue_id: blocker.targetIssueId,
           target_state: blocker.targetState,
         })),
+        root_managed_comments: root.rootManagedComments.map((comment) => ({
+          comment_id: comment.commentId,
+          issue_id: comment.issueId,
+          body: comment.body,
+          managed_marker: comment.managedMarker,
+          updated_at: comment.updatedAt,
+        })),
       })),
       page_info: {
         has_next_page: page.pageInfo.hasNextPage,

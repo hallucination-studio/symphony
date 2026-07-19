@@ -552,7 +552,9 @@ function validateRootScheduling(root: RootIssueValue): void {
     typeof root.isDelegatedToSymphony !== "boolean" ||
     !linearPriority(root.priority) ||
     !Array.isArray(root.blockers) ||
-    root.blockers.length > MAX_TREE_NODES
+    root.blockers.length > MAX_TREE_NODES ||
+    !Array.isArray(root.rootManagedComments) ||
+    root.rootManagedComments.length > 2
   ) {
     throw new Error("linear_root_scheduling_invalid");
   }
@@ -565,6 +567,18 @@ function validateRootScheduling(root: RootIssueValue): void {
       value.targetIssueId === root.issue.issueId ||
       typeof value.targetState !== "string" ||
       !linearIssueState(value.targetState)
+    ) {
+      throw new Error("linear_root_scheduling_invalid");
+    }
+  }
+  for (const comment of root.rootManagedComments) {
+    if (
+      comment.issueId !== root.issue.issueId ||
+      !identifier(comment.commentId, 128) ||
+      comment.managedMarker !== `${root.issue.issueId}:root-comment` ||
+      typeof comment.body !== "string" ||
+      codePointLength(comment.body) > 16_384 ||
+      !timestamp(comment.updatedAt)
     ) {
       throw new Error("linear_root_scheduling_invalid");
     }

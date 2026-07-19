@@ -119,7 +119,10 @@ export class PodiumLinearGatewayClientImpl implements RuntimeGateway {
       for (const value of items) {
         const item = record(value);
         const issue = wireIssue(item.issue);
-        const state = await this.#managedState(projectId, issue.issue_id);
+        const managed = managedCommentSnapshots(
+          item.root_managed_comments,
+          issue.issue_id,
+        );
         roots.push({
           issueId: issue.issue_id,
           identifier: issue.identifier,
@@ -138,8 +141,8 @@ export class PodiumLinearGatewayClientImpl implements RuntimeGateway {
           blockers: array(item.blockers, "linear_blockers_invalid").map(
             (blocker) => linearBlocker(issue.issue_id, blocker),
           ),
-          ...(state.managedComment
-            ? { managedConductorId: state.managedComment.conductorId }
+          ...(managed.comment
+            ? { managedConductorId: managed.comment.conductorId }
             : {}),
         });
         if (roots.length > 512) throw new Error("linear_roots_too_many");
@@ -246,17 +249,10 @@ export class PodiumLinearGatewayClientImpl implements RuntimeGateway {
     );
     if (response.kind !== "issue_tree_page") throw protocolError(response);
     const tree = record(response.tree);
-    const comments = array(
+    const managed = managedCommentSnapshots(
       tree.root_managed_comments,
-      "root_managed_comments_invalid",
+      rootId,
     );
-    if (comments.length > 1) throw new Error("root_managed_comment_ambiguous");
-    const parsed = comments[0]
-      ? parseRootManagedComment(
-          string(record(comments[0]).body, "root_managed_comment_invalid"),
-        )
-      : undefined;
-    if (parsed && !parsed.ok) throw new Error(parsed.error);
     const phases = array(tree.root_phase_labels, "root_phase_labels_invalid");
     if (phases.length > 1) throw new Error("root_phase_ambiguous");
     return {
@@ -276,21 +272,8 @@ export class PodiumLinearGatewayClientImpl implements RuntimeGateway {
         ),
       ),
       phaseLabels: phases.map(rootPhase),
-      ...(parsed?.ok ? { managedComment: parsed.value } : {}),
-      ...(comments[0]
-        ? {
-            managedCommentRemote: {
-              commentId: string(
-                record(comments[0]).comment_id,
-                "root_managed_comment_id_invalid",
-              ),
-              updatedAt: string(
-                record(comments[0]).updated_at,
-                "root_managed_comment_updated_at_invalid",
-              ),
-            },
-          }
-        : {}),
+      ...(managed.comment ? { managedComment: managed.comment } : {}),
+      ...(managed.remote ? { managedCommentRemote: managed.remote } : {}),
     };
   }
 
@@ -384,6 +367,40 @@ function workflowNode(
       : {}),
   };
   return work;
+}
+
+function managedCommentSnapshots(
+  value: JsonValue | undefined,
+  rootIssueId: string,
+) {
+  const comments = array(value, "root_managed_comments_invalid");
+  if (comments.length > 1) throw new Error("root_managed_comment_ambiguous");
+  if (!comments[0]) return {};
+  const snapshot = record(comments[0]);
+  if (
+    string(snapshot.issue_id, "root_managed_comment_issue_invalid") !== rootIssueId ||
+    string(snapshot.managed_marker, "root_managed_comment_marker_invalid") !==
+      `${rootIssueId}:root-comment`
+  ) {
+    throw new Error("root_managed_comment_identity_invalid");
+  }
+  const parsed = parseRootManagedComment(
+    string(snapshot.body, "root_managed_comment_invalid"),
+  );
+  if (!parsed.ok) throw new Error(parsed.error);
+  return {
+    comment: parsed.value,
+    remote: {
+      commentId: string(
+        snapshot.comment_id,
+        "root_managed_comment_id_invalid",
+      ),
+      updatedAt: string(
+        snapshot.updated_at,
+        "root_managed_comment_updated_at_invalid",
+      ),
+    },
+  };
 }
 
 function wireIssue(value: JsonValue | undefined): WireIssue {
