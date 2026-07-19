@@ -10,6 +10,7 @@ from openai_codex import Codex, CodexConfig, Sandbox
 
 from performer.backends.provider_backend_interface import (
     ProviderBackendError,
+    ProviderConversationUnavailable,
     ProviderTurnDeadlineExpired,
 )
 
@@ -106,25 +107,45 @@ class CodexBackendImpl:
     def __init__(self, sdk: Any | None = None) -> None:
         self._sdk = sdk or Codex()
 
+    def open_conversation(self, command: dict[str, Any]) -> dict[str, Any]:
+        settings = command["codex_turn_settings"]
+        service_tier = self._service_tier(settings)
+        try:
+            thread = self._sdk.thread_start(
+                model=settings["model"],
+                service_tier=service_tier,
+            )
+        except ProviderBackendError:
+            raise
+        except Exception as exc:
+            raise ProviderBackendError(
+                _provider_failure_reason(exc),
+                code="provider_conversation_open_failed",
+                retryable=True,
+                action_required="Retry opening the Root conversation.",
+            ) from exc
+        performer_id = getattr(thread, "id", None)
+        if not isinstance(performer_id, str) or not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}", performer_id
+        ):
+            raise ProviderBackendError(
+                "The Provider returned an invalid conversation identifier.",
+                code="provider_conversation_id_invalid",
+                retryable=False,
+                action_required="Check the Provider integration.",
+            )
+        return {"performer_id": performer_id}
+
     def run_turn(self, command: dict[str, Any]) -> dict[str, Any]:
         kind = command["turn_kind"]
         sandbox = _execution_sandbox(command, kind)
         settings = command["codex_turn_settings"]
-        if (
-            settings["is_fast_mode_enabled"]
-            and self._authentication_method() != "chatgpt"
-        ):
-            raise ProviderBackendError(
-                "Codex Fast is unavailable for this Profile.",
-                code="performer_profile_setting_unsupported",
-                retryable=False,
-                action_required="Disable Fast or use a supported ChatGPT Profile.",
-            )
+        service_tier = self._service_tier(settings)
         common = {
             "cwd": command["workspace_root"],
             "model": settings["model"],
             "sandbox": sandbox,
-            "service_tier": "fast" if settings["is_fast_mode_enabled"] else None,
+            "service_tier": service_tier,
         }
         performer_id = command.get("performer_id")
         if performer_id is None:
@@ -139,6 +160,8 @@ class CodexBackendImpl:
         else:
             try:
                 thread = self._sdk.thread_resume(performer_id, **common)
+            except ProviderConversationUnavailable:
+                raise
             except Exception as exc:
                 raise ProviderBackendError(
                     "The Provider conversation could not be resumed.",
@@ -188,6 +211,19 @@ class CodexBackendImpl:
             "body": body,
             "usage": _usage(result.usage),
         }
+
+    def _service_tier(self, settings: dict[str, Any]) -> str | None:
+        if (
+            settings["is_fast_mode_enabled"]
+            and self._authentication_method() != "chatgpt"
+        ):
+            raise ProviderBackendError(
+                "Codex Fast is unavailable for this Profile.",
+                code="performer_profile_setting_unsupported",
+                retryable=False,
+                action_required="Disable Fast or use a supported ChatGPT Profile.",
+            )
+        return "fast" if settings["is_fast_mode_enabled"] else None
 
     def _authentication_method(self) -> str | None:
         try:

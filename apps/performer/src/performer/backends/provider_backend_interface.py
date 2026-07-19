@@ -23,5 +23,19 @@ class ProviderBackendError(RuntimeError):
         self.action_required = action_required
 
 
+class ProviderConversationUnavailable(ProviderBackendError):
+    def __init__(self, code: str) -> None:
+        if code not in {"conversation_not_found", "conversation_unrecoverable"}:
+            raise ValueError("provider_conversation_error_invalid")
+        super().__init__(
+            "The Provider conversation is unavailable.",
+            code=code,
+            retryable=False,
+            action_required="Retry the Root with a new conversation.",
+        )
+
+
 class ProviderBackendInterface(Protocol):
+    def open_conversation(self, command: dict[str, Any]) -> dict[str, Any]: ...
+
     def run_turn(self, command: dict[str, Any]) -> dict[str, Any]: ...

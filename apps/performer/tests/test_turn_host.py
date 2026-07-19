@@ -5,6 +5,79 @@ import json
 import pytest
 
 from performer.turn_protocol.host import TurnFileHost
+from performer.conversation_protocol.host import ConversationFileHost
+
+
+def test_conversation_host_opens_without_root_side_effect_inputs(tmp_path):
+    request = tmp_path / "open.json"
+    result = tmp_path / "opened.json"
+    request.write_text(json.dumps(open_command()), encoding="utf-8")
+    observed = []
+    host = ConversationFileHost(
+        lambda command: observed.append(command)
+        or {"performer_id": "conversation-1"},
+        now=lambda: "2026-07-19T11:00:00Z",
+    )
+
+    outcome = host.run(request, result)
+
+    assert observed == [open_command()]
+    assert outcome["performer_id"] == "conversation-1"
+    assert json.loads(result.read_text()) == outcome
+
+
+def test_conversation_host_rejects_context_before_provider_work(tmp_path):
+    request = tmp_path / "open.json"
+    result = tmp_path / "opened.json"
+    request.write_text(
+        json.dumps(
+            {
+                **open_command(),
+                "root_context": {"json": "{}", "markdown": "unsafe"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    called = False
+
+    def open_provider(_command):
+        nonlocal called
+        called = True
+
+    with pytest.raises(ValueError, match="Open Root Conversation command"):
+        ConversationFileHost(open_provider).run(request, result)
+    assert called is False
+    assert not result.exists()
+
+
+def test_conversation_host_publishes_closed_provider_failure(tmp_path):
+    from performer.backends.provider_backend_interface import ProviderBackendError
+
+    request = tmp_path / "open.json"
+    result = tmp_path / "opened.json"
+    request.write_text(json.dumps(open_command()), encoding="utf-8")
+
+    def fail(_command):
+        raise ProviderBackendError(
+            "Provider temporarily unavailable.",
+            code="provider_conversation_open_failed",
+            retryable=True,
+            action_required="Retry opening the Root conversation.",
+        )
+
+    outcome = ConversationFileHost(
+        fail, now=lambda: "2026-07-19T11:00:00Z"
+    ).run(request, result)
+    assert outcome == {
+        "protocol_version": "1",
+        "request_id": "request-1",
+        "performer_profile_id": "profile-1",
+        "error_code": "provider_conversation_open_failed",
+        "sanitized_reason": "Provider temporarily unavailable.",
+        "retryable": True,
+        "action_required": "Retry opening the Root conversation.",
+        "completed_at": "2026-07-19T11:00:00Z",
+    }
 
 
 def test_host_publishes_result_before_flushed_completion(
@@ -124,4 +197,18 @@ def failed_result(plan_command):
             "retryable": True,
             "action_required": "Retry the Turn.",
         },
+    }
+
+
+def open_command():
+    return {
+        "protocol_version": "1",
+        "request_id": "request-1",
+        "performer_profile_id": "profile-1",
+        "codex_turn_settings": {
+            "model": "gpt-5.2-codex",
+            "reasoning_effort": "high",
+            "is_fast_mode_enabled": False,
+        },
+        "hard_deadline_at": "2026-07-19T12:00:00Z",
     }

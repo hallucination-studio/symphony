@@ -13,6 +13,7 @@ from performer.backends.codex.codex_backend_impl import (
     CodexBackendImpl,
     ProviderBackendError,
 )
+from performer.backends.provider_backend_interface import ProviderConversationUnavailable
 
 
 class FakeThread:
@@ -61,6 +62,40 @@ class FakeCodex:
 
     def account(self, refresh_token=False):
         return SimpleNamespace(account=SimpleNamespace(root=SimpleNamespace(type="chatgpt")))
+
+
+def test_open_conversation_starts_no_turn_and_receives_no_business_context():
+    sdk = FakeCodex()
+    outcome = CodexBackendImpl(sdk).open_conversation(
+        {
+            "protocol_version": "1",
+            "request_id": "request-1",
+            "performer_profile_id": "profile-1",
+            "codex_turn_settings": {
+                "model": "gpt-5.2-codex",
+                "reasoning_effort": "high",
+                "is_fast_mode_enabled": False,
+            },
+            "hard_deadline_at": "2026-07-19T12:00:00Z",
+        }
+    )
+
+    assert outcome == {"performer_id": "thread-1"}
+    assert sdk.started == [{"model": "gpt-5.2-codex", "service_tier": None}]
+    assert sdk.thread.calls == []
+
+
+def test_resume_preserves_explicit_conversation_loss_signal(plan_command):
+    command = deepcopy(plan_command)
+    command["performer_id"] = "lost-id"
+
+    class LostConversation(FakeCodex):
+        def thread_resume(self, thread_id, **kwargs):
+            raise ProviderConversationUnavailable("conversation_not_found")
+
+    with pytest.raises(ProviderConversationUnavailable) as raised:
+        CodexBackendImpl(LostConversation()).run_turn(command)
+    assert raised.value.code == "conversation_not_found"
 
 
 def test_plan_maps_public_settings_and_read_only_sandbox(plan_command):
@@ -263,8 +298,10 @@ def test_unresumable_id_never_starts_replacement(plan_command):
             raise RuntimeError("not found")
 
     sdk = BrokenResume()
-    with pytest.raises(ProviderBackendError, match="could not be resumed"):
+    with pytest.raises(ProviderBackendError, match="could not be resumed") as raised:
         CodexBackendImpl(sdk).run_turn(command)
+    assert type(raised.value) is ProviderBackendError
+    assert raised.value.code == "performer_conversation_unresumable"
     assert sdk.started == []
 
 
