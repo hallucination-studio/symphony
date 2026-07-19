@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import type {
   PlannedWorkflowNode,
   WorkflowNode,
@@ -117,7 +119,11 @@ export function reconcilePlan(input: {
       const operation: PlanOperation = {
         kind: "create",
         clientNodeKey: planned.clientNodeKey,
-        managedMarker: `${input.rootIssueId}:${input.turnInputHash}:${planned.clientNodeKey}`,
+        managedMarker: planManagedMarker(
+          input.rootIssueId,
+          input.turnInputHash,
+          planned.clientNodeKey,
+        ),
         nodeKind: planned.kind,
         order: planned.order,
         title: titleFor(planned),
@@ -146,6 +152,17 @@ export function reconcilePlan(input: {
       managedMarker: `${input.rootIssueId}:plan-approval`,
     },
   };
+}
+
+function planManagedMarker(
+  rootIssueId: string,
+  turnInputHash: string,
+  clientNodeKey: string,
+) {
+  const digest = createHash("sha256")
+    .update(JSON.stringify([rootIssueId, turnInputHash, clientNodeKey]))
+    .digest("hex");
+  return `plan:${digest}`;
 }
 
 function validatePlannedNodes(nodes: PlannedWorkflowNode[]) {

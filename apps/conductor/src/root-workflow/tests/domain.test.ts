@@ -339,7 +339,10 @@ test("Plan reconciliation preserves user and completed nodes and reuses stable m
   assert.equal(result.operations.some((item) => item.kind === "preserve" && item.issueId === "done-plan"), true);
   assert.equal(result.operations.some((item) => item.kind === "cancel" && item.issueId === "old-plan"), true);
   assert.equal(result.approval.title, "[Human Action] Approve Plan");
-  assert.match(result.operations.find((item) => item.kind === "create")?.managedMarker ?? "", /root-1:turn-hash:new-work/);
+  assert.match(
+    result.operations.find((item) => item.kind === "create")?.managedMarker ?? "",
+    /^plan:[a-f0-9]{64}$/u,
+  );
   assert.throws(
     () =>
       reconcilePlan({
@@ -368,6 +371,32 @@ test("Plan reconciliation preserves user and completed nodes and reuses stable m
       }),
     /plan_tree_cycle/,
   );
+});
+
+test("Plan reconciliation bounds managed markers derived from valid protocol identifiers", () => {
+  const input = {
+    rootIssueId: "root-12345678-1234-1234-1234-123456789012",
+    turnInputHash: "a".repeat(64),
+    summary: "Create one work node.",
+    current: [],
+    planned: [{
+      clientNodeKey: "create-the-exact-e2e-delivery-marker-file",
+      kind: "work" as const,
+      order: 0,
+      title: "Create the delivery marker",
+      description: "Create the requested file.",
+    }],
+  };
+
+  const marker = (value: typeof input) => reconcilePlan(value).operations
+    .flatMap((operation) => operation.kind === "create" ? [operation.managedMarker] : [])[0];
+  const first = marker(input);
+  const repeated = marker(input);
+  const otherRoot = marker({ ...input, rootIssueId: "other-root" });
+
+  assert.match(first ?? "", /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u);
+  assert.equal(first, repeated);
+  assert.notEqual(first, otherRoot);
 });
 
 test("Profile store atomically preserves fixed authentication and activates only ready Profiles", async () => {
