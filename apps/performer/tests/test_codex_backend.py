@@ -98,6 +98,24 @@ def test_resume_preserves_explicit_conversation_loss_signal(plan_command):
     assert raised.value.code == "conversation_not_found"
 
 
+def test_root_turn_only_resumes_supplied_conversation(root_command):
+    sdk = FakeCodex(FakeThread(response="Root work yielded."))
+
+    outcome = CodexBackendImpl(sdk).run_root_turn(root_command)
+
+    assert sdk.started == []
+    assert sdk.resumed[0][0] == "conversation-1"
+    assert "turn_kind" not in root_command
+    prompt, kwargs = sdk.thread.calls[0]
+    assert root_command["root_context"]["json"] in prompt
+    assert root_command["root_context"]["markdown"] in prompt
+    assert json.dumps(root_command["command_channel"], separators=(",", ":")) in prompt
+    assert json.dumps(root_command["turn_limits"], separators=(",", ":")) in prompt
+    assert "output_schema" not in kwargs
+    assert outcome["bounded_summary"] == json.dumps("Root work yielded.")
+    assert outcome["yield_reason"] == "agent_finished"
+
+
 def test_plan_maps_public_settings_and_read_only_sandbox(plan_command):
     sdk = FakeCodex()
     outcome = CodexBackendImpl(sdk).run_turn(plan_command)

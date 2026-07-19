@@ -6,6 +6,7 @@ import pytest
 
 from performer.turn_protocol.host import TurnFileHost
 from performer.conversation_protocol.host import ConversationFileHost
+from performer.root_turn.host import RootTurnFileHost
 
 
 def test_conversation_host_opens_without_root_side_effect_inputs(tmp_path):
@@ -78,6 +79,33 @@ def test_conversation_host_publishes_closed_provider_failure(tmp_path):
         "action_required": "Retry opening the Root conversation.",
         "completed_at": "2026-07-19T11:00:00Z",
     }
+
+
+def test_root_turn_host_emits_only_root_correlated_events(
+    tmp_path, root_command, monkeypatch
+):
+    request = tmp_path / "root-turn.json"
+    result_path = tmp_path / "root-result.json"
+    request.write_text(json.dumps(root_command), encoding="utf-8")
+    result = root_result(root_command)
+    emitted = []
+
+    def capture(payload, *, flush):
+        event = json.loads(payload)
+        if event["body"]["kind"] == "turn_completed":
+            assert json.loads(result_path.read_text()) == result
+        emitted.append(event)
+
+    monkeypatch.setattr("builtins.print", capture)
+    RootTurnFileHost(lambda _: result).run(request, result_path, 3)
+
+    assert [event["body"]["kind"] for event in emitted] == [
+        "turn_started",
+        "turn_completed",
+    ]
+    assert [event["sequence"] for event in emitted] == [3, 4]
+    assert all("work_issue_id" not in event for event in emitted)
+    assert all(event["performer_id"] == "conversation-1" for event in emitted)
 
 
 def test_host_publishes_result_before_flushed_completion(
@@ -211,4 +239,26 @@ def open_command():
             "is_fast_mode_enabled": False,
         },
         "hard_deadline_at": "2026-07-19T12:00:00Z",
+    }
+
+
+def root_result(command):
+    return {
+        "protocol_version": "1",
+        "turn_id": command["turn_id"],
+        "root_issue_id": command["root_issue_id"],
+        "performer_profile_id": command["performer_profile_id"],
+        "performer_id": command["performer_id"],
+        "context_digest": command["context_digest"],
+        "result_kind": "root_turn_completed",
+        "completed_at": command["started_at"],
+        "bounded_summary": "Root work yielded.",
+        "yield_reason": "agent_finished",
+        "turn_usage": {
+            "wall_time_ms": 10,
+            "context_bytes": 50,
+            "provider_tokens": 0,
+            "broker_calls": 0,
+            "mutations": 0,
+        },
     }
