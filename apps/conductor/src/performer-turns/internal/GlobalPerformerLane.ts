@@ -1,4 +1,12 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import type { Duplex } from "node:stream";
+
+export interface PerformerInvocationControl {
+  writeStdin(value: Uint8Array): void;
+  closeStdin(): void;
+  extraStreams: Duplex[];
+  markReady?(): void;
+}
 
 export interface PerformerInvocation {
   executable: string;
@@ -6,8 +14,12 @@ export interface PerformerInvocation {
   environment?: NodeJS.ProcessEnv;
   workingDirectory?: string;
   deadlineMs: number;
+  startupDeadlineMs?: number;
   stdin?: Uint8Array;
+  extraPipeCount?: number;
+  onStarted?(control: PerformerInvocationControl): void;
   onStdout?(chunk: Uint8Array): void;
+  maxOutputBytes?: number;
 }
 
 export class GlobalPerformerLane {
@@ -31,9 +43,9 @@ export class GlobalPerformerLane {
     this.#stopping = true;
     const child = this.#active;
     if (!child) return;
-    child.kill("SIGTERM");
+    signalProcessTree(child, "SIGTERM");
     if (await waitForExit(child, graceMs)) return;
-    child.kill("SIGKILL");
+    signalProcessTree(child, "SIGKILL");
     if (!(await waitForExit(child, graceMs))) {
       throw new Error("performer_process_reap_timeout");
     }
@@ -47,7 +59,13 @@ export class GlobalPerformerLane {
       const child = spawn(invocation.executable, invocation.arguments, {
         cwd: invocation.workingDirectory,
         env: invocation.environment,
-        stdio: [invocation.stdin ? "pipe" : "ignore", "pipe", "pipe"],
+        detached: process.platform !== "win32",
+        stdio: [
+          invocation.stdin || invocation.onStarted ? "pipe" : "ignore",
+          "pipe",
+          "pipe",
+          ...Array.from({ length: invocation.extraPipeCount ?? 0 }, () => "pipe" as const),
+        ],
       });
       if (invocation.stdin && child.stdin) {
         child.stdin.end(invocation.stdin);
@@ -55,29 +73,28 @@ export class GlobalPerformerLane {
       this.#active = child;
       const stdout: Buffer[] = [];
       const stderr: Buffer[] = [];
+      const maxOutputBytes = invocation.maxOutputBytes ?? 1_048_576;
+      let stdoutBytes = 0;
+      let stderrBytes = 0;
+      let outputError: Error | undefined;
       if (!child.stdout || !child.stderr) {
-        child.kill("SIGKILL");
+        signalProcessTree(child, "SIGKILL");
         this.#active = undefined;
         reject(new Error("performer_process_stream_missing"));
         return;
       }
-      child.stdout.on("data", (chunk: Buffer) => {
-        if (invocation.onStdout) invocation.onStdout(chunk);
-        else stdout.push(chunk);
-      });
-      child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
       let forceKill: NodeJS.Timeout | undefined;
       let terminalTimeout: NodeJS.Timeout | undefined;
       let settled = false;
-      const clearTimers = () => {
-        clearTimeout(deadline);
-        if (forceKill) clearTimeout(forceKill);
-        if (terminalTimeout) clearTimeout(terminalTimeout);
-      };
-      const deadline = setTimeout(() => {
-        child.kill("SIGTERM");
+      let terminationStarted = false;
+      let deadline: NodeJS.Timeout | undefined;
+      const expire = () => {
+        if (terminationStarted) return;
+        terminationStarted = true;
+        if (deadline) clearTimeout(deadline);
+        signalProcessTree(child, "SIGTERM");
         forceKill = setTimeout(() => {
-          if (child.exitCode === null) child.kill("SIGKILL");
+          if (child.exitCode === null) signalProcessTree(child, "SIGKILL");
           terminalTimeout = setTimeout(() => {
             if (settled) return;
             settled = true;
@@ -85,7 +102,54 @@ export class GlobalPerformerLane {
             reject(new Error("performer_process_reap_timeout"));
           }, 1000);
         }, 1000);
-      }, invocation.deadlineMs);
+      };
+      if (invocation.onStarted) {
+        const extraStreams = child.stdio.slice(3).filter(
+          (stream): stream is Duplex => stream !== null,
+        );
+        invocation.onStarted({
+          writeStdin(value) {
+            if (!child.stdin?.writable) throw new Error("performer_stdin_closed");
+            child.stdin.write(value);
+          },
+          closeStdin() { child.stdin?.end(); },
+          extraStreams,
+          markReady() {
+            if (deadline) clearTimeout(deadline);
+            deadline = setTimeout(expire, invocation.deadlineMs);
+          },
+        });
+      }
+      child.stdout.on("data", (chunk: Buffer) => {
+        if (invocation.onStdout) invocation.onStdout(chunk);
+        else {
+          stdoutBytes += chunk.byteLength;
+          if (stdoutBytes > maxOutputBytes) {
+            if (!outputError) {
+              outputError = new Error("performer_stdout_bytes_exceeded");
+              expire();
+            }
+          } else stdout.push(chunk);
+        }
+      });
+      child.stderr.on("data", (chunk: Buffer) => {
+        stderrBytes += chunk.byteLength;
+        if (stderrBytes > maxOutputBytes) {
+          if (!outputError) {
+            outputError = new Error("performer_stderr_bytes_exceeded");
+            expire();
+          }
+        } else stderr.push(chunk);
+      });
+      const clearTimers = () => {
+        if (deadline) clearTimeout(deadline);
+        if (forceKill) clearTimeout(forceKill);
+        if (terminalTimeout) clearTimeout(terminalTimeout);
+      };
+      deadline = setTimeout(
+        expire,
+        invocation.startupDeadlineMs ?? invocation.deadlineMs,
+      );
       child.once("error", (error) => {
         if (settled) return;
         settled = true;
@@ -102,7 +166,8 @@ export class GlobalPerformerLane {
           stdout: Buffer.concat(stdout).toString("utf8"),
           stderr: Buffer.concat(stderr).toString("utf8"),
         };
-        if (code === 0) resolve(output);
+        if (outputError) reject(outputError);
+        else if (code === 0) resolve(output);
         else {
           reject(
             new Error(
@@ -112,6 +177,17 @@ export class GlobalPerformerLane {
         }
       });
     });
+  }
+}
+
+function signalProcessTree(child: ChildProcess, signal: NodeJS.Signals): void {
+  if (child.pid === undefined || child.exitCode !== null) return;
+  try {
+    if (process.platform !== "win32") process.kill(-child.pid, signal);
+    else child.kill(signal);
+  } catch (error) {
+    if (!(error instanceof Error && "code" in error
+      && (error as NodeJS.ErrnoException).code === "ESRCH")) throw error;
   }
 }
 

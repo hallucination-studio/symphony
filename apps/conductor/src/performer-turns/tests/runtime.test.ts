@@ -93,6 +93,74 @@ test("stopping the Performer lane is bounded and rejects queued Turns", async ()
   await assert.rejects(queued, /performer_lane_stopped/);
 });
 
+test("cancellation terminates and reaps the complete Performer process tree", async () => {
+  const lane = new GlobalPerformerLane();
+  const root = await mkdtemp(path.join(tmpdir(), "performer-tree-"));
+  const pidFile = path.join(root, "descendant.pid");
+  const script = [
+    "const {spawn}=require('child_process');const fs=require('fs');",
+    "const child=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'});",
+    "fs.writeFileSync(process.argv[1],String(child.pid));setInterval(()=>{},1000);",
+  ].join("");
+  const running = lane.run({
+    executable: process.execPath,
+    arguments: ["-e", script, pidFile],
+    deadlineMs: 10_000,
+  });
+  const descendantPid = await waitForPid(pidFile);
+
+  await lane.cancelAndReap(200);
+  await assert.rejects(running, /performer_process_failed/u);
+  await waitForProcessExit(descendantPid);
+});
+
+test("Performer process bounds stderr before it can retain unbounded output", async () => {
+  const lane = new GlobalPerformerLane();
+  await assert.rejects(
+    lane.run({
+      executable: process.execPath,
+      arguments: ["-e", "process.stderr.write('x'.repeat(2048))"],
+      deadlineMs: 1_000,
+      maxOutputBytes: 1_024,
+    }),
+    /performer_stderr_bytes_exceeded/u,
+  );
+});
+
+test("Performer process protocol readiness has an independent startup deadline", async () => {
+  const lane = new GlobalPerformerLane();
+  await assert.rejects(
+    lane.run({
+      executable: process.execPath,
+      arguments: ["-e", "setInterval(()=>{},1000)"],
+      deadlineMs: 10_000,
+      startupDeadlineMs: 20,
+      onStarted() {},
+    }),
+    /performer_process_failed/u,
+  );
+});
+
+async function waitForPid(file: string): Promise<number> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    try {
+      return Number(await readFile(file, "utf8"));
+    } catch {
+      // The child publishes its PID asynchronously after spawn.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error("descendant_pid_missing");
+}
+
+async function waitForProcessExit(pid: number): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    try { process.kill(pid, 0); } catch { return; }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.fail("descendant process remained alive");
+}
+
 test("Git workspace creation and Work commit leave the original checkout untouched", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "conductor-git-"));
   const repository = path.join(root, "repository");
