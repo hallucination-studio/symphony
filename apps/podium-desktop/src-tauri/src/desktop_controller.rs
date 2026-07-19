@@ -1,6 +1,7 @@
 use crate::desktop_lifecycle::{ManagedProcess, ProcessError};
 use crate::oauth_return::{OAuthReturn, OAuthReturnRegistry};
 use crate::repository_context::{select_repository, validate_base_branch, RepositoryContext};
+use crate::runtime_bundle::RuntimeBundleStore;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -493,6 +494,13 @@ fn backend_command(app: &AppHandle) -> Result<Command, ControllerError> {
 }
 
 fn bundled_executable(name: &str) -> Option<PathBuf> {
+    if let Some(root) = std::env::var_os("SYMPHONY_RUNTIME_BUNDLE_ROOT") {
+        if let Ok(executable) =
+            RuntimeBundleStore::new(PathBuf::from(root), "1").current_executable(name)
+        {
+            return Some(executable);
+        }
+    }
     let directory = std::env::current_exe().ok()?.parent()?.to_owned();
     let candidate = directory.join(name);
     candidate.is_file().then_some(candidate)
